@@ -5,6 +5,11 @@ use std::collections::BTreeMap;
 
 use crate::lsa::{Lsa, LsaHeader, LsaKey};
 
+/// RFC 2328 §14: LSAs are refreshed before they reach MaxAge.
+pub const MAX_AGE_SECS: u16 = 3_600;
+/// RFC 2328 §14.1: default self-originated LSA refresh interval.
+pub const LS_REFRESH_TIME_SECS: u16 = 1_800;
+
 /// An LSA entry in the LSDB. Carries the LSA itself + an installation age.
 #[derive(Debug, Clone)]
 pub struct LsaEntry {
@@ -65,9 +70,51 @@ impl Lsdb {
         self.entries.iter()
     }
 
+    /// Return self-originated LSAs due for RFC 2328 §14.1 refresh.
+    ///
+    /// Each returned LSA has its sequence number incremented, age reset to
+    /// zero, and checksum cleared for the egress encoder to recompute. The
+    /// refreshed instance replaces the installed copy atomically.
+    pub fn refresh_due(&mut self, advertising_router: u32, now_ms: u64) -> Vec<Lsa> {
+        let due: Vec<LsaKey> = self
+            .entries
+            .iter()
+            .filter(|(_, entry)| {
+                entry.lsa.header.advertising_router == advertising_router
+                    && now_ms.saturating_sub(entry.installed_ms)
+                        + u64::from(entry.lsa.header.ls_age) * 1_000
+                        >= u64::from(LS_REFRESH_TIME_SECS) * 1_000
+            })
+            .map(|(key, _)| *key)
+            .collect();
+        let mut refreshed = Vec::with_capacity(due.len());
+        for key in due {
+            let Some(entry) = self.entries.get(&key) else {
+                continue;
+            };
+            let mut lsa = entry.lsa.clone();
+            let Some(sequence) = lsa.header.ls_sequence_number.checked_add(1) else {
+                continue;
+            };
+            lsa.header.ls_sequence_number = sequence;
+            lsa.header.ls_age = 0;
+            lsa.header.ls_checksum = 0;
+            self.seq_watermark.insert(key, sequence);
+            self.entries.insert(
+                key,
+                LsaEntry {
+                    lsa: lsa.clone(),
+                    installed_ms: now_ms,
+                },
+            );
+            refreshed.push(lsa);
+        }
+        refreshed
+    }
+
     /// Aging — LSAs whose age exceeds MAX_AGE (3600s) are removed.
     pub fn age_out(&mut self, now_ms: u64) -> Vec<Lsa> {
-        const MAX_AGE: u64 = 3600 * 1000;
+        const MAX_AGE: u64 = MAX_AGE_SECS as u64 * 1000;
         let mut removed = Vec::new();
         let keys: Vec<LsaKey> = self
             .entries
@@ -140,6 +187,27 @@ mod tests {
         assert_eq!(db.len(), 1);
         let e = db.get(&make_lsa(1, 2, 0).key()).unwrap();
         assert_eq!(e.lsa.header.ls_sequence_number, 0x80000005);
+    }
+
+    #[test]
+    fn refresh_due_reoriginates_self_lsa() {
+        let mut db = Lsdb::new();
+        let lsa = make_lsa(1, 2, 0x80000001);
+        db.install(lsa, 0);
+        assert!(db.refresh_due(2, 1_799_999).is_empty());
+        let refreshed = db.refresh_due(2, 1_800_000);
+        assert_eq!(refreshed.len(), 1);
+        assert_eq!(refreshed[0].header.ls_age, 0);
+        assert_eq!(refreshed[0].header.ls_sequence_number, 0x80000002);
+        let entry = db.get(&refreshed[0].key()).unwrap();
+        assert_eq!(entry.installed_ms, 1_800_000);
+    }
+
+    #[test]
+    fn refresh_skips_non_self_lsa() {
+        let mut db = Lsdb::new();
+        db.install(make_lsa(1, 2, 0x80000001), 0);
+        assert!(db.refresh_due(3, 1_800_000).is_empty());
     }
 
     #[test]

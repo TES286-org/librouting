@@ -104,6 +104,14 @@ let _ = session.start(lr_core::time::Instant(0));
 // push bytes via feed_bytes, drain via drain_outgoing
 ```
 
+## OSPF LSA lifecycle
+
+`DefaultRouter::tick` applies RFC 2328 LSA lifecycle processing to OSPF
+sessions: locally originated LSAs are refreshed and flooded as LSUs after
+1800 seconds, while LSAs that reach MaxAge (3600 seconds) are removed and SPF
+is rerun. The router clock is embedder-driven, so call `tick` with a monotonic
+millisecond timestamp.
+
 ## Babel RFC 8967 authentication
 
 ```rust

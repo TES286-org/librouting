@@ -53,7 +53,9 @@ use lr_bgp::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
 use lr_bgp::{BgpAction, BgpEvent, BgpPeer, PeerConfig as BgpPeerConfig};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
-use lr_ospf::packet::{OspfBody, OspfPacket};
+use lr_ospf::packet::{
+    LsUpdateBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType, OspfVersion,
+};
 use lr_ospf::spf;
 use lr_policy::hooks::{HookChain, HookVerdict};
 use lr_policy::safety::SafetyNet;
@@ -159,6 +161,43 @@ impl OspfRuntime {
                 Protocol::Ospfv2
             },
             published: BTreeMap::new(),
+        }
+    }
+
+    /// Refresh locally originated LSAs and construct an LSU for flooding.
+    fn refresh_due(&mut self, now_ms: u64) -> Option<OspfPacket> {
+        let lsas = self.lsdb.refresh_due(self.router_id, now_ms);
+        (!lsas.is_empty()).then(|| OspfPacket {
+            header: OspfHeader {
+                version: if self.protocol == Protocol::Ospfv3 {
+                    OspfVersion::V3 as u8
+                } else {
+                    OspfVersion::V2 as u8
+                },
+                kind: OspfPacketType::LinkStateUpdate as u8,
+                length: 0,
+                router_id: self.router_id,
+                area_id: self.area_id,
+                checksum: 0,
+                au_type_or_instance: 0,
+                auth_data: 0,
+            },
+            body: OspfBody::LsUpdate(LsUpdateBody {
+                lsa_count: lsas.len() as u32,
+                lsas,
+            }),
+        })
+    }
+
+    /// Age received LSAs and recompute if expiry changes the topology.
+    fn age_out(&mut self, now_ms: u64) -> RuntimeDelta {
+        if self.lsdb.age_out(now_ms).is_empty() {
+            RuntimeDelta {
+                installed: Vec::new(),
+                withdrawn: Vec::new(),
+            }
+        } else {
+            self.recompute()
         }
     }
 
@@ -1296,6 +1335,36 @@ impl RouterInstance for DefaultRouter {
             let actions = peer.step(ev);
             self.dispatch_bgp_actions(session, actions);
         }
+
+        // OSPF uses periodic self-LSA refresh (RFC 2328 §14.1) rather than
+        // an individual timer per LSA. One poll-driven pass keeps the router
+        // compact while preserving exact caller-controlled timestamps.
+        let mut ospf_deltas = Vec::new();
+        for state in self.sessions.values_mut() {
+            let SessionState::Ospf { runtime, conn } = state else {
+                continue;
+            };
+            if let Some(packet) = runtime.refresh_due(self.now_ms) {
+                let codec = match runtime.protocol {
+                    Protocol::Ospfv3 => lr_ospf::codec::OspfCodec::v3(),
+                    _ => lr_ospf::codec::OspfCodec::v2(),
+                };
+                if let Ok(bytes) = codec.encode_vec(&packet) {
+                    conn.put_output(&bytes);
+                }
+            }
+            ospf_deltas.push(runtime.age_out(self.now_ms));
+        }
+        for delta in ospf_deltas {
+            for route in delta.installed {
+                self.loc_rib.install(route.clone());
+                self.pending_events.push(RouterEvent::RouteInstalled(route));
+            }
+            for key in delta.withdrawn {
+                self.loc_rib.uninstall(&key);
+                self.pending_events.push(RouterEvent::RouteWithdrawn(key));
+            }
+        }
         self.flush_mrai();
     }
 
@@ -1348,6 +1417,33 @@ mod tests {
     use super::*;
     use lr_core::addr::Asn;
     use lr_core::fsm::TimerSpec;
+
+    #[test]
+    fn ospf_self_lsa_refresh_emits_new_lsu() {
+        let mut runtime = OspfRuntime::new(0x01020304, 0, false);
+        let lsa = lr_ospf::lsa::Lsa {
+            header: lr_ospf::lsa::LsaHeader {
+                ls_age: 0,
+                options: 0,
+                ls_type: 1,
+                link_state_id: 0x01020304,
+                advertising_router: 0x01020304,
+                ls_sequence_number: 0x80000001,
+                ls_checksum: 0,
+                length: lr_ospf::lsa::LsaHeader::LEN as u16,
+            },
+            body: Vec::new(),
+        };
+        runtime.lsdb.install(lsa, 0);
+        assert!(runtime.refresh_due(1_799_999).is_none());
+        let packet = runtime.refresh_due(1_800_000).expect("LSU refresh");
+        let OspfBody::LsUpdate(update) = packet.body else {
+            panic!("expected LS Update");
+        };
+        assert_eq!(update.lsa_count, 1);
+        assert_eq!(update.lsas[0].header.ls_sequence_number, 0x80000002);
+        assert_eq!(update.lsas[0].header.ls_age, 0);
+    }
 
     #[test]
     fn add_and_remove_bgp_session() {

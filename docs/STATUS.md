@@ -58,7 +58,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
 | Designated-router election | ✅ | |
 | Area support | 🟡 | single area (backbone) focus; inter-area/ABR summary-LSA handling is minimal |
-| LSA refresh / aging / MaxAge flush | 🟡 | basic aging; periodic re-origination not scheduled |
+| LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s |
 | Stub/NSSA areas | ❌ | |
 | Auth (cryptographic) | ❌ | |
 
