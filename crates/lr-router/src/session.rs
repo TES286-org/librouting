@@ -43,10 +43,20 @@ impl SessionConfig {
             hold_time: 90,
             keepalive: 0,
             asn4: true,
-            mp_families: Vec::new(),
+            // Advertise MP-BGP for IPv4 unicast (RFC 4760). Modern
+            // speakers (BIRD 2, FRR) require the capability to match one
+            // of their channels — without it BIRD refuses the session
+            // with "Required capability missing".
+            mp_families: vec![lr_core::nlri::NlriFamily::IPV4_UNICAST],
             local_address: None,
             area_id: 0,
         }
+    }
+
+    /// Override the MP-BGP address families advertised in OPEN.
+    pub fn with_mp_families(mut self, families: Vec<lr_core::nlri::NlriFamily>) -> Self {
+        self.mp_families = families;
+        self
     }
 
     /// Set the local interface address (next-hop-self / protocol identity).

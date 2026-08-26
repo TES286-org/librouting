@@ -56,19 +56,116 @@
 // `std` feature is enabled (the default).
 #![cfg_attr(not(feature = "std"), forbid(unsafe_code))]
 
+// Platform backends:
+// - Linux      → rtnetlink        (`linux`)
+// - *BSD/macOS → route(4) socket  (`bsd`)
+// - Windows    → IP Helper API    (`windows`)
+// - other      → compile-only stub so the trait surface stays identical.
 #[cfg(feature = "std")]
 pub mod stub;
 
-// The rtnetlink backend only exists on Linux. On every other platform we
-// fall back to the stub so the trait surface stays identical and the crate
-// still cross-compiles (e.g. to Windows/other Unixes).
+#[cfg(all(
+    feature = "std",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos"
+    )
+))]
+pub mod bsd;
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub mod linux;
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub mod windows;
 
+#[cfg(all(
+    feature = "std",
+    not(target_os = "linux"),
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos"
+    )
+))]
+pub use bsd::RouteSocket as RtNetlink;
+/// The rtnetlink backend (Linux). Historically exported under this name;
+/// on non-Linux platforms it aliases the platform's native backend so
+/// embedders written against old code keep compiling.
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub use linux::RtNetlink;
-#[cfg(all(feature = "std", not(target_os = "linux")))]
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos",
+        target_os = "windows"
+    ))
+))]
 pub use stub::StubRouteTable as RtNetlink;
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub use windows::IpHelper as RtNetlink;
+
+#[cfg(all(
+    feature = "std",
+    any(
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos"
+    )
+))]
+pub use bsd::RouteSocket as SystemRouteTable;
+/// The native OS route-table backend for the compilation target:
+/// [`linux::RtNetlink`] on Linux, [`bsd::RouteSocket`] on the BSDs/macOS,
+/// [`windows::IpHelper`] on Windows and [`stub::StubRouteTable`] anywhere
+/// else. Prefer this alias in new code.
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub use linux::RtNetlink as SystemRouteTable;
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos",
+        target_os = "windows"
+    ))
+))]
+pub use stub::StubRouteTable as SystemRouteTable;
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub use windows::IpHelper as SystemRouteTable;
+
+/// Human-readable name of the backend compiled in — for logs and banners.
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub const PLATFORM_NAME: &str = "linux-rtnetlink";
+#[cfg(all(feature = "std", target_os = "freebsd"))]
+pub const PLATFORM_NAME: &str = "freebsd-route-socket";
+#[cfg(all(feature = "std", target_os = "netbsd"))]
+pub const PLATFORM_NAME: &str = "netbsd-route-socket";
+#[cfg(all(feature = "std", target_os = "openbsd"))]
+pub const PLATFORM_NAME: &str = "openbsd-route-socket";
+#[cfg(all(feature = "std", target_os = "macos"))]
+pub const PLATFORM_NAME: &str = "macos-route-socket";
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub const PLATFORM_NAME: &str = "windows-ip-helper";
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_os = "linux",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "macos",
+        target_os = "windows"
+    ))
+))]
+pub const PLATFORM_NAME: &str = "stub";
 
 use lr_core::addr::{IpAddr, Prefix};
 use lr_core::rib::Protocol;

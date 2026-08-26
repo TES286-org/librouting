@@ -697,6 +697,9 @@ impl DefaultRouter {
                     advertised.push(r);
                 }
             }
+            // RFC 4724 §4: mark the end of the initial dump so the peer can
+            // detect convergence (BIRD/FRR log End-of-RIB reception).
+            peer.send_end_of_rib();
             let bytes = peer.drain_outgoing();
             if !bytes.is_empty() {
                 conn.put_output(&bytes);
@@ -778,6 +781,52 @@ impl DefaultRouter {
                 conn.put_output(&bytes);
             }
         }
+    }
+    /// Tell a session its transport went away (peer closed, TCP reset,
+    /// connect timeout). Drives the protocol FSM to Idle and purges every
+    /// route the session contributed — RFC 4271 §4.3/§8.2.2 semantics for
+    /// BGP; OSPF/Babel runtimes simply stop receiving input.
+    pub fn close_session(&mut self, h: SessionHandle) {
+        let Some(state) = self.sessions.get_mut(&h.0) else {
+            return;
+        };
+        let actions = match state {
+            SessionState::Bgp { peer, .. } => peer.step(BgpEvent::TransportClose),
+            SessionState::Ospf { .. } | SessionState::Babel { .. } => Vec::new(),
+        };
+        self.dispatch_bgp_actions(h.0, actions);
+        self.session_down_cleanup(h.0);
+    }
+
+    /// Purge a session's contribution from the RIB pipeline after the
+    /// session went down: clear its Adj-RIB-In slice and re-run selection
+    /// for the affected prefixes (RFC 4271: routes learned from a peer do
+    /// not survive the session that carried them).
+    fn session_down_cleanup(&mut self, session: u64) {
+        let origin = RouteOrigin {
+            proto: 0,
+            peer: session,
+        };
+        let affected: Vec<RouteKey> = self
+            .adj_rib_in
+            .iter_origin(origin)
+            .map(|r| r.key.clone())
+            .collect();
+        if affected.is_empty() {
+            return;
+        }
+        self.adj_rib_in.clear_for(origin);
+        self.adj_rib_out.clear_for(RouteOrigin {
+            proto: 0,
+            peer: session,
+        });
+        for key in affected {
+            self.reselect(&key);
+        }
+        self.pending_events.push(RouterEvent::Log(format!(
+            "session {} down: purged its Adj-RIB-In routes",
+            session
+        )));
     }
 }
 
@@ -867,6 +916,12 @@ impl RouterInstance for DefaultRouter {
             .ok_or_else(|| format!("no session {}", h.0))?;
         match state {
             SessionState::Bgp { peer, .. } => {
+                // A (re)start must begin from a clean slate: a previous run
+                // of this session may have died mid-conversation, leaving
+                // the FSM in Established with stale peer state. RFC 4271
+                // §8.2.2 sends the FSM to Idle on transport failure — the
+                // next ManualStart then re-runs the full handshake.
+                peer.reset();
                 let a1 = peer.step(BgpEvent::ManualStart);
                 let a2 = peer.step(BgpEvent::TransportOpen);
                 let mut actions = a1;
@@ -877,6 +932,11 @@ impl RouterInstance for DefaultRouter {
                 // Link-state/distance-vector protocols begin exchanging as
                 // soon as bytes flow — no explicit start event needed.
             }
+        }
+        // Clear the established latch so a re-established session is
+        // recognised as *newly* established (initial table dump).
+        if let Some(SessionState::Bgp { established, .. }) = self.sessions.get_mut(&h.0) {
+            *established = false;
         }
         Ok(())
     }

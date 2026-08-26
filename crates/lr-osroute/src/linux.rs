@@ -283,7 +283,12 @@ impl OsRouteTable for RtNetlink {
         let mut attrs = Vec::new();
         attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
         attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, next_hop.octets()));
-        attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
+        // With no explicit output interface the kernel resolves the gateway
+        // against the existing table (`ip route add ... via GW` semantics).
+        // Passing RTA_OIF=0 would be rejected with EINVAL, so omit it.
+        if if_index != 0 {
+            attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
+        }
         // Pad to 4-byte alignment
         while attrs.len() % 4 != 0 {
             attrs.push(0);

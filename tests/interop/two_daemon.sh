@@ -7,6 +7,9 @@
 #        ↑↓ TCP
 #   B (AS64513, connects, receives the route)
 #
+# NOTE: log matching uses POSIX `grep -qF`, not ripgrep — CI images do not
+# guarantee `rg` on PATH and a missing binary fails every iteration of the
+# poll loop while its stderr is swallowed by `2>/dev/null`.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -34,16 +37,18 @@ echo "== starting daemon B (connector, AS64513) =="
     >"$OUT/b.log" 2>&1 &
 B_PID=$!
 
-# Wait for the session to establish and the route to propagate.
+# Wait for the session to establish and the route to propagate (up to 30s:
+# slow CI runners can take several seconds through connect + OPEN/KEEPALIVE).
 ok=1
-for i in $(seq 1 40); do
+reason="timeout waiting for route propagation"
+for i in $(seq 1 120); do
     sleep 0.25
-    if rg -q "route installed 203.0.113.0/24" "$OUT/b.log" 2>/dev/null; then
+    if grep -qF "route installed 203.0.113.0/24" "$OUT/b.log" 2>/dev/null; then
         ok=0
         break
     fi
     if ! kill -0 $A_PID 2>/dev/null || ! kill -0 $B_PID 2>/dev/null; then
-        echo "FAIL: a daemon died"
+        reason="a daemon died"
         break
     fi
 done
@@ -58,10 +63,10 @@ echo "== daemon B log =="
 cat "$OUT/b.log"
 
 if [ $ok -ne 0 ]; then
-    echo "FAIL: route did not propagate to B"
+    echo "FAIL: route did not propagate to B ($reason)"
     exit 1
 fi
-if ! rg -q "session #1 → Established" "$OUT/b.log"; then
+if ! grep -qF "session #1 → Established" "$OUT/b.log"; then
     echo "FAIL: B never reached Established"
     exit 1
 fi

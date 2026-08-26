@@ -79,7 +79,7 @@ fn print_usage() {
          --listen ADDR:PORT       Accept an inbound BGP connection\n  \
          --network PREFIX         Locally originate PREFIX (repeatable)\n  \
          --hold-time SEC          BGP hold time in seconds (default 90)\n  \
-         --install-kernel-routes  Install best routes via rtnetlink (root)\n  \
+         --install-kernel-routes  Install best routes into the OS FIB (root)\n  \
          -h, --help               Show this help"
     );
 }
@@ -276,6 +276,7 @@ fn main() -> ExitCode {
     }
     println!("  networks:    {:?}", cfg.networks);
     println!("  install:     {}", cfg.install_kernel);
+    println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks.
     {
@@ -443,22 +444,41 @@ fn run_session(
         r.start_session(session)
             .map_err(|e| format!("start_session: {}", e))?;
     }
-    let mut buf = [0u8; 8192];
     let mut os_table: Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>> =
         None;
     if install_kernel {
-        match lr_osroute::RtNetlink::connect() {
+        match lr_osroute::SystemRouteTable::connect() {
             Ok(t) => {
-                println!("daemon: rtnetlink connected — installing kernel routes");
+                println!("daemon: os route table connected — installing kernel routes");
                 os_table = Some(Box::new(t));
             }
             Err(e) => eprintln!(
-                "daemon: rtnetlink unavailable ({}); kernel install disabled",
+                "daemon: os route table unavailable ({}); kernel install disabled",
                 e
             ),
         }
     }
+    let result = pump_session(router, running, &mut stream, session, &mut os_table);
+    // The transport is gone: drive the FSM to Idle and purge the routes
+    // this session contributed (RFC 4271 §8.2.2).
+    {
+        let mut r = router.lock().unwrap();
+        r.close_session(session);
+        for ev in r.poll_events() {
+            log_event(&ev);
+        }
+    }
+    result
+}
 
+fn pump_session(
+    router: &Arc<Mutex<DefaultRouter>>,
+    running: &Arc<AtomicBool>,
+    stream: &mut TcpStream,
+    session: SessionHandle,
+    os_table: &mut Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
+) -> Result<(), String> {
+    let mut buf = [0u8; 8192];
     while running.load(Ordering::Relaxed) {
         // 1. Read peer bytes → feed_input.
         match stream.read(&mut buf) {
@@ -482,7 +502,7 @@ fn run_session(
             for ev in &events {
                 log_event(ev);
             }
-            handle_events(&mut r, &events, &mut os_table);
+            handle_events(&mut r, &events, os_table);
             o
         };
         if !out.is_empty() {

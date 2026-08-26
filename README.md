@@ -101,6 +101,9 @@ librouting/
 | Architecture | `docs/ARCHITECTURE.md` |
 | RFC reference map | `docs/RFC_MAP.md` |
 | Public API tour | `docs/API.md` |
+| Implemented-vs-missing gap analysis | `docs/STATUS.md` |
+| OS route-table integration guide (Linux/BSD/Windows + porting) | `docs/OS-INTEGRATION.md` |
+| Interop testing guide (BIRD / FRR) | `docs/INTEROP.md` |
 | Scaffolding guide | `docs/scaffolding/README.md` |
 | Examples | `docs/examples/*.md` |
 | Templates | `templates/*/` |
@@ -165,15 +168,26 @@ restrictive).
 
 ## Status
 
-Early implementation. The library is **not** production-ready and the C ABI is
-**unstable** until v0.5.
+Implemented and missing features are tracked in detail in
+[`docs/STATUS.md`](docs/STATUS.md). Highlights:
+
+- BGP data plane verified bidirectionally against **BIRD 2** and **FRR
+  bgpd** over real TCP sessions (`tests/interop/{bird,frr}.sh`, wired into
+  CI).
+- OS route-table integration for **Linux (rtnetlink)**, the **BSD family
+  (route(4) socket)** and **Windows (IP Helper API)**, plus a porting guide
+  for other systems (`docs/OS-INTEGRATION.md`).
+- Not yet production-ready: see the roadmap at the end of `STATUS.md`
+  (MRAI, route-refresh wiring, graceful-restart retention and OSPF
+  multi-area are the main gaps). The C ABI is **unstable** until v0.5.
 
 ## CI/CD
 
 GitHub Actions workflows live in `.github/workflows/` and run on push to
 `main` and on PRs: fmt + clippy + workspace tests + C harness + Go bindings +
-Python bindings + MSRV + cross-build. Nightly runs `miri` for the unsafe
-audit on `lr-osroute` Linux FFI.
+Python bindings + MSRV + cross-build (aarch64 Linux, Windows) + **interop
+jobs against BIRD and FRR**. Nightly runs `miri` for the unsafe audit on
+`lr-osroute` FFI.
 
 ## License
 

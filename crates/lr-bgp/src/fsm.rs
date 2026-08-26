@@ -222,6 +222,16 @@ impl BgpPeer {
                 caps.extend(Capability::decode_set(&p.value));
             }
         }
+        // Dynamic AS4 negotiation (RFC 6793 §4.2.2): 4-byte AS_PATH encoding
+        // is only used when *both* speakers advertised the capability. Our
+        // OPEN was already sent with the AS4 capability when configured; if
+        // the peer did not offer it, downgrade both directions to the
+        // 2-byte width for the lifetime of this session.
+        let peer_offered_as4 = caps
+            .iter()
+            .any(|c| c.code == crate::capabilities::CapabilityCode::FourOctetAs);
+        self.cfg.asn4 = self.cfg.asn4 && peer_offered_as4;
+        self.codec.set_asn4(self.cfg.asn4);
         if let Some(c) = caps
             .iter()
             .find(|c| c.code == crate::capabilities::CapabilityCode::FourOctetAs)
@@ -347,6 +357,24 @@ impl BgpPeer {
             (_, BgpEvent::ManualStop)
             | (_, BgpEvent::TransportFatal)
             | (_, BgpEvent::TransportClose) => {
+                self.established = false;
+                my_actions.push(BgpAction::Close);
+                BgpState::Idle
+            }
+            // RFC 4271 §6.8: receiving a NOTIFICATION is always fatal to
+            // the session — transition to Idle and let the embedder close
+            // the transport. Without this arm a peer-initiated teardown
+            // (hold-time expiry, ceasing, malformed UPDATE) would leave us
+            // stuck in Established.
+            (_, BgpEvent::Message(BgpMessage::Notification(n))) => {
+                my_actions.push(BgpAction::Emit(lr_core::event::Event::PeerStateChange {
+                    session: self.cfg.peer_id,
+                    peer_state: "Idle (notification received)",
+                }));
+                my_actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                    "peer sent NOTIFICATION code={} sub={} — closing session",
+                    n.error_code, n.error_subcode
+                ))));
                 self.established = false;
                 my_actions.push(BgpAction::Close);
                 BgpState::Idle
@@ -593,5 +621,75 @@ mod tests {
         p.reset();
         assert_eq!(p.state(), BgpState::Idle);
         assert!(!p.is_established());
+    }
+
+    /// RFC 6793 §4.2.2: when the peer's OPEN lacks the 4-octet-AS
+    /// capability the session must downgrade both directions to 2-byte
+    /// AS_PATH encoding — BIRD/FRR would reject 4-byte paths otherwise.
+    #[test]
+    fn as4_downgrades_when_peer_lacks_capability() {
+        let mut peer = BgpPeer::new(PeerConfig::new(
+            Asn(64512),
+            Asn(64513),
+            RouterId::from_v4([10, 0, 0, 1]),
+        ));
+        peer.step(BgpEvent::ManualStart);
+        peer.step(BgpEvent::TransportOpen);
+        assert!(peer.cfg.asn4); // we advertise the capability
+                                // Hand-craft an OPEN *without* any capabilities.
+        let open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 2]));
+        let (state, _) = {
+            // handle_open_in_opensent is private; drive through step().
+            let ev = BgpEvent::Message(BgpMessage::Open(open));
+            let actions = peer.step(ev);
+            (peer.state(), actions)
+        };
+        let _ = state;
+        assert!(!peer.cfg.asn4, "session must downgrade to 2-byte AS_PATH");
+    }
+
+    /// RFC 4271 §6.8: a NOTIFICATION received in Established tears the
+    /// session down to Idle instead of being ignored.
+    #[test]
+    fn notification_tears_down_established_session() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        let _ = a.feed_bytes(&b_open).unwrap();
+        let _ = b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        let _ = a.feed_bytes(&b_ka).unwrap();
+        let _ = b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established());
+
+        let n = BgpNotification::new(4, 0, vec![]); // Hold Timer Expired
+        let actions = a.step(BgpEvent::Message(BgpMessage::Notification(n)));
+        assert_eq!(a.state(), BgpState::Idle);
+        assert!(!a.is_established());
+        assert!(actions.iter().any(|x| matches!(x, BgpAction::Close)));
+    }
+
+    /// A peer that *does* offer the AS4 capability keeps 4-byte encoding.
+    #[test]
+    fn as4_kept_when_peer_offers_capability() {
+        let mut peer = BgpPeer::new(PeerConfig::new(
+            Asn(64512),
+            Asn(64513),
+            RouterId::from_v4([10, 0, 0, 1]),
+        ));
+        peer.step(BgpEvent::ManualStart);
+        peer.step(BgpEvent::TransportOpen);
+        let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 2]));
+        open.params.push(crate::message::open::OpenParam {
+            param_type: crate::message::open::OpenParam::PARAM_TYPE_CAPABILITY,
+            value: Capability::encode_set(&[Capability::four_octet_as(64513)]),
+        });
+        peer.step(BgpEvent::Message(BgpMessage::Open(open)));
+        assert!(peer.cfg.asn4, "4-byte encoding must be negotiated up");
     }
 }

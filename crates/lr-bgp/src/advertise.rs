@@ -78,10 +78,13 @@ impl BgpPeer {
         ));
 
         // --- LOCAL_PREF: iBGP only (RFC 4271 §5.1.4 / §9.1.2.2) ---
+        // LOCAL_PREF is well-known discretionary → optional bit MUST be 0.
+        // Peers such as BIRD/FRR validate well-known attribute flags and
+        // reset the session on a malformed optional bit.
         if topo.role.is_internal() {
             if attrs.local_pref().is_none() {
                 attrs.insert(PathAttribute::new(
-                    PathAttrFlags::new().set_optional(true).set_transitive(true),
+                    PathAttrFlags::new().set_transitive(true),
                     AttrType::LocalPref,
                     LocalPref(100).encode().to_vec(),
                 ));
@@ -102,6 +105,8 @@ impl BgpPeer {
         }
 
         // --- Route-Reflector reflection attributes (RFC 4456 §3) ---
+        // ORIGINATOR_ID and CLUSTER_LIST are optional non-transitive
+        // (RFC 4456 §5): optional=1, transitive=0 → 0x80.
         if topo.rr_client {
             let cluster = self
                 .cfg
@@ -110,7 +115,7 @@ impl BgpPeer {
             // ORIGINATOR_ID: the BGP-ID of the originator in the local AS.
             if attrs.get(AttrType::OriginatorId).is_none() {
                 attrs.insert(PathAttribute::new(
-                    PathAttrFlags::new().set_optional(true).set_transitive(true),
+                    PathAttrFlags::new().set_optional(true),
                     AttrType::OriginatorId,
                     self.cfg.local_bgp_id.to_v4_bytes().to_vec(),
                 ));
@@ -133,7 +138,7 @@ impl BgpPeer {
                 bytes.extend_from_slice(&c.to_be_bytes());
             }
             attrs.insert(PathAttribute::new(
-                PathAttrFlags::new().set_optional(true).set_transitive(true),
+                PathAttrFlags::new().set_optional(true),
                 AttrType::ClusterList,
                 bytes,
             ));
@@ -190,6 +195,20 @@ impl BgpPeer {
                 ));
             }
         }
+        if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
+            self.out_buf.extend_from_slice(&bytes);
+        }
+    }
+
+    /// Send the End-of-RIB (EoR) marker: an UPDATE carrying no withdrawn
+    /// routes, no path attributes and no NLRI (RFC 4724 §4). Well-behaved
+    /// speakers emit it after the initial table dump so the peer can detect
+    /// convergence (BIRD and FRR both log and act on it).
+    pub fn send_end_of_rib(&mut self) {
+        if !self.is_established() {
+            return;
+        }
+        let update = Update::new();
         if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
             self.out_buf.extend_from_slice(&bytes);
         }
@@ -381,6 +400,68 @@ mod tests {
             assert!(u.nlri.is_empty());
         } else {
             panic!("UPDATE did not decode");
+        }
+    }
+
+    /// Attribute flag conformance: strict implementations (BIRD, FRR)
+    /// validate the optional/transitive bits of well-known attributes.
+    /// LOCAL_PREF is well-known discretionary → 0x40; ORIGINATOR_ID and
+    /// CLUSTER_LIST are optional non-transitive → 0x80.
+    #[test]
+    fn attribute_flags_match_rfc() {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.route_reflector_client = true;
+        let mut peer = established_peer(cfg);
+        let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
+        assert!(peer.advertise(&route));
+        let bytes = peer.drain_outgoing();
+        let mut dec = crate::codec::BgpCodec::new();
+        let mut r = lr_core::buf::ReadBuf::new(&bytes);
+        let msg = dec.decode(&mut r).unwrap().unwrap();
+        let BgpMessage::Update(u) = msg else {
+            panic!("expected UPDATE");
+        };
+        let lp = u.attributes.get(AttrType::LocalPref).expect("LOCAL_PREF");
+        assert_eq!(lp.flags.0 & 0xc0, 0x40, "LOCAL_PREF must be well-known");
+        let oi = u
+            .attributes
+            .get(AttrType::OriginatorId)
+            .expect("ORIGINATOR_ID");
+        assert_eq!(
+            oi.flags.0 & 0xc0,
+            0x80,
+            "ORIGINATOR_ID optional non-transitive"
+        );
+        let cl = u
+            .attributes
+            .get(AttrType::ClusterList)
+            .expect("CLUSTER_LIST");
+        assert_eq!(
+            cl.flags.0 & 0xc0,
+            0x80,
+            "CLUSTER_LIST optional non-transitive"
+        );
+    }
+
+    /// End-of-RIB marker: an empty UPDATE (no withdrawn, no attributes, no
+    /// NLRI) per RFC 4724 §4.
+    #[test]
+    fn end_of_rib_is_empty_update() {
+        let cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        let mut peer = established_peer(cfg);
+        peer.send_end_of_rib();
+        let bytes = peer.drain_outgoing();
+        assert_eq!(bytes.len(), 23); // 19-byte header + 4 zero length fields
+        assert_eq!(bytes[18], 2); // UPDATE type
+        let mut dec = crate::codec::BgpCodec::new();
+        let mut r = lr_core::buf::ReadBuf::new(&bytes);
+        match dec.decode(&mut r).unwrap().unwrap() {
+            BgpMessage::Update(u) => {
+                assert!(u.withdrawn.is_empty());
+                assert!(u.nlri.is_empty());
+                assert_eq!(u.attributes.len(), 0);
+            }
+            _ => panic!("expected UPDATE"),
         }
     }
 }
