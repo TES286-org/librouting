@@ -25,6 +25,8 @@ pub struct SessionConfig {
     pub hold_time: u16,
     pub keepalive: u16,
     pub asn4: bool,
+    /// Advertise and use RFC 2918 route refresh when the peer supports it.
+    pub route_refresh: bool,
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
     /// Local interface address: used as NEXT_HOP for eBGP egress
     /// (next-hop-self) and as the local identity for Babel/OSPF runtimes.
@@ -43,6 +45,7 @@ impl SessionConfig {
             hold_time: 90,
             keepalive: 0,
             asn4: true,
+            route_refresh: true,
             // Advertise MP-BGP for IPv4 unicast (RFC 4760). Modern
             // speakers (BIRD 2, FRR) require the capability to match one
             // of their channels — without it BIRD refuses the session
@@ -75,6 +78,7 @@ impl SessionConfig {
             hold_time: 0,
             keepalive: 0,
             asn4: false,
+            route_refresh: false,
             mp_families: Vec::new(),
             local_address: None,
             area_id,
@@ -91,6 +95,7 @@ impl SessionConfig {
             hold_time: 0,
             keepalive: 0,
             asn4: false,
+            route_refresh: false,
             mp_families: Vec::new(),
             local_address: Some(local_addr),
             area_id: 0,

@@ -130,6 +130,17 @@ int32_t lr_router_tick(lr_router_t r, uint64_t now_ms);
 int32_t lr_router_start_session(lr_router_t r, uint64_t session);
 
 /**
+ * Request an RFC 2918 route refresh from an established BGP peer.
+ *
+ * Returns 1 when a request was queued, 0 when the session has not negotiated
+ * route refresh, and a negative value for invalid handles or inputs.
+ */
+int32_t lr_router_request_route_refresh(lr_router_t r,
+                                        uint64_t session,
+                                        uint16_t afi,
+                                        uint8_t safi);
+
+/**
  * Originate a local IPv4 route: `prefix_addr` is 4 bytes, `prefix_len` is
  * the prefix length, `next_hop` is 4 bytes or NULL. The route is injected
  * into Loc-RIB and advertised to all established BGP peers.

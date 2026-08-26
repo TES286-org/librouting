@@ -34,7 +34,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 7947 route server mode | ✅ | |
 | RFC 9234 OTC / roles | ✅ | |
 | RFC 7911 Add-Path | 🟡 | capability + encoding; full N-path handling in best-path not wired |
-| RFC 2918 route refresh | 🟡 | codec + capability; request generation not wired into router |
+| RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
 | RFC 7313 enhanced route refresh | 🟡 | codec only |
 | RFC 4724 graceful restart | 🟡 | capability + EoR marker sent; restart-state retention not implemented |
 | RFC 8277/8533 LLGR | ❌ | |
@@ -124,13 +124,11 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 1. **MRAI** — batch UPDATEs per prefix (default 30 s eBGP / 5 s iBGP,
    configurable) to be a polite peer at scale.
-2. **Route refresh wiring** — emit ROUTE-REFRESH on policy change so
-   Adj-RIB-In can be re-evaluated without a session bounce.
-3. **Graceful restart restart-state** — retain routes during restart
+2. **Graceful restart restart-state** — retain routes during restart
    window (capability already negotiated).
-4. **OSPF LSA refresh scheduling + ABR summary LSAs** — multi-area
+3. **OSPF LSA refresh scheduling + ABR summary LSAs** — multi-area
    correctness.
-5. **Babel HMAC (RFC 8967)** — authentication for untrusted links.
-6. **BGP MD5/TCP-AO** — where operators require it.
-7. **Daemon hardening** — signal handling, privilege drop, config reload,
+4. **Babel HMAC (RFC 8967)** — authentication for untrusted links.
+5. **BGP MD5/TCP-AO** — where operators require it.
+6. **Daemon hardening** — signal handling, privilege drop, config reload,
    runtime API (gRPC/UNIX socket) for operational visibility.

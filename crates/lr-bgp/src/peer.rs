@@ -33,6 +33,8 @@ pub struct PeerConfig {
     pub add_path: bool,
     /// Optional: enable graceful restart (RFC 4724).
     pub graceful_restart: bool,
+    /// Optional: advertise and accept route refresh (RFC 2918).
+    pub route_refresh: bool,
     /// Optional: enable enhanced route refresh (RFC 7313).
     pub enhanced_rr: bool,
     /// Optional: keepalive interval (seconds). 0 = hold_time / 3.
@@ -76,6 +78,7 @@ impl PeerConfig {
             mp_families: Vec::new(),
             add_path: false,
             graceful_restart: false,
+            route_refresh: true,
             enhanced_rr: false,
             keepalive: 0,
             long_lived: false,

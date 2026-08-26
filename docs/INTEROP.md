@@ -23,7 +23,9 @@ For every peer pair, all of the following must hold:
 3. **peer → lr propagation** — a prefix originated by the peer
    (`198.51.100.0/24`, static in BIRD / `network` statement in FRR)
    shows up in lr-daemon's Loc-RIB log with the correct next hop.
-4. **Clean teardown** — End-of-RIB markers are sent after the initial
+4. **Route refresh** — an RFC 2918 ROUTE-REFRESH request triggers a fresh
+   family-scoped table dump that is evaluated through the current export policy.
+5. **Clean teardown** — End-of-RIB markers are sent after the initial
    dump; no protocol error logs on either side.
 
 ## Running locally
@@ -154,6 +156,10 @@ mind when embedding librouting or extending the BGP code:
    expiry, ceasing, malformed UPDATE) must drive the FSM to Idle and
    purge that peer's Adj-RIB-In — otherwise stale routes survive a
    session reset.
+6. **Route refresh is capability-gated.** `RouterInstance::request_route_refresh`
+   sends a request only after both OPEN messages advertised RFC 2918. An
+   inbound request replaces the peer's family-scoped Adj-RIB-Out entries with
+   a fresh export-policy evaluation and finishes with End-of-RIB.
 
 ## Extending the suite
 

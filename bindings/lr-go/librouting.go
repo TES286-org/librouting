@@ -93,6 +93,21 @@ func (r *Router) DrainOutput(session uint64) ([]byte, error) {
         return copyBytes(&b), nil
 }
 
+// RequestRouteRefresh asks an established peer to resend the specified address
+// family. It returns false when the session did not negotiate RFC 2918.
+func (r *Router) RequestRouteRefresh(session uint64, afi uint16, safi uint8) (bool, error) {
+        rc := C.lr_router_request_route_refresh(
+                r.ptr,
+                C.uint64_t(session),
+                C.uint16_t(afi),
+                C.uint8_t(safi),
+        )
+        if rc < 0 {
+                return false, fmt.Errorf("lr_router_request_route_refresh: %s (rc=%d)", LastError(), int(rc))
+        }
+        return rc == 1, nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
         rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))

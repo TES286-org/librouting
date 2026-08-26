@@ -87,6 +87,8 @@ pub enum BgpAction {
     Close,
     InstallRoute(lr_core::rib::Route),
     WithdrawRoute(lr_core::rib::RouteKey),
+    /// A negotiated peer requested that this family be re-advertised.
+    RouteRefreshRequested(lr_core::nlri::NlriFamily),
     Emit(lr_core::event::Event),
     None,
 }
@@ -152,6 +154,34 @@ impl BgpPeer {
         &self.cfg
     }
 
+    /// Whether both speakers negotiated the RFC 2918 route-refresh capability.
+    pub fn route_refresh_negotiated(&self) -> bool {
+        self.cfg.route_refresh
+            && self
+                .peer_capabilities
+                .iter()
+                .any(|cap| cap.code == crate::capabilities::CapabilityCode::RouteRefresh)
+    }
+
+    /// Queue an RFC 2918 ROUTE-REFRESH request for an address family.
+    ///
+    /// Returns `false` without writing bytes unless the session is established
+    /// and both speakers advertised the capability in OPEN.
+    pub fn request_route_refresh(&mut self, family: NlriFamily) -> bool {
+        if !self.is_established() || !self.route_refresh_negotiated() {
+            return false;
+        }
+        match self.codec.encode_vec(&BgpMessage::RouteRefresh(
+            crate::message::RouteRefresh::new(family),
+        )) {
+            Ok(bytes) => {
+                self.out_buf.extend_from_slice(&bytes);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     /// Push inbound bytes; decode and emit any actions for consumed messages.
     pub fn feed_bytes(&mut self, bytes: &[u8]) -> Result<Vec<BgpAction>, ParseError> {
         let mut actions = Vec::new();
@@ -182,6 +212,9 @@ impl BgpPeer {
         }
         for fam in &self.cfg.mp_families {
             caps.push(Capability::multiprotocol(fam.afi, fam.safi));
+        }
+        if self.cfg.route_refresh {
+            caps.push(Capability::route_refresh());
         }
         if self.cfg.enhanced_rr {
             caps.push(Capability::enhanced_rr());
@@ -322,6 +355,12 @@ impl BgpPeer {
                     timer_ids::HOLD,
                     TimerSpec::once(self.hold_remaining),
                 ));
+                BgpState::Established
+            }
+            (BgpState::Established, BgpEvent::Message(BgpMessage::RouteRefresh(refresh))) => {
+                if self.route_refresh_negotiated() {
+                    my_actions.push(BgpAction::RouteRefreshRequested(refresh.family));
+                }
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::Update(_))) => {
@@ -545,6 +584,9 @@ impl StateMachine for BgpPeer {
                 BgpAction::Emit(ev) => Action::EmitEvent(ev),
                 BgpAction::InstallRoute(r) => Action::InstallRoute(r),
                 BgpAction::WithdrawRoute(k) => Action::WithdrawRoute(k),
+                // The generic core FSM has no route-refresh-specific action;
+                // router-aware embedders consume it through `BgpAction`.
+                BgpAction::RouteRefreshRequested(_) => Action::None,
                 BgpAction::None => Action::None,
             })
             .collect()
@@ -672,6 +714,42 @@ mod tests {
         assert_eq!(a.state(), BgpState::Idle);
         assert!(!a.is_established());
         assert!(actions.iter().any(|x| matches!(x, BgpAction::Close)));
+    }
+
+    #[test]
+    fn route_refresh_is_negotiated_and_dispatched() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_keepalive = a.drain_outgoing();
+        let b_keepalive = b.drain_outgoing();
+        a.feed_bytes(&b_keepalive).unwrap();
+        b.feed_bytes(&a_keepalive).unwrap();
+
+        assert!(a.route_refresh_negotiated());
+        assert!(a.request_route_refresh(NlriFamily::IPV4_UNICAST));
+        let request = a.drain_outgoing();
+        let actions = b.feed_bytes(&request).unwrap();
+        assert!(actions.iter().any(|action| {
+            matches!(
+                action,
+                BgpAction::RouteRefreshRequested(NlriFamily { afi: 1, safi: 1 })
+            )
+        }));
+    }
+
+    #[test]
+    fn route_refresh_requires_negotiated_capability() {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.route_refresh = false;
+        let peer = BgpPeer::new(cfg);
+        assert!(!peer.route_refresh_negotiated());
     }
 
     /// A peer that *does* offer the AS4 capability keeps 4-byte encoding.

@@ -71,6 +71,20 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_start_session failed (rc={rc}): {last_error()}")
 
+    def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
+        """Ask an established BGP peer to resend an RFC 2918 address family.
+
+        Returns ``False`` if the peer did not negotiate route refresh.
+        """
+        rc = get_lib().lr_router_request_route_refresh(
+            self._ptr, int(session), int(afi), int(safi)
+        )
+        if rc < 0:
+            raise LrError(
+                f"lr_router_request_route_refresh failed (rc={rc}): {last_error()}"
+            )
+        return bool(rc)
+
     def originate_v4(self, prefix: str, next_hop: str | None = None) -> None:
         """Originate a local IPv4 route, e.g. originate_v4("203.0.113.0/24", "192.0.2.1")."""
         addr_str, _, plen_str = prefix.partition("/")

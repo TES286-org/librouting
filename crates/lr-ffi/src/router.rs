@@ -49,6 +49,7 @@ pub extern "C" fn lr_router_add_bgp_session(
         hold_time,
         keepalive,
         asn4: asn4 != 0,
+        route_refresh: true,
         mp_families: Vec::new(),
         local_address: None,
         area_id: 0,
@@ -142,6 +143,35 @@ pub extern "C" fn lr_router_start_session(r: lr_router_t, session: u64) -> i32 {
             set_last_error(e);
             -3
         }
+    }
+}
+
+/// Request an RFC 2918 route refresh from an established BGP peer.
+///
+/// Returns 1 when a request was queued, 0 when the session has not negotiated
+/// route refresh, and a negative value for invalid handles or inputs.
+#[no_mangle]
+pub extern "C" fn lr_router_request_route_refresh(
+    r: lr_router_t,
+    session: u64,
+    afi: u16,
+    safi: u8,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    if afi == 0 || safi == 0 {
+        set_last_error("AFI and SAFI must be non-zero".to_string());
+        return -2;
+    }
+    if router.request_route_refresh(
+        SessionHandle(session),
+        lr_core::nlri::NlriFamily { afi, safi },
+    ) {
+        1
+    } else {
+        0
     }
 }
 

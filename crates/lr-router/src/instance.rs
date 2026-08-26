@@ -70,6 +70,9 @@ pub trait RouterInstance {
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String>;
     fn drain_output(&mut self, h: SessionHandle) -> Vec<u8>;
     fn tick(&mut self, now: Instant);
+    /// Request that an established peer resend its Adj-RIB-Out for `family`.
+    /// Returns `false` if RFC 2918 was not negotiated for that session.
+    fn request_route_refresh(&mut self, h: SessionHandle, family: NlriFamily) -> bool;
     fn poll_events(&mut self) -> Vec<RouterEvent>;
     fn rib_snapshot(&self) -> Vec<&Route>;
 }
@@ -656,6 +659,63 @@ impl DefaultRouter {
         }
     }
 
+    /// Re-evaluate and resend one address family after an RFC 2918 request.
+    ///
+    /// This intentionally re-runs export hooks rather than replaying cached
+    /// bytes so a policy update is reflected immediately. Entries no longer
+    /// permitted by policy are withdrawn before the refreshed advertisements.
+    fn reannounce_to_session(&mut self, session: u64, family: NlriFamily) {
+        let origin = RouteOrigin {
+            proto: 0,
+            peer: session,
+        };
+        let prior: Vec<RouteKey> = self
+            .adj_rib_out
+            .iter_for(origin)
+            .filter(|route| route.key.family == family)
+            .map(|route| route.key.clone())
+            .collect();
+        let snapshot: Vec<Route> = self
+            .loc_rib
+            .iter_best()
+            .filter(|route| route.key.family == family && route.origin.peer != session)
+            .cloned()
+            .collect();
+        let hooks = std::mem::take(&mut self.hooks);
+        let mut advertised = Vec::new();
+
+        if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
+            if !peer.is_established() {
+                self.hooks = hooks;
+                return;
+            }
+            for key in &prior {
+                peer.withdraw(&[key.prefix], family);
+                self.adj_rib_out.suppress(origin, key);
+            }
+            for route in snapshot {
+                let mut route = route;
+                if matches!(hooks.run_export(&mut route), HookVerdict::Drop) {
+                    continue;
+                }
+                if peer.advertise(&route) {
+                    advertised.push(route);
+                }
+            }
+            peer.send_end_of_rib();
+            let bytes = peer.drain_outgoing();
+            if !bytes.is_empty() {
+                conn.put_output(&bytes);
+            }
+        }
+        self.hooks = hooks;
+        for route in advertised {
+            self.adj_rib_out.advertise(origin, &route);
+            self.pending_events
+                .push(RouterEvent::PrefixAdvertised(route.key.prefix));
+        }
+    }
+
     fn propagate_withdrawal(&mut self, key: &RouteKey) {
         for (h, state) in self.sessions.iter_mut() {
             let SessionState::Bgp { peer, conn, .. } = state else {
@@ -760,6 +820,9 @@ impl DefaultRouter {
                     };
                     self.withdraw_from_session(origin, &k);
                 }
+                BgpAction::RouteRefreshRequested(family) => {
+                    self.reannounce_to_session(session, family);
+                }
                 BgpAction::Emit(ev) => {
                     let ev: RouterEvent = ev.into();
                     self.pending_events.push(ev);
@@ -839,6 +902,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.hold_time = cfg.hold_time;
                 p_cfg.keepalive = cfg.keepalive;
                 p_cfg.asn4 = cfg.asn4;
+                p_cfg.route_refresh = cfg.route_refresh;
                 p_cfg.mp_families = cfg.mp_families.clone();
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
@@ -1074,6 +1138,17 @@ impl RouterInstance for DefaultRouter {
         }
     }
 
+    fn request_route_refresh(&mut self, h: SessionHandle, family: NlriFamily) -> bool {
+        let requested = match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => peer.request_route_refresh(family),
+            _ => false,
+        };
+        if requested {
+            self.flush_peer_output(h.0);
+        }
+        requested
+    }
+
     fn poll_events(&mut self) -> Vec<RouterEvent> {
         core::mem::take(&mut self.pending_events)
     }
@@ -1131,5 +1206,51 @@ mod tests {
         assert_eq!(r.rib_len(), 1);
         r.unoriginate(&key);
         assert_eq!(r.rib_len(), 0);
+    }
+
+    #[test]
+    fn route_refresh_reannounces_current_family() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 1]),
+            ))
+            .unwrap();
+        let b_session = b
+            .add_session(SessionConfig::bgp(
+                Asn(64513),
+                Asn(64512),
+                RouterId::from_v4([10, 0, 0, 2]),
+            ))
+            .unwrap();
+        a.start_session(a_session).unwrap();
+        b.start_session(b_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        let b_open = b.drain_output(b_session);
+        a.feed_input(a_session, &b_open).unwrap();
+        b.feed_input(b_session, &a_open).unwrap();
+        let a_keepalive = a.drain_output(a_session);
+        let b_keepalive = b.drain_output(b_session);
+        a.feed_input(a_session, &b_keepalive).unwrap();
+        b.feed_input(b_session, &a_keepalive).unwrap();
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let initial_advertisement = a.drain_output(a_session);
+        b.feed_input(b_session, &initial_advertisement).unwrap();
+        assert_eq!(b.rib_len(), 1);
+
+        assert!(b.request_route_refresh(b_session, NlriFamily::IPV4_UNICAST));
+        let request = b.drain_output(b_session);
+        a.feed_input(a_session, &request).unwrap();
+        let refreshed = a.drain_output(a_session);
+        assert!(!refreshed.is_empty());
+        b.feed_input(b_session, &refreshed).unwrap();
+        assert_eq!(b.rib_len(), 1);
     }
 }
