@@ -1,0 +1,28 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+jobs:
+  publish:
+    name: Build + release
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release artifacts
+        run: |
+          cargo build --workspace --release --all-features
+          cargo build --release -p lr-ffi
+          tar czf librouting-linux-x86_64.tar.gz -C target/release liblr_ffi.so liblr_ffi.a include
+          cp include/lr_ffi.h lr_ffi.h
+          cp include/librouting.hpp librouting.hpp
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            librouting-linux-x86_64.tar.gz
+            lr_ffi.h
+            librouting.hpp
+          draft: true

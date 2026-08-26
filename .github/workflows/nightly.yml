@@ -1,0 +1,24 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  miri:
+    name: Miri (UB check for unsafe FFI)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri
+      - name: Install cargo-nextest
+        run: cargo install cargo-nextest --version 0.9.70 || true
+      - name: Miri test
+        run: cargo miri test -p lr-ffi --all-features
+        continue-on-error: true # nightly + experimental
