@@ -43,9 +43,24 @@ func NewRouter() (*Router, error) {
 }
 
 // AddBGPSession adds a BGP session. Returns the session handle.
+// Graceful restart (RFC 4724) is enabled with a 120 s restart time;
+// Long-Lived Graceful Restart (RFC 9494) is disabled.
 func (r *Router) AddBGPSession(localAS, peerAS, localBGPID uint32, holdTime, keepalive uint16, asn4 bool) (uint64, error) {
+        return r.AddBGPSessionExt(localAS, peerAS, localBGPID, holdTime, keepalive, asn4,
+                true, 120, false, 0, 0)
+}
+
+// AddBGPSessionExt adds a BGP session with explicit graceful-restart
+// configuration (RFC 4724 + RFC 9494). Returns the session handle.
+//
+// restartTime and llgrStaleTime are seconds. LLGR requires GR: when llgr
+// is enabled with gracefulRestart disabled the LLGR capability is not
+// advertised (RFC 9494 §4.1). llgrMaxStale caps the stale time received
+// from the peer; 0 honours the peer's value.
+func (r *Router) AddBGPSessionExt(localAS, peerAS, localBGPID uint32, holdTime, keepalive uint16, asn4 bool,
+        gracefulRestart bool, restartTime uint16, llgr bool, llgrStaleTime, llgrMaxStale uint32) (uint64, error) {
         var h C.uint64_t
-        rc := C.lr_router_add_bgp_session(
+        rc := C.lr_router_add_bgp_session_ext(
                 r.ptr,
                 C.uint32_t(localAS),
                 C.uint32_t(peerAS),
@@ -53,10 +68,15 @@ func (r *Router) AddBGPSession(localAS, peerAS, localBGPID uint32, holdTime, kee
                 C.uint16_t(holdTime),
                 C.uint16_t(keepalive),
                 toCBool(asn4),
+                toCBool(gracefulRestart),
+                C.uint16_t(restartTime),
+                toCBool(llgr),
+                C.uint32_t(llgrStaleTime),
+                C.uint32_t(llgrMaxStale),
                 &h,
         )
         if rc != 0 {
-                return 0, fmt.Errorf("lr_router_add_bgp_session: %s (rc=%d)", LastError(), int(rc))
+                return 0, fmt.Errorf("lr_router_add_bgp_session_ext: %s (rc=%d)", LastError(), int(rc))
         }
         return uint64(h), nil
 }

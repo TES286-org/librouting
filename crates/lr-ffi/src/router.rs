@@ -26,6 +26,10 @@ pub unsafe extern "C" fn lr_router_destroy(r: lr_router_t) {
 
 /// Add a BGP session. Returns 0 on success, negative on error. The session
 /// handle is written to `out_handle`.
+///
+/// Graceful restart (RFC 4724) is enabled with a 120 s restart time;
+/// Long-Lived Graceful Restart (RFC 9494) is disabled. Use
+/// [`lr_router_add_bgp_session_ext`] to configure both.
 #[no_mangle]
 pub extern "C" fn lr_router_add_bgp_session(
     r: lr_router_t,
@@ -35,6 +39,51 @@ pub extern "C" fn lr_router_add_bgp_session(
     hold_time: u16,
     keepalive: u16,
     asn4: u8,
+    out_handle: *mut u64,
+) -> i32 {
+    unsafe {
+        lr_router_add_bgp_session_ext(
+            r,
+            local_as,
+            peer_as,
+            local_bgp_id,
+            hold_time,
+            keepalive,
+            asn4,
+            1,
+            120,
+            0,
+            0,
+            0,
+            out_handle,
+        )
+    }
+}
+
+/// Extended session creation with graceful-restart knobs.
+///
+/// - `graceful_restart` / `gr_restart_time`: RFC 4724 advertisement and
+///   stale-route retention (seconds; restart time is clamped to 12 bits).
+/// - `long_lived_gr` / `llgr_stale_time`: RFC 9494 Long-Lived Graceful
+///   Restart — LLGR requires GR per RFC 9494 §4.1, so when
+///   `long_lived_gr` is set with `graceful_restart` clear the LLGR
+///   capability is not advertised.
+/// - `llgr_max_stale_time`: optional local cap (seconds) on the stale time
+///   received from the peer; 0 disables the cap (RFC 9494 §4.2).
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
+    r: lr_router_t,
+    local_as: u32,
+    peer_as: u32,
+    local_bgp_id: u32,
+    hold_time: u16,
+    keepalive: u16,
+    asn4: u8,
+    graceful_restart: u8,
+    gr_restart_time: u16,
+    long_lived_gr: u8,
+    llgr_stale_time: u32,
+    llgr_max_stale_time: u32,
     out_handle: *mut u64,
 ) -> i32 {
     let mut router = match unsafe { lock_router(r) } {
@@ -51,11 +100,15 @@ pub extern "C" fn lr_router_add_bgp_session(
         asn4: asn4 != 0,
         route_refresh: true,
         enhanced_route_refresh: true,
-        graceful_restart: true,
-        graceful_restart_time: 120,
-        long_lived_gr: false,
-        long_lived_stale_time: 0,
-        llgr_max_stale_time: None,
+        graceful_restart: graceful_restart != 0,
+        graceful_restart_time: gr_restart_time,
+        long_lived_gr: long_lived_gr != 0,
+        long_lived_stale_time: llgr_stale_time,
+        llgr_max_stale_time: if llgr_max_stale_time != 0 {
+            Some(llgr_max_stale_time)
+        } else {
+            None
+        },
         mrai_ms: if local_as == peer_as { 5_000 } else { 30_000 },
         mp_families: Vec::new(),
         local_address: None,

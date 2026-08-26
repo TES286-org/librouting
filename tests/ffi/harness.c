@@ -34,6 +34,61 @@ int main(void) {
     check(rc == 0, "add_bgp_session");
     check(h == 1, "session_handle == 1");
 
+    /* Extended session creation (RFC 4724 GR + RFC 9494 LLGR knobs) */
+    uint64_t h2 = 0;
+    rc = lr_router_add_bgp_session_ext(r, 64512, 64513, 0x0a000001u, 90, 0, 1,
+                                       1, 120, 1, 3600, 0, &h2);
+    check(rc == 0, "add_bgp_session_ext (GR 120s + LLGR 3600s)");
+    check(h2 == 2, "ext session_handle == 2");
+    /* A second router to complete a full LLGR handshake against. */
+    lr_router_t peer = lr_router_new();
+    check(peer != NULL, "peer router_new");
+    uint64_t ph = 0;
+    rc = lr_router_add_bgp_session_ext(peer, 64513, 64512, 0x0a000002u, 90, 0, 1,
+                                       1, 90, 1, 1800, 0, &ph);
+    check(rc == 0, "peer add_bgp_session_ext");
+    /* Drive the OPEN/KEEPALIVE exchange byte-by-byte. */
+    rc = lr_router_start_session(r, h2);
+    check(rc == 0, "start ext session");
+    rc = lr_router_start_session(peer, ph);
+    check(rc == 0, "start peer session");
+    lr_bytes_t a_open = {0}, b_open = {0};
+    rc = lr_router_drain_output(r, h2, &a_open);
+    check(rc == 0, "drain ext OPEN");
+    rc = lr_router_drain_output(peer, ph, &b_open);
+    check(rc == 0, "drain peer OPEN");
+    /* The OPEN must carry the LLGR capability (code 71, RFC 9494). */
+    {
+        const uint8_t *o = lr_bytes_ptr(&a_open);
+        size_t len = lr_bytes_len(&a_open), i;
+        int has_llgr = 0;
+        for (i = 19; i + 1 < len; i++) {
+            if (o[i] == 71 && o[i + 1] == 7) { /* cap 71, len 7 (one tuple) */
+                has_llgr = 1;
+                break;
+            }
+        }
+        check(has_llgr, "OPEN advertises LLGR capability (code 71)");
+    }
+    rc = lr_router_feed_input(r, h2, lr_bytes_ptr(&b_open), (size_t)lr_bytes_len(&b_open));
+    check(rc == 0, "feed peer OPEN");
+    rc = lr_router_feed_input(peer, ph, lr_bytes_ptr(&a_open), (size_t)lr_bytes_len(&a_open));
+    check(rc == 0, "feed ext OPEN");
+    lr_bytes_free(&a_open);
+    lr_bytes_free(&b_open);
+    lr_bytes_t a_ka = {0}, b_ka = {0};
+    rc = lr_router_drain_output(r, h2, &a_ka);
+    check(rc == 0, "drain ext KEEPALIVE");
+    rc = lr_router_drain_output(peer, ph, &b_ka);
+    check(rc == 0, "drain peer KEEPALIVE");
+    rc = lr_router_feed_input(r, h2, lr_bytes_ptr(&b_ka), (size_t)lr_bytes_len(&b_ka));
+    check(rc == 0, "feed peer KEEPALIVE");
+    rc = lr_router_feed_input(peer, ph, lr_bytes_ptr(&a_ka), (size_t)lr_bytes_len(&a_ka));
+    check(rc == 0, "feed ext KEEPALIVE");
+    lr_bytes_free(&a_ka);
+    lr_bytes_free(&b_ka);
+    lr_router_destroy(peer);
+
     /* Tick once */
     rc = lr_router_tick(r, 0);
     check(rc == 0, "tick");

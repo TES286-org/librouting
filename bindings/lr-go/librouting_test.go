@@ -93,3 +93,35 @@ func TestDataPlane(t *testing.T) {
 	}
 	r.ptr = nil
 }
+
+// TestAddBGPSessionExtLLGR verifies the extended session constructor
+// advertises the RFC 9494 LLGR capability (code 71, one 7-byte tuple).
+func TestAddBGPSessionExtLLGR(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	h, err := r.AddBGPSessionExt(64512, 64513, 0x0a000001, 90, 0, true,
+		true, 120, true, 3600, 0)
+	if err != nil {
+		t.Fatalf("AddBGPSessionExt: %v", err)
+	}
+	if err := r.StartSession(h); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	open, err := r.DrainOutput(h)
+	if err != nil {
+		t.Fatalf("DrainOutput: %v", err)
+	}
+	hasLLGR := false
+	for i := 19; i+1 < len(open); i++ {
+		if open[i] == 71 && open[i+1] == 7 {
+			hasLLGR = true
+			break
+		}
+	}
+	if !hasLLGR {
+		t.Fatalf("OPEN does not advertise the LLGR capability (code 71)")
+	}
+	r.ptr = nil
+}

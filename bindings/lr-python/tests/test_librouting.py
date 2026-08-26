@@ -78,3 +78,21 @@ if __name__ == "__main__":
     test_router_lifecycle()
     test_router_data_plane()
     print("all tests passed")
+
+
+def test_add_bgp_session_ext_llgr():
+    """RFC 9494 LLGR: the extended constructor must make the OPEN carry
+    the LLGR capability (code 71, one 7-byte tuple)."""
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513,
+                              local_bgp_id=0x0a000001,
+                              graceful_restart=True, gr_restart_time=120,
+                              long_lived_gr=True, llgr_stale_time=3600)
+        r.start_session(h)
+        open_msg = r.drain_output(h)
+        assert len(open_msg) >= 29
+        has_llgr = any(
+            open_msg[i] == 71 and open_msg[i + 1] == 7
+            for i in range(19, len(open_msg) - 1)
+        )
+        assert has_llgr, "OPEN does not advertise the LLGR capability (code 71)"

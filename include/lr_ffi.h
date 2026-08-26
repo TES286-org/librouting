@@ -92,6 +92,10 @@ void lr_router_destroy(lr_router_t r);
 /**
  * Add a BGP session. Returns 0 on success, negative on error. The session
  * handle is written to `out_handle`.
+ *
+ * Graceful restart (RFC 4724) is enabled with a 120 s restart time;
+ * Long-Lived Graceful Restart (RFC 9494) is disabled. Use
+ * [`lr_router_add_bgp_session_ext`] to configure both.
  */
 int32_t lr_router_add_bgp_session(lr_router_t r,
                                   uint32_t local_as,
@@ -101,6 +105,32 @@ int32_t lr_router_add_bgp_session(lr_router_t r,
                                   uint16_t keepalive,
                                   uint8_t asn4,
                                   uint64_t *out_handle);
+
+/**
+ * Extended session creation with graceful-restart knobs.
+ *
+ * - `graceful_restart` / `gr_restart_time`: RFC 4724 advertisement and
+ *   stale-route retention (seconds; restart time is clamped to 12 bits).
+ * - `long_lived_gr` / `llgr_stale_time`: RFC 9494 Long-Lived Graceful
+ *   Restart — LLGR requires GR per RFC 9494 §4.1, so when
+ *   `long_lived_gr` is set with `graceful_restart` clear the LLGR
+ *   capability is not advertised.
+ * - `llgr_max_stale_time`: optional local cap (seconds) on the stale time
+ *   received from the peer; 0 disables the cap (RFC 9494 §4.2).
+ */
+int32_t lr_router_add_bgp_session_ext(lr_router_t r,
+                                      uint32_t local_as,
+                                      uint32_t peer_as,
+                                      uint32_t local_bgp_id,
+                                      uint16_t hold_time,
+                                      uint16_t keepalive,
+                                      uint8_t asn4,
+                                      uint8_t graceful_restart,
+                                      uint16_t gr_restart_time,
+                                      uint8_t long_lived_gr,
+                                      uint32_t llgr_stale_time,
+                                      uint32_t llgr_max_stale_time,
+                                      uint64_t *out_handle);
 
 /**
  * Push bytes from the peer transport into a session.

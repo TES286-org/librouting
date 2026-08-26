@@ -31,12 +31,27 @@ class Router:
         self.__del__()
 
     def add_bgp_session(self, local_as: int, peer_as: int, local_bgp_id: int,
-                        hold_time: int = 90, keepalive: int = 0, asn4: bool = True) -> int:
+                        hold_time: int = 90, keepalive: int = 0, asn4: bool = True,
+                        graceful_restart: bool = True, gr_restart_time: int = 120,
+                        long_lived_gr: bool = False, llgr_stale_time: int = 0,
+                        llgr_max_stale_time: int = 0) -> int:
+        """Add a BGP session and return its handle.
+
+        ``gr_restart_time`` is the RFC 4724 restart time in seconds.
+        ``llgr_stale_time`` is the RFC 9494 long-lived stale time in
+        seconds; LLGR requires GR (RFC 9494 §4.1), so it is only
+        advertised when ``graceful_restart`` is set.
+        ``llgr_max_stale_time`` optionally caps the stale time received
+        from the peer (0 = honour the peer's value).
+        """
         h = ffi.new("uint64_t*")
-        rc = get_lib().lr_router_add_bgp_session(
+        rc = get_lib().lr_router_add_bgp_session_ext(
             self._ptr,
             int(local_as), int(peer_as), int(local_bgp_id),
             int(hold_time), int(keepalive), 1 if asn4 else 0,
+            1 if graceful_restart else 0, int(gr_restart_time),
+            1 if long_lived_gr else 0, int(llgr_stale_time),
+            int(llgr_max_stale_time),
             h,
         )
         if rc != 0:
