@@ -1,0 +1,300 @@
+//! BGP path attributes (RFC 4271 §5 + RFC 4360/6675 communities +
+//! RFC 4760 MP-BGP + RFC 7911 AddPath + RFC 4893 AS4_PATH/AS4_AGGREGATOR).
+//!
+//! Every path attribute has a fixed header:
+//! - Flags (1 byte): bit 7 optional, bit 6 transitive, bit 5 partial,
+//!   bit 4 extended-length, bits 3-0 unused (RFC 4271 §5.1 + RFC 9072 §2).
+//! - Type (1 byte).
+//! - Length (1 byte, or 2 bytes if extended-length flag is set).
+//! - Value (length bytes).
+
+pub mod as_path;
+pub mod communities;
+pub mod mp_nlri;
+pub mod well_known;
+
+pub use as_path::{AsPath, AsPathSegment, AsPathType};
+pub use communities::{Community, CommunityKind, ExtendedCommunity};
+pub use mp_nlri::{MpNextHop, MpReach, MpUnreach};
+pub use well_known::{
+    Aggregator, AtomicAggregate, LocalPref, Med, NextHop, NextHopKind, Origin, OriginKind,
+};
+
+use lr_core::attr::{AttrTag, Attribute, Attributes};
+
+/// Path attribute flags (RFC 4271 §5.1). Bit positions are documented in
+/// RFC 9072 §2 (extended length) and earlier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct PathAttrFlags(pub u8);
+
+impl PathAttrFlags {
+    pub const OPTIONAL: u8 = 0x80;
+    pub const TRANSITIVE: u8 = 0x40;
+    pub const PARTIAL: u8 = 0x20;
+    pub const EXTENDED_LENGTH: u8 = 0x10;
+
+    pub const fn new() -> Self {
+        Self(0)
+    }
+    pub const fn optional(self) -> bool {
+        (self.0 & Self::OPTIONAL) != 0
+    }
+    pub const fn transitive(self) -> bool {
+        (self.0 & Self::TRANSITIVE) != 0
+    }
+    pub const fn partial(self) -> bool {
+        (self.0 & Self::PARTIAL) != 0
+    }
+    pub const fn extended_length(self) -> bool {
+        (self.0 & Self::EXTENDED_LENGTH) != 0
+    }
+    pub fn set_optional(mut self, v: bool) -> Self {
+        self.0 |= Self::OPTIONAL * v as u8;
+        self
+    }
+    pub fn set_transitive(mut self, v: bool) -> Self {
+        self.0 |= Self::TRANSITIVE * v as u8;
+        self
+    }
+    pub fn set_partial(mut self, v: bool) -> Self {
+        self.0 |= Self::PARTIAL * v as u8;
+        self
+    }
+    pub fn set_extended(mut self, v: bool) -> Self {
+        self.0 |= Self::EXTENDED_LENGTH * v as u8;
+        self
+    }
+}
+
+/// BGP path attribute type code (RFC 4271 §5 + IANA registry).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[repr(u8)]
+pub enum AttrType {
+    Origin = 1,
+    AsPath = 2,
+    NextHop = 3,
+    MultiExitDisc = 4,
+    LocalPref = 5,
+    AtomicAggregate = 6,
+    Aggregator = 7,
+    Communities = 8,
+    OriginatorId = 9,
+    ClusterList = 10,
+    MpReachNlri = 14,
+    MpUnreachNlri = 15,
+    ExtendedCommunities = 16,
+    As4Path = 17,
+    As4Aggregator = 18,
+    PmsiTunnel = 22,
+    TunnelEncap = 23,
+    TrafficEngineering = 24,
+    LargeCommunities = 32,
+    /// AddPath (RFC 7911 §3): 1-byte length, then NLRI.
+    BgpAddPath = 30,
+    /// Unknown attribute code.
+    Other(u8),
+}
+
+impl AttrType {
+    pub fn from_u8(v: u8) -> Self {
+        match v {
+            1 => Self::Origin,
+            2 => Self::AsPath,
+            3 => Self::NextHop,
+            4 => Self::MultiExitDisc,
+            5 => Self::LocalPref,
+            6 => Self::AtomicAggregate,
+            7 => Self::Aggregator,
+            8 => Self::Communities,
+            9 => Self::OriginatorId,
+            10 => Self::ClusterList,
+            14 => Self::MpReachNlri,
+            15 => Self::MpUnreachNlri,
+            16 => Self::ExtendedCommunities,
+            17 => Self::As4Path,
+            18 => Self::As4Aggregator,
+            22 => Self::PmsiTunnel,
+            23 => Self::TunnelEncap,
+            24 => Self::TrafficEngineering,
+            30 => Self::BgpAddPath,
+            32 => Self::LargeCommunities,
+            _ => Self::Other(v),
+        }
+    }
+
+    pub fn to_u8(self) -> u8 {
+        match self {
+            Self::Origin => 1,
+            Self::AsPath => 2,
+            Self::NextHop => 3,
+            Self::MultiExitDisc => 4,
+            Self::LocalPref => 5,
+            Self::AtomicAggregate => 6,
+            Self::Aggregator => 7,
+            Self::Communities => 8,
+            Self::OriginatorId => 9,
+            Self::ClusterList => 10,
+            Self::MpReachNlri => 14,
+            Self::MpUnreachNlri => 15,
+            Self::ExtendedCommunities => 16,
+            Self::As4Path => 17,
+            Self::As4Aggregator => 18,
+            Self::PmsiTunnel => 22,
+            Self::TunnelEncap => 23,
+            Self::TrafficEngineering => 24,
+            Self::BgpAddPath => 30,
+            Self::LargeCommunities => 32,
+            Self::Other(v) => v,
+        }
+    }
+
+    /// Whether the attribute is well-known (RFC 4271 §5.2). Well-known
+    /// attributes are mandatory unless explicitly flagged optional.
+    pub fn is_well_known(self) -> bool {
+        matches!(
+            self,
+            Self::Origin
+                | Self::AsPath
+                | Self::NextHop
+                | Self::MultiExitDisc
+                | Self::LocalPref
+                | Self::AtomicAggregate
+                | Self::Aggregator
+        )
+    }
+
+    /// Whether the attribute is mandatory (must be present in every UPDATE
+    /// carrying NLRI).
+    pub fn is_mandatory(self) -> bool {
+        matches!(self, Self::Origin | Self::AsPath | Self::NextHop)
+    }
+}
+
+/// A parsed path attribute with type and flags plus raw value bytes.
+/// Decoders for individual attributes live in the `well_known`, `as_path`,
+/// `communities`, `mp_nlri` modules and accept the raw value bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathAttribute {
+    pub flags: PathAttrFlags,
+    pub attr_type: AttrType,
+    pub value: Vec<u8>,
+}
+
+impl PathAttribute {
+    pub fn new(flags: PathAttrFlags, attr_type: AttrType, value: Vec<u8>) -> Self {
+        Self {
+            flags,
+            attr_type,
+            value,
+        }
+    }
+}
+
+/// Ordered path-attribute set keyed by attribute type code.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PathAttributes {
+    attrs: Vec<PathAttribute>,
+}
+
+impl PathAttributes {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn insert(&mut self, attr: PathAttribute) {
+        // Replace if same type code already present.
+        for a in &mut self.attrs {
+            if a.attr_type == attr.attr_type {
+                *a = attr;
+                return;
+            }
+        }
+        self.attrs.push(attr);
+    }
+
+    pub fn get(&self, t: AttrType) -> Option<&PathAttribute> {
+        self.attrs.iter().find(|a| a.attr_type == t)
+    }
+
+    pub fn remove(&mut self, t: AttrType) -> Option<PathAttribute> {
+        let idx = self.attrs.iter().position(|a| a.attr_type == t)?;
+        Some(self.attrs.remove(idx))
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &PathAttribute> {
+        self.attrs.iter()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.attrs.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.attrs.len()
+    }
+
+    // ===== typed accessors for well-known attributes =====
+
+    pub fn origin(&self) -> Option<Origin> {
+        let a = self.get(AttrType::Origin)?;
+        Origin::decode(&a.value)
+    }
+    pub fn as_path(&self) -> Option<AsPath> {
+        let a = self.get(AttrType::AsPath)?;
+        AsPath::decode(&a.value)
+    }
+    pub fn as4_path(&self) -> Option<AsPath> {
+        let a = self.get(AttrType::As4Path)?;
+        AsPath::decode_4(&a.value)
+    }
+    pub fn next_hop(&self) -> Option<NextHop> {
+        let a = self.get(AttrType::NextHop)?;
+        NextHop::decode(&a.value)
+    }
+    pub fn med(&self) -> Option<Med> {
+        let a = self.get(AttrType::MultiExitDisc)?;
+        Med::decode(&a.value)
+    }
+    pub fn local_pref(&self) -> Option<LocalPref> {
+        let a = self.get(AttrType::LocalPref)?;
+        LocalPref::decode(&a.value)
+    }
+    pub fn atomic_aggregate(&self) -> Option<AtomicAggregate> {
+        self.get(AttrType::AtomicAggregate).map(|_| AtomicAggregate)
+    }
+    pub fn aggregator(&self) -> Option<Aggregator> {
+        let a = self.get(AttrType::Aggregator)?;
+        Aggregator::decode(&a.value)
+    }
+    pub fn communities(&self) -> Vec<Community> {
+        self.get(AttrType::Communities)
+            .map(|a| Community::decode_set(&a.value))
+            .unwrap_or_default()
+    }
+    pub fn extended_communities(&self) -> Vec<ExtendedCommunity> {
+        self.get(AttrType::ExtendedCommunities)
+            .map(|a| ExtendedCommunity::decode_set(&a.value))
+            .unwrap_or_default()
+    }
+    pub fn mp_reach(&self) -> Option<MpReach> {
+        let a = self.get(AttrType::MpReachNlri)?;
+        MpReach::decode(&a.value)
+    }
+    pub fn mp_unreach(&self) -> Option<MpUnreach> {
+        let a = self.get(AttrType::MpUnreachNlri)?;
+        MpUnreach::decode(&a.value)
+    }
+}
+
+impl From<PathAttributes> for Attributes {
+    fn from(p: PathAttributes) -> Self {
+        let mut out = Self::new();
+        for a in p.attrs {
+            out.insert(Attribute {
+                tag: AttrTag(a.attr_type.to_u8()),
+                flags: a.flags.0,
+                value: a.value,
+            });
+        }
+        out
+    }
+}

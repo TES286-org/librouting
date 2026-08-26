@@ -1,0 +1,12 @@
+/target
+**/__pycache__
+**/*.pyc
+**/.pytest_cache
+bindings/lr-python/src/librouting/_generated_*.py
+bindings/lr-python/build
+bindings/lr-python/dist
+bindings/lr-go/liblr_ffi.*
+Cargo.lock.bak
+*.swp
+.idea/
+.vscode/

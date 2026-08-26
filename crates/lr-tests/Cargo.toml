@@ -1,0 +1,18 @@
+[package]
+name = "lr-tests"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Cross-crate integration tests for librouting"
+
+[dependencies]
+lr-core = { workspace = true }
+lr-bgp = { workspace = true }
+lr-ospf = { workspace = true }
+lr-babel = { workspace = true }
+lr-rib = { workspace = true }
+lr-policy = { workspace = true }
+lr-router = { workspace = true }

@@ -1,0 +1,22 @@
+[package]
+name = "lr-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "Core primitives, codec traits, generic FSM and RIB traits for librouting"
+
+[features]
+default = ["std"]
+std = []
+no_std = []
+
+[dependencies]
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+bitflags.workspace = true
+serde = { workspace = true, optional = true }
+once_cell = { workspace = true, optional = true }

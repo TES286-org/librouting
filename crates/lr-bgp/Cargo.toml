@@ -1,0 +1,25 @@
+[package]
+name = "lr-bgp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "BGP-4 protocol codec, peer FSM, path attributes and extensions"
+
+[features]
+default = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities"]
+asn4 = []
+mp_bgp = []
+addpath = []
+graceful_restart = []
+enhanced_rr = []
+extended_communities = []
+long_lived = []
+
+[dependencies]
+lr-core = { workspace = true }
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

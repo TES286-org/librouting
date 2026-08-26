@@ -1,0 +1,25 @@
+[package]
+name = "lr-ospf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "OSPFv2 and OSPFv3 codec, LSA, neighbor/interface FSM, SPF"
+
+[features]
+default = ["v2", "v3", "nssa", "te", "hmac_sha", "graceful_restart"]
+v2 = []
+v3 = []
+nssa = []
+te = []
+hmac_sha = []
+graceful_restart = []
+ospfv3_extended_lsa = []
+
+[dependencies]
+lr-core = { workspace = true }
+bytes.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
