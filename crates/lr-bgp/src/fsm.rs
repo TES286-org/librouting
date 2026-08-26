@@ -163,23 +163,47 @@ impl BgpPeer {
                 .any(|cap| cap.code == crate::capabilities::CapabilityCode::RouteRefresh)
     }
 
+    /// Whether both speakers negotiated RFC 7313 enhanced route refresh.
+    pub fn enhanced_route_refresh_negotiated(&self) -> bool {
+        self.route_refresh_negotiated()
+            && self.cfg.enhanced_rr
+            && self.peer_capabilities.iter().any(|cap| {
+                cap.code == crate::capabilities::CapabilityCode::EnhancedRouteRefresh
+                    && cap.value.is_empty()
+            })
+    }
+
     /// Queue an RFC 2918 ROUTE-REFRESH request for an address family.
     ///
     /// Returns `false` without writing bytes unless the session is established
     /// and both speakers advertised the capability in OPEN.
     pub fn request_route_refresh(&mut self, family: NlriFamily) -> bool {
+        self.enqueue_route_refresh(crate::message::RouteRefresh::new(family))
+    }
+
+    fn enqueue_route_refresh(&mut self, refresh: crate::message::RouteRefresh) -> bool {
         if !self.is_established() || !self.route_refresh_negotiated() {
             return false;
         }
-        match self.codec.encode_vec(&BgpMessage::RouteRefresh(
-            crate::message::RouteRefresh::new(family),
-        )) {
+        match self.codec.encode_vec(&BgpMessage::RouteRefresh(refresh)) {
             Ok(bytes) => {
                 self.out_buf.extend_from_slice(&bytes);
                 true
             }
             Err(_) => false,
         }
+    }
+
+    /// Start an RFC 7313 enhanced-refresh response for an address family.
+    pub fn begin_enhanced_route_refresh(&mut self, family: NlriFamily) -> bool {
+        self.enhanced_route_refresh_negotiated()
+            && self.enqueue_route_refresh(crate::message::RouteRefresh::begin_of_rib(family))
+    }
+
+    /// Finish an RFC 7313 enhanced-refresh response for an address family.
+    pub fn end_enhanced_route_refresh(&mut self, family: NlriFamily) -> bool {
+        self.enhanced_route_refresh_negotiated()
+            && self.enqueue_route_refresh(crate::message::RouteRefresh::end_of_rib(family))
     }
 
     /// Push inbound bytes; decode and emit any actions for consumed messages.
@@ -358,7 +382,9 @@ impl BgpPeer {
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::RouteRefresh(refresh))) => {
-                if self.route_refresh_negotiated() {
+                if self.route_refresh_negotiated()
+                    && refresh.subtype == crate::message::RouteRefreshSubtype::Normal
+                {
                     my_actions.push(BgpAction::RouteRefreshRequested(refresh.family));
                 }
                 BgpState::Established
@@ -733,6 +759,7 @@ mod tests {
         b.feed_bytes(&a_keepalive).unwrap();
 
         assert!(a.route_refresh_negotiated());
+        assert!(a.enhanced_route_refresh_negotiated());
         assert!(a.request_route_refresh(NlriFamily::IPV4_UNICAST));
         let request = a.drain_outgoing();
         let actions = b.feed_bytes(&request).unwrap();
@@ -742,6 +769,42 @@ mod tests {
                 BgpAction::RouteRefreshRequested(NlriFamily { afi: 1, safi: 1 })
             )
         }));
+    }
+
+    #[test]
+    fn enhanced_route_refresh_emits_demarcation_messages() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_keepalive = a.drain_outgoing();
+        let b_keepalive = b.drain_outgoing();
+        a.feed_bytes(&b_keepalive).unwrap();
+        b.feed_bytes(&a_keepalive).unwrap();
+
+        assert!(a.begin_enhanced_route_refresh(NlriFamily::IPV4_UNICAST));
+        assert!(a.end_enhanced_route_refresh(NlriFamily::IPV4_UNICAST));
+        let bytes = a.drain_outgoing();
+        let mut codec = BgpCodec::new();
+        let first = codec.decode_slice(&bytes).unwrap().unwrap();
+        let second = codec.decode_slice(&[]).unwrap().unwrap();
+        assert_eq!(
+            first,
+            BgpMessage::RouteRefresh(crate::message::RouteRefresh::begin_of_rib(
+                NlriFamily::IPV4_UNICAST
+            ))
+        );
+        assert_eq!(
+            second,
+            BgpMessage::RouteRefresh(crate::message::RouteRefresh::end_of_rib(
+                NlriFamily::IPV4_UNICAST
+            ))
+        );
     }
 
     #[test]

@@ -689,6 +689,10 @@ impl DefaultRouter {
                 self.hooks = hooks;
                 return;
             }
+            // RFC 7313 brackets the refreshed table with BoRR/EoRR when
+            // negotiated. Older RFC 2918 peers receive the same UPDATE delta
+            // without the optional demarcation messages.
+            let enhanced_refresh = peer.begin_enhanced_route_refresh(family);
             for key in &prior {
                 peer.withdraw(&[key.prefix], family);
                 self.adj_rib_out.suppress(origin, key);
@@ -703,6 +707,9 @@ impl DefaultRouter {
                 }
             }
             peer.send_end_of_rib();
+            if enhanced_refresh {
+                peer.end_enhanced_route_refresh(family);
+            }
             let bytes = peer.drain_outgoing();
             if !bytes.is_empty() {
                 conn.put_output(&bytes);
@@ -903,6 +910,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.keepalive = cfg.keepalive;
                 p_cfg.asn4 = cfg.asn4;
                 p_cfg.route_refresh = cfg.route_refresh;
+                p_cfg.enhanced_rr = cfg.enhanced_route_refresh;
                 p_cfg.mp_families = cfg.mp_families.clone();
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;

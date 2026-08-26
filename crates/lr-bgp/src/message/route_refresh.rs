@@ -1,37 +1,59 @@
 //! ROUTE-REFRESH message (RFC 2918 + RFC 7313 enhanced variant).
 //!
-//! The basic variant is a 4-byte body: AFI (2) | Reserved (1) | SAFI (1).
-//! The enhanced variant (RFC 7313) adds a BGP Identifier prefix.
+//! Both variants have a 4-byte body: AFI (2) | subtype/reserved (1) | SAFI
+//! (1). RFC 7313 redefines the formerly reserved octet as a demarcation
+//! subtype; it does not append a BGP identifier to the message.
 
 use lr_core::nlri::NlriFamily;
+
+/// RFC 7313 route-refresh subtype carried in the third body octet.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum RouteRefreshSubtype {
+    /// RFC 2918 request, or a normal RFC 7313 route-refresh message.
+    Normal = 0,
+    /// Beginning-of-RIB marker (BoRR).
+    BeginOfRib = 1,
+    /// End-of-RIB marker (EoRR).
+    EndOfRib = 2,
+}
+
+impl RouteRefreshSubtype {
+    pub fn from_u8(value: u8) -> Option<Self> {
+        match value {
+            0 => Some(Self::Normal),
+            1 => Some(Self::BeginOfRib),
+            2 => Some(Self::EndOfRib),
+            _ => None,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RouteRefresh {
     pub family: NlriFamily,
-    /// Optional BGP identifier prefix (RFC 7313). 0 = basic.
-    pub bgp_id: u32,
-    /// Optional boundary (RFC 7313). None = basic.
-    pub boundary: Option<u8>,
+    pub subtype: RouteRefreshSubtype,
 }
 
 impl RouteRefresh {
     pub fn new(family: NlriFamily) -> Self {
         Self {
             family,
-            bgp_id: 0,
-            boundary: None,
+            subtype: RouteRefreshSubtype::Normal,
         }
     }
 
-    pub fn enhanced(family: NlriFamily, bgp_id: u32, boundary: u8) -> Self {
+    pub fn begin_of_rib(family: NlriFamily) -> Self {
         Self {
             family,
-            bgp_id,
-            boundary: Some(boundary),
+            subtype: RouteRefreshSubtype::BeginOfRib,
         }
     }
 
-    pub fn is_enhanced(&self) -> bool {
-        self.boundary.is_some()
+    pub fn end_of_rib(family: NlriFamily) -> Self {
+        Self {
+            family,
+            subtype: RouteRefreshSubtype::EndOfRib,
+        }
     }
 }

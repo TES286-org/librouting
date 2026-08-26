@@ -159,7 +159,9 @@ mind when embedding librouting or extending the BGP code:
 6. **Route refresh is capability-gated.** `RouterInstance::request_route_refresh`
    sends a request only after both OPEN messages advertised RFC 2918. An
    inbound request replaces the peer's family-scoped Adj-RIB-Out entries with
-   a fresh export-policy evaluation and finishes with End-of-RIB.
+   a fresh export-policy evaluation and finishes with End-of-RIB. When RFC
+   7313 is also negotiated, the refreshed dump is bracketed by BoRR and EoRR
+   ROUTE-REFRESH messages, which BIRD reports as `Enhanced refresh`.
 
 ## Extending the suite
 

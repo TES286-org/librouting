@@ -373,24 +373,19 @@ fn decode_route_refresh(body: &[u8]) -> Result<RouteRefresh, BgpError> {
         )));
     }
     let afi = u16::from_be_bytes([body[0], body[1]]);
-    let _reserved = body[2];
-    let safi = body[3];
-    let family = NlriFamily { afi, safi };
-    if body.len() >= 8 {
-        let bgp_id = u32::from_be_bytes([body[4], body[5], body[6], body[7]]);
-        let boundary = body.get(8).copied();
-        Ok(RouteRefresh {
-            family,
-            bgp_id,
-            boundary,
-        })
-    } else {
-        Ok(RouteRefresh {
-            family,
-            bgp_id: 0,
-            boundary: None,
-        })
+    if body.len() != 4 {
+        return Err(BgpError::Codec(format!(
+            "invalid ROUTE-REFRESH body length: {}",
+            body.len()
+        )));
     }
+    let subtype = crate::message::RouteRefreshSubtype::from_u8(body[2])
+        .ok_or_else(|| BgpError::Codec(format!("invalid ROUTE-REFRESH subtype: {}", body[2])))?;
+    let safi = body[3];
+    Ok(RouteRefresh {
+        family: NlriFamily { afi, safi },
+        subtype,
+    })
 }
 
 // ===== Encoders =====
@@ -486,14 +481,8 @@ fn encode_notification(n: &BgpNotification, out: &mut WriteBuf<'_>) -> Result<()
 fn encode_route_refresh(r: &RouteRefresh, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
     out.put_u16_be(r.family.afi)
         .ok_or(EncodeError::BufferFull)?;
-    out.put_u8(0).ok_or(EncodeError::BufferFull)?;
+    out.put_u8(r.subtype as u8).ok_or(EncodeError::BufferFull)?;
     out.put_u8(r.family.safi).ok_or(EncodeError::BufferFull)?;
-    if r.is_enhanced() {
-        out.put_u32_be(r.bgp_id).ok_or(EncodeError::BufferFull)?;
-        if let Some(b) = r.boundary {
-            out.put_u8(b).ok_or(EncodeError::BufferFull)?;
-        }
-    }
     Ok(())
 }
 
@@ -621,10 +610,27 @@ mod tests {
         match dec {
             BgpMessage::RouteRefresh(d) => {
                 assert_eq!(d.family, NlriFamily::IPV4_UNICAST);
-                assert!(!d.is_enhanced());
+                assert_eq!(d.subtype, crate::message::RouteRefreshSubtype::Normal);
             }
             _ => panic!("expected ROUTE-REFRESH"),
         }
+    }
+
+    #[test]
+    fn enhanced_route_refresh_markers_roundtrip() {
+        for refresh in [
+            RouteRefresh::begin_of_rib(NlriFamily::IPV4_UNICAST),
+            RouteRefresh::end_of_rib(NlriFamily::IPV4_UNICAST),
+        ] {
+            let decoded = roundtrip(BgpMessage::RouteRefresh(refresh), false);
+            assert_eq!(decoded, BgpMessage::RouteRefresh(refresh));
+        }
+    }
+
+    #[test]
+    fn route_refresh_rejects_invalid_subtype_and_length() {
+        assert!(decode_route_refresh(&[0, 1, 3, 1]).is_err());
+        assert!(decode_route_refresh(&[0, 1, 0, 1, 0]).is_err());
     }
 
     #[test]

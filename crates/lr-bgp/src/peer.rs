@@ -79,7 +79,7 @@ impl PeerConfig {
             add_path: false,
             graceful_restart: false,
             route_refresh: true,
-            enhanced_rr: false,
+            enhanced_rr: true,
             keepalive: 0,
             long_lived: false,
             role_override: None,

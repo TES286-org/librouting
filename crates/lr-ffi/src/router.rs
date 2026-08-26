@@ -50,6 +50,7 @@ pub extern "C" fn lr_router_add_bgp_session(
         keepalive,
         asn4: asn4 != 0,
         route_refresh: true,
+        enhanced_route_refresh: true,
         mp_families: Vec::new(),
         local_address: None,
         area_id: 0,

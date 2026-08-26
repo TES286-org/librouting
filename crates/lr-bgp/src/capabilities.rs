@@ -17,8 +17,8 @@ pub enum CapabilityCode {
     GracefulRestart = 64,
     /// RFC 4893: 4-byte AS number
     FourOctetAs = 65,
-    /// RFC 5149: Outbound Route Filtering
-    OutboundRouteFiltering = 70,
+    /// RFC 7313: Enhanced route refresh
+    EnhancedRouteRefresh = 70,
     /// RFC 7911: AddPath
     AddPath = 69,
     /// RFC 8277 / 8533: Long-Lived Graceful Restart
@@ -35,7 +35,7 @@ impl CapabilityCode {
             6 => Self::ExtendedMessage,
             64 => Self::GracefulRestart,
             65 => Self::FourOctetAs,
-            70 => Self::OutboundRouteFiltering,
+            70 => Self::EnhancedRouteRefresh,
             69 => Self::AddPath,
             72 => Self::LongLivedGracefulRestart,
             _ => Self::Other(v),
@@ -57,7 +57,7 @@ impl CapabilityCode {
             Self::ExtendedMessage => 6,
             Self::GracefulRestart => 64,
             Self::FourOctetAs => 65,
-            Self::OutboundRouteFiltering => 70,
+            Self::EnhancedRouteRefresh => 70,
             Self::AddPath => 69,
             Self::LongLivedGracefulRestart => 72,
             Self::Other(v) => v,
@@ -128,13 +128,9 @@ impl Capability {
         Self::new(CapabilityCode::AddPath, v)
     }
 
-    /// Enhanced Route Refresh (RFC 7313). IANA assigned code 70 was
-    /// originally proposed for both ORF and Enhanced RR; the actual published
-    /// code is 70 in the IANA registry. We expose Enhanced RR via a separate
-    /// method that callers can use; the registry treats them as the same
-    /// codepoint with different value encodings.
+    /// Enhanced Route Refresh capability (RFC 7313, code 70).
     pub fn enhanced_rr() -> Self {
-        Self::new(CapabilityCode::OutboundRouteFiltering, Vec::new())
+        Self::new(CapabilityCode::EnhancedRouteRefresh, Vec::new())
     }
 
     pub fn graceful_restart(restart_flags: u8, restart_time_ms: u16) -> Self {

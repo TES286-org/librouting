@@ -12,7 +12,7 @@ pub mod update;
 pub use keepalive::Keepalive;
 pub use notification::Notification;
 pub use open::{Open, OpenParam};
-pub use route_refresh::RouteRefresh;
+pub use route_refresh::{RouteRefresh, RouteRefreshSubtype};
 pub use update::Update;
 
 /// BGP message header (RFC 4271 §4.1).
