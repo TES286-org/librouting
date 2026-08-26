@@ -24,5 +24,19 @@ local_address = "192.0.2.1"
 # Hold time in seconds (default 90; 0 disables keepalives).
 hold_time = 90
 
+# RFC 4724 graceful restart: restart time advertised to the peer, in
+# seconds (0 disables). Stale routes from the peer are retained for this
+# window after a session loss.
+graceful_restart_time = 120
+
+# RFC 9494 long-lived graceful restart: stale time advertised per address
+# family, in seconds (0 disables). Retention extends past the RFC 4724
+# window; stale routes are marked LLGR_STALE and become least preferred.
+# llgr_stale_time = 3600
+
+# Optional local cap on the LLGR stale time received from the peer
+# (seconds; 0 = honour the peer's value).
+# llgr_max_stale_time = 7200
+
 # Locally originated networks.
 networks = ["203.0.113.0/24"]

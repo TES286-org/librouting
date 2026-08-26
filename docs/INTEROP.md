@@ -8,6 +8,7 @@ job `interop`) and can all be reproduced locally:
 |------|--------|-------|----------------|
 | Two-daemon | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP | FSM + codec consistency in both roles |
 | BIRD | `tests/interop/bird.sh` | lr-daemon ↔ BIRD 2 (eBGP, multihop) | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions** |
+| BIRD LLGR | `tests/interop/bird_llgr.sh` | lr-daemon ↔ BIRD 2 (RFC 9494) | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge |
 | FRR | `tests/interop/frr.sh` | lr-daemon ↔ FRR bgpd (eBGP, multihop) | Wire compatibility with FRR bgpd incl. its stricter next-hop validation |
 
 ## What the tests actually verify

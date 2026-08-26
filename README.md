@@ -55,8 +55,10 @@ library without depending on the Rust toolchain at runtime.
 ## The daemon
 
 `lr-daemon` is a complete reference embedder: TCP transport (connect or
-listen), poll-driven router, ticker thread, reconnect with backoff, and
-optional kernel route installation via rtnetlink.
+listen), poll-driven router, ticker thread, reconnect with backoff, RFC
+4724 graceful restart and RFC 9494 long-lived graceful restart
+(`--graceful-restart SECS`, `--llgr SECS`), and optional kernel route
+installation via rtnetlink.
 
 ```bash
 # Terminal 1 — speaker A (listens, originates a prefix)
@@ -123,6 +125,13 @@ librouting/
   NEXT_HOP preserved) + per-client filter chains.
 - **BGP Role / OTC** (RFC 9234): `OtcRole` (Provider/Customer/Peer/RS/RsClient)
   + valley-free advertisement enforcement.
+- **Graceful Restart** (RFC 4724): per-family capability advertisement,
+  stale-route retention for the negotiated restart window and End-of-RIB
+  driven resynchronization.
+- **Long-Lived Graceful Restart** (RFC 9494): capability 71 negotiation,
+  `LLGR_STALE`/`NO_LLGR` communities, least-preferred stale-route
+  selection, egress gating to non-LLGR neighbors and per-family stale-time
+  retention with a locally configurable cap.
 
 ## Best-path selection
 
@@ -173,13 +182,16 @@ Implemented and missing features are tracked in detail in
 
 - BGP data plane verified bidirectionally against **BIRD 2** and **FRR
   bgpd** over real TCP sessions (`tests/interop/{bird,frr}.sh`, wired into
-  CI).
+  CI), including an **RFC 9494 LLGR** lifecycle test
+  (`tests/interop/bird_llgr.sh`): both sides negotiate the Long-Lived
+  Graceful Restart capability, retain routes across a restart, mark them
+  `LLGR_STALE` and purge at the negotiated stale-time expiry.
 - OS route-table integration for **Linux (rtnetlink)**, the **BSD family
   (route(4) socket)** and **Windows (IP Helper API)**, plus a porting guide
   for other systems (`docs/OS-INTEGRATION.md`).
 - Not yet production-ready: see the roadmap at the end of `STATUS.md`
-  (MRAI, route-refresh wiring, graceful-restart retention and OSPF
-  multi-area are the main gaps). The C ABI is **unstable** until v0.5.
+  (BGP MD5/TCP-AO, OSPF multi-area/ABR work and daemon hardening are the
+  main gaps). The C ABI is **unstable** until v0.5.
 
 ## CI/CD
 

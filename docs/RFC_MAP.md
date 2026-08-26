@@ -16,7 +16,7 @@ implements, or references. It is grouped by protocol family.
 | 3065  | BGP Confederations                                   | ✓ (superseded by 6793) | `lr-bgp::role::confederation`        |
 | 4360  | BGP Extended Communities                             | ✓                       | `lr-bgp::path::communities`         |
 | 4456  | BGP Route Reflection (revised)                       | ✓                       | `lr-bgp::role::cluster`              |
-| 4724  | BGP Graceful Restart                                 | ✓                       | `lr-bgp::extensions::graceful_restart` |
+| 4724  | BGP Graceful Restart                                 | ✓ (per-family F bits)  | `lr-bgp::extensions::graceful_restart`, `lr-router` |
 | 4760  | Multiprotocol BGP                                    | ✓                       | `lr-bgp::path::mp_nlri`              |
 | 4784  | BGP Cumulative Bestpath                              | ✓ (multipath)           | `lr-bgp::best_path`                  |
 | 4893  | BGP Support for 4-byte AS                            | ✓                       | `lr-bgp::extensions::asn4`           |
@@ -28,10 +28,11 @@ implements, or references. It is grouped by protocol family.
 | 7911  | BGP Add-Path                                         | ✓                       | `lr-bgp::extensions::addpath`        |
 | 7947  | Internet Exchange BGP Route Server                   | ✓                       | `lr-bgp::role::route_server`         |
 | 8212  | Default EBGP Route Behaviors                         | partial (policy)        | `lr-policy`                          |
-| 8277  | Long-Lived Graceful Restart                          | ✓                       | `lr-bgp::extensions::long_lived`    |
+| 8277  | BGP and Labeled Address Prefixes (MPLS)              | not implemented         | —                                    |
 | 8326  | Graceful BGP Session Restart + damp deprecation       | ✓                       | `lr-bgp::best_path`, `lr-damping`    |
 | 9072  | Extended Message Support for BGP                      | ✓ (extended length)     | `lr-bgp::path::PathAttrFlags`        |
 | 9234  | BGP Role (OTC)                                       | ✓                       | `lr-bgp::role::otc`                  |
+| 9494  | Long-Lived Graceful Restart                          | ✓                       | `lr-bgp::extensions::long_lived`, `lr-router` |
 | 9647  | Babel YANG model                                     | partial                 | `lr-babel`                            |
 | 1105  | BGP-1 (historic)                                     | not implemented (legacy)| —                                   |
 | 1163  | BGP-3 (historic)                                     | not implemented (legacy)| —                                   |
@@ -63,7 +64,7 @@ implements, or references. It is grouped by protocol family.
 |--------|------------------------------------------------------|--------------|--------------------------------------|
 | 7557   | Babel Source-Specific Extensions (precursor to 9079) | ✓            | `lr-babel::source`                  |
 | 8966   | Babel                                                | ✓ core       | `lr-babel::tlv`, `lr-babel::message` |
-| 8967   | Babel HMAC Cryptographic Auth                        | partial      | `lr-babel::tlv`                      |
+| 8967   | Babel HMAC Cryptographic Auth                        | ✓            | `lr-babel::tlv`, `lr-babel::hmac`   |
 | 9079   | Babel Source-Specific Routing                        | ✓            | `lr-babel::source`                  |
 | 9289   | Babel-MAC Algorithm                                  | partial      | `lr-babel::codec`                    |
 | 9647   | Babel YANG Data Model                                | partial      | TBD                                 |

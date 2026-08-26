@@ -36,12 +36,12 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 7911 Add-Path | 🟡 | capability + encoding; full N-path handling in best-path not wired |
 | RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
 | RFC 7313 enhanced route refresh | ✅ | negotiated capability plus BoRR/EoRR demarcation around refreshed tables |
-| RFC 4724 graceful restart | ✅ | capability negotiation, stale-route retention, negotiated expiry purge, and reconnect cancellation |
-| RFC 8277/8533 LLGR | ❌ | |
+| RFC 4724 graceful restart | ✅ 🧪 | capability lists address families with F bits; stale-route retention, negotiated expiry purge, EoR-based resynchronization (BIRD-verified) |
+| RFC 9494 LLGR | ✅ 🧪 | capability 71, per-family LLST, LLGR_STALE/NO_LLGR communities, least-preferred selection, egress gating, full retention lifecycle (BIRD-verified) |
 | MRAI (Min. Route Advertisement Interval) | ✅ | configurable per-prefix batching (withdrawals immediate); defaults to 30 s eBGP / 5 s iBGP |
 | MD5 / TCP-AO session authentication | ❌ | |
 | BGPsec | ❌ | out of scope for now |
-| Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak |
+| Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ | session liveness events feed the FSM |
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` |
@@ -78,8 +78,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Capability | Status | Notes |
 |-----------|:------:|-------|
 | Adj-RIB-In → safety → import hooks → best-path → Loc-RIB → export hooks → Adj-RIB-Out | ✅ 🧪 | full pipeline, per-session attribution |
-| Initial table dump on session establishment + End-of-RIB | ✅ 🧪 | BIRD/FRR see convergence markers |
-| Session-down Adj-RIB-In purge (RFC 4271 §8.2.2 semantics) | ✅ | routes do not outlive their session |
+| Initial table dump on session establishment + End-of-RIB | ✅ 🧪 | BIRD/FRR see convergence markers; inbound EoR drives restart resynchronization |
+| Session-down Adj-RIB-In purge (RFC 4271 §8.2.2 semantics) | ✅ | routes do not outlive their session — except negotiated RFC 4724/9494 retention |
 | Reconnect-safe session restart | ✅ | FSM reset + established-latch clear |
 | OSPF/Babel delta integration into Loc-RIB | ✅ | |
 | Cross-protocol administrative distance merge | ✅ 🧪 | |
@@ -110,23 +110,26 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 29 binaries / 170+ tests |
+| Unit tests (workspace) | ✅ 29 binaries / 195+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
+| BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
 | FRR bgpd interop (bidirectional) | ✅ 🧪 |
 | C / Go / Python binding harnesses | ✅ 🧪 |
 | fmt + clippy (-D warnings) | ✅ |
 | Cross builds: aarch64-linux-gnu, x86_64-windows-gnu (full link), freebsd/netbsd (check) | ✅ |
 | Coverage (tarpaulin) | ✅ |
-| MSRV 1.74 build | ✅ |
+| MSRV 1.88 build | ✅ |
 
 ## Roadmap to production (recommended order)
 
-1. **Graceful restart restart-state** — retain routes during restart
-   window (capability already negotiated).
+1. ~~**Graceful restart restart-state**~~ — done, including RFC 9494
+   long-lived graceful restart.
 2. **OSPF LSA refresh scheduling + ABR summary LSAs** — multi-area
-   correctness.
-3. **Babel HMAC (RFC 8967)** — authentication for untrusted links.
+   correctness. (Self-LSA refresh done; ABR summary LSAs remain.)
+3. ~~**Babel HMAC (RFC 8967)**~~ — done.
 4. **BGP MD5/TCP-AO** — where operators require it.
 5. **Daemon hardening** — signal handling, privilege drop, config reload,
    runtime API (gRPC/UNIX socket) for operational visibility.
+6. **Add-Path best-path wiring** — capability + encoding exist; N-path
+   selection/advertisement remains partial.
