@@ -41,8 +41,13 @@ pub struct PeerConfig {
     pub enhanced_rr: bool,
     /// Optional: keepalive interval (seconds). 0 = hold_time / 3.
     pub keepalive: u16,
-    /// Optional: long-lived graceful restart (RFC 8277).
+    /// Optional: long-lived graceful restart (RFC 9494). Requires
+    /// `graceful_restart` — RFC 9494 §4.1 mandates the GR capability
+    /// accompanies LLGR, otherwise LLGR is ignored.
     pub long_lived: bool,
+    /// Long-Lived Stale Time (seconds) advertised per address family
+    /// (RFC 9494 §3.1). Zero advertises negotiation without retention.
+    pub long_lived_stale_time: u32,
     /// Topological role (eBGP/iBGP/confed-*) — overrides the auto-detection.
     /// If `None`, [`PeerConfig::compute_topology`] derives it from local/peer
     /// ASN + confederation configuration.
@@ -85,6 +90,7 @@ impl PeerConfig {
             enhanced_rr: true,
             keepalive: 0,
             long_lived: false,
+            long_lived_stale_time: 0,
             role_override: None,
             otc_role: OtcRole::Unset,
             confederation: None,

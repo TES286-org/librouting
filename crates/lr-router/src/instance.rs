@@ -33,7 +33,7 @@
 //! [`RouterInstance::drain_output`] and consumes events via
 //! [`RouterInstance::poll_events`]. It never owns sockets.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::connection::{Connection, MemoryConn};
 use crate::event::RouterEvent;
@@ -49,7 +49,7 @@ use lr_core::timer::TimerQueue;
 
 use lr_babel::{BabelCodec, BabelFrame, BabelNeighbor, BabelRoute, BabelRouteTable};
 use lr_bgp::best_path::{BestPath, BestPathConfig};
-use lr_bgp::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
+use lr_bgp::path::{AttrType, Community, PathAttrFlags, PathAttribute, PathAttributes};
 use lr_bgp::{BgpAction, BgpEvent, BgpPeer, PeerConfig as BgpPeerConfig};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
@@ -119,10 +119,26 @@ struct MraiState {
     pending: BTreeMap<RouteKey, PendingMraiUpdate>,
 }
 
-/// Routes retained while a graceful-restart capable BGP peer reconnects.
-#[derive(Debug, Clone, Copy)]
+/// RFC 4724 + RFC 9494 retention bookkeeping for one down BGP session.
+///
+/// While the state exists the session's routes stay in Adj-RIB-In. The
+/// RFC 4724 restart window elapses first; if LLGR was negotiated for an
+/// address family the routes of that family are marked `LLGR_STALE` and
+/// retained until the family's long-lived stale deadline, otherwise they
+/// are purged (RFC 9494 §4.2 applies the two windows serially).
+#[derive(Debug, Clone)]
 struct GracefulRestartState {
-    expires_at_ms: u64,
+    /// End of the RFC 4724 restart window (ms since the router epoch).
+    restart_expires_at_ms: u64,
+    /// Per-family long-lived stale deadlines (ms): restart expiry + the
+    /// family's negotiated (and locally capped) LLST.
+    llgr_deadlines: BTreeMap<NlriFamily, u64>,
+    /// Whether the retained routes have already been marked LLGR_STALE.
+    marked_stale: bool,
+    /// Keys refreshed since the session re-established — used at EoR and
+    /// at LLST expiry during resync to drop routes the peer did not
+    /// resend (RFC 4724 §4.1, RFC 9494 §4.2).
+    refreshed: BTreeSet<RouteKey>,
 }
 
 impl SessionState {
@@ -508,8 +524,11 @@ pub struct DefaultRouter {
     babel_codec: BabelCodec,
     /// RFC 4271 MRAI state keyed by BGP session.
     mrai: BTreeMap<u64, MraiState>,
-    /// RFC 4724 stale-route retention keyed by BGP session.
+    /// RFC 4724 / RFC 9494 stale-route retention keyed by BGP session.
     graceful_restart: BTreeMap<u64, GracefulRestartState>,
+    /// Local cap (seconds) for the LLGR stale time received from a peer
+    /// (RFC 9494 §4.2), keyed by BGP session.
+    llgr_caps: BTreeMap<u64, u32>,
 }
 
 impl Default for DefaultRouter {
@@ -532,6 +551,7 @@ impl Default for DefaultRouter {
             babel_codec: BabelCodec::new(),
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),
+            llgr_caps: BTreeMap::new(),
         }
     }
 }
@@ -650,6 +670,13 @@ impl DefaultRouter {
         }
         let key = route.key.clone();
         let origin = route.origin;
+        // Track re-advertised routes while the session is resynchronizing
+        // after a restart (RFC 4724 §4.1: at EoR, unrefreshed stale routes
+        // are deleted; RFC 9494 §4.2 keeps the LLST timer running until
+        // then).
+        if let Some(state) = self.graceful_restart.get_mut(&origin.peer) {
+            state.refreshed.insert(key.clone());
+        }
         self.adj_rib_in.feed_pre_policy(origin, route);
         self.reselect(&key);
     }
@@ -975,12 +1002,6 @@ impl DefaultRouter {
             let now_est = peer.is_established();
             if now_est && !*established {
                 *established = true;
-                if self.graceful_restart.remove(&session).is_some() {
-                    self.pending_events.push(RouterEvent::Log(format!(
-                        "session {} completed graceful restart before expiry",
-                        session
-                    )));
-                }
                 self.pending_events.push(RouterEvent::PeerStateChange {
                     session: SessionHandle(session),
                     state: "Established",
@@ -1020,6 +1041,11 @@ impl DefaultRouter {
                 BgpAction::RouteRefreshRequested(family) => {
                     self.reannounce_to_session(session, family);
                 }
+                BgpAction::EndOfRib(family) => {
+                    // RFC 4724 §4 / RFC 9494 §4.2: table synchronization for
+                    // this family is complete; retention tracking ends.
+                    self.on_end_of_rib(session, family);
+                }
                 BgpAction::Emit(ev) => {
                     let ev: RouterEvent = ev.into();
                     self.pending_events.push(ev);
@@ -1043,15 +1069,36 @@ impl DefaultRouter {
         }
     }
     /// Tell a session its transport went away (peer closed, TCP reset,
-    /// connect timeout). RFC 4724 peers retain routes until the negotiated
-    /// restart deadline; all other sessions follow RFC 4271 immediate purge.
+    /// connect timeout). RFC 4724 / RFC 9494 peers retain routes until the
+    /// negotiated deadline; all other sessions follow RFC 4271 immediate
+    /// purge.
     pub fn close_session(&mut self, h: SessionHandle) {
         if let Some(mrai) = self.mrai.get_mut(&h.0) {
             mrai.last_sent.clear();
             mrai.pending.clear();
         }
-        let restart_time = match self.sessions.get(&h.0) {
-            Some(SessionState::Bgp { peer, .. }) => peer.negotiated_graceful_restart_time(),
+        // Compute the retention windows *before* stepping the FSM (the
+        // step clears nothing, but keep the ordering explicit).
+        let retention = match self.sessions.get(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                let restart_time = peer.negotiated_graceful_restart_time().unwrap_or(0);
+                // RFC 9494 §4.2: per-family LLST extends the retention
+                // window beyond the RFC 4724 restart time. The received
+                // timer may be capped by local configuration.
+                let cap = self.llgr_caps.get(&h.0).copied();
+                let mut llgr_deadlines = BTreeMap::new();
+                if peer.llgr_negotiated() {
+                    for (family, llst) in peer.negotiated_llgr_families() {
+                        let llst = cap.map(|c| llst.min(c)).unwrap_or(llst);
+                        let deadline = self
+                            .now_ms
+                            .saturating_add(u64::from(restart_time).saturating_mul(1_000))
+                            .saturating_add(u64::from(llst).saturating_mul(1_000));
+                        llgr_deadlines.insert(family, deadline);
+                    }
+                }
+                Some((restart_time, llgr_deadlines))
+            }
             _ => None,
         };
         let Some(state) = self.sessions.get_mut(&h.0) else {
@@ -1062,21 +1109,37 @@ impl DefaultRouter {
             SessionState::Ospf { .. } | SessionState::Babel { .. } => Vec::new(),
         };
         self.dispatch_bgp_actions(h.0, actions);
-        if let Some(restart_time) = restart_time.filter(|time| *time != 0) {
-            self.graceful_restart.insert(
-                h.0,
-                GracefulRestartState {
-                    expires_at_ms: self
-                        .now_ms
-                        .saturating_add(u64::from(restart_time).saturating_mul(1_000)),
-                },
-            );
-            self.pending_events.push(RouterEvent::Log(format!(
-                "session {} entered graceful-restart retention for {} seconds",
-                h.0, restart_time
-            )));
-        } else {
-            self.session_down_cleanup(h.0);
+        match retention {
+            Some((restart_time, llgr_deadlines))
+                if restart_time > 0 || !llgr_deadlines.is_empty() =>
+            {
+                let families: Vec<String> = llgr_deadlines
+                    .keys()
+                    .map(|f| format!("{}/{}", f.afi, f.safi))
+                    .collect();
+                self.graceful_restart.insert(
+                    h.0,
+                    GracefulRestartState {
+                        restart_expires_at_ms: self
+                            .now_ms
+                            .saturating_add(u64::from(restart_time).saturating_mul(1_000)),
+                        llgr_deadlines,
+                        marked_stale: false,
+                        refreshed: BTreeSet::new(),
+                    },
+                );
+                self.pending_events.push(RouterEvent::Log(format!(
+                    "session {} entered graceful-restart retention for {} seconds{}",
+                    h.0,
+                    restart_time,
+                    if families.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" + LLGR for families {:?}", families)
+                    }
+                )));
+            }
+            _ => self.session_down_cleanup(h.0),
         }
     }
 
@@ -1115,6 +1178,246 @@ impl DefaultRouter {
             session
         )));
     }
+
+    // ----- RFC 4724 + RFC 9494 retention processing -----
+
+    /// Begin the LLGR period for a session whose RFC 4724 restart window
+    /// just elapsed (RFC 9494 §4.2): routes of LLGR-protected families are
+    /// marked `LLGR_STALE`, routes of unprotected families and routes
+    /// carrying `NO_LLGR` are deleted, selection is re-run so stale paths
+    /// lose to fresh ones, and the stale routes are withdrawn from
+    /// neighbors without LLGR. Routes in `refreshed` (re-advertised after
+    /// the session re-established) are fresh and left untouched.
+    fn enter_llgr_period(
+        &mut self,
+        session: u64,
+        llgr_deadlines: &BTreeMap<NlriFamily, u64>,
+        refreshed: &BTreeSet<RouteKey>,
+    ) {
+        let origins = [
+            RouteOrigin {
+                proto: 0,
+                peer: session,
+            },
+            RouteOrigin {
+                proto: 1,
+                peer: session,
+            },
+        ];
+        let mut affected: Vec<RouteKey> = Vec::new();
+        for origin in origins {
+            affected.extend(
+                self.adj_rib_in
+                    .iter_origin(origin)
+                    .filter(|r| !refreshed.contains(&r.key))
+                    .map(|r| r.key.clone()),
+            );
+            self.adj_rib_in.mutate_origin(origin, |mut route| {
+                if refreshed.contains(&route.key) {
+                    // Freshly re-advertised during resynchronization.
+                    return Some(route);
+                }
+                let mut attrs: PathAttributes = route.attributes.clone().into();
+                let no_llgr = attrs.has_community(Community::NO_LLGR);
+                let llgr_protected = llgr_deadlines.contains_key(&route.key.family);
+                if no_llgr || !llgr_protected {
+                    // RFC 9494 §4.2: NO_LLGR routes are never retained;
+                    // families without a negotiated LLST follow plain GR.
+                    None
+                } else {
+                    attrs.insert_community(Community::LLGR_STALE);
+                    route.attributes = attrs.into();
+                    Some(route)
+                }
+            });
+        }
+        for key in &affected {
+            self.reselect(key);
+            self.withdraw_stale_from_non_llgr_sessions(key);
+        }
+        if !affected.is_empty() {
+            self.pending_events.push(RouterEvent::Log(format!(
+                "session {} restart window elapsed: {} route(s) entered LLGR stale state",
+                session,
+                affected.len()
+            )));
+        }
+    }
+
+    /// RFC 9494 §4.3: an LLGR_STALE route is not advertised to neighbors
+    /// that did not negotiate LLGR — the previous advertisement must be
+    /// withdrawn from them.
+    fn withdraw_stale_from_non_llgr_sessions(&mut self, key: &RouteKey) {
+        let sessions: Vec<u64> = self
+            .sessions
+            .iter()
+            .filter_map(|(session, state)| match state {
+                SessionState::Bgp { peer, .. }
+                    if peer.is_established() && !peer.llgr_negotiated() =>
+                {
+                    Some(*session)
+                }
+                _ => None,
+            })
+            .filter(|session| {
+                self.adj_rib_out
+                    .iter_for(RouteOrigin {
+                        proto: 0,
+                        peer: *session,
+                    })
+                    .any(|route| route.key == *key)
+            })
+            .collect();
+        for session in sessions {
+            self.queue_or_send_withdrawal(session, key.clone());
+        }
+    }
+
+    /// Delete a session's unrefreshed routes of one address family and
+    /// re-run selection for them. Used at EoR (RFC 4724 §4.1) and at LLST
+    /// expiry during resynchronization (RFC 9494 §4.2): anything the peer
+    /// did not re-advertise goes away.
+    fn purge_unrefreshed_family(
+        &mut self,
+        session: u64,
+        family: NlriFamily,
+        refreshed: &BTreeSet<RouteKey>,
+    ) {
+        let origins = [
+            RouteOrigin {
+                proto: 0,
+                peer: session,
+            },
+            RouteOrigin {
+                proto: 1,
+                peer: session,
+            },
+        ];
+        let mut purged = 0usize;
+        for origin in origins {
+            let stale_keys: Vec<RouteKey> = self
+                .adj_rib_in
+                .iter_origin(origin)
+                .filter(|r| r.key.family == family && !refreshed.contains(&r.key))
+                .map(|r| r.key.clone())
+                .collect();
+            purged += stale_keys.len();
+            for key in stale_keys {
+                self.adj_rib_in.withdraw(origin, &key);
+                self.reselect(&key);
+            }
+        }
+        if purged > 0 {
+            self.pending_events.push(RouterEvent::Log(format!(
+                "session {} resynchronized for AFI {}/SAFI {}: purged {} stale route(s)",
+                session, family.afi, family.safi, purged
+            )));
+        }
+    }
+
+    /// End-of-RIB received for one family (RFC 4724 §4): the peer finished
+    /// re-advertising its table. Stale routes it did not refresh are
+    /// deleted and the family's LLGR deadline is retired (RFC 9494 §4.2).
+    fn on_end_of_rib(&mut self, session: u64, family: NlriFamily) {
+        let Some(state) = self.graceful_restart.get_mut(&session) else {
+            return;
+        };
+        state.llgr_deadlines.remove(&family);
+        let refreshed = state.refreshed.clone();
+        let more_families = !state.llgr_deadlines.is_empty();
+        if !more_families {
+            self.graceful_restart.remove(&session);
+        }
+        self.purge_unrefreshed_family(session, family, &refreshed);
+        self.pending_events.push(RouterEvent::Log(format!(
+            "session {} received End-of-RIB for AFI {}/SAFI {} — synchronization complete",
+            session, family.afi, family.safi
+        )));
+    }
+
+    /// Drive the RFC 4724 / RFC 9494 retention state machines for all
+    /// down-but-retained sessions. Called from [`Self::tick`].
+    fn process_graceful_restart(&mut self) {
+        // Phase 1: RFC 4724 restart-window expiry — either purge the
+        // session (no LLGR) or enter the LLGR stale period.
+        let expired: Vec<u64> = self
+            .graceful_restart
+            .iter()
+            .filter(|(_, st)| !st.marked_stale && st.restart_expires_at_ms <= self.now_ms)
+            .map(|(session, _)| *session)
+            .collect();
+        for session in expired {
+            let Some(mut state) = self.graceful_restart.remove(&session) else {
+                continue;
+            };
+            // A session that already re-established is resynchronizing:
+            // its freshly re-advertised routes are *not* stale. Only a
+            // session that is still down purges wholesale at restart-time
+            // expiry (RFC 4724 §4.2); the re-established case waits for
+            // End-of-RIB, which removes whatever was not refreshed.
+            let established = matches!(
+                self.sessions.get(&session),
+                Some(SessionState::Bgp {
+                    established: true,
+                    ..
+                })
+            );
+            if state.llgr_deadlines.is_empty() {
+                if established {
+                    // Keep the bookkeeping alive so on_end_of_rib can purge
+                    // unrefreshed routes; the restart window itself is moot.
+                    state.marked_stale = true;
+                    self.graceful_restart.insert(session, state);
+                } else {
+                    self.session_down_cleanup(session);
+                    self.pending_events.push(RouterEvent::Log(format!(
+                        "session {} graceful-restart retention expired; purged stale routes",
+                        session
+                    )));
+                }
+            } else {
+                state.marked_stale = true;
+                let deadlines = state.llgr_deadlines.clone();
+                let refreshed = state.refreshed.clone();
+                self.graceful_restart.insert(session, state);
+                self.enter_llgr_period(session, &deadlines, &refreshed);
+            }
+        }
+
+        // Phase 2: per-family LLGR deadline expiry. The timer keeps
+        // running across re-establishment until EoR (RFC 9494 §4.2), so
+        // only routes the peer has not refreshed are removed.
+        let expired_llgr: Vec<(u64, NlriFamily)> = self
+            .graceful_restart
+            .iter()
+            .filter(|(_, st)| st.marked_stale)
+            .flat_map(|(session, st)| {
+                st.llgr_deadlines
+                    .iter()
+                    .filter(|(_, deadline)| **deadline <= self.now_ms)
+                    .map(|(family, _)| (*session, *family))
+                    .collect::<Vec<_>>()
+            })
+            .collect();
+        for (session, family) in expired_llgr {
+            let Some(state) = self.graceful_restart.get_mut(&session) else {
+                continue;
+            };
+            state.llgr_deadlines.remove(&family);
+            let refreshed = state.refreshed.clone();
+            let done = state.llgr_deadlines.is_empty();
+            if done {
+                self.graceful_restart.remove(&session);
+            }
+            // When the session is still down every route of the family is
+            // unrefreshed, so this degenerates to a full family purge.
+            self.purge_unrefreshed_family(session, family, &refreshed);
+            self.pending_events.push(RouterEvent::Log(format!(
+                "session {} long-lived stale time expired for AFI {}/SAFI {}; purged",
+                session, family.afi, family.safi
+            )));
+        }
+    }
 }
 
 impl RouterInstance for DefaultRouter {
@@ -1130,6 +1433,11 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.enhanced_rr = cfg.enhanced_route_refresh;
                 p_cfg.graceful_restart = cfg.graceful_restart;
                 p_cfg.graceful_restart_time = cfg.graceful_restart_time;
+                p_cfg.long_lived = cfg.long_lived_gr;
+                p_cfg.long_lived_stale_time = cfg.long_lived_stale_time;
+                if let Some(cap) = cfg.llgr_max_stale_time {
+                    self.llgr_caps.insert(h.0, cap);
+                }
                 p_cfg.mp_families = cfg.mp_families.clone();
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
@@ -1407,21 +1715,7 @@ impl RouterInstance for DefaultRouter {
             }
         }
         self.flush_mrai();
-
-        let expired_restarts: Vec<u64> = self
-            .graceful_restart
-            .iter()
-            .filter(|(_, state)| state.expires_at_ms <= self.now_ms)
-            .map(|(session, _)| *session)
-            .collect();
-        for session in expired_restarts {
-            self.graceful_restart.remove(&session);
-            self.session_down_cleanup(session);
-            self.pending_events.push(RouterEvent::Log(format!(
-                "session {} graceful-restart retention expired; purged stale routes",
-                session
-            )));
-        }
+        self.process_graceful_restart();
     }
 
     fn request_route_refresh(&mut self, h: SessionHandle, family: NlriFamily) -> bool {
@@ -1646,5 +1940,312 @@ mod tests {
         assert!(!refreshed.is_empty());
         b.feed_input(b_session, &refreshed).unwrap();
         assert_eq!(b.rib_len(), 1);
+    }
+
+    // ===== RFC 4724 + RFC 9494 retention tests =====
+
+    fn establish(
+        a: &mut DefaultRouter,
+        a_session: SessionHandle,
+        b: &mut DefaultRouter,
+        b_session: SessionHandle,
+    ) {
+        a.start_session(a_session).unwrap();
+        b.start_session(b_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        let b_open = b.drain_output(b_session);
+        a.feed_input(a_session, &b_open).unwrap();
+        b.feed_input(b_session, &a_open).unwrap();
+        let a_keepalive = a.drain_output(a_session);
+        let b_keepalive = b.drain_output(b_session);
+        a.feed_input(a_session, &b_keepalive).unwrap();
+        b.feed_input(b_session, &a_keepalive).unwrap();
+    }
+
+    /// Wire B's Loc-RIB into A: originate on B, pump the UPDATE across.
+    fn b_advertise_to_a(
+        a: &mut DefaultRouter,
+        a_session: SessionHandle,
+        b: &mut DefaultRouter,
+        b_session: SessionHandle,
+    ) {
+        b.originate(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 10])),
+        );
+        let advertisement = b.drain_output(b_session);
+        assert!(!advertisement.is_empty());
+        a.feed_input(a_session, &advertisement).unwrap();
+        assert_eq!(a.rib_len(), 1);
+    }
+
+    fn llgr_pair() -> (DefaultRouter, SessionHandle, DefaultRouter, SessionHandle) {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(1)
+                    .with_long_lived_gr(10),
+            )
+            .unwrap();
+        // B advertises LLST 20 s: A must retain B's routes for
+        // restart (1 s) + LLST (20 s) per RFC 9494 §4.2.
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(1)
+                    .with_long_lived_gr(20),
+            )
+            .unwrap();
+        (a, a_session, b, b_session)
+    }
+
+    fn best_has_llgr_stale(a: &DefaultRouter) -> bool {
+        let snap = a.rib_snapshot();
+        assert_eq!(snap.len(), 1);
+        let attrs: PathAttributes = snap[0].attributes.clone().into();
+        attrs.has_community(Community::LLGR_STALE)
+    }
+
+    /// RFC 4724: routes are retained for the restart window and purged
+    /// when it expires (no LLGR negotiated).
+    #[test]
+    fn plain_gr_retains_then_purges() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(1),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(1),
+            )
+            .unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(500));
+        assert_eq!(a.rib_len(), 1, "still inside the restart window");
+        a.tick(Instant(1_500));
+        assert_eq!(a.rib_len(), 0, "restart window expired — purge");
+    }
+
+    /// RFC 9494 §4.2: after the restart window the routes are marked
+    /// LLGR_STALE and retained for the negotiated long-lived stale time.
+    #[test]
+    fn llgr_marks_stale_then_purges_at_llst_expiry() {
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(500));
+        assert_eq!(a.rib_len(), 1, "retained inside the restart window");
+        assert!(!best_has_llgr_stale(&a), "not yet long-lived stale");
+
+        // Restart window (1 s) elapses → LLGR period begins.
+        a.tick(Instant(1_500));
+        assert_eq!(a.rib_len(), 1, "LLGR retains the route");
+        assert!(best_has_llgr_stale(&a), "marked LLGR_STALE");
+
+        // LLST (20 s after the restart window) not yet over.
+        a.tick(Instant(20_999));
+        assert_eq!(a.rib_len(), 1);
+
+        a.tick(Instant(21_000));
+        assert_eq!(a.rib_len(), 0, "long-lived stale time expired — purge");
+    }
+
+    /// RFC 9494 §4.2: when the session re-establishes and resends its
+    /// table (EoR received), the routes are refreshed and outlive the
+    /// original LLST deadline.
+    #[test]
+    fn llgr_reestablishment_with_eor_refreshes_routes() {
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(1_500)); // enter LLGR stale period
+        assert!(best_has_llgr_stale(&a));
+
+        // B restarts and re-advertises everything (initial dump + EoR).
+        establish(&mut a, a_session, &mut b, b_session);
+        let b_dump = b.drain_output(b_session);
+        assert!(!b_dump.is_empty());
+        a.feed_input(a_session, &b_dump).unwrap();
+        assert_eq!(a.rib_len(), 1);
+        assert!(
+            !best_has_llgr_stale(&a),
+            "fresh route replaced the stale one"
+        );
+
+        // Well past the original LLST deadline: nothing may be purged
+        // because synchronization completed at EoR.
+        a.tick(Instant(60_000));
+        assert_eq!(a.rib_len(), 1, "refreshed routes survive past LLST");
+    }
+
+    /// RFC 4724 §4.1 / RFC 9494 §4.2: at EoR, stale routes the peer did
+    /// not re-advertise are deleted.
+    #[test]
+    fn llgr_eor_purges_unrefreshed_routes() {
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let key = RouteKey::new(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(1_500)); // LLGR stale period
+
+        // B no longer originates the prefix when it comes back.
+        b.unoriginate(&key);
+        establish(&mut a, a_session, &mut b, b_session);
+        let b_dump = b.drain_output(b_session);
+        a.feed_input(a_session, &b_dump).unwrap();
+        assert_eq!(
+            a.rib_len(),
+            0,
+            "EoR arrived without a refresh — stale route purged"
+        );
+    }
+
+    /// RFC 9494 §4.2: routes marked NO_LLGR are not retained.
+    #[test]
+    fn llgr_no_llgr_routes_are_dropped() {
+        struct TagNoLlgr;
+        impl lr_policy::hooks::ImportHook for TagNoLlgr {
+            fn on_import(&self, route: &mut Route) -> lr_policy::hooks::HookVerdict {
+                let mut attrs: PathAttributes = route.attributes.clone().into();
+                attrs.insert_community(Community::NO_LLGR);
+                route.attributes = attrs.into();
+                lr_policy::hooks::HookVerdict::Keep
+            }
+        }
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        a.hooks_mut().import.push(Box::new(TagNoLlgr));
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(500));
+        assert_eq!(a.rib_len(), 1, "retained inside the restart window");
+        a.tick(Instant(1_500));
+        assert_eq!(
+            a.rib_len(),
+            0,
+            "NO_LLGR routes must not survive into the LLGR period"
+        );
+    }
+
+    /// RFC 9494 §4.2: a locally configured cap limits the received LLST.
+    #[test]
+    fn llgr_local_cap_limits_received_stale_time() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(1)
+                    .with_long_lived_gr(10)
+                    .with_llgr_max_stale_time(5),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(1)
+                    .with_long_lived_gr(20), // peer proposes 20 s
+            )
+            .unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(1_500));
+        assert_eq!(a.rib_len(), 1, "LLGR period, still retained");
+        // 1 s restart + 5 s capped LLST = 6 s deadline; 20 s would be
+        // the un-capped expiry.
+        a.tick(Instant(6_000));
+        assert_eq!(a.rib_len(), 0, "capped LLST expired the retention early");
+    }
+
+    /// RFC 4724 §4.2: when the session re-establishes *before* the restart
+    /// window elapses and re-advertises its routes, expiry of the (now
+    /// moot) restart timer must NOT purge the fresh routes.
+    #[test]
+    fn fast_reestablishment_survives_restart_window_expiry() {
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        // Re-establish immediately and refresh the route.
+        establish(&mut a, a_session, &mut b, b_session);
+        let b_dump = b.drain_output(b_session);
+        a.feed_input(a_session, &b_dump).unwrap();
+        assert_eq!(a.rib_len(), 1);
+
+        // Long past the 1 s restart window (and past the 20 s LLST): the
+        // session is up and synchronized, so nothing may be purged.
+        a.tick(Instant(30_000));
+        assert_eq!(a.rib_len(), 1, "resynchronized routes survive expiry");
+    }
+
+    /// LLGR variant: the LLST timer keeps running across re-establishment
+    /// (RFC 9494 §4.2) but only removes routes the peer did not refresh.
+    #[test]
+    fn llgr_timer_runs_during_resync_but_spares_refreshed_routes() {
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let key = RouteKey::new(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        // Enter the LLGR stale period while still down.
+        a.tick(Instant(1_500));
+        assert_eq!(a.rib_len(), 1);
+
+        // B comes back but no longer originates the prefix; the session
+        // re-establishes without refreshing the stale route.
+        b.unoriginate(&key);
+        establish(&mut a, a_session, &mut b, b_session);
+        let b_dump = b.drain_output(b_session);
+        a.feed_input(a_session, &b_dump).unwrap();
+
+        // LLST deadline (1 s restart + 20 s LLST) passes while the session
+        // is up: the unrefreshed stale route must go.
+        a.tick(Instant(21_500));
+        assert_eq!(
+            a.rib_len(),
+            0,
+            "LLST expiry during resync removes unrefreshed stale routes"
+        );
     }
 }

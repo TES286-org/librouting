@@ -285,6 +285,24 @@ impl PathAttributes {
             .map(|a| Community::decode_set(&a.value))
             .unwrap_or_default()
     }
+    /// True when the COMMUNITIES attribute contains `c`.
+    pub fn has_community(&self, c: Community) -> bool {
+        self.communities().contains(&c)
+    }
+    /// Attach a community to the COMMUNITIES attribute (idempotent).
+    /// COMMUNITIES is optional transitive (RFC 1997 §4).
+    pub fn insert_community(&mut self, c: Community) {
+        let mut set = self.communities();
+        if set.contains(&c) {
+            return;
+        }
+        set.push(c);
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::Communities,
+            Community::encode_set(&set),
+        ));
+    }
     pub fn extended_communities(&self) -> Vec<ExtendedCommunity> {
         self.get(AttrType::ExtendedCommunities)
             .map(|a| ExtendedCommunity::decode_set(&a.value))

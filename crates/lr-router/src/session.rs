@@ -33,6 +33,17 @@ pub struct SessionConfig {
     pub graceful_restart: bool,
     /// Maximum restart duration advertised to the peer, in seconds.
     pub graceful_restart_time: u16,
+    /// Advertise RFC 9494 Long-Lived Graceful Restart and retain the
+    /// peer's routes for the negotiated long-lived stale time after the
+    /// RFC 4724 restart window elapses. Requires `graceful_restart`.
+    pub long_lived_gr: bool,
+    /// Long-Lived Stale Time (seconds) advertised per address family
+    /// (RFC 9494 §3.1).
+    pub long_lived_stale_time: u32,
+    /// Optional local cap (seconds) applied to the LLGR stale time
+    /// received from peers (RFC 9494 §4.2: received timers SHOULD be
+    /// modifiable by local configuration). `None` = honour the peer.
+    pub llgr_max_stale_time: Option<u32>,
     /// Minimum interval between UPDATE advertisements for one prefix.
     /// Zero disables MRAI batching for this session.
     pub mrai_ms: u64,
@@ -58,6 +69,9 @@ impl SessionConfig {
             enhanced_route_refresh: true,
             graceful_restart: true,
             graceful_restart_time: 120,
+            long_lived_gr: false,
+            long_lived_stale_time: 0,
+            llgr_max_stale_time: None,
             // RFC 4271 §9.2.1.1: common defaults are 30 seconds for eBGP
             // and 5 seconds for iBGP. `DefaultRouter` selects the latter
             // automatically when local and peer ASNs are equal.
@@ -82,6 +96,21 @@ impl SessionConfig {
     pub fn with_graceful_restart(mut self, restart_time_secs: u16) -> Self {
         self.graceful_restart = restart_time_secs != 0;
         self.graceful_restart_time = restart_time_secs.min(0x0fff);
+        self
+    }
+
+    /// Advertise RFC 9494 Long-Lived Graceful Restart with the given
+    /// stale time (seconds) and retain the peer's routes accordingly.
+    /// Zero disables LLGR for this session.
+    pub fn with_long_lived_gr(mut self, stale_time_secs: u32) -> Self {
+        self.long_lived_gr = stale_time_secs != 0;
+        self.long_lived_stale_time = stale_time_secs;
+        self
+    }
+
+    /// Cap the LLGR stale time received from peers (RFC 9494 §4.2).
+    pub fn with_llgr_max_stale_time(mut self, cap_secs: u32) -> Self {
+        self.llgr_max_stale_time = Some(cap_secs);
         self
     }
 
@@ -112,6 +141,9 @@ impl SessionConfig {
             enhanced_route_refresh: false,
             graceful_restart: false,
             graceful_restart_time: 0,
+            long_lived_gr: false,
+            long_lived_stale_time: 0,
+            llgr_max_stale_time: None,
             mrai_ms: 0,
             mp_families: Vec::new(),
             local_address: None,
@@ -133,6 +165,9 @@ impl SessionConfig {
             enhanced_route_refresh: false,
             graceful_restart: false,
             graceful_restart_time: 0,
+            long_lived_gr: false,
+            long_lived_stale_time: 0,
+            llgr_max_stale_time: None,
             mrai_ms: 0,
             mp_families: Vec::new(),
             local_address: Some(local_addr),

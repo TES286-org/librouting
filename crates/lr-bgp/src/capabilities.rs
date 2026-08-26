@@ -1,5 +1,6 @@
 //! BGP capabilities (RFC 5492 + RFC 4760 MP-BGP + RFC 4893 4-byte AS +
-//! RFC 7911 AddPath + RFC 4724 Graceful Restart + RFC 7313 Enhanced RR).
+//! RFC 7911 AddPath + RFC 4724 Graceful Restart + RFC 7313 Enhanced RR +
+//! RFC 9494 Long-Lived Graceful Restart).
 
 use core::fmt;
 
@@ -21,8 +22,8 @@ pub enum CapabilityCode {
     EnhancedRouteRefresh = 70,
     /// RFC 7911: AddPath
     AddPath = 69,
-    /// RFC 8277 / 8533: Long-Lived Graceful Restart
-    LongLivedGracefulRestart = 72,
+    /// RFC 9494: Long-Lived Graceful Restart
+    LongLivedGracefulRestart = 71,
     /// Unknown
     Other(u8),
 }
@@ -37,7 +38,7 @@ impl CapabilityCode {
             65 => Self::FourOctetAs,
             70 => Self::EnhancedRouteRefresh,
             69 => Self::AddPath,
-            72 => Self::LongLivedGracefulRestart,
+            71 => Self::LongLivedGracefulRestart,
             _ => Self::Other(v),
         }
     }
@@ -59,7 +60,7 @@ impl CapabilityCode {
             Self::FourOctetAs => 65,
             Self::EnhancedRouteRefresh => 70,
             Self::AddPath => 69,
-            Self::LongLivedGracefulRestart => 72,
+            Self::LongLivedGracefulRestart => 71,
             Self::Other(v) => v,
         }
     }
@@ -133,15 +134,31 @@ impl Capability {
         Self::new(CapabilityCode::EnhancedRouteRefresh, Vec::new())
     }
 
-    /// Graceful Restart capability (RFC 4724 §3). `restart_time_secs` is a
-    /// 12-bit field; the high nibble contains capability flags.
-    pub fn graceful_restart(restart_flags: u8, restart_time_secs: u16) -> Self {
+    /// Graceful Restart capability (RFC 4724 §3). `restart_flags` is a
+    /// 4-bit field (bit 0x8 = Restart State, R); `restart_time_secs` is a
+    /// 12-bit field. `families` lists `(afi, safi, forwarding_state)`
+    /// tuples — a family is only listed when the speaker can preserve its
+    /// state; per RFC 4724 §4.2 the receiving speaker retains routes
+    /// exactly for the listed families.
+    pub fn graceful_restart(
+        restart_flags: u8,
+        restart_time_secs: u16,
+        families: &[(u16, u8, bool)],
+    ) -> Self {
         let encoded = (u16::from(restart_flags & 0x0f) << 12) | (restart_time_secs & 0x0fff);
-        Self::new(
-            CapabilityCode::GracefulRestart,
-            encoded.to_be_bytes().to_vec(),
-        )
+        let mut v = encoded.to_be_bytes().to_vec();
+        v.reserve(families.len() * 4);
+        for (afi, safi, forwarding) in families {
+            v.extend_from_slice(&afi.to_be_bytes());
+            v.push(*safi);
+            v.push(Self::GR_AF_FLAG_F * *forwarding as u8);
+        }
+        Self::new(CapabilityCode::GracefulRestart, v)
     }
+
+    /// AF flags bit (RFC 4724 §3): forwarding state preserved for the
+    /// address family.
+    const GR_AF_FLAG_F: u8 = 0x80;
 
     /// Decode the RFC 4724 restart flags and time from a capability.
     pub fn as_graceful_restart(&self) -> Option<(u8, u16)> {
@@ -150,6 +167,62 @@ impl Capability {
         }
         let encoded = u16::from_be_bytes([self.value[0], self.value[1]]);
         Some(((encoded >> 12) as u8, encoded & 0x0fff))
+    }
+
+    /// Decode the RFC 4724 per-address-family tuples: `(afi, safi,
+    /// forwarding_state)`. An empty list means GR was negotiated without
+    /// retaining any family (RFC 4724 §4.2: nothing is retained).
+    pub fn as_graceful_restart_families(&self) -> Option<Vec<(u16, u8, bool)>> {
+        if self.code != CapabilityCode::GracefulRestart || self.value.len() < 2 {
+            return None;
+        }
+        let mut out = Vec::new();
+        for t in self.value[2..].as_chunks::<4>().0 {
+            let afi = u16::from_be_bytes([t[0], t[1]]);
+            out.push((afi, t[2], t[3] & Self::GR_AF_FLAG_F != 0));
+        }
+        Some(out)
+    }
+
+    /// Long-Lived Graceful Restart capability (RFC 9494 §3.1). The value is
+    /// a sequence of `<AFI:2, SAFI:1, Flags:1, LLST:3>` tuples, where the
+    /// flags field carries the F bit (0x80) and LLST is a 24-bit stale time
+    /// in seconds.
+    pub fn long_lived_gr(families: &[(u16, u8, bool, u32)]) -> Self {
+        let mut v = Vec::with_capacity(families.len() * 7);
+        for (afi, safi, forwarding, stale_time) in families {
+            v.extend_from_slice(&afi.to_be_bytes());
+            v.push(*safi);
+            v.push(Self::llgr_flags(*forwarding));
+            v.extend_from_slice(&stale_time.to_be_bytes()[1..]); // low 24 bits
+        }
+        Self::new(CapabilityCode::LongLivedGracefulRestart, v)
+    }
+
+    /// F bit (RFC 9494 §3.1): forwarding state preserved during restart.
+    const LLGR_FLAG_F: u8 = 0x80;
+
+    fn llgr_flags(forwarding: bool) -> u8 {
+        Self::LLGR_FLAG_F * forwarding as u8
+    }
+
+    /// Decode the RFC 9494 LLGR tuples: `(afi, safi, forwarding_bit,
+    /// stale_time_secs)` per address family.
+    pub fn as_long_lived_gr(&self) -> Option<Vec<(u16, u8, bool, u32)>> {
+        if self.code != CapabilityCode::LongLivedGracefulRestart
+            || !self.value.len().is_multiple_of(7)
+        {
+            return None;
+        }
+        let mut out = Vec::with_capacity(self.value.len() / 7);
+        for t in self.value.as_chunks::<7>().0 {
+            let afi = u16::from_be_bytes([t[0], t[1]]);
+            let safi = t[2];
+            let forwarding = t[3] & Self::LLGR_FLAG_F != 0;
+            let stale_time = u32::from_be_bytes([0, t[4], t[5], t[6]]);
+            out.push((afi, safi, forwarding, stale_time));
+        }
+        Some(out)
     }
 
     /// Encode all capabilities as the OPEN optional-parameter value
@@ -203,5 +276,63 @@ mod tests {
         let dec = Capability::decode_set(&v);
         assert_eq!(dec.len(), 1);
         assert_eq!(dec[0].as_multiprotocol(), Some((2, 1)));
+    }
+
+    #[test]
+    fn long_lived_gr_roundtrip() {
+        // RFC 9494 §3.1: capability code 71, 7-byte tuples.
+        let cap = Capability::long_lived_gr(&[(1, 1, true, 3600), (2, 1, false, 0xffffff)]);
+        let v = Capability::encode_set(&[cap]);
+        let dec = Capability::decode_set(&v);
+        assert_eq!(dec.len(), 1);
+        assert_eq!(dec[0].code, CapabilityCode::LongLivedGracefulRestart);
+        assert_eq!(dec[0].value.len(), 14);
+        let tuples = dec[0].as_long_lived_gr().unwrap();
+        assert_eq!(tuples[0], (1, 1, true, 3600));
+        assert_eq!(tuples[1], (2, 1, false, 0xffffff));
+    }
+
+    #[test]
+    fn long_lived_gr_capability_code_is_71() {
+        // RFC 9494 / IANA: 71 = Long-Lived Graceful Restart. (72 is
+        // Routing Policy Distribution — a historical mix-up.)
+        let cap = Capability::long_lived_gr(&[(1, 1, true, 10)]);
+        assert_eq!(cap.code.to_u8(), 71);
+        assert_eq!(
+            CapabilityCode::from_u8(71),
+            CapabilityCode::LongLivedGracefulRestart
+        );
+    }
+
+    #[test]
+    fn long_lived_gr_rejects_malformed_value() {
+        let cap = Capability::new(CapabilityCode::LongLivedGracefulRestart, vec![1, 2, 3]);
+        assert!(cap.as_long_lived_gr().is_none());
+    }
+
+    /// RFC 4724 §3: the GR capability carries per-address-family tuples
+    /// with the Forwarding State (F) bit; receivers retain routes exactly
+    /// for the listed families (§4.2).
+    #[test]
+    fn graceful_restart_lists_address_families() {
+        let cap = Capability::graceful_restart(0, 120, &[(1, 1, true), (2, 1, false)]);
+        let v = Capability::encode_set(&[cap]);
+        let dec = Capability::decode_set(&v);
+        assert_eq!(dec.len(), 1);
+        assert_eq!(dec[0].value.len(), 10); // 2 + 2 * 4
+        assert_eq!(dec[0].as_graceful_restart(), Some((0, 120)));
+        assert_eq!(
+            dec[0].as_graceful_restart_families(),
+            Some(vec![(1, 1, true), (2, 1, false)])
+        );
+    }
+
+    /// A GR capability without family tuples negotiates GR but retains
+    /// nothing (the historical encoding this library used to emit).
+    #[test]
+    fn graceful_restart_empty_family_list_is_empty() {
+        let cap = Capability::graceful_restart(0, 90, &[]);
+        assert_eq!(cap.value.len(), 2);
+        assert_eq!(cap.as_graceful_restart_families(), Some(vec![]));
     }
 }

@@ -24,7 +24,8 @@ use crate::fsm::BgpPeer;
 use crate::message::update::Update;
 use crate::message::BgpMessage;
 use crate::path::{
-    AttrType, LocalPref, MpNextHop, MpReach, PathAttrFlags, PathAttribute, PathAttributes,
+    AttrType, Community, LocalPref, MpNextHop, MpReach, PathAttrFlags, PathAttribute,
+    PathAttributes,
 };
 use crate::role::otc::Otc;
 
@@ -57,6 +58,14 @@ impl BgpPeer {
         let mut attrs: PathAttributes = route.attributes.clone().into();
         let route_otc = attrs.get(AttrType::Otc).and_then(|a| Otc::decode(&a.value));
         if route_otc.map(|o| o.0 != 0).unwrap_or(false) && !topo.otc.is_upstream() {
+            return false;
+        }
+
+        // RFC 9494 §4.3: a long-lived stale route (LLGR_STALE) must not be
+        // advertised to a neighbor that did not advertise the LLGR
+        // capability. The community itself is passed through untouched for
+        // neighbors that did — §4.3 forbids stripping LLGR_STALE.
+        if attrs.has_community(Community::LLGR_STALE) && !self.llgr_negotiated() {
             return false;
         }
 
@@ -460,6 +469,77 @@ mod tests {
                 assert!(u.withdrawn.is_empty());
                 assert!(u.nlri.is_empty());
                 assert_eq!(u.attributes.len(), 0);
+            }
+            _ => panic!("expected UPDATE"),
+        }
+    }
+
+    fn llgr_peer(long_lived: bool) -> BgpPeer {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.graceful_restart = true;
+        cfg.long_lived = long_lived;
+        cfg.long_lived_stale_time = 3600;
+        cfg.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        // The dummy partner must mirror the LLGR setting so negotiation
+        // succeeds/fails on both sides.
+        let mut p = BgpPeer::new(cfg.clone());
+        let mut dummy_cfg =
+            PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 9, 9, 9]));
+        dummy_cfg.graceful_restart = true;
+        dummy_cfg.long_lived = long_lived;
+        dummy_cfg.long_lived_stale_time = 3600;
+        dummy_cfg.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut dummy = BgpPeer::new(dummy_cfg);
+        p.step(BgpEvent::ManualStart);
+        p.step(BgpEvent::TransportOpen);
+        dummy.step(BgpEvent::ManualStart);
+        dummy.step(BgpEvent::TransportOpen);
+        let p_open = p.drain_outgoing();
+        let d_open = dummy.drain_outgoing();
+        let _ = p.feed_bytes(&d_open);
+        let _ = dummy.feed_bytes(&p_open);
+        let p_ka = p.drain_outgoing();
+        let d_ka = dummy.drain_outgoing();
+        let _ = p.feed_bytes(&d_ka);
+        let _ = dummy.feed_bytes(&p_ka);
+        assert!(p.is_established());
+        p
+    }
+
+    fn llgr_stale_route() -> Route {
+        let mut route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
+        let mut attrs: PathAttributes = route.attributes.clone().into();
+        attrs.insert_community(Community::LLGR_STALE);
+        route.attributes = attrs.into();
+        route
+    }
+
+    /// RFC 9494 §4.3: an LLGR_STALE route is not advertised to a neighbor
+    /// that did not advertise the LLGR capability.
+    #[test]
+    fn llgr_stale_route_not_advertised_without_llgr_peer() {
+        let mut peer = llgr_peer(false);
+        assert!(!peer.llgr_negotiated());
+        assert!(!peer.advertise(&llgr_stale_route()));
+        assert!(peer.drain_outgoing().is_empty());
+    }
+
+    /// RFC 9494 §4.3: to an LLGR-capable neighbor the stale route is
+    /// advertised and the LLGR_STALE community is preserved.
+    #[test]
+    fn llgr_stale_route_advertised_with_community_intact() {
+        let mut peer = llgr_peer(true);
+        assert!(peer.llgr_negotiated());
+        assert!(peer.advertise(&llgr_stale_route()));
+        let bytes = peer.drain_outgoing();
+        let mut dec = crate::codec::BgpCodec::new();
+        let mut r = lr_core::buf::ReadBuf::new(&bytes);
+        match dec.decode(&mut r).unwrap().unwrap() {
+            BgpMessage::Update(u) => {
+                assert!(
+                    u.attributes.has_community(Community::LLGR_STALE),
+                    "LLGR_STALE must survive egress"
+                );
             }
             _ => panic!("expected UPDATE"),
         }

@@ -17,6 +17,10 @@ impl Community {
     pub const NO_EXPORT_SUBCONFED: Self = Self(0xffff_ff03);
     pub const NOPEER: Self = Self(0xffff_ff04);
     pub const PLANNED_SHUTDOWN: Self = Self(0xffff_0000);
+    /// RFC 9494 §3.2: marks a long-lived stale route (least preferred).
+    pub const LLGR_STALE: Self = Self(0xffff_0006);
+    /// RFC 9494 §3.3: opts a route out of long-lived graceful restart.
+    pub const NO_LLGR: Self = Self(0xffff_0007);
 
     pub fn new(asn: u16, value: u16) -> Self {
         Self(((asn as u32) << 16) | value as u32)
@@ -39,6 +43,10 @@ impl Community {
             CommunityKind::NoExportSubconfed
         } else if self.0 == Self::NOPEER.0 {
             CommunityKind::NoPeer
+        } else if self.0 == Self::LLGR_STALE.0 {
+            CommunityKind::LlgrStale
+        } else if self.0 == Self::NO_LLGR.0 {
+            CommunityKind::NoLlgr
         } else {
             CommunityKind::Custom
         }
@@ -69,6 +77,8 @@ impl fmt::Display for Community {
             CommunityKind::NoAdvertise => f.write_str("no-advertise"),
             CommunityKind::NoExportSubconfed => f.write_str("no-export-subconfed"),
             CommunityKind::NoPeer => f.write_str("no-peer"),
+            CommunityKind::LlgrStale => f.write_str("llgr-stale"),
+            CommunityKind::NoLlgr => f.write_str("no-llgr"),
             CommunityKind::Custom => {
                 let asn = (self.0 >> 16) as u16;
                 let val = (self.0 & 0xffff) as u16;
@@ -84,6 +94,10 @@ pub enum CommunityKind {
     NoAdvertise,
     NoExportSubconfed,
     NoPeer,
+    /// RFC 9494 §3.2 `LLGR_STALE` (0xFFFF0006).
+    LlgrStale,
+    /// RFC 9494 §3.3 `NO_LLGR` (0xFFFF0007).
+    NoLlgr,
     Custom,
 }
 
@@ -156,5 +170,16 @@ mod tests {
         let enc = ExtendedCommunity::encode_set(&set);
         let dec = ExtendedCommunity::decode_set(&enc);
         assert_eq!(dec, set);
+    }
+
+    #[test]
+    fn llgr_communities_display_and_classify() {
+        // RFC 9494 §3.2/§3.3 wire values.
+        assert_eq!(Community::LLGR_STALE.0, 0xffff0006);
+        assert_eq!(Community::NO_LLGR.0, 0xffff0007);
+        assert_eq!(Community::LLGR_STALE.to_string(), "llgr-stale");
+        assert_eq!(Community::NO_LLGR.to_string(), "no-llgr");
+        assert_eq!(Community::LLGR_STALE.kind(), CommunityKind::LlgrStale);
+        assert_eq!(Community::NO_LLGR.kind(), CommunityKind::NoLlgr);
     }
 }

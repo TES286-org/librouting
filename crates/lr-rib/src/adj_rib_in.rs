@@ -50,6 +50,28 @@ impl AdjRibIn {
         self.inner.get(&(origin, key.clone()))
     }
 
+    /// Mutate every route contributed by `origin`. The closure returns the
+    /// replacement route, or `None` to remove it. Used by the graceful
+    /// restart / LLGR retention logic to mark or purge retained routes in
+    /// place (RFC 4724 §4, RFC 9494 §4.2).
+    pub fn mutate_origin<F>(&mut self, origin: RouteOrigin, mut f: F)
+    where
+        F: FnMut(Route) -> Option<Route>,
+    {
+        let keys: Vec<(RouteOrigin, RouteKey)> = self
+            .inner
+            .keys()
+            .filter(|(o, _)| *o == origin)
+            .cloned()
+            .collect();
+        for k in keys {
+            let route = self.inner.remove(&k).expect("key just collected");
+            if let Some(r) = f(route) {
+                self.inner.insert(k, r);
+            }
+        }
+    }
+
     /// Iterate every route in the Adj-RIB-In across all origins.
     pub fn iter_all(&self) -> impl Iterator<Item = &Route> {
         self.inner.values()

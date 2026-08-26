@@ -89,6 +89,10 @@ pub enum BgpAction {
     WithdrawRoute(lr_core::rib::RouteKey),
     /// A negotiated peer requested that this family be re-advertised.
     RouteRefreshRequested(lr_core::nlri::NlriFamily),
+    /// End-of-RIB marker received for an address family (RFC 4724 §4).
+    /// Emitted for an empty UPDATE (IPv4 unicast) or an UPDATE whose only
+    /// content is an empty MP_UNREACH_NLRI (other families).
+    EndOfRib(lr_core::nlri::NlriFamily),
     Emit(lr_core::event::Event),
     None,
 }
@@ -176,6 +180,65 @@ impl BgpPeer {
             .map(|(_, time)| time)
     }
 
+    /// Whether both speakers exchanged the RFC 9494 Long-Lived Graceful
+    /// Restart capability *and* the RFC 4724 GR capability. Per §4.5 an
+    /// LLGR capability received without GR is ignored.
+    pub fn llgr_negotiated(&self) -> bool {
+        if !self.cfg.long_lived || !self.cfg.graceful_restart {
+            return false;
+        }
+        let peer_gr = self
+            .peer_capabilities
+            .iter()
+            .any(|cap| cap.code == crate::capabilities::CapabilityCode::GracefulRestart);
+        let peer_llgr = self
+            .peer_capabilities
+            .iter()
+            .any(|cap| cap.code == crate::capabilities::CapabilityCode::LongLivedGracefulRestart);
+        peer_gr && peer_llgr
+    }
+
+    /// Peer-advertised Long-Lived Stale Time for one address family
+    /// (RFC 9494 §4.2): the extra retention window that begins after the
+    /// RFC 4724 restart time elapses. Families the peer did not list are
+    /// deemed zero (§4.2); `None` means LLGR is not usable at all.
+    pub fn negotiated_llgr_stale_time(&self, family: NlriFamily) -> Option<u32> {
+        if !self.llgr_negotiated() {
+            return None;
+        }
+        Some(
+            self.peer_capabilities
+                .iter()
+                .filter_map(crate::capabilities::Capability::as_long_lived_gr)
+                .flatten()
+                .find(|(afi, safi, _, _)| *afi == family.afi && *safi == family.safi)
+                .map(|(_, _, _, llst)| llst)
+                .unwrap_or(0),
+        )
+    }
+
+    /// Address families for which the peer advertised a nonzero LLGR
+    /// stale time (RFC 9494 §4.2): these are the families whose routes
+    /// may be retained beyond the RFC 4724 restart window, each with its
+    /// own long-lived stale deadline.
+    pub fn negotiated_llgr_families(&self) -> Vec<(NlriFamily, u32)> {
+        if !self.llgr_negotiated() {
+            return Vec::new();
+        }
+        self.peer_capabilities
+            .iter()
+            .filter_map(crate::capabilities::Capability::as_long_lived_gr)
+            .flatten()
+            .filter(|(afi, safi, _, llst)| {
+                *llst > 0
+                    && crate::extensions::long_lived::advertised_families(&self.cfg)
+                        .iter()
+                        .any(|f| f.afi == *afi && f.safi == *safi)
+            })
+            .map(|(afi, safi, _, llst)| (NlriFamily { afi, safi }, llst))
+            .collect()
+    }
+
     pub fn enhanced_route_refresh_negotiated(&self) -> bool {
         self.route_refresh_negotiated()
             && self.cfg.enhanced_rr
@@ -256,10 +319,24 @@ impl BgpPeer {
             caps.push(Capability::enhanced_rr());
         }
         if self.cfg.graceful_restart {
+            // RFC 4724 §3: list the families whose state we can preserve —
+            // the receiving speaker retains routes exactly for these
+            // (§4.2). The F bit is set: the library keeps Adj-RIB-In across
+            // reconnects within the same process (the reference daemon).
+            let families: Vec<(u16, u8, bool)> =
+                crate::extensions::long_lived::advertised_families(&self.cfg)
+                    .into_iter()
+                    .map(|f| (f.afi, f.safi, true))
+                    .collect();
             caps.push(Capability::graceful_restart(
                 0,
                 self.cfg.graceful_restart_time,
+                &families,
             ));
+        }
+        // RFC 9494 §4.1: LLGR is advertised alongside the GR capability.
+        if let Some(llgr) = crate::extensions::long_lived::open_capability(&self.cfg) {
+            caps.push(llgr);
         }
         let param_value = Capability::encode_set(&caps);
         let mut open = Open::new(self.cfg.local_as, self.cfg.hold_time, self.cfg.local_bgp_id);
@@ -511,6 +588,23 @@ impl BgpPeer {
     ///   merging has a comparable figure of merit.
     fn handle_update_in_established(&mut self, u: &Update) -> Vec<BgpAction> {
         let mut actions: Vec<BgpAction> = Vec::new();
+
+        // --- End-of-RIB detection (RFC 4724 §4) ---
+        // An UPDATE with no withdrawn routes, no path attributes and no
+        // NLRI is the EoR marker for <IPv4, Unicast>; for other families
+        // the marker carries a lone, empty MP_UNREACH_NLRI attribute
+        // (RFC 4724 §4 + RFC 4760). Downstream (graceful restart, RFC
+        // 9494 §4.2) uses it to conclude table synchronization.
+        if u.withdrawn.is_empty() && u.nlri.is_empty() {
+            if let Some(mp) = u.attributes.mp_unreach() {
+                if mp.nlri.is_empty() && u.attributes.len() == 1 {
+                    actions.push(BgpAction::EndOfRib(mp.family));
+                }
+            } else if u.attributes.is_empty() {
+                actions.push(BgpAction::EndOfRib(NlriFamily::IPV4_UNICAST));
+            }
+        }
+
         let topo = self.cfg.compute_topology();
         let origin = RouteOrigin {
             // Convention (consumed by best_path / the safety net):
@@ -631,6 +725,7 @@ impl StateMachine for BgpPeer {
                 // The generic core FSM has no route-refresh-specific action;
                 // router-aware embedders consume it through `BgpAction`.
                 BgpAction::RouteRefreshRequested(_) => Action::None,
+                BgpAction::EndOfRib(_) => Action::None,
                 BgpAction::None => Action::None,
             })
             .collect()
@@ -850,5 +945,119 @@ mod tests {
         });
         peer.step(BgpEvent::Message(BgpMessage::Open(open)));
         assert!(peer.cfg.asn4, "4-byte encoding must be negotiated up");
+    }
+
+    fn establish_llgr_pair() -> (BgpPeer, BgpPeer) {
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.graceful_restart = true;
+        cfg1.graceful_restart_time = 90;
+        cfg1.long_lived = true;
+        cfg1.long_lived_stale_time = 3600;
+        cfg1.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.graceful_restart = true;
+        cfg2.graceful_restart_time = 120;
+        cfg2.long_lived = true;
+        cfg2.long_lived_stale_time = 1800;
+        cfg2.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        (a, b)
+    }
+
+    #[test]
+    fn llgr_negotiated_after_open_exchange() {
+        let (a, b) = establish_llgr_pair();
+        assert!(a.is_established() && b.is_established());
+        // Both sides see LLGR negotiated and the *peer's* LLST per family.
+        assert!(a.llgr_negotiated());
+        assert_eq!(
+            a.negotiated_llgr_stale_time(NlriFamily::IPV4_UNICAST),
+            Some(1800)
+        );
+        assert!(b.llgr_negotiated());
+        assert_eq!(
+            b.negotiated_llgr_stale_time(NlriFamily::IPV4_UNICAST),
+            Some(3600)
+        );
+        // Restart time comes from the peer's GR capability.
+        assert_eq!(a.negotiated_graceful_restart_time(), Some(120));
+        assert_eq!(b.negotiated_graceful_restart_time(), Some(90));
+    }
+
+    /// RFC 9494 §4.5: an LLGR capability received without the GR
+    /// capability MUST be ignored.
+    #[test]
+    fn llgr_without_gr_capability_is_ignored() {
+        let mut peer = BgpPeer::new(PeerConfig::new(
+            Asn(64512),
+            Asn(64513),
+            RouterId::from_v4([10, 0, 0, 1]),
+        ));
+        peer.cfg.graceful_restart = true;
+        peer.cfg.long_lived = true;
+        peer.step(BgpEvent::ManualStart);
+        peer.step(BgpEvent::TransportOpen);
+        // Peer offers LLGR (71) but no GR (64).
+        let mut open = Open::new(Asn(64513), 90, RouterId::from_v4([10, 0, 0, 2]));
+        open.params.push(crate::message::open::OpenParam {
+            param_type: crate::message::open::OpenParam::PARAM_TYPE_CAPABILITY,
+            value: Capability::encode_set(&[Capability::long_lived_gr(&[(1, 1, true, 600)])]),
+        });
+        peer.step(BgpEvent::Message(BgpMessage::Open(open)));
+        assert!(!peer.llgr_negotiated());
+        assert_eq!(
+            peer.negotiated_llgr_stale_time(NlriFamily::IPV4_UNICAST),
+            None
+        );
+    }
+
+    /// Families not listed in the peer's LLGR capability are deemed zero
+    /// (RFC 9494 §4.2) — LLGR is negotiated but grants no extra retention.
+    #[test]
+    fn unlisted_family_has_zero_llst() {
+        let (a, _) = establish_llgr_pair();
+        assert_eq!(
+            a.negotiated_llgr_stale_time(NlriFamily::IPV6_UNICAST),
+            Some(0)
+        );
+    }
+
+    /// RFC 4724 §4: an empty UPDATE is the End-of-RIB marker.
+    #[test]
+    fn empty_update_is_end_of_rib() {
+        let (mut a, _b) = establish_llgr_pair();
+        let actions = a.step(BgpEvent::Message(BgpMessage::Update(Update::new())));
+        assert!(actions
+            .iter()
+            .any(|x| matches!(x, BgpAction::EndOfRib(NlriFamily::IPV4_UNICAST))));
+    }
+
+    /// A non-empty UPDATE carrying a route must NOT be mistaken for EoR.
+    #[test]
+    fn route_update_is_not_end_of_rib() {
+        use crate::message::update::Update;
+        let (mut a, _b) = establish_llgr_pair();
+        let mut u = Update::new();
+        u.nlri
+            .push(lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        let actions = a.step(BgpEvent::Message(BgpMessage::Update(u)));
+        assert!(!actions.iter().any(|x| matches!(x, BgpAction::EndOfRib(_))));
     }
 }

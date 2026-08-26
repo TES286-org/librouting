@@ -20,7 +20,7 @@ use core::cmp::Ordering;
 
 use lr_core::rib::Route;
 
-use crate::path::{AsPath, AttrType, PathAttributes};
+use crate::path::{AsPath, AttrType, Community, PathAttributes};
 
 /// Knobs that control the best-path algorithm.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -103,6 +103,17 @@ impl BestPath {
     pub fn compare_multipath(a: &Route, b: &Route, cfg: &BestPathConfig) -> Ordering {
         let attrs_a: PathAttributes = a.attributes.clone().into();
         let attrs_b: PathAttributes = b.attributes.clone().into();
+
+        // RFC 9494 §4.4 applies ahead of every multipath-eligible step.
+        let stale_a = Self::is_llgr_stale(&attrs_a);
+        let stale_b = Self::is_llgr_stale(&attrs_b);
+        if stale_a != stale_b {
+            return if stale_a {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
 
         let internal_a = a.protocol == lr_core::rib::Protocol::Bgp && a.origin.proto == 1;
         let internal_b = b.protocol == lr_core::rib::Protocol::Bgp && b.origin.proto == 1;
@@ -197,6 +208,19 @@ impl BestPath {
     pub fn compare(a: &Route, b: &Route, cfg: &BestPathConfig) -> Ordering {
         let attrs_a: PathAttributes = a.attributes.clone().into();
         let attrs_b: PathAttributes = b.attributes.clone().into();
+
+        // 0. RFC 9494 §4.4: a route marked LLGR_STALE is the least
+        //    preferred — any non-stale route beats it; between two stale
+        //    routes the normal tiebreakers below apply.
+        let stale_a = Self::is_llgr_stale(&attrs_a);
+        let stale_b = Self::is_llgr_stale(&attrs_b);
+        if stale_a != stale_b {
+            return if stale_a {
+                Ordering::Greater
+            } else {
+                Ordering::Less
+            };
+        }
 
         // 1. Weight (vendor-specific; treated as 0; embedder injects via policy).
         // 2. LOCAL_PREF — only meaningful for iBGP. For eBGP routes we
@@ -327,6 +351,12 @@ impl BestPath {
                 .map(|s| s.ases.len())
                 .sum()
         }
+    }
+
+    /// RFC 9494 §4.4: a route carrying the LLGR_STALE community is
+    /// "least preferred".
+    fn is_llgr_stale(attrs: &PathAttributes) -> bool {
+        attrs.has_community(Community::LLGR_STALE)
     }
 
     fn same_neighbor(a: &Route, b: &Route) -> bool {
@@ -461,5 +491,44 @@ mod tests {
         let routes = [a, b];
         let mp = BestPath::multipath(&routes, &cfg).unwrap();
         assert_eq!(mp.len(), 2);
+    }
+
+    /// RFC 9494 §4.4: an LLGR_STALE route is least preferred — it loses to
+    /// any non-stale candidate regardless of the other attributes, and
+    /// only survives selection when no fresh route exists.
+    #[test]
+    fn llgr_stale_route_is_least_preferred() {
+        let llgr_stale = Community::LLGR_STALE.0.to_be_bytes().to_vec();
+        let path_2as = vec![2, 2, 0, 0, 0, 100, 0, 0, 0, 200]; // sequence: AS100, AS200
+        let path_1as = vec![2, 1, 0, 0, 0, 100]; // sequence: AS100
+
+        // The stale route has a *shorter* AS path; without §4.4 it would
+        // win. The fresh route must still be selected.
+        let fresh = route_with_attrs_many(&[(2, path_2as.clone())], 1);
+        let stale = route_with_attrs_many(&[(2, path_1as.clone()), (8, llgr_stale)], 2);
+        let cfg = BestPathConfig::default();
+        let fresh_set = [fresh, stale];
+        let best = BestPath::select(&fresh_set, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 1, "fresh route must beat the stale one");
+
+        // Only stale candidates remain: the normal tiebreakers (shorter AS
+        // path) decide between them.
+        let stale_long = route_with_attrs_many(
+            &[
+                (2, path_2as),
+                (8, Community::LLGR_STALE.0.to_be_bytes().to_vec()),
+            ],
+            2,
+        );
+        let stale_short = route_with_attrs_many(
+            &[
+                (2, path_1as),
+                (8, Community::LLGR_STALE.0.to_be_bytes().to_vec()),
+            ],
+            3,
+        );
+        let stale_set = [stale_long, stale_short];
+        let best = BestPath::select(&stale_set, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 3);
     }
 }

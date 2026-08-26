@@ -154,7 +154,7 @@ pub enum BgpCeaseSubcode {
     OtherConfigurationChange = 6,
     ConnectionCollision = 7,
     OutOfResources = 8,
-    /// RFC 8533 — Long-Lived Graceful Restart, peer rejected LLGR.
+    /// RFC 9494 §4.5: hard reset of a peer whose LLGR procedures failed.
     HardReset = 9,
 }
 
