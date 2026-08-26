@@ -104,6 +104,16 @@ let _ = session.start(lr_core::time::Instant(0));
 // push bytes via feed_bytes, drain via drain_outgoing
 ```
 
+## BGP graceful restart
+
+BGP sessions advertise RFC 4724 graceful restart by default through
+`SessionConfig::bgp`. Configure the negotiated restart window with
+`with_graceful_restart(seconds)`. When an established peer's transport closes,
+its imported routes remain selectable until the peer reconnects or the
+negotiated restart window expires; expiry purges both eBGP and iBGP route
+origins. A successful reconnect cancels retention. The embedder must continue
+calling `DefaultRouter::tick` so expiry is enforced.
+
 ## OSPF LSA lifecycle
 
 `DefaultRouter::tick` applies RFC 2328 LSA lifecycle processing to OSPF

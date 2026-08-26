@@ -29,6 +29,10 @@ pub struct SessionConfig {
     pub route_refresh: bool,
     /// Advertise and use RFC 7313 enhanced refresh when the peer supports it.
     pub enhanced_route_refresh: bool,
+    /// Retain peer routes over an RFC 4724 graceful restart.
+    pub graceful_restart: bool,
+    /// Maximum restart duration advertised to the peer, in seconds.
+    pub graceful_restart_time: u16,
     /// Minimum interval between UPDATE advertisements for one prefix.
     /// Zero disables MRAI batching for this session.
     pub mrai_ms: u64,
@@ -52,6 +56,8 @@ impl SessionConfig {
             asn4: true,
             route_refresh: true,
             enhanced_route_refresh: true,
+            graceful_restart: true,
+            graceful_restart_time: 120,
             // RFC 4271 §9.2.1.1: common defaults are 30 seconds for eBGP
             // and 5 seconds for iBGP. `DefaultRouter` selects the latter
             // automatically when local and peer ASNs are equal.
@@ -69,6 +75,13 @@ impl SessionConfig {
     /// Override the MP-BGP address families advertised in OPEN.
     pub fn with_mp_families(mut self, families: Vec<lr_core::nlri::NlriFamily>) -> Self {
         self.mp_families = families;
+        self
+    }
+
+    /// Configure RFC 4724 graceful-restart advertisement and retention.
+    pub fn with_graceful_restart(mut self, restart_time_secs: u16) -> Self {
+        self.graceful_restart = restart_time_secs != 0;
+        self.graceful_restart_time = restart_time_secs.min(0x0fff);
         self
     }
 
@@ -97,6 +110,8 @@ impl SessionConfig {
             asn4: false,
             route_refresh: false,
             enhanced_route_refresh: false,
+            graceful_restart: false,
+            graceful_restart_time: 0,
             mrai_ms: 0,
             mp_families: Vec::new(),
             local_address: None,
@@ -116,6 +131,8 @@ impl SessionConfig {
             asn4: false,
             route_refresh: false,
             enhanced_route_refresh: false,
+            graceful_restart: false,
+            graceful_restart_time: 0,
             mrai_ms: 0,
             mp_families: Vec::new(),
             local_address: Some(local_addr),

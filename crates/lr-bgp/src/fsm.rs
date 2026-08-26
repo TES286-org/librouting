@@ -164,6 +164,18 @@ impl BgpPeer {
     }
 
     /// Whether both speakers negotiated RFC 7313 enhanced route refresh.
+    /// Peer-advertised RFC 4724 restart time, when graceful restart was
+    /// negotiated. The caller retains stale routes no longer than this limit.
+    pub fn negotiated_graceful_restart_time(&self) -> Option<u16> {
+        if !self.cfg.graceful_restart {
+            return None;
+        }
+        self.peer_capabilities
+            .iter()
+            .find_map(crate::capabilities::Capability::as_graceful_restart)
+            .map(|(_, time)| time)
+    }
+
     pub fn enhanced_route_refresh_negotiated(&self) -> bool {
         self.route_refresh_negotiated()
             && self.cfg.enhanced_rr
@@ -242,6 +254,12 @@ impl BgpPeer {
         }
         if self.cfg.enhanced_rr {
             caps.push(Capability::enhanced_rr());
+        }
+        if self.cfg.graceful_restart {
+            caps.push(Capability::graceful_restart(
+                0,
+                self.cfg.graceful_restart_time,
+            ));
         }
         let param_value = Capability::encode_set(&caps);
         let mut open = Open::new(self.cfg.local_as, self.cfg.hold_time, self.cfg.local_bgp_id);

@@ -33,6 +33,8 @@ pub struct PeerConfig {
     pub add_path: bool,
     /// Optional: enable graceful restart (RFC 4724).
     pub graceful_restart: bool,
+    /// Maximum restart time advertised in the RFC 4724 capability, in seconds.
+    pub graceful_restart_time: u16,
     /// Optional: advertise and accept route refresh (RFC 2918).
     pub route_refresh: bool,
     /// Optional: enable enhanced route refresh (RFC 7313).
@@ -78,6 +80,7 @@ impl PeerConfig {
             mp_families: Vec::new(),
             add_path: false,
             graceful_restart: false,
+            graceful_restart_time: 120,
             route_refresh: true,
             enhanced_rr: true,
             keepalive: 0,

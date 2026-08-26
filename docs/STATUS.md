@@ -36,7 +36,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 7911 Add-Path | 🟡 | capability + encoding; full N-path handling in best-path not wired |
 | RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
 | RFC 7313 enhanced route refresh | ✅ | negotiated capability plus BoRR/EoRR demarcation around refreshed tables |
-| RFC 4724 graceful restart | 🟡 | capability + EoR marker sent; restart-state retention not implemented |
+| RFC 4724 graceful restart | ✅ | capability negotiation, stale-route retention, negotiated expiry purge, and reconnect cancellation |
 | RFC 8277/8533 LLGR | ❌ | |
 | MRAI (Min. Route Advertisement Interval) | ✅ | configurable per-prefix batching (withdrawals immediate); defaults to 30 s eBGP / 5 s iBGP |
 | MD5 / TCP-AO session authentication | ❌ | |

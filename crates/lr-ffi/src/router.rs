@@ -51,6 +51,8 @@ pub extern "C" fn lr_router_add_bgp_session(
         asn4: asn4 != 0,
         route_refresh: true,
         enhanced_route_refresh: true,
+        graceful_restart: true,
+        graceful_restart_time: 120,
         mrai_ms: if local_as == peer_as { 5_000 } else { 30_000 },
         mp_families: Vec::new(),
         local_address: None,

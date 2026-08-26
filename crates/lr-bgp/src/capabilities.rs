@@ -133,14 +133,23 @@ impl Capability {
         Self::new(CapabilityCode::EnhancedRouteRefresh, Vec::new())
     }
 
-    pub fn graceful_restart(restart_flags: u8, restart_time_ms: u16) -> Self {
-        let mut v = Vec::with_capacity(2);
-        v.push(restart_flags);
-        // Time is encoded as 4 bits flags + 12 bits restart time (seconds) → 2 bytes.
-        let time_seconds = restart_time_ms / 1000;
-        let encoded = (restart_flags as u16) << 12 | (time_seconds & 0x0fff);
-        v = encoded.to_be_bytes().to_vec();
-        Self::new(CapabilityCode::GracefulRestart, v)
+    /// Graceful Restart capability (RFC 4724 §3). `restart_time_secs` is a
+    /// 12-bit field; the high nibble contains capability flags.
+    pub fn graceful_restart(restart_flags: u8, restart_time_secs: u16) -> Self {
+        let encoded = (u16::from(restart_flags & 0x0f) << 12) | (restart_time_secs & 0x0fff);
+        Self::new(
+            CapabilityCode::GracefulRestart,
+            encoded.to_be_bytes().to_vec(),
+        )
+    }
+
+    /// Decode the RFC 4724 restart flags and time from a capability.
+    pub fn as_graceful_restart(&self) -> Option<(u8, u16)> {
+        if self.code != CapabilityCode::GracefulRestart || self.value.len() < 2 {
+            return None;
+        }
+        let encoded = u16::from_be_bytes([self.value[0], self.value[1]]);
+        Some(((encoded >> 12) as u8, encoded & 0x0fff))
     }
 
     /// Encode all capabilities as the OPEN optional-parameter value

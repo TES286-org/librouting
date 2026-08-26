@@ -119,6 +119,12 @@ struct MraiState {
     pending: BTreeMap<RouteKey, PendingMraiUpdate>,
 }
 
+/// Routes retained while a graceful-restart capable BGP peer reconnects.
+#[derive(Debug, Clone, Copy)]
+struct GracefulRestartState {
+    expires_at_ms: u64,
+}
+
 impl SessionState {
     fn conn(&mut self) -> &mut MemoryConn {
         match self {
@@ -502,6 +508,8 @@ pub struct DefaultRouter {
     babel_codec: BabelCodec,
     /// RFC 4271 MRAI state keyed by BGP session.
     mrai: BTreeMap<u64, MraiState>,
+    /// RFC 4724 stale-route retention keyed by BGP session.
+    graceful_restart: BTreeMap<u64, GracefulRestartState>,
 }
 
 impl Default for DefaultRouter {
@@ -523,6 +531,7 @@ impl Default for DefaultRouter {
             ospf_codec: lr_ospf::codec::OspfCodec::v2(),
             babel_codec: BabelCodec::new(),
             mrai: BTreeMap::new(),
+            graceful_restart: BTreeMap::new(),
         }
     }
 }
@@ -966,6 +975,12 @@ impl DefaultRouter {
             let now_est = peer.is_established();
             if now_est && !*established {
                 *established = true;
+                if self.graceful_restart.remove(&session).is_some() {
+                    self.pending_events.push(RouterEvent::Log(format!(
+                        "session {} completed graceful restart before expiry",
+                        session
+                    )));
+                }
                 self.pending_events.push(RouterEvent::PeerStateChange {
                     session: SessionHandle(session),
                     state: "Established",
@@ -1028,14 +1043,17 @@ impl DefaultRouter {
         }
     }
     /// Tell a session its transport went away (peer closed, TCP reset,
-    /// connect timeout). Drives the protocol FSM to Idle and purges every
-    /// route the session contributed — RFC 4271 §4.3/§8.2.2 semantics for
-    /// BGP; OSPF/Babel runtimes simply stop receiving input.
+    /// connect timeout). RFC 4724 peers retain routes until the negotiated
+    /// restart deadline; all other sessions follow RFC 4271 immediate purge.
     pub fn close_session(&mut self, h: SessionHandle) {
         if let Some(mrai) = self.mrai.get_mut(&h.0) {
             mrai.last_sent.clear();
             mrai.pending.clear();
         }
+        let restart_time = match self.sessions.get(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => peer.negotiated_graceful_restart_time(),
+            _ => None,
+        };
         let Some(state) = self.sessions.get_mut(&h.0) else {
             return;
         };
@@ -1044,7 +1062,22 @@ impl DefaultRouter {
             SessionState::Ospf { .. } | SessionState::Babel { .. } => Vec::new(),
         };
         self.dispatch_bgp_actions(h.0, actions);
-        self.session_down_cleanup(h.0);
+        if let Some(restart_time) = restart_time.filter(|time| *time != 0) {
+            self.graceful_restart.insert(
+                h.0,
+                GracefulRestartState {
+                    expires_at_ms: self
+                        .now_ms
+                        .saturating_add(u64::from(restart_time).saturating_mul(1_000)),
+                },
+            );
+            self.pending_events.push(RouterEvent::Log(format!(
+                "session {} entered graceful-restart retention for {} seconds",
+                h.0, restart_time
+            )));
+        } else {
+            self.session_down_cleanup(h.0);
+        }
     }
 
     /// Purge a session's contribution from the RIB pipeline after the
@@ -1052,23 +1085,28 @@ impl DefaultRouter {
     /// for the affected prefixes (RFC 4271: routes learned from a peer do
     /// not survive the session that carried them).
     fn session_down_cleanup(&mut self, session: u64) {
-        let origin = RouteOrigin {
-            proto: 0,
-            peer: session,
-        };
-        let affected: Vec<RouteKey> = self
-            .adj_rib_in
-            .iter_origin(origin)
+        let origins = [
+            RouteOrigin {
+                proto: 0,
+                peer: session,
+            },
+            RouteOrigin {
+                proto: 1,
+                peer: session,
+            },
+        ];
+        let affected: Vec<RouteKey> = origins
+            .into_iter()
+            .flat_map(|origin| self.adj_rib_in.iter_origin(origin))
             .map(|r| r.key.clone())
             .collect();
         if affected.is_empty() {
             return;
         }
-        self.adj_rib_in.clear_for(origin);
-        self.adj_rib_out.clear_for(RouteOrigin {
-            proto: 0,
-            peer: session,
-        });
+        for origin in origins {
+            self.adj_rib_in.clear_for(origin);
+            self.adj_rib_out.clear_for(origin);
+        }
         for key in affected {
             self.reselect(&key);
         }
@@ -1090,6 +1128,8 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.asn4 = cfg.asn4;
                 p_cfg.route_refresh = cfg.route_refresh;
                 p_cfg.enhanced_rr = cfg.enhanced_route_refresh;
+                p_cfg.graceful_restart = cfg.graceful_restart;
+                p_cfg.graceful_restart_time = cfg.graceful_restart_time;
                 p_cfg.mp_families = cfg.mp_families.clone();
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
@@ -1149,6 +1189,7 @@ impl RouterInstance for DefaultRouter {
             return Err(format!("session {} not found", h.0));
         }
         self.mrai.remove(&h.0);
+        self.graceful_restart.remove(&h.0);
         // Remove every route that session contributed and re-select.
         let keys: Vec<RouteKey> = self
             .adj_rib_in
@@ -1366,6 +1407,21 @@ impl RouterInstance for DefaultRouter {
             }
         }
         self.flush_mrai();
+
+        let expired_restarts: Vec<u64> = self
+            .graceful_restart
+            .iter()
+            .filter(|(_, state)| state.expires_at_ms <= self.now_ms)
+            .map(|(session, _)| *session)
+            .collect();
+        for session in expired_restarts {
+            self.graceful_restart.remove(&session);
+            self.session_down_cleanup(session);
+            self.pending_events.push(RouterEvent::Log(format!(
+                "session {} graceful-restart retention expired; purged stale routes",
+                session
+            )));
+        }
     }
 
     fn request_route_refresh(&mut self, h: SessionHandle, family: NlriFamily) -> bool {
