@@ -54,6 +54,21 @@ librouting/
 Early implementation. The library is **not** production-ready and the C ABI is
 **unstable** until v0.5.
 
+## CI/CD
+
+GitHub Actions workflows live in `.github/workflows/` on disk (see the local
+checkout). They run on push to `main` and on PRs: fmt + clippy + workspace
+tests + C harness + Go bindings + Python bindings + MSRV + cross-build.
+
+**Note**: pushing the workflow files via the bot's PAT requires the `workflow`
+scope. The PAT used to push the main code lacks that scope, so the workflow
+files are tracked on disk locally but were not pushed to the remote. To
+activate CI, either:
+
+1. Grant the bot PAT the `workflow` scope and run `git add .github/workflows && git commit -m "ci: workflows" && git push origin main`, or
+2. Open `.github/workflows/*.yml` on the GitHub web UI and create them by hand
+   (copy-paste from the local repo).
+
 ## License
 
 Dual-licensed under MIT OR Apache-2.0.
