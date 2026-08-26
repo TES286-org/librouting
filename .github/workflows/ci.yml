@@ -62,11 +62,11 @@ jobs:
           ./tests/interop/two_daemon.sh
 
   msrv:
-    name: MSRV (1.74)
+    name: MSRV (1.88)
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.74.0
+      - uses: dtolnay/rust-toolchain@1.88.0
       - run: cargo --version
       - run: cargo build --workspace --all-features
 
@@ -133,5 +133,7 @@ jobs:
         run: ./tests/interop/two_daemon.sh
       - name: BIRD interop (librouting ↔ BIRD)
         run: ./tests/interop/bird.sh
+      - name: BIRD LLGR interop (librouting ↔ BIRD, RFC 9494)
+        run: ./tests/interop/bird_llgr.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         run: ./tests/interop/frr.sh
