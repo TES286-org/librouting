@@ -73,6 +73,8 @@ pub trait RouterInstance {
     /// Request that an established peer resend its Adj-RIB-Out for `family`.
     /// Returns `false` if RFC 2918 was not negotiated for that session.
     fn request_route_refresh(&mut self, h: SessionHandle, family: NlriFamily) -> bool;
+    /// Set the per-prefix RFC 4271 MRAI interval for a BGP session.
+    fn set_mrai(&mut self, h: SessionHandle, interval_ms: u64) -> Result<(), String>;
     fn poll_events(&mut self) -> Vec<RouterEvent>;
     fn rib_snapshot(&self) -> Vec<&Route>;
 }
@@ -92,6 +94,27 @@ enum SessionState {
         runtime: BabelRuntime,
         conn: MemoryConn,
     },
+}
+
+/// Pending per-prefix outbound UPDATE state for one BGP session.
+///
+/// The latest desired route supersedes any older pending advertisement. A
+/// `None` route represents a withdrawal, allowing route churn to collapse to
+/// one wire UPDATE at MRAI expiry.
+#[derive(Debug, Clone)]
+struct PendingMraiUpdate {
+    route: Option<Route>,
+    due_ms: u64,
+}
+
+/// Per-session MRAI state. `last_sent` is keyed by prefix so unrelated routes
+/// are never delayed by a busy peer; this matches RFC 4271 §9.2.1.1's
+/// per-destination model.
+#[derive(Debug, Default)]
+struct MraiState {
+    interval_ms: u64,
+    last_sent: BTreeMap<RouteKey, u64>,
+    pending: BTreeMap<RouteKey, PendingMraiUpdate>,
 }
 
 impl SessionState {
@@ -438,6 +461,8 @@ pub struct DefaultRouter {
     /// Decoders for connectionless protocols (OSPF/Babel) keyed by session.
     ospf_codec: lr_ospf::codec::OspfCodec,
     babel_codec: BabelCodec,
+    /// RFC 4271 MRAI state keyed by BGP session.
+    mrai: BTreeMap<u64, MraiState>,
 }
 
 impl Default for DefaultRouter {
@@ -458,6 +483,7 @@ impl Default for DefaultRouter {
             pending_events: Vec::new(),
             ospf_codec: lr_ospf::codec::OspfCodec::v2(),
             babel_codec: BabelCodec::new(),
+            mrai: BTreeMap::new(),
         }
     }
 }
@@ -625,37 +651,81 @@ impl DefaultRouter {
 
     // ----- export pipeline -----
 
+    /// Queue an UPDATE until the per-prefix MRAI expires, or transmit it
+    /// immediately when the prefix has no active interval.
+    fn queue_or_send_advertisement(&mut self, session: u64, route: Route) {
+        let key = route.key.clone();
+        let now_ms = self.now_ms;
+        let state = self.mrai.entry(session).or_default();
+        if state.interval_ms != 0 {
+            if let Some(last) = state.last_sent.get(&key) {
+                let due_ms = last.saturating_add(state.interval_ms);
+                if now_ms < due_ms {
+                    state.pending.insert(
+                        key,
+                        PendingMraiUpdate {
+                            route: Some(route),
+                            due_ms,
+                        },
+                    );
+                    return;
+                }
+            }
+        }
+        self.send_advertisement(session, route);
+    }
+
+    fn send_advertisement(&mut self, session: u64, route: Route) {
+        let sent =
+            if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
+                let sent = peer.advertise(&route);
+                let bytes = peer.drain_outgoing();
+                if !bytes.is_empty() {
+                    conn.put_output(&bytes);
+                }
+                sent
+            } else {
+                false
+            };
+        if sent {
+            self.mrai
+                .entry(session)
+                .or_default()
+                .last_sent
+                .insert(route.key.clone(), self.now_ms);
+            self.adj_rib_out.advertise(
+                RouteOrigin {
+                    proto: 0,
+                    peer: session,
+                },
+                &route,
+            );
+            self.pending_events
+                .push(RouterEvent::PrefixAdvertised(route.key.prefix));
+        }
+    }
+
     fn export_route(&mut self, route: &Route) {
-        // Hooks borrow self immutably while sessions borrow mutably — swap
-        // the chain out for the duration of the fan-out.
+        // Hooks borrow self immutably while session enumeration requires a
+        // mutable borrow, so collect policy-approved work before transmitting.
         let hooks = std::mem::take(&mut self.hooks);
         let origin_session = route.origin.peer;
-        let mut advertised: Vec<(u64, Route)> = Vec::new();
-        for (h, state) in self.sessions.iter_mut() {
-            let SessionState::Bgp { peer, conn, .. } = state else {
+        let mut exports = Vec::new();
+        for (session, state) in &self.sessions {
+            let SessionState::Bgp { peer, .. } = state else {
                 continue;
             };
-            if *h == origin_session || !peer.is_established() {
+            if *session == origin_session || !peer.is_established() {
                 continue;
             }
-            let mut r = route.clone();
-            if matches!(hooks.run_export(&mut r), HookVerdict::Drop) {
-                continue;
-            }
-            if peer.advertise(&r) {
-                advertised.push((*h, r));
-            }
-            let bytes = peer.drain_outgoing();
-            if !bytes.is_empty() {
-                conn.put_output(&bytes);
+            let mut candidate = route.clone();
+            if !matches!(hooks.run_export(&mut candidate), HookVerdict::Drop) {
+                exports.push((*session, candidate));
             }
         }
         self.hooks = hooks;
-        for (h, r) in advertised {
-            self.adj_rib_out
-                .advertise(RouteOrigin { proto: 0, peer: h }, &r);
-            self.pending_events
-                .push(RouterEvent::PrefixAdvertised(r.key.prefix));
+        for (session, route) in exports {
+            self.queue_or_send_advertisement(session, route);
         }
     }
 
@@ -723,28 +793,94 @@ impl DefaultRouter {
         }
     }
 
-    fn propagate_withdrawal(&mut self, key: &RouteKey) {
-        for (h, state) in self.sessions.iter_mut() {
-            let SessionState::Bgp { peer, conn, .. } = state else {
-                continue;
-            };
-            if !peer.is_established() {
-                continue;
-            }
-            // Only withdraw from sessions we actually advertised to.
-            if self
-                .adj_rib_out
-                .iter_for(RouteOrigin { proto: 0, peer: *h })
-                .any(|r| r.key == *key)
-            {
+    fn queue_or_send_withdrawal(&mut self, session: u64, key: RouteKey) {
+        // RFC 4271 §9.2.1.1 applies MRAI to advertisements. A withdrawal is
+        // sent immediately so remote routers stop forwarding to an invalid
+        // path without waiting for the advertisement rate limiter.
+        if let Some(state) = self.mrai.get_mut(&session) {
+            state.pending.remove(&key);
+        }
+        self.send_withdrawal(session, key);
+    }
+
+    fn send_withdrawal(&mut self, session: u64, key: RouteKey) {
+        let sent =
+            if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
                 peer.withdraw(&[key.prefix], key.family);
                 let bytes = peer.drain_outgoing();
-                if !bytes.is_empty() {
+                let sent = !bytes.is_empty();
+                if sent {
                     conn.put_output(&bytes);
                 }
-                self.adj_rib_out
-                    .suppress(RouteOrigin { proto: 0, peer: *h }, key);
+                sent
+            } else {
+                false
+            };
+        if sent {
+            self.mrai
+                .entry(session)
+                .or_default()
+                .last_sent
+                .insert(key.clone(), self.now_ms);
+            self.adj_rib_out.suppress(
+                RouteOrigin {
+                    proto: 0,
+                    peer: session,
+                },
+                &key,
+            );
+            self.pending_events
+                .push(RouterEvent::PrefixRetracted(key.prefix));
+        }
+    }
+
+    fn flush_mrai(&mut self) {
+        let due: Vec<(u64, RouteKey, Option<Route>)> = self
+            .mrai
+            .iter_mut()
+            .flat_map(|(session, state)| {
+                let ready: Vec<RouteKey> = state
+                    .pending
+                    .iter()
+                    .filter(|(_, update)| update.due_ms <= self.now_ms)
+                    .map(|(key, _)| key.clone())
+                    .collect();
+                ready.into_iter().filter_map(|key| {
+                    state
+                        .pending
+                        .remove(&key)
+                        .map(|update| (*session, key, update.route))
+                })
+            })
+            .collect();
+        for (session, key, route) in due {
+            if let Some(route) = route {
+                self.send_advertisement(session, route);
+            } else {
+                self.send_withdrawal(session, key);
             }
+        }
+    }
+
+    fn propagate_withdrawal(&mut self, key: &RouteKey) {
+        let sessions: Vec<u64> = self
+            .sessions
+            .iter()
+            .filter_map(|(session, state)| {
+                matches!(state, SessionState::Bgp { peer, .. } if peer.is_established())
+                    .then_some(*session)
+            })
+            .filter(|session| {
+                self.adj_rib_out
+                    .iter_for(RouteOrigin {
+                        proto: 0,
+                        peer: *session,
+                    })
+                    .any(|route| route.key == *key)
+            })
+            .collect();
+        for session in sessions {
+            self.queue_or_send_withdrawal(session, key.clone());
         }
     }
 
@@ -857,6 +993,10 @@ impl DefaultRouter {
     /// route the session contributed — RFC 4271 §4.3/§8.2.2 semantics for
     /// BGP; OSPF/Babel runtimes simply stop receiving input.
     pub fn close_session(&mut self, h: SessionHandle) {
+        if let Some(mrai) = self.mrai.get_mut(&h.0) {
+            mrai.last_sent.clear();
+            mrai.pending.clear();
+        }
         let Some(state) = self.sessions.get_mut(&h.0) else {
             return;
         };
@@ -923,6 +1063,13 @@ impl RouterInstance for DefaultRouter {
                         established: false,
                     },
                 );
+                self.mrai.insert(
+                    h.0,
+                    MraiState {
+                        interval_ms: cfg.mrai_ms,
+                        ..MraiState::default()
+                    },
+                );
                 if self.safety.is_none() {
                     self.safety = Some(SafetyNet::new(cfg.local_as));
                 }
@@ -962,6 +1109,7 @@ impl RouterInstance for DefaultRouter {
         if self.sessions.remove(&h.0).is_none() {
             return Err(format!("session {} not found", h.0));
         }
+        self.mrai.remove(&h.0);
         // Remove every route that session contributed and re-select.
         let keys: Vec<RouteKey> = self
             .adj_rib_in
@@ -982,6 +1130,10 @@ impl RouterInstance for DefaultRouter {
     }
 
     fn start_session(&mut self, h: SessionHandle) -> Result<(), String> {
+        if let Some(mrai) = self.mrai.get_mut(&h.0) {
+            mrai.last_sent.clear();
+            mrai.pending.clear();
+        }
         let state = self
             .sessions
             .get_mut(&h.0)
@@ -1144,6 +1296,7 @@ impl RouterInstance for DefaultRouter {
             let actions = peer.step(ev);
             self.dispatch_bgp_actions(session, actions);
         }
+        self.flush_mrai();
     }
 
     fn request_route_refresh(&mut self, h: SessionHandle, family: NlriFamily) -> bool {
@@ -1155,6 +1308,30 @@ impl RouterInstance for DefaultRouter {
             self.flush_peer_output(h.0);
         }
         requested
+    }
+
+    fn set_mrai(&mut self, h: SessionHandle, interval_ms: u64) -> Result<(), String> {
+        if !matches!(self.sessions.get(&h.0), Some(SessionState::Bgp { .. })) {
+            return Err(format!("BGP session {} not found", h.0));
+        }
+        let state = self.mrai.entry(h.0).or_default();
+        state.interval_ms = interval_ms;
+        if interval_ms == 0 {
+            let pending: Vec<(RouteKey, Option<Route>)> = state
+                .pending
+                .iter()
+                .map(|(key, update)| (key.clone(), update.route.clone()))
+                .collect();
+            state.pending.clear();
+            for (key, route) in pending {
+                if let Some(route) = route {
+                    self.send_advertisement(h.0, route);
+                } else {
+                    self.send_withdrawal(h.0, key);
+                }
+            }
+        }
+        Ok(())
     }
 
     fn poll_events(&mut self) -> Vec<RouterEvent> {
@@ -1214,6 +1391,63 @@ mod tests {
         assert_eq!(r.rib_len(), 1);
         r.unoriginate(&key);
         assert_eq!(r.rib_len(), 0);
+    }
+
+    #[test]
+    fn mrai_batches_prefix_reannouncements() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(100),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(SessionConfig::bgp(
+                Asn(64513),
+                Asn(64512),
+                RouterId::from_v4([10, 0, 0, 2]),
+            ))
+            .unwrap();
+        a.start_session(a_session).unwrap();
+        b.start_session(b_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        let b_open = b.drain_output(b_session);
+        a.feed_input(a_session, &b_open).unwrap();
+        b.feed_input(b_session, &a_open).unwrap();
+        let a_keepalive = a.drain_output(a_session);
+        let b_keepalive = b.drain_output(b_session);
+        a.feed_input(a_session, &b_keepalive).unwrap();
+        b.feed_input(b_session, &a_keepalive).unwrap();
+
+        let key = a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let advertisement = a.drain_output(a_session);
+        assert!(!advertisement.is_empty());
+        b.feed_input(b_session, &advertisement).unwrap();
+        assert_eq!(b.rib_len(), 1);
+
+        // Re-origination changes the path and would normally advertise an
+        // UPDATE immediately; MRAI holds it until the 100 ms boundary.
+        a.unoriginate(&key);
+        let withdrawal = a.drain_output(a_session);
+        assert!(!withdrawal.is_empty(), "withdrawals bypass MRAI");
+        b.feed_input(b_session, &withdrawal).unwrap();
+        let _replacement = a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 2])),
+        );
+        assert!(a.drain_output(a_session).is_empty());
+        a.tick(Instant(99));
+        assert!(a.drain_output(a_session).is_empty());
+        a.tick(Instant(100));
+        let replacement = a.drain_output(a_session);
+        assert!(!replacement.is_empty());
+        b.feed_input(b_session, &replacement).unwrap();
+        assert_eq!(b.rib_len(), 1);
     }
 
     #[test]

@@ -108,6 +108,16 @@ func (r *Router) RequestRouteRefresh(session uint64, afi uint16, safi uint8) (bo
         return rc == 1, nil
 }
 
+// SetMRAI configures the per-prefix RFC 4271 UPDATE batching interval.
+// Setting zero disables batching and flushes pending updates.
+func (r *Router) SetMRAI(session uint64, intervalMs uint64) error {
+        rc := C.lr_router_set_mrai(r.ptr, C.uint64_t(session), C.uint64_t(intervalMs))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_mrai: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
         rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))

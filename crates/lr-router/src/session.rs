@@ -29,6 +29,9 @@ pub struct SessionConfig {
     pub route_refresh: bool,
     /// Advertise and use RFC 7313 enhanced refresh when the peer supports it.
     pub enhanced_route_refresh: bool,
+    /// Minimum interval between UPDATE advertisements for one prefix.
+    /// Zero disables MRAI batching for this session.
+    pub mrai_ms: u64,
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
     /// Local interface address: used as NEXT_HOP for eBGP egress
     /// (next-hop-self) and as the local identity for Babel/OSPF runtimes.
@@ -49,6 +52,10 @@ impl SessionConfig {
             asn4: true,
             route_refresh: true,
             enhanced_route_refresh: true,
+            // RFC 4271 §9.2.1.1: common defaults are 30 seconds for eBGP
+            // and 5 seconds for iBGP. `DefaultRouter` selects the latter
+            // automatically when local and peer ASNs are equal.
+            mrai_ms: if local_as == peer_as { 5_000 } else { 30_000 },
             // Advertise MP-BGP for IPv4 unicast (RFC 4760). Modern
             // speakers (BIRD 2, FRR) require the capability to match one
             // of their channels — without it BIRD refuses the session
@@ -62,6 +69,13 @@ impl SessionConfig {
     /// Override the MP-BGP address families advertised in OPEN.
     pub fn with_mp_families(mut self, families: Vec<lr_core::nlri::NlriFamily>) -> Self {
         self.mp_families = families;
+        self
+    }
+
+    /// Override the RFC 4271 MRAI interval for this BGP session.
+    /// Set to zero to disable batching.
+    pub fn with_mrai_ms(mut self, mrai_ms: u64) -> Self {
+        self.mrai_ms = mrai_ms;
         self
     }
 
@@ -83,6 +97,7 @@ impl SessionConfig {
             asn4: false,
             route_refresh: false,
             enhanced_route_refresh: false,
+            mrai_ms: 0,
             mp_families: Vec::new(),
             local_address: None,
             area_id,
@@ -101,6 +116,7 @@ impl SessionConfig {
             asn4: false,
             route_refresh: false,
             enhanced_route_refresh: false,
+            mrai_ms: 0,
             mp_families: Vec::new(),
             local_address: Some(local_addr),
             area_id: 0,

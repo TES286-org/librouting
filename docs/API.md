@@ -135,5 +135,8 @@ use lr_core::addr::{Asn, RouterId};
 
 let mut r = DefaultRouter::new();
 let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1])))?;
+// RFC 4271 MRAI uses 30 s for eBGP and 5 s for iBGP by default.
+// Override it per session; zero sends updates immediately.
+r.set_mrai(h, 10_000)?;
 let events = r.poll_events();
 ```

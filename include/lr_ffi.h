@@ -130,6 +130,13 @@ int32_t lr_router_tick(lr_router_t r, uint64_t now_ms);
 int32_t lr_router_start_session(lr_router_t r, uint64_t session);
 
 /**
+ * Set the per-prefix RFC 4271 MRAI interval for a BGP session.
+ *
+ * A zero interval disables batching and flushes any pending UPDATEs.
+ */
+int32_t lr_router_set_mrai(lr_router_t r, uint64_t session, uint64_t interval_ms);
+
+/**
  * Request an RFC 2918 route refresh from an established BGP peer.
  *
  * Returns 1 when a request was queued, 0 when the session has not negotiated

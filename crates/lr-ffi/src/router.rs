@@ -51,6 +51,7 @@ pub extern "C" fn lr_router_add_bgp_session(
         asn4: asn4 != 0,
         route_refresh: true,
         enhanced_route_refresh: true,
+        mrai_ms: if local_as == peer_as { 5_000 } else { 30_000 },
         mp_families: Vec::new(),
         local_address: None,
         area_id: 0,
@@ -143,6 +144,24 @@ pub extern "C" fn lr_router_start_session(r: lr_router_t, session: u64) -> i32 {
         Err(e) => {
             set_last_error(e);
             -3
+        }
+    }
+}
+
+/// Set the per-prefix RFC 4271 MRAI interval for a BGP session.
+///
+/// A zero interval disables batching and flushes any pending UPDATEs.
+#[no_mangle]
+pub extern "C" fn lr_router_set_mrai(r: lr_router_t, session: u64, interval_ms: u64) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.set_mrai(SessionHandle(session), interval_ms) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
         }
     }
 }

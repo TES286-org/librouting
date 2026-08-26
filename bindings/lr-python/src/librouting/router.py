@@ -71,6 +71,15 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_start_session failed (rc={rc}): {last_error()}")
 
+    def set_mrai(self, session: int, interval_ms: int) -> None:
+        """Set the per-prefix RFC 4271 UPDATE batching interval in milliseconds.
+
+        Set ``interval_ms`` to zero to disable batching and flush pending updates.
+        """
+        rc = get_lib().lr_router_set_mrai(self._ptr, int(session), int(interval_ms))
+        if rc != 0:
+            raise LrError(f"lr_router_set_mrai failed (rc={rc}): {last_error()}")
+
     def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
         """Ask an established BGP peer to resend an RFC 2918 address family.
 
