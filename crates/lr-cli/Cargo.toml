@@ -1,0 +1,32 @@
+[package]
+name = "lr-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "CLI tool and daemon scaffolding for librouting"
+keywords = ["bgp", "routing", "cli", "daemon"]
+categories = ["network-programming"]
+
+[[bin]]
+name = "lr"
+path = "src/main.rs"
+
+[[bin]]
+name = "lr-daemon"
+path = "src/daemon.rs"
+
+[dependencies]
+lr-core = { workspace = true }
+lr-bgp = { workspace = true }
+lr-rib = { workspace = true }
+lr-policy = { workspace = true }
+lr-router = { workspace = true }
+lr-bfd = { workspace = true }
+lr-osroute = { workspace = true }
+
+[features]
+default = ["std"]
+std = []

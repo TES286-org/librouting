@@ -218,6 +218,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lr-bfd"
+version = "0.1.0"
+dependencies = [
+ "bitflags",
+ "lr-core",
+]
+
+[[package]]
 name = "lr-bgp"
 version = "0.1.0"
 dependencies = [
@@ -225,6 +233,19 @@ dependencies = [
  "lr-core",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "lr-cli"
+version = "0.1.0"
+dependencies = [
+ "lr-bfd",
+ "lr-bgp",
+ "lr-core",
+ "lr-osroute",
+ "lr-policy",
+ "lr-rib",
+ "lr-router",
 ]
 
 [[package]]
@@ -237,6 +258,13 @@ dependencies = [
  "serde",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "lr-damping"
+version = "0.1.0"
+dependencies = [
+ "lr-core",
 ]
 
 [[package]]
@@ -261,6 +289,13 @@ dependencies = [
  "lr-core",
  "thiserror",
  "tracing",
+]
+
+[[package]]
+name = "lr-osroute"
+version = "0.1.0"
+dependencies = [
+ "lr-core",
 ]
 
 [[package]]

@@ -91,6 +91,8 @@ pub enum AttrType {
     LargeCommunities = 32,
     /// AddPath (RFC 7911 §3): 1-byte length, then NLRI.
     BgpAddPath = 30,
+    /// RFC 9234: OTC (Only To Customer) — 4-byte unsigned integer.
+    Otc = 35,
     /// Unknown attribute code.
     Other(u8),
 }
@@ -118,6 +120,7 @@ impl AttrType {
             24 => Self::TrafficEngineering,
             30 => Self::BgpAddPath,
             32 => Self::LargeCommunities,
+            35 => Self::Otc,
             _ => Self::Other(v),
         }
     }
@@ -144,6 +147,7 @@ impl AttrType {
             Self::TrafficEngineering => 24,
             Self::BgpAddPath => 30,
             Self::LargeCommunities => 32,
+            Self::Otc => 35,
             Self::Other(v) => v,
         }
     }
@@ -293,6 +297,20 @@ impl From<PathAttributes> for Attributes {
                 tag: AttrTag(a.attr_type.to_u8()),
                 flags: a.flags.0,
                 value: a.value,
+            });
+        }
+        out
+    }
+}
+
+impl From<Attributes> for PathAttributes {
+    fn from(a: Attributes) -> Self {
+        let mut out = Self::new();
+        for attr in a.iter().cloned() {
+            out.insert(PathAttribute {
+                flags: PathAttrFlags(attr.flags),
+                attr_type: AttrType::from_u8(attr.tag.0),
+                value: attr.value,
             });
         }
         out

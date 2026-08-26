@@ -11,3 +11,7 @@ description = "Routing policy: route maps, prefix lists, AS-path filters, commun
 [dependencies]
 lr-core = { workspace = true }
 tracing.workspace = true
+
+[features]
+default = ["std"]
+std = []

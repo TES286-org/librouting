@@ -40,7 +40,10 @@ pub struct DefaultRouter {
 
 #[allow(clippy::large_enum_variant)]
 enum SessionState {
-    Bgp { peer: BgpPeer, conn: MemoryConn },
+    Bgp {
+        peer: BgpPeer,
+        conn: MemoryConn,
+    },
     Ospf,
     #[allow(dead_code)]
     Babel,

@@ -1,0 +1,9 @@
+[package]
+name = "bfd-integration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lr-core = { path = "../../crates/lr-core" }
+lr-bgp = { path = "../../crates/lr-bgp" }
+lr-bfd = { path = "../../crates/lr-bfd" }

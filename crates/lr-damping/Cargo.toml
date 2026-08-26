@@ -1,0 +1,18 @@
+[package]
+name = "lr-damping"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+keywords = ["routing", "damping", "flap", "bgp"]
+categories = ["network-programming", "algorithms"]
+
+[features]
+default = ["std"]
+std = ["lr-core/std"]
+
+[dependencies]
+lr-core = { workspace = true }

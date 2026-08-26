@@ -1,0 +1,18 @@
+[package]
+name = "lr-osroute"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "OS routing table reference implementation (Linux netlink, BSD route socket, Windows IPHelper)"
+keywords = ["routing", "netlink", "rtnetlink", "linux"]
+categories = ["network-programming", "os"]
+
+[features]
+default = ["std"]
+std = ["lr-core/std"]
+
+[dependencies]
+lr-core = { workspace = true }

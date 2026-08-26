@@ -1,0 +1,19 @@
+[package]
+name = "lr-bfd"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description.workspace = true
+keywords = ["bfd", "fault-detection", "routing"]
+categories = ["network-programming", "parser-implementations"]
+
+[features]
+default = ["std"]
+std = ["lr-core/std"]
+
+[dependencies]
+lr-core = { workspace = true }
+bitflags.workspace = true

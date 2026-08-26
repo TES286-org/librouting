@@ -1,0 +1,10 @@
+[package]
+name = "analyzer"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lr-core = { path = "../../crates/lr-core" }
+lr-bgp = { path = "../../crates/lr-bgp" }
+lr-ospf = { path = "../../crates/lr-ospf" }
+lr-babel = { path = "../../crates/lr-babel" }

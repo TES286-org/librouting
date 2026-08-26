@@ -1,0 +1,8 @@
+[package]
+name = "os-integration"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lr-core = { path = "../../crates/lr-core" }
+lr-osroute = { path = "../../crates/lr-osroute" }

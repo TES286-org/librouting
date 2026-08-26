@@ -29,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod best_path;
 pub mod capabilities;
 pub mod codec;
 pub mod error;
@@ -38,6 +39,7 @@ pub mod message;
 pub mod nlri;
 pub mod path;
 pub mod peer;
+pub mod role;
 
 pub use codec::BgpCodec;
 pub use error::{

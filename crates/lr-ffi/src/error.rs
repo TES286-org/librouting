@@ -31,7 +31,6 @@ pub fn set_last_error(s: String) {
 /// The returned pointer is valid until the next FFI call on this thread.
 #[no_mangle]
 pub extern "C" fn lr_last_error() -> *const std::os::raw::c_char {
-    
     thread_local! {
         static BUF: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
     }
