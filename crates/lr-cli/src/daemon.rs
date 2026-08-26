@@ -63,6 +63,14 @@ struct DaemonConfig {
     install_kernel: bool,
     /// BGP hold time (seconds).
     hold_time: u16,
+    /// RFC 4724 graceful restart time to advertise (seconds). 0 disables GR.
+    gr_restart_time: u16,
+    /// RFC 9494 Long-Lived Graceful Restart stale time (seconds).
+    /// 0 disables LLGR.
+    llgr_stale_time: u32,
+    /// Optional local cap (seconds) for the LLGR stale time received from
+    /// peers. 0 = honour the peer's value.
+    llgr_max_stale_time: u32,
 }
 
 fn print_usage() {
@@ -79,6 +87,11 @@ fn print_usage() {
          --listen ADDR:PORT       Accept an inbound BGP connection\n  \
          --network PREFIX         Locally originate PREFIX (repeatable)\n  \
          --hold-time SEC          BGP hold time in seconds (default 90)\n  \
+         --graceful-restart SEC   RFC 4724 restart time to advertise\n  \
+         (default 120; 0 disables)\n  \
+         --llgr SEC               RFC 9494 long-lived graceful restart\n  \
+         stale time to advertise (default 0 = disabled)\n  \
+         --llgr-max-stale SEC     Cap the peer-advertised LLGR stale time\n  \
          --install-kernel-routes  Install best routes into the OS FIB (root)\n  \
          -h, --help               Show this help"
     );
@@ -187,6 +200,18 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.hold_time = args[i + 1].parse().unwrap_or(90);
                 i += 2;
             }
+            "--graceful-restart" if i + 1 < args.len() => {
+                cfg.gr_restart_time = args[i + 1].parse().unwrap_or(120);
+                i += 2;
+            }
+            "--llgr" if i + 1 < args.len() => {
+                cfg.llgr_stale_time = args[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
+            "--llgr-max-stale" if i + 1 < args.len() => {
+                cfg.llgr_max_stale_time = args[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
             "--install-kernel-routes" => {
                 cfg.install_kernel = true;
                 i += 1;
@@ -238,6 +263,16 @@ fn main() -> ExitCode {
         let mut r = router.lock().unwrap();
         let mut sc = SessionConfig::bgp(Asn(cfg.local_as), Asn(cfg.peer_as), rid);
         sc.hold_time = cfg.hold_time;
+        // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
+        // LLGR requires GR (RFC 9494 §4.1): with_long_lived_gr is therefore
+        // only applied when the restart time is nonzero.
+        sc = sc.with_graceful_restart(cfg.gr_restart_time);
+        if cfg.llgr_stale_time != 0 {
+            sc = sc.with_long_lived_gr(cfg.llgr_stale_time);
+        }
+        if cfg.llgr_max_stale_time != 0 {
+            sc = sc.with_llgr_max_stale_time(cfg.llgr_max_stale_time);
+        }
         // Local address for next-hop-self egress: prefer the peer address
         // (we connect from the interface that reaches it), else the listen
         // address. Without this, eBGP UPDATEs would carry no NEXT_HOP and
