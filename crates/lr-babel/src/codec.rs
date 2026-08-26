@@ -40,6 +40,34 @@ impl BabelCodec {
         out.truncate(n);
         Ok(out)
     }
+
+    /// Encode and authenticate one Babel datagram with RFC 8967 HMAC-SHA256.
+    pub fn encode_authenticated(
+        &self,
+        frame: &BabelFrame,
+        pseudo_header: crate::auth::BabelPseudoHeader,
+        key: &crate::auth::BabelMacKey,
+        counter: &mut crate::auth::BabelPacketCounter,
+    ) -> Result<Vec<u8>, crate::auth::BabelAuthError> {
+        let packet = self
+            .encode_vec(frame)
+            .map_err(|_| crate::auth::BabelAuthError::InvalidLength)?;
+        crate::auth::authenticate_packet(&packet, pseudo_header, key, counter)
+    }
+
+    /// Verify, replay-check and decode an RFC 8967 authenticated datagram.
+    /// The PC TLV and MAC trailer are stripped before normal Babel TLV parsing.
+    pub fn decode_authenticated_slice(
+        &mut self,
+        packet: &[u8],
+        pseudo_header: crate::auth::BabelPseudoHeader,
+        keys: &[crate::auth::BabelMacKey],
+        replay: &mut crate::auth::BabelReplayProtection,
+    ) -> Result<Option<BabelFrame>, crate::auth::BabelAuthError> {
+        let plain = crate::auth::verify_packet(packet, pseudo_header, keys, replay)?;
+        self.decode_slice(&plain)
+            .map_err(|_| crate::auth::BabelAuthError::InvalidLength)
+    }
 }
 
 fn decode_frame_body(body: &[u8]) -> Result<BabelFrame, ParseError> {
@@ -154,6 +182,36 @@ mod tests {
             }
             _ => panic!("expected Hello TLV"),
         }
+    }
+
+    #[test]
+    fn authenticated_frame_roundtrip() {
+        let frame = BabelFrame::new(vec![Tlv::new(
+            TlvType::Hello,
+            Hello {
+                seqno: 1,
+                interval_cs: 200,
+            }
+            .encode()
+            .to_vec(),
+        )]);
+        let pseudo = crate::auth::BabelPseudoHeader {
+            source: lr_core::addr::IpAddr::V4([192, 0, 2, 1]),
+            source_port: 6696,
+            destination: lr_core::addr::IpAddr::V4([224, 0, 0, 111]),
+            destination_port: 6696,
+        };
+        let key = crate::auth::BabelMacKey::new(b"test-key".to_vec());
+        let mut counter = crate::auth::BabelPacketCounter::new(b"index".to_vec(), 1).unwrap();
+        let packet = BabelCodec::new()
+            .encode_authenticated(&frame, pseudo, &key, &mut counter)
+            .unwrap();
+        let mut replay = crate::auth::BabelReplayProtection::default();
+        let decoded = BabelCodec::new()
+            .decode_authenticated_slice(&packet, pseudo, &[key], &mut replay)
+            .unwrap()
+            .unwrap();
+        assert_eq!(decoded, frame);
     }
 
     #[test]

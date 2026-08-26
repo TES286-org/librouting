@@ -16,6 +16,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod auth;
 pub mod codec;
 pub mod message;
 pub mod metric;
@@ -24,6 +25,10 @@ pub mod route;
 pub mod source;
 pub mod tlv;
 
+pub use auth::{
+    authenticate_packet, verify_packet, BabelAuthError, BabelMacKey, BabelPacketCounter,
+    BabelPseudoHeader, BabelReplayProtection,
+};
 pub use codec::BabelCodec;
 pub use message::*;
 pub use neighbor::BabelNeighbor;

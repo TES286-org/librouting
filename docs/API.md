@@ -104,6 +104,32 @@ let _ = session.start(lr_core::time::Instant(0));
 // push bytes via feed_bytes, drain via drain_outgoing
 ```
 
+## Babel RFC 8967 authentication
+
+```rust
+use lr_babel::{
+    BabelCodec, BabelFrame, BabelMacKey, BabelPacketCounter, BabelPseudoHeader,
+    BabelReplayProtection,
+};
+use lr_core::addr::IpAddr;
+
+let pseudo_header = BabelPseudoHeader {
+    source: IpAddr::V4([192, 0, 2, 1]),
+    source_port: 6696,
+    destination: IpAddr::V4([224, 0, 0, 111]),
+    destination_port: 6696,
+};
+let key = BabelMacKey::new(b"32-byte-interface-secret".to_vec());
+let mut sender = BabelPacketCounter::new(b"fresh-interface-index".to_vec(), 0)?;
+let packet = BabelCodec::new().encode_authenticated(
+    &BabelFrame::empty(), pseudo_header, &key, &mut sender,
+)?;
+let mut replay = BabelReplayProtection::default();
+let frame = BabelCodec::new().decode_authenticated_slice(
+    &packet, pseudo_header, &[key], &mut replay,
+)?;
+```
+
 ## OS routing table
 
 ```rust

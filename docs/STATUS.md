@@ -70,7 +70,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Neighbor / route table + feasibility (RFC 8966 §3.5.2) | ✅ | |
 | Metric computation, seqno handling | ✅ 🧪 | E2E install/withdraw tests |
 | RFC 9079 source-specific routing | 🟡 | TLVs modelled; source-table integration partial |
-| RFC 8967 HMAC authentication | ❌ | |
+| RFC 8967 HMAC authentication | ✅ | HMAC-SHA256, IPv4/IPv6 pseudo-headers, multi-key receive validation, packet counters, replay rejection |
 | Babel over IPv6 link-local transport | 🟡 | model supported; daemon transport is IPv4 today |
 
 ## Layer 3 — router pipeline (`lr-router`)
