@@ -16,13 +16,16 @@ use core::fmt;
 use crate::capabilities::Capability;
 use crate::codec::BgpCodec;
 use crate::error::{BgpErrorCode, BgpNotification};
-use crate::message::{keepalive::Keepalive, open::Open, BgpMessage};
+use crate::message::{keepalive::Keepalive, open::Open, update::Update, BgpMessage};
+use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
 use crate::peer::PeerConfig;
 
 use lr_core::addr::{Asn, RouterId};
 use lr_core::codec::Decoder;
 use lr_core::error::ParseError;
 use lr_core::fsm::{Action, StateId, StateMachine, TimerId, TimerSpec};
+use lr_core::nlri::NlriFamily;
+use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
 
 /// BGP peer state (RFC 4271 §8.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -90,14 +93,14 @@ pub enum BgpAction {
 
 /// BGP peer FSM. Owns codec, peer state, and timers.
 pub struct BgpPeer {
-    cfg: PeerConfig,
-    codec: BgpCodec,
+    pub(crate) cfg: PeerConfig,
+    pub(crate) codec: BgpCodec,
     state: BgpState,
     negotiated_hold_time: u16,
     peer_bgp_id: Option<RouterId>,
     peer_as: Option<Asn>,
     peer_capabilities: Vec<Capability>,
-    out_buf: Vec<u8>,
+    pub(crate) out_buf: Vec<u8>,
     hold_remaining: u64,
     keepalive_remaining: u64,
     established: bool,
@@ -297,7 +300,7 @@ impl BgpPeer {
             (BgpState::OpenConfirm, BgpEvent::Message(BgpMessage::Keepalive(_))) => {
                 self.established = true;
                 my_actions.push(BgpAction::Emit(lr_core::event::Event::PeerStateChange {
-                    session: 0,
+                    session: self.cfg.peer_id,
                     peer_state: "Established",
                 }));
                 BgpState::Established
@@ -312,6 +315,19 @@ impl BgpPeer {
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::Message(BgpMessage::Update(_))) => {
+                let update = if let BgpEvent::Message(BgpMessage::Update(ref u)) = ev {
+                    u.clone()
+                } else {
+                    unreachable!()
+                };
+                my_actions.extend(self.handle_update_in_established(&update));
+                // Feasibility: re-arm the hold timer — any valid message
+                // refreshes it (RFC 4271 §4.4).
+                my_actions.push(BgpAction::CancelTimer(timer_ids::HOLD));
+                my_actions.push(BgpAction::SetTimer(
+                    timer_ids::HOLD,
+                    TimerSpec::once((self.negotiated_hold_time as u64) * 1000),
+                ));
                 BgpState::Established
             }
             (BgpState::Established, BgpEvent::TimerKeepalive) => {
@@ -364,6 +380,121 @@ impl BgpPeer {
         self.hold_remaining = 0;
         self.keepalive_remaining = 0;
         self.negotiated_hold_time = 0;
+    }
+
+    /// Extract routes from an inbound UPDATE (RFC 4271 §9.1.1 "update
+    /// filtering" stage-0: pure decode-to-route conversion, no policy).
+    ///
+    /// Withdrawals become [`BgpAction::WithdrawRoute`] and announcements
+    /// become [`BgpAction::InstallRoute`] with the full path-attribute set
+    /// carried in the route's attribute bag. The router layer (or a
+    /// standalone embedder) then applies its import pipeline: safety net,
+    /// import hooks, Adj-RIB-In, decision process.
+    ///
+    /// Conventions:
+    /// - `RouteOrigin::peer` is this session's `peer_id`.
+    /// - `RouteOrigin::proto` is `1` for iBGP-learned and `0` for
+    ///   eBGP-learned routes (the convention consumed by
+    ///   [`crate::best_path::BestPath`]).
+    /// - `Preference::metric` carries the AS-path length so cross-protocol
+    ///   merging has a comparable figure of merit.
+    fn handle_update_in_established(&mut self, u: &Update) -> Vec<BgpAction> {
+        let mut actions: Vec<BgpAction> = Vec::new();
+        let topo = self.cfg.compute_topology();
+        let origin = RouteOrigin {
+            // Convention (consumed by best_path / the safety net):
+            // 0 = eBGP-learned, 1 = iBGP-learned.
+            proto: u32::from(topo.role.is_internal()),
+            peer: self.cfg.peer_id,
+        };
+
+        // --- Withdrawals (IPv4 legacy section) ---
+        for p in &u.withdrawn {
+            actions.push(BgpAction::WithdrawRoute(RouteKey::new(
+                *p,
+                NlriFamily::IPV4_UNICAST,
+            )));
+        }
+
+        // --- MP_UNREACH_NLRI withdrawals (RFC 4760) ---
+        if let Some(mp) = u.attributes.mp_unreach() {
+            for p in &mp.nlri {
+                actions.push(BgpAction::WithdrawRoute(RouteKey::new(*p, mp.family)));
+            }
+        }
+
+        // --- Announcements ---
+        // A valid announcement needs at least ORIGIN, AS_PATH and NEXT_HOP
+        // (RFC 4271 §6.3); rather than tearing the session down we skip
+        // malformed NLRI — the safety net at the router layer reports it.
+        let attrs_ok = u.attributes.origin().is_some()
+            && (u.attributes.as_path().is_some() || u.attributes.as4_path().is_some())
+            && (u.attributes.next_hop().is_some() || u.attributes.mp_reach().is_some());
+
+        // Normalize the attribute bag: the route's internal AS_PATH is
+        // always 4-byte-encoded (canonical form) so that downstream
+        // consumers (best-path, safety net, egress) never have to guess the
+        // wire width. AS4_PATH (RFC 6793 transition) is merged in and
+        // dropped.
+        let mut normalized: PathAttributes = u.attributes.clone();
+        let wire_path = normalized.as_path_wire(self.cfg.asn4);
+        let as4 = normalized.as4_path();
+        let canonical_path = as4.or(wire_path);
+        normalized.remove(AttrType::As4Path);
+        if let Some(path) = &canonical_path {
+            normalized.insert(PathAttribute::new(
+                PathAttrFlags::new().set_transitive(true),
+                AttrType::AsPath,
+                path.encode_4(),
+            ));
+        }
+
+        let announce = |prefix: lr_core::addr::Prefix,
+                        family: NlriFamily,
+                        next_hop: Option<lr_core::addr::IpAddr>,
+                        actions: &mut Vec<BgpAction>| {
+            if !attrs_ok {
+                return;
+            }
+            let metric = canonical_path
+                .as_ref()
+                .map(|p| p.length() as u32)
+                .unwrap_or(0);
+            let route = Route {
+                key: RouteKey::new(prefix, family),
+                origin,
+                protocol: Protocol::Bgp,
+                preference: Preference::new(Protocol::Bgp.default_admin_distance(), metric),
+                next_hop,
+                attributes: normalized.clone().into(),
+                age_ms: 0, // stamped by the router when it imports
+            };
+            actions.push(BgpAction::InstallRoute(route));
+        };
+
+        // IPv4 NLRI: NEXT_HOP from the well-known attribute.
+        if !u.nlri.is_empty() {
+            let nh = u.attributes.next_hop().map(|n| n.to_ip());
+            for p in &u.nlri {
+                announce(*p, NlriFamily::IPV4_UNICAST, nh, &mut actions);
+            }
+        }
+
+        // MP_REACH_NLRI (RFC 4760): family + next-hop from the attribute.
+        if let Some(mp) = u.attributes.mp_reach() {
+            let nh = match &mp.next_hop {
+                crate::path::MpNextHop::V4(b) => Some(lr_core::addr::IpAddr::V4(*b)),
+                crate::path::MpNextHop::V6Global(b)
+                | crate::path::MpNextHop::V6LinkLocal(b)
+                | crate::path::MpNextHop::V6GlobalLinkLocal(b, _)
+                | crate::path::MpNextHop::V4OverV6(b) => Some(lr_core::addr::IpAddr::V6(*b)),
+            };
+            for p in &mp.nlri {
+                announce(*p, mp.family, nh, &mut actions);
+            }
+        }
+
+        actions
     }
 }
 

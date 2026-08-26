@@ -44,6 +44,12 @@ int32_t lr_router_drain_output(lr_router_t r,
                                 lr_bytes_t *out);
 int32_t lr_router_tick(lr_router_t r, uint64_t now_ms);
 int32_t lr_router_start_session(lr_router_t r, uint64_t session);
+int32_t lr_router_originate_v4(lr_router_t r,
+                               const uint8_t *prefix_addr,
+                               uint8_t prefix_len,
+                               const uint8_t *next_hop);
+int64_t lr_router_rib_len(lr_router_t r);
+int32_t lr_router_rib_dump(lr_router_t r, lr_bytes_t *out);
 
 int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_bgp_encode_keepalive(lr_bytes_t *out);

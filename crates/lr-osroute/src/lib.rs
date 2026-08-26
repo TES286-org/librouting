@@ -44,9 +44,8 @@
 //! # // pseudo-code — see the `examples/` directory for a runnable sample.
 //! use lr_osroute::OsRouteTable;
 //! use lr_core::addr::{Prefix, IpAddr};
-//! use lr_core::rib::Route;
 //!
-//! let mut rt = lr_osroute::linux::RtNetlink::connect().unwrap();
+//! let mut rt = lr_osroute::RtNetlink::connect().unwrap();
 //! let prefix: Prefix = "203.0.113.0/24".parse().unwrap();
 //! let gw: IpAddr = "198.51.100.1".parse().unwrap();
 //! rt.add_route(prefix, gw, 0).unwrap();
@@ -58,14 +57,18 @@
 #![cfg_attr(not(feature = "std"), forbid(unsafe_code))]
 
 #[cfg(feature = "std")]
-pub mod linux;
-#[cfg(feature = "std")]
 pub mod stub;
 
-#[cfg(feature = "std")]
+// The rtnetlink backend only exists on Linux. On every other platform we
+// fall back to the stub so the trait surface stays identical and the crate
+// still cross-compiles (e.g. to Windows/other Unixes).
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub mod linux;
+
+#[cfg(all(feature = "std", target_os = "linux"))]
 pub use linux::RtNetlink;
-#[cfg(feature = "std")]
-pub use stub::StubRouteTable;
+#[cfg(all(feature = "std", not(target_os = "linux")))]
+pub use stub::StubRouteTable as RtNetlink;
 
 use lr_core::addr::{IpAddr, Prefix};
 use lr_core::rib::Protocol;

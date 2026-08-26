@@ -22,6 +22,15 @@ merging via admin distance) is captured in `lr-rib`. Policy framework (route
 maps, prefix lists, AS-path filters, community lists, hooks + safety net)
 lives in `lr-policy`.
 
+The full data plane is wired end-to-end: UPDATEs received by a BGP session
+are extracted into routes, pass the safety net and import hooks, enter
+Adj-RIB-In, win (or lose) the decision process, land in Loc-RIB, and are
+re-advertised to other peers with the correct egress rules (AS prepend,
+next-hop-self, LOCAL_PREF stripping/injection, iBGP split-horizon, RR
+reflection with ORIGINATOR_ID/CLUSTER_LIST, OTC valley-free enforcement).
+Withdrawals propagate back through the same pipeline. See
+`docs/ARCHITECTURE.md` for the pipeline diagram.
+
 C ABI bindings (`lr-ffi`) let Go, Python, C and C++ embedders call into the
 library without depending on the Rust toolchain at runtime.
 
@@ -42,6 +51,27 @@ library without depending on the Rust toolchain at runtime.
 | `lr-cli` | `crates/lr-cli` | `lr` CLI tool (decode/routes) + `lr-daemon` reference wiring |
 | `lr-ffi` | `crates/lr-ffi` | C ABI bindings (cbindgen-generated header) |
 | `lr-tests` | `crates/lr-tests` | Cross-crate integration tests |
+
+## The daemon
+
+`lr-daemon` is a complete reference embedder: TCP transport (connect or
+listen), poll-driven router, ticker thread, reconnect with backoff, and
+optional kernel route installation via rtnetlink.
+
+```bash
+# Terminal 1 — speaker A (listens, originates a prefix)
+lr-daemon --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+          --listen 127.0.0.1:1179 --local-address 192.0.2.1 \
+          --network 203.0.113.0/24
+
+# Terminal 2 — speaker B (connects, receives the route)
+lr-daemon --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+          --peer 127.0.0.1:1179 --local-address 192.0.2.2
+# → daemon: session #1 → Established
+# → daemon: route installed 203.0.113.0/24 via 192.0.2.1
+```
+
+A TOML config (`templates/daemon.toml`) is supported via `--config`.
 
 ## Workspace Layout
 

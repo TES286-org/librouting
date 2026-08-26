@@ -556,7 +556,7 @@ mod tests {
         u.attributes.insert(PathAttribute::new(
             PathAttrFlags::new().set_transitive(true),
             AttrType::AsPath,
-            AsPath::from_sequence([Asn(100), Asn(200)]).encode_2(),
+            AsPath::from_sequence([Asn(100), Asn(200)]).encode_4(),
         ));
         u.attributes.insert(PathAttribute::new(
             PathAttrFlags::new().set_transitive(true),

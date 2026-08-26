@@ -52,6 +52,14 @@ pub struct PeerConfig {
     pub route_reflector: RouteReflectorConfig,
     /// Route-server configuration (RFC 7947).
     pub route_server: RouteServerConfig,
+    /// Session identifier stamped into every route this peer installs
+    /// (`RouteOrigin::peer`). The router assigns it; routes decoded by the
+    /// FSM carry it so the RIB can attribute them back to the session.
+    pub peer_id: u64,
+    /// Local interface address used as NEXT_HOP when advertising to eBGP
+    /// peers ("next-hop-self"). When `None` the received NEXT_HOP is
+    /// preserved, which is correct for iBGP and for shared-medium eBGP.
+    pub local_address: Option<lr_core::addr::IpAddr>,
 }
 
 impl PeerConfig {
@@ -76,6 +84,8 @@ impl PeerConfig {
             confederation: None,
             route_reflector: RouteReflectorConfig::default(),
             route_server: RouteServerConfig::default(),
+            peer_id: 0,
+            local_address: None,
         }
     }
 

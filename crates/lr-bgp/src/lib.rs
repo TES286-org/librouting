@@ -29,6 +29,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod advertise;
 pub mod best_path;
 pub mod capabilities;
 pub mod codec;

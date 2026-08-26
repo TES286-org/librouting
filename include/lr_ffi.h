@@ -124,8 +124,37 @@ int32_t lr_router_drain_output(lr_router_t r, uint64_t session, struct lr_bytes_
 int32_t lr_router_tick(lr_router_t r, uint64_t now_ms);
 
 /**
- * Start a BGP session (no-op placeholder; FSM is driven by tick/feed).
+ * Start a session: drives the protocol FSM into operation (BGP:
+ * ManualStart + TransportOpen). Call once the transport is connected.
  */
 int32_t lr_router_start_session(lr_router_t r, uint64_t session);
+
+/**
+ * Originate a local IPv4 route: `prefix_addr` is 4 bytes, `prefix_len` is
+ * the prefix length, `next_hop` is 4 bytes or NULL. The route is injected
+ * into Loc-RIB and advertised to all established BGP peers.
+ *
+ * # Safety
+ * `prefix_addr` and `next_hop` (when non-NULL) must be valid pointers to
+ * 4 readable bytes.
+ */
+int32_t lr_router_originate_v4(lr_router_t r,
+                               const uint8_t *prefix_addr,
+                               uint8_t prefix_len,
+                               const uint8_t *next_hop);
+
+/**
+ * Number of routes currently in Loc-RIB.
+ */
+int64_t lr_router_rib_len(lr_router_t r);
+
+/**
+ * Dump the Loc-RIB as a text table (one route per line). The caller owns
+ * the returned bytes and must free them with `lr_bytes_free`.
+ *
+ * # Safety
+ * `out` must point to a valid `lr_bytes_t` slot.
+ */
+int32_t lr_router_rib_dump(lr_router_t r, struct lr_bytes_t *out);
 
 #endif  /* LR_FFI_H */

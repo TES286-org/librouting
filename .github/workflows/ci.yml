@@ -41,7 +41,10 @@ jobs:
         run: cargo build --release -p lr-ffi
       - name: C harness
         run: |
-          cc -Iinclude -Ltarget/release -llr_ffi -o /tmp/lr_harness tests/ffi/harness.c
+          # NB: sources MUST come before -l: Ubuntu's default `ld --as-needed`
+          # drops a shared library that appears before the objects that
+          # reference its symbols.
+          cc -Iinclude tests/ffi/harness.c -Ltarget/release -llr_ffi -o /tmp/lr_harness
           LD_LIBRARY_PATH=target/release /tmp/lr_harness
       - name: Python bindings test
         run: |
@@ -53,6 +56,10 @@ jobs:
           CGO_LDFLAGS: "-L${{ github.workspace }}/target/release -llr_ffi"
         run: |
           cd bindings/lr-go && go test -v ./...
+      - name: Two-daemon TCP interop test
+        run: |
+          cargo build -p lr-cli
+          ./tests/interop/two_daemon.sh
 
   msrv:
     name: MSRV (1.74)
@@ -92,4 +99,14 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - run: cargo build --workspace --target ${{ matrix.target }} --all-features
+      - name: Install cross linkers
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            gcc-aarch64-linux-gnu \
+            gcc-mingw-w64-x86-64
+      - name: cargo build (${{ matrix.target }})
+        run: cargo build --workspace --target ${{ matrix.target }} --all-features
+        env:
+          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc

@@ -53,9 +53,28 @@ def test_router_lifecycle():
         r.tick(0)
 
 
+def test_router_data_plane():
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513, local_bgp_id=0x0a000001)
+        # Start the session -> OPEN gets queued.
+        r.start_session(h)
+        open_msg = r.drain_output(h)
+        assert len(open_msg) >= 29
+        assert open_msg[18] == 1  # OPEN
+
+        # Originate a route -> Loc-RIB grows; nothing is sent while the
+        # session is unestablished (correct RFC 4271 egress behavior).
+        r.originate_v4("203.0.113.0/24", "192.0.2.1")
+        assert r.rib_len() == 1
+        dump = r.rib_dump()
+        assert "203.0.113.0/24" in dump
+        assert r.drain_output(h) == b""
+
+
 if __name__ == "__main__":
     test_abi_version()
     test_encode_keepalive()
     test_decode_bgp()
     test_router_lifecycle()
+    test_router_data_plane()
     print("all tests passed")

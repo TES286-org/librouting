@@ -50,6 +50,19 @@ impl AdjRibIn {
         self.inner.get(&(origin, key.clone()))
     }
 
+    /// Iterate every route in the Adj-RIB-In across all origins.
+    pub fn iter_all(&self) -> impl Iterator<Item = &Route> {
+        self.inner.values()
+    }
+
+    /// Iterate every origin that contributed to a key.
+    pub fn origins_for<'a>(&'a self, key: &'a RouteKey) -> impl Iterator<Item = RouteOrigin> + 'a {
+        self.inner
+            .keys()
+            .filter(move |(_, k)| k == key)
+            .map(|(o, _)| *o)
+    }
+
     pub fn len(&self) -> usize {
         self.inner.len()
     }

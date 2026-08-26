@@ -61,24 +61,63 @@ deltas back.
 
 ## RIB pipeline
 
+Fully implemented in `lr-router::DefaultRouter` (see
+`crates/lr-router/src/instance.rs`):
+
 ```
-inbound bytes  →  decode  →  SafetyNet.check  →  ImportHooks  →  AdjRibIn
+inbound bytes  →  BgpPeer::feed_bytes  →  InstallRoute/WithdrawRoute actions
                                                                 ↓
-                                              BestPath.select  ← (per-protocol)
+              SafetyNet.check  (AS-loop, martian, next-hop sanity)
                                                                 ↓
-                                                              LocRib
+              ImportHooks  →  AdjRibIn  →  reselect (BestPath for BGP,
+                                              RouteSelector for mixed)
                                                                 ↓
-                                            ExportHooks  ←  AdjRibOut  →  outbound bytes
+                                              LocRib  →  RouterEvent::RouteInstalled
                                                                 ↓
-                                              OsRouteTable.add_route  (optional)
+              ExportHooks  →  egress rules (AS prepend, next-hop-self,
+              iBGP split-horizon, RR reflection, OTC valley-free)
+                                                                ↓
+                      AdjRibOut  →  BgpPeer::advertise  →  outbound bytes
+                                                                ↓
+                            OsRouteTable.add_route  (optional, lr-daemon)
 ```
+
+Withdrawals run the same pipeline in reverse: the session reports
+`WithdrawRoute`, the Adj-RIB-In entry is removed, the decision process
+re-runs, and peers that previously received the route get a wire
+withdrawal.
 
 Each stage is replaceable via traits:
 - `ImportHook` / `ExportHook` — arbitrary Rust code that may drop or mutate
-  routes.
+  routes (`DefaultRouter::hooks_mut()`).
 - `SelectionHook` — override the comparator (e.g. prefer routes from a
   specific peer).
 - `OsRouteTable` — platform abstraction for the kernel FIB.
+
+### Timer routing
+
+Timer IDs are encoded as `(session << 8) | timer_code` inside
+`DefaultRouter`, so every FSM timer expiry is routed back to the session
+that armed it — a prerequisite for multi-session deployments where hold
+timers must not cross-fire between peers.
+
+### OSPF / Babel runtimes
+
+OSPF sessions decode Hellos into the neighbor FSM, install received LSAs
+into the per-session LSDB and re-run SPF on every LSDB change; the
+resulting intra-area routes (stub + transit networks) land in Loc-RIB with
+delta bookkeeping (stale routes are withdrawn). Babel sessions track
+Hello/IHU/Router-Id/NextHop/Update TLVs into the neighbor + route tables,
+apply the feasibility rules of RFC 8966 §3.5, and publish feasible best
+routes to Loc-RIB — including metric-infinity retractions and RFC 9079
+source-specific destinations.
+
+### Canonical AS_PATH
+
+Route attribute bags store AS_PATH in canonical 4-byte encoding regardless
+of the session's negotiated width (ingress normalizes, egress re-encodes).
+This means best-path, the safety net and the egress rules never have to
+guess the wire format of a route's provenance.
 
 ## Extension points
 

@@ -244,7 +244,18 @@ impl PathAttributes {
     }
     pub fn as_path(&self) -> Option<AsPath> {
         let a = self.get(AttrType::AsPath)?;
-        AsPath::decode(&a.value)
+        AsPath::decode_4(&a.value)
+    }
+    /// Decode the AS_PATH attribute at its wire width. Use this on
+    /// freshly-decoded wire attributes; [`Self::as_path`] reads the
+    /// canonical (4-byte) form stored in route bags.
+    pub fn as_path_wire(&self, asn4: bool) -> Option<AsPath> {
+        let a = self.get(AttrType::AsPath)?;
+        if asn4 {
+            AsPath::decode_4(&a.value)
+        } else {
+            AsPath::decode(&a.value)
+        }
     }
     pub fn as4_path(&self) -> Option<AsPath> {
         let a = self.get(AttrType::As4Path)?;

@@ -1,7 +1,8 @@
 /* lr_harness.c — minimal C test that exercises the lr_ffi C ABI surface.
- * Build:
- *   cc -Iinclude -Ltarget/release -llr_ffi -o /tmp/lr_harness \
- *      tests/ffi/harness.c
+ * Build (sources BEFORE -l: `ld --as-needed` drops libs that precede the
+ * objects referencing them):
+ *   cc -Iinclude tests/ffi/harness.c -Ltarget/release -llr_ffi \
+ *      -o /tmp/lr_harness
  * Run:
  *   LD_LIBRARY_PATH=target/release /tmp/lr_harness
  */
@@ -52,6 +53,47 @@ int main(void) {
     rc = lr_router_drain_output(r, h, &out);
     check(rc == 0, "drain_output");
     lr_bytes_free(&out);
+
+    /* Start session (drives BGP ManualStart + TransportOpen) */
+    rc = lr_router_start_session(r, h);
+    check(rc == 0, "start_session");
+
+    /* The OPEN message must now be queued for the peer */
+    lr_bytes_t open_msg = {0};
+    rc = lr_router_drain_output(r, h, &open_msg);
+    check(rc == 0, "drain_output after start");
+    check(lr_bytes_len(&open_msg) >= 29, "OPEN message queued (>=29 bytes)");
+    if (lr_bytes_ptr(&open_msg) != NULL && lr_bytes_len(&open_msg) >= 19) {
+        check(lr_bytes_ptr(&open_msg)[18] == 1, "queued message type == OPEN");
+    }
+    lr_bytes_free(&open_msg);
+
+    /* Originate a route: 203.0.113.0/24 via 192.0.2.1 */
+    const uint8_t prefix[4] = {203, 0, 113, 0};
+    const uint8_t nh[4] = {192, 0, 2, 1};
+    rc = lr_router_originate_v4(r, prefix, 24, nh);
+    check(rc == 0, "originate_v4");
+
+    /* Loc-RIB must now hold exactly one route */
+    int64_t n = lr_router_rib_len(r);
+    check(n == 1, "rib_len == 1 after originate");
+
+    /* RIB dump renders the route */
+    lr_bytes_t dump = {0};
+    rc = lr_router_rib_dump(r, &dump);
+    check(rc == 0, "rib_dump");
+    check(lr_bytes_len(&dump) > 0, "rib_dump non-empty");
+    lr_bytes_free(&dump);
+
+    /* No UPDATE is queued for the peer yet: the session has not completed
+     * its OPEN/KEEPALIVE handshake, so the route is held in Loc-RIB and
+     * will be advertised when the session reaches Established (initial
+     * table dump). Egress only to established peers is RFC 4271 behavior. */
+    lr_bytes_t upd = {0};
+    rc = lr_router_drain_output(r, h, &upd);
+    check(rc == 0, "drain_output after originate");
+    check(lr_bytes_len(&upd) == 0, "no UPDATE while session unestablished");
+    lr_bytes_free(&upd);
 
     lr_router_destroy(r);
     if (failures == 0) {

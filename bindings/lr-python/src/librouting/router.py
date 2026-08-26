@@ -65,6 +65,55 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_tick failed (rc={rc}): {last_error()}")
 
+    def start_session(self, session: int) -> None:
+        """Begin protocol operation (BGP: ManualStart + TransportOpen)."""
+        rc = get_lib().lr_router_start_session(self._ptr, int(session))
+        if rc != 0:
+            raise LrError(f"lr_router_start_session failed (rc={rc}): {last_error()}")
+
+    def originate_v4(self, prefix: str, next_hop: str | None = None) -> None:
+        """Originate a local IPv4 route, e.g. originate_v4("203.0.113.0/24", "192.0.2.1")."""
+        addr_str, _, plen_str = prefix.partition("/")
+        plen = int(plen_str) if plen_str else 32
+        parts = addr_str.split(".")
+        if len(parts) != 4:
+            raise LrError(f"invalid IPv4 prefix: {prefix}")
+        try:
+            addr = bytes(int(p) for p in parts)
+        except ValueError as e:
+            raise LrError(f"invalid IPv4 prefix: {prefix}") from e
+        if next_hop is not None:
+            nh_parts = next_hop.split(".")
+            if len(nh_parts) != 4:
+                raise LrError(f"invalid next-hop: {next_hop}")
+            try:
+                nh = bytes(int(p) for p in nh_parts)
+            except ValueError as e:
+                raise LrError(f"invalid next-hop: {next_hop}") from e
+            nh_buf = ffi.new("uint8_t[]", nh)
+            rc = get_lib().lr_router_originate_v4(self._ptr, addr, plen, nh_buf)
+        else:
+            rc = get_lib().lr_router_originate_v4(self._ptr, addr, plen, ffi.NULL)
+        if rc != 0:
+            raise LrError(f"lr_router_originate_v4 failed (rc={rc}): {last_error()}")
+
+    def rib_len(self) -> int:
+        n = get_lib().lr_router_rib_len(self._ptr)
+        if n < 0:
+            raise LrError(f"lr_router_rib_len failed (rc={n})")
+        return int(n)
+
+    def rib_dump(self) -> str:
+        """Dump the Loc-RIB as a text table (one route per line)."""
+        b = alloc_bytes()
+        rc = get_lib().lr_router_rib_dump(self._ptr, b)
+        if rc != 0:
+            raise LrError(f"lr_router_rib_dump failed (rc={rc}): {last_error()}")
+        try:
+            return copy_bytes(b).decode("utf-8", errors="replace")
+        finally:
+            free_bytes(b)
+
 
 def abi_version() -> int:
     return int(get_lib().lr_abi_version())

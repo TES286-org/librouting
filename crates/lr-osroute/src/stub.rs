@@ -14,6 +14,15 @@ impl StubRouteTable {
     pub fn new() -> Self {
         Self
     }
+
+    /// Mirror of [`crate::linux::RtNetlink::connect`] so callers written
+    /// against the Linux backend compile unchanged on other platforms (they
+    /// get a runtime error instead).
+    pub fn connect() -> Result<Self, OsRouteError> {
+        Err(OsRouteError(
+            "OS route table backend not available on this platform".to_string(),
+        ))
+    }
 }
 
 impl OsRouteTable for StubRouteTable {

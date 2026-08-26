@@ -29,9 +29,11 @@ impl Hello {
     }
 }
 
-/// IHU (I Heard You) TLV body. `rxcost:2` + `interval:2` + address.
+/// IHU (I Heard You) TLV body (RFC 8966 §4.6.3):
+/// `ae:1` + `rxcost:2` + `interval:2` + `address:0..16`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ihu {
+    pub ae: u8,
     pub rxcost: u16,
     pub interval_cs: u16,
     pub address: IpAddr,
@@ -39,13 +41,19 @@ pub struct Ihu {
 
 impl Ihu {
     pub fn decode(v: &[u8]) -> Option<Self> {
-        if v.len() < 4 {
+        if v.len() < 5 {
             return None;
         }
-        let rxcost = u16::from_be_bytes([v[0], v[1]]);
-        let interval_cs = u16::from_be_bytes([v[2], v[3]]);
-        let addr = IpAddr::from_bytes(&v[4..])?;
+        let ae = v[0];
+        let rxcost = u16::from_be_bytes([v[1], v[2]]);
+        let interval_cs = u16::from_be_bytes([v[3], v[4]]);
+        let addr = if ae == 0 {
+            IpAddr::V4([0, 0, 0, 0])
+        } else {
+            IpAddr::from_bytes(&v[5..])?
+        };
         Some(Self {
+            ae,
             rxcost,
             interval_cs,
             address: addr,
@@ -53,10 +61,13 @@ impl Ihu {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut a = Vec::with_capacity(4 + self.address.octets().len());
+        let mut a = Vec::with_capacity(5 + self.address.octets().len());
+        a.push(self.ae);
         a.extend_from_slice(&self.rxcost.to_be_bytes());
         a.extend_from_slice(&self.interval_cs.to_be_bytes());
-        a.extend_from_slice(self.address.octets());
+        if self.ae != 0 {
+            a.extend_from_slice(self.address.octets());
+        }
         a
     }
 }
@@ -82,70 +93,130 @@ impl RouterId {
     }
 }
 
-/// Next Hop TLV body. Carries the next-hop address for subsequent Updates.
+/// Next Hop TLV body (RFC 8966 §4.6.5): `ae:1` + `address:0..16`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NextHop {
+    pub ae: u8,
     pub address: IpAddr,
 }
 
 impl NextHop {
     pub fn decode(v: &[u8]) -> Option<Self> {
-        Some(Self {
-            address: IpAddr::from_bytes(v)?,
-        })
+        if v.is_empty() {
+            return None;
+        }
+        let ae = v[0];
+        let address = if ae == 0 {
+            IpAddr::V4([0, 0, 0, 0])
+        } else {
+            IpAddr::from_bytes(&v[1..])?
+        };
+        Some(Self { ae, address })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        self.address.octets().to_vec()
+        let mut a = Vec::with_capacity(1 + self.address.octets().len());
+        a.push(self.ae);
+        if self.ae != 0 {
+            a.extend_from_slice(self.address.octets());
+        }
+        a
     }
 }
 
-/// Update TLV body (RFC 8966 §4.4.5). Variable length, at minimum 10 bytes:
-/// `metric:4` + `flags:1` + `prefix_len:1` + `prefix:0..`.
-/// Also `seqno:2` comes BEFORE metric, so the actual layout is:
-/// `ae:1` + `srcplen:1` + `reserved:1` + `metric:4` + `seqno:2` + `prefix:0..`.
+/// Update TLV body (RFC 8966 §4.6.9):
+/// `ae:1` + `src_prefix_len:1` + `src_prefix:0..4` + `prefix_len:1` +
+/// `prefix:0..16` + `metric:2` + `seqno:2`.
+///
+/// Prefix lengths are in *bits*; the encoded prefix carries ceil(len/8)
+/// octets (trailing zero octets elided). Metric 0xFFFF is infinity
+/// (retraction).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Update {
-    pub ae: u8, // Address Encoding (RFC 8966 §4.5.1)
+    pub ae: u8,
+    /// Source prefix length in bits (0 = no source prefix).
     pub src_prefix_len: u8,
-    pub metric: u32,
-    pub seqno: u16,
+    /// Source prefix octets (RFC 9079 source-specific routing).
+    pub src_prefix: Vec<u8>,
+    /// Prefix length in bits.
+    pub prefix_len: u8,
+    /// Prefix octets (ceil(prefix_len / 8), no embedded length byte).
     pub prefix: Vec<u8>,
+    pub metric: u16,
+    pub seqno: u16,
 }
 
 impl Update {
     pub fn decode(v: &[u8]) -> Option<Self> {
-        if v.len() < 10 {
+        if v.len() < 6 {
             return None;
         }
         let ae = v[0];
         let src_prefix_len = v[1];
-        // skip reserved v[2]
-        let metric = u32::from_be_bytes([v[3], v[4], v[5], v[6]]);
-        let seqno = u16::from_be_bytes([v[7], v[8]]);
-        let prefix = v[9..].to_vec();
+        let mut i = 2usize;
+        let src_octets = if ae == 0 || src_prefix_len == 0 {
+            0
+        } else {
+            (src_prefix_len as usize).div_ceil(8)
+        };
+        if i + src_octets >= v.len() {
+            return None;
+        }
+        let src_prefix = v[i..i + src_octets].to_vec();
+        i += src_octets;
+        let prefix_len = v[i];
+        i += 1;
+        let pfx_octets = (prefix_len as usize).div_ceil(8);
+        // metric(2) + seqno(2) follow the prefix.
+        if i + pfx_octets + 4 > v.len() {
+            return None;
+        }
+        let prefix = v[i..i + pfx_octets].to_vec();
+        i += pfx_octets;
+        let metric = u16::from_be_bytes([v[i], v[i + 1]]);
+        let seqno = u16::from_be_bytes([v[i + 2], v[i + 3]]);
         Some(Self {
             ae,
             src_prefix_len,
+            src_prefix,
+            prefix_len,
+            prefix,
             metric,
             seqno,
-            prefix,
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut a = Vec::with_capacity(9 + self.prefix.len());
+        let mut a = Vec::with_capacity(6 + self.prefix.len() + self.src_prefix.len());
         a.push(self.ae);
         a.push(self.src_prefix_len);
-        a.push(0); // reserved
+        if self.ae != 0 && self.src_prefix_len > 0 {
+            a.extend_from_slice(&self.src_prefix);
+        }
+        a.push(self.prefix_len);
+        a.extend_from_slice(&self.prefix);
         a.extend_from_slice(&self.metric.to_be_bytes());
         a.extend_from_slice(&self.seqno.to_be_bytes());
-        a.extend_from_slice(&self.prefix);
         a
     }
 
+    /// The destination prefix of this Update, if AE is known.
     pub fn prefix_value(&self) -> Option<Prefix> {
-        decode_ae(self.ae, &self.prefix)
+        match self.ae {
+            1 => {
+                let mut addr = [0u8; 4];
+                let n = self.prefix.len().min(4);
+                addr[..n].copy_from_slice(&self.prefix[..n]);
+                Some(Prefix::new_v4(addr, self.prefix_len))
+            }
+            2 => {
+                let mut addr = [0u8; 16];
+                let n = self.prefix.len().min(16);
+                addr[..n].copy_from_slice(&self.prefix[..n]);
+                Some(Prefix::new_v6(addr, self.prefix_len))
+            }
+            _ => None,
+        }
     }
 }
 
@@ -351,13 +422,29 @@ mod tests {
         let u = Update {
             ae: 1,
             src_prefix_len: 0,
+            src_prefix: Vec::new(),
+            prefix_len: 24,
+            prefix: vec![203, 0, 113],
             metric: 100,
             seqno: 5,
-            prefix: {
-                let mut v = vec![8u8]; // /8
-                v.push(10);
-                v
-            },
+        };
+        let enc = u.encode();
+        let dec = Update::decode(&enc).unwrap();
+        assert_eq!(dec, u);
+        assert_eq!(u.prefix_value(), Some(Prefix::new_v4([203, 0, 113, 0], 24)));
+    }
+
+    #[test]
+    fn update_with_source_prefix_roundtrip() {
+        // RFC 9079 source-specific update.
+        let u = Update {
+            ae: 1,
+            src_prefix_len: 8,
+            src_prefix: vec![10],
+            prefix_len: 24,
+            prefix: vec![192, 0, 2],
+            metric: 0xFFFF,
+            seqno: 9,
         };
         let enc = u.encode();
         let dec = Update::decode(&enc).unwrap();

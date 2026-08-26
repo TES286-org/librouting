@@ -2,6 +2,7 @@
 package librouting
 
 import (
+	"strings"
 	"testing"
 )
 
@@ -50,4 +51,45 @@ func TestDecodeBGP(t *testing.T) {
 	if len(out) != len(b) {
 		t.Fatalf("expected roundtrip len %d, got %d", len(b), len(out))
 	}
+}
+
+func TestDataPlane(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	h, err := r.AddBGPSession(64512, 64513, 0x0a000001, 90, 0, true)
+	if err != nil {
+		t.Fatalf("AddBGPSession: %v", err)
+	}
+	if err := r.StartSession(h); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	open, err := r.DrainOutput(h)
+	if err != nil {
+		t.Fatalf("DrainOutput: %v", err)
+	}
+	if len(open) < 29 || open[18] != 1 {
+		t.Fatalf("expected queued OPEN, got %d bytes type=%d", len(open), open[18])
+	}
+
+	nh := [4]byte{192, 0, 2, 1}
+	if err := r.OriginateV4([4]byte{203, 0, 113, 0}, 24, &nh); err != nil {
+		t.Fatalf("OriginateV4: %v", err)
+	}
+	n, err := r.RibLen()
+	if err != nil {
+		t.Fatalf("RibLen: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("expected rib len 1, got %d", n)
+	}
+	dump, err := r.RibDump()
+	if err != nil {
+		t.Fatalf("RibDump: %v", err)
+	}
+	if !strings.Contains(dump, "203.0.113.0/24") {
+		t.Fatalf("rib dump missing prefix: %q", dump)
+	}
+	r.ptr = nil
 }

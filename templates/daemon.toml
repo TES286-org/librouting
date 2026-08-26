@@ -1,0 +1,28 @@
+# lr-daemon configuration (TOML subset).
+#
+# Equivalent CLI:
+#   lr-daemon --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+#             --peer 192.0.2.2:179 --local-address 192.0.2.1 \
+#             --network 203.0.113.0/24 --hold-time 90
+
+[bgp]
+local_as = 64512
+peer_as = 64513
+router_id = "10.0.0.1"
+
+# Outbound: connect to the peer (omit when listen_addr is used).
+peer_addr = "192.0.2.2:179"
+
+# Inbound: accept one BGP connection (mutually exclusive with peer_addr in
+# the reference daemon; a production daemon supports both).
+# listen_addr = "0.0.0.0:179"
+
+# Source address for next-hop-self egress. Required when the daemon peers
+# over an address not derivable from peer_addr/listen_addr.
+local_address = "192.0.2.1"
+
+# Hold time in seconds (default 90; 0 disables keepalives).
+hold_time = 90
+
+# Locally originated networks.
+networks = ["203.0.113.0/24"]

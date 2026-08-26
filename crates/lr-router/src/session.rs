@@ -26,6 +26,11 @@ pub struct SessionConfig {
     pub keepalive: u16,
     pub asn4: bool,
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
+    /// Local interface address: used as NEXT_HOP for eBGP egress
+    /// (next-hop-self) and as the local identity for Babel/OSPF runtimes.
+    pub local_address: Option<lr_core::addr::IpAddr>,
+    /// OSPF area ID (0 = backbone).
+    pub area_id: u32,
 }
 
 impl SessionConfig {
@@ -39,6 +44,46 @@ impl SessionConfig {
             keepalive: 0,
             asn4: true,
             mp_families: Vec::new(),
+            local_address: None,
+            area_id: 0,
+        }
+    }
+
+    /// Set the local interface address (next-hop-self / protocol identity).
+    pub fn with_local_address(mut self, addr: lr_core::addr::IpAddr) -> Self {
+        self.local_address = Some(addr);
+        self
+    }
+
+    /// Build an OSPFv2 session config.
+    pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
+        Self {
+            kind: SessionKind::Ospfv2,
+            local_as: Asn(0),
+            peer_as: Asn(0),
+            local_bgp_id: router_id,
+            hold_time: 0,
+            keepalive: 0,
+            asn4: false,
+            mp_families: Vec::new(),
+            local_address: None,
+            area_id,
+        }
+    }
+
+    /// Build a Babel session config.
+    pub fn babel(local_addr: lr_core::addr::IpAddr) -> Self {
+        Self {
+            kind: SessionKind::Babel,
+            local_as: Asn(0),
+            peer_as: Asn(0),
+            local_bgp_id: RouterId::from_u32(0),
+            hold_time: 0,
+            keepalive: 0,
+            asn4: false,
+            mp_families: Vec::new(),
+            local_address: Some(local_addr),
+            area_id: 0,
         }
     }
 }
