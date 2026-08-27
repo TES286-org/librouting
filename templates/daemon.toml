@@ -51,5 +51,23 @@ graceful_restart_time = 120
 # tcp_ao_algorithm = "hmac-sha1"
 # tcp_ao_maclen = 12
 
-# Locally originated networks.
+# Locally originated networks. Reloadable via SIGHUP / the runtime API
+# `reload` command: added prefixes are originated, removed ones withdrawn.
 networks = ["203.0.113.0/24"]
+
+# --- Daemon hardening (top-level keys) ---
+
+# Drop privileges to this user (name or numeric uid) after the listener is
+# bound and session auth armed. Default group: the user's login group.
+# Unix only; without it the daemon keeps its startup identity.
+# user = "lr"
+
+# Override the privilege-drop group (name or numeric gid).
+# group = "lr"
+
+# Runtime API on a Unix stream socket (0600) for operational visibility:
+# status / sessions / routes / reload / shutdown / help (one command per
+# line, e.g. `echo status | socat - UNIX-CONNECT:/run/lr-daemon.api`).
+# SIGTERM/SIGINT shut the daemon down gracefully (sessions are closed with
+# a NOTIFICATION); SIGHUP is equivalent to `reload`.
+# api_socket = "/run/lr-daemon.api"

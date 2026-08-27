@@ -45,6 +45,10 @@ use lr_core::addr::{Asn, Prefix, RouterId};
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
+mod api;
+mod privdrop;
+mod signal;
+
 /// Daemon configuration (TOML or CLI flags).
 #[derive(Debug, Clone, Default)]
 struct DaemonConfig {
@@ -81,6 +85,15 @@ struct DaemonConfig {
     tcp_ao_algorithm: String,
     /// TCP-AO MAC length in bytes (0 = algorithm default).
     tcp_ao_maclen: u8,
+    /// Drop privileges to this user (name or uid) after binding.
+    user: Option<String>,
+    /// Drop privileges to this group (name or gid); default: the user's
+    /// login group.
+    group: Option<String>,
+    /// Runtime API socket path (Unix domain socket, 0600).
+    api_socket: Option<String>,
+    /// Configuration file the daemon was started with (reload source).
+    config_path: Option<String>,
 }
 
 fn print_usage() {
@@ -109,6 +122,11 @@ fn print_usage() {
          or cmac-aes\n  \
          --tcp-ao-maclen N        TCP-AO MAC length in bytes (default 12)\n  \
          --install-kernel-routes  Install best routes into the OS FIB (root)\n  \
+         --user USER|UID          Drop privileges to USER after binding\n  \
+         (Unix; default group: the user's login group)\n  \
+         --group GROUP|GID        Override the privilege-drop group\n  \
+         --api-socket PATH        Runtime API on a Unix stream socket\n  \
+         (status / sessions / routes / reload / shutdown)\n  \
          -h, --help               Show this help"
     );
 }
@@ -166,8 +184,12 @@ fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
             }
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
-            "networks" => {
-                // Comma-separated array: ["a", "b"]
+            "user" => cfg.user = Some(value.to_string()),
+            "group" => cfg.group = Some(value.to_string()),
+            "api_socket" => cfg.api_socket = Some(value.to_string()),
+            "networks" | "bgp.networks" => {
+                // Comma-separated array: ["a", "b"] (top-level `networks`
+                // or inside [bgp] — the shipped template uses the latter).
                 let inner = value.trim_start_matches('[').trim_end_matches(']');
                 for item in inner.split(',') {
                     let item = item.trim().trim_matches('"');
@@ -262,6 +284,18 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.install_kernel = true;
                 i += 1;
             }
+            "--user" if i + 1 < args.len() => {
+                cfg.user = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--group" if i + 1 < args.len() => {
+                cfg.group = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--api-socket" if i + 1 < args.len() => {
+                cfg.api_socket = Some(args[i + 1].clone());
+                i += 2;
+            }
             "-h" | "--help" => {
                 print_usage();
                 return Err(ExitCode::SUCCESS);
@@ -282,6 +316,9 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
             eprintln!("config parse error: {}", e);
             ExitCode::from(1)
         })?;
+        // Remember the file so `status` can show it and SIGHUP / `reload`
+        // can re-apply it.
+        cfg.config_path = Some(path);
     }
     Ok(cfg)
 }
@@ -351,6 +388,19 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Signal handling must precede everything that could receive one:
+    // without a SIGHUP handler the default disposition would terminate
+    // the daemon on a hung-up terminal.
+    if let Err(sig) = signal::init() {
+        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        return ExitCode::from(1);
+    }
+    if cfg.user.is_some() && cfg.install_kernel {
+        eprintln!(
+            "daemon: warning: --user with --install-kernel-routes: \
+             kernel installs may be denied after the privilege drop"
+        );
+    }
 
     let router = Arc::new(Mutex::new(DefaultRouter::new()));
     {
@@ -408,7 +458,9 @@ fn main() -> ExitCode {
     println!("  auth:        {}", tcp_auth.describe());
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
-    // Locally originated networks.
+    // Locally originated networks. The string list is kept around so
+    // reloads can diff old vs new (SIGHUP / runtime API `reload`).
+    let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
     {
         let mut r = router.lock().unwrap();
         for net in &cfg.networks {
@@ -423,10 +475,20 @@ fn main() -> ExitCode {
     }
 
     let running = Arc::new(AtomicBool::new(true));
+    let runtime = Arc::new(Runtime {
+        reload: Arc::new({
+            let router = Arc::clone(&router);
+            let current_networks = Arc::clone(&current_networks);
+            let config_path = cfg.config_path.clone();
+            move || reload_config(config_path.as_deref(), &router, &current_networks)
+        }),
+        router,
+        running: Arc::clone(&running),
+    });
 
     // --- Ticker thread: pump the router clock every 50 ms. ---
     {
-        let router = Arc::clone(&router);
+        let router = Arc::clone(&runtime.router);
         let running = Arc::clone(&running);
         thread::spawn(move || {
             let start = WallClock::now();
@@ -474,31 +536,47 @@ fn main() -> ExitCode {
         if !tcp_auth.is_none() {
             println!("daemon: session auth armed ({})", tcp_auth.describe());
         }
-        let mut ever_established = false;
-        for stream in listener.incoming() {
-            match stream {
-                Ok(s) => {
+        // Privileged work is done: drop root before touching any network
+        // input, then create the management socket as the reduced user.
+        if let Err(e) = do_privdrop(&cfg) {
+            eprintln!("daemon: {}", e);
+            return ExitCode::from(1);
+        }
+        if let Err(e) = spawn_api(&cfg, &runtime) {
+            eprintln!("daemon: {}", e);
+            return ExitCode::from(1);
+        }
+        // Non-blocking accept: the poll cadence is what lets the main
+        // thread notice SIGTERM/SIGINT (graceful stop) and SIGHUP
+        // (reload) while idle between connections.
+        if let Err(e) = listener.set_nonblocking(true) {
+            eprintln!("daemon: cannot set listener non-blocking: {}", e);
+            return ExitCode::from(1);
+        }
+        loop {
+            dispatch_signals(&runtime);
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
+            match listener.accept() {
+                Ok((s, _)) => {
                     let peer = s
                         .peer_addr()
                         .map(|a| a.to_string())
                         .unwrap_or_else(|_| "?".into());
                     println!("daemon: inbound connection from {}", peer);
                     let _ = s.set_nodelay(true);
-                    if let Err(e) = run_session(
-                        &router,
-                        &running,
-                        s,
-                        session,
-                        cfg.install_kernel,
-                        &mut ever_established,
-                    ) {
+                    if let Err(e) = run_session(&runtime, s, session, cfg.install_kernel) {
                         eprintln!("daemon: session ended: {}", e);
                     }
                 }
-                Err(e) => eprintln!("daemon: accept failed: {}", e),
-            }
-            if !running.load(Ordering::Relaxed) {
-                break;
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(e) => {
+                    eprintln!("daemon: accept failed: {}", e);
+                    thread::sleep(Duration::from_millis(100));
+                }
             }
         }
         println!("daemon: shutdown complete");
@@ -508,17 +586,39 @@ fn main() -> ExitCode {
     let peer_addr = match cfg.peer_addr.clone() {
         Some(p) => p,
         None => {
-            println!("daemon: no --peer/--listen given; idling (tick loop only). Ctrl-C to stop.");
-            wait_for_shutdown(&running);
+            // Idle mode: no sockets beyond the management plane.
+            if let Err(e) = do_privdrop(&cfg) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            if let Err(e) = spawn_api(&cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            println!("daemon: no --peer/--listen given; idling (tick loop only)");
+            wait_for_shutdown(&runtime);
             return ExitCode::SUCCESS;
         }
     };
 
     // ---- Outbound mode: connect (with reconnect + backoff). ----
+    // No privileged resource is needed (ephemeral source port; auth keys
+    // are plain setsockopt) — drop before the first connect attempt.
+    if let Err(e) = do_privdrop(&cfg) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+    if let Err(e) = spawn_api(&cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
     let mut backoff_ms: u64 = 1_000;
-    let mut ever_established = false;
 
     while running.load(Ordering::Relaxed) {
+        dispatch_signals(&runtime);
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
         let sockaddr = match resolve(&peer_addr) {
             Some(a) => a,
             None => {
@@ -544,21 +644,14 @@ fn main() -> ExitCode {
                         "daemon: connect failed ({}); retrying in {}ms",
                         e, backoff_ms
                     );
-                    thread::sleep(Duration::from_millis(backoff_ms));
+                    sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
                     backoff_ms = (backoff_ms * 2).min(30_000);
                     continue;
                 }
             };
         backoff_ms = 1_000;
         let _ = stream.set_nodelay(true);
-        match run_session(
-            &router,
-            &running,
-            stream,
-            session,
-            cfg.install_kernel,
-            &mut ever_established,
-        ) {
+        match run_session(&runtime, stream, session, cfg.install_kernel) {
             Ok(()) => break,
             Err(e) => {
                 eprintln!("daemon: session ended: {}", e);
@@ -566,7 +659,8 @@ fn main() -> ExitCode {
                     break;
                 }
                 eprintln!("daemon: reconnecting in {}ms", backoff_ms);
-                thread::sleep(Duration::from_millis(backoff_ms));
+                sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
+                backoff_ms = (backoff_ms * 2).min(30_000);
             }
         }
     }
@@ -579,18 +673,152 @@ fn resolve(addr: &str) -> Option<std::net::SocketAddr> {
     addr.to_socket_addrs().ok()?.next()
 }
 
+/// Shared daemon state threaded through the I/O loops.
+struct Runtime {
+    router: Arc<Mutex<DefaultRouter>>,
+    running: Arc<AtomicBool>,
+    /// Re-apply the configuration file (SIGHUP / API `reload`).
+    reload: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+}
+
+/// Act on every pending signal. SIGTERM/SIGINT trigger a graceful stop
+/// (sessions are closed with a NOTIFICATION before the FIN); SIGHUP
+/// reloads the configuration file.
+fn dispatch_signals(rt: &Runtime) {
+    while let Some(sig) = signal::take_pending() {
+        match sig {
+            signal::SIGTERM | signal::SIGINT => {
+                println!("daemon: signal {} received — shutting down", sig);
+                rt.running.store(false, Ordering::Relaxed);
+            }
+            signal::SIGHUP => {
+                println!("daemon: SIGHUP received — reloading configuration");
+                for line in (rt.reload)() {
+                    println!("daemon: {}", line);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Sleep in small slices so signals (shutdown / reload) are noticed
+/// within ~100 ms even during long reconnect backoffs.
+fn sleep_interruptible(rt: &Runtime, total: Duration) {
+    let mut remaining = total;
+    while !remaining.is_zero() && rt.running.load(Ordering::Relaxed) {
+        let chunk = remaining.min(Duration::from_millis(100));
+        thread::sleep(chunk);
+        remaining -= chunk;
+        dispatch_signals(rt);
+    }
+}
+
+/// Drop privileges when `--user` is configured; a no-op otherwise.
+/// A failed drop is fatal — never continue as root by accident.
+fn do_privdrop(cfg: &DaemonConfig) -> Result<(), String> {
+    if let Some(user) = &cfg.user {
+        privdrop::drop_privileges(user, cfg.group.as_deref())?;
+        println!("daemon: privileges dropped ({})", privdrop::identity());
+    }
+    Ok(())
+}
+
+/// Start the runtime API socket when `--api-socket` is configured.
+/// Creation failure is fatal: the operator asked for a management plane;
+/// running without it silently is not an option.
+fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
+    let Some(path) = &cfg.api_socket else {
+        return Ok(());
+    };
+    let ctx = api::ApiContext {
+        info: api::DaemonInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            local_as: cfg.local_as,
+            peer_as: cfg.peer_as,
+            router_id: cfg.router_id.clone(),
+            config_path: cfg.config_path.clone(),
+        },
+        router: Arc::clone(&rt.router),
+        running: Arc::clone(&rt.running),
+        reload: Box::new({
+            let rt = Arc::clone(rt);
+            move || (rt.reload)()
+        }),
+    };
+    api::spawn(path, ctx)
+        .map(|p| println!("daemon: runtime API on {}", p))
+        .map_err(|e| format!("runtime API: {e}"))
+}
+
+/// Re-apply the configuration file: diff the `networks` list against the
+/// currently originated set and apply add/remove. Identity and transport
+/// auth changes cannot be applied to a live session — they are reported
+/// so the operator knows a restart is required. A parse or I/O error
+/// keeps the current configuration running (reload must never crash or
+/// half-apply).
+fn reload_config(
+    path: Option<&str>,
+    router: &Arc<Mutex<DefaultRouter>>,
+    current_networks: &Arc<Mutex<Vec<String>>>,
+) -> Vec<String> {
+    let Some(path) = path else {
+        return vec!["reload: no config file in use; nothing to reload".into()];
+    };
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(e) => {
+            return vec![format!(
+                "reload: cannot read {}: {} (keeping current config)",
+                path, e
+            )]
+        }
+    };
+    let mut fresh = DaemonConfig::default();
+    if let Err(e) = parse_toml_subset(&text, &mut fresh) {
+        return vec![format!("reload: {} (keeping current config)", e)];
+    }
+
+    let old = current_networks.lock().unwrap().clone();
+    let new = fresh.networks.clone();
+    let mut lines = Vec::new();
+    {
+        let mut r = router.lock().unwrap();
+        for net in new.iter().filter(|n| !old.contains(n)) {
+            match Prefix::from_str(net) {
+                Ok(p) => {
+                    r.originate(p, None);
+                    lines.push(format!("reload: originating {}", p));
+                }
+                Err(_) => lines.push(format!("reload: invalid network '{}' skipped", net)),
+            }
+        }
+        for net in old.iter().filter(|n| !new.contains(n)) {
+            if let Ok(p) = Prefix::from_str(net) {
+                let key = lr_core::rib::RouteKey::new(p, lr_core::nlri::NlriFamily::IPV4_UNICAST);
+                r.unoriginate(&key);
+                lines.push(format!("reload: unoriginating {}", p));
+            }
+        }
+    }
+    *current_networks.lock().unwrap() = new;
+    if lines.is_empty() {
+        lines.push("reload: no network changes".into());
+    }
+    lines.push("reload: note: AS, router-id, peer and auth changes require a restart".into());
+    lines
+}
+
 /// Drive one established TCP connection until it drops or we shut down.
 fn run_session(
-    router: &Arc<Mutex<DefaultRouter>>,
-    running: &Arc<AtomicBool>,
+    rt: &Runtime,
     mut stream: TcpStream,
     session: SessionHandle,
     install_kernel: bool,
-    _ever_established: &mut bool,
 ) -> Result<(), String> {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     {
-        let mut r = router.lock().unwrap();
+        let mut r = rt.router.lock().unwrap();
         r.start_session(session)
             .map_err(|e| format!("start_session: {}", e))?;
     }
@@ -608,28 +836,44 @@ fn run_session(
             ),
         }
     }
-    let result = pump_session(router, running, &mut stream, session, &mut os_table);
+    let result = pump_session(rt, &mut stream, session, &mut os_table);
     // The transport is gone: drive the FSM to Idle and purge the routes
     // this session contributed (RFC 4271 §8.2.2).
     {
-        let mut r = router.lock().unwrap();
+        let mut r = rt.router.lock().unwrap();
         r.close_session(session);
         for ev in r.poll_events() {
             log_event(&ev);
         }
+        // RFC 4271 §6.4: close a live session with a NOTIFICATION
+        // (CEASE) rather than a bare FIN — close_session queues it, so
+        // drain and flush it to the wire before the socket goes away.
+        let out = r.drain_output(session);
+        if !out.is_empty() {
+            let _ = stream.write_all(&out);
+        }
     }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
     result
 }
 
 fn pump_session(
-    router: &Arc<Mutex<DefaultRouter>>,
-    running: &Arc<AtomicBool>,
+    rt: &Runtime,
     stream: &mut TcpStream,
     session: SessionHandle,
     os_table: &mut Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
 ) -> Result<(), String> {
+    let router = &rt.router;
     let mut buf = [0u8; 8192];
-    while running.load(Ordering::Relaxed) {
+    while rt.running.load(Ordering::Relaxed) {
+        // Signals first: a shutdown must tear the session down cleanly
+        // even while the peer is idle, and a reload can change what we
+        // originate mid-session.
+        dispatch_signals(rt);
+        if !rt.running.load(Ordering::Relaxed) {
+            break;
+        }
+
         // 1. Read peer bytes → feed_input.
         match stream.read(&mut buf) {
             Ok(0) => return Err("peer closed connection".into()),
@@ -714,15 +958,11 @@ fn log_event(ev: &RouterEvent) {
     }
 }
 
-fn wait_for_shutdown(running: &Arc<AtomicBool>) {
-    // No signal handling without libc: the loop exits when stdin closes or
-    // the process is killed. In production use `signal-hook` or `tokio`.
-    println!("daemon: press Ctrl-C to stop");
-    loop {
-        if running.load(Ordering::Relaxed) {
-            thread::sleep(Duration::from_millis(500));
-        } else {
-            break;
-        }
+fn wait_for_shutdown(rt: &Runtime) {
+    println!("daemon: waiting for SIGTERM / SIGINT");
+    while rt.running.load(Ordering::Relaxed) {
+        thread::sleep(Duration::from_millis(100));
+        dispatch_signals(rt);
     }
+    println!("daemon: shutdown complete");
 }

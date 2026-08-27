@@ -1,0 +1,396 @@
+//! Runtime API for `lr-daemon` — operational visibility over a Unix
+//! stream socket (the BIRD control-socket / FRR vty pattern, kept
+//! deliberately minimal).
+//!
+//! The daemon exposes a line-oriented command protocol:
+//!
+//! ```text
+//! $ socat - UNIX-CONNECT:/run/lr-daemon.api
+//! status
+//! version 0.1.0
+//! local-as 64512
+//! ...
+//! sessions
+//! #1 kind=bgp local-as=64512 peer-as=64513 state=Established ...
+//! routes
+//! 203.0.113.0/24 via 192.0.2.1 proto=Bgp metric=0
+//! shutdown
+//! shutting down
+//! ```
+//!
+//! One command per line; the connection stays open until `quit` or EOF.
+//! A stale socket file (left over from an unclean shutdown) is unlinked
+//! before binding, and the socket is restricted to its owner (0600).
+//!
+//! The server thread never holds the router lock while blocking on I/O:
+//! it locks only for the duration of a single command.
+
+#[cfg(unix)]
+mod imp {
+    use std::io::{BufRead, BufReader, Write};
+    use std::os::unix::net::{UnixListener, UnixStream};
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
+    use std::thread;
+    use std::time::Duration;
+
+    use lr_router::{DefaultRouter, RouterInstance};
+
+    // `Read` is only needed by the test helper below.
+    #[cfg(test)]
+    use std::io::Read as _;
+
+    /// Static daemon facts served by `status`.
+    pub struct DaemonInfo {
+        pub version: String,
+        pub local_as: u32,
+        pub peer_as: u32,
+        pub router_id: String,
+        pub config_path: Option<String>,
+    }
+
+    /// Everything the API thread needs to answer commands.
+    pub struct ApiContext {
+        pub info: DaemonInfo,
+        pub router: Arc<Mutex<DefaultRouter>>,
+        pub running: Arc<AtomicBool>,
+        /// Re-apply configuration (SIGHUP equivalent); returns the log
+        /// lines describing what was (not) applied.
+        pub reload: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    }
+
+    extern "C" {
+        fn chmod(path: *const std::ffi::c_char, mode: u32) -> i32;
+    }
+
+    fn chmod_0600(path: &str) {
+        if let Ok(c) = std::ffi::CString::new(path) {
+            // Best effort: management access is also guarded by the
+            // socket directory's permissions.
+            unsafe { chmod(c.as_ptr(), 0o600) };
+        }
+    }
+
+    /// Bind the API socket and spawn the serving thread. Returns the
+    /// canonical path on success.
+    pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
+        // A socket file from an unclean shutdown would make bind fail
+        // with EADDRINUSE; stale sockets are never clients.
+        let _ = std::fs::remove_file(path);
+        let listener = UnixListener::bind(path).map_err(|e| format!("bind {path}: {e}"))?;
+        chmod_0600(path);
+        listener
+            .set_nonblocking(true)
+            .map_err(|e| format!("nonblocking {path}: {e}"))?;
+
+        let path_owned = path.to_string();
+        let info = Arc::new(ctx.info);
+        let router = Arc::clone(&ctx.router);
+        let running = Arc::clone(&ctx.running);
+        let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
+        let started = std::time::Instant::now();
+
+        thread::Builder::new()
+            .name("lr-api".into())
+            .spawn(move || {
+                accept_loop(&listener, &running, |stream| {
+                    serve_connection(stream, &info, &router, &running, &reload, started);
+                });
+                let _ = std::fs::remove_file(&path_owned);
+            })
+            .map_err(|e| format!("spawn api thread: {e}"))?;
+        Ok(path.to_string())
+    }
+
+    /// Poll the listener until the daemon stops; hand live connections
+    /// to `on_conn`.
+    fn accept_loop(
+        listener: &UnixListener,
+        running: &AtomicBool,
+        mut on_conn: impl FnMut(UnixStream),
+    ) {
+        while running.load(Ordering::Relaxed) {
+            match listener.accept() {
+                Ok((stream, _)) => on_conn(stream),
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => thread::sleep(Duration::from_millis(100)),
+            }
+        }
+    }
+
+    /// One connection: read a command line, answer, repeat.
+    fn serve_connection(
+        stream: UnixStream,
+        info: &DaemonInfo,
+        router: &Arc<Mutex<DefaultRouter>>,
+        running: &Arc<AtomicBool>,
+        reload: &Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+        started: std::time::Instant,
+    ) {
+        let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+        let Ok(write_half) = stream.try_clone() else {
+            return;
+        };
+        let mut reader = BufReader::new(stream);
+        let mut out = write_half;
+        let mut line = String::new();
+        loop {
+            line.clear();
+            // Tolerate idle clients without blocking shutdown forever:
+            // read timeouts return 0 bytes; check `running` between tries.
+            let mut idle_rounds = 0;
+            let n = loop {
+                match reader.read_line(&mut line) {
+                    Ok(n) => break n,
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        idle_rounds += 1;
+                        if idle_rounds > 40 || !running.load(Ordering::Relaxed) {
+                            return; // ~10 s idle timeout or shutdown
+                        }
+                    }
+                    Err(_) => return,
+                }
+            };
+            if n == 0 {
+                return; // EOF
+            }
+            let cmd = line.trim();
+            if cmd.is_empty() {
+                continue;
+            }
+            match cmd {
+                "quit" => return,
+                "help" => {
+                    let _ = writeln!(
+                        out,
+                        "commands:\n  \
+                         status    daemon summary (version, identity, uptime, counters)\n  \
+                         sessions  one line per configured session\n  \
+                         routes    Loc-RIB dump (one route per line)\n  \
+                         reload    re-apply configuration (SIGHUP equivalent)\n  \
+                         shutdown  graceful shutdown\n  \
+                         help      this text\n  \
+                         quit      close this connection"
+                    );
+                }
+                "status" => {
+                    let (sessions, rib) = {
+                        let r = router.lock().unwrap();
+                        (r.session_summaries().len(), r.rib_len())
+                    };
+                    let _ = writeln!(out, "version {}", info.version);
+                    let _ = writeln!(out, "local-as {}", info.local_as);
+                    let _ = writeln!(out, "peer-as {}", info.peer_as);
+                    let _ = writeln!(out, "router-id {}", info.router_id);
+                    let _ = writeln!(
+                        out,
+                        "config {}",
+                        info.config_path.as_deref().unwrap_or("(none)")
+                    );
+                    let _ = writeln!(out, "uptime-secs {}", started.elapsed().as_secs());
+                    let _ = writeln!(out, "sessions {}", sessions);
+                    let _ = writeln!(out, "rib-entries {}", rib);
+                }
+                "sessions" => {
+                    let summaries = router.lock().unwrap().session_summaries();
+                    for s in summaries {
+                        let _ = writeln!(
+                            out,
+                            "#{handle} kind={kind} local-as={la} peer-as={pa} \
+                             state={state} established={est} peer-id={id} \
+                             hold-time={hold} adj-rib-in={ar}",
+                            handle = s.handle.0,
+                            kind = s.kind,
+                            la = s.local_as.0,
+                            pa = s.peer_as.0,
+                            state = s.state,
+                            est = s.established,
+                            id = s
+                                .peer_bgp_id
+                                .map(|i| i.to_string())
+                                .unwrap_or_else(|| "-".into()),
+                            hold = s.negotiated_hold_time,
+                            ar = s.adj_rib_in_len,
+                        );
+                    }
+                }
+                "routes" => {
+                    // Hold the lock only for the dump: rib_snapshot()
+                    // borrows from the router.
+                    let r = router.lock().unwrap();
+                    for route in r.rib_snapshot() {
+                        let _ = writeln!(
+                            out,
+                            "{} via {} proto={:?} metric={}",
+                            route.key.prefix,
+                            route
+                                .next_hop
+                                .map(|n| n.to_string())
+                                .unwrap_or_else(|| "(none)".to_string()),
+                            route.protocol,
+                            route.preference.metric
+                        );
+                    }
+                }
+                "reload" => {
+                    for line in reload() {
+                        let _ = writeln!(out, "{}", line);
+                    }
+                }
+                "shutdown" => {
+                    running.store(false, Ordering::Relaxed);
+                    let _ = writeln!(out, "shutting down");
+                    return;
+                }
+                other => {
+                    let _ = writeln!(out, "error: unknown command '{other}' (try 'help')");
+                }
+            }
+            if out.flush().is_err() {
+                return;
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn test_ctx(router: Arc<Mutex<DefaultRouter>>, running: Arc<AtomicBool>) -> ApiContext {
+            ApiContext {
+                info: DaemonInfo {
+                    version: "test".into(),
+                    local_as: 64512,
+                    peer_as: 64513,
+                    router_id: "10.0.0.1".into(),
+                    config_path: None,
+                },
+                router,
+                running,
+                reload: Box::new(|| vec!["reloaded".into()]),
+            }
+        }
+
+        #[test]
+        fn api_serves_status_sessions_routes_and_shutdown() {
+            let dir = std::env::temp_dir().join(format!("lr-api-test-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("daemon.api");
+            let path_str = path.to_str().unwrap().to_string();
+
+            let router = Arc::new(Mutex::new(DefaultRouter::new()));
+            {
+                let mut r = router.lock().unwrap();
+                r.add_session(lr_router::SessionConfig::bgp(
+                    lr_core::addr::Asn(64512),
+                    lr_core::addr::Asn(64513),
+                    lr_core::addr::RouterId::from_v4([10, 0, 0, 1]),
+                ))
+                .unwrap();
+                r.originate(
+                    lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+                    Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+                );
+            }
+            let running = Arc::new(AtomicBool::new(true));
+
+            spawn(
+                &path_str,
+                test_ctx(Arc::clone(&router), Arc::clone(&running)),
+            )
+            .expect("api server spawns");
+
+            let mut conn = UnixStream::connect(&path_str).expect("connect");
+            let mut probe = conn.try_clone().unwrap();
+
+            let ask = |conn: &mut UnixStream, cmd: &str| -> String {
+                conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
+                conn.flush().unwrap();
+                // Give the server a beat, then read what arrived.
+                thread::sleep(Duration::from_millis(100));
+                let mut buf = Vec::new();
+                conn.set_nonblocking(true).unwrap();
+                let _ = conn.read_to_end(&mut buf);
+                conn.set_nonblocking(false).unwrap();
+                String::from_utf8_lossy(&buf).into_owned()
+            };
+
+            let status = ask(&mut conn, "status");
+            assert!(status.contains("version test"), "status: {status}");
+            assert!(status.contains("local-as 64512"));
+            assert!(status.contains("rib-entries 1"));
+
+            // New connection per command (read_to_end above drained the
+            // first one); reuse of `probe` for a second round.
+            let sessions = ask(&mut probe, "sessions");
+            assert!(sessions.contains("kind=bgp"), "sessions: {sessions}");
+            assert!(sessions.contains("state=Idle"));
+
+            let routes = ask(&mut probe, "routes");
+            assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
+
+            let unknown = ask(&mut probe, "bogus");
+            assert!(unknown.contains("error: unknown command"));
+
+            let help = ask(&mut probe, "help");
+            assert!(help.contains("shutdown"));
+
+            // Shutdown flips the daemon's running flag.
+            let shutting = ask(&mut probe, "shutdown");
+            assert!(shutting.contains("shutting down"));
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while running.load(Ordering::Relaxed) && std::time::Instant::now() < deadline {
+                thread::sleep(Duration::from_millis(50));
+            }
+            assert!(
+                !running.load(Ordering::Relaxed),
+                "shutdown must stop the daemon"
+            );
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+#[cfg(not(unix))]
+mod imp {
+    use std::sync::atomic::AtomicBool;
+    use std::sync::{Arc, Mutex};
+
+    use lr_router::DefaultRouter;
+
+    /// Static daemon facts (inert mirror of the Unix type so callers
+    /// compile unchanged on this platform).
+    pub struct DaemonInfo {
+        pub version: String,
+        pub local_as: u32,
+        pub peer_as: u32,
+        pub router_id: String,
+        pub config_path: Option<String>,
+    }
+
+    /// Everything the API server would need (inert mirror; see
+    /// [`DaemonInfo`]).
+    pub struct ApiContext {
+        pub info: DaemonInfo,
+        pub router: Arc<Mutex<DefaultRouter>>,
+        pub running: Arc<AtomicBool>,
+        pub reload: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    }
+
+    /// Unix domain sockets are the transport; other platforms get a
+    /// clear refusal instead of a pretend API.
+    pub fn spawn(_path: &str, _ctx: ApiContext) -> Result<String, String> {
+        Err("runtime API requires Unix domain sockets (not supported here)".to_string())
+    }
+}
+
+#[cfg(not(unix))]
+pub use imp::{spawn, ApiContext, DaemonInfo};
+#[cfg(unix)]
+pub use imp::{spawn, ApiContext, DaemonInfo};
