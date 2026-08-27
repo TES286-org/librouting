@@ -47,6 +47,10 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` |
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
+| GTSM / TTL security (RFC 5082) | ❌ | BIRD `ttl security` / FRR `ttl-security` parity |
+| Per-peer maximum-prefix | ❌ | limit + warn / tear-down semantics |
+| Route aggregation | ❌ | aggregate NLRI generation + AS_PATH zeroing |
+| BMP monitoring (RFC 7854) | ❌ | session mirroring to a collector |
 
 ### OSPF (`lr-ospf`)
 
@@ -58,12 +62,16 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
 | Inter-area routes from summary-LSAs (§16.2) | ✅ 🧪 | reachable-border check, dist-to-border + summary metric, LSInfinity skip |
 | ABR summary-LSA origination/flush (§12.4.3) | ✅ 🧪 | type-3 lifecycle with backbone-only loop guard, checksummed LSAs, MaxAge flush |
+| AS-external routes (type-5 LSAs, §16.4) | ❌ | LSA body modelled only — no origination, flooding or external route calculation |
+| Summary-ASBR LSAs (type-4, §12.4.3) | ❌ | enum value only — no ABR origination / ASBR reachability use |
+| External route redistribution API | ❌ | BIRD/FRR `redistribute` equivalent |
+| Cross-protocol redistribution engine | ❌ | BGP/OSPF/Babel ↔ Loc-RIB import/export pipes |
 | Designated-router election | ✅ | |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
-| Stub/NSSA areas | ❌ | |
+| Stub/NSSA areas | ❌ | stub needs type-5 awareness (block + default-route injection); NSSA adds type-7 LSAs |
 | Virtual links | ❌ | non-backbone-only attachment does not summarize (needs backbone) |
-| Auth (cryptographic) | ❌ | |
+| Auth (cryptographic) | 🟡 | `Auth` trait + AuType model exist; only NullAuth implemented — RFC 2328 §C.3 MD5, RFC 5709 HMAC-SHA, RFC 7166 v3 trailer missing |
 
 ### Babel (`lr-babel`)
 
@@ -153,5 +161,28 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    (`BestPath::rank` → Loc-RIB path sets → per-path Adj-RIB-Out diffs);
    the daemon exposes `--add-path` / `--add-path-max` and the runtime API
    dumps paths with their identifiers.
-7. **OSPF depth** — OSPFv3 inter-area (A.4.3-equivalent bodies), stub/NSSA
-   areas, virtual links, cryptographic auth (§C.3 / RFC 7166).
+7. **OSPF external routes (type-5 AS-external-LSAs)** — the largest OSPF
+   parity gap with BIRD/FRR (`redistribute` support): type-5
+   origination/flush API, AS-scope flooding into every attached area,
+   type-4 summary-ASBR origination by ABRs, and the §16.4 external route
+   calculation (type-1/type-2 metrics, forwarding-address reachability).
+8. **OSPF stub/NSSA areas** — stub areas (block type-5 flooding, ABR
+   summary-default injection, RFC 2328 §3.6 / §12.4.3) and NSSA (RFC 3101
+   + RFC 3509 type-7 LSAs, P-bit translation to type-5 at the ABR,
+   no-summary option). Depends on 7.
+9. **OSPF virtual links** — §15 transit through non-backbone areas,
+   §16.3 virtual-link next-hop resolution, allowing partitioned
+   backbone repair.
+10. **OSPF authentication + OSPFv3 inter-area** — RFC 5709 HMAC-SHA auth
+    (v2 AuType 2 trailer), RFC 7166 v3 auth trailer, and OSPFv3
+    inter-area-prefix-LSA (0x2003) ABR origination.
+11. **BGP GTSM + maximum-prefix** — RFC 5082 TTL security (peer
+    `min-ttl` enforcement) and per-peer `maximum-prefix` with warn /
+    restart / teardown actions. Quick BIRD/FRR parity wins.
+12. **Cross-protocol redistribution engine** — explicit import/export
+    pipes between BGP, OSPF, Babel and Loc-RIB (BIRD pipe / FRR
+    `redistribute` equivalent), with protocol-tag and metric policy.
+13. **Babel daemon parity** — IPv6 link-local transport in the daemon
+    (today IPv4-only) and RFC 9079 source-specific table completion.
+14. **BMP monitoring (RFC 7854)** — session mirroring to an external
+    collector for operational parity with BIRD/FRR.
