@@ -4,7 +4,9 @@
 
 use lr_core::addr::{Asn, RouterId};
 use lr_core::time::Instant;
-use lr_router::{DefaultRouter, RouterInstance, SessionConfig, SessionHandle, SessionKind};
+use lr_router::{
+    DefaultRouter, OspfAreaType, RouterInstance, SessionConfig, SessionHandle, SessionKind,
+};
 
 use crate::error::set_last_error;
 use crate::handle::{box_router, lock_router, lr_bytes_t, lr_router_t, unbox_router};
@@ -114,6 +116,7 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         mp_families: Vec::new(),
         local_address: None,
         area_id: 0,
+        ospf_area_type: OspfAreaType::Normal,
     };
     match router.add_session(cfg) {
         Ok(h) => {

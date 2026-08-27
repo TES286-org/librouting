@@ -15,6 +15,104 @@ pub enum SessionKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct SessionHandle(pub u64);
 
+/// OSPF area type policy (RFC 2328 §3.6 stub areas; RFC 3101 NSSA).
+///
+/// Attached to a session via [`SessionConfig::ospfv2`] +
+/// [`SessionConfig::with_ospf_area_type`]; the first session attaching
+/// to an area fixes its type (mismatching later sessions are rejected
+/// unless [`crate::DefaultRouter::ospf_set_area_type`] changed it).
+/// Stub/NSSA semantics apply to OSPFv2 areas only.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OspfAreaType {
+    /// Regular area: type-3/type-4 summaries and type-5 externals flow.
+    Normal,
+    /// Stub area (RFC 2328 §3.6): no type-5 or type-4 LSAs enter; the
+    /// border routers inject a type-3 summary default (`0.0.0.0/0`)
+    /// with `default_metric`. `no_summary` additionally suppresses all
+    /// other type-3 summaries ("totally stubby").
+    Stub {
+        default_metric: u32,
+        no_summary: bool,
+    },
+    /// Not-So-Stubby area (RFC 3101): like stub, but internal ASBRs
+    /// may redistribute externals as area-scoped type-7 LSAs, which the
+    /// elected border router translates into type-5s for the rest of
+    /// the AS (§3.2). The border-router default is a type-7 LSA while
+    /// summaries are imported, or a type-3 summary default with
+    /// `no_summary` ("totally NSSA", §2.7).
+    Nssa {
+        default_metric: u32,
+        no_summary: bool,
+    },
+}
+
+impl OspfAreaType {
+    /// A stub area with the given default-route metric (summaries
+    /// imported — the RFC 2328 default).
+    pub fn stub(default_metric: u32) -> Self {
+        Self::Stub {
+            default_metric,
+            no_summary: false,
+        }
+    }
+
+    /// A totally-stubby stub area (no type-3 summaries except the
+    /// injected default).
+    pub fn stub_no_summary(default_metric: u32) -> Self {
+        Self::Stub {
+            default_metric,
+            no_summary: true,
+        }
+    }
+
+    /// An NSSA with the given default-route metric (summaries
+    /// imported — the RFC 3101 §2.7 default).
+    pub fn nssa(default_metric: u32) -> Self {
+        Self::Nssa {
+            default_metric,
+            no_summary: false,
+        }
+    }
+
+    /// A totally-NSSA (no type-3 summaries except the type-3 default).
+    pub fn nssa_no_summary(default_metric: u32) -> Self {
+        Self::Nssa {
+            default_metric,
+            no_summary: true,
+        }
+    }
+
+    pub fn is_stub(&self) -> bool {
+        matches!(self, Self::Stub { .. })
+    }
+
+    pub fn is_nssa(&self) -> bool {
+        matches!(self, Self::Nssa { .. })
+    }
+
+    /// Type-5 and type-4 LSAs are refused (flooded to no stub/NSSA area).
+    pub fn is_stubby(&self) -> bool {
+        self.is_stub() || self.is_nssa()
+    }
+
+    pub fn no_summary(&self) -> bool {
+        match self {
+            Self::Normal => false,
+            Self::Stub { no_summary, .. } | Self::Nssa { no_summary, .. } => *no_summary,
+        }
+    }
+
+    /// Metric of the border-router-injected default route, if any.
+    pub fn default_metric(&self) -> Option<u32> {
+        match self {
+            Self::Normal => None,
+            Self::Stub { default_metric, .. } | Self::Nssa { default_metric, .. } => {
+                Some(*default_metric)
+            }
+        }
+    }
+}
+
 /// Configuration for a new session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -58,6 +156,8 @@ pub struct SessionConfig {
     pub local_address: Option<lr_core::addr::IpAddr>,
     /// OSPF area ID (0 = backbone).
     pub area_id: u32,
+    /// OSPF area type policy (stub/NSSA, RFC 2328 §3.6 + RFC 3101).
+    pub ospf_area_type: OspfAreaType,
 }
 
 impl SessionConfig {
@@ -89,6 +189,7 @@ impl SessionConfig {
             mp_families: vec![lr_core::nlri::NlriFamily::IPV4_UNICAST],
             local_address: None,
             area_id: 0,
+            ospf_area_type: OspfAreaType::Normal,
         }
     }
 
@@ -140,6 +241,14 @@ impl SessionConfig {
         self
     }
 
+    /// Set the OSPF area type policy (stub/NSSA) of the area this
+    /// session attaches to (RFC 2328 §3.6, RFC 3101). Ignored for
+    /// non-OSPF sessions.
+    pub fn with_ospf_area_type(mut self, area_type: OspfAreaType) -> Self {
+        self.ospf_area_type = area_type;
+        self
+    }
+
     /// Build an OSPFv2 session config.
     pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
         Self {
@@ -162,6 +271,7 @@ impl SessionConfig {
             mp_families: Vec::new(),
             local_address: None,
             area_id,
+            ospf_area_type: OspfAreaType::Normal,
         }
     }
 
@@ -187,6 +297,7 @@ impl SessionConfig {
             mp_families: Vec::new(),
             local_address: Some(local_addr),
             area_id: 0,
+            ospf_area_type: OspfAreaType::Normal,
         }
     }
 }
