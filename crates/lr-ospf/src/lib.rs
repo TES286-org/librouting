@@ -26,6 +26,7 @@
 pub mod abr;
 pub mod auth;
 pub mod codec;
+pub mod external;
 pub mod interface;
 pub mod lsa;
 pub mod lsdb;

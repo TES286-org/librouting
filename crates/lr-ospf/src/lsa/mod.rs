@@ -4,6 +4,9 @@ use core::fmt;
 
 use lr_core::util::fletcher;
 
+/// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.
+pub use crate::lsdb::MAX_AGE_SECS;
+
 /// LSA header (RFC 2328 §A.4.1). 20 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LsaHeader {
@@ -84,6 +87,25 @@ impl Lsa {
     pub fn checksum_ok(&self) -> bool {
         let wire = self.to_wire();
         fletcher::ospf_lsa_checksum_ok(&wire)
+    }
+
+    /// Build the MaxAge instance that flushes `self` from all databases
+    /// (RFC 2328 §14.1: age the LSA to MaxAge and flood). The sequence
+    /// number advances so peers accept the flush as newer.
+    ///
+    /// Returns `None` when the sequence number cannot advance (wrapped
+    /// past `MAX_SEQUENCE_NUMBER`, §12.1.2).
+    pub fn maxage_flush(&self) -> Option<Lsa> {
+        let seq = self.header.ls_sequence_number.checked_add(1)?;
+        if seq == 0x8000_0000 {
+            // Wrapped past MaxSequence into the reserved value (§12.1.2).
+            return None;
+        }
+        let mut lsa = self.clone();
+        lsa.header.ls_age = MAX_AGE_SECS;
+        lsa.header.ls_sequence_number = seq;
+        lsa.finalize();
+        Some(lsa)
     }
 }
 
@@ -244,6 +266,33 @@ impl AsExternalEntry {
     pub fn metric_value(&self) -> u32 {
         self.metric & 0x00ff_ffff
     }
+}
+
+/// Encode an AS-external LSA body (RFC 2328 §A.4.5): network mask, the
+/// E-bit + 24-bit metric packed into one word, forwarding address and
+/// external route tag. Always 16 bytes.
+pub fn encode_as_external_body(entry: &AsExternalEntry) -> Vec<u8> {
+    let mut v = Vec::with_capacity(16);
+    v.extend_from_slice(&entry.network_mask.to_be_bytes());
+    v.extend_from_slice(&(entry.metric & 0x80ff_ffff).to_be_bytes());
+    v.extend_from_slice(&entry.forwarding_addr.to_be_bytes());
+    v.extend_from_slice(&entry.route_tag.to_be_bytes());
+    v
+}
+
+/// Decode an AS-external LSA body (RFC 2328 §A.4.5). Returns `None` when
+/// the body is not exactly 16 bytes. The E-bit and metric are kept packed
+/// in [`AsExternalEntry::metric`] exactly as they appear on the wire.
+pub fn decode_as_external_body(body: &[u8]) -> Option<AsExternalEntry> {
+    if body.len() != 16 {
+        return None;
+    }
+    Some(AsExternalEntry {
+        network_mask: u32::from_be_bytes([body[0], body[1], body[2], body[3]]),
+        metric: u32::from_be_bytes([body[4], body[5], body[6], body[7]]),
+        forwarding_addr: u32::from_be_bytes([body[8], body[9], body[10], body[11]]),
+        route_tag: u32::from_be_bytes([body[12], body[13], body[14], body[15]]),
+    })
 }
 
 impl fmt::Display for LsaTypeV2 {

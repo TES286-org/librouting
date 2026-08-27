@@ -277,6 +277,23 @@ fn decode_network_attached_routers(body: &[u8]) -> Vec<u32> {
     out
 }
 
+/// Encode a router-LSA body (RFC 2328 §A.4.2): 2-byte link flags, 2-byte
+/// link count, then one 12-byte block per link. Used by tests and by
+/// embedders originating router-LSAs.
+pub fn encode_router_lsa_body(flags: u16, links: Vec<RouterLink>) -> Vec<u8> {
+    let mut v = Vec::with_capacity(4 + 12 * links.len());
+    v.extend_from_slice(&flags.to_be_bytes());
+    v.extend_from_slice(&(links.len() as u16).to_be_bytes());
+    for l in links {
+        v.extend_from_slice(&l.link_id.to_be_bytes());
+        v.extend_from_slice(&l.link_data.to_be_bytes());
+        v.push(l.link_type);
+        v.push(l.tos);
+        v.extend_from_slice(&l.metric.to_be_bytes());
+    }
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

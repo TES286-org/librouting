@@ -26,7 +26,6 @@
 //! single length.
 
 use crate::lsa::{encode_summary_lsa_body, prefix_len_to_mask, Lsa, LsaHeader, LsaTypeV2};
-use crate::lsdb::MAX_AGE_SECS;
 use lr_core::addr::Prefix;
 
 /// RFC 2328 §12.1.2: the first sequence number of a newly originated LSA.
@@ -103,22 +102,14 @@ pub fn originate_summary_lsa(
 /// Returns `None` when the sequence number cannot advance (wrapped past
 /// `MAX_SEQUENCE_NUMBER`).
 pub fn flush_summary_lsa(existing: &Lsa) -> Option<Lsa> {
-    let seq = existing.header.ls_sequence_number.checked_add(1)?;
-    if seq == INITIAL_SEQUENCE_NUMBER - 1 {
-        // Wrapped past MaxSequence into the reserved value (§12.1.2).
-        return None;
-    }
-    let mut lsa = existing.clone();
-    lsa.header.ls_age = MAX_AGE_SECS;
-    lsa.header.ls_sequence_number = seq;
-    lsa.finalize();
-    Some(lsa)
+    existing.maxage_flush()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::lsa::decode_summary_lsa_body;
+    use crate::lsdb::MAX_AGE_SECS;
     use lr_core::addr::IpAddr;
 
     fn net(a: u32, len: u8) -> Prefix {
