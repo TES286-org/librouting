@@ -122,6 +122,33 @@ sessions: locally originated LSAs are refreshed and flooded as LSUs after
 is rerun. The router clock is embedder-driven, so call `tick` with a monotonic
 millisecond timestamp.
 
+## OSPF external routes (RFC 2328 §12.4.3 / §16.4)
+
+`DefaultRouter::ospf_redistribute` injects an external destination into
+OSPF as a type-5 AS-external-LSA, originated into every attached OSPFv2
+area (AS flooding scope) with the requested metric type
+(`ExternalMetricType::Type1`/`Type2`), forwarding address and route tag.
+`ospf_unredistribute` MaxAge-flushes the LSA across the AS. The router
+re-floods received type-5s into every other attached area, originates
+type-4 summary-ASBR-LSAs for ASBRs that are only reachable inter-area,
+and merges the §16.4 external calculation into Loc-RIB — forwarding
+addresses become the route's next hop.
+
+```rust
+use lr_ospf::external::{ExternalDestination, ExternalMetricType};
+use lr_core::addr::Prefix;
+
+let dest = ExternalDestination::new(
+    Prefix::new_v4([198, 51, 100, 0], 24),
+    40,
+    ExternalMetricType::Type2,
+);
+router.ospf_redistribute(dest);
+```
+
+The C ABI does not expose an OSPF session surface yet; redistribution is
+Rust-level until the daemon gains OSPF support (roadmap item 12).
+
 ## Babel RFC 8967 authentication
 
 ```rust

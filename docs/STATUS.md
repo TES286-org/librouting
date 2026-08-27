@@ -62,9 +62,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
 | Inter-area routes from summary-LSAs (§16.2) | ✅ 🧪 | reachable-border check, dist-to-border + summary metric, LSInfinity skip |
 | ABR summary-LSA origination/flush (§12.4.3) | ✅ 🧪 | type-3 lifecycle with backbone-only loop guard, checksummed LSAs, MaxAge flush |
-| AS-external routes (type-5 LSAs, §16.4) | ❌ | LSA body modelled only — no origination, flooding or external route calculation |
-| Summary-ASBR LSAs (type-4, §12.4.3) | ❌ | enum value only — no ABR origination / ASBR reachability use |
-| External route redistribution API | ❌ | BIRD/FRR `redistribute` equivalent |
+| AS-external routes (type-5 LSAs, §16.4) | ✅ 🧪 | origination via `ospf_redistribute`, AS-scope flooding across ABRs, §16.4 calculation (type-1/2 metrics, forwarding-address reachability + next hop), MaxAge flush lifecycle |
+| Summary-ASBR LSAs (type-4, §12.4.3) | ✅ 🧪 | ABR origination for inter-area-only ASBRs, ASBR leg resolution in §16.4 (b) |
+| External route redistribution API | ✅ 🧪 | `DefaultRouter::ospf_redistribute`/`ospf_unredistribute` |
 | Cross-protocol redistribution engine | ❌ | BGP/OSPF/Babel ↔ Loc-RIB import/export pipes |
 | Designated-router election | ✅ | |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
@@ -129,6 +129,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
+| OSPF external-route E2E (type-5 AS-scope propagation, type-4 ASBR legs, §16.4 type-1/2 + forwarding address, flush lifecycle) | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
 | BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
 | FRR bgpd interop (bidirectional) | ✅ 🧪 |
@@ -161,11 +162,12 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    (`BestPath::rank` → Loc-RIB path sets → per-path Adj-RIB-Out diffs);
    the daemon exposes `--add-path` / `--add-path-max` and the runtime API
    dumps paths with their identifiers.
-7. **OSPF external routes (type-5 AS-external-LSAs)** — the largest OSPF
-   parity gap with BIRD/FRR (`redistribute` support): type-5
-   origination/flush API, AS-scope flooding into every attached area,
-   type-4 summary-ASBR origination by ABRs, and the §16.4 external route
-   calculation (type-1/type-2 metrics, forwarding-address reachability).
+7. ~~**OSPF external routes (type-5 AS-external-LSAs)**~~ — done:
+   `lr_ospf::external` (type-5/type-4 origination + flush, §16.4
+   calculation) and the `DefaultRouter::ospf_redistribute` /
+   `ospf_unredistribute` API with AS-scope flooding, type-4 ABR
+   origination and per-area external route merging into Loc-RIB;
+   verified by 9 unit + 5 three-router E2E tests.
 8. **OSPF stub/NSSA areas** — stub areas (block type-5 flooding, ABR
    summary-default injection, RFC 2328 §3.6 / §12.4.3) and NSSA (RFC 3101
    + RFC 3509 type-7 LSAs, P-bit translation to type-5 at the ABR,
