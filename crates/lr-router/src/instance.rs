@@ -195,6 +195,16 @@ struct OspfRuntime {
     codec: lr_ospf::codec::OspfCodec,
 }
 
+/// One configured virtual link (RFC 2328 §15): a backbone adjacency
+/// between two area border routers, riding through `transit_area`.
+#[derive(Debug, Clone, Copy)]
+struct OspfVirtualLink {
+    /// The backbone session materialized while the link is up. Its
+    /// transport is the embedder's responsibility (tunnel the drained
+    /// bytes through the transit area to the peer's virtual session).
+    session: Option<SessionHandle>,
+}
+
 /// Per-area OSPF state shared by every session attached to that area.
 struct OspfAreaState {
     lsdb: Lsdb,
@@ -611,6 +621,9 @@ pub struct DefaultRouter {
     /// A tracked translation is flushed when its source disappears, the
     /// P-bit clears or the translator role is lost.
     ospf_translations: BTreeSet<(u32, u32, u32)>,
+    /// Configured virtual links (RFC 2328 §15), keyed by
+    /// (transit area, endpoint router ID).
+    ospf_vlinks: BTreeMap<(u32, u32), OspfVirtualLink>,
     /// RFC 4271 MRAI state keyed by BGP session.
     mrai: BTreeMap<u64, MraiState>,
     /// RFC 4724 / RFC 9494 stale-route retention keyed by BGP session.
@@ -642,6 +655,7 @@ impl Default for DefaultRouter {
             ospf_published: BTreeMap::new(),
             ospf_externals: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
+            ospf_vlinks: BTreeMap::new(),
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),
             llgr_caps: BTreeMap::new(),
@@ -1847,6 +1861,11 @@ impl RouterInstance for DefaultRouter {
                         ));
                     }
                 }
+                // RFC 2328 §3.6: the backbone is never a stub area (nor
+                // an NSSA — RFC 3101 §2.1).
+                if cfg.area_id == 0 && cfg.ospf_area_type != OspfAreaType::Normal {
+                    return Err("the OSPF backbone (area 0) cannot be a stub or NSSA area".into());
+                }
                 self.ospf_areas.entry(cfg.area_id).or_insert(OspfAreaState {
                     lsdb: Lsdb::new(),
                     protocol,
@@ -1864,6 +1883,12 @@ impl RouterInstance for DefaultRouter {
                 // Areas attached after a redistribution call catch up on
                 // the self-originated type-5 set (RFC 2328 §12.4.3).
                 if self.ospf_sync_externals() {
+                    let delta = self.ospf_on_lsdb_change();
+                    self.apply_runtime_delta(delta);
+                }
+                // A newly attached (transit) area may bring configured
+                // virtual links up (RFC 2328 §15).
+                if self.ospf_eval_virtual_links() {
                     let delta = self.ospf_on_lsdb_change();
                     self.apply_runtime_delta(delta);
                 }
@@ -2288,10 +2313,13 @@ impl DefaultRouter {
     }
 
     /// Recompute the OSPF route table after any area LSDB changed:
-    /// first re-run ABR summary origination (RFC 2328 §12.4.3) so inter-
-    /// area knowledge propagates, refresh the NSSA type-7 → type-5
-    /// translations (RFC 3101 §3.2) and then rebuild the merged view.
+    /// first re-evaluate the virtual links (RFC 2328 §15 — a link coming
+    /// up attaches the backbone and changes border-router status), then
+    /// re-run ABR summary origination (§12.4.3) so inter-area knowledge
+    /// propagates, refresh the NSSA type-7 → type-5 translations
+    /// (RFC 3101 §3.2) and finally rebuild the merged view.
     fn ospf_on_lsdb_change(&mut self) -> RuntimeDelta {
+        self.ospf_eval_virtual_links();
         self.ospf_summarize_areas();
         self.ospf_translate_nssa();
         self.ospf_recompute()
@@ -3377,6 +3405,11 @@ impl DefaultRouter {
             if area.kind == kind {
                 return false;
             }
+            // RFC 2328 §3.6: the backbone is never a stub area (nor an
+            // NSSA — RFC 3101 §2.1).
+            if area_id == 0 && kind != OspfAreaType::Normal {
+                return false;
+            }
             area.kind = kind;
             let mut flushes: Vec<Lsa> = Vec::new();
             let mut drop_keys = Vec::new();
@@ -3409,6 +3442,169 @@ impl DefaultRouter {
         let delta = self.ospf_on_lsdb_change();
         self.apply_runtime_delta(delta);
         true
+    }
+
+    // ------------------------------------------------------------------
+    // Virtual links (RFC 2328 §15)
+    // ------------------------------------------------------------------
+
+    /// Configure a virtual link to the area border router `endpoint`,
+    /// riding through `transit_area` (RFC 2328 §15). Both endpoints must
+    /// configure each other; the link is up as soon as this router's
+    /// transit-area SPF reaches the endpoint. While up it materializes a
+    /// backbone (area 0) adjacency — see
+    /// [`Self::ospf_virtual_link_session`] for the transport handle.
+    ///
+    /// Refused (`false`) when OSPF is not active, the transit area is not
+    /// attached, runs OSPFv3 or is a stub/NSSA area (§15: virtual links
+    /// cannot cross stub areas; RFC 3101 §2.1 extends this to NSSAs), the
+    /// endpoint is this router itself, or the link already exists.
+    ///
+    /// Router-LSA origination stays with the embedder: the endpoints
+    /// advertise the link as a type-4 link in their backbone router-LSAs
+    /// (metric = transit-area path cost) and set the V-bit in their
+    /// transit-area router-LSAs, exactly as on the wire.
+    pub fn ospf_add_virtual_link(&mut self, transit_area: u32, endpoint: u32) -> bool {
+        let Some(router_id) = self.ospf_router_id else {
+            return false;
+        };
+        if endpoint == router_id {
+            return false;
+        }
+        if self.ospf_vlinks.contains_key(&(transit_area, endpoint)) {
+            return false;
+        }
+        match self.ospf_areas.get(&transit_area) {
+            Some(area) if area.protocol == Protocol::Ospfv2 && !area.kind.is_stubby() => {}
+            _ => return false,
+        }
+        self.ospf_vlinks
+            .insert((transit_area, endpoint), OspfVirtualLink { session: None });
+        if self.ospf_eval_virtual_links() {
+            let delta = self.ospf_on_lsdb_change();
+            self.apply_runtime_delta(delta);
+        }
+        true
+    }
+
+    /// Remove a configured virtual link, tearing down its backbone
+    /// adjacency (and the routes it justified) when it was up. Returns
+    /// whether the link existed.
+    pub fn ospf_remove_virtual_link(&mut self, transit_area: u32, endpoint: u32) -> bool {
+        let Some(vlink) = self.ospf_vlinks.remove(&(transit_area, endpoint)) else {
+            return false;
+        };
+        if let Some(h) = vlink.session {
+            if self.sessions.contains_key(&h.0) {
+                let _ = self.remove_session(h);
+            }
+        }
+        true
+    }
+
+    /// Whether the virtual link through `transit_area` to `endpoint` is
+    /// currently up (RFC 2328 §15: the endpoint is intra-area reachable
+    /// through the transit area).
+    pub fn ospf_virtual_link_up(&self, transit_area: u32, endpoint: u32) -> bool {
+        self.ospf_vlinks
+            .get(&(transit_area, endpoint))
+            .is_some_and(|v| v.session.is_some())
+    }
+
+    /// The backbone session handle of an up virtual link — the embedder
+    /// wires its transport: drain it with
+    /// [`RouterInstance::drain_output`] and deliver the bytes to the
+    /// peer endpoint's virtual session (tunnelled through the transit
+    /// area), feeding what returns the same way. `None` while the link
+    /// is down.
+    pub fn ospf_virtual_link_session(
+        &self,
+        transit_area: u32,
+        endpoint: u32,
+    ) -> Option<SessionHandle> {
+        self.ospf_vlinks
+            .get(&(transit_area, endpoint))
+            .and_then(|v| v.session)
+    }
+
+    /// Re-evaluate every configured virtual link (RFC 2328 §15): a link
+    /// is up when this router's SPF over the transit area's LSDB reaches
+    /// the endpoint. Coming up materializes a backbone (area 0) session —
+    /// restoring border-router status for a router without a physical
+    /// backbone attachment; going down tears that session down again
+    /// (flushing whatever it justified). Returns whether any session
+    /// churned; callers follow up with [`Self::ospf_on_lsdb_change`].
+    fn ospf_eval_virtual_links(&mut self) -> bool {
+        let Some(router_id) = self.ospf_router_id else {
+            return false;
+        };
+        let mut changed = false;
+        let keys: Vec<(u32, u32)> = self.ospf_vlinks.keys().copied().collect();
+        for key in keys {
+            let up = self
+                .ospf_areas
+                .get(&key.0)
+                .filter(|area| area.protocol == Protocol::Ospfv2)
+                .is_some_and(|area| {
+                    let transit_spf = spf::run_spf(&area.lsdb, router_id);
+                    transit_spf
+                        .vertices
+                        .contains_key(&spf::VertexId::Router(key.1))
+                });
+            // A session the embedder removed behind our back counts as
+            // down so the link is re-materialized on the next pass.
+            let current = self
+                .ospf_vlinks
+                .get(&key)
+                .and_then(|v| v.session)
+                .filter(|h| self.sessions.contains_key(&h.0));
+            if let Some(v) = self.ospf_vlinks.get_mut(&key) {
+                v.session = current;
+            }
+            match (up, current) {
+                (true, None) => {
+                    // Materialize the backbone adjacency. The session is
+                    // registered before any re-entrant evaluation so the
+                    // link cannot be brought up twice.
+                    let handle = SessionHandle(self.next_handle);
+                    self.next_handle += 1;
+                    self.ospf_areas.entry(0).or_insert(OspfAreaState {
+                        lsdb: Lsdb::new(),
+                        protocol: Protocol::Ospfv2,
+                        kind: OspfAreaType::Normal,
+                    });
+                    let runtime = OspfRuntime::new(router_id, 0, false);
+                    self.sessions.insert(
+                        handle.0,
+                        SessionState::Ospf {
+                            runtime,
+                            conn: MemoryConn::new(),
+                        },
+                    );
+                    if let Some(v) = self.ospf_vlinks.get_mut(&key) {
+                        v.session = Some(handle);
+                    }
+                    changed = true;
+                }
+                (false, Some(h)) => {
+                    // Tear the adjacency down; `remove_session` runs the
+                    // full pipeline (flushing summaries that lost their
+                    // justification).
+                    if let Some(v) = self.ospf_vlinks.get_mut(&key) {
+                        v.session = None;
+                    }
+                    let _ = self.remove_session(h);
+                    changed = true;
+                }
+                _ => {}
+            }
+        }
+        if changed {
+            // A freshly attached virtual backbone must catch up on the
+            // self-originated type-5 set, like any newly attached area.
+            self.ospf_sync_externals();
+        }
+        changed
     }
 }
 
