@@ -64,6 +64,13 @@
 #[cfg(feature = "std")]
 pub mod stub;
 
+/// TCP session authentication (RFC 2385 MD5, RFC 5925 TCP-AO) — key
+/// installation on listener/connect sockets. Linux implements both; other
+/// platforms return [`tcp_auth::TcpAuthError::Unsupported`] while keeping
+/// the configuration model portable.
+#[cfg(feature = "std")]
+pub mod tcp_auth;
+
 #[cfg(all(
     feature = "std",
     any(
