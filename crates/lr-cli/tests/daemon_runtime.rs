@@ -315,7 +315,10 @@ fn api_reload_command_matches_sighup() {
         ],
         "areload",
     );
-    wait_log_all(&d.log, &["originating 203.0.113.0/24"]);
+    // The API socket is spawned after the networks are originated, so wait
+    // for BOTH markers before connecting (waiting for "originating" alone
+    // races the socket bind on slow runners).
+    wait_log_all(&d.log, &["originating 203.0.113.0/24", "runtime API on"]);
 
     std::fs::write(
         &conf,
