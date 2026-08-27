@@ -46,7 +46,7 @@ implements, or references. It is grouped by protocol family.
 
 | RFC    | Title                                                | Status       | Crate path                          |
 |--------|------------------------------------------------------|--------------|--------------------------------------|
-| 2328   | OSPF Version 2                                       | ✓ core + inter-area + external + stub areas | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf`, `lr-ospf::abr`, `lr-ospf::external`, `lr-router` |
+| 2328   | OSPF Version 2                                       | ✓ core + inter-area + external + stub areas + virtual links | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf`, `lr-ospf::abr`, `lr-ospf::external`, `lr-router` |
 | 3101   | OSPF Not-So-Stubby Areas (NSSA)                      | ✓ type-7 origination (P-bit + forwarding-address rules), §2.5 calculation, §3.1 translator election, §3.2 type-5 translation, type-7/type-3 defaults, `no_summary` | `lr-ospf::nssa`, `lr-router` |
 | 3623   | Graceful OSPF Restart                                | partial      | TBD                                 |
 | 4577   | OSPF as the Provider Edge-to-CE                      | partial      | —                                    |

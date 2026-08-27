@@ -189,6 +189,39 @@ highest router ID among the area's B-bit routers, Nt-bit (RFC 3101
 Appendix B) wins — translates P-bit, non-zero-forwarding-address type-7s
 into AS-scoped type-5s. Stub/NSSA semantics are OSPFv2-only.
 
+## OSPF virtual links (RFC 2328 §15)
+
+A virtual link is a backbone adjacency between two border routers that
+rides through a non-backbone transit area, repairing a partitioned or
+physically disconnected backbone:
+
+```rust
+use lr_router::RouterInstance;
+
+// On both endpoints (transit area 1, far endpoint's router ID):
+assert!(router.ospf_add_virtual_link(1, 0x0202_0202));
+assert!(router.ospf_virtual_link_up(1, 0x0202_0202));
+
+// While up, the transport is the embedder's job: tunnel the backbone
+// session's bytes through the transit area to the peer.
+let h = router.ospf_virtual_link_session(1, 0x0202_0202).unwrap();
+let out = router.drain_output(h);
+// ... deliver `out` to the peer's virtual session; feed what returns.
+
+router.ospf_remove_virtual_link(1, 0x0202_0202);
+```
+
+The link is up while the router's transit-area SPF reaches the endpoint;
+coming up materializes an area-0 session — restoring border-router
+status (summaries, defaults, type-4s) for a router without a physical
+backbone attachment — and losing the transit area tears it down again.
+Stub/NSSA transit areas are refused (§15, RFC 3101 §2.1), as is
+configuring the backbone itself as stub. Router-LSA origination stays
+with the embedder, as everywhere in this model: endpoints advertise the
+link as a type-4 link in their backbone router-LSAs (metric = the
+transit-area path cost) and set the V-bit in their transit-area
+router-LSAs.
+
 ## Babel RFC 8967 authentication
 
 ```rust

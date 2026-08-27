@@ -70,7 +70,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
 | Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
-| Virtual links | ❌ | non-backbone-only attachment does not summarize (needs backbone) |
+| Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
 | Auth (cryptographic) | 🟡 | `Auth` trait + AuType model exist; only NullAuth implemented — RFC 2328 §C.3 MD5, RFC 5709 HMAC-SHA, RFC 7166 v3 trailer missing |
 
 ### Babel (`lr-babel`)
@@ -131,6 +131,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
 | OSPF external-route E2E (type-5 AS-scope propagation, type-4 ASBR legs, §16.4 type-1/2 + forwarding address, flush lifecycle) | ✅ 🧪 |
 | OSPF stub/NSSA E2E (stub/totally-stubby gating + default injection, NSSA type-7 + P-bit translation with forwarding address, type-7/type-3 defaults, no-summary, translator election, flush lifecycle) | ✅ 🧪 |
+| OSPF virtual-link E2E (§15 backbone partition repair, summaries over the virtual adjacency, teardown + stale-LSA MaxAge age-out, stub-transit refusal) | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
 | BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
 | FRR bgpd interop (bidirectional) | ✅ 🧪 |
@@ -178,9 +179,16 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    (`with_ospf_area_type`) or at runtime (`ospf_set_area_type`);
    verified by 13 unit + 8 three-/four-router E2E tests. OSPFv2 only —
    v3 stub/NSSA follows the v3 inter-area work in item 10.
-9. **OSPF virtual links** — §15 transit through non-backbone areas,
-   §16.3 virtual-link next-hop resolution, allowing partitioned
-   backbone repair.
+9. ~~**OSPF virtual links**~~ — done: §15 lifecycle (`ospf_add_virtual_link`/
+   `ospf_remove_virtual_link`, up while the transit-area SPF reaches the
+   endpoint, stub/NSSA transit areas refused), type-4 link SPF
+   traversal, and the materialized backbone adjacency that restores
+   border-router status for partitioned / backbone-disconnected ABRs —
+   summaries, defaults and type-4s flow across the virtual backbone
+   through an embedder-routed transport session. Router-LSA
+   origination (type-4 link descriptions, V-bit) stays with the
+   embedder, as with all router-LSAs in this model; verified by 4 E2E
+   tests incl. MaxAge age-out of stale LSAs after a partition.
 10. **OSPF authentication + OSPFv3 inter-area** — RFC 5709 HMAC-SHA auth
     (v2 AuType 2 trailer), RFC 7166 v3 auth trailer, and OSPFv3
     inter-area-prefix-LSA (0x2003) ABR origination.
