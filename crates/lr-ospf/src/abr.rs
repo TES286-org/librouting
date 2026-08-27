@@ -14,6 +14,16 @@
 //! All helpers target OSPFv2 LSA encodings (RFC 2328 §A.4.3 bodies,
 //! 32-bit link-state IDs). OSPFv3 inter-area-prefix-LSAs use a different
 //! body format and are not originated here.
+//!
+//! # Link-state ID collisions
+//!
+//! The link-state ID of a summary-LSA is the summarized network address.
+//! Two prefixes whose network addresses coincide with different lengths
+//! (e.g. `10.0.0.0/8` and `10.0.0.0/16`) therefore collide on one LSA —
+//! reference implementations remap the ID in that case. This crate does
+//! not remap: the last originated LSA wins the `(type, ls-id, adv)`
+//! key. Embedders requiring overlapping prefixes should summarize at a
+//! single length.
 
 use crate::lsa::{encode_summary_lsa_body, prefix_len_to_mask, Lsa, LsaHeader, LsaTypeV2};
 use crate::lsdb::MAX_AGE_SECS;

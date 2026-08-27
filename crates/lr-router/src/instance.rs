@@ -276,6 +276,9 @@ impl OspfRuntime {
 struct BabelRuntime {
     neighbor: BabelNeighbor,
     routes: BabelRouteTable,
+    /// Per-session streaming decoder (carryover must never leak between
+    /// different peers' transports).
+    codec: BabelCodec,
     /// Current next-hop (learned from NextHop TLVs, RFC 8966 §4.6.4).
     next_hop: Option<IpAddr>,
     /// Router-id of the peer (learned from Router-Id TLVs).
@@ -296,6 +299,7 @@ impl BabelRuntime {
         Self {
             neighbor: BabelNeighbor::new(local, now_ms),
             routes: BabelRouteTable::new(),
+            codec: BabelCodec::new(),
             next_hop: None,
             router_id: [0; 8],
             published: BTreeMap::new(),
@@ -470,8 +474,6 @@ pub struct DefaultRouter {
     /// OSPF route table currently published to Loc-RIB: the merged view
     /// across all areas, diffed on every recompute.
     ospf_published: BTreeMap<RouteKey, Route>,
-    /// Babel streaming decoder.
-    babel_codec: BabelCodec,
     /// RFC 4271 MRAI state keyed by BGP session.
     mrai: BTreeMap<u64, MraiState>,
     /// RFC 4724 / RFC 9494 stale-route retention keyed by BGP session.
@@ -500,7 +502,6 @@ impl Default for DefaultRouter {
             ospf_areas: BTreeMap::new(),
             ospf_router_id: None,
             ospf_published: BTreeMap::new(),
-            babel_codec: BabelCodec::new(),
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),
             llgr_caps: BTreeMap::new(),
@@ -1619,7 +1620,7 @@ impl RouterInstance for DefaultRouter {
                         withdrawn: Vec::new(),
                     };
                     let mut r = lr_core::buf::ReadBuf::new(&input);
-                    while let Ok(Some(frame)) = self.babel_codec.decode(&mut r) {
+                    while let Ok(Some(frame)) = runtime.codec.decode(&mut r) {
                         let d = runtime.handle_frame(&frame, self.now_ms);
                         delta.installed.extend(d.installed);
                         delta.withdrawn.extend(d.withdrawn);
@@ -1649,10 +1650,8 @@ impl RouterInstance for DefaultRouter {
                 // LSAs belong to the session's area: install into the
                 // shared area LSDB, flood what changed to the area's other
                 // sessions (RFC 2328 §13.3) and recompute.
-                let SessionState::Ospf { runtime, .. } =
-                    self.sessions.get(&h.0).expect("session vanished")
-                else {
-                    unreachable!()
+                let Some(SessionState::Ospf { runtime, .. }) = self.sessions.get(&h.0) else {
+                    return Ok(()); // session vanished between phases
                 };
                 let area_id = runtime.area_id;
                 let mut changed = false;
