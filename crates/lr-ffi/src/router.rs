@@ -100,6 +100,7 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         asn4: asn4 != 0,
         route_refresh: true,
         enhanced_route_refresh: true,
+        add_path: false,
         graceful_restart: graceful_restart != 0,
         graceful_restart_time: gr_restart_time,
         long_lived_gr: long_lived_gr != 0,
@@ -222,6 +223,41 @@ pub extern "C" fn lr_router_set_mrai(r: lr_router_t, session: u64, interval_ms: 
             -2
         }
     }
+}
+
+/// Enable or disable RFC 7911 Add-Path on one BGP session.
+///
+/// Must be called after `lr_router_add_bgp_session*` and before
+/// `lr_router_start_session` — the capability is negotiated in OPEN.
+/// `enabled` is 0 (off) or non-zero (on).
+#[no_mangle]
+pub extern "C" fn lr_router_set_add_path(r: lr_router_t, session: u64, enabled: u8) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.set_session_add_path(SessionHandle(session), enabled != 0) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// Set how many paths per prefix the RFC 7911 decision process keeps in
+/// Loc-RIB and advertises to Add-Path peers (router-wide).
+///
+/// Values below 1 are clamped to 1 (single-path). Takes effect for
+/// sessions whose Add-Path capability was negotiated.
+#[no_mangle]
+pub extern "C" fn lr_router_set_add_path_max_paths(r: lr_router_t, max_paths: u32) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    router.set_add_path_max_paths(max_paths.max(1) as usize);
+    0
 }
 
 /// Request an RFC 2918 route refresh from an established BGP peer.

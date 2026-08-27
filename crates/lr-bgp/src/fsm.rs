@@ -171,6 +171,13 @@ impl BgpPeer {
         &self.cfg
     }
 
+    /// Mutable config access for pre-establishment tuning (e.g. enabling
+    /// Add-Path). Changing identity or capability settings after the
+    /// session establishes has no effect until it re-establishes.
+    pub fn config_mut(&mut self) -> &mut PeerConfig {
+        &mut self.cfg
+    }
+
     /// Whether RFC 7911 Add-Path NLRI framing is active outbound for
     /// `family` (we may advertise multiple paths, each identified by a
     /// path identifier).

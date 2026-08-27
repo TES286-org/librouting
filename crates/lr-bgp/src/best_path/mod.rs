@@ -71,6 +71,17 @@ impl BestPath {
         routes.iter().min_by(|a, b| Self::compare(a, b, cfg))
     }
 
+    /// Rank every route best-first (a stable full sort by the decision
+    /// process). This is the Add-Path selection primitive (RFC 7911): the
+    /// top-N entries are the paths an Add-Path speaker advertises. Ties
+    /// beyond the last tiebreaker keep insertion order, which makes the
+    /// ranking deterministic for a given Adj-RIB-In state.
+    pub fn rank<'a>(routes: &'a [Route], cfg: &BestPathConfig) -> Vec<&'a Route> {
+        let mut ranked: Vec<&Route> = routes.iter().collect();
+        ranked.sort_by(|a, b| Self::compare(a, b, cfg));
+        ranked
+    }
+
     /// Select the best route and all equal-cost paths up to `cfg.multipath`.
     /// "Equal cost" means all of the major decision steps tie (LOCAL_PREF,
     /// AS_PATH length, ORIGIN, MED, eBGP/iBGP, originator-id, cluster-list)
@@ -470,6 +481,41 @@ mod tests {
         let routes = [a, b];
         let best = BestPath::select(&routes, &cfg).unwrap();
         assert_eq!(best.origin.peer, 1);
+    }
+
+    #[test]
+    fn rank_is_stable_across_insertion_order() {
+        let a = route_with_attr(2, vec![2, 1, 0, 0, 100], 1);
+        let b = route_with_attr(2, vec![2, 1, 0, 0, 100], 2);
+        let cfg = BestPathConfig::default();
+        let set_one = [a.clone(), b.clone()];
+        let set_two = [b, a];
+        let one = BestPath::rank(&set_one, &cfg);
+        let two = BestPath::rank(&set_two, &cfg);
+        assert_eq!(
+            one.iter().map(|r| r.origin.peer).collect::<Vec<_>>(),
+            two.iter().map(|r| r.origin.peer).collect::<Vec<_>>()
+        );
+    }
+
+    /// Add-Path ranking: the first entry is always `select`'s winner.
+    #[test]
+    fn rank_head_equals_select() {
+        let a = route_with_attr(2, vec![2, 3, 0, 0, 100, 0, 0, 200, 0, 0], 1);
+        let b = route_with_attr(2, vec![2, 1, 0, 0, 100], 2);
+        let cfg = BestPathConfig::default();
+        let set = [a, b];
+        let ranked = BestPath::rank(&set, &cfg);
+        let owned: Vec<Route> = ranked.into_iter().cloned().collect();
+        assert_eq!(
+            ranked_head_peer(&owned, &cfg),
+            BestPath::select(&set, &cfg).unwrap().origin.peer
+        );
+        assert_eq!(owned.len(), 2);
+    }
+
+    fn ranked_head_peer(routes: &[Route], cfg: &BestPathConfig) -> u64 {
+        BestPath::select(routes, cfg).unwrap().origin.peer
     }
 
     #[test]

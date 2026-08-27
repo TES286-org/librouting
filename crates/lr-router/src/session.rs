@@ -29,6 +29,11 @@ pub struct SessionConfig {
     pub route_refresh: bool,
     /// Advertise and use RFC 7313 enhanced refresh when the peer supports it.
     pub enhanced_route_refresh: bool,
+    /// Advertise RFC 7911 Add-Path (send + receive) for the session's
+    /// families. Effective only when the peer also offers the capability;
+    /// the router additionally limits how many paths per prefix are kept
+    /// and advertised (see `DefaultRouter::set_add_path_max_paths`).
+    pub add_path: bool,
     /// Retain peer routes over an RFC 4724 graceful restart.
     pub graceful_restart: bool,
     /// Maximum restart duration advertised to the peer, in seconds.
@@ -67,6 +72,7 @@ impl SessionConfig {
             asn4: true,
             route_refresh: true,
             enhanced_route_refresh: true,
+            add_path: false,
             graceful_restart: true,
             graceful_restart_time: 120,
             long_lived_gr: false,
@@ -89,6 +95,13 @@ impl SessionConfig {
     /// Override the MP-BGP address families advertised in OPEN.
     pub fn with_mp_families(mut self, families: Vec<lr_core::nlri::NlriFamily>) -> Self {
         self.mp_families = families;
+        self
+    }
+
+    /// Advertise RFC 7911 Add-Path for this session's families (send +
+    /// receive). Requires the peer to offer the capability too.
+    pub fn with_add_path(mut self) -> Self {
+        self.add_path = true;
         self
     }
 
@@ -139,6 +152,7 @@ impl SessionConfig {
             asn4: false,
             route_refresh: false,
             enhanced_route_refresh: false,
+            add_path: false,
             graceful_restart: false,
             graceful_restart_time: 0,
             long_lived_gr: false,
@@ -163,6 +177,7 @@ impl SessionConfig {
             asn4: false,
             route_refresh: false,
             enhanced_route_refresh: false,
+            add_path: false,
             graceful_restart: false,
             graceful_restart_time: 0,
             long_lived_gr: false,

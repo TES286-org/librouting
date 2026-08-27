@@ -82,6 +82,13 @@ pub trait RouterInstance {
     fn set_mrai(&mut self, h: SessionHandle, interval_ms: u64) -> Result<(), String>;
     fn poll_events(&mut self) -> Vec<RouterEvent>;
     fn rib_snapshot(&self) -> Vec<&Route>;
+
+    /// Every path of every prefix (the RFC 7911 Add-Path view of the
+    /// Loc-RIB). Defaults to the best-path snapshot for implementors
+    /// without path multiplicity.
+    fn rib_paths_snapshot(&self) -> Vec<&Route> {
+        self.rib_snapshot()
+    }
 }
 
 /// Per-session protocol runtime.
@@ -105,12 +112,14 @@ enum SessionState {
 
 /// Pending per-prefix outbound UPDATE state for one BGP session.
 ///
-/// The latest desired route supersedes any older pending advertisement. A
-/// `None` route represents a withdrawal, allowing route churn to collapse to
-/// one wire UPDATE at MRAI expiry.
+/// The latest desired advertisement set supersedes any older pending one,
+/// so route churn collapses to the final state at MRAI expiry. The set
+/// holds every RFC 7911 path of the prefix destined for the wire (one
+/// element in single-path mode); withdrawals bypass MRAI entirely and are
+/// transmitted immediately.
 #[derive(Debug, Clone)]
 struct PendingMraiUpdate {
-    route: Option<Route>,
+    routes: Vec<Route>,
     due_ms: u64,
 }
 
@@ -467,6 +476,10 @@ pub struct DefaultRouter {
     safety: Option<SafetyNet>,
     hooks: HookChain,
     best_path_cfg: BestPathConfig,
+    /// RFC 7911: how many paths per prefix the decision process keeps in
+    /// Loc-RIB (and therefore can advertise to Add-Path peers). 1 = the
+    /// historical single-path behaviour.
+    add_path_max_paths: usize,
     /// Locally originated routes (kept so unoriginate can remove them).
     originated: BTreeMap<RouteKey, Route>,
     pending_events: Vec<RouterEvent>,
@@ -501,6 +514,7 @@ impl Default for DefaultRouter {
             safety: None,
             hooks: HookChain::new(),
             best_path_cfg: BestPathConfig::default(),
+            add_path_max_paths: 1,
             originated: BTreeMap::new(),
             pending_events: Vec::new(),
             ospf_areas: BTreeMap::new(),
@@ -544,6 +558,38 @@ impl DefaultRouter {
         &mut self.best_path_cfg
     }
 
+    /// RFC 7911: how many paths per prefix the decision process keeps in
+    /// Loc-RIB and advertises to Add-Path peers. Values below 1 are
+    /// treated as 1 (single-path). Only takes effect for sessions whose
+    /// Add-Path capability was negotiated.
+    pub fn set_add_path_max_paths(&mut self, max_paths: usize) {
+        self.add_path_max_paths = max_paths.max(1);
+    }
+
+    /// RFC 7911 path cap currently in force.
+    pub fn add_path_max_paths(&self) -> usize {
+        self.add_path_max_paths
+    }
+
+    /// Enable or disable RFC 7911 Add-Path on one BGP session. Must be
+    /// called before the session establishes (the capability is exchanged
+    /// in OPEN); later calls are rejected.
+    pub fn set_session_add_path(&mut self, h: SessionHandle, enabled: bool) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: add-path must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().add_path = enabled;
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
     /// Originate a local route (e.g. from `network` statements): injects it
     /// into Loc-RIB and advertises it to all suitable BGP peers.
     pub fn originate(&mut self, prefix: Prefix, next_hop: Option<IpAddr>) -> RouteKey {
@@ -579,11 +625,11 @@ impl DefaultRouter {
             age_ms: 0,
             path_id: 0,
         };
-        self.loc_rib.install(route.clone());
+        self.loc_rib.install_set(&key, vec![route.clone()]);
         self.originated.insert(key.clone(), route.clone());
         self.pending_events
             .push(RouterEvent::RouteInstalled(route.clone()));
-        self.export_route(&route);
+        self.export_selection(&key, &[route]);
         key
     }
 
@@ -701,6 +747,12 @@ impl DefaultRouter {
     }
 
     /// Re-run the decision process for one prefix and propagate deltas.
+    ///
+    /// RFC 7911: instead of a single best path the decision process now
+    /// produces a *ranking* (best first, [`BestPath::rank`]) truncated to
+    /// `add_path_max_paths`. The whole ranked set is installed into
+    /// Loc-RIB; Add-Path peers receive every path while single-path peers
+    /// continue to see only the head of the set.
     fn reselect(&mut self, key: &RouteKey) {
         let candidates: Vec<Route> = self
             .adj_rib_in
@@ -710,63 +762,83 @@ impl DefaultRouter {
             .chain(self.originated.values().filter(|r| r.key == *key).cloned())
             .collect();
 
-        let new_best: Option<Route> = if candidates.is_empty() {
-            None
+        let ranked: Vec<Route> = if candidates.is_empty() {
+            Vec::new()
         } else if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
-            BestPath::select(&candidates, &self.best_path_cfg).cloned()
+            BestPath::rank(&candidates, &self.best_path_cfg)
+                .into_iter()
+                .take(self.add_path_max_paths)
+                .cloned()
+                .collect()
         } else {
-            RouteSelector::select(&candidates).cloned()
+            RouteSelector::select(&candidates)
+                .cloned()
+                .into_iter()
+                .collect()
         };
+        self.apply_selection(key, ranked);
+    }
 
+    /// Apply a fresh ranking for one prefix to Loc-RIB, events and egress.
+    fn apply_selection(&mut self, key: &RouteKey, ranked: Vec<Route>) {
         let old_best = self.loc_rib.best(key).cloned();
-        match (new_best, old_best) {
-            (Some(nb), Some(ob)) if nb == ob => {}
-            (Some(nb), _) => {
-                self.loc_rib.install(nb.clone());
-                self.pending_events
-                    .push(RouterEvent::RouteInstalled(nb.clone()));
-                self.export_route(&nb);
-            }
-            (None, Some(_)) => {
-                self.loc_rib.uninstall(key);
-                self.pending_events
-                    .push(RouterEvent::RouteWithdrawn(key.clone()));
-                self.propagate_withdrawal(key);
-            }
-            (None, None) => {}
+        if ranked.is_empty() {
+            self.loc_rib.uninstall(key);
+            self.pending_events
+                .push(RouterEvent::RouteWithdrawn(key.clone()));
+            self.propagate_withdrawal(key);
+            return;
         }
+        let new_best = ranked[0].clone();
+        self.loc_rib.install_set(key, ranked.clone());
+        if old_best.as_ref() != Some(&new_best) {
+            self.pending_events
+                .push(RouterEvent::RouteInstalled(new_best.clone()));
+        }
+        self.export_selection(key, &ranked);
     }
 
     // ----- export pipeline -----
 
-    /// Queue an UPDATE until the per-prefix MRAI expires, or transmit it
-    /// immediately when the prefix has no active interval.
-    fn queue_or_send_advertisement(&mut self, session: u64, route: Route) {
-        let key = route.key.clone();
+    /// Queue an UPDATE (one per path) until the per-prefix MRAI expires,
+    /// or transmit it immediately when the prefix has no active interval.
+    /// `routes` is the desired advertisement set for one prefix: multiple
+    /// elements only occur on Add-Path sessions (RFC 7911).
+    fn queue_or_send_advertisement(&mut self, session: u64, routes: Vec<Route>) {
+        let Some(first) = routes.first() else {
+            return;
+        };
+        let key = first.key.clone();
         let now_ms = self.now_ms;
         let state = self.mrai.entry(session).or_default();
         if state.interval_ms != 0 {
             if let Some(last) = state.last_sent.get(&key) {
                 let due_ms = last.saturating_add(state.interval_ms);
                 if now_ms < due_ms {
-                    state.pending.insert(
-                        key,
-                        PendingMraiUpdate {
-                            route: Some(route),
-                            due_ms,
-                        },
-                    );
+                    state
+                        .pending
+                        .insert(key, PendingMraiUpdate { routes, due_ms });
                     return;
                 }
             }
         }
-        self.send_advertisement(session, route);
+        self.send_advertisement_set(session, &routes);
     }
 
-    fn send_advertisement(&mut self, session: u64, route: Route) {
+    /// Transmit the advertisement set: one UPDATE per path (each path has
+    /// its own attributes), recorded in Adj-RIB-Out under its assigned
+    /// transmit path identifier.
+    fn send_advertisement_set(&mut self, session: u64, routes: &[Route]) {
+        let Some(first) = routes.first() else {
+            return;
+        };
+        let key = first.key.clone();
         let sent =
             if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
-                let sent = peer.advertise(&route);
+                let mut sent = false;
+                for route in routes {
+                    sent |= peer.advertise(route);
+                }
                 let bytes = peer.drain_outgoing();
                 if !bytes.is_empty() {
                     conn.put_output(&bytes);
@@ -780,40 +852,94 @@ impl DefaultRouter {
                 .entry(session)
                 .or_default()
                 .last_sent
-                .insert(route.key.clone(), self.now_ms);
-            self.adj_rib_out.advertise(
-                RouteOrigin {
-                    proto: 0,
-                    peer: session,
-                },
-                &route,
-            );
+                .insert(key, self.now_ms);
+            let dest = RouteOrigin {
+                proto: 0,
+                peer: session,
+            };
+            for route in routes {
+                self.adj_rib_out.advertise(dest, route, route.path_id);
+            }
             self.pending_events
-                .push(RouterEvent::PrefixAdvertised(route.key.prefix));
+                .push(RouterEvent::PrefixAdvertised(first.key.prefix));
         }
     }
 
-    fn export_route(&mut self, route: &Route) {
+    /// Push the current ranking of one prefix to every BGP session:
+    /// Add-Path peers (RFC 7911) receive each path under the transmit
+    /// identifier `rank slot + 1`; single-path peers receive only the best
+    /// path. Transmits are diffs against Adj-RIB-Out, so paths that fell
+    /// out of the ranking (or are no longer exported) are withdrawn.
+    ///
+    /// Split horizon (RFC 4271 §10) is per path: a path learned from a
+    /// session is never re-advertised to that same session.
+    fn export_selection(&mut self, key: &RouteKey, ranked: &[Route]) {
         // Hooks borrow self immutably while session enumeration requires a
         // mutable borrow, so collect policy-approved work before transmitting.
         let hooks = std::mem::take(&mut self.hooks);
-        let origin_session = route.origin.peer;
-        let mut exports = Vec::new();
+        let mut work: Vec<(u64, Vec<Route>, Vec<u32>)> = Vec::new();
         for (session, state) in &self.sessions {
             let SessionState::Bgp { peer, .. } = state else {
                 continue;
             };
-            if *session == origin_session || !peer.is_established() {
+            if !peer.is_established() {
                 continue;
             }
-            let mut candidate = route.clone();
-            if !matches!(hooks.run_export(&mut candidate), HookVerdict::Drop) {
-                exports.push((*session, candidate));
+            let add_path_tx = peer.add_path_tx_for(key.family);
+            let mut desired: Vec<Route> = Vec::new();
+            if add_path_tx {
+                for (slot, route) in ranked.iter().enumerate() {
+                    if route.origin.peer == *session {
+                        continue; // split horizon, per path
+                    }
+                    let mut candidate = route.clone();
+                    candidate.path_id = slot as u32 + 1;
+                    if matches!(hooks.run_export(&mut candidate), HookVerdict::Drop) {
+                        continue;
+                    }
+                    desired.push(candidate);
+                }
+            } else if let Some(best) = ranked.first() {
+                if best.origin.peer == *session {
+                    continue;
+                }
+                let mut candidate = best.clone();
+                candidate.path_id = 0;
+                if !matches!(hooks.run_export(&mut candidate), HookVerdict::Drop) {
+                    desired.push(candidate);
+                }
             }
+            let current = self.adj_rib_out.paths_for(
+                RouteOrigin {
+                    proto: 0,
+                    peer: *session,
+                },
+                key,
+            );
+            let mut withdraw_ids: Vec<u32> = Vec::new();
+            let mut advertise: Vec<Route> = Vec::new();
+            for (id, cur) in &current {
+                match desired.iter().find(|r| r.path_id == *id) {
+                    None => withdraw_ids.push(*id),
+                    Some(new) if new == cur => {}
+                    Some(new) => advertise.push(new.clone()),
+                }
+            }
+            for new in &desired {
+                if !current.iter().any(|(id, _)| *id == new.path_id) {
+                    advertise.push(new.clone());
+                }
+            }
+            work.push((*session, advertise, withdraw_ids));
         }
         self.hooks = hooks;
-        for (session, route) in exports {
-            self.queue_or_send_advertisement(session, route);
+        for (session, advertise, withdraw_ids) in work {
+            if !withdraw_ids.is_empty() {
+                self.queue_or_send_withdrawal(session, key, &withdraw_ids);
+            }
+            if !advertise.is_empty() {
+                self.queue_or_send_advertisement(session, advertise);
+            }
         }
     }
 
@@ -827,17 +953,45 @@ impl DefaultRouter {
             proto: 0,
             peer: session,
         };
-        let prior: Vec<RouteKey> = self
+        let prior: Vec<(RouteKey, Vec<u32>)> = self
             .adj_rib_out
-            .iter_for(origin)
-            .filter(|route| route.key.family == family)
-            .map(|route| route.key.clone())
+            .advertised_keys(origin, family)
+            .into_iter()
+            .filter(|(key, _)| key.family == family)
             .collect();
-        let snapshot: Vec<Route> = self
+        // Single-path peers refresh the best path per prefix; Add-Path
+        // peers (RFC 7911) refresh the whole ranked set.
+        let add_path_tx = self
+            .sessions
+            .get(&session)
+            .map(|state| match state {
+                SessionState::Bgp { peer, .. } => peer.add_path_tx_for(family),
+                _ => false,
+            })
+            .unwrap_or(false);
+        let snapshot: Vec<Vec<Route>> = self
             .loc_rib
-            .iter_best()
-            .filter(|route| route.key.family == family && route.origin.peer != session)
-            .cloned()
+            .iter_sets()
+            .filter(|(key, _)| key.family == family)
+            .map(|(_key, set)| {
+                if add_path_tx {
+                    set.iter()
+                        .enumerate()
+                        .filter(|(_, r)| r.origin.peer != session)
+                        .map(|(slot, r)| {
+                            let mut c = r.clone();
+                            c.path_id = slot as u32 + 1;
+                            c
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    set.first()
+                        .filter(|r| r.origin.peer != session)
+                        .cloned()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                }
+            })
             .collect();
         let hooks = std::mem::take(&mut self.hooks);
         let mut advertised = Vec::new();
@@ -851,17 +1005,24 @@ impl DefaultRouter {
             // negotiated. Older RFC 2918 peers receive the same UPDATE delta
             // without the optional demarcation messages.
             let enhanced_refresh = peer.begin_enhanced_route_refresh(family);
-            for key in &prior {
-                peer.withdraw(&[key.prefix], family);
-                self.adj_rib_out.suppress(origin, key);
-            }
-            for route in snapshot {
-                let mut route = route;
-                if matches!(hooks.run_export(&mut route), HookVerdict::Drop) {
-                    continue;
+            for (key, ids) in &prior {
+                let entries: Vec<lr_bgp::message::update::Nlri> = ids
+                    .iter()
+                    .map(|id| lr_bgp::message::update::Nlri::new(*id, key.prefix))
+                    .collect();
+                peer.withdraw_paths(&entries, family);
+                for id in ids {
+                    self.adj_rib_out.suppress(origin, key, *id);
                 }
-                if peer.advertise(&route) {
-                    advertised.push(route);
+            }
+            for set in snapshot {
+                for mut route in set {
+                    if matches!(hooks.run_export(&mut route), HookVerdict::Drop) {
+                        continue;
+                    }
+                    if peer.advertise(&route) {
+                        advertised.push(route);
+                    }
                 }
             }
             peer.send_end_of_rib();
@@ -875,26 +1036,31 @@ impl DefaultRouter {
         }
         self.hooks = hooks;
         for route in advertised {
-            self.adj_rib_out.advertise(origin, &route);
+            self.adj_rib_out.advertise(origin, &route, route.path_id);
             self.pending_events
                 .push(RouterEvent::PrefixAdvertised(route.key.prefix));
         }
     }
 
-    fn queue_or_send_withdrawal(&mut self, session: u64, key: RouteKey) {
-        // RFC 4271 §9.2.1.1 applies MRAI to advertisements. A withdrawal is
-        // sent immediately so remote routers stop forwarding to an invalid
-        // path without waiting for the advertisement rate limiter.
+    /// Withdraw specific advertised paths of one prefix. Withdrawals are
+    /// transmitted immediately (RFC 4271 §9.2.1.1 applies MRAI to
+    /// advertisements only) and cancel any pending advertisement set for
+    /// the prefix.
+    fn queue_or_send_withdrawal(&mut self, session: u64, key: &RouteKey, ids: &[u32]) {
         if let Some(state) = self.mrai.get_mut(&session) {
-            state.pending.remove(&key);
+            state.pending.remove(key);
         }
-        self.send_withdrawal(session, key);
+        self.send_withdrawal(session, key, ids);
     }
 
-    fn send_withdrawal(&mut self, session: u64, key: RouteKey) {
+    fn send_withdrawal(&mut self, session: u64, key: &RouteKey, ids: &[u32]) {
         let sent =
             if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
-                peer.withdraw(&[key.prefix], key.family);
+                let entries: Vec<lr_bgp::message::update::Nlri> = ids
+                    .iter()
+                    .map(|id| lr_bgp::message::update::Nlri::new(*id, key.prefix))
+                    .collect();
+                peer.withdraw_paths(&entries, key.family);
                 let bytes = peer.drain_outgoing();
                 let sent = !bytes.is_empty();
                 if sent {
@@ -910,20 +1076,20 @@ impl DefaultRouter {
                 .or_default()
                 .last_sent
                 .insert(key.clone(), self.now_ms);
-            self.adj_rib_out.suppress(
-                RouteOrigin {
-                    proto: 0,
-                    peer: session,
-                },
-                &key,
-            );
+            let dest = RouteOrigin {
+                proto: 0,
+                peer: session,
+            };
+            for id in ids {
+                self.adj_rib_out.suppress(dest, key, *id);
+            }
             self.pending_events
                 .push(RouterEvent::PrefixRetracted(key.prefix));
         }
     }
 
     fn flush_mrai(&mut self) {
-        let due: Vec<(u64, RouteKey, Option<Route>)> = self
+        let due: Vec<(u64, RouteKey, Vec<Route>)> = self
             .mrai
             .iter_mut()
             .flat_map(|(session, state)| {
@@ -937,19 +1103,17 @@ impl DefaultRouter {
                     state
                         .pending
                         .remove(&key)
-                        .map(|update| (*session, key, update.route))
+                        .map(|update| (*session, key, update.routes))
                 })
             })
             .collect();
-        for (session, key, route) in due {
-            if let Some(route) = route {
-                self.send_advertisement(session, route);
-            } else {
-                self.send_withdrawal(session, key);
-            }
+        for (session, _key, routes) in due {
+            self.send_advertisement_set(session, &routes);
         }
     }
 
+    /// Withdraw every advertised path of one prefix from every session
+    /// (the prefix has left the Loc-RIB entirely).
     fn propagate_withdrawal(&mut self, key: &RouteKey) {
         let sessions: Vec<u64> = self
             .sessions
@@ -959,23 +1123,73 @@ impl DefaultRouter {
                     .then_some(*session)
             })
             .filter(|session| {
-                self.adj_rib_out
-                    .iter_for(RouteOrigin {
-                        proto: 0,
-                        peer: *session,
-                    })
-                    .any(|route| route.key == *key)
+                !self
+                    .adj_rib_out
+                    .tx_path_ids(
+                        RouteOrigin {
+                            proto: 0,
+                            peer: *session,
+                        },
+                        key,
+                    )
+                    .is_empty()
             })
             .collect();
         for session in sessions {
-            self.queue_or_send_withdrawal(session, key.clone());
+            let ids = self.adj_rib_out.tx_path_ids(
+                RouteOrigin {
+                    proto: 0,
+                    peer: session,
+                },
+                key,
+            );
+            self.queue_or_send_withdrawal(session, key, &ids);
         }
     }
 
     /// When a BGP session first reaches Established, advertise the whole
-    /// Loc-RIB to it (initial table dump).
+    /// Loc-RIB to it (initial table dump). Add-Path peers (RFC 7911)
+    /// receive every ranked path of each prefix, single-path peers the
+    /// best path only.
     fn on_bgp_established(&mut self, h: u64) {
-        let snapshot: Vec<Route> = self.loc_rib.iter_best().cloned().collect();
+        // The families the session speaks, each with its Add-Path mode —
+        // the pair decides which Loc-RIB view to dump.
+        let families: Vec<(NlriFamily, bool)> = match self.sessions.get(&h) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                let mut fams = vec![NlriFamily::IPV4_UNICAST];
+                for f in &peer.config().mp_families {
+                    if !fams.contains(f) {
+                        fams.push(*f);
+                    }
+                }
+                fams.into_iter()
+                    .map(|f| (f, peer.add_path_tx_for(f)))
+                    .collect()
+            }
+            _ => Vec::new(),
+        };
+        let mut snapshot: Vec<Route> = Vec::new();
+        for (family, add_path_tx) in families {
+            if add_path_tx {
+                for (key, set) in self.loc_rib.iter_sets() {
+                    if key.family != family {
+                        continue;
+                    }
+                    for (slot, route) in set.iter().enumerate() {
+                        let mut r = route.clone();
+                        r.path_id = slot as u32 + 1;
+                        snapshot.push(r);
+                    }
+                }
+            } else {
+                snapshot.extend(
+                    self.loc_rib
+                        .iter_best()
+                        .filter(|route| route.key.family == family)
+                        .cloned(),
+                );
+            }
+        }
         let hooks = std::mem::take(&mut self.hooks);
         let mut advertised: Vec<Route> = Vec::new();
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&h) {
@@ -999,7 +1213,7 @@ impl DefaultRouter {
         self.hooks = hooks;
         for r in advertised {
             self.adj_rib_out
-                .advertise(RouteOrigin { proto: 0, peer: h }, &r);
+                .advertise(RouteOrigin { proto: 0, peer: h }, &r, r.path_id);
         }
     }
 
@@ -1261,6 +1475,10 @@ impl DefaultRouter {
     /// that did not negotiate LLGR — the previous advertisement must be
     /// withdrawn from them.
     fn withdraw_stale_from_non_llgr_sessions(&mut self, key: &RouteKey) {
+        let dest = |session: u64| RouteOrigin {
+            proto: 0,
+            peer: session,
+        };
         let sessions: Vec<u64> = self
             .sessions
             .iter()
@@ -1272,17 +1490,11 @@ impl DefaultRouter {
                 }
                 _ => None,
             })
-            .filter(|session| {
-                self.adj_rib_out
-                    .iter_for(RouteOrigin {
-                        proto: 0,
-                        peer: *session,
-                    })
-                    .any(|route| route.key == *key)
-            })
+            .filter(|session| !self.adj_rib_out.tx_path_ids(dest(*session), key).is_empty())
             .collect();
         for session in sessions {
-            self.queue_or_send_withdrawal(session, key.clone());
+            let ids = self.adj_rib_out.tx_path_ids(dest(session), key);
+            self.queue_or_send_withdrawal(session, key, &ids);
         }
     }
 
@@ -1446,6 +1658,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.asn4 = cfg.asn4;
                 p_cfg.route_refresh = cfg.route_refresh;
                 p_cfg.enhanced_rr = cfg.enhanced_route_refresh;
+                p_cfg.add_path = cfg.add_path;
                 p_cfg.graceful_restart = cfg.graceful_restart;
                 p_cfg.graceful_restart_time = cfg.graceful_restart_time;
                 p_cfg.long_lived = cfg.long_lived_gr;
@@ -1813,18 +2026,14 @@ impl RouterInstance for DefaultRouter {
         let state = self.mrai.entry(h.0).or_default();
         state.interval_ms = interval_ms;
         if interval_ms == 0 {
-            let pending: Vec<(RouteKey, Option<Route>)> = state
+            let pending: Vec<(RouteKey, Vec<Route>)> = state
                 .pending
                 .iter()
-                .map(|(key, update)| (key.clone(), update.route.clone()))
+                .map(|(key, update)| (key.clone(), update.routes.clone()))
                 .collect();
             state.pending.clear();
-            for (key, route) in pending {
-                if let Some(route) = route {
-                    self.send_advertisement(h.0, route);
-                } else {
-                    self.send_withdrawal(h.0, key);
-                }
+            for (_key, routes) in pending {
+                self.send_advertisement_set(h.0, &routes);
             }
         }
         Ok(())
@@ -1836,6 +2045,10 @@ impl RouterInstance for DefaultRouter {
 
     fn rib_snapshot(&self) -> Vec<&Route> {
         self.loc_rib.iter_best().collect()
+    }
+
+    fn rib_paths_snapshot(&self) -> Vec<&Route> {
+        self.loc_rib.iter_paths().collect()
     }
 }
 

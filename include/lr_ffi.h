@@ -167,6 +167,24 @@ int32_t lr_router_start_session(lr_router_t r, uint64_t session);
 int32_t lr_router_set_mrai(lr_router_t r, uint64_t session, uint64_t interval_ms);
 
 /**
+ * Enable or disable RFC 7911 Add-Path on one BGP session.
+ *
+ * Must be called after `lr_router_add_bgp_session*` and before
+ * `lr_router_start_session` — the capability is negotiated in OPEN.
+ * `enabled` is 0 (off) or non-zero (on).
+ */
+int32_t lr_router_set_add_path(lr_router_t r, uint64_t session, uint8_t enabled);
+
+/**
+ * Set how many paths per prefix the RFC 7911 decision process keeps in
+ * Loc-RIB and advertises to Add-Path peers (router-wide).
+ *
+ * Values below 1 are clamped to 1 (single-path). Takes effect for
+ * sessions whose Add-Path capability was negotiated.
+ */
+int32_t lr_router_set_add_path_max_paths(lr_router_t r, uint32_t max_paths);
+
+/**
  * Request an RFC 2918 route refresh from an established BGP peer.
  *
  * Returns 1 when a request was queued, 0 when the session has not negotiated
