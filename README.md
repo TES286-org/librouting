@@ -186,13 +186,16 @@ Implemented and missing features are tracked in detail in
   CI), including an **RFC 9494 LLGR** lifecycle test
   (`tests/interop/bird_llgr.sh`): both sides negotiate the Long-Lived
   Graceful Restart capability, retain routes across a restart, mark them
-  `LLGR_STALE` and purge at the negotiated stale-time expiry.
+  `LLGR_STALE` and purge at the negotiated stale-time expiry. An
+  **RFC 7911 Add-Path** suite (`tests/interop/addpath.sh`) negotiates the
+  capability over real TCP and verifies the path identifier survives the
+  whole pipeline (wire → Adj-RIB-In → Loc-RIB → runtime API).
 - OS route-table integration for **Linux (rtnetlink)**, the **BSD family
   (route(4) socket)** and **Windows (IP Helper API)**, plus a porting guide
   for other systems (`docs/OS-INTEGRATION.md`).
 - Not yet production-ready: see the roadmap at the end of `STATUS.md`
-  (daemon hardening, Add-Path best-path wiring and OSPF depth are the
-  main gaps). The C ABI is **unstable** until v0.5.
+  (OSPF depth is the main remaining gap). The C ABI is **unstable** until
+  v0.5.
 
 ## CI/CD
 

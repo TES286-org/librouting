@@ -33,7 +33,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 5065 confederations | ✅ | |
 | RFC 7947 route server mode | ✅ | |
 | RFC 9234 OTC / roles | ✅ | |
-| RFC 7911 Add-Path | 🟡 | capability + encoding; full N-path handling in best-path not wired |
+| RFC 7911 Add-Path | ✅ 🧪 | capability negotiation (per-family send/receive), path-id NLRI framing (plain + MP), Adj-RIB-In keyed by path id, ranked N-path selection (`add_path_max_paths`), per-path export/withdrawal with rank-slot transmit ids, MRAI path sets, GR/LLGR per-path retention; two-daemon + full-stack e2e |
 | RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
 | RFC 7313 enhanced route refresh | ✅ | negotiated capability plus BoRR/EoRR demarcation around refreshed tables |
 | RFC 4724 graceful restart | ✅ 🧪 | capability lists address families with F bits; stale-route retention, negotiated expiry purge, EoR-based resynchronization (BIRD-verified) |
@@ -116,6 +116,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 |------|:------:|
 | Unit tests (workspace) | ✅ 30 binaries / 260+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 |
+| Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
@@ -147,7 +148,10 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    runtime API (`--api-socket`: status/sessions/routes/reload/shutdown)
    backed by the new `DefaultRouter::session_summaries()` introspection
    (also exposed through the FFI and the Go/Python bindings).
-6. **Add-Path best-path wiring** — capability + encoding exist; N-path
-   selection/advertisement remains partial.
+6. ~~**Add-Path best-path wiring**~~ — done: RFC 7911 negotiation,
+   wire framing and the N-path decision/export pipeline
+   (`BestPath::rank` → Loc-RIB path sets → per-path Adj-RIB-Out diffs);
+   the daemon exposes `--add-path` / `--add-path-max` and the runtime API
+   dumps paths with their identifiers.
 7. **OSPF depth** — OSPFv3 inter-area (A.4.3-equivalent bodies), stub/NSSA
    areas, virtual links, cryptographic auth (§C.3 / RFC 7166).

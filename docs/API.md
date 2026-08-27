@@ -185,6 +185,24 @@ r.set_mrai(h, 10_000)?;
 let events = r.poll_events();
 ```
 
+### RFC 7911 Add-Path
+
+`SessionConfig::with_add_path()` advertises the Add-Path capability
+(send + receive) for the session's families; it only takes effect when
+the peer offers it too. `set_add_path_max_paths(n)` caps how many paths
+per prefix the decision process keeps in the Loc-RIB (default 1 =
+single-path). Add-Path peers then receive every ranked path, each under
+its own wire path identifier (rank slot + 1), while plain peers continue
+to see only the best path.
+
+```rust
+let h = r.add_session(
+    SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]))
+        .with_add_path(),
+)?;
+r.set_add_path_max_paths(4);
+```
+
 ### Operational introspection
 
 `session_summaries()` renders one [`SessionSummary`] per session (kind,
