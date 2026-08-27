@@ -125,14 +125,20 @@ millisecond timestamp.
 ## OSPF external routes (RFC 2328 §12.4.3 / §16.4)
 
 `DefaultRouter::ospf_redistribute` injects an external destination into
-OSPF as a type-5 AS-external-LSA, originated into every attached OSPFv2
-area (AS flooding scope) with the requested metric type
+OSPF as a type-5 AS-external-LSA, originated into every attached *regular*
+OSPFv2 area (AS flooding scope) with the requested metric type
 (`ExternalMetricType::Type1`/`Type2`), forwarding address and route tag.
-`ospf_unredistribute` MaxAge-flushes the LSA across the AS. The router
-re-floods received type-5s into every other attached area, originates
-type-4 summary-ASBR-LSAs for ASBRs that are only reachable inter-area,
-and merges the §16.4 external calculation into Loc-RIB — forwarding
-addresses become the route's next hop.
+In NSSA areas the destination is originated as an area-scoped type-7 LSA
+instead (RFC 3101 §2.4): with the P-bit set (`ExternalDestination::p_bit`,
+the default) and a non-zero forwarding address it is translated back into
+a type-5 by the elected border router; a border router that also sources
+the type-5 into its regular areas forces the P-bit clear (§2.4). Stub
+areas receive nothing. `ospf_unredistribute` MaxAge-flushes the type-5 and
+type-7 LSAs across the areas carrying them. The router re-floods received
+type-5s into every other attached regular area, originates type-4
+summary-ASBR-LSAs for ASBRs that are only reachable inter-area, and merges
+the §16.4 external calculation into Loc-RIB — forwarding addresses become
+the route's next hop.
 
 ```rust
 use lr_ospf::external::{ExternalDestination, ExternalMetricType};
@@ -148,6 +154,40 @@ router.ospf_redistribute(dest);
 
 The C ABI does not expose an OSPF session surface yet; redistribution is
 Rust-level until the daemon gains OSPF support (roadmap item 12).
+
+## OSPF stub/NSSA areas (RFC 2328 §3.6, RFC 3101)
+
+Area types are policy attached to an OSPF area, fixed by the first session
+that connects to it and changeable later via
+`DefaultRouter::ospf_set_area_type`:
+
+```rust
+use lr_router::{OspfAreaType, RouterInstance, SessionConfig};
+
+// Stub area (summary default injected at metric 10, summaries imported):
+let cfg = SessionConfig::ospfv2(rid, 1)
+    .with_ospf_area_type(OspfAreaType::stub(10));
+// Totally-stubby (default only), NSSA and totally-NSSA:
+OspfAreaType::stub_no_summary(10);
+OspfAreaType::nssa(10);          // type-7 default, summaries imported
+OspfAreaType::nssa_no_summary(10); // type-3 default, summaries suppressed
+
+// Runtime conversion (flushes/drops the LSAs the new type refuses):
+router.ospf_set_area_type(1, OspfAreaType::nssa(10));
+```
+
+Behaviour per type: stub/NSSA areas refuse type-5 and type-4 LSAs (both at
+install time and in the AS-scope re-flood path); `no_summary` areas
+additionally refuse every type-3 summary except the default. Border
+routers inject the default route with the configured metric — a type-3
+summary-LSA for stub and `no_summary` areas, a type-7 LSA (P-bit clear)
+for summary-importing NSSAs (RFC 3101 §2.4/§2.7). Type-7 LSAs inside an
+NSSA are calculated by the §2.5 rules (non-zero forwarding addresses must
+be intra-area reachable within the NSSA; border routers only install
+type-7 defaults with the P-bit set) and the elected border router —
+highest router ID among the area's B-bit routers, Nt-bit (RFC 3101
+Appendix B) wins — translates P-bit, non-zero-forwarding-address type-7s
+into AS-scoped type-5s. Stub/NSSA semantics are OSPFv2-only.
 
 ## Babel RFC 8967 authentication
 

@@ -69,7 +69,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Designated-router election | ✅ | |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
-| Stub/NSSA areas | ❌ | stub needs type-5 awareness (block + default-route injection); NSSA adds type-7 LSAs |
+| Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
 | Virtual links | ❌ | non-backbone-only attachment does not summarize (needs backbone) |
 | Auth (cryptographic) | 🟡 | `Auth` trait + AuType model exist; only NullAuth implemented — RFC 2328 §C.3 MD5, RFC 5709 HMAC-SHA, RFC 7166 v3 trailer missing |
 
@@ -130,6 +130,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
 | OSPF external-route E2E (type-5 AS-scope propagation, type-4 ASBR legs, §16.4 type-1/2 + forwarding address, flush lifecycle) | ✅ 🧪 |
+| OSPF stub/NSSA E2E (stub/totally-stubby gating + default injection, NSSA type-7 + P-bit translation with forwarding address, type-7/type-3 defaults, no-summary, translator election, flush lifecycle) | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
 | BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
 | FRR bgpd interop (bidirectional) | ✅ 🧪 |
@@ -168,10 +169,15 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    `ospf_unredistribute` API with AS-scope flooding, type-4 ABR
    origination and per-area external route merging into Loc-RIB;
    verified by 9 unit + 5 three-router E2E tests.
-8. **OSPF stub/NSSA areas** — stub areas (block type-5 flooding, ABR
-   summary-default injection, RFC 2328 §3.6 / §12.4.3) and NSSA (RFC 3101
-   + RFC 3509 type-7 LSAs, P-bit translation to type-5 at the ABR,
-   no-summary option). Depends on 7.
+8. ~~**OSPF stub/NSSA areas**~~ — done: stub areas (type-5/type-4
+   refusal, ABR summary-default, `no_summary` totally-stubby) and NSSA
+   (RFC 3101: area-scoped type-7 LSAs with P-bit + forwarding-address
+   rules, §3.1 translator election, §3.2 translation to type-5, §2.5
+   route calculation, type-7 default with the `no_summary` type-3
+   fallback); area types configured per session
+   (`with_ospf_area_type`) or at runtime (`ospf_set_area_type`);
+   verified by 13 unit + 8 three-/four-router E2E tests. OSPFv2 only —
+   v3 stub/NSSA follows the v3 inter-area work in item 10.
 9. **OSPF virtual links** — §15 transit through non-backbone areas,
    §16.3 virtual-link next-hop resolution, allowing partitioned
    backbone repair.
