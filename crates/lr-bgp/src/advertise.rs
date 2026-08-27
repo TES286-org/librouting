@@ -21,7 +21,7 @@
 //! configured and the route has no OTC yet.
 
 use crate::fsm::BgpPeer;
-use crate::message::update::Update;
+use crate::message::update::{Nlri, Update};
 use crate::message::BgpMessage;
 use crate::path::{
     AttrType, Community, LocalPref, MpNextHop, MpReach, PathAttrFlags, PathAttribute,
@@ -163,7 +163,7 @@ impl BgpPeer {
                         attrs.insert(Self::next_hop_attr(nh));
                     }
                 }
-                update.nlri.push(route.key.prefix);
+                update.nlri.push(Nlri::new(route.path_id, route.key.prefix));
             }
             _ => {
                 let nh = match next_hop {
@@ -173,10 +173,11 @@ impl BgpPeer {
                 };
                 attrs.remove(AttrType::MpReachNlri);
                 attrs.remove(AttrType::MpUnreachNlri);
+                let entries = vec![Nlri::new(route.path_id, route.key.prefix)];
                 attrs.insert(PathAttribute::new(
                     PathAttrFlags::new().set_optional(true),
                     AttrType::MpReachNlri,
-                    MpReach::new(family, nh, vec![route.key.prefix]).encode(),
+                    MpReach::new(family, nh, entries).encode_ex(self.add_path_tx_for(family)),
                 ));
             }
         }
@@ -187,20 +188,29 @@ impl BgpPeer {
         true
     }
 
-    /// Withdraw prefixes previously advertised to this peer.
+    /// Withdraw prefixes previously advertised to this peer (single-path
+    /// mode: the entries carry no RFC 7911 path identifier).
     pub fn withdraw(&mut self, prefixes: &[Prefix], family: NlriFamily) {
+        let entries: Vec<Nlri> = prefixes.iter().map(|p| Nlri::plain(*p)).collect();
+        self.withdraw_paths(&entries, family);
+    }
+
+    /// Withdraw specific paths previously advertised to this peer. Each
+    /// entry carries the RFC 7911 path identifier it was advertised under
+    /// (0 in single-path mode, where the identifier is simply not encoded).
+    pub fn withdraw_paths(&mut self, entries: &[Nlri], family: NlriFamily) {
         if !self.is_established() {
             return;
         }
         let mut update = Update::new();
         match family {
-            NlriFamily::IPV4_UNICAST => update.withdrawn.extend_from_slice(prefixes),
+            NlriFamily::IPV4_UNICAST => update.withdrawn.extend_from_slice(entries),
             _ => {
-                let mp = crate::path::MpUnreach::new(family, prefixes.to_vec());
+                let mp = crate::path::MpUnreach::new(family, entries.to_vec());
                 update.attributes.insert(PathAttribute::new(
                     PathAttrFlags::new().set_optional(true),
                     AttrType::MpUnreachNlri,
-                    mp.encode(),
+                    mp.encode_ex(self.add_path_tx_for(family)),
                 ));
             }
         }
@@ -307,6 +317,7 @@ mod tests {
             next_hop: Some(IpAddr::V4(next_hop)),
             attributes: attrs.into(),
             age_ms: 0,
+            path_id: 0,
         }
     }
 

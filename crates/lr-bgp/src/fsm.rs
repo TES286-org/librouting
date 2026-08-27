@@ -86,7 +86,12 @@ pub enum BgpAction {
     CancelTimer(TimerId),
     Close,
     InstallRoute(lr_core::rib::Route),
-    WithdrawRoute(lr_core::rib::RouteKey),
+    /// Withdraw a route from the local RIB. `path_id` is the RFC 7911
+    /// Add-Path identifier of the withdrawn path (0 = single-path mode).
+    WithdrawRoute {
+        key: lr_core::rib::RouteKey,
+        path_id: u32,
+    },
     /// A negotiated peer requested that this family be re-advertised.
     RouteRefreshRequested(lr_core::nlri::NlriFamily),
     /// End-of-RIB marker received for an address family (RFC 4724 §4).
@@ -106,6 +111,12 @@ pub struct BgpPeer {
     peer_bgp_id: Option<RouterId>,
     peer_as: Option<Asn>,
     peer_capabilities: Vec<Capability>,
+    /// RFC 7911 families on which this speaker transmits Add-Path
+    /// (negotiated at OPEN: the peer advertised Receive).
+    add_path_tx: Vec<NlriFamily>,
+    /// RFC 7911 families on which this speaker receives Add-Path
+    /// (negotiated at OPEN: the peer advertised Send).
+    add_path_rx: Vec<NlriFamily>,
     pub(crate) out_buf: Vec<u8>,
     hold_remaining: u64,
     keepalive_remaining: u64,
@@ -132,6 +143,8 @@ impl BgpPeer {
             peer_bgp_id: None,
             peer_as: None,
             peer_capabilities: Vec::new(),
+            add_path_tx: Vec::new(),
+            add_path_rx: Vec::new(),
             out_buf: Vec::new(),
             hold_remaining: 0,
             keepalive_remaining: 0,
@@ -156,6 +169,24 @@ impl BgpPeer {
     }
     pub fn config(&self) -> &PeerConfig {
         &self.cfg
+    }
+
+    /// Whether RFC 7911 Add-Path NLRI framing is active outbound for
+    /// `family` (we may advertise multiple paths, each identified by a
+    /// path identifier).
+    pub fn add_path_tx_for(&self, family: NlriFamily) -> bool {
+        self.add_path_tx.contains(&family)
+    }
+
+    /// Whether RFC 7911 Add-Path NLRI framing is active inbound for
+    /// `family` (the peer may advertise multiple paths to us).
+    pub fn add_path_rx_for(&self, family: NlriFamily) -> bool {
+        self.add_path_rx.contains(&family)
+    }
+
+    /// Whether Add-Path was negotiated in either direction.
+    pub fn add_path_negotiated(&self) -> bool {
+        !self.add_path_tx.is_empty() || !self.add_path_rx.is_empty()
     }
 
     /// Whether both speakers negotiated the RFC 2918 route-refresh capability.
@@ -338,6 +369,16 @@ impl BgpPeer {
         if let Some(llgr) = crate::extensions::long_lived::open_capability(&self.cfg) {
             caps.push(llgr);
         }
+        // RFC 7911 §4.4: offer to send and receive multiple paths for
+        // every family this session speaks.
+        let add_path_families = crate::extensions::addpath::advertised_families(&self.cfg);
+        if !add_path_families.is_empty() {
+            let tuples: Vec<(u16, u8, bool, bool)> = add_path_families
+                .iter()
+                .map(|f| (f.afi, f.safi, true, true))
+                .collect();
+            caps.push(Capability::add_path(&tuples));
+        }
         let param_value = Capability::encode_set(&caps);
         let mut open = Open::new(self.cfg.local_as, self.cfg.hold_time, self.cfg.local_bgp_id);
         open.params.push(crate::message::open::OpenParam {
@@ -407,6 +448,22 @@ impl BgpPeer {
         self.peer_bgp_id = Some(open.bgp_id);
         self.peer_as = Some(peer_as);
         self.peer_capabilities = caps;
+
+        // RFC 7911 §4.4: Add-Path works per address family and per
+        // direction. We transmit multiple paths only where the peer
+        // offered to receive them, and accept them only where the peer
+        // offered to send. The codec switches NLRI framing accordingly.
+        let peer_add_path: Vec<(u16, u8, bool, bool)> = self
+            .peer_capabilities
+            .iter()
+            .filter_map(Capability::as_add_path)
+            .flatten()
+            .collect();
+        let (tx, rx) = crate::extensions::addpath::negotiated_directions(&self.cfg, &peer_add_path);
+        self.add_path_tx = tx;
+        self.add_path_rx = rx;
+        self.codec
+            .set_add_path(self.add_path_tx.clone(), self.add_path_rx.clone());
         self.negotiated_hold_time = if open.hold_time == 0 {
             self.cfg.hold_time
         } else {
@@ -596,7 +653,10 @@ impl BgpPeer {
         // (RFC 4724 §4 + RFC 4760). Downstream (graceful restart, RFC
         // 9494 §4.2) uses it to conclude table synchronization.
         if u.withdrawn.is_empty() && u.nlri.is_empty() {
-            if let Some(mp) = u.attributes.mp_unreach() {
+            if let Some(mp) = u
+                .attributes
+                .mp_unreach_with(|fam| self.add_path_rx_for(fam))
+            {
                 if mp.nlri.is_empty() && u.attributes.len() == 1 {
                     actions.push(BgpAction::EndOfRib(mp.family));
                 }
@@ -614,17 +674,23 @@ impl BgpPeer {
         };
 
         // --- Withdrawals (IPv4 legacy section) ---
-        for p in &u.withdrawn {
-            actions.push(BgpAction::WithdrawRoute(RouteKey::new(
-                *p,
-                NlriFamily::IPV4_UNICAST,
-            )));
+        for w in &u.withdrawn {
+            actions.push(BgpAction::WithdrawRoute {
+                key: RouteKey::new(w.prefix, NlriFamily::IPV4_UNICAST),
+                path_id: w.path_id,
+            });
         }
 
         // --- MP_UNREACH_NLRI withdrawals (RFC 4760) ---
-        if let Some(mp) = u.attributes.mp_unreach() {
-            for p in &mp.nlri {
-                actions.push(BgpAction::WithdrawRoute(RouteKey::new(*p, mp.family)));
+        if let Some(mp) = u
+            .attributes
+            .mp_unreach_with(|fam| self.add_path_rx_for(fam))
+        {
+            for w in &mp.nlri {
+                actions.push(BgpAction::WithdrawRoute {
+                    key: RouteKey::new(w.prefix, mp.family),
+                    path_id: w.path_id,
+                });
             }
         }
 
@@ -634,7 +700,10 @@ impl BgpPeer {
         // malformed NLRI — the safety net at the router layer reports it.
         let attrs_ok = u.attributes.origin().is_some()
             && (u.attributes.as_path().is_some() || u.attributes.as4_path().is_some())
-            && (u.attributes.next_hop().is_some() || u.attributes.mp_reach().is_some());
+            && (u.attributes.next_hop().is_some()
+                || u.attributes
+                    .mp_reach_with(|fam| self.add_path_rx_for(fam))
+                    .is_some());
 
         // Normalize the attribute bag: the route's internal AS_PATH is
         // always 4-byte-encoded (canonical form) so that downstream
@@ -656,6 +725,7 @@ impl BgpPeer {
 
         let announce = |prefix: lr_core::addr::Prefix,
                         family: NlriFamily,
+                        path_id: u32,
                         next_hop: Option<lr_core::addr::IpAddr>,
                         actions: &mut Vec<BgpAction>| {
             if !attrs_ok {
@@ -673,6 +743,7 @@ impl BgpPeer {
                 next_hop,
                 attributes: normalized.clone().into(),
                 age_ms: 0, // stamped by the router when it imports
+                path_id,
             };
             actions.push(BgpAction::InstallRoute(route));
         };
@@ -680,13 +751,19 @@ impl BgpPeer {
         // IPv4 NLRI: NEXT_HOP from the well-known attribute.
         if !u.nlri.is_empty() {
             let nh = u.attributes.next_hop().map(|n| n.to_ip());
-            for p in &u.nlri {
-                announce(*p, NlriFamily::IPV4_UNICAST, nh, &mut actions);
+            for entry in &u.nlri {
+                announce(
+                    entry.prefix,
+                    NlriFamily::IPV4_UNICAST,
+                    entry.path_id,
+                    nh,
+                    &mut actions,
+                );
             }
         }
 
         // MP_REACH_NLRI (RFC 4760): family + next-hop from the attribute.
-        if let Some(mp) = u.attributes.mp_reach() {
+        if let Some(mp) = u.attributes.mp_reach_with(|fam| self.add_path_rx_for(fam)) {
             let nh = match &mp.next_hop {
                 crate::path::MpNextHop::V4(b) => Some(lr_core::addr::IpAddr::V4(*b)),
                 crate::path::MpNextHop::V6Global(b)
@@ -694,8 +771,8 @@ impl BgpPeer {
                 | crate::path::MpNextHop::V6GlobalLinkLocal(b, _)
                 | crate::path::MpNextHop::V4OverV6(b) => Some(lr_core::addr::IpAddr::V6(*b)),
             };
-            for p in &mp.nlri {
-                announce(*p, mp.family, nh, &mut actions);
+            for entry in &mp.nlri {
+                announce(entry.prefix, mp.family, entry.path_id, nh, &mut actions);
             }
         }
 
@@ -721,7 +798,7 @@ impl StateMachine for BgpPeer {
                 BgpAction::Close => Action::Close,
                 BgpAction::Emit(ev) => Action::EmitEvent(ev),
                 BgpAction::InstallRoute(r) => Action::InstallRoute(r),
-                BgpAction::WithdrawRoute(k) => Action::WithdrawRoute(k),
+                BgpAction::WithdrawRoute { key, path_id } => Action::WithdrawRoute { key, path_id },
                 // The generic core FSM has no route-refresh-specific action;
                 // router-aware embedders consume it through `BgpAction`.
                 BgpAction::RouteRefreshRequested(_) => Action::None,
@@ -1050,8 +1127,9 @@ mod tests {
         use crate::message::update::Update;
         let (mut a, _b) = establish_llgr_pair();
         let mut u = Update::new();
-        u.nlri
-            .push(lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24));
+        u.nlri.push(crate::message::update::Nlri::plain(
+            lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+        ));
         u.attributes.insert(PathAttribute::new(
             PathAttrFlags::new().set_transitive(true),
             AttrType::Origin,
@@ -1059,5 +1137,129 @@ mod tests {
         ));
         let actions = a.step(BgpEvent::Message(BgpMessage::Update(u)));
         assert!(!actions.iter().any(|x| matches!(x, BgpAction::EndOfRib(_))));
+    }
+
+    // ----- RFC 7911 Add-Path -----
+
+    fn establish_add_path_pair() -> (BgpPeer, BgpPeer) {
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.add_path = true;
+        cfg1.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.add_path = true;
+        cfg2.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established() && b.is_established());
+        (a, b)
+    }
+
+    /// RFC 7911 §4.4: when both speakers advertise Add-Path for a family
+    /// both directions are enabled on both sides.
+    #[test]
+    fn add_path_negotiated_both_directions() {
+        let (a, b) = establish_add_path_pair();
+        assert!(a.add_path_negotiated() && b.add_path_negotiated());
+        assert!(a.add_path_tx_for(NlriFamily::IPV4_UNICAST));
+        assert!(a.add_path_rx_for(NlriFamily::IPV4_UNICAST));
+        assert!(b.add_path_tx_for(NlriFamily::IPV4_UNICAST));
+        assert!(b.add_path_rx_for(NlriFamily::IPV4_UNICAST));
+        // A family nobody negotiated stays single-path.
+        assert!(!a.add_path_tx_for(NlriFamily::IPV6_UNICAST));
+        assert!(!a.add_path_rx_for(NlriFamily::IPV6_UNICAST));
+    }
+
+    /// RFC 7911 §4.4: a peer that did not advertise Add-Path keeps the
+    /// session in single-path mode even when we offered it.
+    #[test]
+    fn add_path_not_negotiated_when_peer_silent() {
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.add_path = true;
+        cfg1.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established());
+        assert!(!a.add_path_negotiated());
+        assert!(!a.add_path_tx_for(NlriFamily::IPV4_UNICAST));
+        assert!(!a.add_path_rx_for(NlriFamily::IPV4_UNICAST));
+    }
+
+    /// RFC 7911 §4.3: two paths to the same prefix advertised with distinct
+    /// path identifiers arrive as two InstallRoute actions carrying those
+    /// identifiers; withdrawing one identifier yields a WithdrawRoute for
+    /// exactly that path.
+    #[test]
+    fn add_path_two_paths_install_and_withdraw() {
+        use crate::message::update::{Nlri as Entry, Update};
+        let (_a, mut b) = establish_add_path_pair();
+
+        let mut u = Update::new();
+        u.nlri.push(Entry::new(
+            1,
+            lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+        ));
+        u.nlri.push(Entry::new(
+            2,
+            lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            vec![],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![192, 0, 2, 1],
+        ));
+        let actions = b.step(BgpEvent::Message(BgpMessage::Update(u)));
+        let installed: Vec<u32> = actions
+            .iter()
+            .filter_map(|x| match x {
+                BgpAction::InstallRoute(r) => Some(r.path_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(installed, vec![1, 2], "both paths must install");
+
+        let mut w = Update::new();
+        w.withdrawn.push(Entry::new(
+            1,
+            lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+        ));
+        let actions = b.step(BgpEvent::Message(BgpMessage::Update(w)));
+        assert!(matches!(
+            actions.first(),
+            Some(BgpAction::WithdrawRoute { path_id: 1, .. })
+        ));
     }
 }

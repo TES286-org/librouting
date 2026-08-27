@@ -312,7 +312,9 @@ fn safety_net_rejects_as_loop() {
         // to B's session (emulating what a buggy/malicious peer would send).
         let mut update = lr_bgp::message::update::Update::new();
         update.attributes = attrs;
-        update.nlri.push(prefix);
+        update
+            .nlri
+            .push(lr_bgp::message::update::Nlri::plain(prefix));
         let msg = lr_bgp::BgpMessage::Update(update);
         let codec = lr_bgp::BgpCodec::new();
         let bytes = codec.encode_vec(&msg).unwrap();
@@ -407,7 +409,9 @@ fn best_path_prefers_shorter_as_path() {
         ));
         let mut update = lr_bgp::message::update::Update::new();
         update.attributes = attrs;
-        update.nlri.push(prefix);
+        update
+            .nlri
+            .push(lr_bgp::message::update::Nlri::plain(prefix));
         let bytes = lr_bgp::BgpCodec::new()
             .encode_vec(&lr_bgp::BgpMessage::Update(update))
             .unwrap();

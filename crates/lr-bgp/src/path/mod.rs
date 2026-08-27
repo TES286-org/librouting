@@ -21,6 +21,7 @@ pub use well_known::{
 };
 
 use lr_core::attr::{AttrTag, Attribute, Attributes};
+use lr_core::nlri::NlriFamily;
 
 /// Path attribute flags (RFC 4271 §5.1). Bit positions are documented in
 /// RFC 9072 §2 (extended length) and earlier.
@@ -89,8 +90,6 @@ pub enum AttrType {
     TunnelEncap = 23,
     TrafficEngineering = 24,
     LargeCommunities = 32,
-    /// AddPath (RFC 7911 §3): 1-byte length, then NLRI.
-    BgpAddPath = 30,
     /// RFC 9234: OTC (Only To Customer) — 4-byte unsigned integer.
     Otc = 35,
     /// Unknown attribute code.
@@ -118,7 +117,6 @@ impl AttrType {
             22 => Self::PmsiTunnel,
             23 => Self::TunnelEncap,
             24 => Self::TrafficEngineering,
-            30 => Self::BgpAddPath,
             32 => Self::LargeCommunities,
             35 => Self::Otc,
             _ => Self::Other(v),
@@ -145,7 +143,6 @@ impl AttrType {
             Self::PmsiTunnel => 22,
             Self::TunnelEncap => 23,
             Self::TrafficEngineering => 24,
-            Self::BgpAddPath => 30,
             Self::LargeCommunities => 32,
             Self::Otc => 35,
             Self::Other(v) => v,
@@ -316,6 +313,35 @@ impl PathAttributes {
         let a = self.get(AttrType::MpUnreachNlri)?;
         MpUnreach::decode(&a.value)
     }
+
+    /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`
+    /// decides, per address family, whether each NLRI entry carries a
+    /// 4-octet path identifier (the family is read from the attribute value
+    /// itself before decoding the entries).
+    pub fn mp_reach_with(&self, add_path: impl Fn(NlriFamily) -> bool) -> Option<MpReach> {
+        let a = self.get(AttrType::MpReachNlri)?;
+        let family = read_family_prefix(&a.value)?;
+        MpReach::decode_ex(&a.value, add_path(family))
+    }
+
+    /// Decode MP_UNREACH_NLRI with RFC 7911 Add-Path awareness — see
+    /// [`Self::mp_reach_with`].
+    pub fn mp_unreach_with(&self, add_path: impl Fn(NlriFamily) -> bool) -> Option<MpUnreach> {
+        let a = self.get(AttrType::MpUnreachNlri)?;
+        let family = read_family_prefix(&a.value)?;
+        MpUnreach::decode_ex(&a.value, add_path(family))
+    }
+}
+
+/// Read the (AFI, SAFI) prefix of an MP_REACH/MP_UNREACH attribute value.
+fn read_family_prefix(value: &[u8]) -> Option<lr_core::nlri::NlriFamily> {
+    if value.len() < 3 {
+        return None;
+    }
+    Some(lr_core::nlri::NlriFamily {
+        afi: u16::from_be_bytes([value[0], value[1]]),
+        safi: value[2],
+    })
 }
 
 impl From<PathAttributes> for Attributes {

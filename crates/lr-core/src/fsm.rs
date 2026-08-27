@@ -24,8 +24,12 @@ pub enum Action {
     CancelTimer(TimerId),
     /// Install a route into the local RIB (post-policy).
     InstallRoute(crate::rib::Route),
-    /// Withdraw a route from the local RIB.
-    WithdrawRoute(crate::rib::RouteKey),
+    /// Withdraw a route from the local RIB. `path_id` is the RFC 7911
+    /// Add-Path identifier of the withdrawn path (0 = single-path mode).
+    WithdrawRoute {
+        key: crate::rib::RouteKey,
+        path_id: u32,
+    },
     /// Emit a router-level event (state change, log, error).
     EmitEvent(crate::event::Event),
     /// Tear down the session; embedder will close the transport.

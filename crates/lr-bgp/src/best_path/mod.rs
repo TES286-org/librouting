@@ -417,6 +417,7 @@ mod tests {
             next_hop: None,
             attributes: attrs,
             age_ms: 0,
+            path_id: 0,
         }
     }
 
@@ -437,6 +438,7 @@ mod tests {
             next_hop: None,
             attributes: a,
             age_ms: 0,
+            path_id: 0,
         }
     }
 

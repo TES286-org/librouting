@@ -18,7 +18,7 @@ use crate::message::{
     keepalive::Keepalive,
     open::{Open, OpenParam},
     route_refresh::RouteRefresh,
-    update::Update,
+    update::{Nlri, Update},
     BgpHeader, BgpMessage, BgpMessageType,
 };
 use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
@@ -30,12 +30,24 @@ use lr_core::error::EncodeError;
 use lr_core::nlri::NlriFamily;
 
 /// BGP-4 message codec. Stateless encoder + stateful decoder (carryover).
+///
+/// Add-Path (RFC 7911) is a negotiated, per-address-family NLRI framing
+/// change: once the OPEN exchange completes, `add_path_tx` lists the
+/// families whose outbound NLRI carries 4-octet path identifiers and
+/// `add_path_rx` the families whose inbound NLRI does. Both default to
+/// empty (plain single-path framing).
 #[derive(Default)]
 pub struct BgpCodec {
     /// Carryover buffer for partial frames.
     carryover: Vec<u8>,
     /// True if the OPEN has been negotiated and 4-byte AS is in use.
     asn4: bool,
+    /// Address families whose outbound NLRI entries carry RFC 7911 path
+    /// identifiers (we advertise multiple paths to the peer).
+    add_path_tx: Vec<NlriFamily>,
+    /// Address families whose inbound NLRI entries carry RFC 7911 path
+    /// identifiers (the peer advertises multiple paths to us).
+    add_path_rx: Vec<NlriFamily>,
 }
 
 impl BgpCodec {
@@ -52,12 +64,28 @@ impl BgpCodec {
         self.asn4 = v;
     }
 
+    /// Set the address families whose NLRI carries RFC 7911 path
+    /// identifiers in each direction (call after OPEN negotiation).
+    pub fn set_add_path(&mut self, tx: Vec<NlriFamily>, rx: Vec<NlriFamily>) {
+        self.add_path_tx = tx;
+        self.add_path_rx = rx;
+    }
+
+    fn tx_add_path(&self, family: NlriFamily) -> bool {
+        self.add_path_tx.contains(&family)
+    }
+
+    fn rx_add_path(&self, family: NlriFamily) -> bool {
+        self.add_path_rx.contains(&family)
+    }
+
     /// Direct decode of a complete frame from a slice. Returns None if the
     /// slice doesn't contain a full frame.
     pub fn decode_slice(&mut self, buf: &[u8]) -> Result<Option<BgpMessage>, BgpError> {
         // Append incoming bytes to the carryover, then attempt decode.
         self.carryover.extend_from_slice(buf);
-        let consumed = match try_decode_frame(&self.carryover)? {
+        let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
+        let consumed = match try_decode_frame(&self.carryover, rx_v4)? {
             Some((n, msg)) => {
                 // Drain the consumed prefix.
                 self.carryover.drain(0..n);
@@ -87,7 +115,13 @@ const MAX_LEN: u16 = 4096;
 /// Attempt to decode one frame from `buf`. Returns `Ok(Some((consumed, msg)))`
 /// on success, `Ok(None)` when the buffer doesn't yet contain a full frame,
 /// and `Err(BgpError)` on a protocol-level parse failure.
-fn try_decode_frame(buf: &[u8]) -> Result<Option<(usize, BgpMessage)>, BgpError> {
+///
+/// `rx_v4_add_path` selects the RFC 7911 framing (4-octet path identifier
+/// ahead of each prefix) for the plain IPv4 NLRI/withdrawn sections.
+fn try_decode_frame(
+    buf: &[u8],
+    rx_v4_add_path: bool,
+) -> Result<Option<(usize, BgpMessage)>, BgpError> {
     if buf.len() < BgpHeader::LEN {
         return Ok(None);
     }
@@ -112,7 +146,7 @@ fn try_decode_frame(buf: &[u8]) -> Result<Option<(usize, BgpMessage)>, BgpError>
     let kind = buf[18];
     let body_len = (len as usize) - BgpHeader::LEN;
     let body = &buf[BgpHeader::LEN..BgpHeader::LEN + body_len];
-    let msg = decode_body(kind, body)?;
+    let msg = decode_body(kind, body, rx_v4_add_path)?;
     Ok(Some((len as usize, msg)))
 }
 
@@ -128,7 +162,9 @@ impl Encoder<BgpMessage> for BgpCodec {
             .ok_or(EncodeError::BufferFull)?;
         match msg {
             BgpMessage::Open(o) => encode_open(o, out)?,
-            BgpMessage::Update(u) => encode_update(u, self.asn4, out)?,
+            BgpMessage::Update(u) => {
+                encode_update(u, self.tx_add_path(NlriFamily::IPV4_UNICAST), out)?
+            }
             BgpMessage::Notification(n) => encode_notification(n, out)?,
             BgpMessage::Keepalive(_) => {}
             BgpMessage::RouteRefresh(r) => encode_route_refresh(r, out)?,
@@ -147,7 +183,8 @@ impl Decoder<BgpMessage> for BgpCodec {
     ) -> Result<Option<BgpMessage>, lr_core::error::ParseError> {
         // Append the slice into carryover and try decode.
         self.carryover.extend_from_slice(src.chunk());
-        let result = try_decode_frame(&self.carryover).map_err(|e| match e {
+        let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
+        let result = try_decode_frame(&self.carryover, rx_v4).map_err(|e| match e {
             BgpError::Notification(n) => {
                 lr_core::error::ParseError::invalid(BgpHeader::LEN, "bgp.body.notification")
                     .with_detail(format!("code={} sub={}", n.error_code, n.error_subcode))
@@ -176,7 +213,7 @@ impl Decoder<BgpMessage> for BgpCodec {
     }
 }
 
-fn decode_body(kind: u8, body: &[u8]) -> Result<BgpMessage, BgpError> {
+fn decode_body(kind: u8, body: &[u8], rx_v4_add_path: bool) -> Result<BgpMessage, BgpError> {
     let kind = BgpMessageType::from_u8(kind).ok_or_else(|| {
         BgpError::Notification(BgpNotification::new(
             crate::error::BgpErrorCode::Header as u8,
@@ -186,7 +223,7 @@ fn decode_body(kind: u8, body: &[u8]) -> Result<BgpMessage, BgpError> {
     })?;
     match kind {
         BgpMessageType::Open => Ok(BgpMessage::Open(decode_open(body)?)),
-        BgpMessageType::Update => Ok(BgpMessage::Update(decode_update(body)?)),
+        BgpMessageType::Update => Ok(BgpMessage::Update(decode_update(body, rx_v4_add_path)?)),
         BgpMessageType::Notification => Ok(BgpMessage::Notification(decode_notification(body))),
         BgpMessageType::Keepalive => {
             if !body.is_empty() {
@@ -246,7 +283,7 @@ fn decode_open(body: &[u8]) -> Result<Open, BgpError> {
     })
 }
 
-fn decode_update(body: &[u8]) -> Result<Update, BgpError> {
+fn decode_update(body: &[u8], rx_v4_add_path: bool) -> Result<Update, BgpError> {
     if body.len() < 4 {
         return Err(BgpError::Notification(BgpNotification::new(
             crate::error::BgpErrorCode::Update as u8,
@@ -263,7 +300,7 @@ fn decode_update(body: &[u8]) -> Result<Update, BgpError> {
         )));
     }
     let withdrawn_bytes = &body[2..2 + withdrawn_len];
-    let withdrawn = decode_nlri_set(withdrawn_bytes).map_err(BgpError::Codec)?;
+    let withdrawn = decode_nlri_set(withdrawn_bytes, rx_v4_add_path).map_err(BgpError::Codec)?;
     let mut i = 2 + withdrawn_len;
     if i + 2 > body.len() {
         return Err(BgpError::Notification(BgpNotification::new(
@@ -284,7 +321,7 @@ fn decode_update(body: &[u8]) -> Result<Update, BgpError> {
     let attr_bytes = &body[i..i + attr_len];
     let attributes = decode_path_attributes(attr_bytes)?;
     i += attr_len;
-    let nlri = decode_nlri_set(&body[i..]).map_err(BgpError::Codec)?;
+    let nlri = decode_nlri_set(&body[i..], rx_v4_add_path).map_err(BgpError::Codec)?;
     Ok(Update {
         withdrawn,
         attributes,
@@ -292,10 +329,23 @@ fn decode_update(body: &[u8]) -> Result<Update, BgpError> {
     })
 }
 
-fn decode_nlri_set(bytes: &[u8]) -> Result<Vec<Prefix>, String> {
+/// Decode the plain IPv4 NLRI section. With RFC 7911 Add-Path active each
+/// entry is `<path-id:4, prefix-len:1, prefix>`; otherwise `<prefix-len:1,
+/// prefix>`.
+fn decode_nlri_set(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, String> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
+        let path_id = if add_path {
+            if i + 4 > bytes.len() {
+                return Err(format!("truncated NLRI at offset {}", i));
+            }
+            let id = u32::from_be_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+            i += 4;
+            id
+        } else {
+            0
+        };
         let pl = bytes[i];
         i += 1;
         let n = (pl as usize).div_ceil(8);
@@ -305,7 +355,7 @@ fn decode_nlri_set(bytes: &[u8]) -> Result<Vec<Prefix>, String> {
         let mut a = [0u8; 4];
         a[..n].copy_from_slice(&bytes[i..i + n]);
         i += n;
-        out.push(Prefix::new_v4(a, pl));
+        out.push(Nlri::new(path_id, Prefix::new_v4(a, pl)));
     }
     Ok(out)
 }
@@ -411,11 +461,15 @@ fn encode_open(o: &Open, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
     Ok(())
 }
 
-fn encode_update(u: &Update, _asn4: bool, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+fn encode_update(
+    u: &Update,
+    tx_v4_add_path: bool,
+    out: &mut WriteBuf<'_>,
+) -> Result<(), EncodeError> {
     let withdrawn_len_pos = out.reserve(2).ok_or(EncodeError::BufferFull)?;
     let withdrawn_start = out.position();
     for w in &u.withdrawn {
-        encode_nlri_prefix(w, out)?;
+        encode_nlri(w, tx_v4_add_path, out)?;
     }
     let wlen = (out.position() - withdrawn_start) as u16;
     out.patch(withdrawn_len_pos, &wlen.to_be_bytes())
@@ -431,16 +485,23 @@ fn encode_update(u: &Update, _asn4: bool, out: &mut WriteBuf<'_>) -> Result<(), 
         .ok_or(EncodeError::BufferFull)?;
 
     for n in &u.nlri {
-        encode_nlri_prefix(n, out)?;
+        encode_nlri(n, tx_v4_add_path, out)?;
     }
     Ok(())
 }
 
-fn encode_nlri_prefix(p: &Prefix, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+/// Encode one NLRI entry into the plain IPv4 section. With RFC 7911
+/// Add-Path active the 4-octet path identifier precedes the prefix.
+fn encode_nlri(entry: &Nlri, add_path: bool, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+    let p = &entry.prefix;
     if !p.is_ipv4() {
         return Err(EncodeError::InvalidValue(
             "NLRI in legacy section must be IPv4",
         ));
+    }
+    if add_path {
+        out.put_u32_be(entry.path_id)
+            .ok_or(EncodeError::BufferFull)?;
     }
     out.put_u8(p.prefix_len).ok_or(EncodeError::BufferFull)?;
     let n = (p.prefix_len as usize).div_ceil(8);
@@ -500,6 +561,61 @@ mod tests {
         c2.decode_slice(&bytes).unwrap().unwrap()
     }
 
+    /// RFC 7911 §4.3: encode and decode an UPDATE whose IPv4 NLRI and
+    /// withdrawn sections carry 4-octet path identifiers. The framing only
+    /// roundtrips when both sides use the negotiated mode.
+    #[test]
+    fn update_add_path_roundtrip() {
+        let mut u = Update::new();
+        u.nlri
+            .push(Nlri::new(1, Prefix::new_v4([203, 0, 113, 0], 24)));
+        u.nlri
+            .push(Nlri::new(2, Prefix::new_v4([203, 0, 113, 0], 24)));
+        u.withdrawn
+            .push(Nlri::new(7, Prefix::new_v4([198, 51, 100, 0], 24)));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+
+        let mut tx = BgpCodec::new().with_asn4(true);
+        tx.set_add_path(vec![NlriFamily::IPV4_UNICAST], vec![]);
+        let bytes = tx.encode_vec(&BgpMessage::Update(u.clone())).unwrap();
+        // Each of the three entries carries 4 extra identifier octets.
+        let plain = BgpCodec::new()
+            .with_asn4(true)
+            .encode_vec(&BgpMessage::Update(u.clone()))
+            .unwrap();
+        assert_eq!(bytes.len(), plain.len() + 12);
+
+        let mut rx = BgpCodec::new().with_asn4(true);
+        rx.set_add_path(
+            vec![NlriFamily::IPV4_UNICAST],
+            vec![NlriFamily::IPV4_UNICAST],
+        );
+        match rx.decode_slice(&bytes).unwrap().unwrap() {
+            BgpMessage::Update(d) => {
+                assert_eq!(d.nlri.len(), 2);
+                assert_eq!(d.nlri[0].path_id, 1);
+                assert_eq!(d.nlri[1].path_id, 2);
+                assert_eq!(d.withdrawn[0].path_id, 7);
+            }
+            _ => panic!("expected UPDATE"),
+        }
+
+        // Without the negotiated mode the same bytes misparse (the
+        // identifier octets are read as prefix data).
+        let mut blind = BgpCodec::new().with_asn4(true);
+        let mis = blind.decode_slice(&bytes);
+        assert!(
+            mis.is_err()
+                || !matches!(&mis.unwrap().unwrap(), BgpMessage::Update(d)
+                if d.nlri.iter().all(|n| n.path_id == 0) && d.nlri.len() == 2),
+            "add-path bytes must not decode as clean single-path NLRI"
+        );
+    }
+
     #[test]
     fn keepalive_roundtrip() {
         let m = BgpMessage::Keepalive(Keepalive);
@@ -557,14 +673,15 @@ mod tests {
             AttrType::MultiExitDisc,
             Med(100).encode().to_vec(),
         ));
-        u.nlri.push(Prefix::new_v4([192, 168, 1, 0], 24));
+        u.nlri
+            .push(Nlri::plain(Prefix::new_v4([192, 168, 1, 0], 24)));
 
         let m = BgpMessage::Update(u.clone());
         let dec = roundtrip(m, true);
         match dec {
             BgpMessage::Update(d) => {
                 assert_eq!(d.nlri.len(), 1);
-                assert_eq!(d.nlri[0].prefix_len, 24);
+                assert_eq!(d.nlri[0].prefix.prefix_len, 24);
                 assert_eq!(d.attributes.origin(), Some(Origin::new(OriginKind::Igp)));
                 assert!(d.attributes.as_path().is_some());
             }
@@ -575,8 +692,10 @@ mod tests {
     #[test]
     fn update_withdrawn() {
         let mut u = Update::new();
-        u.withdrawn.push(Prefix::new_v4([10, 0, 0, 0], 8));
-        u.withdrawn.push(Prefix::new_v4([192, 168, 0, 0], 16));
+        u.withdrawn
+            .push(Nlri::plain(Prefix::new_v4([10, 0, 0, 0], 8)));
+        u.withdrawn
+            .push(Nlri::plain(Prefix::new_v4([192, 168, 0, 0], 16)));
         let m = BgpMessage::Update(u.clone());
         let dec = roundtrip(m, false);
         match dec {

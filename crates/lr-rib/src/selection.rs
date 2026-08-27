@@ -74,6 +74,7 @@ mod tests {
             next_hop: None,
             attributes: lr_core::attr::Attributes::new(),
             age_ms: age,
+            path_id: 0,
         }
     }
 

@@ -96,4 +96,11 @@ pub struct Route {
     pub next_hop: Option<crate::addr::IpAddr>,
     pub attributes: crate::attr::Attributes,
     pub age_ms: u64,
+    /// BGP Add-Path identifier (RFC 7911): distinguishes multiple paths
+    /// to the same prefix advertised over one session. `0` means no
+    /// add-path discrimination (the single-path default). On routes learned
+    /// from a peer it is the peer's path identifier; on routes advertised
+    /// by this speaker it is the identifier this speaker assigned for the
+    /// egress session.
+    pub path_id: u32,
 }

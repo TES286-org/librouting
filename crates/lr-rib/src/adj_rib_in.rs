@@ -4,10 +4,16 @@ use std::collections::BTreeMap;
 
 use lr_core::rib::{Route, RouteKey, RouteOrigin};
 
-/// Per-peer pre-policy RIB. Keyed by `(origin, route key)`.
+/// Per-peer pre-policy RIB. Keyed by `(origin, route key, path_id)`.
+///
+/// The third key element is the RFC 7911 Add-Path identifier: a peer that
+/// negotiated Add-Path may advertise several paths to the same prefix,
+/// distinguished by their path identifiers. For single-path operation
+/// every identifier is 0, so the map degenerates to one entry per
+/// `(origin, key)` — exactly the pre-Add-Path behaviour.
 #[derive(Default)]
 pub struct AdjRibIn {
-    inner: BTreeMap<(RouteOrigin, RouteKey), Route>,
+    inner: BTreeMap<(RouteOrigin, RouteKey, u32), Route>,
 }
 
 impl AdjRibIn {
@@ -16,12 +22,14 @@ impl AdjRibIn {
     }
 
     pub fn feed_pre_policy(&mut self, origin: RouteOrigin, route: Route) {
-        let key = (origin, route.key.clone());
+        let key = (origin, route.key.clone(), route.path_id);
         self.inner.insert(key, route);
     }
 
-    pub fn withdraw(&mut self, origin: RouteOrigin, key: &RouteKey) -> Option<Route> {
-        self.inner.remove(&(origin, key.clone()))
+    /// Remove one path: `(origin, key, path_id)`. Returns the removed
+    /// route when it existed.
+    pub fn withdraw(&mut self, origin: RouteOrigin, key: &RouteKey, path_id: u32) -> Option<Route> {
+        self.inner.remove(&(origin, key.clone(), path_id))
     }
 
     pub fn iter_origin<'a>(&'a self, origin: RouteOrigin) -> impl Iterator<Item = &'a Route> + 'a {
@@ -33,6 +41,7 @@ impl AdjRibIn {
                         lr_core::addr::Prefix::new_v4([0; 4], 0),
                         lr_core::nlri::NlriFamily::IPV4_UNICAST,
                     ),
+                    u32::MIN,
                 )
                     ..(
                         origin,
@@ -40,14 +49,15 @@ impl AdjRibIn {
                             lr_core::addr::Prefix::new_v4([0xff; 4], 32),
                             lr_core::nlri::NlriFamily::IPV4_UNICAST,
                         ),
+                        u32::MAX,
                     ),
             )
-            .filter(move |((o, _), _)| *o == origin)
+            .filter(move |((o, _, _), _)| *o == origin)
             .map(|(_, r)| r)
     }
 
-    pub fn get(&self, origin: RouteOrigin, key: &RouteKey) -> Option<&Route> {
-        self.inner.get(&(origin, key.clone()))
+    pub fn get(&self, origin: RouteOrigin, key: &RouteKey, path_id: u32) -> Option<&Route> {
+        self.inner.get(&(origin, key.clone(), path_id))
     }
 
     /// Mutate every route contributed by `origin`. The closure returns the
@@ -58,10 +68,10 @@ impl AdjRibIn {
     where
         F: FnMut(Route) -> Option<Route>,
     {
-        let keys: Vec<(RouteOrigin, RouteKey)> = self
+        let keys: Vec<(RouteOrigin, RouteKey, u32)> = self
             .inner
             .keys()
-            .filter(|(o, _)| *o == origin)
+            .filter(|(o, _, _)| *o == origin)
             .cloned()
             .collect();
         for k in keys {
@@ -81,8 +91,8 @@ impl AdjRibIn {
     pub fn origins_for<'a>(&'a self, key: &'a RouteKey) -> impl Iterator<Item = RouteOrigin> + 'a {
         self.inner
             .keys()
-            .filter(move |(_, k)| k == key)
-            .map(|(o, _)| *o)
+            .filter(move |(_, k, _)| k == key)
+            .map(|(o, _, _)| *o)
     }
 
     pub fn len(&self) -> usize {
@@ -98,7 +108,7 @@ impl AdjRibIn {
         let keys: Vec<_> = self
             .inner
             .keys()
-            .filter(|(o, _)| *o == origin)
+            .filter(|(o, _, _)| *o == origin)
             .cloned()
             .collect();
         for k in keys {
@@ -114,7 +124,7 @@ mod tests {
     use lr_core::nlri::NlriFamily;
     use lr_core::rib::{Preference, Protocol, Route};
 
-    fn route(prefix: [u8; 4], pl: u8, origin: RouteOrigin) -> Route {
+    fn route(prefix: [u8; 4], pl: u8, origin: RouteOrigin, path_id: u32) -> Route {
         Route {
             key: RouteKey::new(Prefix::new_v4(prefix, pl), NlriFamily::IPV4_UNICAST),
             origin,
@@ -123,6 +133,7 @@ mod tests {
             next_hop: None,
             attributes: lr_core::attr::Attributes::new(),
             age_ms: 0,
+            path_id,
         }
     }
 
@@ -130,12 +141,46 @@ mod tests {
     fn feed_and_get() {
         let mut rib = AdjRibIn::new();
         let o = RouteOrigin { proto: 1, peer: 1 };
-        rib.feed_pre_policy(o, route([10, 0, 0, 0], 8, o));
+        rib.feed_pre_policy(o, route([10, 0, 0, 0], 8, o, 0));
         assert_eq!(rib.len(), 1);
         let k = RouteKey::new(Prefix::new_v4([10, 0, 0, 0], 8), NlriFamily::IPV4_UNICAST);
-        let r = rib.get(o, &k);
+        let r = rib.get(o, &k, 0);
         assert!(r.is_some());
-        rib.withdraw(o, &k);
+        rib.withdraw(o, &k, 0);
         assert_eq!(rib.len(), 0);
+    }
+
+    /// RFC 7911: two paths to the same prefix from one peer coexist when
+    /// their path identifiers differ; withdrawing one leaves the other.
+    #[test]
+    fn add_path_paths_coexist_per_identifier() {
+        let mut rib = AdjRibIn::new();
+        let o = RouteOrigin { proto: 0, peer: 9 };
+        rib.feed_pre_policy(o, route([203, 0, 113, 0], 24, o, 1));
+        rib.feed_pre_policy(o, route([203, 0, 113, 0], 24, o, 2));
+        assert_eq!(rib.len(), 2);
+
+        let k = RouteKey::new(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+        assert!(rib.withdraw(o, &k, 1).is_some());
+        assert_eq!(rib.len(), 1);
+        assert!(rib.get(o, &k, 2).is_some());
+        // A re-advertisement under the same identifier replaces in place.
+        rib.feed_pre_policy(o, route([203, 0, 113, 0], 24, o, 2));
+        assert_eq!(rib.len(), 1);
+    }
+
+    /// Same identifier from two different origins is two distinct paths
+    /// (identifiers are scoped to the advertising session).
+    #[test]
+    fn same_identifier_different_origins_coexist() {
+        let mut rib = AdjRibIn::new();
+        let a = RouteOrigin { proto: 0, peer: 1 };
+        let b = RouteOrigin { proto: 0, peer: 2 };
+        rib.feed_pre_policy(a, route([203, 0, 113, 0], 24, a, 1));
+        rib.feed_pre_policy(b, route([203, 0, 113, 0], 24, b, 1));
+        assert_eq!(rib.len(), 2);
     }
 }

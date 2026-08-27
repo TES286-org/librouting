@@ -87,7 +87,9 @@ pub trait RouterInstance {
 /// Per-session protocol runtime.
 enum SessionState {
     Bgp {
-        peer: BgpPeer,
+        /// Boxed: the FSM outweighs the other runtimes by far and would
+        /// inflate every session slot otherwise.
+        peer: Box<BgpPeer>,
         conn: MemoryConn,
         established: bool,
     },
@@ -141,7 +143,7 @@ struct GracefulRestartState {
     /// Keys refreshed since the session re-established — used at EoR and
     /// at LLST expiry during resync to drop routes the peer did not
     /// resend (RFC 4724 §4.1, RFC 9494 §4.2).
-    refreshed: BTreeSet<RouteKey>,
+    refreshed: BTreeSet<(RouteKey, u32)>,
 }
 
 impl SessionState {
@@ -442,6 +444,7 @@ impl BabelRuntime {
                 }),
                 attributes: lr_core::attr::Attributes::new(),
                 age_ms: 0,
+                path_id: 0,
             })
             .collect()
     }
@@ -574,6 +577,7 @@ impl DefaultRouter {
             next_hop,
             attributes: attrs.into(),
             age_ms: 0,
+            path_id: 0,
         };
         self.loc_rib.install(route.clone());
         self.originated.insert(key.clone(), route.clone());
@@ -684,14 +688,14 @@ impl DefaultRouter {
         // are deleted; RFC 9494 §4.2 keeps the LLST timer running until
         // then).
         if let Some(state) = self.graceful_restart.get_mut(&origin.peer) {
-            state.refreshed.insert(key.clone());
+            state.refreshed.insert((key.clone(), route.path_id));
         }
         self.adj_rib_in.feed_pre_policy(origin, route);
         self.reselect(&key);
     }
 
-    fn withdraw_from_session(&mut self, origin: RouteOrigin, key: &RouteKey) {
-        if self.adj_rib_in.withdraw(origin, key).is_some() {
+    fn withdraw_from_session(&mut self, origin: RouteOrigin, key: &RouteKey, path_id: u32) {
+        if self.adj_rib_in.withdraw(origin, key, path_id).is_some() {
             self.reselect(key);
         }
     }
@@ -1038,14 +1042,14 @@ impl DefaultRouter {
                     self.timers.cancel(encode_timer(session, id));
                 }
                 BgpAction::InstallRoute(r) => self.import_route(r),
-                BgpAction::WithdrawRoute(k) => {
+                BgpAction::WithdrawRoute { key, path_id } => {
                     // Withdrawals carry the origin implicitly: the session
                     // that reports them is the origin.
                     let origin = RouteOrigin {
                         proto: 0,
                         peer: session,
                     };
-                    self.withdraw_from_session(origin, &k);
+                    self.withdraw_from_session(origin, &key, path_id);
                 }
                 BgpAction::RouteRefreshRequested(family) => {
                     self.reannounce_to_session(session, family);
@@ -1201,7 +1205,7 @@ impl DefaultRouter {
         &mut self,
         session: u64,
         llgr_deadlines: &BTreeMap<NlriFamily, u64>,
-        refreshed: &BTreeSet<RouteKey>,
+        refreshed: &BTreeSet<(RouteKey, u32)>,
     ) {
         let origins = [
             RouteOrigin {
@@ -1218,11 +1222,11 @@ impl DefaultRouter {
             affected.extend(
                 self.adj_rib_in
                     .iter_origin(origin)
-                    .filter(|r| !refreshed.contains(&r.key))
+                    .filter(|r| !refreshed.contains(&(r.key.clone(), r.path_id)))
                     .map(|r| r.key.clone()),
             );
             self.adj_rib_in.mutate_origin(origin, |mut route| {
-                if refreshed.contains(&route.key) {
+                if refreshed.contains(&(route.key.clone(), route.path_id)) {
                     // Freshly re-advertised during resynchronization.
                     return Some(route);
                 }
@@ -1290,7 +1294,7 @@ impl DefaultRouter {
         &mut self,
         session: u64,
         family: NlriFamily,
-        refreshed: &BTreeSet<RouteKey>,
+        refreshed: &BTreeSet<(RouteKey, u32)>,
     ) {
         let origins = [
             RouteOrigin {
@@ -1304,15 +1308,17 @@ impl DefaultRouter {
         ];
         let mut purged = 0usize;
         for origin in origins {
-            let stale_keys: Vec<RouteKey> = self
+            let stale: Vec<(RouteKey, u32)> = self
                 .adj_rib_in
                 .iter_origin(origin)
-                .filter(|r| r.key.family == family && !refreshed.contains(&r.key))
-                .map(|r| r.key.clone())
+                .filter(|r| {
+                    r.key.family == family && !refreshed.contains(&(r.key.clone(), r.path_id))
+                })
+                .map(|r| (r.key.clone(), r.path_id))
                 .collect();
-            purged += stale_keys.len();
-            for key in stale_keys {
-                self.adj_rib_in.withdraw(origin, &key);
+            purged += stale.len();
+            for (key, path_id) in stale {
+                self.adj_rib_in.withdraw(origin, &key, path_id);
                 self.reselect(&key);
             }
         }
@@ -1454,7 +1460,7 @@ impl RouterInstance for DefaultRouter {
                 self.sessions.insert(
                     h.0,
                     SessionState::Bgp {
-                        peer,
+                        peer: Box::new(peer),
                         conn: MemoryConn::new(),
                         established: false,
                     },
@@ -1543,19 +1549,20 @@ impl RouterInstance for DefaultRouter {
         self.mrai.remove(&h.0);
         self.graceful_restart.remove(&h.0);
         // Remove every route that session contributed and re-select.
-        let keys: Vec<RouteKey> = self
+        let keys: Vec<(RouteKey, u32)> = self
             .adj_rib_in
             .iter_all()
             .filter(|r| r.origin.peer == h.0)
-            .map(|r| r.key.clone())
+            .map(|r| (r.key.clone(), r.path_id))
             .collect();
-        for k in keys {
+        for (k, path_id) in keys {
             self.withdraw_from_session(
                 RouteOrigin {
                     proto: 0,
                     peer: h.0,
                 },
                 &k,
+                path_id,
             );
         }
         // OSPF: LSAs live per area, so the area survives while any session
@@ -1941,6 +1948,7 @@ impl DefaultRouter {
                     next_hop: None,
                     attributes: lr_core::attr::Attributes::new(),
                     age_ms: 0,
+                    path_id: 0,
                 };
                 (key, route)
             })

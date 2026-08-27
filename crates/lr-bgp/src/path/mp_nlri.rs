@@ -1,8 +1,11 @@
-//! MP-BGP NLRI (RFC 4760): MP_REACH_NLRI (type 14) and MP_UNREACH_NLRI (type 15).
+//! MP-BGP NLRI (RFC 4760): MP_REACH_NLRI (type 14) and MP_UNREACH_NLRI (type 15),
+//! with RFC 7911 Add-Path NLRI encoding.
 
 use lr_core::addr::IpAddr;
 use lr_core::addr::Prefix;
 use lr_core::nlri::NlriFamily;
+
+use crate::message::update::Nlri;
 
 /// NEXT_HOP encoding for MP-BGP. RFC 4760 §3.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -44,11 +47,11 @@ impl MpNextHop {
 pub struct MpReach {
     pub family: NlriFamily,
     pub next_hop: MpNextHop,
-    pub nlri: Vec<Prefix>,
+    pub nlri: Vec<Nlri>,
 }
 
 impl MpReach {
-    pub fn new(family: NlriFamily, next_hop: MpNextHop, nlri: Vec<Prefix>) -> Self {
+    pub fn new(family: NlriFamily, next_hop: MpNextHop, nlri: Vec<Nlri>) -> Self {
         Self {
             family,
             next_hop,
@@ -57,6 +60,12 @@ impl MpReach {
     }
 
     pub fn decode(b: &[u8]) -> Option<Self> {
+        Self::decode_ex(b, false)
+    }
+
+    /// Decode with RFC 7911 Add-Path: when `add_path` is true every NLRI
+    /// entry is prefixed by a 4-octet path identifier.
+    pub fn decode_ex(b: &[u8], add_path: bool) -> Option<Self> {
         if b.len() < 3 + 1 {
             return None;
         }
@@ -81,7 +90,18 @@ impl MpReach {
         i += 1;
         let mut nlri = Vec::new();
         while i < b.len() {
-            // Prefix-length (1) + ceil(pl / 8) bytes
+            // Prefix-length (1) + ceil(pl / 8) bytes, optionally after a
+            // 4-octet Add-Path identifier (RFC 7911 §4.3).
+            let path_id = if add_path {
+                if i + 4 > b.len() {
+                    return None;
+                }
+                let id = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+                i += 4;
+                id
+            } else {
+                0
+            };
             let pl = b[i];
             i += 1;
             let n = (pl as usize).div_ceil(8);
@@ -103,7 +123,7 @@ impl MpReach {
                 }
                 _ => return None,
             };
-            nlri.push(p);
+            nlri.push(Nlri::new(path_id, p));
         }
         Some(Self {
             family,
@@ -113,6 +133,12 @@ impl MpReach {
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_ex(false)
+    }
+
+    /// Encode with RFC 7911 Add-Path: when `add_path` is true every NLRI
+    /// entry is prefixed by its 4-octet path identifier.
+    pub fn encode_ex(&self, add_path: bool) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.family.afi.to_be_bytes());
         out.push(self.family.safi);
@@ -120,7 +146,11 @@ impl MpReach {
         out.push(nh.len() as u8);
         out.extend_from_slice(&nh);
         out.push(0); // reserved
-        for p in &self.nlri {
+        for entry in &self.nlri {
+            if add_path {
+                out.extend_from_slice(&entry.path_id.to_be_bytes());
+            }
+            let p = &entry.prefix;
             out.push(p.prefix_len);
             let pl = p.prefix_len as usize;
             let n = pl.div_ceil(8);
@@ -147,15 +177,20 @@ impl MpReach {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MpUnreach {
     pub family: NlriFamily,
-    pub nlri: Vec<Prefix>,
+    pub nlri: Vec<Nlri>,
 }
 
 impl MpUnreach {
-    pub fn new(family: NlriFamily, nlri: Vec<Prefix>) -> Self {
+    pub fn new(family: NlriFamily, nlri: Vec<Nlri>) -> Self {
         Self { family, nlri }
     }
 
     pub fn decode(b: &[u8]) -> Option<Self> {
+        Self::decode_ex(b, false)
+    }
+
+    /// Decode with RFC 7911 Add-Path path identifiers on each NLRI entry.
+    pub fn decode_ex(b: &[u8], add_path: bool) -> Option<Self> {
         if b.len() < 3 {
             return None;
         }
@@ -165,6 +200,16 @@ impl MpUnreach {
         let mut i = 3;
         let mut nlri = Vec::new();
         while i < b.len() {
+            let path_id = if add_path {
+                if i + 4 > b.len() {
+                    return None;
+                }
+                let id = u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]);
+                i += 4;
+                id
+            } else {
+                0
+            };
             let pl = b[i];
             i += 1;
             let n = (pl as usize).div_ceil(8);
@@ -186,16 +231,25 @@ impl MpUnreach {
                 }
                 _ => return None,
             };
-            nlri.push(p);
+            nlri.push(Nlri::new(path_id, p));
         }
         Some(Self { family, nlri })
     }
 
     pub fn encode(&self) -> Vec<u8> {
+        self.encode_ex(false)
+    }
+
+    /// Encode with RFC 7911 Add-Path path identifiers on each NLRI entry.
+    pub fn encode_ex(&self, add_path: bool) -> Vec<u8> {
         let mut out = Vec::new();
         out.extend_from_slice(&self.family.afi.to_be_bytes());
         out.push(self.family.safi);
-        for p in &self.nlri {
+        for entry in &self.nlri {
+            if add_path {
+                out.extend_from_slice(&entry.path_id.to_be_bytes());
+            }
+            let p = &entry.prefix;
             out.push(p.prefix_len);
             let pl = p.prefix_len as usize;
             let n = pl.div_ceil(8);
@@ -248,10 +302,10 @@ mod tests {
         let mp = MpReach::new(
             NlriFamily::IPV6_UNICAST,
             MpNextHop::V6Global([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-            vec![Prefix::new_v6(
+            vec![Nlri::plain(Prefix::new_v6(
                 [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                 64,
-            )],
+            ))],
         );
         let enc = mp.encode();
         let dec = MpReach::decode(&enc).unwrap();
@@ -263,18 +317,66 @@ mod tests {
         let mp = MpUnreach::new(
             NlriFamily::IPV6_UNICAST,
             vec![
-                Prefix::new_v6(
+                Nlri::plain(Prefix::new_v6(
                     [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
                     64,
-                ),
-                Prefix::new_v6(
+                )),
+                Nlri::plain(Prefix::new_v6(
                     [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
                     65,
-                ),
+                )),
             ],
         );
         let enc = mp.encode();
         let dec = MpUnreach::decode(&enc).unwrap();
+        assert_eq!(dec, mp);
+    }
+
+    /// RFC 7911 §4.3: with Add-Path negotiated every NLRI entry carries a
+    /// 4-octet path identifier ahead of the prefix, and the encoding
+    /// roundtrips. Without Add-Path the identifier is absent.
+    #[test]
+    fn mp_reach_add_path_roundtrip() {
+        let mp = MpReach::new(
+            NlriFamily::IPV6_UNICAST,
+            MpNextHop::V6Global([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            vec![
+                Nlri::new(
+                    7,
+                    Prefix::new_v6(
+                        [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                        64,
+                    ),
+                ),
+                Nlri::new(
+                    9,
+                    Prefix::new_v6(
+                        [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0],
+                        64,
+                    ),
+                ),
+            ],
+        );
+        let enc = mp.encode_ex(true);
+        let dec = MpReach::decode_ex(&enc, true).unwrap();
+        assert_eq!(dec, mp);
+        // Each entry grew by exactly the 4 identifier octets.
+        assert_eq!(enc.len(), mp.encode_ex(false).len() + 8);
+        // Decoding without the flag misparses — negotiated state must match.
+        assert!(MpReach::decode_ex(&enc, false).is_none());
+    }
+
+    #[test]
+    fn mp_unreach_add_path_roundtrip() {
+        let mp = MpUnreach::new(
+            NlriFamily::IPV4_UNICAST,
+            vec![
+                Nlri::new(1, Prefix::new_v4([203, 0, 113, 0], 24)),
+                Nlri::new(2, Prefix::new_v4([198, 51, 100, 0], 24)),
+            ],
+        );
+        let enc = mp.encode_ex(true);
+        let dec = MpUnreach::decode_ex(&enc, true).unwrap();
         assert_eq!(dec, mp);
     }
 }

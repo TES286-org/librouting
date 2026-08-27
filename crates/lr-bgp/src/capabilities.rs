@@ -117,14 +117,16 @@ impl Capability {
         Self::new(CapabilityCode::RouteRefresh, Vec::new())
     }
 
-    /// AddPath capability (RFC 7911 §4.4). Value = repeated (AFI:2, SAFI:1, send:1, recv:1).
+    /// AddPath capability (RFC 7911 §4.4). Value = repeated
+    /// `<AFI:2, SAFI:1, Send/Receive:1>` tuples where the Send/Receive
+    /// field is 1 = receive (willing to receive multiple paths),
+    /// 2 = send, 3 = both.
     pub fn add_path(families: &[(u16, u8, bool, bool)]) -> Self {
-        let mut v = Vec::with_capacity(families.len() * 5);
+        let mut v = Vec::with_capacity(families.len() * 4);
         for (afi, safi, send, recv) in families {
             v.extend_from_slice(&afi.to_be_bytes());
             v.push(*safi);
-            v.push(*send as u8);
-            v.push(*recv as u8);
+            v.push((*recv as u8) | ((*send as u8) << 1));
         }
         Self::new(CapabilityCode::AddPath, v)
     }
@@ -132,6 +134,25 @@ impl Capability {
     /// Enhanced Route Refresh capability (RFC 7313, code 70).
     pub fn enhanced_rr() -> Self {
         Self::new(CapabilityCode::EnhancedRouteRefresh, Vec::new())
+    }
+
+    /// Decode the RFC 7911 AddPath capability (code 69): a sequence of
+    /// `<AFI:2, SAFI:1, Send/Receive:1>` tuples. The Send/Receive field is
+    /// 1 = receive (the sender is willing to receive multiple paths),
+    /// 2 = send, 3 = both (RFC 7911 §4.4). Returns `(afi, safi, send,
+    /// recv)` per family.
+    pub fn as_add_path(&self) -> Option<Vec<(u16, u8, bool, bool)>> {
+        if self.code != CapabilityCode::AddPath || self.value.is_empty() {
+            return None;
+        }
+        let mut out = Vec::new();
+        for t in self.value.as_chunks::<4>().0 {
+            let afi = u16::from_be_bytes([t[0], t[1]]);
+            let send = t[3] & 0x02 != 0;
+            let recv = t[3] & 0x01 != 0;
+            out.push((afi, t[2], send, recv));
+        }
+        Some(out)
     }
 
     /// Graceful Restart capability (RFC 4724 §3). `restart_flags` is a
