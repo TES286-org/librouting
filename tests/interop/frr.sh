@@ -45,17 +45,20 @@ case "$BGPD" in
 esac
 
 PORT=${PORT:-17996}
-VTY_PORT=${VTY_PORT:-2615}
+# Never default the vty port into FRR's well-known range (2600-2620):
+# every FRR daemon owns one (zebra 2600, bgpd 2605, staticd 2616, ...) and
+# `apt-get install frr` starts a system zebra+staticd pair. A squatted
+# port makes bgpd silently skip its own vty listener, and the test would
+# interrogate whichever daemon owns the port instead of bgpd.
+VTY_PORT=${VTY_PORT:-26995}
 OUT=/tmp/lr_frr_interop
-rm -rf "$OUT"; mkdir -p "$OUT"
+rm -rf "$OUT"; mkdir -p "$OUT" "$OUT/vty"
 
 cat >"$OUT/bgpd.conf" <<EOF
 frr version 10
 frr defaults traditional
 hostname bgpd-lr
 password zebra
-log file $OUT/bgpd.log
-log suppress_duplicates
 !
 route-map lr-out permit 10
  set ip next-hop 192.0.2.20
@@ -85,20 +88,67 @@ echo "== starting FRR bgpd (AS64514, connects to lr-daemon :$PORT) =="
     --log "file:$OUT/bgpd.log" \
     >"$OUT/bgpd.stdout" 2>&1 &
 BGPD_PID=$!
-trap 'kill $BGPD_PID $LR_PID 2>/dev/null || true' EXIT
+trap 'kill ${BGPD_PID:-} ${LR_PID:-} 2>/dev/null || true' EXIT
 
-# Wait for the vty to accept connections (bgpd startup).
+# Query a command over the vty TCP interface; output goes to stdout.
+# Robust against peers that close the session at any point (a vty that
+# rejects us may close mid-conversation; never traceback).
+vty_cmd() {
+    python3 - "$VTY_PORT" "$1" <<'PYEOF'
+import socket, sys, time
+port, cmd = int(sys.argv[1]), sys.argv[2]
+try:
+    s = socket.create_connection(("127.0.0.1", port), timeout=5)
+except OSError:
+    sys.exit(1)
+s.settimeout(0.5)
+
+def drain(idle_rounds=2):
+    # Read until EOF or `idle_rounds` consecutive 0.5 s silences.
+    out = b""
+    idle = 0
+    while idle < idle_rounds:
+        try:
+            d = s.recv(4096)
+            if not d:
+                break
+            out += d
+            idle = 0
+        except socket.timeout:
+            idle += 1
+        except OSError:
+            break
+    return out
+
+def send(line):
+    try:
+        s.sendall(line)
+    except OSError:
+        pass  # peer closed early; report what we collected
+
+banner = drain()
+if b"Password:" in banner:
+    send(b"zebra\r\n")
+    time.sleep(0.2)
+    drain(1)
+send(cmd.encode() + b"\r\n")
+time.sleep(0.8)
+out = drain()
+send(b"quit\r\n")
+s.close()
+sys.stdout.write(out.decode("utf-8", "replace"))
+PYEOF
+}
+
+# Wait for the vty AND verify it answers as OUR bgpd: the configured
+# hostname `bgpd-lr` appears in the vty prompt. bgpd silently skips its
+# vty TCP listener when the port is already bound, so a squatter (e.g.
+# a system staticd on its well-known port) would otherwise be
+# interrogated instead of bgpd and the failure would be confusing.
 vty_ok=1
 for i in $(seq 1 40); do
     sleep 0.25
-    if python3 -c "
-import socket, sys
-try:
-    s = socket.create_connection(('127.0.0.1', $VTY_PORT), timeout=1)
-    s.close()
-except OSError:
-    sys.exit(1)
-" 2>/dev/null; then
+    if vty_cmd "show version" 2>/dev/null | grep -q "bgpd-lr"; then
         vty_ok=0
         break
     fi
@@ -110,7 +160,12 @@ except OSError:
     fi
 done
 if [ $vty_ok -ne 0 ]; then
-    echo "FAIL: bgpd vty never came up"
+    echo "FAIL: bgpd vty did not answer as our instance (bgpd-lr) on port $VTY_PORT"
+    echo "      another daemon may be holding the port; set VTY_PORT to a free one"
+    cat "$OUT/bgpd.stdout" 2>/dev/null || true
+    tail -15 "$OUT/bgpd.log" 2>/dev/null || true
+    kill $BGPD_PID 2>/dev/null || true
+    wait 2>/dev/null || true
     exit 1
 fi
 
@@ -120,39 +175,7 @@ echo "== starting lr-daemon (AS64512, listener) =="
     --network 203.0.113.0/24 \
     >"$OUT/lr.log" 2>&1 &
 LR_PID=$!
-trap 'kill $BGPD_PID $LR_PID 2>/dev/null || true' EXIT
-
-# Query a command over the vty TCP interface; output goes to stdout.
-vty_cmd() {
-    python3 - "$VTY_PORT" "$1" <<'PYEOF'
-import socket, sys, time
-port, cmd = int(sys.argv[1]), sys.argv[2]
-s = socket.create_connection(("127.0.0.1", port), timeout=5)
-s.settimeout(2)
-def drain():
-    out = b""
-    try:
-        while True:
-            d = s.recv(4096)
-            if not d:
-                break
-            out += d
-    except socket.timeout:
-        pass
-    return out
-banner = drain()
-if b"Password:" in banner:
-    s.sendall(b"zebra\r\n")
-    time.sleep(0.2)
-    drain()
-s.sendall(cmd.encode() + b"\r\n")
-time.sleep(0.8)
-out = drain()
-s.sendall(b"quit\r\n")
-s.close()
-sys.stdout.write(out.decode("utf-8", "replace"))
-PYEOF
-}
+trap 'kill ${BGPD_PID:-} ${LR_PID:-} 2>/dev/null || true' EXIT
 
 # Wait for both directions to converge (up to 45 s on slow runners). The
 # lr-daemon side is polled cheaply via its log; the FRR side is polled over
