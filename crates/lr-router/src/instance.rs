@@ -51,6 +51,8 @@ use lr_babel::{BabelCodec, BabelFrame, BabelNeighbor, BabelRoute, BabelRouteTabl
 use lr_bgp::best_path::{BestPath, BestPathConfig};
 use lr_bgp::path::{AttrType, Community, PathAttrFlags, PathAttribute, PathAttributes};
 use lr_bgp::{BgpAction, BgpEvent, BgpPeer, PeerConfig as BgpPeerConfig};
+use lr_ospf::abr::{flush_summary_lsa, originate_summary_lsa, SummaryDestination};
+use lr_ospf::lsa::{prefix_len_to_mask, Lsa, LsaTypeV2};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
 use lr_ospf::packet::{
@@ -151,23 +153,70 @@ impl SessionState {
     }
 }
 
-/// OSPF protocol runtime for one adjacency: neighbor FSM + LSDB view + SPF.
+/// OSPF protocol runtime for one adjacency: neighbor FSM + per-session
+/// decode state.
 ///
-/// This is a simplified but functional driver: Hellos advance the neighbor
-/// FSM, LS-Updates populate the LSDB, and every LSDB change re-runs SPF. The
-/// resulting intra-area routes land in the router's Loc-RIB. Full DBD/LSR
-/// exchange sequencing is the embedder's job to extend (the FSM states are
-/// all exposed).
+/// The LSDB is *per area* (shared by every session attached to the same
+/// area — LSAs flooded within an area belong to the area, not to the
+/// adjacency that happened to deliver them). See [`OspfAreaState`].
+///
+/// This is a simplified but functional driver: Hellos advance the
+/// neighbor FSM and LS-Updates are handed to the area LSDB. Full
+/// DBD/LSR exchange sequencing is the embedder's job to extend (the FSM
+/// states are all exposed).
 struct OspfRuntime {
     router_id: u32,
-    #[allow(dead_code)] // reserved for ABR / inter-area routing
     area_id: u32,
     neighbor: OspfNeighbor,
-    lsdb: Lsdb,
     /// Protocol origin tag used when installing routes.
     protocol: Protocol,
-    /// Routes previously published to Loc-RIB — used to compute deltas.
-    published: BTreeMap<RouteKey, Route>,
+    /// Per-session streaming decoder (carryover must never leak between
+    /// different peers' transports).
+    codec: lr_ospf::codec::OspfCodec,
+}
+
+/// Per-area OSPF state shared by every session attached to that area.
+struct OspfAreaState {
+    lsdb: Lsdb,
+    /// Protocol version the area runs (v2 and v3 cannot mix in one area).
+    protocol: Protocol,
+}
+
+/// One entry of an area's computed route table: the metric plus how the
+/// route was derived. Inter-area entries remember the advertising border
+/// router — ABR summary origination must never re-advertise a route whose
+/// only justification is the router's own (possibly stale) summary.
+#[derive(Debug, Clone, Copy)]
+struct OspfTableEntry {
+    metric: u64,
+    intra_area: bool,
+    /// Advertising border router for inter-area entries.
+    border_router: Option<u32>,
+}
+
+impl OspfTableEntry {
+    fn intra(metric: u64) -> Self {
+        Self {
+            metric,
+            intra_area: true,
+            border_router: None,
+        }
+    }
+
+    fn inter(metric: u64, border_router: Option<u32>) -> Self {
+        Self {
+            metric,
+            intra_area: false,
+            border_router,
+        }
+    }
+
+    /// RFC 2328 §16.2 preference order for identical prefixes: intra-area
+    /// beats inter-area, then lower metric wins.
+    fn beats(&self, prev: &Self) -> bool {
+        (self.intra_area && !prev.intra_area)
+            || (self.intra_area == prev.intra_area && self.metric < prev.metric)
+    }
 }
 
 impl OspfRuntime {
@@ -176,56 +225,22 @@ impl OspfRuntime {
             router_id,
             area_id,
             neighbor: OspfNeighbor::new(RouterId::from_u32(router_id)),
-            lsdb: Lsdb::new(),
             protocol: if v3 {
                 Protocol::Ospfv3
             } else {
                 Protocol::Ospfv2
             },
-            published: BTreeMap::new(),
-        }
-    }
-
-    /// Refresh locally originated LSAs and construct an LSU for flooding.
-    fn refresh_due(&mut self, now_ms: u64) -> Option<OspfPacket> {
-        let lsas = self.lsdb.refresh_due(self.router_id, now_ms);
-        (!lsas.is_empty()).then(|| OspfPacket {
-            header: OspfHeader {
-                version: if self.protocol == Protocol::Ospfv3 {
-                    OspfVersion::V3 as u8
-                } else {
-                    OspfVersion::V2 as u8
-                },
-                kind: OspfPacketType::LinkStateUpdate as u8,
-                length: 0,
-                router_id: self.router_id,
-                area_id: self.area_id,
-                checksum: 0,
-                au_type_or_instance: 0,
-                auth_data: 0,
+            codec: if v3 {
+                lr_ospf::codec::OspfCodec::v3()
+            } else {
+                lr_ospf::codec::OspfCodec::v2()
             },
-            body: OspfBody::LsUpdate(LsUpdateBody {
-                lsa_count: lsas.len() as u32,
-                lsas,
-            }),
-        })
-    }
-
-    /// Age received LSAs and recompute if expiry changes the topology.
-    fn age_out(&mut self, now_ms: u64) -> RuntimeDelta {
-        if self.lsdb.age_out(now_ms).is_empty() {
-            RuntimeDelta {
-                installed: Vec::new(),
-                withdrawn: Vec::new(),
-            }
-        } else {
-            self.recompute()
         }
     }
 
-    /// Feed one decoded OSPF packet; returns the Loc-RIB delta.
-    fn handle_packet(&mut self, pkt: &OspfPacket, now_ms: u64) -> RuntimeDelta {
-        let mut changed = false;
+    /// Feed one decoded OSPF packet. Hello packets advance the neighbor
+    /// FSM; LS-Updates yield their LSAs for the area LSDB.
+    fn handle_packet(&mut self, pkt: &OspfPacket) -> Vec<Lsa> {
         match &pkt.body {
             OspfBody::Hello(h) => {
                 // If our router-id appears in the neighbor list, the remote
@@ -239,10 +254,7 @@ impl OspfRuntime {
                     }
                 } else {
                     // Hello without us in it — just refresh timers.
-                    return RuntimeDelta {
-                        installed: Vec::new(),
-                        withdrawn: Vec::new(),
-                    };
+                    return Vec::new();
                 };
                 let _ = self.neighbor.step(ev);
                 // Simplified adjacency bring-up: proceed to ExStart on 2-Way.
@@ -252,80 +264,11 @@ impl OspfRuntime {
                     let _ = self.neighbor.step(NeighborEvent::ExchangeDone);
                     let _ = self.neighbor.step(NeighborEvent::LsaUpdateArrived);
                 }
+                Vec::new()
             }
-            OspfBody::LsUpdate(u) => {
-                for lsa in &u.lsas {
-                    self.lsdb.install(lsa.clone(), now_ms);
-                    changed = true;
-                }
-            }
-            _ => {}
+            OspfBody::LsUpdate(u) => u.lsas.clone(),
+            _ => Vec::new(),
         }
-        if changed {
-            self.recompute()
-        } else {
-            RuntimeDelta {
-                installed: Vec::new(),
-                withdrawn: Vec::new(),
-            }
-        }
-    }
-
-    /// Run SPF over the LSDB and diff against the published set.
-    fn recompute(&mut self) -> RuntimeDelta {
-        let current: BTreeMap<RouteKey, Route> = self
-            .compute_routes()
-            .into_iter()
-            .map(|r| (r.key.clone(), r))
-            .collect();
-        let mut delta = RuntimeDelta {
-            installed: Vec::new(),
-            withdrawn: Vec::new(),
-        };
-        for (k, r) in &current {
-            match self.published.get(k) {
-                Some(prev) if prev == r => {}
-                _ => delta.installed.push(r.clone()),
-            }
-        }
-        for k in self.published.keys() {
-            if !current.contains_key(k) {
-                delta.withdrawn.push(k.clone());
-            }
-        }
-        self.published = current;
-        delta
-    }
-
-    /// Run SPF over the LSDB and return the resulting intra-area routes.
-    fn compute_routes(&mut self) -> Vec<Route> {
-        let result = spf::run_spf(&self.lsdb, self.router_id);
-        let mut routes = Vec::new();
-        let mut push = |prefix: Prefix, metric: u64, next_hop: Option<IpAddr>| {
-            routes.push(Route {
-                key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
-                origin: RouteOrigin {
-                    proto: 3, // OSPF adjacency tag
-                    peer: u64::from(self.neighbor.router_id.as_u32()),
-                },
-                protocol: self.protocol,
-                preference: lr_core::rib::Preference::new(
-                    self.protocol.default_admin_distance(),
-                    metric as u32,
-                ),
-                next_hop,
-                attributes: lr_core::attr::Attributes::new(),
-                age_ms: 0,
-            });
-        };
-        for r in result
-            .stub_routes
-            .iter()
-            .chain(result.transit_routes.iter())
-        {
-            push(r.prefix, r.metric, r.next_hop);
-        }
-        routes
     }
 }
 
@@ -519,8 +462,15 @@ pub struct DefaultRouter {
     /// Locally originated routes (kept so unoriginate can remove them).
     originated: BTreeMap<RouteKey, Route>,
     pending_events: Vec<RouterEvent>,
-    /// Decoders for connectionless protocols (OSPF/Babel) keyed by session.
-    ospf_codec: lr_ospf::codec::OspfCodec,
+    /// OSPF: per-area link-state databases, shared by all sessions of an
+    /// area and keyed by area ID.
+    ospf_areas: BTreeMap<u32, OspfAreaState>,
+    /// OSPF router ID (all OSPF sessions must agree on it).
+    ospf_router_id: Option<u32>,
+    /// OSPF route table currently published to Loc-RIB: the merged view
+    /// across all areas, diffed on every recompute.
+    ospf_published: BTreeMap<RouteKey, Route>,
+    /// Babel streaming decoder.
     babel_codec: BabelCodec,
     /// RFC 4271 MRAI state keyed by BGP session.
     mrai: BTreeMap<u64, MraiState>,
@@ -547,7 +497,9 @@ impl Default for DefaultRouter {
             best_path_cfg: BestPathConfig::default(),
             originated: BTreeMap::new(),
             pending_events: Vec::new(),
-            ospf_codec: lr_ospf::codec::OspfCodec::v2(),
+            ospf_areas: BTreeMap::new(),
+            ospf_router_id: None,
+            ospf_published: BTreeMap::new(),
             babel_codec: BabelCodec::new(),
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),
@@ -1462,11 +1414,40 @@ impl RouterInstance for DefaultRouter {
                 }
             }
             SessionKind::Ospfv2 | SessionKind::Ospfv3 => {
-                let runtime = OspfRuntime::new(
-                    cfg.local_bgp_id.as_u32(),
-                    cfg.area_id,
-                    cfg.kind == SessionKind::Ospfv3,
-                );
+                let router_id = cfg.local_bgp_id.as_u32();
+                if let Some(existing) = self.ospf_router_id {
+                    if existing != router_id {
+                        return Err(format!(
+                            "OSPF router-id {router_id} does not match established {existing}"
+                        ));
+                    }
+                } else {
+                    self.ospf_router_id = Some(router_id);
+                }
+                let protocol = if cfg.kind == SessionKind::Ospfv3 {
+                    Protocol::Ospfv3
+                } else {
+                    Protocol::Ospfv2
+                };
+                if let Some(area) = self.ospf_areas.get(&cfg.area_id) {
+                    if area.protocol != protocol {
+                        return Err(format!(
+                            "OSPF area {} already runs {}",
+                            cfg.area_id,
+                            if area.protocol == Protocol::Ospfv3 {
+                                "OSPFv3"
+                            } else {
+                                "OSPFv2"
+                            }
+                        ));
+                    }
+                }
+                self.ospf_areas.entry(cfg.area_id).or_insert(OspfAreaState {
+                    lsdb: Lsdb::new(),
+                    protocol,
+                });
+                let runtime =
+                    OspfRuntime::new(router_id, cfg.area_id, protocol == Protocol::Ospfv3);
                 self.sessions.insert(
                     h.0,
                     SessionState::Ospf {
@@ -1493,6 +1474,12 @@ impl RouterInstance for DefaultRouter {
     }
 
     fn remove_session(&mut self, h: SessionHandle) -> Result<(), String> {
+        // Remember the OSPF area before the session goes away so the last
+        // session of an area can tear its shared LSDB down.
+        let ospf_area = match self.sessions.get(&h.0) {
+            Some(SessionState::Ospf { runtime, .. }) => Some(runtime.area_id),
+            _ => None,
+        };
         if self.sessions.remove(&h.0).is_none() {
             return Err(format!("session {} not found", h.0));
         }
@@ -1513,6 +1500,23 @@ impl RouterInstance for DefaultRouter {
                 },
                 &k,
             );
+        }
+        // OSPF: LSAs live per area, so the area survives while any session
+        // remains. Dropping the last session discards the area LSDB and
+        // recomputes — its routes must not outlive the area (and summaries
+        // that lost their source area are flushed).
+        if let Some(area_id) = ospf_area {
+            let still_attached = self.sessions.values().any(
+                |s| matches!(s, SessionState::Ospf { runtime, .. } if runtime.area_id == area_id),
+            );
+            if !still_attached {
+                self.ospf_areas.remove(&area_id);
+                if self.ospf_areas.is_empty() {
+                    self.ospf_router_id = None;
+                }
+                let delta = self.ospf_on_lsdb_change();
+                self.apply_runtime_delta(delta);
+            }
         }
         Ok(())
     }
@@ -1563,6 +1567,9 @@ impl RouterInstance for DefaultRouter {
             Other {
                 delta: RuntimeDelta,
             },
+            OspfLsas {
+                lsas: Vec<Lsa>,
+            },
         }
         let pending = {
             let state = self
@@ -1594,17 +1601,12 @@ impl RouterInstance for DefaultRouter {
                     if input.is_empty() {
                         return Ok(());
                     }
-                    let mut delta = RuntimeDelta {
-                        installed: Vec::new(),
-                        withdrawn: Vec::new(),
-                    };
+                    let mut lsas = Vec::new();
                     let mut r = lr_core::buf::ReadBuf::new(&input);
-                    while let Ok(Some(pkt)) = self.ospf_codec.decode(&mut r) {
-                        let d = runtime.handle_packet(&pkt, self.now_ms);
-                        delta.installed.extend(d.installed);
-                        delta.withdrawn.extend(d.withdrawn);
+                    while let Ok(Some(pkt)) = runtime.codec.decode(&mut r) {
+                        lsas.extend(runtime.handle_packet(&pkt));
                     }
-                    Pending::Other { delta }
+                    Pending::OspfLsas { lsas }
                 }
                 SessionState::Babel { runtime, conn } => {
                     conn.push_input(bytes);
@@ -1639,15 +1641,34 @@ impl RouterInstance for DefaultRouter {
                 }
             }
             Pending::Other { delta } => {
-                // OSPF/Babel routes land directly in Loc-RIB (their egress
-                // is protocol-internal flooding, not BGP advertisement).
-                for route in delta.installed {
-                    self.loc_rib.install(route.clone());
-                    self.pending_events.push(RouterEvent::RouteInstalled(route));
+                // Babel routes land directly in Loc-RIB (their egress
+                // is protocol-internal, not BGP advertisement).
+                self.apply_runtime_delta(delta);
+            }
+            Pending::OspfLsas { lsas } => {
+                // LSAs belong to the session's area: install into the
+                // shared area LSDB, flood what changed to the area's other
+                // sessions (RFC 2328 §13.3) and recompute.
+                let SessionState::Ospf { runtime, .. } =
+                    self.sessions.get(&h.0).expect("session vanished")
+                else {
+                    unreachable!()
+                };
+                let area_id = runtime.area_id;
+                let mut changed = false;
+                let mut to_flood = Vec::new();
+                if let Some(area) = self.ospf_areas.get_mut(&area_id) {
+                    for lsa in lsas {
+                        if area.lsdb.install(lsa.clone(), self.now_ms).changed() {
+                            to_flood.push(lsa);
+                            changed = true;
+                        }
+                    }
                 }
-                for key in delta.withdrawn {
-                    self.loc_rib.uninstall(&key);
-                    self.pending_events.push(RouterEvent::RouteWithdrawn(key));
+                if changed {
+                    self.ospf_flood(area_id, &to_flood, Some(h.0));
+                    let delta = self.ospf_on_lsdb_change();
+                    self.apply_runtime_delta(delta);
                 }
             }
         }
@@ -1688,30 +1709,24 @@ impl RouterInstance for DefaultRouter {
         // OSPF uses periodic self-LSA refresh (RFC 2328 §14.1) rather than
         // an individual timer per LSA. One poll-driven pass keeps the router
         // compact while preserving exact caller-controlled timestamps.
-        let mut ospf_deltas = Vec::new();
-        for state in self.sessions.values_mut() {
-            let SessionState::Ospf { runtime, conn } = state else {
-                continue;
-            };
-            if let Some(packet) = runtime.refresh_due(self.now_ms) {
-                let codec = match runtime.protocol {
-                    Protocol::Ospfv3 => lr_ospf::codec::OspfCodec::v3(),
-                    _ => lr_ospf::codec::OspfCodec::v2(),
-                };
-                if let Ok(bytes) = codec.encode_vec(&packet) {
-                    conn.put_output(&bytes);
+        if let Some(router_id) = self.ospf_router_id {
+            let mut refreshed: Vec<(u32, Vec<Lsa>)> = Vec::new();
+            let mut aged = false;
+            for (area_id, area) in self.ospf_areas.iter_mut() {
+                let lsas = area.lsdb.refresh_due(router_id, self.now_ms);
+                if !lsas.is_empty() {
+                    refreshed.push((*area_id, lsas));
+                }
+                if !area.lsdb.age_out(self.now_ms).is_empty() {
+                    aged = true;
                 }
             }
-            ospf_deltas.push(runtime.age_out(self.now_ms));
-        }
-        for delta in ospf_deltas {
-            for route in delta.installed {
-                self.loc_rib.install(route.clone());
-                self.pending_events.push(RouterEvent::RouteInstalled(route));
+            for (area_id, lsas) in &refreshed {
+                self.ospf_flood(*area_id, lsas, None);
             }
-            for key in delta.withdrawn {
-                self.loc_rib.uninstall(&key);
-                self.pending_events.push(RouterEvent::RouteWithdrawn(key));
+            if aged {
+                let delta = self.ospf_on_lsdb_change();
+                self.apply_runtime_delta(delta);
             }
         }
         self.flush_mrai();
@@ -1762,16 +1777,412 @@ impl RouterInstance for DefaultRouter {
     }
 }
 
+impl DefaultRouter {
+    // ------------------------------------------------------------------
+    // OSPF multi-area plumbing
+    // ------------------------------------------------------------------
+
+    /// Apply one protocol-runtime delta (installed/withdrawn routes) to
+    /// Loc-RIB and emit the corresponding events.
+    fn apply_runtime_delta(&mut self, delta: RuntimeDelta) {
+        for route in delta.installed {
+            self.loc_rib.install(route.clone());
+            self.pending_events.push(RouterEvent::RouteInstalled(route));
+        }
+        for key in delta.withdrawn {
+            self.loc_rib.uninstall(&key);
+            self.pending_events.push(RouterEvent::RouteWithdrawn(key));
+        }
+    }
+
+    /// Flood `lsas` to every OSPF session of `area` except `exclude`
+    /// (RFC 2328 §13.3, simplified: no ack/retransmission bookkeeping —
+    /// the poll-driven embedder handles transport reliability).
+    fn ospf_flood(&mut self, area_id: u32, lsas: &[Lsa], exclude: Option<u64>) {
+        if lsas.is_empty() {
+            return;
+        }
+        for (handle, state) in self.sessions.iter_mut() {
+            let SessionState::Ospf { runtime, conn } = state else {
+                continue;
+            };
+            if runtime.area_id != area_id || exclude == Some(*handle) {
+                continue;
+            }
+            let packet =
+                ospf_ls_update(runtime.protocol, runtime.router_id, area_id, lsas.to_vec());
+            if let Ok(bytes) = runtime.codec.encode_vec(&packet) {
+                conn.put_output(&bytes);
+            }
+        }
+    }
+
+    /// Recompute the OSPF route table after any area LSDB changed:
+    /// first re-run ABR summary origination (RFC 2328 §12.4.3) so inter-
+    /// area knowledge propagates, then rebuild the merged area view.
+    fn ospf_on_lsdb_change(&mut self) -> RuntimeDelta {
+        self.ospf_summarize_areas();
+        self.ospf_recompute()
+    }
+
+    /// One area's computed route table: intra-area routes from SPF
+    /// (RFC 2328 §16.1) merged with inter-area routes derived from
+    /// summary-LSAs (§16.2). Intra-area paths win per prefix.
+    fn ospf_area_table(lsdb: &Lsdb, router_id: u32) -> BTreeMap<Prefix, OspfTableEntry> {
+        let spf_result = spf::run_spf(lsdb, router_id);
+        let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
+        for r in spf_result
+            .stub_routes
+            .iter()
+            .chain(spf_result.transit_routes.iter())
+        {
+            table.insert(r.prefix, OspfTableEntry::intra(r.metric));
+        }
+        for r in spf::summary_routes(lsdb, &spf_result) {
+            table
+                .entry(r.prefix)
+                .or_insert_with(|| OspfTableEntry::inter(r.metric, r.border_router));
+        }
+        table
+    }
+
+    /// Rebuild the merged OSPF route table across all areas and diff it
+    /// against the published set. Across areas: intra-area beats
+    /// inter-area, then lowest metric, then lowest area ID (areas iterate
+    /// in sorted order, so the first entry of a full tie wins —
+    /// deterministic).
+    fn ospf_recompute(&mut self) -> RuntimeDelta {
+        let Some(router_id) = self.ospf_router_id else {
+            return self.ospf_diff_published(BTreeMap::new());
+        };
+        // Best entry per prefix across areas.
+        let mut global: BTreeMap<Prefix, (OspfTableEntry, u32, Protocol)> = BTreeMap::new();
+        for (area_id, area) in &self.ospf_areas {
+            for (prefix, entry) in Self::ospf_area_table(&area.lsdb, router_id) {
+                let better = match global.get(&prefix) {
+                    None => true,
+                    Some((prev, _, _)) => entry.beats(prev),
+                };
+                if better {
+                    global.insert(prefix, (entry, *area_id, area.protocol));
+                }
+            }
+        }
+        let current: BTreeMap<RouteKey, Route> = global
+            .into_iter()
+            .map(|(prefix, (entry, area_id, protocol))| {
+                let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
+                let route = Route {
+                    key: key.clone(),
+                    origin: RouteOrigin {
+                        proto: 3, // OSPF adjacency tag
+                        peer: u64::from(area_id),
+                    },
+                    protocol,
+                    preference: lr_core::rib::Preference::new(
+                        protocol.default_admin_distance(),
+                        entry.metric as u32,
+                    ),
+                    next_hop: None,
+                    attributes: lr_core::attr::Attributes::new(),
+                    age_ms: 0,
+                };
+                (key, route)
+            })
+            .collect();
+        self.ospf_diff_published(current)
+    }
+
+    /// Diff `current` against the published OSPF table and swap it in.
+    fn ospf_diff_published(&mut self, current: BTreeMap<RouteKey, Route>) -> RuntimeDelta {
+        let mut delta = RuntimeDelta {
+            installed: Vec::new(),
+            withdrawn: Vec::new(),
+        };
+        for (k, r) in &current {
+            match self.ospf_published.get(k) {
+                Some(prev) if prev == r => {}
+                _ => delta.installed.push(r.clone()),
+            }
+        }
+        for k in self.ospf_published.keys() {
+            if !current.contains_key(k) {
+                delta.withdrawn.push(k.clone());
+            }
+        }
+        self.ospf_published = current;
+        delta
+    }
+
+    /// RFC 2328 §12.4.3: originate and flush type-3 summary-LSAs so each
+    /// area learns what is reachable outside it. Rules enforced here:
+    ///
+    /// - ABRs need a backbone attachment (`area 0`) and v2-only areas;
+    ///   otherwise every self-originated summary is flushed (nothing can
+    ///   justify it any more — e.g. after the last session of a remote
+    ///   area went away).
+    /// - Into the backbone: the intra-area networks of each non-backbone
+    ///   area. Into a non-backbone area: backbone intra nets, inter-area
+    ///   routes other ABRs summarized into the backbone, and the intra
+    ///   nets of the remaining non-backbone areas (the mirror of what the
+    ///   router itself injects into the backbone). Routes whose only
+    ///   justification is the router's *own* backbone summary are never
+    ///   sources — that path is exactly the loop a stale summary would
+    ///   otherwise take back into its area of origin.
+    /// - A target area never receives summaries for its own intra-area
+    ///   networks (loop guard, §12.4.3/§16.2).
+    ///
+    /// Originated/flushed LSAs are installed into the target area LSDB and
+    /// queued for flooding on that area's sessions. Returns whether any
+    /// LSDB changed.
+    fn ospf_summarize_areas(&mut self) -> bool {
+        let Some(router_id) = self.ospf_router_id else {
+            return false;
+        };
+        let abr = self.ospf_areas.len() >= 2
+            && self.ospf_areas.contains_key(&0)
+            && self
+                .ospf_areas
+                .values()
+                .all(|a| a.protocol == Protocol::Ospfv2);
+        if !abr {
+            // Not a functioning ABR: flush every self-originated summary.
+            let mut changed = false;
+            let mut floods: Vec<(u32, Vec<Lsa>)> = Vec::new();
+            let areas: Vec<u32> = self.ospf_areas.keys().copied().collect();
+            for target in areas {
+                let mut flushes = Vec::new();
+                if let Some(area) = self.ospf_areas.get(&target) {
+                    for (key, entry) in area.lsdb.iter() {
+                        if key.ls_type == LsaTypeV2::SummaryIpLsa as u8
+                            && key.advertising_router == router_id
+                        {
+                            if let Some(flush) = flush_summary_lsa(&entry.lsa) {
+                                flushes.push(flush);
+                            }
+                        }
+                    }
+                }
+                if let Some(area) = self.ospf_areas.get_mut(&target) {
+                    for flush in flushes {
+                        if area.lsdb.install(flush.clone(), self.now_ms).changed() {
+                            floods.push((target, vec![flush]));
+                            changed = true;
+                        }
+                    }
+                }
+            }
+            for (area_id, lsas) in floods {
+                self.ospf_flood(area_id, &lsas, None);
+            }
+            return changed;
+        }
+        // 1. Fresh per-area tables.
+        let tables: BTreeMap<u32, BTreeMap<Prefix, OspfTableEntry>> = self
+            .ospf_areas
+            .iter()
+            .map(|(id, area)| (*id, Self::ospf_area_table(&area.lsdb, router_id)))
+            .collect();
+        let backbone = tables.get(&0).cloned().unwrap_or_default();
+
+        // 2. Per-target source sets, then diff against the self-originated
+        //    type-3 LSAs already in the target LSDB.
+        let mut changed = false;
+        let mut floods: Vec<(u32, Vec<Lsa>)> = Vec::new();
+        for (&target, table) in &tables {
+            // Sources: what the target should learn about the outside.
+            let mut sources: BTreeMap<Prefix, u64> = if target == 0 {
+                // Backbone: intra-area nets of every non-backbone area.
+                let mut s = BTreeMap::new();
+                for (id, t) in &tables {
+                    if *id == 0 {
+                        continue;
+                    }
+                    for (p, e) in t {
+                        if e.intra_area {
+                            s.entry(*p)
+                                .and_modify(|m: &mut u64| *m = (*m).min(e.metric))
+                                .or_insert(e.metric);
+                        }
+                    }
+                }
+                s
+            } else {
+                let mut s = BTreeMap::new();
+                // (a) Backbone intra nets.
+                for (p, e) in &backbone {
+                    if e.intra_area {
+                        s.insert(*p, e.metric);
+                    }
+                }
+                // (b) Inter-area routes other ABRs put into the backbone.
+                for (p, e) in &backbone {
+                    if !e.intra_area && e.border_router != Some(router_id) {
+                        s.insert(*p, e.metric);
+                    }
+                }
+                // (c) Intra nets of the remaining non-backbone areas — the
+                //     mirror of this router's own backbone summaries.
+                for (id, t) in &tables {
+                    if *id == 0 || *id == target {
+                        continue;
+                    }
+                    for (p, e) in t {
+                        if e.intra_area {
+                            s.entry(*p)
+                                .and_modify(|m: &mut u64| *m = (*m).min(e.metric))
+                                .or_insert(e.metric);
+                        }
+                    }
+                }
+                s
+            };
+            // Loop guard: never summarize the target's own intra nets back
+            // into the target.
+            for (p, e) in table {
+                if e.intra_area {
+                    sources.remove(p);
+                }
+            }
+
+            // 3. Existing self-originated summaries, keyed by LS-ID.
+            let existing: BTreeMap<u32, Lsa> = self
+                .ospf_areas
+                .get(&target)
+                .map(|area| {
+                    area.lsdb
+                        .iter()
+                        .filter(|(key, _)| {
+                            key.ls_type == LsaTypeV2::SummaryIpLsa as u8
+                                && key.advertising_router == router_id
+                        })
+                        .map(|(key, entry)| (key.link_state_id, entry.lsa.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut to_originate: Vec<Lsa> = Vec::new();
+            let mut used_lsids: BTreeSet<u32> = BTreeSet::new();
+            for (prefix, metric) in &sources {
+                let dest = SummaryDestination::new(*prefix, *metric as u32);
+                let mask = prefix_len_to_mask(prefix.prefix_len);
+                let network = match prefix.addr {
+                    lr_core::addr::IpAddr::V4(o) => u32::from_be_bytes(o) & mask,
+                    lr_core::addr::IpAddr::V6(_) => continue,
+                };
+                used_lsids.insert(network);
+                let prev = existing.get(&network);
+                let unchanged = prev.is_some_and(|lsa| {
+                    lr_ospf::lsa::decode_summary_lsa_body(&lsa.body).is_some_and(|body| {
+                        body.network_mask == mask && body.tos0_metric() == Some(dest.metric)
+                    })
+                });
+                if unchanged {
+                    continue;
+                }
+                let prev_seq = prev.map(|lsa| lsa.header.ls_sequence_number);
+                if let Some(lsa) = originate_summary_lsa(router_id, &dest, prev_seq) {
+                    to_originate.push(lsa);
+                }
+            }
+            // 4. Flush summaries whose destination disappeared.
+            let mut to_flush: Vec<Lsa> = Vec::new();
+            for (lsid, lsa) in &existing {
+                if !used_lsids.contains(lsid) {
+                    if let Some(flush) = flush_summary_lsa(lsa) {
+                        to_flush.push(flush);
+                    }
+                }
+            }
+
+            if to_originate.is_empty() && to_flush.is_empty() {
+                continue;
+            }
+            // 5. Install into the target LSDB and queue for flooding.
+            //    Origination replaces (seq+1); MaxAge flush purges.
+            let mut flooded = Vec::with_capacity(to_originate.len() + to_flush.len());
+            if let Some(area) = self.ospf_areas.get_mut(&target) {
+                for lsa in to_originate.into_iter().chain(to_flush) {
+                    if area.lsdb.install(lsa.clone(), self.now_ms).changed() {
+                        flooded.push(lsa);
+                        changed = true;
+                    }
+                }
+            }
+            if !flooded.is_empty() {
+                floods.push((target, flooded));
+            }
+        }
+        for (area_id, lsas) in floods {
+            self.ospf_flood(area_id, &lsas, None);
+        }
+        changed
+    }
+}
+
+/// Build one LS-Update packet for an area.
+fn ospf_ls_update(protocol: Protocol, router_id: u32, area_id: u32, lsas: Vec<Lsa>) -> OspfPacket {
+    OspfPacket {
+        header: OspfHeader {
+            version: if protocol == Protocol::Ospfv3 {
+                OspfVersion::V3 as u8
+            } else {
+                OspfVersion::V2 as u8
+            },
+            kind: OspfPacketType::LinkStateUpdate as u8,
+            length: 0,
+            router_id,
+            area_id,
+            checksum: 0,
+            au_type_or_instance: 0,
+            auth_data: 0,
+        },
+        body: OspfBody::LsUpdate(LsUpdateBody {
+            lsa_count: lsas.len() as u32,
+            lsas,
+        }),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use lr_core::addr::Asn;
     use lr_core::fsm::TimerSpec;
 
+    /// Test helper: encode one LS-Update carrying `lsas` as if received
+    /// from a peer in `area`.
+    fn ospf_lsu_bytes(router_id: u32, area_id: u32, lsas: Vec<Lsa>) -> Vec<u8> {
+        let packet = ospf_ls_update(Protocol::Ospfv2, router_id, area_id, lsas);
+        lr_ospf::codec::OspfCodec::v2()
+            .encode_vec(&packet)
+            .expect("encode LSU")
+    }
+
+    /// Decode every LS-Update packet from a drained output stream.
+    fn decode_lsus(bytes: &[u8]) -> Vec<LsUpdateBody> {
+        let mut out = Vec::new();
+        let mut codec = lr_ospf::codec::OspfCodec::v2();
+        let mut r = lr_core::buf::ReadBuf::new(bytes);
+        while let Ok(Some(pkt)) = codec.decode(&mut r) {
+            if let OspfBody::LsUpdate(u) = pkt.body {
+                out.push(u);
+            }
+        }
+        out
+    }
+
     #[test]
     fn ospf_self_lsa_refresh_emits_new_lsu() {
-        let mut runtime = OspfRuntime::new(0x01020304, 0, false);
-        let lsa = lr_ospf::lsa::Lsa {
+        // Router with one OSPF session in area 0 and a self-originated
+        // Router-LSA installed in the area LSDB at t=0. The refresh pass
+        // at the 1800 s boundary must re-originate it (seq+1, age 0) and
+        // queue an LSU on the session.
+        let mut r = DefaultRouter::new();
+        let h = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(0x01020304), 0))
+            .unwrap();
+        let lsa = Lsa {
             header: lr_ospf::lsa::LsaHeader {
                 ls_age: 0,
                 options: 0,
@@ -1784,15 +2195,360 @@ mod tests {
             },
             body: Vec::new(),
         };
-        runtime.lsdb.install(lsa, 0);
-        assert!(runtime.refresh_due(1_799_999).is_none());
-        let packet = runtime.refresh_due(1_800_000).expect("LSU refresh");
-        let OspfBody::LsUpdate(update) = packet.body else {
-            panic!("expected LS Update");
-        };
-        assert_eq!(update.lsa_count, 1);
-        assert_eq!(update.lsas[0].header.ls_sequence_number, 0x80000002);
-        assert_eq!(update.lsas[0].header.ls_age, 0);
+        r.ospf_areas.get_mut(&0).unwrap().lsdb.install(lsa, 0);
+        r.tick(Instant(1_799_999));
+        assert!(r.drain_output(h).is_empty());
+        r.tick(Instant(1_800_000));
+        let updates = decode_lsus(&r.drain_output(h));
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].lsa_count, 1);
+        assert_eq!(updates[0].lsas[0].header.ls_sequence_number, 0x80000002);
+        assert_eq!(updates[0].lsas[0].header.ls_age, 0);
+    }
+
+    /// Router-LSA test constructor: `(link_id, link_data, link_type, metric)`.
+    fn router_lsa(rid: u32, links: Vec<(u32, u32, u8, u16)>) -> Lsa {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u16.to_be_bytes()); // flags
+        body.extend_from_slice(&(links.len() as u16).to_be_bytes());
+        for (lid, ldata, ltype, metric) in links {
+            body.extend_from_slice(&lid.to_be_bytes());
+            body.extend_from_slice(&ldata.to_be_bytes());
+            body.push(ltype);
+            body.push(0); // tos
+            body.extend_from_slice(&metric.to_be_bytes());
+        }
+        Lsa {
+            header: lr_ospf::lsa::LsaHeader {
+                ls_age: 0,
+                options: 0x02,
+                ls_type: 1,
+                link_state_id: rid,
+                advertising_router: rid,
+                ls_sequence_number: 0x80000001,
+                ls_checksum: 0,
+                length: (lr_ospf::lsa::LsaHeader::LEN + body.len()) as u16,
+            },
+            body,
+        }
+    }
+
+    const P2P: u8 = 1; // RouterLinkType::PointToPoint
+    const STUB: u8 = 3; // RouterLinkType::StubNetwork
+
+    #[test]
+    fn ospf_same_area_sessions_share_lsdb() {
+        // Two sessions in one area: an LSA arriving on one must be flooded
+        // to the other (RFC 2328 §13.3) and both share the area LSDB, so
+        // the route installs exactly once.
+        let mut r = DefaultRouter::new();
+        let rid = RouterId::from_u32(0x01010101);
+        let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+        let b = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
+
+        let ours = router_lsa(0x01010101, vec![(0x0a0a0a00, 0xffff_ff00, STUB, 10)]);
+        r.feed_input(a, &ospf_lsu_bytes(0x02020202, 0, vec![ours]))
+            .unwrap();
+
+        let updates = decode_lsus(&r.drain_output(b));
+        assert_eq!(updates.len(), 1, "session b must see the flooded LSA");
+        assert_eq!(updates[0].lsas[0].header.advertising_router, 0x01010101);
+        assert!(r.drain_output(a).is_empty(), "no flood back to the source");
+
+        let snap = r.rib_snapshot();
+        assert!(snap
+            .iter()
+            .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)));
+    }
+
+    #[test]
+    fn ospf_abr_originates_summary_into_backbone() {
+        // ABR attached to area 0 and area 1. An intra-area net in area 1
+        // (10.10.10.0/24, total metric 15) must be summarized into the
+        // backbone as a type-3 LSA with a valid §C.4 checksum.
+        let mut r = DefaultRouter::new();
+        let rid = 0x01010101;
+        let h0 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+        let h1 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 1))
+            .unwrap();
+
+        let ours = router_lsa(rid, vec![(0x02020202, 0, P2P, 5)]);
+        let r2 = router_lsa(
+            0x02020202,
+            vec![(rid, 0, P2P, 5), (0x0a0a0a00, 0xffff_ff00, STUB, 10)],
+        );
+        r.feed_input(h1, &ospf_lsu_bytes(0x02020202, 1, vec![ours, r2]))
+            .unwrap();
+
+        // Intra-area route: 5 (to R2) + 10 (stub) = 15.
+        let route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24))
+            .expect("intra-area route installed");
+        assert_eq!(route.preference.metric, 15);
+
+        // Backbone session received exactly the type-3 summary.
+        let updates = decode_lsus(&r.drain_output(h0));
+        assert_eq!(updates.len(), 1);
+        let lsa = &updates[0].lsas[0];
+        assert_eq!(lsa.header.ls_type, 3);
+        assert_eq!(lsa.header.advertising_router, rid);
+        assert_eq!(lsa.header.link_state_id, 0x0a0a0a00);
+        assert_eq!(lsa.header.ls_sequence_number, 0x80000001);
+        let body = lr_ospf::lsa::decode_summary_lsa_body(&lsa.body).unwrap();
+        assert_eq!(body.network_mask, 0xffff_ff00);
+        assert_eq!(body.tos0_metric(), Some(15));
+        assert!(
+            lsa.checksum_ok(),
+            "originated summary must checksum correctly"
+        );
+        // The summary targets the backbone only.
+        assert!(r.drain_output(h1).is_empty());
+    }
+
+    #[test]
+    fn ospf_inter_area_route_installed() {
+        // Single backbone area: border router 3.3.3.3 (metric 5 away)
+        // summarizes 10.20.20.0/24 metric 7 → inter-area route metric 12.
+        // A summary from an unreachable border router must yield nothing.
+        let mut r = DefaultRouter::new();
+        let rid = 0x01010101;
+        let h0 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+
+        let ours = router_lsa(rid, vec![(0x03030303, 0, P2P, 5)]);
+        let br = router_lsa(0x03030303, vec![(rid, 0, P2P, 5)]);
+        let reachable_summary = originate_summary_lsa(
+            0x03030303,
+            &SummaryDestination::new(Prefix::new_v4([10, 20, 20, 0], 24), 7),
+            None,
+        )
+        .unwrap();
+        let ghost_summary = originate_summary_lsa(
+            0x09090909,
+            &SummaryDestination::new(Prefix::new_v4([10, 30, 30, 0], 24), 7),
+            None,
+        )
+        .unwrap();
+        r.feed_input(
+            h0,
+            &ospf_lsu_bytes(
+                0x03030303,
+                0,
+                vec![ours, br, reachable_summary, ghost_summary],
+            ),
+        )
+        .unwrap();
+
+        let snap = r.rib_snapshot();
+        let route = snap
+            .iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v4([10, 20, 20, 0], 24))
+            .expect("inter-area route via reachable border router");
+        assert_eq!(route.preference.metric, 12); // 5 + 7
+        assert_eq!(route.protocol, Protocol::Ospfv2);
+        assert!(
+            !snap
+                .iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([10, 30, 30, 0], 24)),
+            "unreachable border router's summary must not install a route"
+        );
+    }
+
+    #[test]
+    fn ospf_inter_area_loop_guard() {
+        // ABR attached to areas 0, 1, 2. A route learned *inter-area* in
+        // area 1 (from border router 4.4.4.4) must never be re-advertised
+        // into area 2 or the backbone — only the backbone's knowledge is
+        // summarized into non-backbone areas (RFC 2328 §12.4.3).
+        let mut r = DefaultRouter::new();
+        let rid = 0x01010101;
+        let h0 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+        let h1 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 1))
+            .unwrap();
+        let h2 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 2))
+            .unwrap();
+
+        // Area 1: BR 4.4.4.4 reachable at 5, advertising 10.40.40.0/24 (7).
+        let ours_a1 = router_lsa(rid, vec![(0x04040404, 0, P2P, 5)]);
+        let br = router_lsa(0x04040404, vec![(rid, 0, P2P, 5)]);
+        let br_summary = originate_summary_lsa(
+            0x04040404,
+            &SummaryDestination::new(Prefix::new_v4([10, 40, 40, 0], 24), 7),
+            None,
+        )
+        .unwrap();
+        r.feed_input(
+            h1,
+            &ospf_lsu_bytes(0x04040404, 1, vec![ours_a1, br, br_summary]),
+        )
+        .unwrap();
+        // Area 2: our stub net 10.50.50.0/24 metric 3.
+        let ours_a2 = router_lsa(rid, vec![(0x0a323200, 0xffff_ff00, STUB, 3)]);
+        r.feed_input(h2, &ospf_lsu_bytes(0x05050505, 2, vec![ours_a2]))
+            .unwrap();
+
+        // The area-1-learned inter-area route is usable locally...
+        let snap = r.rib_snapshot();
+        let route = snap
+            .iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v4([10, 40, 40, 0], 24))
+            .expect("inter-area route via area 1");
+        assert_eq!(route.preference.metric, 12); // 5 + 7
+
+        // ...but area 2 must NOT learn it. Area 2 receives nothing at all:
+        // the backbone knows no routes beyond area 2's own intra net,
+        // which the loop guard excludes.
+        assert!(
+            r.drain_output(h2).is_empty(),
+            "non-backbone inter-area knowledge must not transit areas"
+        );
+        // The backbone only gets area 2's intra net (10.50.50.0/24), never
+        // the area-1-learned 10.40.40.0/24.
+        let backbone_updates = decode_lsus(&r.drain_output(h0));
+        let backbone_prefixes: Vec<u32> = backbone_updates
+            .iter()
+            .flat_map(|u| u.lsas.iter().map(|l| l.header.link_state_id))
+            .collect();
+        assert_eq!(backbone_prefixes, vec![0x0a323200]);
+    }
+
+    #[test]
+    fn ospf_summary_flushed_when_net_disappears() {
+        // ABR setup as in ospf_abr_originates_summary_into_backbone; then
+        // R2's Router-LSA ages out (MaxAge instance) → the backbone
+        // summary is flushed with a MaxAge LSA and the route withdraws.
+        let mut r = DefaultRouter::new();
+        let rid = 0x01010101;
+        let h0 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+        let h1 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 1))
+            .unwrap();
+
+        let ours = router_lsa(rid, vec![(0x02020202, 0, P2P, 5)]);
+        let mut r2 = router_lsa(
+            0x02020202,
+            vec![(rid, 0, P2P, 5), (0x0a0a0a00, 0xffff_ff00, STUB, 10)],
+        );
+        r.feed_input(h1, &ospf_lsu_bytes(0x02020202, 1, vec![ours, r2.clone()]))
+            .unwrap();
+        assert!(r
+            .rib_snapshot()
+            .iter()
+            .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)));
+        let _ = r.drain_output(h0);
+
+        // Flush R2's LSA with a MaxAge instance (seq advanced).
+        r2.header.ls_age = 3600;
+        r2.header.ls_sequence_number += 1;
+        r.feed_input(h1, &ospf_lsu_bytes(0x02020202, 1, vec![r2]))
+            .unwrap();
+
+        let updates = decode_lsus(&r.drain_output(h0));
+        let flushed = updates
+            .iter()
+            .flat_map(|u| u.lsas.iter())
+            .find(|l| l.header.ls_type == 3 && l.header.link_state_id == 0x0a0a0a00)
+            .expect("backbone summary must be flushed");
+        assert_eq!(flushed.header.ls_age, 3600);
+
+        assert!(
+            !r.rib_snapshot()
+                .iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)),
+            "route must withdraw with its summary"
+        );
+    }
+
+    #[test]
+    fn ospf_no_backbone_no_summaries() {
+        // Router attached to areas 1 and 2 only: without a backbone
+        // attachment it is not a functioning ABR and must not summarize.
+        let mut r = DefaultRouter::new();
+        let rid = 0x01010101;
+        let h1 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 1))
+            .unwrap();
+        let h2 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 2))
+            .unwrap();
+        let ours = router_lsa(rid, vec![(0x0a0a0a00, 0xffff_ff00, STUB, 10)]);
+        r.feed_input(h1, &ospf_lsu_bytes(0x02020202, 1, vec![ours]))
+            .unwrap();
+        assert!(r.drain_output(h2).is_empty());
+        assert!(r.drain_output(h1).is_empty());
+        assert!(r
+            .rib_snapshot()
+            .iter()
+            .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)));
+    }
+
+    #[test]
+    fn ospf_area_teardown_with_last_session() {
+        // Routes must not outlive their area: removing the last session of
+        // an area withdraws its routes, while other areas keep theirs.
+        let mut r = DefaultRouter::new();
+        let rid = 0x01010101;
+        let h0 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+        let h1 = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 1))
+            .unwrap();
+        // Area 0: our stub net.
+        let ours_a0 = router_lsa(rid, vec![(0x0b0b0b00, 0xffff_ff00, STUB, 4)]);
+        r.feed_input(h0, &ospf_lsu_bytes(0x02020202, 0, vec![ours_a0]))
+            .unwrap();
+        // Area 1: our stub net.
+        let ours_a1 = router_lsa(rid, vec![(0x0c0c0c00, 0xffff_ff00, STUB, 6)]);
+        r.feed_input(h1, &ospf_lsu_bytes(0x03030303, 1, vec![ours_a1]))
+            .unwrap();
+        assert_eq!(r.rib_snapshot().len(), 2);
+
+        r.remove_session(h1).unwrap();
+        let snap = r.rib_snapshot();
+        assert!(
+            !snap
+                .iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([12, 12, 12, 0], 24)),
+            "area 1 routes must withdraw with the last session"
+        );
+        assert!(
+            snap.iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([11, 11, 11, 0], 24)),
+            "area 0 routes must survive"
+        );
+    }
+
+    #[test]
+    fn ospf_rejects_mismatched_router_id_and_version() {
+        let mut r = DefaultRouter::new();
+        let _h = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(0x01010101), 0))
+            .unwrap();
+        assert!(
+            r.add_session(SessionConfig::ospfv2(RouterId::from_u32(0x02020202), 1))
+                .is_err(),
+            "a second OSPF router ID must be rejected"
+        );
+        // v3 into the same area as v2 must be rejected.
+        let mut v3_cfg = SessionConfig::ospfv2(RouterId::from_u32(0x01010101), 0);
+        v3_cfg.kind = crate::session::SessionKind::Ospfv3;
+        assert!(
+            r.add_session(v3_cfg).is_err(),
+            "OSPFv3 must not mix into a v2 area"
+        );
     }
 
     #[test]

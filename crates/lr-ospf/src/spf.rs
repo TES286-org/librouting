@@ -41,6 +41,9 @@ pub struct SpfRoute {
     pub prefix: Prefix,
     pub metric: u64,
     pub next_hop: Option<IpAddr>,
+    /// For inter-area routes derived from summary-LSAs: the advertising
+    /// border router. `None` for intra-area routes.
+    pub border_router: Option<u32>,
 }
 
 impl Ord for SpfVertex {
@@ -120,14 +123,12 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                                 // Stub network: link-id is the network/subnet; link-data is the mask.
                                 let mask = link.link_data;
                                 let pl = mask_to_pl(mask);
-                                let mut a = link.link_id.to_be_bytes();
-                                let prefix = Prefix::new_v4(a, pl);
-                                a = [0, 0, 0, 0];
-                                let _ = a;
+                                let prefix = Prefix::new_v4(link.link_id.to_be_bytes(), pl);
                                 result.stub_routes.push(SpfRoute {
                                     prefix,
                                     metric: current_dist + link.metric as u64,
                                     next_hop: None,
+                                    border_router: None,
                                 });
                             }
                             _ => {}
@@ -208,6 +209,7 @@ pub fn summary_routes(lsdb: &Lsdb, result: &SpfResult) -> Vec<SpfRoute> {
             prefix,
             metric: dist + u64::from(metric),
             next_hop: None, // resolved from the border router's next hop by the caller
+            border_router: Some(key.advertising_router),
         };
         let replace = match best.get(&prefix) {
             None => true,

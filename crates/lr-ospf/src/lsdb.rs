@@ -138,7 +138,7 @@ impl Lsdb {
             };
             lsa.header.ls_sequence_number = sequence;
             lsa.header.ls_age = 0;
-            lsa.header.ls_checksum = 0;
+            lsa.finalize(); // length + §C.4 checksum cover the new instance
             self.seq_watermark.insert(key, sequence);
             self.entries.insert(
                 key,
