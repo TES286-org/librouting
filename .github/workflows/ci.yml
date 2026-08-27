@@ -131,9 +131,31 @@ jobs:
         run: cargo build -p lr-cli
       - name: Two-daemon interop (librouting ↔ librouting)
         run: ./tests/interop/two_daemon.sh
+      - name: BGP MD5 auth interop (RFC 2385)
+        run: ./tests/interop/md5.sh
       - name: BIRD interop (librouting ↔ BIRD)
         run: ./tests/interop/bird.sh
       - name: BIRD LLGR interop (librouting ↔ BIRD, RFC 9494)
         run: ./tests/interop/bird_llgr.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         run: ./tests/interop/frr.sh
+
+  # TCP-AO needs Linux >= 6.7: ubuntu-24.04 ships a 6.8 kernel. The
+  # script itself skips gracefully when the option is missing, so this
+  # job also doubles as a rolling check on newer kernels/packages.
+  interop-auth:
+    name: Interop auth (TCP-AO, ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install reference daemons
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bird2 frr iproute2
+      - name: Build lr-daemon
+        run: cargo build -p lr-cli
+      - name: TCP-AO two-daemon interop (kernel-gated)
+        run: ./tests/interop/tcp_ao.sh
+      - name: MD5 auth interop (RFC 2385, incl. BIRD/FRR)
+        run: ./tests/interop/md5.sh
