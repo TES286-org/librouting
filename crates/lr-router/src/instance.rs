@@ -37,9 +37,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::connection::{Connection, MemoryConn};
 use crate::event::RouterEvent;
-use crate::session::{SessionConfig, SessionHandle, SessionKind};
+use crate::session::{SessionConfig, SessionHandle, SessionKind, SessionSummary};
 
-use lr_core::addr::{IpAddr, Prefix, RouterId};
+use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
+
 use lr_core::codec::Decoder;
 use lr_core::fsm::{StateMachine, TimerId};
 use lr_core::nlri::NlriFamily;
@@ -595,6 +596,61 @@ impl DefaultRouter {
     /// Number of routes currently in Loc-RIB.
     pub fn rib_len(&self) -> usize {
         self.loc_rib.len()
+    }
+
+    /// Operational summaries of every configured session, ordered by
+    /// handle. Intended for management surfaces (runtime APIs, dumps).
+    pub fn session_summaries(&self) -> Vec<SessionSummary> {
+        self.sessions
+            .iter()
+            .map(|(id, state)| {
+                let adj_rib_in_len = self
+                    .adj_rib_in
+                    .iter_all()
+                    .filter(|r| r.origin.peer == *id)
+                    .count();
+                match state {
+                    SessionState::Bgp {
+                        peer, established, ..
+                    } => SessionSummary {
+                        handle: SessionHandle(*id),
+                        kind: "bgp",
+                        local_as: peer.config().local_as,
+                        peer_as: peer.config().peer_as,
+                        state: peer.state().name(),
+                        established: *established,
+                        peer_bgp_id: peer.peer_bgp_id(),
+                        negotiated_hold_time: peer.negotiated_hold_time(),
+                        adj_rib_in_len,
+                    },
+                    SessionState::Ospf { runtime, .. } => SessionSummary {
+                        handle: SessionHandle(*id),
+                        kind: "ospf",
+                        local_as: Asn(0),
+                        peer_as: Asn(0),
+                        state: runtime.neighbor.state.name(),
+                        established: runtime.neighbor.state == NeighborState::Full,
+                        peer_bgp_id: None,
+                        negotiated_hold_time: 0,
+                        adj_rib_in_len,
+                    },
+                    SessionState::Babel { runtime, .. } => {
+                        let heard = !runtime.neighbor.hello_history.is_empty();
+                        SessionSummary {
+                            handle: SessionHandle(*id),
+                            kind: "babel",
+                            local_as: Asn(0),
+                            peer_as: Asn(0),
+                            state: if heard { "Up" } else { "Down" },
+                            established: heard,
+                            peer_bgp_id: None,
+                            negotiated_hold_time: 0,
+                            adj_rib_in_len,
+                        }
+                    }
+                }
+            })
+            .collect()
     }
 
     fn alloc_handle(&mut self) -> SessionHandle {
@@ -3002,5 +3058,86 @@ mod tests {
             0,
             "LLST expiry during resync removes unrefreshed stale routes"
         );
+    }
+
+    #[test]
+    fn session_summaries_track_bgp_lifecycle() {
+        // A plain (no-GR) pair: session loss must purge the Adj-RIB-In
+        // immediately, which the summary counter reflects.
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+
+        // Pre-start: configured but idle.
+        let s = a.session_summaries();
+        assert_eq!(s.len(), 1);
+        assert_eq!(s[0].handle, a_session);
+        assert_eq!(s[0].kind, "bgp");
+        assert_eq!(s[0].state, "Idle");
+        assert!(!s[0].established);
+        assert_eq!(s[0].local_as, Asn(64512));
+        assert_eq!(s[0].peer_as, Asn(64513));
+        assert_eq!(s[0].peer_bgp_id, None);
+        assert_eq!(s[0].adj_rib_in_len, 0);
+
+        // Post-handshake: established, peer identity + hold time known.
+        establish(&mut a, a_session, &mut b, b_session);
+        let s = a.session_summaries();
+        assert_eq!(s[0].state, "Established");
+        assert!(s[0].established);
+        assert_eq!(s[0].peer_bgp_id, Some(RouterId::from_v4([10, 0, 0, 2])));
+        assert!(s[0].negotiated_hold_time > 0);
+
+        // Adj-RIB-In counter follows the peer's advertisements.
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let s = a.session_summaries();
+        assert_eq!(s[0].adj_rib_in_len, 1);
+
+        // Session loss flips the summary back to Idle and purges the RIB.
+        a.close_session(a_session);
+        a.tick(Instant(0));
+        let s = a.session_summaries();
+        assert_eq!(s[0].state, "Idle");
+        assert!(!s[0].established);
+        assert_eq!(s[0].adj_rib_in_len, 0);
+    }
+
+    #[test]
+    fn session_summaries_list_multiple_sessions_in_order() {
+        let mut r = DefaultRouter::new();
+        r.add_session(SessionConfig::bgp(
+            Asn(64512),
+            Asn(64513),
+            RouterId::from_v4([10, 0, 0, 1]),
+        ))
+        .unwrap();
+        r.add_session(SessionConfig::ospfv2(RouterId::from_u32(0x01020304), 0))
+            .unwrap();
+        r.add_session(SessionConfig::babel(IpAddr::V4([192, 0, 2, 1])))
+            .unwrap();
+
+        let s = r.session_summaries();
+        assert_eq!(s.len(), 3);
+        // Ordered by handle.
+        assert_eq!(s[0].handle, SessionHandle(1));
+        assert_eq!(s[0].kind, "bgp");
+        assert_eq!(s[1].handle, SessionHandle(2));
+        assert_eq!(s[1].kind, "ospf");
+        assert_eq!(s[1].state, "Down");
+        assert_eq!(s[2].handle, SessionHandle(3));
+        assert_eq!(s[2].kind, "babel");
+        assert_eq!(s[2].state, "Down");
+        assert!(!s.iter().any(|x| x.established));
     }
 }

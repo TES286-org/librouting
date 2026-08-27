@@ -176,6 +176,33 @@ impl SessionConfig {
     }
 }
 
+/// Operational summary of one session — the introspection view behind
+/// management surfaces (`lr-daemon` runtime API, FFI dumps, bindings).
+///
+/// Produced by [`crate::DefaultRouter::session_summaries`]; fields outside
+/// the session's protocol are zero/`None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SessionSummary {
+    /// Opaque session handle.
+    pub handle: SessionHandle,
+    /// Protocol kind: `"bgp"`, `"ospf"` or `"babel"`.
+    pub kind: &'static str,
+    /// Configured local AS (BGP only).
+    pub local_as: Asn,
+    /// Configured peer AS (BGP only).
+    pub peer_as: Asn,
+    /// Current protocol state name (`"Established"`, `"Full"`, `"Up"`, ...).
+    pub state: &'static str,
+    /// Whether the session is currently fully established.
+    pub established: bool,
+    /// BGP identifier advertised by the peer (BGP only, post-OPEN).
+    pub peer_bgp_id: Option<RouterId>,
+    /// Hold time negotiated on the current connection (BGP only).
+    pub negotiated_hold_time: u16,
+    /// Routes currently held in this session's Adj-RIB-In.
+    pub adj_rib_in_len: usize,
+}
+
 /// One session.
 pub struct Session {
     pub handle: SessionHandle,

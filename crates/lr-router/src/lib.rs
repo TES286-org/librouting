@@ -12,4 +12,4 @@ pub mod session;
 
 pub use event::{EventSink, RouterEvent};
 pub use instance::{DefaultRouter, RouterInstance};
-pub use session::{Session, SessionConfig, SessionHandle, SessionKind};
+pub use session::{Session, SessionConfig, SessionHandle, SessionKind, SessionSummary};
