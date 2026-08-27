@@ -30,7 +30,7 @@ use crate::spf::{summary_routes, SpfResult, VertexId};
 use lr_core::addr::{IpAddr, Prefix};
 
 /// LSInfinity — an external metric that means "unreachable" (§16.4 (1)).
-const LS_INFINITY: u32 = 0x00ff_ffff;
+pub(crate) const LS_INFINITY: u32 = 0x00ff_ffff;
 
 /// External metric type (RFC 2328 §2.3).
 ///
@@ -68,6 +68,11 @@ impl ExternalMetricType {
 /// reserved to mean "unreachable". A forwarding address of `0.0.0.0`
 /// routes traffic to the ASBR itself; otherwise traffic is forwarded to
 /// that address, which must be reachable through OSPF (§16.4 (c)).
+///
+/// `p_bit` only matters when the destination is redistributed into an
+/// NSSA as a type-7 LSA (RFC 3101 §2.4): set means the originator asks
+/// border routers to translate the LSA into a type-5 — which then
+/// requires a non-zero `forwarding_addr` (§2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ExternalDestination {
     pub prefix: Prefix,
@@ -76,6 +81,9 @@ pub struct ExternalDestination {
     /// 0 means "forward to the ASBR".
     pub forwarding_addr: u32,
     pub route_tag: u32,
+    /// Ask NSSA border routers to translate the type-7 into a type-5
+    /// (RFC 3101 §2.4). Ignored for type-5 origination.
+    pub p_bit: bool,
 }
 
 impl ExternalDestination {
@@ -86,6 +94,7 @@ impl ExternalDestination {
             metric_type,
             forwarding_addr: 0,
             route_tag: 0,
+            p_bit: true,
         }
     }
 }
@@ -223,7 +232,7 @@ impl ExternalRoute {
     /// §16.4 (6) candidate preference for identical prefixes: type 1
     /// beats type 2, then the lowest metric, then (type 2) the lowest
     /// internal cost, then the lowest ASBR router ID for determinism.
-    fn beats(&self, prev: &Self) -> bool {
+    pub(crate) fn beats(&self, prev: &Self) -> bool {
         match self.metric_type.cmp(&prev.metric_type) {
             core::cmp::Ordering::Less => return true,
             core::cmp::Ordering::Greater => return false,
@@ -385,13 +394,13 @@ pub fn external_routes(lsdb: &Lsdb, spf_result: &SpfResult) -> Vec<ExternalRoute
 }
 
 /// `/32` prefix around a forwarding address.
-fn fa_prefix(addr: u32) -> Prefix {
+pub(crate) fn fa_prefix(addr: u32) -> Prefix {
     Prefix::new_v4(addr.to_be_bytes(), 32)
 }
 
 /// Longest-prefix match of `prefix` against `table`. Returns the covering
 /// entry (prefix length, metric) or `None`.
-fn longest_covering(table: &[(Prefix, u64)], prefix: Prefix) -> Option<(u8, u64)> {
+pub(crate) fn longest_covering(table: &[(Prefix, u64)], prefix: Prefix) -> Option<(u8, u64)> {
     let mut best: Option<(u8, u64)> = None;
     for (candidate, metric) in table {
         if candidate.prefix_len <= prefix.prefix_len

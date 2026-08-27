@@ -118,7 +118,9 @@ pub fn mask_to_prefix_len(mask: u32) -> u8 {
 /// Convert a prefix length (0–32) to a dotted-quad netmask. Values above
 /// 32 clamp to a full mask.
 pub fn prefix_len_to_mask(len: u8) -> u32 {
-    if len >= 32 {
+    if len == 0 {
+        0
+    } else if len >= 32 {
         u32::MAX
     } else {
         !0u32 << (32 - len)
@@ -214,6 +216,27 @@ impl LsaTypeV2 {
             _ => return None,
         })
     }
+}
+
+/// Router-LSA flags bits (RFC 2328 §A.4.2 diagram; Nt from RFC 3101
+/// Appendix B): the flags word is the first 16 bits of the body —
+/// `| 0 | Nt | W | V | E | B | 0 |` in the high byte.
+pub mod router_lsa_flags {
+    /// B-bit: the router is an area border router.
+    pub const B: u8 = 0x01;
+    /// E-bit: the router is an AS boundary router.
+    pub const E: u8 = 0x02;
+    /// V-bit: the router is an endpoint of an active virtual link.
+    pub const V: u8 = 0x04;
+    /// Nt-bit (RFC 3101 Appendix B): the NSSA border router is an
+    /// unconditional type-7 translator.
+    pub const NT: u8 = 0x10;
+}
+
+/// Extract the router-LSA flags byte (RFC 2328 §A.4.2) from a body.
+/// Returns `None` for truncated bodies.
+pub fn router_lsa_flags_byte(body: &[u8]) -> Option<u8> {
+    body.first().copied()
 }
 
 /// Router-LSA link types (RFC 2328 §A.4.2).
