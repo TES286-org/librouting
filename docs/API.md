@@ -184,3 +184,18 @@ let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_
 r.set_mrai(h, 10_000)?;
 let events = r.poll_events();
 ```
+
+### Operational introspection
+
+`session_summaries()` renders one [`SessionSummary`] per session (kind,
+ASNs, FSM state, establishment, peer BGP id, negotiated hold time,
+Adj-RIB-In size) — the data plane behind `lr-daemon --api-socket`
+(`sessions` command), `lr_router_sessions_dump` in the FFI and the
+Go/Python bindings. `rib_snapshot()` (via `RouterInstance`) yields the
+Loc-RIB for `routes`/dumps.
+
+```rust
+for s in r.session_summaries() {
+    println!("#{} {} state={} established={}", s.handle.0, s.kind, s.state, s.established);
+}
+```

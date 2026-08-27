@@ -103,19 +103,20 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML subset) | ✅ 🧪 | |
+| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML subset) | ✅ 🧪 | signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API |
 | C ABI FFI (`lr-ffi`) + cbindgen header | ✅ 🧪 | C harness in CI |
 | Go bindings | ✅ 🧪 | `bindings/lr-go` |
 | Python bindings | ✅ 🧪 | `bindings/lr-python` (cffi) |
-| C++ bindings | ✅ | header-compatible with the C ABI (`bindings/lr-cpp`) |
-| Signal handling / privilege drop in daemon | ❌ | documented as embedder responsibility |
+| C++ bindings | ✅ | header-only RAII wrapper over the C ABI (`include/librouting.hpp`) |
+| Signal handling / privilege drop / config reload / runtime API in daemon | ✅ 🧪 | SIGTERM/SIGINT close sessions with a NOTIFICATION (RFC 4271 §6.4) then exit 0; SIGHUP + API `reload` re-apply `networks` (bad config keeps running); `--user`/`--group` setuid/setgid after bind; `--api-socket` Unix-socket management plane (status/sessions/routes/reload/shutdown); `daemon_runtime.rs` E2E |
 
 ## Testing & CI
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 30 binaries / 230+ tests |
+| Unit tests (workspace) | ✅ 30 binaries / 260+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 |
+| Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
@@ -140,8 +141,12 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 4. ~~**BGP MD5/TCP-AO**~~ — done: `lr-osroute::tcp_auth` (RFC 2385 +
    RFC 5925, Linux kernel-signed segments), daemon flags `--md5-key` /
    `--tcp-ao-key`, interop-verified against BIRD and FRR.
-5. **Daemon hardening** — signal handling, privilege drop, config reload,
-   runtime API (gRPC/UNIX socket) for operational visibility.
+5. ~~**Daemon hardening**~~ — done: signal handling (SIGTERM/SIGINT
+   graceful shutdown with NOTIFICATION-first close, SIGHUP config
+   reload), privilege drop (`--user`/`--group`), and a Unix-socket
+   runtime API (`--api-socket`: status/sessions/routes/reload/shutdown)
+   backed by the new `DefaultRouter::session_summaries()` introspection
+   (also exposed through the FFI and the Go/Python bindings).
 6. **Add-Path best-path wiring** — capability + encoding exist; N-path
    selection/advertisement remains partial.
 7. **OSPF depth** — OSPFv3 inter-area (A.4.3-equivalent bodies), stub/NSSA
