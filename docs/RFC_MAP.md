@@ -42,11 +42,11 @@ implements, or references. It is grouped by protocol family.
 
 | RFC    | Title                                                | Status       | Crate path                          |
 |--------|------------------------------------------------------|--------------|--------------------------------------|
-| 2328   | OSPF Version 2                                       | ✓ core       | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf` |
+| 2328   | OSPF Version 2                                       | ✓ core + inter-area | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf`, `lr-ospf::abr`, `lr-router` |
 | 3101   | OSPF Not-So-Stubby Areas (NSSA)                      | partial      | `lr-ospf::lsa`                       |
 | 3623   | Graceful OSPF Restart                                | partial      | TBD                                 |
 | 4577   | OSPF as the Provider Edge-to-CE                      | partial      | —                                    |
-| 5340   | OSPF for IPv6                                         | ✓ core       | `lr-ospf::packet`                   |
+| 5340   | OSPF for IPv6                                         | ✓ core       | `lr-ospf::packet` (inter-area-prefix-LSA origination not implemented) |
 | 5643   | Management Information Base for OSPFv3                | partial      | —                                    |
 | 6850   | OSPFv3 MIB                                            | partial      | —                                    |
 | 7166   | Support for the Auth Trailer in OSPFv3               | partial      | `lr-ospf::auth`                      |

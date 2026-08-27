@@ -54,12 +54,15 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 |-----------|:------:|-------|
 | Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ | hello, DBD, LSR, LSU, LSAck |
 | Neighbor FSM | ✅ | |
-| LSDB + LSA flooding | ✅ | |
+| LSDB + LSA flooding | ✅ | per-area shared LSDB; same-area sessions flood to each other (§13.3 simplified) |
 | SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
+| Inter-area routes from summary-LSAs (§16.2) | ✅ 🧪 | reachable-border check, dist-to-border + summary metric, LSInfinity skip |
+| ABR summary-LSA origination/flush (§12.4.3) | ✅ 🧪 | type-3 lifecycle with backbone-only loop guard, checksummed LSAs, MaxAge flush |
 | Designated-router election | ✅ | |
-| Area support | 🟡 | single area (backbone) focus; inter-area/ABR summary-LSA handling is minimal |
-| LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s |
+| Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
+| LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
 | Stub/NSSA areas | ❌ | |
+| Virtual links | ❌ | non-backbone-only attachment does not summarize (needs backbone) |
 | Auth (cryptographic) | ❌ | |
 
 ### Babel (`lr-babel`)
@@ -110,8 +113,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 29 binaries / 195+ tests |
+| Unit tests (workspace) | ✅ 30 binaries / 230+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 |
+| OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
 | BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
 | FRR bgpd interop (bidirectional) | ✅ 🧪 |
@@ -125,11 +129,15 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 1. ~~**Graceful restart restart-state**~~ — done, including RFC 9494
    long-lived graceful restart.
-2. **OSPF LSA refresh scheduling + ABR summary LSAs** — multi-area
-   correctness. (Self-LSA refresh done; ABR summary LSAs remain.)
+2. ~~**OSPF LSA refresh scheduling + ABR summary LSAs**~~ — done: shared
+   per-area LSDBs, §16.2 inter-area calculation, §12.4.3 summary
+   origination/flush with loop guards (OSPFv2; v3 inter-area-prefix-LSA
+   origination remains future work).
 3. ~~**Babel HMAC (RFC 8967)**~~ — done.
 4. **BGP MD5/TCP-AO** — where operators require it.
 5. **Daemon hardening** — signal handling, privilege drop, config reload,
    runtime API (gRPC/UNIX socket) for operational visibility.
 6. **Add-Path best-path wiring** — capability + encoding exist; N-path
    selection/advertisement remains partial.
+7. **OSPF depth** — OSPFv3 inter-area (A.4.3-equivalent bodies), stub/NSSA
+   areas, virtual links, cryptographic auth (§C.3 / RFC 7166).
