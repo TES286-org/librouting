@@ -51,6 +51,11 @@ def test_router_lifecycle():
         out = r.drain_output(h)
         assert isinstance(out, bytes)
         r.tick(0)
+        # Operational summary reflects the configured-but-idle session.
+        sessions = r.sessions_dump()
+        assert "kind=bgp" in sessions
+        assert "state=Idle" in sessions
+        assert "local-as=64512" in sessions
 
 
 def test_router_data_plane():

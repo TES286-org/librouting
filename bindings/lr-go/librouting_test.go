@@ -91,6 +91,15 @@ func TestDataPlane(t *testing.T) {
 	if !strings.Contains(dump, "203.0.113.0/24") {
 		t.Fatalf("rib dump missing prefix: %q", dump)
 	}
+	sessions, err := r.SessionsDump()
+	if err != nil {
+		t.Fatalf("SessionsDump: %v", err)
+	}
+	// The session was started and its OPEN drained, so the FSM sits in
+	// OpenSent awaiting the peer's OPEN.
+	if !strings.Contains(sessions, "kind=bgp") || !strings.Contains(sessions, "state=OpenSent") {
+		t.Fatalf("sessions dump missing bgp session: %q", sessions)
+	}
 	r.ptr = nil
 }
 

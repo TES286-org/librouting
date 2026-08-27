@@ -205,4 +205,15 @@ int64_t lr_router_rib_len(lr_router_t r);
  */
 int32_t lr_router_rib_dump(lr_router_t r, struct lr_bytes_t *out);
 
+/**
+ * Dump every session's operational summary as a text table (one line
+ * per session: handle, kind, ASNs, state, establishment, peer BGP id,
+ * negotiated hold time, Adj-RIB-In size). The caller owns the returned
+ * bytes and must free them with `lr_bytes_free`.
+ *
+ * # Safety
+ * `out` must point to a valid `lr_bytes_t` slot.
+ */
+int32_t lr_router_sessions_dump(lr_router_t r, struct lr_bytes_t *out);
+
 #endif  /* LR_FFI_H */

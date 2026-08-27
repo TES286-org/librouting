@@ -330,3 +330,43 @@ pub unsafe extern "C" fn lr_router_rib_dump(r: lr_router_t, out: *mut lr_bytes_t
     unsafe { *out = lr_bytes_t::from_vec(text.into_bytes()) }
     0
 }
+
+/// Dump every session's operational summary as a text table (one line
+/// per session: handle, kind, ASNs, state, establishment, peer BGP id,
+/// negotiated hold time, Adj-RIB-In size). The caller owns the returned
+/// bytes and must free them with `lr_bytes_free`.
+///
+/// # Safety
+/// `out` must point to a valid `lr_bytes_t` slot.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_sessions_dump(r: lr_router_t, out: *mut lr_bytes_t) -> i32 {
+    if out.is_null() {
+        return -1;
+    }
+    let router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -2,
+    };
+    let mut text = String::new();
+    for s in router.session_summaries() {
+        use std::fmt::Write as _;
+        let _ = writeln!(
+            text,
+            "#{} kind={} local-as={} peer-as={} state={} established={} peer-id={} \
+             hold-time={} adj-rib-in={}",
+            s.handle.0,
+            s.kind,
+            s.local_as.0,
+            s.peer_as.0,
+            s.state,
+            s.established,
+            s.peer_bgp_id
+                .map(|i| i.to_string())
+                .unwrap_or_else(|| "-".to_string()),
+            s.negotiated_hold_time,
+            s.adj_rib_in_len
+        );
+    }
+    unsafe { *out = lr_bytes_t::from_vec(text.into_bytes()) }
+    0
+}

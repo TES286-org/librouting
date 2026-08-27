@@ -152,6 +152,17 @@ class Router:
         finally:
             free_bytes(b)
 
+    def sessions_dump(self) -> str:
+        """Dump every session's operational summary (one line per session)."""
+        b = alloc_bytes()
+        rc = get_lib().lr_router_sessions_dump(self._ptr, b)
+        if rc != 0:
+            raise LrError(f"lr_router_sessions_dump failed (rc={rc}): {last_error()}")
+        try:
+            return copy_bytes(b).decode("utf-8", errors="replace")
+        finally:
+            free_bytes(b)
+
 
 def abi_version() -> int:
     return int(get_lib().lr_abi_version())

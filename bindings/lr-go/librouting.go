@@ -196,6 +196,18 @@ func (r *Router) RibDump() (string, error) {
         return string(copyBytes(&b)), nil
 }
 
+// SessionsDump renders every session's operational summary as a text
+// table (one line per session: handle, kind, ASNs, state, ...).
+func (r *Router) SessionsDump() (string, error) {
+        var b C.struct_lr_bytes_t
+        rc := C.lr_router_sessions_dump(r.ptr, &b)
+        if rc != 0 {
+                return "", fmt.Errorf("lr_router_sessions_dump: %s (rc=%d)", LastError(), int(rc))
+        }
+        defer C.lr_bytes_free(&b)
+        return string(copyBytes(&b)), nil
+}
+
 // ABIVersion returns the packed ABI version of the linked library.
 func ABIVersion() uint32 {
         return uint32(C.lr_abi_version())

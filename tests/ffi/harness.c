@@ -140,6 +140,13 @@ int main(void) {
     check(lr_bytes_len(&dump) > 0, "rib_dump non-empty");
     lr_bytes_free(&dump);
 
+    /* Session summary dump: one line per session, machine-parsable */
+    lr_bytes_t sdump = {0};
+    rc = lr_router_sessions_dump(r, &sdump);
+    check(rc == 0, "sessions_dump");
+    check(lr_bytes_len(&sdump) > 0, "sessions_dump non-empty");
+    lr_bytes_free(&sdump);
+
     /* No UPDATE is queued for the peer yet: the session has not completed
      * its OPEN/KEEPALIVE handshake, so the route is held in Loc-RIB and
      * will be advertised when the session reaches Established (initial
