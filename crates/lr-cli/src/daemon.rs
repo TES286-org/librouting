@@ -295,8 +295,7 @@ fn build_tcp_auth(cfg: &DaemonConfig) -> Result<TcpAuth, String> {
         if !cfg.tcp_ao_keys.is_empty() {
             return Err("--md5-key and --tcp-ao-key are mutually exclusive".to_string());
         }
-        return TcpAuth::md5(md5.as_bytes().to_vec())
-            .map_err(|e| format!("bad --md5-key: {e}"));
+        return TcpAuth::md5(md5.as_bytes().to_vec()).map_err(|e| format!("bad --md5-key: {e}"));
     }
     if cfg.tcp_ao_keys.is_empty() {
         return Ok(TcpAuth::None);
@@ -531,28 +530,25 @@ fn main() -> ExitCode {
         // With authentication configured the raw-socket path installs the
         // keys before connect(2) so the SYN itself is signed (RFC 2385
         // §2 / RFC 5925 §3.1).
-        let stream = match lr_osroute::tcp_auth::connect_auth(
-            sockaddr,
-            &tcp_auth,
-            Duration::from_secs(5),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                if e.is_kernel_unsupported() {
-                    // Permanent condition (e.g. TCP-AO on Linux < 6.7):
-                    // retrying cannot help, fail closed.
-                    eprintln!("daemon: session auth not supported by kernel: {}", e);
-                    return ExitCode::from(1);
+        let stream =
+            match lr_osroute::tcp_auth::connect_auth(sockaddr, &tcp_auth, Duration::from_secs(5)) {
+                Ok(s) => s,
+                Err(e) => {
+                    if e.is_kernel_unsupported() {
+                        // Permanent condition (e.g. TCP-AO on Linux < 6.7):
+                        // retrying cannot help, fail closed.
+                        eprintln!("daemon: session auth not supported by kernel: {}", e);
+                        return ExitCode::from(1);
+                    }
+                    eprintln!(
+                        "daemon: connect failed ({}); retrying in {}ms",
+                        e, backoff_ms
+                    );
+                    thread::sleep(Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(30_000);
+                    continue;
                 }
-                eprintln!(
-                    "daemon: connect failed ({}); retrying in {}ms",
-                    e, backoff_ms
-                );
-                thread::sleep(Duration::from_millis(backoff_ms));
-                backoff_ms = (backoff_ms * 2).min(30_000);
-                continue;
-            }
-        };
+            };
         backoff_ms = 1_000;
         let _ = stream.set_nodelay(true);
         match run_session(
