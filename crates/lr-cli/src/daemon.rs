@@ -42,6 +42,7 @@ use std::time::{Duration, Instant as WallClock};
 
 use core::str::FromStr;
 use lr_core::addr::{Asn, Prefix, RouterId};
+use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
 /// Daemon configuration (TOML or CLI flags).
@@ -71,6 +72,15 @@ struct DaemonConfig {
     /// Optional local cap (seconds) for the LLGR stale time received from
     /// peers. 0 = honour the peer's value.
     llgr_max_stale_time: u32,
+    /// RFC 2385 TCP MD5 shared secret for the BGP session.
+    md5_key: Option<String>,
+    /// RFC 5925 TCP-AO keys as "id:secret" pairs (id = KeyID, used as
+    /// both SendID and RecvID in the reference daemon).
+    tcp_ao_keys: Vec<String>,
+    /// TCP-AO MAC algorithm ("hmac-sha1" or "cmac-aes").
+    tcp_ao_algorithm: String,
+    /// TCP-AO MAC length in bytes (0 = algorithm default).
+    tcp_ao_maclen: u8,
 }
 
 fn print_usage() {
@@ -92,6 +102,12 @@ fn print_usage() {
          --llgr SEC               RFC 9494 long-lived graceful restart\n  \
          stale time to advertise (default 0 = disabled)\n  \
          --llgr-max-stale SEC     Cap the peer-advertised LLGR stale time\n  \
+         --md5-key SECRET         RFC 2385 TCP MD5 session authentication\n  \
+         --tcp-ao-key ID:SECRET   RFC 5925 TCP-AO key (repeatable; first key\n  \
+         is Current/RNext; Linux 6.7+)\n  \
+         --tcp-ao-alg NAME        TCP-AO MAC algorithm: hmac-sha1 (default)\n  \
+         or cmac-aes\n  \
+         --tcp-ao-maclen N        TCP-AO MAC length in bytes (default 12)\n  \
          --install-kernel-routes  Install best routes into the OS FIB (root)\n  \
          -h, --help               Show this help"
     );
@@ -137,6 +153,19 @@ fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
             "bgp.listen_addr" => cfg.listen_addr = Some(value.to_string()),
             "bgp.local_address" => cfg.local_address = Some(value.to_string()),
             "bgp.hold_time" => cfg.hold_time = value.parse().unwrap_or(90),
+            "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
+            "bgp.tcp_ao_keys" => {
+                // Comma-separated array: ["1:secret", "2:other"]
+                let inner = value.trim_start_matches('[').trim_end_matches(']');
+                for item in inner.split(',') {
+                    let item = item.trim().trim_matches('"');
+                    if !item.is_empty() {
+                        cfg.tcp_ao_keys.push(item.to_string());
+                    }
+                }
+            }
+            "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
+            "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
             "networks" => {
                 // Comma-separated array: ["a", "b"]
                 let inner = value.trim_start_matches('[').trim_end_matches(']');
@@ -157,6 +186,7 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
     let args: Vec<String> = std::env::args().collect();
     let mut cfg = DaemonConfig {
         hold_time: 90,
+        tcp_ao_algorithm: "hmac-sha1".to_string(),
         ..Default::default()
     };
     let mut config_path: Option<String> = None;
@@ -212,6 +242,22 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.llgr_max_stale_time = args[i + 1].parse().unwrap_or(0);
                 i += 2;
             }
+            "--md5-key" if i + 1 < args.len() => {
+                cfg.md5_key = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--tcp-ao-key" if i + 1 < args.len() => {
+                cfg.tcp_ao_keys.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--tcp-ao-alg" if i + 1 < args.len() => {
+                cfg.tcp_ao_algorithm = args[i + 1].clone();
+                i += 2;
+            }
+            "--tcp-ao-maclen" if i + 1 < args.len() => {
+                cfg.tcp_ao_maclen = args[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
             "--install-kernel-routes" => {
                 cfg.install_kernel = true;
                 i += 1;
@@ -240,6 +286,46 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
     Ok(cfg)
 }
 
+/// Builds the transport authentication configuration from CLI flags / TOML.
+/// MD5 and TCP-AO are mutually exclusive (the kernel forbids mixing them
+/// on one socket anyway: `TCP_AO_INFO.ao_required` fails with EKEYREJECTED
+/// when MD5 keys are present).
+fn build_tcp_auth(cfg: &DaemonConfig) -> Result<TcpAuth, String> {
+    if let Some(md5) = &cfg.md5_key {
+        if !cfg.tcp_ao_keys.is_empty() {
+            return Err("--md5-key and --tcp-ao-key are mutually exclusive".to_string());
+        }
+        return TcpAuth::md5(md5.as_bytes().to_vec())
+            .map_err(|e| format!("bad --md5-key: {e}"));
+    }
+    if cfg.tcp_ao_keys.is_empty() {
+        return Ok(TcpAuth::None);
+    }
+    let algorithm = TcpAoAlgorithm::parse(&cfg.tcp_ao_algorithm).ok_or_else(|| {
+        format!(
+            "unknown --tcp-ao-alg '{}' (use hmac-sha1 or cmac-aes)",
+            cfg.tcp_ao_algorithm
+        )
+    })?;
+    let mut keys = Vec::with_capacity(cfg.tcp_ao_keys.len());
+    for raw in &cfg.tcp_ao_keys {
+        // Format: "id:secret" — the id is used as both SendID and RecvID.
+        let (id, secret) = raw.split_once(':').ok_or_else(|| {
+            format!("bad --tcp-ao-key '{raw}': expected ID:SECRET (e.g. 1:alpha)")
+        })?;
+        let id: u8 = id
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad --tcp-ao-key '{raw}': ID must be 0-255"))?;
+        keys.push(
+            TcpAoKey::symmetric(id, secret.as_bytes().to_vec())
+                .map_err(|e| format!("bad --tcp-ao-key '{raw}': {e}"))?,
+        );
+    }
+    TcpAuth::tcp_ao(keys, algorithm, cfg.tcp_ao_maclen)
+        .map_err(|e| format!("bad tcp-ao configuration: {e}"))
+}
+
 fn main() -> ExitCode {
     let cfg = match parse_args() {
         Ok(c) => c,
@@ -254,6 +340,15 @@ fn main() -> ExitCode {
         Ok(r) => r,
         Err(_) => {
             eprintln!("error: invalid router-id: {}", cfg.router_id);
+            return ExitCode::from(2);
+        }
+    };
+    // Transport authentication (RFC 2385 / RFC 5925). MD5 and TCP-AO are
+    // mutually exclusive — a single TcpAuth value carries the choice.
+    let tcp_auth = match build_tcp_auth(&cfg) {
+        Ok(a) => a,
+        Err(e) => {
+            eprintln!("error: {}", e);
             return ExitCode::from(2);
         }
     };
@@ -311,6 +406,7 @@ fn main() -> ExitCode {
     }
     println!("  networks:    {:?}", cfg.networks);
     println!("  install:     {}", cfg.install_kernel);
+    println!("  auth:        {}", tcp_auth.describe());
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks.
@@ -369,6 +465,16 @@ fn main() -> ExitCode {
             }
         };
         println!("daemon: listening on {}", listen_addr);
+        // Fail closed: if session authentication is configured but cannot
+        // be armed on the listener (missing kernel support, bad key), stop
+        // instead of accepting unauthenticated connections.
+        if let Err(e) = lr_osroute::tcp_auth::arm_listener(&listener, &tcp_auth) {
+            eprintln!("daemon: session auth arming failed: {}", e);
+            return ExitCode::from(1);
+        }
+        if !tcp_auth.is_none() {
+            println!("daemon: session auth armed ({})", tcp_auth.describe());
+        }
         let mut ever_established = false;
         for stream in listener.incoming() {
             match stream {
@@ -422,9 +528,22 @@ fn main() -> ExitCode {
             }
         };
         println!("daemon: connecting to {} ...", peer_addr);
-        let stream = match TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5)) {
+        // With authentication configured the raw-socket path installs the
+        // keys before connect(2) so the SYN itself is signed (RFC 2385
+        // §2 / RFC 5925 §3.1).
+        let stream = match lr_osroute::tcp_auth::connect_auth(
+            sockaddr,
+            &tcp_auth,
+            Duration::from_secs(5),
+        ) {
             Ok(s) => s,
             Err(e) => {
+                if e.is_kernel_unsupported() {
+                    // Permanent condition (e.g. TCP-AO on Linux < 6.7):
+                    // retrying cannot help, fail closed.
+                    eprintln!("daemon: session auth not supported by kernel: {}", e);
+                    return ExitCode::from(1);
+                }
                 eprintln!(
                     "daemon: connect failed ({}); retrying in {}ms",
                     e, backoff_ms

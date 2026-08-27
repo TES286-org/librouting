@@ -38,5 +38,18 @@ graceful_restart_time = 120
 # (seconds; 0 = honour the peer's value).
 # llgr_max_stale_time = 7200
 
+# RFC 2385 TCP MD5 session authentication (transport level). The same
+# secret must be configured on the peer ("password" in BIRD / FRR).
+# Mutually exclusive with tcp_ao_keys.
+# md5_key = "alpha"
+
+# RFC 5925 TCP-AO session authentication (Linux 6.7+). Keys are
+# "id:secret"; the id is used as both SendID and RecvID, and the first
+# key is Current/RNext. Optionally select the MAC algorithm
+# ("hmac-sha1", the default, or "cmac-aes") and MAC length (default 12).
+# tcp_ao_keys = ["1:alpha"]
+# tcp_ao_algorithm = "hmac-sha1"
+# tcp_ao_maclen = 12
+
 # Locally originated networks.
 networks = ["203.0.113.0/24"]
