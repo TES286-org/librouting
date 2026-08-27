@@ -261,6 +261,16 @@ struct AsbrLeg {
 /// 4. build the candidate metric from the metric type (§2.3) and keep
 ///    the best candidate per prefix (§16.4 (6)).
 pub fn external_routes(lsdb: &Lsdb, spf_result: &SpfResult) -> Vec<ExternalRoute> {
+    // Fast path: areas without any type-5/type-4 LSAs skip the covering
+    // table construction entirely (summary routes are not needed).
+    let has_externals = lsdb.iter().any(|(key, _)| {
+        key.ls_type == LsaTypeV2::AsExternalLsa as u8
+            || key.ls_type == LsaTypeV2::SummaryAsbrLsa as u8
+    });
+    if !has_externals {
+        return Vec::new();
+    }
+
     // §16.4 (b): inter-area ASBR legs from type-4 summary-ASBR-LSAs.
     let mut asbr_legs: BTreeMap<u32, AsbrLeg> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
