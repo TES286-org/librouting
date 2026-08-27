@@ -10,6 +10,27 @@ pub const MAX_AGE_SECS: u16 = 3_600;
 /// RFC 2328 §14.1: default self-originated LSA refresh interval.
 pub const LS_REFRESH_TIME_SECS: u16 = 1_800;
 
+/// Outcome of installing one LSA instance (RFC 2328 §13).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InstallOutcome {
+    /// No previous instance existed; the LSA was added.
+    New,
+    /// The instance was newer and replaced the previous one.
+    Replaced,
+    /// Duplicate or older instance; the database is unchanged.
+    Ignored,
+    /// A MaxAge instance purged the previous entry from the database.
+    Purged,
+}
+
+impl InstallOutcome {
+    /// Whether the install changed the database (and thus whether the LSA
+    /// should be flooded onward and routes recomputed).
+    pub fn changed(self) -> bool {
+        !matches!(self, InstallOutcome::Ignored)
+    }
+}
+
 /// An LSA entry in the LSDB. Carries the LSA itself + an installation age.
 #[derive(Debug, Clone)]
 pub struct LsaEntry {
@@ -39,22 +60,41 @@ impl Lsdb {
         self.entries.is_empty()
     }
 
-    /// Install or refresh an LSA. Returns the previous entry, if any.
-    pub fn install(&mut self, lsa: Lsa, now_ms: u64) -> Option<LsaEntry> {
+    /// Install one LSA instance (RFC 2328 §13): newer instances replace
+    /// the stored copy, duplicates and older instances are ignored, and an
+    /// instance aged to MaxAge purges the LSA from the database.
+    pub fn install(&mut self, lsa: Lsa, now_ms: u64) -> InstallOutcome {
         let key = lsa.key();
-        // Accept if newer than what we have.
+        if lsa.header.ls_age >= MAX_AGE_SECS {
+            // §13: a MaxAge instance flushes the LSA (and its watermark so
+            // re-origination may restart at the initial sequence number).
+            return if self.entries.remove(&key).is_some() {
+                self.seq_watermark.remove(&key);
+                InstallOutcome::Purged
+            } else {
+                InstallOutcome::Ignored
+            };
+        }
+        // Accept if newer than what we have (signed sequence space, §12.1.2).
         let prev_seq = self.seq_watermark.get(&key).copied().unwrap_or(0);
         if (lsa.header.ls_sequence_number as i32) <= (prev_seq as i32) && prev_seq != 0 {
-            // Older or duplicate; ignore.
-            return None;
+            return InstallOutcome::Ignored;
         }
         self.seq_watermark
             .insert(key, lsa.header.ls_sequence_number);
-        let entry = LsaEntry {
-            lsa,
-            installed_ms: now_ms,
+        let outcome = if self.entries.contains_key(&key) {
+            InstallOutcome::Replaced
+        } else {
+            InstallOutcome::New
         };
-        self.entries.insert(key, entry)
+        self.entries.insert(
+            key,
+            LsaEntry {
+                lsa,
+                installed_ms: now_ms,
+            },
+        );
+        outcome
     }
 
     pub fn remove(&mut self, key: &LsaKey) -> Option<LsaEntry> {
@@ -170,8 +210,7 @@ mod tests {
     fn install_and_lookup() {
         let mut db = Lsdb::new();
         let lsa = make_lsa(1, 0x01020304, 0x80000001);
-        let prev = db.install(lsa.clone(), 0);
-        assert!(prev.is_none());
+        assert_eq!(db.install(lsa.clone(), 0), InstallOutcome::New);
         assert_eq!(db.len(), 1);
         let e = db.get(&lsa.key()).unwrap();
         assert_eq!(e.lsa.header.ls_sequence_number, 0x80000001);
@@ -182,11 +221,62 @@ mod tests {
         let mut db = Lsdb::new();
         let l1 = make_lsa(1, 2, 0x80000005);
         let l2 = make_lsa(1, 2, 0x80000003);
-        assert!(db.install(l1, 0).is_none());
-        assert!(db.install(l2, 1).is_none()); // older
+        assert_eq!(db.install(l1, 0), InstallOutcome::New);
+        assert_eq!(db.install(l2, 1), InstallOutcome::Ignored); // older
         assert_eq!(db.len(), 1);
         let e = db.get(&make_lsa(1, 2, 0).key()).unwrap();
         assert_eq!(e.lsa.header.ls_sequence_number, 0x80000005);
+    }
+
+    #[test]
+    fn newer_replaces() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000001), 0),
+            InstallOutcome::New
+        );
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000002), 5),
+            InstallOutcome::Replaced
+        );
+        let e = db.get(&make_lsa(1, 2, 0).key()).unwrap();
+        assert_eq!(e.installed_ms, 5);
+        assert_eq!(e.lsa.header.ls_sequence_number, 0x80000002);
+    }
+
+    #[test]
+    fn max_age_instance_purges() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000001), 0),
+            InstallOutcome::New
+        );
+        let mut flush = make_lsa(1, 2, 0x80000002);
+        flush.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(flush, 10), InstallOutcome::Purged);
+        assert!(db.is_empty());
+        // A second MaxAge instance for the purged LSA is a no-op.
+        let mut again = make_lsa(1, 2, 0x80000003);
+        again.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(again, 11), InstallOutcome::Ignored);
+    }
+
+    #[test]
+    fn re_origination_after_flush_starts_at_initial_sequence() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000009), 0),
+            InstallOutcome::New
+        );
+        let mut flush = make_lsa(1, 2, 0x8000000a);
+        flush.header.ls_age = MAX_AGE_SECS;
+        assert_eq!(db.install(flush, 10), InstallOutcome::Purged);
+        // The watermark was cleared with the entry, so a fresh instance at
+        // the initial sequence number is accepted again.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000001), 12),
+            InstallOutcome::New
+        );
     }
 
     #[test]
@@ -213,11 +303,13 @@ mod tests {
     #[test]
     fn age_out_max_age() {
         let mut db = Lsdb::new();
-        let mut lsa = make_lsa(1, 2, 0x80000001);
-        lsa.header.ls_age = 3600; // at max age already
-        db.install(lsa, 0);
+        // Installed at age 0; after 3600 s of wallclock it ages out.
+        // (Instances that *arrive* at MaxAge are purged at install time —
+        // see `max_age_instance_purges`.)
+        db.install(make_lsa(1, 2, 0x80000001), 0);
         assert_eq!(db.len(), 1);
-        let removed = db.age_out(0);
+        assert!(db.age_out(3_599_999).is_empty());
+        let removed = db.age_out(3_600_000);
         assert_eq!(removed.len(), 1);
         assert!(db.is_empty());
     }

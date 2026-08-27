@@ -163,8 +163,8 @@ fn encode_lsreq(r: &LsRequestBody, out: &mut WriteBuf<'_>) -> Result<(), EncodeE
 fn encode_lsupdate(u: &LsUpdateBody, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
     out.put_u32_be(u.lsa_count).ok_or(EncodeError::BufferFull)?;
     for lsa in &u.lsas {
-        encode_lsa_header(&lsa.header, out)?;
-        out.put_bytes(&lsa.body).ok_or(EncodeError::BufferFull)?;
+        out.put_bytes(&lsa.to_wire())
+            .ok_or(EncodeError::BufferFull)?;
     }
     Ok(())
 }
@@ -429,5 +429,46 @@ mod tests {
         let mut dec = OspfCodec::v2();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
         assert!(matches!(p2.body, OspfBody::LsAck(_)));
+    }
+
+    #[test]
+    fn lsupdate_roundtrip_preserves_lsa_bytes() {
+        // A finalized summary-LSA must survive an encode/decode cycle
+        // byte-for-byte, checksum included.
+        use crate::abr::{originate_summary_lsa, SummaryDestination};
+        use lr_core::addr::Prefix;
+
+        let dest = SummaryDestination::new(Prefix::new_v4([10, 10, 10, 0], 24), 10);
+        let lsa = originate_summary_lsa(0x01020304, &dest, None).unwrap();
+        let expected = lsa.to_wire();
+
+        let codec = OspfCodec::v2();
+        let pkt = OspfPacket {
+            header: OspfHeader {
+                version: 2,
+                kind: 4,
+                length: 0,
+                router_id: 0x01020304,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 0,
+                auth_data: 0,
+            },
+            body: OspfBody::LsUpdate(LsUpdateBody {
+                lsa_count: 1,
+                lsas: vec![lsa],
+            }),
+        };
+        let bytes = codec.encode_vec(&pkt).unwrap();
+        let mut dec = OspfCodec::v2();
+        let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
+        match p2.body {
+            OspfBody::LsUpdate(u) => {
+                assert_eq!(u.lsas.len(), 1);
+                assert_eq!(u.lsas[0].to_wire(), expected);
+                assert!(u.lsas[0].checksum_ok());
+            }
+            _ => panic!("expected LS Update"),
+        }
     }
 }

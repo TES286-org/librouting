@@ -23,6 +23,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod abr;
 pub mod auth;
 pub mod codec;
 pub mod interface;

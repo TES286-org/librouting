@@ -2,6 +2,8 @@
 
 use core::fmt;
 
+use lr_core::util::fletcher;
+
 /// LSA header (RFC 2328 §A.4.1). 20 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LsaHeader {
@@ -50,6 +52,113 @@ impl Lsa {
     pub fn key(&self) -> LsaKey {
         LsaKey::from(&self.header)
     }
+
+    /// Serialized wire form: the 20-byte header followed by the body.
+    /// The header fields (including `length` and `ls_checksum`) are
+    /// written exactly as stored — this is a faithful serialization, not
+    /// a normalizing one.
+    pub fn to_wire(&self) -> Vec<u8> {
+        let mut v = Vec::with_capacity(LsaHeader::LEN + self.body.len());
+        v.extend_from_slice(&self.header.ls_age.to_be_bytes());
+        v.push(self.header.options);
+        v.push(self.header.ls_type);
+        v.extend_from_slice(&self.header.link_state_id.to_be_bytes());
+        v.extend_from_slice(&self.header.advertising_router.to_be_bytes());
+        v.extend_from_slice(&self.header.ls_sequence_number.to_be_bytes());
+        v.extend_from_slice(&self.header.ls_checksum.to_be_bytes());
+        v.extend_from_slice(&self.header.length.to_be_bytes());
+        v.extend_from_slice(&self.body);
+        v
+    }
+
+    /// Fix the `length` field and recompute the RFC 2328 §C.4 checksum.
+    /// Call after constructing or mutating an LSA that will be flooded.
+    pub fn finalize(&mut self) {
+        self.header.length = (LsaHeader::LEN + self.body.len()) as u16;
+        let wire = self.to_wire();
+        self.header.ls_checksum = fletcher::ospf_lsa_checksum(&wire);
+    }
+
+    /// Verify the embedded RFC 2328 §C.4 checksum. Validation of received
+    /// LSAs is the embedder's policy (§13); this helper makes it a one-liner.
+    pub fn checksum_ok(&self) -> bool {
+        let wire = self.to_wire();
+        fletcher::ospf_lsa_checksum_ok(&wire)
+    }
+}
+
+/// Convert a dotted-quad netmask to a prefix length. Non-contiguous masks
+/// count their set bits (lenient, matching common implementations).
+pub fn mask_to_prefix_len(mask: u32) -> u8 {
+    mask.count_ones() as u8
+}
+
+/// Convert a prefix length (0–32) to a dotted-quad netmask. Values above
+/// 32 clamp to a full mask.
+pub fn prefix_len_to_mask(len: u8) -> u32 {
+    if len >= 32 {
+        u32::MAX
+    } else {
+        !0u32 << (32 - len)
+    }
+}
+
+/// One TOS-metric entry of a summary-LSA (RFC 2328 §A.4.3). `metric` holds
+/// the 24-bit metric value; the TOS byte distinguishes multiple entries
+/// (TOS 0 is the one inter-area routing uses).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SummaryTosMetric {
+    pub tos: u8,
+    pub metric: u32,
+}
+
+/// Decoded summary-LSA body (RFC 2328 §A.4.3): a network mask followed by
+/// one or more TOS-metric entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SummaryLsaBody {
+    pub network_mask: u32,
+    pub tos_metrics: Vec<SummaryTosMetric>,
+}
+
+impl SummaryLsaBody {
+    /// The TOS-0 metric — the value inter-area routing consumes. `None`
+    /// when the LSA carries no usable entry.
+    pub fn tos0_metric(&self) -> Option<u32> {
+        self.tos_metrics
+            .iter()
+            .find(|m| m.tos == 0)
+            .map(|m| m.metric)
+    }
+}
+
+/// Encode a summary-LSA body carrying a single TOS-0 metric.
+pub fn encode_summary_lsa_body(network_mask: u32, metric: u32) -> Vec<u8> {
+    let mut v = Vec::with_capacity(8);
+    v.extend_from_slice(&network_mask.to_be_bytes());
+    v.push(0); // TOS 0
+    v.extend_from_slice(&metric.to_be_bytes()[1..]); // 24-bit metric
+    v
+}
+
+/// Decode a summary-LSA body. Returns `None` when the body is truncated
+/// or shorter than the mandatory mask + first TOS-0 entry.
+pub fn decode_summary_lsa_body(body: &[u8]) -> Option<SummaryLsaBody> {
+    if body.len() < 8 || !(body.len() - 4).is_multiple_of(4) {
+        return None;
+    }
+    let network_mask = u32::from_be_bytes([body[0], body[1], body[2], body[3]]);
+    let mut tos_metrics = Vec::new();
+    let mut i = 4;
+    while i + 4 <= body.len() {
+        let tos = body[i];
+        let metric = u32::from_be_bytes([0, body[i + 1], body[i + 2], body[i + 3]]);
+        tos_metrics.push(SummaryTosMetric { tos, metric });
+        i += 4;
+    }
+    Some(SummaryLsaBody {
+        network_mask,
+        tos_metrics,
+    })
 }
 
 /// Well-known LSA types (RFC 2328 §A.4 for v2; RFC 5340 §A.4 for v3 uses

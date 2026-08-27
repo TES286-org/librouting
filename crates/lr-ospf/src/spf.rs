@@ -1,10 +1,15 @@
 //! SPF (Dijkstra) over the LSDB.
 //!
 //! Produces [`SpfResult`] entries that the router installs into Loc-RIB.
+//! [`run_spf`] computes the intra-area shortest-path tree (RFC 2328 §16.1);
+//! [`summary_routes`] derives inter-area candidates from summary-LSAs on
+//! top of an intra-area result (RFC 2328 §16.2).
 
 use std::collections::{BTreeMap, BinaryHeap};
 
-use crate::lsa::{LsaTypeV2, RouterLink, RouterLinkType};
+use crate::lsa::{
+    decode_summary_lsa_body, mask_to_prefix_len, LsaTypeV2, RouterLink, RouterLinkType,
+};
 use crate::lsdb::Lsdb;
 use lr_core::addr::{IpAddr, Prefix};
 
@@ -156,13 +161,66 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
 }
 
 fn mask_to_pl(mask: u32) -> u8 {
-    let mut n = 0u8;
-    let mut m = mask;
-    while m != 0 {
-        n += 1;
-        m <<= 1;
+    mask_to_prefix_len(mask)
+}
+
+/// RFC 2328 §16.2: inter-area route calculation from summary-LSAs.
+///
+/// Every type-3 summary-LSA whose advertising border router is reachable
+/// through the intra-area tree contributes a candidate route with metric
+/// `dist(border router) + summary metric`. Candidates with a metric of
+/// LSInfinity (`0x00ff_ffff`) are unreachable and skipped. The best
+/// candidate per prefix wins — lowest metric, ties broken by the lowest
+/// border router ID for determinism.
+///
+/// Callers must merge the result with the intra-area routes of the same
+/// area so that intra-area paths always win for an identical prefix
+/// (§16.2 (b)).
+pub fn summary_routes(lsdb: &Lsdb, result: &SpfResult) -> Vec<SpfRoute> {
+    /// LSInfinity — a summary metric that means "unreachable" (§16.2).
+    const LS_INFINITY: u32 = 0x00ff_ffff;
+    // (route, advertising border router) — the router ID breaks ties.
+    let mut best: BTreeMap<Prefix, (SpfRoute, u32)> = BTreeMap::new();
+    for (key, entry) in lsdb.iter() {
+        if key.ls_type != LsaTypeV2::SummaryIpLsa as u8 {
+            continue;
+        }
+        // (a) The border router must be reachable via intra-area paths.
+        let Some(&dist) = result
+            .vertices
+            .get(&VertexId::Router(key.advertising_router))
+        else {
+            continue;
+        };
+        let Some(body) = decode_summary_lsa_body(&entry.lsa.body) else {
+            continue;
+        };
+        let Some(metric) = body.tos0_metric() else {
+            continue;
+        };
+        if metric >= LS_INFINITY {
+            continue;
+        }
+        let prefix_len = mask_to_prefix_len(body.network_mask);
+        let network = entry.lsa.header.link_state_id & body.network_mask;
+        let prefix = Prefix::new_v4(network.to_be_bytes(), prefix_len);
+        let candidate = SpfRoute {
+            prefix,
+            metric: dist + u64::from(metric),
+            next_hop: None, // resolved from the border router's next hop by the caller
+        };
+        let replace = match best.get(&prefix) {
+            None => true,
+            Some((cur, cur_border)) => {
+                candidate.metric < cur.metric
+                    || (candidate.metric == cur.metric && key.advertising_router < *cur_border)
+            }
+        };
+        if replace {
+            best.insert(prefix, (candidate, key.advertising_router));
+        }
     }
-    n
+    best.into_values().map(|(route, _)| route).collect()
 }
 
 /// Decode Router-LSA links from the body. RFC 2328 §A.4.2.
@@ -292,5 +350,137 @@ mod tests {
         assert_eq!(mask_to_pl(0xff000000), 8);
         assert_eq!(mask_to_pl(0xffffff00), 24);
         assert_eq!(mask_to_pl(0xffffffff), 32);
+    }
+
+    fn summary_lsa(adv: u32, network: u32, mask: u32, metric: u32, seq: u32) -> Lsa {
+        let body = crate::lsa::encode_summary_lsa_body(mask, metric);
+        Lsa {
+            header: LsaHeader {
+                ls_age: 0,
+                options: 0x02,
+                ls_type: LsaTypeV2::SummaryIpLsa as u8,
+                link_state_id: network,
+                advertising_router: adv,
+                ls_sequence_number: seq,
+                ls_checksum: 0,
+                length: (LsaHeader::LEN + body.len()) as u16,
+            },
+            body,
+        }
+    }
+
+    /// Area-0 topology: root (1.1.1.1) --10-- BR-a (2.2.2.2),
+    /// root --20-- BR-b (3.3.3.3); BR-a and BR-b are border routers
+    /// advertising summaries.
+    fn two_border_routers() -> Lsdb {
+        let mut db = Lsdb::new();
+        let root = 0x01010101;
+        let br_a = 0x02020202;
+        let br_b = 0x03030303;
+        db.install(
+            router_lsa(
+                root,
+                vec![(br_a, 0, RouterLinkType::PointToPoint as u8, 10)],
+            ),
+            0,
+        );
+        db.install(
+            router_lsa(
+                br_a,
+                vec![(root, 0, RouterLinkType::PointToPoint as u8, 10)],
+            ),
+            0,
+        );
+        db.install(
+            router_lsa(
+                root,
+                vec![(br_b, 0, RouterLinkType::PointToPoint as u8, 20)],
+            ),
+            0,
+        );
+        db.install(
+            router_lsa(
+                br_b,
+                vec![(root, 0, RouterLinkType::PointToPoint as u8, 20)],
+            ),
+            0,
+        );
+        db
+    }
+
+    #[test]
+    fn summary_route_requires_reachable_border() {
+        let mut db = two_border_routers();
+        let spf = run_spf(&db, 0x01010101);
+        // Summary from unreachable border router 9.9.9.9: ignored.
+        db.install(
+            summary_lsa(0x09090909, 0x0a000000, 0xff000000, 5, 0x80000001),
+            0,
+        );
+        assert!(summary_routes(&db, &spf).is_empty());
+    }
+
+    #[test]
+    fn summary_metric_adds_border_distance() {
+        let mut db = two_border_routers();
+        let spf = run_spf(&db, 0x01010101);
+        // BR-a (dist 10) advertises 10.0.0.0/8 metric 7 → 17.
+        db.install(
+            summary_lsa(0x02020202, 0x0a000000, 0xff000000, 7, 0x80000001),
+            0,
+        );
+        let routes = summary_routes(&db, &spf);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].prefix, Prefix::new_v4([10, 0, 0, 0], 8));
+        assert_eq!(routes[0].metric, 17);
+    }
+
+    #[test]
+    fn summary_prefers_lower_total_metric_then_lower_border() {
+        let mut db = two_border_routers();
+        let spf = run_spf(&db, 0x01010101);
+        // BR-a: dist 10 + 7 = 17; BR-b: dist 20 + 5 = 25 → BR-a wins.
+        db.install(
+            summary_lsa(0x02020202, 0x0a000000, 0xff000000, 7, 0x80000001),
+            0,
+        );
+        db.install(
+            summary_lsa(0x03030303, 0x0a000000, 0xff000000, 5, 0x80000001),
+            0,
+        );
+        let routes = summary_routes(&db, &spf);
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].metric, 17);
+
+        // Equal total metric → lower border router ID (BR-a) wins.
+        let mut db2 = two_border_routers();
+        let spf2 = run_spf(&db2, 0x01010101);
+        db2.install(
+            summary_lsa(0x02020202, 0x0a000000, 0xff000000, 10, 0x80000001),
+            0,
+        );
+        db2.install(
+            summary_lsa(0x03030303, 0x0a000000, 0xff000000, 0, 0x80000001),
+            0,
+        );
+        let routes2 = summary_routes(&db2, &spf2);
+        assert_eq!(routes2.len(), 1);
+        assert_eq!(routes2[0].metric, 20); // both 20 — deterministic winner
+    }
+
+    #[test]
+    fn summary_ls_infinity_and_garbage_ignored() {
+        let mut db = two_border_routers();
+        let spf = run_spf(&db, 0x01010101);
+        // LSInfinity means unreachable.
+        db.install(
+            summary_lsa(0x02020202, 0x0a000000, 0xff000000, 0x00ff_ffff, 0x80000001),
+            0,
+        );
+        // Truncated body (no TOS entry).
+        let mut bad = summary_lsa(0x02020202, 0x0b000000, 0xff000000, 1, 0x80000001);
+        bad.body.truncate(4);
+        db.install(bad, 0);
+        assert!(summary_routes(&db, &spf).is_empty());
     }
 }
