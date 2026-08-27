@@ -100,14 +100,29 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                     for link in decode_router_links(&entry.lsa.body) {
                         match link.link_type {
                             x if x == RouterLinkType::PointToPoint as u8
-                                || x == RouterLinkType::TransitNetwork as u8 =>
+                                || x == RouterLinkType::VirtualLink as u8 =>
                             {
-                                // Link-ID is neighbor's Router-ID (P2P) or DR's IP (Transit).
-                                let target = if x == RouterLinkType::PointToPoint as u8 {
-                                    VertexId::Router(link.link_id)
-                                } else {
-                                    VertexId::Network(link.link_id)
-                                };
+                                // Link-ID is the neighbor's Router-ID. A
+                                // virtual link (type 4, RFC 2328 §A.4.2)
+                                // only appears in backbone router-LSAs and
+                                // behaves as a point-to-point adjacency —
+                                // its metric is the transit-area path cost
+                                // the endpoint maintains (§15).
+                                let target = VertexId::Router(link.link_id);
+                                let new_dist = current_dist + link.metric as u64;
+                                let prev =
+                                    result.vertices.get(&target).copied().unwrap_or(u64::MAX);
+                                if new_dist < prev {
+                                    result.vertices.insert(target, new_dist);
+                                    heap.push(SpfVertex {
+                                        id: target,
+                                        distance: new_dist,
+                                    });
+                                }
+                            }
+                            x if x == RouterLinkType::TransitNetwork as u8 => {
+                                // Link-ID is the DR's IP.
+                                let target = VertexId::Network(link.link_id);
                                 let new_dist = current_dist + link.metric as u64;
                                 let prev =
                                     result.vertices.get(&target).copied().unwrap_or(u64::MAX);
@@ -369,6 +384,51 @@ mod tests {
         assert_eq!(mask_to_pl(0xff000000), 8);
         assert_eq!(mask_to_pl(0xffffff00), 24);
         assert_eq!(mask_to_pl(0xffffffff), 32);
+    }
+
+    #[test]
+    fn virtual_links_act_as_router_adjacencies() {
+        // Backbone repair (RFC 2328 §15): R1 reaches R3 only through the
+        // virtual adjacency R1 == R2 (metric 7, the transit-area path
+        // cost); R2 also has a physical p2p link to R3 (metric 3).
+        let mut db = Lsdb::new();
+        db.install(
+            router_lsa(
+                0x01010101,
+                vec![(0x02020202, 0, RouterLinkType::VirtualLink as u8, 7)],
+            ),
+            0,
+        );
+        db.install(
+            router_lsa(
+                0x02020202,
+                vec![
+                    (0x01010101, 0, RouterLinkType::VirtualLink as u8, 7),
+                    (0x03030303, 0, RouterLinkType::PointToPoint as u8, 3),
+                ],
+            ),
+            0,
+        );
+        db.install(
+            router_lsa(
+                0x03030303,
+                vec![
+                    (0x02020202, 0, RouterLinkType::PointToPoint as u8, 3),
+                    (0x0a646400, 0xffffff00, RouterLinkType::StubNetwork as u8, 2),
+                ],
+            ),
+            0,
+        );
+        // From the far side of the virtual link: R3 is 7 + 3 away and its
+        // stub network adds 2 more.
+        let res = run_spf(&db, 0x01010101);
+        assert_eq!(res.vertices.get(&VertexId::Router(0x03030303)), Some(&10));
+        assert_eq!(res.vertices.get(&VertexId::Router(0x02020202)), Some(&7));
+        assert_eq!(res.stub_routes.len(), 1);
+        assert_eq!(res.stub_routes[0].metric, 12);
+        // And in the other direction the virtual link is symmetric.
+        let res = run_spf(&db, 0x03030303);
+        assert_eq!(res.vertices.get(&VertexId::Router(0x01010101)), Some(&10));
     }
 
     fn summary_lsa(adv: u32, network: u32, mask: u32, metric: u32, seq: u32) -> Lsa {
