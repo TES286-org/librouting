@@ -39,7 +39,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 4724 graceful restart | ✅ 🧪 | capability lists address families with F bits; stale-route retention, negotiated expiry purge, EoR-based resynchronization (BIRD-verified) |
 | RFC 9494 LLGR | ✅ 🧪 | capability 71, per-family LLST, LLGR_STALE/NO_LLGR communities, least-preferred selection, egress gating, full retention lifecycle (BIRD-verified) |
 | MRAI (Min. Route Advertisement Interval) | ✅ | configurable per-prefix batching (withdrawals immediate); defaults to 30 s eBGP / 5 s iBGP |
-| MD5 / TCP-AO session authentication | ❌ | |
+| MD5 / TCP-AO session authentication | ✅ 🧪 | RFC 2385 MD5 + RFC 5925 TCP-AO (hmac(sha1)/cmac(aes), ao_required) via `lr-osroute::tcp_auth`; kernel-signed SYNs, fail-closed arming; BIRD/FRR interop-verified |
 | BGPsec | ❌ | out of scope for now |
 | Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
@@ -93,6 +93,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Capability | Status | Notes |
 |-----------|:------:|-------|
 | Linux rtnetlink add/delete/list | ✅ 🧪 | used by `lr-daemon --install-kernel-routes` |
+| TCP MD5 / TCP-AO socket auth | ✅ 🧪 | `lr-osroute::tcp_auth` — arm_listener (wildcard keys) + connect_auth (keys before connect, signed SYN); Linux both, other platforms Unsupported |
 | BSD route(4) socket (FreeBSD/NetBSD/OpenBSD/macOS) | ✅ | layouts pinned per-OS; cross-compile checked |
 | Windows IP Helper API | ✅ | full link verified (x86_64-pc-windows-gnu) |
 | Interface auto-resolution when `if_index == 0` | ✅ | gateway-based (Linux), longest-prefix (Windows) |
@@ -115,6 +116,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 |------|:------:|
 | Unit tests (workspace) | ✅ 30 binaries / 230+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 |
+| MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
+| TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
 | BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
@@ -134,7 +137,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    origination/flush with loop guards (OSPFv2; v3 inter-area-prefix-LSA
    origination remains future work).
 3. ~~**Babel HMAC (RFC 8967)**~~ — done.
-4. **BGP MD5/TCP-AO** — where operators require it.
+4. ~~**BGP MD5/TCP-AO**~~ — done: `lr-osroute::tcp_auth` (RFC 2385 +
+   RFC 5925, Linux kernel-signed segments), daemon flags `--md5-key` /
+   `--tcp-ao-key`, interop-verified against BIRD and FRR.
 5. **Daemon hardening** — signal handling, privilege drop, config reload,
    runtime API (gRPC/UNIX socket) for operational visibility.
 6. **Add-Path best-path wiring** — capability + encoding exist; N-path

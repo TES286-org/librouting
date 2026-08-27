@@ -9,6 +9,7 @@ implements, or references. It is grouped by protocol family.
 |--------|------------------------------------------------------|--------------------------|--------------------------------------|
 | 4271   | BGP-4                                                | ✓ core                  | `lr-bgp::fsm`, `lr-bgp::message`    |
 | 1997  | BGP Communities Attribute                            | ✓                       | `lr-bgp::path::communities`         |
+| 2385  | Protection of BGP Sessions via a TCP MD5 Signature (TCP MD5) | ✓                       | `lr-osroute::tcp_auth` (TCP_MD5SIG/_EXT) |
 | 2439  | BGP Route Flap Damping                               | ✓ (deprecated by 8326) | `lr-damping`                          |
 | 2545  | BGP-4 Multiprotocol Extensions for IPv6              | ✓ (under mp_bgp)        | `lr-bgp::path::mp_nlri`              |
 | 2796  | BGP Route Reflection                                 | ✓ (superseded by 4456) | `lr-bgp::role::cluster`              |
@@ -23,6 +24,7 @@ implements, or references. It is grouped by protocol family.
 | 5004  | BGP Deterministic Path Selection                     | ✓ (default on)          | `lr-bgp::best_path`                  |
 | 5492  | BGP Capabilities                                     | ✓                       | `lr-bgp::capabilities`              |
 | 5666  | BGP Egress Peer Engineering                          | partial (TBD)           | —                                    |
+| 5925  | The TCP Authentication Option (TCP-AO)               | ✓ (Linux >= 6.7; RFC 5926 KDFs via kernel) | `lr-osroute::tcp_auth` (TCP_AO_ADD_KEY/INFO) |
 | 6793  | BGP Support for 4-byte AS (revised)                  | ✓ (superseded 4893)     | `lr-bgp::role::confederation`         |
 | 7313  | Enhanced Route Refresh                               | ✓                       | `lr-bgp::extensions::enhanced_rr`    |
 | 7911  | BGP Add-Path                                         | ✓                       | `lr-bgp::extensions::addpath`        |

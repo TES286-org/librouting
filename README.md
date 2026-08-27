@@ -57,8 +57,9 @@ library without depending on the Rust toolchain at runtime.
 `lr-daemon` is a complete reference embedder: TCP transport (connect or
 listen), poll-driven router, ticker thread, reconnect with backoff, RFC
 4724 graceful restart and RFC 9494 long-lived graceful restart
-(`--graceful-restart SECS`, `--llgr SECS`), and optional kernel route
-installation via rtnetlink.
+(`--graceful-restart SECS`, `--llgr SECS`), RFC 2385 MD5 / RFC 5925
+TCP-AO session authentication (`--md5-key SECRET`, `--tcp-ao-key
+ID:SECRET`), and optional kernel route installation via rtnetlink.
 
 ```bash
 # Terminal 1 — speaker A (listens, originates a prefix)
@@ -190,7 +191,7 @@ Implemented and missing features are tracked in detail in
   (route(4) socket)** and **Windows (IP Helper API)**, plus a porting guide
   for other systems (`docs/OS-INTEGRATION.md`).
 - Not yet production-ready: see the roadmap at the end of `STATUS.md`
-  (BGP MD5/TCP-AO, OSPF multi-area/ABR work and daemon hardening are the
+  (daemon hardening, Add-Path best-path wiring and OSPF depth are the
   main gaps). The C ABI is **unstable** until v0.5.
 
 ## CI/CD
