@@ -24,6 +24,42 @@
 //!
 //! The server thread never holds the router lock while blocking on I/O:
 //! it locks only for the duration of a single command.
+//!
+//! The context types are platform-independent data; only the transport
+//! (`spawn` and friends) is Unix-specific. Platforms without Unix domain
+//! sockets compile the same caller code against the same types and get a
+//! clear refusal at startup instead of a pretend API.
+
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
+
+use lr_router::DefaultRouter;
+
+/// Static daemon facts served by `status`.
+///
+/// The fields are only read by the Unix server below; on other targets
+/// the type exists so callers compile unchanged (`spawn` refuses there).
+#[cfg_attr(not(unix), expect(dead_code))]
+pub struct DaemonInfo {
+    pub version: String,
+    pub local_as: u32,
+    pub peer_as: u32,
+    pub router_id: String,
+    pub config_path: Option<String>,
+}
+
+/// Everything the API thread needs to answer commands.
+///
+/// See [`DaemonInfo`] for why some fields are unread on non-Unix targets.
+#[cfg_attr(not(unix), expect(dead_code))]
+pub struct ApiContext {
+    pub info: DaemonInfo,
+    pub router: Arc<Mutex<DefaultRouter>>,
+    pub running: Arc<AtomicBool>,
+    /// Re-apply configuration (SIGHUP equivalent); returns the log
+    /// lines describing what was (not) applied.
+    pub reload: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+}
 
 #[cfg(unix)]
 mod imp {
@@ -36,28 +72,11 @@ mod imp {
 
     use lr_router::{DefaultRouter, RouterInstance};
 
+    use super::{ApiContext, DaemonInfo};
+
     // `Read` is only needed by the test helper below.
     #[cfg(test)]
     use std::io::Read as _;
-
-    /// Static daemon facts served by `status`.
-    pub struct DaemonInfo {
-        pub version: String,
-        pub local_as: u32,
-        pub peer_as: u32,
-        pub router_id: String,
-        pub config_path: Option<String>,
-    }
-
-    /// Everything the API thread needs to answer commands.
-    pub struct ApiContext {
-        pub info: DaemonInfo,
-        pub router: Arc<Mutex<DefaultRouter>>,
-        pub running: Arc<AtomicBool>,
-        /// Re-apply configuration (SIGHUP equivalent); returns the log
-        /// lines describing what was (not) applied.
-        pub reload: Box<dyn Fn() -> Vec<String> + Send + Sync>,
-    }
 
     extern "C" {
         fn chmod(path: *const std::ffi::c_char, mode: u32) -> i32;
@@ -359,29 +378,7 @@ mod imp {
 
 #[cfg(not(unix))]
 mod imp {
-    use std::sync::atomic::AtomicBool;
-    use std::sync::{Arc, Mutex};
-
-    use lr_router::DefaultRouter;
-
-    /// Static daemon facts (inert mirror of the Unix type so callers
-    /// compile unchanged on this platform).
-    pub struct DaemonInfo {
-        pub version: String,
-        pub local_as: u32,
-        pub peer_as: u32,
-        pub router_id: String,
-        pub config_path: Option<String>,
-    }
-
-    /// Everything the API server would need (inert mirror; see
-    /// [`DaemonInfo`]).
-    pub struct ApiContext {
-        pub info: DaemonInfo,
-        pub router: Arc<Mutex<DefaultRouter>>,
-        pub running: Arc<AtomicBool>,
-        pub reload: Box<dyn Fn() -> Vec<String> + Send + Sync>,
-    }
+    use super::ApiContext;
 
     /// Unix domain sockets are the transport; other platforms get a
     /// clear refusal instead of a pretend API.
@@ -390,7 +387,4 @@ mod imp {
     }
 }
 
-#[cfg(not(unix))]
-pub use imp::{spawn, ApiContext, DaemonInfo};
-#[cfg(unix)]
-pub use imp::{spawn, ApiContext, DaemonInfo};
+pub use imp::spawn;
