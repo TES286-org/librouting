@@ -348,11 +348,11 @@ pub unsafe extern "C" fn lr_router_rib_dump(r: lr_router_t, out: *mut lr_bytes_t
         None => return -2,
     };
     let mut text = String::new();
-    for route in router.rib_snapshot() {
+    for route in router.rib_paths_snapshot() {
         use std::fmt::Write as _;
         let _ = writeln!(
             text,
-            "{}/{} via {} proto={:?} metric={}",
+            "{}/{} via {} proto={:?} metric={} path-id={}",
             route.key.prefix,
             route.key.prefix.prefix_len,
             route
@@ -360,7 +360,8 @@ pub unsafe extern "C" fn lr_router_rib_dump(r: lr_router_t, out: *mut lr_bytes_t
                 .map(|n| n.to_string())
                 .unwrap_or_else(|| "(none)".to_string()),
             route.protocol,
-            route.preference.metric
+            route.preference.metric,
+            route.path_id
         );
     }
     unsafe { *out = lr_bytes_t::from_vec(text.into_bytes()) }

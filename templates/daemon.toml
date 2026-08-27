@@ -51,6 +51,13 @@ graceful_restart_time = 120
 # tcp_ao_algorithm = "hmac-sha1"
 # tcp_ao_maclen = 12
 
+# RFC 7911 Add-Path: advertise the Add-Path capability (send + receive)
+# so the session can carry multiple paths per prefix. Effective only when
+# the peer also offers it. add_path_max_paths caps how many paths per
+# prefix the decision process keeps (default 6).
+# add_path = true
+# add_path_max_paths = 6
+
 # Locally originated networks. Reloadable via SIGHUP / the runtime API
 # `reload` command: added prefixes are originated, removed ones withdrawn.
 networks = ["203.0.113.0/24"]

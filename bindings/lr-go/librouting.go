@@ -138,6 +138,29 @@ func (r *Router) SetMRAI(session uint64, intervalMs uint64) error {
         return nil
 }
 
+// SetAddPath enables or disables RFC 7911 Add-Path on one BGP session.
+// Call it after AddBGPSession and before StartSession — the capability is
+// negotiated in OPEN. The peer must also offer Add-Path for it to take
+// effect; see also SetAddPathMaxPaths.
+func (r *Router) SetAddPath(session uint64, enabled bool) error {
+        rc := C.lr_router_set_add_path(r.ptr, C.uint64_t(session), toCBool(enabled))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_add_path: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// SetAddPathMaxPaths caps how many paths per prefix the RFC 7911 decision
+// process keeps in the Loc-RIB and advertises to Add-Path peers
+// (router-wide; values below 1 are clamped to 1).
+func (r *Router) SetAddPathMaxPaths(maxPaths uint32) error {
+        rc := C.lr_router_set_add_path_max_paths(r.ptr, C.uint32_t(maxPaths))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_add_path_max_paths: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
         rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))

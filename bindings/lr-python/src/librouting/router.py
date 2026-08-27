@@ -95,6 +95,30 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_set_mrai failed (rc={rc}): {last_error()}")
 
+    def set_add_path(self, session: int, enabled: bool) -> None:
+        """Enable or disable RFC 7911 Add-Path on one BGP session.
+
+        Call after ``add_bgp_session`` and before ``start_session`` — the
+        capability is negotiated in OPEN. The peer must also offer
+        Add-Path; see :meth:`set_add_path_max_paths`.
+        """
+        rc = get_lib().lr_router_set_add_path(
+            self._ptr, int(session), 1 if enabled else 0
+        )
+        if rc != 0:
+            raise LrError(f"lr_router_set_add_path failed (rc={rc}): {last_error()}")
+
+    def set_add_path_max_paths(self, max_paths: int) -> None:
+        """Cap how many paths per prefix the RFC 7911 decision process keeps.
+
+        Router-wide; values below 1 are clamped to 1 (single-path).
+        """
+        rc = get_lib().lr_router_set_add_path_max_paths(self._ptr, int(max_paths))
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_add_path_max_paths failed (rc={rc}): {last_error()}"
+            )
+
     def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
         """Ask an established BGP peer to resend an RFC 2918 address family.
 

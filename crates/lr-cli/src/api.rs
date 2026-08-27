@@ -239,20 +239,23 @@ mod imp {
                     }
                 }
                 "routes" => {
-                    // Hold the lock only for the dump: rib_snapshot()
-                    // borrows from the router.
+                    // Hold the lock only for the dump: rib_paths_snapshot()
+                    // borrows from the router. One line per path: with
+                    // RFC 7911 Add-Path a prefix can hold several ranked
+                    // paths, distinguished by their path identifiers.
                     let r = router.lock().unwrap();
-                    for route in r.rib_snapshot() {
+                    for route in r.rib_paths_snapshot() {
                         let _ = writeln!(
                             out,
-                            "{} via {} proto={:?} metric={}",
+                            "{} via {} proto={:?} metric={} path-id={}",
                             route.key.prefix,
                             route
                                 .next_hop
                                 .map(|n| n.to_string())
                                 .unwrap_or_else(|| "(none)".to_string()),
                             route.protocol,
-                            route.preference.metric
+                            route.preference.metric,
+                            route.path_id
                         );
                     }
                 }

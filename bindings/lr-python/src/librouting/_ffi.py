@@ -58,6 +58,8 @@ int32_t lr_router_drain_output(lr_router_t r,
 int32_t lr_router_tick(lr_router_t r, uint64_t now_ms);
 int32_t lr_router_start_session(lr_router_t r, uint64_t session);
 int32_t lr_router_set_mrai(lr_router_t r, uint64_t session, uint64_t interval_ms);
+int32_t lr_router_set_add_path(lr_router_t r, uint64_t session, uint8_t enabled);
+int32_t lr_router_set_add_path_max_paths(lr_router_t r, uint32_t max_paths);
 int32_t lr_router_request_route_refresh(lr_router_t r,
                                         uint64_t session,
                                         uint16_t afi,

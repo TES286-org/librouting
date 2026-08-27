@@ -94,6 +94,12 @@ struct DaemonConfig {
     api_socket: Option<String>,
     /// Configuration file the daemon was started with (reload source).
     config_path: Option<String>,
+    /// RFC 7911 Add-Path: advertise the capability (send + receive) for
+    /// the session's families. Requires peer support to take effect.
+    add_path: bool,
+    /// RFC 7911: how many paths per prefix the decision process keeps in
+    /// Loc-RIB and advertises to Add-Path peers.
+    add_path_max_paths: u32,
 }
 
 fn print_usage() {
@@ -171,6 +177,8 @@ fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
             "bgp.listen_addr" => cfg.listen_addr = Some(value.to_string()),
             "bgp.local_address" => cfg.local_address = Some(value.to_string()),
             "bgp.hold_time" => cfg.hold_time = value.parse().unwrap_or(90),
+            "bgp.add_path" => cfg.add_path = value == "true",
+            "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
             "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
             "bgp.tcp_ao_keys" => {
                 // Comma-separated array: ["1:secret", "2:other"]
@@ -209,6 +217,7 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
     let mut cfg = DaemonConfig {
         hold_time: 90,
         tcp_ao_algorithm: "hmac-sha1".to_string(),
+        add_path_max_paths: 6,
         ..Default::default()
     };
     let mut config_path: Option<String> = None;
@@ -283,6 +292,14 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--install-kernel-routes" => {
                 cfg.install_kernel = true;
                 i += 1;
+            }
+            "--add-path" => {
+                cfg.add_path = true;
+                i += 1;
+            }
+            "--add-path-max" if i + 1 < args.len() => {
+                cfg.add_path_max_paths = args[i + 1].parse().unwrap_or(6);
+                i += 2;
             }
             "--user" if i + 1 < args.len() => {
                 cfg.user = Some(args[i + 1].clone());
@@ -405,8 +422,14 @@ fn main() -> ExitCode {
     let router = Arc::new(Mutex::new(DefaultRouter::new()));
     {
         let mut r = router.lock().unwrap();
+        // RFC 7911 Add-Path: cap how many paths per prefix survive the
+        // decision process (and reach Add-Path peers).
+        r.set_add_path_max_paths(cfg.add_path_max_paths.max(1) as usize);
         let mut sc = SessionConfig::bgp(Asn(cfg.local_as), Asn(cfg.peer_as), rid);
         sc.hold_time = cfg.hold_time;
+        if cfg.add_path {
+            sc = sc.with_add_path();
+        }
         // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
         // LLGR requires GR (RFC 9494 §4.1): with_long_lived_gr is therefore
         // only applied when the restart time is nonzero.
@@ -455,6 +478,12 @@ fn main() -> ExitCode {
     }
     println!("  networks:    {:?}", cfg.networks);
     println!("  install:     {}", cfg.install_kernel);
+    if cfg.add_path {
+        println!(
+            "  add-path:    enabled (max {} paths/prefix)",
+            cfg.add_path_max_paths.max(1)
+        );
+    }
     println!("  auth:        {}", tcp_auth.describe());
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 

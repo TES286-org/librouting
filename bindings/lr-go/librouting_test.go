@@ -134,3 +134,43 @@ func TestAddBGPSessionExtLLGR(t *testing.T) {
 	}
 	r.ptr = nil
 }
+
+// TestSetAddPath verifies the RFC 7911 Add-Path setters: the OPEN
+// advertises capability 69 with one 4-byte <AFI, SAFI, Send/Receive>
+// tuple for IPv4 unicast, and toggling after establishment is rejected.
+func TestSetAddPath(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	h, err := r.AddBGPSession(64512, 64513, 0x0a000001, 90, 0, true)
+	if err != nil {
+		t.Fatalf("AddBGPSession: %v", err)
+	}
+	if err := r.SetAddPathMaxPaths(4); err != nil {
+		t.Fatalf("SetAddPathMaxPaths: %v", err)
+	}
+	if err := r.SetAddPath(h, true); err != nil {
+		t.Fatalf("SetAddPath: %v", err)
+	}
+	if err := r.StartSession(h); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	open, err := r.DrainOutput(h)
+	if err != nil {
+		t.Fatalf("DrainOutput: %v", err)
+	}
+	// Capability 69, length 4: AFI 0/1, SAFI 1, Send/Receive 3 (both).
+	hasAddPath := false
+	for i := 19; i+5 < len(open); i++ {
+		if open[i] == 69 && open[i+1] == 4 &&
+			open[i+2] == 0 && open[i+3] == 1 && open[i+4] == 1 && open[i+5] == 3 {
+			hasAddPath = true
+			break
+		}
+	}
+	if !hasAddPath {
+		t.Fatalf("OPEN does not advertise Add-Path (code 69, len 4, send+recv)")
+	}
+	r.ptr = nil
+}

@@ -60,6 +60,9 @@ jobs:
         run: |
           cargo build -p lr-cli
           ./tests/interop/two_daemon.sh
+      - name: Add-Path interop (RFC 7911, two-daemon)
+        run: |
+          ./tests/interop/addpath.sh
 
   msrv:
     name: MSRV (1.88)
