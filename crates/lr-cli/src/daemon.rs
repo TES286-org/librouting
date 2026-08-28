@@ -43,8 +43,8 @@ use std::time::{Duration, Instant as WallClock};
 use core::str::FromStr;
 use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
 use lr_core::nlri::NlriFamily;
-use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_osroute::gtsm::Gtsm;
+use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
 mod api;
@@ -117,6 +117,12 @@ struct DaemonConfig {
     /// given hop count; single-hop when `hops == 1` (or when `--gtsm`
     /// alone is passed, which implies single-hop TTL=255).
     gtsm_hops: Option<u8>,
+    /// Per-peer maximum-prefix limit. `None` = no limit.
+    max_prefixes: Option<u32>,
+    /// Action when the limit is exceeded: "warn", "teardown", "restart".
+    max_prefix_action: String,
+    /// Early-warning threshold percentage (0..=100). 0 disables.
+    max_prefix_threshold: u8,
 }
 
 fn print_usage() {
@@ -157,6 +163,10 @@ fn print_usage() {
          --local-address-v6 ADDR  Local IPv6 source for next-hop-self / ENH egress\n  \
          --gtsm [HOPS]            RFC 5082 TTL security (no arg = single-hop ttl=255;\n  \
          a number = multihop with that TTL). Linux only.\n  \
+         --max-prefixes N         Per-peer maximum-prefix limit (BIRD\n  \
+         `maximum prefix`, FRR `maximum-prefix`). 0 = no limit.\n  \
+         --max-prefix-action A    warn (default) | teardown | restart\n  \
+         --max-prefix-threshold P Early-warning percentage (0..100, default 75)\n  \
          -h, --help               Show this help"
     );
 }
@@ -213,6 +223,15 @@ fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
                     cfg.gtsm_hops = Some(hops);
                 }
             }
+            "bgp.max_prefixes" => {
+                cfg.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);
+            }
+            "bgp.max_prefix_action" => {
+                cfg.max_prefix_action = value.to_string();
+            }
+            "bgp.max_prefix_threshold" => {
+                cfg.max_prefix_threshold = value.parse().unwrap_or(75);
+            }
             "bgp.mp_families" => {
                 // Comma-separated array: ["ipv4-unicast", "ipv6-unicast"]
                 let inner = value.trim_start_matches('[').trim_end_matches(']');
@@ -262,6 +281,8 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
         hold_time: 90,
         tcp_ao_algorithm: "hmac-sha1".to_string(),
         add_path_max_paths: 6,
+        max_prefix_action: "warn".to_string(),
+        max_prefix_threshold: 75,
         ..Default::default()
     };
     let mut config_path: Option<String> = None;
@@ -368,6 +389,18 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 }
                 cfg.gtsm_hops = Some(1); // single-hop
                 i += 1;
+            }
+            "--max-prefixes" if i + 1 < args.len() => {
+                cfg.max_prefixes = args[i + 1].parse::<u32>().ok().filter(|&n| n > 0);
+                i += 2;
+            }
+            "--max-prefix-action" if i + 1 < args.len() => {
+                cfg.max_prefix_action = args[i + 1].clone();
+                i += 2;
+            }
+            "--max-prefix-threshold" if i + 1 < args.len() => {
+                cfg.max_prefix_threshold = args[i + 1].parse().unwrap_or(75);
+                i += 2;
             }
             "--user" if i + 1 < args.len() => {
                 cfg.user = Some(args[i + 1].clone());
@@ -534,6 +567,19 @@ fn main() -> ExitCode {
         if cfg.extended_next_hop {
             sc = sc.with_extended_next_hop();
         }
+        // Per-peer maximum-prefix (BIRD `maximum prefix`, FRR
+        // `maximum-prefix`). The action defaults to "warn"; the daemon
+        // banner prints the effective configuration.
+        if let Some(limit) = cfg.max_prefixes {
+            let action = match cfg.max_prefix_action.as_str() {
+                "teardown" => lr_bgp::MaxPrefixAction::Teardown,
+                "restart" => lr_bgp::MaxPrefixAction::Restart,
+                _ => lr_bgp::MaxPrefixAction::Warn,
+            };
+            sc = sc
+                .with_maximum_prefix(limit, action)
+                .with_maximum_prefix_threshold(cfg.max_prefix_threshold);
+        }
         // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
         // LLGR requires GR (RFC 9494 §4.1): with_long_lived_gr is therefore
         // only applied when the restart time is nonzero.
@@ -611,6 +657,12 @@ fn main() -> ExitCode {
     }
     println!("  auth:        {}", tcp_auth.describe());
     println!("  gtsm:        {}", gtsm);
+    if let Some(limit) = cfg.max_prefixes {
+        println!(
+            "  max-prefix:  {} (action={}, threshold={}%)",
+            limit, cfg.max_prefix_action, cfg.max_prefix_threshold
+        );
+    }
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so

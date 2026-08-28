@@ -6,6 +6,7 @@ use lr_core::fsm::TimerId;
 use lr_core::rib::{Route, RouteKey};
 
 use crate::session::SessionHandle;
+use lr_bgp::MaxPrefixAction;
 
 #[derive(Debug, Clone)]
 pub enum RouterEvent {
@@ -27,6 +28,27 @@ pub enum RouterEvent {
     Log(String),
     PrefixAdvertised(Prefix),
     PrefixRetracted(Prefix),
+    /// Per-peer maximum-prefix limit exceeded (BIRD `maximum prefix`,
+    /// FRR `maximum-prefix`). `count` is the current Adj-RIB-In size;
+    /// `limit` is the configured ceiling; `action` is what the router
+    /// is doing about it. For `Warn` the session stays up; for
+    /// `Teardown`/`Restart` the session is being closed with a
+    /// NOTIFICATION CEASE (subcode 8).
+    MaxPrefixExceeded {
+        session: SessionHandle,
+        count: u32,
+        limit: u32,
+        action: MaxPrefixAction,
+    },
+    /// Early warning that the peer's Adj-RIB-In crossed the configured
+    /// threshold percentage of the maximum-prefix limit. Emitted once
+    /// per crossing (not per route); the embedder logs it.
+    MaxPrefixThreshold {
+        session: SessionHandle,
+        count: u32,
+        limit: u32,
+        pct: u8,
+    },
 }
 
 impl From<Event> for RouterEvent {

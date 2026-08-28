@@ -631,6 +631,22 @@ pub struct DefaultRouter {
     /// Local cap (seconds) for the LLGR stale time received from a peer
     /// (RFC 9494 §4.2), keyed by BGP session.
     llgr_caps: BTreeMap<u64, u32>,
+    /// Per-peer maximum-prefix state: `(exceeded, threshold_warned)`.
+    /// `exceeded` is latched once the hard limit is hit so the teardown
+    /// event fires only once per session lifetime. `threshold_warned`
+    /// is latched when the early-warning percentage is crossed.
+    max_prefix_state: BTreeMap<u64, MaxPrefixState>,
+}
+
+/// Per-session maximum-prefix bookkeeping.
+#[derive(Debug, Clone, Copy, Default)]
+struct MaxPrefixState {
+    /// True once the hard limit was exceeded and the action fired.
+    /// Cleared on session reset.
+    exceeded: bool,
+    /// True once the threshold percentage was crossed and the warning
+    /// was emitted. Cleared on session reset.
+    threshold_warned: bool,
 }
 
 impl Default for DefaultRouter {
@@ -659,6 +675,7 @@ impl Default for DefaultRouter {
             mrai: BTreeMap::new(),
             graceful_restart: BTreeMap::new(),
             llgr_caps: BTreeMap::new(),
+            max_prefix_state: BTreeMap::new(),
         }
     }
 }
@@ -957,15 +974,102 @@ impl DefaultRouter {
         }
         let key = route.key.clone();
         let origin = route.origin;
+        let session = origin.peer;
         // Track re-advertised routes while the session is resynchronizing
         // after a restart (RFC 4724 §4.1: at EoR, unrefreshed stale routes
         // are deleted; RFC 9494 §4.2 keeps the LLST timer running until
         // then).
-        if let Some(state) = self.graceful_restart.get_mut(&origin.peer) {
+        if let Some(state) = self.graceful_restart.get_mut(&session) {
             state.refreshed.insert((key.clone(), route.path_id));
         }
         self.adj_rib_in.feed_pre_policy(origin, route);
         self.reselect(&key);
+        // Per-peer maximum-prefix enforcement (BIRD `maximum prefix`,
+        // FRR `maximum-prefix`). Count the session's routes in Adj-RIB-In
+        // after the install; if the count crosses the threshold or the
+        // hard limit, fire the corresponding event.
+        self.check_max_prefix(session);
+    }
+
+    /// Count a session's Adj-RIB-In and enforce the maximum-prefix limit.
+    /// Emits [`RouterEvent::MaxPrefixThreshold`] once when the early-warning
+    /// percentage is crossed, and [`RouterEvent::MaxPrefixExceeded`] once
+    /// when the hard limit is hit. For `Teardown`/`Restart` the session is
+    /// closed with a NOTIFICATION CEASE (subcode 8).
+    fn check_max_prefix(&mut self, session: u64) {
+        // Read the config without borrowing self mutably.
+        let (limit, action, threshold_pct) = match self.sessions.get(&session) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                let cfg = peer.config();
+                match cfg.maximum_prefix {
+                    Some(limit) => (
+                        limit,
+                        cfg.maximum_prefix_action,
+                        cfg.maximum_prefix_threshold,
+                    ),
+                    None => return, // no limit configured
+                }
+            }
+            _ => return, // not a BGP session
+        };
+        let count: u32 = self
+            .adj_rib_in
+            .iter_all()
+            .filter(|r| r.origin.peer == session)
+            .count() as u32;
+        // Early-warning threshold (fires once per crossing).
+        if threshold_pct > 0 && count > 0 {
+            let threshold_count = (u64::from(limit) * u64::from(threshold_pct) / 100) as u32;
+            if count >= threshold_count && count < limit {
+                let state = self.max_prefix_state.entry(session).or_default();
+                if !state.threshold_warned {
+                    state.threshold_warned = true;
+                    self.pending_events.push(RouterEvent::MaxPrefixThreshold {
+                        session: SessionHandle(session),
+                        count,
+                        limit,
+                        pct: threshold_pct,
+                    });
+                }
+            }
+        }
+        // Hard limit (fires once per session lifetime).
+        if count > limit {
+            let state = self.max_prefix_state.entry(session).or_default();
+            if !state.exceeded {
+                state.exceeded = true;
+                self.pending_events.push(RouterEvent::MaxPrefixExceeded {
+                    session: SessionHandle(session),
+                    count,
+                    limit,
+                    action,
+                });
+                match action {
+                    lr_bgp::MaxPrefixAction::Warn => {
+                        self.pending_events.push(RouterEvent::Log(format!(
+                            "max-prefix: session {} exceeded limit ({count}/{limit}), action=warn",
+                            session
+                        )));
+                    }
+                    lr_bgp::MaxPrefixAction::Teardown | lr_bgp::MaxPrefixAction::Restart => {
+                        self.pending_events.push(RouterEvent::Log(format!(
+                            "max-prefix: session {} exceeded limit ({count}/{limit}), action={}",
+                            session,
+                            action.name()
+                        )));
+                        // Tear the session down with a CEASE NOTIFICATION
+                        // (subcode 8 — "Maximum Number of Prefixes
+                        // Exceeded", RFC 4486 §2.1).
+                        if let Some(SessionState::Bgp { peer, .. }) =
+                            self.sessions.get_mut(&session)
+                        {
+                            peer.enqueue_notification(lr_bgp::BgpErrorCode::Cease, 8);
+                        }
+                        self.flush_peer_output(session);
+                    }
+                }
+            }
+        }
     }
 
     fn withdraw_from_session(&mut self, origin: RouteOrigin, key: &RouteKey, path_id: u32) {
@@ -1532,6 +1636,12 @@ impl DefaultRouter {
             mrai.last_sent.clear();
             mrai.pending.clear();
         }
+        // Clear maximum-prefix bookkeeping so a re-established session
+        // starts with fresh threshold/exceeded latches.
+        if let Some(state) = self.max_prefix_state.get_mut(&h.0) {
+            state.exceeded = false;
+            state.threshold_warned = false;
+        }
         // Compute the retention windows *before* stepping the FSM (the
         // step clears nothing, but keep the ordering explicit).
         let retention = match self.sessions.get(&h.0) {
@@ -1898,6 +2008,9 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
                 p_cfg.extended_next_hop = cfg.extended_next_hop.clone();
+                p_cfg.maximum_prefix = cfg.maximum_prefix;
+                p_cfg.maximum_prefix_action = cfg.maximum_prefix_action;
+                p_cfg.maximum_prefix_threshold = cfg.maximum_prefix_threshold;
                 let peer = BgpPeer::new(p_cfg);
                 self.sessions.insert(
                     h.0,

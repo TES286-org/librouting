@@ -163,6 +163,13 @@ pub struct SessionConfig {
     pub area_id: u32,
     /// OSPF area type policy (stub/NSSA, RFC 2328 §3.6 + RFC 3101).
     pub ospf_area_type: OspfAreaType,
+    /// Per-peer maximum-prefix limit (BIRD `maximum prefix`, FRR
+    /// `maximum-prefix`). `None` = no limit.
+    pub maximum_prefix: Option<u32>,
+    /// Action when the limit is exceeded: warn / teardown / restart.
+    pub maximum_prefix_action: lr_bgp::MaxPrefixAction,
+    /// Early-warning threshold percentage (0..=100). 0 disables.
+    pub maximum_prefix_threshold: u8,
 }
 
 impl SessionConfig {
@@ -196,6 +203,9 @@ impl SessionConfig {
             local_address: None,
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
+            maximum_prefix: None,
+            maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
+            maximum_prefix_threshold: 75,
         }
     }
 
@@ -282,6 +292,24 @@ impl SessionConfig {
         self
     }
 
+    /// Configure per-peer maximum-prefix (BIRD `maximum prefix`, FRR
+    /// `maximum-prefix`). When the peer's Adj-RIB-In exceeds `limit`
+    /// prefixes the router fires `action`. The early-warning threshold
+    /// defaults to 75% (BIRD/FRR convention).
+    pub fn with_maximum_prefix(mut self, limit: u32, action: lr_bgp::MaxPrefixAction) -> Self {
+        self.maximum_prefix = Some(limit);
+        self.maximum_prefix_action = action;
+        self
+    }
+
+    /// Override the early-warning threshold percentage (0..=100). 0
+    /// disables the warning. Takes effect only when
+    /// [`with_maximum_prefix`] is also set.
+    pub fn with_maximum_prefix_threshold(mut self, pct: u8) -> Self {
+        self.maximum_prefix_threshold = pct.min(100);
+        self
+    }
+
     /// Build an OSPFv2 session config.
     pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
         Self {
@@ -306,6 +334,9 @@ impl SessionConfig {
             local_address: None,
             area_id,
             ospf_area_type: OspfAreaType::Normal,
+            maximum_prefix: None,
+            maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
+            maximum_prefix_threshold: 75,
         }
     }
 
@@ -333,6 +364,9 @@ impl SessionConfig {
             local_address: Some(local_addr),
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
+            maximum_prefix: None,
+            maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
+            maximum_prefix_threshold: 75,
         }
     }
 }

@@ -118,6 +118,9 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         local_address: None,
         area_id: 0,
         ospf_area_type: OspfAreaType::Normal,
+        maximum_prefix: None,
+        maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
+        maximum_prefix_threshold: 75,
     };
     match router.add_session(cfg) {
         Ok(h) => {

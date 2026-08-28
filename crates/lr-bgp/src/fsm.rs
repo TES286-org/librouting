@@ -438,7 +438,7 @@ impl BgpPeer {
         }
     }
 
-    fn enqueue_notification(&mut self, code: BgpErrorCode, subcode: u8) {
+    pub fn enqueue_notification(&mut self, code: BgpErrorCode, subcode: u8) {
         let n = BgpNotification::new(code as u8, subcode, vec![]);
         if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Notification(n)) {
             self.out_buf.extend_from_slice(&bytes);

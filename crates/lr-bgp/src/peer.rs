@@ -74,6 +74,44 @@ pub struct PeerConfig {
     /// peers ("next-hop-self"). When `None` the received NEXT_HOP is
     /// preserved, which is correct for iBGP and for shared-medium eBGP.
     pub local_address: Option<lr_core::addr::IpAddr>,
+    /// Per-peer maximum-prefix limit. When the peer's Adj-RIB-In exceeds
+    /// this many prefixes the router fires the configured action
+    /// ([`MaxPrefixAction`]). `None` = no limit (the default).
+    pub maximum_prefix: Option<u32>,
+    /// Action to take when the maximum-prefix limit is exceeded.
+    /// Defaults to [`MaxPrefixAction::Warn`].
+    pub maximum_prefix_action: MaxPrefixAction,
+    /// Threshold percentage (0..=100) at which a warning is logged before
+    /// the hard limit is reached. 0 disables the early warning. Defaults
+    /// to 75 (BIRD/FRR convention).
+    pub maximum_prefix_threshold: u8,
+}
+
+/// Action taken when a peer exceeds its configured maximum-prefix limit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum MaxPrefixAction {
+    /// Log a warning but keep the session and all routes. The operator
+    /// is expected to notice the log and adjust the configuration.
+    #[default]
+    Warn,
+    /// Tear the session down immediately with a NOTIFICATION CEASE
+    /// (subcode 8, "Maximum Number of Prefixes Exceeded"). The routes
+    /// the peer already installed are purged (RFC 4271 §8.2.2).
+    Teardown,
+    /// Tear down and refuse to re-establish for the configured cooldown
+    /// period. The daemon implements the cooldown; the library just
+    /// reports the event.
+    Restart,
+}
+
+impl MaxPrefixAction {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Warn => "warn",
+            Self::Teardown => "teardown",
+            Self::Restart => "restart",
+        }
+    }
 }
 
 impl PeerConfig {
@@ -104,6 +142,9 @@ impl PeerConfig {
             route_server: RouteServerConfig::default(),
             peer_id: 0,
             local_address: None,
+            maximum_prefix: None,
+            maximum_prefix_action: MaxPrefixAction::Warn,
+            maximum_prefix_threshold: 75,
         }
     }
 

@@ -49,4 +49,4 @@ pub use error::{
 };
 pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState};
 pub use message::{BgpHeader, BgpMessage, BgpMessageType};
-pub use peer::PeerConfig;
+pub use peer::{MaxPrefixAction, PeerConfig};
