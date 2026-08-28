@@ -39,7 +39,7 @@ library without depending on the Rust toolchain at runtime.
 | Crate | Path | Purpose |
 |-------|------|---------|
 | `lr-core` | `crates/lr-core` | Shared foundation: types, codec traits, generic FSM, RIB traits, timers, wire utilities |
-| `lr-bgp` | `crates/lr-bgp` | BGP-4 codec, path attributes, peer FSM, capabilities, MP-BGP, AddPath, 4-byte ASN, iBGP/eBGP roles, Route Reflector (RFC 4456), Confederations (RFC 6793), Route Server (RFC 7947), OTC (RFC 9234), best-path with multipath (RFC 4271 §9.1.2 / RFC 4784) |
+| `lr-bgp` | `crates/lr-bgp` | BGP-4 codec, path attributes, peer FSM, capabilities, MP-BGP, AddPath, 4-byte ASN, iBGP/eBGP roles, Route Reflector (RFC 4456), Confederations (RFC 6793), Route Server (RFC 7947), OTC (RFC 9234), Extended Next-Hop (RFC 5549), best-path with multipath (RFC 4271 §9.1.2 / RFC 4784) |
 | `lr-ospf` | `crates/lr-ospf` | OSPFv2/v3 codec, LSAs, link-state DB, neighbor FSM, SPF, areas, auth |
 | `lr-babel` | `crates/lr-babel` | Babel codec, TLVs, neighbor FSM, route table, source-specific routing |
 | `lr-rib` | `crates/lr-rib` | Adj-RIB-In, Adj-RIB-Out, Loc-RIB, route selection, cross-protocol merging |
@@ -133,6 +133,13 @@ librouting/
   `LLGR_STALE`/`NO_LLGR` communities, least-preferred stale-route
   selection, egress gating to non-LLGR neighbors and per-family stale-time
   retention with a locally configurable cap.
+- **Extended Next-Hop** (RFC 5549): capability 5 with
+  `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples (canonical `(1,1,2)`),
+  OPEN-negotiated as the intersection of local and peer tuples; IPv4 NLRI
+  carried over an IPv6 next-hop (16-byte well-known NEXT_HOP or
+  MP_REACH `(AFI=1, 16B)`). Daemon `--extended-next-hop`,
+  `--mp-family ipv6-unicast`, `--local-address-v6`; e2e coverage of all
+  eight dual-stack / MP-BGP / ENH / pure-IPv6 session modes.
 
 ## Best-path selection
 

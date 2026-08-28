@@ -34,6 +34,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 7947 route server mode | ✅ | |
 | RFC 9234 OTC / roles | ✅ | |
 | RFC 7911 Add-Path | ✅ 🧪 | capability negotiation (per-family send/receive), path-id NLRI framing (plain + MP), Adj-RIB-In keyed by path id, ranked N-path selection (`add_path_max_paths`), per-path export/withdrawal with rank-slot transmit ids, MRAI path sets, GR/LLGR per-path retention; two-daemon + full-stack e2e |
+| RFC 5549 Extended Next-Hop | ✅ 🧪 | capability code 5 with `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples; OPEN negotiation as the intersection of local + peer tuples (§3); 16-byte NEXT_HOP for IPv4 NLRI decoded as `V4OverV6`, MP_REACH `(AFI=1, 16B)` accepted; eBGP egress rewrites IPv4 NEXT_HOP to IPv6 when `(1,1,2)` is negotiated and `local_address` is IPv6; daemon `--extended-next-hop` / `--local-address-v6` / `--mp-family ipv6-unicast`; e2e coverage of all 8 dual-stack / MP-BGP / ENH / pure-v6 session modes |
 | RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
 | RFC 7313 enhanced route refresh | ✅ | negotiated capability plus BoRR/EoRR demarcation around refreshed tables |
 | RFC 4724 graceful restart | ✅ 🧪 | capability lists address families with F bits; stale-route retention, negotiated expiry purge, EoR-based resynchronization (BIRD-verified) |
@@ -125,6 +126,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Unit tests (workspace) | ✅ 30 binaries / 260+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 |
 | Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
+| BGP session-mode E2E (8 modes: standard dual-stack, LL dual-stack, MP-BGP, MP-BGP+LL, ENH, ENH+LL, pure IPv6, pure IPv6+LL) | ✅ 🧪 | `lr-tests/tests/bgp_session_modes.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
@@ -178,7 +180,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    fallback); area types configured per session
    (`with_ospf_area_type`) or at runtime (`ospf_set_area_type`);
    verified by 13 unit + 8 three-/four-router E2E tests. OSPFv2 only —
-   v3 stub/NSSA follows the v3 inter-area work in item 10.
+   v3 stub/NSSA follows the v3 inter-area work in item 11.
 9. ~~**OSPF virtual links**~~ — done: §15 lifecycle (`ospf_add_virtual_link`/
    `ospf_remove_virtual_link`, up while the transit-area SPF reaches the
    endpoint, stub/NSSA transit areas refused), type-4 link SPF
@@ -189,16 +191,32 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
    origination (type-4 link descriptions, V-bit) stays with the
    embedder, as with all router-LSAs in this model; verified by 4 E2E
    tests incl. MaxAge age-out of stale LSAs after a partition.
-10. **OSPF authentication + OSPFv3 inter-area** — RFC 5709 HMAC-SHA auth
+10. ~~**BGP dual-stack / MP-BGP / Extended Next-Hop session modes**~~ —
+    done: RFC 5549 capability (code 5) negotiated as the intersection
+    of local and peer `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples;
+    16-byte well-known NEXT_HOP for IPv4 NLRI decoded as `V4OverV6`
+    (the spurious 32-byte form is rejected); MP_REACH `(AFI=1, 16B)`
+    accepted; eBGP egress rewrites IPv4 NEXT_HOP to IPv6 when
+    `(1,1,2)` is negotiated and `local_address` is IPv6. Daemon gains
+    `--extended-next-hop`, `--mp-family` (repeatable) and
+    `--local-address-v6`, plus proper IPv6 / `[fe80::1%eth0]:port`
+    address resolution (replacing the `split(':')` shortcut that broke
+    for IPv6). All eight BGP session establishment modes — standard
+    dual-stack, link-local dual-stack, MP-BGP, MP-BGP+link-local,
+    ENH, ENH+link-local, pure IPv6, pure IPv6+link-local — verified by
+    `lr-tests/tests/bgp_session_modes.rs` (10 tests, in-process byte
+    pump). FFI + Go/Python/C++ bindings expose
+    `set_extended_next_hop` / `set_mp_families` / `set_local_address`.
+11. **OSPF authentication + OSPFv3 inter-area** — RFC 5709 HMAC-SHA auth
     (v2 AuType 2 trailer), RFC 7166 v3 auth trailer, and OSPFv3
     inter-area-prefix-LSA (0x2003) ABR origination.
-11. **BGP GTSM + maximum-prefix** — RFC 5082 TTL security (peer
+12. **BGP GTSM + maximum-prefix** — RFC 5082 TTL security (peer
     `min-ttl` enforcement) and per-peer `maximum-prefix` with warn /
     restart / teardown actions. Quick BIRD/FRR parity wins.
-12. **Cross-protocol redistribution engine** — explicit import/export
+13. **Cross-protocol redistribution engine** — explicit import/export
     pipes between BGP, OSPF, Babel and Loc-RIB (BIRD pipe / FRR
     `redistribute` equivalent), with protocol-tag and metric policy.
-13. **Babel daemon parity** — IPv6 link-local transport in the daemon
+14. **Babel daemon parity** — IPv6 link-local transport in the daemon
     (today IPv4-only) and RFC 9079 source-specific table completion.
-14. **BMP monitoring (RFC 7854)** — session mirroring to an external
+15. **BMP monitoring (RFC 7854)** — session mirroring to an external
     collector for operational parity with BIRD/FRR.

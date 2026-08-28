@@ -303,6 +303,44 @@ let h = r.add_session(
 r.set_add_path_max_paths(4);
 ```
 
+### RFC 5549 Extended Next-Hop + MP-BGP family / address selection
+
+`SessionConfig` exposes three builders for the dual-stack / MP-BGP / ENH
+session modes:
+
+* `with_mp_families(families)` — override the MP-BGP family list
+  advertised in OPEN (default: IPv4 unicast only).
+* `with_extended_next_hop()` — advertise the canonical RFC 5549
+  `(1, 1, 2)` tuple (IPv4 unicast over an IPv6 next-hop). Use
+  `with_extended_next_hop_tuple(afi, safi, nh_afi)` for non-canonical
+  tuples.
+* `with_local_address(ip)` — local source for next-hop-self egress.
+  For ENH over IPv6 pass an IPv6 literal; the eBGP egress path then
+  rewrites IPv4 NLRI's NEXT_HOP to a 16-byte IPv6 address.
+
+The same options are exposed post-creation via mutators:
+`set_session_mp_families`, `set_session_extended_next_hop`, and
+`set_session_local_address`. They must be called before
+`start_session` (OPEN negotiation).
+
+```rust
+let h = r.add_session(
+    SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]))
+        .with_mp_families(vec![NlriFamily::IPV4_UNICAST, NlriFamily::IPV6_UNICAST])
+        .with_extended_next_hop()
+        .with_local_address(IpAddr::V6([0x20,0x01,0x0d,0xb8, 0,0,0,0, 0,0,0,0, 0,0,0,1])),
+)?;
+// Equivalent: post-creation mutators (same effect, FFI-friendly).
+r.set_session_mp_families(h, &[NlriFamily::IPV4_UNICAST, NlriFamily::IPV6_UNICAST])?;
+r.set_session_extended_next_hop(h, &[(1, 1, 2)])?;
+r.set_session_local_address(h, IpAddr::V6([0x20,0x01,0x0d,0xb8, 0,0,0,0, 0,0,0,0, 0,0,0,1]))?;
+```
+
+The eight BGP session establishment modes (standard dual-stack,
+link-local dual-stack, MP-BGP, MP-BGP+link-local, ENH, ENH+link-local,
+pure IPv6, pure IPv6+link-local) are exercised end-to-end by
+`crates/lr-tests/tests/bgp_session_modes.rs`.
+
 ### Operational introspection
 
 `session_summaries()` renders one [`SessionSummary`] per session (kind,
