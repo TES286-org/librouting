@@ -25,6 +25,9 @@ pub(crate) struct PeerSpec {
     pub address: Option<String>,
     /// Peer AS; `0` = inherit the global `peer_as`.
     pub peer_as: u32,
+    /// Name of a `[peer-template.<name>]` this peer extends
+    /// (`extends = "<name>"`); per-peer keys override template keys.
+    pub extends: Option<String>,
     /// Import route-map name (`import = "..."`).
     pub import: Option<String>,
     /// Export route-map name (`export = "..."`).
@@ -175,6 +178,8 @@ pub(crate) struct DaemonConfig {
     pub community_lists: Vec<CommunityListSpec>,
     /// `[[route-map]]` tables — one instance per entry.
     pub route_maps: Vec<RouteMapSpec>,
+    /// `[peer-template.<name>]` tables — reusable `[[peer]]` defaults.
+    pub peer_templates: std::collections::BTreeMap<String, PeerSpec>,
 }
 
 impl DaemonConfig {
@@ -195,14 +200,45 @@ impl DaemonConfig {
     /// Apply the legacy-single-peer synthesis after all inputs (CLI +
     /// TOML) are merged: with no explicit peers, the historical
     /// `--peer` / `bgp.peer_addr` (or a bare `--listen`) maps onto one
-    /// implicit peer so previous behaviour is preserved exactly.
-    pub fn finalize(&mut self) {
+    /// implicit peer so previous behaviour is preserved exactly. Then
+    /// every `extends = "<template>"` is resolved (least-specific
+    /// first; per-peer keys win, template chains supported, cycles
+    /// and unknown names are errors — fail closed).
+    pub fn finalize(&mut self) -> Result<(), String> {
         if self.peers.is_empty() && (self.peer_addr.is_some() || self.listen_addr.is_some()) {
             self.peers.push(PeerSpec {
                 remote: self.peer_addr.clone(),
                 ..Default::default()
             });
         }
+        for idx in 0..self.peers.len() {
+            let mut chain: Vec<String> = Vec::new();
+            let mut resolved = self.peers[idx].clone();
+            // Walk the extends chain from the peer upward; each level
+            // only fills fields the level above left unset.
+            while let Some(name) = resolved.extends.clone() {
+                if chain.contains(&name) {
+                    return Err(format!(
+                        "peer {}: extends cycle via '{}'",
+                        resolved.label(),
+                        name
+                    ));
+                }
+                let template = self.peer_templates.get(&name).cloned().ok_or_else(|| {
+                    format!(
+                        "peer {}: unknown peer-template '{}'",
+                        resolved.label(),
+                        name
+                    )
+                })?;
+                chain.push(name);
+                resolved.extends = template.extends.clone();
+                merge_spec(&mut resolved, &template);
+            }
+            resolved.extends = None;
+            self.peers[idx] = resolved;
+        }
+        Ok(())
     }
 
     /// Effective peer AS for `peer` (per-peer value or the global).
@@ -212,6 +248,59 @@ impl DaemonConfig {
         } else {
             self.peer_as
         }
+    }
+}
+
+/// Fill unset fields of `over` from `base` (per-peer key wins).
+fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
+    fn opt<T: Clone>(dst: &mut Option<T>, src: &Option<T>) {
+        if dst.is_none() {
+            *dst = src.clone();
+        }
+    }
+    opt(&mut over.name, &base.name);
+    opt(&mut over.remote, &base.remote);
+    opt(&mut over.address, &base.address);
+    if over.peer_as == 0 {
+        over.peer_as = base.peer_as;
+    }
+    opt(&mut over.import, &base.import);
+    opt(&mut over.export, &base.export);
+    opt(&mut over.hold_time, &base.hold_time);
+    opt(&mut over.gr_restart_time, &base.gr_restart_time);
+    opt(&mut over.llgr_stale_time, &base.llgr_stale_time);
+    opt(&mut over.llgr_max_stale_time, &base.llgr_max_stale_time);
+    opt(&mut over.local_address, &base.local_address);
+    opt(&mut over.local_address_v6, &base.local_address_v6);
+    opt(&mut over.md5_key, &base.md5_key);
+    if over.tcp_ao_keys.is_none() {
+        over.tcp_ao_keys = base.tcp_ao_keys.clone();
+    }
+    opt(&mut over.tcp_ao_algorithm, &base.tcp_ao_algorithm);
+    if over.tcp_ao_maclen.is_none() {
+        over.tcp_ao_maclen = base.tcp_ao_maclen;
+    }
+    if over.add_path.is_none() {
+        over.add_path = base.add_path;
+    }
+    if over.add_path_max_paths.is_none() {
+        over.add_path_max_paths = base.add_path_max_paths;
+    }
+    if over.mp_families.is_none() {
+        over.mp_families = base.mp_families.clone();
+    }
+    if over.extended_next_hop.is_none() {
+        over.extended_next_hop = base.extended_next_hop;
+    }
+    if over.gtsm_hops.is_none() {
+        over.gtsm_hops = base.gtsm_hops;
+    }
+    if over.max_prefixes.is_none() {
+        over.max_prefixes = base.max_prefixes;
+    }
+    opt(&mut over.max_prefix_action, &base.max_prefix_action);
+    if over.max_prefix_threshold.is_none() {
+        over.max_prefix_threshold = base.max_prefix_threshold;
     }
 }
 
@@ -287,7 +376,18 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         }
         if line.starts_with('[') && line.ends_with(']') {
             section = line[1..line.len() - 1].trim().to_string();
-            if section != "bgp" && !section.starts_with("unknown-array.") {
+            // [peer-template.<name>] — reusable peer defaults. Keys use
+            // the [[peer]] schema; unknown keys are hard errors.
+            if let Some(name) = section.strip_prefix("peer-template.") {
+                if name.is_empty() || name.contains('.') {
+                    return Err(format!(
+                        "line {}: bad template section [{}]",
+                        lineno + 1,
+                        section
+                    ));
+                }
+                cfg.peer_templates.entry(name.to_string()).or_default();
+            } else if section != "bgp" && !section.starts_with("unknown-array.") {
                 cfg.warnings.push(format!(
                     "line {}: unknown section [{}] (ignored)",
                     lineno + 1,
@@ -310,6 +410,21 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             {
                 cfg.warnings.push(format!(
                     "line {}: unknown peer key '{}' (ignored)",
+                    lineno + 1,
+                    key
+                ));
+            }
+            continue;
+        }
+        if let Some(name) = section.strip_prefix("peer-template.") {
+            let Some(template) = cfg.peer_templates.get_mut(name) else {
+                return Err(format!("line {}: unknown template", lineno + 1));
+            };
+            if !apply_peer_key(template, key, value)
+                .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+            {
+                return Err(format!(
+                    "line {}: unknown peer-template key '{}' (typo protection)",
                     lineno + 1,
                     key
                 ));
@@ -498,6 +613,7 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "remote" => peer.remote = Some(value.to_string()),
         "address" => peer.address = Some(value.to_string()),
         "peer_as" => peer.peer_as = value.parse().map_err(|_| "bad peer_as".to_string())?,
+        "extends" => peer.extends = Some(value.to_string()),
         "hold_time" => peer.hold_time = Some(value.parse().map_err(|_| "bad hold_time")?),
         "graceful_restart_time" => {
             peer.gr_restart_time = Some(value.parse().map_err(|_| "bad graceful_restart_time")?)
@@ -726,7 +842,7 @@ mod tests {
             &mut cfg,
         )
         .unwrap();
-        cfg.finalize();
+        cfg.finalize().unwrap();
         assert_eq!(cfg.peers.len(), 1);
         assert!(!cfg.explicit_peers);
         assert_eq!(cfg.peers[0].remote.as_deref(), Some("192.0.2.2:179"));
@@ -744,7 +860,7 @@ mod tests {
             &mut cfg,
         )
         .unwrap();
-        cfg.finalize();
+        cfg.finalize().unwrap();
         assert!(cfg.explicit_peers);
         assert_eq!(cfg.peers.len(), 2);
         assert_eq!(cfg.peers[0].remote.as_deref(), Some("192.0.2.2:179"));
@@ -855,5 +971,65 @@ mod tests {
         )
         .unwrap();
         assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+    }
+    #[test]
+    fn peer_templates_inherit_and_override() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [peer-template.transit]\npeer_as = 64500\nmd5_key = \"alpha\"\nmax_prefixes = 1000\n\n\
+             [[peer]]\nextends = \"transit\"\nremote = \"192.0.2.2:179\"\nmax_prefixes = 2000\n\n\
+             [[peer]]\nextends = \"transit\"\nremote = \"192.0.2.3:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.peers.len(), 2);
+        // Both inherit AS + key; peer 0 overrides the prefix limit.
+        assert_eq!(cfg.peers[0].peer_as, 64500);
+        assert_eq!(cfg.peers[0].md5_key.as_deref(), Some("alpha"));
+        assert_eq!(cfg.peers[0].max_prefixes, Some(2000));
+        assert_eq!(cfg.peers[1].max_prefixes, Some(1000));
+        // extends is consumed, not carried into the session config.
+        assert!(cfg.peers[0].extends.is_none());
+    }
+
+    #[test]
+    fn template_chains_resolve_least_specific_first() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[peer-template.base]\npeer_as = 64500\nhold_time = 60\n\n\
+             [peer-template.fast]\nextends = \"base\"\nhold_time = 10\n\n\
+             [[peer]]\nextends = \"fast\"\nremote = \"192.0.2.2:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        // 'fast' overrides hold_time; 'base' fills peer_as.
+        assert_eq!(cfg.peers[0].hold_time, Some(10));
+        assert_eq!(cfg.peers[0].peer_as, 64500);
+    }
+
+    #[test]
+    fn unknown_template_and_cycles_fail_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[peer]]\nextends = \"ghost\"\nremote = \"192.0.2.2:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("must fail");
+        assert!(err.contains("unknown peer-template 'ghost'"), "{err}");
+
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[peer-template.a]\nextends = \"b\"\n\n\
+             [peer-template.b]\nextends = \"a\"\n\n\
+             [[peer]]\nextends = \"a\"\nremote = \"192.0.2.2:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("must fail");
+        assert!(err.contains("cycle"), "{err}");
     }
 }

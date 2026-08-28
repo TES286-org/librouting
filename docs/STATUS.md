@@ -226,12 +226,13 @@ BIRD/FRR-style, without an embedder writing code.
       reusable bridge; the daemon wires them in one block. E2E:
       export filter, import filter, set-actions keep-route,
       unknown-reference startup failure (4 tests).
-   c. **Peer templates**: `[peer-template.<name>]` tables holding
-      defaults (`md5_key`, `graceful_restart_time`, `max_prefixes`,
-      policy attachments…) that `[[peer]]` entries pull in via
-      `extends = "<name>"`; per-peer keys override template keys.
-      Resolves the copy-paste burden of multi-peer configs without
-      inventing a new language (TOML has no anchors).
+   c. ~~**Peer templates**~~ — done: `[peer-template.<name>]` tables
+      holding any `[[peer]]` key (incl. policy attachments); peers
+      pull them in via `extends = "<name>"`, per-peer keys override,
+      template chains resolve least-specific-first, cycles and
+      unknown names are startup errors. Resolves the copy-paste
+      burden of multi-peer configs without inventing a new language
+      (TOML has no anchors). 3 parser unit tests + template e2e.
 5. **OSPF daemon mode** — `--protocol ospf` with area/interface
    configuration, complementing the existing `bgp` and `babel` modes.
 6. **Operational tooling** — MRT dump import/export (`lr routes`

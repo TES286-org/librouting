@@ -115,6 +115,11 @@ networks = ["203.0.113.0/24"]
 # to this peer). Configuring both on one peer waits for RFC 4271 §6.8
 # collision detection (future work).
 #
+# Reusable defaults: [peer-template.<name>] tables hold any [[peer]]
+# key; peers pull them in with extends = "<name>" and override
+# per-peer. Templates may extend other templates (most specific key
+# wins; cycles and unknown names are startup errors).
+#
 # Available keys: name, remote, address, peer_as, hold_time,
 # graceful_restart_time, llgr_stale_time, llgr_max_stale_time,
 # local_address, local_address_v6, md5_key, tcp_ao_keys,
@@ -130,13 +135,23 @@ networks = ["203.0.113.0/24"]
 # peer_as = 64513
 # md5_key = "alpha"
 #
-# [[peer]]
-# name = "customer-b"
-# address = "198.51.100.2"
+# [peer-template.customer]
 # peer_as = 64514
 # hold_time = 30
 # max_prefixes = 1000
 # max_prefix_action = "teardown"
+# import = "from-customer"
+#
+# [[peer]]
+# name = "customer-b"
+# address = "198.51.100.2"
+# extends = "customer"
+#
+# [[peer]]
+# name = "customer-c"
+# address = "198.51.100.3"
+# extends = "customer"
+# max_prefixes = 500        # per-peer override
 #
 # Note: inbound peers must share one auth configuration (the listener
 # socket is armed once); heterogeneous listener keys are future work.

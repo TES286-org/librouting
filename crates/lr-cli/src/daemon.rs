@@ -116,7 +116,10 @@ fn main() -> ExitCode {
             return code;
         }
     };
-    cfg.finalize();
+    if let Err(e) = cfg.finalize() {
+        eprintln!("error: {}", e);
+        return ExitCode::from(2);
+    }
     if cfg.local_as == 0 || cfg.router_id.is_empty() {
         eprintln!("error: --local-as and --router-id are required");
         print_usage();

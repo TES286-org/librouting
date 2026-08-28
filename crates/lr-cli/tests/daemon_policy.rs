@@ -333,3 +333,94 @@ import = "ghost"
     );
     std::fs::remove_file(&cfg).ok();
 }
+
+/// Two peers extending one template (shared AS + policy binding via
+/// the template) must both establish and carry policy — the reuse
+/// mechanism works end-to-end.
+#[test]
+fn peer_templates_share_policy_and_establish() {
+    let port_a = free_port();
+    let port_b = free_port();
+    let port_c = free_port();
+    let cfg_a = std::env::temp_dir().join(format!("lr-pol-t-{}.toml", std::process::id()));
+    std::fs::write(
+        &cfg_a,
+        format!(
+            r#"
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+local_address = "192.0.2.1"
+listen_addr = "127.0.0.1:{port_a}"
+networks = ["203.0.113.0/24"]
+
+[[prefix-list]]
+name = "allowed"
+prefix = "203.0.113.0/24"
+
+[[route-map]]
+name = "out"
+entry = 10
+match_prefix = "allowed"
+permit = true
+
+[peer-template.customer]
+peer_as = 64513
+hold_time = 30
+export = "out"
+
+[[peer]]
+extends = "customer"
+remote = "127.0.0.1:{port_b}"
+
+[[peer]]
+extends = "customer"
+remote = "127.0.0.1:{port_c}"
+"#
+        ),
+    )
+    .unwrap();
+
+    let _a = Daemon::spawn(&["--config", cfg_a.to_str().unwrap()], "tpl-a");
+    let b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--listen",
+            &format!("127.0.0.1:{port_b}"),
+            "--local-address",
+            "192.0.2.2",
+        ],
+        "tpl-b",
+    );
+    let c = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.3",
+            "--listen",
+            &format!("127.0.0.1:{port_c}"),
+            "--local-address",
+            "192.0.2.3",
+        ],
+        "tpl-c",
+    );
+
+    // Both template peers establish and receive the exported prefix.
+    wait_log_all(&b.log, &["daemon: route installed 203.0.113.0/24"]);
+    wait_log_all(&c.log, &["daemon: route installed 203.0.113.0/24"]);
+    // A's banner shows two policy bindings from ONE template.
+    let a_log = std::fs::read_to_string(&_a.log).unwrap_or_default();
+    assert!(
+        a_log.contains("policy:      1 route-maps, 0 import / 2 export"),
+        "{a_log}"
+    );
+    std::fs::remove_file(&cfg_a).ok();
+}

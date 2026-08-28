@@ -81,10 +81,12 @@ per-peer configuration uses `[[peer]]` tables in the TOML config
 (see `templates/daemon.toml`): per-peer AS, hold time, graceful
 restart, auth, GTSM, maximum-prefix, Add-Path, MP families and
 next-hop source, each inheriting the `[bgp]` globals when omitted.
-Outbound peers get one connector thread each (independent reconnect
-backoff); the listener accepts concurrent inbound sessions and matches
-them to configured peers by source address (`address` key), rejecting
-connections that match none. Event consumption (logging, kernel route
+Reusable defaults live in `[peer-template.<name>]` tables that peers
+pull in via `extends = "<name>"` (per-peer keys override template
+keys; chains supported). Outbound peers get one connector thread each
+(independent reconnect backoff); the listener accepts concurrent
+inbound sessions and matches them to configured peers by source
+address (`address` key), rejecting connections that match none. Event consumption (logging, kernel route
 installation) is centralised on the ticker thread, preserving Loc-RIB
 ordering across sessions.
 
