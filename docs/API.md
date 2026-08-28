@@ -163,6 +163,34 @@ sessions: locally originated LSAs are refreshed and flooded as LSUs after
 is rerun. The router clock is embedder-driven, so call `tick` with a monotonic
 millisecond timestamp.
 
+## OSPF DBD/LSR exchange (RFC 2328 §7.2)
+
+OSPF sessions run the full database synchronization: after 2-Way the
+runtime negotiates master/slave (§10.3, higher router-id wins), pages
+LSA headers through Database Description packets bounded by the
+interface MTU, queues missing/newer LSAs and requests them in the
+Loading phase until the adjacency reaches Full. Sequence mismatches
+restart the negotiation (§10.9); duplicates are answered per §10.6;
+pending DBDs and LS-Requests retransmit on RxmtInterval from `tick()`.
+
+```rust
+use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
+use lr_core::addr::RouterId;
+
+let mut r = DefaultRouter::new();
+// The interface MTU must be the real one: peers reject DBDs that
+// advertise a larger MTU (§10.6).
+let h = r.add_session(
+    SessionConfig::ospfv2(RouterId::from_v4([10, 0, 0, 1]), 0)
+        .with_ospf_mtu(1500),
+)?;
+```
+
+The exchange driver itself (`lr_ospf::exchange::DbExchange`) is
+public for embedders that wire their own OSPF transport — it consumes
+decoded packets plus an `&Lsdb` view and produces the packets to
+transmit, unit-tested through both role assignments.
+
 ## OSPF origination + raw transport (speaker building blocks)
 
 The router pipeline is receive-driven; a real OSPF *speaker* additionally

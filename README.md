@@ -123,16 +123,18 @@ silently passes traffic.
 
 **OSPF mode.** `--protocol ospf` runs the OSPFv2 daemon instead of
 BGP: one raw socket (IP protocol 89) per configured interface,
-multicast Hellos to 224.0.0.5, dynamic neighbor discovery, per-area
-Router-LSA origination and dead-timer teardown. Interfaces and areas
+multicast Hellos to 224.0.0.5, dynamic neighbor discovery, the full
+RFC 2328 §7.2 DBD/LSR database exchange to Full adjacency
+(interop-verified against BIRD 2), per-area Router-LSA origination
+and dead-timer teardown. Interfaces and areas
 are configured with `[[ospf.interface]]` / `[[ospf.area]]` tables
 (stub/NSSA area types supported) or the `--ospf-interface` /
 `--ospf-area` CLI flags; BGP tables in the same file are ignored in
 OSPF mode. Raw sockets need root or a user/network namespace — the
 interop lab runs the whole thing rootless via `unshare -Urn` (see
 `tests/interop/ospf.sh`). Current scope: OSPFv2, point-to-point
-segments (no DR election), simplified DBD exchange — full details in
-`docs/STATUS.md` (W1.5).
+segments (no DR election) — full details in `docs/STATUS.md`
+(W1.5/W3.3).
 
 ```bash
 # Two routers on a veth pair, each in its own network namespace:

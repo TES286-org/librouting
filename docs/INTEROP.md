@@ -7,7 +7,8 @@ job `interop`) and can all be reproduced locally:
 | Test | Script | Peers | What it proves |
 |------|--------|-------|----------------|
 | Two-daemon | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP | FSM + codec consistency in both roles |
-| OSPF two-daemon | `tests/interop/ospf.sh` | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5) | OSPF daemon mode end-to-end: Hello exchange, Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown |
+| OSPF two-daemon | `tests/interop/ospf.sh` | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5) | OSPF daemon mode end-to-end: Hello exchange, real DBD/LSR exchange to Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown |
+| OSPF x BIRD | `tests/interop/ospf_bird.sh` | lr-daemon ↔ BIRD 2 (ospf v2, ptp) over a veth pair | Wire compatibility with BIRD's OSPF: DBD master/slave negotiation, header exchange, LSR loading to **Full on both sides**, stub nets propagated in both directions (birdc-verified) |
 | MRT | `tests/interop/mrt.sh` | BIRD 2 `protocol mrt` → `lr mrt rib`; lr-daemon → `lr mrt rib` | RFC 6396 compatibility: BIRD's dump decoded (peer table + prefixes); the daemon's Loc-RIB export round-trips with AS path + next hop |
 | BMP | `tests/interop/bmp.sh` | lr-daemon `--bmp-target` → lr-daemon `--protocol bmp` collector | BMP end-to-end: station connect, Peer Up ordering, Route Monitoring carrying the full UPDATE, collector serving routes + MRT dump via the runtime API |
 | BIRD | `tests/interop/bird.sh` | lr-daemon ↔ BIRD 2 (eBGP, multihop) | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions** |
@@ -62,9 +63,9 @@ available: `unshare -Urn` grants `CAP_NET_RAW` + `CAP_NET_ADMIN`, the
 veth pair plus one network namespace per router is created inside
 it, and each daemon runs via `nsenter` in its own namespace (the
 two-router model — no loopback shortcuts). Environments that forbid
-user namespaces SKIP gracefully. BIRD interop for OSPF is future
-work: lr's Hellos already bring BIRD to ExStart on p2p segments, but
-Full adjacency needs real DBD/LSR exchange (STATUS.md, W3.3).
+user namespaces SKIP gracefully. OSPF x BIRD interop runs the same
+rootless lab shape (`ospf_bird.sh`): the DBD/LSR exchange (RFC 2328
+§7.2) brings both sides to Full and routes flow in both directions.
 
 ### BMP lab specifics
 

@@ -58,8 +58,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ | hello, DBD, LSR, LSU, LSAck |
-| Neighbor FSM | ✅ | |
+| Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ 🧪 | hello, DBD, LSR, LSU, LSAck; LSR wire format (12-byte entries, §A.3.4) interop-verified |
+| Neighbor FSM | ✅ | incl. §10.9 restart-to-ExStart on sequence mismatch (Fig. 12) |
+| DBD/LSR exchange (§7.2, §10.3–§10.8) | ✅ 🧪 | `lr-ospf::exchange::DbExchange` + router wiring: master/slave election, header paging by MTU, LSR loading to Full, duplicate handling, RxmtInterval retransmit; BIRD 2 interop-verified (Full adjacency + bidirectional routes) |
 | LSDB + LSA flooding | ✅ | per-area shared LSDB; same-area sessions flood to each other (§13.3 simplified) |
 | SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
 | Inter-area routes from summary-LSAs (§16.2) | ✅ 🧪 | reachable-border check, dist-to-border + summary metric, LSInfinity skip |
@@ -138,6 +139,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | OSPF two-daemon E2E (raw-socket multicast adjacency, stub-net propagation both ways, dead-timer teardown) | ✅ 🧪 | `tests/interop/ospf.sh` — veth pair, one network namespace per daemon, rootless via `unshare -Urn` |
+| OSPF x BIRD E2E (real DBD/LSR exchange to Full adjacency, stub nets propagated in BOTH directions via birdc) | ✅ 🧪 | `tests/interop/ospf_bird.sh` — lr-daemon ↔ BIRD 2 over a veth pair |
 | MRT interop (BIRD 2 `protocol mrt` dump decoded by `lr mrt rib`; daemon Loc-RIB export round-trip with AS path + next hop) | ✅ 🧪 | `tests/interop/mrt.sh` |
 | BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪 | `tests/interop/bmp.sh` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
@@ -306,12 +308,21 @@ Highest-value missing/partial standards, in rough order:
 2. **RFC 8212** default eBGP route behaviors — full default
    deny-in/deny-out for eBGP without explicit policy (currently
    partial; the safety net approximates it).
-3. **OSPF DBD/LSR exchange** (RFC 2328 §7.2–§10.8) — replace the
-   neighbor FSM's simplified auto-advance with real Database
-   Description negotiation, LSR loading and implicit
-   acknowledgement; the missing piece for BIRD/FRR OSPF interop
-   (lr's Hellos already reach ExStart on BIRD p2p segments) and for
-   the OSPF daemon's scale-out beyond two-router labs.
+3. ~~**OSPF DBD/LSR exchange**~~ — done: the router runs the full
+   RFC 2328 §7.2 synchronization per session (`lr-ospf::exchange`):
+   master/slave election per §10.3, MTU-bounded LSA-header paging,
+   request-list loading to Full, duplicate DBD handling and
+   RxmtInterval retransmissions from tick(). The neighbor FSM now
+   restarts to ExStart on sequence mismatch (§10.9/Fig. 12) instead
+   of tearing the neighbor down. Landing this against BIRD 2.17.5
+   flushed out four latent wire bugs (10-byte LS-Request encoding,
+   wrong DBD I-bit value, big-endian MTU ioctl parse, multi-packet
+   IP datagrams) and required MinLSArrival-paced Router-LSA
+   re-origination (§14). Verified by `tests/interop/ospf_bird.sh`:
+   Full adjacency with BIRD over a veth pair and stub nets
+   propagated in both directions — OSPF interop is unlocked. FRR
+   interop and DR-election segments (broadcast networks) remain
+   open; OSPFv3 exchange needs v3 DBD semantics.
 4. **RFC 5187** OSPFv3 graceful restart (and RFC 3623 for v2) —
    planned restart signalling for OSPF.
 5. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
