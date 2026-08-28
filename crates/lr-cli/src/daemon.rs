@@ -44,6 +44,7 @@ use core::str::FromStr;
 use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
 use lr_core::nlri::NlriFamily;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
+use lr_osroute::gtsm::Gtsm;
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
 mod api;
@@ -112,6 +113,10 @@ struct DaemonConfig {
     /// or RFC 5549 ENH. Falls back to the IPv4 `local_address` field when
     /// unset and the session is IPv4.
     local_address_v6: Option<String>,
+    /// RFC 5082 GTSM: `None` = disabled; `Some(hops)` = multihop with the
+    /// given hop count; single-hop when `hops == 1` (or when `--gtsm`
+    /// alone is passed, which implies single-hop TTL=255).
+    gtsm_hops: Option<u8>,
 }
 
 fn print_usage() {
@@ -150,6 +155,8 @@ fn print_usage() {
          --extended-next-hop      Advertise RFC 5549 (1,1,2) — IPv4 NLRI over\n  \
          an IPv6 next-hop. Requires --mp-family ipv6-unicast or a v6 transport.\n  \
          --local-address-v6 ADDR  Local IPv6 source for next-hop-self / ENH egress\n  \
+         --gtsm [HOPS]            RFC 5082 TTL security (no arg = single-hop ttl=255;\n  \
+         a number = multihop with that TTL). Linux only.\n  \
          -h, --help               Show this help"
     );
 }
@@ -198,6 +205,14 @@ fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
             "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
             "bgp.extended_next_hop" => cfg.extended_next_hop = value == "true",
             "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
+            "bgp.gtsm" => {
+                // "true" / "1" = single-hop; a number = multihop TTL.
+                if value == "true" || value == "1" {
+                    cfg.gtsm_hops = Some(1);
+                } else if let Ok(hops) = value.parse::<u8>() {
+                    cfg.gtsm_hops = Some(hops);
+                }
+            }
             "bgp.mp_families" => {
                 // Comma-separated array: ["ipv4-unicast", "ipv6-unicast"]
                 let inner = value.trim_start_matches('[').trim_end_matches(']');
@@ -342,6 +357,18 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.local_address_v6 = Some(args[i + 1].clone());
                 i += 2;
             }
+            "--gtsm" => {
+                // Bare --gtsm → single-hop (TTL=255). --gtsm N → multihop.
+                if i + 1 < args.len() {
+                    if let Ok(hops) = args[i + 1].parse::<u8>() {
+                        cfg.gtsm_hops = Some(hops);
+                        i += 2;
+                        continue;
+                    }
+                }
+                cfg.gtsm_hops = Some(1); // single-hop
+                i += 1;
+            }
             "--user" if i + 1 < args.len() => {
                 cfg.user = Some(args[i + 1].clone());
                 i += 2;
@@ -420,6 +447,16 @@ fn build_tcp_auth(cfg: &DaemonConfig) -> Result<TcpAuth, String> {
         .map_err(|e| format!("bad tcp-ao configuration: {e}"))
 }
 
+/// Build the GTSM configuration from CLI flags / TOML. `None` when GTSM
+/// is not configured. Single-hop when `hops == 1`, multihop otherwise.
+fn build_gtsm(cfg: &DaemonConfig) -> Gtsm {
+    match cfg.gtsm_hops {
+        None => Gtsm::default(),
+        Some(1) => Gtsm::single_hop(),
+        Some(hops) => Gtsm::multihop(hops),
+    }
+}
+
 fn main() -> ExitCode {
     let cfg = match parse_args() {
         Ok(c) => c,
@@ -446,6 +483,10 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // RFC 5082 GTSM (TTL security). Listener-side min-TTL filter + outbound
+    // TTL=255 (or multihop TTL). Linux enforces both; other platforms set
+    // outbound TTL only.
+    let gtsm = build_gtsm(&cfg);
     // Signal handling must precede everything that could receive one:
     // without a SIGHUP handler the default disposition would terminate
     // the daemon on a hung-up terminal.
@@ -569,6 +610,7 @@ fn main() -> ExitCode {
         );
     }
     println!("  auth:        {}", tcp_auth.describe());
+    println!("  gtsm:        {}", gtsm);
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -649,6 +691,16 @@ fn main() -> ExitCode {
         }
         if !tcp_auth.is_none() {
             println!("daemon: session auth armed ({})", tcp_auth.describe());
+        }
+        // RFC 5082 GTSM: arm the listener with the min-TTL filter. Fail
+        // closed when the kernel does not support IP_MINTTL — running
+        // without the filter would defeat the purpose of configuring GTSM.
+        if !gtsm.is_disabled() {
+            if let Err(e) = lr_osroute::gtsm::arm_listener_gtsm(&listener, &gtsm) {
+                eprintln!("daemon: GTSM arming failed: {}", e);
+                return ExitCode::from(1);
+            }
+            println!("daemon: GTSM armed ({})", gtsm);
         }
         // Privileged work is done: drop root before touching any network
         // input, then create the management socket as the reduced user.
@@ -741,16 +793,22 @@ fn main() -> ExitCode {
             }
         };
         println!("daemon: connecting to {} ...", peer_addr);
-        // With authentication configured the raw-socket path installs the
-        // keys before connect(2) so the SYN itself is signed (RFC 2385
-        // §2 / RFC 5925 §3.1).
-        let stream =
+        // Connect with the appropriate transport security:
+        // - TCP auth (MD5/AO) + GTSM: connect_auth creates the socket and
+        //   signs the SYN; GTSM's outbound TTL is set on the returned
+        //   TcpStream via set_ttl. The min-TTL filter is listener-side only.
+        // - GTSM only: connect_gtsm creates the socket with TTL set.
+        // - Neither: plain connect.
+        let stream = if !tcp_auth.is_none() {
             match lr_osroute::tcp_auth::connect_auth(sockaddr, &tcp_auth, Duration::from_secs(5)) {
-                Ok(s) => s,
+                Ok(s) => {
+                    if !gtsm.is_disabled() {
+                        let _ = s.set_ttl(gtsm.outbound_ttl as u32);
+                    }
+                    s
+                }
                 Err(e) => {
                     if e.is_kernel_unsupported() {
-                        // Permanent condition (e.g. TCP-AO on Linux < 6.7):
-                        // retrying cannot help, fail closed.
                         eprintln!("daemon: session auth not supported by kernel: {}", e);
                         return ExitCode::from(1);
                     }
@@ -762,7 +820,38 @@ fn main() -> ExitCode {
                     backoff_ms = (backoff_ms * 2).min(30_000);
                     continue;
                 }
-            };
+            }
+        } else if !gtsm.is_disabled() {
+            match lr_osroute::gtsm::connect_gtsm(sockaddr, &gtsm, Duration::from_secs(5)) {
+                Ok(s) => s,
+                Err(e) => {
+                    if e.is_kernel_unsupported() {
+                        eprintln!("daemon: GTSM not supported by kernel: {}", e);
+                        return ExitCode::from(1);
+                    }
+                    eprintln!(
+                        "daemon: connect failed ({}); retrying in {}ms",
+                        e, backoff_ms
+                    );
+                    sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(30_000);
+                    continue;
+                }
+            }
+        } else {
+            match std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5)) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!(
+                        "daemon: connect failed ({}); retrying in {}ms",
+                        e, backoff_ms
+                    );
+                    sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
+                    backoff_ms = (backoff_ms * 2).min(30_000);
+                    continue;
+                }
+            }
+        };
         backoff_ms = 1_000;
         let _ = stream.set_nodelay(true);
         match run_session(&runtime, stream, session, cfg.install_kernel) {

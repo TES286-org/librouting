@@ -71,6 +71,12 @@ pub mod stub;
 #[cfg(feature = "std")]
 pub mod tcp_auth;
 
+/// RFC 5082 Generalized TTL Security Mechanism (GTSM) — TTL arming on
+/// listener/connect sockets. Linux enforces both outbound TTL and the
+/// min-TTL receive filter; other platforms set outbound TTL only.
+#[cfg(feature = "std")]
+pub mod gtsm;
+
 #[cfg(all(
     feature = "std",
     any(
