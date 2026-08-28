@@ -1539,6 +1539,8 @@ fn spawn_bmp_sender(target: &str, router: &Arc<Mutex<DefaultRouter>>) -> Result<
 /// OSPF and Babel routes reference the synthetic local peer 0, exactly
 /// how BIRD's `protocol mrt` represents non-BGP sources. Returns the
 /// number of RIB records written.
+/// Unix-only: the runtime API that drives it is Unix-gated.
+#[cfg(unix)]
 pub(crate) fn write_mrt_rib_dump(
     router: &DefaultRouter,
     router_id: lr_core::addr::RouterId,
