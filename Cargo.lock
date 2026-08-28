@@ -310,6 +310,7 @@ dependencies = [
  "lr-bfd",
  "lr-bgp",
  "lr-core",
+ "lr-ospf",
  "lr-osroute",
  "lr-policy",
  "lr-rib",
