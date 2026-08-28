@@ -164,6 +164,94 @@ pub fn encode_summary_lsa_body(network_mask: u32, metric: u32) -> Vec<u8> {
     v
 }
 
+// ---------------------------------------------------------------------------
+// OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5)
+// ---------------------------------------------------------------------------
+
+/// OSPFv3 prefix options (RFC 5340 §A.4.1.1). Currently all zero — the
+/// library does not set P/V/LA/NU bits; the embedder can OR them in
+/// after encoding if needed.
+pub type V3PrefixOptions = u8;
+
+/// Encode the body of an OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5).
+///
+/// The body carries a single prefix with its metric:
+/// - Metric (3 bytes, big-endian) — capped at `0x00ff_ffff`
+/// - PrefixLength (1 byte)
+/// - PrefixOptions (1 byte)
+/// - Address Prefix (ceil(PL/8) bytes, zero-padded)
+///
+/// The link-state ID of the enclosing LSA is an arbitrary 32-bit ID
+/// assigned by the ABR (RFC 5340 uses a counter, not the network
+/// address, because v3 prefixes are 128 bits wide).
+pub fn encode_v3_inter_area_prefix_body(
+    prefix: &lr_core::addr::Prefix,
+    metric: u32,
+) -> Vec<u8> {
+    let metric = metric.min(0x00ff_fffe);
+    let mut v = Vec::with_capacity(5 + 16);
+    // 3-byte big-endian metric
+    v.extend_from_slice(&metric.to_be_bytes()[1..]);
+    v.push(prefix.prefix_len);
+    v.push(0); // PrefixOptions — all zero
+    // Address prefix: ceil(PL/8) bytes, zero-padded to the byte boundary.
+    let n = (prefix.prefix_len as usize).div_ceil(8);
+    match &prefix.addr {
+        lr_core::addr::IpAddr::V4(b) => {
+            v.extend_from_slice(&b[..n.min(4)]);
+        }
+        lr_core::addr::IpAddr::V6(b) => {
+            v.extend_from_slice(&b[..n.min(16)]);
+        }
+    }
+    v
+}
+
+/// Decoded OSPFv3 inter-area-prefix-LSA body (RFC 5340 §A.4.5).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V3InterAreaPrefixBody {
+    pub metric: u32,
+    pub prefix_len: u8,
+    pub prefix_options: u8,
+    /// The address prefix, zero-padded to 16 bytes for IPv6 or 4 bytes
+    /// for IPv4 (the caller matches on length).
+    pub prefix_bytes: Vec<u8>,
+}
+
+/// Decode the body of an OSPFv3 inter-area-prefix-LSA. Returns `None`
+/// when the body is truncated.
+pub fn decode_v3_inter_area_prefix_body(body: &[u8]) -> Option<V3InterAreaPrefixBody> {
+    if body.len() < 5 {
+        return None;
+    }
+    let metric = u32::from_be_bytes([0, body[0], body[1], body[2]]);
+    let prefix_len = body[3];
+    let prefix_options = body[4];
+    let n = (prefix_len as usize).div_ceil(8);
+    if body.len() < 5 + n {
+        return None;
+    }
+    let prefix_bytes = body[5..5 + n].to_vec();
+    Some(V3InterAreaPrefixBody {
+        metric,
+        prefix_len,
+        prefix_options,
+        prefix_bytes,
+    })
+}
+
+impl V3InterAreaPrefixBody {
+    /// Reconstruct the prefix as an `IpAddr`. OSPFv3 carries IPv6
+    /// prefixes (16 bytes); IPv4-mapped prefixes are decoded as IPv6
+    /// (the caller can detect `::ffff:x.x.x.x` if needed).
+    pub fn to_prefix(&self) -> Option<lr_core::addr::Prefix> {
+        let mut bytes = [0u8; 16];
+        let n = self.prefix_bytes.len().min(16);
+        bytes[..n].copy_from_slice(&self.prefix_bytes[..n]);
+        Some(lr_core::addr::Prefix::new_v6(bytes, self.prefix_len))
+    }
+}
+
 /// Decode a summary-LSA body. Returns `None` when the body is truncated
 /// or shorter than the mandatory mask + first TOS-0 entry.
 pub fn decode_summary_lsa_body(body: &[u8]) -> Option<SummaryLsaBody> {
@@ -214,6 +302,78 @@ impl LsaTypeV2 {
             10 => Self::OpaqueAreaLsa,
             11 => Self::OpaqueAsLsa,
             _ => return None,
+        })
+    }
+}
+
+/// OSPFv3 LSA types (RFC 5340 §A.4). The high byte carries the function
+/// code; the low byte carries the LSA scope (1=link, 2=area, 3=AS) and
+/// the U-bit (0x08).
+///
+/// In the wire format, v3 LSA types are 16 bits wide but only the low
+/// byte carries the function code (the high byte is zero for the
+/// standard types). We store them as `u16` so callers can match on the
+/// full 0x2003-style values.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum LsaTypeV3 {
+    /// Router-LSA (scope: area). RFC 5340 §A.4.3.
+    RouterLsa = 0x2001,
+    /// Network-LSA (scope: area). RFC 5340 §A.4.4.
+    NetworkLsa = 0x2002,
+    /// Inter-Area-Prefix-LSA (scope: area). RFC 5340 §A.4.5.
+    /// Equivalent to OSPFv2 type-3 summary-LSA.
+    InterAreaPrefixLsa = 0x2003,
+    /// Inter-Area-Router-LSA (scope: area). RFC 5340 §A.4.6.
+    /// Equivalent to OSPFv2 type-4 summary-ASBR-LSA.
+    InterAreaRouterLsa = 0x2004,
+    /// AS-External-LSA (scope: AS). RFC 5340 §A.4.7.
+    AsExternalLsa = 0x4005,
+    /// NSSA-LSA (scope: area). RFC 3101 / RFC 5340.
+    NssaLsa = 0x2007,
+    /// Link-LSA (scope: link). RFC 5340 §A.4.9.
+    LinkLsa = 0x0008,
+    /// Intra-Area-Prefix-LSA (scope: area). RFC 5340 §A.4.10.
+    IntraAreaPrefixLsa = 0x2009,
+}
+
+impl LsaTypeV3 {
+    /// Parse a 16-bit LSA type from the wire. Returns `None` for
+    /// unrecognized values.
+    pub fn from_u16(v: u16) -> Option<Self> {
+        Some(match v {
+            0x2001 => Self::RouterLsa,
+            0x2002 => Self::NetworkLsa,
+            0x2003 => Self::InterAreaPrefixLsa,
+            0x2004 => Self::InterAreaRouterLsa,
+            0x4005 => Self::AsExternalLsa,
+            0x2007 => Self::NssaLsa,
+            0x0008 => Self::LinkLsa,
+            0x2009 => Self::IntraAreaPrefixLsa,
+            _ => return None,
+        })
+    }
+
+    /// The low byte (function code) of this LSA type — the value stored
+    /// in the `ls_type` field of the v3 LSA header (which is only 8 bits
+    /// wide in the shared header layout, but v3 uses the options byte
+    /// to carry the high byte for non-standard types).
+    pub fn function_code(self) -> u8 {
+        (self as u16) as u8
+    }
+}
+
+impl fmt::Display for LsaTypeV3 {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            Self::RouterLsa => "Router-LSA(v3)",
+            Self::NetworkLsa => "Network-LSA(v3)",
+            Self::InterAreaPrefixLsa => "InterArea-Prefix-LSA",
+            Self::InterAreaRouterLsa => "InterArea-Router-LSA",
+            Self::AsExternalLsa => "AS-External-LSA(v3)",
+            Self::NssaLsa => "NSSA-LSA(v3)",
+            Self::LinkLsa => "Link-LSA",
+            Self::IntraAreaPrefixLsa => "IntraArea-Prefix-LSA",
         })
     }
 }
