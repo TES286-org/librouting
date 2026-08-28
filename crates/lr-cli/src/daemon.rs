@@ -123,6 +123,12 @@ struct DaemonConfig {
     max_prefix_action: String,
     /// Early-warning threshold percentage (0..=100). 0 disables.
     max_prefix_threshold: u8,
+    /// Protocol to run: "bgp" (default) or "babel".
+    protocol: String,
+    /// Babel multicast group address (default: ff02::1:6).
+    babel_group: Option<String>,
+    /// Babel local port (default: 6696).
+    babel_port: u16,
 }
 
 fn print_usage() {
@@ -167,6 +173,9 @@ fn print_usage() {
          `maximum prefix`, FRR `maximum-prefix`). 0 = no limit.\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (0..100, default 75)\n  \
+         --protocol NAME          bgp (default) or babel\n  \
+         --babel-group ADDR       Babel multicast group (default: ff02::1:6)\n  \
+         --babel-port PORT        Babel UDP port (default: 6696)\n  \
          -h, --help               Show this help"
     );
 }
@@ -283,6 +292,8 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
         add_path_max_paths: 6,
         max_prefix_action: "warn".to_string(),
         max_prefix_threshold: 75,
+        protocol: "bgp".to_string(),
+        babel_port: 6696,
         ..Default::default()
     };
     let mut config_path: Option<String> = None;
@@ -400,6 +411,18 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--max-prefix-threshold" if i + 1 < args.len() => {
                 cfg.max_prefix_threshold = args[i + 1].parse().unwrap_or(75);
+                i += 2;
+            }
+            "--protocol" if i + 1 < args.len() => {
+                cfg.protocol = args[i + 1].clone();
+                i += 2;
+            }
+            "--babel-group" if i + 1 < args.len() => {
+                cfg.babel_group = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--babel-port" if i + 1 < args.len() => {
+                cfg.babel_port = args[i + 1].parse().unwrap_or(6696);
                 i += 2;
             }
             "--user" if i + 1 < args.len() => {
@@ -520,6 +543,11 @@ fn main() -> ExitCode {
     // TTL=255 (or multihop TTL). Linux enforces both; other platforms set
     // outbound TTL only.
     let gtsm = build_gtsm(&cfg);
+    // Babel mode: short-circuit the BGP session setup and run the
+    // Babel UDP transport loop instead.
+    if cfg.protocol == "babel" {
+        return run_babel_daemon(&cfg);
+    }
     // Signal handling must precede everything that could receive one:
     // without a SIGHUP handler the default disposition would terminate
     // the daemon on a hung-up terminal.
@@ -921,6 +949,164 @@ fn main() -> ExitCode {
     }
 
     println!("daemon: shutdown complete");
+    ExitCode::SUCCESS
+}
+
+/// Babel daemon mode: run the Babel protocol over UDP on an IPv6
+/// link-local address. This is the BIRD `babel` protocol equivalent —
+/// Babel uses UDP multicast on port 6696, not TCP like BGP.
+fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
+    use std::net::UdpSocket;
+
+    // Babel runs on IPv6 link-local by default (RFC 8966 §2.1). The
+    // local address must be a link-local IPv6 address with a scope ID.
+    let local_addr = cfg.local_address.as_deref().or(cfg.listen_addr.as_deref());
+    let local_addr = match local_addr {
+        Some(a) => a,
+        None => {
+            eprintln!("daemon: --protocol babel requires --local-address (IPv6 link-local)");
+            return ExitCode::from(2);
+        }
+    };
+    // Parse the local address. Accept both `fe80::1%eth0` and
+    // `[fe80::1%eth0]:6696` forms.
+    let local_ip: std::net::Ipv6Addr = match local_addr.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            // Try bracketed form.
+            let trimmed = local_addr.trim_start_matches('[').trim_end_matches(']');
+            match trimmed.split(':').next().unwrap_or("").parse() {
+                Ok(ip) => ip,
+                Err(_) => {
+                    eprintln!("daemon: invalid IPv6 local address: {}", local_addr);
+                    return ExitCode::from(2);
+                }
+            }
+        }
+    };
+    let port = cfg.babel_port;
+    let bind_addr = std::net::SocketAddr::new(std::net::IpAddr::V6(local_ip), port);
+    let sock = match UdpSocket::bind(bind_addr) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("daemon: babel bind {} failed: {}", bind_addr, e);
+            return ExitCode::from(1);
+        }
+    };
+    println!("daemon: babel listening on {}", bind_addr);
+
+    // Join the Babel multicast group (ff02::1:6, RFC 8966 §2.1).
+    let group: std::net::Ipv6Addr = cfg
+        .babel_group
+        .as_deref()
+        .unwrap_or("ff02::1:6")
+        .parse()
+        .unwrap_or_else(|_| "ff02::1:6".parse().unwrap());
+    // The interface index is derived from the scope ID of the bind
+    // address. `Ipv6Addr` does not carry a scope ID, so we use 0
+    // (the default interface) when the address has no scope.
+    if let Err(e) = sock.join_multicast_v6(&group, 0) {
+        eprintln!("daemon: babel multicast join failed: {}", e);
+        // Non-fatal: the daemon can still receive unicast.
+    }
+    // Set the multicast hop limit to 255 (Babel requirement, RFC 8966
+    // §2.1: "The hop limit MUST be set to 255").
+    let _ = sock.set_multicast_loop_v6(false);
+    let _ = sock.set_ttl(255);
+
+    // Set up the router with a Babel session.
+    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+    let babel_local = lr_core::addr::IpAddr::V6(local_ip.octets());
+    let sc = SessionConfig::babel(babel_local);
+    let h = {
+        let mut r = router.lock().unwrap();
+        match r.add_session(sc) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("daemon: babel add_session failed: {}", e);
+                return ExitCode::from(1);
+            }
+        }
+    };
+    {
+        let mut r = router.lock().unwrap();
+        r.start_session(h).unwrap();
+    }
+
+    // Signal handling.
+    if let Err(sig) = signal::init() {
+        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        return ExitCode::from(1);
+    }
+
+    let running = Arc::new(AtomicBool::new(true));
+    let runtime = Arc::new(Runtime {
+        reload: Arc::new({
+            let router = Arc::clone(&router);
+            move || reload_config(None, &router, &Arc::new(Mutex::new(Vec::new())))
+        }),
+        router: Arc::clone(&router),
+        running: Arc::clone(&running),
+    });
+    if let Err(e) = spawn_api(cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+
+    // Ticker thread.
+    {
+        let router = Arc::clone(&router);
+        let running = Arc::clone(&running);
+        thread::spawn(move || {
+            let start = WallClock::now();
+            while running.load(Ordering::Relaxed) {
+                let now_ms = start.elapsed().as_millis() as u64;
+                {
+                    let mut r = router.lock().unwrap();
+                    r.tick(lr_core::time::Instant(now_ms));
+                    for ev in r.poll_events() {
+                        log_event(&ev);
+                    }
+                }
+                thread::sleep(Duration::from_millis(50));
+            }
+        });
+    }
+
+    // Non-blocking read loop.
+    let _ = sock.set_nonblocking(true);
+    let mut buf = [0u8; 65535];
+    while running.load(Ordering::Relaxed) {
+        dispatch_signals(&runtime);
+        if !running.load(Ordering::Relaxed) {
+            break;
+        }
+        // Read inbound.
+        match sock.recv_from(&mut buf) {
+            Ok((n, _peer)) => {
+                let mut r = router.lock().unwrap();
+                let _ = r.feed_input(h, &buf[..n]);
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => {
+                eprintln!("daemon: babel recv failed: {}", e);
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+        // Drain outbound.
+        let out = {
+            let mut r = router.lock().unwrap();
+            r.drain_output(h)
+        };
+        if !out.is_empty() {
+            // Send to the Babel multicast group.
+            let dest = std::net::SocketAddr::new(std::net::IpAddr::V6(group), port);
+            let _ = sock.send_to(&out, dest);
+        }
+    }
+    println!("daemon: babel shutdown complete");
     ExitCode::SUCCESS
 }
 
