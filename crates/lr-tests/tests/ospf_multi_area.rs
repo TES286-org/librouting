@@ -85,26 +85,6 @@ fn drain_lsus(r: &mut DefaultRouter, h: SessionHandle) -> Vec<LsUpdateBody> {
     decode_lsus(&r.drain_output(h))
 }
 
-/// Drain a session and keep only the LS-Updates' byte stream — used
-/// where a test asserts "no data traffic" but an LSAck may be present.
-fn drain_data(r: &mut DefaultRouter, h: SessionHandle) -> Vec<u8> {
-    let bytes = r.drain_output(h);
-    let mut codec = lr_ospf::codec::OspfCodec::v2();
-    let mut reader = lr_core::buf::ReadBuf::new(&bytes);
-    let mut out = Vec::new();
-    while let Ok(Some(pkt)) = lr_core::codec::Decoder::decode(&mut codec, &mut reader) {
-        if let OspfBody::LsUpdate(u) = pkt.body {
-            if let Ok(b) = codec.encode_vec(&OspfPacket {
-                header: pkt.header,
-                body: OspfBody::LsUpdate(u),
-            }) {
-                out.extend_from_slice(&b);
-            }
-        }
-    }
-    out
-}
-
 fn abr_with_two_areas() -> (DefaultRouter, SessionHandle, SessionHandle) {
     let mut r = DefaultRouter::new();
     let backbone = r
