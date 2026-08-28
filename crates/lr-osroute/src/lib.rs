@@ -9,9 +9,11 @@
 //! - **It is**: a portable abstraction ([`OsRouteTable`] trait) over the
 //!   platform-specific route-table manipulation API (Linux `rtnetlink`,
 //!   BSD/FreeBSD `route` socket, Windows `IPHelper`).
-//! - **It is**: a **reference** implementation: Linux `rtnetlink` is
-//!   implemented; other platforms have a minimal stub so they at least
-//!   compile and expose the same trait surface.
+//! - **It is**: a **reference** implementation with three native
+//!   backends — Linux `rtnetlink`, the BSD/macOS `route(4)` socket and
+//!   the Windows IP Helper API — each exposing the same trait surface
+//!   (cross-compile checked; see `docs/OS-INTEGRATION.md`). Other
+//!   platforms compile against a stub.
 //!
 //! The crate is **opt-in**: it pulls in OS-specific syscalls. Embedders
 //! running `librouting` inside a sandbox or on a platform without a kernel

@@ -139,6 +139,7 @@ librouting/
 
 | Document | Path |
 |----------|------|
+| Documentation index | `docs/README.md` |
 | Architecture | `docs/ARCHITECTURE.md` |
 | RFC reference map | `docs/RFC_MAP.md` |
 | Public API tour | `docs/API.md` |

@@ -39,7 +39,6 @@ implements, or references. It is grouped by protocol family.
 | 9072  | Extended Message Support for BGP                      | ✓ (extended length)     | `lr-bgp::path::PathAttrFlags`        |
 | 9234  | BGP Role (OTC)                                       | ✓                       | `lr-bgp::role::otc`                  |
 | 9494  | Long-Lived Graceful Restart                          | ✓                       | `lr-bgp::extensions::long_lived`, `lr-router` |
-| 9647  | Babel YANG model                                     | partial                 | `lr-babel`                            |
 | 1105  | BGP-1 (historic)                                     | not implemented (legacy)| —                                   |
 | 1163  | BGP-3 (historic)                                     | not implemented (legacy)| —                                   |
 | 1267  | BGP-3 → BGP-4 transition (historic)                  | not implemented         | —                                    |
@@ -91,8 +90,8 @@ implements, or references. It is grouped by protocol family.
 |------------|------------------------------------------------|--------------|--------------------------------------|
 | 3549       | Linux Netlink as an IP Services Protocol       | ✓            | `lr-osroute::linux::RtNetlink`      |
 | Linux      | `uapi/linux/rtnetlink.h`                       | ✓ reference  | `lr-osroute::linux`                  |
-| FreeBSD    | `route(4)` socket                              | partial      | TBD                                 |
-| Windows    | `IPHelper` (`IP_INTERFACE_INFO`)              | partial      | TBD                                 |
+| FreeBSD, OpenBSD, NetBSD, macOS | `route(4)` socket                     | ✓ (per-OS layout tables pinned; cross-compile checked) | `lr-osroute::bsd::RouteSocket` |
+| Windows    | IP Helper API (`CreateIpForwardEntry2` / `GetIpForwardTable2`) | ✓ (full link verified, x86_64-windows-gnu) | `lr-osroute::windows::IpHelper` |
 
 ## Policy
 
