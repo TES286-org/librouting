@@ -78,6 +78,33 @@ fn decode_lsus(bytes: &[u8]) -> Vec<LsUpdateBody> {
     out
 }
 
+/// Drain a session and drop everything that is not an LS-Update —
+/// LS-Acks of delivered updates are expected background traffic now
+/// that the exchange driver acknowledges every LSU (RFC 2328 §13.7).
+fn drain_lsus(r: &mut DefaultRouter, h: SessionHandle) -> Vec<LsUpdateBody> {
+    decode_lsus(&r.drain_output(h))
+}
+
+/// Drain a session and keep only the LS-Updates' byte stream — used
+/// where a test asserts "no data traffic" but an LSAck may be present.
+fn drain_data(r: &mut DefaultRouter, h: SessionHandle) -> Vec<u8> {
+    let bytes = r.drain_output(h);
+    let mut codec = lr_ospf::codec::OspfCodec::v2();
+    let mut reader = lr_core::buf::ReadBuf::new(&bytes);
+    let mut out = Vec::new();
+    while let Ok(Some(pkt)) = lr_core::codec::Decoder::decode(&mut codec, &mut reader) {
+        if let OspfBody::LsUpdate(u) = pkt.body {
+            if let Ok(b) = codec.encode_vec(&OspfPacket {
+                header: pkt.header,
+                body: OspfBody::LsUpdate(u),
+            }) {
+                out.extend_from_slice(&b);
+            }
+        }
+    }
+    out
+}
+
 fn abr_with_two_areas() -> (DefaultRouter, SessionHandle, SessionHandle) {
     let mut r = DefaultRouter::new();
     let backbone = r
@@ -131,8 +158,12 @@ fn ospf_area_lsa_sharing_and_abr_summary() {
     assert_eq!(body.network_mask, 0xffff_ff00);
     assert_eq!(body.tos0_metric(), Some(15));
 
-    // The summary targets the backbone only — nothing loops back to area 1.
-    assert!(r.drain_output(area1).is_empty());
+    // The summary targets the backbone only — area 1 sees at most the
+    // acknowledgement of what it delivered, never a summary.
+    assert!(
+        drain_lsus(&mut r, area1).is_empty(),
+        "nothing loops back to area 1"
+    );
 }
 
 #[test]
@@ -215,7 +246,7 @@ fn ospf_inter_area_loop_guard_e2e() {
     // ...but area 2 learns nothing (backbone knows nothing beyond area 2's
     // own intra net, which the loop guard excludes)...
     assert!(
-        r.drain_output(h2).is_empty(),
+        drain_lsus(&mut r, h2).is_empty(),
         "area-1 inter-area knowledge must not transit into area 2"
     );
     // ...and the backbone sees only area 2's intra net (10.50.50.0/24).

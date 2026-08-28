@@ -163,6 +163,10 @@ pub struct SessionConfig {
     pub area_id: u32,
     /// OSPF area type policy (stub/NSSA, RFC 2328 §3.6 + RFC 3101).
     pub ospf_area_type: OspfAreaType,
+    /// OSPF interface MTU advertised in DBD packets (RFC 2328 §10.6 —
+    /// peers reject DBDs announcing a larger MTU). The daemon fills
+    /// this from the kernel interface.
+    pub ospf_mtu: u16,
     /// Per-peer maximum-prefix limit (BIRD `maximum prefix`, FRR
     /// `maximum-prefix`). `None` = no limit.
     pub maximum_prefix: Option<u32>,
@@ -203,6 +207,7 @@ impl SessionConfig {
             local_address: None,
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
+            ospf_mtu: 1500,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
@@ -310,6 +315,12 @@ impl SessionConfig {
         self
     }
 
+    /// Set the OSPF interface MTU (RFC 2328 §10.6).
+    pub fn with_ospf_mtu(mut self, mtu: u16) -> Self {
+        self.ospf_mtu = mtu;
+        self
+    }
+
     /// Build an OSPFv2 session config.
     pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
         Self {
@@ -334,6 +345,7 @@ impl SessionConfig {
             local_address: None,
             area_id,
             ospf_area_type: OspfAreaType::Normal,
+            ospf_mtu: 1500,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
@@ -364,6 +376,7 @@ impl SessionConfig {
             local_address: Some(local_addr),
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
+            ospf_mtu: 1500,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,

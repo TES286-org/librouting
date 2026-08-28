@@ -46,4 +46,10 @@ impl OspfV2Transport {
     pub fn ifindex(&self) -> u32 {
         0
     }
+
+    pub fn mtu(&self) -> Result<u16, super::OspfTransportError> {
+        Err(super::OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
 }

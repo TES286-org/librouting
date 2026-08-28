@@ -151,8 +151,12 @@ fn encode_dbdesc(d: &DbDescBody, out: &mut WriteBuf<'_>) -> Result<(), EncodeErr
 
 fn encode_lsreq(r: &LsRequestBody, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
     for e in &r.entries {
-        out.put_u8(0).ok_or(EncodeError::BufferFull)?; // padding (was u32 ls_type in v2)
-        out.put_u8(e.ls_type).ok_or(EncodeError::BufferFull)?;
+        // RFC 2328 §A.3.4: each entry is 12 bytes — 4-byte LS type,
+        // 4-byte Link State ID, 4-byte Advertising Router. (This was
+        // previously encoded as a 10-byte entry, so LS-Requests never
+        // survived a decode round-trip.)
+        out.put_u32_be(u32::from(e.ls_type))
+            .ok_or(EncodeError::BufferFull)?;
         out.put_u32_be(e.ls_id).ok_or(EncodeError::BufferFull)?;
         out.put_u32_be(e.adv_router)
             .ok_or(EncodeError::BufferFull)?;
@@ -364,6 +368,53 @@ fn decode_lsa_header(b: &[u8]) -> Result<LsaHeader, ParseError> {
         ls_checksum: u16::from_be_bytes([b[16], b[17]]),
         length: u16::from_be_bytes([b[18], b[19]]),
     })
+}
+
+#[cfg(test)]
+mod lsreq_wire_tests {
+    use super::*;
+    use crate::packet::{LsRequestBody, LsRequestEntry, OspfBody, OspfHeader, OspfPacket};
+
+    /// RFC 2328 §A.3.4: one LS-Request entry is 12 bytes on the wire.
+    #[test]
+    fn lsreq_entry_is_twelve_bytes() {
+        let pkt = OspfPacket {
+            header: OspfHeader {
+                version: 2,
+                kind: 3,
+                length: 0,
+                router_id: 1,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 0,
+                auth_data: 0,
+            },
+            body: OspfBody::LsRequest(LsRequestBody {
+                entries: vec![LsRequestEntry {
+                    ls_type: 1,
+                    ls_id: 0x0a00_0001,
+                    adv_router: 0x0a00_0001,
+                }],
+            }),
+        };
+        let wire = OspfCodec::v2().encode_vec(&pkt).unwrap();
+        assert_eq!(wire.len(), 24 + 12, "header + one 12-byte entry");
+        // Round-trip through the streaming decoder.
+        let mut codec = OspfCodec::v2();
+        let mut r = lr_core::buf::ReadBuf::new(&wire);
+        let decoded = lr_core::codec::Decoder::decode(&mut codec, &mut r)
+            .unwrap()
+            .unwrap();
+        match decoded.body {
+            OspfBody::LsRequest(req) => {
+                assert_eq!(req.entries.len(), 1);
+                assert_eq!(req.entries[0].ls_type, 1);
+                assert_eq!(req.entries[0].ls_id, 0x0a00_0001);
+                assert_eq!(req.entries[0].adv_router, 0x0a00_0001);
+            }
+            other => panic!("expected LsRequest, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

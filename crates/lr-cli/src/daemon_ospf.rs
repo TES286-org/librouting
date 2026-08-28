@@ -75,11 +75,26 @@ const DEFAULT_STUB_METRIC: u32 = 10;
 /// Loop cadence: also the dead-timer / hello-timer granularity.
 const LOOP_INTERVAL_MS: u64 = 50;
 
+/// Cached `LR_OSPF_DEBUG` gate for the wire trace (checked per packet;
+/// a raw var_os syscall each time showed up in profiling).
+fn ospf_debug_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var_os("LR_OSPF_DEBUG").is_some())
+}
+
+/// Delay before an adjacency-driven Router-LSA re-origination:
+/// receivers throttle new LSA instances by MinLSArrival (RFC 2328
+/// §14, 1 s) — the exchange may have delivered the previous instance
+/// moments earlier.
+const REORIGINATE_DELAY_MS: u64 = 1_500;
+
 /// One configured interface, resolved against the running kernel.
 struct OspfInterface {
     name: String,
     area: u32,
     cost: u16,
+    /// Interface MTU advertised in DBDs (RFC 2328 §10.6).
+    mtu: u16,
     hello_interval: u16,
     dead_interval: u32,
     priority: u8,
@@ -109,6 +124,13 @@ struct OspfDaemon {
     router: Arc<Mutex<DefaultRouter>>,
     interfaces: Vec<OspfInterface>,
     neighbors: BTreeMap<(u32, u32), Neighbor>,
+    /// Router-LSA re-originations scheduled for the future (area → due
+    /// ms). RFC 2328 §14 MinLSArrival: receivers reject a new instance
+    /// of an LSA within ~1 s of the previous one, so adjacency-driven
+    /// re-origination (new p2p links) must be spaced from the instance
+    /// the exchange just delivered — mirroring the calc-cycle delay
+    /// BIRD/FRR naturally have.
+    pending_reorig: BTreeMap<u32, u64>,
     /// Area → anchor session (registers the area, accepts
     /// self-originated LSAs; output never reaches the wire).
     anchors: BTreeMap<u32, SessionHandle>,
@@ -160,11 +182,13 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         router: Arc::new(Mutex::new(DefaultRouter::new())),
         interfaces,
         neighbors: BTreeMap::new(),
+        pending_reorig: BTreeMap::new(),
         anchors: BTreeMap::new(),
         lsa_seq: BTreeMap::new(),
         router_id: rid,
     };
     // ---- Router: one anchor session per area + area types. ----
+    let daemon_iface_mtu = daemon.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
     {
         let router_arc = Arc::clone(&daemon.router);
         let mut router = router_arc.lock().unwrap();
@@ -172,7 +196,9 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             if daemon.anchors.contains_key(&area) {
                 continue;
             }
-            match router.add_session(SessionConfig::ospfv2(rid, area)) {
+            match router
+                .add_session(SessionConfig::ospfv2(rid, area).with_ospf_mtu(daemon_iface_mtu))
+            {
                 Ok(h) => {
                     daemon.anchors.insert(area, h);
                 }
@@ -298,6 +324,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<OspfInterf
     transport
         .set_nonblocking(true)
         .map_err(|e| format!("set_nonblocking on {}: {}", name, e))?;
+    let iface_mtu = transport.mtu().unwrap_or(1500);
     let hello = spec
         .hello_interval
         .unwrap_or(cfg.ospf_hello_interval)
@@ -310,6 +337,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<OspfInterf
         name,
         area: spec.area.unwrap_or(cfg.ospf_area),
         cost: spec.cost.unwrap_or(10),
+        mtu: iface_mtu,
         hello_interval: hello,
         dead_interval: dead,
         priority: spec.priority.unwrap_or(1),
@@ -341,6 +369,7 @@ impl OspfDaemon {
         self.pump_inbound(recv_buf, now_ms);
         self.pump_adjacency(now_ms);
         self.pump_dead_timer(now_ms);
+        self.pump_reoriginate(now_ms);
         self.pump_hellos(now_ms);
         self.pump_outbound();
     }
@@ -358,6 +387,14 @@ impl OspfDaemon {
                         // strip the header so the router's OSPF codec
                         // sees a bare packet.
                         if let Some(ospf) = strip_ipv4_header(&recv_buf[..n]) {
+                            if ospf_debug_enabled() {
+                                eprintln!(
+                                    "dbg-recv kind={} len={} rid={:08x}",
+                                    ospf.get(1).copied().unwrap_or(0),
+                                    u16::from_be_bytes([ospf[2], ospf[3]]),
+                                    u32::from_be_bytes([ospf[4], ospf[5], ospf[6], ospf[7]])
+                                );
+                            }
                             datagrams.push((iface.transport.ifindex(), iface.area, ospf.to_vec()));
                         }
                     }
@@ -371,9 +408,12 @@ impl OspfDaemon {
         }
         // Demux: parse the fixed header, keep only packets for this
         // interface's area from other routers with a valid checksum.
-        let mut accepted: Vec<(u32, u32, u32, usize)> = Vec::new(); // (ifindex, area, rid, idx)
+        let mut accepted: Vec<(u32, u32, u32, usize, u16)> = Vec::new(); // (ifindex, area, rid, idx, mtu)
         for (idx, (ifindex, iface_area, bytes)) in datagrams.iter().enumerate() {
             let Some((rid, area, len)) = demux_header(bytes) else {
+                if ospf_debug_enabled() {
+                    eprintln!("dbg-drop demux");
+                }
                 continue;
             };
             if area != *iface_area {
@@ -383,9 +423,22 @@ impl OspfDaemon {
                 continue; // our own multicast (loopback)
             }
             if !v2_packet_checksum_ok(&bytes[..len as usize]) {
+                if ospf_debug_enabled() {
+                    eprintln!(
+                        "dbg-drop checksum kind={} len={}",
+                        bytes.get(1).copied().unwrap_or(0),
+                        len
+                    );
+                }
                 continue; // corrupt — BIRD/FRR would drop it too
             }
-            accepted.push((*ifindex, area, rid, idx));
+            let mtu = self
+                .interfaces
+                .iter()
+                .find(|i| i.transport.ifindex() == *ifindex)
+                .map(|i| i.mtu)
+                .unwrap_or(1500);
+            accepted.push((*ifindex, area, rid, idx, mtu));
         }
         if accepted.is_empty() {
             return;
@@ -394,7 +447,7 @@ impl OspfDaemon {
         {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.lock().unwrap();
-            for (ifindex, area, rid, idx) in accepted {
+            for (ifindex, area, rid, idx, mtu) in accepted {
                 if let Some(iface) = self
                     .interfaces
                     .iter_mut()
@@ -404,7 +457,9 @@ impl OspfDaemon {
                 }
                 let key = (area, rid);
                 if !self.neighbors.contains_key(&key) {
-                    match router.add_session(SessionConfig::ospfv2(self.router_id, area)) {
+                    match router
+                        .add_session(SessionConfig::ospfv2(self.router_id, area).with_ospf_mtu(mtu))
+                    {
                         Ok(h) => {
                             self.neighbors.insert(
                                 key,
@@ -443,11 +498,11 @@ impl OspfDaemon {
 
     /// Watch for sessions reaching Full — each one adds a p2p link to
     /// the area's Router-LSA (RFC 2328 §12.4.1).
-    fn pump_adjacency(&mut self, _now_ms: u64) {
+    fn pump_adjacency(&mut self, now_ms: u64) {
         let mut newly_full: Vec<(u32, u32)> = Vec::new(); // (area, rid)
         {
             let router_arc = Arc::clone(&self.router);
-            let mut router = router_arc.lock().unwrap();
+            let router = router_arc.lock().unwrap();
             let summaries = router.session_summaries();
             let mut changed_areas: Vec<u32> = Vec::new();
             for ((area, rid), n) in self.neighbors.iter_mut() {
@@ -461,7 +516,7 @@ impl OspfDaemon {
                 }
             }
             for area in changed_areas {
-                self.reoriginate_area(&mut router, area);
+                self.schedule_reoriginate(area, now_ms);
             }
         }
         for (area, rid) in newly_full {
@@ -470,6 +525,38 @@ impl OspfDaemon {
                 fmt_rid(rid),
                 area_label(area)
             );
+        }
+    }
+
+    /// Schedule a Router-LSA re-origination for `area` at
+    /// now + MinLSArrival (+ slack).
+    fn schedule_reoriginate(&mut self, area: u32, now_ms: u64) {
+        let due = now_ms + REORIGINATE_DELAY_MS;
+        let prev = self.pending_reorig.insert(area, due);
+        if prev.is_none() {
+            println!(
+                "daemon: ospf area {} Router-LSA re-origination scheduled",
+                area_label(area)
+            );
+        }
+    }
+
+    /// Fire due re-originations.
+    fn pump_reoriginate(&mut self, now_ms: u64) {
+        let due: Vec<u32> = self
+            .pending_reorig
+            .iter()
+            .filter(|(_, &d)| now_ms >= d)
+            .map(|(&a, _)| a)
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let router_arc = Arc::clone(&self.router);
+        let mut router = router_arc.lock().unwrap();
+        for area in due {
+            self.pending_reorig.remove(&area);
+            self.reoriginate_area(&mut router, area);
         }
     }
 
@@ -509,14 +596,42 @@ impl OspfDaemon {
             log_event(&ev);
         }
         // The p2p links to the dead routers are gone from the LSA.
+        drop(router);
         let areas: Vec<u32> = self.anchors.keys().copied().collect();
         for area in areas {
-            self.reoriginate_area(&mut router, area);
+            self.schedule_reoriginate(area, now_ms);
         }
     }
 
     /// Send one Hello per interface whose interval elapsed, listing the
     /// router-ids heard inside the dead window (RFC 2328 §A.3.2).
+    /// Debug-gated wire trace of an outbound packet stream.
+    #[allow(dead_code)]
+    fn dbg_send_trace(bytes: &[u8]) {
+        if std::env::var_os("LR_OSPF_DEBUG").is_none() {
+            return;
+        }
+        let mut off = 0usize;
+        while off + 24 <= bytes.len() {
+            let len = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]) as usize;
+            if off + len > bytes.len() {
+                break;
+            }
+            eprintln!(
+                "dbg-send kind={} len={} rid={:08x}",
+                bytes[off + 1],
+                len,
+                u32::from_be_bytes([
+                    bytes[off + 4],
+                    bytes[off + 5],
+                    bytes[off + 6],
+                    bytes[off + 7]
+                ])
+            );
+            off += len;
+        }
+    }
+
     fn pump_hellos(&mut self, now_ms: u64) {
         for iface in self.interfaces.iter_mut() {
             let interval_ms = u64::from(iface.hello_interval) * 1000;
@@ -551,6 +666,7 @@ impl OspfDaemon {
                 }
             };
             finalize_v2_packet(&mut bytes);
+            Self::dbg_send_trace(&bytes);
             if let Err(e) = iface.transport.send_multicast(&bytes) {
                 eprintln!("daemon: ospf hello send {}: {}", iface.name, e);
             }
@@ -559,16 +675,31 @@ impl OspfDaemon {
 
     /// Drain neighbor sessions (transmit on the interface the neighbor
     /// was heard on) and anchors (discard — no wire neighbor).
+    ///
+    /// The drained stream can hold several back-to-back packets (an
+    /// LSR plus its LSU answer, an LSAck plus a flood, ...) — each one
+    /// MUST ride its own IP datagram: one OSPF packet per datagram is
+    /// how every implementation parses the protocol, and trailing
+    /// bytes of a concatenated send are silently ignored by BIRD/FRR.
     fn pump_outbound(&mut self) {
-        let mut outbound: Vec<(u32, Vec<u8>)> = Vec::new(); // (ifindex, bytes)
+        let mut outbound: Vec<(u32, Vec<u8>)> = Vec::new(); // (ifindex, datagram)
         {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.lock().unwrap();
             for n in self.neighbors.values() {
-                let mut out = router.drain_output(n.handle);
-                if !out.is_empty() {
-                    finalize_v2_stream(&mut out);
-                    outbound.push((n.ifindex, out));
+                let mut stream = router.drain_output(n.handle);
+                if stream.is_empty() {
+                    continue;
+                }
+                finalize_v2_stream(&mut stream);
+                let mut off = 0usize;
+                while off + lr_ospf::packet::OspfHeader::LEN <= stream.len() {
+                    let len = u16::from_be_bytes([stream[off + 2], stream[off + 3]]) as usize;
+                    if len < lr_ospf::packet::OspfHeader::LEN || off + len > stream.len() {
+                        break; // malformed tail
+                    }
+                    outbound.push((n.ifindex, stream[off..off + len].to_vec()));
+                    off += len;
                 }
             }
             for anchor in self.anchors.values() {
@@ -581,6 +712,7 @@ impl OspfDaemon {
                 .iter()
                 .find(|i| i.transport.ifindex() == ifindex)
             {
+                Self::dbg_send_trace(&bytes);
                 if let Err(e) = iface.transport.send_multicast(&bytes) {
                     eprintln!("daemon: ospf send {}: {}", iface.name, e);
                 }

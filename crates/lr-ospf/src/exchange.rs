@@ -38,8 +38,9 @@ use crate::packet::{
     OspfPacket, OspfPacketType,
 };
 
-/// DBD flag bits (RFC 2328 §A.3.3).
-pub const DD_I: u8 = 0x08; // Initial
+/// DBD flag bits (RFC 2328 §A.3.3): the Imms byte carries I at bit 2,
+/// M at bit 1, MS at bit 0.
+pub const DD_I: u8 = 0x04; // Initial
 pub const DD_M: u8 = 0x02; // More
 pub const DD_MS: u8 = 0x01; // Master/Slave
 
@@ -151,6 +152,12 @@ impl DbExchange {
         self.phase == Phase::Full
     }
 
+    /// True once the initial DBD was sent for this round (restarted
+    /// by a sequence mismatch).
+    pub fn started(&self) -> bool {
+        self.started
+    }
+
     /// Reset for a fresh negotiation round (ExStart re-entry — §10.9
     /// sequence-mismatch handling).
     pub fn restart(&mut self, seq: u32) {
@@ -203,6 +210,10 @@ impl DbExchange {
                 if is_initial && d.lsa_headers.is_empty() && peer_rid > self.router_id {
                     // We are the slave (§10.3): adopt the master's
                     // sequence and answer with our first data DBD.
+                    // Negotiation counts as "started" — a Hello driving
+                    // the FSM to ExStart later must not emit a stale
+                    // initial DBD into an established conversation.
+                    self.started = true;
                     self.master_role = false;
                     self.seq = d.dd_seq;
                     self.phase = Phase::Exchange;
@@ -221,6 +232,7 @@ impl DbExchange {
                     // We are the master: the slave echoed our initial
                     // sequence. Process its headers, bump the sequence
                     // and send our first data DBD.
+                    self.started = true;
                     self.master_role = true;
                     self.phase = Phase::Exchange;
                     let _ = neighbor.step(NeighborEvent::NegotiationDone);

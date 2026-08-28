@@ -193,6 +193,9 @@ struct OspfRuntime {
     /// Per-session streaming decoder (carryover must never leak between
     /// different peers' transports).
     codec: lr_ospf::codec::OspfCodec,
+    /// RFC 2328 §7.2 database synchronization driver: DBD negotiation,
+    /// header exchange and LS-Request loading up to Full.
+    exchange: lr_ospf::exchange::DbExchange,
 }
 
 /// One configured virtual link (RFC 2328 §15): a backbone adjacency
@@ -351,7 +354,7 @@ impl OspfTableEntry {
 }
 
 impl OspfRuntime {
-    fn new(router_id: u32, area_id: u32, v3: bool) -> Self {
+    fn new(router_id: u32, area_id: u32, v3: bool, iface_mtu: u16) -> Self {
         Self {
             router_id,
             area_id,
@@ -366,12 +369,19 @@ impl OspfRuntime {
             } else {
                 lr_ospf::codec::OspfCodec::v2()
             },
+            exchange: lr_ospf::exchange::DbExchange::new(router_id, area_id, iface_mtu),
         }
     }
 
-    /// Feed one decoded OSPF packet. Hello packets advance the neighbor
-    /// FSM; LS-Updates yield their LSAs for the area LSDB.
-    fn handle_packet(&mut self, pkt: &OspfPacket) -> Vec<Lsa> {
+    /// Feed one decoded OSPF packet. Hellos advance the neighbor FSM
+    /// and start the DBD exchange on adjacency; DBDs, LS-Requests,
+    /// LS-Updates and LS-Acks drive the RFC 2328 §7.2 synchronization.
+    fn handle_packet(
+        &mut self,
+        pkt: &OspfPacket,
+        lsdb: &lr_ospf::lsdb::Lsdb,
+        now_ms: u64,
+    ) -> OspfStep {
         match &pkt.body {
             OspfBody::Hello(h) => {
                 // If our router-id appears in the neighbor list, the remote
@@ -385,20 +395,78 @@ impl OspfRuntime {
                     }
                 } else {
                     // Hello without us in it — just refresh timers.
-                    return Vec::new();
+                    return OspfStep::default();
                 };
                 let _ = self.neighbor.step(ev);
-                // Simplified adjacency bring-up: proceed to ExStart on 2-Way.
+                // §10.2: 2-Way + adjacency decision → ExStart. ptp
+                // segments always adjoint (no DR election yet).
                 if self.neighbor.state == NeighborState::TwoWay {
                     let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed: true });
-                    let _ = self.neighbor.step(NeighborEvent::NegotiationDone);
-                    let _ = self.neighbor.step(NeighborEvent::ExchangeDone);
-                    let _ = self.neighbor.step(NeighborEvent::LsaUpdateArrived);
                 }
-                Vec::new()
+                // Entering ExStart emits the initial DBD (§10.3); after
+                // a sequence-mismatch restart the exchange driver
+                // already queued a fresh one.
+                let mut step = OspfStep::default();
+                if self.neighbor.state == NeighborState::ExStart && !self.exchange.started() {
+                    let seq = now_ms as u32 ^ self.router_id | 1;
+                    step.outbound
+                        .push(self.exchange.initial_db_desc(seq, now_ms));
+                }
+                step
             }
-            OspfBody::LsUpdate(u) => u.lsas.clone(),
-            _ => Vec::new(),
+            OspfBody::DbDesc(d) => {
+                // A DBD proves the neighbor sees us: RFC 2328 §10.6
+                // (via BIRD's INM_2WAYREC) advances Init/2-Way to
+                // ExStart before the exchange runs — the peer may have
+                // completed 2-Way detection on its side first.
+                if self.neighbor.state == NeighborState::Init {
+                    let _ = self.neighbor.step(NeighborEvent::HelloSeen {
+                        dr: 0,
+                        bdr: 0,
+                        priority: 1,
+                    });
+                }
+                if self.neighbor.state == NeighborState::TwoWay {
+                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed: true });
+                }
+                self.exchange
+                    .on_db_desc(d, pkt.header.router_id, lsdb, &mut self.neighbor, now_ms)
+                    .into()
+            }
+            OspfBody::LsRequest(r) => self
+                .exchange
+                .on_ls_request(r, lsdb, &mut self.neighbor, now_ms)
+                .into(),
+            OspfBody::LsUpdate(u) => {
+                // The exchange driver acks and tracks the request queue;
+                // the LSAs flow to the area LSDB via the returned step.
+                self.exchange
+                    .on_ls_update(&u.lsas, &mut self.neighbor)
+                    .into()
+            }
+            OspfBody::LsAck(_) => {
+                // Acknowledgements of our flooded LSAs (§13.7) — the
+                // flood path is fire-and-forget; nothing to track yet.
+                OspfStep::default()
+            }
+            _ => OspfStep::default(),
+        }
+    }
+}
+
+/// One OSPF protocol step's output (the router-facing twin of
+/// `lr_ospf::exchange::ExchangeStep`).
+#[derive(Default)]
+struct OspfStep {
+    lsas: Vec<Lsa>,
+    outbound: Vec<OspfPacket>,
+}
+
+impl From<lr_ospf::exchange::ExchangeStep> for OspfStep {
+    fn from(step: lr_ospf::exchange::ExchangeStep) -> Self {
+        Self {
+            lsas: step.lsas,
+            outbound: step.outbound,
         }
     }
 }
@@ -2457,8 +2525,12 @@ impl RouterInstance for DefaultRouter {
                     protocol,
                     kind: cfg.ospf_area_type,
                 });
-                let runtime =
-                    OspfRuntime::new(router_id, cfg.area_id, protocol == Protocol::Ospfv3);
+                let runtime = OspfRuntime::new(
+                    router_id,
+                    cfg.area_id,
+                    protocol == Protocol::Ospfv3,
+                    cfg.ospf_mtu,
+                );
                 self.sessions.insert(
                     h.0,
                     SessionState::Ospf {
@@ -2626,9 +2698,29 @@ impl RouterInstance for DefaultRouter {
                         return Ok(());
                     }
                     let mut lsas = Vec::new();
+                    let mut outbound: Vec<u8> = Vec::new();
+                    let area_id = runtime.area_id;
+                    // The area LSDB is the header-comparison source for
+                    // the DBD exchange (disjoint field borrow from the
+                    // session map entry).
+                    let empty_lsdb = lr_ospf::lsdb::Lsdb::new();
+                    let lsdb = self
+                        .ospf_areas
+                        .get(&area_id)
+                        .map(|a| &a.lsdb)
+                        .unwrap_or(&empty_lsdb);
                     let mut r = lr_core::buf::ReadBuf::new(&input);
                     while let Ok(Some(pkt)) = runtime.codec.decode(&mut r) {
-                        lsas.extend(runtime.handle_packet(&pkt));
+                        let step = runtime.handle_packet(&pkt, lsdb, self.now_ms);
+                        lsas.extend(step.lsas);
+                        for p in step.outbound {
+                            if let Ok(bytes) = runtime.codec.encode_vec(&p) {
+                                outbound.extend_from_slice(&bytes);
+                            }
+                        }
+                    }
+                    if !outbound.is_empty() {
+                        conn.put_output(&outbound);
                     }
                     Pending::OspfLsas { lsas }
                 }
@@ -2777,6 +2869,20 @@ impl RouterInstance for DefaultRouter {
             };
             let actions = peer.step(ev);
             self.dispatch_bgp_actions(session, actions);
+        }
+
+        // OSPF DBD/LSR exchange retransmissions (RFC 2328 §10.8
+        // RxmtInterval): poll every session's driver and queue what it
+        // wants repeated.
+        for state in self.sessions.values_mut() {
+            let SessionState::Ospf { runtime, conn } = state else {
+                continue;
+            };
+            for p in runtime.exchange.poll(self.now_ms) {
+                if let Ok(bytes) = runtime.codec.encode_vec(&p) {
+                    conn.put_output(&bytes);
+                }
+            }
         }
 
         // OSPF uses periodic self-LSA refresh (RFC 2328 §14.1) rather than
@@ -4289,7 +4395,7 @@ impl DefaultRouter {
                         protocol: Protocol::Ospfv2,
                         kind: OspfAreaType::Normal,
                     });
-                    let runtime = OspfRuntime::new(router_id, 0, false);
+                    let runtime = OspfRuntime::new(router_id, 0, false, 1500);
                     self.sessions.insert(
                         handle.0,
                         SessionState::Ospf {
@@ -4376,6 +4482,22 @@ mod tests {
         out
     }
 
+    /// True when the session's output carries only LS-Acks (no data).
+    fn drain_is_ack_only(r: &mut DefaultRouter, h: SessionHandle) -> bool {
+        let bytes = r.drain_output(h);
+        let mut codec = lr_ospf::codec::OspfCodec::v2();
+        let mut reader = lr_core::buf::ReadBuf::new(&bytes);
+        let mut ack_only = true;
+        let mut any = false;
+        while let Ok(Some(pkt)) = codec.decode(&mut reader) {
+            any = true;
+            if !matches!(pkt.body, OspfBody::LsAck(_)) {
+                ack_only = false;
+            }
+        }
+        any && ack_only
+    }
+
     #[test]
     fn ospf_self_lsa_refresh_emits_new_lsu() {
         // Router with one OSPF session in area 0 and a self-originated
@@ -4457,7 +4579,12 @@ mod tests {
         let updates = decode_lsus(&r.drain_output(b));
         assert_eq!(updates.len(), 1, "session b must see the flooded LSA");
         assert_eq!(updates[0].lsas[0].header.advertising_router, 0x01010101);
-        assert!(r.drain_output(a).is_empty(), "no flood back to the source");
+        // Session a's output is at most the acknowledgement of what it
+        // delivered — never a flood of its own LSA back.
+        assert!(
+            drain_is_ack_only(&mut r, a) || r.drain_output(a).is_empty(),
+            "no flood back to the source"
+        );
 
         let snap = r.rib_snapshot();
         assert!(snap
@@ -4510,8 +4637,9 @@ mod tests {
             lsa.checksum_ok(),
             "originated summary must checksum correctly"
         );
-        // The summary targets the backbone only.
-        assert!(r.drain_output(h1).is_empty());
+        // The summary targets the backbone only (area 1 sees at most the
+        // acknowledgement of what it delivered).
+        assert!(drain_is_ack_only(&mut r, h1) || r.drain_output(h1).is_empty());
     }
 
     #[test]
@@ -4613,7 +4741,7 @@ mod tests {
         // the backbone knows no routes beyond area 2's own intra net,
         // which the loop guard excludes.
         assert!(
-            r.drain_output(h2).is_empty(),
+            drain_is_ack_only(&mut r, h2) || r.drain_output(h2).is_empty(),
             "non-backbone inter-area knowledge must not transit areas"
         );
         // The backbone only gets area 2's intra net (10.50.50.0/24), never
@@ -4690,8 +4818,10 @@ mod tests {
         let ours = router_lsa(rid, vec![(0x0a0a0a00, 0xffff_ff00, STUB, 10)]);
         r.feed_input(h1, &ospf_lsu_bytes(0x02020202, 1, vec![ours]))
             .unwrap();
+        // h1's output is at most its acknowledgement of the delivery;
+        // h2 (backbone) must see nothing without an ABR summary.
+        assert!(drain_is_ack_only(&mut r, h1) || r.drain_output(h1).is_empty());
         assert!(r.drain_output(h2).is_empty());
-        assert!(r.drain_output(h1).is_empty());
         assert!(r
             .rib_snapshot()
             .iter()

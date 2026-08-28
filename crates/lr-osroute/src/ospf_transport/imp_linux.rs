@@ -440,6 +440,35 @@ impl OspfV2Transport {
     pub fn ifindex(&self) -> u32 {
         self.ifindex
     }
+
+    /// The interface MTU (SIOCGIFMTU) — DBD packets must advertise it
+    /// (RFC 2328 §10.6; peers reject a larger value).
+    pub fn mtu(&self) -> Result<u16, OspfTransportError> {
+        let mut ifr: [u8; 40] = [0; 40];
+        // Prepend the interface name (16 bytes, NUL-padded) in the
+        // first half of the ifreq; the MTU lands at offset 16.
+        let name = self.interface.as_bytes();
+        ifr[..name.len().min(15)].copy_from_slice(&name[..name.len().min(15)]);
+        // SAFETY: ioctl on our own fd with a valid ifreq buffer.
+        let rc = unsafe { ioctl(self.fd, SIOCGIFMTU, ifr.as_mut_ptr()) };
+        if rc < 0 {
+            return Err(os_error("SIOCGIFMTU"));
+        }
+        // ifru_mtu is a host-endian int; BIRD enforces exact equality
+        // on the DBD MTU field, so this must be the real value.
+        let mtu = u16::from_le_bytes([ifr[16], ifr[17]]);
+        Ok(mtu.max(576))
+    }
+}
+
+/// SIOCGIFMTU (linux/sockios.h) — read the interface MTU.
+const SIOCGIFMTU: libc_ulong = 0x8921;
+
+#[allow(non_camel_case_types)]
+type libc_ulong = core::ffi::c_ulong;
+
+extern "C" {
+    fn ioctl(fd: i32, request: libc_ulong, ...) -> i32;
 }
 
 impl Drop for OspfV2Transport {
