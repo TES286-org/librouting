@@ -2,6 +2,7 @@
 //! multicast scoping (`SO_BINDTODEVICE` + `ip_mreqn`), and `getifaddrs`
 //! for interface address enumeration.
 
+use std::ffi::c_char;
 use std::net::Ipv4Addr;
 
 use super::{InterfaceV4Addr, OspfTransportError, ALL_D_ROUTERS, ALL_SPF_ROUTERS, IPPROTO_OSPF};
@@ -58,7 +59,7 @@ struct IpMreqn {
 #[repr(C)]
 struct Ifaddrs {
     ifa_next: *mut Ifaddrs,
-    ifa_name: *mut i8,
+    ifa_name: *mut c_char,
     ifa_flags: u32,
     ifa_addr: *mut core::ffi::c_void,
     ifa_netmask: *mut core::ffi::c_void,
@@ -93,7 +94,7 @@ extern "C" {
         addr: *mut SockaddrIn,
         addrlen: *mut u32,
     ) -> isize;
-    fn if_nametoindex(ifname: *const i8) -> u32;
+    fn if_nametoindex(ifname: *const c_char) -> u32;
     fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32;
     fn freeifaddrs(ifa: *mut Ifaddrs);
 }
