@@ -127,8 +127,8 @@ fn main() -> ExitCode {
         eprintln!("error: {}", e);
         return ExitCode::from(2);
     }
-    if cfg.local_as == 0 || cfg.router_id.is_empty() {
-        eprintln!("error: --local-as and --router-id are required");
+    if cfg.router_id.is_empty() {
+        eprintln!("error: --router-id is required");
         print_usage();
         return ExitCode::from(2);
     }
@@ -147,6 +147,12 @@ fn main() -> ExitCode {
     // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
     if cfg.protocol == "ospf" {
         return daemon_ospf::run_ospf_daemon(&cfg, rid);
+    }
+    // BGP additionally needs the local AS.
+    if cfg.local_as == 0 {
+        eprintln!("error: --local-as is required");
+        print_usage();
+        return ExitCode::from(2);
     }
     // Signal handling must precede everything that could receive one:
     // without a SIGHUP handler the default disposition would terminate

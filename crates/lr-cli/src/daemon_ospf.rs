@@ -293,6 +293,11 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<OspfInterf
             e.to_string()
         }
     })?;
+    // The main loop polls every interface each pass — blocking sockets
+    // would deadlock it (the Babel daemon does the same for UDP).
+    transport
+        .set_nonblocking(true)
+        .map_err(|e| format!("set_nonblocking on {}: {}", name, e))?;
     let hello = spec
         .hello_interval
         .unwrap_or(cfg.ospf_hello_interval)
@@ -348,11 +353,14 @@ impl OspfDaemon {
         for iface in &self.interfaces {
             loop {
                 match iface.transport.recv_from(recv_buf) {
-                    Ok(Some((n, _src))) => datagrams.push((
-                        iface.transport.ifindex(),
-                        iface.area,
-                        recv_buf[..n].to_vec(),
-                    )),
+                    Ok(Some((n, _src))) => {
+                        // Linux raw sockets deliver the full IP datagram;
+                        // strip the header so the router's OSPF codec
+                        // sees a bare packet.
+                        if let Some(ospf) = strip_ipv4_header(&recv_buf[..n]) {
+                            datagrams.push((iface.transport.ifindex(), iface.area, ospf.to_vec()));
+                        }
+                    }
                     Ok(None) => break,
                     Err(e) => {
                         eprintln!("daemon: ospf recv {}: {}", iface.name, e);
@@ -662,6 +670,25 @@ fn self_lsu(rid: RouterId, area: u32, lsas: Vec<Lsa>) -> OspfPacket {
     }
 }
 
+/// Strip the IPv4 header of a raw-socket datagram, verifying that it
+/// carries OSPF (protocol 89). Returns the OSPF packet bytes.
+fn strip_ipv4_header(bytes: &[u8]) -> Option<&[u8]> {
+    if bytes.len() < 20 {
+        return None;
+    }
+    if bytes[0] >> 4 != 4 {
+        return None; // not IPv4
+    }
+    let ihl = (bytes[0] & 0x0f) as usize * 4;
+    if ihl < 20 || bytes.len() < ihl {
+        return None;
+    }
+    if bytes[9] != 89 {
+        return None; // not OSPF
+    }
+    Some(&bytes[ihl..])
+}
+
 /// Extract `(router-id, area, length)` from a raw OSPFv2 datagram
 /// without a full decode. Returns `None` for short or non-v2 packets.
 fn demux_header(bytes: &[u8]) -> Option<(u32, u32, u16)> {
@@ -747,6 +774,36 @@ fn log_event(ev: &RouterEvent) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn strip_ipv4_header_extracts_ospf() {
+        let pkt = build_hello(
+            RouterId::from_u32(0x0a00_0001),
+            7,
+            0xffff_ff00,
+            10,
+            40,
+            1,
+            vec![],
+        )
+        .unwrap();
+        // Simulate a raw-socket datagram: 20-byte IP header (protocol 89)
+        // in front of the OSPF packet.
+        let mut dg = vec![0u8; 20];
+        dg[0] = 0x45; // IPv4, IHL 5
+        dg[9] = 89; // OSPF
+        dg.extend_from_slice(&pkt);
+        let stripped = strip_ipv4_header(&dg).unwrap();
+        assert_eq!(stripped, &pkt[..]);
+        // Non-OSPF protocol, wrong version, truncated → None.
+        let mut other = dg.clone();
+        other[9] = 6; // TCP
+        assert!(strip_ipv4_header(&other).is_none());
+        let mut v6 = dg.clone();
+        v6[0] = 0x65;
+        assert!(strip_ipv4_header(&v6).is_none());
+        assert!(strip_ipv4_header(&dg[..12]).is_none());
+    }
 
     #[test]
     fn demux_header_parses_and_rejects() {
