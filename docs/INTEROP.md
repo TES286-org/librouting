@@ -8,6 +8,8 @@ job `interop`) and can all be reproduced locally:
 |------|--------|-------|----------------|
 | Two-daemon | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP | FSM + codec consistency in both roles |
 | OSPF two-daemon | `tests/interop/ospf.sh` | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5) | OSPF daemon mode end-to-end: Hello exchange, Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown |
+| MRT | `tests/interop/mrt.sh` | BIRD 2 `protocol mrt` → `lr mrt rib`; lr-daemon → `lr mrt rib` | RFC 6396 compatibility: BIRD's dump decoded (peer table + prefixes); the daemon's Loc-RIB export round-trips with AS path + next hop |
+| BMP | `tests/interop/bmp.sh` | lr-daemon `--bmp-target` → lr-daemon `--protocol bmp` collector | BMP end-to-end: station connect, Peer Up ordering, Route Monitoring carrying the full UPDATE, collector serving routes + MRT dump via the runtime API |
 | BIRD | `tests/interop/bird.sh` | lr-daemon ↔ BIRD 2 (eBGP, multihop) | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions** |
 | BIRD LLGR | `tests/interop/bird_llgr.sh` | lr-daemon ↔ BIRD 2 (RFC 9494) | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge |
 | FRR | `tests/interop/frr.sh` | lr-daemon ↔ FRR bgpd (eBGP, multihop) | Wire compatibility with FRR bgpd incl. its stricter next-hop validation |
@@ -36,6 +38,8 @@ For every peer pair, all of the following must hold:
 cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/two_daemon.sh               # no external dependencies
 ./tests/interop/ospf.sh                     # needs iproute2 + user namespaces
+./tests/interop/mrt.sh                      # BIRD phase needs bird2 (or skips)
+./tests/interop/bmp.sh                      # no external dependencies
 ./tests/interop/bird.sh                     # needs bird2 (or skips)
 ./tests/interop/frr.sh                      # needs FRR bgpd (or skips)
 ```
@@ -61,6 +65,15 @@ two-router model — no loopback shortcuts). Environments that forbid
 user namespaces SKIP gracefully. BIRD interop for OSPF is future
 work: lr's Hellos already bring BIRD to ExStart on p2p segments, but
 Full adjacency needs real DBD/LSR exchange (STATUS.md, W3.3).
+
+### BMP lab specifics
+
+`bmp.sh` is pure librouting — a BGP speaker with `--bmp-target`
+mirrors into a `--protocol bmp` collector — but the reference-sender
+variant (BIRD's `protocol bmp` connecting to our collector) cannot run
+yet: Debian's bird2 package is built **without** the BMP protocol
+(verified on 2.17.5 — the binary contains no BMP symbols). Revisit
+when a BMP-enabled BIRD is packaged or built from source.
 
 ### Rootless operation
 

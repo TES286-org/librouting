@@ -589,7 +589,42 @@ r.set_bmp_sink(move |bytes| {
 
 The `lr-bmp` crate provides the full BMP message codec (`BmpCodec`,
 `BmpMessage`, `BmpMsgType`, `PeerHeader`) for embedders that need to
-decode the messages on the collector side.
+decode the messages on the collector side. `BmpCodec` splits buffering
+from decoding (`feed` + `next_message`) so one `read(2)` carrying
+several messages drains fully. The daemon wires both directions:
+`--bmp-target host:port` mirrors to a monitoring station, and
+`--protocol bmp --listen` runs the collector (decoding Peer Up/Down +
+Route Monitoring, installing monitored prefixes through
+[`originate_with_attributes`]).
+
+### MRT dumps (RFC 6396)
+
+The `lr-mrt` crate reads and writes the MRT interchange format:
+`MrtReader` (streaming, carryover-safe) decodes TABLE_DUMP_V2 peer
+index tables, RIB_IPV4/IPv6_UNICAST records (including the RFC 7911
+add-path variants) and BGP4MP state changes/messages;
+`MrtRibDump::encode` produces the same shape BIRD's `protocol mrt`
+emits (byte-verified in the interop suite). RIB entries keep path
+attributes as raw TLVs; with the default `bgp` feature,
+`walk_attributes` interprets them (AS path, next hop, communities,
+LOCAL_PREF, MED) through the `lr-bgp` decoders.
+
+```rust
+use lr_mrt::{parse_file, MrtRecord};
+
+for record in parse_file("rib.mrt")? {
+    if let MrtRecord::Rib(table) = record {
+        for entry in &table.entries {
+            let summary = lr_mrt::walk_attributes(entry);
+            println!("{} via {:?}", table.prefix, summary.next_hop);
+        }
+    }
+}
+```
+
+Restoring a RIB (offline replay / observation feed) goes through
+`DefaultRouter::originate_with_attributes(prefix, family, next_hop,
+attributes)` — the same entry point the BMP collector uses.
 
 ### Operational introspection
 

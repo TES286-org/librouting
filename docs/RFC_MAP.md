@@ -28,6 +28,7 @@ implements, or references. It is grouped by protocol family.
 | 5549  | BGP Extended Next-Hop                                | ✓ (capability 5, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |
 | 5666  | BGP Egress Peer Engineering                          | partial (TBD)           | —                                    |
 | 5925  | The TCP Authentication Option (TCP-AO)               | ✓ (Linux >= 6.7; RFC 5926 KDFs via kernel) | `lr-osroute::tcp_auth` (TCP_AO_ADD_KEY/INFO) |
+| 6396   | MRT Routing Information Export Format            | ✓ TABLE_DUMP_V2 read/write (peer index tables, RIB v4/v6 unicast + add-path), BGP4MP decode | `lr-mrt` |
 | 6793  | BGP Support for 4-byte AS (revised)                  | ✓ (superseded 4893)     | `lr-bgp::role::confederation`         |
 | 7313  | Enhanced Route Refresh                               | ✓                       | `lr-bgp::extensions::enhanced_rr`    |
 | 7854  | BGP Monitoring Protocol (BMP)                        | ✓ (lr-bmp crate: 7 message types, streaming codec, IPv4/IPv6 peer headers; set_bmp_sink router integration) | `lr-bmp`, `lr-router` |

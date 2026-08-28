@@ -46,6 +46,7 @@ library without depending on the Rust toolchain at runtime.
 | `lr-policy` | `crates/lr-policy` | Route maps, prefix lists, AS-path filters, community lists, import/export/selection hooks, safety net |
 | `lr-router` | `crates/lr-router` | Layer-3 router instance, sessions, scheduler, event dispatch |
 | `lr-bfd` | `crates/lr-bfd` | BFD Control packet codec (RFC 5880), session FSM (Down→Init→Up), auth |
+| `lr-mrt` | `crates/lr-mrt` | MRT dump format (RFC 6396): TABLE_DUMP_V2 read/write, BGP4MP decode |
 | `lr-bmp` | `crates/lr-bmp` | BGP Monitoring Protocol (RFC 7854): BMP message codec + router sink |
 | `lr-damping` | `crates/lr-damping` | Route flap damping (RFC 2439) |
 | `lr-osroute` | `crates/lr-osroute` | OS routing table reference (Linux rtnetlink) + Stub for non-Linux |
@@ -139,6 +140,18 @@ unshare -Urn lr-daemon --protocol ospf --router-id 1.1.1.1 \
                        --ospf-interface veth0
 # → daemon: ospf neighbor 2.2.2.2 Full (area 0.0.0.0)
 # → daemon: route installed 10.99.3.0/24 via (none)
+```
+
+**Operational tooling.** The daemon dumps its Loc-RIB as an MRT file
+(RFC 6396 — the format BIRD's `protocol mrt` and every route-analysis
+tool speaks) through the runtime API, and mirrors BMP (RFC 7854) to a
+monitoring station or *acts as one*:
+
+```bash
+echo "mrt /tmp/rib.mrt" | socat - UNIX-CONNECT:/run/lr-daemon.api
+lr mrt rib /tmp/rib.mrt          # parse any MRT dump (BIRD, FRR, ours)
+lr-daemon --local-as ... --bmp-target 10.0.0.9:1170   # BMP egress
+lr-daemon --protocol bmp --listen 0.0.0.0:1170        # BMP collector
 ```
 
 ## Workspace Layout

@@ -51,7 +51,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
 | Per-peer maximum-prefix | ✅ 🧪 | `with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold(pct)`; warn / teardown / restart actions; CEASE NOTIFICATION subcode 8 (RFC 4486 §2.1); threshold + exceeded events latched per session; daemon `--max-prefixes` / `--max-prefix-action` / `--max-prefix-threshold` |
 | Route aggregation | ✅ 🧪 | `add_aggregate(prefix)` / `remove_aggregate(prefix)` (RFC 4271 §9.2.2.2): originates aggregate with zeroed AS_PATH + ATOMIC_AGGREGATE + AGGREGATOR when specifics exist; withdraws when all specifics disappear; 5 e2e tests |
-| BMP monitoring (RFC 7854) | ✅ 🧪 | `lr-bmp` crate (7 message types, streaming codec, IPv4/IPv6 peer headers); `DefaultRouter::set_bmp_sink` mirrors Peer Up/Down + Route Monitoring; 10 unit + 3 e2e tests |
+| BMP monitoring (RFC 7854) | ✅ 🧪 | `lr-bmp` crate (7 message types, streaming codec with split feed/next_message, IPv4/IPv6 peer headers); `DefaultRouter::set_bmp_sink` mirrors Peer Up/Down + Route Monitoring — Route Monitoring carries the full UPDATE (real path attributes, MP_REACH for IPv6), Peer Up precedes it per §4.6 ordering; daemon egress `--bmp-target` + collector mode `--protocol bmp --listen`; 10 unit + 3 e2e tests |
+| MRT dump import/export (RFC 6396) | ✅ 🧪 | `lr-mrt` crate: streaming TABLE_DUMP_V2 reader/writer (peer index tables, RIB_IPV4/IPv6_UNICAST + ADDPATH) + BGP4MP decode; `lr mrt parse/rib` CLI; daemon runtime API `mrt <path>` dumps the Loc-RIB (BIRD-shape output, byte-verified against BIRD 2.17.5 `protocol mrt`); typed attribute interpretation behind the `bgp` feature |
 
 ### OSPF (`lr-ospf`)
 
@@ -137,6 +138,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | OSPF two-daemon E2E (raw-socket multicast adjacency, stub-net propagation both ways, dead-timer teardown) | ✅ 🧪 | `tests/interop/ospf.sh` — veth pair, one network namespace per daemon, rootless via `unshare -Urn` |
+| MRT interop (BIRD 2 `protocol mrt` dump decoded by `lr mrt rib`; daemon Loc-RIB export round-trip with AS path + next hop) | ✅ 🧪 | `tests/interop/mrt.sh` |
+| BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪 | `tests/interop/bmp.sh` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
 | Policy-in-config E2E (export filter, import filter, set-actions keep-route, unknown-reference fail-closed startup) | ✅ 🧪 | `crates/lr-cli/tests/daemon_policy.rs` |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
@@ -256,9 +259,26 @@ BIRD/FRR-style, without an embedder writing code.
    (DR/BDR stay 0.0.0.0; BIRD sees our Hellos and reaches ExStart,
    but Full interop waits on real DBD/LSR exchange, tracked below);
    auth and reload are not wired into the daemon yet.
-6. **Operational tooling** — MRT dump import/export (`lr routes`
-   already exists; add RIB dump/restore), BMP collector mode for the
-   daemon.
+6. ~~**Operational tooling**~~ — done: the `lr-mrt` crate (RFC 6396)
+   reads and writes TABLE_DUMP_V2 dumps (peer index tables,
+   RIB_IPV4/IPv6_UNICAST incl. the ADDPATH variants; BGP4MP decode for
+   stream tools) and `lr mrt parse|rib` inspects them; the daemon's
+   runtime API `mrt <path>` dumps the Loc-RIB in the exact shape
+   BIRD's `protocol mrt` produces (byte-verified in the interop suite,
+   BIRD dump -> lr parse and back). BMP grew both directions: egress
+   `--bmp-target` (channel + reconnecting sender thread wiring the
+   router sink) and collector mode `--protocol bmp --listen` (accepts
+   stations, decodes Peer Up/Down + Route Monitoring with the split
+   feed/next_message codec API, mirrors monitored prefixes into the
+   Loc-RIB via `originate_with_attributes` so routes/status/mrt serve
+   them). Route Monitoring now carries the full UPDATE (real path
+   attributes, MP_REACH for IPv6) and Peer Up mirrors before it even
+   under TCP coalescing. RIB *restore* is `originate_with_attributes`
+   + `parse_file` — an offline router fed from a dump (the MRT
+   round-trip e2e covers the encode side; a full restore CLI remains
+   future work). Known limitation: Debian's bird2 package ships
+   without the BMP protocol, so the BMP e2e uses two lr-daemons; a
+   BIRD-side BMP test waits on a BMP-enabled build.
 
 ### W2 — BIRD / FRR non-standard compatibility (selective)
 
