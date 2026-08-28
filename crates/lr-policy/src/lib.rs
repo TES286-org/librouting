@@ -17,6 +17,8 @@
 
 pub mod action;
 pub mod as_path_filter;
+#[cfg(feature = "bgp")]
+pub mod bgp;
 pub mod community_list;
 pub mod hooks;
 pub mod policy;

@@ -45,10 +45,22 @@ pub fn evaluate_match(m: &MatchCondition, route: &Route, resolver: &dyn MatchRes
 pub fn apply_set(action: &SetAction, route: &mut Route) {
     match action {
         SetAction::SetLocalPref(v) => route.preference.admin_distance = *v,
-        SetAction::SetMed(_) => { /* TODO: BGP-specific path attr */ }
+        #[cfg(feature = "bgp")]
+        SetAction::SetMed(v) => crate::bgp::set_med(route, *v),
+        #[cfg(not(feature = "bgp"))]
+        SetAction::SetMed(_) => { /* needs the bgp feature: no-op */ }
         SetAction::SetNextHop(ip) => route.next_hop = Some(*ip),
-        SetAction::PrependAs(_) => { /* TODO: BGP-specific path attr */ }
-        SetAction::AddCommunity(_, _) => { /* TODO: BGP-specific path attr */ }
+        #[cfg(feature = "bgp")]
+        SetAction::PrependAs(asn) => crate::bgp::prepend_as(route, *asn),
+        #[cfg(not(feature = "bgp"))]
+        SetAction::PrependAs(_) => { /* needs the bgp feature: no-op */ }
+        #[cfg(feature = "bgp")]
+        SetAction::AddCommunity(asn, local) => crate::bgp::add_community(
+            route,
+            lr_bgp::path::communities::Community::new(asn.0 as u16, *local),
+        ),
+        #[cfg(not(feature = "bgp"))]
+        SetAction::AddCommunity(_, _) => { /* needs the bgp feature: no-op */ }
         SetAction::SetMetric(v) => route.preference.metric = *v,
         SetAction::SetTag(_) => { /* TODO: route tags */ }
     }

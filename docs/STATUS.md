@@ -45,7 +45,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ | session liveness events feed the FSM |
-| Policy: prefix-lists, community-lists, AS-path filters, route-maps | 🟡 | `lr-policy` — prefix-lists fully work; community-list / AS-path matching and the MED/prepend/add-community set actions are stubs (roadmap W1.4a) |
+| Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community set actions; route tags (`set tag`) still open
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
@@ -204,13 +204,15 @@ BIRD/FRR-style, without an embedder writing code.
    to fast-fail the BGP FSM (after W3.1 multihop BFD exists).
 4. **Policy in config + reuse** (external request) — three slices,
    in order:
-   a. **Policy engine completion** (prerequisite): community-list and
-      AS-path-filter matching currently return `true` unconditionally,
-      and `set med` / `as-path prepend` / `add community` are no-ops.
-      Implement typed evaluation against BGP path attributes via a
-      feature-gated `lr-policy → lr-bgp` dependency (no cycle:
-      `lr-bgp` does not depend on `lr-policy`). Unit tests against
-      real attribute bytes.
+   a. ~~**Policy engine completion**~~ — done: new `lr-policy::bgp`
+      module decodes/encodes AS_PATH, COMMUNITIES and MED straight
+      on the raw attribute bag (no whole-bag conversion); community
+      lists do first-match/implicit-deny against real communities;
+      AS-path filters get an FRR-parity pattern matcher (`^ $ _`,
+      documented substring semantics); `set med`, `as-path prepend`
+      and `add community` now write real attributes. Feature-gated
+      `lr-policy → lr-bgp` (default on, no cycle). 14 new unit tests
+      against real attribute bytes.
    b. **Policy objects in TOML**: `[[prefix-list]]`, `[[as-path-list]]`,
       `[[community-list]]`, `[[route-map]]` tables (match/set entries
       mapping 1:1 onto `lr-policy` primitives), attached per peer via

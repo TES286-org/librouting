@@ -373,6 +373,7 @@ dependencies = [
 name = "lr-policy"
 version = "0.1.0"
 dependencies = [
+ "lr-bgp",
  "lr-core",
  "tracing",
 ]
