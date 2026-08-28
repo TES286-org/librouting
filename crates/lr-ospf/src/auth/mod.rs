@@ -1,5 +1,15 @@
 //! Authentication strategies for OSPF (RFC 2328 §D, RFC 5709 HMAC-SHA,
-//! RFC 4552 IPsec for v3 — out of scope here).
+//! RFC 7166 v3 auth trailer).
+//!
+//! - [`NullAuth`] — no authentication (AuType 0).
+//! - [`SimplePassword`] — cleartext 8-byte password (AuType 1, RFC 2328 §D.2).
+//! - [`CryptoAuth`] — cryptographic auth with HMAC-SHA-1 / HMAC-SHA-256
+//!   (AuType 2, RFC 2328 §D.3 + RFC 5709). The MAC is carried in an
+//!   authentication trailer appended after the OSPF body.
+
+pub mod crypto;
+
+pub use crypto::{CryptoAlgorithm, CryptoAuth};
 
 use core::fmt;
 

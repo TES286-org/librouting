@@ -24,3 +24,6 @@ lr-core = { workspace = true }
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+hmac.workspace = true
+sha1.workspace = true
+sha2.workspace = true
