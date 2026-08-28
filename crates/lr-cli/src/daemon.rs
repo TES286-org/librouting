@@ -1,9 +1,11 @@
 //! `lr-daemon` — reference librouting daemon with a real I/O loop.
 //!
-//! This is the embedder pattern in full: a TCP transport, a poll-driven
-//! router, a ticker thread and graceful shutdown. It is deliberately small —
-//! production daemons add config includes, privilege dropping, supervision
-//! and MIBs — but every byte that flows is real BGP.
+//! This is the embedder pattern in full: TCP transports, a poll-driven
+//! router, a ticker thread and graceful shutdown. Multi-peer is first
+//! class: one connector thread per outbound `[[peer]]`, a listener that
+//! accepts concurrent inbound sessions (matched to configured peers by
+//! source address), and a single event consumer so Loc-RIB ordering is
+//! preserved across sessions.
 //!
 //! ```text
 //!            ┌──────────────────────────────────────────────┐
@@ -16,7 +18,7 @@
 //!            │       │ tick(ms)           │        ▼       │
 //!            │  ┌────┴─────┐        poll_events  Loc-RIB   │
 //!            │  │ ticker   │ ─────────────► events ─► log  │
-//!            │  └──────────┘                          │     │
+//!            │  └──────────┘                 + kernel FIB   │
 //!            │                          optionally:   ▼     │
 //!            │                       lr-osroute (netlink)   │
 //!            └──────────────────────────────────────────────┘
@@ -35,7 +37,7 @@
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant as WallClock};
@@ -48,478 +50,74 @@ use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
 mod api;
+mod daemon_config;
 mod privdrop;
 mod signal;
 
-/// Daemon configuration (TOML or CLI flags).
-#[derive(Debug, Clone, Default)]
-struct DaemonConfig {
-    local_as: u32,
-    peer_as: u32,
-    router_id: String,
-    /// Remote peer address (outbound connection).
-    peer_addr: Option<String>,
-    /// Local listen address (inbound connections).
-    listen_addr: Option<String>,
-    /// Explicit local interface address (next-hop-self). Overrides the
-    /// address derived from --peer/--listen.
-    local_address: Option<String>,
-    /// Locally originated networks.
-    networks: Vec<String>,
-    /// Install best routes into the kernel FIB.
-    install_kernel: bool,
-    /// BGP hold time (seconds).
-    hold_time: u16,
-    /// RFC 4724 graceful restart time to advertise (seconds). 0 disables GR.
-    gr_restart_time: u16,
-    /// RFC 9494 Long-Lived Graceful Restart stale time (seconds).
-    /// 0 disables LLGR.
-    llgr_stale_time: u32,
-    /// Optional local cap (seconds) for the LLGR stale time received from
-    /// peers. 0 = honour the peer's value.
-    llgr_max_stale_time: u32,
-    /// RFC 2385 TCP MD5 shared secret for the BGP session.
-    md5_key: Option<String>,
-    /// RFC 5925 TCP-AO keys as "id:secret" pairs (id = KeyID, used as
-    /// both SendID and RecvID in the reference daemon).
-    tcp_ao_keys: Vec<String>,
-    /// TCP-AO MAC algorithm ("hmac-sha1" or "cmac-aes").
-    tcp_ao_algorithm: String,
-    /// TCP-AO MAC length in bytes (0 = algorithm default).
-    tcp_ao_maclen: u8,
-    /// Drop privileges to this user (name or uid) after binding.
-    user: Option<String>,
-    /// Drop privileges to this group (name or gid); default: the user's
-    /// login group.
-    group: Option<String>,
-    /// Runtime API socket path (Unix domain socket, 0600).
-    api_socket: Option<String>,
-    /// Configuration file the daemon was started with (reload source).
-    config_path: Option<String>,
-    /// RFC 7911 Add-Path: advertise the capability (send + receive) for
-    /// the session's families. Requires peer support to take effect.
-    add_path: bool,
-    /// RFC 7911: how many paths per prefix the decision process keeps in
-    /// Loc-RIB and advertises to Add-Path peers.
-    add_path_max_paths: u32,
-    /// RFC 4760 MP-BGP families advertised in OPEN, beyond the default
-    /// IPv4 unicast. Each entry is a name (`ipv4-unicast`, `ipv6-unicast`).
-    /// Empty defaults to IPv4 unicast only (the historical daemon default).
-    mp_families: Vec<String>,
-    /// RFC 5549 Extended Next-Hop: advertise the (1,1,2) tuple so IPv4
-    /// NLRI can be resolved over an IPv6 next-hop. Requires peer support.
-    extended_next_hop: bool,
-    /// Local IPv6 source address for next-hop-self egress over IPv6 NLRI
-    /// or RFC 5549 ENH. Falls back to the IPv4 `local_address` field when
-    /// unset and the session is IPv4.
-    local_address_v6: Option<String>,
-    /// RFC 5082 GTSM: `None` = disabled; `Some(hops)` = multihop with the
-    /// given hop count; single-hop when `hops == 1` (or when `--gtsm`
-    /// alone is passed, which implies single-hop TTL=255).
-    gtsm_hops: Option<u8>,
-    /// Per-peer maximum-prefix limit. `None` = no limit.
-    max_prefixes: Option<u32>,
-    /// Action when the limit is exceeded: "warn", "teardown", "restart".
-    max_prefix_action: String,
-    /// Early-warning threshold percentage (0..=100). 0 disables.
-    max_prefix_threshold: u8,
-    /// Protocol to run: "bgp" (default) or "babel".
-    protocol: String,
-    /// Babel multicast group address (default: ff02::1:6).
-    babel_group: Option<String>,
-    /// Babel local port (default: 6696).
-    babel_port: u16,
-}
+use daemon_config::{DaemonConfig, PeerSpec};
 
 fn print_usage() {
     println!(
         "lr-daemon — reference librouting BGP daemon\n\n\
          USAGE:\n  \
          lr-daemon --local-as AS --peer-as AS --router-id A.B.C.D \
-         [--peer ADDR:PORT] [--listen ADDR:PORT] [--network PREFIX]...\n         \
+         [--peer ADDR:PORT]... [--listen ADDR:PORT] [--network PREFIX]...\n         \
          [--hold-time SEC]\n         \
          lr-daemon --config daemon.toml [--install-kernel-routes]\n\n\
          OPTIONS:\n  \
          --config PATH            Load TOML configuration\n  \
-         --peer ADDR:PORT         Remote BGP peer to connect to (outbound)\n  \
-         --listen ADDR:PORT       Accept an inbound BGP connection\n  \
+         --peer ADDR:PORT         Remote BGP peer to connect to (repeatable;\n  \
+         all peers share --peer-as; per-peer settings need [[peer]])\n  \
+         --listen ADDR:PORT       Accept inbound BGP connections\n  \
          --network PREFIX         Locally originate PREFIX (repeatable)\n  \
          --hold-time SEC          BGP hold time in seconds (default 90)\n  \
          --graceful-restart SEC   RFC 4724 restart time to advertise\n  \
          (default 120; 0 disables)\n  \
          --llgr SEC               RFC 9494 long-lived graceful restart\n  \
-         stale time to advertise (default 0 = disabled)\n  \
+         stale time (0 disables)\n  \
          --llgr-max-stale SEC     Cap the peer-advertised LLGR stale time\n  \
-         --md5-key SECRET         RFC 2385 TCP MD5 session authentication\n  \
-         --tcp-ao-key ID:SECRET   RFC 5925 TCP-AO key (repeatable; first key\n  \
-         is Current/RNext; Linux 6.7+)\n  \
-         --tcp-ao-alg NAME        TCP-AO MAC algorithm: hmac-sha1 (default)\n  \
-         or cmac-aes\n  \
-         --tcp-ao-maclen N        TCP-AO MAC length in bytes (default 12)\n  \
-         --install-kernel-routes  Install best routes into the OS FIB (root)\n  \
-         --user USER|UID          Drop privileges to USER after binding\n  \
-         (Unix; default group: the user's login group)\n  \
-         --group GROUP|GID        Override the privilege-drop group\n  \
-         --api-socket PATH        Runtime API on a Unix stream socket\n  \
-         (status / sessions / routes / reload / shutdown)\n  \
-         --mp-family NAME         MP-BGP family to advertise (repeatable;\n  \
-         ipv4-unicast, ipv6-unicast). Default: ipv4-unicast only.\n  \
-         --extended-next-hop      Advertise RFC 5549 (1,1,2) — IPv4 NLRI over\n  \
-         an IPv6 next-hop. Requires --mp-family ipv6-unicast or a v6 transport.\n  \
-         --local-address-v6 ADDR  Local IPv6 source for next-hop-self / ENH egress\n  \
-         --gtsm [HOPS]            RFC 5082 TTL security (no arg = single-hop ttl=255;\n  \
-         a number = multihop with that TTL). Linux only.\n  \
-         --max-prefixes N         Per-peer maximum-prefix limit (BIRD\n  \
-         `maximum prefix`, FRR `maximum-prefix`). 0 = no limit.\n  \
+         --md5-key SECRET         RFC 2385 TCP MD5 session auth\n  \
+         --tcp-ao-key ID:SECRET   RFC 5925 TCP-AO key (repeatable)\n  \
+         --tcp-ao-alg ALG         hmac-sha1 (default) or cmac-aes\n  \
+         --tcp-ao-maclen BYTES    TCP-AO MAC length (0 = default)\n  \
+         --add-path               Advertise RFC 7911 Add-Path\n  \
+         --add-path-max N         Paths per prefix kept (default 6)\n  \
+         --mp-family NAME         Extra MP-BGP family (repeatable;\n  \
+         ipv4-unicast | ipv6-unicast)\n  \
+         --extended-next-hop      RFC 5549 IPv4-over-IPv6 next-hops\n  \
+         --local-address ADDR     Source address for next-hop-self\n  \
+         --local-address-v6 ADDR  IPv6 source for v6 NLRI / ENH egress\n  \
+         --gtsm [N]               RFC 5082 TTL security (bare = 1 hop)\n  \
+         --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
-         --max-prefix-threshold P Early-warning percentage (0..100, default 75)\n  \
-         --protocol NAME          bgp (default) or babel\n  \
-         --babel-group ADDR       Babel multicast group (default: ff02::1:6)\n  \
-         --babel-port PORT        Babel UDP port (default: 6696)\n  \
-         -h, --help               Show this help"
+         --max-prefix-threshold P Early-warning percentage (default 75)\n  \
+         --protocol PROTO         bgp (default) | babel\n  \
+         --babel-group ADDR       Babel multicast group (ff02::1:6)\n  \
+         --babel-port PORT        Babel UDP port (6696)\n  \
+         --install-kernel-routes  Install best routes into the kernel FIB\n  \
+         --user NAME              Drop privileges after binding\n  \
+         --group NAME             Privilege-drop group\n  \
+         --api-socket PATH        Unix-socket runtime API\n  \
+         Multi-peer configuration uses [[peer]] tables in the TOML config\n  \
+         (see templates/daemon.toml): per-peer remote/address, peer_as,\n  \
+         auth, GTSM, maximum-prefix, Add-Path and family settings,\n  \
+         inheriting the [bgp] globals when omitted."
     );
 }
 
-/// Minimal TOML subset parser: `key = value` lines, `[section]` headers,
-/// `#` comments, and quoted strings. Sufficient for the daemon's config
-/// schema (see templates/daemon.toml).
-fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
-    let mut section = String::new();
-    for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if line.starts_with('[') && line.ends_with(']') {
-            section = line[1..line.len() - 1].trim().to_string();
-            continue;
-        }
-        let Some((key, value)) = line.split_once('=') else {
-            return Err(format!("line {}: expected `key = value`", lineno + 1));
-        };
-        let key = key.trim();
-        let value = value.trim().trim_matches('"');
-        let full = if section.is_empty() {
-            key.to_string()
-        } else {
-            format!("{}.{}", section, key)
-        };
-        match full.as_str() {
-            "bgp.local_as" => {
-                cfg.local_as = value
-                    .parse()
-                    .map_err(|_| format!("line {}: bad local_as", lineno + 1))?
-            }
-            "bgp.peer_as" => {
-                cfg.peer_as = value
-                    .parse()
-                    .map_err(|_| format!("line {}: bad peer_as", lineno + 1))?
-            }
-            "bgp.router_id" => cfg.router_id = value.to_string(),
-            "bgp.peer_addr" => cfg.peer_addr = Some(value.to_string()),
-            "bgp.listen_addr" => cfg.listen_addr = Some(value.to_string()),
-            "bgp.local_address" => cfg.local_address = Some(value.to_string()),
-            "bgp.hold_time" => cfg.hold_time = value.parse().unwrap_or(90),
-            "bgp.add_path" => cfg.add_path = value == "true",
-            "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
-            "bgp.extended_next_hop" => cfg.extended_next_hop = value == "true",
-            "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
-            "bgp.gtsm" => {
-                // "true" / "1" = single-hop; a number = multihop TTL.
-                if value == "true" || value == "1" {
-                    cfg.gtsm_hops = Some(1);
-                } else if let Ok(hops) = value.parse::<u8>() {
-                    cfg.gtsm_hops = Some(hops);
-                }
-            }
-            "bgp.max_prefixes" => {
-                cfg.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);
-            }
-            "bgp.max_prefix_action" => {
-                cfg.max_prefix_action = value.to_string();
-            }
-            "bgp.max_prefix_threshold" => {
-                cfg.max_prefix_threshold = value.parse().unwrap_or(75);
-            }
-            "bgp.mp_families" => {
-                // Comma-separated array: ["ipv4-unicast", "ipv6-unicast"]
-                let inner = value.trim_start_matches('[').trim_end_matches(']');
-                for item in inner.split(',') {
-                    let item = item.trim().trim_matches('"');
-                    if !item.is_empty() {
-                        cfg.mp_families.push(item.to_string());
-                    }
-                }
-            }
-            "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
-            "bgp.tcp_ao_keys" => {
-                // Comma-separated array: ["1:secret", "2:other"]
-                let inner = value.trim_start_matches('[').trim_end_matches(']');
-                for item in inner.split(',') {
-                    let item = item.trim().trim_matches('"');
-                    if !item.is_empty() {
-                        cfg.tcp_ao_keys.push(item.to_string());
-                    }
-                }
-            }
-            "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
-            "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
-            "user" => cfg.user = Some(value.to_string()),
-            "group" => cfg.group = Some(value.to_string()),
-            "api_socket" => cfg.api_socket = Some(value.to_string()),
-            "networks" | "bgp.networks" => {
-                // Comma-separated array: ["a", "b"] (top-level `networks`
-                // or inside [bgp] — the shipped template uses the latter).
-                let inner = value.trim_start_matches('[').trim_end_matches(']');
-                for item in inner.split(',') {
-                    let item = item.trim().trim_matches('"');
-                    if !item.is_empty() {
-                        cfg.networks.push(item.to_string());
-                    }
-                }
-            }
-            _ => {} // unknown keys are tolerated (forward compatibility)
-        }
-    }
-    Ok(())
-}
-
-fn parse_args() -> Result<DaemonConfig, ExitCode> {
-    let args: Vec<String> = std::env::args().collect();
-    let mut cfg = DaemonConfig {
-        hold_time: 90,
-        tcp_ao_algorithm: "hmac-sha1".to_string(),
-        add_path_max_paths: 6,
-        max_prefix_action: "warn".to_string(),
-        max_prefix_threshold: 75,
-        protocol: "bgp".to_string(),
-        babel_port: 6696,
-        ..Default::default()
-    };
-    let mut config_path: Option<String> = None;
-    let mut i = 1;
-    while i < args.len() {
-        let a = args[i].as_str();
-        match a {
-            "--config" if i + 1 < args.len() => {
-                config_path = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--local-as" if i + 1 < args.len() => {
-                cfg.local_as = args[i + 1].parse().unwrap_or(0);
-                i += 2;
-            }
-            "--peer-as" if i + 1 < args.len() => {
-                cfg.peer_as = args[i + 1].parse().unwrap_or(0);
-                i += 2;
-            }
-            "--router-id" if i + 1 < args.len() => {
-                cfg.router_id = args[i + 1].clone();
-                i += 2;
-            }
-            "--peer" if i + 1 < args.len() => {
-                cfg.peer_addr = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--listen" if i + 1 < args.len() => {
-                cfg.listen_addr = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--local-address" if i + 1 < args.len() => {
-                cfg.local_address = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--network" if i + 1 < args.len() => {
-                cfg.networks.push(args[i + 1].clone());
-                i += 2;
-            }
-            "--hold-time" if i + 1 < args.len() => {
-                cfg.hold_time = args[i + 1].parse().unwrap_or(90);
-                i += 2;
-            }
-            "--graceful-restart" if i + 1 < args.len() => {
-                cfg.gr_restart_time = args[i + 1].parse().unwrap_or(120);
-                i += 2;
-            }
-            "--llgr" if i + 1 < args.len() => {
-                cfg.llgr_stale_time = args[i + 1].parse().unwrap_or(0);
-                i += 2;
-            }
-            "--llgr-max-stale" if i + 1 < args.len() => {
-                cfg.llgr_max_stale_time = args[i + 1].parse().unwrap_or(0);
-                i += 2;
-            }
-            "--md5-key" if i + 1 < args.len() => {
-                cfg.md5_key = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--tcp-ao-key" if i + 1 < args.len() => {
-                cfg.tcp_ao_keys.push(args[i + 1].clone());
-                i += 2;
-            }
-            "--tcp-ao-alg" if i + 1 < args.len() => {
-                cfg.tcp_ao_algorithm = args[i + 1].clone();
-                i += 2;
-            }
-            "--tcp-ao-maclen" if i + 1 < args.len() => {
-                cfg.tcp_ao_maclen = args[i + 1].parse().unwrap_or(0);
-                i += 2;
-            }
-            "--install-kernel-routes" => {
-                cfg.install_kernel = true;
-                i += 1;
-            }
-            "--add-path" => {
-                cfg.add_path = true;
-                i += 1;
-            }
-            "--add-path-max" if i + 1 < args.len() => {
-                cfg.add_path_max_paths = args[i + 1].parse().unwrap_or(6);
-                i += 2;
-            }
-            "--mp-family" if i + 1 < args.len() => {
-                cfg.mp_families.push(args[i + 1].clone());
-                i += 2;
-            }
-            "--extended-next-hop" => {
-                cfg.extended_next_hop = true;
-                i += 1;
-            }
-            "--local-address-v6" if i + 1 < args.len() => {
-                cfg.local_address_v6 = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--gtsm" => {
-                // Bare --gtsm → single-hop (TTL=255). --gtsm N → multihop.
-                if i + 1 < args.len() {
-                    if let Ok(hops) = args[i + 1].parse::<u8>() {
-                        cfg.gtsm_hops = Some(hops);
-                        i += 2;
-                        continue;
-                    }
-                }
-                cfg.gtsm_hops = Some(1); // single-hop
-                i += 1;
-            }
-            "--max-prefixes" if i + 1 < args.len() => {
-                cfg.max_prefixes = args[i + 1].parse::<u32>().ok().filter(|&n| n > 0);
-                i += 2;
-            }
-            "--max-prefix-action" if i + 1 < args.len() => {
-                cfg.max_prefix_action = args[i + 1].clone();
-                i += 2;
-            }
-            "--max-prefix-threshold" if i + 1 < args.len() => {
-                cfg.max_prefix_threshold = args[i + 1].parse().unwrap_or(75);
-                i += 2;
-            }
-            "--protocol" if i + 1 < args.len() => {
-                cfg.protocol = args[i + 1].clone();
-                i += 2;
-            }
-            "--babel-group" if i + 1 < args.len() => {
-                cfg.babel_group = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--babel-port" if i + 1 < args.len() => {
-                cfg.babel_port = args[i + 1].parse().unwrap_or(6696);
-                i += 2;
-            }
-            "--user" if i + 1 < args.len() => {
-                cfg.user = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--group" if i + 1 < args.len() => {
-                cfg.group = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "--api-socket" if i + 1 < args.len() => {
-                cfg.api_socket = Some(args[i + 1].clone());
-                i += 2;
-            }
-            "-h" | "--help" => {
-                print_usage();
-                return Err(ExitCode::SUCCESS);
-            }
-            _ => {
-                eprintln!("unknown arg: {}", a);
-                print_usage();
-                return Err(ExitCode::from(2));
-            }
-        }
-    }
-    if let Some(path) = config_path {
-        let text = std::fs::read_to_string(&path).map_err(|e| {
-            eprintln!("cannot read config {}: {}", path, e);
-            ExitCode::from(1)
-        })?;
-        parse_toml_subset(&text, &mut cfg).map_err(|e| {
-            eprintln!("config parse error: {}", e);
-            ExitCode::from(1)
-        })?;
-        // Remember the file so `status` can show it and SIGHUP / `reload`
-        // can re-apply it.
-        cfg.config_path = Some(path);
-    }
-    Ok(cfg)
-}
-
-/// Builds the transport authentication configuration from CLI flags / TOML.
-/// MD5 and TCP-AO are mutually exclusive (the kernel forbids mixing them
-/// on one socket anyway: `TCP_AO_INFO.ao_required` fails with EKEYREJECTED
-/// when MD5 keys are present).
-fn build_tcp_auth(cfg: &DaemonConfig) -> Result<TcpAuth, String> {
-    if let Some(md5) = &cfg.md5_key {
-        if !cfg.tcp_ao_keys.is_empty() {
-            return Err("--md5-key and --tcp-ao-key are mutually exclusive".to_string());
-        }
-        return TcpAuth::md5(md5.as_bytes().to_vec()).map_err(|e| format!("bad --md5-key: {e}"));
-    }
-    if cfg.tcp_ao_keys.is_empty() {
-        return Ok(TcpAuth::None);
-    }
-    let algorithm = TcpAoAlgorithm::parse(&cfg.tcp_ao_algorithm).ok_or_else(|| {
-        format!(
-            "unknown --tcp-ao-alg '{}' (use hmac-sha1 or cmac-aes)",
-            cfg.tcp_ao_algorithm
-        )
-    })?;
-    let mut keys = Vec::with_capacity(cfg.tcp_ao_keys.len());
-    for raw in &cfg.tcp_ao_keys {
-        // Format: "id:secret" — the id is used as both SendID and RecvID.
-        let (id, secret) = raw.split_once(':').ok_or_else(|| {
-            format!("bad --tcp-ao-key '{raw}': expected ID:SECRET (e.g. 1:alpha)")
-        })?;
-        let id: u8 = id
-            .trim()
-            .parse()
-            .map_err(|_| format!("bad --tcp-ao-key '{raw}': ID must be 0-255"))?;
-        keys.push(
-            TcpAoKey::symmetric(id, secret.as_bytes().to_vec())
-                .map_err(|e| format!("bad --tcp-ao-key '{raw}': {e}"))?,
-        );
-    }
-    TcpAuth::tcp_ao(keys, algorithm, cfg.tcp_ao_maclen)
-        .map_err(|e| format!("bad tcp-ao configuration: {e}"))
-}
-
-/// Build the GTSM configuration from CLI flags / TOML. `None` when GTSM
-/// is not configured. Single-hop when `hops == 1`, multihop otherwise.
-fn build_gtsm(cfg: &DaemonConfig) -> Gtsm {
-    match cfg.gtsm_hops {
-        None => Gtsm::default(),
-        Some(1) => Gtsm::single_hop(),
-        Some(hops) => Gtsm::multihop(hops),
-    }
-}
-
 fn main() -> ExitCode {
-    let cfg = match parse_args() {
+    let mut cfg = match daemon_config::parse_args() {
         Ok(c) => c,
-        Err(code) => return code,
+        Err(code) => {
+            if code == ExitCode::SUCCESS || code == ExitCode::from(2) {
+                print_usage();
+            }
+            return code;
+        }
     };
-    if cfg.local_as == 0 || cfg.peer_as == 0 || cfg.router_id.is_empty() {
-        eprintln!("error: --local-as, --peer-as and --router-id are required");
+    cfg.finalize();
+    if cfg.local_as == 0 || cfg.router_id.is_empty() {
+        eprintln!("error: --local-as and --router-id are required");
         print_usage();
         return ExitCode::from(2);
     }
@@ -530,19 +128,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // Transport authentication (RFC 2385 / RFC 5925). MD5 and TCP-AO are
-    // mutually exclusive — a single TcpAuth value carries the choice.
-    let tcp_auth = match build_tcp_auth(&cfg) {
-        Ok(a) => a,
-        Err(e) => {
-            eprintln!("error: {}", e);
-            return ExitCode::from(2);
-        }
-    };
-    // RFC 5082 GTSM (TTL security). Listener-side min-TTL filter + outbound
-    // TTL=255 (or multihop TTL). Linux enforces both; other platforms set
-    // outbound TTL only.
-    let gtsm = build_gtsm(&cfg);
     // Babel mode: short-circuit the BGP session setup and run the
     // Babel UDP transport loop instead.
     if cfg.protocol == "babel" {
@@ -561,136 +146,129 @@ fn main() -> ExitCode {
              kernel installs may be denied after the privilege drop"
         );
     }
+    run_bgp_daemon(&cfg, rid)
+}
 
+/// One configured BGP peer: its router session, transport security and
+/// the busy flag serialising inbound connections on the session.
+struct PeerEntry {
+    spec: PeerSpec,
+    handle: SessionHandle,
+    auth: TcpAuth,
+    gtsm: Gtsm,
+    /// True while a transport thread owns this session — prevents two
+    /// concurrent connections racing one FSM.
+    busy: Arc<AtomicBool>,
+}
+
+impl PeerEntry {
+    fn label(&self) -> &str {
+        self.spec.label()
+    }
+}
+
+fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let router = Arc::new(Mutex::new(DefaultRouter::new()));
+
+    // ---- Build one router session per configured peer. ----
+    let mut entries: Vec<PeerEntry> = Vec::new();
     {
         let mut r = router.lock().unwrap();
         // RFC 7911 Add-Path: cap how many paths per prefix survive the
-        // decision process (and reach Add-Path peers).
+        // decision process (and reach Add-Path peers). Router-global.
         r.set_add_path_max_paths(cfg.add_path_max_paths.max(1) as usize);
-        let mut sc = SessionConfig::bgp(Asn(cfg.local_as), Asn(cfg.peer_as), rid);
-        sc.hold_time = cfg.hold_time;
-        if cfg.add_path {
-            sc = sc.with_add_path();
-        }
-        // RFC 4760 MP-BGP: build the family list from --mp-family entries.
-        // Empty config keeps the SessionConfig::bgp() default (IPv4 unicast),
-        // preserving the historical daemon behaviour. `ipv4-unicast` and
-        // `ipv6-unicast` are recognised; unknown names are logged and dropped.
-        if !cfg.mp_families.is_empty() {
-            let mut families = Vec::new();
-            for name in &cfg.mp_families {
-                match name.as_str() {
-                    "ipv4-unicast" => families.push(NlriFamily::IPV4_UNICAST),
-                    "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
-                    other => eprintln!("daemon: unknown --mp-family '{}' (skipped)", other),
+        for spec in &cfg.peers {
+            if cfg.explicit_peers && !spec.is_outbound() && !spec.is_inbound() {
+                eprintln!(
+                    "daemon: peer {}: 'remote' or 'address' is required",
+                    spec.label()
+                );
+                return ExitCode::from(2);
+            }
+            if spec.is_outbound() && spec.is_inbound() {
+                eprintln!(
+                    "daemon: peer {}: 'remote' and 'address' together are not \
+                     supported yet (RFC 4271 §6.8 collision detection is \
+                     future work); configure one direction",
+                    spec.label()
+                );
+                return ExitCode::from(2);
+            }
+            if cfg.effective_peer_as(spec) == 0 {
+                eprintln!(
+                    "daemon: peer {}: no peer AS configured (set peer_as or \
+                     the global --peer-as)",
+                    spec.label()
+                );
+                return ExitCode::from(2);
+            }
+            if spec.is_inbound() && cfg.listen_addr.is_none() {
+                eprintln!(
+                    "daemon: peer {}: inbound peers require --listen",
+                    spec.label()
+                );
+                return ExitCode::from(2);
+            }
+            let auth = match build_peer_tcp_auth(cfg, spec) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("error: peer {}: {}", spec.label(), e);
+                    return ExitCode::from(2);
                 }
-            }
-            if !families.is_empty() {
-                sc = sc.with_mp_families(families);
-            }
-        }
-        // RFC 5549 Extended Next-Hop. Advertise the canonical (1,1,2) tuple
-        // so an IPv6 transport can carry IPv4 NLRI without an IPv4 next-hop.
-        if cfg.extended_next_hop {
-            sc = sc.with_extended_next_hop();
-        }
-        // Per-peer maximum-prefix (BIRD `maximum prefix`, FRR
-        // `maximum-prefix`). The action defaults to "warn"; the daemon
-        // banner prints the effective configuration.
-        if let Some(limit) = cfg.max_prefixes {
-            let action = match cfg.max_prefix_action.as_str() {
-                "teardown" => lr_bgp::MaxPrefixAction::Teardown,
-                "restart" => lr_bgp::MaxPrefixAction::Restart,
-                _ => lr_bgp::MaxPrefixAction::Warn,
             };
-            sc = sc
-                .with_maximum_prefix(limit, action)
-                .with_maximum_prefix_threshold(cfg.max_prefix_threshold);
-        }
-        // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
-        // LLGR requires GR (RFC 9494 §4.1): with_long_lived_gr is therefore
-        // only applied when the restart time is nonzero.
-        sc = sc.with_graceful_restart(cfg.gr_restart_time);
-        if cfg.llgr_stale_time != 0 {
-            sc = sc.with_long_lived_gr(cfg.llgr_stale_time);
-        }
-        if cfg.llgr_max_stale_time != 0 {
-            sc = sc.with_llgr_max_stale_time(cfg.llgr_max_stale_time);
-        }
-        // Local address for next-hop-self egress. The IPv4 source derives
-        // from --local-address or the peer/listen socket's IP; the IPv6
-        // source (for IPv6 NLRI / RFC 5549 ENH egress) is taken verbatim
-        // from --local-address-v6. Without a relevant source we leave the
-        // session's local_address unset and rely on the route's existing
-        // NEXT_HOP (correct for iBGP; eBGP without a source skips rewrite).
-        if let Some(ip) = parse_local_address(&cfg.local_address, &cfg.peer_addr, &cfg.listen_addr)
-        {
-            sc = sc.with_local_address(ip);
-        }
-        // When the IPv6 source differs from the IPv4 one (the common case
-        // for dual-stack hosts), prefer it for IPv6 / ENH egress. The
-        // router layer accepts only one local_address today, so we pick
-        // the v6 source when the configured transport is IPv6 — otherwise
-        // the v4 source above already covers IPv4 NLRI.
-        if let Some(v6) = &cfg.local_address_v6 {
-            if let Ok(ip) = IpAddr::from_str(v6) {
-                if matches!(ip, IpAddr::V6(_)) {
-                    // When the transport is IPv6 (peer_addr or listen_addr
-                    // resolves to a v6 socket), the v6 source is the right
-                    // next-hop-self for any family this session speaks.
-                    let transport_is_v6 = cfg
-                        .peer_addr
-                        .as_deref()
-                        .or(cfg.listen_addr.as_deref())
-                        .and_then(transport_ip)
-                        .map(|ip| matches!(ip, IpAddr::V6(_)))
-                        .unwrap_or(false);
-                    if transport_is_v6 {
-                        sc = sc.with_local_address(ip);
-                    } else if cfg.extended_next_hop {
-                        // ENH egress needs the v6 source even when the
-                        // transport is v4 — the peer resolves IPv4 NLRI
-                        // over the v6 next-hop.
-                        sc = sc.with_local_address(ip);
-                    }
-                }
-            } else {
-                eprintln!("daemon: invalid --local-address-v6 '{}'", v6);
+            let gtsm = build_peer_gtsm(cfg, spec);
+            let sc = build_session_config(cfg, spec, rid);
+            // eBGP without a source address: egress keeps the received
+            // NEXT_HOP, which peers usually reject — warn loudly.
+            if cfg.effective_peer_as(spec) != cfg.local_as
+                && sc.local_address.is_none()
+                && spec.is_outbound()
+            {
+                eprintln!(
+                    "daemon: peer {}: warning: no local_address; eBGP \
+                     egress will keep the received NEXT_HOP (peers often \
+                     reject these UPDATEs)",
+                    spec.label()
+                );
             }
-        }
-        match r.add_session(sc) {
-            Ok(h) => println!("daemon: BGP session #{} configured", h.0),
-            Err(e) => {
-                eprintln!("daemon: add_session failed: {}", e);
-                return ExitCode::from(1);
+            match r.add_session(sc) {
+                Ok(h) => entries.push(PeerEntry {
+                    spec: spec.clone(),
+                    handle: h,
+                    auth,
+                    gtsm,
+                    busy: Arc::new(AtomicBool::new(false)),
+                }),
+                Err(e) => {
+                    eprintln!("daemon: peer {}: add_session failed: {}", spec.label(), e);
+                    return ExitCode::from(1);
+                }
             }
         }
     }
 
+    // ---- Banner. ----
     println!("librouting daemon (lr-daemon)");
     println!("  local AS:    AS{}", cfg.local_as);
-    println!("  peer AS:     AS{}", cfg.peer_as);
     println!("  router-id:   {}", rid);
-    if let Some(peer) = &cfg.peer_addr {
-        println!("  peer:        {}", peer);
+    println!("  peers:       {}", entries.len());
+    for e in &entries {
+        println!(
+            "    #{} {} AS{} ({})",
+            e.handle.0,
+            e.label(),
+            cfg.effective_peer_as(&e.spec),
+            if e.spec.is_outbound() {
+                "outbound"
+            } else if e.spec.is_inbound() {
+                "inbound"
+            } else {
+                "any"
+            }
+        );
     }
     println!("  networks:    {:?}", cfg.networks);
     println!("  install:     {}", cfg.install_kernel);
-    if cfg.add_path {
-        println!(
-            "  add-path:    enabled (max {} paths/prefix)",
-            cfg.add_path_max_paths.max(1)
-        );
-    }
-    println!("  auth:        {}", tcp_auth.describe());
-    println!("  gtsm:        {}", gtsm);
-    if let Some(limit) = cfg.max_prefixes {
-        println!(
-            "  max-prefix:  {} (action={}, threshold={}%)",
-            limit, cfg.max_prefix_action, cfg.max_prefix_threshold
-        );
-    }
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -711,6 +289,7 @@ fn main() -> ExitCode {
     }
 
     let running = Arc::new(AtomicBool::new(true));
+    let live_sessions = Arc::new(AtomicUsize::new(0));
     let runtime = Arc::new(Runtime {
         reload: Arc::new({
             let router = Arc::clone(&router);
@@ -722,31 +301,20 @@ fn main() -> ExitCode {
         running: Arc::clone(&running),
     });
 
-    // --- Ticker thread: pump the router clock every 50 ms. ---
-    {
-        let router = Arc::clone(&runtime.router);
-        let running = Arc::clone(&running);
-        thread::spawn(move || {
-            let start = WallClock::now();
-            while running.load(Ordering::Relaxed) {
-                let now_ms = start.elapsed().as_millis() as u64;
-                {
-                    let mut r = router.lock().unwrap();
-                    r.tick(lr_core::time::Instant(now_ms));
-                    for ev in r.poll_events() {
-                        log_event(&ev);
-                    }
-                }
-                thread::sleep(Duration::from_millis(50));
-            }
-        });
-    }
+    // --- Ticker thread: pump the router clock every 50 ms. It is the
+    // single consumer of router events — logging and (optional) kernel
+    // route installation happen here, never on the I/O threads, so the
+    // Loc-RIB event order cannot be shuffled across sessions. ---
+    spawn_ticker(&runtime, cfg.install_kernel, Arc::clone(&live_sessions));
 
-    // --- IO loop: connect to the peer and pump bytes both ways. ---
-    let session: SessionHandle = SessionHandle(1);
-
+    // ---- Listener (inbound), if configured. ----
+    // Legacy mode (no [[peer]] tables, a single peer): the listener
+    // accepts any connection on session #1, and `--listen` wins over
+    // `--peer` exactly as the historical daemon did. Explicit mode:
+    // inbound connections are matched to peers by source address.
+    let strict_inbound = cfg.explicit_peers || cfg.peers.len() > 1;
+    let mut listener: Option<std::net::TcpListener> = None;
     if let Some(listen_addr) = cfg.listen_addr.clone() {
-        // ---- Inbound mode: accept connections on a local port. ----
         let sockaddr = match resolve(&listen_addr) {
             Some(a) => a,
             None => {
@@ -754,7 +322,7 @@ fn main() -> ExitCode {
                 return ExitCode::from(1);
             }
         };
-        let listener = match std::net::TcpListener::bind(sockaddr) {
+        let l = match std::net::TcpListener::bind(sockaddr) {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("daemon: bind {} failed: {}", listen_addr, e);
@@ -764,60 +332,127 @@ fn main() -> ExitCode {
         println!("daemon: listening on {}", listen_addr);
         // Fail closed: if session authentication is configured but cannot
         // be armed on the listener (missing kernel support, bad key), stop
-        // instead of accepting unauthenticated connections.
-        if let Err(e) = lr_osroute::tcp_auth::arm_listener(&listener, &tcp_auth) {
+        // instead of accepting unauthenticated connections. All inbound
+        // peers must share one auth configuration — heterogeneous
+        // listener keys are future work.
+        let inbound_auth = match listener_auth(cfg, &entries) {
+            Ok(a) => a,
+            Err(e) => {
+                eprintln!("daemon: session auth arming failed: {}", e);
+                return ExitCode::from(1);
+            }
+        };
+        if let Err(e) = lr_osroute::tcp_auth::arm_listener(&l, &inbound_auth) {
             eprintln!("daemon: session auth arming failed: {}", e);
             return ExitCode::from(1);
         }
-        if !tcp_auth.is_none() {
-            println!("daemon: session auth armed ({})", tcp_auth.describe());
+        if !inbound_auth.is_none() {
+            println!("daemon: session auth armed ({})", inbound_auth.describe());
         }
         // RFC 5082 GTSM: arm the listener with the min-TTL filter. Fail
         // closed when the kernel does not support IP_MINTTL — running
         // without the filter would defeat the purpose of configuring GTSM.
-        if !gtsm.is_disabled() {
-            if let Err(e) = lr_osroute::gtsm::arm_listener_gtsm(&listener, &gtsm) {
+        // Like auth, the filter is listener-wide.
+        let inbound_gtsm = listener_gtsm(cfg, &entries);
+        if !inbound_gtsm.is_disabled() {
+            if let Err(e) = lr_osroute::gtsm::arm_listener_gtsm(&l, &inbound_gtsm) {
                 eprintln!("daemon: GTSM arming failed: {}", e);
                 return ExitCode::from(1);
             }
-            println!("daemon: GTSM armed ({})", gtsm);
+            println!("daemon: GTSM armed ({})", inbound_gtsm);
         }
-        // Privileged work is done: drop root before touching any network
-        // input, then create the management socket as the reduced user.
-        if let Err(e) = do_privdrop(&cfg) {
-            eprintln!("daemon: {}", e);
-            return ExitCode::from(1);
-        }
-        if let Err(e) = spawn_api(&cfg, &runtime) {
-            eprintln!("daemon: {}", e);
-            return ExitCode::from(1);
-        }
-        // Non-blocking accept: the poll cadence is what lets the main
-        // thread notice SIGTERM/SIGINT (graceful stop) and SIGHUP
-        // (reload) while idle between connections.
-        if let Err(e) = listener.set_nonblocking(true) {
+        if let Err(e) = l.set_nonblocking(true) {
             eprintln!("daemon: cannot set listener non-blocking: {}", e);
             return ExitCode::from(1);
         }
+        listener = Some(l);
+    }
+
+    // Privileged work is done: drop root before touching any network
+    // input, then create the management socket as the reduced user.
+    if let Err(e) = do_privdrop(cfg) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+    if let Err(e) = spawn_api(cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+
+    // ---- Outbound connectors: one thread per remote peer. ----
+    // Legacy listen precedence: with a single peer and --listen, the
+    // historical daemon ignored --peer entirely (listen mode wins).
+    let legacy_listen_only = !strict_inbound && listener.is_some();
+    if !legacy_listen_only {
+        for entry in &entries {
+            if entry.spec.is_outbound() {
+                spawn_connector(&runtime, entry, Arc::clone(&live_sessions));
+            }
+        }
+    }
+
+    // ---- Main thread: run the accept loop, or idle until shutdown. ----
+    if let Some(listener) = listener {
+        let mut poll_idle = Duration::from_millis(100);
         loop {
             dispatch_signals(&runtime);
             if !running.load(Ordering::Relaxed) {
                 break;
             }
             match listener.accept() {
-                Ok((s, _)) => {
-                    let peer = s
-                        .peer_addr()
-                        .map(|a| a.to_string())
-                        .unwrap_or_else(|_| "?".into());
+                Ok((s, peer_sockaddr)) => {
+                    let peer = peer_sockaddr.to_string();
                     println!("daemon: inbound connection from {}", peer);
                     let _ = s.set_nodelay(true);
-                    if let Err(e) = run_session(&runtime, s, session, cfg.install_kernel) {
-                        eprintln!("daemon: session ended: {}", e);
+                    let entry = if strict_inbound {
+                        match match_inbound_peer(&entries, peer_sockaddr.ip()) {
+                            Ok(e) => e,
+                            Err(reason) => {
+                                eprintln!(
+                                    "daemon: inbound connection from {} rejected: {}",
+                                    peer, reason
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        // Historical accept-any: session #1.
+                        &entries[0]
+                    };
+                    if entry.busy.swap(true, Ordering::Relaxed) {
+                        eprintln!(
+                            "daemon: peer {} already has an active session; \
+                             dropping inbound connection from {}",
+                            entry.label(),
+                            peer
+                        );
+                        continue;
                     }
+                    let rt = Arc::clone(&runtime);
+                    let busy = Arc::clone(&entry.busy);
+                    let live = Arc::clone(&live_sessions);
+                    let handle = entry.handle;
+                    live.fetch_add(1, Ordering::Relaxed);
+                    let spawned = thread::Builder::new()
+                        .name(format!("lr-session-{}", handle.0))
+                        .spawn(move || {
+                            if let Err(e) = run_peer_session(rt, s, handle) {
+                                eprintln!("daemon: session #{} ended: {}", handle.0, e);
+                            }
+                            busy.store(false, Ordering::Relaxed);
+                            live.fetch_sub(1, Ordering::Relaxed);
+                        });
+                    if spawned.is_err() {
+                        // Thread spawn failed: undo the guards so the
+                        // peer is not wedged busy forever.
+                        entry.busy.store(false, Ordering::Relaxed);
+                        live_sessions.fetch_sub(1, Ordering::Relaxed);
+                    }
+                    poll_idle = Duration::from_millis(1);
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    thread::sleep(Duration::from_millis(100));
+                    thread::sleep(poll_idle);
+                    poll_idle = (poll_idle * 2).min(Duration::from_millis(100));
                 }
                 Err(e) => {
                     eprintln!("daemon: accept failed: {}", e);
@@ -825,131 +460,548 @@ fn main() -> ExitCode {
                 }
             }
         }
-        println!("daemon: shutdown complete");
-        return ExitCode::SUCCESS;
+    } else if entries.iter().any(|e| e.spec.is_outbound()) {
+        // Connectors own the I/O; the main thread just supervises.
+        wait_for_shutdown(&runtime);
+    } else {
+        println!("daemon: no --peer/--listen given; idling (tick loop only)");
+        wait_for_shutdown(&runtime);
     }
 
-    let peer_addr = match cfg.peer_addr.clone() {
-        Some(p) => p,
-        None => {
-            // Idle mode: no sockets beyond the management plane.
-            if let Err(e) = do_privdrop(&cfg) {
-                eprintln!("daemon: {}", e);
-                return ExitCode::from(1);
+    // Give live session threads a bounded grace period to flush their
+    // close NOTIFICATIONs (RFC 4271 §6.4) before the process exits.
+    let deadline = WallClock::now() + Duration::from_secs(3);
+    while live_sessions.load(Ordering::Relaxed) > 0 && WallClock::now() < deadline {
+        thread::sleep(Duration::from_millis(50));
+    }
+    println!("daemon: shutdown complete");
+    ExitCode::SUCCESS
+}
+
+/// Build the `SessionConfig` for one peer, resolving all per-peer
+/// overrides against the `[bgp]` globals.
+fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> SessionConfig {
+    let mut sc = SessionConfig::bgp(Asn(g.local_as), Asn(g.effective_peer_as(p)), rid);
+    sc.hold_time = p.hold_time.unwrap_or(g.hold_time);
+    if p.add_path.unwrap_or(g.add_path) {
+        sc = sc.with_add_path();
+    }
+    // RFC 4760 MP-BGP: build the family list from the effective config.
+    // Empty keeps the SessionConfig::bgp() default (IPv4 unicast),
+    // preserving the historical daemon behaviour. `ipv4-unicast` and
+    // `ipv6-unicast` are recognised; unknown names are logged and dropped.
+    let families_cfg = p.mp_families.as_ref().unwrap_or(&g.mp_families);
+    if !families_cfg.is_empty() {
+        let mut families = Vec::new();
+        for name in families_cfg {
+            match name.as_str() {
+                "ipv4-unicast" => families.push(NlriFamily::IPV4_UNICAST),
+                "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
+                other => eprintln!(
+                    "daemon: peer {}: unknown mp_family '{}' (skipped)",
+                    p.label(),
+                    other
+                ),
             }
-            if let Err(e) = spawn_api(&cfg, &runtime) {
-                eprintln!("daemon: {}", e);
-                return ExitCode::from(1);
-            }
-            println!("daemon: no --peer/--listen given; idling (tick loop only)");
-            wait_for_shutdown(&runtime);
-            return ExitCode::SUCCESS;
         }
-    };
-
-    // ---- Outbound mode: connect (with reconnect + backoff). ----
-    // No privileged resource is needed (ephemeral source port; auth keys
-    // are plain setsockopt) — drop before the first connect attempt.
-    if let Err(e) = do_privdrop(&cfg) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
-    }
-    if let Err(e) = spawn_api(&cfg, &runtime) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
-    }
-    let mut backoff_ms: u64 = 1_000;
-
-    while running.load(Ordering::Relaxed) {
-        dispatch_signals(&runtime);
-        if !running.load(Ordering::Relaxed) {
-            break;
+        if !families.is_empty() {
+            sc = sc.with_mp_families(families);
         }
-        let sockaddr = match resolve(&peer_addr) {
-            Some(a) => a,
-            None => {
-                eprintln!("daemon: cannot resolve {}", peer_addr);
-                return ExitCode::from(1);
-            }
+    }
+    // RFC 5549 Extended Next-Hop. Advertise the canonical (1,1,2) tuple
+    // so an IPv6 transport can carry IPv4 NLRI without an IPv4 next-hop.
+    if p.extended_next_hop.unwrap_or(g.extended_next_hop) {
+        sc = sc.with_extended_next_hop();
+    }
+    // Per-peer maximum-prefix (BIRD `maximum prefix`, FRR
+    // `maximum-prefix`).
+    if let Some(limit) = p.max_prefixes.or(g.max_prefixes) {
+        let action = match p
+            .max_prefix_action
+            .as_deref()
+            .unwrap_or(g.max_prefix_action.as_str())
+        {
+            "teardown" => lr_bgp::MaxPrefixAction::Teardown,
+            "restart" => lr_bgp::MaxPrefixAction::Restart,
+            _ => lr_bgp::MaxPrefixAction::Warn,
         };
-        println!("daemon: connecting to {} ...", peer_addr);
-        // Connect with the appropriate transport security:
-        // - TCP auth (MD5/AO) + GTSM: connect_auth creates the socket and
-        //   signs the SYN; GTSM's outbound TTL is set on the returned
-        //   TcpStream via set_ttl. The min-TTL filter is listener-side only.
-        // - GTSM only: connect_gtsm creates the socket with TTL set.
-        // - Neither: plain connect.
-        let stream = if !tcp_auth.is_none() {
-            match lr_osroute::tcp_auth::connect_auth(sockaddr, &tcp_auth, Duration::from_secs(5)) {
-                Ok(s) => {
-                    if !gtsm.is_disabled() {
-                        let _ = s.set_ttl(gtsm.outbound_ttl as u32);
-                    }
-                    s
-                }
-                Err(e) => {
-                    if e.is_kernel_unsupported() {
-                        eprintln!("daemon: session auth not supported by kernel: {}", e);
-                        return ExitCode::from(1);
-                    }
-                    eprintln!(
-                        "daemon: connect failed ({}); retrying in {}ms",
-                        e, backoff_ms
-                    );
-                    sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(30_000);
-                    continue;
-                }
-            }
-        } else if !gtsm.is_disabled() {
-            match lr_osroute::gtsm::connect_gtsm(sockaddr, &gtsm, Duration::from_secs(5)) {
-                Ok(s) => s,
-                Err(e) => {
-                    if e.is_kernel_unsupported() {
-                        eprintln!("daemon: GTSM not supported by kernel: {}", e);
-                        return ExitCode::from(1);
-                    }
-                    eprintln!(
-                        "daemon: connect failed ({}); retrying in {}ms",
-                        e, backoff_ms
-                    );
-                    sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(30_000);
-                    continue;
+        sc = sc
+            .with_maximum_prefix(limit, action)
+            .with_maximum_prefix_threshold(
+                p.max_prefix_threshold.unwrap_or(g.max_prefix_threshold),
+            );
+    }
+    // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
+    // LLGR requires GR (RFC 9494 §4.1): with_long_lived_gr is therefore
+    // only applied when the restart time is nonzero.
+    sc = sc.with_graceful_restart(p.gr_restart_time.unwrap_or(g.gr_restart_time));
+    let llgr = p.llgr_stale_time.unwrap_or(g.llgr_stale_time);
+    if llgr != 0 {
+        sc = sc.with_long_lived_gr(llgr);
+    }
+    let llgr_cap = p.llgr_max_stale_time.unwrap_or(g.llgr_max_stale_time);
+    if llgr_cap != 0 {
+        sc = sc.with_llgr_max_stale_time(llgr_cap);
+    }
+    // Local address for next-hop-self egress. The IPv4 source derives
+    // from the peer's local_address / the global --local-address / the
+    // listener's IP. Without a relevant source we leave the session's
+    // local_address unset and rely on the route's existing NEXT_HOP
+    // (correct for iBGP; eBGP without a source skips rewrite).
+    if let Some(ip) = peer_local_address(g, p) {
+        sc = sc.with_local_address(ip);
+    }
+    // When the IPv6 source differs from the IPv4 one (the common case
+    // for dual-stack hosts), prefer it for IPv6 / ENH egress: when the
+    // transport is IPv6 it is the right next-hop-self for any family
+    // this session speaks; with ENH the peer resolves IPv4 NLRI over
+    // the v6 next-hop even on a v4 transport.
+    let v6_source = p.local_address_v6.as_ref().or(g.local_address_v6.as_ref());
+    if let Some(v6) = v6_source {
+        if let Ok(ip) = IpAddr::from_str(v6) {
+            if matches!(ip, IpAddr::V6(_)) {
+                // The session transport: the remote address for outbound
+                // peers, the listener for inbound/legacy ones.
+                let transport = p.remote.as_deref().or(g.listen_addr.as_deref());
+                let transport_is_v6 = transport
+                    .and_then(transport_ip)
+                    .map(|ip| matches!(ip, IpAddr::V6(_)))
+                    .unwrap_or(false);
+                if transport_is_v6 || p.extended_next_hop.unwrap_or(g.extended_next_hop) {
+                    sc = sc.with_local_address(ip);
                 }
             }
         } else {
-            match std::net::TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5)) {
-                Ok(s) => s,
-                Err(e) => {
-                    eprintln!(
-                        "daemon: connect failed ({}); retrying in {}ms",
-                        e, backoff_ms
-                    );
-                    sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
-                    backoff_ms = (backoff_ms * 2).min(30_000);
-                    continue;
-                }
-            }
-        };
-        backoff_ms = 1_000;
-        let _ = stream.set_nodelay(true);
-        match run_session(&runtime, stream, session, cfg.install_kernel) {
-            Ok(()) => break,
-            Err(e) => {
-                eprintln!("daemon: session ended: {}", e);
-                if !running.load(Ordering::Relaxed) {
-                    break;
-                }
-                eprintln!("daemon: reconnecting in {}ms", backoff_ms);
-                sleep_interruptible(&runtime, Duration::from_millis(backoff_ms));
-                backoff_ms = (backoff_ms * 2).min(30_000);
-            }
+            eprintln!(
+                "daemon: peer {}: invalid local_address_v6 '{}'",
+                p.label(),
+                v6
+            );
         }
     }
+    sc
+}
 
-    println!("daemon: shutdown complete");
-    ExitCode::SUCCESS
+/// Per-peer transport authentication (RFC 2385 / RFC 5925). MD5 and
+/// TCP-AO are mutually exclusive (the kernel forbids mixing them on one
+/// socket anyway).
+fn build_peer_tcp_auth(g: &DaemonConfig, p: &PeerSpec) -> Result<TcpAuth, String> {
+    let md5 = p.md5_key.as_ref().or(g.md5_key.as_ref());
+    let ao_keys = p
+        .tcp_ao_keys
+        .clone()
+        .unwrap_or_else(|| g.tcp_ao_keys.clone());
+    if let Some(md5) = md5 {
+        if !ao_keys.is_empty() {
+            return Err("--md5-key and --tcp-ao-key are mutually exclusive".to_string());
+        }
+        return TcpAuth::md5(md5.as_bytes().to_vec()).map_err(|e| format!("bad md5 key: {e}"));
+    }
+    if ao_keys.is_empty() {
+        return Ok(TcpAuth::None);
+    }
+    let algorithm_name = p
+        .tcp_ao_algorithm
+        .clone()
+        .unwrap_or_else(|| g.tcp_ao_algorithm.clone());
+    let algorithm = TcpAoAlgorithm::parse(&algorithm_name).ok_or_else(|| {
+        format!("unknown tcp-ao-alg '{algorithm_name}' (use hmac-sha1 or cmac-aes)")
+    })?;
+    let maclen = p.tcp_ao_maclen.unwrap_or(g.tcp_ao_maclen);
+    let mut keys = Vec::with_capacity(ao_keys.len());
+    for raw in &ao_keys {
+        // Format: "id:secret" — the id is used as both SendID and RecvID.
+        let (id, secret) = raw
+            .split_once(':')
+            .ok_or_else(|| format!("bad tcp-ao-key '{raw}': expected ID:SECRET (e.g. 1:alpha)"))?;
+        let id: u8 = id
+            .trim()
+            .parse()
+            .map_err(|_| format!("bad tcp-ao-key '{raw}': ID must be 0-255"))?;
+        keys.push(
+            TcpAoKey::symmetric(id, secret.as_bytes().to_vec())
+                .map_err(|e| format!("bad tcp-ao-key '{raw}': {e}"))?,
+        );
+    }
+    TcpAuth::tcp_ao(keys, algorithm, maclen).map_err(|e| format!("bad tcp-ao configuration: {e}"))
+}
+
+/// Per-peer RFC 5082 GTSM configuration.
+fn build_peer_gtsm(g: &DaemonConfig, p: &PeerSpec) -> Gtsm {
+    match p.gtsm_hops.or(g.gtsm_hops) {
+        None => Gtsm::default(),
+        Some(1) => Gtsm::single_hop(),
+        Some(hops) => Gtsm::multihop(hops),
+    }
+}
+
+/// The auth configuration a shared listener must be armed with: every
+/// inbound-capable peer's auth, which must all be identical (hetero-
+/// geneous listener keys are future work). Legacy mode arms the single
+/// peer's configuration exactly as the historical daemon did.
+fn listener_auth(g: &DaemonConfig, entries: &[PeerEntry]) -> Result<TcpAuth, String> {
+    let strict = g.explicit_peers || g.peers.len() > 1;
+    let inbound: Vec<&PeerEntry> = if strict {
+        entries.iter().filter(|e| e.spec.is_inbound()).collect()
+    } else {
+        entries.iter().take(1).collect() // legacy: the single peer
+    };
+    if inbound.is_empty() {
+        return Ok(TcpAuth::None);
+    }
+    let first = inbound[0].auth.clone();
+    for e in &inbound[1..] {
+        if e.auth != first {
+            return Err(format!(
+                "peers {} and {} configure different session auth; a \
+                 shared listener supports one key set (configure identical \
+                 auth for all inbound peers)",
+                inbound[0].label(),
+                e.label()
+            ));
+        }
+    }
+    Ok(first)
+}
+
+/// The GTSM filter for the shared listener (same rules as
+/// [`listener_auth`]).
+fn listener_gtsm(g: &DaemonConfig, entries: &[PeerEntry]) -> Gtsm {
+    let strict = g.explicit_peers || g.peers.len() > 1;
+    let inbound: Vec<&PeerEntry> = if strict {
+        entries.iter().filter(|e| e.spec.is_inbound()).collect()
+    } else {
+        entries.iter().take(1).collect()
+    };
+    inbound.first().map(|e| e.gtsm).unwrap_or_default()
+}
+
+/// Resolve the effective source address for next-hop-self egress of
+/// `peer`. Explicit peers derive from the listener only (deriving from
+/// the *peer's* address would advertise the peer's IP as next-hop);
+/// the legacy single peer keeps the historical derivation order.
+fn peer_local_address(g: &DaemonConfig, p: &PeerSpec) -> Option<IpAddr> {
+    let configured = p.local_address.as_ref().or(g.local_address.as_ref());
+    if let Some(s) = configured {
+        if let Ok(ip) = IpAddr::from_str(s) {
+            return Some(ip);
+        }
+        // The configured string might be a `host:port` form (legacy).
+        if let Some(ip) = transport_ip(s) {
+            return Some(ip);
+        }
+        return None;
+    }
+    if g.explicit_peers {
+        g.listen_addr.as_deref().and_then(transport_ip)
+    } else {
+        g.peer_addr
+            .as_deref()
+            .or(g.listen_addr.as_deref())
+            .and_then(transport_ip)
+    }
+}
+
+/// Match an inbound connection's source address to a configured peer
+/// (explicit mode). Exactly one peer must claim the address.
+fn match_inbound_peer(entries: &[PeerEntry], src: std::net::IpAddr) -> Result<&PeerEntry, String> {
+    let src = match src {
+        std::net::IpAddr::V4(v4) => IpAddr::V4(v4.octets()),
+        std::net::IpAddr::V6(v6) => IpAddr::V6(v6.octets()),
+    };
+    let mut found: Option<&PeerEntry> = None;
+    for e in entries {
+        let Some(expected) = expected_peer_ip(&e.spec) else {
+            continue;
+        };
+        if expected == src {
+            if found.is_some() {
+                return Err(format!("address {} is claimed by more than one peer", src));
+            }
+            found = Some(e);
+        }
+    }
+    found.ok_or_else(|| format!("no configured peer matches {}", src))
+}
+
+/// The IP an inbound connection from this peer is expected to carry:
+/// the explicit `address`, else the host part of `remote`.
+fn expected_peer_ip(spec: &PeerSpec) -> Option<IpAddr> {
+    spec.address
+        .as_deref()
+        .or(spec.remote.as_deref())
+        .and_then(transport_ip)
+}
+
+/// Connect with the appropriate transport security:
+/// - TCP auth (MD5/AO) + GTSM: connect_auth creates the socket and
+///   signs the SYN; GTSM's outbound TTL is set on the returned
+///   TcpStream via set_ttl. The min-TTL filter is listener-side only.
+/// - GTSM only: connect_gtsm creates the socket with TTL set.
+/// - Neither: plain connect.
+///
+/// The Err payload marks kernel-unsupported auth as fatal for this peer
+/// (fail closed: the key was configured, running without it is worse
+/// than not running the session).
+fn connect_secure(
+    sockaddr: std::net::SocketAddr,
+    auth: &TcpAuth,
+    gtsm: &Gtsm,
+) -> Result<TcpStream, (String, bool)> {
+    if !auth.is_none() {
+        match lr_osroute::tcp_auth::connect_auth(sockaddr, auth, Duration::from_secs(5)) {
+            Ok(s) => {
+                if !gtsm.is_disabled() {
+                    let _ = s.set_ttl(gtsm.outbound_ttl as u32);
+                }
+                Ok(s)
+            }
+            Err(e) => {
+                if e.is_kernel_unsupported() {
+                    Err((format!("session auth not supported by kernel: {e}"), true))
+                } else {
+                    Err((format!("{e}"), false))
+                }
+            }
+        }
+    } else if !gtsm.is_disabled() {
+        match lr_osroute::gtsm::connect_gtsm(sockaddr, gtsm, Duration::from_secs(5)) {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                if e.is_kernel_unsupported() {
+                    Err((format!("GTSM not supported by kernel: {e}"), true))
+                } else {
+                    Err((format!("{e}"), false))
+                }
+            }
+        }
+    } else {
+        TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5))
+            .map_err(|e| (format!("{e}"), false))
+    }
+}
+
+/// One outbound peer: connect, run the session until it drops, back
+/// off, repeat — for the lifetime of the daemon.
+fn spawn_connector(rt: &Arc<Runtime>, entry: &PeerEntry, live: Arc<AtomicUsize>) {
+    let rt = Arc::clone(rt);
+    let remote = entry.spec.remote.clone().expect("outbound peer has remote");
+    let auth = entry.auth.clone();
+    let gtsm = entry.gtsm;
+    let handle = entry.handle;
+    let label = entry.spec.label().to_string();
+    let _ = thread::Builder::new()
+        .name(format!("lr-connect-{}", label))
+        .spawn(move || {
+            let mut backoff_ms: u64 = 1_000;
+            while rt.running.load(Ordering::Relaxed) {
+                dispatch_signals(&rt);
+                if !rt.running.load(Ordering::Relaxed) {
+                    break;
+                }
+                let sockaddr = match resolve(&remote) {
+                    Some(a) => a,
+                    None => {
+                        eprintln!("daemon: peer {}: cannot resolve {}", label, remote);
+                        return;
+                    }
+                };
+                println!("daemon: peer {}: connecting to {} ...", label, remote);
+                match connect_secure(sockaddr, &auth, &gtsm) {
+                    Ok(stream) => {
+                        backoff_ms = 1_000;
+                        let _ = stream.set_nodelay(true);
+                        live.fetch_add(1, Ordering::Relaxed);
+                        let result = run_peer_session(Arc::clone(&rt), stream, handle);
+                        live.fetch_sub(1, Ordering::Relaxed);
+                        if let Err(e) = result {
+                            eprintln!("daemon: peer {}: session ended: {}", label, e);
+                        }
+                        if !rt.running.load(Ordering::Relaxed) {
+                            break;
+                        }
+                        eprintln!("daemon: peer {}: reconnecting in {}ms", label, backoff_ms);
+                        sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
+                        backoff_ms = (backoff_ms * 2).min(30_000);
+                    }
+                    Err((e, fatal)) => {
+                        if fatal {
+                            eprintln!("daemon: peer {}: {}", label, e);
+                            return;
+                        }
+                        eprintln!(
+                            "daemon: peer {}: connect failed ({}); retrying in {}ms",
+                            label, e, backoff_ms
+                        );
+                        sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
+                        backoff_ms = (backoff_ms * 2).min(30_000);
+                    }
+                }
+            }
+        });
+}
+
+/// Drive one established TCP connection until it drops or we shut down.
+fn run_peer_session(
+    rt: Arc<Runtime>,
+    mut stream: TcpStream,
+    session: SessionHandle,
+) -> Result<(), String> {
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
+    {
+        let mut r = rt.router.lock().unwrap();
+        r.start_session(session)
+            .map_err(|e| format!("start_session: {}", e))?;
+    }
+    let result = pump_session(&rt, &mut stream, session);
+    // The transport is gone: drive the FSM to Idle and purge the routes
+    // this session contributed (RFC 4271 §8.2.2). Event consumers (the
+    // ticker thread) observe the resulting events.
+    {
+        let mut r = rt.router.lock().unwrap();
+        r.close_session(session);
+        // RFC 4271 §6.4: close a live session with a NOTIFICATION
+        // (CEASE) rather than a bare FIN — close_session queues it, so
+        // drain and flush it to the wire before the socket goes away.
+        let out = r.drain_output(session);
+        if !out.is_empty() {
+            let _ = stream.write_all(&out);
+        }
+    }
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+    result
+}
+
+fn pump_session(
+    rt: &Arc<Runtime>,
+    stream: &mut TcpStream,
+    session: SessionHandle,
+) -> Result<(), String> {
+    let router = &rt.router;
+    let mut buf = [0u8; 8192];
+    while rt.running.load(Ordering::Relaxed) {
+        // Signals first: a shutdown must tear the session down cleanly
+        // even while the peer is idle, and a reload can change what we
+        // originate mid-session.
+        dispatch_signals(rt);
+        if !rt.running.load(Ordering::Relaxed) {
+            break;
+        }
+
+        // 1. Read peer bytes → feed_input.
+        match stream.read(&mut buf) {
+            Ok(0) => return Err("peer closed connection".into()),
+            Ok(n) => {
+                let mut r = router.lock().unwrap();
+                r.feed_input(session, &buf[..n])
+                    .map_err(|e| format!("feed_input: {}", e))?;
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut => {}
+            Err(e) => return Err(format!("read: {}", e)),
+        }
+
+        // 2. Drain router output → write to peer.
+        let out = {
+            let mut r = router.lock().unwrap();
+            r.drain_output(session)
+        };
+        if !out.is_empty() {
+            stream
+                .write_all(&out)
+                .map_err(|e| format!("write: {}", e))?;
+        }
+    }
+    Ok(())
+}
+
+/// The ticker thread: sole consumer of router events. Drives the router
+/// clock every 50 ms, logs every event, and (when enabled) mirrors the
+/// Loc-RIB into the kernel FIB. Keeping event consumption on one thread
+/// preserves Loc-RIB ordering across concurrently pumped sessions.
+/// During shutdown it keeps draining until the live session threads
+/// have flushed their close NOTIFICATIONs, so withdrawal events (and
+/// their kernel route deletions) are not lost.
+fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>) {
+    let rt = Arc::clone(rt);
+    thread::Builder::new()
+        .name("lr-ticker".into())
+        .spawn(move || {
+            let mut os_table: Option<
+                Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
+            > = None;
+            if install_kernel {
+                match lr_osroute::SystemRouteTable::connect() {
+                    Ok(t) => {
+                        println!("daemon: os route table connected — installing kernel routes");
+                        os_table = Some(Box::new(t));
+                    }
+                    Err(e) => eprintln!(
+                        "daemon: os route table unavailable ({}); kernel install disabled",
+                        e
+                    ),
+                }
+            }
+            let start = WallClock::now();
+            loop {
+                let shutting_down = !rt.running.load(Ordering::Relaxed);
+                if shutting_down && live.load(Ordering::Relaxed) == 0 {
+                    break;
+                }
+                let now_ms = start.elapsed().as_millis() as u64;
+                {
+                    let mut r = rt.router.lock().unwrap();
+                    r.tick(lr_core::time::Instant(now_ms));
+                    let events = r.poll_events();
+                    for ev in &events {
+                        log_event(ev);
+                    }
+                    install_kernel_routes(&mut os_table, &events);
+                }
+                if shutting_down {
+                    // Bounded shutdown cadence: the main thread exits the
+                    // process after its grace period regardless.
+                    thread::sleep(Duration::from_millis(10));
+                } else {
+                    thread::sleep(Duration::from_millis(50));
+                }
+            }
+            // Final drain: the last events queued by closing sessions.
+            {
+                let mut r = rt.router.lock().unwrap();
+                let events = r.poll_events();
+                for ev in &events {
+                    log_event(ev);
+                }
+                install_kernel_routes(&mut os_table, &events);
+            }
+        })
+        .expect("spawn ticker thread");
+}
+
+/// Mirror Loc-RIB events into the kernel FIB (best-effort: a failed
+/// install is logged by rtnetlink itself and retried on the next event).
+fn install_kernel_routes(
+    table: &mut Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
+    events: &[RouterEvent],
+) {
+    let Some(table) = table else {
+        return;
+    };
+    for ev in events {
+        match ev {
+            RouterEvent::RouteInstalled(r) => {
+                if let Some(nh) = r.next_hop {
+                    let _ = table.add_route(r.key.prefix, nh, 0);
+                }
+            }
+            RouterEvent::RouteWithdrawn(k) => {
+                let _ = table.delete_route(k.prefix);
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Babel daemon mode: run the Babel protocol over UDP on an IPv6
@@ -1055,7 +1107,7 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
 
     // Ticker thread.
     {
-        let router = Arc::clone(&router);
+        let router = Arc::clone(&runtime.router);
         let running = Arc::clone(&running);
         thread::spawn(move || {
             let start = WallClock::now();
@@ -1161,30 +1213,6 @@ fn transport_ip(addr: &str) -> Option<IpAddr> {
     IpAddr::from_str(addr).ok()
 }
 
-/// Resolve the configured local source address for next-hop-self.
-/// Priority: explicit `--local-address` → derived from peer/listen addr.
-/// Returns `None` when nothing usable was configured.
-fn parse_local_address(
-    configured: &Option<String>,
-    peer_addr: &Option<String>,
-    listen_addr: &Option<String>,
-) -> Option<IpAddr> {
-    if let Some(s) = configured {
-        if let Ok(ip) = IpAddr::from_str(s) {
-            return Some(ip);
-        }
-        // The configured string might be a `host:port` form (legacy).
-        if let Some(ip) = transport_ip(s) {
-            return Some(ip);
-        }
-        return None;
-    }
-    peer_addr
-        .as_deref()
-        .or(listen_addr.as_deref())
-        .and_then(transport_ip)
-}
-
 /// Pick the NLRI family for a `--network` prefix based on its address
 /// family. IPv4 prefixes → IPv4 unicast (the historical default); IPv6
 /// prefixes → IPv6 unicast (requires `--mp-family ipv6-unicast` on the
@@ -1207,7 +1235,8 @@ struct Runtime {
 
 /// Act on every pending signal. SIGTERM/SIGINT trigger a graceful stop
 /// (sessions are closed with a NOTIFICATION before the FIN); SIGHUP
-/// reloads the configuration file.
+/// reloads the configuration file. Safe to call from any thread —
+/// exactly one caller wins the atomic take.
 fn dispatch_signals(rt: &Runtime) {
     while let Some(sig) = signal::take_pending() {
         match sig {
@@ -1299,7 +1328,7 @@ fn reload_config(
         }
     };
     let mut fresh = DaemonConfig::default();
-    if let Err(e) = parse_toml_subset(&text, &mut fresh) {
+    if let Err(e) = daemon_config::parse_toml_subset(&text, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
 
@@ -1335,130 +1364,6 @@ fn reload_config(
     lines
 }
 
-/// Drive one established TCP connection until it drops or we shut down.
-fn run_session(
-    rt: &Runtime,
-    mut stream: TcpStream,
-    session: SessionHandle,
-    install_kernel: bool,
-) -> Result<(), String> {
-    let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
-    {
-        let mut r = rt.router.lock().unwrap();
-        r.start_session(session)
-            .map_err(|e| format!("start_session: {}", e))?;
-    }
-    let mut os_table: Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>> =
-        None;
-    if install_kernel {
-        match lr_osroute::SystemRouteTable::connect() {
-            Ok(t) => {
-                println!("daemon: os route table connected — installing kernel routes");
-                os_table = Some(Box::new(t));
-            }
-            Err(e) => eprintln!(
-                "daemon: os route table unavailable ({}); kernel install disabled",
-                e
-            ),
-        }
-    }
-    let result = pump_session(rt, &mut stream, session, &mut os_table);
-    // The transport is gone: drive the FSM to Idle and purge the routes
-    // this session contributed (RFC 4271 §8.2.2).
-    {
-        let mut r = rt.router.lock().unwrap();
-        r.close_session(session);
-        for ev in r.poll_events() {
-            log_event(&ev);
-        }
-        // RFC 4271 §6.4: close a live session with a NOTIFICATION
-        // (CEASE) rather than a bare FIN — close_session queues it, so
-        // drain and flush it to the wire before the socket goes away.
-        let out = r.drain_output(session);
-        if !out.is_empty() {
-            let _ = stream.write_all(&out);
-        }
-    }
-    let _ = stream.shutdown(std::net::Shutdown::Both);
-    result
-}
-
-fn pump_session(
-    rt: &Runtime,
-    stream: &mut TcpStream,
-    session: SessionHandle,
-    os_table: &mut Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
-) -> Result<(), String> {
-    let router = &rt.router;
-    let mut buf = [0u8; 8192];
-    while rt.running.load(Ordering::Relaxed) {
-        // Signals first: a shutdown must tear the session down cleanly
-        // even while the peer is idle, and a reload can change what we
-        // originate mid-session.
-        dispatch_signals(rt);
-        if !rt.running.load(Ordering::Relaxed) {
-            break;
-        }
-
-        // 1. Read peer bytes → feed_input.
-        match stream.read(&mut buf) {
-            Ok(0) => return Err("peer closed connection".into()),
-            Ok(n) => {
-                let mut r = router.lock().unwrap();
-                r.feed_input(session, &buf[..n])
-                    .map_err(|e| format!("feed_input: {}", e))?;
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => return Err(format!("read: {}", e)),
-        }
-
-        // 2. Drain router output → write to peer.
-        let out = {
-            let mut r = router.lock().unwrap();
-            let o = r.drain_output(session);
-            let events = r.poll_events();
-            for ev in &events {
-                log_event(ev);
-            }
-            handle_events(&mut r, &events, os_table);
-            o
-        };
-        if !out.is_empty() {
-            stream
-                .write_all(&out)
-                .map_err(|e| format!("write: {}", e))?;
-        }
-    }
-    Ok(())
-}
-
-/// React to router events (kernel route installation lives here).
-fn handle_events(
-    router: &mut DefaultRouter,
-    events: &[RouterEvent],
-    os_table: &mut Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
-) {
-    let _ = router;
-    let Some(table) = os_table else {
-        return;
-    };
-    for ev in events {
-        match ev {
-            RouterEvent::RouteInstalled(r) => {
-                if let Some(nh) = r.next_hop {
-                    let _ = table.add_route(r.key.prefix, nh, 0);
-                }
-            }
-            RouterEvent::RouteWithdrawn(k) => {
-                let _ = table.delete_route(k.prefix);
-            }
-            _ => {}
-        }
-    }
-}
-
 fn log_event(ev: &RouterEvent) {
     match ev {
         RouterEvent::PeerStateChange { session, state } => {
@@ -1490,5 +1395,4 @@ fn wait_for_shutdown(rt: &Runtime) {
         thread::sleep(Duration::from_millis(100));
         dispatch_signals(rt);
     }
-    println!("daemon: shutdown complete");
 }
