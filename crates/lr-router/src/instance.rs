@@ -729,7 +729,20 @@ impl DefaultRouter {
     /// Originate a local route (e.g. from `network` statements): injects it
     /// into Loc-RIB and advertises it to all suitable BGP peers.
     pub fn originate(&mut self, prefix: Prefix, next_hop: Option<IpAddr>) -> RouteKey {
-        let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
+        self.originate_family(prefix, NlriFamily::IPV4_UNICAST, next_hop)
+    }
+
+    /// Originate a route for an explicit address family. Use this for
+    /// IPv6 unicast (`NlriFamily::IPV6_UNICAST`) or any other MP-BGP
+    /// family the session speaks. The IPv4 unicast convenience wrapper
+    /// [`Self::originate`] covers the historical single-family case.
+    pub fn originate_family(
+        &mut self,
+        prefix: Prefix,
+        family: NlriFamily,
+        next_hop: Option<IpAddr>,
+    ) -> RouteKey {
+        let key = RouteKey::new(prefix, family);
         let mut attrs = PathAttributes::new();
         attrs.insert(PathAttribute::new(
             PathAttrFlags::new().set_transitive(true),
@@ -741,15 +754,22 @@ impl DefaultRouter {
             AttrType::AsPath,
             Vec::new(), // empty AS_PATH: locally originated
         ));
-        if let Some(nh) = next_hop {
-            attrs.insert(PathAttribute::new(
-                PathAttrFlags::new().set_transitive(true),
-                AttrType::NextHop,
-                match nh {
-                    IpAddr::V4(b) => b.to_vec(),
-                    IpAddr::V6(b) => b.to_vec(),
-                },
-            ));
+        // IPv4 unicast uses the well-known NEXT_HOP attribute; every
+        // other family is carried by MP_REACH_NLRI. The egress path will
+        // synthesize the correct attribute from `next_hop` regardless of
+        // where it lives, but populating it here keeps the Loc-RIB route
+        // self-describing for tools that snapshot it directly.
+        if family == NlriFamily::IPV4_UNICAST {
+            if let Some(nh) = next_hop {
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_transitive(true),
+                    AttrType::NextHop,
+                    match nh {
+                        IpAddr::V4(b) => b.to_vec(),
+                        IpAddr::V6(b) => b.to_vec(),
+                    },
+                ));
+            }
         }
         let route = Route {
             key: key.clone(),

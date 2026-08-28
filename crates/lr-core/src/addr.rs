@@ -577,7 +577,7 @@ impl RouterId {
         Self(v)
     }
 
-    pub fn from_v4(b: [u8; 4]) -> Self {
+    pub const fn from_v4(b: [u8; 4]) -> Self {
         Self(u32::from_be_bytes(b))
     }
 
