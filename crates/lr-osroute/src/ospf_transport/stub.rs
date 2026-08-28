@@ -1,0 +1,49 @@
+//! Non-Linux placeholder — the raw-socket transport exists only on
+//! Linux in librouting. The configuration model stays portable;
+//! embedders on other systems provide their own transport and feed
+//! bytes through the router's session API (see docs/OS-INTEGRATION.md).
+
+use super::{InterfaceV4Addr, OspfTransportError};
+
+pub fn interface_v4_addrs(_interface: &str) -> Result<Vec<InterfaceV4Addr>, OspfTransportError> {
+    Err(OspfTransportError::Unsupported(
+        "OSPF raw sockets exist only on Linux in librouting",
+    ))
+}
+
+pub struct OspfV2Transport {
+    _private: (),
+}
+
+impl OspfV2Transport {
+    pub fn bind(_interface: &str, _multicast_loop: bool) -> Result<Self, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn set_nonblocking(&self, _on: bool) -> Result<(), OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn recv_from(
+        &self,
+        _buf: &mut [u8],
+    ) -> Result<Option<(usize, std::net::Ipv4Addr)>, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn send_multicast(&self, _bytes: &[u8]) -> Result<usize, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn ifindex(&self) -> u32 {
+        0
+    }
+}

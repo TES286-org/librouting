@@ -1,0 +1,479 @@
+//! Linux implementation: raw `IPPROTO_OSPF` sockets with per-interface
+//! multicast scoping (`SO_BINDTODEVICE` + `ip_mreqn`), and `getifaddrs`
+//! for interface address enumeration.
+
+use std::net::Ipv4Addr;
+
+use super::{InterfaceV4Addr, OspfTransportError, ALL_D_ROUTERS, ALL_SPF_ROUTERS, IPPROTO_OSPF};
+
+// socket(2) / fcntl(2) constants (Linux).
+const AF_INET: i32 = 2;
+const SOCK_RAW: i32 = 3;
+const SOL_SOCKET: i32 = 1;
+const SO_BINDTODEVICE: i32 = 25;
+const F_GETFL: i32 = 3;
+const F_SETFL: i32 = 4;
+const O_NONBLOCK: i32 = 0o4000;
+
+// IPv4 socket options (ip(7)).
+const IPPROTO_IP: i32 = 0;
+const IP_MULTICAST_IF: i32 = 32;
+const IP_MULTICAST_TTL: i32 = 33;
+const IP_MULTICAST_LOOP: i32 = 34;
+const IP_ADD_MEMBERSHIP: i32 = 35;
+
+/// `EAGAIN`/`EWOULDBLOCK` — both 11 on Linux.
+const EAGAIN: i32 = 11;
+
+/// `struct sockaddr_in` (the 8 bytes of padding included).
+#[repr(C)]
+struct SockaddrIn {
+    sin_family: u16,
+    sin_port: u16,
+    sin_addr: [u8; 4],
+    sin_zero: [u8; 8],
+}
+
+impl SockaddrIn {
+    fn new(addr: [u8; 4]) -> Self {
+        Self {
+            sin_family: AF_INET as u16,
+            sin_port: 0,
+            sin_addr: addr,
+            sin_zero: [0; 8],
+        }
+    }
+}
+
+/// `struct ip_mreqn` — multicast group + interface, selectable by index
+/// so unnumbered interfaces work (ip(7)).
+#[repr(C)]
+struct IpMreqn {
+    imr_multiaddr: [u8; 4],
+    imr_address: [u8; 4],
+    imr_ifindex: i32,
+}
+
+/// `struct ifaddrs` (getifaddrs(3)) — only the fields we read.
+#[repr(C)]
+struct Ifaddrs {
+    ifa_next: *mut Ifaddrs,
+    ifa_name: *mut i8,
+    ifa_flags: u32,
+    ifa_addr: *mut core::ffi::c_void,
+    ifa_netmask: *mut core::ffi::c_void,
+    ifa_ifu: *mut core::ffi::c_void,
+    ifa_data: *mut core::ffi::c_void,
+}
+
+extern "C" {
+    fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
+    fn setsockopt(
+        fd: i32,
+        level: i32,
+        optname: i32,
+        optval: *const core::ffi::c_void,
+        optlen: u32,
+    ) -> i32;
+    fn close(fd: i32) -> i32;
+    fn fcntl(fd: i32, cmd: i32, ...) -> i32;
+    fn sendto(
+        fd: i32,
+        buf: *const core::ffi::c_void,
+        len: usize,
+        flags: i32,
+        addr: *const SockaddrIn,
+        addrlen: u32,
+    ) -> isize;
+    fn recvfrom(
+        fd: i32,
+        buf: *mut core::ffi::c_void,
+        len: usize,
+        flags: i32,
+        addr: *mut SockaddrIn,
+        addrlen: *mut u32,
+    ) -> isize;
+    fn if_nametoindex(ifname: *const i8) -> u32;
+    fn getifaddrs(ifap: *mut *mut Ifaddrs) -> i32;
+    fn freeifaddrs(ifa: *mut Ifaddrs);
+}
+
+fn errno() -> i32 {
+    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
+}
+
+fn os_error(context: &'static str) -> OspfTransportError {
+    OspfTransportError::Os {
+        context,
+        errno: errno(),
+    }
+}
+
+/// Read the `sin_addr` octets out of a `struct sockaddr*` pointer when
+/// it is an AF_INET one.
+///
+/// # Safety
+/// `ptr` must be NULL or point at a valid `struct sockaddr`.
+unsafe fn sockaddr_ipv4(ptr: *mut core::ffi::c_void) -> Option<[u8; 4]> {
+    if ptr.is_null() {
+        return None;
+    }
+    // SAFETY: sockaddr and sockaddr_in share the leading family field;
+    // reading the first two bytes as u16 is alignment-safe.
+    let family = unsafe { *(ptr as *const u16) };
+    if family != AF_INET as u16 {
+        return None;
+    }
+    // SAFETY: for AF_INET the pointer really is a sockaddr_in; the
+    // address field sits at offset 4..8.
+    let s = unsafe { &*(ptr as *const SockaddrIn) };
+    Some(s.sin_addr)
+}
+
+/// Enumerate the IPv4 addresses and prefix lengths of `interface`.
+///
+/// The mask is converted to a prefix length; non-contiguous masks
+/// (legal historically, never used by OSPF) are skipped rather than
+/// approximated. An interface that exists but has no IPv4 address
+/// yields an empty vector; a missing interface is an error.
+pub fn interface_v4_addrs(interface: &str) -> Result<Vec<InterfaceV4Addr>, OspfTransportError> {
+    let mut head: *mut Ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs writes one fresh, self-linked list into head.
+    let rc = unsafe { getifaddrs(&mut head) };
+    if rc != 0 {
+        return Err(os_error("getifaddrs"));
+    }
+    let mut out = Vec::new();
+    let mut exists = false;
+    // SAFETY: the list stays valid until freeifaddrs below; we only
+    // read through the borrowed pointers.
+    unsafe {
+        let mut cur = head;
+        while !cur.is_null() {
+            let entry = &*cur;
+            // SAFETY: ifa_name is a NUL-terminated C string owned by
+            // the list.
+            let name = std::ffi::CStr::from_ptr(entry.ifa_name);
+            if name.to_bytes() == interface.as_bytes() {
+                exists = true;
+                if let (Some(addr), Some(mask)) = (
+                    sockaddr_ipv4(entry.ifa_addr),
+                    sockaddr_ipv4(entry.ifa_netmask),
+                ) {
+                    if let Some(prefix_len) = mask_to_prefix_len(mask) {
+                        out.push(InterfaceV4Addr {
+                            addr: Ipv4Addr::new(addr[0], addr[1], addr[2], addr[3]),
+                            prefix_len,
+                        });
+                    }
+                }
+            }
+            cur = entry.ifa_next;
+        }
+    }
+    // SAFETY: hand the borrowed list back.
+    unsafe { freeifaddrs(head) };
+    if !exists {
+        return Err(OspfTransportError::UnknownInterface(interface.to_string()));
+    }
+    Ok(out)
+}
+
+/// Convert a dotted-quad mask to a prefix length; `None` when the mask
+/// is non-contiguous.
+fn mask_to_prefix_len(mask: [u8; 4]) -> Option<u8> {
+    let mut len: u8 = 0;
+    let mut seen_zero = false;
+    for byte in mask {
+        for bit in (0..8).rev() {
+            let set = (byte >> bit) & 1 == 1;
+            if set {
+                if seen_zero {
+                    return None; // gap: non-contiguous
+                }
+                len += 1;
+            } else {
+                seen_zero = true;
+            }
+        }
+    }
+    Some(len)
+}
+
+/// One raw OSPFv2 socket bound to a single interface.
+pub struct OspfV2Transport {
+    fd: i32,
+    #[allow(dead_code)]
+    interface: String,
+    ifindex: u32,
+}
+
+impl OspfV2Transport {
+    /// Open the raw socket for `interface`, join both multicast groups,
+    /// and arm multicast egress (TTL 1, loopback per `multicast_loop`).
+    ///
+    /// `multicast_loop = false` (the daemon default) keeps the socket
+    /// from receiving its own multicasts; tests turn it on to verify
+    /// the full send/receive path on a single host.
+    pub fn bind(interface: &str, multicast_loop: bool) -> Result<Self, OspfTransportError> {
+        let cname = std::ffi::CString::new(interface)
+            .map_err(|_| OspfTransportError::UnknownInterface(interface.to_string()))?;
+        // SAFETY: plain syscall with a valid NUL-terminated name.
+        let ifindex = unsafe { if_nametoindex(cname.as_ptr()) };
+        if ifindex == 0 {
+            return Err(OspfTransportError::UnknownInterface(interface.to_string()));
+        }
+        // SAFETY: plain socket(2) call.
+        let fd = unsafe { socket(AF_INET, SOCK_RAW, IPPROTO_OSPF) };
+        if fd < 0 {
+            return Err(os_error("socket"));
+        }
+        let transport = Self {
+            fd,
+            interface: interface.to_string(),
+            ifindex,
+        };
+        // Scope the socket to the interface (receive + egress).
+        if let Err(e) =
+            transport.set_sockopt_bytes(SOL_SOCKET, SO_BINDTODEVICE, cname.as_bytes_with_nul())
+        {
+            unsafe { close(fd) };
+            return Err(e);
+        }
+        // Multicast egress: choose the interface by index (works on
+        // unnumbered links), TTL 1 (link-local groups, RFC 2328 A.1),
+        // loopback per caller.
+        if let Err(e) = transport.set_multicast_if() {
+            unsafe { close(fd) };
+            return Err(e);
+        }
+        if let Err(e) = transport.set_sockopt_u8(IPPROTO_IP, IP_MULTICAST_TTL, 1) {
+            unsafe { close(fd) };
+            return Err(e);
+        }
+        let loop_on = if multicast_loop { 1u8 } else { 0u8 };
+        if let Err(e) = transport.set_sockopt_u8(IPPROTO_IP, IP_MULTICAST_LOOP, loop_on) {
+            unsafe { close(fd) };
+            return Err(e);
+        }
+        for group in [ALL_SPF_ROUTERS, ALL_D_ROUTERS] {
+            if let Err(e) = transport.join_group(group) {
+                unsafe { close(fd) };
+                return Err(e);
+            }
+        }
+        Ok(transport)
+    }
+
+    fn set_multicast_if(&self) -> Result<(), OspfTransportError> {
+        let mreqn = IpMreqn {
+            imr_multiaddr: [0; 4],
+            imr_address: [0; 4],
+            imr_ifindex: self.ifindex as i32,
+        };
+        // SAFETY: fd and optval are valid for the duration of the call.
+        let rc = unsafe {
+            setsockopt(
+                self.fd,
+                IPPROTO_IP,
+                IP_MULTICAST_IF,
+                &mreqn as *const IpMreqn as *const core::ffi::c_void,
+                std::mem::size_of::<IpMreqn>() as u32,
+            )
+        };
+        if rc != 0 {
+            return Err(os_error("IP_MULTICAST_IF"));
+        }
+        Ok(())
+    }
+
+    fn join_group(&self, group: [u8; 4]) -> Result<(), OspfTransportError> {
+        let mreqn = IpMreqn {
+            imr_multiaddr: group,
+            imr_address: [0; 4],
+            imr_ifindex: self.ifindex as i32,
+        };
+        // SAFETY: fd and optval are valid for the duration of the call.
+        let rc = unsafe {
+            setsockopt(
+                self.fd,
+                IPPROTO_IP,
+                IP_ADD_MEMBERSHIP,
+                &mreqn as *const IpMreqn as *const core::ffi::c_void,
+                std::mem::size_of::<IpMreqn>() as u32,
+            )
+        };
+        if rc != 0 {
+            return Err(os_error("IP_ADD_MEMBERSHIP"));
+        }
+        Ok(())
+    }
+
+    fn set_sockopt_u8(
+        &self,
+        level: i32,
+        optname: i32,
+        value: u8,
+    ) -> Result<(), OspfTransportError> {
+        // SAFETY: fd and optval are valid for the duration of the call.
+        let rc = unsafe {
+            setsockopt(
+                self.fd,
+                level,
+                optname,
+                &value as *const u8 as *const core::ffi::c_void,
+                std::mem::size_of::<u8>() as u32,
+            )
+        };
+        if rc != 0 {
+            return Err(os_error("setsockopt"));
+        }
+        Ok(())
+    }
+
+    fn set_sockopt_bytes(
+        &self,
+        level: i32,
+        optname: i32,
+        value: &[u8],
+    ) -> Result<(), OspfTransportError> {
+        // SAFETY: fd and optval are valid for the duration of the call.
+        let rc = unsafe {
+            setsockopt(
+                self.fd,
+                level,
+                optname,
+                value.as_ptr() as *const core::ffi::c_void,
+                value.len() as u32,
+            )
+        };
+        if rc != 0 {
+            return Err(os_error("setsockopt"));
+        }
+        Ok(())
+    }
+
+    /// Toggle non-blocking mode (`false` = blocking, the default).
+    pub fn set_nonblocking(&self, on: bool) -> Result<(), OspfTransportError> {
+        // SAFETY: fcntl(F_GETFL) on our own fd.
+        let flags = unsafe { fcntl(self.fd, F_GETFL) };
+        if flags < 0 {
+            return Err(os_error("fcntl(F_GETFL)"));
+        }
+        let new_flags = if on {
+            flags | O_NONBLOCK
+        } else {
+            flags & !O_NONBLOCK
+        };
+        // SAFETY: fcntl(F_SETFL) with the flag word we just read.
+        let rc = unsafe { fcntl(self.fd, F_SETFL, new_flags) };
+        if rc < 0 {
+            return Err(os_error("fcntl(F_SETFL)"));
+        }
+        Ok(())
+    }
+
+    /// Receive one pending packet. `Ok(None)` means nothing to read
+    /// (non-blocking mode).
+    pub fn recv_from(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<Option<(usize, Ipv4Addr)>, OspfTransportError> {
+        let mut src = SockaddrIn::new([0; 4]);
+        let mut srclen = std::mem::size_of::<SockaddrIn>() as u32;
+        // SAFETY: buf and src outlive the call; both are plain memory.
+        let n = unsafe {
+            recvfrom(
+                self.fd,
+                buf.as_mut_ptr() as *mut core::ffi::c_void,
+                buf.len(),
+                0,
+                &mut src,
+                &mut srclen,
+            )
+        };
+        if n < 0 {
+            let e = errno();
+            return if e == EAGAIN {
+                Ok(None) // nothing pending
+            } else {
+                Err(OspfTransportError::Os {
+                    context: "recvfrom",
+                    errno: e,
+                })
+            };
+        }
+        Ok(Some((
+            n as usize,
+            Ipv4Addr::new(
+                src.sin_addr[0],
+                src.sin_addr[1],
+                src.sin_addr[2],
+                src.sin_addr[3],
+            ),
+        )))
+    }
+
+    /// Multicast `bytes` to AllSPFRouters (224.0.0.5) on the bound
+    /// interface.
+    pub fn send_multicast(&self, bytes: &[u8]) -> Result<usize, OspfTransportError> {
+        let dest = SockaddrIn::new(ALL_SPF_ROUTERS);
+        // SAFETY: bytes and dest outlive the call.
+        let n = unsafe {
+            sendto(
+                self.fd,
+                bytes.as_ptr() as *const core::ffi::c_void,
+                bytes.len(),
+                0,
+                &dest,
+                std::mem::size_of::<SockaddrIn>() as u32,
+            )
+        };
+        if n < 0 {
+            return Err(os_error("sendto"));
+        }
+        Ok(n as usize)
+    }
+
+    /// The kernel interface index the socket is bound to.
+    pub fn ifindex(&self) -> u32 {
+        self.ifindex
+    }
+}
+
+impl Drop for OspfV2Transport {
+    fn drop(&mut self) {
+        // SAFETY: we own the fd; close exactly once.
+        unsafe { close(self.fd) };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn masks_roundtrip() {
+        assert_eq!(mask_to_prefix_len([255, 255, 255, 0]), Some(24));
+        assert_eq!(mask_to_prefix_len([255, 255, 255, 255]), Some(32));
+        assert_eq!(mask_to_prefix_len([0, 0, 0, 0]), Some(0));
+        assert_eq!(mask_to_prefix_len([255, 0, 255, 0]), None);
+        assert_eq!(mask_to_prefix_len([254, 255, 255, 0]), None);
+    }
+
+    #[test]
+    fn interface_lookup_lo() {
+        // `lo` always exists with 127.0.0.1/8 — even in containers.
+        let addrs = interface_v4_addrs("lo").expect("lo lookup");
+        assert!(
+            addrs.iter().any(|a| a.addr == Ipv4Addr::LOCALHOST),
+            "127.0.0.1 must be listed: {addrs:?}"
+        );
+    }
+
+    #[test]
+    fn interface_lookup_unknown() {
+        let e = interface_v4_addrs("no-such-if-xyz").unwrap_err();
+        assert!(matches!(e, OspfTransportError::UnknownInterface(_)));
+    }
+}

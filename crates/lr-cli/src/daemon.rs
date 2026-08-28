@@ -51,6 +51,7 @@ use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, Sessi
 
 mod api;
 mod daemon_config;
+mod daemon_ospf;
 mod daemon_policy;
 mod privdrop;
 mod signal;
@@ -92,9 +93,15 @@ fn print_usage() {
          --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (default 75)\n  \
-         --protocol PROTO         bgp (default) | babel\n  \
+         --protocol PROTO         bgp (default) | babel | ospf\n  \
          --babel-group ADDR       Babel multicast group (ff02::1:6)\n  \
          --babel-port PORT        Babel UDP port (6696)\n  \
+         --ospf-interface NAME    OSPF interface (repeatable; needs root\n  \
+         or a user/network namespace)\n  \
+         --ospf-area ID           Area for --ospf-interface (default 0;\n  \
+         integer or dotted quad)\n  \
+         --ospf-hello-interval S  OSPF hello interval (default 10)\n  \
+         --ospf-dead-interval S   OSPF dead interval (default 40)\n  \
          --install-kernel-routes  Install best routes into the kernel FIB\n  \
          --user NAME              Drop privileges after binding\n  \
          --group NAME             Privilege-drop group\n  \
@@ -120,8 +127,16 @@ fn main() -> ExitCode {
         eprintln!("error: {}", e);
         return ExitCode::from(2);
     }
-    if cfg.local_as == 0 || cfg.router_id.is_empty() {
-        eprintln!("error: --local-as and --router-id are required");
+    // Fail closed on a typo'd --protocol instead of silently running BGP.
+    if !matches!(cfg.protocol.as_str(), "bgp" | "babel" | "ospf") {
+        eprintln!(
+            "error: unknown --protocol '{}' (bgp | babel | ospf)",
+            cfg.protocol
+        );
+        return ExitCode::from(2);
+    }
+    if cfg.router_id.is_empty() {
+        eprintln!("error: --router-id is required");
         print_usage();
         return ExitCode::from(2);
     }
@@ -136,6 +151,16 @@ fn main() -> ExitCode {
     // Babel UDP transport loop instead.
     if cfg.protocol == "babel" {
         return run_babel_daemon(&cfg);
+    }
+    // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
+    if cfg.protocol == "ospf" {
+        return daemon_ospf::run_ospf_daemon(&cfg, rid);
+    }
+    // BGP additionally needs the local AS.
+    if cfg.local_as == 0 {
+        eprintln!("error: --local-as is required");
+        print_usage();
+        return ExitCode::from(2);
     }
     // Signal handling must precede everything that could receive one:
     // without a SIGHUP handler the default disposition would terminate

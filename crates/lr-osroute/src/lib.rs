@@ -79,6 +79,13 @@ pub mod tcp_auth;
 #[cfg(feature = "std")]
 pub mod gtsm;
 
+/// OSPF raw-socket transport (RFC 2328 appendix A) — one `IPPROTO_OSPF`
+/// socket per interface with multicast scoping, plus interface address
+/// enumeration. Linux only; other platforms return
+/// [`ospf_transport::OspfTransportError::Unsupported`].
+#[cfg(feature = "std")]
+pub mod ospf_transport;
+
 #[cfg(all(
     feature = "std",
     any(

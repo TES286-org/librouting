@@ -7,6 +7,7 @@ job `interop`) and can all be reproduced locally:
 | Test | Script | Peers | What it proves |
 |------|--------|-------|----------------|
 | Two-daemon | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP | FSM + codec consistency in both roles |
+| OSPF two-daemon | `tests/interop/ospf.sh` | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5) | OSPF daemon mode end-to-end: Hello exchange, Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown |
 | BIRD | `tests/interop/bird.sh` | lr-daemon ↔ BIRD 2 (eBGP, multihop) | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions** |
 | BIRD LLGR | `tests/interop/bird_llgr.sh` | lr-daemon ↔ BIRD 2 (RFC 9494) | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge |
 | FRR | `tests/interop/frr.sh` | lr-daemon ↔ FRR bgpd (eBGP, multihop) | Wire compatibility with FRR bgpd incl. its stricter next-hop validation |
@@ -34,6 +35,7 @@ For every peer pair, all of the following must hold:
 ```bash
 cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/two_daemon.sh               # no external dependencies
+./tests/interop/ospf.sh                     # needs iproute2 + user namespaces
 ./tests/interop/bird.sh                     # needs bird2 (or skips)
 ./tests/interop/frr.sh                      # needs FRR bgpd (or skips)
 ```
@@ -46,6 +48,19 @@ The scripts auto-detect the reference daemons:
   used when present (see below).
 * If neither is found the script prints `SKIP: ...` and exits 0, so the
   suite degrades gracefully on restricted runners.
+
+### OSPF lab specifics
+
+`ospf.sh` needs no reference daemon — it runs two lr-daemons — but
+raw OSPF sockets require `CAP_NET_RAW`. The script builds a
+completely rootless lab when unprivileged user namespaces are
+available: `unshare -Urn` grants `CAP_NET_RAW` + `CAP_NET_ADMIN`, the
+veth pair plus one network namespace per router is created inside
+it, and each daemon runs via `nsenter` in its own namespace (the
+two-router model — no loopback shortcuts). Environments that forbid
+user namespaces SKIP gracefully. BIRD interop for OSPF is future
+work: lr's Hellos already bring BIRD to ExStart on p2p segments, but
+Full adjacency needs real DBD/LSR exchange (STATUS.md, W3.3).
 
 ### Rootless operation
 

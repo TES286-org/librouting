@@ -89,6 +89,54 @@ impl PeerSpec {
     }
 }
 
+/// One `[[ospf.area]]` table: area ID plus stub/NSSA policy
+/// (RFC 2328 §3.6, RFC 3101). The backbone (area 0) is always normal
+/// and needs no declaration.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct OspfAreaSpec {
+    /// Area ID: dotted quad (`"0.0.0.1"`) or plain integer (`1`).
+    pub id: Option<u32>,
+    /// `"normal"` (default) | `"stub"` | `"nssa"`.
+    pub kind: Option<String>,
+    /// Suppress type-3 summaries — "totally stubby" / totally-NSSA.
+    pub no_summary: Option<bool>,
+    /// Metric of the default route injected into stub/NSSA areas.
+    pub stub_metric: Option<u32>,
+}
+
+/// One `[[ospf.interface]]` table (or `--ospf-interface` flag).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct OspfIfSpec {
+    /// Kernel interface name (required).
+    pub name: Option<String>,
+    /// Area ID; unset inherits the global default (area 0).
+    pub area: Option<u32>,
+    /// Interface cost advertised in Router-LSA links (default 10).
+    pub cost: Option<u16>,
+    pub hello_interval: Option<u16>,
+    pub dead_interval: Option<u32>,
+    /// DR election priority (default 1).
+    pub priority: Option<u8>,
+}
+
+impl OspfIfSpec {
+    /// Human-readable label for log lines.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or("(unnamed)")
+    }
+}
+
+/// Parse an OSPF area ID: dotted quad (`"0.0.0.1"`) or integer
+/// (`"1"`). Both BIRD and FRR accept the two spellings.
+pub(crate) fn parse_area_id(value: &str) -> Option<u32> {
+    if value.contains('.') {
+        let ip: std::net::Ipv4Addr = value.parse().ok()?;
+        Some(u32::from(ip))
+    } else {
+        value.parse().ok()
+    }
+}
+
 /// Daemon configuration (TOML or CLI flags). The historical fields are
 /// the globals every `PeerSpec` inherits from; `peers` carries the
 /// explicit per-peer entries.
@@ -149,12 +197,23 @@ pub(crate) struct DaemonConfig {
     pub max_prefix_action: String,
     /// Early-warning threshold percentage (0..=100). 0 disables.
     pub max_prefix_threshold: u8,
-    /// Protocol to run: "bgp" (default) or "babel".
+    /// Protocol to run: "bgp" (default), "babel" or "ospf".
     pub protocol: String,
     /// Babel multicast group address (default: ff02::1:6).
     pub babel_group: Option<String>,
     /// Babel local port (default: 6696).
     pub babel_port: u16,
+
+    /// OSPF hello interval default (seconds; RFC 2328 default 10).
+    pub ospf_hello_interval: u16,
+    /// OSPF dead interval default (seconds; RFC 2328 default 4× hello).
+    pub ospf_dead_interval: u32,
+    /// Default area for interfaces without one (`--ospf-area`; 0).
+    pub ospf_area: u32,
+    /// `[[ospf.area]]` tables — non-backbone areas must be declared.
+    pub ospf_areas: Vec<OspfAreaSpec>,
+    /// `[[ospf.interface]]` tables / `--ospf-interface` flags.
+    pub ospf_interfaces: Vec<OspfIfSpec>,
 
     /// Explicit `[[peer]]` entries and repeatable `--peer` flags.
     /// Post-parse, [`DaemonConfig::finalize`] also synthesises the
@@ -193,6 +252,9 @@ impl DaemonConfig {
             max_prefix_threshold: 75,
             protocol: "bgp".to_string(),
             babel_port: 6696,
+            ospf_hello_interval: 10,
+            ospf_dead_interval: 40,
+            ospf_area: 0,
             ..Default::default()
         }
     }
@@ -238,6 +300,66 @@ impl DaemonConfig {
             resolved.extends = None;
             self.peers[idx] = resolved;
         }
+        self.finalize_ospf()?;
+        Ok(())
+    }
+
+    /// Validate and complete the OSPF configuration (only meaningful
+    /// with `--protocol ospf`; other protocols get a warning when OSPF
+    /// tables are present). Fills interface areas from the global
+    /// default and enforces the fail-closed rules: every interface
+    /// named, non-backbone areas declared exactly once, valid area
+    /// types, the backbone never stub/NSSA.
+    fn finalize_ospf(&mut self) -> Result<(), String> {
+        if self.ospf_areas.is_empty() && self.ospf_interfaces.is_empty() {
+            return Ok(());
+        }
+        if self.protocol != "ospf" {
+            self.warnings.push(format!(
+                "OSPF tables present but --protocol is '{}' (ignored)",
+                self.protocol
+            ));
+            return Ok(());
+        }
+        // Areas: id present, unique, kind valid; backbone stays normal.
+        let mut seen = std::collections::BTreeSet::new();
+        for area in &self.ospf_areas {
+            let Some(id) = area.id else {
+                return Err("[[ospf.area]] without 'id'".to_string());
+            };
+            if !seen.insert(id) {
+                return Err(format!("area {} declared twice", area_label(id)));
+            }
+            match area.kind.as_deref() {
+                None | Some("normal") | Some("stub") | Some("nssa") => {}
+                Some(other) => {
+                    return Err(format!(
+                        "area {}: unknown type '{}' (normal | stub | nssa)",
+                        area_label(id),
+                        other
+                    ))
+                }
+            }
+            if id == 0 && matches!(area.kind.as_deref(), Some("stub" | "nssa")) {
+                return Err("the OSPF backbone (area 0) cannot be a stub or NSSA area".into());
+            }
+        }
+        // Interfaces: named, area resolved + declared (area 0 implicit).
+        let declared = |id: u32| id == 0 || seen.contains(&id);
+        for iface in &mut self.ospf_interfaces {
+            if iface.name.as_deref().is_none_or(str::is_empty) {
+                return Err("[[ospf.interface]] without 'name'".to_string());
+            }
+            let area = iface.area.unwrap_or(self.ospf_area);
+            if !declared(area) {
+                return Err(format!(
+                    "interface {}: area {} is not declared ([[ospf.area]])",
+                    iface.label(),
+                    area_label(area)
+                ));
+            }
+            iface.area = Some(area);
+        }
         Ok(())
     }
 
@@ -249,6 +371,12 @@ impl DaemonConfig {
             self.peer_as
         }
     }
+}
+
+/// Area IDs render as dotted quads when they look like one (BIRD/FRR
+/// habit); plain small integers stay integers.
+pub(crate) fn area_label(id: u32) -> String {
+    std::net::Ipv4Addr::from(id).to_string()
 }
 
 /// Fill unset fields of `over` from `base` (per-peer key wins).
@@ -361,6 +489,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.route_maps.push(RouteMapSpec::default());
                     section = "route-map".to_string();
                 }
+                "ospf.area" => {
+                    cfg.ospf_areas.push(OspfAreaSpec::default());
+                    section = "ospf.area".to_string();
+                }
+                "ospf.interface" => {
+                    cfg.ospf_interfaces.push(OspfIfSpec::default());
+                    section = "ospf.interface".to_string();
+                }
                 _ => {
                     // Unknown array table: tolerate (forward compatibility),
                     // but leave peer context so keys do not leak into one.
@@ -387,7 +523,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     ));
                 }
                 cfg.peer_templates.entry(name.to_string()).or_default();
-            } else if section != "bgp" && !section.starts_with("unknown-array.") {
+            } else if section != "bgp"
+                && section != "ospf"
+                && !section.starts_with("unknown-array.")
+            {
                 cfg.warnings.push(format!(
                     "line {}: unknown section [{}] (ignored)",
                     lineno + 1,
@@ -435,6 +574,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         // keys inside them are hard errors (typo protection for
         // policy the operator expects to be in force — fail closed).
         if apply_policy_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        // OSPF tables and globals: protocol configuration is fail-closed —
+        // an unknown key is a typo that could silently alter adjacency
+        // behaviour (hello intervals, area types), so it is an error.
+        if apply_ospf_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -599,6 +746,108 @@ fn apply_policy_key(
         }
         // Not a policy section: signal the caller to fall through to
         // the global schema.
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Apply one `key = value` pair to the OSPF schema: the `[ospf]`
+/// globals plus the `[[ospf.area]]` / `[[ospf.interface]]` tables.
+/// Unknown keys are errors (fail closed — see the parser). Returns
+/// `Ok(false)` for non-OSPF sections so the caller falls through.
+fn apply_ospf_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    match section {
+        "ospf" => match key {
+            "hello_interval" => {
+                cfg.ospf_hello_interval = value
+                    .parse()
+                    .map_err(|_| format!("bad hello_interval '{value}'"))?;
+            }
+            "dead_interval" => {
+                cfg.ospf_dead_interval = value
+                    .parse()
+                    .map_err(|_| format!("bad dead_interval '{value}'"))?;
+            }
+            _ => {
+                return Err(format!(
+                    "unknown [ospf] key '{key}' (typo protection; OSPF config fails closed)"
+                ))
+            }
+        },
+        "ospf.area" => {
+            let Some(area) = cfg.ospf_areas.last_mut() else {
+                return Err("key outside a [[ospf.area]] table".into());
+            };
+            match key {
+                "id" => {
+                    area.id = Some(parse_area_id(value).ok_or_else(|| {
+                        format!("bad area id '{value}' (integer or dotted quad)")
+                    })?);
+                }
+                "type" => area.kind = Some(value.to_string()),
+                "no_summary" => area.no_summary = Some(parse_bool(value)),
+                "stub_metric" => {
+                    area.stub_metric = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad stub_metric '{value}'"))?,
+                    );
+                }
+                _ => {
+                    return Err(format!(
+                    "unknown [[ospf.area]] key '{key}' (typo protection; OSPF config fails closed)"
+                ))
+                }
+            }
+        }
+        "ospf.interface" => {
+            let Some(iface) = cfg.ospf_interfaces.last_mut() else {
+                return Err("key outside a [[ospf.interface]] table".into());
+            };
+            match key {
+                "name" => iface.name = Some(value.to_string()),
+                "area" => {
+                    iface.area = Some(
+                        parse_area_id(value)
+                            .ok_or_else(|| format!("bad area '{value}' (integer or dotted quad)"))?,
+                    );
+                }
+                "cost" => {
+                    iface.cost = Some(value.parse().map_err(|_| format!("bad cost '{value}'"))?);
+                }
+                "hello_interval" => {
+                    iface.hello_interval = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad hello_interval '{value}'"))?,
+                    );
+                }
+                "dead_interval" => {
+                    iface.dead_interval = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad dead_interval '{value}'"))?,
+                    );
+                }
+                "priority" => {
+                    iface.priority = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad priority '{value}'"))?,
+                    );
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown [[ospf.interface]] key '{key}' (typo protection; OSPF config fails closed)"
+                    ))
+                }
+            }
+        }
         _ => return Ok(false),
     }
     Ok(true)
@@ -788,6 +1037,33 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--babel-port" if i + 1 < args.len() => {
                 cfg.babel_port = args[i + 1].parse().unwrap_or(6696);
+                i += 2;
+            }
+            // Repeatable: each --ospf-interface adds one interface; its
+            // area defaults to --ospf-area (resolved in finalize).
+            "--ospf-interface" if i + 1 < args.len() => {
+                cfg.ospf_interfaces.push(OspfIfSpec {
+                    name: Some(args[i + 1].clone()),
+                    ..Default::default()
+                });
+                i += 2;
+            }
+            "--ospf-area" if i + 1 < args.len() => {
+                match parse_area_id(&args[i + 1]) {
+                    Some(id) => cfg.ospf_area = id,
+                    None => {
+                        eprintln!("invalid area id: {}", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--ospf-hello-interval" if i + 1 < args.len() => {
+                cfg.ospf_hello_interval = args[i + 1].parse().unwrap_or(10);
+                i += 2;
+            }
+            "--ospf-dead-interval" if i + 1 < args.len() => {
+                cfg.ospf_dead_interval = args[i + 1].parse().unwrap_or(40);
                 i += 2;
             }
             "--user" if i + 1 < args.len() => {
@@ -1031,5 +1307,123 @@ mod tests {
         .unwrap();
         let err = cfg.finalize().expect_err("must fail");
         assert!(err.contains("cycle"), "{err}");
+    }
+
+    // ---- OSPF configuration ----
+
+    #[test]
+    fn area_ids_parse_both_spellings() {
+        assert_eq!(parse_area_id("0"), Some(0));
+        assert_eq!(parse_area_id("1"), Some(1));
+        assert_eq!(parse_area_id("0.0.0.1"), Some(1));
+        assert_eq!(parse_area_id("10.1.0.0"), Some(0x0a01_0000));
+        assert_eq!(parse_area_id("x"), None);
+        assert_eq!(parse_area_id("1.2.3"), None);
+    }
+
+    #[test]
+    fn ospf_tables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\nhello_interval = 5\ndead_interval = 20\n\n\
+             [[ospf.area]]\nid = 1\ntype = \"stub\"\nno_summary = true\nstub_metric = 25\n\n\
+             [[ospf.area]]\nid = \"0.0.0.2\"\n\n\
+             [[ospf.interface]]\nname = \"eth0\"\narea = 1\ncost = 20\n\n\
+             [[ospf.interface]]\nname = \"eth1\"\narea = 2\nhello_interval = 3\ndead_interval = 12\npriority = 5\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.ospf_hello_interval, 5);
+        assert_eq!(cfg.ospf_dead_interval, 20);
+        assert_eq!(cfg.ospf_areas.len(), 2);
+        assert_eq!(cfg.ospf_areas[0].id, Some(1));
+        assert_eq!(cfg.ospf_areas[0].kind.as_deref(), Some("stub"));
+        assert_eq!(cfg.ospf_areas[0].no_summary, Some(true));
+        assert_eq!(cfg.ospf_areas[0].stub_metric, Some(25));
+        assert_eq!(cfg.ospf_areas[1].id, Some(2), "dotted-quad id");
+        assert_eq!(cfg.ospf_interfaces.len(), 2);
+        assert_eq!(cfg.ospf_interfaces[0].name.as_deref(), Some("eth0"));
+        assert_eq!(cfg.ospf_interfaces[0].area, Some(1));
+        assert_eq!(cfg.ospf_interfaces[0].cost, Some(20));
+        assert_eq!(cfg.ospf_interfaces[1].hello_interval, Some(3));
+        assert_eq!(cfg.ospf_interfaces[1].dead_interval, Some(12));
+        assert_eq!(cfg.ospf_interfaces[1].priority, Some(5));
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+    }
+
+    #[test]
+    fn ospf_interface_area_defaults_to_backbone() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[[ospf.interface]]\nname = \"eth0\"\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.ospf_interfaces[0].area, Some(0));
+    }
+
+    #[test]
+    fn ospf_undeclared_area_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[[ospf.area]]\nid = 1\n\n\
+             [[ospf.interface]]\nname = \"eth0\"\narea = 2\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("undeclared area must fail");
+        assert!(err.contains("not declared"), "{err}");
+    }
+
+    #[test]
+    fn ospf_unknown_keys_are_errors() {
+        for (section, key) in [
+            ("[ospf]", "verion"),
+            ("[[ospf.area]]", "typ"),
+            ("[[ospf.interface]]", "nam"),
+        ] {
+            let mut cfg = DaemonConfig::with_defaults();
+            let err = parse_toml_subset(&format!("{section}\n{key} = 1\n"), &mut cfg);
+            let err = err.expect_err("unknown OSPF key must fail");
+            assert!(err.contains("typo protection"), "{section}.{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn ospf_backbone_cannot_be_stub() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[[ospf.area]]\nid = 0\ntype = \"stub\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("stub backbone must fail");
+        assert!(err.contains("backbone"), "{err}");
+    }
+
+    #[test]
+    fn ospf_duplicate_and_missing_area_ids_fail() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[[ospf.area]]\nid = 1\n\n[[ospf.area]]\nid = 1\n", &mut cfg).unwrap();
+        assert!(cfg.finalize().is_err(), "duplicate area");
+
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[[ospf.area]]\ntype = \"stub\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("missing id must fail");
+        assert!(err.contains("without 'id'"), "{err}");
+    }
+
+    #[test]
+    fn ospf_tables_in_bgp_mode_warn() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[ospf.interface]]\nname = \"eth0\"\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert!(
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("OSPF tables present but --protocol")),
+            "{:?}",
+            cfg.warnings
+        );
     }
 }
