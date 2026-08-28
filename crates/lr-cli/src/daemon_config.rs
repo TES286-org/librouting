@@ -9,6 +9,8 @@
 
 use std::process::ExitCode;
 
+use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, RouteMapSpec};
+
 /// Per-peer settings — one `[[peer]]` TOML table (or one `--peer` CLI
 /// flag). `None` fields inherit the `[bgp]` globals.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -23,6 +25,10 @@ pub(crate) struct PeerSpec {
     pub address: Option<String>,
     /// Peer AS; `0` = inherit the global `peer_as`.
     pub peer_as: u32,
+    /// Import route-map name (`import = "..."`).
+    pub import: Option<String>,
+    /// Export route-map name (`export = "..."`).
+    pub export: Option<String>,
 
     // --- per-peer overrides (None/empty = inherit the global value) ---
     pub hold_time: Option<u16>,
@@ -160,6 +166,15 @@ pub(crate) struct DaemonConfig {
     /// Keeping them here (instead of printing directly) makes the
     /// parser unit-testable.
     pub warnings: Vec<String>,
+
+    /// `[[prefix-list]]` tables (see `daemon_policy::PrefixListSpec`).
+    pub prefix_lists: Vec<PrefixListSpec>,
+    /// `[[as-path-list]]` tables.
+    pub as_path_lists: Vec<AsPathListSpec>,
+    /// `[[community-list]]` tables.
+    pub community_lists: Vec<CommunityListSpec>,
+    /// `[[route-map]]` tables — one instance per entry.
+    pub route_maps: Vec<RouteMapSpec>,
 }
 
 impl DaemonConfig {
@@ -231,22 +246,42 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        // Array-of-tables: `[[peer]]` starts a new peer entry.
+        // Array-of-tables: `[[peer]]` starts a new peer entry; the
+        // policy tables accumulate into their spec vectors.
         if line.starts_with("[[") && line.ends_with("]]") {
             let name = line[2..line.len() - 2].trim();
-            if name == "peer" {
-                cfg.peers.push(PeerSpec::default());
-                cfg.explicit_peers = true;
-                section = "peer".to_string();
-            } else {
-                // Unknown array table: tolerate (forward compatibility),
-                // but leave peer context so keys do not leak into one.
-                cfg.warnings.push(format!(
-                    "line {}: unknown table [[{}]] (ignored)",
-                    lineno + 1,
-                    name
-                ));
-                section = format!("unknown-array.{name}");
+            match name {
+                "peer" => {
+                    cfg.peers.push(PeerSpec::default());
+                    cfg.explicit_peers = true;
+                    section = "peer".to_string();
+                }
+                "prefix-list" => {
+                    cfg.prefix_lists.push(PrefixListSpec::default());
+                    section = "prefix-list".to_string();
+                }
+                "as-path-list" => {
+                    cfg.as_path_lists.push(AsPathListSpec::default());
+                    section = "as-path-list".to_string();
+                }
+                "community-list" => {
+                    cfg.community_lists.push(CommunityListSpec::default());
+                    section = "community-list".to_string();
+                }
+                "route-map" => {
+                    cfg.route_maps.push(RouteMapSpec::default());
+                    section = "route-map".to_string();
+                }
+                _ => {
+                    // Unknown array table: tolerate (forward compatibility),
+                    // but leave peer context so keys do not leak into one.
+                    cfg.warnings.push(format!(
+                        "line {}: unknown table [[{}]] (ignored)",
+                        lineno + 1,
+                        name
+                    ));
+                    section = format!("unknown-array.{name}");
+                }
             }
             continue;
         }
@@ -279,6 +314,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     key
                 ));
             }
+            continue;
+        }
+        // Policy table sections have their own key schemas; unknown
+        // keys inside them are hard errors (typo protection for
+        // policy the operator expects to be in force — fail closed).
+        if apply_policy_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
             continue;
         }
         let full = if section.is_empty() {
@@ -347,6 +390,105 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
     Ok(())
 }
 
+/// Apply one `key = value` pair to the current policy table
+/// (`[[prefix-list]]`, `[[as-path-list]]`, `[[community-list]]`,
+/// `[[route-map]]`). Returns `Some(error)` for unknown keys so
+/// policy typos fail at parse time instead of silently passing
+/// traffic. Returns `None` for sections that are not policy tables
+/// (the caller falls through to the global schema).
+fn apply_policy_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    match section {
+        "prefix-list" => {
+            let Some(list) = cfg.prefix_lists.last_mut() else {
+                return Err("key outside a [[prefix-list]] table".into());
+            };
+            match key {
+                "name" => list.name = value.to_string(),
+                "prefix" => list.prefix = value.to_string(),
+                "ge" => list.ge = value.parse().ok(),
+                "le" => list.le = value.parse().ok(),
+                "permit" => list.permit = Some(parse_bool(value)),
+                _ => {
+                    return Err(format!(
+                        "unknown prefix-list key '{}' (typo protection; policy fails closed)",
+                        key
+                    ))
+                }
+            }
+        }
+        "as-path-list" => {
+            let Some(list) = cfg.as_path_lists.last_mut() else {
+                return Err("key outside a [[as-path-list]] table".into());
+            };
+            match key {
+                "name" => list.name = value.to_string(),
+                "pattern" => list.pattern = value.to_string(),
+                "permit" => list.permit = Some(parse_bool(value)),
+                _ => {
+                    return Err(format!(
+                        "unknown as-path-list key '{}' (typo protection; policy fails closed)",
+                        key
+                    ))
+                }
+            }
+        }
+        "community-list" => {
+            let Some(list) = cfg.community_lists.last_mut() else {
+                return Err("key outside a [[community-list]] table".into());
+            };
+            match key {
+                "name" => list.name = value.to_string(),
+                "communities" => list.communities = parse_str_array(value),
+                "permit" => list.permit = Some(parse_bool(value)),
+                _ => {
+                    return Err(format!(
+                        "unknown community-list key '{}' (typo protection; policy fails closed)",
+                        key
+                    ))
+                }
+            }
+        }
+        "route-map" => {
+            let Some(map) = cfg.route_maps.last_mut() else {
+                return Err("key outside a [[route-map]] table".into());
+            };
+            match key {
+                "name" => map.name = value.to_string(),
+                "entry" => {
+                    map.entry = value
+                        .parse()
+                        .map_err(|_| format!("bad entry '{}'", value))?
+                }
+                "match_prefix" => map.match_prefix = Some(value.to_string()),
+                "match_as_path" => map.match_as_path = Some(value.to_string()),
+                "match_community" => map.match_community = Some(value.to_string()),
+                "set_local_pref" => map.set_local_pref = value.parse().ok(),
+                "set_med" => map.set_med = value.parse().ok(),
+                "set_metric" => map.set_metric = value.parse().ok(),
+                "set_next_hop" => map.set_next_hop = Some(value.to_string()),
+                "prepend" => map.prepend = Some(value.to_string()),
+                "add_community" => map.add_community = Some(value.to_string()),
+                "permit" => map.permit = Some(parse_bool(value)),
+                _ => {
+                    return Err(format!(
+                        "unknown route-map key '{}' (typo protection; policy fails closed)",
+                        key
+                    ))
+                }
+            }
+        }
+        // Not a policy section: signal the caller to fall through to
+        // the global schema.
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Apply one `key = value` pair to the current `[[peer]]` entry.
 /// Returns `Ok(false)` when the key is not part of the schema so the
 /// caller can surface an unknown-key warning.
@@ -388,6 +530,8 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "max_prefix_threshold" => {
             peer.max_prefix_threshold = Some(value.parse().map_err(|_| "bad max_prefix_threshold")?)
         }
+        "import" => peer.import = Some(value.to_string()),
+        "export" => peer.export = Some(value.to_string()),
         _ => return Ok(false), // unknown key — caller warns
     }
     Ok(true)

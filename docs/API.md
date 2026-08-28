@@ -87,6 +87,47 @@ safety.cfg = SafetyConfig { reject_as_loop: true, ..Default::default() };
 safety.check(&route, true).unwrap(); // Err on violation
 ```
 
+## Policy — named sets + per-peer dispatch (PolicySet)
+
+`PolicySet` binds user-facing names to prefix-lists / AS-path filters
+/ community lists / route-maps and implements `MatchResolver`, so a
+route-map's `match` clauses resolve through the same set. `PolicyHooks`
+is the import/export dispatch pair: routes whose session has a bound
+route-map are evaluated (FRR semantics: first matching entry wins, no
+match = deny); sessions without a binding pass through.
+
+```rust
+use lr_policy::{ListKind, PolicySet, SetAction};
+use lr_policy::prefix_list::{PrefixList, PrefixListEntry};
+use lr_policy::route_map::RouteMapEntry;
+use lr_core::addr::Prefix;
+
+let mut set = PolicySet::new();
+let mut space = PrefixList::new();
+space.push(PrefixListEntry {
+    prefix: Prefix::new_v4([203, 0, 113, 0], 24),
+    ge: 24, le: 32, permit: true,
+});
+set.add_prefix_list("customer-space", space);
+
+set.push_route_map_entry("to-customer", RouteMapEntry {
+    matches: vec![set.match_condition(ListKind::Prefix, "customer-space").unwrap()],
+    sets: vec![SetAction::SetLocalPref(200)],
+    verdict: Some(true),
+});
+
+// Attach to session 3 and register on the router.
+set.bind_export(3, "to-customer");
+let hooks = set.hooks();
+router.hooks_mut().import.push(Box::new(hooks.clone()));
+router.hooks_mut().export.push(Box::new(hooks));
+```
+
+`ExportHook::on_export_to(route, destination)` receives the egress
+session id (default method delegates to `on_export`, so existing hooks
+are unaffected). The daemon exposes all of this as TOML tables — see
+`templates/daemon.toml`.
+
 ## BFD
 
 ```rust

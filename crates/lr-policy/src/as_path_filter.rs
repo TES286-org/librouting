@@ -138,6 +138,12 @@ impl AsPathFilterBank {
     pub fn add(&mut self, list: Vec<AsPathFilter>) {
         self.filters.push(list);
     }
+    pub fn len(&self) -> usize {
+        self.filters.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.filters.is_empty()
+    }
 
     /// First-match evaluation of list `id` against the route's
     /// canonical AS_PATH; unknown ids and no-match deny.

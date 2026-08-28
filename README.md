@@ -109,7 +109,14 @@ peer_as = 64514
 max_prefixes = 1000
 ```
 
-A TOML config (`templates/daemon.toml`) is supported via `--config`.
+A TOML config (`templates/daemon.toml`) is supported via `--config`,
+including routing policy: `[[prefix-list]]`, `[[as-path-list]]`,
+`[[community-list]]` and `[[route-map]]` tables attached per peer
+with `import = "<route-map>"` / `export = "<route-map>"` (FRR-style
+first-match / implicit-deny semantics; set actions include
+`set_local_pref`, `set_med`, `set_next_hop`, `prepend` and
+`add_community`). Unknown references fail at startup — policy never
+silently passes traffic.
 
 ## Workspace Layout
 

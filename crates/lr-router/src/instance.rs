@@ -1524,7 +1524,10 @@ impl DefaultRouter {
                     }
                     let mut candidate = route.clone();
                     candidate.path_id = slot as u32 + 1;
-                    if matches!(hooks.run_export(&mut candidate), HookVerdict::Drop) {
+                    if matches!(
+                        hooks.run_export_to(&mut candidate, *session),
+                        HookVerdict::Drop
+                    ) {
                         continue;
                     }
                     desired.push(candidate);
@@ -1535,7 +1538,10 @@ impl DefaultRouter {
                 }
                 let mut candidate = best.clone();
                 candidate.path_id = 0;
-                if !matches!(hooks.run_export(&mut candidate), HookVerdict::Drop) {
+                if !matches!(
+                    hooks.run_export_to(&mut candidate, *session),
+                    HookVerdict::Drop
+                ) {
                     desired.push(candidate);
                 }
             }
@@ -1647,7 +1653,7 @@ impl DefaultRouter {
             }
             for set in snapshot {
                 for mut route in set {
-                    if matches!(hooks.run_export(&mut route), HookVerdict::Drop) {
+                    if matches!(hooks.run_export_to(&mut route, session), HookVerdict::Drop) {
                         continue;
                     }
                     if peer.advertise(&route) {
@@ -1825,7 +1831,7 @@ impl DefaultRouter {
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&h) {
             for route in &snapshot {
                 let mut r = route.clone();
-                if matches!(hooks.run_export(&mut r), HookVerdict::Drop) {
+                if matches!(hooks.run_export_to(&mut r, h), HookVerdict::Drop) {
                     continue;
                 }
                 if peer.advertise(&r) {

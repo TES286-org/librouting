@@ -72,6 +72,15 @@ pub trait ExportHook: Send {
     }
     /// Process the outbound route. May mutate or drop it.
     fn on_export(&self, route: &mut Route) -> HookVerdict;
+    /// Destination-aware variant: the router calls this with the id of
+    /// the session the route is being advertised to, so per-peer
+    /// export policy can dispatch on it. The default delegates to
+    /// [`ExportHook::on_export`], preserving destination-agnostic
+    /// behaviour for existing hooks.
+    fn on_export_to(&self, route: &mut Route, destination: u64) -> HookVerdict {
+        let _ = destination;
+        self.on_export(route)
+    }
 }
 
 /// A collection of hooks + safety net configuration. Aggregated by the
@@ -119,9 +128,16 @@ impl HookChain {
 
     /// Run all export hooks on the route.
     pub fn run_export(&self, route: &mut Route) -> HookVerdict {
+        self.run_export_to(route, u64::MAX)
+    }
+
+    /// Run all export hooks with the destination session id. Hooks
+    /// that do not override [`ExportHook::on_export_to`] behave
+    /// exactly as under [`HookChain::run_export`].
+    pub fn run_export_to(&self, route: &mut Route, destination: u64) -> HookVerdict {
         let mut verdict = HookVerdict::Keep;
         for h in &self.export {
-            let v = h.on_export(route);
+            let v = h.on_export_to(route, destination);
             match v {
                 HookVerdict::Drop => return HookVerdict::Drop,
                 HookVerdict::Replace(r) => {

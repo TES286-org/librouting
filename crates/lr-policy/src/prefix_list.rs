@@ -80,6 +80,12 @@ impl PrefixListBank {
     pub fn add(&mut self, id: u32, list: PrefixList) {
         self.lists.insert(id, list);
     }
+    pub fn len(&self) -> usize {
+        self.lists.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.lists.is_empty()
+    }
     pub fn get(&self, id: u32) -> Option<&PrefixList> {
         self.lists.get(&id)
     }

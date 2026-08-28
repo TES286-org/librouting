@@ -70,6 +70,12 @@ impl CommunityListBank {
     pub fn add(&mut self, list: CommunityList) {
         self.lists.push(list);
     }
+    pub fn len(&self) -> usize {
+        self.lists.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.lists.is_empty()
+    }
     pub fn evaluate(&self, id: u32, route: &Route) -> bool {
         match self.lists.get(id as usize) {
             Some(list) => list.evaluate(route),

@@ -51,6 +51,7 @@ use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, Sessi
 
 mod api;
 mod daemon_config;
+mod daemon_policy;
 mod privdrop;
 mod signal;
 
@@ -245,6 +246,39 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 }
             }
         }
+    }
+
+    // ---- Policy (route-maps / lists from the TOML config). ----
+    // Registered before any session comes up so the initial table
+    // dump already flows through per-peer import/export policy.
+    let has_policy_bindings = cfg
+        .peers
+        .iter()
+        .any(|p| p.import.is_some() || p.export.is_some());
+    if has_policy_bindings || !cfg.route_maps.is_empty() {
+        let mut policy_set = match daemon_policy::build_policy_set(cfg) {
+            Ok(set) => set,
+            Err(e) => return daemon_policy::policy_error(e),
+        };
+        if let Err(e) = daemon_policy::bind_peer_policies(cfg, &mut policy_set, |idx| {
+            entries.get(idx).map(|e| e.handle.0).unwrap_or(u64::MAX)
+        }) {
+            return daemon_policy::policy_error(e);
+        }
+        let hooks = policy_set.hooks();
+        let bound_imports = cfg.peers.iter().filter(|p| p.import.is_some()).count();
+        let bound_exports = cfg.peers.iter().filter(|p| p.export.is_some()).count();
+        {
+            let mut r = router.lock().unwrap();
+            r.hooks_mut().import.push(Box::new(hooks.clone()));
+            r.hooks_mut().export.push(Box::new(hooks));
+        }
+        println!(
+            "  policy:      {} route-maps, {} import / {} export bindings",
+            cfg.route_maps.len(),
+            bound_imports,
+            bound_exports
+        );
     }
 
     // ---- Banner. ----

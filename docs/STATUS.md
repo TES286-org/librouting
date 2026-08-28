@@ -113,7 +113,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML subset) | ✅ 🧪 | multi-peer (`[[peer]]` TOML tables / repeatable `--peer`): per-peer AS/hold-time/GR/auth/GTSM/max-prefix/Add-Path/families with `[bgp]` inheritance, one connector thread per outbound peer, listener matches inbound connections to peers by source address (fail-closed), centralized event consumption preserving Loc-RIB ordering; signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API |
+| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML incl. policy tables) | ✅ 🧪 | multi-peer (`[[peer]]` TOML tables / repeatable `--peer`): per-peer AS/hold-time/GR/auth/GTSM/max-prefix/Add-Path/families with `[bgp]` inheritance, one connector thread per outbound peer, listener matches inbound connections to peers by source address (fail-closed), centralized event consumption preserving Loc-RIB ordering; signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API |
 | C ABI FFI (`lr-ffi`) + cbindgen header | ✅ 🧪 | C harness in CI |
 | Go bindings | ✅ 🧪 | `bindings/lr-go` |
 | Python bindings | ✅ 🧪 | `bindings/lr-python` (cffi) |
@@ -136,6 +136,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
+| Policy-in-config E2E (export filter, import filter, set-actions keep-route, unknown-reference fail-closed startup) | ✅ 🧪 | `crates/lr-cli/tests/daemon_policy.rs` |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
@@ -213,15 +214,18 @@ BIRD/FRR-style, without an embedder writing code.
       and `add community` now write real attributes. Feature-gated
       `lr-policy → lr-bgp` (default on, no cycle). 14 new unit tests
       against real attribute bytes.
-   b. **Policy objects in TOML**: `[[prefix-list]]`, `[[as-path-list]]`,
-      `[[community-list]]`, `[[route-map]]` tables (match/set entries
-      mapping 1:1 onto `lr-policy` primitives), attached per peer via
-      `import = "<route-map>"` / `export = "<route-map>"`. Rejected by
-      design: a BIRD-style filter DSL (un-TOML-able, heavy parser) and
-      embedded scripting languages (dependency weight, auditability).
-      Data-only declarative tables win on both performance and
-      maintainability. E2E: a two-daemon run where an import filter
-      drops one prefix and passes another.
+   b. ~~**Policy objects in TOML**~~ — done: `[[prefix-list]]`,
+      `[[as-path-list]]`, `[[community-list]]`, `[[route-map]]`
+      tables with per-peer `import`/`export` attachment; entries in
+      ascending `entry` order; unknown keys inside policy tables and
+      unknown references are startup errors (fail closed). Router
+      export hooks gained a destination-aware variant
+      (`ExportHook::on_export_to`) so per-peer export policy
+      dispatches on the egress session — backward compatible via a
+      default method. `lr_policy::PolicySet` + `PolicyHooks` are the
+      reusable bridge; the daemon wires them in one block. E2E:
+      export filter, import filter, set-actions keep-route,
+      unknown-reference startup failure (4 tests).
    c. **Peer templates**: `[peer-template.<name>]` tables holding
       defaults (`md5_key`, `graceful_restart_time`, `max_prefixes`,
       policy attachments…) that `[[peer]]` entries pull in via

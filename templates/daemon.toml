@@ -140,3 +140,50 @@ networks = ["203.0.113.0/24"]
 #
 # Note: inbound peers must share one auth configuration (the listener
 # socket is armed once); heterogeneous listener keys are future work.
+
+# ---------------------------------------------------------------------
+# Routing policy (W1.4): named lists + route-maps, attached per peer.
+#
+# Lists are first-match / implicit-deny, FRR-style. Route-map entries
+# apply in ascending `entry` order (ties keep file order); `permit`
+# sets the verdict of that entry, omit it to fall through to the next
+# entry after applying the sets.
+#
+# Available tables and keys:
+#
+#   [[prefix-list]]    name, prefix, ge (default: prefix len),
+#                      le (default: unbounded), permit (default: true)
+#   [[as-path-list]]   name, pattern, permit (default: true)
+#                      pattern tokens: ^ start, $ end, _ any separator;
+#                      e.g. "_65000$" = learned from AS65000
+#   [[community-list]] name, communities (["asn:value", "no-export",
+#                      "llgr-stale", ...]), permit (default: true)
+#   [[route-map]]      name, entry, match_prefix, match_as_path,
+#                      match_community (AND), set_local_pref, set_med,
+#                      set_metric, set_next_hop, prepend ("65001 65001"),
+#                      add_community ("64512:100"), permit
+#
+# Peers attach policy with import = "<route-map>" / export = "<route-map>"
+# (see [[peer]] keys above). Unknown references fail at startup —
+# policy never silently passes traffic.
+
+[[prefix-list]]
+name = "customer-space"
+prefix = "203.0.113.0/24"
+
+[[route-map]]
+name = "to-customer"
+entry = 10
+match_prefix = "customer-space"
+permit = true
+
+[[route-map]]
+name = "to-customer"
+entry = 20      # everything else stays internal
+permit = false
+
+# [[peer]]
+# name = "customer-b"
+# address = "198.51.100.2"
+# peer_as = 64514
+# export = "to-customer"
