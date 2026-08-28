@@ -120,6 +120,27 @@ first-match / implicit-deny semantics; set actions include
 `add_community`). Unknown references fail at startup — policy never
 silently passes traffic.
 
+**OSPF mode.** `--protocol ospf` runs the OSPFv2 daemon instead of
+BGP: one raw socket (IP protocol 89) per configured interface,
+multicast Hellos to 224.0.0.5, dynamic neighbor discovery, per-area
+Router-LSA origination and dead-timer teardown. Interfaces and areas
+are configured with `[[ospf.interface]]` / `[[ospf.area]]` tables
+(stub/NSSA area types supported) or the `--ospf-interface` /
+`--ospf-area` CLI flags; BGP tables in the same file are ignored in
+OSPF mode. Raw sockets need root or a user/network namespace — the
+interop lab runs the whole thing rootless via `unshare -Urn` (see
+`tests/interop/ospf.sh`). Current scope: OSPFv2, point-to-point
+segments (no DR election), simplified DBD exchange — full details in
+`docs/STATUS.md` (W1.5).
+
+```bash
+# Two routers on a veth pair, each in its own network namespace:
+unshare -Urn lr-daemon --protocol ospf --router-id 1.1.1.1 \
+                       --ospf-interface veth0
+# → daemon: ospf neighbor 2.2.2.2 Full (area 0.0.0.0)
+# → daemon: route installed 10.99.3.0/24 via (none)
+```
+
 ## Workspace Layout
 
 ```

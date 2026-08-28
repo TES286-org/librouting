@@ -163,6 +163,45 @@ sessions: locally originated LSAs are refreshed and flooded as LSUs after
 is rerun. The router clock is embedder-driven, so call `tick` with a monotonic
 millisecond timestamp.
 
+## OSPF origination + raw transport (speaker building blocks)
+
+The router pipeline is receive-driven; a real OSPF *speaker* additionally
+produces its own artifacts. `lr-ospf::origination` and
+`lr-osroute::ospf_transport` are the two halves `lr-daemon --protocol ospf`
+is built from — and embedders can reuse them directly:
+
+```rust
+use lr_ospf::origination::{originate_router_lsa, RouterLsaLink,
+    finalize_v2_packet, finalize_v2_stream, v2_packet_checksum_ok};
+use lr_osroute::ospf_transport::{OspfV2Transport, interface_v4_addrs};
+
+// 1. Transport: one raw socket per interface (SO_BINDTODEVICE, both
+//    multicast groups joined, TTL 1). Needs root or a user/net namespace.
+let addrs = interface_v4_addrs("eth0")?;      // for stub links + masks
+let sock = OspfV2Transport::bind("eth0", false)?;
+sock.set_nonblocking(true)?;
+
+// 2. Router-LSA (RFC 2328 12.4.1): stub links per interface address,
+//    p2p links per Full adjacency; prev_seq continues the sequence space.
+let lsa = originate_router_lsa(router_id, &[
+    RouterLsaLink::Stub { network: 0x0a0a_0a00, mask: 0xffff_ff00, metric: 10 },
+    RouterLsaLink::PointToPoint { neighbor: 0x0b00_0002, local_addr: 0x0a0a_0a01, metric: 10 },
+], None)?;
+
+// 3. Egress checksums: the codec emits the A.1 checksum field zeroed;
+//    checksum-validating peers (BIRD, FRR) require it. Finalize whole
+//    packets (Hellos) or drain_output-shaped streams (LSU bursts).
+let mut bytes = codec.encode_vec(&hello_packet)?;
+finalize_v2_packet(&mut bytes);          // single packet
+finalize_v2_stream(&mut drained);        // back-to-back packets
+assert!(v2_packet_checksum_ok(&received[..len]));  // ingress gate
+```
+
+`v2_packet_checksum_ok` excludes the 64-bit authentication field exactly
+as RFC 2328 §A.1 prescribes. On non-Linux platforms the transport returns
+`OspfTransportError::Unsupported`; `is_permission_denied()` detects a
+missing `CAP_NET_RAW` so callers can degrade gracefully.
+
 ## OSPF external routes (RFC 2328 §12.4.3 / §16.4)
 
 `DefaultRouter::ospf_redistribute` injects an external destination into

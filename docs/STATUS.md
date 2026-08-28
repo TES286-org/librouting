@@ -70,6 +70,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Designated-router election | ✅ | |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area-prefix-LSA (0x2003) origination via `originate_v3_inter_area_prefix_lsa` |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
+| Daemon transport (`--protocol ospf`) | ✅ 🧪 | `lr-osroute::ospf_transport`: raw `IPPROTO_OSPF` socket per interface, `SO_BINDTODEVICE` + `ip_mreqn` membership (224.0.0.5/6), TTL 1; `lr-ospf::origination`: Router-LSA builder + §A.1 packet checksum; two-daemon e2e over a veth pair (user namespaces, rootless) |
 | Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
 | Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer), RFC 7166 v3 auth trailer (SA-ID + 64-bit crypto-seq + MAC), anti-replay; 22 unit tests |
@@ -113,7 +114,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML incl. policy tables) | ✅ 🧪 | multi-peer (`[[peer]]` TOML tables / repeatable `--peer`): per-peer AS/hold-time/GR/auth/GTSM/max-prefix/Add-Path/families with `[bgp]` inheritance, one connector thread per outbound peer, listener matches inbound connections to peers by source address (fail-closed), centralized event consumption preserving Loc-RIB ordering; signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API |
+| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML incl. policy tables) | ✅ 🧪 | multi-peer (`[[peer]]` TOML tables / repeatable `--peer`): per-peer AS/hold-time/GR/auth/GTSM/max-prefix/Add-Path/families with `[bgp]` inheritance, one connector thread per outbound peer, listener matches inbound connections to peers by source address (fail-closed), centralized event consumption preserving Loc-RIB ordering; signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API; `--protocol ospf` mode: `[[ospf.interface]]`/`[[ospf.area]]` config (stub/NSSA, no-summary, dotted-quad area IDs), dynamic per-`(area, router-id)` neighbor sessions, Hello origination, dead timer, per-area Router-LSA self-origination, raw-socket transport (above) |
 | C ABI FFI (`lr-ffi`) + cbindgen header | ✅ 🧪 | C harness in CI |
 | Go bindings | ✅ 🧪 | `bindings/lr-go` |
 | Python bindings | ✅ 🧪 | `bindings/lr-python` (cffi) |
@@ -135,6 +136,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Route-aggregation E2E (aggregate origination/withdrawal lifecycle) | ✅ 🧪 | `lr-tests/tests/route_aggregation.rs` |
 | BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
+| OSPF two-daemon E2E (raw-socket multicast adjacency, stub-net propagation both ways, dead-timer teardown) | ✅ 🧪 | `tests/interop/ospf.sh` — veth pair, one network namespace per daemon, rootless via `unshare -Urn` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
 | Policy-in-config E2E (export filter, import filter, set-actions keep-route, unknown-reference fail-closed startup) | ✅ 🧪 | `crates/lr-cli/tests/daemon_policy.rs` |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
@@ -233,8 +235,27 @@ BIRD/FRR-style, without an embedder writing code.
       unknown names are startup errors. Resolves the copy-paste
       burden of multi-peer configs without inventing a new language
       (TOML has no anchors). 3 parser unit tests + template e2e.
-5. **OSPF daemon mode** — `--protocol ospf` with area/interface
-   configuration, complementing the existing `bgp` and `babel` modes.
+5. ~~**OSPF daemon mode**~~ — done: `--protocol ospf` with
+   area/interface configuration (`[[ospf.area]]` +
+   `[[ospf.interface]]` TOML tables, `--ospf-interface` /
+   `--ospf-area` / `--ospf-hello-interval` / `--ospf-dead-interval`
+   CLI flags, fail-closed key schemas). Transport: one raw
+   `IPPROTO_OSPF` socket per interface (`lr-osroute::ospf_transport`,
+   Linux) with `SO_BINDTODEVICE` + `ip_mreqn` multicast scoping; the
+   daemon originates Hellos (with the heard-router list), discovers
+   neighbors dynamically — one session per `(area, router-id)`, one
+   anchor session per area registering the area type — originates
+   and re-originates the Router-LSA per area (stub links from
+   interface addresses, p2p links per Full adjacency), verifies
+   inbound packet checksums and finalizes them on egress. Verified by
+   `tests/interop/ospf.sh`: two daemons over a veth pair (one network
+   namespace each, rootless via `unshare -Urn`) reach Full adjacency,
+   exchange stub nets both directions (10.99.2.0/24 ↔ 10.99.3.0/24)
+   and tear the session down on the dead timer. Scope notes: OSPFv2
+   only (v3 needs Link-LSAs); no DR election — segments behave p2p
+   (DR/BDR stay 0.0.0.0; BIRD sees our Hellos and reaches ExStart,
+   but Full interop waits on real DBD/LSR exchange, tracked below);
+   auth and reload are not wired into the daemon yet.
 6. **Operational tooling** — MRT dump import/export (`lr routes`
    already exists; add RIB dump/restore), BMP collector mode for the
    daemon.
@@ -265,14 +286,20 @@ Highest-value missing/partial standards, in rough order:
 2. **RFC 8212** default eBGP route behaviors — full default
    deny-in/deny-out for eBGP without explicit policy (currently
    partial; the safety net approximates it).
-3. **RFC 5187** OSPFv3 graceful restart (and RFC 3623 for v2) —
+3. **OSPF DBD/LSR exchange** (RFC 2328 §7.2–§10.8) — replace the
+   neighbor FSM's simplified auto-advance with real Database
+   Description negotiation, LSR loading and implicit
+   acknowledgement; the missing piece for BIRD/FRR OSPF interop
+   (lr's Hellos already reach ExStart on BIRD p2p segments) and for
+   the OSPF daemon's scale-out beyond two-router labs.
+4. **RFC 5187** OSPFv3 graceful restart (and RFC 3623 for v2) —
    planned restart signalling for OSPF.
-4. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
+5. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
    (0x4004/0x2007 options carrying).
-5. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
-6. **RFC 8277** BGP labeled prefixes (BGP-LU) — MPLS label NLRI,
+6. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
+7. **RFC 8277** BGP labeled prefixes (BGP-LU) — MPLS label NLRI,
    also unlocks RFC 5666 EPE.
-7. YANG models (RFC 9647 Babel, key chains RFC 8177) — low priority
+8. YANG models (RFC 9647 Babel, key chains RFC 8177) — low priority
    unless an embedder asks.
 
 ### W4 — Documentation, guides, tutorials

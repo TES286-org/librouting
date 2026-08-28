@@ -202,3 +202,38 @@ permit = false
 # address = "198.51.100.2"
 # peer_as = 64514
 # export = "to-customer"
+
+# ---------------------------------------------------------------------------
+# OSPF daemon mode (run with --protocol ospf; BGP tables above are ignored)
+# ---------------------------------------------------------------------------
+# CLI equivalent (single area, defaults):
+#   lr-daemon --protocol ospf --router-id 10.0.0.1 \
+#             --ospf-interface eth0 [--ospf-area 0]
+#
+# Raw OSPF sockets (IP protocol 89, multicast 224.0.0.5) need root or a
+# user/network namespace: `unshare -Urn lr-daemon --protocol ospf ...`.
+# The daemon sends Hellos per hello_interval, discovers neighbors
+# dynamically, originates a Router-LSA per area (stub links from the
+# interface addresses + p2p links per Full adjacency) and runs the dead
+# timer per interface. See docs/STATUS.md (W1.5) for the current scope:
+# OSPFv2, no DR election (segments behave p2p), simplified DBD exchange.
+
+# [ospf]
+# hello_interval = 10        # per-interface default (RFC 2328 default)
+# dead_interval = 40         # per-interface default (4x hello)
+
+# Non-backbone areas must be declared before interfaces reference them;
+# the backbone (area 0) is implicit and always "normal".
+# [[ospf.area]]
+# id = 1                      # integer or dotted quad ("0.0.0.1")
+# type = "stub"               # normal (default) | stub | nssa
+# no_summary = true           # totally-stubby / totally-NSSA
+# stub_metric = 10            # default-route metric injected into the area
+
+# [[ospf.interface]]
+# name = "eth0"               # kernel interface (required)
+# area = 0                    # inherits --ospf-area (default 0)
+# cost = 10                   # Router-LSA link metric
+# hello_interval = 10         # inherits [ospf]
+# dead_interval = 40          # inherits [ospf]
+# priority = 1                # DR election priority (future)
