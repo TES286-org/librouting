@@ -127,6 +127,14 @@ fn main() -> ExitCode {
         eprintln!("error: {}", e);
         return ExitCode::from(2);
     }
+    // Fail closed on a typo'd --protocol instead of silently running BGP.
+    if !matches!(cfg.protocol.as_str(), "bgp" | "babel" | "ospf") {
+        eprintln!(
+            "error: unknown --protocol '{}' (bgp | babel | ospf)",
+            cfg.protocol
+        );
+        return ExitCode::from(2);
+    }
     if cfg.router_id.is_empty() {
         eprintln!("error: --router-id is required");
         print_usage();
