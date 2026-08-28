@@ -341,8 +341,8 @@ fn print_rib(records: &[lr_mrt::MrtRecord]) -> ExitCode {
                         }
                     }
                     println!(
-                        "{:<20} {:<14} {:<28} {:<15} {}",
-                        "PREFIX", "PEER", "AS-PATH", "NEXT-HOP", "PATH-ID"
+                        "{:<20} {:<14} {:<28} {:<15} PATH-ID",
+                        "PREFIX", "PEER", "AS-PATH", "NEXT-HOP"
                     );
                 }
                 rib_count += 1;
