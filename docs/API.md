@@ -248,6 +248,48 @@ let frame = BabelCodec::new().decode_authenticated_slice(
 )?;
 ```
 
+## OSPF authentication (RFC 5709 / RFC 7166)
+
+OSPFv2 crypto auth (`CryptoAuth`, AuType 2) and OSPFv3 auth trailer
+(`V3Auth`, RFC 7166) both use HMAC-SHA-1 or HMAC-SHA-256. The MAC is
+computed over the packet (with checksum/auth fields zeroed) plus an
+optional IP pseudo-header. Anti-replay is enforced via a monotonic
+cryptographic sequence number.
+
+```rust
+use lr_ospf::auth::{CryptoAuth, V3Auth};
+
+// OSPFv2: Key ID + HMAC-SHA-256, 32-bit crypto-seq.
+let mut v2 = CryptoAuth::new(1, b"shared-secret".to_vec());
+v2.advance_seq();
+let trailer = v2.sign_trailer(&header_bytes, &body_bytes);
+// ... append `trailer` after the OSPF body on the wire ...
+
+// OSPFv3: SA-ID + HMAC-SHA-256, 64-bit crypto-seq.
+let mut v3 = V3Auth::new(1, b"shared-secret".to_vec())
+    .with_addresses(src_v6, dst_v6);
+v3.advance_seq();
+let trailer = v3.sign_trailer(&packet); // header + body
+```
+
+## OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5)
+
+An OSPFv3 ABR re-advertises reachability between areas using
+inter-area-prefix-LSAs (type 0x2003). The body carries a 3-byte metric,
+the prefix length, prefix options, and the truncated address prefix.
+
+```rust
+use lr_ospf::abr::{originate_v3_inter_area_prefix_lsa, SummaryDestination};
+use lr_ospf::lsa::LsaTypeV3;
+use lr_core::addr::Prefix;
+
+let prefix = Prefix::new_v6([0x20,0x01,0x0d,0xb8, 0,0,0,0, 0,0,0,0, 0,0,0,1], 64);
+let dest = SummaryDestination::new(prefix, 10);
+let lsa = originate_v3_inter_area_prefix_lsa(router_id, ls_id, &dest, None)?;
+assert_eq!(lsa.header.ls_type, LsaTypeV3::InterAreaPrefixLsa.function_code());
+assert!(lsa.checksum_ok());
+```
+
 ## OS routing table
 
 ```rust

@@ -208,13 +208,8 @@ mod imp {
 
     extern "C" {
         fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
-        fn setsockopt(
-            fd: i32,
-            level: i32,
-            optname: i32,
-            optval: *const c_void,
-            optlen: u32,
-        ) -> i32;
+        fn setsockopt(fd: i32, level: i32, optname: i32, optval: *const c_void, optlen: u32)
+            -> i32;
         fn getsockopt(
             fd: i32,
             level: i32,
@@ -299,9 +294,7 @@ mod imp {
         if gtsm.outbound_ttl > 0 {
             match addr_family {
                 AF_INET => set_opt_int(fd, SOL_IP, IP_TTL, gtsm.outbound_ttl as i32)?,
-                AF_INET6 => {
-                    set_opt_int(fd, SOL_IPV6, IPV6_UNICAST_HOPS, gtsm.outbound_ttl as i32)?
-                }
+                AF_INET6 => set_opt_int(fd, SOL_IPV6, IPV6_UNICAST_HOPS, gtsm.outbound_ttl as i32)?,
                 _ => return Err(GtsmError::Unsupported("unknown address family")),
             }
         }
@@ -515,11 +508,10 @@ mod fallback {
                 errno: e.raw_os_error().unwrap_or(0),
             });
         }
-        let stream =
-            TcpStream::connect_timeout(&addr, timeout).map_err(|e| GtsmError::Os {
-                context: "connect",
-                errno: e.raw_os_error().unwrap_or(0),
-            })?;
+        let stream = TcpStream::connect_timeout(&addr, timeout).map_err(|e| GtsmError::Os {
+            context: "connect",
+            errno: e.raw_os_error().unwrap_or(0),
+        })?;
         if gtsm.outbound_ttl > 0 {
             stream
                 .set_ttl(gtsm.outbound_ttl as u32)
@@ -640,13 +632,13 @@ mod tests {
         // no SYN-ACK is sent because IP_MINTTL drops the inbound SYN.
         let stream = TcpStream::connect_timeout(&addr, Duration::from_millis(500));
         if let Ok(mut s) = stream {
-            s.set_read_timeout(Some(Duration::from_millis(200))).unwrap();
+            s.set_read_timeout(Some(Duration::from_millis(200)))
+                .unwrap();
             let mut buf = [0u8; 1];
             let _ = s.read(&mut buf);
             listener.set_nonblocking(true).unwrap();
-            match listener.accept() {
-                Ok(_) => panic!("GTSM listener accepted a low-TTL connection"),
-                Err(_) => {} // expected: the SYN was dropped
+            if listener.accept().is_ok() {
+                panic!("GTSM listener accepted a low-TTL connection");
             }
         }
     }

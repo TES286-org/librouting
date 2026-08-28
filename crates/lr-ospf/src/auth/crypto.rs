@@ -84,8 +84,8 @@ impl CryptoAlgorithm {
             }
             Self::HmacSha256 => {
                 use hmac::{Hmac, Mac};
-                let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
-                    .expect("HMAC accepts any key");
+                let mut mac =
+                    <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key");
                 mac.update(data);
                 mac.finalize().into_bytes().to_vec()
             }
@@ -198,8 +198,8 @@ impl CryptoAuth {
             buf[12] = 0;
             buf[13] = 0;
             // auth_data is 16..24 — zero it.
-            for i in 16..24 {
-                buf[i] = 0;
+            for b in buf.iter_mut().take(24).skip(16) {
+                *b = 0;
             }
         }
         buf.extend_from_slice(body_bytes);
@@ -393,11 +393,17 @@ mod tests {
         packet.extend_from_slice(&body);
 
         let mut verifier = CryptoAuth::new(1, b"key".to_vec()).with_source([192, 0, 2, 1]);
-        assert!(verifier.verify(&packet, &trailer), "same source must verify");
+        assert!(
+            verifier.verify(&packet, &trailer),
+            "same source must verify"
+        );
 
         // Different source → different pseudo-header → MAC mismatch.
         let mut verifier2 = CryptoAuth::new(1, b"key".to_vec()).with_source([10, 0, 0, 1]);
-        assert!(!verifier2.verify(&packet, &trailer), "different source must fail");
+        assert!(
+            !verifier2.verify(&packet, &trailer),
+            "different source must fail"
+        );
     }
 
     #[test]

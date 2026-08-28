@@ -52,10 +52,11 @@ implements, or references. It is grouped by protocol family.
 | 3101   | OSPF Not-So-Stubby Areas (NSSA)                      | ✓ type-7 origination (P-bit + forwarding-address rules), §2.5 calculation, §3.1 translator election, §3.2 type-5 translation, type-7/type-3 defaults, `no_summary` | `lr-ospf::nssa`, `lr-router` |
 | 3623   | Graceful OSPF Restart                                | partial      | TBD                                 |
 | 4577   | OSPF as the Provider Edge-to-CE                      | partial      | —                                    |
-| 5340   | OSPF for IPv6                                         | ✓ core       | `lr-ospf::packet` (inter-area-prefix-LSA origination not implemented) |
+| 5340   | OSPF for IPv6                                         | ✓ core + inter-area-prefix-LSA origination | `lr-ospf::packet`, `lr-ospf::abr`, `lr-ospf::lsa` |
+| 5709   | OSPFv2 HMAC-SHA Cryptographic Auth                   | ✓ (HMAC-SHA-1 + HMAC-SHA-256, anti-replay) | `lr-ospf::auth::crypto` |
 | 5643   | Management Information Base for OSPFv3                | partial      | —                                    |
 | 6850   | OSPFv3 MIB                                            | partial      | —                                    |
-| 7166   | Support for the Auth Trailer in OSPFv3               | partial      | `lr-ospf::auth`                      |
+| 7166   | Support for the Auth Trailer in OSPFv3               | ✓ (SA-ID + 64-bit crypto-seq + HMAC-SHA, IPv6 pseudo-header, anti-replay) | `lr-ospf::auth::v3_auth` |
 | 7471   | OSPF TE MIB                                           | partial      | —                                    |
 | 7506   | OSPFv3 Auto-Configuration                             | partial      | —                                    |
 | 7684   | OSPFv3 Prefix Link-Local Attributes                  | partial      | —                                    |

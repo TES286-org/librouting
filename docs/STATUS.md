@@ -72,7 +72,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
 | Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
-| Auth (cryptographic) | 🟡 | `Auth` trait + AuType model exist; only NullAuth implemented — RFC 2328 §C.3 MD5, RFC 5709 HMAC-SHA, RFC 7166 v3 trailer missing |
+| Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer), RFC 7166 v3 auth trailer (SA-ID + 64-bit crypto-seq + MAC), anti-replay; 22 unit tests |
+| OSPFv3 inter-area-prefix-LSA (0x2003) | ✅ 🧪 | `originate_v3_inter_area_prefix_lsa` ABR origination; v3 LSA type enum; body encode/decode with IPv6 prefix support |
 
 ### Babel (`lr-babel`)
 
@@ -208,9 +209,15 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
     `lr-tests/tests/bgp_session_modes.rs` (10 tests, in-process byte
     pump). FFI + Go/Python/C++ bindings expose
     `set_extended_next_hop` / `set_mp_families` / `set_local_address`.
-11. **OSPF authentication + OSPFv3 inter-area** — RFC 5709 HMAC-SHA auth
-    (v2 AuType 2 trailer), RFC 7166 v3 auth trailer, and OSPFv3
-    inter-area-prefix-LSA (0x2003) ABR origination.
+11. ~~**OSPF authentication + OSPFv3 inter-area**~~ — done: RFC 5709
+    HMAC-SHA-1/SHA-256 crypto auth for OSPFv2 (`CryptoAuth` with Key ID,
+    shared secret, algorithm, anti-replay via monotonic crypto-seq, IPv4
+    pseudo-header), RFC 7166 auth trailer for OSPFv3 (`V3Auth` with
+    SA-ID, 64-bit crypto-seq, IPv6 pseudo-header), and OSPFv3
+    inter-area-prefix-LSA (0x2003) ABR origination
+    (`originate_v3_inter_area_prefix_lsa` + `LsaTypeV3` enum + body
+    encode/decode with IPv6 prefix support). 22 auth unit tests + 5 v3
+    ABR origination tests.
 12. ~~**BGP GTSM + maximum-prefix**~~ — done: RFC 5082 TTL security
     (`lr-osroute::gtsm` — listener-side `IP_MINTTL`/`IPV6_MINHOPLIMIT`
     filter + outbound TTL on connector; daemon `--gtsm` / `--gtsm N`;
