@@ -156,6 +156,10 @@ jobs:
         run: ./tests/interop/two_daemon.sh
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         run: ./tests/interop/ospf.sh
+      - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
+        run: ./tests/interop/mrt.sh
+      - name: BMP collector e2e (daemon mirroring -> daemon collector)
+        run: ./tests/interop/bmp.sh
       - name: BGP MD5 auth interop (RFC 2385)
         run: ./tests/interop/md5.sh
       - name: BIRD interop (librouting ↔ BIRD)
