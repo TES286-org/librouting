@@ -296,6 +296,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lr-bmp"
+version = "0.1.0"
+dependencies = [
+ "lr-bgp",
+ "lr-core",
+]
+
+[[package]]
 name = "lr-cli"
 version = "0.1.0"
 dependencies = [
@@ -383,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "lr-babel",
  "lr-bgp",
+ "lr-bmp",
  "lr-core",
  "lr-ospf",
  "lr-policy",
@@ -396,6 +405,7 @@ version = "0.1.0"
 dependencies = [
  "lr-babel",
  "lr-bgp",
+ "lr-bmp",
  "lr-core",
  "lr-ospf",
  "lr-osroute",

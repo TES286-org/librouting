@@ -466,6 +466,26 @@ r.add_redistribution_pipe(
 `Fixed(N)` always advertises N; `Add(N)` adds N to the source metric.
 `remove_redistribution_pipe(source, target)` removes matching pipes.
 
+### Route aggregation (RFC 4271 §9.2.2.2)
+
+`add_aggregate(prefix)` registers a BGP route aggregate. When the
+Loc-RIB contains at least one route more specific than the aggregate,
+the router originates the aggregate with:
+- AS_PATH zeroed (empty AS_SEQUENCE)
+- ATOMIC_AGGREGATE attribute
+- AGGREGATOR attribute (local AS + router ID)
+
+When all specifics disappear, the aggregate is withdrawn automatically.
+
+```rust
+use lr_core::addr::Prefix;
+// Aggregate 203.0.113.0/24 from any /25..-/32 specifics.
+r.add_aggregate(Prefix::new_v4([203, 0, 113, 0], 24));
+// ... when a /32 arrives via BGP, the /24 aggregate appears in Loc-RIB.
+// ... when the /32 is withdrawn, the /24 aggregate disappears.
+r.remove_aggregate(&Prefix::new_v4([203, 0, 113, 0], 24));
+```
+
 ### BMP monitoring (RFC 7854)
 
 `DefaultRouter::set_bmp_sink` installs a closure that receives encoded

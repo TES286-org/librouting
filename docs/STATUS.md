@@ -50,7 +50,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
 | Per-peer maximum-prefix | ✅ 🧪 | `with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold(pct)`; warn / teardown / restart actions; CEASE NOTIFICATION subcode 8 (RFC 4486 §2.1); threshold + exceeded events latched per session; daemon `--max-prefixes` / `--max-prefix-action` / `--max-prefix-threshold` |
-| Route aggregation | ❌ | aggregate NLRI generation + AS_PATH zeroing |
+| Route aggregation | ✅ 🧪 | `add_aggregate(prefix)` / `remove_aggregate(prefix)` (RFC 4271 §9.2.2.2): originates aggregate with zeroed AS_PATH + ATOMIC_AGGREGATE + AGGREGATOR when specifics exist; withdraws when all specifics disappear; 5 e2e tests |
 | BMP monitoring (RFC 7854) | ✅ 🧪 | `lr-bmp` crate (7 message types, streaming codec, IPv4/IPv6 peer headers); `DefaultRouter::set_bmp_sink` mirrors Peer Up/Down + Route Monitoring; 10 unit + 3 e2e tests |
 
 ### OSPF (`lr-ospf`)
@@ -68,7 +68,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | External route redistribution API | ✅ 🧪 | `DefaultRouter::ospf_redistribute`/`ospf_unredistribute` |
 | Cross-protocol redistribution engine | ✅ 🧪 | `RedistributionPipe` (BIRD `pipe` / FRR `redistribute`); BGP↔BGP, BGP→OSPF, OSPF→BGP; metric policy (Inherit/Fixed/Add); prefix-list filter; withdrawal propagation; 7 e2e tests |
 | Designated-router election | ✅ | |
-| Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
+| Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area-prefix-LSA (0x2003) origination via `originate_v3_inter_area_prefix_lsa` |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
 | Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |

@@ -411,9 +411,7 @@ impl SsSeqnoRequest {
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut a = Vec::with_capacity(
-            4 + self.src_prefix.len() + self.prefix.len() + 12,
-        );
+        let mut a = Vec::with_capacity(4 + self.src_prefix.len() + self.prefix.len() + 12);
         a.push(self.ae);
         a.push(self.src_prefix_len);
         if self.ae != 0 && self.src_prefix_len > 0 {
@@ -660,9 +658,7 @@ mod tests {
         let r = super::SsSeqnoRequest {
             ae: 2,
             src_prefix_len: 128,
-            src_prefix: vec![
-                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            ],
+            src_prefix: vec![0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
             prefix_len: 64,
             prefix: vec![0xfe, 0x80, 0, 0, 0, 0, 0, 0],
             seqno: 100,

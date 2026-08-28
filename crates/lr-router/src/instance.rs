@@ -684,6 +684,12 @@ pub struct DefaultRouter {
     /// collector.
     #[allow(clippy::type_complexity)]
     bmp_sink: Option<Box<dyn Fn(&[u8]) + Send + Sync>>,
+    /// Registered BGP route aggregates (RFC 4271 §9.2.2.2). When the
+    /// Loc-RIB contains at least one route more specific than a
+    /// registered aggregate, the aggregate is originated with a zeroed
+    /// AS_PATH and ATOMIC_AGGREGATE. When all specifics disappear, the
+    /// aggregate is withdrawn.
+    aggregates: BTreeSet<lr_core::addr::Prefix>,
 }
 
 /// Per-session maximum-prefix bookkeeping.
@@ -727,6 +733,7 @@ impl Default for DefaultRouter {
             pipes: Vec::new(),
             redistributed_bgp: BTreeMap::new(),
             bmp_sink: None,
+            aggregates: BTreeSet::new(),
         }
     }
 }
@@ -1068,6 +1075,109 @@ impl DefaultRouter {
         }
     }
 
+    /// Register a BGP route aggregate (RFC 4271 §9.2.2.2). When the
+    /// Loc-RIB contains at least one route more specific than `prefix`,
+    /// the aggregate is originated with a zeroed AS_PATH,
+    /// ATOMIC_AGGREGATE, and AGGREGATOR attributes. When all specifics
+    /// disappear, the aggregate is withdrawn.
+    ///
+    /// This is the BIRD `aggregate` / FRR `aggregate-address` equivalent.
+    pub fn add_aggregate(&mut self, prefix: lr_core::addr::Prefix) {
+        self.aggregates.insert(prefix);
+        self.recompute_aggregates();
+    }
+
+    /// Remove a registered aggregate. The aggregate route (if currently
+    /// originated) is withdrawn.
+    pub fn remove_aggregate(&mut self, prefix: &lr_core::addr::Prefix) {
+        if self.aggregates.remove(prefix) {
+            // Withdraw the aggregate if it was originated.
+            let family = match prefix.addr {
+                lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
+                lr_core::addr::IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+            };
+            let key = RouteKey::new(*prefix, family);
+            self.unoriginate(&key);
+        }
+    }
+
+    /// Scan the Loc-RIB for routes more specific than each registered
+    /// aggregate. Originates or withdraws aggregate routes as needed.
+    fn recompute_aggregates(&mut self) {
+        if self.aggregates.is_empty() {
+            return;
+        }
+        // Collect the current Loc-RIB prefixes (best routes only).
+        let loc_rib_prefixes: Vec<lr_core::addr::Prefix> =
+            self.loc_rib.iter_best().map(|r| r.key.prefix).collect();
+        // Collect the aggregate list and local AS first to avoid
+        // borrowing self while we mutate it below.
+        let aggregates: Vec<lr_core::addr::Prefix> = self.aggregates.iter().copied().collect();
+        let local_as = self
+            .sessions
+            .values()
+            .find_map(|s| match s {
+                SessionState::Bgp { peer, .. } => Some(peer.config().local_as.as_u32()),
+                _ => None,
+            })
+            .unwrap_or(0);
+        for agg in &aggregates {
+            let family = match agg.addr {
+                lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
+                lr_core::addr::IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+            };
+            let key = RouteKey::new(*agg, family);
+            let has_specific = loc_rib_prefixes
+                .iter()
+                .any(|p| agg.contains_prefix(p) && p.prefix_len > agg.prefix_len);
+            let already_originated = self.originated.contains_key(&key);
+            if has_specific && !already_originated {
+                let mut attrs = PathAttributes::new();
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_transitive(true),
+                    AttrType::Origin,
+                    vec![0],
+                ));
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_transitive(true),
+                    AttrType::AsPath,
+                    Vec::new(),
+                ));
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_transitive(true),
+                    AttrType::AtomicAggregate,
+                    Vec::new(),
+                ));
+                let mut agg_val = Vec::with_capacity(8);
+                agg_val.extend_from_slice(&local_as.to_be_bytes());
+                agg_val.extend_from_slice(&[0, 0, 0, 0]);
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_transitive(true),
+                    AttrType::Aggregator,
+                    agg_val,
+                ));
+                let route = Route {
+                    key: key.clone(),
+                    origin: RouteOrigin { proto: 2, peer: 0 },
+                    protocol: Protocol::Bgp,
+                    preference: lr_core::rib::Preference::new(
+                        Protocol::Bgp.default_admin_distance(),
+                        0,
+                    ),
+                    next_hop: None,
+                    attributes: attrs.into(),
+                    age_ms: self.now_ms,
+                    path_id: 0,
+                };
+                self.loc_rib.install_set(&key, vec![route.clone()]);
+                self.originated.insert(key.clone(), route.clone());
+                self.pending_events.push(RouterEvent::RouteInstalled(route));
+            } else if !has_specific && already_originated {
+                self.unoriginate(&key);
+            }
+        }
+    }
+
     /// Number of routes currently in Loc-RIB.
     pub fn rib_len(&self) -> usize {
         self.loc_rib.len()
@@ -1300,6 +1410,7 @@ impl DefaultRouter {
                 .push(RouterEvent::RouteWithdrawn(key.clone()));
             self.propagate_withdrawal(key);
             self.unredistribute_route(key);
+            self.recompute_aggregates();
             return;
         }
         let new_best = ranked[0].clone();
@@ -1311,6 +1422,10 @@ impl DefaultRouter {
             self.bmp_route_monitor(&new_best);
         }
         self.export_selection(key, &ranked);
+        // Recompute aggregates after the Loc-RIB changes — a new
+        // specific may trigger an aggregate, or a withdrawn specific
+        // may remove the last covering route.
+        self.recompute_aggregates();
     }
 
     // ----- export pipeline -----
