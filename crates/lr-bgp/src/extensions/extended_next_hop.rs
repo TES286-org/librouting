@@ -81,10 +81,10 @@ pub fn advertised_tuples(cfg: &PeerConfig) -> Vec<ExtNextHopTuple> {
     for (nlri_afi, nlri_safi, nh_afi) in &cfg.extended_next_hop {
         let tuple = ExtNextHopTuple::new(*nlri_afi, *nlri_safi, *nh_afi);
         let family = tuple.family();
-        if family == NlriFamily::IPV4_UNICAST || cfg.mp_families.contains(&family) {
-            if !out.contains(&tuple) {
-                out.push(tuple);
-            }
+        if (family == NlriFamily::IPV4_UNICAST || cfg.mp_families.contains(&family))
+            && !out.contains(&tuple)
+        {
+            out.push(tuple);
         }
     }
     out
@@ -109,9 +109,9 @@ pub fn negotiated_tuples(
 
 /// True when `(nlri_afi, nlri_safi, nh_afi)` is in the negotiated set.
 pub fn supports(negotiated: &[ExtNextHopTuple], nlri_afi: u16, nlri_safi: u8, nh_afi: u16) -> bool {
-    negotiated.iter().any(|t| {
-        t.nlri_afi == nlri_afi && t.nlri_safi == nlri_safi && t.nexthop_afi == nh_afi
-    })
+    negotiated
+        .iter()
+        .any(|t| t.nlri_afi == nlri_afi && t.nlri_safi == nlri_safi && t.nexthop_afi == nh_afi)
 }
 
 #[cfg(test)]
@@ -179,6 +179,9 @@ mod tests {
             ExtNextHopTuple::IPV4_OVER_IPV6,
             ExtNextHopTuple::new(1, 1, 2)
         );
-        assert_eq!(ExtNextHopTuple::IPV4_OVER_IPV6.family(), NlriFamily::IPV4_UNICAST);
+        assert_eq!(
+            ExtNextHopTuple::IPV4_OVER_IPV6.family(),
+            NlriFamily::IPV4_UNICAST
+        );
     }
 }

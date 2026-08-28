@@ -135,9 +135,7 @@ impl Capability {
     /// `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples. Returns `None` when
     /// the value length is not a multiple of 5.
     pub fn as_extended_next_hop(&self) -> Option<Vec<(u16, u8, u16)>> {
-        if self.code != CapabilityCode::ExtendedNextHop
-            || !self.value.len().is_multiple_of(5)
-        {
+        if self.code != CapabilityCode::ExtendedNextHop || !self.value.len().is_multiple_of(5) {
             return None;
         }
         let mut out = Vec::with_capacity(self.value.len() / 5);

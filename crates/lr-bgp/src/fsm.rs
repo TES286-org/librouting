@@ -212,12 +212,7 @@ impl BgpPeer {
     /// True when `(nlri_afi, nlri_safi, nexthop_afi)` is in the
     /// negotiated set — i.e. we may emit IPv6 next-hops for IPv4 NLRI on
     /// this session.
-    pub fn extended_next_hop_for(
-        &self,
-        nlri_afi: u16,
-        nlri_safi: u8,
-        nexthop_afi: u16,
-    ) -> bool {
+    pub fn extended_next_hop_for(&self, nlri_afi: u16, nlri_safi: u8, nexthop_afi: u16) -> bool {
         crate::extensions::extended_next_hop::supports(
             &self.extended_next_hop,
             nlri_afi,
