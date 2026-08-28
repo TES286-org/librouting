@@ -8,10 +8,12 @@
 pub mod connection;
 pub mod event;
 pub mod instance;
+pub mod redistribution;
 pub mod session;
 
 pub use event::{EventSink, RouterEvent};
 pub use instance::{DefaultRouter, RouterInstance};
+pub use redistribution::{MetricPolicy, RedistributionPipe};
 pub use session::{
     OspfAreaType, Session, SessionConfig, SessionHandle, SessionKind, SessionSummary,
 };

@@ -636,6 +636,13 @@ pub struct DefaultRouter {
     /// event fires only once per session lifetime. `threshold_warned`
     /// is latched when the early-warning percentage is crossed.
     max_prefix_state: BTreeMap<u64, MaxPrefixState>,
+    /// Configured redistribution pipes (BIRD `pipe` / FRR `redistribute`).
+    /// Each pipe bridges routes from `source` to `target` protocol.
+    pipes: Vec<crate::redistribution::RedistributionPipe>,
+    /// Routes this router has redistributed into BGP, keyed by the
+    /// original Loc-RIB key. When the source route disappears, the
+    /// redistributed BGP route is unoriginated.
+    redistributed_bgp: BTreeMap<RouteKey, RouteKey>,
 }
 
 /// Per-session maximum-prefix bookkeeping.
@@ -676,6 +683,8 @@ impl Default for DefaultRouter {
             graceful_restart: BTreeMap::new(),
             llgr_caps: BTreeMap::new(),
             max_prefix_state: BTreeMap::new(),
+            pipes: Vec::new(),
+            redistributed_bgp: BTreeMap::new(),
         }
     }
 }
@@ -1119,6 +1128,7 @@ impl DefaultRouter {
             self.pending_events
                 .push(RouterEvent::RouteWithdrawn(key.clone()));
             self.propagate_withdrawal(key);
+            self.unredistribute_route(key);
             return;
         }
         let new_best = ranked[0].clone();
@@ -1126,6 +1136,7 @@ impl DefaultRouter {
         if old_best.as_ref() != Some(&new_best) {
             self.pending_events
                 .push(RouterEvent::RouteInstalled(new_best.clone()));
+            self.redistribute_route(&new_best);
         }
         self.export_selection(key, &ranked);
     }
@@ -3342,6 +3353,130 @@ impl DefaultRouter {
             self.ospf_flood(area_id, &lsas, None);
         }
         changed
+    }
+
+    // ----- cross-protocol redistribution engine -----
+
+    /// Add a redistribution pipe (BIRD `pipe` / FRR `redistribute`).
+    /// Routes from `pipe.source` that enter the Loc-RIB will be
+    /// re-originated into `pipe.target` with the configured metric
+    /// policy. Existing Loc-RIB routes are scanned immediately so the
+    /// pipe takes effect on already-installed routes.
+    pub fn add_redistribution_pipe(&mut self, pipe: crate::redistribution::RedistributionPipe) {
+        self.pipes.push(pipe);
+        // Scan existing Loc-RIB for routes that match the new pipe.
+        let routes: Vec<Route> = self.loc_rib.iter_best().cloned().collect();
+        for route in routes {
+            self.redistribute_route(&route);
+        }
+    }
+
+    /// Remove all redistribution pipes matching `(source, target)`.
+    /// Returns the number of pipes removed.
+    pub fn remove_redistribution_pipe(&mut self, source: Protocol, target: Protocol) -> usize {
+        let before = self.pipes.len();
+        self.pipes
+            .retain(|p| !(p.source == source && p.target == target));
+        before - self.pipes.len()
+    }
+
+    /// Apply redistribution for a single route that just entered (or
+    /// changed in) the Loc-RIB. Called from `apply_selection` when the
+    /// best route for a prefix changes.
+    fn redistribute_route(&mut self, route: &Route) {
+        // Collect matching pipes first to avoid borrowing self.pipes
+        // while we mutate self via ospf_redistribute.
+        let matches: Vec<crate::redistribution::RedistributionPipe> = self
+            .pipes
+            .iter()
+            .filter(|p| p.source == route.protocol && p.matches(&route.key.prefix))
+            .cloned()
+            .collect();
+        for pipe in matches {
+            let metric = pipe.metric.apply(route.preference.metric);
+            match pipe.target {
+                Protocol::Bgp => {
+                    let family = match route.key.family {
+                        NlriFamily::IPV4_UNICAST => NlriFamily::IPV4_UNICAST,
+                        NlriFamily::IPV6_UNICAST => NlriFamily::IPV6_UNICAST,
+                        _ => continue,
+                    };
+                    let mut attrs = PathAttributes::new();
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_transitive(true),
+                        AttrType::Origin,
+                        vec![0],
+                    ));
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_transitive(true),
+                        AttrType::AsPath,
+                        Vec::new(),
+                    ));
+                    if family == NlriFamily::IPV4_UNICAST {
+                        if let Some(nh) = route.next_hop {
+                            attrs.insert(PathAttribute::new(
+                                PathAttrFlags::new().set_transitive(true),
+                                AttrType::NextHop,
+                                match nh {
+                                    IpAddr::V4(b) => b.to_vec(),
+                                    IpAddr::V6(b) => b.to_vec(),
+                                },
+                            ));
+                        }
+                    }
+                    let bgp_route = Route {
+                        key: route.key.clone(),
+                        origin: RouteOrigin { proto: 2, peer: 0 },
+                        protocol: Protocol::Bgp,
+                        preference: lr_core::rib::Preference::new(
+                            Protocol::Bgp.default_admin_distance(),
+                            metric,
+                        ),
+                        next_hop: route.next_hop,
+                        attributes: attrs.into(),
+                        age_ms: self.now_ms,
+                        path_id: 0,
+                    };
+                    self.loc_rib.install_set(&route.key, vec![bgp_route]);
+                    self.redistributed_bgp
+                        .insert(route.key.clone(), route.key.clone());
+                    self.pending_events.push(RouterEvent::Log(format!(
+                        "redistribute: {} -> BGP (metric={})",
+                        route.key.prefix, metric
+                    )));
+                }
+                Protocol::Ospfv2 | Protocol::Ospfv3 => {
+                    if matches!(route.key.prefix.addr, IpAddr::V4(_)) {
+                        let dest = ExternalDestination {
+                            prefix: route.key.prefix,
+                            metric,
+                            metric_type: ExternalMetricType::Type1,
+                            forwarding_addr: 0,
+                            route_tag: pipe.tag,
+                            p_bit: true,
+                        };
+                        self.ospf_redistribute(dest);
+                        self.pending_events.push(RouterEvent::Log(format!(
+                            "redistribute: {} -> OSPF (metric={})",
+                            route.key.prefix, metric
+                        )));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    /// Withdraw a redistributed route. Called when the source route
+    /// disappears from the Loc-RIB.
+    fn unredistribute_route(&mut self, key: &RouteKey) {
+        if let Some(bgp_key) = self.redistributed_bgp.remove(key) {
+            self.loc_rib.uninstall(&bgp_key);
+            self.pending_events.push(RouterEvent::Log(format!(
+                "redistribute: withdraw {} from BGP",
+                key.prefix
+            )));
+        }
     }
 
     /// Redistribute one external destination into OSPF (RFC 2328
