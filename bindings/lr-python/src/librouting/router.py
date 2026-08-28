@@ -119,6 +119,80 @@ class Router:
                 f"lr_router_set_add_path_max_paths failed (rc={rc}): {last_error()}"
             )
 
+    def set_extended_next_hop(self, session: int,
+                              tuples: list[tuple[int, int, int]] | None = None) -> None:
+        """Configure RFC 5549 Extended Next-Hop on a BGP session.
+
+        Each tuple is ``(nlri_afi, nlri_safi, nexthop_afi)`` — the
+        canonical entry is ``(1, 1, 2)`` (IPv4 unicast over an IPv6
+        next-hop). Pass ``None`` or an empty list to clear.
+
+        Must be called after :meth:`add_bgp_session` and before
+        :meth:`start_session` — the capability is negotiated in OPEN.
+        """
+        if not tuples:
+            rc = get_lib().lr_router_set_extended_next_hop(
+                self._ptr, int(session), ffi.NULL, 0
+            )
+        else:
+            buf = bytearray()
+            for nlri_afi, nlri_safi, nh_afi in tuples:
+                buf += int(nlri_afi).to_bytes(2, "big")
+                buf += bytes([int(nlri_safi) & 0xFF])
+                buf += int(nh_afi).to_bytes(2, "big")
+            rc = get_lib().lr_router_set_extended_next_hop(
+                self._ptr, int(session), bytes(buf), len(tuples)
+            )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_extended_next_hop failed (rc={rc}): {last_error()}"
+            )
+
+    def set_mp_families(self, session: int,
+                        families: list[tuple[int, int]] | None = None) -> None:
+        """Override the MP-BGP address families advertised in OPEN.
+
+        Each entry is ``(afi, safi)`` — e.g. ``(1, 1)`` for IPv4 unicast
+        and ``(2, 1)`` for IPv6 unicast. Pass ``None`` or empty to clear
+        (the session then advertises no MP-BGP families).
+        """
+        if not families:
+            rc = get_lib().lr_router_set_mp_families(
+                self._ptr, int(session), ffi.NULL, 0
+            )
+        else:
+            buf = bytearray()
+            for afi, safi in families:
+                buf += int(afi).to_bytes(2, "big")
+                buf += bytes([0])  # reserved
+                buf += bytes([int(safi) & 0xFF])
+            rc = get_lib().lr_router_set_mp_families(
+                self._ptr, int(session), bytes(buf), len(families)
+            )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_mp_families failed (rc={rc}): {last_error()}"
+            )
+
+    def set_local_address(self, session: int, addr: str) -> None:
+        """Set the local source address for next-hop-self egress.
+
+        Accepts an IPv4 or IPv6 literal. For RFC 5549 ENH egress over
+        IPv6 pass an IPv6 literal. Must be called before
+        :meth:`start_session`.
+        """
+        import ipaddress
+        ip = ipaddress.ip_address(addr)
+        family = 1 if ip.version == 4 else 2
+        packed = ip.packed
+        rc = get_lib().lr_router_set_local_address(
+            self._ptr, int(session), int(family), packed, len(packed)
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_local_address failed (rc={rc}): {last_error()}"
+            )
+
     def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
         """Ask an established BGP peer to resend an RFC 2918 address family.
 

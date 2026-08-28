@@ -161,6 +161,110 @@ func (r *Router) SetAddPathMaxPaths(maxPaths uint32) error {
         return nil
 }
 
+// ExtNextHopTuple is a single RFC 5549 Extended Next-Hop tuple: IPv4
+// unicast NLRI can be resolved over an IPv6 next-hop when all three
+// fields are 1, 1, 2 respectively.
+type ExtNextHopTuple struct {
+        NlriAfi     uint16
+        NlriSafi    uint8
+        NexthopAfi  uint16
+}
+
+// SetExtendedNextHop configures RFC 5549 Extended Next-Hop on a BGP
+// session. Pass an empty slice to clear. Must be called after
+// AddBGPSession and before StartSession — the capability is negotiated
+// in OPEN.
+func (r *Router) SetExtendedNextHop(session uint64, tuples []ExtNextHopTuple) error {
+        if len(tuples) == 0 {
+                rc := C.lr_router_set_extended_next_hop(r.ptr, C.uint64_t(session), nil, 0)
+                if rc != 0 {
+                        return fmt.Errorf("lr_router_set_extended_next_hop: %s (rc=%d)", LastError(), int(rc))
+                }
+                return nil
+        }
+        buf := make([]byte, 5*len(tuples))
+        for i, t := range tuples {
+                buf[5*i+0] = byte(t.NlriAfi >> 8)
+                buf[5*i+1] = byte(t.NlriAfi)
+                buf[5*i+2] = t.NlriSafi
+                buf[5*i+3] = byte(t.NexthopAfi >> 8)
+                buf[5*i+4] = byte(t.NexthopAfi)
+        }
+        rc := C.lr_router_set_extended_next_hop(
+                r.ptr,
+                C.uint64_t(session),
+                (*C.uint8_t)(unsafe.Pointer(&buf[0])),
+                C.uintptr_t(len(tuples)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_extended_next_hop: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// MPFamily is a single RFC 4760 multiprotocol family: AFI + SAFI.
+type MPFamily struct {
+        Afi  uint16
+        Safi uint8
+}
+
+// SetMPFamilies overrides the MP-BGP address families advertised in OPEN.
+// Common values: {AFI=1, SAFI=1} for IPv4 unicast, {AFI=2, SAFI=1} for
+// IPv6 unicast. Must be called before StartSession.
+func (r *Router) SetMPFamilies(session uint64, families []MPFamily) error {
+        if len(families) == 0 {
+                rc := C.lr_router_set_mp_families(r.ptr, C.uint64_t(session), nil, 0)
+                if rc != 0 {
+                        return fmt.Errorf("lr_router_set_mp_families: %s (rc=%d)", LastError(), int(rc))
+                }
+                return nil
+        }
+        buf := make([]byte, 4*len(families))
+        for i, f := range families {
+                buf[4*i+0] = byte(f.Afi >> 8)
+                buf[4*i+1] = byte(f.Afi)
+                buf[4*i+2] = 0 // reserved
+                buf[4*i+3] = f.Safi
+        }
+        rc := C.lr_router_set_mp_families(
+                r.ptr,
+                C.uint64_t(session),
+                (*C.uint8_t)(unsafe.Pointer(&buf[0])),
+                C.uintptr_t(len(families)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_mp_families: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// SetLocalAddress sets the local source address for next-hop-self egress.
+// Accepts 4-byte (IPv4) or 16-byte (IPv6) slices. For RFC 5549 ENH
+// egress over IPv6 pass a 16-byte IPv6 address. Must be called before
+// StartSession.
+func (r *Router) SetLocalAddress(session uint64, addr []byte) error {
+        var afi uint16
+        switch len(addr) {
+        case 4:
+                afi = 1
+        case 16:
+                afi = 2
+        default:
+                return fmt.Errorf("SetLocalAddress: bad address length %d (want 4 or 16)", len(addr))
+        }
+        rc := C.lr_router_set_local_address(
+                r.ptr,
+                C.uint64_t(session),
+                C.uint16_t(afi),
+                (*C.uint8_t)(unsafe.Pointer(&addr[0])),
+                C.uintptr_t(len(addr)),
+        )
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_local_address: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
         rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))

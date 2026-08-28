@@ -118,6 +118,91 @@ inline void tick(Router& r, std::uint64_t now_ms) {
     }
 }
 
+/// RFC 5549 Extended Next-Hop tuple: `(NLRI AFI, NLRI SAFI, Nexthop AFI)`.
+/// The canonical entry `{1, 1, 2}` advertises IPv4 unicast over an IPv6
+/// next-hop.
+struct ExtNextHopTuple {
+    std::uint16_t nlri_afi;
+    std::uint8_t  nlri_safi;
+    std::uint16_t nexthop_afi;
+};
+
+/// Configure RFC 5549 Extended Next-Hop on a BGP session. Must be called
+/// after `add_bgp_session` and before `start_session`.
+inline void set_extended_next_hop(Router& r, std::uint64_t session,
+                                  const std::vector<ExtNextHopTuple>& tuples) {
+    std::vector<std::uint8_t> buf;
+    buf.reserve(tuples.size() * 5);
+    for (const auto& t : tuples) {
+        buf.push_back(static_cast<std::uint8_t>(t.nlri_afi >> 8));
+        buf.push_back(static_cast<std::uint8_t>(t.nlri_afi));
+        buf.push_back(t.nlri_safi);
+        buf.push_back(static_cast<std::uint8_t>(t.nexthop_afi >> 8));
+        buf.push_back(static_cast<std::uint8_t>(t.nexthop_afi));
+    }
+    int rc = lr_router_set_extended_next_hop(
+        r.get(), session,
+        buf.empty() ? nullptr : buf.data(),
+        tuples.size());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_extended_next_hop failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// RFC 4760 MP-BGP family: `(AFI, SAFI)`. `{1, 1}` is IPv4 unicast,
+/// `{2, 1}` is IPv6 unicast.
+struct MPFamily {
+    std::uint16_t afi;
+    std::uint8_t  safi;
+};
+
+/// Override the MP-BGP address families advertised in OPEN. Must be
+/// called before `start_session`.
+inline void set_mp_families(Router& r, std::uint64_t session,
+                            const std::vector<MPFamily>& families) {
+    std::vector<std::uint8_t> buf;
+    buf.reserve(families.size() * 4);
+    for (const auto& f : families) {
+        buf.push_back(static_cast<std::uint8_t>(f.afi >> 8));
+        buf.push_back(static_cast<std::uint8_t>(f.afi));
+        buf.push_back(0); // reserved
+        buf.push_back(f.safi);
+    }
+    int rc = lr_router_set_mp_families(
+        r.get(), session,
+        buf.empty() ? nullptr : buf.data(),
+        families.size());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_mp_families failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Set the local source address for next-hop-self egress. `addr` must be
+/// 4 bytes (IPv4) or 16 bytes (IPv6). For RFC 5549 ENH egress over IPv6
+/// pass a 16-byte IPv6 address.
+inline void set_local_address(Router& r, std::uint64_t session,
+                              const std::vector<std::uint8_t>& addr) {
+    std::uint16_t afi;
+    if (addr.size() == 4) {
+        afi = 1;
+    } else if (addr.size() == 16) {
+        afi = 2;
+    } else {
+        throw Error("set_local_address: bad address length (want 4 or 16)");
+    }
+    int rc = lr_router_set_local_address(
+        r.get(), session, afi, addr.data(), addr.size());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_local_address failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
 inline std::vector<std::uint8_t> to_vec(const Bytes& b) {
     if (!b) return {};
     auto len = lr_bytes_len(b.get());
