@@ -133,17 +133,33 @@ impl Capability {
 
     /// Decode the RFC 5549 Extended Next-Hop capability value into its
     /// `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples. Returns `None` when
-    /// the value length is not a multiple of 5.
+    /// the value length is not a multiple of 5 (the RFC 5549 wire form:
+    /// `AFI:2, SAFI:1, Nexthop-AFI:2`) or 6 (the BIRD 2.x wire form:
+    /// `AFI:2, SAFI:2, Nexthop-AFI:2` — non-standard but widely deployed).
     pub fn as_extended_next_hop(&self) -> Option<Vec<(u16, u8, u16)>> {
-        if self.code != CapabilityCode::ExtendedNextHop || !self.value.len().is_multiple_of(5) {
+        if self.code != CapabilityCode::ExtendedNextHop {
             return None;
         }
-        let mut out = Vec::with_capacity(self.value.len() / 5);
-        for t in self.value.as_chunks::<5>().0 {
-            let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
-            let nlri_safi = t[2];
-            let nh_afi = u16::from_be_bytes([t[3], t[4]]);
-            out.push((nlri_afi, nlri_safi, nh_afi));
+        let mut out = Vec::new();
+        if self.value.len().is_multiple_of(5) {
+            for t in self.value.as_chunks::<5>().0 {
+                let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
+                let nlri_safi = t[2];
+                let nh_afi = u16::from_be_bytes([t[3], t[4]]);
+                out.push((nlri_afi, nlri_safi, nh_afi));
+            }
+        } else if self.value.len().is_multiple_of(6) {
+            // BIRD 2.x encodes SAFI as 2 bytes (AFI:2, SAFI:2, NH-AFI:2).
+            // The high byte is always zero for any real SAFI; mask it out
+            // so callers see the canonical 1-byte SAFI.
+            for t in self.value.as_chunks::<6>().0 {
+                let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
+                let nlri_safi = u16::from_be_bytes([t[2], t[3]]) as u8;
+                let nh_afi = u16::from_be_bytes([t[4], t[5]]);
+                out.push((nlri_afi, nlri_safi, nh_afi));
+            }
+        } else {
+            return None;
         }
         Some(out)
     }

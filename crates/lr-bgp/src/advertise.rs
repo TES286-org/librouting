@@ -108,27 +108,39 @@ impl BgpPeer {
         // address. Without ENH the peer would reject the IPv6 next-hop,
         // so we fall back to the original IPv4 next-hop (or skip the
         // route if none exists).
-        let next_hop = route
+        let mut next_hop = route
             .next_hop
             .or_else(|| attrs.next_hop().map(|n| n.to_ip()));
         if topo.role.rewrites_next_hop() {
             if let Some(local) = self.cfg.local_address {
                 let enh_ipv4_over_v6 = route.key.family == NlriFamily::IPV4_UNICAST
                     && self.extended_next_hop_for(1, 1, 2);
-                match (local, enh_ipv4_over_v6) {
-                    (lr_core::addr::IpAddr::V6(_), true) => {
-                        // RFC 5549: IPv4 NLRI carries an IPv6 NEXT_HOP.
+                match (local, route.key.family, enh_ipv4_over_v6) {
+                    // IPv6 NLRI with an IPv6 local source: next-hop-self
+                    // rewrites the MP_REACH next-hop to the local IPv6.
+                    (lr_core::addr::IpAddr::V6(_), NlriFamily::IPV6_UNICAST, _) => {
+                        next_hop = Some(local);
+                    }
+                    // IPv4 NLRI + ENH negotiated + IPv6 local source: the
+                    // well-known NEXT_HOP attribute carries a 16-byte IPv6.
+                    (lr_core::addr::IpAddr::V6(_), NlriFamily::IPV4_UNICAST, true) => {
                         attrs.remove(AttrType::NextHop);
                         attrs.insert(Self::next_hop_attr(local));
+                        next_hop = Some(local);
                     }
-                    (lr_core::addr::IpAddr::V4(_), _) => {
+                    // IPv4 NLRI + IPv4 local source: classic next-hop-self.
+                    (lr_core::addr::IpAddr::V4(_), NlriFamily::IPV4_UNICAST, _) => {
                         attrs.remove(AttrType::NextHop);
                         attrs.insert(Self::next_hop_attr(local));
+                        next_hop = Some(local);
                     }
-                    (lr_core::addr::IpAddr::V6(_), false) => {
-                        // IPv6 local source for an IPv4 route but ENH is
-                        // not negotiated — preserve any IPv4 next-hop the
-                        // route already carries; do not fabricate one.
+                    // IPv4 NLRI + IPv6 local source without ENH: leave the
+                    // route's IPv4 next-hop intact (or skip if none).
+                    (lr_core::addr::IpAddr::V6(_), NlriFamily::IPV4_UNICAST, false) => {}
+                    // Other MP-BGP families with a matching-family local
+                    // source: rewrite the MP_REACH next-hop accordingly.
+                    (lr_core::addr::IpAddr::V4(_), _, _) | (lr_core::addr::IpAddr::V6(_), _, _) => {
+                        next_hop = Some(local);
                     }
                 }
             }
@@ -177,29 +189,53 @@ impl BgpPeer {
         // --- NLRI ---
         let family = route.key.family;
         let mut update = Update::new();
-        match family {
-            NlriFamily::IPV4_UNICAST => {
-                if let Some(nh) = next_hop {
-                    if attrs.get(AttrType::NextHop).is_none() {
-                        attrs.insert(Self::next_hop_attr(nh));
+        // RFC 5549: when (1, 1, 2) is negotiated and the next-hop is IPv6,
+        // IPv4 NLRI is carried by MP_REACH_NLRI (AFI=1, SAFI=1) with a
+        // 16-byte IPv6 next-hop. BIRD 2.x rejects a 16-byte well-known
+        // NEXT_HOP attribute even with ENH negotiated, so MP_REACH is the
+        // interoperable form.
+        let enh_ipv4_over_v6 = family == NlriFamily::IPV4_UNICAST
+            && self.extended_next_hop_for(1, 1, 2)
+            && matches!(next_hop, Some(lr_core::addr::IpAddr::V6(_)));
+        if enh_ipv4_over_v6 {
+            let nh = match next_hop {
+                Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V4OverV6(b),
+                _ => unreachable!("checked above"),
+            };
+            attrs.remove(AttrType::NextHop);
+            attrs.remove(AttrType::MpReachNlri);
+            attrs.remove(AttrType::MpUnreachNlri);
+            let entries = vec![Nlri::new(route.path_id, route.key.prefix)];
+            attrs.insert(PathAttribute::new(
+                PathAttrFlags::new().set_optional(true),
+                AttrType::MpReachNlri,
+                MpReach::new(family, nh, entries).encode_ex(self.add_path_tx_for(family)),
+            ));
+        } else {
+            match family {
+                NlriFamily::IPV4_UNICAST => {
+                    if let Some(nh) = next_hop {
+                        if attrs.get(AttrType::NextHop).is_none() {
+                            attrs.insert(Self::next_hop_attr(nh));
+                        }
                     }
+                    update.nlri.push(Nlri::new(route.path_id, route.key.prefix));
                 }
-                update.nlri.push(Nlri::new(route.path_id, route.key.prefix));
-            }
-            _ => {
-                let nh = match next_hop {
-                    Some(lr_core::addr::IpAddr::V4(b)) => MpNextHop::V4(b),
-                    Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V6Global(b),
-                    None => return false, // cannot encode MP_REACH without next-hop
-                };
-                attrs.remove(AttrType::MpReachNlri);
-                attrs.remove(AttrType::MpUnreachNlri);
-                let entries = vec![Nlri::new(route.path_id, route.key.prefix)];
-                attrs.insert(PathAttribute::new(
-                    PathAttrFlags::new().set_optional(true),
-                    AttrType::MpReachNlri,
-                    MpReach::new(family, nh, entries).encode_ex(self.add_path_tx_for(family)),
-                ));
+                _ => {
+                    let nh = match next_hop {
+                        Some(lr_core::addr::IpAddr::V4(b)) => MpNextHop::V4(b),
+                        Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V6Global(b),
+                        None => return false, // cannot encode MP_REACH without next-hop
+                    };
+                    attrs.remove(AttrType::MpReachNlri);
+                    attrs.remove(AttrType::MpUnreachNlri);
+                    let entries = vec![Nlri::new(route.path_id, route.key.prefix)];
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_optional(true),
+                        AttrType::MpReachNlri,
+                        MpReach::new(family, nh, entries).encode_ex(self.add_path_tx_for(family)),
+                    ));
+                }
             }
         }
         update.attributes = attrs;
@@ -224,8 +260,16 @@ impl BgpPeer {
             return;
         }
         let mut update = Update::new();
+        // RFC 5549: IPv4 NLRI advertised via MP_REACH must also be withdrawn
+        // via MP_UNREACH (the legacy `withdrawn` field would not match the
+        // original MP_REACH advertisement for a peer that tracks routes by
+        // the MP-BGP family).
+        let enh_ipv4_over_v6 =
+            family == NlriFamily::IPV4_UNICAST && self.extended_next_hop_for(1, 1, 2);
         match family {
-            NlriFamily::IPV4_UNICAST => update.withdrawn.extend_from_slice(entries),
+            NlriFamily::IPV4_UNICAST if !enh_ipv4_over_v6 => {
+                update.withdrawn.extend_from_slice(entries)
+            }
             _ => {
                 let mp = crate::path::MpUnreach::new(family, entries.to_vec());
                 update.attributes.insert(PathAttribute::new(
