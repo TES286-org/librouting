@@ -21,15 +21,15 @@ embedders.
                     |   (DefaultRouter)   |
                     +----------+----------+
                                |
-            +------------------+------------------+
-            |                  |                  |
-            v                  v                  v
-    +---------------+   +---------------+   +----------------+
-    |   lr-rib      |   |   lr-policy  |   |   lr-bfd       |
-    | (Adj-RIB-In, |   | (route-maps, |   | (peer failure  |
-    |  Loc-RIB,    |   |  prefix lists,|  |  detection)    |
-    |  Adj-RIB-Out)|   |  AS filters,  |   +----------------+
-    +-------+------+   |  safety net)  |
+            +------------------+------------------+----------------+
+            |                  |                  |                |
+            v                  v                  v                v
+    +---------------+   +---------------+   +----------------+  +---------+
+    |   lr-rib      |   |   lr-policy  |   |   lr-bfd       |  | lr-bmp  |
+    | (Adj-RIB-In, |   | (route-maps, |   | (peer failure  |  | (RFC    |
+    |  Loc-RIB,    |   |  prefix lists,|  |  detection)    |  |  7854   |
+    |  Adj-RIB-Out)|   |  AS filters,  |  +----------------+  |  sink)  |
+    +-------+------+   |  safety net)  |                      +---------+
             |          +-------+-------+
             |                  |
             v                  v
@@ -41,7 +41,9 @@ embedders.
 
 All crates depend on `lr-core` for shared primitives (`IpAddr`, `Prefix`,
 `Asn`, `RouterId`, `Route`, `Attributes`, codec traits, FSM/timer traits).
-`lr-ffi` exposes a C ABI; Go/Python/C++ bindings sit on top.
+`lr-damping` (RFC 2439 flap damping) plugs into the selection stage via
+`lr-policy` hooks. `lr-ffi` exposes a C ABI; Go/Python/C++ bindings sit on
+top.
 
 ## Three-layer API
 
@@ -216,12 +218,26 @@ embedders. Notable toggles:
 ## Testing
 
 - Unit tests live alongside the source (`#[cfg(test)]` modules).
-- End-to-end tests live in `crates/lr-tests`:
+- End-to-end tests live in `crates/lr-tests/tests/` — currently 13 files:
   - `tcp_smoke.rs` — two librouting BGP peers exchange OPEN+KEEPALIVE over
     real TCP.
-  - `bird/` — Dockerfile + bird.conf for interop with the BIRD reference
-    router (CI runs when Docker is available).
-- Total: 130+ tests across 11 crates.
+  - `route_propagation.rs` — originate → Adj-RIB-In → Loc-RIB →
+    Adj-RIB-Out → withdrawal reversal, over the full pipeline.
+  - `protocol_runtimes.rs` — OSPF and Babel delta integration into Loc-RIB.
+  - `add_path.rs` — RFC 7911 multi-path propagation.
+  - `bgp_session_modes.rs` — the 8 dual-stack / MP-BGP / ENH session modes.
+  - `gtsm_max_prefix.rs` — RFC 5082 GTSM + per-peer maximum-prefix.
+  - `redistribution.rs` — cross-protocol pipes.
+  - `route_aggregation.rs` — RFC 4271 §9.2.2.2 aggregate lifecycle.
+  - `bmp_monitoring.rs` — RFC 7854 Peer Up/Down + Route Monitoring.
+  - `ospf_multi_area.rs`, `ospf_external.rs`, `ospf_stub_nssa.rs`,
+    `ospf_virtual_link.rs` — OSPF area/ABR/NSSA/§15 coverage.
+- Daemon-level integration tests in `crates/lr-cli/tests/daemon_runtime.rs`
+  spawn the real `lr-daemon` binary (runtime API, signals, reload,
+  privilege drop).
+- Interop scripts against the BIRD and FRR reference routers live in
+  `tests/interop/` (run in CI when Docker is available).
+- Total: 433 tests across 42 test binaries in 14 crates.
 
 ## CI/CD
 

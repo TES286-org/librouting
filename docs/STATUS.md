@@ -124,12 +124,16 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 30 binaries / 260+ tests |
-| Two-daemon TCP E2E | ✅ 🧪 |
+| Unit tests (workspace) | ✅ 42 binaries / 433 tests |
+| Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
+| Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
+| Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
 | Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
 | BGP session-mode E2E (8 modes: standard dual-stack, LL dual-stack, MP-BGP, MP-BGP+LL, ENH, ENH+LL, pure IPv6, pure IPv6+LL) | ✅ 🧪 | `lr-tests/tests/bgp_session_modes.rs` |
 | GTSM + maximum-prefix E2E (TTL security + per-peer prefix limit) | ✅ 🧪 | `lr-tests/tests/gtsm_max_prefix.rs` |
 | Redistribution E2E (BGP↔BGP, BGP→OSPF, metric policy, prefix filter, withdrawal) | ✅ 🧪 | `lr-tests/tests/redistribution.rs` |
+| Route-aggregation E2E (aggregate origination/withdrawal lifecycle) | ✅ 🧪 | `lr-tests/tests/route_aggregation.rs` |
+| BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
@@ -146,109 +150,126 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Coverage (tarpaulin) | ✅ |
 | MSRV 1.88 build | ✅ |
 
-## Roadmap to production (recommended order)
+## Roadmap v1 — complete
 
-1. ~~**Graceful restart restart-state**~~ — done, including RFC 9494
-   long-lived graceful restart.
-2. ~~**OSPF LSA refresh scheduling + ABR summary LSAs**~~ — done: shared
-   per-area LSDBs, §16.2 inter-area calculation, §12.4.3 summary
-   origination/flush with loop guards (OSPFv2; v3 inter-area-prefix-LSA
-   origination remains future work).
-3. ~~**Babel HMAC (RFC 8967)**~~ — done.
-4. ~~**BGP MD5/TCP-AO**~~ — done: `lr-osroute::tcp_auth` (RFC 2385 +
-   RFC 5925, Linux kernel-signed segments), daemon flags `--md5-key` /
-   `--tcp-ao-key`, interop-verified against BIRD and FRR.
-5. ~~**Daemon hardening**~~ — done: signal handling (SIGTERM/SIGINT
-   graceful shutdown with NOTIFICATION-first close, SIGHUP config
-   reload), privilege drop (`--user`/`--group`), and a Unix-socket
-   runtime API (`--api-socket`: status/sessions/routes/reload/shutdown)
-   backed by the new `DefaultRouter::session_summaries()` introspection
-   (also exposed through the FFI and the Go/Python bindings).
-6. ~~**Add-Path best-path wiring**~~ — done: RFC 7911 negotiation,
-   wire framing and the N-path decision/export pipeline
-   (`BestPath::rank` → Loc-RIB path sets → per-path Adj-RIB-Out diffs);
-   the daemon exposes `--add-path` / `--add-path-max` and the runtime API
-   dumps paths with their identifiers.
-7. ~~**OSPF external routes (type-5 AS-external-LSAs)**~~ — done:
-   `lr_ospf::external` (type-5/type-4 origination + flush, §16.4
-   calculation) and the `DefaultRouter::ospf_redistribute` /
-   `ospf_unredistribute` API with AS-scope flooding, type-4 ABR
-   origination and per-area external route merging into Loc-RIB;
-   verified by 9 unit + 5 three-router E2E tests.
-8. ~~**OSPF stub/NSSA areas**~~ — done: stub areas (type-5/type-4
-   refusal, ABR summary-default, `no_summary` totally-stubby) and NSSA
-   (RFC 3101: area-scoped type-7 LSAs with P-bit + forwarding-address
-   rules, §3.1 translator election, §3.2 translation to type-5, §2.5
-   route calculation, type-7 default with the `no_summary` type-3
-   fallback); area types configured per session
-   (`with_ospf_area_type`) or at runtime (`ospf_set_area_type`);
-   verified by 13 unit + 8 three-/four-router E2E tests. OSPFv2 only —
-   v3 stub/NSSA follows the v3 inter-area work in item 11.
-9. ~~**OSPF virtual links**~~ — done: §15 lifecycle (`ospf_add_virtual_link`/
-   `ospf_remove_virtual_link`, up while the transit-area SPF reaches the
-   endpoint, stub/NSSA transit areas refused), type-4 link SPF
-   traversal, and the materialized backbone adjacency that restores
-   border-router status for partitioned / backbone-disconnected ABRs —
-   summaries, defaults and type-4s flow across the virtual backbone
-   through an embedder-routed transport session. Router-LSA
-   origination (type-4 link descriptions, V-bit) stays with the
-   embedder, as with all router-LSAs in this model; verified by 4 E2E
-   tests incl. MaxAge age-out of stale LSAs after a partition.
-10. ~~**BGP dual-stack / MP-BGP / Extended Next-Hop session modes**~~ —
-    done: RFC 5549 capability (code 5) negotiated as the intersection
-    of local and peer `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples;
-    16-byte well-known NEXT_HOP for IPv4 NLRI decoded as `V4OverV6`
-    (the spurious 32-byte form is rejected); MP_REACH `(AFI=1, 16B)`
-    accepted; eBGP egress rewrites IPv4 NEXT_HOP to IPv6 when
-    `(1,1,2)` is negotiated and `local_address` is IPv6. Daemon gains
-    `--extended-next-hop`, `--mp-family` (repeatable) and
-    `--local-address-v6`, plus proper IPv6 / `[fe80::1%eth0]:port`
-    address resolution (replacing the `split(':')` shortcut that broke
-    for IPv6). All eight BGP session establishment modes — standard
-    dual-stack, link-local dual-stack, MP-BGP, MP-BGP+link-local,
-    ENH, ENH+link-local, pure IPv6, pure IPv6+link-local — verified by
-    `lr-tests/tests/bgp_session_modes.rs` (10 tests, in-process byte
-    pump). FFI + Go/Python/C++ bindings expose
-    `set_extended_next_hop` / `set_mp_families` / `set_local_address`.
-11. ~~**OSPF authentication + OSPFv3 inter-area**~~ — done: RFC 5709
-    HMAC-SHA-1/SHA-256 crypto auth for OSPFv2 (`CryptoAuth` with Key ID,
-    shared secret, algorithm, anti-replay via monotonic crypto-seq, IPv4
-    pseudo-header), RFC 7166 auth trailer for OSPFv3 (`V3Auth` with
-    SA-ID, 64-bit crypto-seq, IPv6 pseudo-header), and OSPFv3
-    inter-area-prefix-LSA (0x2003) ABR origination
-    (`originate_v3_inter_area_prefix_lsa` + `LsaTypeV3` enum + body
-    encode/decode with IPv6 prefix support). 22 auth unit tests + 5 v3
-    ABR origination tests.
-12. ~~**BGP GTSM + maximum-prefix**~~ — done: RFC 5082 TTL security
-    (`lr-osroute::gtsm` — listener-side `IP_MINTTL`/`IPV6_MINHOPLIMIT`
-    filter + outbound TTL on connector; daemon `--gtsm` / `--gtsm N`;
-    live socket tests verify both happy-path and low-TTL rejection) and
-    per-peer `maximum-prefix` with warn/teardown/restart actions
-    (`with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold`;
-    CEASE NOTIFICATION subcode 8 per RFC 4486 §2.1; threshold +
-    exceeded events latched per session; daemon `--max-prefixes` /
-    `--max-prefix-action` / `--max-prefix-threshold`). Verified by 10
-    e2e tests in `lr-tests/tests/gtsm_max_prefix.rs`.
-13. ~~**Cross-protocol redistribution engine**~~ — done:
-    `RedistributionPipe` (BIRD `pipe` / FRR `redistribute`) bridges
-    routes from a source protocol to a target protocol with a
-    configurable metric policy (`Inherit` / `Fixed(N)` / `Add(N)`) and
-    an optional prefix-list filter. Supported pipes: BGP→BGP
-    (re-originate as locally originated), BGP→OSPF (type-5 external),
-    OSPF→BGP. Withdrawals propagate automatically. 7 e2e tests cover
-    basic re-origination, fixed/add metric, prefix-list filter,
-    withdrawal propagation, pipe removal, and IPv6 support.
-14. ~~**Babel daemon parity**~~ — done: IPv6 link-local transport in
-    the daemon via `--protocol babel` (UDP on port 6696, ff02::1:6
-    multicast, TTL=255 per RFC 8966 §2.1); RFC 9079 source-specific
-    table completion (IPv6 source prefixes in `apply_update`, IPv6
-    Loc-RIB family selection in `best_routes`, `SsRouteRequest` and
-    `SsSeqnoRequest` TLV encode/decode with 4 roundtrip tests).
-15. ~~**BMP monitoring (RFC 7854)**~~ — done: new `lr-bmp` crate
-    implements the BMP message codec (RFC 7854 §4) with all 7 message
-    types, common + per-peer headers, streaming carryover decoder, and
-    IPv4/IPv6 peer address support. `DefaultRouter::set_bmp_sink`
-    installs a closure that receives encoded BMP messages — the router
-    fires Peer Up (§4.6) on session establishment, Peer Down (§4.5) on
-    teardown, and Route Monitoring (§4.3) when a route enters the
-    Loc-RIB. 10 unit tests + 3 e2e tests verify the full pipeline.
+The original 15-item production roadmap is finished. In order:
+graceful restart (RFC 4724) + LLGR (RFC 9494); OSPF LSA refresh/ABR
+summaries (§12.4.3, §16.2); Babel HMAC (RFC 8967); BGP MD5/TCP-AO
+(RFC 2385/5925); daemon hardening (signals, privilege drop, runtime
+API); RFC 7911 Add-Path end-to-end; OSPF type-5/type-4 external routes
+(§16.4); OSPF stub/NSSA areas (RFC 3101); OSPF virtual links (§15);
+BGP dual-stack/MP-BGP/ENH session modes (RFC 5549, 8 modes e2e); OSPF
+authentication (RFC 5709/7166) + OSPFv3 inter-area; BGP GTSM (RFC 5082)
++ maximum-prefix; cross-protocol redistribution; Babel daemon parity
+(IPv6 link-local + RFC 9079 completion); BMP monitoring (RFC 7854).
+BGP route aggregation (RFC 4271 §9.2.2.2) landed as a bonus item.
+Per-item details live in the git history; the capability tables above
+reflect the current state.
+
+## Roadmap v2 — toward a complete routing stack
+
+Six workstreams, ordered by expected user value. Work top-down inside
+each workstream; cross-workstream ordering is a judgement call, but
+protocol-correctness items (W3) always beat convenience items when in
+doubt. Items get checked off here as they land.
+
+### W1 — A complete daemon (`lr-daemon`)
+
+The reference daemon must be able to run a real router on its own,
+BIRD/FRR-style, without an embedder writing code.
+
+1. **Multi-peer daemon** — `[[peer]]` array-of-tables in the TOML
+   config with per-peer settings (AS, transport, auth, GTSM,
+   maximum-prefix, Add-Path, MP families) inherited from the `[bgp]`
+   globals when omitted; repeatable `--peer` CLI flag; one connector
+   thread per outbound peer (independent reconnect/backoff); the
+   listener accepts concurrent sessions and matches inbound
+   connections to configured peers by source address; centralized
+   event consumption so Loc-RIB ordering is preserved. Status:
+   in progress.
+2. **Config completeness** — parse every key documented in
+   `templates/daemon.toml` (today `graceful_restart_time`,
+   `llgr_stale_time`, `llgr_max_stale_time` and `install_kernel` are
+   documented but silently ignored); warn on unknown keys.
+3. **BFD in the daemon** — `--bfd` per peer wiring `lr-bfd` sessions
+   to fast-fail the BGP FSM (after W3.1 multihop BFD exists).
+4. **Policy in config** — route-maps / prefix-lists / community
+   filters expressible in TOML and attached to peers (import/export).
+5. **OSPF daemon mode** — `--protocol ospf` with area/interface
+   configuration, complementing the existing `bgp` and `babel` modes.
+6. **Operational tooling** — MRT dump import/export (`lr routes`
+   already exists; add RIB dump/restore), BMP collector mode for the
+   daemon.
+
+### W2 — BIRD / FRR non-standard compatibility (selective)
+
+Where BIRD or FRR deviate from (or extend) the RFCs in ways that
+matter for interoperation, support the behaviour behind explicit
+flags; never break standards compliance by default.
+
+1. FRR `bgp default ipv4-unicast` semantics (auto-activation of the
+   IPv4 unicast family per eBGP session, on by default in FRR).
+2. FRR `bgp enforce-first-as` / disable checks, `bgp
+   bestpath compare-routerid` variants.
+3. BIRD `bgp allow local as` and extended-community syntax sugar
+   (`rt:`/`ro:` literals already parse; keep parity).
+4. Soft reconfiguration inbound (`neighbor X soft-reconfiguration
+   inbound`): keep the pre-policy Adj-RIB-In view — the data model
+   already supports it; expose per-session snapshots.
+5. Maintain the interop scripts (`tests/interop/*`) as the acceptance
+   gate for every compatibility item.
+
+### W3 — RFC coverage gaps (from `RFC_MAP.md`)
+
+Highest-value missing/partial standards, in rough order:
+
+1. **BFD multihop** (RFC 8562/5881) — TTL>1 BFD sessions; blocks W1.3.
+2. **RFC 8212** default eBGP route behaviors — full default
+   deny-in/deny-out for eBGP without explicit policy (currently
+   partial; the safety net approximates it).
+3. **RFC 5187** OSPFv3 graceful restart (and RFC 3623 for v2) —
+   planned restart signalling for OSPF.
+4. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
+   (0x4004/0x2007 options carrying).
+5. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
+6. **RFC 8277** BGP labeled prefixes (BGP-LU) — MPLS label NLRI,
+   also unlocks RFC 5666 EPE.
+7. YANG models (RFC 9647 Babel, key chains RFC 8177) — low priority
+   unless an embedder asks.
+
+### W4 — Documentation, guides, tutorials
+
+1. A book-style tutorial (`docs/tutorial.md`): wire decode → two
+   peer FSMs → the full router pipeline, runnable end-to-end.
+2. Per-protocol deep dives extending `docs/examples/` (BGP roles,
+   OSPF ABR/NSSA scenarios, Babel source-specific routing).
+3. Binding guides per language (Go / Python / C / C++), one page
+   each with a complete program.
+4. Operations runbook: daemon config reference, runtime API,
+   troubleshooting FAQ, interop lab setup (BIRD + FRR).
+5. Keep `STATUS.md` / `RFC_MAP.md` / `API.md` synchronized with
+   every landed feature (standing rule, enforced at review).
+
+### W5 — Compatibility layer
+
+1. `lr-cli translate bird|frr <config>` — best-effort conversion of
+   BIRD/FRR protocol configs into lr TOML (peers, auth, filters).
+2. Behaviour parity flags documented side-by-side with the source
+   implementation's semantics.
+3. Wire-level parity harness: replay captured UPDATE streams against
+   both lr and the reference implementation and diff the Loc-RIBs.
+
+### W6 — Research: BGP defects and a private exchange plane
+
+1. `docs/research/BGP-DEFECTS.md` — catalogue BGP's inherent
+   weaknesses with references: slow convergence/path-vector latency,
+   withdrawal propagation storms, route leaks (policy opacity),
+   AS-path forgery pre-RPKI, full-mesh/RR scaling limits, MRAI vs
+   churn trade-offs, MED oscillation.
+2. `docs/research/EXCHANGE-PLANE.md` — design a private data
+   exchange plane negotiated between lr speakers via a capability:
+   richer state (feasibility hints, policy intent, provenance
+   proofs) exchanged alongside UPDATEs, with transparent fallback
+   to pure standard BGP when the peer does not participate.
+3. Prototype the plane inside `lr-bgp::extensions` once the design
+   review converges; gate behind a feature flag.

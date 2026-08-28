@@ -83,17 +83,20 @@ A TOML config (`templates/daemon.toml`) is supported via `--config`.
 librouting/
 ├── Cargo.toml
 ├── crates/{lr-core, lr-bgp, lr-ospf, lr-babel, lr-rib, lr-policy,
-│           lr-router, lr-bfd, lr-damping, lr-osroute, lr-cli,
-│           lr-ffi, lr-tests}/
+│           lr-router, lr-bfd, lr-bmp, lr-damping, lr-osroute,
+│           lr-cli, lr-ffi, lr-tests}/
 ├── bindings/{lr-go, lr-python}/
 ├── docs/
 │   ├── ARCHITECTURE.md
 │   ├── RFC_MAP.md
 │   ├── API.md
+│   ├── STATUS.md
+│   ├── INTEROP.md
+│   ├── OS-INTEGRATION.md
 │   ├── examples/
 │   └── scaffolding/
-├── examples/                    # standalone example binaries
-├── templates/                  # scaffolding templates
+├── templates/                  # scaffolding templates + daemon.toml
+├── tests/                      # FFI harness + interop scripts (BIRD/FRR)
 ├── include/{lr_ffi.h, librouting.hpp}
 └── .github/workflows/
 ```
