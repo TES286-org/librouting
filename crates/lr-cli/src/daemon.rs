@@ -1331,10 +1331,14 @@ fn reload_config(
     if let Err(e) = daemon_config::parse_toml_subset(&text, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
+    let mut lines: Vec<String> = fresh
+        .warnings
+        .iter()
+        .map(|w| format!("reload: config warning: {}", w))
+        .collect();
 
     let old = current_networks.lock().unwrap().clone();
     let new = fresh.networks.clone();
-    let mut lines = Vec::new();
     {
         let mut r = router.lock().unwrap();
         for net in new.iter().filter(|n| !old.contains(n)) {

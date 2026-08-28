@@ -194,11 +194,12 @@ BIRD/FRR-style, without an embedder writing code.
    hold time). Bidirectional peers (`remote` + `address` on one peer)
    wait for RFC 4271 §6.8 collision detection; heterogeneous listener
    auth keys are still future work.
-2. **Config completeness** — partially done: the previously-ignored
-   documented keys (`graceful_restart_time`, `llgr_stale_time`,
-   `llgr_max_stale_time`, `install_kernel`) now parse. Remaining:
-   warn on unknown keys (currently tolerated silently for forward
-   compatibility).
+2. ~~**Config completeness**~~ — done: the previously-ignored documented
+   keys (`graceful_restart_time`, `llgr_stale_time`,
+   `llgr_max_stale_time`, `install_kernel`) parse, and unknown keys /
+   sections / tables now produce line-numbered warnings (kept
+   non-fatal for forward compatibility) surfaced at startup
+   (`config warning: …`) and on reload.
 3. **BFD in the daemon** — `--bfd` per peer wiring `lr-bfd` sessions
    to fast-fail the BGP FSM (after W3.1 multihop BFD exists).
 4. **Policy in config + reuse** (external request) — three slices,

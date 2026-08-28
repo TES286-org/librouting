@@ -155,6 +155,11 @@ pub(crate) struct DaemonConfig {
     /// the listener to strict source-address matching instead of the
     /// historical accept-any behaviour.
     pub explicit_peers: bool,
+    /// Non-fatal configuration problems (unknown keys / sections),
+    /// collected during parsing and reported at startup and reload.
+    /// Keeping them here (instead of printing directly) makes the
+    /// parser unit-testable.
+    pub warnings: Vec<String>,
 }
 
 impl DaemonConfig {
@@ -236,12 +241,24 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             } else {
                 // Unknown array table: tolerate (forward compatibility),
                 // but leave peer context so keys do not leak into one.
+                cfg.warnings.push(format!(
+                    "line {}: unknown table [[{}]] (ignored)",
+                    lineno + 1,
+                    name
+                ));
                 section = format!("unknown-array.{name}");
             }
             continue;
         }
         if line.starts_with('[') && line.ends_with(']') {
             section = line[1..line.len() - 1].trim().to_string();
+            if section != "bgp" && !section.starts_with("unknown-array.") {
+                cfg.warnings.push(format!(
+                    "line {}: unknown section [{}] (ignored)",
+                    lineno + 1,
+                    section
+                ));
+            }
             continue;
         }
         let Some((key, value)) = line.split_once('=') else {
@@ -253,7 +270,15 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             let Some(peer) = cfg.peers.last_mut() else {
                 return Err(format!("line {}: key outside a [[peer]] table", lineno + 1));
             };
-            apply_peer_key(peer, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))?;
+            if !apply_peer_key(peer, key, value)
+                .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+            {
+                cfg.warnings.push(format!(
+                    "line {}: unknown peer key '{}' (ignored)",
+                    lineno + 1,
+                    key
+                ));
+            }
             continue;
         }
         let full = if section.is_empty() {
@@ -310,14 +335,22 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "group" => cfg.group = Some(value.to_string()),
             "api_socket" => cfg.api_socket = Some(value.to_string()),
             "networks" | "bgp.networks" => cfg.networks = parse_str_array(value),
-            _ => {} // unknown keys are tolerated (forward compatibility)
+            _ => {
+                cfg.warnings.push(format!(
+                    "line {}: unknown key '{}' (ignored)",
+                    lineno + 1,
+                    full
+                ));
+            }
         }
     }
     Ok(())
 }
 
 /// Apply one `key = value` pair to the current `[[peer]]` entry.
-fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<(), String> {
+/// Returns `Ok(false)` when the key is not part of the schema so the
+/// caller can surface an unknown-key warning.
+fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, String> {
     match key {
         "name" => peer.name = Some(value.to_string()),
         "remote" => peer.remote = Some(value.to_string()),
@@ -355,9 +388,9 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<(), Str
         "max_prefix_threshold" => {
             peer.max_prefix_threshold = Some(value.parse().map_err(|_| "bad max_prefix_threshold")?)
         }
-        _ => {} // unknown keys are tolerated (forward compatibility)
+        _ => return Ok(false), // unknown key — caller warns
     }
-    Ok(())
+    Ok(true)
 }
 
 pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
@@ -527,6 +560,9 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             eprintln!("config parse error: {}", e);
             ExitCode::from(1)
         })?;
+        for w in &cfg.warnings {
+            eprintln!("config warning: {}", w);
+        }
         // Remember the file so `status` can show it and SIGHUP / `reload`
         // can re-apply it.
         cfg.config_path = Some(path);
@@ -630,5 +666,50 @@ mod tests {
         let mut cfg = DaemonConfig::with_defaults();
         parse_toml_subset("[[peer]]\npeer_as = 65010\n", &mut cfg).unwrap();
         assert_eq!(cfg.peers[0].label(), "(unnamed)");
+    }
+
+    #[test]
+    fn unknown_keys_and_sections_warn() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             typo_key = 5\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\npeer_typo = \"x\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.warnings.len(), 2, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].contains("unknown key 'bgp.typo_key'"));
+        assert!(cfg.warnings[1].contains("unknown peer key 'peer_typo'"));
+    }
+
+    #[test]
+    fn unknown_table_headers_warn() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[vendor]]\nfoo = 1\n[logging]\nlevel = \"debug\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.warnings.len(), 4, "{:?}", cfg.warnings);
+        assert!(cfg.warnings[0].contains("unknown table [[vendor]]"));
+        // Keys inside an unknown array table warn too.
+        assert!(cfg.warnings[1].contains("unknown key 'unknown-array.vendor.foo'"));
+        assert!(cfg.warnings[2].contains("unknown section [logging]"));
+        // Keys inside an unknown section warn as unknown keys.
+        assert!(cfg.warnings[3].contains("unknown key 'logging.level'"));
+    }
+
+    #[test]
+    fn clean_config_produces_no_warnings() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "user = \"lr\"\n\n[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             networks = [\"203.0.113.0/24\"]\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\nhold_time = 30\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
     }
 }
