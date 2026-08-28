@@ -292,6 +292,143 @@ impl SeqnoRequest {
     }
 }
 
+/// Source-specific Route-Request TLV body (RFC 9079 §4.4):
+/// `ae:1` + `src_prefix_len:1` + `src_prefix:0..` + `prefix_len:1` + `prefix:0..`.
+///
+/// Asks the peer to send Updates for the given (destination, source)
+/// tuple.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SsRouteRequest {
+    pub ae: u8,
+    pub src_prefix_len: u8,
+    pub src_prefix: Vec<u8>,
+    pub prefix_len: u8,
+    pub prefix: Vec<u8>,
+}
+
+impl SsRouteRequest {
+    pub fn decode(v: &[u8]) -> Option<Self> {
+        if v.len() < 2 {
+            return None;
+        }
+        let ae = v[0];
+        let src_prefix_len = v[1];
+        let mut i = 2usize;
+        let src_octets = if ae == 0 || src_prefix_len == 0 {
+            0
+        } else {
+            (src_prefix_len as usize).div_ceil(8)
+        };
+        if i + src_octets >= v.len() {
+            return None;
+        }
+        let src_prefix = v[i..i + src_octets].to_vec();
+        i += src_octets;
+        if i >= v.len() {
+            return None;
+        }
+        let prefix_len = v[i];
+        i += 1;
+        let prefix = v[i..].to_vec();
+        Some(Self {
+            ae,
+            src_prefix_len,
+            src_prefix,
+            prefix_len,
+            prefix,
+        })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut a = Vec::with_capacity(4 + self.src_prefix.len() + self.prefix.len());
+        a.push(self.ae);
+        a.push(self.src_prefix_len);
+        if self.ae != 0 && self.src_prefix_len > 0 {
+            a.extend_from_slice(&self.src_prefix);
+        }
+        a.push(self.prefix_len);
+        a.extend_from_slice(&self.prefix);
+        a
+    }
+}
+
+/// Source-specific Seqno-Request TLV body (RFC 9079 §4.5):
+/// `ae:1` + `src_prefix_len:1` + `src_prefix:0..` + `prefix_len:1` +
+/// `prefix:0..` + `seqno:2` + `hop_count:1` + `reserved:1` + `router_id:8`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SsSeqnoRequest {
+    pub ae: u8,
+    pub src_prefix_len: u8,
+    pub src_prefix: Vec<u8>,
+    pub prefix_len: u8,
+    pub prefix: Vec<u8>,
+    pub seqno: u16,
+    pub hop_count: u8,
+    pub router_id: [u8; 8],
+}
+
+impl SsSeqnoRequest {
+    pub fn decode(v: &[u8]) -> Option<Self> {
+        if v.len() < 4 {
+            return None;
+        }
+        let ae = v[0];
+        let src_prefix_len = v[1];
+        let mut i = 2usize;
+        let src_octets = if ae == 0 || src_prefix_len == 0 {
+            0
+        } else {
+            (src_prefix_len as usize).div_ceil(8)
+        };
+        if i + src_octets + 12 > v.len() {
+            return None;
+        }
+        let src_prefix = v[i..i + src_octets].to_vec();
+        i += src_octets;
+        let prefix_len = v[i];
+        i += 1;
+        let pfx_octets = (prefix_len as usize).div_ceil(8);
+        if i + pfx_octets + 12 > v.len() {
+            return None;
+        }
+        let prefix = v[i..i + pfx_octets].to_vec();
+        i += pfx_octets;
+        let seqno = u16::from_be_bytes([v[i], v[i + 1]]);
+        let hop_count = v[i + 2];
+        // v[i+3] is reserved
+        let mut rid = [0u8; 8];
+        rid.copy_from_slice(&v[i + 4..i + 12]);
+        Some(Self {
+            ae,
+            src_prefix_len,
+            src_prefix,
+            prefix_len,
+            prefix,
+            seqno,
+            hop_count,
+            router_id: rid,
+        })
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        let mut a = Vec::with_capacity(
+            4 + self.src_prefix.len() + self.prefix.len() + 12,
+        );
+        a.push(self.ae);
+        a.push(self.src_prefix_len);
+        if self.ae != 0 && self.src_prefix_len > 0 {
+            a.extend_from_slice(&self.src_prefix);
+        }
+        a.push(self.prefix_len);
+        a.extend_from_slice(&self.prefix);
+        a.extend_from_slice(&self.seqno.to_be_bytes());
+        a.push(self.hop_count);
+        a.push(0); // reserved
+        a.extend_from_slice(&self.router_id);
+        a
+    }
+}
+
 /// AckReq TLV body (RFC 8966 §4.4.8).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AckReq {
@@ -471,5 +608,69 @@ mod tests {
         assert_eq!(ae, 2);
         let dec = decode_ae(ae, &bytes).unwrap();
         assert_eq!(dec, p);
+    }
+
+    #[test]
+    fn ss_route_request_roundtrip() {
+        let r = super::SsRouteRequest {
+            ae: 1,
+            src_prefix_len: 8,
+            src_prefix: vec![10],
+            prefix_len: 24,
+            prefix: vec![192, 0, 2],
+        };
+        let enc = r.encode();
+        let dec = super::SsRouteRequest::decode(&enc).unwrap();
+        assert_eq!(dec, r);
+    }
+
+    #[test]
+    fn ss_route_request_ipv6_roundtrip() {
+        let r = super::SsRouteRequest {
+            ae: 2,
+            src_prefix_len: 64,
+            src_prefix: vec![0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0],
+            prefix_len: 48,
+            prefix: vec![0xfe, 0x80, 0, 0, 0, 0],
+        };
+        let enc = r.encode();
+        let dec = super::SsRouteRequest::decode(&enc).unwrap();
+        assert_eq!(dec, r);
+    }
+
+    #[test]
+    fn ss_seqno_request_roundtrip() {
+        let r = super::SsSeqnoRequest {
+            ae: 1,
+            src_prefix_len: 8,
+            src_prefix: vec![10],
+            prefix_len: 24,
+            prefix: vec![192, 0, 2],
+            seqno: 42,
+            hop_count: 3,
+            router_id: [1, 2, 3, 4, 5, 6, 7, 8],
+        };
+        let enc = r.encode();
+        let dec = super::SsSeqnoRequest::decode(&enc).unwrap();
+        assert_eq!(dec, r);
+    }
+
+    #[test]
+    fn ss_seqno_request_ipv6_roundtrip() {
+        let r = super::SsSeqnoRequest {
+            ae: 2,
+            src_prefix_len: 128,
+            src_prefix: vec![
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ],
+            prefix_len: 64,
+            prefix: vec![0xfe, 0x80, 0, 0, 0, 0, 0, 0],
+            seqno: 100,
+            hop_count: 2,
+            router_id: [0xff; 8],
+        };
+        let enc = r.encode();
+        let dec = super::SsSeqnoRequest::decode(&enc).unwrap();
+        assert_eq!(dec, r);
     }
 }

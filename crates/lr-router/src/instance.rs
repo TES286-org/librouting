@@ -476,22 +476,48 @@ impl BabelRuntime {
     }
 
     fn apply_update(&mut self, u: &lr_babel::message::Update) {
-        // AE 0 = wildcard; AE 1 = IPv4. Only IPv4 is handled here.
-        if u.ae != 1 || u.prefix.is_empty() || u.prefix.len() > 4 {
-            return;
-        }
-        let mut addr = [0u8; 4];
-        addr[..u.prefix.len()].copy_from_slice(&u.prefix);
-        let prefix = Prefix::new_v4(addr, u.prefix_len);
+        // AE 0 = wildcard; AE 1 = IPv4; AE 2 = IPv6. Both are handled.
+        let prefix = match u.ae {
+            1 => {
+                if u.prefix.is_empty() || u.prefix.len() > 4 {
+                    return;
+                }
+                let mut addr = [0u8; 4];
+                addr[..u.prefix.len()].copy_from_slice(&u.prefix);
+                Prefix::new_v4(addr, u.prefix_len)
+            }
+            2 => {
+                if u.prefix.is_empty() || u.prefix.len() > 16 {
+                    return;
+                }
+                let mut addr = [0u8; 16];
+                addr[..u.prefix.len()].copy_from_slice(&u.prefix);
+                Prefix::new_v6(addr, u.prefix_len)
+            }
+            _ => return, // AE 0 (wildcard) and unknown AEs are ignored.
+        };
         // Source-specific destination (RFC 9079) — tracked in the route key.
-        let source = if u.src_prefix_len > 0 && !u.src_prefix.is_empty() && u.src_prefix.len() <= 4
-        {
-            let mut s = [0u8; 4];
-            s[..u.src_prefix.len()].copy_from_slice(&u.src_prefix);
-            Some(lr_babel::source::SourcePrefix::new(Prefix::new_v4(
-                s,
-                u.src_prefix_len,
-            )))
+        // The source prefix uses the same AE as the destination.
+        let source = if u.src_prefix_len > 0 && !u.src_prefix.is_empty() {
+            match u.ae {
+                1 if u.src_prefix.len() <= 4 => {
+                    let mut s = [0u8; 4];
+                    s[..u.src_prefix.len()].copy_from_slice(&u.src_prefix);
+                    Some(lr_babel::source::SourcePrefix::new(Prefix::new_v4(
+                        s,
+                        u.src_prefix_len,
+                    )))
+                }
+                2 if u.src_prefix.len() <= 16 => {
+                    let mut s = [0u8; 16];
+                    s[..u.src_prefix.len()].copy_from_slice(&u.src_prefix);
+                    Some(lr_babel::source::SourcePrefix::new(Prefix::new_v6(
+                        s,
+                        u.src_prefix_len,
+                    )))
+                }
+                _ => None,
+            }
         } else {
             None
         };
@@ -549,30 +575,39 @@ impl BabelRuntime {
         self.routes
             .best_routes()
             .into_iter()
-            .map(|r| Route {
-                key: RouteKey::new(r.key.destination, NlriFamily::IPV4_UNICAST),
-                origin: RouteOrigin {
-                    proto: 4, // Babel adjacency tag
-                    peer: u64::from(u32::from_be_bytes([
-                        self.router_id[4],
-                        self.router_id[5],
-                        self.router_id[6],
-                        self.router_id[7],
-                    ])),
-                },
-                protocol: Protocol::Babel,
-                preference: lr_core::rib::Preference::new(
-                    Protocol::Babel.default_admin_distance(),
-                    r.metric,
-                ),
-                next_hop: Some(if r.next_hop == lr_core::addr::IpAddr::V4([0, 0, 0, 0]) {
-                    nh_default
-                } else {
-                    r.next_hop
-                }),
-                attributes: lr_core::attr::Attributes::new(),
-                age_ms: 0,
-                path_id: 0,
+            .map(|r| {
+                // The Loc-RIB key family depends on the destination's
+                // address family: IPv4 destinations → IPV4_UNICAST,
+                // IPv6 destinations → IPV6_UNICAST.
+                let family = match r.key.destination.addr {
+                    lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
+                    lr_core::addr::IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+                };
+                Route {
+                    key: RouteKey::new(r.key.destination, family),
+                    origin: RouteOrigin {
+                        proto: 4, // Babel adjacency tag
+                        peer: u64::from(u32::from_be_bytes([
+                            self.router_id[4],
+                            self.router_id[5],
+                            self.router_id[6],
+                            self.router_id[7],
+                        ])),
+                    },
+                    protocol: Protocol::Babel,
+                    preference: lr_core::rib::Preference::new(
+                        Protocol::Babel.default_admin_distance(),
+                        r.metric,
+                    ),
+                    next_hop: Some(if r.next_hop == lr_core::addr::IpAddr::V4([0, 0, 0, 0]) {
+                        nh_default
+                    } else {
+                        r.next_hop
+                    }),
+                    attributes: lr_core::attr::Attributes::new(),
+                    age_ms: 0,
+                    path_id: 0,
+                }
             })
             .collect()
     }
