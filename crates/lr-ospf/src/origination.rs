@@ -266,7 +266,7 @@ mod tests {
 
     #[test]
     fn v2_stream_finalize_walks_frames() {
-        let mut a = OspfCodec::v2().encode_vec(&hello()).unwrap();
+        let a = OspfCodec::v2().encode_vec(&hello()).unwrap();
         let mut b = OspfCodec::v2().encode_vec(&hello()).unwrap();
         b[4] ^= 0x02; // different router-id byte so the frames differ
         let mut stream = a.clone();
