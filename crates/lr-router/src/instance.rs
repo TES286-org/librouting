@@ -873,29 +873,50 @@ impl DefaultRouter {
         let Some(sink) = &self.bmp_sink else {
             return;
         };
-        // Build a minimal BGP UPDATE: 19-byte marker + 2-byte length +
-        // 1-byte type (2=UPDATE) + withdrawn_len(2) + attr_len(2) +
-        // NLRI. This is a synthetic message — a real BMP sender encodes
-        // the full UPDATE including path attributes.
-        let mut bgp_msg = vec![0xff; 16]; // marker
-        bgp_msg.push(0); // length high (patched below)
-        bgp_msg.push(23); // length low (minimum: 19+4)
-        bgp_msg.push(2); // type = UPDATE
-        bgp_msg.push(0);
-        bgp_msg.push(0); // withdrawn_len = 0
-        bgp_msg.push(0);
-        bgp_msg.push(0); // attr_len = 0
-                         // NLRI: prefix_len + prefix bytes
-        bgp_msg.push(route.key.prefix.prefix_len);
-        let n = (route.key.prefix.prefix_len as usize).div_ceil(8);
-        match &route.key.prefix.addr {
-            lr_core::addr::IpAddr::V4(b) => bgp_msg.extend_from_slice(&b[..n.min(4)]),
-            lr_core::addr::IpAddr::V6(b) => bgp_msg.extend_from_slice(&b[..n.min(16)]),
-        }
-        // Patch length.
-        let total = bgp_msg.len() as u16;
-        bgp_msg[16] = (total >> 8) as u8;
-        bgp_msg[17] = total as u8;
+        // A real BGP UPDATE (RFC 7854 §4.3 mirrors what the session
+        // sent): the route's own path attributes, IPv4 NLRI in the
+        // legacy section, IPv6 via MP_REACH_NLRI.
+        use lr_bgp::message::update::{Nlri, Update};
+        let mut attrs: PathAttributes = route.attributes.clone().into();
+        let update = if route.key.family == NlriFamily::IPV4_UNICAST {
+            Update {
+                withdrawn: Vec::new(),
+                attributes: attrs,
+                nlri: vec![Nlri {
+                    path_id: route.path_id,
+                    prefix: route.key.prefix,
+                }],
+            }
+        } else {
+            let next_hop = match route.next_hop {
+                Some(IpAddr::V4(b)) => lr_bgp::path::MpNextHop::V4(b),
+                Some(IpAddr::V6(b)) => lr_bgp::path::MpNextHop::V6Global(b),
+                None => lr_bgp::path::MpNextHop::V6Global([0; 16]),
+            };
+            let mp = lr_bgp::path::MpReach::new(
+                route.key.family,
+                next_hop,
+                vec![Nlri {
+                    path_id: route.path_id,
+                    prefix: route.key.prefix,
+                }],
+            );
+            attrs.insert(PathAttribute::new(
+                PathAttrFlags::new().set_optional(true),
+                AttrType::MpReachNlri,
+                mp.encode(),
+            ));
+            Update {
+                withdrawn: Vec::new(),
+                attributes: attrs,
+                nlri: Vec::new(),
+            }
+        };
+        let Ok(bgp_msg) =
+            lr_bgp::codec::BgpCodec::new().encode_vec(&lr_bgp::message::BgpMessage::Update(update))
+        else {
+            return;
+        };
         let peer = match self.bmp_peer_header(route.origin.peer) {
             Some(p) => p,
             None => return,
@@ -1036,6 +1057,49 @@ impl DefaultRouter {
         // where it lives, but populating it here keeps the Loc-RIB route
         // self-describing for tools that snapshot it directly.
         if family == NlriFamily::IPV4_UNICAST {
+            if let Some(nh) = next_hop {
+                attrs.insert(PathAttribute::new(
+                    PathAttrFlags::new().set_transitive(true),
+                    AttrType::NextHop,
+                    match nh {
+                        IpAddr::V4(b) => b.to_vec(),
+                        IpAddr::V6(b) => b.to_vec(),
+                    },
+                ));
+            }
+        }
+        let route = Route {
+            key: key.clone(),
+            origin: RouteOrigin { proto: 2, peer: 0 }, // 2 = locally originated
+            protocol: Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(Protocol::Bgp.default_admin_distance(), 0),
+            next_hop,
+            attributes: attrs.into(),
+            age_ms: 0,
+            path_id: 0,
+        };
+        self.loc_rib.install_set(&key, vec![route.clone()]);
+        self.originated.insert(key.clone(), route.clone());
+        self.pending_events
+            .push(RouterEvent::RouteInstalled(route.clone()));
+        self.export_selection(&key, &[route]);
+        key
+    }
+
+    /// Originate a route with an explicit attribute set (the BMP
+    /// collector and MRT restore paths: observation feeds the Loc-RIB
+    /// with the attributes exactly as received). NEXT_HOP is injected
+    /// only when the caller's set does not already carry one.
+    pub fn originate_with_attributes(
+        &mut self,
+        prefix: Prefix,
+        family: NlriFamily,
+        next_hop: Option<IpAddr>,
+        attributes: lr_core::attr::Attributes,
+    ) -> RouteKey {
+        let key = RouteKey::new(prefix, family);
+        let mut attrs: PathAttributes = attributes.into();
+        if next_hop.is_some() && attrs.next_hop().is_none() {
             if let Some(nh) = next_hop {
                 attrs.insert(PathAttribute::new(
                     PathAttrFlags::new().set_transitive(true),
@@ -2594,13 +2658,17 @@ impl RouterInstance for DefaultRouter {
                 actions,
                 newly_established,
             } => {
-                self.dispatch_bgp_actions(h.0, actions);
                 if newly_established {
+                    // BMP (RFC 7854 §4.6): the Peer Up event mirrors
+                    // *before* any Route Monitoring from the same batch
+                    // — with TCP coalescing the KEEPALIVE that completes
+                    // the handshake and the first UPDATE arrive in one
+                    // read, and collectors expect Peer Up ordering.
+                    self.bmp_peer_up(h.0);
                     // Initial table dump to the newly established peer.
                     self.on_bgp_established(h.0);
-                    // BMP (RFC 7854): mirror the Peer Up event.
-                    self.bmp_peer_up(h.0);
                 }
+                self.dispatch_bgp_actions(h.0, actions);
             }
             Pending::Other { delta } => {
                 // Babel routes land directly in Loc-RIB (their egress

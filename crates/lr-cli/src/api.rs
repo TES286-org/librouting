@@ -182,6 +182,33 @@ mod imp {
             if cmd.is_empty() {
                 continue;
             }
+            // Argument-bearing command: `mrt <path>` writes a dump of
+            // the current Loc-RIB (RFC 6396 TABLE_DUMP_V2).
+            if let Some(path) = cmd.strip_prefix("mrt ") {
+                let path = path.trim();
+                if path.is_empty() {
+                    let _ = writeln!(out, "usage: mrt <path>");
+                } else {
+                    let router_id = core::str::FromStr::from_str(&info.router_id)
+                        .unwrap_or(lr_core::addr::RouterId::from_u32(0));
+                    let records = {
+                        let r = router.lock().unwrap();
+                        crate::write_mrt_rib_dump(&r, router_id, path)
+                    };
+                    match records {
+                        Ok(n) => {
+                            let _ = writeln!(out, "mrt-dump {path} records={n}");
+                        }
+                        Err(e) => {
+                            let _ = writeln!(out, "mrt-dump failed: {e}");
+                        }
+                    }
+                }
+                if out.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
             match cmd {
                 "quit" => return,
                 "help" => {
@@ -191,6 +218,7 @@ mod imp {
                          status    daemon summary (version, identity, uptime, counters)\n  \
                          sessions  one line per configured session\n  \
                          routes    Loc-RIB dump (one route per line)\n  \
+                         mrt PATH  write the Loc-RIB as an MRT dump (RFC 6396)\n  \
                          reload    re-apply configuration (SIGHUP equivalent)\n  \
                          shutdown  graceful shutdown\n  \
                          help      this text\n  \

@@ -309,6 +309,7 @@ version = "0.1.0"
 dependencies = [
  "lr-bfd",
  "lr-bgp",
+ "lr-bmp",
  "lr-core",
  "lr-mrt",
  "lr-ospf",

@@ -93,7 +93,7 @@ fn print_usage() {
          --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (default 75)\n  \
-         --protocol PROTO         bgp (default) | babel | ospf\n  \
+         --protocol PROTO         bgp (default) | babel | ospf | bmp\n  \
          --babel-group ADDR       Babel multicast group (ff02::1:6)\n  \
          --babel-port PORT        Babel UDP port (6696)\n  \
          --ospf-interface NAME    OSPF interface (repeatable; needs root\n  \
@@ -102,6 +102,8 @@ fn print_usage() {
          integer or dotted quad)\n  \
          --ospf-hello-interval S  OSPF hello interval (default 10)\n  \
          --ospf-dead-interval S   OSPF dead interval (default 40)\n  \
+         --bmp-target ADDR:PORT  Mirror Peer Up/Down + Route Monitoring\n  \
+         to a BMP monitoring station (RFC 7854)\n  \
          --install-kernel-routes  Install best routes into the kernel FIB\n  \
          --user NAME              Drop privileges after binding\n  \
          --group NAME             Privilege-drop group\n  \
@@ -128,9 +130,9 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     // Fail closed on a typo'd --protocol instead of silently running BGP.
-    if !matches!(cfg.protocol.as_str(), "bgp" | "babel" | "ospf") {
+    if !matches!(cfg.protocol.as_str(), "bgp" | "babel" | "ospf" | "bmp") {
         eprintln!(
-            "error: unknown --protocol '{}' (bgp | babel | ospf)",
+            "error: unknown --protocol '{}' (bgp | babel | ospf | bmp)",
             cfg.protocol
         );
         return ExitCode::from(2);
@@ -155,6 +157,10 @@ fn main() -> ExitCode {
     // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
     if cfg.protocol == "ospf" {
         return daemon_ospf::run_ospf_daemon(&cfg, rid);
+    }
+    // BMP collector mode: accept monitoring sessions from routers.
+    if cfg.protocol == "bmp" {
+        return run_bmp_collector(&cfg, rid);
     }
     // BGP additionally needs the local AS.
     if cfg.local_as == 0 {
@@ -198,6 +204,20 @@ impl PeerEntry {
 
 fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let router = Arc::new(Mutex::new(DefaultRouter::new()));
+
+    // Optional BMP egress (RFC 7854): mirror Peer Up/Down + Route
+    // Monitoring to a monitoring station. The sink is called from
+    // inside the router lock, so bytes travel over a channel to a
+    // dedicated sender thread (connect + reconnect + backoff).
+    if let Some(target) = cfg.bmp_target.as_deref() {
+        match spawn_bmp_sender(target, &router) {
+            Ok(()) => println!("daemon: bmp mirroring to {}", target),
+            Err(e) => {
+                eprintln!("daemon: bmp target {}: {}", target, e);
+                return ExitCode::from(1);
+            }
+        }
+    }
 
     // ---- Build one router session per configured peer. ----
     let mut entries: Vec<PeerEntry> = Vec::new();
@@ -1066,6 +1086,243 @@ fn install_kernel_routes(
     }
 }
 
+/// BMP collector mode (`--protocol bmp --listen ADDR:PORT`): the
+/// monitoring-station side of RFC 7854 — accept BMP sessions from
+/// routers (BIRD's `protocol bmp`, FRR's bmpbgpd), decode Peer Up/Down
+/// and Route Monitoring, and mirror the observed prefixes into the
+/// Loc-RIB so the runtime API (`routes`, `mrt <path>`) serves them like
+/// any other source. One thread per BMP connection; BGP UPDATEs are
+/// decoded with the `lr-bgp` codec (the 19-byte header included) and
+/// withdrawals retract the corresponding entries.
+///
+/// Scope note: the Loc-RIB keys routes by prefix, so a prefix monitored
+/// through several peers keeps the last-received path — the collector
+/// is an operational view, not a full Adj-RIB-In replay (W5.3's
+/// wire-parity harness will build that).
+fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
+    use std::net::TcpListener;
+
+    let Some(listen) = cfg.listen_addr.as_deref() else {
+        eprintln!("daemon: --protocol bmp requires --listen ADDR:PORT");
+        return ExitCode::from(2);
+    };
+    let addr = match resolve(listen) {
+        Some(a) => a,
+        None => {
+            eprintln!("daemon: invalid --listen address: {}", listen);
+            return ExitCode::from(2);
+        }
+    };
+    let listener = match TcpListener::bind(addr) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("daemon: bmp bind {} failed: {}", addr, e);
+            return ExitCode::from(1);
+        }
+    };
+    println!("daemon: bmp collector listening on {}", addr);
+    if let Err(sig) = signal::init() {
+        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        return ExitCode::from(1);
+    }
+    let running = Arc::new(AtomicBool::new(true));
+    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+    let runtime = Arc::new(Runtime {
+        reload: Arc::new(|| vec!["bmp: configuration reload is not supported".to_string()]),
+        router: Arc::clone(&router),
+        running: Arc::clone(&running),
+    });
+    if let Err(e) = spawn_api(cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+    let _ = rid;
+    // Ticker: drains the events the originate/unoriginate calls emit.
+    {
+        let rt = Arc::clone(&runtime);
+        thread::Builder::new()
+            .name("lr-ticker".into())
+            .spawn(move || {
+                let start = WallClock::now();
+                loop {
+                    if !rt.running.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let now_ms = start.elapsed().as_millis() as u64;
+                    {
+                        let mut r = rt.router.lock().unwrap();
+                        r.tick(lr_core::time::Instant(now_ms));
+                        for ev in r.poll_events() {
+                            log_event(&ev);
+                        }
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+            })
+            .expect("spawn ticker thread");
+    }
+    listener
+        .set_nonblocking(true)
+        .map_err(|e| {
+            eprintln!("daemon: bmp listener nonblocking: {}", e);
+            ExitCode::from(1)
+        })
+        .unwrap();
+    while running.load(Ordering::Relaxed) {
+        dispatch_signals(&runtime);
+        match listener.accept() {
+            Ok((stream, peer)) => {
+                println!("daemon: bmp station connected from {}", peer);
+                let router = Arc::clone(&router);
+                let running = Arc::clone(&running);
+                thread::Builder::new()
+                    .name("lr-bmp-station".into())
+                    .spawn(move || serve_bmp_station(stream, &router, &running))
+                    .expect("spawn bmp station thread");
+            }
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                eprintln!("daemon: bmp accept: {}", e);
+                thread::sleep(Duration::from_millis(100));
+            }
+        }
+    }
+    println!("daemon: bmp collector shutdown complete");
+    ExitCode::SUCCESS
+}
+
+/// Serve one connected BMP station until it disconnects or the daemon
+/// stops. Decoded Route Monitoring messages install routes into the
+/// shared router; Peer Up/Down are logged.
+fn serve_bmp_station(
+    mut stream: std::net::TcpStream,
+    router: &Arc<Mutex<DefaultRouter>>,
+    running: &Arc<AtomicBool>,
+) {
+    use lr_bmp::BmpCodec;
+    let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
+    let mut bmp = BmpCodec::new();
+    let mut bgp = lr_bgp::BgpCodec::new();
+    let mut buf = [0u8; 65535];
+    // Locally originated keys per prefix, so withdrawals can retract.
+    let mut installed: std::collections::BTreeMap<lr_core::addr::Prefix, lr_core::rib::RouteKey> =
+        std::collections::BTreeMap::new();
+    while running.load(Ordering::Relaxed) {
+        let n = match stream.read(&mut buf) {
+            Ok(0) => break, // station disconnected
+            Ok(n) => n,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                continue;
+            }
+            Err(e) => {
+                eprintln!("daemon: bmp station read: {}", e);
+                break;
+            }
+        };
+        // One read can carry several BMP messages: feed the bytes
+        // once, then drain every complete buffered message.
+        bmp.feed(&buf[..n]);
+        loop {
+            let message = match bmp.next_message() {
+                Ok(Some(m)) => m,
+                Ok(None) => break,
+                Err(e) => {
+                    eprintln!("daemon: bmp decode: {}", e);
+                    break;
+                }
+            };
+            handle_bmp_message(&message, &mut bgp, router, &mut installed);
+        }
+    }
+    println!("daemon: bmp station disconnected");
+}
+
+/// Apply one decoded BMP message.
+fn handle_bmp_message(
+    message: &lr_bmp::BmpMessage,
+    bgp: &mut lr_bgp::BgpCodec,
+    router: &Arc<Mutex<DefaultRouter>>,
+    installed: &mut std::collections::BTreeMap<lr_core::addr::Prefix, lr_core::rib::RouteKey>,
+) {
+    use lr_bmp::BmpMsgType;
+    use lr_core::codec::Decoder;
+    let peer_desc = message
+        .peer
+        .as_ref()
+        .map(|p| format!("peer as={} bgp-id={}", p.peer_as, fmt_bgp_id(p.peer_bgp_id)))
+        .unwrap_or_else(|| "station".to_string());
+    match message.header.msg_type {
+        BmpMsgType::RouteMonitoring => {
+            // Payload: a complete BGP UPDATE (marker included).
+            let mut r = lr_core::buf::ReadBuf::new(&message.payload);
+            let update = match bgp.decode(&mut r) {
+                Ok(Some(lr_bgp::message::BgpMessage::Update(u))) => u,
+                Ok(Some(other)) => {
+                    // KEEPALIVE / OPEN echoes inside monitoring are legal
+                    // but carry no routes.
+                    let _ = other;
+                    return;
+                }
+                Ok(None) => return,
+                Err(e) => {
+                    eprintln!("daemon: bmp monitored update decode: {}", e);
+                    return;
+                }
+            };
+            let mut r = router.lock().unwrap();
+            for w in &update.withdrawn {
+                if let Some(key) = installed.remove(&w.prefix) {
+                    r.unoriginate(&key);
+                }
+            }
+            for n in &update.nlri {
+                let next_hop = update.attributes.next_hop().map(|nh| nh.to_ip());
+                let key = r.originate_with_attributes(
+                    n.prefix,
+                    lr_core::nlri::NlriFamily::IPV4_UNICAST,
+                    next_hop,
+                    update.attributes.clone().into(),
+                );
+                installed.insert(n.prefix, key);
+                println!(
+                    "daemon: bmp route {} via {} ({})",
+                    n.prefix,
+                    next_hop
+                        .map(|nh| nh.to_string())
+                        .unwrap_or_else(|| "(none)".into()),
+                    peer_desc
+                );
+            }
+        }
+        BmpMsgType::PeerUp => {
+            println!("daemon: bmp peer up ({})", peer_desc);
+        }
+        BmpMsgType::PeerDown => {
+            println!("daemon: bmp peer down ({})", peer_desc);
+        }
+        BmpMsgType::Initiation => {
+            println!("daemon: bmp station initiated ({})", peer_desc);
+        }
+        BmpMsgType::Termination => {
+            println!("daemon: bmp station terminating ({})", peer_desc);
+        }
+        _ => {}
+    }
+}
+
+/// Format a BGP identifier as a dotted quad (shared log helper).
+fn fmt_bgp_id(id: u32) -> String {
+    std::net::Ipv4Addr::from(id).to_string()
+}
+
 /// Babel daemon mode: run the Babel protocol over UDP on an IPv6
 /// link-local address. This is the BIRD `babel` protocol equivalent —
 /// Babel uses UDP multicast on port 6696, not TCP like BGP.
@@ -1222,6 +1479,149 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
     }
     println!("daemon: babel shutdown complete");
     ExitCode::SUCCESS
+}
+
+/// Spawn the BMP sender thread: connects to `target` (host:port) and
+/// forwards every BMP message the router emits. Reconnects with
+/// backoff; messages produced while disconnected are dropped (BMP is
+/// best-effort monitoring).
+fn spawn_bmp_sender(target: &str, router: &Arc<Mutex<DefaultRouter>>) -> Result<(), String> {
+    use std::sync::mpsc;
+    let addr = resolve(target).ok_or_else(|| format!("invalid address: {target}"))?;
+    let (tx, rx) = mpsc::channel::<Vec<u8>>();
+    {
+        let mut r = router.lock().unwrap();
+        r.set_bmp_sink(move |bytes| {
+            // Channel send is non-blocking enough for the router lock;
+            // unbounded queueing under a stuck collector is bounded by
+            // dropping when the receiver is gone.
+            let _ = tx.send(bytes.to_vec());
+        });
+    }
+    thread::Builder::new()
+        .name("lr-bmp-sender".into())
+        .spawn(move || {
+            let mut backoff_ms = 500u64;
+            loop {
+                match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
+                    Ok(mut stream) => {
+                        println!("daemon: bmp station {} connected", addr);
+                        backoff_ms = 500; // a good connect resets the timer
+                        let mut station_alive = true;
+                        while let Ok(bytes) = rx.recv() {
+                            use std::io::Write;
+                            if stream.write_all(&bytes).is_err() {
+                                station_alive = false;
+                                break;
+                            }
+                        }
+                        if !station_alive {
+                            continue; // station dropped — reconnect
+                        }
+                        // recv() only fails when the sink is dropped,
+                        // i.e. the router is gone: exit.
+                        return;
+                    }
+                    Err(_) => {
+                        thread::sleep(Duration::from_millis(backoff_ms));
+                        backoff_ms = (backoff_ms * 2).min(10_000);
+                    }
+                }
+            }
+        })
+        .map_err(|e| format!("spawn bmp sender: {e}"))?;
+    Ok(())
+}
+
+/// Write the Loc-RIB as an RFC 6396 TABLE_DUMP_V2 dump (one peer index
+/// table + one RIB record per prefix). Peers come from the session
+/// summaries (BGP-learned routes reference their session's peer); local,
+/// OSPF and Babel routes reference the synthetic local peer 0, exactly
+/// how BIRD's `protocol mrt` represents non-BGP sources. Returns the
+/// number of RIB records written.
+pub(crate) fn write_mrt_rib_dump(
+    router: &DefaultRouter,
+    router_id: lr_core::addr::RouterId,
+    path: &str,
+) -> Result<usize, String> {
+    use lr_core::rib::Protocol;
+    use lr_mrt::{MrtRibDump, PeerEntry, RibEntry, RibTable};
+
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as u32)
+        .unwrap_or(0);
+    let summaries = router.session_summaries();
+    let mut dump = MrtRibDump::new(router_id.as_u32(), "loc-rib");
+    // Peer 0: the synthetic local source (BIRD convention: ::, AS 0).
+    dump.add_peer(PeerEntry {
+        bgp_id: 0,
+        ip: lr_core::addr::IpAddr::V6([0; 16]),
+        asn: lr_core::addr::Asn(0),
+    });
+    // One peer per BGP session that contributed at least one route.
+    let routes = router.rib_paths_snapshot();
+    let mut session_peer: std::collections::BTreeMap<u64, u16> = std::collections::BTreeMap::new();
+    for s in &summaries {
+        if s.kind != "bgp" {
+            continue;
+        }
+        if !routes
+            .iter()
+            .any(|r| r.origin.peer == s.handle.0 && r.protocol == Protocol::Bgp)
+        {
+            continue;
+        }
+        let index = dump.add_peer(PeerEntry {
+            bgp_id: s.peer_bgp_id.map(|id| id.as_u32()).unwrap_or(0),
+            // The session summary carries the peer's BGP identifier but
+            // not its transport address; the ID in dotted-quad form is
+            // the conventional stand-in.
+            ip: lr_core::addr::IpAddr::V4(
+                s.peer_bgp_id.map(|id| id.to_v4_bytes()).unwrap_or([0; 4]),
+            ),
+            asn: lr_core::addr::Asn(s.peer_as.0),
+        });
+        session_peer.insert(s.handle.0, index);
+    }
+    // Flatten into prefix-keyed entries, then split plain / add-path.
+    let mut by_prefix: std::collections::BTreeMap<lr_core::addr::Prefix, Vec<RibEntry>> =
+        std::collections::BTreeMap::new();
+    for r in &routes {
+        let entry = RibEntry {
+            peer_index: match (r.protocol, session_peer.get(&r.origin.peer)) {
+                (Protocol::Bgp, Some(idx)) => *idx,
+                _ => 0,
+            },
+            originated_time: now,
+            path_id: r.path_id,
+            attributes: lr_mrt::encode_attributes(&r.attributes),
+        };
+        by_prefix.entry(r.key.prefix).or_default().push(entry);
+    }
+    let mut records = 0usize;
+    for (prefix, entries) in by_prefix {
+        for add_path in [false, true] {
+            let entries: Vec<RibEntry> = entries
+                .iter()
+                .filter(|e| (e.path_id != 0) == add_path)
+                .cloned()
+                .collect();
+            if entries.is_empty() {
+                continue;
+            }
+            dump.add_table(RibTable {
+                sequence: records as u32,
+                prefix,
+                add_path,
+                entries,
+            });
+            records += 1;
+        }
+    }
+    let bytes = dump.encode(now).map_err(|e| format!("mrt encode: {}", e))?;
+    std::fs::write(path, bytes).map_err(|e| format!("mrt write {path}: {e}"))?;
+    Ok(records)
 }
 
 fn resolve(addr: &str) -> Option<std::net::SocketAddr> {

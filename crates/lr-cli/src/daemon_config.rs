@@ -203,6 +203,9 @@ pub(crate) struct DaemonConfig {
     pub babel_group: Option<String>,
     /// Babel local port (default: 6696).
     pub babel_port: u16,
+    /// BMP monitoring station to mirror Peer Up/Down + Route Monitoring
+    /// to (`--bmp-target host:port` / `[bgp] bmp_target`).
+    pub bmp_target: Option<String>,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -633,6 +636,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             }
             "bgp.mp_families" => cfg.mp_families = parse_str_array(value),
             "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
+            "bgp.bmp_target" => cfg.bmp_target = Some(value.to_string()),
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -977,6 +981,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--tcp-ao-maclen" if i + 1 < args.len() => {
                 cfg.tcp_ao_maclen = args[i + 1].parse().unwrap_or(0);
+                i += 2;
+            }
+            "--bmp-target" if i + 1 < args.len() => {
+                cfg.bmp_target = Some(args[i + 1].clone());
                 i += 2;
             }
             "--install-kernel-routes" => {

@@ -27,6 +27,7 @@ lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-router = { workspace = true }
 lr-bfd = { workspace = true }
+lr-bmp = { workspace = true }
 lr-mrt = { workspace = true }
 lr-osroute = { workspace = true }
 

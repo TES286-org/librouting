@@ -320,8 +320,15 @@ impl BmpCodec {
         Ok(out)
     }
 
-    pub fn decode_slice(&mut self, b: &[u8]) -> Result<Option<BmpMessage>, ParseError> {
+    /// Buffer raw bytes (split feed/decode API for read loops that
+    /// carry several messages per `read(2)`).
+    pub fn feed(&mut self, b: &[u8]) {
         self.carryover.extend_from_slice(b);
+    }
+
+    /// Decode the next complete buffered message, if any.
+    /// `Ok(None)` = need more bytes.
+    pub fn next_message(&mut self) -> Result<Option<BmpMessage>, ParseError> {
         if self.carryover.len() < BmpHeader::LEN {
             return Ok(None);
         }
@@ -338,6 +345,11 @@ impl BmpCodec {
         let msg = decode_message(buf)?;
         self.carryover.drain(0..msg_len);
         Ok(Some(msg))
+    }
+
+    pub fn decode_slice(&mut self, b: &[u8]) -> Result<Option<BmpMessage>, ParseError> {
+        self.feed(b);
+        self.next_message()
     }
 }
 
