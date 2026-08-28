@@ -184,17 +184,14 @@ pub type V3PrefixOptions = u8;
 /// The link-state ID of the enclosing LSA is an arbitrary 32-bit ID
 /// assigned by the ABR (RFC 5340 uses a counter, not the network
 /// address, because v3 prefixes are 128 bits wide).
-pub fn encode_v3_inter_area_prefix_body(
-    prefix: &lr_core::addr::Prefix,
-    metric: u32,
-) -> Vec<u8> {
+pub fn encode_v3_inter_area_prefix_body(prefix: &lr_core::addr::Prefix, metric: u32) -> Vec<u8> {
     let metric = metric.min(0x00ff_fffe);
     let mut v = Vec::with_capacity(5 + 16);
     // 3-byte big-endian metric
     v.extend_from_slice(&metric.to_be_bytes()[1..]);
     v.push(prefix.prefix_len);
     v.push(0); // PrefixOptions — all zero
-    // Address prefix: ceil(PL/8) bytes, zero-padded to the byte boundary.
+               // Address prefix: ceil(PL/8) bytes, zero-padded to the byte boundary.
     let n = (prefix.prefix_len as usize).div_ceil(8);
     match &prefix.addr {
         lr_core::addr::IpAddr::V4(b) => {

@@ -258,7 +258,10 @@ mod tests {
             10,
         );
         let lsa = originate_v3_inter_area_prefix_lsa(0x01020304, 1, &dest, None).unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV3::InterAreaPrefixLsa.function_code());
+        assert_eq!(
+            lsa.header.ls_type,
+            LsaTypeV3::InterAreaPrefixLsa.function_code()
+        );
         assert_eq!(lsa.header.link_state_id, 1); // arbitrary LS-ID
         assert_eq!(lsa.header.advertising_router, 0x01020304);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
@@ -293,7 +296,10 @@ mod tests {
     #[test]
     fn v3_originate_caps_metric() {
         let dest = SummaryDestination::new(
-            v6_prefix([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64),
+            v6_prefix(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                64,
+            ),
             0xffff_ffff,
         );
         assert_eq!(dest.metric, 0x00ff_fffe);
@@ -305,16 +311,23 @@ mod tests {
     #[test]
     fn v3_originate_rejects_max_sequence() {
         let dest = SummaryDestination::new(
-            v6_prefix([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64),
+            v6_prefix(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                64,
+            ),
             5,
         );
-        assert!(originate_v3_inter_area_prefix_lsa(1, 1, &dest, Some(MAX_SEQUENCE_NUMBER)).is_none());
+        assert!(
+            originate_v3_inter_area_prefix_lsa(1, 1, &dest, Some(MAX_SEQUENCE_NUMBER)).is_none()
+        );
     }
 
     #[test]
     fn v3_roundtrip_preserves_prefix() {
         let prefix = v6_prefix(
-            [0x20, 0x01, 0x0d, 0xb8, 0xca, 0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            [
+                0x20, 0x01, 0x0d, 0xb8, 0xca, 0xfe, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ],
             48,
         );
         let dest = SummaryDestination::new(prefix, 42);
@@ -323,10 +336,13 @@ mod tests {
         let decoded = body.to_prefix().unwrap();
         assert_eq!(decoded.prefix_len, 48);
         // 48 bits = 6 bytes; the decoded prefix is zero-padded to 16
-        assert_eq!(&decoded.addr, &lr_core::addr::IpAddr::V6({
-            let mut b = [0u8; 16];
-            b[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0xca, 0xfe]);
-            b
-        }));
+        assert_eq!(
+            &decoded.addr,
+            &lr_core::addr::IpAddr::V6({
+                let mut b = [0u8; 16];
+                b[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0xca, 0xfe]);
+                b
+            })
+        );
     }
 }

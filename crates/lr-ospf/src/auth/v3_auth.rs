@@ -309,11 +309,17 @@ mod tests {
         let trailer = auth.sign_trailer(&packet);
 
         let mut verifier = V3Auth::new(1, b"key".to_vec()).with_addresses(src, dst);
-        assert!(verifier.verify(&packet, &trailer), "same addresses must verify");
+        assert!(
+            verifier.verify(&packet, &trailer),
+            "same addresses must verify"
+        );
 
         let wrong_src = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9];
         let mut verifier2 = V3Auth::new(1, b"key".to_vec()).with_addresses(wrong_src, dst);
-        assert!(!verifier2.verify(&packet, &trailer), "different source must fail");
+        assert!(
+            !verifier2.verify(&packet, &trailer),
+            "different source must fail"
+        );
     }
 
     #[test]
