@@ -103,6 +103,7 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         route_refresh: true,
         enhanced_route_refresh: true,
         add_path: false,
+        extended_next_hop: Vec::new(),
         graceful_restart: graceful_restart != 0,
         graceful_restart_time: gr_restart_time,
         long_lived_gr: long_lived_gr != 0,

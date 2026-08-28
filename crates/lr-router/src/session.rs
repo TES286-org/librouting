@@ -132,6 +132,11 @@ pub struct SessionConfig {
     /// the router additionally limits how many paths per prefix are kept
     /// and advertised (see `DefaultRouter::set_add_path_max_paths`).
     pub add_path: bool,
+    /// RFC 5549 Extended Next-Hop tuples advertised in OPEN. Each tuple
+    /// is `(NLRI AFI, NLRI SAFI, Nexthop AFI)`; the canonical entry is
+    /// `(1, 1, 2)` (IPv4 unicast NLRI resolved over an IPv6 next-hop).
+    /// Effective only when the peer also offers the capability.
+    pub extended_next_hop: Vec<(u16, u8, u16)>,
     /// Retain peer routes over an RFC 4724 graceful restart.
     pub graceful_restart: bool,
     /// Maximum restart duration advertised to the peer, in seconds.
@@ -173,6 +178,7 @@ impl SessionConfig {
             route_refresh: true,
             enhanced_route_refresh: true,
             add_path: false,
+            extended_next_hop: Vec::new(),
             graceful_restart: true,
             graceful_restart_time: 120,
             long_lived_gr: false,
@@ -203,6 +209,33 @@ impl SessionConfig {
     /// receive). Requires the peer to offer the capability too.
     pub fn with_add_path(mut self) -> Self {
         self.add_path = true;
+        self
+    }
+
+    /// Advertise RFC 5549 Extended Next-Hop with the canonical
+    /// `(1, 1, 2)` tuple — IPv4 unicast NLRI resolved over an IPv6
+    /// next-hop. Effective only when the peer also offers the capability.
+    /// Idempotent: calling twice adds the tuple once.
+    pub fn with_extended_next_hop(mut self) -> Self {
+        let t = (1, 1, 2);
+        if !self.extended_next_hop.contains(&t) {
+            self.extended_next_hop.push(t);
+        }
+        self
+    }
+
+    /// Advertise an arbitrary RFC 5549 Extended Next-Hop tuple
+    /// `(NLRI AFI, NLRI SAFI, Nexthop AFI)`. Idempotent.
+    pub fn with_extended_next_hop_tuple(
+        mut self,
+        nlri_afi: u16,
+        nlri_safi: u8,
+        nexthop_afi: u16,
+    ) -> Self {
+        let t = (nlri_afi, nlri_safi, nexthop_afi);
+        if !self.extended_next_hop.contains(&t) {
+            self.extended_next_hop.push(t);
+        }
         self
     }
 
@@ -262,6 +295,7 @@ impl SessionConfig {
             route_refresh: false,
             enhanced_route_refresh: false,
             add_path: false,
+            extended_next_hop: Vec::new(),
             graceful_restart: false,
             graceful_restart_time: 0,
             long_lived_gr: false,
@@ -288,6 +322,7 @@ impl SessionConfig {
             route_refresh: false,
             enhanced_route_refresh: false,
             add_path: false,
+            extended_next_hop: Vec::new(),
             graceful_restart: false,
             graceful_restart_time: 0,
             long_lived_gr: false,

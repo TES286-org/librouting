@@ -1805,6 +1805,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.mp_families = cfg.mp_families.clone();
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
+                p_cfg.extended_next_hop = cfg.extended_next_hop.clone();
                 let peer = BgpPeer::new(p_cfg);
                 self.sessions.insert(
                     h.0,
