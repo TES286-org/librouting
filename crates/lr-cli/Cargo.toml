@@ -22,6 +22,7 @@ path = "src/daemon.rs"
 [dependencies]
 lr-core = { workspace = true }
 lr-bgp = { workspace = true }
+lr-ospf = { workspace = true }
 lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-router = { workspace = true }

@@ -798,9 +798,11 @@ fn apply_ospf_key(
                             .map_err(|_| format!("bad stub_metric '{value}'"))?,
                     );
                 }
-                _ => return Err(format!(
+                _ => {
+                    return Err(format!(
                     "unknown [[ospf.area]] key '{key}' (typo protection; OSPF config fails closed)"
-                )),
+                ))
+                }
             }
         }
         "ospf.interface" => {

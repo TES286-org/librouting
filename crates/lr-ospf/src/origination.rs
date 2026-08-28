@@ -146,6 +146,25 @@ pub fn finalize_v2_packet(bytes: &mut [u8]) -> bool {
     true
 }
 
+/// Finalize a stream of back-to-back encoded OSPFv2 packets (the shape
+/// `drain_output` produces): each packet's checksum is patched in
+/// place, walking the length-framed stream. Returns the number of
+/// finalized packets.
+pub fn finalize_v2_stream(bytes: &mut [u8]) -> usize {
+    let mut off = 0usize;
+    let mut count = 0usize;
+    while off + crate::packet::OspfHeader::LEN <= bytes.len() {
+        let len = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]) as usize;
+        if len < crate::packet::OspfHeader::LEN || off + len > bytes.len() {
+            break; // malformed tail — leave the rest untouched
+        }
+        finalize_v2_packet(&mut bytes[off..off + len]);
+        off += len;
+        count += 1;
+    }
+    count
+}
+
 /// The OSPFv2 packet checksum of `bytes` (checksum field assumed zero /
 /// ignored, authentication bytes excluded).
 fn v2_packet_checksum(bytes: &[u8]) -> u16 {
@@ -243,6 +262,24 @@ mod tests {
         let mut auth_only = wire.clone();
         auth_only[20] ^= 0xff; // inside the 64-bit auth field
         assert!(v2_packet_checksum_ok(&auth_only));
+    }
+
+    #[test]
+    fn v2_stream_finalize_walks_frames() {
+        let mut a = OspfCodec::v2().encode_vec(&hello()).unwrap();
+        let mut b = OspfCodec::v2().encode_vec(&hello()).unwrap();
+        b[4] ^= 0x02; // different router-id byte so the frames differ
+        let mut stream = a.clone();
+        stream.extend_from_slice(&b);
+        let count = finalize_v2_stream(&mut stream);
+        assert_eq!(count, 2);
+        let mid = a.len();
+        assert!(v2_packet_checksum_ok(&stream[..mid]));
+        assert!(v2_packet_checksum_ok(&stream[mid..]));
+        // A malformed trailing frame stops the walk without panicking.
+        let mut truncated = stream.clone();
+        truncated.truncate(truncated.len() - 4);
+        assert_eq!(finalize_v2_stream(&mut truncated), 1);
     }
 
     #[test]
