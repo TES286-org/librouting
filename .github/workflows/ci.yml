@@ -138,6 +138,10 @@ jobs:
         run: ./tests/interop/md5.sh
       - name: BIRD interop (librouting ↔ BIRD)
         run: ./tests/interop/bird.sh
+      - name: BIRD IPv6 interop (librouting ↔ BIRD, pure IPv6)
+        run: ./tests/interop/bird_ipv6.sh
+      - name: BIRD ENH interop (librouting ↔ BIRD, RFC 5549)
+        run: ./tests/interop/bird_enh.sh
       - name: BIRD LLGR interop (librouting ↔ BIRD, RFC 9494)
         run: ./tests/interop/bird_llgr.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
