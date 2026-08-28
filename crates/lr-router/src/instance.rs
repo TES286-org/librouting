@@ -726,6 +726,78 @@ impl DefaultRouter {
         }
     }
 
+    /// Configure RFC 5549 Extended Next-Hop tuples on a BGP session.
+    /// Each tuple is `(NLRI AFI, NLRI SAFI, Nexthop AFI)`; the canonical
+    /// entry is `(1, 1, 2)` — IPv4 unicast NLRI resolved over an IPv6
+    /// next-hop. Must be called before `start_session` (OPEN negotiation).
+    pub fn set_session_extended_next_hop(
+        &mut self,
+        h: SessionHandle,
+        tuples: &[(u16, u8, u16)],
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: extended-next-hop must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().extended_next_hop = tuples.to_vec();
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
+    /// Override the MP-BGP families advertised in OPEN. Must be called
+    /// before `start_session`. Use this to enable IPv6 unicast
+    /// (`NlriFamily::IPV6_UNICAST`) alongside the default IPv4 unicast,
+    /// or to restrict the session to a single family.
+    pub fn set_session_mp_families(
+        &mut self,
+        h: SessionHandle,
+        families: &[NlriFamily],
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: mp_families must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().mp_families = families.to_vec();
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
+    /// Set the local source address used for next-hop-self egress
+    /// (eBGP) and as the protocol identity for Babel/OSPF runtimes.
+    /// Must be called before `start_session`. For RFC 5549 ENH egress
+    /// over IPv6 the address should be IPv6.
+    pub fn set_session_local_address(
+        &mut self,
+        h: SessionHandle,
+        addr: IpAddr,
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: local_address must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().local_address = Some(addr);
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
     /// Originate a local route (e.g. from `network` statements): injects it
     /// into Loc-RIB and advertises it to all suitable BGP peers.
     pub fn originate(&mut self, prefix: Prefix, next_hop: Option<IpAddr>) -> RouteKey {

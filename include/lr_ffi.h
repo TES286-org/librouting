@@ -185,6 +185,62 @@ int32_t lr_router_set_add_path(lr_router_t r, uint64_t session, uint8_t enabled)
 int32_t lr_router_set_add_path_max_paths(lr_router_t r, uint32_t max_paths);
 
 /**
+ * Configure RFC 5549 Extended Next-Hop on a BGP session.
+ *
+ * `tuples` points to `count` 5-byte records, each laid out as
+ * `<NLRI AFI:2 (big-endian), NLRI SAFI:1, Nexthop AFI:2 (big-endian)>`.
+ * The canonical tuple is `00 01 01 00 02` — IPv4 unicast NLRI resolved
+ * over an IPv6 next-hop. Pass `count = 0` to clear the configuration.
+ *
+ * Must be called after `lr_router_add_bgp_session*` and before
+ * `lr_router_start_session` — the capability is negotiated in OPEN.
+ *
+ * # Safety
+ * `tuples` must point to at least `count * 5` readable bytes when
+ * `count > 0`.
+ */
+int32_t lr_router_set_extended_next_hop(lr_router_t r,
+                                        uint64_t session,
+                                        const uint8_t *tuples,
+                                        uintptr_t count);
+
+/**
+ * Override the MP-BGP address families advertised in OPEN.
+ *
+ * `families` points to `count` 4-byte records, each laid out as
+ * `<AFI:2 (big-endian), reserved:1, SAFI:1>` — the same encoding used
+ * by the RFC 4760 multiprotocol capability. The two well-known values
+ * are `00 01 00 01` (IPv4 unicast) and `00 02 00 01` (IPv6 unicast).
+ *
+ * Must be called before `lr_router_start_session`. Replaces the default
+ * IPv4-unicast-only family list.
+ *
+ * # Safety
+ * `families` must point to at least `count * 4` readable bytes when
+ * `count > 0`.
+ */
+int32_t lr_router_set_mp_families(lr_router_t r,
+                                  uint64_t session,
+                                  const uint8_t *families,
+                                  uintptr_t count);
+
+/**
+ * Set the local source address for next-hop-self egress on a BGP session.
+ *
+ * `addr_family` is `1` for IPv4 (4 bytes) or `2` for IPv6 (16 bytes).
+ * `addr_bytes` must point to the appropriate number of bytes. Must be
+ * called before `lr_router_start_session`.
+ *
+ * # Safety
+ * `addr_bytes` must point to 4 (IPv4) or 16 (IPv6) readable bytes.
+ */
+int32_t lr_router_set_local_address(lr_router_t r,
+                                    uint64_t session,
+                                    uint16_t addr_family,
+                                    const uint8_t *addr_bytes,
+                                    uintptr_t addr_len);
+
+/**
  * Request an RFC 2918 route refresh from an established BGP peer.
  *
  * Returns 1 when a request was queued, 0 when the session has not negotiated

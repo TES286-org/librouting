@@ -264,6 +264,149 @@ pub extern "C" fn lr_router_set_add_path_max_paths(r: lr_router_t, max_paths: u3
     0
 }
 
+/// Configure RFC 5549 Extended Next-Hop on a BGP session.
+///
+/// `tuples` points to `count` 5-byte records, each laid out as
+/// `<NLRI AFI:2 (big-endian), NLRI SAFI:1, Nexthop AFI:2 (big-endian)>`.
+/// The canonical tuple is `00 01 01 00 02` — IPv4 unicast NLRI resolved
+/// over an IPv6 next-hop. Pass `count = 0` to clear the configuration.
+///
+/// Must be called after `lr_router_add_bgp_session*` and before
+/// `lr_router_start_session` — the capability is negotiated in OPEN.
+///
+/// # Safety
+/// `tuples` must point to at least `count * 5` readable bytes when
+/// `count > 0`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_set_extended_next_hop(
+    r: lr_router_t,
+    session: u64,
+    tuples: *const u8,
+    count: usize,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    let parsed: Vec<(u16, u8, u16)> = if count == 0 || tuples.is_null() {
+        Vec::new()
+    } else {
+        let slice = unsafe { std::slice::from_raw_parts(tuples, count * 5) };
+        let mut out = Vec::with_capacity(count);
+        for t in slice.as_chunks::<5>().0 {
+            let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
+            let nlri_safi = t[2];
+            let nh_afi = u16::from_be_bytes([t[3], t[4]]);
+            out.push((nlri_afi, nlri_safi, nh_afi));
+        }
+        out
+    };
+    match router.set_session_extended_next_hop(SessionHandle(session), &parsed) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// Override the MP-BGP address families advertised in OPEN.
+///
+/// `families` points to `count` 4-byte records, each laid out as
+/// `<AFI:2 (big-endian), reserved:1, SAFI:1>` — the same encoding used
+/// by the RFC 4760 multiprotocol capability. The two well-known values
+/// are `00 01 00 01` (IPv4 unicast) and `00 02 00 01` (IPv6 unicast).
+///
+/// Must be called before `lr_router_start_session`. Replaces the default
+/// IPv4-unicast-only family list.
+///
+/// # Safety
+/// `families` must point to at least `count * 4` readable bytes when
+/// `count > 0`.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_set_mp_families(
+    r: lr_router_t,
+    session: u64,
+    families: *const u8,
+    count: usize,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    let parsed: Vec<lr_core::nlri::NlriFamily> = if count == 0 || families.is_null() {
+        Vec::new()
+    } else {
+        let slice = unsafe { std::slice::from_raw_parts(families, count * 4) };
+        let mut out = Vec::with_capacity(count);
+        for t in slice.as_chunks::<4>().0 {
+            let afi = u16::from_be_bytes([t[0], t[1]]);
+            let safi = t[3];
+            out.push(lr_core::nlri::NlriFamily { afi, safi });
+        }
+        out
+    };
+    match router.set_session_mp_families(SessionHandle(session), &parsed) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// Set the local source address for next-hop-self egress on a BGP session.
+///
+/// `addr_family` is `1` for IPv4 (4 bytes) or `2` for IPv6 (16 bytes).
+/// `addr_bytes` must point to the appropriate number of bytes. Must be
+/// called before `lr_router_start_session`.
+///
+/// # Safety
+/// `addr_bytes` must point to 4 (IPv4) or 16 (IPv6) readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_set_local_address(
+    r: lr_router_t,
+    session: u64,
+    addr_family: u16,
+    addr_bytes: *const u8,
+    addr_len: usize,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    if addr_bytes.is_null() {
+        set_last_error("null address".into());
+        return -3;
+    }
+    let slice = unsafe { std::slice::from_raw_parts(addr_bytes, addr_len) };
+    let addr = match addr_family {
+        1 if addr_len == 4 => {
+            let mut a = [0u8; 4];
+            a.copy_from_slice(slice);
+            lr_core::addr::IpAddr::V4(a)
+        }
+        2 if addr_len == 16 => {
+            let mut a = [0u8; 16];
+            a.copy_from_slice(slice);
+            lr_core::addr::IpAddr::V6(a)
+        }
+        _ => {
+            set_last_error(format!(
+                "bad address family/length: afi={addr_family} len={addr_len}"
+            ));
+            return -3;
+        }
+    };
+    match router.set_session_local_address(SessionHandle(session), addr) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
 /// Request an RFC 2918 route refresh from an established BGP peer.
 ///
 /// Returns 1 when a request was queued, 0 when the session has not negotiated
