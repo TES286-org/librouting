@@ -16,6 +16,7 @@ use core::fmt;
 use crate::capabilities::Capability;
 use crate::codec::BgpCodec;
 use crate::error::{BgpErrorCode, BgpNotification};
+use crate::extensions::extended_next_hop::ExtNextHopTuple;
 use crate::message::{keepalive::Keepalive, open::Open, update::Update, BgpMessage};
 use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
 use crate::peer::PeerConfig;
@@ -117,6 +118,10 @@ pub struct BgpPeer {
     /// RFC 7911 families on which this speaker receives Add-Path
     /// (negotiated at OPEN: the peer advertised Send).
     add_path_rx: Vec<NlriFamily>,
+    /// RFC 5549 Extended Next-Hop tuples negotiated with the peer
+    /// (intersection of our advertised tuples and the peer's). Empty when
+    /// the capability was not advertised by either side.
+    extended_next_hop: Vec<ExtNextHopTuple>,
     pub(crate) out_buf: Vec<u8>,
     hold_remaining: u64,
     keepalive_remaining: u64,
@@ -145,6 +150,7 @@ impl BgpPeer {
             peer_capabilities: Vec::new(),
             add_path_tx: Vec::new(),
             add_path_rx: Vec::new(),
+            extended_next_hop: Vec::new(),
             out_buf: Vec::new(),
             hold_remaining: 0,
             keepalive_remaining: 0,
@@ -194,6 +200,30 @@ impl BgpPeer {
     /// Whether Add-Path was negotiated in either direction.
     pub fn add_path_negotiated(&self) -> bool {
         !self.add_path_tx.is_empty() || !self.add_path_rx.is_empty()
+    }
+
+    /// RFC 5549 tuples negotiated with the peer (intersection of our
+    /// advertised tuples and the peer's). Empty when neither side
+    /// advertised the capability.
+    pub fn negotiated_extended_next_hop(&self) -> &[ExtNextHopTuple] {
+        &self.extended_next_hop
+    }
+
+    /// True when `(nlri_afi, nlri_safi, nexthop_afi)` is in the
+    /// negotiated set — i.e. we may emit IPv6 next-hops for IPv4 NLRI on
+    /// this session.
+    pub fn extended_next_hop_for(
+        &self,
+        nlri_afi: u16,
+        nlri_safi: u8,
+        nexthop_afi: u16,
+    ) -> bool {
+        crate::extensions::extended_next_hop::supports(
+            &self.extended_next_hop,
+            nlri_afi,
+            nlri_safi,
+            nexthop_afi,
+        )
     }
 
     /// Whether both speakers negotiated the RFC 2918 route-refresh capability.
@@ -386,6 +416,16 @@ impl BgpPeer {
                 .collect();
             caps.push(Capability::add_path(&tuples));
         }
+        // RFC 5549 §2: advertise the Extended Next-Hop tuples configured
+        // for this session (filtered to families the session speaks).
+        let enh_tuples = crate::extensions::extended_next_hop::advertised_tuples(&self.cfg);
+        if !enh_tuples.is_empty() {
+            let raw: Vec<(u16, u8, u16)> = enh_tuples
+                .iter()
+                .map(|t| (t.nlri_afi, t.nlri_safi, t.nexthop_afi))
+                .collect();
+            caps.push(Capability::extended_next_hop(&raw));
+        }
         let param_value = Capability::encode_set(&caps);
         let mut open = Open::new(self.cfg.local_as, self.cfg.hold_time, self.cfg.local_bgp_id);
         open.params.push(crate::message::open::OpenParam {
@@ -471,6 +511,20 @@ impl BgpPeer {
         self.add_path_rx = rx;
         self.codec
             .set_add_path(self.add_path_tx.clone(), self.add_path_rx.clone());
+
+        // RFC 5549 §3: Extended Next-Hop is usable only for tuples both
+        // speakers advertised. Store the intersection; the egress path
+        // consults it before rewriting an IPv4 NEXT_HOP to IPv6.
+        let peer_enh: Vec<ExtNextHopTuple> = self
+            .peer_capabilities
+            .iter()
+            .filter_map(|cap| cap.as_extended_next_hop())
+            .flatten()
+            .map(|(a, s, n)| ExtNextHopTuple::new(a, s, n))
+            .collect();
+        self.extended_next_hop =
+            crate::extensions::extended_next_hop::negotiated_tuples(&self.cfg, &peer_enh);
+
         self.negotiated_hold_time = if open.hold_time == 0 {
             self.cfg.hold_time
         } else {
@@ -628,6 +682,9 @@ impl BgpPeer {
         self.peer_bgp_id = None;
         self.peer_as = None;
         self.peer_capabilities.clear();
+        self.add_path_tx.clear();
+        self.add_path_rx.clear();
+        self.extended_next_hop.clear();
         self.out_buf.clear();
         self.hold_remaining = 0;
         self.keepalive_remaining = 0;

@@ -31,6 +31,11 @@ pub struct PeerConfig {
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
     /// Optional: enable AddPath (RFC 7911).
     pub add_path: bool,
+    /// Optional: RFC 5549 Extended Next-Hop tuples this session
+    /// advertises in OPEN. The canonical entry is `(1, 1, 2)` — IPv4
+    /// unicast NLRI resolved over an IPv6 next-hop. Tuples for families
+    /// the session does not speak are filtered out at OPEN time.
+    pub extended_next_hop: Vec<(u16, u8, u16)>,
     /// Optional: enable graceful restart (RFC 4724).
     pub graceful_restart: bool,
     /// Maximum restart time advertised in the RFC 4724 capability, in seconds.
@@ -84,6 +89,7 @@ impl PeerConfig {
             asn4: true,
             mp_families: Vec::new(),
             add_path: false,
+            extended_next_hop: Vec::new(),
             graceful_restart: false,
             graceful_restart_time: 120,
             route_refresh: true,

@@ -1,6 +1,6 @@
 //! BGP capabilities (RFC 5492 + RFC 4760 MP-BGP + RFC 4893 4-byte AS +
 //! RFC 7911 AddPath + RFC 4724 Graceful Restart + RFC 7313 Enhanced RR +
-//! RFC 9494 Long-Lived Graceful Restart).
+//! RFC 5549 Extended Next-Hop + RFC 9494 Long-Lived Graceful Restart).
 
 use core::fmt;
 
@@ -14,6 +14,8 @@ pub enum CapabilityCode {
     RouteRefresh = 2,
     /// RFC 5492: Extended message support
     ExtendedMessage = 6,
+    /// RFC 5549: Extended Next-Hop for IPv4 NLRI over IPv6 transport
+    ExtendedNextHop = 5,
     /// RFC 4724: Graceful restart
     GracefulRestart = 64,
     /// RFC 4893: 4-byte AS number
@@ -33,6 +35,7 @@ impl CapabilityCode {
         match v {
             1 => Self::MultiprotocolExtensions,
             2 => Self::RouteRefresh,
+            5 => Self::ExtendedNextHop,
             6 => Self::ExtendedMessage,
             64 => Self::GracefulRestart,
             65 => Self::FourOctetAs,
@@ -55,6 +58,7 @@ impl CapabilityCode {
         match self {
             Self::MultiprotocolExtensions => 1,
             Self::RouteRefresh => 2,
+            Self::ExtendedNextHop => 5,
             Self::ExtendedMessage => 6,
             Self::GracefulRestart => 64,
             Self::FourOctetAs => 65,
@@ -111,6 +115,39 @@ impl Capability {
         let afi = u16::from_be_bytes([self.value[0], self.value[1]]);
         let safi = self.value[3];
         Some((afi, safi))
+    }
+
+    /// Extended Next-Hop capability (RFC 5549 §2). The value is a
+    /// sequence of 5-byte tuples `<NLRI AFI:2, NLRI SAFI:1, Nexthop
+    /// AFI:2>`. A tuple `(1, 1, 2)` says "IPv4 unicast NLRI may be
+    /// resolved over an IPv6 next-hop."
+    pub fn extended_next_hop(tuples: &[(u16, u8, u16)]) -> Self {
+        let mut v = Vec::with_capacity(tuples.len() * 5);
+        for (nlri_afi, nlri_safi, nh_afi) in tuples {
+            v.extend_from_slice(&nlri_afi.to_be_bytes());
+            v.push(*nlri_safi);
+            v.extend_from_slice(&nh_afi.to_be_bytes());
+        }
+        Self::new(CapabilityCode::ExtendedNextHop, v)
+    }
+
+    /// Decode the RFC 5549 Extended Next-Hop capability value into its
+    /// `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples. Returns `None` when
+    /// the value length is not a multiple of 5.
+    pub fn as_extended_next_hop(&self) -> Option<Vec<(u16, u8, u16)>> {
+        if self.code != CapabilityCode::ExtendedNextHop
+            || !self.value.len().is_multiple_of(5)
+        {
+            return None;
+        }
+        let mut out = Vec::with_capacity(self.value.len() / 5);
+        for t in self.value.as_chunks::<5>().0 {
+            let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
+            let nlri_safi = t[2];
+            let nh_afi = u16::from_be_bytes([t[3], t[4]]);
+            out.push((nlri_afi, nlri_safi, nh_afi));
+        }
+        Some(out)
     }
 
     pub fn route_refresh() -> Self {
@@ -297,6 +334,39 @@ mod tests {
         let dec = Capability::decode_set(&v);
         assert_eq!(dec.len(), 1);
         assert_eq!(dec[0].as_multiprotocol(), Some((2, 1)));
+    }
+
+    /// RFC 5549 §2: capability code 5, value = repeated
+    /// `<NLRI AFI:2, NLRI SAFI:1, Nexthop AFI:2>` 5-byte tuples.
+    #[test]
+    fn extended_next_hop_roundtrip() {
+        let cap = Capability::extended_next_hop(&[(1, 1, 2)]);
+        assert_eq!(cap.code.to_u8(), 5);
+        assert_eq!(CapabilityCode::from_u8(5), CapabilityCode::ExtendedNextHop);
+        assert_eq!(cap.value.len(), 5);
+        let v = Capability::encode_set(&[cap]);
+        let dec = Capability::decode_set(&v);
+        assert_eq!(dec.len(), 1);
+        assert_eq!(dec[0].as_extended_next_hop(), Some(vec![(1, 1, 2)]));
+    }
+
+    #[test]
+    fn extended_next_hop_multiple_tuples() {
+        let cap = Capability::extended_next_hop(&[(1, 1, 2), (1, 1, 25), (1, 128, 2)]);
+        assert_eq!(cap.value.len(), 15);
+        let v = Capability::encode_set(&[cap]);
+        let dec = Capability::decode_set(&v);
+        assert_eq!(
+            dec[0].as_extended_next_hop(),
+            Some(vec![(1, 1, 2), (1, 1, 25), (1, 128, 2)])
+        );
+    }
+
+    /// Malformed values (not a multiple of 5) must be rejected.
+    #[test]
+    fn extended_next_hop_rejects_malformed_value() {
+        let cap = Capability::new(CapabilityCode::ExtendedNextHop, vec![1, 2, 3, 4]);
+        assert!(cap.as_extended_next_hop().is_none());
     }
 
     #[test]

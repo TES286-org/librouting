@@ -103,13 +103,34 @@ impl BgpPeer {
         }
 
         // --- NEXT_HOP ---
+        // RFC 5549: when (1, 1, 2) is negotiated and our local source is
+        // IPv6, IPv4 NLRI egress rewrites NEXT_HOP to a 16-byte IPv6
+        // address. Without ENH the peer would reject the IPv6 next-hop,
+        // so we fall back to the original IPv4 next-hop (or skip the
+        // route if none exists).
         let next_hop = route
             .next_hop
             .or_else(|| attrs.next_hop().map(|n| n.to_ip()));
         if topo.role.rewrites_next_hop() {
             if let Some(local) = self.cfg.local_address {
-                attrs.remove(AttrType::NextHop);
-                attrs.insert(Self::next_hop_attr(local));
+                let enh_ipv4_over_v6 = route.key.family == NlriFamily::IPV4_UNICAST
+                    && self.extended_next_hop_for(1, 1, 2);
+                match (local, enh_ipv4_over_v6) {
+                    (lr_core::addr::IpAddr::V6(_), true) => {
+                        // RFC 5549: IPv4 NLRI carries an IPv6 NEXT_HOP.
+                        attrs.remove(AttrType::NextHop);
+                        attrs.insert(Self::next_hop_attr(local));
+                    }
+                    (lr_core::addr::IpAddr::V4(_), _) => {
+                        attrs.remove(AttrType::NextHop);
+                        attrs.insert(Self::next_hop_attr(local));
+                    }
+                    (lr_core::addr::IpAddr::V6(_), false) => {
+                        // IPv6 local source for an IPv4 route but ENH is
+                        // not negotiated — preserve any IPv4 next-hop the
+                        // route already carries; do not fabricate one.
+                    }
+                }
             }
         }
 

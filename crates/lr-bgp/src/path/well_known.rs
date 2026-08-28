@@ -73,6 +73,18 @@ impl NextHop {
         }
     }
 
+    /// Decode a well-known NEXT_HOP attribute (RFC 4271 §5.1.3).
+    ///
+    /// Wire widths:
+    /// - 4 bytes: IPv4 next-hop (the historical default for IPv4 NLRI).
+    /// - 16 bytes: IPv6 next-hop for IPv4 NLRI — only valid when RFC 5549
+    ///   Extended Next-Hop was negotiated; decoded as `V4OverV6`. A 16-byte
+    ///   NEXT_HOP for IPv6 NLRI never appears on the wire (IPv6 NLRI uses
+    ///   MP_REACH_NLRI per RFC 4760), so we never return `V6` here.
+    ///
+    /// The 32-byte form is not a valid well-known NEXT_HOP encoding — the
+    /// MP_REACH_NLRI `V6GlobalLinkLocal` (global + link-local) form lives
+    /// behind the MP_REACH attribute, not NEXT_HOP.
     pub fn decode(b: &[u8]) -> Option<Self> {
         match b.len() {
             4 => {
@@ -81,14 +93,9 @@ impl NextHop {
                 Some(Self::from_v4(a))
             }
             16 => {
+                // RFC 5549 §3: IPv6 next-hop for IPv4 NLRI.
                 let mut a = [0u8; 16];
                 a.copy_from_slice(b);
-                Some(Self::from_v6(a))
-            }
-            32 => {
-                // 16-byte V6 next-hop + 16-byte V4-over-V6 (RFC 5549 layout).
-                let mut a = [0u8; 16];
-                a.copy_from_slice(&b[..16]);
                 Some(Self::from_v4_over_v6(a))
             }
             _ => None,
