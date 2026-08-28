@@ -125,14 +125,22 @@ impl StateMachine for OspfNeighbor {
             (NeighborState::Loading, NeighborEvent::LsaUpdateArrived)
             | (NeighborState::Loading, NeighborEvent::ExchangeDone) => NeighborState::Full,
             (NeighborState::Full, NeighborEvent::LsaUpdateArrived) => NeighborState::Full,
-            (_, NeighborEvent::Kill)
-            | (_, NeighborEvent::SeqMismatch)
-            | (_, NeighborEvent::BadLsa) => {
+            (_, NeighborEvent::Kill) => {
                 actions.push(Action::EmitEvent(lr_core::event::Event::Log(format!(
                     "OSPF neighbor {} reset",
                     self.router_id
                 ))));
                 NeighborState::Down
+            }
+            // RFC 2328 §10.9 / Fig. 12: a sequence mismatch or a bad
+            // LSA in the exchange states restarts the *adjacency
+            // negotiation* (back to ExStart), not the neighbor.
+            (_, NeighborEvent::SeqMismatch) | (_, NeighborEvent::BadLsa) => {
+                actions.push(Action::EmitEvent(lr_core::event::Event::Log(format!(
+                    "OSPF neighbor {} exchange restart (sequence mismatch)",
+                    self.router_id
+                ))));
+                NeighborState::ExStart
             }
             (s, _) => s,
         };
