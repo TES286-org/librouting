@@ -113,7 +113,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML subset) | ✅ 🧪 | signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API |
+| `lr-daemon` reference daemon (TCP I/O loop, reconnect, TOML subset) | ✅ 🧪 | multi-peer (`[[peer]]` TOML tables / repeatable `--peer`): per-peer AS/hold-time/GR/auth/GTSM/max-prefix/Add-Path/families with `[bgp]` inheritance, one connector thread per outbound peer, listener matches inbound connections to peers by source address (fail-closed), centralized event consumption preserving Loc-RIB ordering; signals (SIGTERM/SIGINT graceful, SIGHUP reload), privilege drop, runtime API |
 | C ABI FFI (`lr-ffi`) + cbindgen header | ✅ 🧪 | C harness in CI |
 | Go bindings | ✅ 🧪 | `bindings/lr-go` |
 | Python bindings | ✅ 🧪 | `bindings/lr-python` (cffi) |
@@ -124,7 +124,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 42 binaries / 433 tests |
+| Unit tests (workspace) | ✅ 43 binaries / 443 tests |
 | Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
 | Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
 | Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
@@ -135,6 +135,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Route-aggregation E2E (aggregate origination/withdrawal lifecycle) | ✅ 🧪 | `lr-tests/tests/route_aggregation.rs` |
 | BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
+| Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
@@ -178,19 +179,26 @@ doubt. Items get checked off here as they land.
 The reference daemon must be able to run a real router on its own,
 BIRD/FRR-style, without an embedder writing code.
 
-1. **Multi-peer daemon** — `[[peer]]` array-of-tables in the TOML
-   config with per-peer settings (AS, transport, auth, GTSM,
+1. ~~**Multi-peer daemon**~~ — done: `[[peer]]` array-of-tables in the
+   TOML config with per-peer settings (AS, transport, auth, GTSM,
    maximum-prefix, Add-Path, MP families) inherited from the `[bgp]`
    globals when omitted; repeatable `--peer` CLI flag; one connector
    thread per outbound peer (independent reconnect/backoff); the
    listener accepts concurrent sessions and matches inbound
-   connections to configured peers by source address; centralized
-   event consumption so Loc-RIB ordering is preserved. Status:
-   in progress.
-2. **Config completeness** — parse every key documented in
-   `templates/daemon.toml` (today `graceful_restart_time`,
-   `llgr_stale_time`, `llgr_max_stale_time` and `install_kernel` are
-   documented but silently ignored); warn on unknown keys.
+   connections to configured peers by source address (fail-closed);
+   centralized event consumption so Loc-RIB ordering is preserved;
+   the previously-ignored TOML keys (`graceful_restart_time`,
+   `llgr_stale_time`, `llgr_max_stale_time`, `install_kernel`) now
+   parse. Verified by 6 parser unit tests + 4 daemon E2E tests
+   (fan-out/transit, inbound matching, unmatched rejection, per-peer
+   hold time). Bidirectional peers (`remote` + `address` on one peer)
+   wait for RFC 4271 §6.8 collision detection; heterogeneous listener
+   auth keys are still future work.
+2. **Config completeness** — partially done: the previously-ignored
+   documented keys (`graceful_restart_time`, `llgr_stale_time`,
+   `llgr_max_stale_time`, `install_kernel`) now parse. Remaining:
+   warn on unknown keys (currently tolerated silently for forward
+   compatibility).
 3. **BFD in the daemon** — `--bfd` per peer wiring `lr-bfd` sessions
    to fast-fail the BGP FSM (after W3.1 multihop BFD exists).
 4. **Policy in config** — route-maps / prefix-lists / community

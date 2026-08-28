@@ -4,17 +4,24 @@
 #   lr-daemon --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
 #             --peer 192.0.2.2:179 --local-address 192.0.2.1 \
 #             --network 203.0.113.0/24 --hold-time 90
+#
+# Multi-peer deployments: add [[peer]] tables (bottom of this file).
+# Every [bgp] global below doubles as the default each [[peer]] inherits
+# unless it sets its own value.
 
 [bgp]
 local_as = 64512
 peer_as = 64513
 router_id = "10.0.0.1"
 
-# Outbound: connect to the peer (omit when listen_addr is used).
+# Outbound: connect to the peer (legacy single-peer key; omit when
+# listen_addr is used). Repeatable per-peer remotes use [[peer]] instead.
 peer_addr = "192.0.2.2:179"
 
-# Inbound: accept one BGP connection (mutually exclusive with peer_addr in
-# the reference daemon; a production daemon supports both).
+# Inbound: accept BGP connections. With only the legacy single peer the
+# listener accepts any connection on session #1 (historical behaviour);
+# once [[peer]] tables exist, inbound connections are matched to peers
+# by source address and unmatched connections are rejected.
 # listen_addr = "0.0.0.0:179"
 
 # Source address for next-hop-self egress. Required when the daemon peers
@@ -23,6 +30,10 @@ local_address = "192.0.2.1"
 
 # Hold time in seconds (default 90; 0 disables keepalives).
 hold_time = 90
+
+# Install best routes into the kernel FIB (root + Linux; the CLI flag
+# is --install-kernel-routes).
+# install_kernel = false
 
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
@@ -93,3 +104,39 @@ networks = ["203.0.113.0/24"]
 # SIGTERM/SIGINT shut the daemon down gracefully (sessions are closed with
 # a NOTIFICATION); SIGHUP is equivalent to `reload`.
 # api_socket = "/run/lr-daemon.api"
+
+# ---------------------------------------------------------------------
+# Multi-peer configuration.
+#
+# Each [[peer]] table configures one BGP session. Keys left unset inherit
+# the [bgp] globals above. A peer is either outbound (`remote` — the
+# daemon dials it, with its own reconnect thread and backoff) or inbound
+# (`address` — the expected source IP of connections the listener matches
+# to this peer). Configuring both on one peer waits for RFC 4271 §6.8
+# collision detection (future work).
+#
+# Available keys: name, remote, address, peer_as, hold_time,
+# graceful_restart_time, llgr_stale_time, llgr_max_stale_time,
+# local_address, local_address_v6, md5_key, tcp_ao_keys,
+# tcp_ao_algorithm, tcp_ao_maclen, add_path, add_path_max_paths,
+# mp_families, extended_next_hop, gtsm, max_prefixes, max_prefix_action,
+# max_prefix_threshold.
+#
+# Example (commented out):
+#
+# [[peer]]
+# name = "transit-a"
+# remote = "192.0.2.2:179"
+# peer_as = 64513
+# md5_key = "alpha"
+#
+# [[peer]]
+# name = "customer-b"
+# address = "198.51.100.2"
+# peer_as = 64514
+# hold_time = 30
+# max_prefixes = 1000
+# max_prefix_action = "teardown"
+#
+# Note: inbound peers must share one auth configuration (the listener
+# socket is armed once); heterogeneous listener keys are future work.

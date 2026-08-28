@@ -75,6 +75,40 @@ lr-daemon --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
 # → daemon: route installed 203.0.113.0/24 via 192.0.2.1
 ```
 
+**Multi-peer.** The daemon runs any number of BGP sessions at once.
+`--peer` is repeatable (all such peers share `--peer-as`); full
+per-peer configuration uses `[[peer]]` tables in the TOML config
+(see `templates/daemon.toml`): per-peer AS, hold time, graceful
+restart, auth, GTSM, maximum-prefix, Add-Path, MP families and
+next-hop source, each inheriting the `[bgp]` globals when omitted.
+Outbound peers get one connector thread each (independent reconnect
+backoff); the listener accepts concurrent inbound sessions and matches
+them to configured peers by source address (`address` key), rejecting
+connections that match none. Event consumption (logging, kernel route
+installation) is centralised on the ticker thread, preserving Loc-RIB
+ordering across sessions.
+
+```toml
+[bgp]
+local_as = 64512
+router_id = "10.0.0.1"
+local_address = "192.0.2.1"
+listen_addr = "0.0.0.0:1179"
+networks = ["203.0.113.0/24"]
+
+[[peer]]
+name = "transit-a"
+remote = "192.0.2.2:179"    # outbound: dial this peer
+peer_as = 64513
+md5_key = "alpha"
+
+[[peer]]
+name = "customer-b"
+address = "198.51.100.2"    # inbound: accept from this source
+peer_as = 64514
+max_prefixes = 1000
+```
+
 A TOML config (`templates/daemon.toml`) is supported via `--config`.
 
 ## Workspace Layout

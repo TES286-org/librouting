@@ -234,10 +234,12 @@ embedders. Notable toggles:
     `ospf_virtual_link.rs` — OSPF area/ABR/NSSA/§15 coverage.
 - Daemon-level integration tests in `crates/lr-cli/tests/daemon_runtime.rs`
   spawn the real `lr-daemon` binary (runtime API, signals, reload,
-  privilege drop).
+  privilege drop); `crates/lr-cli/tests/daemon_multi_peer.rs` covers the
+  multi-peer daemon (fan-out/transit, inbound matching, fail-closed
+  rejection, per-peer config inheritance).
 - Interop scripts against the BIRD and FRR reference routers live in
   `tests/interop/` (run in CI when Docker is available).
-- Total: 433 tests across 42 test binaries in 14 crates.
+- Total: 443 tests across 43 test binaries in 14 crates.
 
 ## CI/CD
 
