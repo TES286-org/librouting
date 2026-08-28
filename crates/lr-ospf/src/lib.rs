@@ -32,6 +32,7 @@ pub mod lsa;
 pub mod lsdb;
 pub mod neighbor;
 pub mod nssa;
+pub mod origination;
 pub mod packet;
 pub mod spf;
 
