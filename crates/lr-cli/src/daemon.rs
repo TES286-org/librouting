@@ -41,7 +41,8 @@ use std::thread;
 use std::time::{Duration, Instant as WallClock};
 
 use core::str::FromStr;
-use lr_core::addr::{Asn, Prefix, RouterId};
+use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
+use lr_core::nlri::NlriFamily;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
@@ -100,6 +101,17 @@ struct DaemonConfig {
     /// RFC 7911: how many paths per prefix the decision process keeps in
     /// Loc-RIB and advertises to Add-Path peers.
     add_path_max_paths: u32,
+    /// RFC 4760 MP-BGP families advertised in OPEN, beyond the default
+    /// IPv4 unicast. Each entry is a name (`ipv4-unicast`, `ipv6-unicast`).
+    /// Empty defaults to IPv4 unicast only (the historical daemon default).
+    mp_families: Vec<String>,
+    /// RFC 5549 Extended Next-Hop: advertise the (1,1,2) tuple so IPv4
+    /// NLRI can be resolved over an IPv6 next-hop. Requires peer support.
+    extended_next_hop: bool,
+    /// Local IPv6 source address for next-hop-self egress over IPv6 NLRI
+    /// or RFC 5549 ENH. Falls back to the IPv4 `local_address` field when
+    /// unset and the session is IPv4.
+    local_address_v6: Option<String>,
 }
 
 fn print_usage() {
@@ -133,6 +145,11 @@ fn print_usage() {
          --group GROUP|GID        Override the privilege-drop group\n  \
          --api-socket PATH        Runtime API on a Unix stream socket\n  \
          (status / sessions / routes / reload / shutdown)\n  \
+         --mp-family NAME         MP-BGP family to advertise (repeatable;\n  \
+         ipv4-unicast, ipv6-unicast). Default: ipv4-unicast only.\n  \
+         --extended-next-hop      Advertise RFC 5549 (1,1,2) — IPv4 NLRI over\n  \
+         an IPv6 next-hop. Requires --mp-family ipv6-unicast or a v6 transport.\n  \
+         --local-address-v6 ADDR  Local IPv6 source for next-hop-self / ENH egress\n  \
          -h, --help               Show this help"
     );
 }
@@ -179,6 +196,18 @@ fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
             "bgp.hold_time" => cfg.hold_time = value.parse().unwrap_or(90),
             "bgp.add_path" => cfg.add_path = value == "true",
             "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
+            "bgp.extended_next_hop" => cfg.extended_next_hop = value == "true",
+            "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
+            "bgp.mp_families" => {
+                // Comma-separated array: ["ipv4-unicast", "ipv6-unicast"]
+                let inner = value.trim_start_matches('[').trim_end_matches(']');
+                for item in inner.split(',') {
+                    let item = item.trim().trim_matches('"');
+                    if !item.is_empty() {
+                        cfg.mp_families.push(item.to_string());
+                    }
+                }
+            }
             "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
             "bgp.tcp_ao_keys" => {
                 // Comma-separated array: ["1:secret", "2:other"]
@@ -299,6 +328,18 @@ fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--add-path-max" if i + 1 < args.len() => {
                 cfg.add_path_max_paths = args[i + 1].parse().unwrap_or(6);
+                i += 2;
+            }
+            "--mp-family" if i + 1 < args.len() => {
+                cfg.mp_families.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--extended-next-hop" => {
+                cfg.extended_next_hop = true;
+                i += 1;
+            }
+            "--local-address-v6" if i + 1 < args.len() => {
+                cfg.local_address_v6 = Some(args[i + 1].clone());
                 i += 2;
             }
             "--user" if i + 1 < args.len() => {
@@ -430,6 +471,28 @@ fn main() -> ExitCode {
         if cfg.add_path {
             sc = sc.with_add_path();
         }
+        // RFC 4760 MP-BGP: build the family list from --mp-family entries.
+        // Empty config keeps the SessionConfig::bgp() default (IPv4 unicast),
+        // preserving the historical daemon behaviour. `ipv4-unicast` and
+        // `ipv6-unicast` are recognised; unknown names are logged and dropped.
+        if !cfg.mp_families.is_empty() {
+            let mut families = Vec::new();
+            for name in &cfg.mp_families {
+                match name.as_str() {
+                    "ipv4-unicast" => families.push(NlriFamily::IPV4_UNICAST),
+                    "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
+                    other => eprintln!("daemon: unknown --mp-family '{}' (skipped)", other),
+                }
+            }
+            if !families.is_empty() {
+                sc = sc.with_mp_families(families);
+            }
+        }
+        // RFC 5549 Extended Next-Hop. Advertise the canonical (1,1,2) tuple
+        // so an IPv6 transport can carry IPv4 NLRI without an IPv4 next-hop.
+        if cfg.extended_next_hop {
+            sc = sc.with_extended_next_hop();
+        }
         // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
         // LLGR requires GR (RFC 9494 §4.1): with_long_lived_gr is therefore
         // only applied when the restart time is nonzero.
@@ -440,24 +503,45 @@ fn main() -> ExitCode {
         if cfg.llgr_max_stale_time != 0 {
             sc = sc.with_llgr_max_stale_time(cfg.llgr_max_stale_time);
         }
-        // Local address for next-hop-self egress: prefer the peer address
-        // (we connect from the interface that reaches it), else the listen
-        // address. Without this, eBGP UPDATEs would carry no NEXT_HOP and
-        // the remote would (correctly) reject them per RFC 4271 §6.3.
-        let local_source = cfg
-            .local_address
-            .as_deref()
-            .map(|s| s.to_string())
-            .or_else(|| {
-                cfg.peer_addr
-                    .as_deref()
-                    .or(cfg.listen_addr.as_deref())
-                    .and_then(|p| p.split(':').next())
-                    .map(|s| s.to_string())
-            });
-        if let Some(addr) = local_source {
-            if let Ok(ip) = lr_core::addr::IpAddr::from_str(&addr) {
-                sc = sc.with_local_address(ip);
+        // Local address for next-hop-self egress. The IPv4 source derives
+        // from --local-address or the peer/listen socket's IP; the IPv6
+        // source (for IPv6 NLRI / RFC 5549 ENH egress) is taken verbatim
+        // from --local-address-v6. Without a relevant source we leave the
+        // session's local_address unset and rely on the route's existing
+        // NEXT_HOP (correct for iBGP; eBGP without a source skips rewrite).
+        if let Some(ip) = parse_local_address(&cfg.local_address, &cfg.peer_addr, &cfg.listen_addr)
+        {
+            sc = sc.with_local_address(ip);
+        }
+        // When the IPv6 source differs from the IPv4 one (the common case
+        // for dual-stack hosts), prefer it for IPv6 / ENH egress. The
+        // router layer accepts only one local_address today, so we pick
+        // the v6 source when the configured transport is IPv6 — otherwise
+        // the v4 source above already covers IPv4 NLRI.
+        if let Some(v6) = &cfg.local_address_v6 {
+            if let Ok(ip) = IpAddr::from_str(v6) {
+                if matches!(ip, IpAddr::V6(_)) {
+                    // When the transport is IPv6 (peer_addr or listen_addr
+                    // resolves to a v6 socket), the v6 source is the right
+                    // next-hop-self for any family this session speaks.
+                    let transport_is_v6 = cfg
+                        .peer_addr
+                        .as_deref()
+                        .or(cfg.listen_addr.as_deref())
+                        .and_then(transport_ip)
+                        .map(|ip| matches!(ip, IpAddr::V6(_)))
+                        .unwrap_or(false);
+                    if transport_is_v6 {
+                        sc = sc.with_local_address(ip);
+                    } else if cfg.extended_next_hop {
+                        // ENH egress needs the v6 source even when the
+                        // transport is v4 — the peer resolves IPv4 NLRI
+                        // over the v6 next-hop.
+                        sc = sc.with_local_address(ip);
+                    }
+                }
+            } else {
+                eprintln!("daemon: invalid --local-address-v6 '{}'", v6);
             }
         }
         match r.add_session(sc) {
@@ -699,7 +783,78 @@ fn main() -> ExitCode {
 }
 
 fn resolve(addr: &str) -> Option<std::net::SocketAddr> {
-    addr.to_socket_addrs().ok()?.next()
+    // `to_socket_addrs` accepts both `host:port` and `[v6]:port` (incl.
+    // scope ids like `[fe80::1%eth0]:179`). Try the verbatim form first;
+    // for bare IPv6 hosts without brackets, attempt `[host]:179` so a
+    // user passing `--peer fe80::1%eth0` still gets a usable address.
+    if let Ok(mut it) = addr.to_socket_addrs() {
+        if let Some(a) = it.next() {
+            return Some(a);
+        }
+    }
+    if !addr.starts_with('[') && addr.contains("::") {
+        let bracketed = format!("[{}]", addr);
+        if let Some(port) = bracketed.rfind(']') {
+            let host = &bracketed[1..port];
+            // Default to BGP port 179 when no port was specified.
+            let port_str = if bracketed[port..].starts_with("]:") {
+                &bracketed[port + 2..]
+            } else {
+                "179"
+            };
+            if let Ok(port) = port_str.parse::<u16>() {
+                use std::net::Ipv6Addr;
+                if let Ok(v6) = host.parse::<Ipv6Addr>() {
+                    return Some(std::net::SocketAddr::new(v6.into(), port));
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Extract the IP component of a `host:port` or `[v6]:port` string.
+/// Returns `None` when the address cannot be parsed — the caller treats
+/// this as "no derivable local address" and falls back to other sources.
+fn transport_ip(addr: &str) -> Option<IpAddr> {
+    // Bracketed IPv6 form: `[v6]:port` or `[v6]`.
+    if addr.starts_with('[') {
+        let end = addr.find(']')?;
+        let host = &addr[1..end];
+        return IpAddr::from_str(host).ok();
+    }
+    // Plain `host:port` — last colon separates port (IPv4 or hostname).
+    // For a bare IPv6 without brackets this is ambiguous; the resolve()
+    // helper handles that path separately.
+    if let Some(idx) = addr.rfind(':') {
+        let host = &addr[..idx];
+        return IpAddr::from_str(host).ok();
+    }
+    IpAddr::from_str(addr).ok()
+}
+
+/// Resolve the configured local source address for next-hop-self.
+/// Priority: explicit `--local-address` → derived from peer/listen addr.
+/// Returns `None` when nothing usable was configured.
+fn parse_local_address(
+    configured: &Option<String>,
+    peer_addr: &Option<String>,
+    listen_addr: &Option<String>,
+) -> Option<IpAddr> {
+    if let Some(s) = configured {
+        if let Ok(ip) = IpAddr::from_str(s) {
+            return Some(ip);
+        }
+        // The configured string might be a `host:port` form (legacy).
+        if let Some(ip) = transport_ip(s) {
+            return Some(ip);
+        }
+        return None;
+    }
+    peer_addr
+        .as_deref()
+        .or(listen_addr.as_deref())
+        .and_then(transport_ip)
 }
 
 /// Shared daemon state threaded through the I/O loops.

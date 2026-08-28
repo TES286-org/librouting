@@ -58,6 +58,21 @@ graceful_restart_time = 120
 # add_path = true
 # add_path_max_paths = 6
 
+# RFC 4760 MP-BGP address families advertised in OPEN. Defaults to
+# IPv4 unicast only. Set both to enable a dual-stack MP-BGP session
+# (a single TCP transport carrying IPv4 + IPv6 NLRI).
+# mp_families = ["ipv4-unicast", "ipv6-unicast"]
+
+# RFC 5549 Extended Next-Hop: advertise the (1,1,2) tuple so IPv4 NLRI
+# may be resolved over an IPv6 next-hop. Useful for IPv6-only transports
+# that still need to carry IPv4 routes. Requires peer support.
+# extended_next_hop = true
+
+# Local IPv6 source address for next-hop-self egress over IPv6 NLRI or
+# RFC 5549 ENH. When the transport is IPv6 this overrides local_address;
+# otherwise it is used only when extended_next_hop is set.
+# local_address_v6 = "2001:db8::1"
+
 # Locally originated networks. Reloadable via SIGHUP / the runtime API
 # `reload` command: added prefixes are originated, removed ones withdrawn.
 networks = ["203.0.113.0/24"]
