@@ -17,12 +17,13 @@ implements, or references. It is grouped by protocol family.
 | 3065  | BGP Confederations                                   | ✓ (superseded by 6793) | `lr-bgp::role::confederation`        |
 | 4360  | BGP Extended Communities                             | ✓                       | `lr-bgp::path::communities`         |
 | 4456  | BGP Route Reflection (revised)                       | ✓                       | `lr-bgp::role::cluster`              |
+| 4486  | Subcodes for BGP CEASE NOTIFICATION                  | ✓ (subcode 8 = max-prefix exceeded) | `lr-bgp::fsm`, `lr-router` |
 | 4724  | BGP Graceful Restart                                 | ✓ (per-family F bits)  | `lr-bgp::extensions::graceful_restart`, `lr-router` |
 | 4760  | Multiprotocol BGP                                    | ✓                       | `lr-bgp::path::mp_nlri`              |
 | 4784  | BGP Cumulative Bestpath                              | ✓ (multipath)           | `lr-bgp::best_path`                  |
 | 4893  | BGP Support for 4-byte AS                            | ✓                       | `lr-bgp::extensions::asn4`           |
 | 5004  | BGP Deterministic Path Selection                     | ✓ (default on)          | `lr-bgp::best_path`                  |
-| 5082  | The Generalized TTL Security Mechanism (GTSM)        | planned (roadmap 12)    | —                                    |
+| 5082  | The Generalized TTL Security Mechanism (GTSM)        | ✓ (IP_MINTTL listener filter + outbound TTL; `--gtsm` daemon flag) | `lr-osroute::gtsm` |
 | 5492  | BGP Capabilities                                     | ✓                       | `lr-bgp::capabilities`              |
 | 5549  | BGP Extended Next-Hop                                | ✓ (capability 5, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |
 | 5666  | BGP Egress Peer Engineering                          | partial (TBD)           | —                                    |

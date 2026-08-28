@@ -341,6 +341,56 @@ link-local dual-stack, MP-BGP, MP-BGP+link-local, ENH, ENH+link-local,
 pure IPv6, pure IPv6+link-local) are exercised end-to-end by
 `crates/lr-tests/tests/bgp_session_modes.rs`.
 
+### RFC 5082 GTSM (TTL security)
+
+GTSM is a transport-layer concern: the kernel sets the outbound TTL and
+drops inbound segments whose TTL is below the configured minimum. The
+library never inspects TTL on the wire — it only arms the socket.
+
+`lr_osroute::gtsm::Gtsm::single_hop()` produces TTL=255 both directions
+(the standard for directly connected eBGP). `Gtsm::multihop(hops)`
+produces outbound TTL = `hops`, minimum inbound TTL = `255 - hops + 1`.
+`arm_listener_gtsm` arms the listener (the min-TTL filter is inherited
+by accepted sockets); `connect_gtsm` arms the connector (outbound TTL
+only — setting min-TTL on the connector would drop the SYN-ACK).
+
+```rust
+use lr_osroute::gtsm::{Gtsm, arm_listener_gtsm, connect_gtsm};
+let gtsm = Gtsm::single_hop();
+arm_listener_gtsm(&listener, &gtsm)?;
+let stream = connect_gtsm(addr, &gtsm, Duration::from_secs(5))?;
+```
+
+The daemon exposes `--gtsm` (bare = single-hop) and `--gtsm N` (multihop)
+plus the TOML key `bgp.gtsm`. When combined with `--md5-key` /
+`--tcp-ao-key` the connector uses `connect_auth` then sets TTL on the
+stream via `set_ttl`.
+
+### Per-peer maximum-prefix
+
+`SessionConfig::with_maximum_prefix(limit, action)` configures a
+per-peer prefix ceiling. When the peer's Adj-RIB-In exceeds `limit` the
+router fires `RouterEvent::MaxPrefixExceeded` (once, latched) and, for
+`Teardown`/`Restart`, sends a CEASE NOTIFICATION (subcode 8,
+RFC 4486 §2.1). `with_maximum_prefix_threshold(pct)` sets the
+early-warning percentage (default 75); `RouterEvent::MaxPrefixThreshold`
+fires once when the count crosses it.
+
+```rust
+use lr_bgp::MaxPrefixAction;
+let h = r.add_session(
+    SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]))
+        .with_maximum_prefix(1000, MaxPrefixAction::Teardown)
+        .with_maximum_prefix_threshold(75),
+)?;
+// The router emits MaxPrefixThreshold at 750/1000 and MaxPrefixExceeded
+// at 1001/1000; the latter tears the session down with CEASE subcode 8.
+```
+
+The daemon exposes `--max-prefixes N`, `--max-prefix-action warn|
+teardown|restart`, `--max-prefix-threshold P` (TOML:
+`bgp.max_prefixes` / `max_prefix_action` / `max_prefix_threshold`).
+
 ### Operational introspection
 
 `session_summaries()` renders one [`SessionSummary`] per session (kind,

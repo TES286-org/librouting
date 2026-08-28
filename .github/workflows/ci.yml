@@ -140,6 +140,8 @@ jobs:
         run: ./tests/interop/bird.sh
       - name: BIRD IPv6 interop (librouting ↔ BIRD, pure IPv6)
         run: ./tests/interop/bird_ipv6.sh
+      - name: BIRD GTSM interop (librouting ↔ BIRD, RFC 5082)
+        run: ./tests/interop/bird_gtsm.sh
       - name: BIRD ENH interop (librouting ↔ BIRD, RFC 5549)
         run: ./tests/interop/bird_enh.sh
       - name: BIRD LLGR interop (librouting ↔ BIRD, RFC 9494)

@@ -48,8 +48,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` |
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
-| GTSM / TTL security (RFC 5082) | ❌ | BIRD `ttl security` / FRR `ttl-security` parity |
-| Per-peer maximum-prefix | ❌ | limit + warn / tear-down semantics |
+| GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
+| Per-peer maximum-prefix | ✅ 🧪 | `with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold(pct)`; warn / teardown / restart actions; CEASE NOTIFICATION subcode 8 (RFC 4486 §2.1); threshold + exceeded events latched per session; daemon `--max-prefixes` / `--max-prefix-action` / `--max-prefix-threshold` |
 | Route aggregation | ❌ | aggregate NLRI generation + AS_PATH zeroing |
 | BMP monitoring (RFC 7854) | ❌ | session mirroring to a collector |
 
@@ -127,6 +127,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Two-daemon TCP E2E | ✅ 🧪 |
 | Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
 | BGP session-mode E2E (8 modes: standard dual-stack, LL dual-stack, MP-BGP, MP-BGP+LL, ENH, ENH+LL, pure IPv6, pure IPv6+LL) | ✅ 🧪 | `lr-tests/tests/bgp_session_modes.rs` |
+| GTSM + maximum-prefix E2E (TTL security + per-peer prefix limit) | ✅ 🧪 | `lr-tests/tests/gtsm_max_prefix.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
@@ -210,9 +211,16 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 11. **OSPF authentication + OSPFv3 inter-area** — RFC 5709 HMAC-SHA auth
     (v2 AuType 2 trailer), RFC 7166 v3 auth trailer, and OSPFv3
     inter-area-prefix-LSA (0x2003) ABR origination.
-12. **BGP GTSM + maximum-prefix** — RFC 5082 TTL security (peer
-    `min-ttl` enforcement) and per-peer `maximum-prefix` with warn /
-    restart / teardown actions. Quick BIRD/FRR parity wins.
+12. ~~**BGP GTSM + maximum-prefix**~~ — done: RFC 5082 TTL security
+    (`lr-osroute::gtsm` — listener-side `IP_MINTTL`/`IPV6_MINHOPLIMIT`
+    filter + outbound TTL on connector; daemon `--gtsm` / `--gtsm N`;
+    live socket tests verify both happy-path and low-TTL rejection) and
+    per-peer `maximum-prefix` with warn/teardown/restart actions
+    (`with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold`;
+    CEASE NOTIFICATION subcode 8 per RFC 4486 §2.1; threshold +
+    exceeded events latched per session; daemon `--max-prefixes` /
+    `--max-prefix-action` / `--max-prefix-threshold`). Verified by 10
+    e2e tests in `lr-tests/tests/gtsm_max_prefix.rs`.
 13. **Cross-protocol redistribution engine** — explicit import/export
     pipes between BGP, OSPF, Babel and Loc-RIB (BIRD pipe / FRR
     `redistribute` equivalent), with protocol-tag and metric policy.

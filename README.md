@@ -140,6 +140,16 @@ librouting/
   MP_REACH `(AFI=1, 16B)`). Daemon `--extended-next-hop`,
   `--mp-family ipv6-unicast`, `--local-address-v6`; e2e coverage of all
   eight dual-stack / MP-BGP / ENH / pure-IPv6 session modes.
+- **GTSM / TTL security** (RFC 5082): `lr-osroute::gtsm` arms the
+  listener with `IP_MINTTL` / `IPV6_MINHOPLIMIT` (kernel drops low-TTL
+  SYNs) and sets outbound TTL=255 (single-hop) or N (multihop) on the
+  connector. Daemon `--gtsm` / `--gtsm N`.
+- **Per-peer maximum-prefix** (BIRD `maximum prefix`, FRR
+  `maximum-prefix`): `with_maximum_prefix(N, action)` with warn /
+  teardown / restart actions and a configurable early-warning threshold
+  (default 75%). Teardown sends a CEASE NOTIFICATION (subcode 8,
+  RFC 4486). Daemon `--max-prefixes` / `--max-prefix-action` /
+  `--max-prefix-threshold`.
 
 ## Best-path selection
 
