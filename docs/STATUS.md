@@ -66,7 +66,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | AS-external routes (type-5 LSAs, §16.4) | ✅ 🧪 | origination via `ospf_redistribute`, AS-scope flooding across ABRs, §16.4 calculation (type-1/2 metrics, forwarding-address reachability + next hop), MaxAge flush lifecycle |
 | Summary-ASBR LSAs (type-4, §12.4.3) | ✅ 🧪 | ABR origination for inter-area-only ASBRs, ASBR leg resolution in §16.4 (b) |
 | External route redistribution API | ✅ 🧪 | `DefaultRouter::ospf_redistribute`/`ospf_unredistribute` |
-| Cross-protocol redistribution engine | ❌ | BGP/OSPF/Babel ↔ Loc-RIB import/export pipes |
+| Cross-protocol redistribution engine | ✅ 🧪 | `RedistributionPipe` (BIRD `pipe` / FRR `redistribute`); BGP↔BGP, BGP→OSPF, OSPF→BGP; metric policy (Inherit/Fixed/Add); prefix-list filter; withdrawal propagation; 7 e2e tests |
 | Designated-router election | ✅ | |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area LSA bodies not originated yet |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
@@ -129,6 +129,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
 | BGP session-mode E2E (8 modes: standard dual-stack, LL dual-stack, MP-BGP, MP-BGP+LL, ENH, ENH+LL, pure IPv6, pure IPv6+LL) | ✅ 🧪 | `lr-tests/tests/bgp_session_modes.rs` |
 | GTSM + maximum-prefix E2E (TTL security + per-peer prefix limit) | ✅ 🧪 | `lr-tests/tests/gtsm_max_prefix.rs` |
+| Redistribution E2E (BGP↔BGP, BGP→OSPF, metric policy, prefix filter, withdrawal) | ✅ 🧪 | `lr-tests/tests/redistribution.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
@@ -228,9 +229,15 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
     exceeded events latched per session; daemon `--max-prefixes` /
     `--max-prefix-action` / `--max-prefix-threshold`). Verified by 10
     e2e tests in `lr-tests/tests/gtsm_max_prefix.rs`.
-13. **Cross-protocol redistribution engine** — explicit import/export
-    pipes between BGP, OSPF, Babel and Loc-RIB (BIRD pipe / FRR
-    `redistribute` equivalent), with protocol-tag and metric policy.
+13. ~~**Cross-protocol redistribution engine**~~ — done:
+    `RedistributionPipe` (BIRD `pipe` / FRR `redistribute`) bridges
+    routes from a source protocol to a target protocol with a
+    configurable metric policy (`Inherit` / `Fixed(N)` / `Add(N)`) and
+    an optional prefix-list filter. Supported pipes: BGP→BGP
+    (re-originate as locally originated), BGP→OSPF (type-5 external),
+    OSPF→BGP. Withdrawals propagate automatically. 7 e2e tests cover
+    basic re-origination, fixed/add metric, prefix-list filter,
+    withdrawal propagation, pipe removal, and IPv6 support.
 14. **Babel daemon parity** — IPv6 link-local transport in the daemon
     (today IPv4-only) and RFC 9079 source-specific table completion.
 15. **BMP monitoring (RFC 7854)** — session mirroring to an external

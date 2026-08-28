@@ -433,6 +433,39 @@ The daemon exposes `--max-prefixes N`, `--max-prefix-action warn|
 teardown|restart`, `--max-prefix-threshold P` (TOML:
 `bgp.max_prefixes` / `max_prefix_action` / `max_prefix_threshold`).
 
+### Cross-protocol redistribution (BIRD `pipe` / FRR `redistribute`)
+
+`RedistributionPipe` bridges routes from a source protocol to a target
+protocol. When a route enters the Loc-RIB from the source protocol, the
+pipe re-originates it into the target with the configured metric policy.
+Withdrawals propagate automatically.
+
+```rust
+use lr_router::{RedistributionPipe, MetricPolicy};
+use lr_core::rib::Protocol;
+
+// Redistribute BGP routes into OSPF with a fixed metric.
+r.add_redistribution_pipe(
+    RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2)
+        .with_metric(MetricPolicy::Fixed(100))
+);
+
+// Redistribute OSPF routes into BGP, inheriting the metric.
+r.add_redistribution_pipe(
+    RedistributionPipe::new(Protocol::Ospfv2, Protocol::Bgp)
+);
+
+// Restrict to specific prefixes.
+r.add_redistribution_pipe(
+    RedistributionPipe::new(Protocol::Bgp, Protocol::Bgp)
+        .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 0]), 24)])
+);
+```
+
+`MetricPolicy::Inherit` (default) uses the source metric unchanged;
+`Fixed(N)` always advertises N; `Add(N)` adds N to the source metric.
+`remove_redistribution_pipe(source, target)` removes matching pipes.
+
 ### Operational introspection
 
 `session_summaries()` renders one [`SessionSummary`] per session (kind,
