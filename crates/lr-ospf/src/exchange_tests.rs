@@ -201,7 +201,7 @@ fn slave_negotiation_and_full_exchange_with_master() {
     );
 
     // 7. US receives THEM's LS-Update: installs, acks, goes Full.
-    let step_us = us.on_ls_update(&body_ls_update(&them_answer.outbound[0]), &mut us_nbr);
+    let step_us = us.on_ls_update(body_ls_update(&them_answer.outbound[0]), &mut us_nbr);
     assert_eq!(step_us.lsas.len(), 1);
     assert!(step_us
         .outbound
@@ -212,7 +212,7 @@ fn slave_negotiation_and_full_exchange_with_master() {
     assert!(step_us.newly_full);
 
     // 8. THEM receives OUR LS-Update: installs, acks, goes Full.
-    let step_them = them.on_ls_update(&body_ls_update(&us_answer.outbound[0]), &mut them_nbr);
+    let step_them = them.on_ls_update(body_ls_update(&us_answer.outbound[0]), &mut them_nbr);
     assert_eq!(them.phase(), Phase::Full);
     assert_eq!(them_nbr.state, NeighborState::Full);
     assert!(step_them.newly_full);
