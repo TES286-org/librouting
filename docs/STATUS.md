@@ -45,7 +45,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ | session liveness events feed the FSM |
-| Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` |
+| Policy: prefix-lists, community-lists, AS-path filters, route-maps | 🟡 | `lr-policy` — prefix-lists fully work; community-list / AS-path matching and the MED/prepend/add-community set actions are stubs (roadmap W1.4a) |
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
@@ -201,8 +201,30 @@ BIRD/FRR-style, without an embedder writing code.
    compatibility).
 3. **BFD in the daemon** — `--bfd` per peer wiring `lr-bfd` sessions
    to fast-fail the BGP FSM (after W3.1 multihop BFD exists).
-4. **Policy in config** — route-maps / prefix-lists / community
-   filters expressible in TOML and attached to peers (import/export).
+4. **Policy in config + reuse** (external request) — three slices,
+   in order:
+   a. **Policy engine completion** (prerequisite): community-list and
+      AS-path-filter matching currently return `true` unconditionally,
+      and `set med` / `as-path prepend` / `add community` are no-ops.
+      Implement typed evaluation against BGP path attributes via a
+      feature-gated `lr-policy → lr-bgp` dependency (no cycle:
+      `lr-bgp` does not depend on `lr-policy`). Unit tests against
+      real attribute bytes.
+   b. **Policy objects in TOML**: `[[prefix-list]]`, `[[as-path-list]]`,
+      `[[community-list]]`, `[[route-map]]` tables (match/set entries
+      mapping 1:1 onto `lr-policy` primitives), attached per peer via
+      `import = "<route-map>"` / `export = "<route-map>"`. Rejected by
+      design: a BIRD-style filter DSL (un-TOML-able, heavy parser) and
+      embedded scripting languages (dependency weight, auditability).
+      Data-only declarative tables win on both performance and
+      maintainability. E2E: a two-daemon run where an import filter
+      drops one prefix and passes another.
+   c. **Peer templates**: `[peer-template.<name>]` tables holding
+      defaults (`md5_key`, `graceful_restart_time`, `max_prefixes`,
+      policy attachments…) that `[[peer]]` entries pull in via
+      `extends = "<name>"`; per-peer keys override template keys.
+      Resolves the copy-paste burden of multi-peer configs without
+      inventing a new language (TOML has no anchors).
 5. **OSPF daemon mode** — `--protocol ospf` with area/interface
    configuration, complementing the existing `bgp` and `babel` modes.
 6. **Operational tooling** — MRT dump import/export (`lr routes`
