@@ -82,9 +82,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 8966 codec (all core TLVs) | ✅ | |
 | Neighbor / route table + feasibility (RFC 8966 §3.5.2) | ✅ | |
 | Metric computation, seqno handling | ✅ 🧪 | E2E install/withdraw tests |
-| RFC 9079 source-specific routing | 🟡 | TLVs modelled; source-table integration partial |
+| RFC 9079 source-specific routing | ✅ 🧪 | TLV model (SsHello/SsIhu/SsUpdate/SsRouteRequest/SsSeqnoRequest); IPv4 + IPv6 source prefixes; route table keyed by (destination, source) tuple; 4 new encode/decode tests |
 | RFC 8967 HMAC authentication | ✅ | HMAC-SHA256, IPv4/IPv6 pseudo-headers, multi-key receive validation, packet counters, replay rejection |
-| Babel over IPv6 link-local transport | 🟡 | model supported; daemon transport is IPv4 today |
+| Babel over IPv6 link-local transport | ✅ 🧪 | daemon `--protocol babel` mode; UDP on port 6696, ff02::1:6 multicast, TTL=255 (RFC 8966 §2.1); AE=2 (IPv6) destination + source prefix handling |
 
 ## Layer 3 — router pipeline (`lr-router`)
 
@@ -238,7 +238,11 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
     OSPF→BGP. Withdrawals propagate automatically. 7 e2e tests cover
     basic re-origination, fixed/add metric, prefix-list filter,
     withdrawal propagation, pipe removal, and IPv6 support.
-14. **Babel daemon parity** — IPv6 link-local transport in the daemon
-    (today IPv4-only) and RFC 9079 source-specific table completion.
+14. ~~**Babel daemon parity**~~ — done: IPv6 link-local transport in
+    the daemon via `--protocol babel` (UDP on port 6696, ff02::1:6
+    multicast, TTL=255 per RFC 8966 §2.1); RFC 9079 source-specific
+    table completion (IPv6 source prefixes in `apply_update`, IPv6
+    Loc-RIB family selection in `best_routes`, `SsRouteRequest` and
+    `SsSeqnoRequest` TLV encode/decode with 4 roundtrip tests).
 15. **BMP monitoring (RFC 7854)** — session mirroring to an external
     collector for operational parity with BIRD/FRR.

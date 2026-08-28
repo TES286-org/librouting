@@ -72,7 +72,7 @@ implements, or references. It is grouped by protocol family.
 | 7557   | Babel Source-Specific Extensions (precursor to 9079) | ✓            | `lr-babel::source`                  |
 | 8966   | Babel                                                | ✓ core       | `lr-babel::tlv`, `lr-babel::message` |
 | 8967   | Babel HMAC Cryptographic Auth                        | ✓            | `lr-babel::tlv`, `lr-babel::hmac`   |
-| 9079   | Babel Source-Specific Routing                        | ✓            | `lr-babel::source`                  |
+| 9079   | Babel Source-Specific Routing                        | ✓ (SsRouteRequest + SsSeqnoRequest TLVs, IPv6 source prefixes, route table keyed by (dest, source)) | `lr-babel::source`, `lr-babel::message` |
 | 9289   | Babel-MAC Algorithm                                  | partial      | `lr-babel::codec`                    |
 | 9647   | Babel YANG Data Model                                | partial      | TBD                                 |
 
