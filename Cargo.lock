@@ -351,6 +351,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "lr-mrt"
+version = "0.1.0"
+dependencies = [
+ "lr-bgp",
+ "lr-core",
+]
+
+[[package]]
 name = "lr-ospf"
 version = "0.1.0"
 dependencies = [

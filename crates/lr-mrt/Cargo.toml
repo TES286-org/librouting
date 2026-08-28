@@ -1,0 +1,23 @@
+[package]
+name = "lr-mrt"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "MRT routing table dump format (RFC 6396) — TABLE_DUMP_V2 / BGP4MP codec"
+keywords = ["mrt", "bgp", "routing", "rfc6396", "dump"]
+categories = ["network-programming", "parser-implementations"]
+
+[features]
+default = ["std", "bgp"]
+std = ["lr-core/std"]
+# Typed interpretation of RIB entry path attributes (AS_PATH, next hop,
+# communities) on top of the raw-format codec — mirrors lr-policy's gate.
+bgp = ["dep:lr-bgp"]
+
+[dependencies]
+lr-core = { workspace = true }
+lr-bgp = { workspace = true, optional = true }
