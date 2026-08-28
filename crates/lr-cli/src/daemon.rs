@@ -579,7 +579,8 @@ fn main() -> ExitCode {
         for net in &cfg.networks {
             match Prefix::from_str(net) {
                 Ok(p) => {
-                    r.originate(p, None);
+                    let (p, family) = originate_family_for(p);
+                    r.originate_family(p, family, None);
                     println!("daemon: originating {}", p);
                 }
                 Err(_) => eprintln!("daemon: invalid network '{}'", net),
@@ -857,6 +858,18 @@ fn parse_local_address(
         .and_then(transport_ip)
 }
 
+/// Pick the NLRI family for a `--network` prefix based on its address
+/// family. IPv4 prefixes → IPv4 unicast (the historical default); IPv6
+/// prefixes → IPv6 unicast (requires `--mp-family ipv6-unicast` on the
+/// session, otherwise the peer will reject the UPDATE).
+fn originate_family_for(p: Prefix) -> (Prefix, NlriFamily) {
+    let family = match p.addr {
+        IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
+        IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+    };
+    (p, family)
+}
+
 /// Shared daemon state threaded through the I/O loops.
 struct Runtime {
     router: Arc<Mutex<DefaultRouter>>,
@@ -971,7 +984,8 @@ fn reload_config(
         for net in new.iter().filter(|n| !old.contains(n)) {
             match Prefix::from_str(net) {
                 Ok(p) => {
-                    r.originate(p, None);
+                    let (p, family) = originate_family_for(p);
+                    r.originate_family(p, family, None);
                     lines.push(format!("reload: originating {}", p));
                 }
                 Err(_) => lines.push(format!("reload: invalid network '{}' skipped", net)),
@@ -979,7 +993,8 @@ fn reload_config(
         }
         for net in old.iter().filter(|n| !new.contains(n)) {
             if let Ok(p) = Prefix::from_str(net) {
-                let key = lr_core::rib::RouteKey::new(p, lr_core::nlri::NlriFamily::IPV4_UNICAST);
+                let (p, family) = originate_family_for(p);
+                let key = lr_core::rib::RouteKey::new(p, family);
                 r.unoriginate(&key);
                 lines.push(format!("reload: unoriginating {}", p));
             }
