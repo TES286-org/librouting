@@ -9,6 +9,7 @@ members = [
     "crates/lr-policy",
     "crates/lr-router",
     "crates/lr-bfd",
+    "crates/lr-bmp",
     "crates/lr-damping",
     "crates/lr-osroute",
     "crates/lr-ffi",
@@ -37,6 +38,7 @@ lr-rib = { path = "crates/lr-rib", version = "0.1.0" }
 lr-policy = { path = "crates/lr-policy", version = "0.1.0" }
 lr-router = { path = "crates/lr-router", version = "0.1.0" }
 lr-bfd = { path = "crates/lr-bfd", version = "0.1.0" }
+lr-bmp = { path = "crates/lr-bmp", version = "0.1.0" }
 lr-damping = { path = "crates/lr-damping", version = "0.1.0" }
 lr-osroute = { path = "crates/lr-osroute", version = "0.1.0" }
 lr-ffi = { path = "crates/lr-ffi", version = "0.1.0" }

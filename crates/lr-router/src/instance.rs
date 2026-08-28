@@ -678,6 +678,12 @@ pub struct DefaultRouter {
     /// original Loc-RIB key. When the source route disappears, the
     /// redistributed BGP route is unoriginated.
     redistributed_bgp: BTreeMap<RouteKey, RouteKey>,
+    /// Optional BMP (RFC 7854) sink: when set, the router mirrors
+    /// peer state changes and route events to this closure as encoded
+    /// BMP messages. The embedder connects the closure to a TCP
+    /// collector.
+    #[allow(clippy::type_complexity)]
+    bmp_sink: Option<Box<dyn Fn(&[u8]) + Send + Sync>>,
 }
 
 /// Per-session maximum-prefix bookkeeping.
@@ -720,6 +726,7 @@ impl Default for DefaultRouter {
             max_prefix_state: BTreeMap::new(),
             pipes: Vec::new(),
             redistributed_bgp: BTreeMap::new(),
+            bmp_sink: None,
         }
     }
 }
@@ -761,6 +768,135 @@ impl DefaultRouter {
     /// Add-Path capability was negotiated.
     pub fn set_add_path_max_paths(&mut self, max_paths: usize) {
         self.add_path_max_paths = max_paths.max(1);
+    }
+
+    /// Install a BMP (RFC 7854) sink. When set, the router mirrors
+    /// peer state changes (Peer Up / Peer Down) and route events (Route
+    /// Monitoring) to this closure as encoded BMP messages. The
+    /// embedder connects the closure to a TCP collector.
+    ///
+    /// The closure receives raw BMP message bytes — one call per
+    /// message. It is called from within `tick()` / `feed_input()`, so
+    /// it must be non-blocking.
+    pub fn set_bmp_sink(&mut self, sink: impl Fn(&[u8]) + Send + Sync + 'static) {
+        self.bmp_sink = Some(Box::new(sink));
+    }
+
+    /// Build a BMP Peer Header for the given BGP session, using the
+    /// session's negotiated peer info. Returns `None` for non-BGP
+    /// sessions or sessions that haven't completed OPEN.
+    fn bmp_peer_header(&self, session: u64) -> Option<lr_bmp::PeerHeader> {
+        let state = self.sessions.get(&session)?;
+        let SessionState::Bgp { peer, .. } = state else {
+            return None;
+        };
+        let cfg = peer.config();
+        let peer_bgp_id = peer.peer_bgp_id()?;
+        let peer_as = peer.peer_as()?;
+        let mut addr = [0u8; 16];
+        let flags = match cfg.local_address {
+            Some(lr_core::addr::IpAddr::V6(_)) => {
+                // We don't store the peer's address; use the local
+                // address family as a proxy. In practice the embedder
+                // knows the peer address.
+                lr_bmp::PeerFlags::ipv4() // conservative default
+            }
+            _ => lr_bmp::PeerFlags::ipv4(),
+        };
+        // Place the BGP ID in the last 4 bytes (IPv4 convention).
+        let id_bytes = peer_bgp_id.to_v4_bytes();
+        addr[12..16].copy_from_slice(&id_bytes);
+        Some(lr_bmp::PeerHeader {
+            peer_type: lr_bmp::PeerType::Global,
+            peer_flags: flags,
+            peer_distinguisher: 0,
+            peer_address: addr,
+            peer_as: peer_as.as_u32(),
+            peer_bgp_id: peer_bgp_id.as_u32(),
+            timestamp_secs: (self.now_ms / 1000) as u32,
+            timestamp_fraction: 0,
+        })
+    }
+
+    /// Emit a BMP Peer Up message (RFC 7854 §4.6) to the sink, when
+    /// configured. Called when a BGP session transitions to Established.
+    fn bmp_peer_up(&self, session: u64) {
+        let Some(sink) = &self.bmp_sink else {
+            return;
+        };
+        let Some(peer) = self.bmp_peer_header(session) else {
+            return;
+        };
+        let msg = lr_bmp::BmpMessage::peer_up(
+            peer,
+            [0u8; 16], // local address — embedder can patch
+            179,
+            0, // remote port — embedder can patch
+            &[],
+            &[],
+        );
+        if let Ok(bytes) = lr_bmp::BmpCodec::new().encode_vec(&msg) {
+            sink(&bytes);
+        }
+    }
+
+    /// Emit a BMP Peer Down message (RFC 7854 §4.5) to the sink, when
+    /// configured. Called when a BGP session leaves Established.
+    fn bmp_peer_down(&self, session: u64) {
+        let Some(sink) = &self.bmp_sink else {
+            return;
+        };
+        let Some(peer) = self.bmp_peer_header(session) else {
+            return;
+        };
+        let msg = lr_bmp::BmpMessage::peer_down(peer, lr_bmp::PeerDownReason::LocalClose, &[]);
+        if let Ok(bytes) = lr_bmp::BmpCodec::new().encode_vec(&msg) {
+            sink(&bytes);
+        }
+    }
+
+    /// Emit a BMP Route Monitoring message (RFC 7854 §4.3) for a route
+    /// that just entered the Loc-RIB. The payload is a minimal BGP
+    /// UPDATE carrying the route's prefix — a full BGP UPDATE encode
+    /// would require the path-attribute bag, which we delegate to the
+    /// embedder. For now we send the prefix as a BMP Route Mirroring
+    /// message with a synthetic BGP header so the collector sees the
+    /// event.
+    fn bmp_route_monitor(&self, route: &Route) {
+        let Some(sink) = &self.bmp_sink else {
+            return;
+        };
+        // Build a minimal BGP UPDATE: 19-byte marker + 2-byte length +
+        // 1-byte type (2=UPDATE) + withdrawn_len(2) + attr_len(2) +
+        // NLRI. This is a synthetic message — a real BMP sender encodes
+        // the full UPDATE including path attributes.
+        let mut bgp_msg = vec![0xff; 16]; // marker
+        bgp_msg.push(0); // length high (patched below)
+        bgp_msg.push(23); // length low (minimum: 19+4)
+        bgp_msg.push(2); // type = UPDATE
+        bgp_msg.push(0);
+        bgp_msg.push(0); // withdrawn_len = 0
+        bgp_msg.push(0);
+        bgp_msg.push(0); // attr_len = 0
+                         // NLRI: prefix_len + prefix bytes
+        bgp_msg.push(route.key.prefix.prefix_len);
+        let n = (route.key.prefix.prefix_len as usize).div_ceil(8);
+        match &route.key.prefix.addr {
+            lr_core::addr::IpAddr::V4(b) => bgp_msg.extend_from_slice(&b[..n.min(4)]),
+            lr_core::addr::IpAddr::V6(b) => bgp_msg.extend_from_slice(&b[..n.min(16)]),
+        }
+        // Patch length.
+        let total = bgp_msg.len() as u16;
+        bgp_msg[16] = (total >> 8) as u8;
+        bgp_msg[17] = total as u8;
+        let peer = match self.bmp_peer_header(route.origin.peer) {
+            Some(p) => p,
+            None => return,
+        };
+        let msg = lr_bmp::BmpMessage::route_monitoring(peer, &bgp_msg);
+        if let Ok(bytes) = lr_bmp::BmpCodec::new().encode_vec(&msg) {
+            sink(&bytes);
+        }
     }
 
     /// RFC 7911 path cap currently in force.
@@ -1172,6 +1308,7 @@ impl DefaultRouter {
             self.pending_events
                 .push(RouterEvent::RouteInstalled(new_best.clone()));
             self.redistribute_route(&new_best);
+            self.bmp_route_monitor(&new_best);
         }
         self.export_selection(key, &ranked);
     }
@@ -1600,6 +1737,8 @@ impl DefaultRouter {
     fn dispatch_bgp_actions(&mut self, session: u64, actions: Vec<BgpAction>) {
         // Track establishment transitions so embedders learn about session
         // death from tick() too, not only from feed_input().
+        let mut transition_up = false;
+        let mut transition_down = false;
         if let Some(SessionState::Bgp {
             peer, established, ..
         }) = self.sessions.get_mut(&session)
@@ -1607,17 +1746,27 @@ impl DefaultRouter {
             let now_est = peer.is_established();
             if now_est && !*established {
                 *established = true;
+                transition_up = true;
                 self.pending_events.push(RouterEvent::PeerStateChange {
                     session: SessionHandle(session),
                     state: "Established",
                 });
             } else if !now_est && *established {
                 *established = false;
+                transition_down = true;
                 self.pending_events.push(RouterEvent::PeerStateChange {
                     session: SessionHandle(session),
                     state: "Idle",
                 });
             }
+        }
+        // BMP events fire outside the borrow scope so they can read
+        // session state without conflicting with the mutable borrow above.
+        if transition_up {
+            self.bmp_peer_up(session);
+        }
+        if transition_down {
+            self.bmp_peer_down(session);
         }
         for a in actions {
             match a {
@@ -2328,6 +2477,8 @@ impl RouterInstance for DefaultRouter {
                 if newly_established {
                     // Initial table dump to the newly established peer.
                     self.on_bgp_established(h.0);
+                    // BMP (RFC 7854): mirror the Peer Up event.
+                    self.bmp_peer_up(h.0);
                 }
             }
             Pending::Other { delta } => {

@@ -1,0 +1,20 @@
+[package]
+name = "lr-bmp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "BGP Monitoring Protocol (RFC 7854) — BMP message codec and collector sink"
+keywords = ["bmp", "bgp", "monitoring", "rfc7854"]
+categories = ["network-programming", "parser-implementations"]
+
+[features]
+default = ["std"]
+std = ["lr-core/std"]
+
+[dependencies]
+lr-core = { workspace = true }
+lr-bgp = { workspace = true }

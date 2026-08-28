@@ -18,3 +18,4 @@ lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-router = { workspace = true }
 lr-osroute = { workspace = true }
+lr-bmp = { workspace = true }

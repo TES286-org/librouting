@@ -16,4 +16,5 @@ lr-ospf = { workspace = true }
 lr-babel = { workspace = true }
 lr-rib = { workspace = true }
 lr-policy = { workspace = true }
+lr-bmp = { workspace = true }
 tracing.workspace = true
