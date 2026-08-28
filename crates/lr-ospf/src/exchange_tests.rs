@@ -48,24 +48,6 @@ fn lsdb_with(router_id: u32, links: &[RouterLsaLink]) -> Lsdb {
     lsdb
 }
 
-/// Deliver every outbound packet of `from` to `to` (both the exchange
-/// and its neighbor FSM), returning the packets `to` produced.
-fn deliver(
-    from: &mut DbExchange,
-    from_nbr: &mut OspfNeighbor,
-    to: &mut DbExchange,
-    to_nbr: &mut OspfNeighbor,
-    to_lsdb: &Lsdb,
-    now_ms: u64,
-) -> Vec<OspfPacket> {
-    let _ = from_nbr;
-    let mut produced = Vec::new();
-    // A fresh copy of the sender's last output is not tracked here;
-    // callers pass explicit packets.
-    let _ = (to, to_lsdb, now_ms);
-    produced
-}
-
 #[test]
 fn slave_negotiation_and_full_exchange_with_master() {
     // Two routers: THEM (higher id, master) with a Router-LSA, US
@@ -282,7 +264,6 @@ fn sequence_mismatch_restarts_negotiation() {
     let mut us = exchange(US, &their_lsdb);
     let mut us_nbr = neighbor_at_exstart(US);
     let mut them = exchange(THEM, &our_lsdb);
-    let mut them_nbr = neighbor_at_exstart(THEM);
 
     // Negotiate to Exchange (slave).
     let them_init = them.initial_db_desc(5, NOW);
@@ -307,7 +288,6 @@ fn duplicate_master_db_desc_makes_slave_repeat_answer() {
     let mut us = exchange(US, &their_lsdb);
     let mut us_nbr = neighbor_at_exstart(US);
     let mut them = exchange(THEM, &our_lsdb);
-    let mut them_nbr = neighbor_at_exstart(THEM);
 
     let them_init = them.initial_db_desc(5, NOW);
     let step = us.on_db_desc(body_db_desc(&them_init), THEM, &our_lsdb, &mut us_nbr, NOW);
@@ -340,7 +320,6 @@ fn ls_request_for_unknown_lsa_restarts_adjacency() {
     us.restart(1);
     let _ = us.initial_db_desc(1, NOW);
     let mut them = exchange(THEM, &our_lsdb);
-    let mut them_nbr = neighbor_at_exstart(THEM);
     let them_init = them.initial_db_desc(3, NOW);
     us.on_db_desc(body_db_desc(&them_init), THEM, &our_lsdb, &mut us_nbr, NOW);
 
@@ -406,7 +385,6 @@ fn header_paging_respects_mtu() {
     let mut ex = DbExchange::new(US, AREA, (DD_OVERHEAD + LSA_HEADER_LEN + 4) as u16);
     let mut nbr = neighbor_at_exstart(US);
     let mut them = DbExchange::new(THEM, AREA, (DD_OVERHEAD + LSA_HEADER_LEN + 4) as u16);
-    let mut them_nbr = neighbor_at_exstart(THEM);
 
     // Negotiate: THEM (higher id) is master.
     let them_init = them.initial_db_desc(5, NOW);
@@ -475,74 +453,5 @@ fn body_ls_update(p: &OspfPacket) -> &Vec<Lsa> {
     match &p.body {
         OspfBody::LsUpdate(u) => &u.lsas,
         other => panic!("expected LS-Update, got {other:?}"),
-    }
-}
-
-// Silence the unused helper when scenarios inline their pumps.
-#[allow(dead_code)]
-fn _unused(
-    _: fn(
-        &mut DbExchange,
-        &mut OspfNeighbor,
-        &mut DbExchange,
-        &mut OspfNeighbor,
-        &Lsdb,
-        u64,
-    ) -> Vec<OspfPacket>,
-) {
-    let _ = deliver as fn(_, _, _, _, _, _) -> _;
-}
-
-#[test]
-fn dbg_scenario() {
-    let our_lsdb = lsdb_with(
-        US,
-        &[RouterLsaLink::Stub {
-            network: 0x0a0a_0a00,
-            mask: 0xffff_ff00,
-            metric: 10,
-        }],
-    );
-    let their_lsdb = lsdb_with(
-        THEM,
-        &[RouterLsaLink::Stub {
-            network: 0x0a0b_0b00,
-            mask: 0xffff_ff00,
-            metric: 20,
-        }],
-    );
-    let mut us = DbExchange::new(US, AREA, MTU);
-    let mut us_nbr = neighbor_at_exstart(US);
-    let mut them = DbExchange::new(THEM, AREA, MTU);
-    let mut them_nbr = neighbor_at_exstart(THEM);
-    let us_init = us.initial_db_desc(11, NOW);
-    let them_init = them.initial_db_desc(22, NOW);
-    let step = us.on_db_desc(
-        body_db_desc(&them_init),
-        THEM,
-        &their_lsdb,
-        &mut us_nbr,
-        NOW,
-    );
-    eprintln!("slave step: {} outbound", step.outbound.len());
-    for p in &step.outbound {
-        eprintln!(
-            "  kind={} flags={:x} seq={}",
-            p.header.kind,
-            body_db_desc(p).flags,
-            body_db_desc(p).dd_seq
-        );
-    }
-    let answer = step.outbound[0].clone();
-    let step2 = them.on_db_desc(
-        body_db_desc(&answer),
-        US,
-        &their_lsdb,
-        &mut them_nbr,
-        NOW + 5,
-    );
-    eprintln!("master step: {} outbound", step2.outbound.len());
-    for p in &step2.outbound {
-        eprintln!("  kind={}", p.header.kind);
     }
 }

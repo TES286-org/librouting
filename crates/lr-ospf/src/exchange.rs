@@ -348,8 +348,10 @@ impl DbExchange {
     /// entries, and a direct LSAck acknowledges the receipt (§13.7 —
     /// always acking is valid and keeps retransmitters quiet).
     pub fn on_ls_update(&mut self, lsas: &[Lsa], neighbor: &mut OspfNeighbor) -> ExchangeStep {
-        let mut step = ExchangeStep::default();
-        step.lsas = lsas.to_vec();
+        let mut step = ExchangeStep {
+            lsas: lsas.to_vec(),
+            ..ExchangeStep::default()
+        };
         if self.phase == Phase::ExStart {
             // Not yet exchanging: still ack (harmless) and hand the
             // LSAs over — early flooding data is legal to process.
@@ -397,7 +399,7 @@ impl DbExchange {
             }
         }
         if self.phase == Phase::Loading
-            && self.lsr_queue.is_empty() == false
+            && !self.lsr_queue.is_empty()
             && now_ms.saturating_sub(self.last_lsr_sent_ms) >= RXMT_INTERVAL_MS
         {
             let body = self
@@ -527,7 +529,7 @@ impl DbExchange {
 
     fn send_master_db_desc(&mut self, lsdb: &Lsdb, step: &mut ExchangeStep, now_ms: u64) {
         let (headers, more) = self.next_our_chunk(lsdb);
-        let flags = DD_MS | DD_M * u8::from(more);
+        let flags = DD_MS | (DD_M * u8::from(more));
         let pkt = self.db_desc_packet(flags, self.seq, headers.clone());
         self.remember_dd(flags, self.seq, headers, now_ms);
         step.outbound.push(pkt);
