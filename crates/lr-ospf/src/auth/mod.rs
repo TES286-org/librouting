@@ -8,8 +8,10 @@
 //!   authentication trailer appended after the OSPF body.
 
 pub mod crypto;
+pub mod v3_auth;
 
 pub use crypto::{CryptoAlgorithm, CryptoAuth};
+pub use v3_auth::V3Auth;
 
 use core::fmt;
 
