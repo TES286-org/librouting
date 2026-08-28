@@ -51,7 +51,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
 | Per-peer maximum-prefix | ✅ 🧪 | `with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold(pct)`; warn / teardown / restart actions; CEASE NOTIFICATION subcode 8 (RFC 4486 §2.1); threshold + exceeded events latched per session; daemon `--max-prefixes` / `--max-prefix-action` / `--max-prefix-threshold` |
 | Route aggregation | ❌ | aggregate NLRI generation + AS_PATH zeroing |
-| BMP monitoring (RFC 7854) | ❌ | session mirroring to a collector |
+| BMP monitoring (RFC 7854) | ✅ 🧪 | `lr-bmp` crate (7 message types, streaming codec, IPv4/IPv6 peer headers); `DefaultRouter::set_bmp_sink` mirrors Peer Up/Down + Route Monitoring; 10 unit + 3 e2e tests |
 
 ### OSPF (`lr-ospf`)
 
@@ -244,5 +244,11 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
     table completion (IPv6 source prefixes in `apply_update`, IPv6
     Loc-RIB family selection in `best_routes`, `SsRouteRequest` and
     `SsSeqnoRequest` TLV encode/decode with 4 roundtrip tests).
-15. **BMP monitoring (RFC 7854)** — session mirroring to an external
-    collector for operational parity with BIRD/FRR.
+15. ~~**BMP monitoring (RFC 7854)**~~ — done: new `lr-bmp` crate
+    implements the BMP message codec (RFC 7854 §4) with all 7 message
+    types, common + per-peer headers, streaming carryover decoder, and
+    IPv4/IPv6 peer address support. `DefaultRouter::set_bmp_sink`
+    installs a closure that receives encoded BMP messages — the router
+    fires Peer Up (§4.6) on session establishment, Peer Down (§4.5) on
+    teardown, and Route Monitoring (§4.3) when a route enters the
+    Loc-RIB. 10 unit tests + 3 e2e tests verify the full pipeline.

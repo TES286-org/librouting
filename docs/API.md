@@ -466,6 +466,31 @@ r.add_redistribution_pipe(
 `Fixed(N)` always advertises N; `Add(N)` adds N to the source metric.
 `remove_redistribution_pipe(source, target)` removes matching pipes.
 
+### BMP monitoring (RFC 7854)
+
+`DefaultRouter::set_bmp_sink` installs a closure that receives encoded
+BMP messages whenever a BGP session transitions to Established (Peer
+Up), goes down (Peer Down), or a route enters the Loc-RIB (Route
+Monitoring). The closure is called from within `feed_input`/`tick`, so
+it must be non-blocking.
+
+```rust
+use lr_bmp::BmpCodec;
+use std::sync::{Arc, Mutex};
+
+let received: Arc<Mutex<Vec<Vec<u8>>>> = Arc::new(Mutex::new(Vec::new()));
+let received_clone = Arc::clone(&received);
+r.set_bmp_sink(move |bytes| {
+    received_clone.lock().unwrap().push(bytes.to_vec());
+});
+// Every BGP session establishment, teardown, and route install now
+// fires a BMP message into the closure.
+```
+
+The `lr-bmp` crate provides the full BMP message codec (`BmpCodec`,
+`BmpMessage`, `BmpMsgType`, `PeerHeader`) for embedders that need to
+decode the messages on the collector side.
+
 ### Operational introspection
 
 `session_summaries()` renders one [`SessionSummary`] per session (kind,
