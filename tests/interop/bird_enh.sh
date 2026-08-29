@@ -8,18 +8,17 @@
 # Both speakers advertise RFC 5549 (1,1,2) so IPv4 NLRI is carried over
 # an IPv6 next-hop — no IPv4 transport or IPv4 next-hop is needed.
 #
-# NOTE: BIRD 2.x encodes the ENH capability with 6-byte tuples
-# (AFI:2, reserved:1, SAFI:1, NH-AFI:2 — the same layout as the MP-BGP
-# capability) instead of the RFC 5549 standard 5-byte tuples
-# (AFI:2, SAFI:1, NH-AFI:2). librouting sends the RFC-standard 5-byte
-# form (which FRR accepts); BIRD 2.x rejects it with "Invalid OPEN
-# message". This script therefore SKIPs when BIRD is the peer — the
-# RFC 5549 wire format is verified end-to-end by the in-process tests
-# in crates/lr-tests/tests/bgp_session_modes.rs (modes 5 and 6).
+# History: this test used to SKIP by default. The skip reason claimed the
+# 5-byte ENH tuple (AFI:2, SAFI:1, NH-AFI:2) was the RFC 5549 standard
+# form and that only BIRD used 6-byte tuples. That was backwards: RFC 5549
+# §4 and its successor RFC 8950 §4 both define the capability value as
+# 6-byte tuples (AFI:2, SAFI:2, NH-AFI:2), and both BIRD 2.x and FRR
+# encode exactly that while rejecting any length that is not a multiple
+# of 6 with an OPEN error. librouting now sends the standard 6-byte form,
+# so the test runs for real.
 #
 # Env overrides:
 #   BIRD / BIRDC   paths to the bird / birdc binaries (default: from $PATH)
-#   FORCE=1        run the test even though BIRD is known to be incompatible
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -39,17 +38,6 @@ if ! command -v "$BIRD" >/dev/null 2>&1; then
     fi
 fi
 command -v "$BIRD" >/dev/null 2>&1 || { echo "SKIP: bird not found"; exit 0; }
-
-if [ "${FORCE:-0}" != "1" ]; then
-    echo "SKIP: BIRD 2.x uses a non-standard 6-byte ENH tuple encoding"
-    echo "      (AFI:2, reserved:1, SAFI:1, NH-AFI:2) instead of the RFC 5549"
-    echo "      standard 5-byte form (AFI:2, SAFI:1, NH-AFI:2). librouting"
-    echo "      sends the RFC-standard 5-byte form, which FRR accepts. The"
-    echo "      RFC 5549 wire format is verified end-to-end by the in-process"
-    echo "      tests in crates/lr-tests/tests/bgp_session_modes.rs."
-    echo "      Set FORCE=1 to run this test anyway (it will fail at OPEN)."
-    exit 0
-fi
 
 PORT=${PORT:-17994}
 OUT=/tmp/lr_bird_enh_interop
