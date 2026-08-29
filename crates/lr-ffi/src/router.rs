@@ -286,6 +286,24 @@ pub extern "C" fn lr_router_set_ebgp_requires_policy(r: lr_router_t, enabled: u8
     0
 }
 
+/// Enable or disable FRR `bgp enforce-first-as` (W2.2).
+///
+/// When on, an UPDATE received from an external BGP peer (eBGP or a
+/// confederation boundary) whose AS_PATH leftmost sequence segment's
+/// first AS is not the peer's negotiated AS is rejected before the
+/// Adj-RIB-In. When off (the default — `no bgp enforce-first-as`),
+/// the route is admitted subject to the ordinary policy and safety
+/// checks. `enabled` is 0 (off) or non-zero (on).
+#[no_mangle]
+pub extern "C" fn lr_router_set_enforce_first_as(r: lr_router_t, enabled: u8) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    router.set_enforce_first_as(enabled != 0);
+    0
+}
+
 /// Declare which directions of a BGP session carry an explicit policy
 /// (RFC 8212 §3).
 ///

@@ -161,3 +161,11 @@ def test_rfc8212_policy_abi():
         except librouting.LrError:
             pass
         r.set_ebgp_requires_policy(False)
+
+
+def test_enforce_first_as_abi():
+    """FRR `bgp enforce-first-as` (W2.2): the router-wide toggle is
+    callable from Python and round-trips through the C ABI."""
+    with librouting.Router() as r:
+        r.set_enforce_first_as(True)
+        r.set_enforce_first_as(False)

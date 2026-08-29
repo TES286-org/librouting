@@ -217,5 +217,13 @@ func TestRfc8212(t *testing.T) {
 	if err := r.SetEbgpRequiresPolicy(false); err != nil {
 		t.Fatalf("SetEbgpRequiresPolicy(false): %v", err)
 	}
+	// FRR `bgp enforce-first-as` (W2.2): the router-wide toggle is
+	// callable from Go and round-trips through the C ABI.
+	if err := r.SetEnforceFirstAs(true); err != nil {
+		t.Fatalf("SetEnforceFirstAs(true): %v", err)
+	}
+	if err := r.SetEnforceFirstAs(false); err != nil {
+		t.Fatalf("SetEnforceFirstAs(false): %v", err)
+	}
 	r.ptr = nil
 }

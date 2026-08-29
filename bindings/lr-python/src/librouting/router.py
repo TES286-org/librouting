@@ -135,6 +135,25 @@ class Router:
                 f"lr_router_set_ebgp_requires_policy failed (rc={rc}): {last_error()}"
             )
 
+    def set_enforce_first_as(self, enabled: bool) -> None:
+        """Enable or disable FRR ``bgp enforce-first-as`` (W2.2).
+
+        When enabled, an UPDATE received from an external BGP peer (eBGP
+        or a confederation boundary) whose AS_PATH leftmost sequence
+        segment's first AS is not the peer's negotiated AS is rejected
+        before the Adj-RIB-In. When off (the default —
+        ``no bgp enforce-first-as``), the route is admitted subject to the
+        ordinary policy and safety checks. iBGP and confederation-internal
+        sessions are exempt, mirroring FRR.
+        """
+        rc = get_lib().lr_router_set_enforce_first_as(
+            self._ptr, 1 if enabled else 0
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_enforce_first_as failed (rc={rc}): {last_error()}"
+            )
+
     def set_session_policy(self, session: int, import_: bool, export: bool) -> None:
         """Declare which directions of a BGP session carry explicit policy.
 

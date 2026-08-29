@@ -174,6 +174,22 @@ func (r *Router) SetEbgpRequiresPolicy(enabled bool) error {
 	return nil
 }
 
+// SetEnforceFirstAs enables or disables FRR `bgp enforce-first-as`
+// (router-wide, W2.2). When enabled, an UPDATE from an external BGP
+// peer (eBGP or a confederation boundary) whose AS_PATH leftmost
+// sequence segment's first AS is not the peer's negotiated AS is
+// dropped before Adj-RIB-In. When off (the default — `no bgp
+// enforce-first-as`), the route is admitted subject to the ordinary
+// policy and safety checks. iBGP and confederation-internal sessions
+// are exempt, mirroring FRR.
+func (r *Router) SetEnforceFirstAs(enabled bool) error {
+	rc := C.lr_router_set_enforce_first_as(r.ptr, toCBool(enabled))
+	if rc != 0 {
+		return fmt.Errorf("lr_router_set_enforce_first_as: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
 // SetSessionPolicy declares which directions of a BGP session carry an
 // explicit policy (RFC 8212 §3). A direction left false is subject to
 // the RFC 8212 default deny when SetEbgpRequiresPolicy(true) is active.

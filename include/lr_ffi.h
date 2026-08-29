@@ -197,6 +197,18 @@ int32_t lr_router_set_add_path_max_paths(lr_router_t r, uint32_t max_paths);
 int32_t lr_router_set_ebgp_requires_policy(lr_router_t r, uint8_t enabled);
 
 /**
+ * Enable or disable FRR `bgp enforce-first-as` (W2.2).
+ *
+ * When on, an UPDATE received from an external BGP peer (eBGP or a
+ * confederation boundary) whose AS_PATH leftmost sequence segment's
+ * first AS is not the peer's negotiated AS is rejected before the
+ * Adj-RIB-In. When off (the default — `no bgp enforce-first-as`),
+ * the route is admitted subject to the ordinary policy and safety
+ * checks. `enabled` is 0 (off) or non-zero (on).
+ */
+int32_t lr_router_set_enforce_first_as(lr_router_t r, uint8_t enabled);
+
+/**
  * Declare which directions of a BGP session carry an explicit policy
  * (RFC 8212 §3).
  *

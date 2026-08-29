@@ -61,6 +61,7 @@ int32_t lr_router_set_mrai(lr_router_t r, uint64_t session, uint64_t interval_ms
 int32_t lr_router_set_add_path(lr_router_t r, uint64_t session, uint8_t enabled);
 int32_t lr_router_set_add_path_max_paths(lr_router_t r, uint32_t max_paths);
 int32_t lr_router_set_ebgp_requires_policy(lr_router_t r, uint8_t enabled);
+int32_t lr_router_set_enforce_first_as(lr_router_t r, uint8_t enabled);
 int32_t lr_router_set_session_policy(lr_router_t r, uint64_t session,
                                      uint8_t import_, uint8_t export);
 int32_t lr_router_set_extended_next_hop(lr_router_t r,

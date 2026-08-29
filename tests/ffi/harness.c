@@ -191,6 +191,13 @@ int main(void) {
     rc = lr_router_set_ebgp_requires_policy(r, 0);
     check(rc == 0, "set_ebgp_requires_policy(off)");
 
+    /* FRR `bgp enforce-first-as` (W2.2): router-wide toggle for the
+     * leftmost-AS check on eBGP UPDATEs. Library default is off. */
+    rc = lr_router_set_enforce_first_as(r, 1);
+    check(rc == 0, "set_enforce_first_as(on)");
+    rc = lr_router_set_enforce_first_as(r, 0);
+    check(rc == 0, "set_enforce_first_as(off)");
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");
