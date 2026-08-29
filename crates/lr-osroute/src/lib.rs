@@ -86,6 +86,15 @@ pub mod gtsm;
 #[cfg(feature = "std")]
 pub mod ospf_transport;
 
+/// BFD UDP transport (RFC 5881 single-hop / RFC 5883 multihop) — the
+/// shared well-known-port receive socket (3784 / 4784) with the
+/// single-hop TTL 255 filter, plus per-session transmit sockets with
+/// RFC 5881 §4 ephemeral source ports. The TTL receive check needs
+/// `recvmsg` ancillary data and is Linux-only; elsewhere packets pass
+/// with an unknown TTL.
+#[cfg(feature = "std")]
+pub mod bfd_transport;
+
 #[cfg(all(
     feature = "std",
     any(
