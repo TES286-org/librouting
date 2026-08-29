@@ -73,7 +73,7 @@ trap 'kill $BIRD_PID 2>/dev/null || true' EXIT
 sleep 1
 
 echo "== starting lr-daemon (AS64512, [::1]:$PORT, IPv6 NLRI only) =="
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen "[::1]:$PORT" --local-address-v6 "2001:db8::1" \
     --mp-family ipv6-unicast \
     --network "2001:db8:1::/64" \

@@ -103,6 +103,8 @@ fn bfd_fast_fail_beats_hold_time() {
             "203.0.113.0/24",
             "--hold-time",
             "60",
+            "--ebgp-policy",
+            "accept-all",
             "--bfd",
             "--bfd-min-tx-ms",
             "100",
@@ -129,6 +131,7 @@ fn bfd_fast_fail_beats_hold_time() {
              listen_addr = \"{b_addr}:{b_port}\"\n\
              local_address = \"{b_addr}\"\n\
              hold_time = 60\n\
+             ebgp_policy = \"accept-all\"\n\
              bfd = true\n\
              bfd_min_tx_ms = 100\n\
              bfd_min_rx_ms = 100\n\

@@ -119,14 +119,14 @@ fi
 
 echo "== phase 2: lr-daemon Loc-RIB MRT export round-trip =="
 PORT=${PORT:-11831}
-"$DAEMON" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$DAEMON" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT --local-address 192.0.2.1 \
     --network 203.0.113.0/24 \
     --api-socket "$OUT/a.api" >"$OUT/a.log" 2>&1 &
 A_PID=$!
 trap 'kill $A_PID $B_PID 2>/dev/null || true' EXIT
 B_PID=""
-"$DAEMON" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+"$DAEMON" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 --ebgp-policy accept-all \
     --peer 127.0.0.1:$PORT --local-address 192.0.2.2 \
     --api-socket "$OUT/b.api" >"$OUT/b.log" 2>&1 &
 B_PID=$!

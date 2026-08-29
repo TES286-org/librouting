@@ -28,7 +28,7 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # ENOPROTOOPT ("Protocol not available").
 # ---------------------------------------------------------------------------
 echo "== probing kernel TCP-AO support =="
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT1 --tcp-ao-key 1:probe \
     >"$OUT/probe.log" 2>&1 &
 PROBE_PID=$!
@@ -54,14 +54,14 @@ fail=0
 # ---------------------------------------------------------------------------
 echo "== phase 1: two lr-daemons, same TCP-AO key (1:alpha) =="
 mkdir -p "$OUT/p1"
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT1 --local-address 192.0.2.1 \
     --tcp-ao-key 1:alpha --network 203.0.113.0/24 \
     >"$OUT/p1/a.log" 2>&1 &
 A_PID=$!
 trap 'kill $A_PID 2>/dev/null || true' EXIT
 sleep 1
-"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 --ebgp-policy accept-all \
     --peer 127.0.0.1:$PORT1 --local-address 192.0.2.2 \
     --tcp-ao-key 1:alpha \
     >"$OUT/p1/b.log" 2>&1 &
@@ -102,14 +102,14 @@ fi
 # ---------------------------------------------------------------------------
 echo "== phase 2: same KeyID, different secret (1:alpha vs 1:beta) =="
 mkdir -p "$OUT/p2"
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT2 --local-address 192.0.2.1 \
     --tcp-ao-key 1:alpha --network 203.0.113.0/24 \
     >"$OUT/p2/a.log" 2>&1 &
 A_PID=$!
 trap 'kill $A_PID 2>/dev/null || true' EXIT
 sleep 1
-"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 --ebgp-policy accept-all \
     --peer 127.0.0.1:$PORT2 --local-address 192.0.2.2 \
     --tcp-ao-key 1:beta \
     >"$OUT/p2/b.log" 2>&1 &

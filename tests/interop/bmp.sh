@@ -87,14 +87,14 @@ A_PID=""
 B_PID=""
 
 echo "== starting the monitored speaker A (AS64512, --bmp-target) =="
-"$DAEMON" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$DAEMON" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$BGPPORT --local-address 192.0.2.1 \
     --bmp-target 127.0.0.1:$PORT \
     >"$OUT/a.log" 2>&1 &
 A_PID=$!
 
 echo "== starting the route originator B (AS64513, connects to A) =="
-"$DAEMON" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+"$DAEMON" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 --ebgp-policy accept-all \
     --peer 127.0.0.1:$BGPPORT --local-address 192.0.2.2 \
     --network 203.0.113.0/24 \
     >"$OUT/b.log" 2>&1 &

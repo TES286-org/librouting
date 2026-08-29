@@ -170,7 +170,7 @@ if [ $vty_ok -ne 0 ]; then
 fi
 
 echo "== starting lr-daemon (AS64512, listener) =="
-"$BIN" --local-as 64512 --peer-as 64514 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64514 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT --local-address 192.0.2.1 \
     --network 203.0.113.0/24 \
     >"$OUT/lr.log" 2>&1 &

@@ -83,7 +83,9 @@ fn multi_peer_fanout_and_transit() {
     let port_b = 18101u16;
     let port_c = 18102u16;
 
-    // B and C first: A's connectors dial them.
+    // B and C first: A's connectors dial them. The subject here is
+    // A's multi-peer fan-out, so all three run the RFC 8212
+    // accept-all deviation instead of attaching route-maps.
     let b = Daemon::spawn(
         &[
             "--local-as",
@@ -98,6 +100,8 @@ fn multi_peer_fanout_and_transit() {
             "192.0.2.2",
             "--network",
             "198.51.100.0/24",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "fanout-b",
     );
@@ -112,6 +116,8 @@ fn multi_peer_fanout_and_transit() {
             "10.0.0.3",
             "--listen",
             &format!("127.0.0.1:{port_c}"),
+            "--ebgp-policy",
+            "accept-all",
         ],
         "fanout-c",
     );
@@ -125,7 +131,7 @@ fn multi_peer_fanout_and_transit() {
     std::fs::write(
         &conf,
         format!(
-            "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
+            "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\nebgp_policy = \"accept-all\"\n\
              local_address = \"192.0.2.1\"\nnetworks = [\"203.0.113.0/24\"]\n\n\
              [[peer]]\nname = \"b\"\nremote = \"127.0.0.1:{port_b}\"\npeer_as = 64513\n\n\
              [[peer]]\nname = \"c\"\nremote = \"127.0.0.1:{port_c}\"\npeer_as = 64514\n"
@@ -162,7 +168,7 @@ fn inbound_peer_matching_by_source_address() {
     std::fs::write(
         &conf,
         format!(
-            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\nebgp_policy = \"accept-all\"\n\
              listen_addr = \"127.0.0.1:{port_a}\"\nlocal_address = \"192.0.2.1\"\n\
              networks = [\"203.0.113.0/24\"]\n\n\
              [[peer]]\nname = \"b\"\naddress = \"127.0.0.1\"\n"
@@ -184,6 +190,8 @@ fn inbound_peer_matching_by_source_address() {
             &format!("127.0.0.1:{port_a}"),
             "--local-address",
             "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "inbound-b",
     );

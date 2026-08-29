@@ -22,7 +22,7 @@ OUT=/tmp/lr_interop
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 echo "== starting daemon A (listener, AS64512) =="
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT --local-address 192.0.2.1 \
     --network 203.0.113.0/24 \
     >"$OUT/a.log" 2>&1 &
@@ -32,7 +32,7 @@ trap 'kill $A_PID 2>/dev/null || true' EXIT
 sleep 1
 
 echo "== starting daemon B (connector, AS64513) =="
-"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 --ebgp-policy accept-all \
     --peer 127.0.0.1:$PORT --local-address 192.0.2.2 \
     >"$OUT/b.log" 2>&1 &
 B_PID=$!

@@ -81,7 +81,7 @@ trap 'kill $BIRD_PID 2>/dev/null || true' EXIT
 sleep 1
 
 echo "== starting lr-daemon (AS64512, [::1]:$PORT, ENH) =="
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 --ebgp-policy accept-all \
     --listen "[::1]:$PORT" --local-address-v6 "2001:db8::1" \
     --mp-family ipv4-unicast --extended-next-hop \
     --network 203.0.113.0/24 \

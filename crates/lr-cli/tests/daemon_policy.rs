@@ -139,6 +139,8 @@ export = "to-b"
     .unwrap();
 
     let a = Daemon::spawn(&["--config", cfg_a.to_str().unwrap()], "exp-a");
+    // B is a plain sink for this test (A's export policy is the
+    // subject), so it opts into the RFC 8212 accept-all deviation.
     let b = Daemon::spawn(
         &[
             "--local-as",
@@ -151,6 +153,8 @@ export = "to-b"
             &format!("127.0.0.1:{port_b}"),
             "--local-address",
             "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "exp-b",
     );
@@ -214,6 +218,8 @@ import = "from-a"
     )
     .unwrap();
 
+    // A is a plain originator for this test (B's import policy is
+    // the subject), so it opts into the RFC 8212 accept-all deviation.
     let _a = Daemon::spawn(
         &[
             "--local-as",
@@ -230,6 +236,8 @@ import = "from-a"
             "203.0.113.0/24",
             "--network",
             "198.51.100.0/24",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "imp-a",
     );
@@ -281,6 +289,7 @@ export = "mark"
     .unwrap();
 
     let _a = Daemon::spawn(&["--config", cfg_a.to_str().unwrap()], "set-a");
+    // B is a plain sink (A's export set-actions are the subject).
     let b = Daemon::spawn(
         &[
             "--local-as",
@@ -293,6 +302,8 @@ export = "mark"
             &format!("127.0.0.1:{port_b}"),
             "--local-address",
             "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "set-b",
     );
@@ -382,6 +393,8 @@ remote = "127.0.0.1:{port_c}"
     .unwrap();
 
     let _a = Daemon::spawn(&["--config", cfg_a.to_str().unwrap()], "tpl-a");
+    // B and C are plain sinks (the template export policy is the
+    // subject), so both opt into the accept-all deviation.
     let b = Daemon::spawn(
         &[
             "--local-as",
@@ -394,6 +407,8 @@ remote = "127.0.0.1:{port_c}"
             &format!("127.0.0.1:{port_b}"),
             "--local-address",
             "192.0.2.2",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "tpl-b",
     );
@@ -409,6 +424,8 @@ remote = "127.0.0.1:{port_c}"
             &format!("127.0.0.1:{port_c}"),
             "--local-address",
             "192.0.2.3",
+            "--ebgp-policy",
+            "accept-all",
         ],
         "tpl-c",
     );

@@ -141,7 +141,7 @@ birdc_r2() { nsenter -t "$R2" -n "$BIRDC" -s "$OUT/bird.ctl" "$@"; }
 
 echo "   starting lr-daemon (AS65001, --bfd 100ms x 3, hold 60s) ..."
 nsenter -t "$R1" -n "$BIN" \
-    --local-as 65001 --peer-as 65002 --router-id 1.1.1.1 \
+    --local-as 65001 --peer-as 65002 --router-id 1.1.1.1 --ebgp-policy accept-all \
     --peer 10.99.1.2:179 --local-address 10.99.1.1 \
     --network 203.0.113.0/24 --hold-time 60 \
     --bfd --bfd-min-tx-ms 100 --bfd-min-rx-ms 100 --bfd-multiplier 3 \
@@ -250,7 +250,7 @@ birdc_r2() { nsenter -t "$R2" -n "$BIRDC" -s "$OUT/bird2.ctl" "$@"; }
 
 echo "   starting lr-daemon (--bfd-multihop) ..."
 nsenter -t "$R1" -n "$BIN" \
-    --local-as 65001 --peer-as 65002 --router-id 1.1.1.1 \
+    --local-as 65001 --peer-as 65002 --router-id 1.1.1.1 --ebgp-policy accept-all \
     --peer 10.99.13.2:179 --local-address 10.99.11.1 \
     --network 203.0.113.0/24 --hold-time 60 \
     --bfd --bfd-multihop \
