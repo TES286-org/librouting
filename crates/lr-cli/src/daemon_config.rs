@@ -64,6 +64,12 @@ pub(crate) struct PeerSpec {
     pub max_prefixes: Option<u32>,
     pub max_prefix_action: Option<String>,
     pub max_prefix_threshold: Option<u8>,
+    /// BFD fast-fail for this peer (`bfd = true`, RFC 5880/5881).
+    /// `None` inherits the global setting.
+    pub bfd: Option<bool>,
+    /// BFD multihop mode (RFC 5883 — UDP 4784, no TTL check).
+    /// `None` inherits the global setting.
+    pub bfd_multihop: Option<bool>,
 }
 
 impl PeerSpec {
@@ -197,6 +203,19 @@ pub(crate) struct DaemonConfig {
     pub max_prefix_action: String,
     /// Early-warning threshold percentage (0..=100). 0 disables.
     pub max_prefix_threshold: u8,
+    /// BFD fast-fail enabled for peers that do not override
+    /// (`--bfd` / `[bgp] bfd`). Sessions run on the RFC 5881 ports and
+    /// a BFD Down tears the BGP session immediately instead of
+    /// waiting out the hold timer.
+    pub bfd_enabled: bool,
+    /// BFD multihop default (RFC 5883: UDP 4784, no TTL 255 check).
+    pub bfd_multihop: bool,
+    /// BFD DesiredMinTxInterval in milliseconds (RFC 5880 §6.8.1).
+    pub bfd_min_tx_ms: u32,
+    /// BFD RequiredMinRxInterval in milliseconds.
+    pub bfd_min_rx_ms: u32,
+    /// BFD detection multiplier (packets lost before Down).
+    pub bfd_multiplier: u8,
     /// Protocol to run: "bgp" (default), "babel" or "ospf".
     pub protocol: String,
     /// Babel multicast group address (default: ff02::1:6).
@@ -253,6 +272,9 @@ impl DaemonConfig {
             add_path_max_paths: 6,
             max_prefix_action: "warn".to_string(),
             max_prefix_threshold: 75,
+            bfd_min_tx_ms: 100,
+            bfd_min_rx_ms: 100,
+            bfd_multiplier: 3,
             protocol: "bgp".to_string(),
             babel_port: 6696,
             ospf_hello_interval: 10,
@@ -374,6 +396,17 @@ impl DaemonConfig {
             self.peer_as
         }
     }
+
+    /// BFD fast-fail resolved for one peer (per-peer override of the
+    /// `[bgp]` / `--bfd` global).
+    pub fn effective_bfd(&self, peer: &PeerSpec) -> bool {
+        peer.bfd.unwrap_or(self.bfd_enabled)
+    }
+
+    /// BFD mode resolved for one peer.
+    pub fn effective_bfd_multihop(&self, peer: &PeerSpec) -> bool {
+        peer.bfd_multihop.unwrap_or(self.bfd_multihop)
+    }
 }
 
 /// Area IDs render as dotted quads when they look like one (BIRD/FRR
@@ -432,6 +465,12 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
     opt(&mut over.max_prefix_action, &base.max_prefix_action);
     if over.max_prefix_threshold.is_none() {
         over.max_prefix_threshold = base.max_prefix_threshold;
+    }
+    if over.bfd.is_none() {
+        over.bfd = base.bfd;
+    }
+    if over.bfd_multihop.is_none() {
+        over.bfd_multihop = base.bfd_multihop;
     }
 }
 
@@ -635,6 +674,17 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 cfg.max_prefix_threshold = value.parse().unwrap_or(75);
             }
             "bgp.mp_families" => cfg.mp_families = parse_str_array(value),
+            "bgp.bfd" => cfg.bfd_enabled = parse_bool(value),
+            "bgp.bfd_multihop" => cfg.bfd_multihop = parse_bool(value),
+            "bgp.bfd_min_tx_ms" => {
+                cfg.bfd_min_tx_ms = value.parse().unwrap_or(100);
+            }
+            "bgp.bfd_min_rx_ms" => {
+                cfg.bfd_min_rx_ms = value.parse().unwrap_or(100);
+            }
+            "bgp.bfd_multiplier" => {
+                cfg.bfd_multiplier = value.parse().unwrap_or(3);
+            }
             "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
             "bgp.bmp_target" => cfg.bmp_target = Some(value.to_string()),
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
@@ -899,6 +949,8 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "max_prefix_threshold" => {
             peer.max_prefix_threshold = Some(value.parse().map_err(|_| "bad max_prefix_threshold")?)
         }
+        "bfd" => peer.bfd = Some(parse_bool(value)),
+        "bfd_multihop" => peer.bfd_multihop = Some(parse_bool(value)),
         "import" => peer.import = Some(value.to_string()),
         "export" => peer.export = Some(value.to_string()),
         _ => return Ok(false), // unknown key — caller warns
@@ -1033,6 +1085,26 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--max-prefix-threshold" if i + 1 < args.len() => {
                 cfg.max_prefix_threshold = args[i + 1].parse().unwrap_or(75);
+                i += 2;
+            }
+            "--bfd" => {
+                cfg.bfd_enabled = true;
+                i += 1;
+            }
+            "--bfd-multihop" => {
+                cfg.bfd_multihop = true;
+                i += 1;
+            }
+            "--bfd-min-tx-ms" if i + 1 < args.len() => {
+                cfg.bfd_min_tx_ms = args[i + 1].parse().unwrap_or(100);
+                i += 2;
+            }
+            "--bfd-min-rx-ms" if i + 1 < args.len() => {
+                cfg.bfd_min_rx_ms = args[i + 1].parse().unwrap_or(100);
+                i += 2;
+            }
+            "--bfd-multiplier" if i + 1 < args.len() => {
+                cfg.bfd_multiplier = args[i + 1].parse().unwrap_or(3);
                 i += 2;
             }
             "--protocol" if i + 1 < args.len() => {

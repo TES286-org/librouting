@@ -50,12 +50,14 @@ use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
 
 mod api;
+mod daemon_bfd;
 mod daemon_config;
 mod daemon_ospf;
 mod daemon_policy;
 mod privdrop;
 mod signal;
 
+use daemon_bfd::BfdFlags;
 use daemon_config::{DaemonConfig, PeerSpec};
 
 fn print_usage() {
@@ -93,6 +95,13 @@ fn print_usage() {
          --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (default 75)\n  \
+         --bfd                    BFD fast-fail for the peer(s) (RFC 5880/\n  \
+         5881): a BFD Down tears the BGP session immediately\n  \
+         --bfd-multihop           RFC 5883 multihop BFD (UDP 4784, no TTL\n  \
+         255 check)\n  \
+         --bfd-min-tx-ms MS       BFD transmit interval (default 100)\n  \
+         --bfd-min-rx-ms MS       BFD receive interval (default 100)\n  \
+         --bfd-multiplier N       BFD detection multiplier (default 3)\n  \
          --protocol PROTO         bgp (default) | babel | ospf | bmp\n  \
          --babel-group ADDR       Babel multicast group (ff02::1:6)\n  \
          --babel-port PORT        Babel UDP port (6696)\n  \
@@ -191,6 +200,8 @@ struct PeerEntry {
     handle: SessionHandle,
     auth: TcpAuth,
     gtsm: Gtsm,
+    /// BFD liveness flags when the peer runs `bfd = true`.
+    bfd: Option<BfdFlags>,
     /// True while a transport thread owns this session — prevents two
     /// concurrent connections racing one FSM.
     busy: Arc<AtomicBool>,
@@ -286,6 +297,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     handle: h,
                     auth,
                     gtsm,
+                    bfd: None,
                     busy: Arc::new(AtomicBool::new(false)),
                 }),
                 Err(e) => {
@@ -372,6 +384,76 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
 
     let running = Arc::new(AtomicBool::new(true));
     let live_sessions = Arc::new(AtomicUsize::new(0));
+
+    // ---- BFD fast-fail supervisor (RFC 5880/5881/5883, W1.3). ----
+    // One session per `bfd = true` peer; a BFD Down tears the BGP
+    // session immediately instead of waiting out the hold timer.
+    // Fails closed: configured BFD that cannot bind is fatal.
+    {
+        let mut specs = Vec::new();
+        for entry in &entries {
+            if !cfg.effective_bfd(&entry.spec) {
+                continue;
+            }
+            let Some(peer_ip) = expected_peer_ip(&entry.spec) else {
+                eprintln!(
+                    "daemon: peer {}: bfd requires a resolvable peer address \
+                     ('remote' host or 'address')",
+                    entry.label()
+                );
+                return ExitCode::from(2);
+            };
+            let Some(local_ip) = peer_local_address(cfg, &entry.spec) else {
+                eprintln!(
+                    "daemon: peer {}: bfd requires a local address \
+                     (--local-address / local_address)",
+                    entry.label()
+                );
+                return ExitCode::from(2);
+            };
+            let mode = if cfg.effective_bfd_multihop(&entry.spec) {
+                lr_osroute::bfd_transport::BfdMode::Multihop
+            } else {
+                lr_osroute::bfd_transport::BfdMode::SingleHop
+            };
+            specs.push(daemon_bfd::BfdPeerSpec {
+                label: entry.label().to_string(),
+                peer_ip: to_std_ip(peer_ip),
+                local_ip: to_std_ip(local_ip),
+                mode,
+            });
+        }
+        if !specs.is_empty() {
+            println!(
+                "daemon: bfd: {} session(s), min tx {} ms, min rx {} ms, multiplier {}",
+                specs.len(),
+                cfg.bfd_min_tx_ms,
+                cfg.bfd_min_rx_ms,
+                cfg.bfd_multiplier
+            );
+            let flags = match daemon_bfd::spawn_supervisor(
+                specs,
+                cfg.bfd_min_tx_ms,
+                cfg.bfd_min_rx_ms,
+                cfg.bfd_multiplier,
+                Arc::clone(&running),
+            ) {
+                Ok(f) => f,
+                Err(e) => {
+                    eprintln!("daemon: {}", e);
+                    return ExitCode::from(1);
+                }
+            };
+            // specs were built in entry order; assign back by position.
+            let mut flag_iter = flags.into_iter();
+            for entry in &mut entries {
+                if cfg.effective_bfd(&entry.spec) {
+                    entry.bfd = flag_iter.next();
+                }
+            }
+        }
+    }
+
     let runtime = Arc::new(Runtime {
         reload: Arc::new({
             let router = Arc::clone(&router);
@@ -468,7 +550,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     if !legacy_listen_only {
         for entry in &entries {
             if entry.spec.is_outbound() {
-                spawn_connector(&runtime, entry, Arc::clone(&live_sessions));
+                spawn_connector(&runtime, entry, cfg, Arc::clone(&live_sessions));
             }
         }
     }
@@ -514,11 +596,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     let busy = Arc::clone(&entry.busy);
                     let live = Arc::clone(&live_sessions);
                     let handle = entry.handle;
+                    let bfd = entry.bfd.clone();
                     live.fetch_add(1, Ordering::Relaxed);
                     let spawned = thread::Builder::new()
                         .name(format!("lr-session-{}", handle.0))
                         .spawn(move || {
-                            if let Err(e) = run_peer_session(rt, s, handle) {
+                            if let Err(e) = run_peer_session(rt, s, handle, bfd) {
                                 eprintln!("daemon: session #{} ended: {}", handle.0, e);
                             }
                             busy.store(false, Ordering::Relaxed);
@@ -820,13 +903,18 @@ fn expected_peer_ip(spec: &PeerSpec) -> Option<IpAddr> {
 ///   signs the SYN; GTSM's outbound TTL is set on the returned
 ///   TcpStream via set_ttl. The min-TTL filter is listener-side only.
 /// - GTSM only: connect_gtsm creates the socket with TTL set.
-/// - Neither: plain connect.
+/// - Neither: plain connect — bound to `local` when configured so the
+///   peer sees the configured source address.
+///
+/// Source binding does not yet combine with TCP auth (connect_auth
+/// creates its own socket); that combination is future work.
 ///
 /// The Err payload marks kernel-unsupported auth as fatal for this peer
 /// (fail closed: the key was configured, running without it is worse
 /// than not running the session).
 fn connect_secure(
     sockaddr: std::net::SocketAddr,
+    local: Option<std::net::SocketAddr>,
     auth: &TcpAuth,
     gtsm: &Gtsm,
 ) -> Result<TcpStream, (String, bool)> {
@@ -857,6 +945,19 @@ fn connect_secure(
                 }
             }
         }
+    } else if let Some(local) = local {
+        match lr_osroute::tcp_bind::connect_bound(local, sockaddr, Duration::from_secs(5)) {
+            Ok(s) => Ok(s),
+            // `local_address` is primarily a next-hop-self value and
+            // may name an address the host does not own (192.0.2.x in
+            // lab configs); fall back to the kernel's source choice
+            // exactly as before the bind existed.
+            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5))
+                    .map_err(|e2| (format!("{e2}"), false))
+            }
+            Err(e) => Err((format!("{e}"), false)),
+        }
     } else {
         TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5))
             .map_err(|e| (format!("{e}"), false))
@@ -865,13 +966,23 @@ fn connect_secure(
 
 /// One outbound peer: connect, run the session until it drops, back
 /// off, repeat — for the lifetime of the daemon.
-fn spawn_connector(rt: &Arc<Runtime>, entry: &PeerEntry, live: Arc<AtomicUsize>) {
+fn spawn_connector(
+    rt: &Arc<Runtime>,
+    entry: &PeerEntry,
+    cfg: &DaemonConfig,
+    live: Arc<AtomicUsize>,
+) {
     let rt = Arc::clone(rt);
     let remote = entry.spec.remote.clone().expect("outbound peer has remote");
     let auth = entry.auth.clone();
     let gtsm = entry.gtsm;
     let handle = entry.handle;
     let label = entry.spec.label().to_string();
+    let bfd = entry.bfd.clone();
+    // Source the connection from the configured local address when
+    // one exists (port 0 = ephemeral).
+    let local =
+        peer_local_address(cfg, &entry.spec).map(|ip| std::net::SocketAddr::new(to_std_ip(ip), 0));
     let _ = thread::Builder::new()
         .name(format!("lr-connect-{}", label))
         .spawn(move || {
@@ -881,6 +992,15 @@ fn spawn_connector(rt: &Arc<Runtime>, entry: &PeerEntry, live: Arc<AtomicUsize>)
                 if !rt.running.load(Ordering::Relaxed) {
                     break;
                 }
+                // BFD hold-off (after the session has been Up at least
+                // once): don't connect into a path BFD has declared
+                // dead — and don't grow the backoff while waiting.
+                if let Some(bfd) = &bfd {
+                    if bfd.ever_up.load(Ordering::Relaxed) && !bfd.up.load(Ordering::Relaxed) {
+                        sleep_interruptible(&rt, Duration::from_millis(200));
+                        continue;
+                    }
+                }
                 let sockaddr = match resolve(&remote) {
                     Some(a) => a,
                     None => {
@@ -889,12 +1009,12 @@ fn spawn_connector(rt: &Arc<Runtime>, entry: &PeerEntry, live: Arc<AtomicUsize>)
                     }
                 };
                 println!("daemon: peer {}: connecting to {} ...", label, remote);
-                match connect_secure(sockaddr, &auth, &gtsm) {
+                match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
                         backoff_ms = 1_000;
                         let _ = stream.set_nodelay(true);
                         live.fetch_add(1, Ordering::Relaxed);
-                        let result = run_peer_session(Arc::clone(&rt), stream, handle);
+                        let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
                         live.fetch_sub(1, Ordering::Relaxed);
                         if let Err(e) = result {
                             eprintln!("daemon: peer {}: session ended: {}", label, e);
@@ -928,6 +1048,7 @@ fn run_peer_session(
     rt: Arc<Runtime>,
     mut stream: TcpStream,
     session: SessionHandle,
+    bfd: Option<BfdFlags>,
 ) -> Result<(), String> {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     {
@@ -935,7 +1056,7 @@ fn run_peer_session(
         r.start_session(session)
             .map_err(|e| format!("start_session: {}", e))?;
     }
-    let result = pump_session(&rt, &mut stream, session);
+    let result = pump_session(&rt, &mut stream, session, bfd);
     // The transport is gone: drive the FSM to Idle and purge the routes
     // this session contributed (RFC 4271 §8.2.2). Event consumers (the
     // ticker thread) observe the resulting events.
@@ -958,9 +1079,14 @@ fn pump_session(
     rt: &Arc<Runtime>,
     stream: &mut TcpStream,
     session: SessionHandle,
+    bfd: Option<BfdFlags>,
 ) -> Result<(), String> {
     let router = &rt.router;
     let mut buf = [0u8; 8192];
+    // BFD fast-fail: remember the last-seen liveness so only an
+    // Up -> Down *transition* tears the session (a BFD session that
+    // never came up must not kill BGP — BIRD parity).
+    let mut bfd_up_seen = bfd.as_ref().map(|f| f.up.load(Ordering::Relaxed));
     while rt.running.load(Ordering::Relaxed) {
         // Signals first: a shutdown must tear the session down cleanly
         // even while the peer is idle, and a reload can change what we
@@ -968,6 +1094,17 @@ fn pump_session(
         dispatch_signals(rt);
         if !rt.running.load(Ordering::Relaxed) {
             break;
+        }
+
+        // BFD Up -> Down: the path died; tear the session down now
+        // instead of waiting out the hold timer (RFC 5880 §6.8.4,
+        // the whole point of `--bfd`).
+        if let Some(flags) = &bfd {
+            let up = flags.up.load(Ordering::Relaxed);
+            if bfd_up_seen == Some(true) && !up {
+                return Err("bfd session down".into());
+            }
+            bfd_up_seen = Some(up);
         }
 
         // 1. Read peer bytes → feed_input.
@@ -1624,6 +1761,15 @@ pub(crate) fn write_mrt_rib_dump(
     let bytes = dump.encode(now).map_err(|e| format!("mrt encode: {}", e))?;
     std::fs::write(path, bytes).map_err(|e| format!("mrt write {path}: {e}"))?;
     Ok(records)
+}
+
+/// Convert an `lr_core` address into its `std::net` counterpart
+/// (for sockets and transport modules).
+fn to_std_ip(ip: IpAddr) -> std::net::IpAddr {
+    match ip {
+        IpAddr::V4(o) => std::net::IpAddr::V4(std::net::Ipv4Addr::from(o)),
+        IpAddr::V6(o) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(o)),
+    }
 }
 
 fn resolve(addr: &str) -> Option<std::net::SocketAddr> {
