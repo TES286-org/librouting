@@ -247,6 +247,25 @@ class Router:
                 f"lr_router_set_local_address failed (rc={rc}): {last_error()}"
             )
 
+    def set_default_ipv4_unicast(self, session: int, enabled: bool) -> None:
+        """Configure FRR ``bgp default ipv4-unicast`` (W2.1) for one session.
+
+        When ``enabled`` is ``True`` (the default), IPv4 unicast is
+        implicitly active even when :meth:`set_mp_families` did not list
+        it. When ``False``, IPv4 unicast must be added explicitly via
+        :meth:`set_mp_families` to be active — the FRR
+        ``no bgp default ipv4-unicast`` posture. Must be called before
+        :meth:`start_session`; unknown handles or already-established
+        sessions raise :class:`LrError`.
+        """
+        rc = get_lib().lr_router_set_default_ipv4_unicast(
+            self._ptr, int(session), 1 if enabled else 0
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_default_ipv4_unicast failed (rc={rc}): {last_error()}"
+            )
+
     def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
         """Ask an established BGP peer to resend an RFC 2918 address family.
 

@@ -169,3 +169,19 @@ def test_enforce_first_as_abi():
     with librouting.Router() as r:
         r.set_enforce_first_as(True)
         r.set_enforce_first_as(False)
+
+
+def test_default_ipv4_unicast_abi():
+    """FRR `bgp default ipv4-unicast` (W2.1): the per-session toggle is
+    callable from Python and round-trips through the C ABI. Unknown
+    handles fail closed."""
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513,
+                              local_bgp_id=0x0a000001)
+        r.set_default_ipv4_unicast(h, False)
+        r.set_default_ipv4_unicast(h, True)
+        try:
+            r.set_default_ipv4_unicast(9999, True)
+            assert False, "set_default_ipv4_unicast on unknown session must raise"
+        except librouting.LrError:
+            pass

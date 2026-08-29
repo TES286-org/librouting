@@ -306,6 +306,25 @@ func (r *Router) SetLocalAddress(session uint64, addr []byte) error {
 	return nil
 }
 
+// SetDefaultIPv4Unicast configures FRR `bgp default ipv4-unicast`
+// (W2.1) for one BGP session. When `enabled` is true (the default),
+// IPv4 unicast is implicitly active even when SetMpFamilies did not
+// list it. When false, IPv4 unicast must be added explicitly via
+// SetMpFamilies to be active — the FRR `no bgp default ipv4-unicast`
+// posture. Must be called before StartSession; unknown handles or
+// already-established sessions return an error.
+func (r *Router) SetDefaultIPv4Unicast(session uint64, enabled bool) error {
+	rc := C.lr_router_set_default_ipv4_unicast(
+		r.ptr,
+		C.uint64_t(session),
+		toCBool(enabled),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_set_default_ipv4_unicast: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
 	rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))

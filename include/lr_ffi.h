@@ -283,6 +283,19 @@ int32_t lr_router_set_local_address(lr_router_t r,
                                     uintptr_t addr_len);
 
 /**
+ * Configure FRR `bgp default ipv4-unicast` (W2.1) for a BGP session.
+ *
+ * When `enabled` is non-zero (the default), IPv4 unicast is implicitly
+ * active even when `lr_router_set_mp_families` did not list it. When
+ * zero, IPv4 unicast must be added explicitly via
+ * `lr_router_set_mp_families` to be active — the FRR
+ * `no bgp default ipv4-unicast` posture. Must be called after
+ * `lr_router_add_bgp_session*` and before `lr_router_start_session`;
+ * unknown handles or already-established sessions fail with -2.
+ */
+int32_t lr_router_set_default_ipv4_unicast(lr_router_t r, uint64_t session, uint8_t enabled);
+
+/**
  * Request an RFC 2918 route refresh from an established BGP peer.
  *
  * Returns 1 when a request was queued, 0 when the session has not negotiated

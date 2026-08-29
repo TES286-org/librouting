@@ -225,5 +225,17 @@ func TestRfc8212(t *testing.T) {
 	if err := r.SetEnforceFirstAs(false); err != nil {
 		t.Fatalf("SetEnforceFirstAs(false): %v", err)
 	}
+	// FRR `bgp default ipv4-unicast` (W2.1): the per-session toggle
+	// is callable from Go and round-trips through the C ABI. Unknown
+	// handles fail closed.
+	if err := r.SetDefaultIPv4Unicast(h, false); err != nil {
+		t.Fatalf("SetDefaultIPv4Unicast(false): %v", err)
+	}
+	if err := r.SetDefaultIPv4Unicast(h, true); err != nil {
+		t.Fatalf("SetDefaultIPv4Unicast(true): %v", err)
+	}
+	if err := r.SetDefaultIPv4Unicast(9999, true); err == nil {
+		t.Fatalf("SetDefaultIPv4Unicast on unknown session must error")
+	}
 	r.ptr = nil
 }

@@ -115,6 +115,9 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         },
         mrai_ms: if local_as == peer_as { 5_000 } else { 30_000 },
         mp_families: Vec::new(),
+        // W2.1: FRR `bgp default ipv4-unicast` defaults to on. Embedders
+        // flip it via `lr_router_set_default_ipv4_unicast`.
+        default_ipv4_unicast: true,
         local_address: None,
         area_id: 0,
         ospf_area_type: OspfAreaType::Normal,
@@ -470,6 +473,34 @@ pub unsafe extern "C" fn lr_router_set_local_address(
         }
     };
     match router.set_session_local_address(SessionHandle(session), addr) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// Configure FRR `bgp default ipv4-unicast` (W2.1) for a BGP session.
+///
+/// When `enabled` is non-zero (the default), IPv4 unicast is implicitly
+/// active even when `lr_router_set_mp_families` did not list it. When
+/// zero, IPv4 unicast must be added explicitly via
+/// `lr_router_set_mp_families` to be active — the FRR
+/// `no bgp default ipv4-unicast` posture. Must be called after
+/// `lr_router_add_bgp_session*` and before `lr_router_start_session`;
+/// unknown handles or already-established sessions fail with -2.
+#[no_mangle]
+pub extern "C" fn lr_router_set_default_ipv4_unicast(
+    r: lr_router_t,
+    session: u64,
+    enabled: u8,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.set_session_default_ipv4_unicast(SessionHandle(session), enabled != 0) {
         Ok(()) => 0,
         Err(error) => {
             set_last_error(error);

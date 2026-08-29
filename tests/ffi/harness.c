@@ -198,6 +198,15 @@ int main(void) {
     rc = lr_router_set_enforce_first_as(r, 0);
     check(rc == 0, "set_enforce_first_as(off)");
 
+    /* FRR `bgp default ipv4-unicast` (W2.1): per-session toggle for
+     * implicit IPv4 unicast activation. Library default is on. */
+    rc = lr_router_set_default_ipv4_unicast(r, h, 0);
+    check(rc == 0, "set_default_ipv4_unicast(off) on valid handle");
+    rc = lr_router_set_default_ipv4_unicast(r, h, 1);
+    check(rc == 0, "set_default_ipv4_unicast(on) on valid handle");
+    rc = lr_router_set_default_ipv4_unicast(r, 999, 1);
+    check(rc == -2, "set_default_ipv4_unicast on unknown handle fails closed");
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

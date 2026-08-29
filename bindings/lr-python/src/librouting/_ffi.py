@@ -77,6 +77,9 @@ int32_t lr_router_set_local_address(lr_router_t r,
                                     uint16_t addr_family,
                                     const uint8_t *addr_bytes,
                                     uintptr_t addr_len);
+int32_t lr_router_set_default_ipv4_unicast(lr_router_t r,
+                                           uint64_t session,
+                                           uint8_t enabled);
 int32_t lr_router_request_route_refresh(lr_router_t r,
                                         uint64_t session,
                                         uint16_t afi,
