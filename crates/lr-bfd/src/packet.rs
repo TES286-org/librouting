@@ -117,19 +117,38 @@ impl Diagnostic {
 }
 
 bitflags::bitflags! {
-    /// BFD packet flags (RFC 5880 §4.1, low 6 bits of byte 2).
+    /// BFD Control packet flags — the six bits after the State field in
+    /// byte 1, which RFC 5880 §4.1 lays out as `|Sta|P|F|C|A|D|M|`:
+    ///
+    /// ```text
+    /// bit 7-6: State  bit 5: P  bit 4: F  bit 3: C  bit 2: A
+    /// bit 1:   D      bit 0: M
+    /// ```
+    ///
+    /// Note there is no "echo" flag in the BFD Control packet — the
+    /// Echo function is signalled through the Required Min Echo RX
+    /// Interval field, not a header bit.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct PacketFlags: u8 {
-        /// Multi-hop session indicator.
+        /// Multipoint (M, bit 0). Reserved for future point-to-
+        /// multipoint extensions; MUST be zero on transmit and receipt
+        /// (RFC 5880 §4.1).
         const MULTIPOINT = 0b0000_0001;
-        /// Demand mode enabled.
+        /// Demand (D, bit 1). Demand mode is active in the transmitting
+        /// system (RFC 5880 §6.6).
         const DEMAND = 0b0000_0010;
-        /// Authentication section is present.
+        /// Authentication Present (A, bit 2). The Authentication
+        /// Section is present (RFC 5880 §6.7).
         const AUTH = 0b0000_0100;
-        /// Control-plane independent (e.g. via hardware-offloaded BFD-for-PL).
+        /// Control Plane Independent (C, bit 3).
         const CPI = 0b0000_1000;
-        /// Echo function active.
-        const ECHO = 0b0001_0000;
+        /// Final (F, bit 4). The transmitter is responding to a
+        /// received Poll (RFC 5880 §6.5).
+        const FINAL = 0b0001_0000;
+        /// Poll (P, bit 5). The transmitter is requesting connectivity
+        /// / parameter-change verification and expects Final in reply
+        /// (RFC 5880 §6.5).
+        const POLL = 0b0010_0000;
     }
 }
 
@@ -169,16 +188,12 @@ impl BfdPacket {
         }
     }
 
-    /// Length field for this packet (24 without auth, 24 + 28 = 52 with
-    /// MD5/SHA1 keyed auth trailer).
-    pub fn length(&self, has_auth: bool) -> u8 {
-        if !has_auth {
-            24
-        } else {
-            // Auth section is 4-byte header + variable data. MD5: 24 bytes
-            // of data + 4 header = 28 total. SHA1: 24 + 4 = 28. So 24+28=52.
-            52
-        }
+    /// Total length of this packet on the wire (the Length field,
+    /// RFC 5880 §4.1): 24 without authentication, plus the auth
+    /// section length when present (28-40 for Simple Password,
+    /// 48 for Keyed MD5, 52 for Keyed SHA1).
+    pub fn length(&self) -> u8 {
+        BfdPacket::MIN_LEN as u8 + self.auth.as_ref().map_or(0, |a| a.wire_len() as u8)
     }
 }
 
@@ -198,9 +213,16 @@ impl Encoder<BfdPacket> for BfdCodec {
             return Err(EncodeError::BufferFull);
         }
         out.put_u8((BFD_VERSION << 5) | (p.diag.to_u8() & 0x1f));
-        out.put_u8((p.state as u8) << 6 | (p.flags.bits() & 0x3f));
+        // RFC 5880 §6.8.7: the Authentication Present bit is set iff
+        // authentication is in use — derive it from the section's
+        // presence so the two can never disagree.
+        let mut flags = p.flags;
+        if p.auth.is_some() {
+            flags |= PacketFlags::AUTH;
+        }
+        out.put_u8((p.state as u8) << 6 | (flags.bits() & 0x3f));
         out.put_u8(p.detect_mult.clamp(1, 255));
-        out.put_u8(p.length(p.auth.is_some()));
+        out.put_u8(p.length());
         out.put_u32_be(p.my_discriminator);
         out.put_u32_be(p.your_discriminator);
         out.put_u32_be(p.desired_min_tx_interval);
@@ -236,9 +258,21 @@ impl Decoder<BfdPacket> for BfdCodec {
         let detect_mult = r
             .get_u8()
             .ok_or_else(|| ParseError::truncated("bfd.detect_mult"))?;
-        let _length = r
-            .get_u8()
-            .ok_or_else(|| ParseError::truncated("bfd.length"))?;
+        let length_field =
+            r.get_u8()
+                .ok_or_else(|| ParseError::truncated("bfd.length"))? as usize;
+        // RFC 5880 §6.8.6: discard when the Length field is smaller
+        // than the minimum correct value (24 without auth, 26 with) or
+        // larger than the available payload (4 header bytes are
+        // already consumed here).
+        let min_len = if flags.contains(PacketFlags::AUTH) {
+            26
+        } else {
+            BfdPacket::MIN_LEN
+        };
+        if length_field < min_len || length_field > r.remaining() + 4 {
+            return Err(ParseError::invalid(3, "bfd.length"));
+        }
         let my_disc = r
             .get_u32_be()
             .ok_or_else(|| ParseError::truncated("bfd.my_disc"))?;
@@ -288,11 +322,126 @@ mod tests {
         assert_eq!(n, BfdPacket::MIN_LEN);
         let mut r = ReadBuf::new(&buf);
         let decoded = codec.decode(&mut r).unwrap().unwrap();
+        assert_eq!(decoded, p);
         assert_eq!(decoded.state, State::Up);
         assert_eq!(decoded.diag, Diagnostic::None);
         assert_eq!(decoded.my_discriminator, 0x11223344);
         assert_eq!(decoded.your_discriminator, 0x55667788);
         assert_eq!(decoded.desired_min_tx_interval, 1_000_000);
+    }
+
+    #[test]
+    fn flag_bit_positions_match_rfc_5880_4_1() {
+        // Byte 1 layout is |Sta|P|F|C|A|D|M| (RFC 5880 §4.1):
+        // State << 6 | P(0x20) | F(0x10) | C(0x08) | A(0x04) | D(0x02)
+        // | M(0x01).
+        let mut codec = BfdCodec::new();
+        let p = BfdPacket {
+            flags: PacketFlags::POLL
+                | PacketFlags::FINAL
+                | PacketFlags::CPI
+                | PacketFlags::AUTH
+                | PacketFlags::DEMAND
+                | PacketFlags::MULTIPOINT,
+            ..BfdPacket::heartbeat(1, 2)
+        };
+        let mut buf = [0u8; BfdPacket::MIN_LEN];
+        let mut w = WriteBuf::new(&mut buf);
+        codec.encode(&p, &mut w).unwrap();
+        assert_eq!(buf[1], (State::Up as u8) << 6 | 0b0011_1111);
+        // State alone.
+        let p2 = BfdPacket::heartbeat(1, 2);
+        let mut w = WriteBuf::new(&mut buf);
+        codec.encode(&p2, &mut w).unwrap();
+        assert_eq!(buf[1], (State::Up as u8) << 6);
+        // Round-trip the flags.
+        let mut r = ReadBuf::new(&buf);
+        assert_eq!(codec.decode(&mut r).unwrap().unwrap().flags, p2.flags);
+    }
+
+    #[test]
+    fn poll_final_roundtrip() {
+        let mut codec = BfdCodec::new();
+        let p = BfdPacket {
+            flags: PacketFlags::POLL,
+            state: State::Up,
+            ..BfdPacket::heartbeat(0x11111111, 0x22222222)
+        };
+        let mut buf = [0u8; BfdPacket::MIN_LEN];
+        let mut w = WriteBuf::new(&mut buf);
+        codec.encode(&p, &mut w).unwrap();
+        let mut r = ReadBuf::new(&buf);
+        let decoded = codec.decode(&mut r).unwrap().unwrap();
+        assert!(decoded.flags.contains(PacketFlags::POLL));
+        assert!(!decoded.flags.contains(PacketFlags::FINAL));
+    }
+
+    #[test]
+    fn length_field_with_auth() {
+        let mut codec = BfdCodec::new();
+        // Keyed MD5 section (24 bytes): Length = 24 + 24 = 48.
+        let md5 = BfdPacket {
+            flags: PacketFlags::AUTH,
+            auth: Some(crate::auth::AuthSection::keyed_md5(1, 0, vec![0u8; 16])),
+            ..BfdPacket::heartbeat(1, 2)
+        };
+        assert_eq!(md5.length(), 48);
+        let mut buf = [0u8; 96];
+        let mut w = WriteBuf::new(&mut buf);
+        let n = codec.encode(&md5, &mut w).unwrap();
+        assert_eq!(n, 48);
+        let mut r = ReadBuf::new(&buf[..n]);
+        assert_eq!(codec.decode(&mut r).unwrap().unwrap(), md5);
+
+        // Simple Password (3 + 8 bytes): Length = 24 + 11 = 35.
+        let sp = BfdPacket {
+            flags: PacketFlags::AUTH,
+            auth: Some(crate::auth::AuthSection::simple_password(
+                b"hunter22".to_vec(),
+                1,
+            )),
+            ..BfdPacket::heartbeat(1, 2)
+        };
+        assert_eq!(sp.length(), 35);
+        let mut w = WriteBuf::new(&mut buf);
+        let n = codec.encode(&sp, &mut w).unwrap();
+        assert_eq!(n, 35);
+        let mut r = ReadBuf::new(&buf[..n]);
+        assert_eq!(codec.decode(&mut r).unwrap().unwrap(), sp);
+    }
+
+    #[test]
+    fn encoder_sets_auth_bit_from_section() {
+        // A packet with an auth section but no explicit A bit still
+        // encodes the bit (§6.8.7: A is set iff auth is in use).
+        let mut codec = BfdCodec::new();
+        let p = BfdPacket {
+            auth: Some(crate::auth::AuthSection::simple_password(b"pw".to_vec(), 1)),
+            ..BfdPacket::heartbeat(1, 2)
+        };
+        let mut buf = [0u8; 96];
+        let mut w = WriteBuf::new(&mut buf);
+        let n = codec.encode(&p, &mut w).unwrap();
+        assert_eq!(buf[1] & 0x04, 0x04);
+        let mut r = ReadBuf::new(&buf[..n]);
+        assert!(codec.decode(&mut r).unwrap().unwrap().auth.is_some());
+    }
+
+    #[test]
+    fn length_field_validation() {
+        let mut codec = BfdCodec::new();
+        let p = BfdPacket::heartbeat(1, 2);
+        let mut buf = [0u8; BfdPacket::MIN_LEN];
+        let mut w = WriteBuf::new(&mut buf);
+        codec.encode(&p, &mut w).unwrap();
+        // Length < 24 is invalid.
+        buf[3] = 20;
+        let mut r = ReadBuf::new(&buf);
+        assert!(codec.decode(&mut r).is_err());
+        // Length > payload is invalid.
+        buf[3] = 200;
+        let mut r = ReadBuf::new(&buf);
+        assert!(codec.decode(&mut r).is_err());
     }
 
     #[test]
