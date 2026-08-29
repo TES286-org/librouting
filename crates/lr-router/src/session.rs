@@ -156,6 +156,13 @@ pub struct SessionConfig {
     /// Zero disables MRAI batching for this session.
     pub mrai_ms: u64,
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
+    /// FRR `bgp default ipv4-unicast` (W2.1): when `true` (the default),
+    /// IPv4 unicast is implicitly active for this peer even when
+    /// `mp_families` does not list it. When `false`, IPv4 unicast must
+    /// be added explicitly to `mp_families` to be active. The daemon
+    /// populates this from the per-peer or router-level config; the
+    /// FSM gates legacy-section IPv4 NLRI processing on it.
+    pub default_ipv4_unicast: bool,
     /// Local interface address: used as NEXT_HOP for eBGP egress
     /// (next-hop-self) and as the local identity for Babel/OSPF runtimes.
     pub local_address: Option<lr_core::addr::IpAddr>,
@@ -204,6 +211,10 @@ impl SessionConfig {
             // of their channels — without it BIRD refuses the session
             // with "Required capability missing".
             mp_families: vec![lr_core::nlri::NlriFamily::IPV4_UNICAST],
+            // W2.1: FRR `bgp default ipv4-unicast` defaults to on. The
+            // daemon overrides per-peer when `[bgp] default_ipv4_unicast
+            // = false` is set, then `add_session` propagates it here.
+            default_ipv4_unicast: true,
             local_address: None,
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
@@ -342,6 +353,7 @@ impl SessionConfig {
             llgr_max_stale_time: None,
             mrai_ms: 0,
             mp_families: Vec::new(),
+            default_ipv4_unicast: true,
             local_address: None,
             area_id,
             ospf_area_type: OspfAreaType::Normal,
@@ -373,6 +385,7 @@ impl SessionConfig {
             llgr_max_stale_time: None,
             mrai_ms: 0,
             mp_families: Vec::new(),
+            default_ipv4_unicast: true,
             local_address: Some(local_addr),
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,

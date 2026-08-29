@@ -1229,6 +1229,38 @@ impl DefaultRouter {
         }
     }
 
+    /// Set the FRR `bgp default ipv4-unicast` posture (W2.1) for a
+    /// single BGP session. When `on` is `true` (the library default —
+    /// matches FRR), IPv4 unicast is implicitly active even when
+    /// `mp_families` does not list it. When `false`, IPv4 unicast must
+    /// be added explicitly to `mp_families` to be active (FRR
+    /// `no bgp default ipv4-unicast` with explicit
+    /// `address-family ipv4 unicast` activation).
+    ///
+    /// Must be called before `start_session`. Affects the FSM's
+    /// processing of legacy-section IPv4 NLRI, the egress in
+    /// `advertise.rs`, End-of-RIB emission, and the families listed
+    /// by the Add-Path / LLGR capabilities.
+    pub fn set_session_default_ipv4_unicast(
+        &mut self,
+        h: SessionHandle,
+        on: bool,
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: default_ipv4_unicast must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().default_ipv4_unicast = on;
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
     /// Originate a local route (e.g. from `network` statements): injects it
     /// into Loc-RIB and advertises it to all suitable BGP peers.
     pub fn originate(&mut self, prefix: Prefix, next_hop: Option<IpAddr>) -> RouteKey {
@@ -2795,6 +2827,10 @@ impl RouterInstance for DefaultRouter {
                     self.llgr_caps.insert(h.0, cap);
                 }
                 p_cfg.mp_families = cfg.mp_families.clone();
+                // W2.1: propagate the FRR `bgp default ipv4-unicast`
+                // posture to PeerConfig so the FSM can gate legacy-section
+                // IPv4 NLRI on it (see PeerConfig::ipv4_unicast_active).
+                p_cfg.default_ipv4_unicast = cfg.default_ipv4_unicast;
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
                 p_cfg.extended_next_hop = cfg.extended_next_hop.clone();
