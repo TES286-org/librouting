@@ -386,6 +386,7 @@ name = "lr-osroute"
 version = "0.1.0"
 dependencies = [
  "lr-core",
+ "lr-mpls",
 ]
 
 [[package]]

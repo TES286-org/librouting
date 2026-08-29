@@ -101,6 +101,13 @@ pub mod bfd_transport;
 #[cfg(feature = "std")]
 pub mod tcp_bind;
 
+/// MPLS route table installation over Linux `AF_MPLS` netlink
+/// (RFC 3032 LSPs, RFC 8277 BGP-LU kernel binding). Linux only — other
+/// platforms compile against a stub that returns
+/// [`mpls_route::MplsRouteError::Unsupported`].
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub mod mpls_route;
+
 #[cfg(all(
     feature = "std",
     any(

@@ -17,3 +17,4 @@ std = ["lr-core/std"]
 
 [dependencies]
 lr-core = { workspace = true }
+lr-mpls = { workspace = true }
