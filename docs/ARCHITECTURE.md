@@ -182,9 +182,19 @@ Embedders running inside a sandbox can omit it entirely.
 ## BFD integration
 
 `lr-bfd` is fully independent — it doesn't depend on `lr-bgp` or any other
-protocol crate. BGP can register a BFD session per peer; when BFD signals
-"Down", BGP tears down the peer without waiting for the hold timer (typical
-sub-second detection vs. 90s for BGP-only keepalives).
+protocol crate. It implements the RFC 5880 §6.8 state machine and timing
+exactly (peer-multiplier detection time, negotiated transmit interval with
+jitter, Poll/Final parameter confirmation). The sockets live in
+`lr-osroute::bfd_transport` — one shared receive socket per (address,
+mode) on the well-known port (3784 single-hop per RFC 5881, 4784 multihop
+per RFC 5883) with the single-hop TTL 255 filter, plus one transmit
+socket per session with an RFC 5881 §4 ephemeral source port.
+
+The daemon wires the two (`daemon_bfd.rs`): one BFD session per
+`bfd = true` peer; a BFD Up→Down transition tears the BGP session down
+(CEASE NOTIFICATION + route purge) without waiting for the hold timer
+(typical sub-second detection vs. 90s for BGP-only keepalives), and the
+connector holds off reconnecting while BFD is down.
 
 ## Damping integration
 

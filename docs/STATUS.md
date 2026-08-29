@@ -44,7 +44,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BGPsec | ❌ | out of scope for now |
 | Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
-| BFD interaction (`lr-bfd`) | ✅ | session liveness events feed the FSM |
+| BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard rules, Simple Password auth; `lr-osroute::bfd_transport` sockets (3784/4784, TTL 255, ephemeral source ports); daemon `--bfd` fast-fails BGP on BFD Down (BIRD-verified) |
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community set actions; route tags (`set tag`) still open
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
@@ -127,7 +127,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 43 binaries / 443 tests |
+| Unit tests (workspace) | ✅ 47 binaries / 560 tests |
 | Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
 | Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
 | Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
@@ -152,6 +152,8 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | OSPF virtual-link E2E (§15 backbone partition repair, summaries over the virtual adjacency, teardown + stale-LSA MaxAge age-out, stub-transit refusal) | ✅ 🧪 |
 | BIRD 2 interop (bidirectional) | ✅ 🧪 |
 | BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
+| BFD monitoring fast-fail E2E (two-daemon SIGSTOP freeze: BFD tears BGP down in ~0.5s at 100ms×3 vs 60s hold) | ✅ 🧪 | `crates/lr-cli/tests/daemon_bfd.rs` |
+| BFD x BIRD interop (single-hop + multihop sessions, `protocol bfd` + `bfd on`, SIGSTOP fast-fail) | ✅ 🧪 | `tests/interop/bfd_bird.sh` |
 | FRR bgpd interop (bidirectional) | ✅ 🧪 |
 | C / Go / Python binding harnesses | ✅ 🧪 |
 | fmt + clippy (-D warnings) | ✅ |
@@ -208,8 +210,26 @@ BIRD/FRR-style, without an embedder writing code.
    sections / tables now produce line-numbered warnings (kept
    non-fatal for forward compatibility) surfaced at startup
    (`config warning: …`) and on reload.
-3. **BFD in the daemon** — `--bfd` per peer wiring `lr-bfd` sessions
-   to fast-fail the BGP FSM (after W3.1 multihop BFD exists).
+3. ~~**BFD in the daemon**~~ — done: `--bfd` (or per-peer `bfd =
+   true`) starts one BFD session per peer via
+   `lr-osroute::bfd_transport` (shared rx socket on 3784 single-hop /
+   4784 multihop with the RFC 5881 §5 TTL filter, per-session
+   ephemeral source ports) and fast-fails BGP: a BFD Up→Down
+   transition tears the session down with a CEASE NOTIFICATION and a
+   route purge instead of waiting out the hold timer; the connector
+   holds off reconnecting while BFD is down (after first Up — BIRD
+   `bgp_bfd_notify` parity). Timing: `[bgp] bfd_min_tx_ms /
+   bfd_min_rx_ms / bfd_multiplier` globals with per-peer overrides
+   and CLI flags; `bfd_multihop = true` switches to RFC 5883. Verified
+   by `crates/lr-cli/tests/daemon_bfd.rs` (SIGSTOP freeze: BGP down
+   in ~0.5s at 100ms×3 vs a 60s hold time) and
+   `tests/interop/bfd_bird.sh` (BIRD `protocol bfd` + `bfd on`, both
+   single-hop and multihop). Landing this drove an lr-bfd
+   wire-correctness overhaul: RFC 5880 §4.1 flag bits (the old code
+   had a phantom ECHO flag on the Final bit and no Poll/Final), the
+   IANA auth type codes, §4.2-§4.4 auth section layouts, and the
+   §6.8.6 state machine (Down+Init→Up / Init+Init→Up — the old
+   mapping deadlocked two conforming peers in Init forever).
 4. **Policy in config + reuse** (external request) — three slices,
    in order:
    a. ~~**Policy engine completion**~~ — done: new `lr-policy::bgp`
@@ -304,7 +324,19 @@ flags; never break standards compliance by default.
 
 Highest-value missing/partial standards, in rough order:
 
-1. **BFD multihop** (RFC 8562/5881) — TTL>1 BFD sessions; blocks W1.3.
+1. ~~**BFD multihop**~~ — done, as RFC 5883 (the roadmap previously
+   mis-cited this as "RFC 8562/5881": 8562 is *Multipoint* BFD, and
+   5881 is *single-hop*). Multihop sessions ride UDP 4784 with no
+   TTL 255 requirement (RFC 5883 §5/§3), demultiplexed by Your
+   Discriminator with the source-address fallback for discovery
+   packets (§4.1). The daemon exposes it as `--bfd-multihop` /
+   `bfd_multihop = true`. BIRD-verified end-to-end
+   (`tests/interop/bfd_bird.sh` phase 2: multihop BFD + multihop eBGP
+   against `neighbor ... multihop` + `bfd on`). Landing this also
+   fixed lr-bfd's core RFC 5880 wire bugs (see W1.3) — without them
+   no BFD interop worked at all. Keyed-hash auth over multihop
+   (RFC 5883 §6 SHOULD) remains future work (Simple Password is
+   supported).
 2. **RFC 8212** default eBGP route behaviors — full default
    deny-in/deny-out for eBGP without explicit policy (currently
    partial; the safety net approximates it).

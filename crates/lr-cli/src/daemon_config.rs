@@ -1269,6 +1269,48 @@ mod tests {
     }
 
     #[test]
+    fn bfd_globals_and_peer_overrides_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             bfd = true\nbfd_min_tx_ms = 150\nbfd_min_rx_ms = 200\n\
+             bfd_multiplier = 5\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\nbfd = false\n\n\
+             [[peer]]\naddress = \"192.0.2.3\"\nbfd = true\nbfd_multihop = true\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert!(cfg.bfd_enabled);
+        assert_eq!(cfg.bfd_min_tx_ms, 150);
+        assert_eq!(cfg.bfd_min_rx_ms, 200);
+        assert_eq!(cfg.bfd_multiplier, 5);
+        assert!(!cfg.effective_bfd(&cfg.peers[0])); // opt-out
+        assert!(!cfg.effective_bfd_multihop(&cfg.peers[0]));
+        // Opt-in with the multihop override (RFC 5883).
+        assert!(cfg.effective_bfd(&cfg.peers[1]));
+        assert!(cfg.effective_bfd_multihop(&cfg.peers[1]));
+    }
+
+    #[test]
+    fn bfd_defaults_inherit_from_globals() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nbfd = true\nbfd_multihop = true\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        // Peer inherits both globals; timing stays at the defaults.
+        assert!(cfg.effective_bfd(&cfg.peers[0]));
+        assert!(cfg.effective_bfd_multihop(&cfg.peers[0]));
+        assert_eq!(cfg.bfd_min_tx_ms, 100);
+        assert_eq!(cfg.bfd_min_rx_ms, 100);
+        assert_eq!(cfg.bfd_multiplier, 3);
+    }
+
+    #[test]
     fn key_outside_peer_table_is_an_error() {
         let mut cfg = DaemonConfig::with_defaults();
         // A [bgp] section key must not leak into a peer entry: flip the

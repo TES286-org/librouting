@@ -106,6 +106,17 @@ networks = ["203.0.113.0/24"]
 # api_socket = "/run/lr-daemon.api"
 
 # ---------------------------------------------------------------------
+# BFD fast-fail (RFC 5880/5881; the timing applies to every peer that
+# enables bfd). A BFD Up->Down transition tears the BGP session down
+# immediately instead of waiting out the hold timer. Requires a
+# local_address (the BFD sockets bind it).
+# bfd = true
+# bfd_multihop = false     # RFC 5883 multihop sessions (UDP 4784, no TTL check)
+# bfd_min_tx_ms = 100      # DesiredMinTxInterval (RFC 5880 6.8.1)
+# bfd_min_rx_ms = 100      # RequiredMinRxInterval
+# bfd_multiplier = 3       # packets lost before Down (~300ms at 100ms)
+
+# ---------------------------------------------------------------------
 # Multi-peer configuration.
 #
 # Each [[peer]] table configures one BGP session. Keys left unset inherit
@@ -125,7 +136,7 @@ networks = ["203.0.113.0/24"]
 # local_address, local_address_v6, md5_key, tcp_ao_keys,
 # tcp_ao_algorithm, tcp_ao_maclen, add_path, add_path_max_paths,
 # mp_families, extended_next_hop, gtsm, max_prefixes, max_prefix_action,
-# max_prefix_threshold.
+# max_prefix_threshold, bfd, bfd_multihop.
 #
 # Example (commented out):
 #

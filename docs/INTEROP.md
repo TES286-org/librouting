@@ -13,6 +13,7 @@ job `interop`) and can all be reproduced locally:
 | BMP | `tests/interop/bmp.sh` | lr-daemon `--bmp-target` → lr-daemon `--protocol bmp` collector | BMP end-to-end: station connect, Peer Up ordering, Route Monitoring carrying the full UPDATE, collector serving routes + MRT dump via the runtime API |
 | BIRD | `tests/interop/bird.sh` | lr-daemon ↔ BIRD 2 (eBGP, multihop) | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions** |
 | BIRD LLGR | `tests/interop/bird_llgr.sh` | lr-daemon ↔ BIRD 2 (RFC 9494) | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge |
+| BFD x BIRD | `tests/interop/bfd_bird.sh` | lr-daemon ↔ BIRD 2 (`protocol bfd` + `bfd on`) over a veth pair in netns | BFD wire compatibility (RFC 5880): both sessions reach Up, BGP rides `bfd on`, and a frozen peer (SIGSTOP — TCP still open) is torn down in ~0.5s by BFD at 100ms×3 vs a 60s hold timer; phase 2 proves RFC 5883 multihop mode (UDP 4784, off-link address pair) |
 | FRR | `tests/interop/frr.sh` | lr-daemon ↔ FRR bgpd (eBGP, multihop) | Wire compatibility with FRR bgpd incl. its stricter next-hop validation |
 
 ## What the tests actually verify
@@ -43,6 +44,7 @@ cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/bmp.sh                      # no external dependencies
 ./tests/interop/bird.sh                     # needs bird2 (or skips)
 ./tests/interop/bird_enh.sh                 # needs bird2 (or skips) — RFC 5549 ENH
+./tests/interop/bfd_bird.sh                 # needs bird2 + user namespaces (or skips) — BFD RFC 5880/5881/5883
 ./tests/interop/frr.sh                      # needs FRR bgpd (or skips)
 ```
 
@@ -204,6 +206,17 @@ mind when embedding librouting or extending the BGP code:
    BIRD). An earlier revision shipped a non-standard 5-byte tuple
    (`AFI:2, SAFI:1, NH-AFI:2`) and documented BIRD as the deviant — the
    skip note was wrong, the bug was local.
+8. **BFD's state machine has two fast paths that are easy to get wrong.**
+   RFC 5880 §6.8.6 maps Down+received-Init and Init+received-Init both
+   straight to Up; mapping either to Init (an intuitive-looking
+   simplification) deadlocks two Active peers in Init forever. The
+   detection time is the *peer's* detect multiplier × the negotiated
+   interval — not min(local, peer) — and the single-hop TTL filter
+   (RFC 5881 §5) must accept exactly 255, while multihop (RFC 5883)
+   accepts anything on UDP 4784. BIRD drops Poll+Final set together
+   and packets with a zero My Discriminator; the interop
+   (`tests/interop/bfd_bird.sh`) pins all of this against
+   `protocol bfd` + `bfd on`.
 
 ## Extending the suite
 

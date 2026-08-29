@@ -45,11 +45,11 @@ library without depending on the Rust toolchain at runtime.
 | `lr-rib` | `crates/lr-rib` | Adj-RIB-In, Adj-RIB-Out, Loc-RIB, route selection, cross-protocol merging |
 | `lr-policy` | `crates/lr-policy` | Route maps, prefix lists, AS-path filters, community lists, import/export/selection hooks, safety net |
 | `lr-router` | `crates/lr-router` | Layer-3 router instance, sessions, scheduler, event dispatch |
-| `lr-bfd` | `crates/lr-bfd` | BFD Control packet codec (RFC 5880), session FSM (Down→Init→Up), auth |
+| `lr-bfd` | `crates/lr-bfd` | BFD Control packet codec (RFC 5880 §4), session FSM with negotiated timing + Poll/Final (§6.8), auth sections (§4.2-§4.4) |
+| `lr-osroute` | `crates/lr-osroute` | OS route integration + protocol transports: rtnetlink/route(4)/IPHelper, TCP MD5/TCP-AO (`tcp_auth`), GTSM (`gtsm`), BFD UDP (`bfd_transport`, RFC 5881/5883), OSPF raw sockets (`ospf_transport`) |
 | `lr-mrt` | `crates/lr-mrt` | MRT dump format (RFC 6396): TABLE_DUMP_V2 read/write, BGP4MP decode |
 | `lr-bmp` | `crates/lr-bmp` | BGP Monitoring Protocol (RFC 7854): BMP message codec + router sink |
 | `lr-damping` | `crates/lr-damping` | Route flap damping (RFC 2439) |
-| `lr-osroute` | `crates/lr-osroute` | OS routing table reference (Linux rtnetlink) + Stub for non-Linux |
 | `lr-cli` | `crates/lr-cli` | `lr` CLI tool (decode/routes) + `lr-daemon` reference wiring |
 | `lr-ffi` | `crates/lr-ffi` | C ABI bindings (cbindgen-generated header) |
 | `lr-tests` | `crates/lr-tests` | Cross-crate integration tests |

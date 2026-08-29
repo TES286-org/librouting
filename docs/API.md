@@ -132,18 +132,40 @@ are unaffected). The daemon exposes all of this as TOML tables — see
 
 ```rust
 use lr_bfd::{BfdConfig, BfdSession, SessionRole};
+use lr_core::time::Instant;
 
 let cfg = BfdConfig {
     detect_mult: 3,
     desired_min_tx_interval: 100_000, // 100ms
     required_min_rx_interval: 100_000,
-    role: SessionRole::Active,
+    role: SessionRole::Active, // RFC 5881 §3: both sides Active
     ..Default::default()
 };
 let mut session = BfdSession::new(cfg, 0x11111111);
-let _ = session.start(lr_core::time::Instant(0));
-// push bytes via feed_bytes, drain via drain_outgoing
+let _ = session.start(Instant(0));
+// feed a received datagram (pass the current time so the detection
+// timer anchors to arrival); drain the reply onto the wire
+let events = session.feed_bytes(Instant(120), &datagram);
+let out = session.drain_outgoing();
+// every tick: advance timers (periodic transmit + detection expiry)
+let events = session.tick(Instant(200));
 ```
+
+`feed_bytes` applies the RFC 5880 §6.8.6 MUST-discard rules and drives
+the exact §6.8.6 state machine (Down+Init→Up, Init+Init→Up). The
+detection time is the *peer's* detect multiplier ×
+`max(required rx, peer desired tx)` (§6.8.4); the transmit interval is
+`max(desired tx, peer required rx)` with 0-25% jitter (§6.8.7) and a
+one-second floor while not Up (§6.8.3). Interval changes while Up go
+through Poll/Final confirmation (§6.5) via
+`update_timers(now, desired_tx_us, required_rx_us)`.
+
+The sockets live in `lr_osroute::bfd_transport`: `BfdRxSocket` (shared
+receive socket on 3784 single-hop / 4784 multihop, single-hop TTL 255
+filter per RFC 5881 §5) and `BfdTxSocket` (per-session ephemeral
+source port in 49152-65535, TTL 255 on transmit). The daemon wires it
+all with `--bfd` / per-peer `bfd = true` — see
+`docs/examples/bfd_integration.md`.
 
 ## BGP graceful restart
 

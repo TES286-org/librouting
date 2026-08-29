@@ -81,10 +81,20 @@ implements, or references. It is grouped by protocol family.
 
 | RFC    | Title                                                | Status       | Crate path                          |
 |--------|------------------------------------------------------|--------------|--------------------------------------|
-| 5880   | BFD for IPv4/IPv6                                     | ✓ core       | `lr-bfd::packet`, `lr-bfd::session` |
-| 5881   | BFD for IPv4/IPv6 on Multihop                          | partial      | TBD                                 |
-| 7130   | BFD for MPLS PW                                       | not impl     | —                                   |
-| 8562   | BFD for Multi-Hop (revised)                           | partial      | TBD                                 |
+| 5880   | Bidirectional Forwarding Detection                   | ✓ core       | `lr-bfd::packet`, `lr-bfd::session` |
+| 5881   | BFD for IPv4 and IPv6 (Single Hop)                   | ✓ (Linux; TTL check Linux-only) | `lr-osroute::bfd_transport` |
+| 5883   | BFD for Multihop Paths                               | ✓ (UDP 4784, no TTL filter) | `lr-osroute::bfd_transport`, daemon `--bfd-multihop` |
+| 7130   | BFD for LAG                                           | not impl     | —                                   |
+| 8562   | BFD for Multipoint Networks                           | not impl     | —                                   |
+
+Notes: the §6.8.6 state machine, §6.8.4 detection time (peer's detect
+multiplier), §6.8.7 negotiated transmit interval with jitter and the
+§6.5 Poll/Final sequences are implemented and BIRD-verified
+(`tests/interop/bfd_bird.sh`). Simple Password auth (§4.2) works
+end-to-end in sessions; the keyed-hash sections (§4.3/§4.4) are
+framing-only — digests are embedder-supplied (no crypto dependency in
+`lr-bfd`). The Echo function (§6.4) is not implemented (single-hop-only
+and optional; multihop MUST NOT use it, RFC 5883 §3).
 
 ## OS interface — RFC 3549 + Linux
 
