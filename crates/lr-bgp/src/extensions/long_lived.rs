@@ -38,7 +38,15 @@ pub const FLAG_FORWARDING: u8 = 0x80;
 /// LLGR) should list for a peer: the negotiated MP-BGP families, or
 /// implicit `<IPv4, Unicast>` when the session uses RFC 4271 encoding
 /// only (RFC 9494 §3.1).
+///
+/// FRR `no bgp default ipv4-unicast` (W2.1): when the knob is off and
+/// the peer did not explicitly add IPv4 unicast to `mp_families`, the
+/// capability does NOT list it — the family is not active, so there
+/// is no retention promise to make.
 pub fn advertised_families(cfg: &PeerConfig) -> Vec<NlriFamily> {
+    if !cfg.default_ipv4_unicast && !cfg.mp_families.contains(&NlriFamily::IPV4_UNICAST) {
+        return cfg.mp_families.clone();
+    }
     if cfg.mp_families.is_empty() {
         vec![NlriFamily::IPV4_UNICAST]
     } else {

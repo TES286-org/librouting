@@ -42,6 +42,15 @@ impl BgpPeer {
         if !self.is_established() {
             return false;
         }
+        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // for IPv4 unicast must not receive IPv4 NLRI — neither the
+        // legacy section nor the RFC 5549 ENH MP_REACH form. Returning
+        // `false` here makes the router skip the Adj-RIB-Out entry, so
+        // the peer sees nothing for the family (matches FRR's "the
+        // neighbor is not activated for IPv4 unicast" behaviour).
+        if route.key.family == NlriFamily::IPV4_UNICAST && !self.cfg.ipv4_unicast_active() {
+            return false;
+        }
         let topo = self.cfg.compute_topology();
 
         // iBGP split-horizon (RFC 4271 §10): a route learned from an iBGP
@@ -325,6 +334,14 @@ impl BgpPeer {
         if !self.is_established() {
             return;
         }
+        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // for IPv4 unicast must not have IPv4 withdrawals sent to it —
+        // since the advertise() side already refused to send the routes,
+        // a withdrawal would be a no-op anyway. Skip to keep the wire
+        // clean.
+        if family == NlriFamily::IPV4_UNICAST && !self.cfg.ipv4_unicast_active() {
+            return;
+        }
         let mut update = Update::new();
 
         // RFC 8277 labelled-unicast withdrawals go through the labelled
@@ -389,8 +406,17 @@ impl BgpPeer {
     /// routes, no path attributes and no NLRI (RFC 4724 §4). Well-behaved
     /// speakers emit it after the initial table dump so the peer can detect
     /// convergence (BIRD and FRR both log and act on it).
+    ///
+    /// FRR `no bgp default ipv4-unicast` (W2.1): the empty UPDATE is
+    /// conventionally the IPv4 unicast EoR marker. A peer not activated
+    /// for IPv4 unicast must not signal convergence for it — silently
+    /// skip the send. MP-family EoR (via MP_UNREACH_NLRI with just the
+    /// AFI/SAFI) is sent through the family-iteration egress, not here.
     pub fn send_end_of_rib(&mut self) {
         if !self.is_established() {
+            return;
+        }
+        if !self.cfg.ipv4_unicast_active() {
             return;
         }
         let update = Update::new();

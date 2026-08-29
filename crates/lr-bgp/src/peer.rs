@@ -29,6 +29,16 @@ pub struct PeerConfig {
     pub asn4: bool,
     /// Optional: enable MP-BGP for given families.
     pub mp_families: Vec<lr_core::nlri::NlriFamily>,
+    /// FRR `bgp default ipv4-unicast` (W2.1): when `true` (the default —
+    /// matches FRR and the RFC 4271 implicit IPv4 unicast family), IPv4
+    /// unicast is implicitly active for this peer even when
+    /// [`mp_families`](Self::mp_families) does not list it. When `false`,
+    /// IPv4 unicast must be added explicitly to `mp_families` to be
+    /// active — the FRR `no bgp default ipv4-unicast` posture where each
+    /// peer is activated per address-family.
+    ///
+    /// See [`PeerConfig::ipv4_unicast_active`] for the negotiated view.
+    pub default_ipv4_unicast: bool,
     /// Optional: enable AddPath (RFC 7911).
     pub add_path: bool,
     /// Optional: RFC 5549 Extended Next-Hop tuples this session
@@ -126,6 +136,7 @@ impl PeerConfig {
             peer_bgp_id: None,
             asn4: true,
             mp_families: Vec::new(),
+            default_ipv4_unicast: true,
             add_path: false,
             extended_next_hop: Vec::new(),
             graceful_restart: false,
@@ -151,6 +162,26 @@ impl PeerConfig {
     /// True if this is an eBGP session (peer in a different AS).
     pub fn is_ebgp(&self) -> bool {
         !self.peer_role().is_internal()
+    }
+
+    /// True when IPv4 unicast is active for this peer (W2.1).
+    ///
+    /// IPv4 unicast is active when either:
+    /// - [`default_ipv4_unicast`](Self::default_ipv4_unicast) is `true`
+    ///   (the FRR default — RFC 4271's implicit IPv4 unicast family), or
+    /// - the peer's [`mp_families`](Self::mp_families) explicitly lists
+    ///   `NlriFamily::IPV4_UNICAST` (FRR `no bgp default ipv4-unicast`
+    ///   with an explicit `address-family ipv4 unicast` /
+    ///   `neighbor X activate`).
+    ///
+    /// This gates legacy-section IPv4 NLRI processing in the FSM,
+    /// egress in `advertise.rs`, End-of-RIB emission and the families
+    /// listed by Add-Path / LLGR capabilities.
+    pub fn ipv4_unicast_active(&self) -> bool {
+        self.default_ipv4_unicast
+            || self
+                .mp_families
+                .contains(&lr_core::nlri::NlriFamily::IPV4_UNICAST)
     }
 
     /// Returns the topological role of the peer (eBGP/iBGP/confed-*).
@@ -221,5 +252,49 @@ mod tests {
         cfg.role_override = Some(PeerRole::Ebgp);
         assert_eq!(cfg.peer_role(), PeerRole::Ebgp);
         assert!(cfg.is_ebgp());
+    }
+
+    // ===== FRR `bgp default ipv4-unicast` (W2.1) =====
+
+    #[test]
+    fn default_ipv4_unicast_defaults_on() {
+        // Library default: matches FRR `bgp default ipv4-unicast` and
+        // the RFC 4271 implicit IPv4 unicast family.
+        let cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        assert!(cfg.default_ipv4_unicast);
+        assert!(cfg.ipv4_unicast_active());
+    }
+
+    #[test]
+    fn no_default_ipv4_unicast_excludes_implicit_v4() {
+        // FRR `no bgp default ipv4-unicast`: IPv4 unicast must be added
+        // explicitly to `mp_families`.
+        let mut cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.default_ipv4_unicast = false;
+        assert!(!cfg.ipv4_unicast_active());
+    }
+
+    #[test]
+    fn explicit_v4_in_mp_families_activates_v4_even_when_default_off() {
+        // FRR `no bgp default ipv4-unicast` + explicit
+        // `neighbor X activate` in `address-family ipv4 unicast`:
+        // IPv4 unicast is active again.
+        let mut cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.default_ipv4_unicast = false;
+        cfg.mp_families
+            .push(lr_core::nlri::NlriFamily::IPV4_UNICAST);
+        assert!(cfg.ipv4_unicast_active());
+    }
+
+    #[test]
+    fn no_default_ipv4_unicast_keeps_other_mp_families_independent() {
+        // A pure IPv6 BGP session: `default_ipv4_unicast = false` +
+        // `mp_families = [ipv6-unicast]`. IPv4 unicast is NOT active,
+        // IPv6 unicast is in mp_families as configured.
+        let mut cfg = PeerConfig::new(Asn(100), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.default_ipv4_unicast = false;
+        cfg.mp_families
+            .push(lr_core::nlri::NlriFamily::IPV6_UNICAST);
+        assert!(!cfg.ipv4_unicast_active());
     }
 }

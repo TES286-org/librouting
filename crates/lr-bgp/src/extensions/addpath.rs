@@ -19,13 +19,20 @@ use lr_core::nlri::NlriFamily;
 
 use crate::peer::PeerConfig;
 
-/// Families our OPEN advertises for Add-Path: IPv4 unicast (always spoken)
-/// plus every configured MP-BGP family, deduplicated.
+/// Families our OPEN advertises for Add-Path: IPv4 unicast (always spoken
+/// when the FRR `bgp default ipv4-unicast` knob is on, W2.1) plus every
+/// configured MP-BGP family, deduplicated. When `default_ipv4_unicast`
+/// is `false` and `mp_families` does not explicitly list IPv4 unicast,
+/// the capability lists only the MP families.
 pub fn advertised_families(cfg: &PeerConfig) -> Vec<NlriFamily> {
     if !cfg.add_path {
         return Vec::new();
     }
-    let mut families = vec![NlriFamily::IPV4_UNICAST];
+    let mut families = if cfg.default_ipv4_unicast {
+        vec![NlriFamily::IPV4_UNICAST]
+    } else {
+        Vec::new()
+    };
     for f in &cfg.mp_families {
         if !families.contains(f) {
             families.push(*f);

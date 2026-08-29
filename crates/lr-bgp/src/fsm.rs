@@ -723,7 +723,13 @@ impl BgpPeer {
                     };
                     actions.push(BgpAction::EndOfRib(fam));
                 }
-            } else if u.attributes.is_empty() {
+            } else if u.attributes.is_empty() && self.cfg.ipv4_unicast_active() {
+                // RFC 4724 §4: an empty UPDATE is the End-of-RIB marker for
+                // IPv4 unicast (the implicit family). Only emit it when
+                // IPv4 unicast is active for this peer (FRR `bgp default
+                // ipv4-unicast` semantics, W2.1) — a peer that is not
+                // activated for IPv4 unicast must not signal convergence
+                // for it.
                 actions.push(BgpAction::EndOfRib(NlriFamily::IPV4_UNICAST));
             }
         }
@@ -737,11 +743,17 @@ impl BgpPeer {
         };
 
         // --- Withdrawals (IPv4 legacy section) ---
-        for w in &u.withdrawn {
-            actions.push(BgpAction::WithdrawRoute {
-                key: RouteKey::new(w.prefix, NlriFamily::IPV4_UNICAST),
-                path_id: w.path_id,
-            });
+        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // for IPv4 unicast must not have its legacy-section withdrawals
+        // processed — silently drop them (the peer should not be sending
+        // them in the first place, but we fail closed).
+        if self.cfg.ipv4_unicast_active() {
+            for w in &u.withdrawn {
+                actions.push(BgpAction::WithdrawRoute {
+                    key: RouteKey::new(w.prefix, NlriFamily::IPV4_UNICAST),
+                    path_id: w.path_id,
+                });
+            }
         }
 
         // --- MP_UNREACH_NLRI withdrawals (RFC 4760 + RFC 8277) ---
@@ -847,7 +859,11 @@ impl BgpPeer {
         };
 
         // IPv4 NLRI: NEXT_HOP from the well-known attribute.
-        if !u.nlri.is_empty() {
+        // FRR `no bgp default ipv4-unicast` (W2.1): a peer not activated
+        // for IPv4 unicast must not have its legacy-section NLRI installed
+        // — silently drop the entries (the peer should not be sending
+        // them, but failing closed is the safe posture).
+        if !u.nlri.is_empty() && self.cfg.ipv4_unicast_active() {
             let nh = u.attributes.next_hop().map(|n| n.to_ip());
             for entry in &u.nlri {
                 announce(
@@ -1291,6 +1307,92 @@ mod tests {
         ));
         let actions = a.step(BgpEvent::Message(BgpMessage::Update(u)));
         assert!(!actions.iter().any(|x| matches!(x, BgpAction::EndOfRib(_))));
+    }
+
+    // ===== FRR `no bgp default ipv4-unicast` (W2.1) =====
+
+    /// Build a BGP peer with `default_ipv4_unicast = false` and IPv4
+    /// unicast NOT in `mp_families` — the FRR `no bgp default
+    /// ipv4-unicast` posture without explicit per-peer activation.
+    fn peer_no_default_ipv4() -> BgpPeer {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.default_ipv4_unicast = false;
+        cfg.mp_families = Vec::new();
+        let mut peer = BgpPeer::new(cfg);
+        peer.step(BgpEvent::ManualStart);
+        peer.step(BgpEvent::TransportOpen);
+        peer
+    }
+
+    /// A peer with `default_ipv4_unicast = false` must NOT emit an
+    /// End-of-RIB marker for IPv4 unicast on receipt of an empty UPDATE.
+    #[test]
+    fn no_default_ipv4_unicast_suppresses_v4_eor() {
+        let mut a = peer_no_default_ipv4();
+        let actions = a.step(BgpEvent::Message(BgpMessage::Update(Update::new())));
+        assert!(
+            !actions
+                .iter()
+                .any(|x| matches!(x, BgpAction::EndOfRib(NlriFamily::IPV4_UNICAST))),
+            "no IPv4 unicast EoR when the family is not active for this peer"
+        );
+    }
+
+    /// A peer with `default_ipv4_unicast = false` must NOT install
+    /// legacy-section IPv4 NLRI received from the peer.
+    #[test]
+    fn no_default_ipv4_unicast_drops_v4_nlri() {
+        use crate::message::update::Update;
+        use crate::path::AsPath;
+        let mut a = peer_no_default_ipv4();
+        let mut u = Update::new();
+        u.nlri.push(crate::message::update::Nlri::plain(
+            lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            AsPath::from_sequence([Asn(64513)]).encode_4(),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![192, 0, 2, 1],
+        ));
+        let actions = a.step(BgpEvent::Message(BgpMessage::Update(u)));
+        assert!(
+            !actions
+                .iter()
+                .any(|x| matches!(x, BgpAction::InstallRoute(_))),
+            "legacy-section IPv4 NLRI must be dropped when default_ipv4_unicast is off"
+        );
+    }
+
+    /// A peer with `default_ipv4_unicast = false` must NOT process
+    /// legacy-section withdrawals either — the family is not active,
+    /// so a withdrawal would be a no-op anyway, but we fail closed
+    /// (the peer should not be sending them).
+    #[test]
+    fn no_default_ipv4_unicast_drops_v4_withdrawals() {
+        use crate::message::update::{Nlri, Update};
+        let mut a = peer_no_default_ipv4();
+        let mut u = Update::new();
+        u.withdrawn.push(Nlri::plain(lr_core::addr::Prefix::new_v4(
+            [203, 0, 113, 0],
+            24,
+        )));
+        let actions = a.step(BgpEvent::Message(BgpMessage::Update(u)));
+        assert!(
+            !actions
+                .iter()
+                .any(|x| matches!(x, BgpAction::WithdrawRoute { .. })),
+            "legacy-section IPv4 withdrawals must be dropped when default_ipv4_unicast is off"
+        );
     }
 
     // ----- RFC 7911 Add-Path -----
