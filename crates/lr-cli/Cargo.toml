@@ -30,6 +30,7 @@ lr-bfd = { workspace = true }
 lr-bmp = { workspace = true }
 lr-mrt = { workspace = true }
 lr-osroute = { workspace = true }
+lr-mpls = { workspace = true }
 
 [features]
 default = ["std"]

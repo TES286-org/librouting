@@ -428,6 +428,25 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 Err(_) => eprintln!("daemon: invalid network '{}'", net),
             }
         }
+        // RFC 8277 labelled networks: each entry is "<prefix> <labels>"
+        // where labels is a comma-separated list of 20-bit values. The
+        // family is derived from the prefix (v4 → IPV4_LABELED_UNICAST,
+        // v6 → IPV6_LABELED_UNICAST). Requires `mp-family
+        // ipv4-labeled-unicast` (or v6) on the peer to be advertised.
+        for entry in &cfg.labeled_networks {
+            match parse_labeled_network(entry) {
+                Ok((p, labels)) => {
+                    let family = match p.addr {
+                        IpAddr::V4(_) => NlriFamily::IPV4_LABELED_UNICAST,
+                        IpAddr::V6(_) => NlriFamily::IPV6_LABELED_UNICAST,
+                    };
+                    let nh = originate_next_hop(cfg, family);
+                    r.originate_labeled(p, family, labels, nh);
+                    println!("daemon: originating labelled {}", p);
+                }
+                Err(msg) => eprintln!("daemon: invalid labeled_network '{}': {}", entry, msg),
+            }
+        }
     }
 
     let running = Arc::new(AtomicBool::new(true));
@@ -701,8 +720,10 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     }
     // RFC 4760 MP-BGP: build the family list from the effective config.
     // Empty keeps the SessionConfig::bgp() default (IPv4 unicast),
-    // preserving the historical daemon behaviour. `ipv4-unicast` and
-    // `ipv6-unicast` are recognised; unknown names are logged and dropped.
+    // preserving the historical daemon behaviour. `ipv4-unicast`,
+    // `ipv6-unicast`, `ipv4-labeled-unicast` (RFC 8277) and
+    // `ipv6-labeled-unicast` (RFC 8277) are recognised; unknown names are
+    // logged and dropped.
     let families_cfg = p.mp_families.as_ref().unwrap_or(&g.mp_families);
     if !families_cfg.is_empty() {
         let mut families = Vec::new();
@@ -710,6 +731,8 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
             match name.as_str() {
                 "ipv4-unicast" => families.push(NlriFamily::IPV4_UNICAST),
                 "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
+                "ipv4-labeled-unicast" => families.push(NlriFamily::IPV4_LABELED_UNICAST),
+                "ipv6-labeled-unicast" => families.push(NlriFamily::IPV6_LABELED_UNICAST),
                 other => eprintln!(
                     "daemon: peer {}: unknown mp_family '{}' (skipped)",
                     p.label(),
@@ -1869,6 +1892,35 @@ fn transport_ip(addr: &str) -> Option<IpAddr> {
         return IpAddr::from_str(host).ok();
     }
     IpAddr::from_str(addr).ok()
+}
+
+/// Parse a labelled-network entry of the form `"<prefix> <labels>"` where
+/// `labels` is a comma-separated list of 20-bit values. Used by both
+/// `--labeled-network` and the `labeled_networks` TOML key.
+fn parse_labeled_network(spec: &str) -> Result<(Prefix, lr_mpls::LabelStack), String> {
+    let mut parts = spec.split_whitespace();
+    let prefix_str = parts
+        .next()
+        .ok_or_else(|| "expected '<prefix> <label>[,<label>...]': missing prefix".to_string())?;
+    let labels_str = parts
+        .next()
+        .ok_or_else(|| "expected '<prefix> <label>[,<label>...]': missing labels".to_string())?;
+    let prefix = Prefix::from_str(prefix_str).map_err(|e| format!("invalid prefix: {}", e))?;
+    let mut labels = Vec::new();
+    for tok in labels_str.split(',') {
+        let v: u32 = tok
+            .trim()
+            .parse()
+            .map_err(|_| format!("invalid label value '{}'", tok))?;
+        if !lr_mpls::Label::is_valid_value(v) {
+            return Err(format!("label value {} exceeds the 20-bit range", v));
+        }
+        labels.push(lr_mpls::Label::new(v));
+    }
+    if labels.is_empty() {
+        return Err("at least one label is required".to_string());
+    }
+    Ok((prefix, lr_mpls::LabelStack::from_vec(labels)))
 }
 
 /// Pick the NLRI family for a `--network` prefix based on its address

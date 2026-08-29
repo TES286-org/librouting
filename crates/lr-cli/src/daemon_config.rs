@@ -159,6 +159,12 @@ pub(crate) struct DaemonConfig {
     pub local_address: Option<String>,
     /// Locally originated networks.
     pub networks: Vec<String>,
+    /// Locally originated RFC 8277 labelled networks, in the form
+    /// `"prefix label1[,label2,...]"`, e.g. `"203.0.113.0/24 100"` or
+    /// `"10.0.0.0/8 100,200,3"`. Originated as IPv4 labelled-unicast
+    /// (AFI=1, SAFI=4) for IPv4 prefixes and IPv6 labelled-unicast
+    /// (AFI=2, SAFI=4) for IPv6 prefixes.
+    pub labeled_networks: Vec<String>,
     /// Install best routes into the kernel FIB.
     pub install_kernel: bool,
     /// BGP hold time (seconds).
@@ -710,6 +716,9 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "group" => cfg.group = Some(value.to_string()),
             "api_socket" => cfg.api_socket = Some(value.to_string()),
             "networks" | "bgp.networks" => cfg.networks = parse_str_array(value),
+            "labeled_networks" | "bgp.labeled_networks" => {
+                cfg.labeled_networks = parse_str_array(value)
+            }
             _ => {
                 cfg.warnings.push(format!(
                     "line {}: unknown key '{}' (ignored)",
@@ -1017,6 +1026,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--network" if i + 1 < args.len() => {
                 cfg.networks.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--labeled-network" if i + 1 < args.len() => {
+                cfg.labeled_networks.push(args[i + 1].clone());
                 i += 2;
             }
             "--hold-time" if i + 1 < args.len() => {

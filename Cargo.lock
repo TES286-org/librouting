@@ -312,6 +312,7 @@ dependencies = [
  "lr-bgp",
  "lr-bmp",
  "lr-core",
+ "lr-mpls",
  "lr-mrt",
  "lr-ospf",
  "lr-osroute",
