@@ -13,6 +13,7 @@ members = [
     "crates/lr-mrt",
     "crates/lr-damping",
     "crates/lr-osroute",
+    "crates/lr-mpls",
     "crates/lr-ffi",
     "crates/lr-cli",
     "crates/lr-tests",
@@ -43,6 +44,7 @@ lr-bmp = { path = "crates/lr-bmp", version = "0.1.0" }
 lr-mrt = { path = "crates/lr-mrt", version = "0.1.0" }
 lr-damping = { path = "crates/lr-damping", version = "0.1.0" }
 lr-osroute = { path = "crates/lr-osroute", version = "0.1.0" }
+lr-mpls = { path = "crates/lr-mpls", version = "0.1.0" }
 lr-ffi = { path = "crates/lr-ffi", version = "0.1.0" }
 
 bytes = "1"

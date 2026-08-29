@@ -1,0 +1,18 @@
+[package]
+name = "lr-mpls"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "MPLS label and label-stack codec (RFC 3032) for librouting"
+
+[features]
+default = ["std"]
+std = []
+no_std = []
+
+[dependencies]
+lr-core = { workspace = true }
