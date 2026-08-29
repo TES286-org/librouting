@@ -63,6 +63,15 @@ impl PeerRole {
         matches!(self, PeerRole::Ibgp | PeerRole::ConfederationInternal)
     }
 
+    /// True if this peer is outside the local AS (eBGP or
+    /// confederation-external). This is the RFC 8212 notion of an
+    /// "EBGP session" — §1 explicitly includes confederation
+    /// boundaries — and governs the default deny-in/deny-out policy
+    /// behaviour for sessions without explicit policy.
+    pub fn is_external(self) -> bool {
+        matches!(self, PeerRole::Ebgp | PeerRole::ConfederationExternal)
+    }
+
     /// True if AS_PATH is mutated when advertising to this peer.
     pub fn prepends_as_path(self) -> bool {
         matches!(self, PeerRole::Ebgp | PeerRole::ConfederationExternal)
@@ -154,6 +163,26 @@ mod tests {
             PeerRole::from_asns(Asn(100), Asn(100), None),
             PeerRole::Ibgp
         );
+    }
+
+    #[test]
+    fn external_is_the_rfc8212_notion_of_ebgp() {
+        // RFC 8212 §1: EBGP sessions include confederation boundaries,
+        // so confederation-external counts as external; iBGP and
+        // confederation-internal do not.
+        assert!(PeerRole::Ebgp.is_external());
+        assert!(PeerRole::ConfederationExternal.is_external());
+        assert!(!PeerRole::Ibgp.is_external());
+        assert!(!PeerRole::ConfederationInternal.is_external());
+        // is_external / is_internal partition the role space.
+        for role in [
+            PeerRole::Ebgp,
+            PeerRole::Ibgp,
+            PeerRole::ConfederationExternal,
+            PeerRole::ConfederationInternal,
+        ] {
+            assert_eq!(role.is_external(), !role.is_internal());
+        }
     }
 
     #[test]
