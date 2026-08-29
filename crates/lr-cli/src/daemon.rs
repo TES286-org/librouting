@@ -105,6 +105,10 @@ fn print_usage() {
          best-path tiebreaker (RFC 5004 deterministic, default)\n  \
          --no-bestpath-compare-routerid  Fall back to oldest-route-wins\n  \
          (FRR default)\n  \
+         --default-ipv4-unicast  Activate IPv4 unicast for every peer by\n  \
+         default (FRR `bgp default ipv4-unicast`, the default)\n  \
+         --no-default-ipv4-unicast  Require explicit per-peer activation\n  \
+         (FRR `no bgp default ipv4-unicast`)\n  \
          --bfd                    BFD fast-fail for the peer(s) (RFC 5880/\n  \
          5881): a BFD Down tears the BGP session immediately\n  \
          --bfd-multihop           RFC 5883 multihop BFD (UDP 4784, no TTL\n  \
@@ -429,6 +433,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         "  ebgp:        policy={} enforce_first_as={} compare_routerid={}",
         cfg.ebgp_policy, cfg.enforce_first_as, cfg.bestpath_compare_routerid
     );
+    println!("  ipv4-unicast: default={}", cfg.default_ipv4_unicast);
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -738,31 +743,50 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         sc = sc.with_add_path();
     }
     // RFC 4760 MP-BGP: build the family list from the effective config.
-    // Empty keeps the SessionConfig::bgp() default (IPv4 unicast),
-    // preserving the historical daemon behaviour. `ipv4-unicast`,
-    // `ipv6-unicast`, `ipv4-labeled-unicast` (RFC 8277) and
-    // `ipv6-labeled-unicast` (RFC 8277) are recognised; unknown names are
-    // logged and dropped.
+    // Recognised names: `ipv4-unicast`, `ipv6-unicast`,
+    // `ipv4-labeled-unicast` (RFC 8277), `ipv6-labeled-unicast`
+    // (RFC 8277); unknown names are logged and dropped.
+    //
+    // FRR `bgp default ipv4-unicast` (W2.1): when on (the default —
+    // matches FRR and BIRD's MP-BGP capability requirement), ensure
+    // IPV4_UNICAST is in the family list so the MP-BGP capability
+    // advertises it (BIRD 2 refuses the session without a matching
+    // capability). When off, IPV4_UNICAST must be added explicitly to
+    // the peer's `mp_families` to be advertised and processed — the
+    // FRR `no bgp default ipv4-unicast` posture. The router's FSM
+    // additionally gates legacy-section IPv4 NLRI on the same flag
+    // (see `PeerConfig::ipv4_unicast_active`).
+    let effective_default_ipv4 = p.default_ipv4_unicast.unwrap_or(g.default_ipv4_unicast);
     let families_cfg = p.mp_families.as_ref().unwrap_or(&g.mp_families);
-    if !families_cfg.is_empty() {
-        let mut families = Vec::new();
-        for name in families_cfg {
-            match name.as_str() {
-                "ipv4-unicast" => families.push(NlriFamily::IPV4_UNICAST),
-                "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
-                "ipv4-labeled-unicast" => families.push(NlriFamily::IPV4_LABELED_UNICAST),
-                "ipv6-labeled-unicast" => families.push(NlriFamily::IPV6_LABELED_UNICAST),
-                other => eprintln!(
-                    "daemon: peer {}: unknown mp_family '{}' (skipped)",
-                    p.label(),
-                    other
-                ),
-            }
-        }
-        if !families.is_empty() {
-            sc = sc.with_mp_families(families);
+    let mut families = Vec::new();
+    for name in families_cfg {
+        match name.as_str() {
+            "ipv4-unicast" => families.push(NlriFamily::IPV4_UNICAST),
+            "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
+            "ipv4-labeled-unicast" => families.push(NlriFamily::IPV4_LABELED_UNICAST),
+            "ipv6-labeled-unicast" => families.push(NlriFamily::IPV6_LABELED_UNICAST),
+            other => eprintln!(
+                "daemon: peer {}: unknown mp_family '{}' (skipped)",
+                p.label(),
+                other
+            ),
         }
     }
+    if effective_default_ipv4 && !families.contains(&NlriFamily::IPV4_UNICAST) {
+        // Implicit IPv4 unicast (RFC 4271 default + BIRD capability
+        // requirement). Insert at the front so explicit families
+        // listed by the operator stay in their original order.
+        families.insert(0, NlriFamily::IPV4_UNICAST);
+    }
+    // Always override — even when families is empty, this clears the
+    // SessionConfig::bgp() default `[IPV4_UNICAST]` so a
+    // `default_ipv4_unicast = false` peer with no configured families
+    // does not advertise IPv4 unicast (matches FRR).
+    sc = sc.with_mp_families(families);
+    // Stash the effective default_ipv4_unicast on the SessionConfig
+    // so add_session propagates it to PeerConfig — the FSM gates
+    // IPv4 NLRI processing on this flag.
+    sc.default_ipv4_unicast = effective_default_ipv4;
     // RFC 5549 Extended Next-Hop. Advertise the canonical (1,1,2) tuple
     // so an IPv6 transport can carry IPv4 NLRI without an IPv4 next-hop.
     if p.extended_next_hop.unwrap_or(g.extended_next_hop) {

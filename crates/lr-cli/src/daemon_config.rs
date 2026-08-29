@@ -56,6 +56,9 @@ pub(crate) struct PeerSpec {
     pub add_path_max_paths: Option<u32>,
     /// RFC 4760 MP-BGP families beyond the default IPv4 unicast.
     pub mp_families: Option<Vec<String>>,
+    /// FRR `bgp default ipv4-unicast` (W2.1): per-peer override of the
+    /// router-wide default. `None` = inherit the router default.
+    pub default_ipv4_unicast: Option<bool>,
     /// RFC 5549 Extended Next-Hop.
     pub extended_next_hop: Option<bool>,
     /// RFC 5082 GTSM hop count (`Some(1)` = single-hop TTL security).
@@ -246,6 +249,13 @@ pub(crate) struct DaemonConfig {
     /// IDENTIFIER (RFC 5004 deterministic mode). When off, the
     /// oldest-received route wins (FRR's default).
     pub bestpath_compare_routerid: bool,
+    /// FRR `bgp default ipv4-unicast` (W2.1): when on (the default —
+    /// matches FRR), IPv4 unicast is implicitly active for every BGP
+    /// peer even when its `mp_families` does not list it. When off,
+    /// IPv4 unicast must be added explicitly to the peer's
+    /// `mp_families` (FRR `no bgp default ipv4-unicast` with explicit
+    /// `address-family ipv4 unicast` / `neighbor X activate`).
+    pub default_ipv4_unicast: bool,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -301,6 +311,7 @@ impl DaemonConfig {
             ebgp_policy: "rfc8212".to_string(),
             enforce_first_as: false,
             bestpath_compare_routerid: true,
+            default_ipv4_unicast: true,
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -725,6 +736,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "bgp.bestpath_compare_routerid" => {
                 cfg.bestpath_compare_routerid = parse_bool(value);
             }
+            "bgp.default_ipv4_unicast" => cfg.default_ipv4_unicast = parse_bool(value),
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -981,6 +993,7 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
             peer.add_path_max_paths = Some(value.parse().map_err(|_| "bad add_path_max_paths")?)
         }
         "mp_families" => peer.mp_families = Some(parse_str_array(value)),
+        "default_ipv4_unicast" => peer.default_ipv4_unicast = Some(parse_bool(value)),
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
@@ -1109,6 +1122,14 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--no-bestpath-compare-routerid" => {
                 cfg.bestpath_compare_routerid = false;
+                i += 1;
+            }
+            "--default-ipv4-unicast" => {
+                cfg.default_ipv4_unicast = true;
+                i += 1;
+            }
+            "--no-default-ipv4-unicast" => {
+                cfg.default_ipv4_unicast = false;
                 i += 1;
             }
             "--install-kernel-routes" => {
@@ -1676,5 +1697,19 @@ mod tests {
         )
         .unwrap();
         assert!(!cfg.bestpath_compare_routerid);
+    }
+
+    #[test]
+    fn default_ipv4_unicast_default_on_and_parses() {
+        // FRR `bgp default ipv4-unicast` defaults to on. W2.1.
+        assert!(DaemonConfig::with_defaults().default_ipv4_unicast);
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             default_ipv4_unicast = false\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(!cfg.default_ipv4_unicast);
     }
 }
