@@ -43,11 +43,11 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | MD5 / TCP-AO session authentication | ✅ 🧪 | RFC 2385 MD5 + RFC 5925 TCP-AO (hmac(sha1)/cmac(aes), ao_required) via `lr-osroute::tcp_auth`; kernel-signed SYNs, fail-closed arming; BIRD/FRR interop-verified |
 | BGPsec | ❌ | out of scope for now |
 | RFC 8277 BGP labelled unicast (BGP-LU) | ✅ 🧪 | `lr-mpls` (RFC 3032 label + label-stack codec, 4- and 3-octet wire forms) + `lr-bgp::path::labeled_nlri` (RFC 8277 §3 NLRI codec, MP_REACH/MP_UNREACH helpers); `lr-router::originate_labeled`; daemon `--labeled-network` / `labeled_networks` TOML + `--mp-family ipv4-labeled-unicast` / `ipv6-labeled-unicast`; FFI + Go/Python bindings; 4 e2e tests + `tests/interop/labeled_unicast.sh` (two-daemon TCP, label=100 round-trip) |
-| Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
+| Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4); `BestPathConfig::deterministic_router_id` exposed to daemon as FRR `bgp bestpath compare-routerid` (W2.2) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard rules, Simple Password auth; `lr-osroute::bfd_transport` sockets (3784/4784, TTL 255, ephemeral source ports); daemon `--bfd` fast-fails BGP on BFD Down (BIRD-verified) |
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community set actions; route tags (`set tag`) still open
-| Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
+| Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled; FRR `bgp enforce-first-as` (W2.2) — router-level flag rejects eBGP UPDATEs whose leftmost AS_PATH AS != peer AS |
 | RFC 8212 default eBGP route behaviors | ✅ 🧪 | `lr-router` `set_ebgp_requires_policy` + per-session `set_session_policy`: external sessions (eBGP *and* confederation boundaries, §1) without explicit import policy discard received routes before Adj-RIB-In; without export policy advertise nothing — enforced at all three egress paths (per-prefix export, RFC 2918/7313 reannounce, initial dump; EoR still flows) with stale Adj-RIB-Out entries withdrawn; iBGP exempt; daemon default-on via `[bgp] ebgp_policy` with `accept-all` as the §3/Appendix-A deviation; FFI + Go/Python bindings |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
@@ -316,8 +316,33 @@ flags; never break standards compliance by default.
 
 1. FRR `bgp default ipv4-unicast` semantics (auto-activation of the
    IPv4 unicast family per eBGP session, on by default in FRR).
-2. FRR `bgp enforce-first-as` / disable checks, `bgp
-   bestpath compare-routerid` variants.
+2. ~~**FRR `bgp enforce-first-as` + `bgp bestpath compare-routerid`**~~
+   — done: the router gained `set_enforce_first_as(bool)` (default
+   off — matches FRR `no bgp enforce-first-as` and the RFC 4271 §6.3
+   "MAY reject" latitude). With it on, an UPDATE from an external
+   peer (eBGP or a confederation boundary, mirroring the W2.1
+   scope) whose leftmost AS_PATH sequence segment's first AS is not
+   the peer's negotiated AS is dropped before Adj-RIB-In and the
+   rejection is surfaced once per session as a `RouterEvent::Log`;
+   iBGP and confederation-internal sessions are exempt. The decoder
+   uses the FSM-normalized canonical AS_PATH (always 4-byte after the
+   `lr-bgp` codec's AS4_PATH merge) — no wire-width guessing. FRR
+   `bgp bestpath compare-routerid` is exposed through the existing
+   `BestPathConfig::deterministic_router_id` knob: the daemon wires
+   it via `[bgp] bestpath_compare_routerid = bool` (default true —
+   RFC 5004 deterministic, the inverse of FRR's default). Daemon
+   surfaces both as `--enforce-first-as` / `--no-enforce-first-as`
+   and `--bestpath-compare-routerid` / `--no-bestpath-compare-routerid`
+   CLI flags plus the `[bgp] enforce_first_as` /
+   `[bgp] bestpath_compare_routerid` TOML keys; the startup status
+   printout names both. FFI: `lr_router_set_enforce_first_as` mirrors
+   the C ABI; Go (`Router.SetEnforceFirstAs`) and Python
+   (`Router.set_enforce_first_as`) bindings round-trip; the C harness
+   smoke-tests the new entry point. Verified by 4 router unit tests
+   (default-off accepts, accepts the well-formed case, rejects a
+   forged AS_PATH via a hand-rewritten wire UPDATE, iBGP exemption)
+   and 2 daemon e2e tests (the flag parses, legit traffic still
+   flows, the status printout names the new knobs).
 3. BIRD `bgp allow local as` and extended-community syntax sugar
    (`rt:`/`ro:` literals already parse; keep parity).
 4. Soft reconfiguration inbound (`neighbor X soft-reconfiguration
@@ -325,6 +350,7 @@ flags; never break standards compliance by default.
    already supports it; expose per-session snapshots.
 5. Maintain the interop scripts (`tests/interop/*`) as the acceptance
    gate for every compatibility item.
+
 
 ### W3 — RFC coverage gaps (from `RFC_MAP.md`)
 

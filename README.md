@@ -276,6 +276,19 @@ exempt. The shipped daemon enables the mode by default
 (`[bgp] ebgp_policy = "rfc8212"`; `accept-all` restores the RFC 4271
 default-accept the RFC permits as a deviation).
 
+### FRR `bgp enforce-first-as` + `bgp bestpath compare-routerid`
+
+`DefaultRouter::set_enforce_first_as(true)` (off by default — FRR `no
+bgp enforce-first-as`) drops eBGP UPDATEs whose leftmost AS_PATH
+sequence segment's first AS is not the peer's negotiated AS, surfacing
+the rejection as a `RouterEvent::Log`. iBGP and confederation-internal
+sessions are exempt. The shipped daemon exposes it as `[bgp]
+enforce_first_as = true` (CLI `--enforce-first-as` /
+`--no-enforce-first-as`); FFI/Go/Python bindings mirror the call. FRR
+`bgp bestpath compare-routerid` is exposed via `[bgp]
+bestpath_compare_routerid` (default `true` — RFC 5004 deterministic; the
+inverse of FRR's default).
+
 ## Safety net
 
 Protocol-level invariants (RFC compliance requirements) are enforced by

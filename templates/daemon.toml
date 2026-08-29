@@ -45,6 +45,21 @@ hold_time = 90
 #                never affected — RFC 8212 scopes to EBGP sessions.
 # ebgp_policy = "rfc8212"
 
+# FRR `bgp enforce-first-as` (W2.2): when on, an eBGP UPDATE whose
+# leftmost AS_PATH sequence segment's first AS is not the peer's AS
+# is rejected before Adj-RIB-In. Off by default — matches FRR
+# `no bgp enforce-first-as` and the RFC 4271 §6.3 "MAY reject" latitude.
+# iBGP and confederation-internal sessions are exempt, mirroring FRR.
+# CLI: --enforce-first-as / --no-enforce-first-as
+# enforce_first_as = false
+
+# FRR `bgp bestpath compare-routerid` (W2.2): when on (the default), the
+# best-path tiebreaker is the lowest BGP IDENTIFIER (RFC 5004
+# deterministic mode). When off, the oldest-received route wins
+# (FRR's default). CLI: --bestpath-compare-routerid /
+# --no-bestpath-compare-routerid
+# bestpath_compare_routerid = true
+
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
 # window after a session loss.

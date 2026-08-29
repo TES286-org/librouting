@@ -7,7 +7,7 @@ implements, or references. It is grouped by protocol family.
 
 | RFC    | Title                                                | Status                  | Crate path                          |
 |--------|------------------------------------------------------|--------------------------|--------------------------------------|
-| 4271   | BGP-4                                                | ✓ core                  | `lr-bgp::fsm`, `lr-bgp::message`    |
+| 4271  | BGP-4                                                | ✓ core; FRR `bgp enforce-first-as` leftmost-AS check (W2.2, off by default) | `lr-bgp::fsm`, `lr-bgp::message`, `lr-router::import_route` |
 | 1997  | BGP Communities Attribute                            | ✓                       | `lr-bgp::path::communities`         |
 | 2385  | Protection of BGP Sessions via a TCP MD5 Signature (TCP MD5) | ✓                       | `lr-osroute::tcp_auth` (TCP_MD5SIG/_EXT) |
 | 2439  | BGP Route Flap Damping                               | ✓ (deprecated by 8326) | `lr-damping`                          |
@@ -22,7 +22,7 @@ implements, or references. It is grouped by protocol family.
 | 4760  | Multiprotocol BGP                                    | ✓                       | `lr-bgp::path::mp_nlri`              |
 | 4784  | BGP Cumulative Bestpath                              | ✓ (multipath)           | `lr-bgp::best_path`                  |
 | 4893  | BGP Support for 4-byte AS                            | ✓                       | `lr-bgp::extensions::asn4`           |
-| 5004  | BGP Deterministic Path Selection                     | ✓ (default on)          | `lr-bgp::best_path`                  |
+| 5004  | BGP Deterministic Path Selection                     | ✓ (default on; exposed as FRR `bgp bestpath compare-routerid` on the daemon, W2.2) | `lr-bgp::best_path` |
 | 5082  | The Generalized TTL Security Mechanism (GTSM)        | ✓ (IP_MINTTL listener filter + outbound TTL; `--gtsm` daemon flag) | `lr-osroute::gtsm` |
 | 5492  | BGP Capabilities                                     | ✓                       | `lr-bgp::capabilities`              |
 | 5549  | BGP Extended Next-Hop                                | ✓ (capability 5 in the §4 6-byte tuple form, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes + BIRD interop) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |

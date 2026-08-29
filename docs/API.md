@@ -674,6 +674,53 @@ mirrors the two calls (`lr_router_set_ebgp_requires_policy`,
 (`SetEbgpRequiresPolicy` / `SetSessionPolicy`) and Python
 (`set_ebgp_requires_policy` / `set_session_policy`) bindings.
 
+### FRR `bgp enforce-first-as` (W2.2)
+
+`DefaultRouter::set_enforce_first_as(true)` arms the FRR
+`bgp enforce-first-as` import-time safety check: an UPDATE from an
+*external* BGP peer — eBGP **or** a confederation boundary, mirroring
+the [`set_ebgp_requires_policy`](#rfc-8212-default-ebgp-route-behaviors)
+scope — whose leftmost AS_PATH sequence segment's first AS is not the
+peer's negotiated AS is dropped before Adj-RIB-In, and the rejection
+is surfaced once per session as a `RouterEvent::Log` (`enforce-first-as:
+session N rejected P — first AS A != peer AS B`). iBGP and
+confederation-internal sessions are exempt, mirroring FRR. The library
+default is off — FRR's `no bgp enforce-first-as` and the RFC 4271 §6.3
+"MAY reject" latitude — so embedder pipelines stay untouched until the
+operator opts in. The decoder reads the FSM-normalized canonical
+AS_PATH (always 4-byte after the `lr-bgp` codec's AS4_PATH merge) via
+`PathAttributes::as_path()`, so there is no wire-width guessing.
+
+```rust
+r.set_enforce_first_as(true);
+// All subsequent eBGP UPDATEs go through the leftmost-AS check.
+```
+
+The shipped daemon exposes it as `[bgp] enforce_first_as = true` (CLI
+`--enforce-first-as` / `--no-enforce-first-as`); the startup status
+printout names both this and the bestpath tiebreaker (see below). The
+FFI mirrors it as `lr_router_set_enforce_first_as`, as do the Go
+(`Router.SetEnforceFirstAs`) and Python (`Router.set_enforce_first_as`)
+bindings.
+
+### FRR `bgp bestpath compare-routerid` (W2.2)
+
+`BestPathConfig::deterministic_router_id` (default `true` — RFC 5004
+deterministic mode) is the inverse of FRR's `bgp bestpath
+compare-routerid` flag (FRR defaults to oldest-route-wins, lr defaults
+to lowest-router-id-wins). The daemon exposes the knob through
+`best_path_config_mut().deterministic_router_id`:
+
+```rust
+r.best_path_config_mut().deterministic_router_id = false;
+// Fall back to oldest-route-wins (FRR default).
+```
+
+The shipped daemon exposes it as `[bgp] bestpath_compare_routerid =
+bool` (CLI `--bestpath-compare-routerid` / `--no-bestpath-compare-routerid`);
+the default keeps the RFC 5004 deterministic posture that the
+library has shipped since day one.
+
 ### Cross-protocol redistribution (BIRD `pipe` / FRR `redistribute`)
 
 `RedistributionPipe` bridges routes from a source protocol to a target
