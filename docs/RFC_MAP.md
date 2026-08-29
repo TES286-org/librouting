@@ -35,7 +35,7 @@ implements, or references. It is grouped by protocol family.
 | 7911  | BGP Add-Path                                         | ✓ (negotiation, wire framing, N-path selection/export) | `lr-bgp::extensions::addpath`, `lr-bgp::codec`, `lr-bgp::best_path`, `lr-router` |
 | 7947  | Internet Exchange BGP Route Server                   | ✓                       | `lr-bgp::role::route_server`         |
 | 8212  | Default EBGP Route Behaviors                         | ✓ (deny-in/deny-out for external sessions without explicit policy; daemon default-on, `accept-all` deviation) | `lr-router` (`set_ebgp_requires_policy` / `set_session_policy`), `lr-cli` daemon (`ebgp_policy`) |
-| 8277  | BGP and Labeled Address Prefixes (MPLS)              | not implemented         | —                                    |
+| 8277  | BGP and Labeled Address Prefixes (MPLS)              | ✓ (lr-mpls: RFC 3032 label + label-stack codec, 4- and 3-octet wire forms; lr-bgp::path::labeled_nlri: RFC 8277 §3 NLRI codec + MP_REACH/MP_UNREACH helpers; lr-router::originate_labeled; lr-osroute::mpls_route: Linux AF_MPLS netlink LSP install/delete with RTA_DST/RTA_VIA/RTA_NEWDST; lr-ffi + Go/Python bindings; daemon --labeled-network + labeled_networks TOML + --mp-family ipv4-labeled-unicast/ipv6-labeled-unicast; 4 e2e tests + tests/interop/labeled_unicast.sh two-daemon TCP interop) | `lr-mpls`, `lr-bgp::path::labeled_nlri`, `lr-router`, `lr-osroute::mpls_route`, `lr-ffi`, `lr-cli` |
 | 8326  | Graceful BGP Session Restart + damp deprecation       | ✓                       | `lr-bgp::best_path`, `lr-damping`    |
 | 8950  | Advertising IPv4 NLRI with an IPv6 Next Hop           | ✓ (obsoletes 5549's NLRI encoding; capability encoding identical) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::path` |
 | 9072  | Extended Message Support for BGP                      | ✓ (extended length)     | `lr-bgp::path::PathAttrFlags`        |
@@ -95,6 +95,19 @@ end-to-end in sessions; the keyed-hash sections (§4.3/§4.4) are
 framing-only — digests are embedder-supplied (no crypto dependency in
 `lr-bfd`). The Echo function (§6.4) is not implemented (single-hop-only
 and optional; multihop MUST NOT use it, RFC 5883 §3).
+
+## MPLS — RFC 3032 + extensions
+
+| RFC    | Title                                                | Status       | Crate path                          |
+|--------|------------------------------------------------------|--------------|--------------------------------------|
+| 3032   | MPLS Label Stack Encoding                            | ✓ (Label + LabelStack types, 4-octet-per-entry wire form §2.1 + 3-octet-per-entry NLRI form for RFC 8277; bottom-of-stack bit handling; named constants for all reserved labels — IPv4/IPv6 explicit-null, router-alert, implicit-null, ELI, GAL, OAM, extension) | `lr-mpls` |
+| 5462   | MPLS Label Stack Entry — TC field                    | ✓ (3-bit TC field on Label) | `lr-mpls` |
+| 6790   | Entropy LSE Indicator                                | ✓ (Label::ELI constant) | `lr-mpls` |
+| 5586   | GAL (Generic Associated Channel Label)               | ✓ (Label::GAL constant) | `lr-mpls` |
+| 8277   | BGP and Labeled Address Prefixes (BGP-LU)            | ✓ (NLRI codec, MP_REACH/MP_UNREACH helpers, router originate/withdraw, FFI + bindings, daemon config, two-daemon interop) | `lr-bgp::path::labeled_nlri`, `lr-router`, `lr-osroute::mpls_route`, `lr-ffi`, `lr-cli` |
+| 5036   | LDP (Label Distribution Protocol)                    | not impl     | —                                   |
+| 8660   | SR-MPLS Data Plane                                   | not impl     | —                                   |
+| 8667   | IS-IS / OSPF Extensions for SR-MPLS                  | not impl     | —                                   |
 
 ## OS interface — RFC 3549 + Linux
 

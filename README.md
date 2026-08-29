@@ -39,14 +39,15 @@ library without depending on the Rust toolchain at runtime.
 | Crate | Path | Purpose |
 |-------|------|---------|
 | `lr-core` | `crates/lr-core` | Shared foundation: types, codec traits, generic FSM, RIB traits, timers, wire utilities |
-| `lr-bgp` | `crates/lr-bgp` | BGP-4 codec, path attributes, peer FSM, capabilities, MP-BGP, AddPath, 4-byte ASN, iBGP/eBGP roles, Route Reflector (RFC 4456), Confederations (RFC 6793), Route Server (RFC 7947), OTC (RFC 9234), Extended Next-Hop (RFC 5549), best-path with multipath (RFC 4271 §9.1.2 / RFC 4784) |
+| `lr-bgp` | `crates/lr-bgp` | BGP-4 codec, path attributes, peer FSM, capabilities, MP-BGP, AddPath, 4-byte ASN, iBGP/eBGP roles, Route Reflector (RFC 4456), Confederations (RFC 6793), Route Server (RFC 7947), OTC (RFC 9234), Extended Next-Hop (RFC 5549), RFC 8277 labelled unicast (BGP-LU), best-path with multipath (RFC 4271 §9.1.2 / RFC 4784) |
 | `lr-ospf` | `crates/lr-ospf` | OSPFv2/v3 codec, LSAs, link-state DB, neighbor FSM, SPF, areas, auth |
 | `lr-babel` | `crates/lr-babel` | Babel codec, TLVs, neighbor FSM, route table, source-specific routing |
 | `lr-rib` | `crates/lr-rib` | Adj-RIB-In, Adj-RIB-Out, Loc-RIB, route selection, cross-protocol merging |
 | `lr-policy` | `crates/lr-policy` | Route maps, prefix lists, AS-path filters, community lists, import/export/selection hooks, safety net |
 | `lr-router` | `crates/lr-router` | Layer-3 router instance, sessions, scheduler, event dispatch |
 | `lr-bfd` | `crates/lr-bfd` | BFD Control packet codec (RFC 5880 §4), session FSM with negotiated timing + Poll/Final (§6.8), auth sections (§4.2-§4.4) |
-| `lr-osroute` | `crates/lr-osroute` | OS route integration + protocol transports: rtnetlink/route(4)/IPHelper, TCP MD5/TCP-AO (`tcp_auth`), GTSM (`gtsm`), BFD UDP (`bfd_transport`, RFC 5881/5883), OSPF raw sockets (`ospf_transport`) |
+| `lr-mpls` | `crates/lr-mpls` | MPLS label + label-stack codec (RFC 3032): 4-octet wire form, 3-octet NLRI form (RFC 8277 §3.2), reserved-label constants |
+| `lr-osroute` | `crates/lr-osroute` | OS route integration + protocol transports: rtnetlink/route(4)/IPHelper, TCP MD5/TCP-AO (`tcp_auth`), GTSM (`gtsm`), BFD UDP (`bfd_transport`, RFC 5881/5883), OSPF raw sockets (`ospf_transport`), Linux AF_MPLS LSP install (`mpls_route`) |
 | `lr-mrt` | `crates/lr-mrt` | MRT dump format (RFC 6396): TABLE_DUMP_V2 read/write, BGP4MP decode |
 | `lr-bmp` | `crates/lr-bmp` | BGP Monitoring Protocol (RFC 7854): BMP message codec + router sink |
 | `lr-damping` | `crates/lr-damping` | Route flap damping (RFC 2439) |
@@ -162,7 +163,7 @@ lr-daemon --protocol bmp --listen 0.0.0.0:1170        # BMP collector
 librouting/
 ├── Cargo.toml
 ├── crates/{lr-core, lr-bgp, lr-ospf, lr-babel, lr-rib, lr-policy,
-│           lr-router, lr-bfd, lr-bmp, lr-damping, lr-osroute,
+│           lr-router, lr-bfd, lr-bmp, lr-damping, lr-osroute, lr-mpls,
 │           lr-cli, lr-ffi, lr-tests}/
 ├── bindings/{lr-go, lr-python}/
 ├── docs/

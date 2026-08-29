@@ -432,6 +432,81 @@ let gw: IpAddr = "198.51.100.1".parse().unwrap();
 rt.add_route(prefix, gw, 2)?;
 ```
 
+## MPLS — label stack codec (`lr-mpls`)
+
+```rust
+use lr_mpls::{Label, LabelStack};
+
+// Build a stack: top = 100, bottom = 200 (S bit set on encode).
+let stack = LabelStack::from_labels([Label::new(100), Label::new(200)]);
+let wire = stack.encode_4octet();          // RFC 3032 §2.1 (8 bytes)
+let nlri = stack.encode_3octet();          // RFC 8277 §3.2 (6 bytes, no TTL)
+
+// Round-trip both forms.
+assert_eq!(LabelStack::decode_4octet(&wire).unwrap(), stack);
+// The 3-octet form does not carry TTL — decode produces TTL=0.
+let dec = LabelStack::decode_3octet(&nlri).unwrap();
+assert_eq!(dec.labels().iter().map(|l| l.value).collect::<Vec<_>>(),
+           vec![100, 200]);
+```
+
+## MPLS — Linux kernel LSP installation (`lr-osroute::mpls_route`)
+
+```rust
+use lr_osroute::mpls_route::{MplsNetlink, MplsRoute, mpls_enabled};
+use lr_mpls::{Label, LabelStack};
+use lr_core::addr::IpAddr;
+
+if !mpls_enabled() {
+    eprintln!("load mpls_router; echo 16 > /proc/sys/net/mpls/platform_labels");
+    return;
+}
+let mut mpls = MplsNetlink::connect()?;
+
+// Pop: incoming label 100 → forward IP to 192.0.2.1 on if 2.
+mpls.add_route(&MplsRoute::pop(Label::new(100), IpAddr::V4([192, 0, 2, 1]), 2))?;
+
+// Swap: incoming label 200 → push [300, 400], forward to 198.51.100.1.
+let new_stack = LabelStack::from_labels([Label::new(300), Label::new(400)]);
+mpls.add_route(&MplsRoute::swap(Label::new(200), new_stack,
+                                IpAddr::V4([198, 51, 100, 1]), 2))?;
+
+// Remove by in-label.
+mpls.delete_route(Label::new(100))?;
+```
+
+## BGP labelled unicast (RFC 8277)
+
+```rust
+use lr_core::addr::Prefix;
+use lr_core::nlri::NlriFamily;
+use lr_mpls::{Label, LabelStack};
+use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
+
+let mut r = DefaultRouter::new();
+let h = r.add_session(
+    SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+        .with_mp_families(vec![NlriFamily::IPV4_UNICAST,
+                                NlriFamily::IPV4_LABELED_UNICAST]),
+).unwrap();
+r.start_session(h).unwrap();
+
+// Originate a labelled IPv4 route: 198.51.100.0/24 with label 100.
+let stack = LabelStack::from_labels([Label::new(100)]);
+r.originate_labeled(
+    Prefix::new_v4([198, 51, 100, 0], 24),
+    NlriFamily::IPV4_LABELED_UNICAST,
+    stack,
+    Some(IpAddr::V4([192, 0, 2, 1])),
+);
+```
+
+Daemon-side, the same route is originated with `--labeled-network
+"198.51.100.0/24 100"` (or the `labeled_networks` TOML key) plus
+`--mp-family ipv4-labeled-unicast` on the peer. The interop script
+`tests/interop/labeled_unicast.sh` runs the full two-daemon lifecycle
+over a real TCP socket.
+
 ## Damping (RFC 2439)
 
 ```rust

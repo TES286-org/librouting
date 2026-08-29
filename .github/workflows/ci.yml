@@ -154,6 +154,8 @@ jobs:
         run: cargo build -p lr-cli
       - name: Two-daemon interop (librouting ↔ librouting)
         run: ./tests/interop/two_daemon.sh
+      - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)
+        run: ./tests/interop/labeled_unicast.sh
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         run: ./tests/interop/ospf.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)

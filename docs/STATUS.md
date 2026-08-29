@@ -42,6 +42,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | MRAI (Min. Route Advertisement Interval) | ✅ | configurable per-prefix batching (withdrawals immediate); defaults to 30 s eBGP / 5 s iBGP |
 | MD5 / TCP-AO session authentication | ✅ 🧪 | RFC 2385 MD5 + RFC 5925 TCP-AO (hmac(sha1)/cmac(aes), ao_required) via `lr-osroute::tcp_auth`; kernel-signed SYNs, fail-closed arming; BIRD/FRR interop-verified |
 | BGPsec | ❌ | out of scope for now |
+| RFC 8277 BGP labelled unicast (BGP-LU) | ✅ 🧪 | `lr-mpls` (RFC 3032 label + label-stack codec, 4- and 3-octet wire forms) + `lr-bgp::path::labeled_nlri` (RFC 8277 §3 NLRI codec, MP_REACH/MP_UNREACH helpers); `lr-router::originate_labeled`; daemon `--labeled-network` / `labeled_networks` TOML + `--mp-family ipv4-labeled-unicast` / `ipv6-labeled-unicast`; FFI + Go/Python bindings; 4 e2e tests + `tests/interop/labeled_unicast.sh` (two-daemon TCP, label=100 round-trip) |
 | Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard rules, Simple Password auth; `lr-osroute::bfd_transport` sockets (3784/4784, TTL 255, ephemeral source ports); daemon `--bfd` fast-fails BGP on BFD Down (BIRD-verified) |
@@ -107,6 +108,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Capability | Status | Notes |
 |-----------|:------:|-------|
 | Linux rtnetlink add/delete/list | ✅ 🧪 | used by `lr-daemon --install-kernel-routes` |
+| Linux AF_MPLS netlink LSP install/delete | ✅ 🧪 | `lr-osroute::mpls_route` — Pop (label→IP) and Swap (label→label) via `RTM_NEWROUTE`/`RTM_DELROUTE` with `RTA_DST`/`RTA_VIA`/`RTA_NEWDST`/`RTA_OIF`; `/proc/sys/net/mpls/platform_labels` capability detection; per-`MplsNetlink` socket, error decoding (EPERM/ENOENT/EEXIST/EOPNOTSUPP) |
 | TCP MD5 / TCP-AO socket auth | ✅ 🧪 | `lr-osroute::tcp_auth` — arm_listener (wildcard keys) + connect_auth (keys before connect, signed SYN); Linux both, other platforms Unsupported |
 | BSD route(4) socket (FreeBSD/NetBSD/OpenBSD/macOS) | ✅ | layouts pinned per-OS; cross-compile checked |
 | Windows IP Helper API | ✅ | full link verified (x86_64-pc-windows-gnu) |
@@ -128,12 +130,14 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 48 binaries / 576 tests |
+| Unit tests (workspace) | ✅ 36 binaries / 612 tests |
 | Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
 | Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
 | Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
 | Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
 | BGP session-mode E2E (8 modes: standard dual-stack, LL dual-stack, MP-BGP, MP-BGP+LL, ENH, ENH+LL, pure IPv6, pure IPv6+LL) | ✅ 🧪 | `lr-tests/tests/bgp_session_modes.rs` |
+| RFC 8277 BGP-LU E2E (single-label, multi-label, implicit-null, withdrawal) | ✅ 🧪 | `lr-tests/tests/bgp_labeled_unicast.rs` |
+| RFC 8277 two-daemon interop (TCP, label=100 for 198.51.100.0/24) | ✅ 🧪 | `tests/interop/labeled_unicast.sh` |
 | GTSM + maximum-prefix E2E (TTL security + per-peer prefix limit) | ✅ 🧪 | `lr-tests/tests/gtsm_max_prefix.rs` |
 | Redistribution E2E (BGP↔BGP, BGP→OSPF, metric policy, prefix filter, withdrawal) | ✅ 🧪 | `lr-tests/tests/redistribution.rs` |
 | Route-aggregation E2E (aggregate origination/withdrawal lifecycle) | ✅ 🧪 | `lr-tests/tests/route_aggregation.rs` |
@@ -382,10 +386,41 @@ Highest-value missing/partial standards, in rough order:
 5. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
    (0x4004/0x2007 options carrying).
 6. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
-7. **RFC 8277** BGP labeled prefixes (BGP-LU) — MPLS label NLRI,
-   also unlocks RFC 5666 EPE.
+7. ~~**RFC 8277** BGP labeled prefixes (BGP-LU)~~ — done: new `lr-mpls`
+   crate (RFC 3032 label + label-stack codec, 4- and 3-octet wire
+   forms); `lr-bgp::path::labeled_nlri` (RFC 8277 §3 NLRI codec with
+   MP_REACH/MP_UNREACH helpers); `lr-router::originate_labeled`
+   injects labelled routes into Loc-RIB; egress encodes the stack into
+   labelled MP_REACH (BGP peer FSM dispatches on family for both
+   directions); `lr-osroute::mpls_route` (Linux `AF_MPLS` netlink
+   route push/swap/pop with `RTA_DST`/`RTA_VIA`/`RTA_NEWDST` and
+   `/proc/sys/net/mpls/platform_labels` capability detection);
+   `lr-ffi` + Go/Python bindings (`lr_router_originate_labeled_v4/v6`,
+   `lr_mpls_platform_labels`); daemon `--labeled-network` /
+   `labeled_networks` TOML + `--mp-family ipv4-labeled-unicast` /
+   `ipv6-labeled-unicast`; 4 e2e tests + a two-daemon interop script
+   (`tests/interop/labeled_unicast.sh`). RFC 5666 EPE remains future
+   work.
 8. YANG models (RFC 9647 Babel, key chains RFC 8177) — low priority
    unless an embedder asks.
+
+### W3-extra — Comprehensive MPLS support (new)
+
+Standalone workstream tracking the comprehensive MPLS goal. Builds on
+the RFC 8277 BGP-LU foundation above; each item ships independently.
+
+1. ~~**RFC 3032 label + label-stack codec**~~ — done (lr-mpls crate).
+2. ~~**RFC 8277 BGP-LU end-to-end**~~ — done (codec → router → daemon →
+   FFI + bindings → interop).
+3. ~~**Linux `AF_MPLS` LSP installation**~~ — done
+   (`lr-osroute::mpls_route`, push/swap/pop via netlink). Router-level
+   integration (auto-install an LSP when a BGP-LU route lands in
+   Loc-RIB) is the next slice.
+4. **LDP (RFC 5036)** — label distribution protocol for non-BGP MPLS
+   LSPs. Future work; would sit in a new `lr-ldp` crate.
+5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
+   Future work; depends on RFC 9256 (Segment Routing Policy) once an
+   embedder asks.
 
 ### W4 — Documentation, guides, tutorials
 

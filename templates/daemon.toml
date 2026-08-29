@@ -82,7 +82,12 @@ graceful_restart_time = 120
 # RFC 4760 MP-BGP address families advertised in OPEN. Defaults to
 # IPv4 unicast only. Set both to enable a dual-stack MP-BGP session
 # (a single TCP transport carrying IPv4 + IPv6 NLRI).
-# mp_families = ["ipv4-unicast", "ipv6-unicast"]
+# Recognised values:
+#   "ipv4-unicast"            — AFI=1, SAFI=1 (default)
+#   "ipv6-unicast"            — AFI=2, SAFI=1
+#   "ipv4-labeled-unicast"    — AFI=1, SAFI=4 (RFC 8277 BGP-LU)
+#   "ipv6-labeled-unicast"    — AFI=2, SAFI=4 (RFC 8277 BGP-LU)
+# mp_families = ["ipv4-unicast", "ipv6-unicast", "ipv4-labeled-unicast"]
 
 # RFC 5549 Extended Next-Hop: advertise the (1,1,2) tuple so IPv4 NLRI
 # may be resolved over an IPv6 next-hop. Useful for IPv6-only transports
@@ -97,6 +102,17 @@ graceful_restart_time = 120
 # Locally originated networks. Reloadable via SIGHUP / the runtime API
 # `reload` command: added prefixes are originated, removed ones withdrawn.
 networks = ["203.0.113.0/24"]
+
+# RFC 8277 labelled networks — each entry is "<prefix> <labels>" where
+# <labels> is a comma-separated list of 20-bit MPLS label values (top of
+# stack first). Originated as IPv4 labelled-unicast (AFI=1, SAFI=4) for
+# IPv4 prefixes and IPv6 labelled-unicast (AFI=2, SAFI=4) for IPv6
+# prefixes. Requires the matching family in `mp_families` above so the
+# peer accepts the labelled MP_REACH_NLRI.
+# labeled_networks = [
+#     "198.51.100.0/24 100",
+#     "10.0.0.0/8 100,200,3",  # multi-label stack, implicit-null terminator
+# ]
 
 # --- Daemon hardening (top-level keys) ---
 
