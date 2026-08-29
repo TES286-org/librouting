@@ -161,6 +161,31 @@ func (r *Router) SetAddPathMaxPaths(maxPaths uint32) error {
         return nil
 }
 
+// SetEbgpRequiresPolicy enables or disables the RFC 8212 default eBGP
+// route behaviors (router-wide). When enabled, an external BGP session
+// (eBGP or a confederation boundary) with no explicit import policy
+// declared via SetSessionPolicy discards received routes, and one with
+// no export policy advertises nothing (RFC 8212 §3).
+func (r *Router) SetEbgpRequiresPolicy(enabled bool) error {
+        rc := C.lr_router_set_ebgp_requires_policy(r.ptr, toCBool(enabled))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_ebgp_requires_policy: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// SetSessionPolicy declares which directions of a BGP session carry an
+// explicit policy (RFC 8212 §3). A direction left false is subject to
+// the RFC 8212 default deny when SetEbgpRequiresPolicy(true) is active.
+// Call after AddBGPSession; unknown session handles return an error.
+func (r *Router) SetSessionPolicy(session uint64, import_, export bool) error {
+        rc := C.lr_router_set_session_policy(r.ptr, C.uint64_t(session), toCBool(import_), toCBool(export))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_session_policy: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
 // ExtNextHopTuple is a single RFC 5549 Extended Next-Hop tuple: IPv4
 // unicast NLRI can be resolved over an IPv6 next-hop when all three
 // fields are 1, 1, 2 respectively.

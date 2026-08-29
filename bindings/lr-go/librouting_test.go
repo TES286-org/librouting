@@ -174,3 +174,30 @@ func TestSetAddPath(t *testing.T) {
 	}
 	r.ptr = nil
 }
+
+// TestRfc8212 verifies the RFC 8212 ABI: the mode toggle and the
+// per-session policy-presence declaration (unknown handles fail closed).
+func TestRfc8212(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	h, err := r.AddBGPSession(64512, 64513, 0x0a000001, 90, 0, true)
+	if err != nil {
+		t.Fatalf("AddBGPSession: %v", err)
+	}
+	if err := r.SetEbgpRequiresPolicy(true); err != nil {
+		t.Fatalf("SetEbgpRequiresPolicy(true): %v", err)
+	}
+	if err := r.SetSessionPolicy(h, true, true); err != nil {
+		t.Fatalf("SetSessionPolicy: %v", err)
+	}
+	// Unknown session handle: the declaration must fail closed.
+	if err := r.SetSessionPolicy(9999, true, true); err == nil {
+		t.Fatalf("SetSessionPolicy on unknown session must error")
+	}
+	if err := r.SetEbgpRequiresPolicy(false); err != nil {
+		t.Fatalf("SetEbgpRequiresPolicy(false): %v", err)
+	}
+	r.ptr = nil
+}

@@ -133,3 +133,19 @@ def test_set_add_path():
             assert False, "set_add_path on unknown session must raise"
         except librouting.LrError:
             pass
+
+
+def test_rfc8212_policy_abi():
+    """RFC 8212: the mode toggle and the per-session policy-presence
+    declaration; unknown session handles fail closed."""
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513,
+                              local_bgp_id=0x0a000001)
+        r.set_ebgp_requires_policy(True)
+        r.set_session_policy(h, True, True)
+        try:
+            r.set_session_policy(9999, True, True)
+            assert False, "set_session_policy on unknown session must raise"
+        except librouting.LrError:
+            pass
+        r.set_ebgp_requires_policy(False)

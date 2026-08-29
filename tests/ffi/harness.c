@@ -157,6 +157,17 @@ int main(void) {
     check(lr_bytes_len(&upd) == 0, "no UPDATE while session unestablished");
     lr_bytes_free(&upd);
 
+    /* RFC 8212 ABI: mode toggle + per-session policy presence. The
+     * library default is accept-all (RFC 4271); the mode is opt-in. */
+    rc = lr_router_set_ebgp_requires_policy(r, 1);
+    check(rc == 0, "set_ebgp_requires_policy(on)");
+    rc = lr_router_set_session_policy(r, h, 1, 1);
+    check(rc == 0, "set_session_policy(valid handle)");
+    rc = lr_router_set_session_policy(r, 999, 1, 1);
+    check(rc == -2, "set_session_policy(unknown handle) fails closed");
+    rc = lr_router_set_ebgp_requires_policy(r, 0);
+    check(rc == 0, "set_ebgp_requires_policy(off)");
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

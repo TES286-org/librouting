@@ -119,6 +119,41 @@ class Router:
                 f"lr_router_set_add_path_max_paths failed (rc={rc}): {last_error()}"
             )
 
+    def set_ebgp_requires_policy(self, enabled: bool) -> None:
+        """Enable or disable the RFC 8212 default eBGP route behaviors.
+
+        When enabled, an external BGP session (eBGP or a confederation
+        boundary) with no explicit import policy declared via
+        :meth:`set_session_policy` discards received routes, and one with
+        no export policy advertises nothing (RFC 8212 §3).
+        """
+        rc = get_lib().lr_router_set_ebgp_requires_policy(
+            self._ptr, 1 if enabled else 0
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_ebgp_requires_policy failed (rc={rc}): {last_error()}"
+            )
+
+    def set_session_policy(self, session: int, import_: bool, export: bool) -> None:
+        """Declare which directions of a BGP session carry explicit policy.
+
+        RFC 8212 §3: a direction left false is subject to the default
+        deny when :meth:`set_ebgp_requires_policy` is active. The policy
+        itself runs through the hook chain. Unknown session handles
+        raise.
+        """
+        rc = get_lib().lr_router_set_session_policy(
+            self._ptr,
+            int(session),
+            1 if import_ else 0,
+            1 if export else 0,
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_session_policy failed (rc={rc}): {last_error()}"
+            )
+
     def set_extended_next_hop(self, session: int,
                               tuples: list[tuple[int, int, int]] | None = None) -> None:
         """Configure RFC 5549 Extended Next-Hop on a BGP session.

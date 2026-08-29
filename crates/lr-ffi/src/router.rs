@@ -268,6 +268,52 @@ pub extern "C" fn lr_router_set_add_path_max_paths(r: lr_router_t, max_paths: u3
     0
 }
 
+/// Enable or disable the RFC 8212 default eBGP route behaviors
+/// (router-wide).
+///
+/// When enabled, an external BGP session (eBGP or a confederation
+/// boundary) with no explicit import policy declared via
+/// `lr_router_set_session_policy` discards received routes, and one
+/// with no export policy advertises nothing (RFC 8212 §3). `enabled`
+/// is 0 (off — the RFC 4271 default-accept) or non-zero (on).
+#[no_mangle]
+pub extern "C" fn lr_router_set_ebgp_requires_policy(r: lr_router_t, enabled: u8) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    router.set_ebgp_requires_policy(enabled != 0);
+    0
+}
+
+/// Declare which directions of a BGP session carry an explicit policy
+/// (RFC 8212 §3).
+///
+/// `import`/`export` are 0 (no policy — the direction is subject to
+/// the RFC 8212 default deny when enabled) or non-zero (explicit
+/// policy attached; the policy itself runs through the hook chain).
+/// Call after `lr_router_add_bgp_session*`; unknown handles fail with
+/// -2 and set the last-error string.
+#[no_mangle]
+pub extern "C" fn lr_router_set_session_policy(
+    r: lr_router_t,
+    session: u64,
+    import: u8,
+    export: u8,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.set_session_policy(SessionHandle(session), import != 0, export != 0) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
 /// Configure RFC 5549 Extended Next-Hop on a BGP session.
 ///
 /// `tuples` points to `count` 5-byte records, each laid out as
