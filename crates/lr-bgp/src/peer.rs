@@ -84,6 +84,20 @@ pub struct PeerConfig {
     /// peers ("next-hop-self"). When `None` the received NEXT_HOP is
     /// preserved, which is correct for iBGP and for shared-medium eBGP.
     pub local_address: Option<lr_core::addr::IpAddr>,
+    /// FRR `neighbor X allowas-in N` / BIRD `allow local as`
+    /// (W2.3): the maximum number of times the local AS may appear in
+    /// a received UPDATE's AS_PATH before the route is rejected.
+    ///
+    /// `0` (the default) rejects ANY occurrence — the RFC 4271
+    /// §9.1.2.15 AS_PATH loop check the safety net enforces. `N > 0`
+    /// admits a route whose AS_PATH contains the local AS up to N
+    /// times (FRR's `allowas-in N`, default N=1). The special value
+    /// `u32::MAX` admits any number (FRR `allowas-any`).
+    ///
+    /// iBGP is exempt by default — FRR/BIRD scope this to eBGP
+    /// sessions, where the local AS would otherwise always form a
+    /// loop; the router applies the same exemption.
+    pub local_as_tolerance: u32,
     /// Per-peer maximum-prefix limit. When the peer's Adj-RIB-In exceeds
     /// this many prefixes the router fires the configured action
     /// ([`MaxPrefixAction`]). `None` = no limit (the default).
@@ -153,6 +167,7 @@ impl PeerConfig {
             route_server: RouteServerConfig::default(),
             peer_id: 0,
             local_address: None,
+            local_as_tolerance: 0,
             maximum_prefix: None,
             maximum_prefix_action: MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
