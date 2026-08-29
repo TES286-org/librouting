@@ -291,6 +291,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "lr-core",
+ "lr-mpls",
  "thiserror",
  "tracing",
 ]

@@ -9,7 +9,8 @@
 //! - `graceful_restart` (default) — RFC 4724
 //! - `enhanced_rr` (default) — RFC 7313 enhanced route refresh
 //! - `extended_communities` (default) — RFC 4360
-//! - `long_lived` — RFC 8277 Long-Lived Graceful Restart
+//! - `long_lived` — RFC 9494 Long-Lived Graceful Restart
+//! - `labeled_unicast` (default) — RFC 8277 BGP labelled unicast (MPLS)
 //!
 //! # Layer 1: codec
 //!

@@ -10,7 +10,7 @@ homepage.workspace = true
 description = "BGP-4 protocol codec, peer FSM, path attributes and extensions"
 
 [features]
-default = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities"]
+default = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast"]
 asn4 = []
 mp_bgp = []
 addpath = []
@@ -18,9 +18,11 @@ graceful_restart = []
 enhanced_rr = []
 extended_communities = []
 long_lived = []
+labeled_unicast = ["dep:lr-mpls"]
 
 [dependencies]
 lr-core = { workspace = true }
+lr-mpls = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true

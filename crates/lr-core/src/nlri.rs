@@ -16,6 +16,12 @@ impl NlriFamily {
     pub const IPV4_MULTICAST: Self = Self { afi: 1, safi: 2 };
     pub const IPV4_MPLS_VPN: Self = Self { afi: 1, safi: 128 };
     pub const IPV6_MPLS_VPN: Self = Self { afi: 2, safi: 128 };
+    /// RFC 8277 §3: IPv4 labelled unicast (AFI=1, SAFI=4). NLRI carries an
+    /// MPLS label stack immediately before the IP prefix.
+    pub const IPV4_LABELED_UNICAST: Self = Self { afi: 1, safi: 4 };
+    /// RFC 8277 §3: IPv6 labelled unicast (AFI=2, SAFI=4). NLRI carries an
+    /// MPLS label stack immediately before the IP prefix.
+    pub const IPV6_LABELED_UNICAST: Self = Self { afi: 2, safi: 4 };
 
     pub fn is_ipv4(&self) -> bool {
         self.afi == 1
@@ -23,6 +29,12 @@ impl NlriFamily {
 
     pub fn is_ipv6(&self) -> bool {
         self.afi == 2
+    }
+
+    /// True for RFC 8277 labelled-unicast families (SAFI=4). NLRI in these
+    /// families carries an MPLS label stack before the IP prefix.
+    pub fn is_labeled_unicast(&self) -> bool {
+        self.safi == 4 && (self.afi == 1 || self.afi == 2)
     }
 
     pub fn from_addr(addr: &IpAddr) -> Self {

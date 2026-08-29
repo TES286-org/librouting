@@ -10,11 +10,19 @@
 
 pub mod as_path;
 pub mod communities;
+pub mod labeled_nlri;
 pub mod mp_nlri;
 pub mod well_known;
 
 pub use as_path::{AsPath, AsPathSegment, AsPathType};
 pub use communities::{Community, CommunityKind, ExtendedCommunity};
+#[cfg(feature = "labeled_unicast")]
+pub use labeled_nlri::{
+    decode_list as decode_labeled_list, decode_mp_reach as decode_labeled_mp_reach,
+    decode_mp_unreach as decode_labeled_mp_unreach, encode_list as encode_labeled_list,
+    encode_mp_reach as encode_labeled_mp_reach, encode_mp_unreach as encode_labeled_mp_unreach,
+    ipv4_implicit_null, LabeledNlri,
+};
 pub use mp_nlri::{MpNextHop, MpReach, MpUnreach};
 pub use well_known::{
     Aggregator, AtomicAggregate, LocalPref, Med, NextHop, NextHopKind, Origin, OriginKind,
