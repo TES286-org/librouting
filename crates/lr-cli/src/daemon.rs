@@ -109,6 +109,10 @@ fn print_usage() {
          default (FRR `bgp default ipv4-unicast`, the default)\n  \
          --no-default-ipv4-unicast  Require explicit per-peer activation\n  \
          (FRR `no bgp default ipv4-unicast`)\n  \
+         --allow-local-as [N]     Admit the local AS in a received AS_PATH\n  \
+         up to N times (FRR `allowas-in N`; default N=1)\n  \
+         --allowas-any            Admit any number of local AS in the\n  \
+         AS_PATH (FRR `allowas-any`)\n  \
          --bfd                    BFD fast-fail for the peer(s) (RFC 5880/\n  \
          5881): a BFD Down tears the BGP session immediately\n  \
          --bfd-multihop           RFC 5883 multihop BFD (UDP 4784, no TTL\n  \
@@ -434,6 +438,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         cfg.ebgp_policy, cfg.enforce_first_as, cfg.bestpath_compare_routerid
     );
     println!("  ipv4-unicast: default={}", cfg.default_ipv4_unicast);
+    let allowas_label = if cfg.allow_local_as == u32::MAX {
+        "any".to_string()
+    } else {
+        cfg.allow_local_as.to_string()
+    };
+    println!("  allow-local-as: {}", allowas_label);
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -787,6 +797,11 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     // so add_session propagates it to PeerConfig — the FSM gates
     // IPv4 NLRI processing on this flag.
     sc.default_ipv4_unicast = effective_default_ipv4;
+    // FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    // per-peer override of the router-wide default. add_session
+    // propagates it to PeerConfig so the router's per-peer AS-loop
+    // tolerance check sees it.
+    sc.local_as_tolerance = p.allow_local_as.unwrap_or(g.allow_local_as);
     // RFC 5549 Extended Next-Hop. Advertise the canonical (1,1,2) tuple
     // so an IPv6 transport can carry IPv4 NLRI without an IPv4 next-hop.
     if p.extended_next_hop.unwrap_or(g.extended_next_hop) {

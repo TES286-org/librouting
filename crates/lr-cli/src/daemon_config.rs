@@ -59,6 +59,13 @@ pub(crate) struct PeerSpec {
     /// FRR `bgp default ipv4-unicast` (W2.1): per-peer override of the
     /// router-wide default. `None` = inherit the router default.
     pub default_ipv4_unicast: Option<bool>,
+    /// FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    /// per-peer tolerance for the local AS in a received AS_PATH.
+    /// `None` = inherit the router default (0 = reject any).
+    /// `0` = reject any occurrence; `N > 0` = admit up to N occurrences
+    /// (FRR `allowas-in N`); `u32::MAX` = admit any number (FRR
+    /// `allowas-any`).
+    pub allow_local_as: Option<u32>,
     /// RFC 5549 Extended Next-Hop.
     pub extended_next_hop: Option<bool>,
     /// RFC 5082 GTSM hop count (`Some(1)` = single-hop TTL security).
@@ -256,6 +263,13 @@ pub(crate) struct DaemonConfig {
     /// `mp_families` (FRR `no bgp default ipv4-unicast` with explicit
     /// `address-family ipv4 unicast` / `neighbor X activate`).
     pub default_ipv4_unicast: bool,
+    /// FRR `bgp allow-local-as [N]` (W2.3): router-wide default for the
+    /// per-peer `allow_local_as` knob. `0` (the default) rejects any
+    /// occurrence of the local AS in a received AS_PATH (RFC 4271
+    /// §9.1.2.15). `N > 0` admits up to N occurrences (FRR
+    /// `allowas-in N`); `u32::MAX` admits any number (FRR
+    /// `allowas-any`). Per-peer overrides via `[peer] allow_local_as`.
+    pub allow_local_as: u32,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -312,6 +326,7 @@ impl DaemonConfig {
             enforce_first_as: false,
             bestpath_compare_routerid: true,
             default_ipv4_unicast: true,
+            allow_local_as: 0,
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -737,6 +752,22 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 cfg.bestpath_compare_routerid = parse_bool(value);
             }
             "bgp.default_ipv4_unicast" => cfg.default_ipv4_unicast = parse_bool(value),
+            "bgp.allow_local_as" => {
+                // Accept "any" / "allowas-any" as the u32::MAX sentinel,
+                // integers as N. FRR `allow-local-as [N]` defaults to
+                // N=1 when the value is omitted — but a TOML value
+                // without an integer would be a syntax error; the
+                // daemon accepts `true`/`false` to mean N=1/0 for
+                // BIRD `allow local as` parity.
+                cfg.allow_local_as = match value.trim() {
+                    "any" | "allowas-any" => u32::MAX,
+                    "true" => 1,
+                    "false" => 0,
+                    other => other.parse().map_err(|_| {
+                        format!("line {}: bad allow_local_as '{other}' (expected integer N, 'any', or 'true'/'false')", lineno + 1)
+                    })?,
+                };
+            }
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -994,6 +1025,16 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         }
         "mp_families" => peer.mp_families = Some(parse_str_array(value)),
         "default_ipv4_unicast" => peer.default_ipv4_unicast = Some(parse_bool(value)),
+        "allow_local_as" => {
+            peer.allow_local_as = Some(match value.trim() {
+                "any" | "allowas-any" => u32::MAX,
+                "true" => 1,
+                "false" => 0,
+                other => other.parse().map_err(|_| {
+                    format!("bad allow_local_as '{other}' (expected integer N, 'any', or 'true'/'false')")
+                })?,
+            });
+        }
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
@@ -1130,6 +1171,28 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--no-default-ipv4-unicast" => {
                 cfg.default_ipv4_unicast = false;
+                i += 1;
+            }
+            "--allow-local-as" => {
+                // FRR `neighbor X allowas-in` defaults to N=1 when
+                // no argument is given.
+                let n = match args.get(i + 1) {
+                    Some(v) if !v.starts_with("--") => v.parse().unwrap_or(1),
+                    _ => 1,
+                };
+                cfg.allow_local_as = n;
+                i += if args
+                    .get(i + 1)
+                    .map(|v| !v.starts_with("--"))
+                    .unwrap_or(false)
+                {
+                    2
+                } else {
+                    1
+                };
+            }
+            "--allowas-any" => {
+                cfg.allow_local_as = u32::MAX;
                 i += 1;
             }
             "--install-kernel-routes" => {
