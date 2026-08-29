@@ -918,8 +918,7 @@ impl DefaultRouter {
                 .collect();
             let mut work: Vec<(RouteKey, Vec<Route>, Vec<u32>)> = Vec::new();
             for (key, ranked) in &sets {
-                let (advertise, withdraw_ids) =
-                    self.export_work_for(&hooks, h.0, key, ranked);
+                let (advertise, withdraw_ids) = self.export_work_for(&hooks, h.0, key, ranked);
                 if advertise.is_empty() && withdraw_ids.is_empty() {
                     continue;
                 }
@@ -1495,9 +1494,7 @@ impl DefaultRouter {
             return (false, false);
         }
         match self.sessions.get(&session) {
-            Some(SessionState::Bgp { peer, .. })
-                if peer.config().peer_role().is_external() =>
-            {
+            Some(SessionState::Bgp { peer, .. }) if peer.config().peer_role().is_external() => {
                 let p = self.session_policy.get(&session).copied();
                 (
                     !p.is_some_and(|p| p.has_import),

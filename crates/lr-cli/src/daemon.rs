@@ -1891,13 +1891,14 @@ fn originate_family_for(p: Prefix) -> (Prefix, NlriFamily) {
 /// peer (RFC 4271 §6.3).
 fn originate_next_hop(cfg: &DaemonConfig, family: NlriFamily) -> Option<IpAddr> {
     match family {
-        NlriFamily::IPV4_UNICAST => cfg
-            .local_address
-            .as_deref()
-            .and_then(|a| match IpAddr::from_str(a) {
-                Ok(IpAddr::V4(_)) => Some(IpAddr::from_str(a).unwrap()),
-                _ => None,
-            }),
+        NlriFamily::IPV4_UNICAST => {
+            cfg.local_address
+                .as_deref()
+                .and_then(|a| match IpAddr::from_str(a) {
+                    Ok(IpAddr::V4(_)) => Some(IpAddr::from_str(a).unwrap()),
+                    _ => None,
+                })
+        }
         NlriFamily::IPV6_UNICAST => cfg
             .local_address_v6
             .as_deref()

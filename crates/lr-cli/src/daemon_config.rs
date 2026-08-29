@@ -1060,10 +1060,7 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 if v != "rfc8212" && v != "accept-all" {
                     // Fail closed: an unknown mode must not silently
                     // fall back to the permissive behaviour.
-                    eprintln!(
-                        "bad --ebgp-policy '{}' (expected rfc8212 or accept-all)",
-                        v
-                    );
+                    eprintln!("bad --ebgp-policy '{}' (expected rfc8212 or accept-all)", v);
                     return Err(ExitCode::from(2));
                 }
                 cfg.ebgp_policy = v.to_string();
