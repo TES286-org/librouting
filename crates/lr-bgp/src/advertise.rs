@@ -144,6 +144,27 @@ impl BgpPeer {
                     }
                 }
             }
+        } else if next_hop.is_none() && route.origin.proto == 2 {
+            // Locally originated route (proto 2) advertised to an
+            // internal peer: egress preserves the route's NEXT_HOP
+            // (RFC 4271 §10), but a route with none would leave the
+            // UPDATE without the mandatory NEXT_HOP attribute (§6.3)
+            // and the peer would discard it. Synthesize our own
+            // address — §5.1.3's "address of the router that should
+            // be used as the next hop" for self-originated routes.
+            if let Some(local) = self.cfg.local_address {
+                match (local, route.key.family) {
+                    (lr_core::addr::IpAddr::V4(_), NlriFamily::IPV4_UNICAST) => {
+                        attrs.remove(AttrType::NextHop);
+                        attrs.insert(Self::next_hop_attr(local));
+                        next_hop = Some(local);
+                    }
+                    (lr_core::addr::IpAddr::V6(_), NlriFamily::IPV6_UNICAST) => {
+                        next_hop = Some(local);
+                    }
+                    _ => {}
+                }
+            }
         }
 
         // --- Route-Reflector reflection attributes (RFC 4456 §3) ---
@@ -446,6 +467,55 @@ mod tests {
         let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
         assert!(!peer.advertise(&route)); // origin.proto == 1 → iBGP-learned
         assert!(peer.drain_outgoing().is_empty());
+    }
+
+    /// iBGP egress of a locally originated route with no next-hop must
+    /// synthesize NEXT_HOP from the local address: an UPDATE without
+    /// the attribute is discarded by the peer (RFC 4271 §6.3, §5.1.3).
+    #[test]
+    fn ibgp_locally_originated_route_gets_next_hop() {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.local_address = Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1]));
+        let mut peer = established_peer(cfg);
+        // proto 2 = locally originated; no NEXT_HOP attribute either.
+        let mut attrs = PathAttributes::new();
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            AsPath::from_sequence([]).encode_4(),
+        ));
+        let route = Route {
+            key: RouteKey::new(
+                Prefix::new_v4([203, 0, 113, 0], 24),
+                NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 2, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: attrs.into(),
+            age_ms: 0,
+            path_id: 0,
+        };
+        assert!(peer.advertise(&route));
+        let bytes = peer.drain_outgoing();
+        let mut dec = crate::codec::BgpCodec::new();
+        let mut r = lr_core::buf::ReadBuf::new(&bytes);
+        match dec.decode(&mut r) {
+            Ok(Some(BgpMessage::Update(u))) => {
+                assert_eq!(
+                    u.attributes.next_hop().map(|n| n.to_ip()),
+                    Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+                    "NEXT_HOP must be synthesized from the local address"
+                );
+            }
+            _ => panic!("UPDATE did not decode"),
+        }
     }
 
     /// RR reflection: advertising an iBGP-learned route to an RR client
