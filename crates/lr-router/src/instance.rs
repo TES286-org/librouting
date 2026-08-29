@@ -6080,13 +6080,9 @@ mod tests {
                         if attrs_end_rel <= body.len() {
                             let attrs_start = msg_start + 19 + attrs_start_rel;
                             let attrs_end = msg_start + 19 + attrs_end_rel;
-                            if let Some(consumed) = patch_first_as_in_attrs(
-                                &mut out,
-                                attrs_start,
-                                attrs_end,
-                                foreign_as,
-                            ) {
-                                let _ = consumed;
+                            if patch_first_as_in_attrs(&mut out, attrs_start, attrs_end, foreign_as)
+                                .is_some()
+                            {
                                 return out;
                             }
                         }
@@ -6102,7 +6098,7 @@ mod tests {
     /// AS of the leftmost AS_SEQUENCE / AS_CONFED_SEQUENCE segment in
     /// the AS_PATH attribute. Returns `Some(())` on success.
     fn patch_first_as_in_attrs(
-        out: &mut Vec<u8>,
+        out: &mut [u8],
         attrs_start: usize,
         attrs_end: usize,
         foreign_as: u32,
