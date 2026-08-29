@@ -282,7 +282,7 @@ impl BfdSession {
     /// session to Down) when the detection time expires while the
     /// session is Init or Up (§6.8.4).
     pub fn tick(&mut self, now: Instant) -> Vec<BfdSessionEvent> {
-        let mut events = Vec::new();
+        let mut events = core::mem::take(&mut self.pending_events);
         let expired = self.timers.tick(now);
         for tid in expired {
             match tid {
@@ -308,6 +308,7 @@ impl BfdSession {
                 _ => {}
             }
         }
+        events.append(&mut self.pending_events);
         events
     }
 
@@ -520,13 +521,22 @@ impl BfdSession {
                 State::AdminDown => None,
             };
             if let Some(next) = next {
+                if next != State::Down {
+                    // No diagnostic explains coming up (BIRD resets
+                    // LocalDiag to 0 on up-transitions).
+                    self.local_diag = Diagnostic::None;
+                }
                 self.transition(next);
             }
         }
 
         // --- Detection timer: every non-discarded packet re-arms it
-        // (§6.8.4, anchored to arrival time). ---
+        // (§6.8.4, anchored to arrival time). Replace any pending
+        // entry — the queue has no re-schedule, and a stale one would
+        // fire one detection-time later and tear a healthy session
+        // down. ---
         let detect_ms = (self.detection_time_us() / 1000).max(1);
+        self.timers.cancel(timer_ids::DETECT);
         self.timers
             .arm(now, timer_ids::DETECT, TimerSpec::once(detect_ms));
 
@@ -852,6 +862,51 @@ mod tests {
         assert!(b.is_up(), "B stuck in {}", b.state());
     }
 
+    /// Two live sessions keep exchanging packets and STAY Up: the
+    /// detection timer must be replaced (not stacked) on every
+    /// received packet, or the entries armed during the handshake
+    /// fire one detection time in and tear the healthy session down.
+    #[test]
+    fn two_sessions_stay_up() {
+        let mut a = BfdSession::new(cfg_100ms(), 0x11111111);
+        let mut b = BfdSession::new(cfg_100ms(), 0x22222222);
+        let _ = a.start(Instant(0));
+        let _ = b.start(Instant(0));
+        // Drive 3 seconds at 10 ms resolution (10x the detection time).
+        let mut t = 0u64;
+        while t < 3000 {
+            t += 10;
+            let _ = a.tick(Instant(t));
+            let _ = b.tick(Instant(t));
+            let out_a = a.drain_outgoing();
+            if !out_a.is_empty() {
+                let evs = b.feed_bytes(Instant(t), &out_a);
+                assert!(
+                    !evs.iter().any(|e| matches!(e, BfdSessionEvent::Timeout)),
+                    "B timed out at t={t}ms while A was alive"
+                );
+            }
+            let out_b = b.drain_outgoing();
+            if !out_b.is_empty() {
+                let evs = a.feed_bytes(Instant(t), &out_b);
+                assert!(
+                    !evs.iter().any(|e| matches!(e, BfdSessionEvent::Timeout)),
+                    "A timed out at t={t}ms while B was alive"
+                );
+            }
+        }
+        assert!(
+            a.is_up(),
+            "A ended in {} after 3s of live exchange",
+            a.state()
+        );
+        assert!(
+            b.is_up(),
+            "B ended in {} after 3s of live exchange",
+            b.state()
+        );
+    }
+
     #[test]
     fn timeout_brings_session_down() {
         let mut s = make_session();
@@ -864,6 +919,14 @@ mod tests {
         assert_eq!(s.detection_time_us(), 300_000);
         let evs = s.tick(Instant(320));
         assert!(evs.iter().any(|e| matches!(e, BfdSessionEvent::Timeout)));
+        assert!(evs.iter().any(|e| matches!(
+            e,
+            BfdSessionEvent::StateChanged {
+                from: State::Init,
+                to: State::Down,
+                ..
+            }
+        )));
         assert_eq!(s.state(), State::Down);
         assert_eq!(s.local_diag(), Diagnostic::CtrlExpired);
     }

@@ -66,6 +66,12 @@ impl core::fmt::Display for State {
     }
 }
 
+impl core::fmt::Display for Diagnostic {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.write_str(self.name())
+    }
+}
+
 /// Diagnostic code (RFC 5880 §4.1 + §A.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -84,6 +90,23 @@ pub enum Diagnostic {
 }
 
 impl Diagnostic {
+    /// The RFC 5880 §A.1 name (for logs).
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::None => "No Diagnostic",
+            Self::CtrlExpired => "Control Detection Time Expired",
+            Self::EchoFailed => "Echo Function Failed",
+            Self::NeighborSignaled => "Neighbor Signaled Session Down",
+            Self::FwdReset => "Forwarding Plane Reset",
+            Self::PathDown => "Path Down",
+            Self::ConcatPathDown => "Concatenated Path Down",
+            Self::AdminDown => "Administratively Down",
+            Self::RevPathDown => "Reverse Concatenated Path Down",
+            Self::MisConnDefect => "Mis-Connectivity Defect",
+            Self::Unknown(_) => "Unknown",
+        }
+    }
+
     pub fn from_u8(v: u8) -> Self {
         match v {
             0 => Self::None,
