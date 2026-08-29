@@ -108,6 +108,17 @@ impl MpReach {
             if i + n > b.len() {
                 return None;
             }
+            // Reject prefix lengths that exceed the family's address width
+            // (defensive — see `MpUnreach::decode_ex`). Labelled families
+            // are decoded by `labeled_nlri`.
+            let max_octets = match family.afi {
+                1 => 4usize,
+                2 => 16usize,
+                _ => return None,
+            };
+            if n > max_octets {
+                return None;
+            }
             let p = match family.afi {
                 1 => {
                     let mut bytes = [0u8; 4];
@@ -214,6 +225,20 @@ impl MpUnreach {
             i += 1;
             let n = (pl as usize).div_ceil(8);
             if i + n > b.len() {
+                return None;
+            }
+            // Reject prefix lengths that exceed the family's address width
+            // (defensive — a malformed peer could otherwise panic the slice
+            // bounds below). Labelled families carry label octets inside the
+            // prefix-length budget and are decoded by `labeled_nlri`; the
+            // plain decoder rejects them so the EoR / withdrawal paths
+            // dispatch to the labelled decoder.
+            let max_octets = match family.afi {
+                1 => 4usize,
+                2 => 16usize,
+                _ => return None,
+            };
+            if n > max_octets {
                 return None;
             }
             let p = match family.afi {

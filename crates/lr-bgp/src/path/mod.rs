@@ -100,6 +100,14 @@ pub enum AttrType {
     LargeCommunities = 32,
     /// RFC 9234: OTC (Only To Customer) — 4-byte unsigned integer.
     Otc = 35,
+    /// librouting-private MPLS label stack (RFC 8277). This tag is *never*
+    /// transmitted on the wire — RFC 8277 carries the label stack inside
+    /// the NLRI, not as a path attribute. The value holds the 4-octet-per-
+    /// entry wire form (RFC 3032 §2.1, with TTL). The codec filters it out
+    /// at encode time so peers never see it. Lives only in the Loc-RIB to
+    /// let the router carry the label stack from a received BGP-LU UPDATE
+    /// through to a re-advertised one.
+    LrMplsLabelStack = 251,
     /// Unknown attribute code.
     Other(u8),
 }
@@ -127,6 +135,7 @@ impl AttrType {
             24 => Self::TrafficEngineering,
             32 => Self::LargeCommunities,
             35 => Self::Otc,
+            251 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
     }
@@ -153,6 +162,7 @@ impl AttrType {
             Self::TrafficEngineering => 24,
             Self::LargeCommunities => 32,
             Self::Otc => 35,
+            Self::LrMplsLabelStack => 251,
             Self::Other(v) => v,
         }
     }
@@ -320,6 +330,29 @@ impl PathAttributes {
     pub fn mp_unreach(&self) -> Option<MpUnreach> {
         let a = self.get(AttrType::MpUnreachNlri)?;
         MpUnreach::decode(&a.value)
+    }
+
+    /// Attach an MPLS label stack to this attribute set under the private
+    /// [`AttrType::LrMplsLabelStack`] tag. The tag is never transmitted on
+    /// the wire; it carries the label stack from a received BGP-LU UPDATE
+    /// through the Loc-RIB so egress can put it back into the NLRI.
+    #[cfg(feature = "labeled_unicast")]
+    pub fn set_label_stack(&mut self, stack: &lr_mpls::LabelStack) {
+        let value = stack.encode_4octet();
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrMplsLabelStack,
+            value,
+        ));
+    }
+
+    /// Read back the MPLS label stack previously attached with
+    /// [`Self::set_label_stack`]. Returns `None` when the route carries no
+    /// label stack (i.e. it is not a BGP-LU route).
+    #[cfg(feature = "labeled_unicast")]
+    pub fn label_stack(&self) -> Option<lr_mpls::LabelStack> {
+        let a = self.get(AttrType::LrMplsLabelStack)?;
+        lr_mpls::LabelStack::decode_4octet(&a.value).ok()
     }
 
     /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`

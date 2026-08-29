@@ -478,6 +478,12 @@ fn encode_update(
     let attr_len_pos = out.reserve(2).ok_or(EncodeError::BufferFull)?;
     let attr_start = out.position();
     for a in u.attributes.iter() {
+        // The private LrMplsLabelStack tag carries the RFC 8277 label
+        // stack inside the Loc-RIB only — it is never sent on the wire
+        // (the labels live in the NLRI). Skip it during encode.
+        if a.attr_type == crate::path::AttrType::LrMplsLabelStack {
+            continue;
+        }
         encode_path_attribute(a, out)?;
     }
     let alen = (out.position() - attr_start) as u16;

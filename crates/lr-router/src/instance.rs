@@ -1302,6 +1302,57 @@ impl DefaultRouter {
         key
     }
 
+    /// Originate a labelled BGP route (RFC 8277). The label stack is
+    /// stored under the private `LrMplsLabelStack` attribute so egress
+    /// encoding can put it back into the labelled NLRI. The family must
+    /// be `IPV4_LABELED_UNICAST` or `IPV6_LABELED_UNICAST`; for any other
+    /// family this falls back to plain origination (the label stack is
+    /// silently dropped, matching the conservative behaviour of BIRD's
+    /// `route` filter when MPLS is not in scope).
+    #[cfg(feature = "labeled_unicast")]
+    pub fn originate_labeled(
+        &mut self,
+        prefix: Prefix,
+        family: NlriFamily,
+        label_stack: lr_mpls::LabelStack,
+        next_hop: Option<IpAddr>,
+    ) -> RouteKey {
+        if !family.is_labeled_unicast() {
+            // Defensive: caller passed a non-labelled family. Originate
+            // the route without the label stack rather than panicking.
+            return self.originate_family(prefix, family, next_hop);
+        }
+        let key = RouteKey::new(prefix, family);
+        let mut attrs = PathAttributes::new();
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0], // IGP
+        ));
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            Vec::new(), // empty AS_PATH: locally originated
+        ));
+        attrs.set_label_stack(&label_stack);
+        let route = Route {
+            key: key.clone(),
+            origin: RouteOrigin { proto: 2, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(Protocol::Bgp.default_admin_distance(), 0),
+            next_hop,
+            attributes: attrs.into(),
+            age_ms: 0,
+            path_id: 0,
+        };
+        self.loc_rib.install_set(&key, vec![route.clone()]);
+        self.originated.insert(key.clone(), route.clone());
+        self.pending_events
+            .push(RouterEvent::RouteInstalled(route.clone()));
+        self.export_selection(&key, &[route]);
+        key
+    }
+
     /// Remove a locally originated route and withdraw it everywhere.
     pub fn unoriginate(&mut self, key: &RouteKey) {
         if self.originated.remove(key).is_some() {

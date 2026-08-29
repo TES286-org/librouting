@@ -9,6 +9,13 @@ repository.workspace = true
 homepage.workspace = true
 description = "Layer-3 router instance, sessions, scheduler, event dispatch"
 
+[features]
+default = ["labeled_unicast"]
+# Forward to lr-bgp so consumers gating on lr-router's feature see the
+# same code paths compiled in. Disabling this requires also disabling
+# lr-bgp's `labeled_unicast` feature.
+labeled_unicast = ["lr-bgp/labeled_unicast"]
+
 [dependencies]
 lr-core = { workspace = true }
 lr-bgp = { workspace = true }
@@ -17,4 +24,5 @@ lr-babel = { workspace = true }
 lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-bmp = { workspace = true }
+lr-mpls = { workspace = true }
 tracing.workspace = true

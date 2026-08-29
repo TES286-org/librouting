@@ -712,12 +712,16 @@ impl BgpPeer {
         // (RFC 4724 §4 + RFC 4760). Downstream (graceful restart, RFC
         // 9494 §4.2) uses it to conclude table synchronization.
         if u.withdrawn.is_empty() && u.nlri.is_empty() {
-            if let Some(mp) = u
-                .attributes
-                .mp_unreach_with(|fam| self.add_path_rx_for(fam))
-            {
-                if mp.nlri.is_empty() && u.attributes.len() == 1 {
-                    actions.push(BgpAction::EndOfRib(mp.family));
+            if let Some(attr) = u.attributes.get(AttrType::MpUnreachNlri) {
+                // EoR marker = MP_UNREACH with just the 3-byte AFI/SAFI
+                // prefix and no NLRI bytes. We do not need to fully decode
+                // the (possibly labelled) NLRI — just check the length.
+                if attr.value.len() == 3 && u.attributes.len() == 1 {
+                    let fam = NlriFamily {
+                        afi: u16::from_be_bytes([attr.value[0], attr.value[1]]),
+                        safi: attr.value[2],
+                    };
+                    actions.push(BgpAction::EndOfRib(fam));
                 }
             } else if u.attributes.is_empty() {
                 actions.push(BgpAction::EndOfRib(NlriFamily::IPV4_UNICAST));
@@ -740,7 +744,41 @@ impl BgpPeer {
             });
         }
 
-        // --- MP_UNREACH_NLRI withdrawals (RFC 4760) ---
+        // --- MP_UNREACH_NLRI withdrawals (RFC 4760 + RFC 8277) ---
+        // The plain MP_UNREACH decoder assumes NLRI is `<plen><prefix>`;
+        // RFC 8277 labelled NLRI is `<plen><labels><prefix>`. Dispatch on
+        // the family read from the first 3 bytes of the attribute value so
+        // labelled families go through the labelled decoder only.
+        #[cfg(feature = "labeled_unicast")]
+        if let Some(attr) = u.attributes.get(crate::path::AttrType::MpUnreachNlri) {
+            if attr.value.len() >= 3 {
+                let fam = NlriFamily {
+                    afi: u16::from_be_bytes([attr.value[0], attr.value[1]]),
+                    safi: attr.value[2],
+                };
+                let add_path = self.add_path_rx_for(fam);
+                if fam.is_labeled_unicast() {
+                    if let Some((family, entries)) =
+                        crate::path::decode_labeled_mp_unreach(&attr.value, add_path)
+                    {
+                        for e in &entries {
+                            actions.push(BgpAction::WithdrawRoute {
+                                key: RouteKey::new(e.prefix, family),
+                                path_id: e.path_id,
+                            });
+                        }
+                    }
+                } else if let Some(mp) = crate::path::MpUnreach::decode_ex(&attr.value, add_path) {
+                    for w in &mp.nlri {
+                        actions.push(BgpAction::WithdrawRoute {
+                            key: RouteKey::new(w.prefix, mp.family),
+                            path_id: w.path_id,
+                        });
+                    }
+                }
+            }
+        }
+        #[cfg(not(feature = "labeled_unicast"))]
         if let Some(mp) = u
             .attributes
             .mp_unreach_with(|fam| self.add_path_rx_for(fam))
@@ -757,12 +795,13 @@ impl BgpPeer {
         // A valid announcement needs at least ORIGIN, AS_PATH and NEXT_HOP
         // (RFC 4271 §6.3); rather than tearing the session down we skip
         // malformed NLRI — the safety net at the router layer reports it.
+        // The NEXT_HOP may live in the well-known attribute (IPv4) or in
+        // MP_REACH_NLRI (RFC 4760 / RFC 8277) — checking for the attribute's
+        // presence is enough; the per-family decoder validates the body.
         let attrs_ok = u.attributes.origin().is_some()
             && (u.attributes.as_path().is_some() || u.attributes.as4_path().is_some())
             && (u.attributes.next_hop().is_some()
-                || u.attributes
-                    .mp_reach_with(|fam| self.add_path_rx_for(fam))
-                    .is_some());
+                || u.attributes.get(AttrType::MpReachNlri).is_some());
 
         // Normalize the attribute bag: the route's internal AS_PATH is
         // always 4-byte-encoded (canonical form) so that downstream
@@ -821,21 +860,77 @@ impl BgpPeer {
             }
         }
 
-        // MP_REACH_NLRI (RFC 4760): family + next-hop from the attribute.
-        if let Some(mp) = u.attributes.mp_reach_with(|fam| self.add_path_rx_for(fam)) {
-            let nh = match &mp.next_hop {
-                crate::path::MpNextHop::V4(b) => Some(lr_core::addr::IpAddr::V4(*b)),
-                crate::path::MpNextHop::V6Global(b)
-                | crate::path::MpNextHop::V6LinkLocal(b)
-                | crate::path::MpNextHop::V6GlobalLinkLocal(b, _)
-                | crate::path::MpNextHop::V4OverV6(b) => Some(lr_core::addr::IpAddr::V6(*b)),
-            };
-            for entry in &mp.nlri {
-                announce(entry.prefix, mp.family, entry.path_id, nh, &mut actions);
+        // MP_REACH_NLRI (RFC 4760 + RFC 8277): family + next-hop from the
+        // attribute. For labelled families the NLRI carries a label stack
+        // before the prefix; the route stores it under the private
+        // `LrMplsLabelStack` attribute so egress can put it back into the
+        // NLRI on re-advertisement.
+        if let Some(attr) = u.attributes.get(AttrType::MpReachNlri) {
+            #[cfg(feature = "labeled_unicast")]
+            if attr.value.len() >= 3 {
+                let fam = NlriFamily {
+                    afi: u16::from_be_bytes([attr.value[0], attr.value[1]]),
+                    safi: attr.value[2],
+                };
+                let add_path = self.add_path_rx_for(fam);
+                if fam.is_labeled_unicast() {
+                    if let Some((family, mp_nh, entries)) =
+                        crate::path::decode_labeled_mp_reach(&attr.value, add_path)
+                    {
+                        let nh = mp_next_hop_to_ip(&mp_nh);
+                        for e in &entries {
+                            let mut attrs = normalized.clone();
+                            attrs.set_label_stack(&e.label_stack);
+                            let metric = canonical_path
+                                .as_ref()
+                                .map(|p| p.length() as u32)
+                                .unwrap_or(0);
+                            if attrs_ok {
+                                let route = Route {
+                                    key: RouteKey::new(e.prefix, family),
+                                    origin,
+                                    protocol: Protocol::Bgp,
+                                    preference: Preference::new(
+                                        Protocol::Bgp.default_admin_distance(),
+                                        metric,
+                                    ),
+                                    next_hop: nh,
+                                    attributes: attrs.into(),
+                                    age_ms: 0,
+                                    path_id: e.path_id,
+                                };
+                                actions.push(BgpAction::InstallRoute(route));
+                            }
+                        }
+                    }
+                } else if let Some(mp) = crate::path::MpReach::decode_ex(&attr.value, add_path) {
+                    let nh = mp_next_hop_to_ip(&mp.next_hop);
+                    for entry in &mp.nlri {
+                        announce(entry.prefix, mp.family, entry.path_id, nh, &mut actions);
+                    }
+                }
+            }
+            #[cfg(not(feature = "labeled_unicast"))]
+            if let Some(mp) = u.attributes.mp_reach_with(|fam| self.add_path_rx_for(fam)) {
+                let nh = mp_next_hop_to_ip(&mp.next_hop);
+                for entry in &mp.nlri {
+                    announce(entry.prefix, mp.family, entry.path_id, nh, &mut actions);
+                }
             }
         }
 
         actions
+    }
+}
+
+/// Convert an [`MpNextHop`] into the [`IpAddr`] carried by a route.
+fn mp_next_hop_to_ip(nh: &crate::path::MpNextHop) -> Option<lr_core::addr::IpAddr> {
+    match nh {
+        crate::path::MpNextHop::V4(b) => Some(lr_core::addr::IpAddr::V4(*b)),
+        crate::path::MpNextHop::V6Global(b)
+        | crate::path::MpNextHop::V6LinkLocal(b)
+        | crate::path::MpNextHop::V6GlobalLinkLocal(b, _)
+        | crate::path::MpNextHop::V4OverV6(b) => Some(lr_core::addr::IpAddr::V6(*b)),
     }
 }
 

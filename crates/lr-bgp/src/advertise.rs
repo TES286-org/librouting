@@ -210,6 +210,51 @@ impl BgpPeer {
         // --- NLRI ---
         let family = route.key.family;
         let mut update = Update::new();
+
+        // RFC 8277 labelled-unicast: the NLRI carries the label stack
+        // before the prefix. Pull the stack from the route's private
+        // `LrMplsLabelStack` attribute (set by the FSM on receive or by
+        // `originate_labeled` on the local side) and encode it via the
+        // labelled MP_REACH helper. Skip advertisement when the route
+        // carries no label stack — a label-less labelled route is a
+        // consistency violation, not something to send on the wire.
+        #[cfg(feature = "labeled_unicast")]
+        if family.is_labeled_unicast() {
+            let stack = attrs.label_stack();
+            let Some(stack) = stack else {
+                return false;
+            };
+            let nh = match next_hop {
+                Some(lr_core::addr::IpAddr::V4(b)) => MpNextHop::V4(b),
+                Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V6Global(b),
+                None => return false,
+            };
+            attrs.remove(AttrType::NextHop);
+            attrs.remove(AttrType::MpReachNlri);
+            attrs.remove(AttrType::MpUnreachNlri);
+            attrs.remove(AttrType::LrMplsLabelStack); // never sent on wire
+            let entries = vec![crate::path::LabeledNlri::with_path_id(
+                route.path_id,
+                stack,
+                route.key.prefix,
+            )];
+            attrs.insert(PathAttribute::new(
+                PathAttrFlags::new().set_optional(true),
+                AttrType::MpReachNlri,
+                crate::path::encode_labeled_mp_reach(
+                    family,
+                    &nh,
+                    &entries,
+                    self.add_path_tx_for(family),
+                ),
+            ));
+            update.attributes = attrs;
+            if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
+                self.out_buf.extend_from_slice(&bytes);
+            }
+            return true;
+        }
+
         // RFC 5549: when (1, 1, 2) is negotiated and the next-hop is IPv6,
         // IPv4 NLRI is carried by MP_REACH_NLRI (AFI=1, SAFI=1) with a
         // 16-byte IPv6 next-hop. BIRD 2.x rejects a 16-byte well-known
@@ -281,6 +326,41 @@ impl BgpPeer {
             return;
         }
         let mut update = Update::new();
+
+        // RFC 8277 labelled-unicast withdrawals go through the labelled
+        // MP_UNREACH encoder. The label stack is implicit on withdrawal
+        // (only the prefix identifies the route); we synthesise a single
+        // implicit-null label so the NLRI bytes are well-formed.
+        #[cfg(feature = "labeled_unicast")]
+        if family.is_labeled_unicast() {
+            let labelled: Vec<crate::path::LabeledNlri> = entries
+                .iter()
+                .map(|e| {
+                    crate::path::LabeledNlri::with_path_id(
+                        e.path_id,
+                        lr_mpls::LabelStack::from_labels([lr_mpls::Label::new_value(
+                            lr_mpls::Label::IMPLICIT_NULL.value,
+                        )]),
+                        e.prefix,
+                    )
+                })
+                .collect();
+            let mp = crate::path::encode_labeled_mp_unreach(
+                family,
+                &labelled,
+                self.add_path_tx_for(family),
+            );
+            update.attributes.insert(PathAttribute::new(
+                PathAttrFlags::new().set_optional(true),
+                AttrType::MpUnreachNlri,
+                mp,
+            ));
+            if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
+                self.out_buf.extend_from_slice(&bytes);
+            }
+            return;
+        }
+
         // RFC 5549: IPv4 NLRI advertised via MP_REACH must also be withdrawn
         // via MP_UNREACH (the legacy `withdrawn` field would not match the
         // original MP_REACH advertisement for a peer that tracks routes by
