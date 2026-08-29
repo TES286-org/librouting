@@ -84,6 +84,19 @@ int32_t lr_router_originate_v4(lr_router_t r,
                                const uint8_t *prefix_addr,
                                uint8_t prefix_len,
                                const uint8_t *next_hop);
+int32_t lr_router_originate_labeled_v4(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint32_t *labels,
+                                       uintptr_t n_labels,
+                                       const uint8_t *next_hop);
+int32_t lr_router_originate_labeled_v6(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint32_t *labels,
+                                       uintptr_t n_labels,
+                                       const uint8_t *next_hop);
+uint32_t lr_mpls_platform_labels(void);
 int64_t lr_router_rib_len(lr_router_t r);
 int32_t lr_router_rib_dump(lr_router_t r, lr_bytes_t *out);
 int32_t lr_router_sessions_dump(lr_router_t r, lr_bytes_t *out);

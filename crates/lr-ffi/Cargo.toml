@@ -28,6 +28,7 @@ lr-babel = { workspace = true }
 lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-router = { workspace = true }
+lr-mpls = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"

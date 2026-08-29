@@ -523,6 +523,133 @@ pub unsafe extern "C" fn lr_router_originate_v4(
     0
 }
 
+/// Originate an RFC 8277 labelled IPv4 BGP route (AFI=1, SAFI=4). The
+/// label stack is supplied as a flat array of 20-bit label values; the
+/// codec wraps each into a `Label` with TC=0, TTL=64, and sets the
+/// bottom-of-stack bit on the last entry. Returns 0 on success, negative
+/// on error.
+///
+/// # Safety
+/// `prefix_addr` and `next_hop` (when non-NULL) must point to 4 readable
+/// bytes; `labels` must point to `n_labels` readable `uint32_t` values.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_originate_labeled_v4(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    labels: *const u32,
+    n_labels: usize,
+    next_hop: *const u8,
+) -> i32 {
+    if prefix_addr.is_null() || (n_labels > 0 && labels.is_null()) {
+        return -1;
+    }
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -2,
+    };
+    let mut addr = [0u8; 4];
+    unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 4)) };
+    let stack = build_label_stack(labels, n_labels);
+    let Some(stack) = stack else {
+        return -3; // a label value exceeded the 20-bit range
+    };
+    let nh = if next_hop.is_null() {
+        None
+    } else {
+        let mut n = [0u8; 4];
+        unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 4)) };
+        Some(lr_core::addr::IpAddr::V4(n))
+    };
+    router.originate_labeled(
+        lr_core::addr::Prefix::new_v4(addr, prefix_len),
+        lr_core::nlri::NlriFamily::IPV4_LABELED_UNICAST,
+        stack,
+        nh,
+    );
+    0
+}
+
+/// Originate an RFC 8277 labelled IPv6 BGP route (AFI=2, SAFI=4). See
+/// [`lr_router_originate_labeled_v4`] for the label-stack semantics.
+///
+/// # Safety
+/// `prefix_addr` and `next_hop` (when non-NULL) must point to 16 readable
+/// bytes; `labels` must point to `n_labels` readable `uint32_t` values.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_originate_labeled_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    labels: *const u32,
+    n_labels: usize,
+    next_hop: *const u8,
+) -> i32 {
+    if prefix_addr.is_null() || (n_labels > 0 && labels.is_null()) {
+        return -1;
+    }
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -2,
+    };
+    let mut addr = [0u8; 16];
+    unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+    let stack = build_label_stack(labels, n_labels);
+    let Some(stack) = stack else {
+        return -3;
+    };
+    let nh = if next_hop.is_null() {
+        None
+    } else {
+        let mut n = [0u8; 16];
+        unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 16)) };
+        Some(lr_core::addr::IpAddr::V6(n))
+    };
+    router.originate_labeled(
+        lr_core::addr::Prefix::new_v6(addr, prefix_len),
+        lr_core::nlri::NlriFamily::IPV6_LABELED_UNICAST,
+        stack,
+        nh,
+    );
+    0
+}
+
+/// Build a `LabelStack` from a flat C array of 20-bit label values.
+/// Returns `None` when any value exceeds `Label::MAX_VALUE`.
+unsafe fn build_label_stack(labels: *const u32, n_labels: usize) -> Option<lr_mpls::LabelStack> {
+    if n_labels == 0 {
+        return Some(lr_mpls::LabelStack::new());
+    }
+    let slice = unsafe { std::slice::from_raw_parts(labels, n_labels) };
+    let mut out = Vec::with_capacity(n_labels);
+    for v in slice {
+        if !lr_mpls::Label::is_valid_value(*v) {
+            return None;
+        }
+        out.push(lr_mpls::Label::new(*v));
+    }
+    Some(lr_mpls::LabelStack::from_vec(out))
+}
+
+/// Query the kernel's MPLS platform-labels capability (Linux only).
+/// Returns the value of `/proc/sys/net/mpls/platform_labels` (0 when
+/// MPLS routing is not enabled, 16 or 20 when it is). On non-Linux
+/// platforms this always returns 0.
+#[no_mangle]
+pub extern "C" fn lr_mpls_platform_labels() -> u32 {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::read_to_string("/proc/sys/net/mpls/platform_labels")
+            .ok()
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0)
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        0
+    }
+}
+
 /// Number of routes currently in Loc-RIB.
 #[no_mangle]
 pub extern "C" fn lr_router_rib_len(r: lr_router_t) -> i64 {

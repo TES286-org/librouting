@@ -347,6 +347,7 @@ dependencies = [
  "lr-babel",
  "lr-bgp",
  "lr-core",
+ "lr-mpls",
  "lr-ospf",
  "lr-policy",
  "lr-rib",

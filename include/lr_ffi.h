@@ -296,6 +296,47 @@ int32_t lr_router_originate_v4(lr_router_t r,
                                const uint8_t *next_hop);
 
 /**
+ * Originate an RFC 8277 labelled IPv4 BGP route (AFI=1, SAFI=4). The
+ * label stack is supplied as a flat array of 20-bit label values; the
+ * codec wraps each into a `Label` with TC=0, TTL=64, and sets the
+ * bottom-of-stack bit on the last entry. Returns 0 on success, negative
+ * on error.
+ *
+ * # Safety
+ * `prefix_addr` and `next_hop` (when non-NULL) must point to 4 readable
+ * bytes; `labels` must point to `n_labels` readable `uint32_t` values.
+ */
+int32_t lr_router_originate_labeled_v4(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint32_t *labels,
+                                       uintptr_t n_labels,
+                                       const uint8_t *next_hop);
+
+/**
+ * Originate an RFC 8277 labelled IPv6 BGP route (AFI=2, SAFI=4). See
+ * [`lr_router_originate_labeled_v4`] for the label-stack semantics.
+ *
+ * # Safety
+ * `prefix_addr` and `next_hop` (when non-NULL) must point to 16 readable
+ * bytes; `labels` must point to `n_labels` readable `uint32_t` values.
+ */
+int32_t lr_router_originate_labeled_v6(lr_router_t r,
+                                       const uint8_t *prefix_addr,
+                                       uint8_t prefix_len,
+                                       const uint32_t *labels,
+                                       uintptr_t n_labels,
+                                       const uint8_t *next_hop);
+
+/**
+ * Query the kernel's MPLS platform-labels capability (Linux only).
+ * Returns the value of `/proc/sys/net/mpls/platform_labels` (0 when
+ * MPLS routing is not enabled, 16 or 20 when it is). On non-Linux
+ * platforms this always returns 0.
+ */
+uint32_t lr_mpls_platform_labels(void);
+
+/**
  * Number of routes currently in Loc-RIB.
  */
 int64_t lr_router_rib_len(lr_router_t r);

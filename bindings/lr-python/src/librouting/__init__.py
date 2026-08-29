@@ -6,7 +6,7 @@ overridden via the `LIBROUTING_LIB` environment variable; otherwise we look
 in the workspace's `target/release` directory.
 """
 
-from .router import LrError, Router, abi_version, last_error
+from .router import LrError, Router, abi_version, last_error, mpls_platform_labels
 from .codec import (
     encode_keepalive,
     decode_bgp,
@@ -22,6 +22,7 @@ __all__ = [
     "decode_babel",
     "abi_version",
     "last_error",
+    "mpls_platform_labels",
     "LrError",
 ]
 

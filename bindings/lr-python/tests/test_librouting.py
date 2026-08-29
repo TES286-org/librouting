@@ -76,12 +76,24 @@ def test_router_data_plane():
         assert r.drain_output(h) == b""
 
 
+def test_router_labeled_unicast():
+    """RFC 8277 BGP-LU: labelled origination grows the Loc-RIB; the MPLS
+    platform-labels query returns a sane value (0 in CI, 16/20 in a lab)."""
+    with librouting.Router() as r:
+        r.originate_labeled_v4("198.51.100.0/24", [100], "192.0.2.1")
+        r.originate_labeled_v4("10.0.0.0/8", [100, 200, 3], "192.0.2.1")
+        assert r.rib_len() == 2
+        mpl = librouting.mpls_platform_labels()
+        assert mpl in (0, 16, 20), f"unexpected platform_labels={mpl}"
+
+
 if __name__ == "__main__":
     test_abi_version()
     test_encode_keepalive()
     test_decode_bgp()
     test_router_lifecycle()
     test_router_data_plane()
+    test_router_labeled_unicast()
     print("all tests passed")
 
 

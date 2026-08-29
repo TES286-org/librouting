@@ -129,9 +129,32 @@ int main(void) {
     rc = lr_router_originate_v4(r, prefix, 24, nh);
     check(rc == 0, "originate_v4");
 
-    /* Loc-RIB must now hold exactly one route */
+    /* RFC 8277 labelled-unicast origination (AFI=1, SAFI=4).
+     * Originates 198.51.100.0/24 with label 100, next-hop 192.0.2.1. */
+    const uint8_t lu_prefix[4] = {198, 51, 100, 0};
+    const uint32_t labels[1] = {100};
+    rc = lr_router_originate_labeled_v4(r, lu_prefix, 24, labels, 1, nh);
+    check(rc == 0, "originate_labeled_v4 (RFC 8277, label=100)");
+
+    /* A multi-label stack with the implicit-null terminator. */
+    const uint32_t stack[3] = {100, 200, 3 /* implicit-null */};
+    const uint8_t lu2_prefix[4] = {10, 0, 0, 0};
+    rc = lr_router_originate_labeled_v4(r, lu2_prefix, 8, stack, 3, nh);
+    check(rc == 0, "originate_labeled_v4 (3-label stack)");
+
+    /* An out-of-range label value (>20 bits) is rejected. */
+    const uint32_t bad_labels[1] = {0x100000u /* 2^20 */};
+    rc = lr_router_originate_labeled_v4(r, lu_prefix, 24, bad_labels, 1, nh);
+    check(rc == -3, "originate_labeled_v4 rejects label > 20 bits");
+
+    /* MPLS platform-labels query (Linux: 0 in CI; lab: 16/20). */
+    uint32_t mpls = lr_mpls_platform_labels();
+    check(mpls == 0 || mpls == 16 || mpls == 20,
+          "lr_mpls_platform_labels returns a known value");
+
+    /* Loc-RIB must now hold exactly three routes (1 plain + 2 labelled). */
     int64_t n = lr_router_rib_len(r);
-    check(n == 1, "rib_len == 1 after originate");
+    check(n == 3, "rib_len == 3 after originate + 2 labelled");
 
     /* RIB dump renders the route */
     lr_bytes_t dump = {0};

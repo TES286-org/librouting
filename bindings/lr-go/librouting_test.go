@@ -84,6 +84,24 @@ func TestDataPlane(t *testing.T) {
 	if n != 1 {
 		t.Fatalf("expected rib len 1, got %d", n)
 	}
+
+	// RFC 8277 labelled-unicast origination (label stack = [100]).
+	if err := r.OriginateLabeledV4([4]byte{198, 51, 100, 0}, 24, []uint32{100}, &nh); err != nil {
+		t.Fatalf("OriginateLabeledV4: %v", err)
+	}
+	n, err = r.RibLen()
+	if err != nil {
+		t.Fatalf("RibLen after labelled: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected rib len 2 after labelled originate, got %d", n)
+	}
+
+	// MPLS platform-labels query (0 in CI; 16/20 in a lab).
+	mpl := MplsPlatformLabels()
+	if mpl != 0 && mpl != 16 && mpl != 20 {
+		t.Fatalf("unexpected MplsPlatformLabels value: %d", mpl)
+	}
 	dump, err := r.RibDump()
 	if err != nil {
 		t.Fatalf("RibDump: %v", err)

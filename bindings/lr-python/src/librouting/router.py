@@ -268,6 +268,41 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_originate_v4 failed (rc={rc}): {last_error()}")
 
+    def originate_labeled_v4(self, prefix: str, labels: list[int],
+                              next_hop: str | None = None) -> None:
+        """Originate an RFC 8277 labelled IPv4 BGP route (AFI=1, SAFI=4).
+
+        ``labels`` is a list of 20-bit MPLS label values (top of stack
+        first); the bottom-of-stack bit is set automatically.
+        """
+        addr, plen = _parse_v4_prefix(prefix)
+        labels_arr = ffi.new("uint32_t[]", [int(v) & 0xfffff for v in labels])
+        nh_buf = _parse_v4_next_hop(next_hop)
+        rc = get_lib().lr_router_originate_labeled_v4(
+            self._ptr, addr, plen, labels_arr, len(labels), nh_buf
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_originate_labeled_v4 failed (rc={rc}): {last_error()}"
+            )
+
+    def originate_labeled_v6(self, prefix: str, labels: list[int],
+                              next_hop: str | None = None) -> None:
+        """Originate an RFC 8277 labelled IPv6 BGP route (AFI=2, SAFI=4).
+
+        See ``originate_labeled_v4`` for the label-stack semantics.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        labels_arr = ffi.new("uint32_t[]", [int(v) & 0xfffff for v in labels])
+        nh_buf = _parse_v6_next_hop(next_hop)
+        rc = get_lib().lr_router_originate_labeled_v6(
+            self._ptr, addr, plen, labels_arr, len(labels), nh_buf
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_originate_labeled_v6 failed (rc={rc}): {last_error()}"
+            )
+
     def rib_len(self) -> int:
         n = get_lib().lr_router_rib_len(self._ptr)
         if n < 0:
@@ -306,3 +341,60 @@ def last_error() -> str:
     if cstr == ffi.NULL:
         return ""
     return ffi.string(cstr).decode("utf-8", errors="replace")
+
+
+def mpls_platform_labels() -> int:
+    """Kernel MPLS platform-labels capability (Linux only).
+
+    Returns 0 when MPLS routing is not enabled, 16 or 20 when it is.
+    Non-Linux platforms always return 0.
+    """
+    return int(get_lib().lr_mpls_platform_labels())
+
+
+def _parse_v4_prefix(prefix: str):
+    """Return (uint8_t[4], prefix_len) for a "a.b.c.d/plen" string."""
+    addr_str, _, plen_str = prefix.partition("/")
+    plen = int(plen_str) if plen_str else 32
+    parts = addr_str.split(".")
+    if len(parts) != 4:
+        raise LrError(f"invalid IPv4 prefix: {prefix}")
+    try:
+        addr = ffi.new("uint8_t[]", bytes(int(p) for p in parts))
+    except ValueError as e:
+        raise LrError(f"invalid IPv4 prefix: {prefix}") from e
+    return addr, plen
+
+
+def _parse_v4_next_hop(next_hop: str | None):
+    if next_hop is None:
+        return ffi.NULL
+    parts = next_hop.split(".")
+    if len(parts) != 4:
+        raise LrError(f"invalid IPv4 next-hop: {next_hop}")
+    try:
+        return ffi.new("uint8_t[]", bytes(int(p) for p in parts))
+    except ValueError as e:
+        raise LrError(f"invalid IPv4 next-hop: {next_hop}") from e
+
+
+def _parse_v6_prefix(prefix: str):
+    import ipaddress
+    net = ipaddress.ip_network(prefix, strict=False)
+    if net.version != 6:
+        raise LrError(f"not an IPv6 prefix: {prefix}")
+    return ffi.new("uint8_t[]", net.network_address.packed), net.prefixlen
+
+
+def _parse_v6_next_hop(next_hop: str | None):
+    if next_hop is None:
+        return ffi.NULL
+    import ipaddress
+    try:
+        addr = ipaddress.ip_address(next_hop)
+    except ValueError as e:
+        raise LrError(f"invalid IPv6 next-hop: {next_hop}") from e
+    if addr.version != 6:
+        raise LrError(f"not an IPv6 next-hop: {next_hop}")
+    return ffi.new("uint8_t[]", addr.packed)
+
