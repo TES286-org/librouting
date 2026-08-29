@@ -98,6 +98,13 @@ fn print_usage() {
          --ebgp-policy MODE       rfc8212 (default) | accept-all — default\n  \
          eBGP route behavior for peers without import/export\n  \
          route-maps (RFC 8212: deny-in/deny-out vs legacy accept)\n  \
+         --enforce-first-as        Reject eBGP UPDATEs whose leftmost AS_PATH\n  \
+         AS is not the peer's AS (FRR `bgp enforce-first-as`)\n  \
+         --no-enforce-first-as     Disable the check (default)\n  \
+         --bestpath-compare-routerid  Use lowest BGP IDENTIFIER as the\n  \
+         best-path tiebreaker (RFC 5004 deterministic, default)\n  \
+         --no-bestpath-compare-routerid  Fall back to oldest-route-wins\n  \
+         (FRR default)\n  \
          --bfd                    BFD fast-fail for the peer(s) (RFC 5880/\n  \
          5881): a BFD Down tears the BGP session immediately\n  \
          --bfd-multihop           RFC 5883 multihop BFD (UDP 4784, no TTL\n  \
@@ -246,6 +253,14 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         // permits (§3 / Appendix A "insecure-mode").
         let rfc8212 = cfg.ebgp_policy != "accept-all";
         r.set_ebgp_requires_policy(rfc8212);
+        // FRR `bgp enforce-first-as` (W2.2): drop eBGP UPDATEs whose
+        // leftmost AS_PATH sequence segment's first AS is not the
+        // peer's AS. Off by default (FRR `no bgp enforce-first-as`).
+        r.set_enforce_first_as(cfg.enforce_first_as);
+        // FRR `bgp bestpath compare-routerid` (W2.2): the best-path
+        // tiebreaker is the lowest BGP IDENTIFIER (RFC 5004
+        // deterministic) when on, or oldest-route-wins when off.
+        r.best_path_config_mut().deterministic_router_id = cfg.bestpath_compare_routerid;
         for spec in &cfg.peers {
             if cfg.explicit_peers && !spec.is_outbound() && !spec.is_inbound() {
                 eprintln!(
@@ -410,6 +425,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     }
     println!("  networks:    {:?}", cfg.networks);
     println!("  install:     {}", cfg.install_kernel);
+    println!(
+        "  ebgp:        policy={} enforce_first_as={} compare_routerid={}",
+        cfg.ebgp_policy, cfg.enforce_first_as, cfg.bestpath_compare_routerid
+    );
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so

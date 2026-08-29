@@ -236,6 +236,16 @@ pub(crate) struct DaemonConfig {
     /// `"accept-all"` (the RFC 4271 default the RFC allows as a
     /// deviation, §3 / Appendix A "insecure-mode").
     pub ebgp_policy: String,
+    /// FRR `bgp enforce-first-as` (W2.2): when on, an eBGP UPDATE
+    /// whose AS_PATH leftmost sequence segment's first AS is not the
+    /// peer's AS is rejected before Adj-RIB-In. Off by default —
+    /// matches FRR `no bgp enforce-first-as`.
+    pub enforce_first_as: bool,
+    /// FRR `bgp bestpath compare-routerid` (W2.2): when on (the
+    /// default), the best-path tiebreaker uses the lowest BGP
+    /// IDENTIFIER (RFC 5004 deterministic mode). When off, the
+    /// oldest-received route wins (FRR's default).
+    pub bestpath_compare_routerid: bool,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -289,6 +299,8 @@ impl DaemonConfig {
             protocol: "bgp".to_string(),
             babel_port: 6696,
             ebgp_policy: "rfc8212".to_string(),
+            enforce_first_as: false,
+            bestpath_compare_routerid: true,
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -709,6 +721,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 }
                 cfg.ebgp_policy = value.to_string();
             }
+            "bgp.enforce_first_as" => cfg.enforce_first_as = parse_bool(value),
+            "bgp.bestpath_compare_routerid" => {
+                cfg.bestpath_compare_routerid = parse_bool(value);
+            }
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -1078,6 +1094,22 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 }
                 cfg.ebgp_policy = v.to_string();
                 i += 2;
+            }
+            "--enforce-first-as" => {
+                cfg.enforce_first_as = true;
+                i += 1;
+            }
+            "--no-enforce-first-as" => {
+                cfg.enforce_first_as = false;
+                i += 1;
+            }
+            "--bestpath-compare-routerid" => {
+                cfg.bestpath_compare_routerid = true;
+                i += 1;
+            }
+            "--no-bestpath-compare-routerid" => {
+                cfg.bestpath_compare_routerid = false;
+                i += 1;
             }
             "--install-kernel-routes" => {
                 cfg.install_kernel = true;
@@ -1613,5 +1645,36 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.contains("bad ebgp_policy 'permissive'"), "{err}");
+    }
+
+    #[test]
+    fn enforce_first_as_default_off_and_parses() {
+        // FRR `bgp enforce-first-as` is off by default; the config
+        // flips it on. W2.2.
+        assert!(!DaemonConfig::with_defaults().enforce_first_as);
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             enforce_first_as = true\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(cfg.enforce_first_as);
+    }
+
+    #[test]
+    fn bestpath_compare_routerid_default_on_and_parses() {
+        // lr ships deterministic_router_id = true (RFC 5004); the
+        // config exposes FRR `bgp bestpath compare-routerid` and lets
+        // the operator flip it off. W2.2.
+        assert!(DaemonConfig::with_defaults().bestpath_compare_routerid);
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             bestpath_compare_routerid = false\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(!cfg.bestpath_compare_routerid);
     }
 }
