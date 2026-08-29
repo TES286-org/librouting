@@ -70,6 +70,16 @@ hold_time = 90
 # CLI: --default-ipv4-unicast / --no-default-ipv4-unicast
 # default_ipv4_unicast = true
 
+# FRR `bgp allow-local-as [N]` / BIRD `allow local as` (W2.3): admit
+# a route whose AS_PATH contains the local AS up to N times. `0` (the
+# default) rejects any occurrence (RFC 4271 §9.1.2.15 AS_PATH loop
+# check). `N > 0` admits up to N occurrences (FRR `allowas-in N`,
+# default N=1). `any` admits any number (FRR `allowas-any`). iBGP
+# sessions are exempt (FRR/BIRD scope the relaxation to eBGP).
+# Per-peer override: `[peer.X] allow_local_as = N` (or `any`).
+# CLI: --allow-local-as [N] / --allowas-any
+# allow_local_as = 0
+
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
 # window after a session loss.

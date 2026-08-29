@@ -713,6 +713,40 @@ The FFI mirrors it as `lr_router_set_default_ipv4_unicast`, as do the
 Go (`Router.SetDefaultIPv4Unicast`) and Python
 (`Router.set_default_ipv4_unicast`) bindings.
 
+### FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3)
+
+`PeerConfig::local_as_tolerance` (default `0` = reject any occurrence
+of the local AS in a received AS_PATH — RFC 4271 §9.1.2.15) controls
+the per-peer AS-loop tolerance. `N > 0` admits a route whose AS_PATH
+contains the local AS up to N times (FRR `allowas-in N`, default
+N=1). `u32::MAX` admits any number (FRR `allowas-any`). iBGP is
+exempt (FRR/BIRD scope the relaxation to eBGP).
+
+```rust
+let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1])))?;
+// FRR `allowas-in 1`: admit a route whose AS_PATH contains our AS
+// up to 1 time.
+r.set_session_local_as_tolerance(h, 1)?;
+// FRR `allowas-any`: admit any number.
+r.set_session_local_as_tolerance(h, u32::MAX)?;
+```
+
+The router's `import_route` consults the per-peer tolerance when the
+safety net's `reject_as_loop` fires: on an eBGP peer with
+`tolerance > 0`, the route is admitted when the local AS count is ≤
+tolerance. The new `count_local_as` helper reads the FSM-normalized
+canonical AS_PATH via `PathAttributes::as_path()`, fixing a latent
+width-guessing bug in the safety net's `local_as_count` that silently
+broke `reject_as_loop` for routes from any modern peer sending 4-byte
+AS_PATH.
+
+The shipped daemon exposes it as `[bgp] allow_local_as = N|any|true|false`
+(default `0`) with the CLI `--allow-local-as [N]` / `--allowas-any` flags
+and a per-peer override `[peer] allow_local_as`. The FFI mirrors it as
+`lr_router_set_local_as_tolerance`, as do the Go
+(`Router.SetLocalAsTolerance`) and Python
+(`Router.set_local_as_tolerance`) bindings.
+
 ### FRR `bgp enforce-first-as` (W2.2)
 
 `DefaultRouter::set_enforce_first_as(true)` arms the FRR

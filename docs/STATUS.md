@@ -47,7 +47,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard rules, Simple Password auth; `lr-osroute::bfd_transport` sockets (3784/4784, TTL 255, ephemeral source ports); daemon `--bfd` fast-fails BGP on BFD Down (BIRD-verified) |
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community set actions; route tags (`set tag`) still open
-| Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled; FRR `bgp enforce-first-as` (W2.2) — router-level flag rejects eBGP UPDATEs whose leftmost AS_PATH AS != peer AS |
+| Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled; FRR `bgp enforce-first-as` (W2.2) — router-level flag rejects eBGP UPDATEs whose leftmost AS_PATH AS != peer AS; FRR `allowas-in N` / BIRD `allow local as` (W2.3) — per-peer AS-loop tolerance; `local_as_count` fixed to use the FSM-normalized 4-byte AS_PATH |
 | RFC 8212 default eBGP route behaviors | ✅ 🧪 | `lr-router` `set_ebgp_requires_policy` + per-session `set_session_policy`: external sessions (eBGP *and* confederation boundaries, §1) without explicit import policy discard received routes before Adj-RIB-In; without export policy advertise nothing — enforced at all three egress paths (per-prefix export, RFC 2918/7313 reannounce, initial dump; EoR still flows) with stale Adj-RIB-Out entries withdrawn; iBGP exempt; daemon default-on via `[bgp] ebgp_policy` with `accept-all` as the §3/Appendix-A deviation; FFI + Go/Python bindings |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
@@ -373,8 +373,37 @@ flags; never break standards compliance by default.
    forged AS_PATH via a hand-rewritten wire UPDATE, iBGP exemption)
    and 2 daemon e2e tests (the flag parses, legit traffic still
    flows, the status printout names the new knobs).
-3. BIRD `bgp allow local as` and extended-community syntax sugar
-   (`rt:`/`ro:` literals already parse; keep parity).
+3. ~~**BIRD `bgp allow local as`**~~ — done: `PeerConfig` gained a
+   `local_as_tolerance: u32` field (default `0` = reject any
+   occurrence of the local AS in a received AS_PATH — RFC 4271
+   §9.1.2.15). The router's `import_route` now consults the per-peer
+   tolerance when the safety net's `reject_as_loop` fires: on an
+   eBGP peer with `tolerance > 0`, the route is admitted when the
+   local AS count is ≤ tolerance (FRR `allowas-in N`); `u32::MAX` is
+   the `allowas-any` sentinel. iBGP is exempt (FRR/BIRD scope the
+   relaxation to eBGP). The new `count_local_as` helper reads the
+   FSM-normalized canonical AS_PATH via `PathAttributes::as_path()`,
+   fixing a latent width-guessing bug in the safety net's
+   `local_as_count` that silently broke `reject_as_loop` for routes
+   from any modern peer sending 4-byte AS_PATH (the FSM rewrites
+   tag-2 AS_PATH to 4-byte, but the old counter treated tag-2 as
+   2-byte when AS4_PATH was absent — undercounting local AS
+   occurrences). The router gained
+   `set_session_local_as_tolerance(h, N)`; `SessionConfig` carries
+   the field through `add_session`. The daemon wires the router-wide
+   `[bgp] allow_local_as = N|any|true|false` (default `0`) + CLI
+   `--allow-local-as [N]` / `--allowas-any` + per-peer override
+   `[peer] allow_local_as`. FFI:
+   `lr_router_set_local_as_tolerance`, with Go
+   (`Router.SetLocalAsTolerance`) and Python
+   (`Router.set_local_as_tolerance`) mirrors. Verified by 6 router
+   unit tests (default-0 rejects, tolerance=1 admits 1 / rejects 2,
+   allowas-any admits arbitrary, unknown-handle fail-closed,
+   post-start fail-closed), the C/Go/Python binding smoke tests,
+   and the safety-net fix is exercised by the existing
+   `rejects_as_loop` test (2-byte path) plus the new router tests
+   (4-byte path). The extended-community syntax sugar
+   (`rt:`/`ro:` literals) already parses; no further action needed.
 4. Soft reconfiguration inbound (`neighbor X soft-reconfiguration
    inbound`): keep the pre-policy Adj-RIB-In view — the data model
    already supports it; expose per-session snapshots.

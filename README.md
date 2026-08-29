@@ -301,6 +301,18 @@ follow. The shipped daemon exposes it as `[bgp] default_ipv4_unicast`
 (default `true`) with per-peer override; CLI `--no-default-ipv4-unicast`
 matches FRR `no bgp default ipv4-unicast`.
 
+### FRR `allowas-in N` / BIRD `allow local as`
+
+`PeerConfig::local_as_tolerance` (default `0` = reject any occurrence
+of the local AS in a received AS_PATH — RFC 4271 §9.1.2.15) controls
+the per-peer AS-loop tolerance. `N > 0` admits up to N occurrences
+(FRR `allowas-in N`); `u32::MAX` admits any number (FRR `allowas-any`).
+iBGP is exempt. The shipped daemon exposes it as `[bgp] allow_local_as`
+(default `0`) with per-peer override; CLI `--allow-local-as [N]` /
+`--allowas-any`. Landing this also fixed a latent bug in the safety
+net's `local_as_count` that silently broke `reject_as_loop` for routes
+from any modern peer sending 4-byte AS_PATH.
+
 ## Safety net
 
 Protocol-level invariants (RFC compliance requirements) are enforced by
