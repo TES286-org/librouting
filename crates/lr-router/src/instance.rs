@@ -758,6 +758,30 @@ pub struct DefaultRouter {
     /// AS_PATH and ATOMIC_AGGREGATE. When all specifics disappear, the
     /// aggregate is withdrawn.
     aggregates: BTreeSet<lr_core::addr::Prefix>,
+    /// RFC 8212 mode: external BGP sessions (eBGP *and* confederation
+    /// boundaries, per §1) without an explicit import policy discard
+    /// all received routes, and without an explicit export policy
+    /// advertise nothing. Off by default (the library embedder opts
+    /// in; the shipped daemon turns it on).
+    ebgp_requires_policy: bool,
+    /// RFC 8212 §3 per-session state: which directions the embedder
+    /// attached an explicit policy to, plus one-time denial log
+    /// latches (a full table from a policy-less peer must not produce
+    /// one log event per route).
+    session_policy: BTreeMap<u64, SessionPolicy>,
+}
+
+/// RFC 8212 bookkeeping for one BGP session.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct SessionPolicy {
+    /// The embedder attached an explicit import policy to the session.
+    has_import: bool,
+    /// The embedder attached an explicit export policy to the session.
+    has_export: bool,
+    /// Latched after the first import denial is logged.
+    warned_import: bool,
+    /// Latched after the first export denial is logged.
+    warned_export: bool,
 }
 
 /// Per-session maximum-prefix bookkeeping.
@@ -802,6 +826,8 @@ impl Default for DefaultRouter {
             redistributed_bgp: BTreeMap::new(),
             bmp_sink: None,
             aggregates: BTreeSet::new(),
+            ebgp_requires_policy: false,
+            session_policy: BTreeMap::new(),
         }
     }
 }
@@ -830,6 +856,86 @@ impl DefaultRouter {
     /// Access the hook chain to register import/selection/export hooks.
     pub fn hooks_mut(&mut self) -> &mut HookChain {
         &mut self.hooks
+    }
+
+    /// Enable or disable RFC 8212 default eBGP route behaviors.
+    ///
+    /// When on, an external BGP session (eBGP or a confederation
+    /// boundary — RFC 8212 §1 counts both) whose embedder declared no
+    /// explicit import policy discards every received route, and a
+    /// session with no explicit export policy advertises nothing
+    /// (RFC 8212 §3 replaces the RFC 4271 default-accept behavior).
+    ///
+    /// Policy presence is declared per session with
+    /// [`DefaultRouter::set_session_policy`]; absence means no policy,
+    /// so enabling the mode is fail-closed by construction. The
+    /// library default is off to keep embedder pipelines untouched;
+    /// the shipped daemon enables it.
+    pub fn set_ebgp_requires_policy(&mut self, on: bool) {
+        self.ebgp_requires_policy = on;
+    }
+
+    /// Declare which directions of a BGP session carry an explicit
+    /// policy (RFC 8212 §3). Call after `add_session` returned the
+    /// handle; `Err` on unknown handles (typo protection, fail
+    /// closed).
+    ///
+    /// A direction declared `true` suppresses the RFC 8212 default
+    /// deny for it; the policy itself runs through the ordinary hook
+    /// chain (e.g. `lr-policy` route-maps bound to the session).
+    /// Changing the export declaration re-evaluates every prefix
+    /// toward the session immediately: a newly declared policy
+    /// advertises what it permits, a removed one withdraws what the
+    /// session still carried.
+    pub fn set_session_policy(
+        &mut self,
+        h: SessionHandle,
+        import: bool,
+        export: bool,
+    ) -> Result<(), String> {
+        if !self.sessions.contains_key(&h.0) {
+            return Err(format!("set_session_policy: unknown session {}", h.0));
+        }
+        let export_changed = self
+            .session_policy
+            .get(&h.0)
+            .is_none_or(|p| p.has_export != export);
+        let st = self.session_policy.entry(h.0).or_default();
+        st.has_import = import;
+        st.has_export = export;
+        if export_changed {
+            // Re-evaluate every prefix toward the session: a newly
+            // declared policy advertises what it permits, a removed
+            // one withdraws what the session still carries (RFC 8212
+            // §3 keeps routes without an explicit export policy out
+            // of the Adj-RIB-Out). No-op before the session
+            // establishes.
+            let hooks = std::mem::take(&mut self.hooks);
+            let sets: Vec<(RouteKey, Vec<Route>)> = self
+                .loc_rib
+                .iter_sets()
+                .map(|(k, s)| (k.clone(), s.to_vec()))
+                .collect();
+            let mut work: Vec<(RouteKey, Vec<Route>, Vec<u32>)> = Vec::new();
+            for (key, ranked) in &sets {
+                let (advertise, withdraw_ids) =
+                    self.export_work_for(&hooks, h.0, key, ranked);
+                if advertise.is_empty() && withdraw_ids.is_empty() {
+                    continue;
+                }
+                work.push((key.clone(), advertise, withdraw_ids));
+            }
+            self.hooks = hooks;
+            for (key, advertise, withdraw_ids) in work {
+                if !withdraw_ids.is_empty() {
+                    self.queue_or_send_withdrawal(h.0, &key, &withdraw_ids);
+                }
+                if !advertise.is_empty() {
+                    self.queue_or_send_advertisement(h.0, advertise);
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Access the BGP best-path configuration knobs.
@@ -1378,8 +1484,49 @@ impl DefaultRouter {
 
     // ----- import pipeline -----
 
+    /// RFC 8212 §3 classification for one session: `(deny_import,
+    /// deny_export)`. Both are false unless the mode is enabled and the
+    /// session is an external BGP session (eBGP or confederation
+    /// boundary, per §1); for those, a direction is denied exactly when
+    /// the embedder declared no explicit policy for it. Pure — callers
+    /// with a `&mut self` handle the one-time log latching themselves.
+    fn rfc8212_denies(&self, session: u64) -> (bool, bool) {
+        if !self.ebgp_requires_policy {
+            return (false, false);
+        }
+        match self.sessions.get(&session) {
+            Some(SessionState::Bgp { peer, .. })
+                if peer.config().peer_role().is_external() =>
+            {
+                let p = self.session_policy.get(&session).copied();
+                (
+                    !p.is_some_and(|p| p.has_import),
+                    !p.is_some_and(|p| p.has_export),
+                )
+            }
+            _ => (false, false),
+        }
+    }
+
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
+        // RFC 8212 §3: routes from an external peer with no explicit
+        // import policy are not eligible for the decision process —
+        // drop them before Adj-RIB-In (a policy-less peer must not
+        // leak a single route into the pipeline).
+        let (rfc8212_deny_import, _) = self.rfc8212_denies(route.origin.peer);
+        if rfc8212_deny_import {
+            let session = route.origin.peer;
+            let prefix = route.key.prefix;
+            let st = self.session_policy.entry(session).or_default();
+            if !st.warned_import {
+                st.warned_import = true;
+                self.pending_events.push(RouterEvent::Log(format!(
+                    "session {session}: no import policy — discarding received routes (RFC 8212), e.g. {prefix}"
+                )));
+            }
+            return;
+        }
         if let Some(net) = &self.safety {
             if let Err(v) = net.check(&route, is_ebgp) {
                 self.pending_events.push(RouterEvent::Log(format!(
@@ -1639,66 +1786,11 @@ impl DefaultRouter {
         // Hooks borrow self immutably while session enumeration requires a
         // mutable borrow, so collect policy-approved work before transmitting.
         let hooks = std::mem::take(&mut self.hooks);
+        let sessions: Vec<u64> = self.sessions.keys().copied().collect();
         let mut work: Vec<(u64, Vec<Route>, Vec<u32>)> = Vec::new();
-        for (session, state) in &self.sessions {
-            let SessionState::Bgp { peer, .. } = state else {
-                continue;
-            };
-            if !peer.is_established() {
-                continue;
-            }
-            let add_path_tx = peer.add_path_tx_for(key.family);
-            let mut desired: Vec<Route> = Vec::new();
-            if add_path_tx {
-                for (slot, route) in ranked.iter().enumerate() {
-                    if route.origin.peer == *session {
-                        continue; // split horizon, per path
-                    }
-                    let mut candidate = route.clone();
-                    candidate.path_id = slot as u32 + 1;
-                    if matches!(
-                        hooks.run_export_to(&mut candidate, *session),
-                        HookVerdict::Drop
-                    ) {
-                        continue;
-                    }
-                    desired.push(candidate);
-                }
-            } else if let Some(best) = ranked.first() {
-                if best.origin.peer == *session {
-                    continue;
-                }
-                let mut candidate = best.clone();
-                candidate.path_id = 0;
-                if !matches!(
-                    hooks.run_export_to(&mut candidate, *session),
-                    HookVerdict::Drop
-                ) {
-                    desired.push(candidate);
-                }
-            }
-            let current = self.adj_rib_out.paths_for(
-                RouteOrigin {
-                    proto: 0,
-                    peer: *session,
-                },
-                key,
-            );
-            let mut withdraw_ids: Vec<u32> = Vec::new();
-            let mut advertise: Vec<Route> = Vec::new();
-            for (id, cur) in &current {
-                match desired.iter().find(|r| r.path_id == *id) {
-                    None => withdraw_ids.push(*id),
-                    Some(new) if new == cur => {}
-                    Some(new) => advertise.push(new.clone()),
-                }
-            }
-            for new in &desired {
-                if !current.iter().any(|(id, _)| *id == new.path_id) {
-                    advertise.push(new.clone());
-                }
-            }
-            work.push((*session, advertise, withdraw_ids));
+        for session in sessions {
+            let (advertise, withdraw_ids) = self.export_work_for(&hooks, session, key, ranked);
+            work.push((session, advertise, withdraw_ids));
         }
         self.hooks = hooks;
         for (session, advertise, withdraw_ids) in work {
@@ -1709,6 +1801,83 @@ impl DefaultRouter {
                 self.queue_or_send_advertisement(session, advertise);
             }
         }
+    }
+
+    /// Per-session slice of [`Self::export_selection`]: the (advertise,
+    /// withdraw) delta for `key` toward one established session under
+    /// `hooks`, computed against Adj-RIB-Out. Pure with respect to the
+    /// wire — callers transmit the returned work after restoring the
+    /// hook chain (the borrow split forces this two-phase shape).
+    fn export_work_for(
+        &self,
+        hooks: &HookChain,
+        session: u64,
+        key: &RouteKey,
+        ranked: &[Route],
+    ) -> (Vec<Route>, Vec<u32>) {
+        let Some(SessionState::Bgp { peer, .. }) = self.sessions.get(&session) else {
+            return (Vec::new(), Vec::new());
+        };
+        if !peer.is_established() {
+            return (Vec::new(), Vec::new());
+        }
+        // RFC 8212 §3: an external session with no explicit export
+        // policy must not carry routes in its Adj-RIB-Out. Desired
+        // stays empty so the diff below withdraws anything the
+        // session still advertises (e.g. exported before the mode was
+        // enabled or the policy removed).
+        let (_, rfc8212_deny_export) = self.rfc8212_denies(session);
+        let add_path_tx = peer.add_path_tx_for(key.family);
+        let mut desired: Vec<Route> = Vec::new();
+        if add_path_tx && !rfc8212_deny_export {
+            for (slot, route) in ranked.iter().enumerate() {
+                if route.origin.peer == session {
+                    continue; // split horizon, per path
+                }
+                let mut candidate = route.clone();
+                candidate.path_id = slot as u32 + 1;
+                if matches!(
+                    hooks.run_export_to(&mut candidate, session),
+                    HookVerdict::Drop
+                ) {
+                    continue;
+                }
+                desired.push(candidate);
+            }
+        } else if let Some(best) = ranked.first() {
+            if best.origin.peer != session && !rfc8212_deny_export {
+                let mut candidate = best.clone();
+                candidate.path_id = 0;
+                if !matches!(
+                    hooks.run_export_to(&mut candidate, session),
+                    HookVerdict::Drop
+                ) {
+                    desired.push(candidate);
+                }
+            }
+        }
+        let current = self.adj_rib_out.paths_for(
+            RouteOrigin {
+                proto: 0,
+                peer: session,
+            },
+            key,
+        );
+        let mut withdraw_ids: Vec<u32> = Vec::new();
+        let mut advertise: Vec<Route> = Vec::new();
+        for (id, cur) in &current {
+            match desired.iter().find(|r| r.path_id == *id) {
+                None => withdraw_ids.push(*id),
+                Some(new) if new == cur => {}
+                Some(new) => advertise.push(new.clone()),
+            }
+        }
+        for new in &desired {
+            if !current.iter().any(|(id, _)| *id == new.path_id) {
+                advertise.push(new.clone());
+            }
+        }
+        (advertise, withdraw_ids)
     }
 
     /// Re-evaluate and resend one address family after an RFC 2918 request.
@@ -1763,6 +1932,11 @@ impl DefaultRouter {
             .collect();
         let hooks = std::mem::take(&mut self.hooks);
         let mut advertised = Vec::new();
+        // RFC 8212 §3: an external session with no explicit export
+        // policy re-advertises nothing after a route refresh — the
+        // prior entries were withdrawn above, leaving the session's
+        // Adj-RIB-Out empty as the RFC requires.
+        let (_, rfc8212_deny_export) = self.rfc8212_denies(session);
 
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&session) {
             if !peer.is_established() {
@@ -1785,6 +1959,9 @@ impl DefaultRouter {
             }
             for set in snapshot {
                 for mut route in set {
+                    if rfc8212_deny_export {
+                        continue;
+                    }
                     if matches!(hooks.run_export_to(&mut route, session), HookVerdict::Drop) {
                         continue;
                     }
@@ -1960,8 +2137,25 @@ impl DefaultRouter {
         }
         let hooks = std::mem::take(&mut self.hooks);
         let mut advertised: Vec<Route> = Vec::new();
+        // RFC 8212 §3: an external session with no explicit export
+        // policy receives an empty initial dump (EoR still flows — the
+        // peer's convergence logic depends on it). Warn once per
+        // session lifetime, not per establishment.
+        let (_, rfc8212_deny_export) = self.rfc8212_denies(h);
+        if rfc8212_deny_export {
+            let st = self.session_policy.entry(h).or_default();
+            if !st.warned_export {
+                st.warned_export = true;
+                self.pending_events.push(RouterEvent::Log(format!(
+                    "session {h}: no export policy — advertising nothing (RFC 8212)"
+                )));
+            }
+        }
         if let Some(SessionState::Bgp { peer, conn, .. }) = self.sessions.get_mut(&h) {
             for route in &snapshot {
+                if rfc8212_deny_export {
+                    continue;
+                }
                 let mut r = route.clone();
                 if matches!(hooks.run_export_to(&mut r, h), HookVerdict::Drop) {
                     continue;
@@ -2580,6 +2774,7 @@ impl RouterInstance for DefaultRouter {
         }
         self.mrai.remove(&h.0);
         self.graceful_restart.remove(&h.0);
+        self.session_policy.remove(&h.0);
         // Remove every route that session contributed and re-select.
         let keys: Vec<(RouteKey, u32)> = self
             .adj_rib_in
@@ -5446,5 +5641,197 @@ mod tests {
         assert_eq!(s[2].kind, "babel");
         assert_eq!(s[2].state, "Down");
         assert!(!s.iter().any(|x| x.established));
+    }
+
+    // ===== RFC 8212 default eBGP route behaviors =====
+
+    /// A plain eBGP pair (no graceful restart, no MRAI) with the
+    /// RFC 8212 mode armed on the receiving side.
+    fn ebgp_pair() -> (DefaultRouter, SessionHandle, DefaultRouter, SessionHandle) {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        (a, a_session, b, b_session)
+    }
+
+    fn logs_contain(a: &mut DefaultRouter, needle: &str) -> bool {
+        a.poll_events()
+            .iter()
+            .any(|e| matches!(e, RouterEvent::Log(m) if m.contains(needle)))
+    }
+
+    #[test]
+    fn rfc8212_off_by_default_keeps_rfc4271_behaviour() {
+        // Without the mode, a policy-less eBGP session accepts and
+        // advertises everything (library back-compat; the daemon is
+        // what turns the mode on).
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        assert_eq!(a.rib_len(), 1);
+    }
+
+    #[test]
+    fn rfc8212_ebgp_import_denied_without_policy() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_ebgp_requires_policy(true);
+        establish(&mut a, a_session, &mut b, b_session);
+
+        b.originate(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 10])),
+        );
+        let advertisement = b.drain_output(b_session);
+        assert!(!advertisement.is_empty());
+        a.feed_input(a_session, &advertisement).unwrap();
+        assert_eq!(
+            a.rib_len(),
+            0,
+            "routes from a policy-less external peer must not reach the Loc-RIB"
+        );
+        assert!(
+            logs_contain(&mut a, "no import policy"),
+            "the denial is surfaced once as a log event"
+        );
+    }
+
+    #[test]
+    fn rfc8212_ebgp_import_allowed_with_explicit_policy() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_ebgp_requires_policy(true);
+        a.set_session_policy(a_session, true, false).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        assert_eq!(a.rib_len(), 1);
+    }
+
+    #[test]
+    fn rfc8212_ebgp_export_denied_without_policy() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_ebgp_requires_policy(true);
+        establish(&mut a, a_session, &mut b, b_session);
+        assert!(logs_contain(&mut a, "no export policy"));
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        // The drained bytes may carry the session's End-of-RIB marker
+        // from establishment — what matters is that no UPDATE flows.
+        let bytes = a.drain_output(a_session);
+        if !bytes.is_empty() {
+            b.feed_input(b_session, &bytes).unwrap();
+        }
+        assert_eq!(
+            b.rib_len(),
+            0,
+            "a policy-less external peer must not receive advertisements"
+        );
+    }
+
+    #[test]
+    fn rfc8212_ebgp_export_allowed_with_explicit_policy() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_ebgp_requires_policy(true);
+        a.set_session_policy(a_session, false, true).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let advertisement = a.drain_output(a_session);
+        assert!(!advertisement.is_empty());
+        b.feed_input(b_session, &advertisement).unwrap();
+        assert_eq!(b.rib_len(), 1);
+    }
+
+    #[test]
+    fn rfc8212_spared_for_ibgp() {
+        // RFC 8212 §1 scopes the default behaviors to EBGP sessions;
+        // iBGP keeps the RFC 4271 default-accept.
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        a.set_ebgp_requires_policy(true);
+        b.set_ebgp_requires_policy(true);
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        assert_eq!(a.rib_len(), 1);
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let advertisement = a.drain_output(a_session);
+        assert!(!advertisement.is_empty());
+        b.feed_input(b_session, &advertisement).unwrap();
+        // B holds its own 198.51.100.0/24 plus the learned
+        // 203.0.113.0/24 — iBGP exchanges flow without policy.
+        assert!(
+            b.rib_snapshot()
+                .iter()
+                .any(|r| r.key.prefix == Prefix::new_v4([203, 0, 113, 0], 24)),
+            "iBGP keeps the RFC 4271 default-accept"
+        );
+    }
+
+    #[test]
+    fn rfc8212_export_policy_removal_withdraws_advertised_routes() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_ebgp_requires_policy(true);
+        a.set_session_policy(a_session, false, true).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let advertisement = a.drain_output(a_session);
+        b.feed_input(b_session, &advertisement).unwrap();
+        assert_eq!(b.rib_len(), 1);
+
+        // Policy withdrawn at runtime: the Adj-RIB-Out must be emptied
+        // and the far side must see the withdrawal (RFC 8212 §3).
+        a.set_session_policy(a_session, false, false).unwrap();
+        let withdrawal = a.drain_output(a_session);
+        assert!(!withdrawal.is_empty());
+        b.feed_input(b_session, &withdrawal).unwrap();
+        assert_eq!(b.rib_len(), 0);
+    }
+
+    #[test]
+    fn rfc8212_unknown_session_rejected() {
+        let mut a = DefaultRouter::new();
+        let err = a
+            .set_session_policy(SessionHandle(99), true, true)
+            .unwrap_err();
+        assert!(err.contains("unknown session 99"), "{err}");
     }
 }
