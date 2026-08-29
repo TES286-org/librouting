@@ -217,13 +217,16 @@ librouting/
   `LLGR_STALE`/`NO_LLGR` communities, least-preferred stale-route
   selection, egress gating to non-LLGR neighbors and per-family stale-time
   retention with a locally configurable cap.
-- **Extended Next-Hop** (RFC 5549): capability 5 with
-  `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples (canonical `(1,1,2)`),
-  OPEN-negotiated as the intersection of local and peer tuples; IPv4 NLRI
+- **Extended Next-Hop** (RFC 5549 / RFC 8950): capability 5 with
+  `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples (canonical `(1,1,2)`) in
+  the standard 6-byte wire form (AFI:2, SAFI:2, NH-AFI:2 — the form
+  BIRD 2.x and FRR both encode and require), OPEN-negotiated as the
+  intersection of local and peer tuples; IPv4 NLRI
   carried over an IPv6 next-hop (16-byte well-known NEXT_HOP or
   MP_REACH `(AFI=1, 16B)`). Daemon `--extended-next-hop`,
   `--mp-family ipv6-unicast`, `--local-address-v6`; e2e coverage of all
-  eight dual-stack / MP-BGP / ENH / pure-IPv6 session modes.
+  eight dual-stack / MP-BGP / ENH / pure-IPv6 session modes plus real
+  BIRD interop (`tests/interop/bird_enh.sh`).
 - **GTSM / TTL security** (RFC 5082): `lr-osroute::gtsm` arms the
   listener with `IP_MINTTL` / `IPV6_MINHOPLIMIT` (kernel drops low-TTL
   SYNs) and sets outbound TTL=255 (single-hop) or N (multihop) on the

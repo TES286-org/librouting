@@ -42,6 +42,7 @@ cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/mrt.sh                      # BIRD phase needs bird2 (or skips)
 ./tests/interop/bmp.sh                      # no external dependencies
 ./tests/interop/bird.sh                     # needs bird2 (or skips)
+./tests/interop/bird_enh.sh                 # needs bird2 (or skips) — RFC 5549 ENH
 ./tests/interop/frr.sh                      # needs FRR bgpd (or skips)
 ```
 
@@ -192,6 +193,17 @@ mind when embedding librouting or extending the BGP code:
    a fresh export-policy evaluation and finishes with End-of-RIB. When RFC
    7313 is also negotiated, the refreshed dump is bracketed by BoRR and EoRR
    ROUTE-REFRESH messages, which BIRD reports as `Enhanced refresh`.
+7. **The RFC 5549 Extended Next-Hop capability uses 6-byte tuples.** RFC
+   5549 §4 (and its successor RFC 8950 §4) encodes the capability value as
+   repeated `<AFI:2, SAFI:2, NH-AFI:2>` tuples — the SAFI is two octets.
+   BIRD 2.x writes the same bytes with a reserved zero byte between AFI and
+   SAFI (wire-identical for every real SAFI) and FRR writes the literal
+   16-bit SAFI; both reject any value whose length is not a multiple of 6
+   with an OPEN error. librouting encodes and decodes exactly this form
+   (`tests/interop/bird_enh.sh` verifies the full ENH session against
+   BIRD). An earlier revision shipped a non-standard 5-byte tuple
+   (`AFI:2, SAFI:1, NH-AFI:2`) and documented BIRD as the deviant — the
+   skip note was wrong, the bug was local.
 
 ## Extending the suite
 

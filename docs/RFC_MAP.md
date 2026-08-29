@@ -25,7 +25,7 @@ implements, or references. It is grouped by protocol family.
 | 5004  | BGP Deterministic Path Selection                     | ✓ (default on)          | `lr-bgp::best_path`                  |
 | 5082  | The Generalized TTL Security Mechanism (GTSM)        | ✓ (IP_MINTTL listener filter + outbound TTL; `--gtsm` daemon flag) | `lr-osroute::gtsm` |
 | 5492  | BGP Capabilities                                     | ✓                       | `lr-bgp::capabilities`              |
-| 5549  | BGP Extended Next-Hop                                | ✓ (capability 5, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |
+| 5549  | BGP Extended Next-Hop                                | ✓ (capability 5 in the §4 6-byte tuple form, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes + BIRD interop) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |
 | 5666  | BGP Egress Peer Engineering                          | partial (TBD)           | —                                    |
 | 5925  | The TCP Authentication Option (TCP-AO)               | ✓ (Linux >= 6.7; RFC 5926 KDFs via kernel) | `lr-osroute::tcp_auth` (TCP_AO_ADD_KEY/INFO) |
 | 6396   | MRT Routing Information Export Format            | ✓ TABLE_DUMP_V2 read/write (peer index tables, RIB v4/v6 unicast + add-path), BGP4MP decode | `lr-mrt` |
@@ -37,6 +37,7 @@ implements, or references. It is grouped by protocol family.
 | 8212  | Default EBGP Route Behaviors                         | partial (policy)        | `lr-policy`                          |
 | 8277  | BGP and Labeled Address Prefixes (MPLS)              | not implemented         | —                                    |
 | 8326  | Graceful BGP Session Restart + damp deprecation       | ✓                       | `lr-bgp::best_path`, `lr-damping`    |
+| 8950  | Advertising IPv4 NLRI with an IPv6 Next Hop           | ✓ (obsoletes 5549's NLRI encoding; capability encoding identical) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::path` |
 | 9072  | Extended Message Support for BGP                      | ✓ (extended length)     | `lr-bgp::path::PathAttrFlags`        |
 | 9234  | BGP Role (OTC)                                       | ✓                       | `lr-bgp::role::otc`                  |
 | 9494  | Long-Lived Graceful Restart                          | ✓                       | `lr-bgp::extensions::long_lived`, `lr-router` |

@@ -453,7 +453,7 @@ let h = r.add_session(
 r.set_add_path_max_paths(4);
 ```
 
-### RFC 5549 Extended Next-Hop + MP-BGP family / address selection
+### RFC 5549 / RFC 8950 Extended Next-Hop + MP-BGP family / address selection
 
 `SessionConfig` exposes three builders for the dual-stack / MP-BGP / ENH
 session modes:
@@ -463,7 +463,9 @@ session modes:
 * `with_extended_next_hop()` — advertise the canonical RFC 5549
   `(1, 1, 2)` tuple (IPv4 unicast over an IPv6 next-hop). Use
   `with_extended_next_hop_tuple(afi, safi, nh_afi)` for non-canonical
-  tuples.
+  tuples. On the wire the tuples use the RFC 5549 §4 / RFC 8950 §4
+  6-byte form `<AFI:2, SAFI:2, NH-AFI:2>` — byte-identical to what
+  BIRD 2.x and FRR send and the only form both accept.
 * `with_local_address(ip)` — local source for next-hop-self egress.
   For ENH over IPv6 pass an IPv6 literal; the eBGP egress path then
   rewrites IPv4 NLRI's NEXT_HOP to a 16-byte IPv6 address.
@@ -489,7 +491,9 @@ r.set_session_local_address(h, IpAddr::V6([0x20,0x01,0x0d,0xb8, 0,0,0,0, 0,0,0,0
 The eight BGP session establishment modes (standard dual-stack,
 link-local dual-stack, MP-BGP, MP-BGP+link-local, ENH, ENH+link-local,
 pure IPv6, pure IPv6+link-local) are exercised end-to-end by
-`crates/lr-tests/tests/bgp_session_modes.rs`.
+`crates/lr-tests/tests/bgp_session_modes.rs`, and the ENH mode is
+additionally verified against real BIRD by
+`tests/interop/bird_enh.sh`.
 
 ### RFC 5082 GTSM (TTL security)
 
