@@ -185,3 +185,32 @@ def test_default_ipv4_unicast_abi():
             assert False, "set_default_ipv4_unicast on unknown session must raise"
         except librouting.LrError:
             pass
+
+
+def test_local_as_tolerance_abi():
+    """FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    the per-session tolerance is callable from Python and round-trips
+    through the C ABI. Unknown handles fail closed; out-of-range
+    tolerances are rejected client-side."""
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513,
+                              local_bgp_id=0x0a000001)
+        r.set_local_as_tolerance(h, 0)  # default: reject any
+        r.set_local_as_tolerance(h, 1)  # FRR allowas-in 1
+        r.set_local_as_tolerance(h, 0xFFFFFFFF)  # FRR allowas-any
+        try:
+            r.set_local_as_tolerance(9999, 1)
+            assert False, "set_local_as_tolerance on unknown session must raise"
+        except librouting.LrError:
+            pass
+        try:
+            r.set_local_as_tolerance(h, -1)
+            assert False, "negative tolerance must raise"
+        except librouting.LrError:
+            pass
+        try:
+            r.set_local_as_tolerance(h, 0x100000000)
+            assert False, "tolerance > 0xFFFFFFFF must raise"
+        except librouting.LrError:
+            pass
+

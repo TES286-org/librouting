@@ -207,6 +207,16 @@ int main(void) {
     rc = lr_router_set_default_ipv4_unicast(r, 999, 1);
     check(rc == -2, "set_default_ipv4_unicast on unknown handle fails closed");
 
+    /* FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+     * per-session tolerance for the local AS in a received AS_PATH.
+     * Library default is 0 (reject any). */
+    rc = lr_router_set_local_as_tolerance(r, h, 1);
+    check(rc == 0, "set_local_as_tolerance(1) on valid handle");
+    rc = lr_router_set_local_as_tolerance(r, h, 0);
+    check(rc == 0, "set_local_as_tolerance(0) on valid handle");
+    rc = lr_router_set_local_as_tolerance(r, 999, 1);
+    check(rc == -2, "set_local_as_tolerance on unknown handle fails closed");
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

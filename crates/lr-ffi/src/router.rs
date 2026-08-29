@@ -118,6 +118,10 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         // W2.1: FRR `bgp default ipv4-unicast` defaults to on. Embedders
         // flip it via `lr_router_set_default_ipv4_unicast`.
         default_ipv4_unicast: true,
+        // W2.3: FRR `neighbor X allowas-in N` defaults to 0 (reject any
+        // local AS in the AS_PATH). Embedders flip it via
+        // `lr_router_set_local_as_tolerance`.
+        local_as_tolerance: 0,
         local_address: None,
         area_id: 0,
         ospf_area_type: OspfAreaType::Normal,
@@ -501,6 +505,36 @@ pub extern "C" fn lr_router_set_default_ipv4_unicast(
         None => return -1,
     };
     match router.set_session_default_ipv4_unicast(SessionHandle(session), enabled != 0) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// Configure FRR `neighbor X allowas-in N` / BIRD `allow local as`
+/// (W2.3) for a BGP session.
+///
+/// `tolerance = 0` (the default) rejects any occurrence of the local
+/// AS in a received AS_PATH (RFC 4271 §9.1.2.15). `N > 0` admits a
+/// route whose AS_PATH contains the local AS up to N times (FRR
+/// `allowas-in N`, default N=1). The special value `u32::MAX` admits
+/// any number (FRR `allowas-any`). iBGP sessions are exempt
+/// (FRR/BIRD scope the relaxation to eBGP). Must be called after
+/// `lr_router_add_bgp_session*` and before `lr_router_start_session`;
+/// unknown handles or already-established sessions fail with -2.
+#[no_mangle]
+pub extern "C" fn lr_router_set_local_as_tolerance(
+    r: lr_router_t,
+    session: u64,
+    tolerance: u32,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.set_session_local_as_tolerance(SessionHandle(session), tolerance) {
         Ok(()) => 0,
         Err(error) => {
             set_last_error(error);

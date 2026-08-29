@@ -296,6 +296,21 @@ int32_t lr_router_set_local_address(lr_router_t r,
 int32_t lr_router_set_default_ipv4_unicast(lr_router_t r, uint64_t session, uint8_t enabled);
 
 /**
+ * Configure FRR `neighbor X allowas-in N` / BIRD `allow local as`
+ * (W2.3) for a BGP session.
+ *
+ * `tolerance = 0` (the default) rejects any occurrence of the local
+ * AS in a received AS_PATH (RFC 4271 §9.1.2.15). `N > 0` admits a
+ * route whose AS_PATH contains the local AS up to N times (FRR
+ * `allowas-in N`, default N=1). The special value `u32::MAX` admits
+ * any number (FRR `allowas-any`). iBGP sessions are exempt
+ * (FRR/BIRD scope the relaxation to eBGP). Must be called after
+ * `lr_router_add_bgp_session*` and before `lr_router_start_session`;
+ * unknown handles or already-established sessions fail with -2.
+ */
+int32_t lr_router_set_local_as_tolerance(lr_router_t r, uint64_t session, uint32_t tolerance);
+
+/**
  * Request an RFC 2918 route refresh from an established BGP peer.
  *
  * Returns 1 when a request was queued, 0 when the session has not negotiated

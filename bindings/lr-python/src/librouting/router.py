@@ -266,6 +266,31 @@ class Router:
                 f"lr_router_set_default_ipv4_unicast failed (rc={rc}): {last_error()}"
             )
 
+    def set_local_as_tolerance(self, session: int, tolerance: int) -> None:
+        """Configure FRR ``neighbor X allowas-in N`` / BIRD ``allow local as`` (W2.3).
+
+        ``tolerance = 0`` (the default) rejects any occurrence of the
+        local AS in a received AS_PATH (RFC 4271 §9.1.2.15). ``N > 0``
+        admits a route whose AS_PATH contains the local AS up to N
+        times (FRR ``allowas-in N``, default N=1).
+        ``tolerance = 0xFFFFFFFF`` (``math.inf``-equivalent for the
+        unsigned 32-bit field) admits any number (FRR ``allowas-any``).
+        iBGP is exempt. Must be called before :meth:`start_session`;
+        unknown handles or already-established sessions raise
+        :class:`LrError`.
+        """
+        if tolerance < 0 or tolerance > 0xFFFFFFFF:
+            raise LrError(
+                f"tolerance out of range [0, 0xFFFFFFFF]: {tolerance}"
+            )
+        rc = get_lib().lr_router_set_local_as_tolerance(
+            self._ptr, int(session), int(tolerance)
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_local_as_tolerance failed (rc={rc}): {last_error()}"
+            )
+
     def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
         """Ask an established BGP peer to resend an RFC 2918 address family.
 

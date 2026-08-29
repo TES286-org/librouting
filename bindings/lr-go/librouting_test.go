@@ -2,6 +2,7 @@
 package librouting
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -236,6 +237,21 @@ func TestRfc8212(t *testing.T) {
 	}
 	if err := r.SetDefaultIPv4Unicast(9999, true); err == nil {
 		t.Fatalf("SetDefaultIPv4Unicast on unknown session must error")
+	}
+	// FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+	// the per-session tolerance is callable from Go and round-trips
+	// through the C ABI. Unknown handles fail closed.
+	if err := r.SetLocalAsTolerance(h, 1); err != nil {
+		t.Fatalf("SetLocalAsTolerance(1): %v", err)
+	}
+	if err := r.SetLocalAsTolerance(h, 0); err != nil {
+		t.Fatalf("SetLocalAsTolerance(0): %v", err)
+	}
+	if err := r.SetLocalAsTolerance(h, math.MaxUint32); err != nil {
+		t.Fatalf("SetLocalAsTolerance(allowas-any): %v", err)
+	}
+	if err := r.SetLocalAsTolerance(9999, 1); err == nil {
+		t.Fatalf("SetLocalAsTolerance on unknown session must error")
 	}
 	r.ptr = nil
 }

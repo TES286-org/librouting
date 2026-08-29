@@ -325,6 +325,26 @@ func (r *Router) SetDefaultIPv4Unicast(session uint64, enabled bool) error {
 	return nil
 }
 
+// SetLocalAsTolerance configures FRR `neighbor X allowas-in N` / BIRD
+// `allow local as` (W2.3) for one BGP session. tolerance = 0 (the
+// default) rejects any occurrence of the local AS in a received
+// AS_PATH (RFC 4271 §9.1.2.15). N > 0 admits up to N occurrences
+// (FRR `allowas-in N`, default N=1). math.MaxUint32 admits any
+// number (FRR `allowas-any`). iBGP is exempt. Must be called before
+// StartSession; unknown handles or already-established sessions
+// return an error.
+func (r *Router) SetLocalAsTolerance(session uint64, tolerance uint32) error {
+	rc := C.lr_router_set_local_as_tolerance(
+		r.ptr,
+		C.uint64_t(session),
+		C.uint32_t(tolerance),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_set_local_as_tolerance: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
 	rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))
