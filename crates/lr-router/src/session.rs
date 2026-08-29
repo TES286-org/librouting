@@ -163,6 +163,13 @@ pub struct SessionConfig {
     /// populates this from the per-peer or router-level config; the
     /// FSM gates legacy-section IPv4 NLRI processing on it.
     pub default_ipv4_unicast: bool,
+    /// FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3):
+    /// the maximum number of times the local AS may appear in a
+    /// received UPDATE's AS_PATH before the route is rejected. `0`
+    /// (the default) rejects any occurrence; `N > 0` admits up to N
+    /// occurrences; `u32::MAX` admits any number (FRR `allowas-any`).
+    /// iBGP is exempt.
+    pub local_as_tolerance: u32,
     /// Local interface address: used as NEXT_HOP for eBGP egress
     /// (next-hop-self) and as the local identity for Babel/OSPF runtimes.
     pub local_address: Option<lr_core::addr::IpAddr>,
@@ -215,6 +222,7 @@ impl SessionConfig {
             // daemon overrides per-peer when `[bgp] default_ipv4_unicast
             // = false` is set, then `add_session` propagates it here.
             default_ipv4_unicast: true,
+            local_as_tolerance: 0,
             local_address: None,
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
@@ -354,6 +362,7 @@ impl SessionConfig {
             mrai_ms: 0,
             mp_families: Vec::new(),
             default_ipv4_unicast: true,
+            local_as_tolerance: 0,
             local_address: None,
             area_id,
             ospf_area_type: OspfAreaType::Normal,
@@ -386,6 +395,7 @@ impl SessionConfig {
             mrai_ms: 0,
             mp_families: Vec::new(),
             default_ipv4_unicast: true,
+            local_as_tolerance: 0,
             local_address: Some(local_addr),
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,

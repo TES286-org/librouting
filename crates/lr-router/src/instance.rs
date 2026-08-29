@@ -69,7 +69,7 @@ use lr_ospf::packet::{
 };
 use lr_ospf::spf;
 use lr_policy::hooks::{HookChain, HookVerdict};
-use lr_policy::safety::SafetyNet;
+use lr_policy::safety::{SafetyNet, SafetyViolation};
 use lr_rib::selection::RouteSelector;
 use lr_rib::{AdjRibIn, AdjRibOut, LocRib, RibMux};
 
@@ -1261,6 +1261,39 @@ impl DefaultRouter {
         }
     }
 
+    /// Set the FRR `neighbor X allowas-in N` / BIRD `allow local as`
+    /// tolerance (W2.3) for a single BGP session.
+    ///
+    /// `tolerance = 0` (the default) rejects any occurrence of the
+    /// local AS in a received AS_PATH (RFC 4271 §9.1.2.15 AS_PATH loop
+    /// check). `tolerance = N > 0` admits a route whose AS_PATH
+    /// contains the local AS up to N times (FRR `allowas-in N`,
+    /// default N=1). `tolerance = u32::MAX` admits any number (FRR
+    /// `allowas-any`). iBGP sessions are exempt (FRR/BIRD scope the
+    /// relaxation to eBGP).
+    ///
+    /// Must be called after `add_session` and before `start_session`;
+    /// unknown handles or already-established sessions return Err.
+    pub fn set_session_local_as_tolerance(
+        &mut self,
+        h: SessionHandle,
+        tolerance: u32,
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: local_as_tolerance must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().local_as_tolerance = tolerance;
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
     /// Originate a local route (e.g. from `network` statements): injects it
     /// into Loc-RIB and advertises it to all suitable BGP peers.
     pub fn originate(&mut self, prefix: Prefix, next_hop: Option<IpAddr>) -> RouteKey {
@@ -1642,11 +1675,59 @@ impl DefaultRouter {
         }
         if let Some(net) = &self.safety {
             if let Err(v) = net.check(&route, is_ebgp) {
-                self.pending_events.push(RouterEvent::Log(format!(
-                    "safety: rejected {}: {}",
-                    route.key.prefix, v
-                )));
-                return;
+                // FRR `neighbor X allowas-in N` / BIRD `allow local as`
+                // (W2.3): a per-peer tolerance of `N > 0` admits a route
+                // whose AS_PATH contains the local AS up to N times,
+                // overriding the safety net's strict AS_PATH loop check
+                // (RFC 4271 §9.1.2.15). iBGP is exempt — FRR/BIRD scope
+                // the relaxation to eBGP sessions.
+                if let SafetyViolation::AsLoop { .. } = &v {
+                    if is_ebgp {
+                        let tolerance = self
+                            .sessions
+                            .get(&route.origin.peer)
+                            .and_then(|s| match s {
+                                SessionState::Bgp { peer, .. } => {
+                                    Some(peer.config().local_as_tolerance)
+                                }
+                                _ => None,
+                            })
+                            .unwrap_or(0);
+                        if tolerance > 0 {
+                            let count = self.count_local_as(&route);
+                            if count <= tolerance {
+                                // Admitted under the per-peer tolerance.
+                                // Fall through to the rest of the
+                                // import pipeline.
+                            } else {
+                                self.pending_events.push(RouterEvent::Log(format!(
+                                    "safety: rejected {}: AS_PATH contains local AS {} times \
+                                     (peer tolerance {}, is_ebgp={})",
+                                    route.key.prefix, count, tolerance, is_ebgp
+                                )));
+                                return;
+                            }
+                        } else {
+                            self.pending_events.push(RouterEvent::Log(format!(
+                                "safety: rejected {}: {}",
+                                route.key.prefix, v
+                            )));
+                            return;
+                        }
+                    } else {
+                        self.pending_events.push(RouterEvent::Log(format!(
+                            "safety: rejected {}: {}",
+                            route.key.prefix, v
+                        )));
+                        return;
+                    }
+                } else {
+                    self.pending_events.push(RouterEvent::Log(format!(
+                        "safety: rejected {}: {}",
+                        route.key.prefix, v
+                    )));
+                    return;
+                }
             }
         }
         // FRR `bgp enforce-first-as`: for an external BGP peer, the
@@ -1738,6 +1819,40 @@ impl DefaultRouter {
             // net's `reject_empty_as_path_ebgp` covers this shape.
         }
         None
+    }
+
+    /// Count how many times the local AS appears in the route's
+    /// normalized AS_PATH (W2.3 — FRR `neighbor X allowas-in N` /
+    /// BIRD `allow local as`). Uses the FSM-normalized canonical
+    /// AS_PATH (always 4-byte after the `lr-bgp` codec's AS4_PATH
+    /// merge) via `PathAttributes::as_path()` — fixes the latent
+    /// width-guessing bug in the safety net's `local_as_count`
+    /// (which treats tag-2 AS_PATH as 2-byte even after the FSM
+    /// rewrites it to 4-byte).
+    ///
+    /// Counts AS_SEQUENCE and AS_CONFED_SEQUENCE segments only (RFC
+    /// 4271 §5.1.2 puts the loop check on ordered segments). AS_SET
+    /// and AS_CONFED_SET membership is also counted by FRR's
+    /// implementation, so we follow parity.
+    fn count_local_as(&self, route: &Route) -> u32 {
+        let session = route.origin.peer;
+        let local_as = match self.sessions.get(&session) {
+            Some(SessionState::Bgp { peer, .. }) => peer.config().local_as,
+            _ => return 0,
+        };
+        let attrs: PathAttributes = route.attributes.clone().into();
+        let Some(path) = attrs.as_path() else {
+            return 0;
+        };
+        let mut count = 0u32;
+        for seg in &path.segments {
+            for as_ in &seg.ases {
+                if as_.0 == local_as.0 {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
     }
 
     /// Count a session's Adj-RIB-In and enforce the maximum-prefix limit.
@@ -2831,6 +2946,10 @@ impl RouterInstance for DefaultRouter {
                 // posture to PeerConfig so the FSM can gate legacy-section
                 // IPv4 NLRI on it (see PeerConfig::ipv4_unicast_active).
                 p_cfg.default_ipv4_unicast = cfg.default_ipv4_unicast;
+                // W2.3: propagate the FRR `neighbor X allowas-in N` /
+                // BIRD `allow local as` tolerance to PeerConfig so the
+                // router's per-peer AS-loop tolerance check sees it.
+                p_cfg.local_as_tolerance = cfg.local_as_tolerance;
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
                 p_cfg.extended_next_hop = cfg.extended_next_hop.clone();
@@ -6245,5 +6364,153 @@ mod tests {
             !logs_contain(&mut a, "enforce-first-as"),
             "iBGP does not trigger the eBGP-only check"
         );
+    }
+
+    // ===== FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3) =====
+
+    /// Helper: build an eBGP pair where `b`'s egress AS_PATH is forced
+    /// to include `a`'s local AS N times, simulating a route that
+    /// contains the local AS in its path. We construct the forged
+    /// UPDATE from scratch using the `lr-bgp` codec so the wire bytes
+    /// are well-formed (no manual byte-splicing that could confuse
+    /// the receiver's strict UPDATE validator).
+    fn advertise_with_local_as_loop(
+        a: &mut DefaultRouter,
+        a_session: SessionHandle,
+        _b: &mut DefaultRouter,
+        _b_session: SessionHandle,
+        local_as: u32,
+        count: usize,
+    ) {
+        use lr_bgp::codec::BgpCodec;
+        use lr_bgp::message::update::{Nlri, Update};
+        use lr_bgp::message::BgpMessage;
+        use lr_bgp::path::{
+            AsPath, AsPathSegment, AsPathType, AttrType, NextHop, PathAttrFlags, PathAttribute,
+            PathAttributes,
+        };
+
+        // Build the AS_PATH: a single AS_SEQUENCE segment starting
+        // with the peer's AS (so `enforce_first_as` would admit it)
+        // followed by `count` copies of the local AS.
+        let peer_as = 64513u32; // b's local AS
+        let mut ases = vec![lr_core::addr::Asn(peer_as)];
+        for _ in 0..count {
+            ases.push(lr_core::addr::Asn(local_as));
+        }
+        let as_path = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases,
+            }],
+        };
+
+        let mut attrs = PathAttributes::new();
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0], // IGP
+        ));
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            as_path.encode_4(),
+        ));
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            NextHop::from_v4([192, 0, 2, 10]).encode().to_vec(),
+        ));
+
+        let mut u = Update::new();
+        u.attributes = attrs;
+        u.nlri
+            .push(Nlri::plain(Prefix::new_v4([198, 51, 100, 0], 24)));
+
+        // The codec on the receiver's side expects the OPEN-negotiated
+        // asn4 mode. We construct a fresh codec with asn4=true (the
+        // default for the test pairs).
+        let codec = BgpCodec::new().with_asn4(true);
+        let bytes = codec.encode_vec(&BgpMessage::Update(u)).unwrap();
+        a.feed_input(a_session, &bytes).unwrap();
+    }
+
+    #[test]
+    fn allow_local_as_zero_rejects_local_as_in_path() {
+        // Default: tolerance = 0, the safety net's reject_as_loop fires
+        // and the route is dropped (RFC 4271 §9.1.2.15).
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        advertise_with_local_as_loop(&mut a, a_session, &mut b, b_session, 64512, 1);
+        assert_eq!(a.rib_len(), 0, "local AS in AS_PATH is rejected by default");
+        assert!(
+            logs_contain(&mut a, "safety: rejected"),
+            "the rejection is surfaced as a log event"
+        );
+    }
+
+    #[test]
+    fn allow_local_as_one_admits_single_occurrence() {
+        // FRR `allowas-in 1`: admit a route whose AS_PATH contains
+        // the local AS up to 1 time.
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_local_as_tolerance(a_session, 1).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        advertise_with_local_as_loop(&mut a, a_session, &mut b, b_session, 64512, 1);
+        assert_eq!(
+            a.rib_len(),
+            1,
+            "single local AS occurrence admitted under tolerance=1"
+        );
+    }
+
+    #[test]
+    fn allow_local_as_one_rejects_two_occurrences() {
+        // tolerance=1 admits up to 1 occurrence; 2 occurrences must
+        // still be rejected.
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_local_as_tolerance(a_session, 1).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        advertise_with_local_as_loop(&mut a, a_session, &mut b, b_session, 64512, 2);
+        assert_eq!(
+            a.rib_len(),
+            0,
+            "two local AS occurrences rejected under tolerance=1"
+        );
+    }
+
+    #[test]
+    fn allow_local_as_any_admits_arbitrary_count() {
+        // FRR `allowas-any`: tolerate any number of local AS in the
+        // path. u32::MAX is the sentinel.
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_local_as_tolerance(a_session, u32::MAX)
+            .unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        advertise_with_local_as_loop(&mut a, a_session, &mut b, b_session, 64512, 5);
+        assert_eq!(
+            a.rib_len(),
+            1,
+            "any number of local AS admitted under allowas-any"
+        );
+    }
+
+    #[test]
+    fn set_session_local_as_tolerance_rejects_unknown_handle() {
+        // Unknown session handle fails closed.
+        let mut a = DefaultRouter::new();
+        let err = a
+            .set_session_local_as_tolerance(SessionHandle(99), 1)
+            .unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn set_session_local_as_tolerance_after_start_fails() {
+        // Setting tolerance after start_session must fail closed.
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        let err = a.set_session_local_as_tolerance(a_session, 1).unwrap_err();
+        assert!(err.contains("already established"), "{err}");
     }
 }
