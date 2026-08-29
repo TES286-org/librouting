@@ -95,6 +95,12 @@ pub mod ospf_transport;
 #[cfg(feature = "std")]
 pub mod bfd_transport;
 
+/// Source-bound TCP connect — originate an outbound connection from
+/// a configured local address (multihomed BGP sourcing). Full
+/// bind+connect on Linux; plain connect elsewhere.
+#[cfg(feature = "std")]
+pub mod tcp_bind;
+
 #[cfg(all(
     feature = "std",
     any(
