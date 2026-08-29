@@ -274,6 +274,9 @@ pub extern "C" fn lr_router_set_add_path_max_paths(r: lr_router_t, max_paths: u3
 /// `<NLRI AFI:2 (big-endian), NLRI SAFI:1, Nexthop AFI:2 (big-endian)>`.
 /// The canonical tuple is `00 01 01 00 02` — IPv4 unicast NLRI resolved
 /// over an IPv6 next-hop. Pass `count = 0` to clear the configuration.
+/// (This is the FFI input layout, not the wire form: RFC 5549 §4
+/// encodes the capability on the wire as 6-byte tuples with a 2-octet
+/// SAFI — librouting performs that conversion internally.)
 ///
 /// Must be called after `lr_router_add_bgp_session*` and before
 /// `lr_router_start_session` — the capability is negotiated in OPEN.

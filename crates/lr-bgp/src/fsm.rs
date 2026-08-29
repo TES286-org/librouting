@@ -411,7 +411,7 @@ impl BgpPeer {
                 .collect();
             caps.push(Capability::add_path(&tuples));
         }
-        // RFC 5549 §2: advertise the Extended Next-Hop tuples configured
+        // RFC 5549 §4: advertise the Extended Next-Hop tuples configured
         // for this session (filtered to families the session speaks).
         let enh_tuples = crate::extensions::extended_next_hop::advertised_tuples(&self.cfg);
         if !enh_tuples.is_empty() {
@@ -507,7 +507,7 @@ impl BgpPeer {
         self.codec
             .set_add_path(self.add_path_tx.clone(), self.add_path_rx.clone());
 
-        // RFC 5549 §3: Extended Next-Hop is usable only for tuples both
+        // RFC 5549 §4: Extended Next-Hop is usable only for tuples both
         // speakers advertised. Store the intersection; the egress path
         // consults it before rewriting an IPv4 NEXT_HOP to IPv6.
         let peer_enh: Vec<ExtNextHopTuple> = self

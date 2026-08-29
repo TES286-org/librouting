@@ -487,7 +487,7 @@ fn mode8_pure_ipv6_link_local() {
 /// A session without `with_extended_next_hop` must NOT advertise the
 /// capability, even when the local source is IPv6 and the family list
 /// includes IPv4 unicast. This guards against accidental ENH enablement
-/// that would surprise peers (RFC 5549 §3: only advertise what is
+/// that would surprise peers (RFC 5549 §4: only advertise what is
 /// explicitly configured).
 #[test]
 fn enh_not_advertised_when_disabled() {
@@ -565,4 +565,9 @@ fn enh_advertised_when_configured() {
         .find(|c| c.code == CapabilityCode::ExtendedNextHop)
         .expect("ENH capability advertised");
     assert_eq!(enh.as_extended_next_hop(), Some(vec![(1, 1, 2)]));
+    // The wire value must be the RFC 5549 §4 / RFC 8950 §4 6-byte tuple
+    // (AFI:2, SAFI:2, NH-AFI:2) — byte-identical to what BIRD 2.x and FRR
+    // send, and the only form both accept (they OPEN-error anything that
+    // is not a multiple of 6).
+    assert_eq!(enh.value, vec![0x00, 0x01, 0x00, 0x01, 0x00, 0x02]);
 }

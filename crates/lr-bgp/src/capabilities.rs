@@ -117,15 +117,19 @@ impl Capability {
         Some((afi, safi))
     }
 
-    /// Extended Next-Hop capability (RFC 5549 §2). The value is a
-    /// sequence of 5-byte tuples `<NLRI AFI:2, NLRI SAFI:1, Nexthop
-    /// AFI:2>`. A tuple `(1, 1, 2)` says "IPv4 unicast NLRI may be
+    /// Extended Next-Hop capability (RFC 5549 §4, RFC 8950 §4). The
+    /// value is a sequence of 6-byte tuples `<NLRI AFI:2, NLRI SAFI:2,
+    /// Nexthop AFI:2>`. A tuple `(1, 1, 2)` says "IPv4 unicast NLRI may be
     /// resolved over an IPv6 next-hop."
     pub fn extended_next_hop(tuples: &[(u16, u8, u16)]) -> Self {
-        let mut v = Vec::with_capacity(tuples.len() * 5);
+        let mut v = Vec::with_capacity(tuples.len() * 6);
         for (nlri_afi, nlri_safi, nh_afi) in tuples {
             v.extend_from_slice(&nlri_afi.to_be_bytes());
-            v.push(*nlri_safi);
+            // RFC 5549 §4 encodes the SAFI as 2 octets; real SAFI values
+            // are < 256 so the high byte is zero. BIRD writes a reserved
+            // zero byte in the same position — the two forms are
+            // wire-identical.
+            v.extend_from_slice(&(*nlri_safi as u16).to_be_bytes());
             v.extend_from_slice(&nh_afi.to_be_bytes());
         }
         Self::new(CapabilityCode::ExtendedNextHop, v)
@@ -133,33 +137,29 @@ impl Capability {
 
     /// Decode the RFC 5549 Extended Next-Hop capability value into its
     /// `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples. Returns `None` when
-    /// the value length is not a multiple of 5 (the RFC 5549 wire form:
-    /// `AFI:2, SAFI:1, Nexthop-AFI:2`) or 6 (the BIRD 2.x wire form:
-    /// `AFI:2, SAFI:2, Nexthop-AFI:2` — non-standard but widely deployed).
+    /// the value length is not a multiple of 6 — the RFC 5549 §4 /
+    /// RFC 8950 §4 wire form `<AFI:2, SAFI:2, Nexthop-AFI:2>`, which is
+    /// also what BIRD 2.x and FRR encode and the only length both accept
+    /// (each rejects non-multiples of 6 with an OPEN error).
     pub fn as_extended_next_hop(&self) -> Option<Vec<(u16, u8, u16)>> {
         if self.code != CapabilityCode::ExtendedNextHop {
             return None;
         }
-        let mut out = Vec::new();
-        if self.value.len().is_multiple_of(5) {
-            for t in self.value.as_chunks::<5>().0 {
-                let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
-                let nlri_safi = t[2];
-                let nh_afi = u16::from_be_bytes([t[3], t[4]]);
-                out.push((nlri_afi, nlri_safi, nh_afi));
-            }
-        } else if self.value.len().is_multiple_of(6) {
-            // BIRD 2.x encodes SAFI as 2 bytes (AFI:2, SAFI:2, NH-AFI:2).
-            // The high byte is always zero for any real SAFI; mask it out
-            // so callers see the canonical 1-byte SAFI.
-            for t in self.value.as_chunks::<6>().0 {
-                let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
-                let nlri_safi = u16::from_be_bytes([t[2], t[3]]) as u8;
-                let nh_afi = u16::from_be_bytes([t[4], t[5]]);
-                out.push((nlri_afi, nlri_safi, nh_afi));
-            }
-        } else {
+        if !self.value.len().is_multiple_of(6) {
             return None;
+        }
+        let mut out = Vec::new();
+        for t in self.value.as_chunks::<6>().0 {
+            let nlri_afi = u16::from_be_bytes([t[0], t[1]]);
+            // 2-octet SAFI; reject values that do not fit the 1-octet
+            // model used across the rest of the codec rather than
+            // silently truncating.
+            let nlri_safi = u16::from_be_bytes([t[2], t[3]]);
+            if nlri_safi > u8::MAX as u16 {
+                return None;
+            }
+            let nh_afi = u16::from_be_bytes([t[4], t[5]]);
+            out.push((nlri_afi, nlri_safi as u8, nh_afi));
         }
         Some(out)
     }
@@ -350,24 +350,43 @@ mod tests {
         assert_eq!(dec[0].as_multiprotocol(), Some((2, 1)));
     }
 
-    /// RFC 5549 §2: capability code 5, value = repeated
-    /// `<NLRI AFI:2, NLRI SAFI:1, Nexthop AFI:2>` 5-byte tuples.
+    /// RFC 5549 §4 / RFC 8950 §4: capability code 5, value = repeated
+    /// 6-byte tuples `<NLRI AFI:2, NLRI SAFI:2, Nexthop AFI:2>`.
     #[test]
     fn extended_next_hop_roundtrip() {
         let cap = Capability::extended_next_hop(&[(1, 1, 2)]);
         assert_eq!(cap.code.to_u8(), 5);
         assert_eq!(CapabilityCode::from_u8(5), CapabilityCode::ExtendedNextHop);
-        assert_eq!(cap.value.len(), 5);
+        assert_eq!(cap.value.len(), 6);
         let v = Capability::encode_set(&[cap]);
         let dec = Capability::decode_set(&v);
         assert_eq!(dec.len(), 1);
         assert_eq!(dec[0].as_extended_next_hop(), Some(vec![(1, 1, 2)]));
     }
 
+    /// The (1,1,2) tuple must serialize to the exact bytes BIRD 2.x and
+    /// FRR put on the wire (verified against bird-2.17 `packets.c`
+    /// `put_af4` + `put_u16(buf+4)` and FRR 10.2 `bgp_open.c`
+    /// `stream_putw(pkt_afi) / stream_putw(pkt_safi) / stream_putw(AFI_IP6)`).
+    #[test]
+    fn extended_next_hop_wire_bytes_match_bird_and_frr() {
+        let cap = Capability::extended_next_hop(&[(1, 1, 2)]);
+        assert_eq!(cap.value, vec![0x00, 0x01, 0x00, 0x01, 0x00, 0x02]);
+
+        // BIRD's layout puts a reserved zero byte between AFI and SAFI;
+        // with SAFI < 256 the two encodings are byte-identical. Decode a
+        // BIRD-shaped value to prove it.
+        let bird = Capability::new(
+            CapabilityCode::ExtendedNextHop,
+            vec![0x00, 0x01, 0x00, 0x01, 0x00, 0x02],
+        );
+        assert_eq!(bird.as_extended_next_hop(), Some(vec![(1, 1, 2)]));
+    }
+
     #[test]
     fn extended_next_hop_multiple_tuples() {
         let cap = Capability::extended_next_hop(&[(1, 1, 2), (1, 1, 25), (1, 128, 2)]);
-        assert_eq!(cap.value.len(), 15);
+        assert_eq!(cap.value.len(), 18);
         let v = Capability::encode_set(&[cap]);
         let dec = Capability::decode_set(&v);
         assert_eq!(
@@ -376,10 +395,28 @@ mod tests {
         );
     }
 
-    /// Malformed values (not a multiple of 5) must be rejected.
+    /// Malformed values must be rejected: lengths that are not a
+    /// multiple of 6 (BIRD and FRR both send OPEN errors for those) and
+    /// SAFIs that do not fit the 1-octet model.
     #[test]
     fn extended_next_hop_rejects_malformed_value() {
+        // 5 bytes — the legacy librouting encoding; rejected exactly like
+        // BIRD/FRR reject it.
+        let cap = Capability::new(
+            CapabilityCode::ExtendedNextHop,
+            vec![0x00, 0x01, 0x01, 0x00, 0x02],
+        );
+        assert!(cap.as_extended_next_hop().is_none());
+
+        // 4 bytes.
         let cap = Capability::new(CapabilityCode::ExtendedNextHop, vec![1, 2, 3, 4]);
+        assert!(cap.as_extended_next_hop().is_none());
+
+        // 6 bytes but a SAFI > 255 — cannot be represented.
+        let cap = Capability::new(
+            CapabilityCode::ExtendedNextHop,
+            vec![0x00, 0x01, 0x01, 0x00, 0x00, 0x02],
+        );
         assert!(cap.as_extended_next_hop().is_none());
     }
 

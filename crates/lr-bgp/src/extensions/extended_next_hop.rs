@@ -7,15 +7,18 @@
 //!
 //! # Capability
 //!
-//! Capability code 5 (RFC 5549 §2). The value is a sequence of 5-byte
-//! tuples `<NLRI AFI:2, NLRI SAFI:1, Nexthop AFI:2>`. A tuple
-//! `(1, 1, 2)` therefore says "I can resolve IPv4 unicast NLRI over an
-//! IPv6 next-hop".
+//! Capability code 5 (RFC 5549 §4, obsoleted for NLRI encoding by
+//! RFC 8950 §4). The value is a sequence of 6-byte tuples
+//! `<NLRI AFI:2, NLRI SAFI:2, Nexthop AFI:2>` — the SAFI is two octets
+//! on the wire (real SAFI values are < 256, so the high byte is zero;
+//! BIRD writes a reserved zero byte in the same position and the two
+//! forms are byte-identical). A tuple `(1, 1, 2)` therefore says "I can
+//! resolve IPv4 unicast NLRI over an IPv6 next-hop".
 //!
 //! # Negotiation
 //!
 //! Both speakers must advertise the same tuple for it to take effect
-//! (RFC 5549 §3: "a BGP speaker ... SHALL only advertise to a peer ...
+//! (RFC 5549 §4: "a BGP speaker ... SHALL only advertise to a peer ...
 //! next-hop addresses whose AFI was advertised by the peer via the
 //! capability"). [`negotiated_tuples`] returns the intersection.
 //!
@@ -91,7 +94,7 @@ pub fn advertised_tuples(cfg: &PeerConfig) -> Vec<ExtNextHopTuple> {
 }
 
 /// Effective tuples after OPEN negotiation: only those the peer also
-/// advertised survive (RFC 5549 §3). The peer's tuples are decoded from
+/// advertised survive (RFC 5549 §4). The peer's tuples are decoded from
 /// its OPEN capability value.
 pub fn negotiated_tuples(
     cfg: &PeerConfig,
@@ -150,7 +153,7 @@ mod tests {
         assert_eq!(t, vec![ExtNextHopTuple::IPV4_OVER_IPV6]);
     }
 
-    /// RFC 5549 §3: both speakers must advertise a tuple for it to be usable.
+    /// RFC 5549 §4: both speakers must advertise a tuple for it to be usable.
     #[test]
     fn negotiation_keeps_intersection_only() {
         let c = cfg(&[(1, 1, 2)]);
