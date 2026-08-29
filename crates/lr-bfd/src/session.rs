@@ -998,7 +998,7 @@ mod tests {
                 {
                     assert!(probe >= 75, "fired after {}ms (< 75ms)", probe);
                     assert!(probe <= 100, "fired after {}ms (> 100ms)", probe);
-                    t = t + probe;
+                    t += probe;
                     let _ = s.drain_outgoing();
                     break;
                 }

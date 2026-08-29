@@ -84,7 +84,6 @@ fn bfd_fast_fail_beats_hold_time() {
     // Distinct loopback addresses so both daemons can bind UDP 3784.
     let a_addr = "127.0.0.2";
     let b_addr = "127.0.0.3";
-    let a_port = 18501u16;
     let b_port = 18502u16;
 
     // A connects out to B.

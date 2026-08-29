@@ -344,11 +344,6 @@ mod imp {
 
     use super::{bind_address, os_error, BfdMode, BfdTransportError};
 
-    pub fn arm_ttl_rx(_sock: &UdpSocket, _v6: bool) -> Result<(), BfdTransportError> {
-        // No ancillary TTL on this platform.
-        Ok(())
-    }
-
     pub fn arm_ttl_tx(sock: &UdpSocket, v6: bool) -> Result<(), BfdTransportError> {
         if v6 {
             // No portable std API for the IPv6 unicast hop limit.
