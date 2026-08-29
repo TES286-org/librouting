@@ -283,6 +283,52 @@ impl SafetyNet {
 
     /// Count how many times `local_as` appears in the AS_PATH. Used by both
     /// the strict and excessive loop checks.
+    ///
+    /// Reads the AS_PATH via the `AsPath::decode_4` helper first
+    /// (FSM-normalized form — the post-OPEN codec always rewrites
+    /// AS_PATH to 4-byte and removes AS4_PATH), then falls back to
+    /// `AsPath::decode` (2-byte legacy form) for raw attribute bags
+    /// that have not been through the FSM normalization (e.g. unit
+    /// tests, embedder-supplied routes). The previous manual walker
+    /// mis-parsed the post-normalization 4-byte AS_PATH as 2-byte
+    /// when AS4_PATH (tag 17) was absent — which is the common case
+    /// after the FSM rewrites the attribute bag — silently
+    /// undercounting local AS occurrences and breaking `reject_as_loop`.
+    #[cfg(feature = "bgp")]
+    fn local_as_count(&self, route: &Route) -> u8 {
+        let attr = match route.attributes.get(lr_core::attr::AttrTag(17)) {
+            Some(a) => a,
+            None => match route.attributes.get(lr_core::attr::AttrTag(2)) {
+                Some(a) => a,
+                None => return 0,
+            },
+        };
+        // AS4_PATH (tag 17) is always 4-byte; AS_PATH (tag 2) is
+        // 4-byte after FSM normalization, 2-byte in the legacy form.
+        // Try 4-byte first (the production path), fall back to 2-byte
+        // (the raw/test path).
+        let path = lr_bgp::path::AsPath::decode_4(&attr.value)
+            .or_else(|| lr_bgp::path::AsPath::decode(&attr.value));
+        let Some(path) = path else {
+            return 0;
+        };
+        let mut count = 0u8;
+        for seg in &path.segments {
+            for as_ in &seg.ases {
+                if as_.0 == self.local_as.0 {
+                    count = count.saturating_add(1);
+                }
+            }
+        }
+        count
+    }
+
+    /// Fallback AS_PATH counter when the `bgp` feature is disabled
+    /// (no `lr-bgp` dependency). The manual walker parses the AS_PATH
+    /// segment-by-segment, preferring AS4_PATH (tag 17, always 4-byte)
+    /// and falling back to AS_PATH (tag 2, 2-byte in the legacy form).
+    /// Without the FSM normalization step the tag-2 width is correct.
+    #[cfg(not(feature = "bgp"))]
     fn local_as_count(&self, route: &Route) -> u8 {
         let attr = route.attributes.get(lr_core::attr::AttrTag(17));
         let v = match attr {
