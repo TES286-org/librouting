@@ -35,6 +35,16 @@ hold_time = 90
 # is --install-kernel-routes).
 # install_kernel = false
 
+# RFC 8212 default eBGP route behavior for peers without an explicit
+# import/export route-map:
+#   "rfc8212"    (default) deny-in/deny-out — external peers without an
+#                import route-map have their received routes discarded,
+#                peers without an export route-map are announced nothing.
+#   "accept-all" the legacy RFC 4271 default-accept the RFC permits as a
+#                deviation (Appendix A "insecure-mode"). iBGP peers are
+#                never affected — RFC 8212 scopes to EBGP sessions.
+# ebgp_policy = "rfc8212"
+
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
 # window after a session loss.
@@ -192,6 +202,17 @@ networks = ["203.0.113.0/24"]
 # Peers attach policy with import = "<route-map>" / export = "<route-map>"
 # (see [[peer]] keys above). Unknown references fail at startup —
 # policy never silently passes traffic.
+#
+# Under the default ebgp_policy = "rfc8212" (see [bgp] above) an
+# external peer without an import route-map discards every received
+# route and one without an export route-map is announced nothing, so
+# production eBGP peers always want explicit policy in both
+# directions; a permit-all route-map restores the flow when intended:
+#
+#   [[route-map]]
+#   name = "permit-all"
+#   entry = 10
+#   permit = true
 
 [[prefix-list]]
 name = "customer-space"

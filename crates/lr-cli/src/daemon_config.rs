@@ -225,6 +225,11 @@ pub(crate) struct DaemonConfig {
     /// BMP monitoring station to mirror Peer Up/Down + Route Monitoring
     /// to (`--bmp-target host:port` / `[bgp] bmp_target`).
     pub bmp_target: Option<String>,
+    /// RFC 8212 default eBGP route behaviors: `"rfc8212"` (default —
+    /// deny-in/deny-out for external peers without explicit policy) or
+    /// `"accept-all"` (the RFC 4271 default the RFC allows as a
+    /// deviation, §3 / Appendix A "insecure-mode").
+    pub ebgp_policy: String,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -277,6 +282,7 @@ impl DaemonConfig {
             bfd_multiplier: 3,
             protocol: "bgp".to_string(),
             babel_port: 6696,
+            ebgp_policy: "rfc8212".to_string(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -687,6 +693,16 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             }
             "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
             "bgp.bmp_target" => cfg.bmp_target = Some(value.to_string()),
+            "bgp.ebgp_policy" => {
+                if value != "rfc8212" && value != "accept-all" {
+                    return Err(format!(
+                        "line {}: bad ebgp_policy '{}' (expected \"rfc8212\" or \"accept-all\")",
+                        lineno + 1,
+                        value
+                    ));
+                }
+                cfg.ebgp_policy = value.to_string();
+            }
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -1037,6 +1053,20 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--bmp-target" if i + 1 < args.len() => {
                 cfg.bmp_target = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--ebgp-policy" if i + 1 < args.len() => {
+                let v = args[i + 1].as_str();
+                if v != "rfc8212" && v != "accept-all" {
+                    // Fail closed: an unknown mode must not silently
+                    // fall back to the permissive behaviour.
+                    eprintln!(
+                        "bad --ebgp-policy '{}' (expected rfc8212 or accept-all)",
+                        v
+                    );
+                    return Err(ExitCode::from(2));
+                }
+                cfg.ebgp_policy = v.to_string();
                 i += 2;
             }
             "--install-kernel-routes" => {
@@ -1547,5 +1577,31 @@ mod tests {
             "{:?}",
             cfg.warnings
         );
+    }
+
+    #[test]
+    fn ebgp_policy_default_is_rfc8212_and_values_validate() {
+        // Default: RFC 8212 deny-in/deny-out for policy-less external
+        // peers (the roadmap mandate; fail-closed posture).
+        assert_eq!(DaemonConfig::with_defaults().ebgp_policy, "rfc8212");
+
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             ebgp_policy = \"accept-all\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.ebgp_policy, "accept-all");
+
+        // Unknown mode is a hard error — never silently permissive.
+        let mut bad = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             ebgp_policy = \"permissive\"\n",
+            &mut bad,
+        )
+        .unwrap_err();
+        assert!(err.contains("bad ebgp_policy 'permissive'"), "{err}");
     }
 }

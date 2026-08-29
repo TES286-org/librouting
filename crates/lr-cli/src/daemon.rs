@@ -95,6 +95,9 @@ fn print_usage() {
          --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (default 75)\n  \
+         --ebgp-policy MODE       rfc8212 (default) | accept-all — default\n  \
+         eBGP route behavior for peers without import/export\n  \
+         route-maps (RFC 8212: deny-in/deny-out vs legacy accept)\n  \
          --bfd                    BFD fast-fail for the peer(s) (RFC 5880/\n  \
          5881): a BFD Down tears the BGP session immediately\n  \
          --bfd-multihop           RFC 5883 multihop BFD (UDP 4784, no TTL\n  \
@@ -237,6 +240,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         // RFC 7911 Add-Path: cap how many paths per prefix survive the
         // decision process (and reach Add-Path peers). Router-global.
         r.set_add_path_max_paths(cfg.add_path_max_paths.max(1) as usize);
+        // RFC 8212 default eBGP route behaviors: deny-in/deny-out for
+        // external peers without explicit policy ("rfc8212", the
+        // default) or the RFC 4271 accept-all deviation the RFC
+        // permits (§3 / Appendix A "insecure-mode").
+        let rfc8212 = cfg.ebgp_policy != "accept-all";
+        r.set_ebgp_requires_policy(rfc8212);
         for spec in &cfg.peers {
             if cfg.explicit_peers && !spec.is_outbound() && !spec.is_inbound() {
                 eprintln!(
@@ -292,14 +301,44 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 );
             }
             match r.add_session(sc) {
-                Ok(h) => entries.push(PeerEntry {
-                    spec: spec.clone(),
-                    handle: h,
-                    auth,
-                    gtsm,
-                    bfd: None,
-                    busy: Arc::new(AtomicBool::new(false)),
-                }),
+                Ok(h) => {
+                    // RFC 8212 §3: declare the policy presence of this
+                    // peer so the router knows which directions carry
+                    // an explicit route-map. External peers missing a
+                    // direction get the default deny (with an
+                    // Appendix-A-style warning so the incomplete
+                    // configuration is visible at startup).
+                    if let Err(e) =
+                        r.set_session_policy(h, spec.import.is_some(), spec.export.is_some())
+                    {
+                        eprintln!("daemon: peer {}: {}", spec.label(), e);
+                        return ExitCode::from(1);
+                    }
+                    if rfc8212 && cfg.effective_peer_as(spec) != cfg.local_as {
+                        if spec.import.is_none() {
+                            eprintln!(
+                                "daemon: peer {}: warning: no import route-map; discarding \
+                                 received routes (RFC 8212)",
+                                spec.label()
+                            );
+                        }
+                        if spec.export.is_none() {
+                            eprintln!(
+                                "daemon: peer {}: warning: no export route-map; announcing \
+                                 nothing (RFC 8212)",
+                                spec.label()
+                            );
+                        }
+                    }
+                    entries.push(PeerEntry {
+                        spec: spec.clone(),
+                        handle: h,
+                        auth,
+                        gtsm,
+                        bfd: None,
+                        busy: Arc::new(AtomicBool::new(false)),
+                    })
+                }
                 Err(e) => {
                     eprintln!("daemon: peer {}: add_session failed: {}", spec.label(), e);
                     return ExitCode::from(1);
@@ -345,6 +384,14 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     println!("librouting daemon (lr-daemon)");
     println!("  local AS:    AS{}", cfg.local_as);
     println!("  router-id:   {}", rid);
+    println!(
+        "  ebgp policy: {}",
+        if cfg.ebgp_policy == "accept-all" {
+            "accept-all (RFC 8212 insecure-mode)"
+        } else {
+            "rfc8212 (default deny-in/deny-out)"
+        }
+    );
     println!("  peers:       {}", entries.len());
     for e in &entries {
         println!(
@@ -374,7 +421,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             match Prefix::from_str(net) {
                 Ok(p) => {
                     let (p, family) = originate_family_for(p);
-                    r.originate_family(p, family, None);
+                    let nh = originate_next_hop(cfg, family);
+                    r.originate_family(p, family, nh);
                     println!("daemon: originating {}", p);
                 }
                 Err(_) => eprintln!("daemon: invalid network '{}'", net),
@@ -1835,6 +1883,33 @@ fn originate_family_for(p: Prefix) -> (Prefix, NlriFamily) {
     (p, family)
 }
 
+/// The next-hop a locally originated route should carry: the family-
+/// matching local source address. Keeps the Loc-RIB route
+/// self-describing (the `routes` API and MRT dumps show it), lets
+/// kernel FIB installs work, and gives iBGP egress a NEXT_HOP to
+/// preserve — an UPDATE without the attribute is discarded by the
+/// peer (RFC 4271 §6.3).
+fn originate_next_hop(cfg: &DaemonConfig, family: NlriFamily) -> Option<IpAddr> {
+    match family {
+        NlriFamily::IPV4_UNICAST => cfg
+            .local_address
+            .as_deref()
+            .and_then(|a| match IpAddr::from_str(a) {
+                Ok(IpAddr::V4(_)) => Some(IpAddr::from_str(a).unwrap()),
+                _ => None,
+            }),
+        NlriFamily::IPV6_UNICAST => cfg
+            .local_address_v6
+            .as_deref()
+            .or(cfg.local_address.as_deref())
+            .and_then(|a| match IpAddr::from_str(a) {
+                Ok(IpAddr::V6(_)) => Some(IpAddr::from_str(a).unwrap()),
+                _ => None,
+            }),
+        _ => None,
+    }
+}
+
 /// Shared daemon state threaded through the I/O loops.
 struct Runtime {
     router: Arc<Mutex<DefaultRouter>>,
@@ -1955,7 +2030,8 @@ fn reload_config(
             match Prefix::from_str(net) {
                 Ok(p) => {
                     let (p, family) = originate_family_for(p);
-                    r.originate_family(p, family, None);
+                    let nh = originate_next_hop(&fresh, family);
+                    r.originate_family(p, family, nh);
                     lines.push(format!("reload: originating {}", p));
                 }
                 Err(_) => lines.push(format!("reload: invalid network '{}' skipped", net)),
