@@ -34,7 +34,7 @@ implements, or references. It is grouped by protocol family.
 | 7854  | BGP Monitoring Protocol (BMP)                        | ✓ (lr-bmp crate: 7 message types, streaming codec, IPv4/IPv6 peer headers; set_bmp_sink router integration) | `lr-bmp`, `lr-router` |
 | 7911  | BGP Add-Path                                         | ✓ (negotiation, wire framing, N-path selection/export) | `lr-bgp::extensions::addpath`, `lr-bgp::codec`, `lr-bgp::best_path`, `lr-router` |
 | 7947  | Internet Exchange BGP Route Server                   | ✓                       | `lr-bgp::role::route_server`         |
-| 8212  | Default EBGP Route Behaviors                         | partial (policy)        | `lr-policy`                          |
+| 8212  | Default EBGP Route Behaviors                         | ✓ (deny-in/deny-out for external sessions without explicit policy; daemon default-on, `accept-all` deviation) | `lr-router` (`set_ebgp_requires_policy` / `set_session_policy`), `lr-cli` daemon (`ebgp_policy`) |
 | 8277  | BGP and Labeled Address Prefixes (MPLS)              | not implemented         | —                                    |
 | 8326  | Graceful BGP Session Restart + damp deprecation       | ✓                       | `lr-bgp::best_path`, `lr-damping`    |
 | 8950  | Advertising IPv4 NLRI with an IPv6 Next Hop           | ✓ (obsoletes 5549's NLRI encoding; capability encoding identical) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::path` |

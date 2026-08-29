@@ -47,6 +47,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard rules, Simple Password auth; `lr-osroute::bfd_transport` sockets (3784/4784, TTL 255, ephemeral source ports); daemon `--bfd` fast-fails BGP on BFD Down (BIRD-verified) |
 | Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community set actions; route tags (`set tag`) still open
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled |
+| RFC 8212 default eBGP route behaviors | ✅ 🧪 | `lr-router` `set_ebgp_requires_policy` + per-session `set_session_policy`: external sessions (eBGP *and* confederation boundaries, §1) without explicit import policy discard received routes before Adj-RIB-In; without export policy advertise nothing — enforced at all three egress paths (per-prefix export, RFC 2918/7313 reannounce, initial dump; EoR still flows) with stale Adj-RIB-Out entries withdrawn; iBGP exempt; daemon default-on via `[bgp] ebgp_policy` with `accept-all` as the §3/Appendix-A deviation; FFI + Go/Python bindings |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
 | GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL on listener, outbound TTL on connector); daemon `--gtsm` / `--gtsm N`; live socket tests verify both happy-path and low-TTL rejection |
 | Per-peer maximum-prefix | ✅ 🧪 | `with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold(pct)`; warn / teardown / restart actions; CEASE NOTIFICATION subcode 8 (RFC 4486 §2.1); threshold + exceeded events latched per session; daemon `--max-prefixes` / `--max-prefix-action` / `--max-prefix-threshold` |
@@ -127,7 +128,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 47 binaries / 560 tests |
+| Unit tests (workspace) | ✅ 48 binaries / 576 tests |
 | Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
 | Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
 | Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
@@ -144,6 +145,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪 | `tests/interop/bmp.sh` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
 | Policy-in-config E2E (export filter, import filter, set-actions keep-route, unknown-reference fail-closed startup) | ✅ 🧪 | `crates/lr-cli/tests/daemon_policy.rs` |
+| RFC 8212 E2E (default deny-in/deny-out, permit-all route-maps restoring flow, accept-all deviation, iBGP exemption, unknown mode fails closed) | ✅ 🧪 | `crates/lr-cli/tests/daemon_rfc8212.rs` |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
@@ -337,9 +339,29 @@ Highest-value missing/partial standards, in rough order:
    no BFD interop worked at all. Keyed-hash auth over multihop
    (RFC 5883 §6 SHOULD) remains future work (Simple Password is
    supported).
-2. **RFC 8212** default eBGP route behaviors — full default
-   deny-in/deny-out for eBGP without explicit policy (currently
-   partial; the safety net approximates it).
+2. ~~**RFC 8212** default eBGP route behaviors~~ — done: the router
+   gained `set_ebgp_requires_policy` + per-session
+   `set_session_policy(import, export)`; with the mode on, an external
+   session (eBGP or a confederation boundary — §1 counts both) without
+   an explicit import policy drops received routes before Adj-RIB-In,
+   and without an export policy advertises nothing at any of the three
+   egress paths (per-prefix export, RFC 2918/7313 reannounce, initial
+   dump — EoR still flows so peer GR logic converges). Removing an
+   export policy re-evaluates every prefix and withdraws what the
+   session carried; iBGP and confederation-internal sessions are
+   exempt. The daemon enables the mode by default
+   (`[bgp] ebgp_policy = "rfc8212"`; `accept-all` is the §3/Appendix-A
+   "insecure-mode" deviation), warns per policy-less external peer at
+   startup, and unknown modes fail closed. Verified by 8 router unit
+   tests + 5 daemon e2e tests (deny both directions, permit-all
+   route-maps restoring flow, accept-all deviation, iBGP exemption,
+   unknown mode rejected); the protocol-subject interop scripts pin
+   `--ebgp-policy accept-all` on their lr sides. Landing this also
+   fixed daemon-level iBGP propagation: locally originated routes
+   carried no NEXT_HOP and iBGP egress preserved the gap, so peers
+   discarded the UPDATEs (RFC 4271 §6.3) — egress now synthesizes the
+   local address (§5.1.3) and the daemon originates `network`s with
+   their local address, which also un-breaks kernel FIB installs.
 3. ~~**OSPF DBD/LSR exchange**~~ — done: the router runs the full
    RFC 2328 §7.2 synchronization per session (`lr-ospf::exchange`):
    master/slave election per §10.3, MTU-bounded LSA-header paging,

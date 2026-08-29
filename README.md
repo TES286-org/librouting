@@ -263,6 +263,18 @@ All hooks may drop, keep, or replace routes. They are pure Rust code, so
 any operator policy (e.g. "prefer routes from peer X over Y regardless of
 attributes") can be implemented without forking.
 
+### RFC 8212 default eBGP route behaviors
+
+`DefaultRouter::set_ebgp_requires_policy(true)` arms the RFC 8212 §3
+defaults: an external BGP session (eBGP or a confederation boundary)
+whose embedder declared no explicit import policy discards every
+received route, and one without an export policy advertises nothing —
+stale Adj-RIB-Out entries are withdrawn. Policy presence is declared per
+session with `set_session_policy(handle, import, export)`; iBGP is
+exempt. The shipped daemon enables the mode by default
+(`[bgp] ebgp_policy = "rfc8212"`; `accept-all` restores the RFC 4271
+default-accept the RFC permits as a deviation).
+
 ## Safety net
 
 Protocol-level invariants (RFC compliance requirements) are enforced by
@@ -271,7 +283,7 @@ Protocol-level invariants (RFC compliance requirements) are enforced by
 - AS path loop rejection (RFC 4271 §9.1.2.15)
 - NEXT_HOP sanity (unspecified, loopback, or self)
 - Martian prefix rejection (RFC 1918 + link-local + loopback + multicast)
-- Empty AS_PATH on eBGP (RFC 8212)
+- Empty AS_PATH on eBGP (RFC 4271 §6.5 UPDATE error condition)
 - Excessive AS loops (> N appearances of own AS)
 - Oversized AS_PATH (> N segments)
 - Oversized LOCAL_PREF

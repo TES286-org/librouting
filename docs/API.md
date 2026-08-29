@@ -567,6 +567,38 @@ The daemon exposes `--max-prefixes N`, `--max-prefix-action warn|
 teardown|restart`, `--max-prefix-threshold P` (TOML:
 `bgp.max_prefixes` / `max_prefix_action` / `max_prefix_threshold`).
 
+### RFC 8212 default eBGP route behaviors
+
+`DefaultRouter::set_ebgp_requires_policy(true)` arms the RFC 8212 §3
+defaults (updating RFC 4271 §9.1/§9.1.3): an *external* BGP session —
+eBGP **or** a confederation boundary, per §1 — whose embedder declared
+no explicit import policy discards every received route before
+Adj-RIB-In, and one without an explicit export policy advertises
+nothing (stale Adj-RIB-Out entries are withdrawn at the next export
+evaluation). Policy presence is declared per session with
+`set_session_policy(handle, import, export)`; iBGP and
+confederation-internal sessions are exempt. The library default is off
+(RFC 4271 accept-all) — embedder pipelines are untouched until they opt
+in.
+
+```rust
+r.set_ebgp_requires_policy(true);
+let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1])))?;
+// This peer runs without import/export route-maps, so both directions
+// are denied; declare presence to open a direction:
+r.set_session_policy(h, true, false)?; // import policy attached
+```
+
+The shipped daemon enables the mode by default — `[bgp]
+ebgp_policy = "rfc8212"` with per-peer `import`/`export` route-maps as
+the explicit policy; `ebgp_policy = "accept-all"` (CLI
+`--ebgp-policy accept-all`) is the §3/Appendix-A "insecure-mode"
+deviation, and unknown values fail closed at parse time. The FFI
+mirrors the two calls (`lr_router_set_ebgp_requires_policy`,
+`lr_router_set_session_policy`), as do the Go
+(`SetEbgpRequiresPolicy` / `SetSessionPolicy`) and Python
+(`set_ebgp_requires_policy` / `set_session_policy`) bindings.
+
 ### Cross-protocol redistribution (BIRD `pipe` / FRR `redistribute`)
 
 `RedistributionPipe` bridges routes from a source protocol to a target

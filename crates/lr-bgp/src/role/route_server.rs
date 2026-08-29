@@ -17,10 +17,12 @@
 //!   RFC 7947 §2.3.4 "community rewriting").
 //! - The RS may apply client-specific filter chains per RFC 7947 §2.3.4.
 //!
-//! Note: this implementation does not enforce RFC 8212 ("Default EBGP Route
-//! Behaviors toward eBGP Peers"). The embedder's policy chain should set the
-//! default behaviors; the route server module only marks the peer as
-//! "transit-transparent" for AS_PATH/NEXT_HOP.
+//! Note: RFC 8212 ("Default EBGP Route Behaviors toward eBGP Peers")
+//! enforcement lives in the router (`DefaultRouter::
+//! set_ebgp_requires_policy` + per-session `set_session_policy`), not
+//! here — it applies uniformly to every external session, including
+//! route-server clients. The route server module only marks the peer
+//! as "transit-transparent" for AS_PATH/NEXT_HOP.
 
 /// Per-peer route-server configuration.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

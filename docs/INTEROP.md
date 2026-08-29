@@ -16,6 +16,14 @@ job `interop`) and can all be reproduced locally:
 | BFD x BIRD | `tests/interop/bfd_bird.sh` | lr-daemon ↔ BIRD 2 (`protocol bfd` + `bfd on`) over a veth pair in netns | BFD wire compatibility (RFC 5880): both sessions reach Up, BGP rides `bfd on`, and a frozen peer (SIGSTOP — TCP still open) is torn down in ~0.5s by BFD at 100ms×3 vs a 60s hold timer; phase 2 proves RFC 5883 multihop mode (UDP 4784, off-link address pair) |
 | FRR | `tests/interop/frr.sh` | lr-daemon ↔ FRR bgpd (eBGP, multihop) | Wire compatibility with FRR bgpd incl. its stricter next-hop validation |
 
+> **RFC 8212 note.** The daemon's default eBGP route behavior is
+> deny-in/deny-out for peers without explicit import/export route-maps
+> (`[bgp] ebgp_policy = "rfc8212"`). These scripts test protocol
+> behavior (FSM, wire format, GR, auth, BFD — not policy), so their
+> lr sides pin `--ebgp-policy accept-all` to keep the tested feature
+> isolated; the RFC 8212 behavior itself is covered end-to-end by
+> `crates/lr-cli/tests/daemon_rfc8212.rs`.
+
 ## What the tests actually verify
 
 For every peer pair, all of the following must hold:
