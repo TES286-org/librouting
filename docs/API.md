@@ -674,6 +674,45 @@ mirrors the two calls (`lr_router_set_ebgp_requires_policy`,
 (`SetEbgpRequiresPolicy` / `SetSessionPolicy`) and Python
 (`set_ebgp_requires_policy` / `set_session_policy`) bindings.
 
+### FRR `bgp default ipv4-unicast` (W2.1)
+
+`PeerConfig::default_ipv4_unicast` (default `true` — matches FRR's
+default and the RFC 4271 implicit IPv4 unicast family) controls whether
+IPv4 unicast is implicitly active for a peer even when
+`mp_families` does not list it. The helper
+`PeerConfig::ipv4_unicast_active()` returns
+`default_ipv4_unicast || mp_families.contains(IPV4_UNICAST)`. The FSM
+gates legacy-section IPv4 NLRI (withdrawals, NLRI, EoR) on it;
+`advertise.rs` gates `advertise()`, `withdraw_paths()` and
+`send_end_of_rib()`; Add-Path / LLGR `advertised_families()` drop the
+implicit IPv4 unicast when the flag is off.
+
+```rust
+let mut cfg = SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]));
+// FRR `no bgp default ipv4-unicast`: the peer must be activated
+// explicitly via mp_families to speak IPv4 unicast. The router's
+// FSM will drop legacy-section IPv4 NLRI from this peer.
+cfg.default_ipv4_unicast = false;
+cfg.mp_families = vec![NlriFamily::IPV6_UNICAST]; // IPv6-only session
+let h = r.add_session(cfg)?;
+```
+
+`DefaultRouter::set_session_default_ipv4_unicast(h, on)` is the
+post-`add_session` mutator (must be called before `start_session`).
+
+The shipped daemon exposes it as `[bgp] default_ipv4_unicast = bool`
+(default `true`) with the CLI `--default-ipv4-unicast` /
+`--no-default-ipv4-unicast` flags and a per-peer override `[peer]
+default_ipv4_unicast = bool`. The daemon's mp_families builder
+ensures `IPV4_UNICAST` is in the family list when the flag is `true`
+(BIRD 2 requires the capability to match one of their channels), and
+leaves the list as configured when `false` (FRR
+`no bgp default ipv4-unicast`).
+
+The FFI mirrors it as `lr_router_set_default_ipv4_unicast`, as do the
+Go (`Router.SetDefaultIPv4Unicast`) and Python
+(`Router.set_default_ipv4_unicast`) bindings.
+
 ### FRR `bgp enforce-first-as` (W2.2)
 
 `DefaultRouter::set_enforce_first_as(true)` arms the FRR

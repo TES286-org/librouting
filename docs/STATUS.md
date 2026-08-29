@@ -27,7 +27,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 4271 FSM (6 states, timers, events) | ✅ 🧪 | incl. NOTIFICATION-as-fatal, session reset semantics |
 | OPEN / KEEPALIVE / UPDATE / NOTIFICATION codec | ✅ 🧪 | interop-verified against BIRD 2 + FRR 10 |
 | RFC 5492 capabilities | ✅ | |
-| RFC 4760 MP-BGP (IPv4/IPv6 unicast NLRI) | ✅ | BIRD requires it — now advertised by default |
+| RFC 4760 MP-BGP (IPv4/IPv6 unicast NLRI) | ✅ | BIRD requires it — now advertised by default; FRR `bgp default ipv4-unicast` (W2.1) gates implicit IPv4 unicast |
 | RFC 4893/6793 4-octet AS + dynamic negotiation | ✅ | downgrade to 2-byte when peer lacks the capability |
 | RFC 4456 route reflection (ORIGINATOR_ID, CLUSTER_LIST) | ✅ | correct optional non-transitive flags |
 | RFC 5065 confederations | ✅ | |
@@ -314,8 +314,38 @@ Where BIRD or FRR deviate from (or extend) the RFCs in ways that
 matter for interoperation, support the behaviour behind explicit
 flags; never break standards compliance by default.
 
-1. FRR `bgp default ipv4-unicast` semantics (auto-activation of the
-   IPv4 unicast family per eBGP session, on by default in FRR).
+1. ~~**FRR `bgp default ipv4-unicast`**~~ — done: `PeerConfig`
+   gained a `default_ipv4_unicast: bool` field (default `true` —
+   matches FRR's default and the RFC 4271 implicit IPv4 unicast
+   family) plus a helper `ipv4_unicast_active()` returning
+   `default_ipv4_unicast || mp_families.contains(IPV4_UNICAST)`. The
+   FSM gates legacy-section IPv4 NLRI (withdrawals, NLRI, EoR) on it
+   in `lr-bgp::fsm::handle_update_in_established`; `advertise.rs`
+   gates `advertise()`, `withdraw_paths()` and `send_end_of_rib()`;
+   Add-Path / LLGR `advertised_families()` drop the implicit IPv4
+   unicast when the flag is off. The router gained
+   `set_session_default_ipv4_unicast(h, on)`; `SessionConfig`
+   carries the field through `add_session` to PeerConfig. The daemon
+   wires the router-level `[bgp] default_ipv4_unicast = bool` (default
+   `true`) + CLI `--default-ipv4-unicast` / `--no-default-ipv4-unicast`
+   + per-peer override `[peer] default_ipv4_unicast = bool`. The
+   daemon's mp_families builder now always overrides the
+   `SessionConfig::bgp()` default (which keeps IPv4 unicast for BIRD
+   capability interop): when `default_ipv4_unicast=true` it ensures
+   `IPV4_UNICAST` is in the family list (BIRD requires the
+   capability to match one of their channels), when `false` it leaves
+   the list as configured so the user's explicit `mp_families`
+   determines what's active. FFI:
+   `lr_router_set_default_ipv4_unicast(r, session, enabled)`, with
+   Go (`Router.SetDefaultIPv4Unicast`) and Python
+   (`Router.set_default_ipv4_unicast`) mirrors; the C harness
+   smoke-tests the on/off round-trip + unknown-handle fail-closed.
+   Verified by 4 PeerConfig unit tests, 3 FSM tests (EoR, NLRI,
+   withdrawals all suppressed when the flag is off), 1 daemon_config
+   unit test, 3 daemon e2e tests (default-on propagates routes,
+   `--no-default-ipv4-unicast` suppresses them, explicit
+   `--mp-family ipv4-unicast` reactivates), and the C/Go/Python
+   binding smoke tests.
 2. ~~**FRR `bgp enforce-first-as` + `bgp bestpath compare-routerid`**~~
    — done: the router gained `set_enforce_first_as(bool)` (default
    off — matches FRR `no bgp enforce-first-as` and the RFC 4271 §6.3

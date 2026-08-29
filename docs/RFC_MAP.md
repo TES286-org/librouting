@@ -7,7 +7,7 @@ implements, or references. It is grouped by protocol family.
 
 | RFC    | Title                                                | Status                  | Crate path                          |
 |--------|------------------------------------------------------|--------------------------|--------------------------------------|
-| 4271  | BGP-4                                                | ✓ core; FRR `bgp enforce-first-as` leftmost-AS check (W2.2, off by default) | `lr-bgp::fsm`, `lr-bgp::message`, `lr-router::import_route` |
+| 4271  | BGP-4                                                | ✓ core; FRR `bgp enforce-first-as` leftmost-AS check (W2.2, off by default); FRR `bgp default ipv4-unicast` activation posture (W2.1, on by default) | `lr-bgp::fsm`, `lr-bgp::message`, `lr-bgp::peer::ipv4_unicast_active`, `lr-router::import_route` |
 | 1997  | BGP Communities Attribute                            | ✓                       | `lr-bgp::path::communities`         |
 | 2385  | Protection of BGP Sessions via a TCP MD5 Signature (TCP MD5) | ✓                       | `lr-osroute::tcp_auth` (TCP_MD5SIG/_EXT) |
 | 2439  | BGP Route Flap Damping                               | ✓ (deprecated by 8326) | `lr-damping`                          |

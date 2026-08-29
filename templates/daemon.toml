@@ -60,6 +60,16 @@ hold_time = 90
 # --no-bestpath-compare-routerid
 # bestpath_compare_routerid = true
 
+# FRR `bgp default ipv4-unicast` (W2.1): when on (the default — matches
+# FRR and BIRD's MP-BGP capability requirement), IPv4 unicast is
+# implicitly active for every BGP peer even when its `mp_families`
+# does not list it. When off, IPv4 unicast must be added explicitly to
+# the peer's `mp_families` (FRR `no bgp default ipv4-unicast` with
+# explicit `address-family ipv4 unicast` / `neighbor X activate`).
+# Per-peer override: `[peer.X] default_ipv4_unicast = false`.
+# CLI: --default-ipv4-unicast / --no-default-ipv4-unicast
+# default_ipv4_unicast = true
+
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
 # window after a session loss.

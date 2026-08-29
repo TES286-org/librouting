@@ -289,6 +289,18 @@ enforce_first_as = true` (CLI `--enforce-first-as` /
 bestpath_compare_routerid` (default `true` — RFC 5004 deterministic; the
 inverse of FRR's default).
 
+### FRR `bgp default ipv4-unicast`
+
+`PeerConfig::default_ipv4_unicast` (default `true` — FRR's default and
+the RFC 4271 implicit IPv4 unicast family) controls whether IPv4
+unicast is implicitly active for a peer even when `mp_families` does
+not list it. The FSM gates legacy-section IPv4 NLRI (withdrawals,
+NLRI, EoR) on `PeerConfig::ipv4_unicast_active()`; egress in
+`advertise.rs` and the families listed by Add-Path / LLGR capabilities
+follow. The shipped daemon exposes it as `[bgp] default_ipv4_unicast`
+(default `true`) with per-peer override; CLI `--no-default-ipv4-unicast`
+matches FRR `no bgp default ipv4-unicast`.
+
 ## Safety net
 
 Protocol-level invariants (RFC compliance requirements) are enforced by
