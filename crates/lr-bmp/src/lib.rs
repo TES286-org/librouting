@@ -169,6 +169,10 @@ pub struct BmpHeader {
 
 impl BmpHeader {
     pub const LEN: usize = 6;
+
+    /// Upper bound on a single BMP message: a Route Monitoring message
+    /// carries one BGP UPDATE (≤ 4096 bytes), so 64 KiB is generous.
+    pub const MAX_MESSAGE: usize = 65535;
 }
 
 /// Per-peer header (RFC 7854 §4.2). Present on messages of type 0-2, 6.
@@ -351,6 +355,13 @@ impl BmpCodec {
             self.carryover[3],
             self.carryover[4],
         ]) as usize;
+        // A declared length below the header size or beyond any sane BMP
+        // message is malformed — do not buffer unboundedly waiting for a
+        // huge length an attacker keeps feeding.
+        if !(BmpHeader::LEN..=BmpHeader::MAX_MESSAGE).contains(&msg_len) {
+            self.carryover.clear();
+            return Err(ParseError::bad_length(1, "bmp.msg_len"));
+        }
         if self.carryover.len() < msg_len {
             return Ok(None);
         }

@@ -194,6 +194,12 @@ impl MrtRecord {
 /// length(4).
 const HEADER_LEN: usize = 12;
 
+/// Upper bound on a single MRT record body (RFC 6396 §3). A RIB record
+/// carries one BGP UPDATE per entry (≤ 4096 bytes), so 64 KiB is
+/// generous; a malicious declared length must not grow the carryover
+/// unboundedly.
+const MAX_RECORD_BODY: usize = 65535;
+
 /// Streaming MRT decoder. Feed arbitrary chunks; complete records come
 /// out one at a time (the same contract as `lr_bmp::BmpCodec`).
 #[derive(Default)]
@@ -222,6 +228,12 @@ impl MrtReader {
             self.carryover[10],
             self.carryover[11],
         ]) as usize;
+        // A declared length beyond the record-size bound is malformed;
+        // drop the buffer so one bad header cannot wedge the stream.
+        if length > MAX_RECORD_BODY {
+            self.carryover.clear();
+            return Err(ParseError::bad_length(8, "mrt.length"));
+        }
         if self.carryover.len() < HEADER_LEN + length {
             return Ok(None);
         }
