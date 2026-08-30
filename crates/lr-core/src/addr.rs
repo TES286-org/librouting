@@ -47,6 +47,18 @@ impl IpAddr {
         }
     }
 
+    /// True when the address is an IPv4 multicast address (224.0.0.0/4) or
+    /// an IPv6 multicast address (ff00::/8). Used by, e.g., RFC 9467 §3.1
+    /// to pick the multicast vs unicast packet-counter field, and by OSPF /
+    /// Babel transports to classify packet destinations.
+    #[inline]
+    pub fn is_multicast(&self) -> bool {
+        match self {
+            Self::V4(b) => b[0] & 0xf0 == 0xe0,
+            Self::V6(b) => b[0] == 0xff,
+        }
+    }
+
     pub fn from_v4_bytes(b: [u8; 4]) -> Self {
         Self::V4(b)
     }

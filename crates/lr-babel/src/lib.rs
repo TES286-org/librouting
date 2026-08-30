@@ -13,6 +13,14 @@
 //! [`neighbor::BabelNeighbor`] tracks per-neighbor history and RTO. The
 //! route table lives in [`route::BabelRouteTable`] and uses the feasibility
 //! condition from RFC 8966 §3.2.2.
+//!
+//! # Authentication
+//!
+//! [`auth`] implements RFC 8967 MAC authentication (HMAC-SHA-256 mandatory
+//! plus keyed BLAKE2s-128) with the RFC 9467 relaxed packet-counter
+//! verification. [`auth::BabelAuthInterface`] is the stateful entry point;
+//! the codec-level `encode_authenticated`/`decode_authenticated_slice`
+//! helpers remain for single-key embedders.
 
 #![forbid(unsafe_code)]
 
@@ -26,8 +34,10 @@ pub mod source;
 pub mod tlv;
 
 pub use auth::{
-    authenticate_packet, verify_packet, BabelAuthError, BabelMacKey, BabelPacketCounter,
-    BabelPseudoHeader, BabelReplayProtection,
+    authenticate_packet, challenge_reply_tlv, challenge_request_tlv, verify_packet,
+    BabelAuthAction, BabelAuthConfig, BabelAuthError, BabelAuthInterface, BabelMacAlgorithm,
+    BabelMacKey, BabelPacketCounter, BabelPseudoHeader, BabelReplayProtection, BabelVerifyOutcome,
+    CounterNonceSource, NonceSource, SystemNonceSource,
 };
 pub use codec::BabelCodec;
 pub use message::*;
