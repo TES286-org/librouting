@@ -214,3 +214,27 @@ def test_local_as_tolerance_abi():
         except librouting.LrError:
             pass
 
+
+def test_soft_reconfig_inbound_abi():
+    """FRR `neighbor X soft-reconfiguration inbound` (W2.4): the
+    per-session toggle + the soft reconfiguration op are callable from
+    Python and round-trip through the C ABI. Unknown handles fail
+    closed; the op is a no-op (returns 0) when the flag is off."""
+    with librouting.Router() as r:
+        h = r.add_bgp_session(local_as=64512, peer_as=64513,
+                              local_bgp_id=0x0a000001)
+        r.set_soft_reconfig_inbound(h, True)
+        r.set_soft_reconfig_inbound(h, False)
+        try:
+            r.set_soft_reconfig_inbound(9999, True)
+            assert False, "set_soft_reconfig_inbound on unknown session must raise"
+        except librouting.LrError:
+            pass
+        # soft_reconfig_inbound on a session with the flag off is a
+        # no-op (returns 0). An unknown session is also a no-op
+        # (returns 0) — the pre-policy RIB is empty for that origin.
+        n = r.soft_reconfig_inbound(h)
+        assert n == 0, f"soft_reconfig_inbound no-op when flag is off: got {n}"
+        n = r.soft_reconfig_inbound(9999)
+        assert n == 0, f"soft_reconfig_inbound no-op on unknown handle: got {n}"
+

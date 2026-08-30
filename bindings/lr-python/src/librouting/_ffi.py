@@ -83,6 +83,11 @@ int32_t lr_router_set_default_ipv4_unicast(lr_router_t r,
 int32_t lr_router_set_local_as_tolerance(lr_router_t r,
                                          uint64_t session,
                                          uint32_t tolerance);
+int32_t lr_router_set_soft_reconfig_inbound(lr_router_t r,
+                                            uint64_t session,
+                                            uint8_t enabled);
+int64_t lr_router_soft_reconfig_inbound(lr_router_t r,
+                                        uint64_t session);
 int32_t lr_router_request_route_refresh(lr_router_t r,
                                         uint64_t session,
                                         uint16_t afi,

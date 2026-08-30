@@ -291,6 +291,45 @@ class Router:
                 f"lr_router_set_local_as_tolerance failed (rc={rc}): {last_error()}"
             )
 
+    def set_soft_reconfig_inbound(self, session: int, enabled: bool) -> None:
+        """Configure FRR ``neighbor X soft-reconfiguration inbound`` (W2.4).
+
+        When ``enabled`` is ``True``, the router retains the
+        pre-policy Adj-RIB-In for this session — the raw received
+        routes before the import hook chain runs — so
+        :meth:`soft_reconfig_inbound` can re-evaluate the policy
+        without re-fetching from the peer (``clear ip bgp * soft
+        in``). Off by default (FRR's default; the cost is duplicate
+        RIB memory per peer). Must be called before
+        :meth:`start_session`; unknown handles or already-established
+        sessions raise :class:`LrError`.
+        """
+        rc = get_lib().lr_router_set_soft_reconfig_inbound(
+            self._ptr, int(session), 1 if enabled else 0
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_set_soft_reconfig_inbound failed (rc={rc}): {last_error()}"
+            )
+
+    def soft_reconfig_inbound(self, session: int) -> int:
+        """FRR ``clear ip bgp * soft in`` (W2.4).
+
+        Re-evaluate the import policy against the pre-policy
+        Adj-RIB-In for this session, replacing the session's entries
+        in the post-policy RIB with the re-imported routes. Returns
+        the number of routes re-evaluated. No-ops (returns 0) when
+        the session did not have :meth:`set_soft_reconfig_inbound`
+        enabled — the pre-policy RIB was not retained. Unknown
+        handles raise :class:`LrError`.
+        """
+        rc = get_lib().lr_router_soft_reconfig_inbound(self._ptr, int(session))
+        if rc < 0:
+            raise LrError(
+                f"lr_router_soft_reconfig_inbound failed (rc={rc}): {last_error()}"
+            )
+        return int(rc)
+
     def request_route_refresh(self, session: int, afi: int = 1, safi: int = 1) -> bool:
         """Ask an established BGP peer to resend an RFC 2918 address family.
 

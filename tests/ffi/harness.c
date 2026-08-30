@@ -217,6 +217,24 @@ int main(void) {
     rc = lr_router_set_local_as_tolerance(r, 999, 1);
     check(rc == -2, "set_local_as_tolerance on unknown handle fails closed");
 
+    /* FRR `neighbor X soft-reconfiguration inbound` (W2.4):
+     * per-session toggle for pre-policy Adj-RIB-In retention.
+     * Library default is off. */
+    rc = lr_router_set_soft_reconfig_inbound(r, h, 1);
+    check(rc == 0, "set_soft_reconfig_inbound(on) on valid handle");
+    rc = lr_router_set_soft_reconfig_inbound(r, h, 0);
+    check(rc == 0, "set_soft_reconfig_inbound(off) on valid handle");
+    rc = lr_router_set_soft_reconfig_inbound(r, 999, 1);
+    check(rc == -2, "set_soft_reconfig_inbound on unknown handle fails closed");
+
+    /* soft_reconfig_inbound on a session with the flag off is a
+     * no-op (returns 0). An unknown session is also a no-op (returns
+     * 0) — the pre-policy RIB is empty for that origin. */
+    int64_t soft_n = lr_router_soft_reconfig_inbound(r, h);
+    check(soft_n == 0, "soft_reconfig_inbound no-op when flag is off");
+    soft_n = lr_router_soft_reconfig_inbound(r, 999);
+    check(soft_n == 0, "soft_reconfig_inbound no-op on unknown handle");
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

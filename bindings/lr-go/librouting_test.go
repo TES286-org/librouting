@@ -253,5 +253,34 @@ func TestRfc8212(t *testing.T) {
 	if err := r.SetLocalAsTolerance(9999, 1); err == nil {
 		t.Fatalf("SetLocalAsTolerance on unknown session must error")
 	}
+	// FRR `neighbor X soft-reconfiguration inbound` (W2.4): the
+	// per-session toggle + the soft reconfiguration op are callable
+	// from Go and round-trip through the C ABI.
+	if err := r.SetSoftReconfigInbound(h, true); err != nil {
+		t.Fatalf("SetSoftReconfigInbound(true): %v", err)
+	}
+	if err := r.SetSoftReconfigInbound(h, false); err != nil {
+		t.Fatalf("SetSoftReconfigInbound(false): %v", err)
+	}
+	if err := r.SetSoftReconfigInbound(9999, true); err == nil {
+		t.Fatalf("SetSoftReconfigInbound on unknown session must error")
+	}
+	// soft_reconfig_inbound on a session with the flag off is a
+	// no-op (returns 0). An unknown session is also a no-op (returns
+	// 0) — the pre-policy RIB is empty for that origin.
+	n, err := r.SoftReconfigInbound(h)
+	if err != nil {
+		t.Fatalf("SoftReconfigInbound: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("SoftReconfigInbound no-op when flag is off: got %d", n)
+	}
+	n, err = r.SoftReconfigInbound(9999)
+	if err != nil {
+		t.Fatalf("SoftReconfigInbound on unknown handle: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("SoftReconfigInbound no-op on unknown handle: got %d", n)
+	}
 	r.ptr = nil
 }

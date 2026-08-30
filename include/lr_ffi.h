@@ -311,6 +311,35 @@ int32_t lr_router_set_default_ipv4_unicast(lr_router_t r, uint64_t session, uint
 int32_t lr_router_set_local_as_tolerance(lr_router_t r, uint64_t session, uint32_t tolerance);
 
 /**
+ * Configure FRR `neighbor X soft-reconfiguration inbound` (W2.4) for
+ * a BGP session.
+ *
+ * When `enabled` is non-zero, the router retains the pre-policy
+ * Adj-RIB-In for this session — the raw received routes before the
+ * import hook chain runs — so [`lr_router_soft_reconfig_inbound`] can
+ * re-evaluate the policy without re-fetching from the peer. Off by
+ * default (FRR's default; the cost is duplicate RIB memory per peer).
+ * Must be called after `lr_router_add_bgp_session*` and before
+ * `lr_router_start_session`; unknown handles or already-established
+ * sessions fail with -2.
+ */
+int32_t lr_router_set_soft_reconfig_inbound(lr_router_t r, uint64_t session, uint8_t enabled);
+
+/**
+ * FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import policy
+ * against the pre-policy Adj-RIB-In for `session`, replacing the
+ * session's entries in the post-policy RIB with the re-imported
+ * routes.
+ *
+ * Returns the number of routes re-evaluated (as a non-negative
+ * integer), or a negative value on error (-1 for an invalid router
+ * handle, -2 on unknown session handles). No-ops (returns 0) when
+ * the session did not have `soft_reconfig_inbound` enabled — the
+ * pre-policy RIB was not retained.
+ */
+int64_t lr_router_soft_reconfig_inbound(lr_router_t r, uint64_t session);
+
+/**
  * Request an RFC 2918 route refresh from an established BGP peer.
  *
  * Returns 1 when a request was queued, 0 when the session has not negotiated

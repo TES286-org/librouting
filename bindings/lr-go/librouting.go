@@ -345,6 +345,42 @@ func (r *Router) SetLocalAsTolerance(session uint64, tolerance uint32) error {
 	return nil
 }
 
+// SetSoftReconfigInbound configures FRR `neighbor X soft-reconfiguration
+// inbound` (W2.4) for one BGP session. When enabled is true, the
+// router retains the pre-policy Adj-RIB-In for the session — the raw
+// received routes before the import hook chain runs — so
+// SoftReconfigInbound can re-evaluate the policy without re-fetching
+// from the peer (`clear ip bgp * soft in`). Off by default (FRR's
+// default; the cost is duplicate RIB memory per peer). Must be called
+// before StartSession; unknown handles or already-established
+// sessions return an error.
+func (r *Router) SetSoftReconfigInbound(session uint64, enabled bool) error {
+	rc := C.lr_router_set_soft_reconfig_inbound(
+		r.ptr,
+		C.uint64_t(session),
+		toCBool(enabled),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_set_soft_reconfig_inbound: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// SoftReconfigInbound is FRR `clear ip bgp * soft in` (W2.4):
+// re-evaluate the import policy against the pre-policy Adj-RIB-In
+// for the session, replacing the session's entries in the
+// post-policy RIB with the re-imported routes. Returns the number of
+// routes re-evaluated. No-ops (returns 0) when the session did not
+// have SetSoftReconfigInbound(true) enabled — the pre-policy RIB was
+// not retained.
+func (r *Router) SoftReconfigInbound(session uint64) (int64, error) {
+	rc := C.lr_router_soft_reconfig_inbound(r.ptr, C.uint64_t(session))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_router_soft_reconfig_inbound: %s (rc=%d)", LastError(), int(rc))
+	}
+	return int64(rc), nil
+}
+
 // Tick advances the router clock by `nowMs` milliseconds.
 func (r *Router) Tick(nowMs uint64) error {
 	rc := C.lr_router_tick(r.ptr, C.uint64_t(nowMs))

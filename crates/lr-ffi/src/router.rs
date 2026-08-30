@@ -122,6 +122,10 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
         // local AS in the AS_PATH). Embedders flip it via
         // `lr_router_set_local_as_tolerance`.
         local_as_tolerance: 0,
+        // W2.4: FRR `neighbor X soft-reconfiguration inbound` defaults
+        // to off. Embedders flip it via
+        // `lr_router_set_soft_reconfig_inbound`.
+        soft_reconfig_inbound: false,
         local_address: None,
         area_id: 0,
         ospf_area_type: OspfAreaType::Normal,
@@ -536,6 +540,61 @@ pub extern "C" fn lr_router_set_local_as_tolerance(
     };
     match router.set_session_local_as_tolerance(SessionHandle(session), tolerance) {
         Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// Configure FRR `neighbor X soft-reconfiguration inbound` (W2.4) for
+/// a BGP session.
+///
+/// When `enabled` is non-zero, the router retains the pre-policy
+/// Adj-RIB-In for this session — the raw received routes before the
+/// import hook chain runs — so [`lr_router_soft_reconfig_inbound`] can
+/// re-evaluate the policy without re-fetching from the peer. Off by
+/// default (FRR's default; the cost is duplicate RIB memory per peer).
+/// Must be called after `lr_router_add_bgp_session*` and before
+/// `lr_router_start_session`; unknown handles or already-established
+/// sessions fail with -2.
+#[no_mangle]
+pub extern "C" fn lr_router_set_soft_reconfig_inbound(
+    r: lr_router_t,
+    session: u64,
+    enabled: u8,
+) -> i32 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.set_session_soft_reconfig_inbound(SessionHandle(session), enabled != 0) {
+        Ok(()) => 0,
+        Err(error) => {
+            set_last_error(error);
+            -2
+        }
+    }
+}
+
+/// FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import policy
+/// against the pre-policy Adj-RIB-In for `session`, replacing the
+/// session's entries in the post-policy RIB with the re-imported
+/// routes.
+///
+/// Returns the number of routes re-evaluated (as a non-negative
+/// integer), or a negative value on error (-1 for an invalid router
+/// handle, -2 on unknown session handles). No-ops (returns 0) when
+/// the session did not have `soft_reconfig_inbound` enabled — the
+/// pre-policy RIB was not retained.
+#[no_mangle]
+pub extern "C" fn lr_router_soft_reconfig_inbound(r: lr_router_t, session: u64) -> i64 {
+    let mut router = match unsafe { lock_router(r) } {
+        Some(g) => g,
+        None => return -1,
+    };
+    match router.soft_reconfig_inbound(SessionHandle(session)) {
+        Ok(count) => count as i64,
         Err(error) => {
             set_last_error(error);
             -2
