@@ -17,19 +17,19 @@ implements, or references. It is grouped by protocol family.
 | 3065  | BGP Confederations                                   | ✓ (superseded by 6793) | `lr-bgp::role::confederation`        |
 | 4360  | BGP Extended Communities                             | ✓                       | `lr-bgp::path::communities`         |
 | 4456  | BGP Route Reflection (revised)                       | ✓                       | `lr-bgp::role::cluster`              |
-| 4486  | Subcodes for BGP CEASE NOTIFICATION                  | ✓ (subcode 8 = max-prefix exceeded) | `lr-bgp::fsm`, `lr-router` |
+| 4486  | Subcodes for BGP CEASE NOTIFICATION                  | ✓ (subcode 1 = max-prefix reached) | `lr-bgp::fsm`, `lr-router` |
 | 4724  | BGP Graceful Restart                                 | ✓ (per-family F bits)  | `lr-bgp::extensions::graceful_restart`, `lr-router` |
 | 4760  | Multiprotocol BGP                                    | ✓                       | `lr-bgp::path::mp_nlri`              |
 | 4784  | BGP Cumulative Bestpath                              | ✓ (multipath)           | `lr-bgp::best_path`                  |
 | 4893  | BGP Support for 4-byte AS                            | ✓                       | `lr-bgp::extensions::asn4`           |
 | 5004  | BGP Deterministic Path Selection                     | ✓ (default on; exposed as FRR `bgp bestpath compare-routerid` on the daemon, W2.2) | `lr-bgp::best_path` |
-| 5082  | The Generalized TTL Security Mechanism (GTSM)        | ✓ (IP_MINTTL listener filter + outbound TTL; `--gtsm` daemon flag) | `lr-osroute::gtsm` |
+| 5082  | The Generalized TTL Security Mechanism (GTSM)        | ✓ (IP_MINTTL / IPV6_MINHOPCOUNT listener filter + outbound TTL; `--gtsm` daemon flag) | `lr-osroute::gtsm` |
 | 5492  | BGP Capabilities                                     | ✓                       | `lr-bgp::capabilities`              |
 | 5549  | BGP Extended Next-Hop                                | ✓ (capability 5 in the §4 6-byte tuple form, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes + BIRD interop) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |
 | 5666  | BGP Egress Peer Engineering                          | partial (TBD)           | —                                    |
 | 5925  | The TCP Authentication Option (TCP-AO)               | ✓ (Linux >= 6.7; RFC 5926 KDFs via kernel) | `lr-osroute::tcp_auth` (TCP_AO_ADD_KEY/INFO) |
 | 6396   | MRT Routing Information Export Format            | ✓ TABLE_DUMP_V2 read/write (peer index tables, RIB v4/v6 unicast + add-path), BGP4MP decode | `lr-mrt` |
-| 6793  | BGP Support for 4-byte AS (revised)                  | ✓ (superseded 4893)     | `lr-bgp::role::confederation`         |
+| 6793  | BGP Support for 4-byte AS (revised)                  | ✓ (supersedes 4893; §4.2.3 AS4_PATH reconstruction) | `lr-bgp::path::as_path`, `lr-bgp::extensions::asn4`         |
 | 7313  | Enhanced Route Refresh                               | ✓                       | `lr-bgp::extensions::enhanced_rr`    |
 | 7854  | BGP Monitoring Protocol (BMP)                        | ✓ (lr-bmp crate: 7 message types, streaming codec, IPv4/IPv6 peer headers; set_bmp_sink router integration) | `lr-bmp`, `lr-router` |
 | 7911  | BGP Add-Path                                         | ✓ (negotiation, wire framing, N-path selection/export) | `lr-bgp::extensions::addpath`, `lr-bgp::codec`, `lr-bgp::best_path`, `lr-router` |
@@ -39,7 +39,7 @@ implements, or references. It is grouped by protocol family.
 | 8326  | Graceful BGP Session Restart + damp deprecation       | ✓                       | `lr-bgp::best_path`, `lr-damping`    |
 | 8950  | Advertising IPv4 NLRI with an IPv6 Next Hop           | ✓ (obsoletes 5549's NLRI encoding; capability encoding identical) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::path` |
 | 9072  | Extended Message Support for BGP                      | ✓ (extended length)     | `lr-bgp::path::PathAttrFlags`        |
-| 9234  | BGP Role (OTC)                                       | ✓                       | `lr-bgp::role::otc`                  |
+| 9234  | BGP Role (OTC)                                       | ✓ (§5 ingress leak rejection + egress customer/RS-client-only rule) | `lr-bgp::role::otc`                  |
 | 9494  | Long-Lived Graceful Restart                          | ✓                       | `lr-bgp::extensions::long_lived`, `lr-router` |
 | 1105  | BGP-1 (historic)                                     | not implemented (legacy)| —                                   |
 | 1163  | BGP-3 (historic)                                     | not implemented (legacy)| —                                   |
@@ -51,14 +51,14 @@ implements, or references. It is grouped by protocol family.
 |--------|------------------------------------------------------|--------------|--------------------------------------|
 | 2328   | OSPF Version 2                                       | ✓ core + inter-area + external + stub areas + virtual links + daemon transport (raw sockets, Hello/Router-LSA origination, §A.1 packet checksum) + full DBD/LSR exchange (§7.2/§10.3–§10.8, BIRD-verified); DR election & OSPFv3 exchange open | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf`, `lr-ospf::abr`, `lr-ospf::external`, `lr-ospf::origination`, `lr-ospf::exchange`, `lr-router`, `lr-osroute::ospf_transport` |
 | 3101   | OSPF Not-So-Stubby Areas (NSSA)                      | ✓ type-7 origination (P-bit + forwarding-address rules), §2.5 calculation, §3.1 translator election, §3.2 type-5 translation, type-7/type-3 defaults, `no_summary` | `lr-ospf::nssa`, `lr-router` |
-| 3623   | Graceful OSPF Restart                                | ✓ Grace-LSA codec (W3.4 foundation) — body TLV encode/decode, Opaque LSA ID packing, O-bit options helpers, `originate_grace_lsa_v2`; full GR (neighbour retention, daemon integration) future work | `lr-ospf::lsa::grace` |
+| 3623   | Graceful OSPF Restart                                | ✓ Grace-LSA codec (W3.4 foundation) — link-local opaque type 9, TLV numbers 1/2/3, 4-octet TLV padding, `originate_grace_lsa_v2`; full GR (neighbour retention, daemon integration) future work | `lr-ospf::lsa::grace` |
 | 4577   | OSPF as the Provider Edge-to-CE                      | partial      | —                                    |
 | 5340   | OSPF for IPv6                                         | ✓ core + inter-area-prefix-LSA origination | `lr-ospf::packet`, `lr-ospf::abr`, `lr-ospf::lsa` |
 | 5187   | OSPFv3 Graceful Restart                              | ✓ Grace-LSA codec (W3.4 foundation, shares the v2 codec in `lr-ospf::lsa::grace`; v3 O-bit in the OSPFv3 options field is the same bit 0x40); full GR future work | `lr-ospf::lsa::grace` |
-| 5709   | OSPFv2 HMAC-SHA Cryptographic Auth                   | ✓ (HMAC-SHA-1 + HMAC-SHA-256, anti-replay) | `lr-ospf::auth::crypto` |
+| 5709   | OSPFv2 HMAC-SHA Cryptographic Auth                   | ✓ (HMAC-SHA-1 + HMAC-SHA-256 with the §3.3 Ko/Apad construction, Auth Data Len = digest, anti-replay) | `lr-ospf::auth::crypto` |
 | 5643   | Management Information Base for OSPFv3                | partial      | —                                    |
 | 6850   | OSPFv3 MIB                                            | partial      | —                                    |
-| 7166   | Support for the Auth Trailer in OSPFv3               | ✓ (SA-ID + 64-bit crypto-seq + HMAC-SHA, IPv6 pseudo-header, anti-replay) | `lr-ospf::auth::v3_auth` |
+| 7166   | Support for the Auth Trailer in OSPFv3               | ✓ (RFC 7166 trailer: AuthType/SA-ID(16-bit)/crypto-seq + §4.5 Apad MAC embedding the IPv6 source, anti-replay) | `lr-ospf::auth::v3_auth` |
 | 7471   | OSPF TE MIB                                           | partial      | —                                    |
 | 7506   | OSPFv3 Auto-Configuration                             | partial      | —                                    |
 | 7684   | OSPFv3 Prefix Link-Local Attributes                  | ✓ LSA type 0x4004 (AS-scope, function 4) + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec (W3.5) | `lr-ospf::lsa::{LsaTypeV3::PrefixLinkLocalAsLsa, v3_prefix_options, encode/decode_v3_prefix_link_local_*}` |
