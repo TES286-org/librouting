@@ -6,25 +6,30 @@
 //! dropped from the Loc-RIB). The FoM decays exponentially over time, so
 //! stable routes eventually re-emerge.
 //!
-//! ## Algorithm (RFC 2439 §2.5.4)
+//! ## Algorithm
 //!
-//! - **Per-prefix FoM**: integer in the range [0, UPPER_LIMIT].
+//! - **Per-prefix FoM**: float in the range [0, UPPER_LIMIT].
 //! - **On withdraw**: `FoM += ADDITIVE_INCREASE`. Caps at `UPPER_LIMIT`.
-//! - **On re-announce**: `FoM += reuse * (1 - decay_withdrawn)`.
+//!   (RFC 2439 §4.2 increments the FoM only on the reachable →
+//!   unreachable transition; the re-announce increment below is the
+//!   Cisco de-facto variant, enabled for stability on damped prefixes.)
+//! - **On re-announce**: `FoM += reuse * (1 - decay_withdrawn)` (Cisco
+//!   variant — RFC 2439 itself does not penalise re-announcement).
 //! - **On decay (per decay_interval)**: `FoM = FoM * decay_factor`.
-//! - **Suppress** when `FoM > SUPPRESS_THRESHOLD`.
+//! - **Suppress** when `FoM >= SUPPRESS_THRESHOLD` (strictly above per the
+//!   RFC's wording; we use >= so the boundary is deterministic).
 //! - **Reuse** when `FoM < REUSE_THRESHOLD` (after being suppressed).
 //!
-//! Default constants per RFC 2439 §2.5.4 / §2.5.5:
+//! Default constants (Cisco-style, per RFC 2439 §4.7's sample parameters
+//! adapted to decay factors):
 //!
-//! - `decay_ngbr           = 0.99`
-//! - `decay_internals      = 0.97`
-//! - `decay_withdrawn      = 0.5`
-//! - `additive_incr        = 1000`
-//! - `suppress_threshold    = 2000`
-//! - `reuse_threshold       = 750`
-//! - `upper_limit          = 60000`
-//! - `decay_interval        = 30s`
+//! - `additive_incr       = 1000`
+//! - `suppress_threshold  = 2000`
+//! - `reuse_threshold     = 750`
+//! - `upper_limit         = 60000`
+//! - `decay_interval      = 30s`
+//! - `decay_factor_active = 0.97`
+//! - `decay_factor_withdrawn = 0.5`
 //!
 //! These constants are tunable via [`DampingConfig`].
 //!
@@ -42,7 +47,7 @@ use core::cmp::min;
 
 use lr_core::addr::Prefix;
 
-/// Default damping constants (RFC 2439 §2.5.4).
+/// Default damping constants (RFC 2439 §4.2 / §4.7, Cisco-style).
 pub const DEFAULT_ADDITIVE_INCR: u32 = 1000;
 pub const DEFAULT_SUPPRESS_THRESHOLD: u32 = 2000;
 pub const DEFAULT_REUSE_THRESHOLD: u32 = 750;
