@@ -61,9 +61,21 @@ impl LocRib {
 
     /// Replace the whole ranked path set for a key (best first). An empty
     /// set removes the key. Used by the decision process when Add-Path
-    /// selection re-ranks every path for a prefix. Diff semantics follow
-    /// the best path: unchanged best → no event, same-identifier new best
-    /// → modified, different best → remove + add.
+    /// selection re-ranks every path for a prefix, and by local
+    /// origination.
+    ///
+    /// Whole-set replacement is only appropriate for callers that own the
+    /// *full* ranking of the key: the previous set is discarded wholesale,
+    /// so replacing a set with a single path without having re-ranked the
+    /// key's other candidates (e.g. a peer's Adj-RIB-In paths) silently
+    /// evicts them. The BGP decision process (`lr-router::reselect`) and
+    /// the redistribution path run their candidate selection first and
+    /// hand the complete ranking to this method; the single-path
+    /// [`Self::install`] entry exists for callers that only ever manage
+    /// one path per key (OSPF/Babel runtimes).
+    ///
+    /// Diff semantics follow the best path: unchanged best → no event,
+    /// same-identifier new best → modified, different best → remove + add.
     pub fn install_set(&mut self, key: &RouteKey, ranked: Vec<Route>) {
         debug_assert!(ranked.iter().all(|r| &r.key == key));
         if ranked.is_empty() {

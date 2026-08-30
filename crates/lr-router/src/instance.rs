@@ -224,11 +224,11 @@ struct OspfAreaState {
 /// default; type-7 LSAs only exist inside NSSAs.
 fn ospf_area_accepts(kind: &OspfAreaType, lsa: &Lsa) -> bool {
     match lsa.header.ls_type {
-        t if t == LsaTypeV2::AsExternalLsa as u8 || t == LsaTypeV2::SummaryAsbrLsa as u8 => {
+        t if t == LsaTypeV2::AsExternalLsa as u16 || t == LsaTypeV2::SummaryAsbrLsa as u16 => {
             !kind.is_stubby()
         }
-        t if t == LsaTypeV2::NssaExternalLsa as u8 => kind.is_nssa(),
-        t if t == LsaTypeV2::SummaryIpLsa as u8 => {
+        t if t == LsaTypeV2::NssaExternalLsa as u16 => kind.is_nssa(),
+        t if t == LsaTypeV2::SummaryIpLsa as u16 => {
             !kind.no_summary() || lsa.header.link_state_id == 0
         }
         _ => true,
@@ -752,9 +752,13 @@ pub struct DefaultRouter {
     /// Each pipe bridges routes from `source` to `target` protocol.
     pipes: Vec<crate::redistribution::RedistributionPipe>,
     /// Routes this router has redistributed into BGP, keyed by the
-    /// original Loc-RIB key. When the source route disappears, the
-    /// redistributed BGP route is unoriginated.
-    redistributed_bgp: BTreeMap<RouteKey, RouteKey>,
+    /// original Loc-RIB key. The value is the re-originated BGP route:
+    /// it carries the source route's peer (so the export split horizon
+    /// never re-advertises it to the session it came from) and competes
+    /// with the peer's Adj-RIB-In paths for the Loc-RIB slot through the
+    /// decision process. When the source route disappears, the copy is
+    /// dropped via `unredistribute_route`.
+    redistributed_bgp: BTreeMap<RouteKey, Route>,
     /// Optional BMP (RFC 7854) sink: when set, the router mirrors
     /// peer state changes and route events to this closure as encoded
     /// BMP messages. The embedder connects the closure to a TCP
@@ -809,6 +813,12 @@ struct MaxPrefixState {
     /// True once the threshold percentage was crossed and the warning
     /// was emitted. Cleared on session reset.
     threshold_warned: bool,
+    /// Current number of routes this session contributed to the
+    /// post-policy Adj-RIB-In, maintained incrementally on every
+    /// install/withdraw/purge so `check_max_prefix` is O(1) per install
+    /// instead of scanning the whole Adj-RIB-In (which made table
+    /// convergence O(R²)).
+    count: u32,
 }
 
 impl Default for DefaultRouter {
@@ -1401,6 +1411,11 @@ impl DefaultRouter {
         }
         // Count the post-policy slice for this session.
         let count = self.adj_rib_in.iter_origin(origin).count();
+        // The slice was cleared and re-imported wholesale: reset the
+        // incremental max-prefix counter to the new slice size.
+        if let Some(st) = self.max_prefix_state.get_mut(&h.0) {
+            st.count = count as u32;
+        }
         self.pending_events.push(RouterEvent::Log(format!(
             "session {}: soft reconfiguration inbound — re-evaluated {} routes",
             h.0, count
@@ -1583,12 +1598,21 @@ impl DefaultRouter {
     }
 
     /// Remove a locally originated route and withdraw it everywhere.
+    ///
+    /// The decision process re-runs for the prefix (RFC 4271 §9.1.2): a
+    /// peer path that was ranked below the originated route is restored,
+    /// and an empty candidate set withdraws the prefix from every session
+    /// (via `apply_selection`). Any redistribution-sourced copy of the
+    /// route is flushed first — its source (this originated route) is
+    /// gone.
     pub fn unoriginate(&mut self, key: &RouteKey) {
         if self.originated.remove(key).is_some() {
-            self.loc_rib.uninstall(key);
-            self.pending_events
-                .push(RouterEvent::RouteWithdrawn(key.clone()));
-            self.propagate_withdrawal(key);
+            // Flush the redistributed BGP copy whose source was this
+            // originated route.
+            self.unredistribute_route(key);
+            // Re-run selection: a beaten peer path comes back, or the
+            // empty ranking withdraws the prefix everywhere.
+            self.reselect(key);
         }
     }
 
@@ -1906,7 +1930,16 @@ impl DefaultRouter {
         if let Some(state) = self.graceful_restart.get_mut(&session) {
             state.refreshed.insert((key.clone(), route.path_id));
         }
+        // Maintain the incremental per-session Adj-RIB-In count that
+        // `check_max_prefix` reads (O(1) per install). Re-announcing an
+        // existing (origin, key, path_id) replaces in place and does not
+        // double-count.
+        let is_new = self.adj_rib_in.get(origin, &key, route.path_id).is_none();
         self.adj_rib_in.feed_pre_policy(origin, route);
+        if is_new {
+            let st = self.max_prefix_state.entry(session).or_default();
+            st.count = st.count.saturating_add(1);
+        }
         self.reselect(&key);
         // Per-peer maximum-prefix enforcement (BIRD `maximum prefix`,
         // FRR `maximum-prefix`). Count the session's routes in Adj-RIB-In
@@ -2003,11 +2036,12 @@ impl DefaultRouter {
         count
     }
 
-    /// Count a session's Adj-RIB-In and enforce the maximum-prefix limit.
-    /// Emits [`RouterEvent::MaxPrefixThreshold`] once when the early-warning
+    /// Enforce the per-session maximum-prefix limit. Emits
+    /// [`RouterEvent::MaxPrefixThreshold`] once when the early-warning
     /// percentage is crossed, and [`RouterEvent::MaxPrefixExceeded`] once
     /// when the hard limit is hit. For `Teardown`/`Restart` the session is
-    /// closed with a NOTIFICATION CEASE (subcode 8).
+    /// closed with a NOTIFICATION CEASE (subcode 1 — "Maximum Number of
+    /// Prefixes Reached", RFC 4486 §3/§4).
     fn check_max_prefix(&mut self, session: u64) {
         // Read the config without borrowing self mutably.
         let (limit, action, threshold_pct) = match self.sessions.get(&session) {
@@ -2024,11 +2058,13 @@ impl DefaultRouter {
             }
             _ => return, // not a BGP session
         };
+        // The per-session Adj-RIB-In count is maintained incrementally on
+        // every install/withdraw/purge — no whole-RIB scan per install.
         let count: u32 = self
-            .adj_rib_in
-            .iter_all()
-            .filter(|r| r.origin.peer == session)
-            .count() as u32;
+            .max_prefix_state
+            .get(&session)
+            .map(|s| s.count)
+            .unwrap_or(0);
         // Early-warning threshold (fires once per crossing).
         if threshold_pct > 0 && count > 0 {
             let threshold_count = (u64::from(limit) * u64::from(threshold_pct) / 100) as u32;
@@ -2070,12 +2106,15 @@ impl DefaultRouter {
                             action.name()
                         )));
                         // Tear the session down with a CEASE NOTIFICATION
-                        // (subcode 8 — "Maximum Number of Prefixes
-                        // Exceeded", RFC 4486 §2.1).
+                        // (subcode 1 — "Maximum Number of Prefixes
+                        // Reached", RFC 4486 §3).
                         if let Some(SessionState::Bgp { peer, .. }) =
                             self.sessions.get_mut(&session)
                         {
-                            peer.enqueue_notification(lr_bgp::BgpErrorCode::Cease, 8);
+                            peer.enqueue_notification(
+                                lr_bgp::BgpErrorCode::Cease,
+                                lr_bgp::BgpCeaseSubcode::MaximumPrefixes as u8,
+                            );
                         }
                         self.flush_peer_output(session);
                     }
@@ -2089,6 +2128,9 @@ impl DefaultRouter {
         // RIB (it is gone from the peer either way).
         self.pre_policy_adj_rib_in.withdraw(origin, key, path_id);
         if self.adj_rib_in.withdraw(origin, key, path_id).is_some() {
+            if let Some(st) = self.max_prefix_state.get_mut(&origin.peer) {
+                st.count = st.count.saturating_sub(1);
+            }
             self.reselect(key);
         }
     }
@@ -2567,6 +2609,14 @@ impl DefaultRouter {
                         continue;
                     }
                     for (slot, route) in set.iter().enumerate() {
+                        // Split horizon (RFC 4271 §9.1.3 Phase 3): a
+                        // route retained from this very session (e.g.
+                        // under graceful restart) is not advertised back
+                        // to it — the steady-state export path applies
+                        // the same filter.
+                        if route.origin.peer == h {
+                            continue;
+                        }
                         let mut r = route.clone();
                         r.path_id = slot as u32 + 1;
                         snapshot.push(r);
@@ -2576,7 +2626,7 @@ impl DefaultRouter {
                 snapshot.extend(
                     self.loc_rib
                         .iter_best()
-                        .filter(|route| route.key.family == family)
+                        .filter(|route| route.key.family == family && route.origin.peer != h)
                         .cloned(),
                 );
             }
@@ -2697,7 +2747,18 @@ impl DefaultRouter {
                     let ev: RouterEvent = ev.into();
                     self.pending_events.push(ev);
                 }
-                BgpAction::Close | BgpAction::None => {}
+                BgpAction::Close => {
+                    // The FSM ended the session (hold timer expiry,
+                    // NOTIFICATION received, parse error, ManualStop):
+                    // tear it down exactly like a transport close —
+                    // purge the peer's routes (or retain them under
+                    // RFC 4724/9494) — and let the embedder close the
+                    // transport. When the transport also closes later,
+                    // the teardown re-runs idempotently (nothing left
+                    // to purge).
+                    self.teardown_bgp_session(session);
+                }
+                BgpAction::None => {}
             }
         }
         // The FSM buffers outbound bytes internally (OPEN/KEEPALIVE/UPDATE
@@ -2719,26 +2780,56 @@ impl DefaultRouter {
     /// connect timeout). RFC 4724 / RFC 9494 peers retain routes until the
     /// negotiated deadline; all other sessions follow RFC 4271 immediate
     /// purge.
+    ///
+    /// `BgpEvent::TransportClose` always yields [`BgpAction::Close`],
+    /// which [`Self::dispatch_bgp_actions`] routes through
+    /// [`Self::teardown_bgp_session`] — the same path an FSM-initiated
+    /// close takes (hold timer expiry, NOTIFICATION received, parse
+    /// error, ManualStop). A transport close arriving after the FSM
+    /// already closed re-runs the teardown idempotently, so nothing is
+    /// double-purged.
     pub fn close_session(&mut self, h: SessionHandle) {
-        if let Some(mrai) = self.mrai.get_mut(&h.0) {
+        let Some(state) = self.sessions.get_mut(&h.0) else {
+            return;
+        };
+        let actions = match state {
+            SessionState::Bgp { peer, .. } => peer.step(BgpEvent::TransportClose),
+            SessionState::Ospf { .. } | SessionState::Babel { .. } => Vec::new(),
+        };
+        self.dispatch_bgp_actions(h.0, actions);
+    }
+
+    /// Common teardown for a BGP session that went down — whether the
+    /// FSM itself reported it via [`BgpAction::Close`] or the transport
+    /// closed underneath us (see [`Self::close_session`]). Clears the
+    /// session's outbound bookkeeping, then either enters RFC 4724 /
+    /// RFC 9494 retention (routes stay in Adj-RIB-In until the
+    /// negotiated deadline) or purges the session's contribution from
+    /// the RIB pipeline (RFC 4271 §6: the Adj-RIB-In is cleared and the
+    /// Loc-RIB re-selected, withdrawing the stale best routes from the
+    /// other sessions' Adj-RIB-Out).
+    fn teardown_bgp_session(&mut self, session: u64) {
+        if let Some(mrai) = self.mrai.get_mut(&session) {
             mrai.last_sent.clear();
             mrai.pending.clear();
         }
         // Clear maximum-prefix bookkeeping so a re-established session
         // starts with fresh threshold/exceeded latches.
-        if let Some(state) = self.max_prefix_state.get_mut(&h.0) {
+        if let Some(state) = self.max_prefix_state.get_mut(&session) {
             state.exceeded = false;
             state.threshold_warned = false;
         }
-        // Compute the retention windows *before* stepping the FSM (the
-        // step clears nothing, but keep the ordering explicit).
-        let retention = match self.sessions.get(&h.0) {
+        // Compute the retention windows from the peer's negotiated
+        // GR/LLGR values. The FSM step that produced Close clears
+        // nothing, but keep the ordering explicit: this must run before
+        // any mutation that could reset the negotiated state.
+        let retention = match self.sessions.get(&session) {
             Some(SessionState::Bgp { peer, .. }) => {
                 let restart_time = peer.negotiated_graceful_restart_time().unwrap_or(0);
                 // RFC 9494 §4.2: per-family LLST extends the retention
                 // window beyond the RFC 4724 restart time. The received
                 // timer may be capped by local configuration.
-                let cap = self.llgr_caps.get(&h.0).copied();
+                let cap = self.llgr_caps.get(&session).copied();
                 let mut llgr_deadlines = BTreeMap::new();
                 if peer.llgr_negotiated() {
                     for (family, llst) in peer.negotiated_llgr_families() {
@@ -2754,24 +2845,22 @@ impl DefaultRouter {
             }
             _ => None,
         };
-        let Some(state) = self.sessions.get_mut(&h.0) else {
-            return;
-        };
-        let actions = match state {
-            SessionState::Bgp { peer, .. } => peer.step(BgpEvent::TransportClose),
-            SessionState::Ospf { .. } | SessionState::Babel { .. } => Vec::new(),
-        };
-        self.dispatch_bgp_actions(h.0, actions);
         match retention {
             Some((restart_time, llgr_deadlines))
                 if restart_time > 0 || !llgr_deadlines.is_empty() =>
             {
+                // A session already in retention (the FSM closed it and
+                // the transport close arrived later) keeps its original
+                // deadline rather than restarting the clock.
+                if self.graceful_restart.contains_key(&session) {
+                    return;
+                }
                 let families: Vec<String> = llgr_deadlines
                     .keys()
                     .map(|f| format!("{}/{}", f.afi, f.safi))
                     .collect();
                 self.graceful_restart.insert(
-                    h.0,
+                    session,
                     GracefulRestartState {
                         restart_expires_at_ms: self
                             .now_ms
@@ -2783,7 +2872,7 @@ impl DefaultRouter {
                 );
                 self.pending_events.push(RouterEvent::Log(format!(
                     "session {} entered graceful-restart retention for {} seconds{}",
-                    h.0,
+                    session,
                     restart_time,
                     if families.is_empty() {
                         String::new()
@@ -2792,7 +2881,7 @@ impl DefaultRouter {
                     }
                 )));
             }
-            _ => self.session_down_cleanup(h.0),
+            _ => self.session_down_cleanup(session),
         }
     }
 
@@ -2818,6 +2907,11 @@ impl DefaultRouter {
             .collect();
         if affected.is_empty() {
             return;
+        }
+        // One entry per purged route (both origins counted) — keep the
+        // incremental max-prefix counter exact.
+        if let Some(st) = self.max_prefix_state.get_mut(&session) {
+            st.count = st.count.saturating_sub(affected.len() as u32);
         }
         for origin in origins {
             self.adj_rib_in.clear_for(origin);
@@ -2868,7 +2962,7 @@ impl DefaultRouter {
                     .filter(|r| !refreshed.contains(&(r.key.clone(), r.path_id)))
                     .map(|r| r.key.clone()),
             );
-            self.adj_rib_in.mutate_origin(origin, |mut route| {
+            let removed = self.adj_rib_in.mutate_origin(origin, |mut route| {
                 if refreshed.contains(&(route.key.clone(), route.path_id)) {
                     // Freshly re-advertised during resynchronization.
                     return Some(route);
@@ -2886,6 +2980,11 @@ impl DefaultRouter {
                     Some(route)
                 }
             });
+            // Deleted routes leave the session's Adj-RIB-In: keep the
+            // incremental max-prefix counter exact.
+            if let Some(st) = self.max_prefix_state.get_mut(&session) {
+                st.count = st.count.saturating_sub(removed as u32);
+            }
         }
         for key in &affected {
             self.reselect(key);
@@ -2960,6 +3059,9 @@ impl DefaultRouter {
             purged += stale.len();
             for (key, path_id) in stale {
                 self.adj_rib_in.withdraw(origin, &key, path_id);
+                if let Some(st) = self.max_prefix_state.get_mut(&session) {
+                    st.count = st.count.saturating_sub(1);
+                }
                 self.reselect(&key);
             }
         }
@@ -3236,22 +3338,34 @@ impl RouterInstance for DefaultRouter {
         self.mrai.remove(&h.0);
         self.graceful_restart.remove(&h.0);
         self.session_policy.remove(&h.0);
+        // Per-session bookkeeping must not outlive the session: LLGR caps,
+        // max-prefix state and the Adj-RIB-Out / pre-policy slices.
+        self.llgr_caps.remove(&h.0);
+        self.max_prefix_state.remove(&h.0);
+        for origin in [
+            RouteOrigin {
+                proto: 0,
+                peer: h.0,
+            },
+            RouteOrigin {
+                proto: 1,
+                peer: h.0,
+            },
+        ] {
+            self.adj_rib_out.clear_for(origin);
+            self.pre_policy_adj_rib_in.clear_for(origin);
+        }
         // Remove every route that session contributed and re-select.
-        let keys: Vec<(RouteKey, u32)> = self
+        // Withdraw with each route's *actual* origin (proto 0 or 1) so
+        // iBGP-origin paths are not left behind.
+        let keys: Vec<(RouteOrigin, RouteKey, u32)> = self
             .adj_rib_in
             .iter_all()
             .filter(|r| r.origin.peer == h.0)
-            .map(|r| (r.key.clone(), r.path_id))
+            .map(|r| (r.origin, r.key.clone(), r.path_id))
             .collect();
-        for (k, path_id) in keys {
-            self.withdraw_from_session(
-                RouteOrigin {
-                    proto: 0,
-                    peer: h.0,
-                },
-                &k,
-                path_id,
-            );
+        for (origin, k, path_id) in keys {
+            self.withdraw_from_session(origin, &k, path_id);
         }
         // OSPF: LSAs live per area, so the area survives while any session
         // remains. Dropping the last session discards the area LSDB and
@@ -3376,6 +3490,7 @@ impl RouterInstance for DefaultRouter {
                         }
                     }
                     if !outbound.is_empty() {
+                        Self::finalize_ospf_v2_egress(runtime.protocol, &mut outbound);
                         conn.put_output(&outbound);
                     }
                     Pending::OspfLsas { lsas }
@@ -3450,7 +3565,7 @@ impl RouterInstance for DefaultRouter {
                             continue;
                         }
                         if area.lsdb.install(lsa.clone(), self.now_ms).changed() {
-                            if lsa.header.ls_type == LsaTypeV2::AsExternalLsa as u8 {
+                            if lsa.header.ls_type == LsaTypeV2::AsExternalLsa as u16 {
                                 as_scope.push(lsa.clone());
                             }
                             to_flood.push(lsa);
@@ -3535,7 +3650,8 @@ impl RouterInstance for DefaultRouter {
                 continue;
             };
             for p in runtime.exchange.poll(self.now_ms) {
-                if let Ok(bytes) = runtime.codec.encode_vec(&p) {
+                if let Ok(mut bytes) = runtime.codec.encode_vec(&p) {
+                    Self::finalize_ospf_v2_egress(runtime.protocol, &mut bytes);
                     conn.put_output(&bytes);
                 }
             }
@@ -3630,6 +3746,19 @@ impl DefaultRouter {
         }
     }
 
+    /// Patch the RFC 2328 §A.1 packet checksum into every encoded OSPFv2
+    /// packet of an egress stream. The `lr-ospf` codec deliberately emits
+    /// the checksum field zeroed and the receive side validates it
+    /// (RFC 2328 §8.2 discards bad packets), so every v2 packet this
+    /// router puts on the wire must be finalized first. OSPFv3 streams
+    /// are left untouched — RFC 5340 computes a different checksum over a
+    /// pseudo-header.
+    fn finalize_ospf_v2_egress(protocol: Protocol, bytes: &mut [u8]) {
+        if protocol == Protocol::Ospfv2 {
+            lr_ospf::origination::finalize_v2_stream(bytes);
+        }
+    }
+
     /// Flood `lsas` to every OSPF session of `area` except `exclude`
     /// (RFC 2328 §13.3, simplified: no ack/retransmission bookkeeping —
     /// the poll-driven embedder handles transport reliability).
@@ -3646,7 +3775,8 @@ impl DefaultRouter {
             }
             let packet =
                 ospf_ls_update(runtime.protocol, runtime.router_id, area_id, lsas.to_vec());
-            if let Ok(bytes) = runtime.codec.encode_vec(&packet) {
+            if let Ok(mut bytes) = runtime.codec.encode_vec(&packet) {
+                Self::finalize_ospf_v2_egress(runtime.protocol, &mut bytes);
                 conn.put_output(&bytes);
             }
         }
@@ -3873,8 +4003,8 @@ impl DefaultRouter {
             // Not a functioning ABR: flush every self-originated summary
             // (type-3) and summary-ASBR (type-4) LSA.
             let mut changed = self.ospf_flush_self_lsa_types(router_id, |key| {
-                key.ls_type == LsaTypeV2::SummaryIpLsa as u8
-                    || key.ls_type == LsaTypeV2::SummaryAsbrLsa as u8
+                key.ls_type == LsaTypeV2::SummaryIpLsa as u16
+                    || key.ls_type == LsaTypeV2::SummaryAsbrLsa as u16
             });
             // ... and the ABR-injected NSSA defaults lose their
             // justification too (RFC 3101 §2.4).
@@ -3999,7 +4129,7 @@ impl DefaultRouter {
                     area.lsdb
                         .iter()
                         .filter(|(key, _)| {
-                            key.ls_type == LsaTypeV2::SummaryIpLsa as u8
+                            key.ls_type == LsaTypeV2::SummaryIpLsa as u16
                                 && key.advertising_router == router_id
                         })
                         .map(|(key, entry)| (key.link_state_id, entry.lsa.clone()))
@@ -4134,7 +4264,7 @@ impl DefaultRouter {
                         .lsdb
                         .iter()
                         .find(|(key, _)| {
-                            key.ls_type == LsaTypeV2::NssaExternalLsa as u8
+                            key.ls_type == LsaTypeV2::NssaExternalLsa as u16
                                 && key.link_state_id == 0
                                 && key.advertising_router == router_id
                         })
@@ -4210,7 +4340,7 @@ impl DefaultRouter {
         let asbrs: BTreeSet<u32> = source
             .lsdb
             .iter()
-            .filter(|(key, _)| key.ls_type == LsaTypeV2::AsExternalLsa as u8)
+            .filter(|(key, _)| key.ls_type == LsaTypeV2::AsExternalLsa as u16)
             .map(|(key, _)| key.advertising_router)
             .collect();
 
@@ -4232,7 +4362,7 @@ impl DefaultRouter {
                         area.lsdb
                             .iter()
                             .filter(|(key, _)| {
-                                key.ls_type == LsaTypeV2::SummaryAsbrLsa as u8
+                                key.ls_type == LsaTypeV2::SummaryAsbrLsa as u16
                                     && key.advertising_router == router_id
                             })
                             .filter_map(|(_, entry)| flush_summary_lsa(&entry.lsa))
@@ -4257,7 +4387,7 @@ impl DefaultRouter {
                     area.lsdb
                         .iter()
                         .filter(|(key, _)| {
-                            key.ls_type == LsaTypeV2::SummaryAsbrLsa as u8
+                            key.ls_type == LsaTypeV2::SummaryAsbrLsa as u16
                                 && key.advertising_router == router_id
                         })
                         .map(|(key, entry)| (key.link_state_id, entry.lsa.clone()))
@@ -4367,7 +4497,7 @@ impl DefaultRouter {
                     continue; // §3.1: another border router translates
                 }
                 for (key, entry) in area.lsdb.iter() {
-                    if key.ls_type != LsaTypeV2::NssaExternalLsa as u8 {
+                    if key.ls_type != LsaTypeV2::NssaExternalLsa as u16 {
                         continue;
                     }
                     let Some(body) = lr_ospf::lsa::decode_as_external_body(&entry.lsa.body) else {
@@ -4424,7 +4554,7 @@ impl DefaultRouter {
                     area.lsdb
                         .iter()
                         .find(|(k, _)| {
-                            k.ls_type == LsaTypeV2::AsExternalLsa as u8
+                            k.ls_type == LsaTypeV2::AsExternalLsa as u16
                                 && k.advertising_router == router_id
                                 && k.link_state_id == key.1
                         })
@@ -4457,7 +4587,7 @@ impl DefaultRouter {
                     area.lsdb
                         .iter()
                         .find(|(k, _)| {
-                            k.ls_type == LsaTypeV2::AsExternalLsa as u8
+                            k.ls_type == LsaTypeV2::AsExternalLsa as u16
                                 && k.advertising_router == router_id
                                 && k.link_state_id == key.1
                         })
@@ -4509,12 +4639,24 @@ impl DefaultRouter {
     }
 
     /// Remove all redistribution pipes matching `(source, target)`.
-    /// Returns the number of pipes removed.
+    /// Returns the number of pipes removed. When a pipe targeting BGP is
+    /// removed, the re-originated copies it produced are flushed and the
+    /// affected prefixes re-selected, so the Loc-RIB falls back to the
+    /// remaining candidates (a copy produced by another still-configured
+    /// BGP-target pipe is re-created on the next source change).
     pub fn remove_redistribution_pipe(&mut self, source: Protocol, target: Protocol) -> usize {
         let before = self.pipes.len();
         self.pipes
             .retain(|p| !(p.source == source && p.target == target));
-        before - self.pipes.len()
+        let removed = before - self.pipes.len();
+        if removed > 0 && target == Protocol::Bgp {
+            let keys: Vec<RouteKey> = self.redistributed_bgp.keys().cloned().collect();
+            for key in keys {
+                self.unredistribute_route(&key);
+                self.reselect(&key);
+            }
+        }
+        removed
     }
 
     /// Apply redistribution for a single route that just entered (or
@@ -4563,7 +4705,15 @@ impl DefaultRouter {
                     }
                     let bgp_route = Route {
                         key: route.key.clone(),
-                        origin: RouteOrigin { proto: 2, peer: 0 },
+                        // The re-originated copy keeps the source route's
+                        // peer so the export split horizon (RFC 4271
+                        // §9.1.3 Phase 3) never re-advertises it to the
+                        // session it was learned from; proto 2 marks it as
+                        // locally (re-)originated.
+                        origin: RouteOrigin {
+                            proto: 2,
+                            peer: route.origin.peer,
+                        },
                         protocol: Protocol::Bgp,
                         preference: lr_core::rib::Preference::new(
                             Protocol::Bgp.default_admin_distance(),
@@ -4574,9 +4724,54 @@ impl DefaultRouter {
                         age_ms: self.now_ms,
                         path_id: 0,
                     };
-                    self.loc_rib.install_set(&route.key, vec![bgp_route]);
+                    let key = route.key.clone();
+                    // No-op when the copy is unchanged (age aside). This
+                    // also terminates the apply_selection →
+                    // redistribute_route cycle when the copy itself is
+                    // the Loc-RIB best and re-matches its own pipe.
+                    let unchanged = self
+                        .redistributed_bgp
+                        .get(&key)
+                        .is_some_and(|existing| {
+                            existing.origin == bgp_route.origin
+                                && existing.preference == bgp_route.preference
+                                && existing.attributes == bgp_route.attributes
+                                && existing.next_hop == bgp_route.next_hop
+                        });
+                    if unchanged {
+                        continue;
+                    }
                     self.redistributed_bgp
-                        .insert(route.key.clone(), route.key.clone());
+                        .insert(key.clone(), bgp_route.clone());
+                    // Run the decision process instead of a wholesale
+                    // install_set: the best path by the configured
+                    // preference (admin distance / BGP decision process)
+                    // wins the Loc-RIB slot, and a beaten peer path stays
+                    // in Adj-RIB-In to be restored when the winner
+                    // disappears (RFC 4271 §9.1.2).
+                    let mut candidates: Vec<Route> = self
+                        .adj_rib_in
+                        .iter_all()
+                        .filter(|r| r.key == key)
+                        .cloned()
+                        .collect();
+                    candidates.push(bgp_route);
+                    let ranked: Vec<Route> = if candidates
+                        .iter()
+                        .all(|r| r.protocol == Protocol::Bgp)
+                    {
+                        BestPath::rank(&candidates, &self.best_path_cfg)
+                            .into_iter()
+                            .take(self.add_path_max_paths)
+                            .cloned()
+                            .collect()
+                    } else {
+                        RouteSelector::select(&candidates)
+                            .into_iter()
+                            .cloned()
+                            .collect()
+                    };
+                    self.apply_selection(&key, ranked);
                     self.pending_events.push(RouterEvent::Log(format!(
                         "redistribute: {} -> BGP (metric={})",
                         route.key.prefix, metric
@@ -4604,11 +4799,14 @@ impl DefaultRouter {
         }
     }
 
-    /// Withdraw a redistributed route. Called when the source route
-    /// disappears from the Loc-RIB.
+    /// Withdraw a redistributed BGP route. Called when the source route
+    /// disappears from the Loc-RIB (or a locally originated route is
+    /// unoriginated, or the producing pipe is removed). The copy is
+    /// dropped from the redistributed pool; the caller re-runs the
+    /// decision process so the Loc-RIB converges to the remaining
+    /// candidates (RFC 4271 §9.1.2).
     fn unredistribute_route(&mut self, key: &RouteKey) {
-        if let Some(bgp_key) = self.redistributed_bgp.remove(key) {
-            self.loc_rib.uninstall(&bgp_key);
+        if self.redistributed_bgp.remove(key).is_some() {
             self.pending_events.push(RouterEvent::Log(format!(
                 "redistribute: withdraw {} from BGP",
                 key.prefix
@@ -4674,8 +4872,8 @@ impl DefaultRouter {
             let mut flushes = Vec::new();
             if let Some(area) = self.ospf_areas.get(&area_id) {
                 for (key, entry) in area.lsdb.iter() {
-                    let external = key.ls_type == LsaTypeV2::AsExternalLsa as u8
-                        || key.ls_type == LsaTypeV2::NssaExternalLsa as u8;
+                    let external = key.ls_type == LsaTypeV2::AsExternalLsa as u16
+                        || key.ls_type == LsaTypeV2::NssaExternalLsa as u16;
                     if external
                         && key.advertising_router == self.ospf_router_id.unwrap_or(0)
                         && key.link_state_id == network
@@ -4767,7 +4965,7 @@ impl DefaultRouter {
                     area.lsdb
                         .iter()
                         .find(|(key, _)| {
-                            key.ls_type == LsaTypeV2::NssaExternalLsa as u8
+                            key.ls_type == LsaTypeV2::NssaExternalLsa as u16
                                 && key.advertising_router == router_id
                                 && key.link_state_id == network
                         })
@@ -4806,7 +5004,7 @@ impl DefaultRouter {
                     area.lsdb
                         .iter()
                         .find(|(key, _)| {
-                            key.ls_type == LsaTypeV2::AsExternalLsa as u8
+                            key.ls_type == LsaTypeV2::AsExternalLsa as u16
                                 && key.advertising_router == router_id
                                 && key.link_state_id == network
                         })
@@ -4827,7 +5025,7 @@ impl DefaultRouter {
                 area.lsdb
                     .iter()
                     .find(|(key, _)| {
-                        key.ls_type == LsaTypeV2::AsExternalLsa as u8
+                        key.ls_type == LsaTypeV2::AsExternalLsa as u16
                             && key.advertising_router == router_id
                             && key.link_state_id == network
                     })
@@ -5113,16 +5311,21 @@ fn ospf_ls_update(protocol: Protocol, router_id: u32, area_id: u32, lsas: Vec<Ls
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::redistribution::RedistributionPipe;
     use lr_core::addr::Asn;
     use lr_core::fsm::TimerSpec;
 
     /// Test helper: encode one LS-Update carrying `lsas` as if received
-    /// from a peer in `area`.
+    /// from a peer in `area`. The v2 packet checksum is finalized the way
+    /// the router's egress does (RFC 2328 §A.1) — the receive-side
+    /// decoder validates it.
     fn ospf_lsu_bytes(router_id: u32, area_id: u32, lsas: Vec<Lsa>) -> Vec<u8> {
         let packet = ospf_ls_update(Protocol::Ospfv2, router_id, area_id, lsas);
-        lr_ospf::codec::OspfCodec::v2()
+        let mut bytes = lr_ospf::codec::OspfCodec::v2()
             .encode_vec(&packet)
-            .expect("encode LSU")
+            .expect("encode LSU");
+        lr_ospf::origination::finalize_v2_stream(&mut bytes);
+        bytes
     }
 
     /// Decode every LS-Update packet from a drained output stream.
@@ -6794,5 +6997,287 @@ mod tests {
             .set_session_soft_reconfig_inbound(a_session, true)
             .unwrap_err();
         assert!(err.contains("already established"), "{err}");
+    }
+
+    // ===== audit regression tests =====
+
+    /// Walk a stream of framed BGP messages and return the (error code,
+    /// subcode) of the first NOTIFICATION found.
+    fn find_notification(bytes: &[u8]) -> Option<(u8, u8)> {
+        let mut i = 0;
+        while i + 19 <= bytes.len() {
+            let len = u16::from_be_bytes([bytes[i + 16], bytes[i + 17]]) as usize;
+            if len < 19 || i + len > bytes.len() {
+                return None;
+            }
+            if bytes[i + 18] == 3 {
+                return Some((bytes[i + 19], bytes[i + 20]));
+            }
+            i += len;
+        }
+        None
+    }
+
+    /// The FSM's `BgpAction::Close` (hold timer expiry) must tear the
+    /// session down like a transport close: the peer's routes are purged
+    /// from Adj-RIB-In and Loc-RIB (RFC 4271 §6.5 / §6). Regression:
+    /// Close used to be ignored, leaving the peer's routes installed and
+    /// advertised forever.
+    #[test]
+    fn fsm_close_purges_peer_routes_from_loc_rib() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        assert_eq!(a.rib_len(), 1);
+        // Drive A's FSM to hold-timer expiry the way tick() would after a
+        // silent peer: the FSM emits BgpAction::Close.
+        let actions = match a.sessions.get_mut(&a_session.0) {
+            Some(SessionState::Bgp { peer, .. }) => peer.step(BgpEvent::TimerHoldExpired),
+            _ => panic!("expected a BGP session"),
+        };
+        assert!(
+            actions.iter().any(|a| matches!(a, BgpAction::Close)),
+            "hold timer expiry must emit Close"
+        );
+        a.dispatch_bgp_actions(a_session.0, actions);
+        // The session is down and its routes are gone from the pipeline.
+        assert_eq!(a.rib_len(), 0, "peer's routes must not survive Close");
+        assert!(a.adj_rib_in.is_empty(), "Adj-RIB-In purged");
+        assert!(
+            !a.sessions
+                .get(&a_session.0)
+                .is_some_and(|s| matches!(s, SessionState::Bgp { established: true, .. })),
+            "established latch cleared"
+        );
+    }
+
+    /// `unoriginate` re-runs the decision process: a peer path that was
+    /// beaten by the originated route is restored to the Loc-RIB
+    /// (RFC 4271 §9.1.2). Regression: unoriginate used to uninstall the
+    /// key wholesale, leaving the prefix withdrawn until the peer
+    /// re-advertised.
+    #[test]
+    fn unoriginate_restores_beaten_peer_path() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let key = RouteKey::new(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+        // A locally originated route for the same prefix beats the peer
+        // path (empty AS_PATH vs the peer's one-AS path).
+        a.originate(Prefix::new_v4([198, 51, 100, 0], 24), None);
+        let best = a.loc_rib.best(&key).expect("originated route installed");
+        assert_eq!(best.origin.proto, 2, "originated route wins the Loc-RIB");
+        // Unoriginating must re-run selection and restore the peer path.
+        a.unoriginate(&key);
+        let best = a.loc_rib.best(&key).expect("peer path restored");
+        assert_eq!(best.origin.proto, 0, "peer path restored by re-selection");
+        assert_eq!(best.origin.peer, a_session.0);
+    }
+
+    /// The initial table dump on re-establishment applies the same split
+    /// horizon as steady-state export: a route retained by graceful
+    /// restart is never advertised back to the peer it came from
+    /// (RFC 4271 §9.1.3 Phase 3). Regression: on_bgp_established dumped
+    /// the whole Loc-RIB, handing GR-retained routes back to their origin
+    /// (a route-leak loop).
+    #[test]
+    fn established_dump_does_not_readvertise_retained_route_to_origin() {
+        let (mut a, a_session, mut b, b_session) = llgr_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        assert_eq!(a.rib_len(), 1);
+        // B goes down; A retains the route under GR.
+        a.tick(Instant(0));
+        a.close_session(a_session);
+        a.tick(Instant(500));
+        assert_eq!(a.rib_len(), 1, "route retained inside the restart window");
+        // B drops the prefix and comes back without re-advertising it.
+        let key = RouteKey::new(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            NlriFamily::IPV4_UNICAST,
+        );
+        b.unoriginate(&key);
+        establish(&mut a, a_session, &mut b, b_session);
+        let a_dump = a.drain_output(a_session);
+        assert!(!a_dump.is_empty(), "A re-establishes with an initial dump");
+        // A's Adj-RIB-Out for B's session must not carry the retained
+        // route: on_bgp_established applies the same split horizon as the
+        // steady-state export path (RFC 4271 §9.1.3 Phase 3).
+        assert!(
+            a.adj_rib_out
+                .paths_for(RouteOrigin { proto: 0, peer: a_session.0 }, &key)
+                .is_empty(),
+            "the origin session's Adj-RIB-Out must not carry its own retained route"
+        );
+        // And the wire must not hand it back either.
+        b.feed_input(b_session, &a_dump).unwrap();
+        assert_eq!(b.rib_len(), 0, "B never re-learns its own route");
+        assert!(
+            !b.adj_rib_in.iter_all().any(|r| r.key.prefix == key.prefix),
+            "B's Adj-RIB-In stays clear of its own route"
+        );
+    }
+
+    /// RFC 4486 §3: the max-prefix CEASE NOTIFICATION must use subcode 1
+    /// ("Maximum Number of Prefixes Reached"), not 8 ("Out of Resources").
+    #[test]
+    fn max_prefix_cease_uses_subcode_1() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let ha = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_maximum_prefix(1, lr_bgp::MaxPrefixAction::Teardown),
+            )
+            .unwrap();
+        let hb = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        establish(&mut a, ha, &mut b, hb);
+        // Drain the initial-dump residue so only the CEASE is left.
+        let _ = a.drain_output(ha);
+        // Two routes cross the limit of one.
+        for prefix in [
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Prefix::new_v4([198, 51, 100, 0], 24),
+        ] {
+            b.originate(prefix, Some(IpAddr::V4([192, 0, 2, 10])));
+            let adv = b.drain_output(hb);
+            assert!(!adv.is_empty());
+            a.feed_input(ha, &adv).unwrap();
+        }
+        let out = a.drain_output(ha);
+        let (code, sub) = find_notification(&out).expect("CEASE NOTIFICATION queued");
+        assert_eq!(code, 6, "CEASE error code");
+        assert_eq!(
+            sub, 1,
+            "RFC 4486 §3 subcode 1 = Maximum Number of Prefixes Reached"
+        );
+    }
+
+    /// A BGP→BGP redistribution pipe must not re-advertise a route back
+    /// to the session it was learned from (RFC 4271 §9.1.3 Phase 3 /
+    /// §5.1.2 loop avoidance). Regression: the re-originated copy used
+    /// peer=0, so the export split horizon never fired and the origin
+    /// session received its own route back.
+    #[test]
+    fn redistribution_bgp_to_bgp_respects_split_horizon() {
+        // A peers with B (route source) and with C (third party).
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let mut c = DefaultRouter::new();
+        let ha = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_local_address(IpAddr::V4([192, 0, 2, 1])),
+            )
+            .unwrap();
+        let hb = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_local_address(IpAddr::V4([192, 0, 2, 2])),
+            )
+            .unwrap();
+        let ha2 = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64514), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_local_address(IpAddr::V4([192, 0, 2, 1])),
+            )
+            .unwrap();
+        let hc = c
+            .add_session(
+                SessionConfig::bgp(Asn(64514), Asn(64512), RouterId::from_v4([10, 0, 0, 3]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_local_address(IpAddr::V4([192, 0, 2, 3])),
+            )
+            .unwrap();
+        establish(&mut a, ha, &mut b, hb);
+        establish(&mut a, ha2, &mut c, hc);
+        // Drain the initial-dump residue (End-of-RIB markers) so the
+        // assertions below only see post-redistribution traffic.
+        let _ = a.drain_output(ha);
+        let _ = a.drain_output(ha2);
+
+        a.add_redistribution_pipe(RedistributionPipe::new(Protocol::Bgp, Protocol::Bgp));
+
+        let p = Prefix::new_v4([203, 0, 113, 0], 24);
+        b.originate(p, Some(IpAddr::V4([192, 0, 2, 2])));
+        let adv = b.drain_output(hb);
+        assert!(!adv.is_empty());
+        a.feed_input(ha, &adv).unwrap();
+
+        // A re-originates and advertises the copy to the third party.
+        let to_c = a.drain_output(ha2);
+        assert!(
+            !to_c.is_empty(),
+            "the third-party session receives the redistributed route"
+        );
+        c.feed_input(hc, &to_c).unwrap();
+        assert_eq!(c.rib_len(), 1, "C learned the redistributed route");
+
+        // ... and must NOT advertise it back to the origin session.
+        let back_to_b = a.drain_output(ha);
+        assert!(
+            back_to_b.is_empty(),
+            "the origin session must not receive the route back"
+        );
+        assert!(
+            !b.adj_rib_in.iter_all().any(|r| r.key.prefix == p),
+            "B never re-learns its own route"
+        );
+    }
+
+    /// remove_session must drop every piece of per-session bookkeeping:
+    /// Adj-RIB-Out entries, pre-policy slices, LLGR caps, max-prefix
+    /// state (audit m1) — and withdraw iBGP-origin (proto 1) paths too.
+    #[test]
+    fn remove_session_cleans_up_bookkeeping() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_soft_reconfig_inbound(a_session, true)
+            .unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        // A advertises something of its own so Adj-RIB-Out carries an
+        // entry for the session.
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let adv = a.drain_output(a_session);
+        assert!(!adv.is_empty());
+        assert!(!a.adj_rib_out.is_empty(), "A advertised its route to B");
+        assert_eq!(a.adj_rib_in.len(), 1);
+        assert_eq!(a.adj_rib_in_snapshot(a_session).len(), 1);
+        // Seed the bookkeeping that used to leak.
+        a.llgr_caps.insert(a_session.0, 5);
+        a.max_prefix_state
+            .insert(a_session.0, MaxPrefixState { count: 1, ..Default::default() });
+
+        a.remove_session(a_session).unwrap();
+        assert!(a.adj_rib_in.is_empty(), "Adj-RIB-In purged");
+        assert!(
+            a.adj_rib_in_snapshot(a_session).is_empty(),
+            "pre-policy slice purged"
+        );
+        assert!(a.adj_rib_out.is_empty(), "Adj-RIB-Out bookkeeping purged");
+        assert!(!a.llgr_caps.contains_key(&a_session.0));
+        assert!(!a.max_prefix_state.contains_key(&a_session.0));
+        assert!(!a.mrai.contains_key(&a_session.0));
     }
 }

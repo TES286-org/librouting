@@ -33,7 +33,8 @@ pub enum RouterEvent {
     /// `limit` is the configured ceiling; `action` is what the router
     /// is doing about it. For `Warn` the session stays up; for
     /// `Teardown`/`Restart` the session is being closed with a
-    /// NOTIFICATION CEASE (subcode 8).
+    /// NOTIFICATION CEASE (subcode 1 — "Maximum Number of Prefixes
+    /// Reached", RFC 4486 §3/§4).
     MaxPrefixExceeded {
         session: SessionHandle,
         count: u32,

@@ -74,25 +74,15 @@ impl AdjRibOut {
             .collect()
     }
 
+    /// Every advertised path of `dest`, across all address families.
+    ///
+    /// Bounding the range with the absolute RouteKey extremes (rather
+    /// than an IPv4-unicast ceiling) keeps IPv6, labelled-unicast and
+    /// source-specific keys visible — the old v4-only upper bound hid
+    /// them, silently skipping the outbound bookkeeping for IPv6 paths.
     pub fn iter_for<'a>(&'a self, dest: RouteOrigin) -> impl Iterator<Item = &'a Route> + 'a {
         self.inner
-            .range(
-                (
-                    dest,
-                    RouteKey::new(
-                        lr_core::addr::Prefix::new_v4([0; 4], 0),
-                        lr_core::nlri::NlriFamily::IPV4_UNICAST,
-                    ),
-                )
-                    ..(
-                        dest,
-                        RouteKey::new(
-                            lr_core::addr::Prefix::new_v4([0xff; 4], 32),
-                            lr_core::nlri::NlriFamily::IPV4_UNICAST,
-                        ),
-                    ),
-            )
-            .filter(move |((d, _), _)| *d == dest)
+            .range((dest, crate::min_route_key())..=(dest, crate::max_route_key()))
             .flat_map(|(_, m)| m.values())
     }
 
@@ -126,8 +116,16 @@ mod tests {
     use lr_core::rib::{Preference, Protocol, Route, RouteOrigin};
 
     fn route(prefix: [u8; 4], pl: u8, path_id: u32) -> Route {
+        route_in(
+            Prefix::new_v4(prefix, pl),
+            NlriFamily::IPV4_UNICAST,
+            path_id,
+        )
+    }
+
+    fn route_in(prefix: Prefix, family: NlriFamily, path_id: u32) -> Route {
         Route {
-            key: RouteKey::new(Prefix::new_v4(prefix, pl), NlriFamily::IPV4_UNICAST),
+            key: RouteKey::new(prefix, family),
             origin: RouteOrigin { proto: 0, peer: 7 },
             protocol: Protocol::Bgp,
             preference: Preference::new(20, 0),
@@ -166,5 +164,42 @@ mod tests {
         rib.advertise(b, &route([10, 0, 0, 0], 8, 0), 1);
         rib.clear_for(a);
         assert_eq!(rib.len(), 1);
+    }
+
+    /// Regression (audit C1): `iter_for` must cover every family
+    /// advertised to a destination, including IPv6 and labelled-unicast
+    /// keys that sort above the old IPv4-unicast range bound.
+    #[test]
+    fn iter_for_covers_every_family_of_the_destination() {
+        let mut rib = AdjRibOut::new();
+        let dest = RouteOrigin { proto: 0, peer: 1 };
+        rib.advertise(dest, &route([203, 0, 113, 0], 24, 0), 1);
+        rib.advertise(
+            dest,
+            &route_in(
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    32,
+                ),
+                NlriFamily::IPV6_UNICAST,
+                0,
+            ),
+            1,
+        );
+        rib.advertise(
+            dest,
+            &route_in(
+                Prefix::new_v4([198, 51, 100, 0], 24),
+                NlriFamily::IPV4_LABELED_UNICAST,
+                0,
+            ),
+            1,
+        );
+        assert_eq!(rib.iter_for(dest).count(), 3);
+        assert_eq!(rib.len(), 3);
+        // A different destination stays excluded.
+        let other = RouteOrigin { proto: 0, peer: 2 };
+        rib.advertise(other, &route([10, 0, 0, 0], 8, 0), 1);
+        assert_eq!(rib.iter_for(dest).count(), 3);
     }
 }
