@@ -71,11 +71,18 @@ pub mod tdv2_subtype {
 pub mod bgp4mp_subtype {
     pub const STATE_CHANGE: u16 = 0;
     pub const MESSAGE: u16 = 1;
-    pub const MESSAGE_AS4: u16 = 2;
-    pub const STATE_CHANGE_AS4: u16 = 3;
-    /// Deprecated — kept for completeness.
-    pub const ENTRY: u16 = 4;
-    pub const SNAPSHOT: u16 = 5;
+    /// Deprecated pre-publication layout (Zebra `BGP4MP_ENTRY`) — decodes
+    /// as [`MrtRecord::Unknown`].
+    pub const ENTRY: u16 = 2;
+    /// Deprecated pre-publication layout (Zebra `BGP4MP_SNAPSHOT`) —
+    /// decodes as [`MrtRecord::Unknown`].
+    pub const SNAPSHOT: u16 = 3;
+    pub const MESSAGE_AS4: u16 = 4;
+    pub const STATE_CHANGE_AS4: u16 = 5;
+    /// Deprecated — decodes as [`MrtRecord::Unknown`].
+    pub const MESSAGE_LOCAL: u16 = 6;
+    /// Deprecated — decodes as [`MrtRecord::Unknown`].
+    pub const MESSAGE_AS4_LOCAL: u16 = 7;
 }
 
 /// One peer of a [`PeerIndexTable`]. Peers are referenced from RIB
@@ -571,16 +578,28 @@ fn put_prefix(out: &mut Vec<u8>, prefix: &Prefix) {
     }
 }
 
+/// Path-attribute flags octet: extended-length bit (RFC 4271 §4.3, bit 4).
+const ATTR_FLAG_EXT_LEN: u8 = 0x10;
+
 /// Encode core [`Attributes`] as the raw path-attribute TLV sequence
 /// RIB entries carry: each attribute is `flags | type | len[1|3] |
 /// value` on the wire already.
 pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
     let mut out = Vec::new();
     for a in attrs.iter() {
-        out.push(a.flags);
+        // RFC 4271 §4.3: values longer than 255 octets use the
+        // extended-length form — a 3-octet length AND the extended-length
+        // flag bit (0x10) set in the flags octet. A decoder honoring the
+        // flag would otherwise read the 0xff marker as a 1-byte length.
+        let extended = a.value.len() > 255;
+        out.push(if extended {
+            a.flags | ATTR_FLAG_EXT_LEN
+        } else {
+            a.flags
+        });
         out.push(a.tag.0);
-        if a.value.len() > 255 {
-            out.push(0xff); // extended-length marker is in flags; the
+        if extended {
+            out.push(0xff); // extended-length marker
             out.extend_from_slice(&(a.value.len() as u16).to_be_bytes());
         } else {
             out.push(a.value.len() as u8);

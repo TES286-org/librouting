@@ -31,7 +31,7 @@
 //!
 //!  Per-Peer Header (RFC 7854 §4.2, for types 0-2, 6):
 //!    +0  Peer Type      (u8, 0=global, 1=RD, 2=L3VPN)
-//!    +1  Peer Flags     (u8, bit 6=V flag, bit 5=L flag, bit 4=A flag)
+//!    +1  Peer Flags     (u8, V=0x80 bit 7, L=0x40 bit 6, A=0x20 bit 5)
 //!    +2  Peer Distinguisher (u64, big-endian, RD or 0)
 //!   +10  Peer Address   (16 bytes, IPv4 in last 4 or full IPv6)
 //!   +26  Peer AS        (u32, big-endian)
@@ -112,18 +112,21 @@ pub enum PeerType {
     Local = 2,
 }
 
-/// Peer flags (RFC 7854 §4.2). Bit 6 = V (IPv6 peer address), bit 5 =
-/// L (legacy AS number), bit 4 = A (adjacency type: 0=pre-policy,
-/// 1=post-policy).
+/// Peer flags (RFC 7854 §4.2): `V` (bit 7, 0x80) = the peer address is
+/// IPv6 (full 16 bytes); `L` (bit 6, 0x40) = the message reflects the
+/// post-policy Adj-RIB-In; `A` (bit 5, 0x20) = the peer AS is encoded in
+/// the legacy 2-byte AS_PATH format.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct PeerFlags(pub u8);
 
 impl PeerFlags {
-    /// V flag (bit 6): peer address is IPv6 (full 16 bytes).
+    /// V flag (bit 7, 0x80): peer address is IPv6 (full 16 bytes).
     pub const V: u8 = 0x80;
-    /// L flag (bit 5): peer AS is 2-byte (legacy).
+    /// L flag (bit 6, 0x40): the message reflects the post-policy
+    /// Adj-RIB-In (RFC 7854 §4.2).
     pub const L: u8 = 0x40;
-    /// A flag (bit 4): post-policy (1) vs pre-policy (0).
+    /// A flag (bit 5, 0x20): the peer AS is in the legacy 2-byte AS_PATH
+    /// format (RFC 7854 §4.2).
     pub const A: u8 = 0x20;
 
     pub fn ipv6() -> Self {
@@ -132,16 +135,26 @@ impl PeerFlags {
     pub fn ipv4() -> Self {
         Self(0)
     }
+    /// Post-policy flag (L): the message reflects the post-policy
+    /// Adj-RIB-In (RFC 7854 §4.2).
     pub fn post_policy() -> Self {
-        Self(Self::A)
+        Self(Self::L)
     }
     pub fn pre_policy() -> Self {
         Self(0)
+    }
+    /// Legacy-AS flag (A): the peer AS is in the 2-byte AS_PATH format
+    /// (RFC 7854 §4.2).
+    pub fn legacy_as_path() -> Self {
+        Self(Self::A)
     }
     pub fn is_ipv6(self) -> bool {
         self.0 & Self::V != 0
     }
     pub fn is_post_policy(self) -> bool {
+        self.0 & Self::L != 0
+    }
+    pub fn is_legacy_as_path(self) -> bool {
         self.0 & Self::A != 0
     }
 }
@@ -630,9 +643,50 @@ mod tests {
         };
         let msg = BmpMessage::route_monitoring(peer, &[]);
         let enc = BmpCodec::new().encode_vec(&msg).unwrap();
+        // Post-policy is the L flag (0x40, bit 6) — byte 7 is the peer
+        // flags octet (6-byte common header + 1).
+        assert_eq!(enc[7], PeerFlags::L);
         let mut codec = BmpCodec::new();
         let dec = codec.decode_slice(&enc).unwrap().unwrap();
         assert!(dec.peer.unwrap().peer_flags.is_post_policy());
+    }
+
+    #[test]
+    fn peer_flags_match_rfc_7854_4_2() {
+        // RFC 7854 §4.2 peer flags: |V|L|A|Reserved| — V=0x80 (bit 7, IPv6
+        // peer address), L=0x40 (bit 6, message reflects the post-policy
+        // Adj-RIB-In), A=0x20 (bit 5, legacy 2-byte AS_PATH).
+        assert_eq!(PeerFlags::V, 0x80);
+        assert_eq!(PeerFlags::L, 0x40);
+        assert_eq!(PeerFlags::A, 0x20);
+        assert!(PeerFlags(0x80).is_ipv6());
+        assert!(!PeerFlags(0x40).is_ipv6());
+        assert!(PeerFlags(0x40).is_post_policy());
+        assert!(!PeerFlags(0x80).is_post_policy());
+        assert!(PeerFlags(0x20).is_legacy_as_path());
+        assert!(!PeerFlags(0x40).is_legacy_as_path());
+        assert_eq!(PeerFlags::post_policy().0, 0x40);
+        assert_eq!(PeerFlags::legacy_as_path().0, 0x20);
+
+        // All three bits together round-trip through the codec as the
+        // literal byte 0xE0.
+        let peer = PeerHeader {
+            peer_type: PeerType::Global,
+            peer_flags: PeerFlags(0xE0),
+            peer_distinguisher: 0,
+            peer_address: [0u8; 16],
+            peer_as: 64512,
+            peer_bgp_id: 0,
+            timestamp_secs: 0,
+            timestamp_fraction: 0,
+        };
+        let msg = BmpMessage::route_monitoring(peer, &[]);
+        let enc = BmpCodec::new().encode_vec(&msg).unwrap();
+        assert_eq!(enc[7], 0xE0, "peer flags octet on the wire");
+        let mut codec = BmpCodec::new();
+        let dec = codec.decode_slice(&enc).unwrap().unwrap();
+        let flags = dec.peer.unwrap().peer_flags;
+        assert!(flags.is_ipv6() && flags.is_post_policy() && flags.is_legacy_as_path());
     }
 
     #[test]

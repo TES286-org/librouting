@@ -5,7 +5,7 @@
 //! and a [`LabelStack`] that encodes and decodes both the on-the-wire
 //! 4-octet-per-entry format (RFC 3032 §2.1, used by `AF_MPLS` netlink and
 //! raw packet captures) and the 3-octet-per-entry form used inside BGP
-//! labelled NLRI (RFC 8277 §3.2 — no TTL field).
+//! labelled NLRI (RFC 8277 §2.2/§2.3 — no TTL field).
 //!
 //! The crate has no I/O, no clock and no platform dependency — it is
 //! `no_std`-compatible and shares the `lr-core` conventions.
@@ -22,7 +22,8 @@
 //!
 //! `Label` is the 20-bit label value; `TC` (Traffic Class, formerly EXP)
 //! is 3 bits; `S` is the bottom-of-stack bit (1 on the last entry); `TTL`
-//! is 8 bits and is omitted in the 3-octet NLRI form.
+//! is 8 bits. In the 3-octet NLRI form both `TTL` and `TC` are absent —
+//! the entry is `Label(20) | Rsrv(3) | S(1)` (RFC 8277 §2.2/§2.3).
 
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -78,6 +79,11 @@ impl Label {
     pub const FIRST_NORMAL: u32 = 16;
 
     /// Construct a label with default TC=0 and TTL=64.
+    ///
+    /// Infallible and `const`, so it can be used in constant contexts.
+    /// It does *not* validate `value`: an out-of-range value is masked to
+    /// 20 bits on encode. Use [`Self::try_new`] when the range must be
+    /// enforced (RFC 3032 §2.1 labels are 20 bits).
     pub const fn new(value: u32) -> Self {
         Self {
             value,
@@ -88,12 +94,30 @@ impl Label {
 
     /// Construct a label with just the value (TC=0, TTL=0). Used for the
     /// BGP-LU 3-octet NLRI form, where TTL is absent.
+    ///
+    /// Like [`Self::new`], infallible and unchecked — use [`Self::try_new`]
+    /// to validate the 20-bit range.
     pub const fn new_value(value: u32) -> Self {
         Self {
             value,
             tc: 0,
             ttl: 0,
         }
+    }
+
+    /// Construct a label, validating that `value` fits in the 20-bit label
+    /// range (RFC 3032 §2.1).
+    ///
+    /// This is the checked counterpart of the const constructors
+    /// [`Self::new`] / [`Self::new_value`], which silently mask out-of-range
+    /// values on encode. Returns `Err(LabelStackError::ValueOutOfRange)` for
+    /// values above [`Self::MAX_VALUE`] so callers that must not truncate
+    /// can validate up front.
+    pub fn try_new(value: u32) -> Result<Self, LabelStackError> {
+        if value > Self::MAX_VALUE {
+            return Err(LabelStackError::ValueOutOfRange(value));
+        }
+        Ok(Self::new(value))
     }
 
     /// Set the Traffic Class (3 bits, RFC 5462). Returns `self` for chaining.
@@ -120,10 +144,13 @@ impl Label {
         value <= Self::MAX_VALUE
     }
 
-    /// Encode as a single 3-octet NLRI entry (RFC 8277 §3.2: label + TC + S,
-    /// no TTL). The `bottom` flag sets the S bit (bottom-of-stack).
+    /// Encode as a single 3-octet NLRI entry (RFC 8277 §2.2/§2.3:
+    /// `Label(20) | Rsrv(3) | S(1)` — no TTL and no TC field). The
+    /// `bottom` flag sets the S bit (bottom-of-stack). The 3 reserved bits
+    /// (bits 10-8) are always written as zero, as RFC 8277 §2.2 requires on
+    /// transmission.
     pub const fn encode_3octet(self, bottom: bool) -> [u8; 3] {
-        let byte2 = ((self.value & 0x0f) << 4) | ((self.tc as u32 & 0x07) << 1) | (bottom as u32);
+        let byte2 = ((self.value & 0x0f) << 4) | (bottom as u32);
         [
             ((self.value >> 12) & 0xff) as u8,
             ((self.value >> 4) & 0xff) as u8,
@@ -161,8 +188,12 @@ pub enum LabelStackError {
     TooShort,
     /// The input length is not a multiple of the entry width (3 or 4 octets).
     UnevenLength,
-    /// A label value exceeded the 20-bit range. This is unreachable from a
-    /// valid 3- or 4-octet encoding but kept for forward compatibility.
+    /// A bottom-of-stack (S) bit was set on a non-bottom entry. RFC 3032
+    /// §2.1 requires S=1 only on the bottom entry of the stack.
+    MidStackBottom,
+    /// A label value exceeded the 20-bit range. Unreachable from a valid 3-
+    /// or 4-octet encoding (the value is masked on decode), but returned by
+    /// [`Label::try_new`] for out-of-range construction.
     ValueOutOfRange(u32),
 }
 
@@ -172,6 +203,9 @@ impl fmt::Display for LabelStackError {
         match self {
             Self::TooShort => f.write_str("label stack input is empty"),
             Self::UnevenLength => f.write_str("label stack input is not a multiple of entry width"),
+            Self::MidStackBottom => {
+                f.write_str("bottom-of-stack bit set on a non-bottom entry")
+            }
             Self::ValueOutOfRange(v) => write!(f, "label value {} exceeds the 20-bit range", v),
         }
     }
@@ -276,8 +310,9 @@ impl LabelStack {
         out
     }
 
-    /// Encode as the 3-octet-per-entry NLRI form (RFC 8277 §3.2: label + TC
-    /// + S, no TTL). The S bit is set on the last entry.
+    /// Encode as the 3-octet-per-entry NLRI form (RFC 8277 §2.2/§2.3:
+    /// `Label(20) | Rsrv(3) | S(1)` — no TTL and no TC field). The S bit is
+    /// set on the last entry; the reserved bits are written as zero.
     pub fn encode_3octet(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.labels.len() * 3);
         let last = self.labels.len().saturating_sub(1);
@@ -287,9 +322,10 @@ impl LabelStack {
         out
     }
 
-    /// Decode the 4-octet-per-entry wire form (RFC 3032 §2.1). The S bit on
-    /// the last entry is enforced: an entry claiming bottom-of-stack
-    /// mid-stack ends decoding there.
+    /// Decode the 4-octet-per-entry wire form (RFC 3032 §2.1). The S bit
+    /// must mark the bottom entry only: an entry claiming bottom-of-stack
+    /// mid-stack is rejected with [`LabelStackError::MidStackBottom`]
+    /// rather than silently truncating the stack.
     pub fn decode_4octet(bytes: &[u8]) -> Result<Self, LabelStackError> {
         if bytes.is_empty() {
             return Err(LabelStackError::TooShort);
@@ -298,7 +334,7 @@ impl LabelStack {
             return Err(LabelStackError::UnevenLength);
         }
         let mut labels = Vec::with_capacity(bytes.len() / 4);
-        for chunk in bytes.as_chunks::<4>().0 {
+        for (i, chunk) in bytes.as_chunks::<4>().0.iter().enumerate() {
             let word = u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
             let value = (word >> 12) & Label::MAX_VALUE;
             let tc = ((word >> 9) & 0x07) as u8;
@@ -309,16 +345,25 @@ impl LabelStack {
             }
             labels.push(Label { value, tc, ttl });
             if bottom {
+                // RFC 3032 §2.1: S=1 marks the bottom of the stack and may
+                // only appear on the last entry. A mid-stack S bit means a
+                // malformed stack — error instead of dropping the rest.
+                if i + 1 < bytes.len() / 4 {
+                    return Err(LabelStackError::MidStackBottom);
+                }
                 break;
             }
         }
         Ok(Self { labels })
     }
 
-    /// Decode the 3-octet-per-entry NLRI form (RFC 8277 §3.2). TTL is not
-    /// carried in this form and defaults to 0. The S bit terminates the
-    /// stack: any trailing bytes after a bottom-of-stack entry are
-    /// considered part of the surrounding NLRI prefix, not the stack.
+    /// Decode the 3-octet-per-entry NLRI form (RFC 8277 §2.2/§2.3). TTL is
+    /// not carried in this form and defaults to 0. The reserved bits
+    /// (bits 10-8) are ignored on reception per RFC 8277 §2.2 — they are
+    /// *not* a Traffic Class field — so decoded labels always carry
+    /// `tc == 0`. The S bit terminates the stack: any trailing bytes after
+    /// a bottom-of-stack entry are considered part of the surrounding NLRI
+    /// prefix, not the stack.
     pub fn decode_3octet(bytes: &[u8]) -> Result<Self, LabelStackError> {
         if bytes.is_empty() {
             return Err(LabelStackError::TooShort);
@@ -328,17 +373,19 @@ impl LabelStack {
         }
         let mut labels = Vec::with_capacity(bytes.len() / 3);
         for chunk in bytes.as_chunks::<3>().0 {
-            // The 3-octet form is the top 24 bits of the RFC 3032 32-bit
-            // entry (label << 12 | tc << 9 | s << 8), with the TTL byte
-            // stripped. Reassemble directly so the bit math stays obvious.
+            // RFC 8277 §2.2: each 3-octet entry is Label(20) | Rsrv(3) |
+            // S(1). The value reassembles as `chunk[0] << 12 | chunk[1] <<
+            // 4 | chunk[2] >> 4`; the three bits between the label and the
+            // S bit are reserved and MUST be ignored on reception (there is
+            // no TC field here), so they are read and discarded.
             let value =
                 ((chunk[0] as u32) << 12) | ((chunk[1] as u32) << 4) | ((chunk[2] as u32) >> 4);
-            let tc = (chunk[2] >> 1) & 0x07;
+            let _rsrv = (chunk[2] >> 1) & 0x07; // ignored per RFC 8277 §2.2
             let bottom = (chunk[2] & 0x01) != 0;
             if value > Label::MAX_VALUE {
                 return Err(LabelStackError::ValueOutOfRange(value));
             }
-            labels.push(Label::new_value(value).with_tc(tc));
+            labels.push(Label::new_value(value));
             if bottom {
                 break;
             }
@@ -461,11 +508,57 @@ mod tests {
     }
 
     #[test]
-    fn label_stack_4octet_truncates_at_bottom_bit() {
+    fn label_stack_4octet_rejects_midstack_bottom_bit() {
+        // RFC 3032 §2.1: S=1 is only legal on the bottom entry. A mid-stack
+        // S bit marks a malformed stack and must error rather than silently
+        // truncate the remaining entries.
         let mut bytes = vec![0u8; 8];
-        bytes[2] |= 0x01; // S bit on entry 0
-        let dec = LabelStack::decode_4octet(&bytes).unwrap();
+        bytes[2] |= 0x01; // S bit on entry 0 — not the bottom entry
+        assert_eq!(
+            LabelStack::decode_4octet(&bytes).unwrap_err(),
+            LabelStackError::MidStackBottom
+        );
+    }
+
+    #[test]
+    fn label_3octet_has_no_tc_field() {
+        // RFC 8277 §2.2: the NLRI label entry is Label(20) | Rsrv(3) | S(1)
+        // — there is no TC field. The reserved bits MUST be zero on the
+        // wire and MUST be ignored on reception.
+        let l = Label::new_value(16).with_tc(7);
+        let enc = l.encode_3octet(true);
+        assert_eq!(
+            (enc[2] >> 1) & 0x07,
+            0,
+            "reserved bits must be zero on the wire even when tc != 0"
+        );
+        // value 16 → bytes 0x00 0x01 0x01 (label, zero Rsrv, S set).
+        assert_eq!(enc, [0x00, 0x01, 0x01]);
+        // A non-conforming sender may leave the reserved bits set; the
+        // decoder must ignore them and yield tc == 0.
+        let mut bytes = enc;
+        bytes[2] |= 0b0000_1110; // set all three reserved bits
+        let dec = LabelStack::decode_3octet(&bytes).unwrap();
         assert_eq!(dec.len(), 1);
+        assert_eq!(dec.labels()[0].value, 16);
+        assert_eq!(dec.labels()[0].tc, 0);
+    }
+
+    #[test]
+    fn label_try_new_validates_range() {
+        assert_eq!(
+            Label::try_new(Label::MAX_VALUE).unwrap().value,
+            Label::MAX_VALUE
+        );
+        assert_eq!(
+            Label::try_new(Label::MAX_VALUE + 1).unwrap_err(),
+            LabelStackError::ValueOutOfRange(Label::MAX_VALUE + 1)
+        );
+        // The unchecked const constructors keep working (they mask on
+        // encode), but the decoded value is truncated to 20 bits.
+        assert_eq!(Label::new_value(0x1_0000_0).value, 0x1_0000_0);
+        let enc = Label::new_value(0x1_0000_0).encode_3octet(true);
+        assert_eq!(LabelStack::decode_3octet(&enc).unwrap().labels()[0].value, 0);
     }
 
     #[test]

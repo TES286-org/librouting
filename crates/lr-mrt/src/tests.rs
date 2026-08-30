@@ -236,10 +236,29 @@ fn peer_index_table_encodes_and_decodes() {
 }
 
 #[test]
+fn bgp4mp_as4_subtype_numbers_match_rfc_6396() {
+    // RFC 6396 §4.4: 0=STATE_CHANGE, 1=MESSAGE, 2=ENTRY (deprecated),
+    // 3=SNAPSHOT (deprecated), 4=MESSAGE_AS4, 5=STATE_CHANGE_AS4,
+    // 6=MESSAGE_LOCAL, 7=MESSAGE_AS4_LOCAL. The pre-publication Zebra
+    // numbering (BGP4MP_ENTRY=2, BGP4MP_SNAPSHOT=3, AS4 at 4/5 swapped
+    // with 2/3) is what the constants used to encode, so real AS4 dumps
+    // decoded as `Unknown` and real ENTRY records were misparsed as
+    // messages.
+    assert_eq!(bgp4mp_subtype::STATE_CHANGE, 0);
+    assert_eq!(bgp4mp_subtype::MESSAGE, 1);
+    assert_eq!(bgp4mp_subtype::ENTRY, 2);
+    assert_eq!(bgp4mp_subtype::SNAPSHOT, 3);
+    assert_eq!(bgp4mp_subtype::MESSAGE_AS4, 4);
+    assert_eq!(bgp4mp_subtype::STATE_CHANGE_AS4, 5);
+    assert_eq!(bgp4mp_subtype::MESSAGE_LOCAL, 6);
+    assert_eq!(bgp4mp_subtype::MESSAGE_AS4_LOCAL, 7);
+}
+
+#[test]
 fn bgp4mp_message_as4_decodes() {
-    // Hand-built BGP4MP_MESSAGE_AS4: peer AS 65010, local AS 65000,
-    // ifindex 4, AF 1, IPv4 peer/local, then a KEEPALIVE (19 bytes,
-    // marker all-FF, length 19, type 4).
+    // Hand-built BGP4MP_MESSAGE_AS4 (literal RFC 6396 §4.4 subtype 4):
+    // peer AS 65010, local AS 65000, ifindex 4, AF 1, IPv4 peer/local,
+    // then a KEEPALIVE (19 bytes, marker all-FF, length 19, type 4).
     let mut body = Vec::new();
     body.extend_from_slice(&65010u32.to_be_bytes());
     body.extend_from_slice(&65000u32.to_be_bytes());
@@ -255,14 +274,14 @@ fn bgp4mp_message_as4_decodes() {
     let mut record = Vec::new();
     record.extend_from_slice(&77u32.to_be_bytes()); // timestamp
     record.extend_from_slice(&msg_type::BGP4MP.to_be_bytes());
-    record.extend_from_slice(&bgp4mp_subtype::MESSAGE_AS4.to_be_bytes());
+    record.extend_from_slice(&4u16.to_be_bytes()); // BGP4MP_MESSAGE_AS4
     record.extend_from_slice(&(body.len() as u32).to_be_bytes());
     record.extend_from_slice(&body);
 
     let mut reader = MrtReader::new();
     let decoded = reader.decode_slice(&record).unwrap().unwrap();
     let MrtRecord::Bgp4MpMessage(m) = decoded else {
-        panic!("expected BGP4MP message");
+        panic!("expected BGP4MP message, got {:?}", decoded);
     };
     assert_eq!(m.common.peer_as, Asn(65010));
     assert_eq!(m.common.local_as, Asn(65000));
@@ -272,6 +291,75 @@ fn bgp4mp_message_as4_decodes() {
     assert_eq!(m.common.local_ip, IpAddr::V4([192, 0, 2, 1]));
     assert_eq!(m.message.len(), 19);
     assert_eq!(m.message[18], 4);
+}
+
+#[test]
+fn bgp4mp_entry_subtype_2_is_unknown_not_message() {
+    // RFC 6396 §4.4 subtype 2 is the deprecated BGP4MP_ENTRY (a different
+    // body layout), NOT BGP4MP_MESSAGE_AS4 (which is 4). A record
+    // carrying subtype 2 must decode as Unknown, never as a message —
+    // this is what the pre-publication numbering got wrong.
+    let mut body = Vec::new();
+    body.extend_from_slice(&65010u16.to_be_bytes()); // peer AS (2-byte)
+    body.extend_from_slice(&65000u16.to_be_bytes()); // local AS
+    body.extend_from_slice(&0u16.to_be_bytes()); // ifindex
+    body.extend_from_slice(&1u16.to_be_bytes()); // AF IPv4
+    body.extend_from_slice(&[10, 0, 0, 2]); // peer IP
+    body.extend_from_slice(&[10, 0, 0, 1]); // local IP
+    body.extend_from_slice(&[0xff; 19]); // would-be message bytes
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&1u32.to_be_bytes());
+    record.extend_from_slice(&msg_type::BGP4MP.to_be_bytes());
+    record.extend_from_slice(&2u16.to_be_bytes()); // literal BGP4MP_ENTRY
+    record.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    record.extend_from_slice(&body);
+
+    let mut reader = MrtReader::new();
+    let decoded = reader.decode_slice(&record).unwrap().unwrap();
+    assert_eq!(
+        decoded,
+        MrtRecord::Unknown {
+            msg_type: msg_type::BGP4MP,
+            subtype: 2
+        }
+    );
+}
+
+#[test]
+fn bgp4mp_state_change_as4_subtype_5_decodes() {
+    // Literal RFC 6396 §4.4 subtype 5 (BGP4MP_STATE_CHANGE_AS4) with
+    // 4-byte AS numbers: 2-byte-AS variants read a 4-byte offset here.
+    let mut body = Vec::new();
+    body.extend_from_slice(&65010u32.to_be_bytes());
+    body.extend_from_slice(&65000u32.to_be_bytes());
+    body.extend_from_slice(&3u16.to_be_bytes()); // ifindex
+    body.extend_from_slice(&2u16.to_be_bytes()); // AF IPv6
+    body.extend_from_slice(&[0; 15]);
+    body.push(1); // peer ::1
+    body.extend_from_slice(&[0; 15]);
+    body.push(2); // local ::2
+    body.extend_from_slice(&2u16.to_be_bytes()); // OpenConfirm
+    body.extend_from_slice(&6u16.to_be_bytes()); // Established
+
+    let mut record = Vec::new();
+    record.extend_from_slice(&77u32.to_be_bytes());
+    record.extend_from_slice(&msg_type::BGP4MP.to_be_bytes());
+    record.extend_from_slice(&5u16.to_be_bytes()); // BGP4MP_STATE_CHANGE_AS4
+    record.extend_from_slice(&(body.len() as u32).to_be_bytes());
+    record.extend_from_slice(&body);
+
+    let mut reader = MrtReader::new();
+    let decoded = reader.decode_slice(&record).unwrap().unwrap();
+    let MrtRecord::Bgp4MpStateChange(sc) = decoded else {
+        panic!("expected state change, got {:?}", decoded);
+    };
+    assert_eq!(sc.common.peer_as, Asn(65010));
+    assert_eq!(sc.common.local_as, Asn(65000));
+    assert_eq!(sc.common.af, 2);
+    assert_eq!(sc.common.peer_ip, IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]));
+    assert_eq!(sc.old_state, 2);
+    assert_eq!(sc.new_state, 6);
 }
 
 #[test]
@@ -362,6 +450,27 @@ fn core_attributes_encode_as_wire_tlvs() {
             0x40, 0x03, 0x04, 192, 0, 2, 1
         ]
     );
+}
+
+#[test]
+fn extended_length_attribute_sets_flag_bit() {
+    use lr_core::attr::{AttrTag, Attribute};
+    // RFC 4271 §4.3: values > 255 octets need the extended-length form:
+    // the 0x10 flag bit set in the flags octet plus a 3-octet length.
+    let big = vec![0xabu8; 300];
+    let mut attrs = lr_core::attr::Attributes::new();
+    attrs.insert(Attribute {
+        tag: AttrTag::raw(9),
+        flags: 0x40,
+        value: big.clone(),
+    });
+    let wire = encode_attributes(&attrs);
+    assert_eq!(wire.len(), 1 + 1 + 1 + 2 + 300);
+    assert_eq!(wire[0], 0x40 | 0x10, "extended-length flag must be set");
+    assert_eq!(wire[1], 9);
+    assert_eq!(wire[2], 0xff);
+    assert_eq!(u16::from_be_bytes([wire[3], wire[4]]), 300);
+    assert_eq!(&wire[5..], &big[..]);
 }
 
 #[test]
