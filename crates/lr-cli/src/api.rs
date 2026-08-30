@@ -120,10 +120,21 @@ mod imp {
                     let running = Arc::clone(&running);
                     let reload = Arc::clone(&reload);
                     let started = started;
+                    let path_owned = path_owned.clone();
                     thread::Builder::new()
                         .name("lr-api-conn".into())
                         .spawn(move || {
-                            serve_connection(stream, &info, &router, &running, &reload, started);
+                            // `shutdown` removes the socket file itself so
+                            // the cleanup does not race the process exit.
+                            serve_connection(
+                                stream,
+                                &info,
+                                &router,
+                                &running,
+                                &reload,
+                                started,
+                                Some(&path_owned),
+                            );
                         })
                         .ok();
                 });
@@ -152,6 +163,8 @@ mod imp {
     }
 
     /// One connection: read a command line, answer, repeat.
+    /// `socket_path` lets the `shutdown` command remove the socket file
+    /// synchronously (the accept loop's cleanup may race process exit).
     fn serve_connection(
         stream: UnixStream,
         info: &DaemonInfo,
@@ -159,6 +172,7 @@ mod imp {
         running: &Arc<AtomicBool>,
         reload: &Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         started: std::time::Instant,
+        socket_path: Option<&str>,
     ) {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
         let Ok(write_half) = stream.try_clone() else {
@@ -330,6 +344,9 @@ mod imp {
                 "shutdown" => {
                     running.store(false, Ordering::Relaxed);
                     let _ = writeln!(out, "shutting down");
+                    if let Some(path) = socket_path {
+                        let _ = std::fs::remove_file(path);
+                    }
                     return;
                 }
                 other => {
