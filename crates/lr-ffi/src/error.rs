@@ -17,6 +17,14 @@ pub enum LrError {
 
 pub type lr_error_t = i32;
 
+/// Error code returned by every entry point when its body panics and the
+/// `catch_unwind` barrier in `lib.rs` (`guard`/`guarded`) catches it — the
+/// crate-level "Safety" docs promise `LR_ERR_PANIC`. Equal to
+/// `LrError::Panic` (-4). Pointer-returning entry points return NULL
+/// instead; the thread-local last-error string is always set to "panic
+/// caught in FFI" alongside.
+pub const LR_ERR_PANIC: i32 = LrError::Panic as i32;
+
 thread_local! {
     static LAST_ERROR: RefCell<String> = const { RefCell::new(String::new()) };
 }

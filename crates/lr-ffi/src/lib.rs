@@ -4,9 +4,14 @@
 //!
 //! # Safety
 //!
-//! Every entry point wraps its body in `catch_unwind` to convert panics into
-//! `LR_ERR_PANIC`. Returned Rust memory is owned by the caller and must be
-//! freed via the matching `lr_*_free` / `lr_*_destroy` functions.
+//! Every entry point wraps its body in [`guard`] (`catch_unwind`) so a panic
+//! can never unwind across the C ABI: when one is caught, the thread-local
+//! last-error string is set to "panic caught in FFI" (see [`lr_last_error`])
+//! and the entry point returns its documented error value — `LR_ERR_PANIC`
+//! (-4, [`LrError::Panic`]) for integer returns, NULL for pointer returns
+//! (e.g. `lr_router_new`), 0 for usize/u32 returns and `()` for void
+//! returns. Returned Rust memory is owned by the caller and must be freed
+//! via the matching `lr_*_free` / `lr_*_destroy` functions.
 //!
 //! All `extern "C"` entry points are inherently unsafe; we guard against the
 //! most common misuse by null-checking pointers.
@@ -23,5 +28,30 @@ pub mod error;
 pub mod handle;
 pub mod router;
 
+use crate::error::set_last_error;
+
 pub use error::{lr_error_t, lr_last_error, LrError};
 pub use handle::{lr_bytes_t, lr_router_t};
+
+/// Run `f` inside a `catch_unwind` barrier so a panic cannot unwind across
+/// the C ABI. Returns `None` when `f` panics (the panic is swallowed); the
+/// caller is responsible for recording the error and returning its
+/// documented error code — see [`guarded`], which does exactly that.
+pub(crate) fn guard<T>(f: impl FnOnce() -> T) -> Option<T> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).ok()
+}
+
+/// Run `f` inside the [`guard`] barrier. When `f` panics, records "panic
+/// caught in FFI" in the thread-local last-error string and returns
+/// `fallback` — the entry point's documented panic value (`LR_ERR_PANIC`
+/// for integer returns, NULL for pointer returns, 0 for usize/u32 returns,
+/// `()` for void returns).
+pub(crate) fn guarded<T>(f: impl FnOnce() -> T, fallback: T) -> T {
+    match guard(f) {
+        Some(v) => v,
+        None => {
+            set_last_error(lr_core::error::FfiError::PanicCaught.to_string());
+            fallback
+        }
+    }
+}

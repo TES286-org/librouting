@@ -8,6 +8,8 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+
+
 /**
  * Rust-allocated byte slice that the embedder owns and must free.
  */
@@ -237,6 +239,10 @@ int32_t lr_router_set_session_policy(lr_router_t r,
  * Must be called after `lr_router_add_bgp_session*` and before
  * `lr_router_start_session` — the capability is negotiated in OPEN.
  *
+ * `count` must not exceed [`MAX_EXT_NEXT_HOP_TUPLES`]; larger values are
+ * rejected with -3 (the cap keeps `count * 5` free of overflow before the
+ * caller's memory is read).
+ *
  * # Safety
  * `tuples` must point to at least `count * 5` readable bytes when
  * `count > 0`.
@@ -256,6 +262,10 @@ int32_t lr_router_set_extended_next_hop(lr_router_t r,
  *
  * Must be called before `lr_router_start_session`. Replaces the default
  * IPv4-unicast-only family list.
+ *
+ * `count` must not exceed [`MAX_MP_FAMILIES`]; larger values are rejected
+ * with -3 (the cap keeps `count * 4` free of overflow before the caller's
+ * memory is read).
  *
  * # Safety
  * `families` must point to at least `count * 4` readable bytes when
@@ -355,6 +365,10 @@ int32_t lr_router_request_route_refresh(lr_router_t r,
  * the prefix length, `next_hop` is 4 bytes or NULL. The route is injected
  * into Loc-RIB and advertised to all established BGP peers.
  *
+ * `prefix_len` must be <= 32; larger values are rejected with -3 before any
+ * NLRI is encoded (an out-of-range length would otherwise panic inside the
+ * BGP NLRI encoder the first time the route is exported).
+ *
  * # Safety
  * `prefix_addr` and `next_hop` (when non-NULL) must be valid pointers to
  * 4 readable bytes.
@@ -371,6 +385,9 @@ int32_t lr_router_originate_v4(lr_router_t r,
  * bottom-of-stack bit on the last entry. Returns 0 on success, negative
  * on error.
  *
+ * `prefix_len` must be <= 32 (see [`lr_router_originate_v4`]) and
+ * `n_labels` must not exceed [`MAX_LABEL_STACK_DEPTH`].
+ *
  * # Safety
  * `prefix_addr` and `next_hop` (when non-NULL) must point to 4 readable
  * bytes; `labels` must point to `n_labels` readable `uint32_t` values.
@@ -385,6 +402,9 @@ int32_t lr_router_originate_labeled_v4(lr_router_t r,
 /**
  * Originate an RFC 8277 labelled IPv6 BGP route (AFI=2, SAFI=4). See
  * [`lr_router_originate_labeled_v4`] for the label-stack semantics.
+ *
+ * `prefix_len` must be <= 128; larger values are rejected with -3 before
+ * any NLRI is encoded.
  *
  * # Safety
  * `prefix_addr` and `next_hop` (when non-NULL) must point to 16 readable
