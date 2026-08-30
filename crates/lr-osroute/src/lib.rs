@@ -53,9 +53,12 @@
 //! rt.add_route(prefix, gw, 0).unwrap();
 //! ```
 
-// SAFETY: this crate necessarily performs FFI to platform syscalls. unsafe
-// code is contained to the `linux` module which is only compiled when the
-// `std` feature is enabled (the default).
+// SAFETY: this crate necessarily performs FFI to platform syscalls, so
+// `unsafe` blocks are spread across the platform backends and the socket
+// helpers — `linux`, `bsd`, `windows`, `gtsm`, `tcp_auth`, `tcp_bind`,
+// `bfd_transport`, `mpls_route` and `ospf_transport` — not just the
+// `linux` module. The `#![cfg_attr(not(feature = "std"), forbid(unsafe_code))]`
+// gate keeps the no-std build free of unsafe code.
 #![cfg_attr(not(feature = "std"), forbid(unsafe_code))]
 
 // Platform backends:
@@ -102,9 +105,9 @@ pub mod bfd_transport;
 pub mod tcp_bind;
 
 /// MPLS route table installation over Linux `AF_MPLS` netlink
-/// (RFC 3032 LSPs, RFC 8277 BGP-LU kernel binding). Linux only — other
-/// platforms compile against a stub that returns
-/// [`mpls_route::MplsRouteError::Unsupported`].
+/// (RFC 3032 LSPs, RFC 8277 BGP-LU kernel binding). MPLS netlink is
+/// Linux-only — this module is not compiled on other platforms, so
+/// callers must `cfg(target_os = "linux")`-gate their use of it.
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub mod mpls_route;
 

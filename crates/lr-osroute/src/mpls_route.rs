@@ -17,12 +17,14 @@
 //! | Pop  (label → IP)       | in-label | gw     | —          | ifindex |
 //! | Swap (label → label)    | in-label | gw     | new-stack  | ifindex |
 //!
-//! `RTA_VIA` is the gateway family + address (5 bytes for IPv4, 17 for
-//! IPv6). `RTA_NEWDST` is the new label stack to push, in the 4-octet-per-
-//! entry wire form of RFC 3032 §2.1. Push (IP → label) is configured
-//! differently — via `ip route add <prefix> encap mpls <stack>` on the IP
-//! route, not through `AF_MPLS`. The router layer handles the IP-route
-//! side via [`crate::RtNetlink`]; this module owns the LSP side.
+//! `RTA_VIA` is the gateway as a `struct rtvia` payload: 2-byte family
+//! (`sa_family_t`, network byte order) + address (6 bytes total for
+//! IPv4, 18 for IPv6). `RTA_NEWDST` is the new label stack to push, in
+//! the 4-octet-per-entry wire form of RFC 3032 §2.1. Push (IP → label)
+//! is configured differently — via `ip route add <prefix> encap mpls
+//! <stack>` on the IP route, not through `AF_MPLS`. The router layer
+//! handles the IP-route side via [`crate::RtNetlink`]; this module owns
+//! the LSP side.
 //!
 //! References: Linux `uapi/linux/mpls.h`, `net/mpls/mpls_routes.c`,
 //! `Documentation/networking/mpls-sysctl.rst`.
@@ -55,15 +57,21 @@ const RTA_OIF: u16 = 4;
 const RTA_VIA: u16 = 18;
 const RTA_NEWDST: u16 = 19;
 
-// Address families.
-const AF_INET: u8 = 2;
-const AF_INET6: u8 = 10;
+// Address families (2-byte `sa_family_t` in `struct rtvia`).
+const AF_INET: u16 = 2;
+const AF_INET6: u16 = 10;
 const AF_MPLS: u8 = 28;
 
 // Netlink flags.
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_ACK: u16 = 0x04;
+const NLM_F_REPLACE: u16 = 0x100;
 const NLM_F_CREATE: u16 = 0x400;
+
+/// Flags for route installation: CREATE + REPLACE so that installing over
+/// an existing in-label *replaces* it (`mpls_route_add()` in
+/// `net/mpls/af_mpls.c` returns -EEXIST without NLM_F_REPLACE).
+const ADD_ROUTE_FLAGS: u16 = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
 // Netlink socket constants.
 const NETLINK_ROUTE: i32 = 0;
@@ -224,7 +232,7 @@ impl MplsNetlink {
             libc_bind(
                 fd,
                 (&raw const addr) as *const core::ffi::c_void,
-                core::mem::size_of::<libc_sockaddr_nl>() as i32,
+                core::mem::size_of::<libc_sockaddr_nl>() as u32,
             )
         };
         if rc < 0 {
@@ -238,7 +246,7 @@ impl MplsNetlink {
             nl_pid: 0,
             nl_groups: 0,
         };
-        let mut len = core::mem::size_of::<libc_sockaddr_nl>() as i32;
+        let mut len = core::mem::size_of::<libc_sockaddr_nl>() as u32;
         let rc =
             unsafe { libc_getsockname(fd, (&raw mut local) as *mut core::ffi::c_void, &mut len) };
         if rc < 0 {
@@ -371,14 +379,18 @@ impl MplsNetlink {
         Ok(buf)
     }
 
-    /// Build a `RTA_VIA` attribute: `<family:1> <addr:4 or 16>`.
+    /// Build a `RTA_VIA` attribute: `<family:2> <addr:4 or 16>`. The
+    /// family is the kernel's `struct rtvia { __kernel_sa_family_t
+    /// rtvia_family; __u8 rtvia_addr[]; }` — a 2-byte `sa_family_t`,
+    /// encoded in network byte order (AF_INET=2, AF_INET6=10), followed
+    /// by the raw address bytes (6 bytes total for IPv4, 18 for IPv6).
     fn build_rta_via(next_hop: IpAddr) -> Vec<u8> {
         let (family, addr) = match next_hop {
             IpAddr::V4(b) => (AF_INET, b.to_vec()),
             IpAddr::V6(b) => (AF_INET6, b.to_vec()),
         };
-        let mut data = Vec::with_capacity(1 + addr.len());
-        data.push(family);
+        let mut data = Vec::with_capacity(2 + addr.len());
+        data.extend_from_slice(&family.to_be_bytes());
         data.extend_from_slice(&addr);
         Self::build_rta_attribute(RTA_VIA, &data)
     }
@@ -398,11 +410,7 @@ impl MplsNetlink {
     /// Install an MPLS route. Replaces any existing route for the same
     /// in-label.
     pub fn add_route(&mut self, route: &MplsRoute) -> Result<(), MplsRouteError> {
-        let buf = self.build_request(
-            RTM_NEWROUTE,
-            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE,
-            route,
-        )?;
+        let buf = self.build_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, route)?;
         let resp = self.sendmsg_and_recv(&buf)?;
         check_ack(&resp)
     }
@@ -496,8 +504,8 @@ struct libc_msghdr {
 
 extern "C" {
     fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
-    fn bind(fd: i32, addr: *const core::ffi::c_void, len: i32) -> i32;
-    fn getsockname(fd: i32, addr: *mut core::ffi::c_void, len: *mut i32) -> i32;
+    fn bind(fd: i32, addr: *const core::ffi::c_void, len: u32) -> i32;
+    fn getsockname(fd: i32, addr: *mut core::ffi::c_void, len: *mut u32) -> i32;
     fn sendmsg(fd: i32, msg: *const libc_msghdr, flags: i32) -> isize;
     fn recv(fd: i32, buf: *mut core::ffi::c_void, len: usize, flags: i32) -> isize;
     fn close(fd: i32) -> i32;
@@ -506,10 +514,10 @@ extern "C" {
 unsafe fn libc_socket(d: i32, t: i32, p: i32) -> i32 {
     socket(d, t, p)
 }
-unsafe fn libc_bind(fd: i32, addr: *const core::ffi::c_void, len: i32) -> i32 {
+unsafe fn libc_bind(fd: i32, addr: *const core::ffi::c_void, len: u32) -> i32 {
     bind(fd, addr, len)
 }
-unsafe fn libc_getsockname(fd: i32, addr: *mut core::ffi::c_void, len: *mut i32) -> i32 {
+unsafe fn libc_getsockname(fd: i32, addr: *mut core::ffi::c_void, len: *mut u32) -> i32 {
     getsockname(fd, addr, len)
 }
 unsafe fn libc_sendmsg(fd: i32, msg: *const libc_msghdr, flags: i32) -> isize {
@@ -525,6 +533,35 @@ unsafe fn libc_close(fd: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A `MplsNetlink` with no live socket — enough to exercise
+    /// `build_request`, which only touches `seq`/`pid` (never `fd`).
+    fn test_netlink() -> MplsNetlink {
+        MplsNetlink {
+            fd: -1,
+            seq: AtomicU32::new(7),
+            pid: 123,
+        }
+    }
+
+    /// Walk the RTA attributes of a built request (they start at offset 28)
+    /// and return the payload of the one with type `want`, if present.
+    fn find_attr(req: &[u8], want: u16) -> Option<&[u8]> {
+        let msg_len = u32::from_ne_bytes(req[0..4].try_into().unwrap()) as usize;
+        let mut cursor = 28;
+        while cursor + 4 <= msg_len.min(req.len()) {
+            let rta_len = u16::from_ne_bytes([req[cursor], req[cursor + 1]]) as usize;
+            if rta_len < 4 || cursor + rta_len > req.len() {
+                return None;
+            }
+            let rta_type = u16::from_ne_bytes([req[cursor + 2], req[cursor + 3]]);
+            if rta_type == want {
+                return Some(&req[cursor + 4..cursor + rta_len]);
+            }
+            cursor += (rta_len + 3) & !3;
+        }
+        None
+    }
 
     #[test]
     fn platform_labels_reads_without_panic() {
@@ -546,49 +583,105 @@ mod tests {
         }
     }
 
+    /// The kernel `struct rtvia` has a 2-byte `sa_family_t` — the RTA_VIA
+    /// payload must be `<family:2 BE> <addr>`, not `<family:1> <addr>`.
     #[test]
     fn build_rta_via_ipv4_layout() {
         let via = MplsNetlink::build_rta_via(IpAddr::V4([192, 0, 2, 1]));
-        // rta_len (2) + rta_type (2) + family (1) + addr (4) = 9, padded to 12
+        // rta_len (2) + rta_type (2) + family (2) + addr (4) = 10, padded to 12
         assert_eq!(via.len(), 12);
-        assert_eq!(u16::from_ne_bytes([via[0], via[1]]), 9);
+        assert_eq!(u16::from_ne_bytes([via[0], via[1]]), 10);
         assert_eq!(u16::from_ne_bytes([via[2], via[3]]), RTA_VIA);
-        assert_eq!(via[4], AF_INET);
-        assert_eq!(&via[5..9], &[192, 0, 2, 1]);
+        // family is a 2-byte sa_family_t in network byte order
+        assert_eq!(u16::from_be_bytes([via[4], via[5]]), AF_INET);
+        assert_eq!(&via[6..10], &[192, 0, 2, 1]);
     }
 
     #[test]
     fn build_rta_via_ipv6_layout() {
         let addr = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
         let via = MplsNetlink::build_rta_via(IpAddr::V6(addr));
-        // rta_len (2) + rta_type (2) + family (1) + addr (16) = 21, padded to 24
+        // rta_len (2) + rta_type (2) + family (2) + addr (16) = 22, padded to 24
         assert_eq!(via.len(), 24);
-        assert_eq!(u16::from_ne_bytes([via[0], via[1]]), 21);
+        assert_eq!(u16::from_ne_bytes([via[0], via[1]]), 22);
         assert_eq!(u16::from_ne_bytes([via[2], via[3]]), RTA_VIA);
-        assert_eq!(via[4], AF_INET6);
-        assert_eq!(&via[5..21], &addr);
+        assert_eq!(u16::from_be_bytes([via[4], via[5]]), AF_INET6);
+        assert_eq!(&via[6..22], &addr);
     }
 
+    /// `build_request` for a Pop action: RTA_DST in-label, RTA_VIA with a
+    /// 2-byte family, RTA_OIF. Exercises the full request encoder, not a
+    /// hand-mirrored layout.
     #[test]
-    fn build_request_pop_route() {
-        // We can't easily construct MplsNetlink without the kernel, so
-        // build the request body directly by mirroring the layout.
-        let label = Label::new(100);
-        let route = MplsRoute::pop(label, IpAddr::V4([192, 0, 2, 1]), 2);
-        // Build a minimal MplsNetlink-like struct just for build_request:
-        // we replicate the bit math here.
-        let in_label_bytes = label.encode_4octet(true);
-        assert_eq!(in_label_bytes.len(), 4);
-        // The Pop action has no RTA_NEWDST.
-        assert!(matches!(route.action, MplsRouteAction::Pop { .. }));
+    fn build_request_pop_route_encodes_via() {
+        let nl = test_netlink();
+        let route = MplsRoute::pop(Label::new(100), IpAddr::V4([192, 0, 2, 1]), 2);
+        let req = nl
+            .build_request(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, &route)
+            .unwrap();
+        // nlmsghdr + rtmsg fields.
+        assert_eq!(req[16], AF_MPLS); // rtm_family
+        assert_eq!(req[17], MPLS_LABEL_LEN); // rtm_dst_len
+        // RTA_DST: 4-octet in-label (kernel `nla_get_labels` shifts >> 12).
+        let dst = find_attr(&req, RTA_DST).expect("RTA_DST");
+        assert_eq!(dst.len(), 4);
+        assert_eq!(u32::from_be_bytes(dst.try_into().unwrap()) >> 12, 100);
+        // RTA_VIA: 2-byte BE family + 4 address bytes.
+        let via = find_attr(&req, RTA_VIA).expect("RTA_VIA");
+        assert_eq!(via.len(), 6);
+        assert_eq!(u16::from_be_bytes([via[0], via[1]]), AF_INET);
+        assert_eq!(&via[2..6], &[192, 0, 2, 1]);
+        // RTA_OIF present.
+        assert_eq!(find_attr(&req, RTA_OIF).expect("RTA_OIF").len(), 4);
+    }
+
+    /// `build_request` for a Swap action: RTA_NEWDST carries the new stack
+    /// and RTA_VIA the gateway.
+    #[test]
+    fn build_request_swap_route_encodes_newdst_and_via() {
+        let nl = test_netlink();
+        let route = MplsRoute::swap(
+            Label::new(100),
+            LabelStack::from_values([200]),
+            IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ]),
+            3,
+        );
+        let req = nl
+            .build_request(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, &route)
+            .unwrap();
+        let new_dst = find_attr(&req, RTA_NEWDST).expect("RTA_NEWDST");
+        assert_eq!(new_dst.len(), 4);
+        assert_eq!(u32::from_be_bytes(new_dst.try_into().unwrap()) >> 12, 200);
+        let via = find_attr(&req, RTA_VIA).expect("RTA_VIA");
+        assert_eq!(via.len(), 18);
+        assert_eq!(u16::from_be_bytes([via[0], via[1]]), AF_INET6);
     }
 
     #[test]
     fn build_request_swap_route_rejects_empty_stack() {
-        // Build a Swap action with an empty stack; build_request must
-        // reject it. We can't easily test build_request directly without
-        // a socket, so the test documents the contract.
-        let stack = LabelStack::new();
-        assert!(stack.is_empty());
+        let nl = test_netlink();
+        let route = MplsRoute::swap(
+            Label::new(100),
+            LabelStack::new(),
+            IpAddr::V4([192, 0, 2, 1]),
+            2,
+        );
+        match nl.build_request(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, &route) {
+            Err(MplsRouteError::EmptyLabelStack) => { /* expected */ }
+            other => panic!("expected EmptyLabelStack, got {:?}", other),
+        }
+    }
+
+    /// `add_route` must carry NLM_F_REPLACE — the kernel's
+    /// `mpls_route_add()` returns -EEXIST for an existing in-label
+    /// without it, contradicting the "replaces any existing route" doc.
+    #[test]
+    fn add_route_flags_include_replace() {
+        assert_ne!(ADD_ROUTE_FLAGS & NLM_F_REQUEST, 0);
+        assert_ne!(ADD_ROUTE_FLAGS & NLM_F_ACK, 0);
+        assert_ne!(ADD_ROUTE_FLAGS & NLM_F_CREATE, 0);
+        assert_ne!(ADD_ROUTE_FLAGS & NLM_F_REPLACE, 0);
     }
 }

@@ -283,26 +283,43 @@ impl RouteSocket {
             if n < layout::HDR {
                 continue; // runt / notification — keep reading
             }
-            let rtm_seq = i32::from_ne_bytes([
-                buf[layout::OFF_SEQ],
-                buf[layout::OFF_SEQ + 1],
-                buf[layout::OFF_SEQ + 2],
-                buf[layout::OFF_SEQ + 3],
-            ]);
-            if rtm_seq == seq && buf[3] == msg_type {
-                let errno = i32::from_ne_bytes([
-                    buf[layout::OFF_ERRNO],
-                    buf[layout::OFF_ERRNO + 1],
-                    buf[layout::OFF_ERRNO + 2],
-                    buf[layout::OFF_ERRNO + 3],
-                ]);
-                return Ok(errno);
+            if !is_reply(&buf, seq, msg_type) {
+                continue;
             }
+            let errno = i32::from_ne_bytes([
+                buf[layout::OFF_ERRNO],
+                buf[layout::OFF_ERRNO + 1],
+                buf[layout::OFF_ERRNO + 2],
+                buf[layout::OFF_ERRNO + 3],
+            ]);
+            return Ok(errno);
         }
-        // No matching reply — treat as success (some kernels don't echo
-        // unprivileged operations); errors surface on the next operation.
-        Ok(0)
+        // No matching reply after 8 reads (each bounded by SO_RCVTIMEO).
+        // All four BSDs echo RTM_ADD/RTM_DELETE with rtm_errno, so silence
+        // means the reply was lost or never sent (e.g. a queue flooded
+        // with notifications) — report it rather than swallowing
+        // EPERM/EEXIST/etc. and letting the caller believe the route was
+        // installed.
+        Err(OsRouteError(
+            "PF_ROUTE: no reply with matching rtm_seq".to_string(),
+        ))
     }
+}
+
+/// True when a received buffer is the echo for `seq`/`msg_type` (and not an
+/// asynchronous route-change notification). Pure so the reply-matching logic
+/// is unit-testable without a routing socket.
+fn is_reply(buf: &[u8], seq: i32, msg_type: u8) -> bool {
+    if buf.len() < layout::HDR {
+        return false;
+    }
+    let rtm_seq = i32::from_ne_bytes([
+        buf[layout::OFF_SEQ],
+        buf[layout::OFF_SEQ + 1],
+        buf[layout::OFF_SEQ + 2],
+        buf[layout::OFF_SEQ + 3],
+    ]);
+    rtm_seq == seq && buf[3] == msg_type
 }
 
 impl Drop for RouteSocket {
@@ -690,6 +707,19 @@ mod tests {
         assert_eq!(roundup(28), 32);
         assert_eq!(roundup(8), 8);
         assert_eq!(roundup(0), 8);
+    }
+
+    /// Reply matching used by `roundtrip`: the echo must carry both the
+    /// same rtm_seq and the same message type as the request.
+    #[test]
+    fn is_reply_matches_seq_and_type() {
+        let mut buf = vec![0u8; layout::HDR];
+        buf[3] = RTM_ADD;
+        buf[layout::OFF_SEQ..layout::OFF_SEQ + 4].copy_from_slice(&42i32.to_ne_bytes());
+        assert!(is_reply(&buf, 42, RTM_ADD));
+        assert!(!is_reply(&buf, 43, RTM_ADD)); // wrong seq
+        assert!(!is_reply(&buf, 42, RTM_DELETE)); // wrong type
+        assert!(!is_reply(&buf[..layout::HDR - 1], 42, RTM_ADD)); // runt
     }
 
     #[test]

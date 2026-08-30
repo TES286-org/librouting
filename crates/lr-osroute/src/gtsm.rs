@@ -18,7 +18,7 @@
 //!
 //! - **Listener** ([`arm_listener_gtsm`]): sets `IP_TTL` /
 //!   `IPV6_UNICAST_HOPS` + a per-socket minimum-TTL filter
-//!   (`IP_MINTTL` / `IPV6_MINHOPLIMIT`) on the listener so every
+//!   (`IP_MINTTL` / `IPV6_MINHOPCOUNT`) on the listener so every
 //!   accepted connection inherits the policy.
 //! - **Connector** ([`connect_gtsm`]): creates the socket, sets the
 //!   outbound TTL, then connects. The SYN itself carries the high TTL.
@@ -27,7 +27,7 @@
 //!
 //! | Platform | IPv4 | IPv6 |
 //! |----------|------|------|
-//! | Linux    | `IP_TTL` + `IP_MINTTL` | `IPV6_UNICAST_HOPS` + `IPV6_MINHOPLIMIT` |
+//! | Linux    | `IP_TTL` + `IP_MINTTL` | `IPV6_UNICAST_HOPS` + `IPV6_MINHOPCOUNT` |
 //! | Other    | `set_ttl` on `TcpStream` / `TcpListener` (send side only — no kernel min-TTL filter) |
 //!
 //! On non-Linux platforms the send side is still enforced (TTL=255 on
@@ -52,7 +52,7 @@
 
 /// GTSM configuration. The outbound TTL is always set on the socket;
 /// the minimum-TTL filter is enforced when the kernel supports it
-/// (Linux `IP_MINTTL` / `IPV6_MINHOPLIMIT`).
+/// (Linux `IP_MINTTL` / `IPV6_MINHOPCOUNT`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Gtsm {
     /// TTL set on every outbound segment. 255 for single-hop; the
@@ -150,7 +150,7 @@ impl GtsmError {
 
 // ---------------------------------------------------------------------------
 // Linux implementation — IP_TTL / IP_MINTTL / IPV6_UNICAST_HOPS /
-// IPV6_MINHOPLIMIT. The min-TTL filter is what makes GTSM effective: the
+// IPV6_MINHOPCOUNT. The min-TTL filter is what makes GTSM effective: the
 // kernel drops low-TTL packets before they reach userspace.
 //
 // We declare the FFI surface inline (matching the tcp_auth module) so the
@@ -179,7 +179,10 @@ mod imp {
     const IP_MINTTL: i32 = 21;
     const SOL_IPV6: i32 = 41;
     const IPV6_UNICAST_HOPS: i32 = 16;
-    const IPV6_MINHOPLIMIT: i32 = 74;
+    // RFC 5082 receive filter for IPv6. IPV6_MINHOPCOUNT is 73 in
+    // uapi/linux/in6.h; 74 is IPV6_ORIGDSTADDR (an unrelated ancillary
+    // option) — using 74 would silently disable the filter.
+    pub(crate) const IPV6_MINHOPCOUNT: i32 = 73;
     const SOCK_STREAM: i32 = 1;
     const SOCK_NONBLOCK: i32 = 0o4000;
     const O_NONBLOCK: i32 = 0o4000;
@@ -320,15 +323,15 @@ mod imp {
                 }
                 AF_INET6 => {
                     if let Err(GtsmError::Os { errno, .. }) =
-                        set_opt_int(fd, SOL_IPV6, IPV6_MINHOPLIMIT, gtsm.min_ttl as i32)
+                        set_opt_int(fd, SOL_IPV6, IPV6_MINHOPCOUNT, gtsm.min_ttl as i32)
                     {
                         if errno == ENOPROTOOPT {
                             return Err(GtsmError::Unsupported(
-                                "IPV6_MINHOPLIMIT not supported by kernel",
+                                "IPV6_MINHOPCOUNT not supported by kernel",
                             ));
                         }
                         return Err(GtsmError::Os {
-                            context: "setsockopt(IPV6_MINHOPLIMIT)",
+                            context: "setsockopt(IPV6_MINHOPCOUNT)",
                             errno,
                         });
                     }
@@ -578,6 +581,16 @@ mod tests {
         let g = Gtsm::default();
         assert!(g.is_disabled());
         assert_eq!(format!("{g}"), "none");
+    }
+
+    /// The RFC 5082 IPv6 receive filter option is IPV6_MINHOPCOUNT (73);
+    /// 74 is IPV6_ORIGDSTADDR. Regression test for the constant the
+    /// setsockopt path uses.
+    #[cfg(all(feature = "std", target_os = "linux"))]
+    #[test]
+    fn ipv6_min_hop_count_is_73() {
+        assert_eq!(imp::IPV6_MINHOPCOUNT, 73);
+        assert_ne!(imp::IPV6_MINHOPCOUNT, 74); // 74 = IPV6_ORIGDSTADDR
     }
 
     #[test]

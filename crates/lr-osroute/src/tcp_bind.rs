@@ -97,8 +97,10 @@ mod imp {
 
     // bind lives in linux.rs with this exact signature; redeclaring
     // it differently would be UB at link time, so route through it.
+    // socklen_t is u32 on Linux — keep the declaration in sync with
+    // linux.rs.
     extern "C" {
-        fn bind(fd: i32, addr: *const core::ffi::c_void, len: i32) -> i32;
+        fn bind(fd: i32, addr: *const core::ffi::c_void, len: u32) -> i32;
     }
 
     fn errno() -> i32 {
@@ -186,7 +188,7 @@ mod imp {
             }
         });
         // SAFETY: local_sa holds a valid sockaddr of local_len.
-        let rc = unsafe { bind(fd, &local_sa as *const _ as *const _, local_len as i32) };
+        let rc = unsafe { bind(fd, &local_sa as *const _ as *const _, local_len) };
         if rc < 0 {
             let e = std::io::Error::from_raw_os_error(errno());
             unsafe { close(fd) };
