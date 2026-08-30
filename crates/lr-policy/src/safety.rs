@@ -259,26 +259,14 @@ impl SafetyNet {
     fn as_path_len(&self, route: &Route) -> Option<usize> {
         let attr_2 = route.attributes.get(lr_core::attr::AttrTag(2));
         let attr_17 = route.attributes.get(lr_core::attr::AttrTag(17));
-        if let Some(a) = attr_17.or(attr_2) {
-            // Per RFC 4271, AS_PATH length is the sum of `count` fields of
-            // each segment header.
-            let mut len = 0;
-            let mut i = 0;
-            let v = &a.value;
-            while i + 1 < v.len() {
-                let _kind = v[i];
-                let count = v[i + 1] as usize;
-                len += count;
-                i += 2;
-                // Determine segment width: AS4_PATH uses 4 bytes/AS, AS_PATH
-                // uses 2 bytes/AS.
-                let width = if a.tag.0 == 17 { 4 } else { 2 };
-                i += count * width;
-            }
-            Some(len)
-        } else {
-            None
-        }
+        let attr = attr_17.or(attr_2)?;
+        // AS4_PATH (tag 17) is always 4-byte; AS_PATH (tag 2) is 4-byte
+        // after FSM normalization, 2-byte in the legacy form. Try 4-byte
+        // first (the production path), fall back to 2-byte.
+        let path = lr_bgp::path::AsPath::decode_4(&attr.value)
+            .or_else(|| lr_bgp::path::AsPath::decode(&attr.value))?;
+        // RFC 4271 §9.1.2.2(a): AS_SET counts as 1 regardless of size.
+        Some(path.length())
     }
 
     /// Count how many times `local_as` appears in the AS_PATH. Used by both

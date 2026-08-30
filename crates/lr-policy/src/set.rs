@@ -331,7 +331,10 @@ mod tests {
 
         let mut ok = route_for(&[203, 0, 113, 0]);
         assert!(matches!(hooks.on_import(&mut ok), HookVerdict::Keep));
-        assert_eq!(ok.preference.admin_distance, 250);
+        // SetLocalPref writes the LOCAL_PREF path attribute, not the
+        // cross-protocol admin distance (which stays 20 for BGP).
+        assert_eq!(ok.preference.admin_distance, 20);
+        assert_eq!(crate::bgp::local_pref(&ok), Some(250));
 
         // Session without a binding: untouched.
         let mut other = route_for(&[198, 51, 100, 0]);

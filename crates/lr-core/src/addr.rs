@@ -145,11 +145,9 @@ fn parse_ipv4(s: &str) -> Option<[u8; 4]> {
     }
     let mut out = [0u8; 4];
     for (i, p) in parts.iter().enumerate() {
-        let v: u16 = p.parse().ok()?;
-        if v > 255 {
-            return None;
-        }
-        out[i] = v as u8;
+        // parse_ipv4_octet rejects empty, oversized, and non-digit octets
+        // (including a leading '+' that Rust's integer parse accepts).
+        out[i] = parse_ipv4_octet(p)?;
     }
     Some(out)
 }
@@ -184,9 +182,10 @@ fn parse_ipv4_strict(s: &str) -> Option<[u8; 4]> {
 }
 
 /// Parse an IPv6 address in any standard textual form (RFC 4291 §2.2),
-/// including the `::` shorthand. Mixed `::ffff:1.2.3.4` form is also accepted.
+/// including the `::` shorthand. Mixed `::ffff:1.2.3.4` form is accepted
+/// only with the dotted quad in the final position (RFC 4291 §2.2.3).
 fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
-    // Split on "::" (at most one occurrence)
+    // Split on "::" (at most one occurrence).
     let (left, right) = if let Some(idx) = s.find("::") {
         (&s[..idx], &s[idx + 2..])
     } else {
@@ -203,9 +202,7 @@ fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
         right.split(':').collect()
     };
 
-    // Reject malformed input (e.g. three consecutive colons handled above by
-    // splitting into pieces with empty strings between them, which we treat as
-    // errors below).
+    // Reject malformed input (e.g. ":::" → pieces with empty strings).
     if left_groups.iter().any(|g| g.is_empty()) && !left.is_empty() {
         return None;
     }
@@ -213,25 +210,43 @@ fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
         return None;
     }
 
-    // Detect the "::" case
+    // A dotted quad, if present, must be the *last* group of its side and
+    // counts as two hextets.
+    let last = right_groups.last().or_else(|| left_groups.last());
+    let has_quad = last.map(|g| g.contains('.')).unwrap_or(false);
+    let (quad_bytes, quad_units) = if has_quad {
+        (parse_ipv4_strict(last.unwrap())?, 2)
+    } else {
+        ([0u8; 4], 0)
+    };
+
     let has_double_colon = s.contains("::");
-    let total = left_groups.len() + right_groups.len();
+    // The quad (when present) is one element of the split groups but counts
+    // as two hextets; adjust so `total` is in hextet units.
+    let quad_element = usize::from(has_quad);
+    let total = left_groups.len() + right_groups.len() - quad_element + quad_units;
 
     if !has_double_colon {
-        // Need exactly 8 groups
+        // Need exactly 8 hextets (or 6 hextets + quad).
         if total != 8 {
             return None;
         }
         let mut out = [0u8; 16];
-        for (i, g) in left_groups.iter().enumerate() {
+        let mut pos = 0;
+        let hextet_count = left_groups.len() - if has_quad { 1 } else { 0 };
+        for g in left_groups.iter().take(hextet_count) {
             let v = u16::from_str_radix(g, 16).ok()?;
-            out[i * 2] = (v >> 8) as u8;
-            out[i * 2 + 1] = v as u8;
+            out[pos] = (v >> 8) as u8;
+            out[pos + 1] = v as u8;
+            pos += 2;
+        }
+        if has_quad {
+            out[pos..pos + 4].copy_from_slice(&quad_bytes);
         }
         return Some(out);
     }
 
-    // With "::": total must be < 8
+    // With "::": total must be < 8.
     if total >= 8 {
         return None;
     }
@@ -245,14 +260,15 @@ fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
         pos += 2;
     }
     pos += zeros * 2; // skip zero-filled middle
-    for g in &right_groups {
-        // The last group may be a dotted-quad.
+    for (i, g) in right_groups.iter().enumerate() {
+        let is_last = i + 1 == right_groups.len();
         if g.contains('.') {
-            if pos + 4 > 16 {
+            // The quad must be the last group and it was already consumed
+            // into quad_bytes above.
+            if !is_last || pos + 4 > 16 {
                 return None;
             }
-            let quad = parse_ipv4_strict(g)?;
-            out[pos..pos + 4].copy_from_slice(&quad);
+            out[pos..pos + 4].copy_from_slice(&quad_bytes);
             break;
         }
         let v = parse_group(g, false)?;
@@ -275,6 +291,20 @@ fn parse_group_to_bytes(v: u16) -> Option<[u8; 2]> {
 }
 
 fn to_ipv6_string(b: &[u8; 16]) -> String {
+    // RFC 4291 §2.2.3: IPv4-mapped addresses render with a dotted quad.
+    if b[0..10] == [0; 10] && b[10..12] == [0xff, 0xff] {
+        let mut head = String::new();
+        // The 5 zero groups compress to "::"; then "ffff" + the quad.
+        head.push_str("::ffff:");
+        use core::fmt::Write;
+        let _ = write!(
+            head,
+            "{}.{}.{}.{}",
+            b[12], b[13], b[14], b[15]
+        );
+        return head;
+    }
+
     // Compress the longest run of zero groups into "::" (RFC 5952 §4.2.3).
     let groups: [u16; 8] = [
         u16::from_be_bytes([b[0], b[1]]),
@@ -671,5 +701,33 @@ mod tests {
         let r: RouterId = "1.2.3.4".parse().unwrap();
         assert_eq!(r.to_string(), "1.2.3.4");
         assert_eq!(r.as_u32(), 0x01020304);
+    }
+
+    /// RFC 4291 §2.2.3 mixed IPv4-mapped IPv6 form must parse, and
+    /// malformed inputs (quad not last, trailing junk) must be rejected.
+    #[test]
+    fn ipv6_mixed_form() {
+        let a: IpAddr = "::ffff:1.2.3.4".parse().unwrap();
+        eprintln!("parsed: {:02x?} -> {}", a.octets(), a.to_string());
+        assert!(a.is_ipv4_mapped_ipv6());
+        assert_eq!(a.to_string(), "::ffff:1.2.3.4");
+
+        let b: IpAddr = "0:0:0:0:0:ffff:192.168.1.1".parse().unwrap();
+        assert_eq!(b.to_string(), "::ffff:192.168.1.1");
+
+        // Quad must be the last group.
+        assert!("::1.2.3.4:5".parse::<IpAddr>().is_err());
+        assert!("1.2.3.4::5".parse::<IpAddr>().is_err());
+        // Junk after the quad.
+        assert!("::ffff:1.2.3.4junk".parse::<IpAddr>().is_err());
+        // Too many hextets.
+        assert!("1:2:3:4:5:6:7:8:9".parse::<IpAddr>().is_err());
+    }
+
+    /// A leading '+' must not be accepted as an IPv4 octet.
+    #[test]
+    fn ipv4_rejects_plus_prefix() {
+        assert!("+1.2.3.4".parse::<IpAddr>().is_err());
+        assert!("1.2.3.4".parse::<IpAddr>().is_ok());
     }
 }

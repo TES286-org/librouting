@@ -44,7 +44,12 @@ pub fn evaluate_match(m: &MatchCondition, route: &Route, resolver: &dyn MatchRes
 
 pub fn apply_set(action: &SetAction, route: &mut Route) {
     match action {
-        SetAction::SetLocalPref(v) => route.preference.admin_distance = *v,
+        // LOCAL_PREF is a BGP path attribute (RFC 4271 §5.1.5), not the
+        // cross-protocol admin distance; the two must not be conflated.
+        #[cfg(feature = "bgp")]
+        SetAction::SetLocalPref(v) => crate::bgp::set_local_pref(route, *v),
+        #[cfg(not(feature = "bgp"))]
+        SetAction::SetLocalPref(_) => { /* needs the bgp feature: no-op */ }
         #[cfg(feature = "bgp")]
         SetAction::SetMed(v) => crate::bgp::set_med(route, *v),
         #[cfg(not(feature = "bgp"))]
@@ -55,10 +60,16 @@ pub fn apply_set(action: &SetAction, route: &mut Route) {
         #[cfg(not(feature = "bgp"))]
         SetAction::PrependAs(_) => { /* needs the bgp feature: no-op */ }
         #[cfg(feature = "bgp")]
-        SetAction::AddCommunity(asn, local) => crate::bgp::add_community(
-            route,
-            lr_bgp::path::communities::Community::new(asn.0 as u16, *local),
-        ),
+        SetAction::AddCommunity(asn, local) => {
+            // RFC 1997 communities carry a 2-byte AS number; larger ASNs
+            // cannot be encoded and are silently dropped.
+            if asn.0 <= u16::MAX as u32 {
+                crate::bgp::add_community(
+                    route,
+                    lr_bgp::path::communities::Community::new(asn.0 as u16, *local),
+                );
+            }
+        }
         #[cfg(not(feature = "bgp"))]
         SetAction::AddCommunity(_, _) => { /* needs the bgp feature: no-op */ }
         SetAction::SetMetric(v) => route.preference.metric = *v,

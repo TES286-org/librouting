@@ -28,10 +28,12 @@ use lr_core::rib::Route;
 /// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4).
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
+const TAG_LOCAL_PREF: u8 = 5;
 const TAG_COMMUNITIES: u8 = 8;
 
 const FLAGS_AS_PATH: u8 = 0x40;
 const FLAGS_MED: u8 = 0x80;
+const FLAGS_LOCAL_PREF: u8 = 0x40; // well-known discretionary
 const FLAGS_COMMUNITIES: u8 = 0xC0;
 
 fn attr_bytes(route: &Route, tag: u8) -> Option<&[u8]> {
@@ -75,6 +77,25 @@ fn put(route: &mut Route, tag: u8, flags: u8, value: Vec<u8>) {
 /// Set the MULTI_EXIT_DISC (RFC 4271 §4.2.4). Inserts or replaces.
 pub fn set_med(route: &mut Route, value: u32) {
     put(route, TAG_MED, FLAGS_MED, value.to_be_bytes().to_vec());
+}
+
+/// Set the LOCAL_PREF (RFC 4271 §5.1.5). Inserts or replaces.
+///
+/// LOCAL_PREF is a BGP path attribute, distinct from the cross-protocol
+/// administrative distance carried in `Route.preference.admin_distance`;
+/// writing it into the preference would corrupt the admin-distance merge.
+pub fn set_local_pref(route: &mut Route, value: u32) {
+    put(
+        route,
+        TAG_LOCAL_PREF,
+        FLAGS_LOCAL_PREF,
+        value.to_be_bytes().to_vec(),
+    );
+}
+
+/// The route's LOCAL_PREF; `None` when absent (defaults to 100 on eBGP).
+pub fn local_pref(route: &Route) -> Option<u32> {
+    attr_bytes(route, TAG_LOCAL_PREF).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the

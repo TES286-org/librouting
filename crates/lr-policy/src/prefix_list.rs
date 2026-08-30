@@ -92,7 +92,10 @@ impl PrefixListBank {
     pub fn evaluate(&self, id: u32, p: &Prefix) -> bool {
         match self.lists.get(&id) {
             Some(list) => list.evaluate(p),
-            None => true, // missing list = implicit permit (configurable)
+            // Unknown list id: deny — consistent with the community-list
+            // and AS-path-filter banks, and with FRR (an undefined
+            // reference must not silently pass traffic).
+            None => false,
         }
     }
 }
