@@ -113,6 +113,9 @@ fn print_usage() {
          up to N times (FRR `allowas-in N`; default N=1)\n  \
          --allowas-any            Admit any number of local AS in the\n  \
          AS_PATH (FRR `allowas-any`)\n  \
+         --soft-reconfig-inbound  Retain the pre-policy Adj-RIB-In for\n  \
+         every peer (FRR `soft-reconfiguration inbound`)\n  \
+         --no-soft-reconfig-inbound  Disable pre-policy retention (default)\n  \
          --bfd                    BFD fast-fail for the peer(s) (RFC 5880/\n  \
          5881): a BFD Down tears the BGP session immediately\n  \
          --bfd-multihop           RFC 5883 multihop BFD (UDP 4784, no TTL\n  \
@@ -444,6 +447,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         cfg.allow_local_as.to_string()
     };
     println!("  allow-local-as: {}", allowas_label);
+    println!("  soft-reconfig-in: {}", cfg.soft_reconfig_inbound);
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -802,6 +806,11 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
     // propagates it to PeerConfig so the router's per-peer AS-loop
     // tolerance check sees it.
     sc.local_as_tolerance = p.allow_local_as.unwrap_or(g.allow_local_as);
+    // FRR `neighbor X soft-reconfiguration inbound` (W2.4): per-peer
+    // override of the router-wide default. add_session propagates it
+    // to PeerConfig so import_route knows to retain the raw received
+    // route in the pre-policy RIB.
+    sc.soft_reconfig_inbound = p.soft_reconfig_inbound.unwrap_or(g.soft_reconfig_inbound);
     // RFC 5549 Extended Next-Hop. Advertise the canonical (1,1,2) tuple
     // so an IPv6 transport can carry IPv4 NLRI without an IPv4 next-hop.
     if p.extended_next_hop.unwrap_or(g.extended_next_hop) {

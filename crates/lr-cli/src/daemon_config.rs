@@ -66,6 +66,10 @@ pub(crate) struct PeerSpec {
     /// (FRR `allowas-in N`); `u32::MAX` = admit any number (FRR
     /// `allowas-any`).
     pub allow_local_as: Option<u32>,
+    /// FRR `neighbor X soft-reconfiguration inbound` (W2.4): per-peer
+    /// toggle for pre-policy Adj-RIB-In retention. `None` = inherit
+    /// the router default (off).
+    pub soft_reconfig_inbound: Option<bool>,
     /// RFC 5549 Extended Next-Hop.
     pub extended_next_hop: Option<bool>,
     /// RFC 5082 GTSM hop count (`Some(1)` = single-hop TTL security).
@@ -270,6 +274,15 @@ pub(crate) struct DaemonConfig {
     /// `allowas-in N`); `u32::MAX` admits any number (FRR
     /// `allowas-any`). Per-peer overrides via `[peer] allow_local_as`.
     pub allow_local_as: u32,
+    /// FRR `bgp soft-reconfiguration inbound` (W2.4): router-wide
+    /// default for the per-peer `soft_reconfig_inbound` knob. When
+    /// on, the router retains the pre-policy Adj-RIB-In for every BGP
+    /// peer — the raw received routes before the import hook chain
+    /// runs — so a policy reconfiguration can be applied without
+    /// re-fetching from the peer (`clear ip bgp * soft in`). Off by
+    /// default (FRR's default; the cost is duplicate RIB memory per
+    /// peer). Per-peer overrides via `[peer] soft_reconfig_inbound`.
+    pub soft_reconfig_inbound: bool,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -327,6 +340,7 @@ impl DaemonConfig {
             bestpath_compare_routerid: true,
             default_ipv4_unicast: true,
             allow_local_as: 0,
+            soft_reconfig_inbound: false,
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -768,6 +782,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     })?,
                 };
             }
+            "bgp.soft_reconfig_inbound" => cfg.soft_reconfig_inbound = parse_bool(value),
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -1035,6 +1050,7 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
                 })?,
             });
         }
+        "soft_reconfig_inbound" => peer.soft_reconfig_inbound = Some(parse_bool(value)),
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
@@ -1193,6 +1209,14 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--allowas-any" => {
                 cfg.allow_local_as = u32::MAX;
+                i += 1;
+            }
+            "--soft-reconfig-inbound" => {
+                cfg.soft_reconfig_inbound = true;
+                i += 1;
+            }
+            "--no-soft-reconfig-inbound" => {
+                cfg.soft_reconfig_inbound = false;
                 i += 1;
             }
             "--install-kernel-routes" => {
