@@ -73,9 +73,9 @@ implements, or references. It is grouped by protocol family.
 | ---- | ---------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------- |
 | 7557 | Babel Source-Specific Extensions (precursor to 9079) | ✓                                                                                                                                      | `lr-babel::source`                      |
 | 8966 | Babel                                                | ✓ core                                                                                                                                 | `lr-babel::tlv`, `lr-babel::message`    |
-| 8967 | Babel HMAC Cryptographic Auth                        | ✓                                                                                                                                      | `lr-babel::tlv`, `lr-babel::hmac`       |
+| 8967 | Babel MAC Cryptographic Auth                         | ✓ (stateful §4.3 interface, §4.3.1 challenge handshake, §4.4 expiry, §5 incremental deployment, HMAC-SHA256 + keyed BLAKE2s-128)        | `lr-babel::auth`                        |
 | 9079 | Babel Source-Specific Routing                        | ✓ (Source Prefix sub-TLV 128 inside Update / Route Request / Seqno Request, IPv6 source prefixes, route table keyed by (dest, source)) | `lr-babel::source`, `lr-babel::message` |
-| 9467 | Relaxed Packet Counter Verification for Babel MAC    | partial                                                                                                                                | `lr-babel::auth`                        |
+| 9467 | Relaxed Packet Counter Verification for Babel MAC    | ✓ (§3.1 unicast/multicast split, §3.2 window, §3.3 combined)                                                                           | `lr-babel::auth`                        |
 | 9647 | Babel YANG Data Model                                | partial                                                                                                                                | TBD                                     |
 
 ## BFD — RFC 5880 + extensions

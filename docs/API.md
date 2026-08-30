@@ -352,14 +352,37 @@ link as a type-4 link in their backbone router-LSAs (metric = the
 transit-area path cost) and set the V-bit in their transit-area
 router-LSAs.
 
-## Babel RFC 8967 authentication
+## Babel MAC authentication (RFC 8967 + RFC 9467)
+
+For the full RFC 8967 reception algorithm (MAC test, PC verification,
+Challenge Request/Reply resynchronization, neighbour-state expiry) use
+the stateful `BabelAuthInterface`. The embedder drives it with the
+datagram, its pseudo-header and a monotonic clock; the interface
+returns the accepted plain body plus the challenge control traffic to
+emit (unicast to the peer). RFC 9467 relaxed PC verification
+(unicast/multicast split, optional window) is built in.
 
 ```rust
 use lr_babel::{
-    BabelCodec, BabelFrame, BabelMacKey, BabelPacketCounter, BabelPseudoHeader,
-    BabelReplayProtection,
+    challenge_request_tlv, BabelAuthConfig, BabelAuthInterface, BabelCodec, BabelFrame,
+    BabelMacAlgorithm, BabelMacKey, BabelPseudoHeader, SystemNonceSource, NonceSource,
 };
 use lr_core::addr::IpAddr;
+
+// One interface: keys (one MAC per key per datagram, key rotation safe),
+// RFC 9467 3.1 unicast/multicast PC split (on by default) and an optional
+// 3.2 window (S=128 here).
+let mut cfg = BabelAuthConfig::new(BabelMacKey::new(b"32-byte-interface-secret".to_vec()));
+cfg.keys.push(BabelMacKey {
+    algorithm: BabelMacAlgorithm::Blake2s128,
+    secret: b"rotated-blake2s-key".to_vec(),
+});
+cfg.pc_window = Some(128);
+let mut nonce = SystemNonceSource::new();
+use lr_babel::NonceSource;
+let mut index = vec![0u8; 8];
+nonce.fill(&mut index); // the outbound Index must be fresh (RFC 8967 3.1)
+let mut iface = BabelAuthInterface::new(cfg, index, 0, Box::new(nonce))?;
 
 let pseudo_header = BabelPseudoHeader {
     source: IpAddr::V4([192, 0, 2, 1]),
@@ -367,15 +390,34 @@ let pseudo_header = BabelPseudoHeader {
     destination: IpAddr::V4([224, 0, 0, 111]),
     destination_port: 6696,
 };
-let key = BabelMacKey::new(b"32-byte-interface-secret".to_vec());
-let mut sender = BabelPacketCounter::new(b"fresh-interface-index".to_vec(), 0)?;
-let packet = BabelCodec::new().encode_authenticated(
-    &BabelFrame::empty(), pseudo_header, &key, &mut sender,
-)?;
+
+// Egress: append the PC TLV (fresh index on overflow, RFC 8967 4.2) and
+// one MAC TLV per key into the trailer.
+let raw = BabelCodec::new().encode_vec(&BabelFrame::empty())?;
+let wire = iface.authenticate_packet(&raw, pseudo_header)?;
+
+// Ingress: the RFC 8967 4.3 state machine. Accepted datagrams come back
+// with the PC/challenge TLVs and the trailer stripped, ready for the
+// normal codec; challenge traffic is returned as actions.
+let outcome = iface.verify(&wire, pseudo_header, /* now_ms */ 42);
+if let Some(plain) = outcome.accepted {
+    let frame = BabelCodec::new().decode_slice(&plain)?.unwrap();
+    // ... feed the frame to the Babel FSM ...
+}
+for action in outcome.actions {
+    // Build the Challenge Request/Reply frame (see `challenge_request_tlv`
+    // / `challenge_reply_tlv`), authenticate it, and unicast it to the peer.
+    let _ = &action;
+}
+iface.gc(/* now_ms */ 42); // RFC 8967 4.4 neighbour-state expiry
+
+// The stateless primitives remain for single-key embedders that manage
+// their own replay state:
+use lr_babel::{authenticate_packet, verify_packet, BabelPacketCounter, BabelReplayProtection};
+let mut counter = BabelPacketCounter::new(b"fresh-interface-index".to_vec(), 0)?;
+let signed = authenticate_packet(&raw, pseudo_header, &BabelMacKey::new(b"k"), &mut counter)?;
 let mut replay = BabelReplayProtection::default();
-let frame = BabelCodec::new().decode_authenticated_slice(
-    &packet, pseudo_header, &[key], &mut replay,
-)?;
+let _plain = verify_packet(&signed, pseudo_header, &[BabelMacKey::new(b"k")], &mut replay)?;
 ```
 
 ## OSPF authentication (RFC 5709 / RFC 7166)

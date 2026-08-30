@@ -90,8 +90,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Neighbor / route table + feasibility (RFC 8966 §3.5.2) | ✅ | |
 | Metric computation, seqno handling | ✅ 🧪 | E2E install/withdraw tests |
 | RFC 9079 source-specific routing | ✅ 🧪 | Source Prefix **sub-TLV** (type 128) inside Update / Route Request / Seqno Request per §7.1; IPv4 + IPv6 source prefixes; route table keyed by (destination, source) tuple |
-| RFC 8967 HMAC authentication | ✅ | HMAC-SHA256, IPv4/IPv6 pseudo-headers, multi-key receive validation, first-PC-wins counters (RFC 8967 §4.3), constant-time MAC compare, replay rejection |
-| Babel over IPv6 link-local transport | ✅ 🧪 | daemon `--protocol babel` mode; UDP on port 6696, ff02::1:6 multicast, TTL=255 (RFC 8966 §2.1), scope-id carried from `%iface` into bind/join/send |
+| RFC 8967 MAC authentication | ✅ 🧪 | stateful `BabelAuthInterface`: full §4.3 reception (MAC test once per key, preparse, PC verification), §4.3.1 Challenge Request/Reply resynchronization (30 s expiry, 300 ms request/reply rate limits), §4.4 neighbour-state expiry (lazy + gc), §5 incremental-deployment mode, keyed BLAKE2s-128 (§4.1 SHOULD) beside the mandatory HMAC-SHA256, §4.2 PC-overflow index rotation, variable-length MAC TLVs (unknown trailer TLVs skipped, body MAC TLVs ignored); two-daemon e2e (`tests/interop/babel_auth.sh`) |
+| RFC 9467 relaxed PC verification | ✅ 🧪 | §3.1 unicast/multicast PC split (PCm/PCu, RECOMMENDED, default on), §3.2 window verification (OPTIONAL, configurable S), §3.3 combined mode with two windows; successful Challenge Replies seed both fields; covered by unit tests and the two-daemon e2e |
+| Babel daemon transport (IPv6 link-local + IPv4 local networks) | ✅ 🧪 | daemon `--protocol babel` mode: UDP 6696, TTL=255 (RFC 8966 §2.1/§4), `%iface` scope carried into bind/join/send; two-socket transport (unicast on the local address + multicast on the group address — ff02::1:6 v6 / 224.0.0.111 v4 — with SO_REUSEADDR) so the destination class is exact; periodic Hello + Router-Id + Next-Hop + Update announcements (Loc-RIB minus babel-learned routes, split horizon, boot-unique router-id); `--network` origination; source-port/self-datagram filtering (§4.1); RFC 8967 auth wired in with per-neighbour state and challenge traffic unicast to the peer; `tests/interop/babel_auth.sh` (four phases) |
 
 ## Layer 3 — router pipeline (`lr-router`)
 
@@ -147,6 +148,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | OSPF two-daemon E2E (raw-socket multicast adjacency, stub-net propagation both ways, dead-timer teardown) | ✅ 🧪 | `tests/interop/ospf.sh` — veth pair, one network namespace per daemon, rootless via `unshare -Urn` |
 | OSPF x BIRD E2E (real DBD/LSR exchange to Full adjacency, stub nets propagated in BOTH directions via birdc) | ✅ 🧪 | `tests/interop/ospf_bird.sh` — lr-daemon ↔ BIRD 2 over a veth pair |
+| Babel MAC auth E2E (two-daemon: propagation, restart challenge resync, wrong-key fail-closed, RFC 8967 §5 incremental deployment) | ✅ 🧪 | `tests/interop/babel_auth.sh` — IPv4 multicast over loopback, rootless netns |
 | MRT interop (BIRD 2 `protocol mrt` dump decoded by `lr mrt rib`; daemon Loc-RIB export round-trip with AS path + next hop) | ✅ 🧪 | `tests/interop/mrt.sh` |
 | BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪 | `tests/interop/bmp.sh` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
@@ -528,12 +530,29 @@ Highest-value missing/partial standards, in rough order:
    Af-bit + without Af-bit), multi-entry body roundtrip, truncated
    body failure (prefix-options byte, prefix bytes, Af-bit af_id),
    empty body, new LSA type parse + display.
-6. **Babel-MAC completion** — the DTLS-less MAC variant is RFC 8967
-   (not "RFC 9289", which is an ONC-RPC/TLS document and was a wrong
-   citation here). Remaining: the RFC 8967 §4.3.1 Challenge
-   Request/Reply resynchronization mechanism, §5 incremental
-   deployment, keyed BLAKE2s-128 (§4.1 SHOULD), and RFC 9467 relaxed
-   PC verification (unicast/multicast split + window).
+6. ~~**Babel-MAC completion**~~ — done (the item previously cited
+   "RFC 9289", which is an ONC-RPC/TLS document — a wrong citation;
+   the DTLS-less MAC variant is RFC 8967, and RFC 9467 updates it).
+   New `BabelAuthInterface` in `lr-babel::auth` implements the full
+   RFC 8967 §4.3 reception algorithm: per-neighbour (Index, PC) state
+   keyed by source address (created only after the MAC test passes),
+   §4.3.1 Challenge Request/Reply resynchronization with a 30 s
+   challenge expiry and 300 ms request/reply rate limits, §4.4
+   neighbour-state expiry (lazy + explicit gc), and §5 incremental
+   deployment (send authenticated, accept unauthenticated). MAC
+   algorithms: the mandatory HMAC-SHA256 plus keyed BLAKE2s-128
+   (§4.1 SHOULD). §4.2 PC overflow now rotates to a fresh index.
+   RFC 9467 landed on top: §3.1 unicast/multicast PC split
+   (RECOMMENDED, default on), §3.2 window verification (OPTIONAL,
+   configurable size), §3.3 combined mode. The daemon transport signs
+   and verifies every datagram (`--babel-key`/`[[babel.key]]`,
+   `--babel-accept-unauthenticated`, `--babel-no-pc-split`,
+   `--babel-pc-window`), and gained the two-socket unicast/multicast
+   transport, periodic Hello/Router-Id/Next-Hop/Update announcements
+   with boot-unique router-ids, and `--network` origination.
+   Verified by 27 new unit tests plus the two-daemon e2e
+   (`tests/interop/babel_auth.sh`: propagation, restart challenge
+   resynchronization, wrong-key fail-closed, incremental deployment).
 7. ~~**RFC 8277** BGP labeled prefixes (BGP-LU)~~ — done: new `lr-mpls`
    crate (RFC 3032 label + label-stack codec, 4- and 3-octet wire
    forms); `lr-bgp::path::labeled_nlri` (RFC 8277 §3 NLRI codec with
