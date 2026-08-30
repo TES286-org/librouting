@@ -5,7 +5,9 @@
 // `librouting::Error` (a std::runtime_error subclass) on FFI errors.
 #pragma once
 
+extern "C" {
 #include "lr_ffi.h"
+}
 
 #include <cstddef>
 #include <cstdint>
@@ -47,6 +49,21 @@ inline Router make_router() {
     return Router(r);
 }
 
+inline std::uint64_t add_bgp_session_ext(Router& r,
+                                         std::uint32_t local_as,
+                                         std::uint32_t peer_as,
+                                         std::uint32_t local_bgp_id,
+                                         std::uint16_t hold_time,
+                                         std::uint16_t keepalive,
+                                         bool asn4,
+                                         bool graceful_restart,
+                                         std::uint16_t gr_restart_time,
+                                         bool long_lived_gr,
+                                         std::uint32_t llgr_stale_time,
+                                         std::uint32_t llgr_max_stale_time);
+
+/// Create a BGP session with the defaults an operator expects:
+/// graceful restart on (120 s), RFC 9494 LLGR off.
 inline std::uint64_t add_bgp_session(Router& r,
                                      std::uint32_t local_as,
                                      std::uint32_t peer_as,
@@ -54,7 +71,6 @@ inline std::uint64_t add_bgp_session(Router& r,
                                      std::uint16_t hold_time = 90,
                                      std::uint16_t keepalive = 0,
                                      bool asn4 = true) {
-    // RFC 4724 graceful restart on (120 s), RFC 9494 LLGR off.
     return add_bgp_session_ext(r, local_as, peer_as, local_bgp_id, hold_time,
                                keepalive, asn4, true, 120, false, 0, 0);
 }
@@ -101,13 +117,16 @@ inline void feed_input(Router& r, std::uint64_t session, const std::uint8_t* dat
 }
 
 inline Bytes drain_output(Router& r, std::uint64_t session) {
-    lr_bytes_t* out = nullptr;
-    int rc = lr_router_drain_output(r.get(), session, &out);
+    // The FFI writes the bytes into a caller-provided struct and expects
+    // it to be freed with lr_bytes_free (which drops the struct itself),
+    // so allocate it on the heap and hand ownership to Bytes.
+    auto out = std::make_unique<lr_bytes_t>();
+    int rc = lr_router_drain_output(r.get(), session, out.get());
     if (rc != 0) {
         const char* err = lr_last_error();
         throw Error("lr_router_drain_output failed: " + std::string(err ? err : "unknown"));
     }
-    return Bytes(out);
+    return Bytes(out.release());
 }
 
 inline void tick(Router& r, std::uint64_t now_ms) {
