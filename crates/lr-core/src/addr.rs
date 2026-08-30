@@ -11,7 +11,13 @@ use core::fmt;
 use core::str::FromStr;
 
 #[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
 use alloc::string::{String, ToString};
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// IPv4 or IPv6 address. Stored compactly.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

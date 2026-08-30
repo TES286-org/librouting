@@ -7,6 +7,11 @@
 //! (sending bytes, arming timers, installing routes, etc.).
 
 use core::fmt;
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Stable identifier for an FSM state (used by `RouterEvent::PeerStateChange`
 /// across protocols). 0 = idle / down.

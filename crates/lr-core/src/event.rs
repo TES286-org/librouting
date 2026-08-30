@@ -6,6 +6,13 @@
 use crate::addr::Prefix;
 use crate::fsm::TimerId;
 use crate::rib::{Route, RouteKey};
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::string::String;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 #[derive(Debug, Clone)]
 pub enum Event {

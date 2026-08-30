@@ -2,6 +2,11 @@
 //! structs; this enum lets the RIB hold any of them.
 
 use crate::addr::{IpAddr, Prefix};
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Address family identifier (AFI) + subsequent AFI (SAFI). RFC 4760.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]

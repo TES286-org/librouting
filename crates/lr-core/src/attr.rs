@@ -5,6 +5,8 @@
 extern crate alloc;
 #[cfg(not(feature = "std"))]
 use alloc::collections::BTreeMap;
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 #[cfg(feature = "std")]
 use std::collections::BTreeMap;
 

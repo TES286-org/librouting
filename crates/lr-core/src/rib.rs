@@ -5,6 +5,11 @@
 
 use crate::addr::Prefix;
 use crate::nlri::NlriFamily;
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
 
 /// Where a route came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
