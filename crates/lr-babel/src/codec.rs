@@ -1,11 +1,10 @@
 //! Babel codec: frame encoder/decoder.
 
 use crate::tlv::Tlv;
-use crate::{BabelFrame, BODY_OFFSET};
+use crate::{BabelFrame, BODY_OFFSET, MAGIC, VERSION};
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::codec::{Decoder, Encoder};
 use lr_core::error::{EncodeError, ParseError};
-use lr_core::util::crc::crc32c;
 
 /// Babel codec. Stateless encoder + stateful decoder.
 #[derive(Default)]
@@ -20,16 +19,34 @@ impl BabelCodec {
 
     pub fn decode_slice(&mut self, b: &[u8]) -> Result<Option<BabelFrame>, ParseError> {
         self.carryover.extend_from_slice(b);
-        // Babel frames are 4-byte header + body of TLVs. We don't know the
-        // total length until we read it (the frame is one UDP datagram,
-        // though, so the embedder usually knows). For streaming decode, we
-        // assume one frame per buffer.
+        let result = self.try_decode();
+        // A malformed frame must not wedge the codec: drop the offending
+        // bytes so the decoder can recover on the next call.
+        if result.is_err() {
+            self.carryover.clear();
+        }
+        result
+    }
+
+    fn try_decode(&mut self) -> Result<Option<BabelFrame>, ParseError> {
         if self.carryover.len() < BODY_OFFSET {
             return Ok(None);
         }
-        let body = &self.carryover[BODY_OFFSET..];
+        let magic = self.carryover[0];
+        let version = self.carryover[1];
+        if magic != MAGIC || version != VERSION {
+            // RFC 8966 §4.2: packets with a wrong magic or version MUST be
+            // silently ignored — do not wedge the decoder.
+            return Err(ParseError::invalid(0, "babel.header.magic"));
+        }
+        let body_len = u16::from_be_bytes([self.carryover[2], self.carryover[3]]) as usize;
+        let total = BODY_OFFSET + body_len;
+        if self.carryover.len() < total {
+            return Ok(None);
+        }
+        let body = &self.carryover[BODY_OFFSET..total];
         let frame = decode_frame_body(body)?;
-        self.carryover.clear();
+        self.carryover.drain(0..total);
         Ok(Some(frame))
     }
 
@@ -110,9 +127,7 @@ impl Encoder<BabelFrame> for BabelCodec {
         let body_len = (out.position() - body_start) as u16;
         out.patch(len_pos, &body_len.to_be_bytes())
             .ok_or(EncodeError::BufferFull)?;
-        let total = out.position() - start;
-        let _ = crc32c(&out.written()[start..]); // unused; embedder may add CRC TLV.
-        Ok(total)
+        Ok(out.position() - start)
     }
 }
 
@@ -121,13 +136,11 @@ impl Decoder<BabelFrame> for BabelCodec {
         self.carryover.extend_from_slice(src.chunk());
         let n = src.remaining();
         src.advance(n);
-        if self.carryover.len() < BODY_OFFSET {
-            return Ok(None);
+        let result = self.try_decode();
+        if result.is_err() {
+            self.carryover.clear();
         }
-        let body = self.carryover[BODY_OFFSET..].to_vec();
-        let frame = decode_frame_body(&body)?;
-        self.carryover.clear();
-        Ok(Some(frame))
+        result
     }
 }
 
@@ -157,10 +170,7 @@ mod tests {
 
     #[test]
     fn frame_roundtrip() {
-        let h = Hello {
-            seqno: 1,
-            interval_cs: 200,
-        };
+        let h = Hello::new(1, 200);
         let mut frame = BabelFrame::empty();
         frame
             .body
@@ -188,12 +198,7 @@ mod tests {
     fn authenticated_frame_roundtrip() {
         let frame = BabelFrame::new(vec![Tlv::new(
             TlvType::Hello,
-            Hello {
-                seqno: 1,
-                interval_cs: 200,
-            }
-            .encode()
-            .to_vec(),
+            Hello::new(1, 200).encode().to_vec(),
         )]);
         let pseudo = crate::auth::BabelPseudoHeader {
             source: lr_core::addr::IpAddr::V4([192, 0, 2, 1]),

@@ -199,7 +199,7 @@ pub fn verify_packet(
     let macs = parse_mac_trailer(trailer)?;
     let valid = keys.iter().any(|key| {
         compute_mac(pseudo_header, &packet[..authenticated_end], key)
-            .is_ok_and(|expected| macs.contains(&expected.as_slice()))
+            .is_ok_and(|expected| macs.iter().any(|m| constant_time_eq(m, &expected)))
     });
     if !valid {
         return Err(BabelAuthError::AuthenticationFailed);
@@ -214,6 +214,19 @@ pub fn verify_packet(
     plain[2..4].copy_from_slice(&(body_without_pc.len() as u16).to_be_bytes());
     plain.extend_from_slice(&body_without_pc);
     Ok(plain)
+}
+
+/// Constant-time equality for MAC digests: the comparison time must not
+/// depend on the number of matching leading bytes.
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        diff |= x ^ y;
+    }
+    diff == 0
 }
 
 fn validate_packet(packet: &[u8]) -> Result<usize, BabelAuthError> {
@@ -284,18 +297,19 @@ fn parse_packet_counter(body: &[u8]) -> Result<(u32, &[u8], Vec<u8>), BabelAuthE
             return Err(BabelAuthError::InvalidLength);
         }
         if kind == PC_TLV {
-            if found.is_some() || !(4..=36).contains(&len) {
-                return Err(BabelAuthError::InvalidPacketCounter);
+            // RFC 8967 §4.3: only the first PC TLV is processed; any
+            // further ones MUST be silently ignored.
+            if found.is_none() && (4..=36).contains(&len) {
+                found = Some((
+                    u32::from_be_bytes([
+                        body[offset + 2],
+                        body[offset + 3],
+                        body[offset + 4],
+                        body[offset + 5],
+                    ]),
+                    &body[offset + 6..end],
+                ));
             }
-            found = Some((
-                u32::from_be_bytes([
-                    body[offset + 2],
-                    body[offset + 3],
-                    body[offset + 4],
-                    body[offset + 5],
-                ]),
-                &body[offset + 6..end],
-            ));
         } else {
             plain.extend_from_slice(&body[offset..end]);
         }

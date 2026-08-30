@@ -36,9 +36,10 @@ pub use route::{BabelRoute, BabelRouteTable, RouteKey};
 pub use source::SourcePrefix;
 pub use tlv::{Tlv, TlvType};
 
-/// Babel magic + version header (RFC 8966 §4.1): 0x20 + 0x2 and a body of
-/// TLVs. The body may include a CRC TLV at the end (CRC-32C).
-pub const MAGIC: u8 = 0x20;
+/// Babel packet header (RFC 8966 §4.2): magic 42 (0x2A) + version 2 and a
+/// 2-octet body length. Packets whose first octet is not 42 or whose second
+/// octet is not 2 MUST be silently ignored.
+pub const MAGIC: u8 = 0x2A;
 pub const VERSION: u8 = 2;
 pub const BODY_OFFSET: usize = 4;
 
