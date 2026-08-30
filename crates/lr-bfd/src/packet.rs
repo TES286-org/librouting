@@ -244,7 +244,12 @@ impl Encoder<BfdPacket> for BfdCodec {
             flags |= PacketFlags::AUTH;
         }
         out.put_u8((p.state as u8) << 6 | (flags.bits() & 0x3f));
-        out.put_u8(p.detect_mult.clamp(1, 255));
+        // RFC 5880 §6.8.4/§4.1: Detect Mult must be nonzero; a config
+        // error (0) must not be silently rewritten to 1 on the wire.
+        if p.detect_mult == 0 {
+            return Err(EncodeError::InvalidValue("bfd detect_mult is zero"));
+        }
+        out.put_u8(p.detect_mult);
         out.put_u8(p.length());
         out.put_u32_be(p.my_discriminator);
         out.put_u32_be(p.your_discriminator);
@@ -281,6 +286,12 @@ impl Decoder<BfdPacket> for BfdCodec {
         let detect_mult = r
             .get_u8()
             .ok_or_else(|| ParseError::truncated("bfd.detect_mult"))?;
+        // RFC 5880 §6.8.6: "If the Detect Mult field is zero, the packet
+        // MUST be discarded." Enforced at the codec so direct BfdCodec
+        // users get the same rule as the session layer.
+        if detect_mult == 0 {
+            return Err(ParseError::invalid(2, "bfd.detect_mult"));
+        }
         let length_field =
             r.get_u8()
                 .ok_or_else(|| ParseError::truncated("bfd.length"))? as usize;
