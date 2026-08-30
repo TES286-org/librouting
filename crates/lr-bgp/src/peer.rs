@@ -98,6 +98,14 @@ pub struct PeerConfig {
     /// sessions, where the local AS would otherwise always form a
     /// loop; the router applies the same exemption.
     pub local_as_tolerance: u32,
+    /// FRR `neighbor X soft-reconfiguration inbound` (W2.4): when
+    /// `true`, the router retains the **pre-policy** view of the
+    /// peer's Adj-RIB-In — the raw received routes before the import
+    /// hook chain runs — so a policy reconfiguration can be applied
+    /// without re-fetching from the peer (`clear ip bgp * soft in`).
+    /// Off by default (FRR's default; the cost is duplicate RIB
+    /// memory per peer).
+    pub soft_reconfig_inbound: bool,
     /// Per-peer maximum-prefix limit. When the peer's Adj-RIB-In exceeds
     /// this many prefixes the router fires the configured action
     /// ([`MaxPrefixAction`]). `None` = no limit (the default).
@@ -168,6 +176,7 @@ impl PeerConfig {
             peer_id: 0,
             local_address: None,
             local_as_tolerance: 0,
+            soft_reconfig_inbound: false,
             maximum_prefix: None,
             maximum_prefix_action: MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
