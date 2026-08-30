@@ -14,7 +14,7 @@ Three-layer API:
 | Layer | Crate | Purpose |
 |-------|-------|---------|
 | 1 | `lr-core::codec` + per-protocol codec modules | Stateless wire codec |
-| 2 | `lr-bgp::fsm`, `lr-ospf::neighbor`, `lr-babel::fsm`, `lr-bfd::session` | Peer FSM + transport abstraction |
+| 2 | `lr-bgp::fsm`, `lr-ospf::neighbor`, `lr-babel::neighbor`, `lr-bfd::session` | Peer FSM + transport abstraction |
 | 3 | `lr-router::instance` | High-level router instance tying sessions, RIB and policies |
 
 The four-tier RIB model (Adj-RIB-In, Adj-RIB-Out, Loc-RIB, with cross-protocol
@@ -229,7 +229,7 @@ librouting/
   eight dual-stack / MP-BGP / ENH / pure-IPv6 session modes plus real
   BIRD interop (`tests/interop/bird_enh.sh`).
 - **GTSM / TTL security** (RFC 5082): `lr-osroute::gtsm` arms the
-  listener with `IP_MINTTL` / `IPV6_MINHOPLIMIT` (kernel drops low-TTL
+  listener with `IP_MINTTL` / `IPV6_MINHOPCOUNT` (kernel drops low-TTL
   SYNs) and sets outbound TTL=255 (single-hop) or N (multihop) on the
   connector. Daemon `--gtsm` / `--gtsm N`.
 - **Per-peer maximum-prefix** (BIRD `maximum prefix`, FRR

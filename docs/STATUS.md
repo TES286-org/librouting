@@ -86,12 +86,12 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| RFC 8966 codec (all core TLVs) | ✅ | |
+| RFC 8966 codec (all core TLVs) | ✅ | magic 42 (0x2A) + version 2 header validated; §4.6 TLV bodies byte-exact (flags/reserved fields, Update Seqno/Metric order) |
 | Neighbor / route table + feasibility (RFC 8966 §3.5.2) | ✅ | |
 | Metric computation, seqno handling | ✅ 🧪 | E2E install/withdraw tests |
-| RFC 9079 source-specific routing | ✅ 🧪 | TLV model (SsHello/SsIhu/SsUpdate/SsRouteRequest/SsSeqnoRequest); IPv4 + IPv6 source prefixes; route table keyed by (destination, source) tuple; 4 new encode/decode tests |
-| RFC 8967 HMAC authentication | ✅ | HMAC-SHA256, IPv4/IPv6 pseudo-headers, multi-key receive validation, packet counters, replay rejection |
-| Babel over IPv6 link-local transport | ✅ 🧪 | daemon `--protocol babel` mode; UDP on port 6696, ff02::1:6 multicast, TTL=255 (RFC 8966 §2.1); AE=2 (IPv6) destination + source prefix handling |
+| RFC 9079 source-specific routing | ✅ 🧪 | Source Prefix **sub-TLV** (type 128) inside Update / Route Request / Seqno Request per §7.1; IPv4 + IPv6 source prefixes; route table keyed by (destination, source) tuple |
+| RFC 8967 HMAC authentication | ✅ | HMAC-SHA256, IPv4/IPv6 pseudo-headers, multi-key receive validation, first-PC-wins counters (RFC 8967 §4.3), constant-time MAC compare, replay rejection |
+| Babel over IPv6 link-local transport | ✅ 🧪 | daemon `--protocol babel` mode; UDP on port 6696, ff02::1:6 multicast, TTL=255 (RFC 8966 §2.1), scope-id carried from `%iface` into bind/join/send |
 
 ## Layer 3 — router pipeline (`lr-router`)
 
