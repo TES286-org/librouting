@@ -445,11 +445,11 @@ use lr_mpls::{Label, LabelStack};
 // Build a stack: top = 100, bottom = 200 (S bit set on encode).
 let stack = LabelStack::from_labels([Label::new(100), Label::new(200)]);
 let wire = stack.encode_4octet();          // RFC 3032 §2.1 (8 bytes)
-let nlri = stack.encode_3octet();          // RFC 8277 §3.2 (6 bytes, no TTL)
+let nlri = stack.encode_3octet();          // RFC 8277 §2.2/§2.3 (6 bytes, no TTL, Rsrv zeroed)
 
 // Round-trip both forms.
 assert_eq!(LabelStack::decode_4octet(&wire).unwrap(), stack);
-// The 3-octet form does not carry TTL — decode produces TTL=0.
+// The 3-octet form carries no TTL (and no TC) — decode produces TTL=0.
 let dec = LabelStack::decode_3octet(&nlri).unwrap();
 assert_eq!(dec.labels().iter().map(|l| l.value).collect::<Vec<_>>(),
            vec![100, 200]);
@@ -627,7 +627,7 @@ stream via `set_ttl`.
 `SessionConfig::with_maximum_prefix(limit, action)` configures a
 per-peer prefix ceiling. When the peer's Adj-RIB-In exceeds `limit` the
 router fires `RouterEvent::MaxPrefixExceeded` (once, latched) and, for
-`Teardown`/`Restart`, sends a CEASE NOTIFICATION (subcode 8,
+`Teardown`/`Restart`, sends a CEASE NOTIFICATION (subcode 1,
 RFC 4486 §2.1). `with_maximum_prefix_threshold(pct)` sets the
 early-warning percentage (default 75); `RouterEvent::MaxPrefixThreshold`
 fires once when the count crosses it.
@@ -640,7 +640,7 @@ let h = r.add_session(
         .with_maximum_prefix_threshold(75),
 )?;
 // The router emits MaxPrefixThreshold at 750/1000 and MaxPrefixExceeded
-// at 1001/1000; the latter tears the session down with CEASE subcode 8.
+// at 1001/1000; the latter tears the session down with CEASE subcode 1.
 ```
 
 The daemon exposes `--max-prefixes N`, `--max-prefix-action warn|

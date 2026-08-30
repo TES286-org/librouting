@@ -223,7 +223,7 @@ embedders. Notable toggles:
 
 - `lr-core` — `std` (default) / `no_std` (for embedded analyzers).
 - `lr-bgp` — `asn4` / `mp_bgp` / `addpath` / `graceful_restart` /
-  `enhanced_rr` / `extended_communities` / `long_lived`.
+  `enhanced_rr` / `extended_communities` / `long_lived` / `labeled_unicast`.
 - `lr-bfd` — `std` / `no_std`.
 
 ## Testing
@@ -250,7 +250,8 @@ embedders. Notable toggles:
   multi-peer daemon (fan-out/transit, inbound matching, fail-closed
   rejection, per-peer config inheritance).
 - Interop scripts against the BIRD and FRR reference routers live in
-  `tests/interop/` (run in CI when Docker is available).
+  `tests/interop/` (run in CI on ubuntu runners with the reference
+  daemons installed via apt; they skip gracefully when absent).
 - Total: 705 tests across 35 test binaries (16 crates + doc-tests).
 
 ## CI/CD

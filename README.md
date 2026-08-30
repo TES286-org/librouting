@@ -235,7 +235,7 @@ librouting/
 - **Per-peer maximum-prefix** (BIRD `maximum prefix`, FRR
   `maximum-prefix`): `with_maximum_prefix(N, action)` with warn /
   teardown / restart actions and a configurable early-warning threshold
-  (default 75%). Teardown sends a CEASE NOTIFICATION (subcode 8,
+  (default 75%). Teardown sends a CEASE NOTIFICATION (subcode 1,
   RFC 4486). Daemon `--max-prefixes` / `--max-prefix-action` /
   `--max-prefix-threshold`.
 
