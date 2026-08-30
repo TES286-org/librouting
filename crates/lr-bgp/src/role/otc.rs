@@ -105,42 +105,62 @@ impl Otc {
     }
 }
 
-/// Compute the OTC value to set when receiving a route from a peer with
-/// `peer_role`.
+/// Compute the OTC handling when receiving a route from a peer with
+/// `local_role` (the local speaker's role relative to that peer), per RFC
+/// 9234 §5 ingress rules:
 ///
-/// Per RFC 9234 §3.2:
-/// - On reception from a Customer or Peer: set OTC=local_as if absent.
-/// - On reception from a Provider: OTC must be present; if absent, set to
-///   peer_as (treat as if the provider already tagged it).
-/// - On reception from RS-Client (when local is RS): no change (RS will
-///   set it for downstream clients as appropriate).
-/// - On reception when local is RS-Client: same as Provider.
+/// 1. A route that already carries OTC received from a Customer or an
+///    RS-Client is a route leak and MUST be considered ineligible.
+/// 2. A route that carries OTC received from a Peer whose value differs
+///    from the peer's AS number is a route leak and MUST be considered
+///    ineligible.
+/// 3. A route received from a Provider, a Peer, or an RS without OTC MUST
+///    have OTC added with the remote AS number.
+///
+/// Returns `Err(OtcLeak)` for cases 1–2; otherwise `Ok(otc)` is the value
+/// the route must carry (the existing value, or the newly-added one).
 pub fn otc_on_receive(
     existing: Option<Otc>,
     local_role: OtcRole,
-    local_as: Asn,
     peer_as: Asn,
-) -> Otc {
+) -> Result<Otc, OtcLeak> {
     match local_role {
-        OtcRole::Customer => existing.unwrap_or(Otc(local_as.0)),
-        OtcRole::Peer => existing.unwrap_or(Otc(local_as.0)),
-        OtcRole::Provider => existing.unwrap_or(Otc(peer_as.0)),
-        OtcRole::RouteServer => existing.unwrap_or(Otc(0)),
-        OtcRole::RsClient => existing.unwrap_or(Otc(peer_as.0)),
-        OtcRole::Unset => existing.unwrap_or(Otc(0)),
+        // Rule 1: the sender is our customer / an RS-client.
+        OtcRole::Provider | OtcRole::RouteServer => {
+            if existing.map(|o| o.is_set()).unwrap_or(false) {
+                Err(OtcLeak)
+            } else {
+                Ok(Otc(0))
+            }
+        }
+        // Rule 2: a peer must tag with its own AS.
+        OtcRole::Peer => match existing {
+            Some(o) if o.is_set() && o.0 != peer_as.0 => Err(OtcLeak),
+            Some(o) => Ok(o),
+            None => Ok(Otc(peer_as.0)),
+        },
+        // Rule 3: from a provider or an RS without OTC, add the remote AS.
+        OtcRole::Customer | OtcRole::RsClient => Ok(existing.unwrap_or(Otc(peer_as.0))),
+        OtcRole::Unset => Ok(existing.unwrap_or(Otc(0))),
     }
 }
 
+/// A route received in violation of RFC 9234 §5 ingress rules 1–2.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OtcLeak;
+
 /// Whether a route with `route_otc` may be advertised to a peer with
-/// `peer_role`, per RFC 9234 §3.3.
-pub fn otc_can_advertise(route_otc: Otc, peer_role: OtcRole) -> bool {
+/// `local_role` (the local speaker's role relative to that peer), per RFC
+/// 9234 §5 egress rule 2: a route that already contains OTC MUST NOT be
+/// propagated to Providers, Peers, or RSes. It may go to Customers and to
+/// RS-clients (rule 1).
+pub fn otc_can_advertise(route_otc: Otc, local_role: OtcRole) -> bool {
     if !route_otc.is_set() {
         return true;
     }
-    match peer_role {
-        // A route with OTC may only go to customers or RS-clients of an RS.
-        OtcRole::Customer | OtcRole::RsClient => true,
-        OtcRole::RouteServer => true,
+    match local_role {
+        // The target is our customer or an RS-client.
+        OtcRole::Provider | OtcRole::RouteServer => true,
         _ => false,
     }
 }
@@ -159,29 +179,68 @@ mod tests {
         assert!(!Otc(0).is_set());
     }
 
+    /// RFC 9234 §5 ingress rule 1: OTC from a Customer / RS-Client is a leak.
     #[test]
-    fn otc_set_on_customer_reception() {
-        let r = otc_on_receive(None, OtcRole::Customer, Asn(100), Asn(200));
-        assert_eq!(r.0, 100);
+    fn otc_from_customer_is_a_leak() {
+        assert_eq!(
+            otc_on_receive(Some(Otc::new(100)), OtcRole::Provider, Asn(200)),
+            Err(OtcLeak)
+        );
+        assert_eq!(
+            otc_on_receive(Some(Otc::new(100)), OtcRole::RouteServer, Asn(200)),
+            Err(OtcLeak)
+        );
+        // No OTC from a customer: nothing to set (rule 3 does not apply).
+        assert_eq!(
+            otc_on_receive(None, OtcRole::Provider, Asn(200)),
+            Ok(Otc(0))
+        );
     }
 
+    /// RFC 9234 §5 ingress rule 2: a Peer must tag with its own AS.
     #[test]
-    fn otc_set_on_peer_reception() {
-        let r = otc_on_receive(None, OtcRole::Peer, Asn(100), Asn(200));
-        assert_eq!(r.0, 100);
+    fn otc_from_peer_with_wrong_as_is_a_leak() {
+        assert_eq!(
+            otc_on_receive(Some(Otc::new(999)), OtcRole::Peer, Asn(200)),
+            Err(OtcLeak)
+        );
+        assert_eq!(
+            otc_on_receive(Some(Otc::new(200)), OtcRole::Peer, Asn(200)),
+            Ok(Otc::new(200))
+        );
+        // No OTC from a peer: add the remote AS (rule 3).
+        assert_eq!(
+            otc_on_receive(None, OtcRole::Peer, Asn(200)),
+            Ok(Otc::new(200))
+        );
     }
 
+    /// RFC 9234 §5 ingress rule 3: from a Provider / RS without OTC, add
+    /// the remote AS number.
     #[test]
-    fn otc_set_on_provider_reception() {
-        let r = otc_on_receive(None, OtcRole::Provider, Asn(100), Asn(200));
-        assert_eq!(r.0, 200);
+    fn otc_added_on_provider_and_rs_reception() {
+        assert_eq!(
+            otc_on_receive(None, OtcRole::Customer, Asn(200)),
+            Ok(Otc::new(200))
+        );
+        assert_eq!(
+            otc_on_receive(None, OtcRole::RsClient, Asn(200)),
+            Ok(Otc::new(200))
+        );
     }
 
+    /// RFC 9234 §5 egress rule 2: OTC routes go only to Customers and
+    /// RS-clients.
     #[test]
-    fn otc_advertise_only_to_customer() {
+    fn otc_advertise_only_to_customer_or_rs_client() {
         let otc = Otc::new(100);
-        assert!(otc_can_advertise(otc, OtcRole::Customer));
-        assert!(!otc_can_advertise(otc, OtcRole::Provider));
+        assert!(otc_can_advertise(otc, OtcRole::Provider)); // peer is our customer
+        assert!(otc_can_advertise(otc, OtcRole::RouteServer)); // peer is an RS-client
+        assert!(!otc_can_advertise(otc, OtcRole::Customer)); // peer is our provider
         assert!(!otc_can_advertise(otc, OtcRole::Peer));
+        assert!(!otc_can_advertise(otc, OtcRole::RsClient)); // peer is an RS
+        assert!(!otc_can_advertise(otc, OtcRole::Unset));
+        // A route without OTC may go anywhere.
+        assert!(otc_can_advertise(Otc(0), OtcRole::Peer));
     }
 }

@@ -133,14 +133,11 @@ impl PeerTopology {
             return false;
         }
 
-        // RFC 9234 OTC valley-free: a route with OTC may be advertised only to
-        // customers (Provider -> Customer ok; Customer -> Provider not ok
-        // unless the peer is also a customer of the local AS).
+        // RFC 9234 §5 egress rule 2: a route that already carries OTC MUST
+        // NOT be propagated to Providers, Peers, or RSes — it may go only
+        // to Customers and RS-clients.
         if let Some(otc) = route_otc {
-            // OTC means "only to customer" — the route must not leave the
-            // local AS except to direct customers. Here we approximate "is
-            // the target a customer?" via the OTC role on this peer.
-            if !matches!(self.otc, OtcRole::Customer | OtcRole::RouteServer) && otc.0 != 0 {
+            if !crate::role::otc::otc_can_advertise(otc, self.otc) {
                 return false;
             }
         }

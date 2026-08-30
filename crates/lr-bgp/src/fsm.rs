@@ -15,14 +15,13 @@ use core::fmt;
 
 use crate::capabilities::Capability;
 use crate::codec::BgpCodec;
-use crate::error::{BgpErrorCode, BgpNotification};
+use crate::error::{BgpError, BgpErrorCode, BgpNotification};
 use crate::extensions::extended_next_hop::ExtNextHopTuple;
 use crate::message::{keepalive::Keepalive, open::Open, update::Update, BgpMessage};
 use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
 use crate::peer::PeerConfig;
 
 use lr_core::addr::{Asn, RouterId};
-use lr_core::codec::Decoder;
 use lr_core::error::ParseError;
 use lr_core::fsm::{Action, StateId, StateMachine, TimerId, TimerSpec};
 use lr_core::nlri::NlriFamily;
@@ -344,16 +343,33 @@ impl BgpPeer {
             && self.enqueue_route_refresh(crate::message::RouteRefresh::end_of_rib(family))
     }
 
-    /// Push inbound bytes; decode and emit any actions for consumed messages.
+    /// Push inbound bytes; decode and emit any actions for consumed
+    /// messages. A protocol-level parse error is converted into the FSM's
+    /// `BgpEvent::ParseError`, which sends the required NOTIFICATION and
+    /// closes the session (RFC 4271 §6) — the error is not surfaced to the
+    /// embedder as a generic parse failure.
     pub fn feed_bytes(&mut self, bytes: &[u8]) -> Result<Vec<BgpAction>, ParseError> {
         let mut actions = Vec::new();
         let mut r = lr_core::buf::ReadBuf::new(bytes);
         loop {
             let before = r.position();
-            match self.codec.decode(&mut r)? {
-                None => break,
-                Some(msg) => {
+            match self.codec.decode_bgp(&mut r) {
+                Ok(None) => break,
+                Ok(Some(msg)) => {
                     actions.extend(self.step(BgpEvent::Message(msg)));
+                }
+                Err(BgpError::Notification(n)) => {
+                    actions.extend(self.step(BgpEvent::ParseError(n)));
+                    break;
+                }
+                Err(BgpError::Truncated) => break,
+                Err(BgpError::Codec(s)) => {
+                    actions.extend(self.step(BgpEvent::ParseError(BgpNotification::new(
+                        crate::error::BgpErrorCode::Update as u8,
+                        crate::error::BgpUpdateErrorSubcode::MalformedAttributeList as u8,
+                        s.into_bytes(),
+                    ))));
+                    break;
                 }
             }
             if r.position() == before && r.remaining() > 0 {
@@ -1105,6 +1121,47 @@ mod tests {
         assert_eq!(a.state(), BgpState::Idle);
         assert!(!a.is_established());
         assert!(actions.iter().any(|x| matches!(x, BgpAction::Close)));
+    }
+
+    /// RFC 4271 §6: malformed inbound data must raise the required
+    /// NOTIFICATION and close the session instead of surfacing a generic
+    /// parse error to the embedder.
+    #[test]
+    fn malformed_update_produces_notification_and_closes() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let _ = a.feed_bytes(&b.drain_outgoing()).unwrap();
+        let _ = b.feed_bytes(&a.drain_outgoing()).unwrap();
+        let _ = a.feed_bytes(&b.drain_outgoing()).unwrap();
+        let _ = b.feed_bytes(&a.drain_outgoing()).unwrap();
+        assert!(a.is_established());
+
+        // Craft an UPDATE with a duplicate well-known attribute (RFC 4271
+        // §6.3 Malformed Attribute List): two ORIGIN attributes.
+        let mut frame = vec![0xffu8; 16];
+        frame.extend_from_slice(&(19 + 12u16).to_be_bytes());
+        frame.push(2); // UPDATE
+        frame.extend_from_slice(&0u16.to_be_bytes()); // withdrawn len
+        frame.extend_from_slice(&8u16.to_be_bytes()); // attrs len
+        // ORIGIN(1) flags=0x40, len=1, value=0
+        frame.extend_from_slice(&[0x40, 1, 1, 0]);
+        // ORIGIN(1) again — duplicate.
+        frame.extend_from_slice(&[0x40, 1, 1, 0]);
+        // No NLRI.
+        let actions = a.feed_bytes(&frame).unwrap();
+        assert_eq!(a.state(), BgpState::Idle, "malformed UPDATE must close the session");
+        assert!(!a.is_established());
+        assert!(actions.iter().any(|x| matches!(x, BgpAction::Close)));
+        // The peer must receive the NOTIFICATION (Malformed Attribute List:
+        // code 3, subcode 1).
+        let out = a.drain_outgoing();
+        assert!(!out.is_empty(), "a NOTIFICATION must be sent");
+        assert_eq!(out[18], 3, "message type = NOTIFICATION");
+        assert_eq!(out[19], 3, "error code = UPDATE Message Error");
+        assert_eq!(out[20], 1, "subcode = Malformed Attribute List");
     }
 
     #[test]

@@ -101,6 +101,25 @@ impl BgpCodec {
         }
     }
 
+    /// Streaming decode preserving the [`BgpError`] payload. Unlike the
+    /// [`Decoder`] trait path (which flattens protocol errors into a
+    /// generic [`ParseError`]), this lets the FSM raise the exact
+    /// NOTIFICATION RFC 4271 requires on malformed input. The whole chunk
+    /// is consumed into the carryover; frames are pulled one per call.
+    pub fn decode_bgp(&mut self, src: &mut ReadBuf<'_>) -> Result<Option<BgpMessage>, BgpError> {
+        self.carryover.extend_from_slice(src.chunk());
+        let all = src.remaining();
+        src.advance(all);
+        let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
+        match try_decode_frame(&self.carryover, rx_v4)? {
+            Some((n, msg)) => {
+                self.carryover.drain(0..n);
+                Ok(Some(msg))
+            }
+            None => Ok(None),
+        }
+    }
+
     /// Direct encode of a message to a fresh Vec.
     pub fn encode_vec(&self, msg: &BgpMessage) -> Result<Vec<u8>, EncodeError> {
         let mut buf = vec![0u8; 4096];
@@ -400,11 +419,22 @@ fn decode_path_attributes(bytes: &[u8]) -> Result<PathAttributes, BgpError> {
             )));
         }
         let value = bytes[value_start..value_start + attr_len].to_vec();
-        out.insert(PathAttribute {
+        let attr = PathAttribute {
             flags,
             attr_type: AttrType::from_u8(ty_byte),
             value,
-        });
+        };
+        // RFC 4271 §6.3: an attribute appearing more than once is a
+        // Malformed Attribute List error — silent last-wins hides peer
+        // misbehaviour and is not interoperable.
+        if out.get(attr.attr_type).is_some() {
+            return Err(BgpError::Notification(BgpNotification::new(
+                crate::error::BgpErrorCode::Update as u8,
+                crate::error::BgpUpdateErrorSubcode::MalformedAttributeList as u8,
+                vec![ty_byte],
+            )));
+        }
+        out.insert(attr);
         i = value_start + attr_len;
     }
     Ok(out)

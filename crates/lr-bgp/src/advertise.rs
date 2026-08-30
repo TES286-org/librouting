@@ -62,11 +62,12 @@ impl BgpPeer {
             return false;
         }
 
-        // OTC (RFC 9234 §4): a provider learning a route from a peer with an
-        // OTC attribute must not leak it further sideways.
+        // OTC (RFC 9234 §5 egress rule 2): a route that already carries an
+        // OTC attribute MUST NOT be propagated to Providers, Peers, or
+        // RSes — it may go only to Customers and RS-clients.
         let mut attrs: PathAttributes = route.attributes.clone().into();
         let route_otc = attrs.get(AttrType::Otc).and_then(|a| Otc::decode(&a.value));
-        if route_otc.map(|o| o.0 != 0).unwrap_or(false) && !topo.otc.is_upstream() {
+        if !crate::role::otc::otc_can_advertise(route_otc.unwrap_or(Otc(0)), topo.otc) {
             return false;
         }
 
@@ -146,6 +147,11 @@ impl BgpPeer {
                     // IPv4 NLRI + IPv6 local source without ENH: leave the
                     // route's IPv4 next-hop intact (or skip if none).
                     (lr_core::addr::IpAddr::V6(_), NlriFamily::IPV4_UNICAST, false) => {}
+                    // IPv6 NLRI with an IPv4 local source: an IPv4 next-hop
+                    // is invalid for AFI=2 MP_REACH (RFC 4760 §3 requires
+                    // 16/32-byte next-hops), so keep the route's original
+                    // next-hop instead of rewriting it to the IPv4 source.
+                    (lr_core::addr::IpAddr::V4(_), NlriFamily::IPV6_UNICAST, _) => {}
                     // Other MP-BGP families with a matching-family local
                     // source: rewrite the MP_REACH next-hop accordingly.
                     (lr_core::addr::IpAddr::V4(_), _, _) | (lr_core::addr::IpAddr::V6(_), _, _) => {
