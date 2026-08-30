@@ -688,8 +688,17 @@ pub struct DefaultRouter {
     timers: TimerQueue,
     /// Logical "now" the embedder sets via tick().
     now_ms: u64,
-    /// Import pipeline state.
+    /// Import pipeline state (post-safety-net, post-import-hook —
+    /// the "post-policy" Adj-RIB-In consumed by the decision process).
     adj_rib_in: AdjRibIn,
+    /// Pre-policy Adj-RIB-In (W2.4 — FRR soft-reconfiguration inbound):
+    /// the **raw** received routes before the safety net or import
+    /// hooks run, kept only for peers with `soft_reconfig_inbound` on.
+    /// `soft_reconfig_inbound(h)` re-runs the import hooks against
+    /// this view and replaces the session's entries in `adj_rib_in`,
+    /// so a policy change can be applied without re-fetching from the
+    /// peer (`clear ip bgp * soft in`).
+    pre_policy_adj_rib_in: AdjRibIn,
     /// Export bookkeeping (what we advertised to whom).
     adj_rib_out: AdjRibOut,
     loc_rib: LocRib,
@@ -810,6 +819,7 @@ impl Default for DefaultRouter {
             timers: TimerQueue::new(),
             now_ms: 0,
             adj_rib_in: AdjRibIn::new(),
+            pre_policy_adj_rib_in: AdjRibIn::new(),
             adj_rib_out: AdjRibOut::new(),
             loc_rib: LocRib::new(),
             rib_mux: RibMux::new(),
@@ -1294,6 +1304,127 @@ impl DefaultRouter {
         }
     }
 
+    /// Enable or disable FRR `neighbor X soft-reconfiguration inbound`
+    /// (W2.4) for a BGP session.
+    ///
+    /// When `on`, the router retains the **pre-policy** view of the
+    /// peer's Adj-RIB-In — the raw received routes before the import
+    /// hook chain runs — so [`Self::soft_reconfig_inbound`] can apply
+    /// a policy reconfiguration without re-fetching from the peer
+    /// (`clear ip bgp * soft in`). Off by default (FRR's default; the
+    /// cost is duplicate RIB memory per peer).
+    ///
+    /// Must be called after `add_session` and before `start_session`;
+    /// unknown handles or already-established sessions return Err.
+    pub fn set_session_soft_reconfig_inbound(
+        &mut self,
+        h: SessionHandle,
+        on: bool,
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: soft_reconfig_inbound must be set before start",
+                        h.0
+                    ));
+                }
+                peer.config_mut().soft_reconfig_inbound = on;
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
+    /// FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import
+    /// policy against the pre-policy Adj-RIB-In for `h`, replacing the
+    /// session's entries in the post-policy `adj_rib_in` with the
+    /// re-imported routes, and re-selecting every affected prefix.
+    ///
+    /// Returns the number of routes re-evaluated. No-ops (returns 0)
+    /// when the session did not have `soft_reconfig_inbound` enabled
+    /// (the pre-policy RIB was not retained), or when the session is
+    /// not a known BGP peer.
+    pub fn soft_reconfig_inbound(&mut self, h: SessionHandle) -> Result<usize, String> {
+        let origin = RouteOrigin {
+            proto: 0,
+            peer: h.0,
+        };
+        // Collect the session's raw routes (clone to release the
+        // borrow on `pre_policy_adj_rib_in` before we mutate
+        // `adj_rib_in` / `loc_rib` via `reselect`).
+        let raw_routes: Vec<Route> = self
+            .pre_policy_adj_rib_in
+            .iter_origin(origin)
+            .cloned()
+            .collect();
+        if raw_routes.is_empty() {
+            return Ok(0);
+        }
+        // Drop the session's existing post-policy slice — every raw
+        // route will be re-imported below.
+        let affected_keys: Vec<RouteKey> = self
+            .adj_rib_in
+            .iter_origin(origin)
+            .map(|r| r.key.clone())
+            .collect();
+        self.adj_rib_in.clear_for(origin);
+        // Re-run the import pipeline against every raw route. We do
+        // NOT re-run the safety net / enforce-first-as / RFC 8212
+        // here — those are invariant under a policy change (they
+        // reject routes for protocol-level reasons, not policy
+        // reasons). Only the import hook chain is re-evaluated.
+        let hooks = std::mem::take(&mut self.hooks);
+        let mut reimported_keys: Vec<RouteKey> = Vec::new();
+        for mut route in raw_routes {
+            route.age_ms = self.now_ms;
+            if matches!(hooks.run_import(&mut route), HookVerdict::Drop) {
+                continue;
+            }
+            let key = route.key.clone();
+            let route_origin = route.origin;
+            // Track re-advertised routes during GR resync (same as
+            // the live import path).
+            if let Some(state) = self.graceful_restart.get_mut(&h.0) {
+                state.refreshed.insert((key.clone(), route.path_id));
+            }
+            self.adj_rib_in.feed_pre_policy(route_origin, route);
+            reimported_keys.push(key);
+        }
+        self.hooks = hooks;
+        // Re-select every affected prefix (the union of old + new).
+        let mut all_keys: std::collections::BTreeSet<RouteKey> =
+            affected_keys.into_iter().collect();
+        all_keys.extend(reimported_keys);
+        for key in all_keys {
+            self.reselect(&key);
+        }
+        // Count the post-policy slice for this session.
+        let count = self.adj_rib_in.iter_origin(origin).count();
+        self.pending_events.push(RouterEvent::Log(format!(
+            "session {}: soft reconfiguration inbound — re-evaluated {} routes",
+            h.0, count
+        )));
+        Ok(count)
+    }
+
+    /// Return the **pre-policy** Adj-RIB-In snapshot for `h` — the
+    /// raw received routes (before the safety net or import hook
+    /// chain ran), retained only when `soft_reconfig_inbound` is on
+    /// for the session (W2.4 — FRR `neighbor X soft-reconfiguration
+    /// inbound`). Returns an empty vec when the session is unknown
+    /// or has no pre-policy routes retained.
+    pub fn adj_rib_in_snapshot(&self, h: SessionHandle) -> Vec<Route> {
+        let origin = RouteOrigin {
+            proto: 0,
+            peer: h.0,
+        };
+        self.pre_policy_adj_rib_in
+            .iter_origin(origin)
+            .cloned()
+            .collect()
+    }
+
     /// Originate a local route (e.g. from `network` statements): injects it
     /// into Loc-RIB and advertises it to all suitable BGP peers.
     pub fn originate(&mut self, prefix: Prefix, next_hop: Option<IpAddr>) -> RouteKey {
@@ -1656,6 +1787,23 @@ impl DefaultRouter {
 
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
+        // W2.4 — FRR soft-reconfiguration inbound: retain the raw
+        // received route in the pre-policy RIB before any safety net
+        // or import hook runs. Only peers with `soft_reconfig_inbound`
+        // on pay the memory cost; the snapshot is consumed by
+        // `soft_reconfig_inbound(h)` on a policy change.
+        let soft_reconfig = self
+            .sessions
+            .get(&route.origin.peer)
+            .and_then(|s| match s {
+                SessionState::Bgp { peer, .. } => Some(peer.config().soft_reconfig_inbound),
+                _ => None,
+            })
+            .unwrap_or(false);
+        if soft_reconfig {
+            self.pre_policy_adj_rib_in
+                .feed_pre_policy(route.origin, route.clone());
+        }
         // RFC 8212 §3: routes from an external peer with no explicit
         // import policy are not eligible for the decision process —
         // drop them before Adj-RIB-In (a policy-less peer must not
@@ -1937,6 +2085,9 @@ impl DefaultRouter {
     }
 
     fn withdraw_from_session(&mut self, origin: RouteOrigin, key: &RouteKey, path_id: u32) {
+        // W2.4: a withdrawal also removes the route from the pre-policy
+        // RIB (it is gone from the peer either way).
+        self.pre_policy_adj_rib_in.withdraw(origin, key, path_id);
         if self.adj_rib_in.withdraw(origin, key, path_id).is_some() {
             self.reselect(key);
         }
@@ -2670,6 +2821,9 @@ impl DefaultRouter {
         }
         for origin in origins {
             self.adj_rib_in.clear_for(origin);
+            // W2.4: also drop the session's pre-policy slice — the
+            // peer's raw routes do not survive the session either.
+            self.pre_policy_adj_rib_in.clear_for(origin);
             self.adj_rib_out.clear_for(origin);
         }
         for key in affected {
@@ -2950,6 +3104,10 @@ impl RouterInstance for DefaultRouter {
                 // BIRD `allow local as` tolerance to PeerConfig so the
                 // router's per-peer AS-loop tolerance check sees it.
                 p_cfg.local_as_tolerance = cfg.local_as_tolerance;
+                // W2.4: propagate the FRR `neighbor X soft-reconfiguration
+                // inbound` flag to PeerConfig so import_route knows to
+                // retain the raw received route in the pre-policy RIB.
+                p_cfg.soft_reconfig_inbound = cfg.soft_reconfig_inbound;
                 p_cfg.peer_id = h.0;
                 p_cfg.local_address = cfg.local_address;
                 p_cfg.extended_next_hop = cfg.extended_next_hop.clone();
@@ -6511,6 +6669,130 @@ mod tests {
         let (mut a, a_session, mut b, b_session) = ebgp_pair();
         establish(&mut a, a_session, &mut b, b_session);
         let err = a.set_session_local_as_tolerance(a_session, 1).unwrap_err();
+        assert!(err.contains("already established"), "{err}");
+    }
+
+    // ===== FRR `neighbor X soft-reconfiguration inbound` (W2.4) =====
+
+    #[test]
+    fn soft_reconfig_inbound_retains_pre_policy_view() {
+        // When soft_reconfig_inbound is on, the pre-policy RIB
+        // retains the raw received route — even after the import hook
+        // chain drops it.
+        use lr_policy::hooks::{HookVerdict, ImportHook};
+        struct DropAll;
+        impl ImportHook for DropAll {
+            fn on_import(&self, _route: &mut Route) -> HookVerdict {
+                HookVerdict::Drop
+            }
+        }
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        // Enable soft-reconfig-inbound before start_session.
+        a.set_session_soft_reconfig_inbound(a_session, true)
+            .unwrap();
+        // Install an import hook that drops every route.
+        a.hooks_mut().import.push(Box::new(DropAll));
+        establish(&mut a, a_session, &mut b, b_session);
+        // Advertise one route from b.
+        b.originate(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 10])),
+        );
+        let advertisement = b.drain_output(b_session);
+        a.feed_input(a_session, &advertisement).unwrap();
+        // The import hook dropped the route — Loc-RIB is empty.
+        assert_eq!(a.rib_len(), 0, "import hook dropped the route");
+        // But the pre-policy RIB retained the raw received route.
+        let snapshot = a.adj_rib_in_snapshot(a_session);
+        assert_eq!(snapshot.len(), 1, "pre-policy RIB retained the raw route");
+        assert_eq!(
+            snapshot[0].key.prefix,
+            Prefix::new_v4([198, 51, 100, 0], 24)
+        );
+    }
+
+    #[test]
+    fn soft_reconfig_inbound_off_does_not_retain() {
+        // When soft_reconfig_inbound is off (the default), the
+        // pre-policy RIB stays empty — no memory cost.
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let snapshot = a.adj_rib_in_snapshot(a_session);
+        assert!(
+            snapshot.is_empty(),
+            "pre-policy RIB is empty when soft_reconfig_inbound is off"
+        );
+    }
+
+    #[test]
+    fn soft_reconfig_inbound_re_evaluates_after_policy_change() {
+        // soft_reconfig_inbound(h) re-runs the import hooks against
+        // the pre-policy RIB. A route previously dropped by an
+        // import hook is re-admitted when the hook is removed.
+        use lr_policy::hooks::{HookVerdict, ImportHook};
+        struct DropAll;
+        impl ImportHook for DropAll {
+            fn on_import(&self, _route: &mut Route) -> HookVerdict {
+                HookVerdict::Drop
+            }
+        }
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_soft_reconfig_inbound(a_session, true)
+            .unwrap();
+        a.hooks_mut().import.push(Box::new(DropAll));
+        establish(&mut a, a_session, &mut b, b_session);
+        b.originate(
+            Prefix::new_v4([198, 51, 100, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 10])),
+        );
+        let advertisement = b.drain_output(b_session);
+        a.feed_input(a_session, &advertisement).unwrap();
+        assert_eq!(a.rib_len(), 0);
+        // Remove the import hook (simulating a policy change).
+        a.hooks_mut().import.clear();
+        // Run soft reconfiguration inbound.
+        let n = a.soft_reconfig_inbound(a_session).unwrap();
+        assert_eq!(n, 1, "one route re-evaluated");
+        assert_eq!(a.rib_len(), 1, "route admitted into Loc-RIB after re-eval");
+    }
+
+    #[test]
+    fn soft_reconfig_inbound_noop_when_flag_off() {
+        // soft_reconfig_inbound on a session without the flag is a
+        // no-op (returns 0) — the pre-policy RIB was not retained.
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let n = a.soft_reconfig_inbound(a_session).unwrap();
+        assert_eq!(n, 0, "no-op when soft_reconfig_inbound is off");
+    }
+
+    #[test]
+    fn soft_reconfig_inbound_unknown_handle_noop() {
+        // Unknown session handle: the pre-policy RIB is empty for
+        // that origin, so the op is a no-op (returns 0).
+        let mut a = DefaultRouter::new();
+        let n = a.soft_reconfig_inbound(SessionHandle(999)).unwrap();
+        assert_eq!(n, 0, "no-op on unknown handle");
+    }
+
+    #[test]
+    fn set_session_soft_reconfig_inbound_rejects_unknown_handle() {
+        let mut a = DefaultRouter::new();
+        let err = a
+            .set_session_soft_reconfig_inbound(SessionHandle(99), true)
+            .unwrap_err();
+        assert!(err.contains("not found"), "{err}");
+    }
+
+    #[test]
+    fn set_session_soft_reconfig_inbound_after_start_fails() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        establish(&mut a, a_session, &mut b, b_session);
+        let err = a
+            .set_session_soft_reconfig_inbound(a_session, true)
+            .unwrap_err();
         assert!(err.contains("already established"), "{err}");
     }
 }

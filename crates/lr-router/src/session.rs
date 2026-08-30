@@ -170,6 +170,11 @@ pub struct SessionConfig {
     /// occurrences; `u32::MAX` admits any number (FRR `allowas-any`).
     /// iBGP is exempt.
     pub local_as_tolerance: u32,
+    /// FRR `neighbor X soft-reconfiguration inbound` (W2.4): retain
+    /// the pre-policy Adj-RIB-In so a policy reconfiguration can be
+    /// applied without re-fetching from the peer. Off by default
+    /// (FRR's default; the cost is duplicate RIB memory per peer).
+    pub soft_reconfig_inbound: bool,
     /// Local interface address: used as NEXT_HOP for eBGP egress
     /// (next-hop-self) and as the local identity for Babel/OSPF runtimes.
     pub local_address: Option<lr_core::addr::IpAddr>,
@@ -223,6 +228,7 @@ impl SessionConfig {
             // = false` is set, then `add_session` propagates it here.
             default_ipv4_unicast: true,
             local_as_tolerance: 0,
+            soft_reconfig_inbound: false,
             local_address: None,
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
@@ -363,6 +369,7 @@ impl SessionConfig {
             mp_families: Vec::new(),
             default_ipv4_unicast: true,
             local_as_tolerance: 0,
+            soft_reconfig_inbound: false,
             local_address: None,
             area_id,
             ospf_area_type: OspfAreaType::Normal,
@@ -396,6 +403,7 @@ impl SessionConfig {
             mp_families: Vec::new(),
             default_ipv4_unicast: true,
             local_as_tolerance: 0,
+            soft_reconfig_inbound: false,
             local_address: Some(local_addr),
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
