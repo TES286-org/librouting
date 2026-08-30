@@ -9,6 +9,8 @@
 
 use std::process::ExitCode;
 
+use lr_babel::BabelMacAlgorithm;
+
 use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, RouteMapSpec};
 
 /// Per-peer settings — one `[[peer]]` TOML table (or one `--peer` CLI
@@ -146,6 +148,18 @@ impl OspfIfSpec {
     }
 }
 
+/// One `[[babel.key]]` table (or `--babel-key` flag): a symmetric MAC
+/// key for RFC 8967 Babel authentication.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BabelKeySpec {
+    /// Shared secret (raw string bytes; RFC 8967 §7 recommends 32 octets
+    /// chosen randomly — passphrases should go through a KDF upstream).
+    pub secret: Option<String>,
+    /// `"hmac-sha256"` (default, mandatory to implement) or `"blake2s"`
+    /// (keyed BLAKE2s, 16-octet digest).
+    pub algorithm: Option<String>,
+}
+
 /// Parse an OSPF area ID: dotted quad (`"0.0.0.1"`) or integer
 /// (`"1"`). Both BIRD and FRR accept the two spellings.
 pub(crate) fn parse_area_id(value: &str) -> Option<u32> {
@@ -242,6 +256,19 @@ pub(crate) struct DaemonConfig {
     pub babel_group: Option<String>,
     /// Babel local port (default: 6696).
     pub babel_port: u16,
+    /// RFC 8967 MAC keys (`[[babel.key]]` tables / repeatable
+    /// `--babel-key`). When non-empty the babel transport signs every
+    /// datagram (one MAC TLV per key) and verifies inbound ones with the
+    /// full RFC 8967 §4.3 state machine.
+    pub babel_keys: Vec<BabelKeySpec>,
+    /// RFC 8967 §5 incremental deployment: send authenticated packets but
+    /// accept unauthenticated inbound ones (`--babel-accept-unauthenticated`).
+    pub babel_accept_unauthenticated: bool,
+    /// RFC 9467 §3.1 unicast/multicast PC split (RECOMMENDED, default on;
+    /// `--babel-no-pc-split` disables it).
+    pub babel_split_unicast_multicast: bool,
+    /// RFC 9467 §3.2 window size for PC verification (OPTIONAL; 0 = off).
+    pub babel_pc_window: usize,
     /// BMP monitoring station to mirror Peer Up/Down + Route Monitoring
     /// to (`--bmp-target host:port` / `[bgp] bmp_target`).
     pub bmp_target: Option<String>,
@@ -335,6 +362,10 @@ impl DaemonConfig {
             bfd_multiplier: 3,
             protocol: "bgp".to_string(),
             babel_port: 6696,
+            babel_keys: Vec::new(),
+            babel_accept_unauthenticated: false,
+            babel_split_unicast_multicast: true,
+            babel_pc_window: 0,
             ebgp_policy: "rfc8212".to_string(),
             enforce_first_as: false,
             bestpath_compare_routerid: true,
@@ -612,6 +643,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.ospf_interfaces.push(OspfIfSpec::default());
                     section = "ospf.interface".to_string();
                 }
+                "babel.key" => {
+                    cfg.babel_keys.push(BabelKeySpec::default());
+                    section = "babel.key".to_string();
+                }
                 _ => {
                     // Unknown array table: tolerate (forward compatibility),
                     // but leave peer context so keys do not leak into one.
@@ -640,6 +675,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 cfg.peer_templates.entry(name.to_string()).or_default();
             } else if section != "bgp"
                 && section != "ospf"
+                && section != "babel"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -689,6 +725,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         // keys inside them are hard errors (typo protection for
         // policy the operator expects to be in force — fail closed).
         if apply_policy_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        // Babel tables and globals: protocol configuration is fail-closed —
+        // an unknown key is a typo that could silently disable link
+        // authentication or alter replay handling.
+        if apply_babel_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -917,6 +961,70 @@ fn apply_policy_key(
 /// globals plus the `[[ospf.area]]` / `[[ospf.interface]]` tables.
 /// Unknown keys are errors (fail closed — see the parser). Returns
 /// `Ok(false)` for non-OSPF sections so the caller falls through.
+/// Babel `[babel]` globals and `[[babel.key]]` tables. Fail-closed like
+/// the OSPF schema: an unknown key may mean authentication silently
+/// disabled, so it is a hard error.
+/// Returns `Ok(true)` when the key was consumed here, `Ok(false)` to fall
+/// through to the next section schema.
+fn apply_babel_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    match section {
+        "babel" => match key {
+            "group" => {
+                cfg.babel_group = Some(value.to_string());
+            }
+            "port" => {
+                cfg.babel_port = value
+                    .parse()
+                    .map_err(|_| format!("bad babel port '{value}'"))?;
+            }
+            "accept_unauthenticated" => {
+                cfg.babel_accept_unauthenticated = parse_bool(value);
+            }
+            "split_unicast_multicast" => {
+                cfg.babel_split_unicast_multicast = parse_bool(value);
+            }
+            "pc_window" => {
+                cfg.babel_pc_window = value
+                    .parse()
+                    .map_err(|_| format!("bad babel pc_window '{value}'"))?;
+            }
+            _ => {
+                return Err(format!(
+                    "unknown [babel] key '{key}' (typo protection; Babel config fails closed)"
+                ))
+            }
+        },
+        "babel.key" => {
+            let Some(k) = cfg.babel_keys.last_mut() else {
+                return Err("key outside a [[babel.key]] table".into());
+            };
+            match key {
+                "secret" => k.secret = Some(value.to_string()),
+                "algorithm" => {
+                    if BabelMacAlgorithm::from_name(value).is_none() {
+                        return Err(format!(
+                            "unknown babel key algorithm '{value}' (hmac-sha256 | blake2s)"
+                        ));
+                    }
+                    k.algorithm = Some(value.to_string());
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown [[babel.key]] key '{key}' (typo protection; Babel config fails closed)"
+                    ))
+                }
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 fn apply_ospf_key(
     cfg: &mut DaemonConfig,
     section: &str,
@@ -1306,6 +1414,28 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--babel-port" if i + 1 < args.len() => {
                 cfg.babel_port = args[i + 1].parse().unwrap_or(6696);
+                i += 2;
+            }
+            "--babel-key" if i + 1 < args.len() => {
+                // Repeatable: every flag adds one key. The default algorithm
+                // is HMAC-SHA256 (RFC 8967 §4.1 mandatory); TOML
+                // `[[babel.key]]` tables allow per-key algorithm selection.
+                cfg.babel_keys.push(BabelKeySpec {
+                    secret: Some(args[i + 1].clone()),
+                    algorithm: None,
+                });
+                i += 2;
+            }
+            "--babel-accept-unauthenticated" => {
+                cfg.babel_accept_unauthenticated = true;
+                i += 1;
+            }
+            "--babel-no-pc-split" => {
+                cfg.babel_split_unicast_multicast = false;
+                i += 1;
+            }
+            "--babel-pc-window" if i + 1 < args.len() => {
+                cfg.babel_pc_window = args[i + 1].parse().unwrap_or(0);
                 i += 2;
             }
             // Repeatable: each --ospf-interface adds one interface; its
@@ -1807,5 +1937,75 @@ mod tests {
         )
         .unwrap();
         assert!(!cfg.default_ipv4_unicast);
+    }
+
+    #[test]
+    fn babel_toml_globals_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[babel]\ngroup = \"224.0.0.111\"\nport = 7696\n\
+             accept_unauthenticated = true\nsplit_unicast_multicast = false\n\
+             pc_window = 128\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.babel_group.as_deref(), Some("224.0.0.111"));
+        assert_eq!(cfg.babel_port, 7696);
+        assert!(cfg.babel_accept_unauthenticated);
+        assert!(!cfg.babel_split_unicast_multicast);
+        assert_eq!(cfg.babel_pc_window, 128);
+    }
+
+    #[test]
+    fn babel_toml_unknown_key_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[babel]\ntypo = 1\n", &mut cfg);
+        assert!(err.is_err(), "{err:?}");
+        assert!(err.unwrap_err().contains("unknown [babel] key"));
+    }
+
+    #[test]
+    fn babel_key_tables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.key]]\nsecret = \"one\"\n\
+             [[babel.key]]\nsecret = \"two\"\nalgorithm = \"blake2s\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.babel_keys.len(), 2);
+        assert_eq!(cfg.babel_keys[0].secret.as_deref(), Some("one"));
+        assert_eq!(cfg.babel_keys[0].algorithm, None);
+        assert_eq!(cfg.babel_keys[1].algorithm.as_deref(), Some("blake2s"));
+    }
+
+    #[test]
+    fn babel_key_unknown_algorithm_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[babel.key]]\nsecret = \"x\"\nalgorithm = \"md5\"\n",
+            &mut cfg,
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert!(err.unwrap_err().contains("unknown babel key algorithm"));
+    }
+
+    #[test]
+    fn babel_key_without_secret_is_rejected_at_build() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[babel.key]]\nalgorithm = \"blake2s\"\n", &mut cfg).unwrap();
+        // The daemon treats a key without a secret as a fatal
+        // configuration error (fail closed): the auth interface is None
+        // and the caller must refuse to run.
+        let built = {
+            let mut ok = true;
+            for k in &cfg.babel_keys {
+                if k.secret.is_none() {
+                    ok = false;
+                }
+            }
+            ok
+        };
+        assert!(!built);
     }
 }

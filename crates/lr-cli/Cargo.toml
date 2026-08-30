@@ -21,6 +21,8 @@ path = "src/daemon.rs"
 
 [dependencies]
 lr-core = { workspace = true }
+lr-babel = { workspace = true }
+socket2.workspace = true
 lr-bgp = { workspace = true }
 lr-ospf = { workspace = true }
 lr-rib = { workspace = true }

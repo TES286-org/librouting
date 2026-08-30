@@ -124,8 +124,16 @@ fn print_usage() {
          --bfd-min-rx-ms MS       BFD receive interval (default 100)\n  \
          --bfd-multiplier N       BFD detection multiplier (default 3)\n  \
          --protocol PROTO         bgp (default) | babel | ospf | bmp\n  \
-         --babel-group ADDR       Babel multicast group (ff02::1:6)\n  \
+         --babel-group ADDR       Babel multicast group (ff02::1:6 v6, 224.0.0.111 v4)\n  \
          --babel-port PORT        Babel UDP port (6696)\n  \
+         --babel-key SECRET       RFC 8967 MAC key (repeatable; one MAC per\n  \
+                                  key per datagram, key-rotation safe)\n  \
+         --babel-accept-unauthenticated\n  \
+                                  RFC 8967 5 incremental deployment: sign\n  \
+                                  outgoing but accept unsigned inbound\n  \
+         --babel-no-pc-split      RFC 9467 3.1: single PC field instead of\n  \
+                                  the recommended unicast/multicast split\n  \
+         --babel-pc-window N      RFC 9467 3.2 window verification (0 = off)\n  \
          --ospf-interface NAME    OSPF interface (repeatable; needs root\n  \
          or a user/network namespace)\n  \
          --ospf-area ID           Area for --ospf-interface (default 0;\n  \
@@ -167,6 +175,12 @@ fn main() -> ExitCode {
         );
         return ExitCode::from(2);
     }
+    // Babel mode: short-circuit the BGP session setup and run the
+    // Babel UDP transport loop instead. Babel derives its router-id from
+    // the local address (RFC 8966 §3.3) — --router-id is not used.
+    if cfg.protocol == "babel" {
+        return run_babel_daemon(&cfg);
+    }
     if cfg.router_id.is_empty() {
         eprintln!("error: --router-id is required");
         print_usage();
@@ -179,11 +193,6 @@ fn main() -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    // Babel mode: short-circuit the BGP session setup and run the
-    // Babel UDP transport loop instead.
-    if cfg.protocol == "babel" {
-        return run_babel_daemon(&cfg);
-    }
     // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
     if cfg.protocol == "ospf" {
         return daemon_ospf::run_ospf_daemon(&cfg, rid);
@@ -1598,81 +1607,198 @@ fn fmt_bgp_id(id: u32) -> String {
     std::net::Ipv4Addr::from(id).to_string()
 }
 
-/// Babel daemon mode: run the Babel protocol over UDP on an IPv6
-/// link-local address. This is the BIRD `babel` protocol equivalent —
-/// Babel uses UDP multicast on port 6696, not TCP like BGP.
-fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
-    use std::net::UdpSocket;
+/// Build the RFC 8967 authentication interface from the `[babel]` config:
+/// one [`lr_babel::BabelAuthInterface`] when keys are configured, `None`
+/// otherwise (unsigned transport, the historical behaviour).
+fn build_babel_auth_interface(cfg: &DaemonConfig) -> Option<lr_babel::BabelAuthInterface> {
+    if cfg.babel_keys.is_empty() {
+        return None;
+    }
+    let mut keys: Vec<lr_babel::BabelMacKey> = Vec::new();
+    for spec in &cfg.babel_keys {
+        let Some(secret) = &spec.secret else {
+            eprintln!("daemon: [[babel.key]] without 'secret' (fail closed)");
+            return None;
+        };
+        let algorithm = spec
+            .algorithm
+            .as_deref()
+            .and_then(lr_babel::BabelMacAlgorithm::from_name)
+            .unwrap_or(lr_babel::BabelMacAlgorithm::HmacSha256);
+        keys.push(lr_babel::BabelMacKey {
+            algorithm,
+            secret: secret.clone().into_bytes(),
+        });
+    }
+    let first = keys.remove(0);
+    let mut acfg = lr_babel::BabelAuthConfig::new(first);
+    acfg.keys.extend(keys);
+    acfg.accept_unauthenticated = cfg.babel_accept_unauthenticated;
+    acfg.split_unicast_multicast = cfg.babel_split_unicast_multicast;
+    acfg.pc_window = if cfg.babel_pc_window > 0 {
+        Some(cfg.babel_pc_window)
+    } else {
+        None
+    };
+    let mut nonce = lr_babel::SystemNonceSource::new();
+    // The outbound Index must be fresh (RFC 8967 §3.1): draw it from the
+    // OS-entropy nonce source.
+    use lr_babel::NonceSource;
+    let mut index = [0u8; 8];
+    nonce.fill(&mut index);
+    match lr_babel::BabelAuthInterface::new(acfg, index.to_vec(), 0, Box::new(nonce)) {
+        Ok(iface) => Some(iface),
+        Err(e) => {
+            eprintln!("daemon: babel auth config rejected: {} (fail closed)", e);
+            None
+        }
+    }
+}
 
-    // Babel runs on IPv6 link-local by default (RFC 8966 §2.1). The
-    // local address must be a link-local IPv6 address with a scope ID.
-    let local_addr = cfg.local_address.as_deref().or(cfg.listen_addr.as_deref());
-    let local_addr = match local_addr {
-        Some(a) => a,
-        None => {
-            eprintln!("daemon: --protocol babel requires --local-address (IPv6 link-local)");
+fn lr_ip(addr: std::net::IpAddr) -> lr_core::addr::IpAddr {
+    match addr {
+        std::net::IpAddr::V4(v4) => lr_core::addr::IpAddr::V4(v4.octets()),
+        std::net::IpAddr::V6(v6) => lr_core::addr::IpAddr::V6(v6.octets()),
+    }
+}
+
+/// Babel daemon mode: run the Babel protocol over UDP (RFC 8966 §4) on an
+/// IPv6 link-local address or an IPv4 local address. Without keys this is
+/// the unsigned transport. With `[[babel.key]]` / `--babel-key`, every
+/// datagram carries one MAC TLV per configured key and inbound datagrams go
+/// through the full RFC 8967 §4.3 state machine (MAC test, PC verification,
+/// Challenge Request/Reply resynchronization, RFC 9467 §3.1 unicast/
+/// multicast PC split).
+///
+/// Authenticated transport uses two sockets so the destination class of
+/// each datagram is exact (RFC 9467 §3.1 picks PCm vs PCu by destination):
+/// a unicast socket bound to the local address and a multicast socket bound
+/// to the group address. Challenge traffic is unicast to the peer, per
+/// RFC 8967 §4.3.1.1/§4.3.1.2.
+fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
+    // ---- local address (IPv6 link-local with %scope, or IPv4) ----
+    let local_str = cfg.local_address.as_deref().or(cfg.listen_addr.as_deref());
+    let Some(local_str) = local_str else {
+        eprintln!("daemon: --protocol babel requires --local-address (IPv6 link-local or IPv4)");
+        return ExitCode::from(2);
+    };
+    // Accept `fe80::1%eth0`, `[fe80::1%eth0]:6696`, and bare IPv4.
+    let bare = local_str
+        .trim_start_matches('[')
+        .split(']')
+        .next()
+        .unwrap_or(local_str);
+    let (addr_part, scope_part) = bare.split_once('%').unwrap_or((bare, ""));
+    let scope_id: u32 = scope_part.parse().unwrap_or(0);
+    let local: std::net::IpAddr = match addr_part.parse() {
+        Ok(ip) => ip,
+        Err(_) => {
+            eprintln!("daemon: invalid babel local address: {}", local_str);
             return ExitCode::from(2);
         }
     };
-    // Parse the local address. Accept both `fe80::1%eth0` and
-    // `[fe80::1%eth0]:6696` forms.
-    let local_ip: std::net::Ipv6Addr = match local_addr.parse() {
+    if local.is_unspecified() {
+        eprintln!("daemon: babel local address must be a real interface address");
+        return ExitCode::from(2);
+    }
+    let port = cfg.babel_port;
+
+    // ---- multicast group (family must match the local address) ----
+    let default_group = if local.is_ipv4() {
+        "224.0.0.111"
+    } else {
+        "ff02::1:6"
+    };
+    let group: std::net::IpAddr = match cfg.babel_group.as_deref().unwrap_or(default_group).parse()
+    {
         Ok(ip) => ip,
         Err(_) => {
-            // Try bracketed form.
-            let trimmed = local_addr.trim_start_matches('[').trim_end_matches(']');
-            match trimmed.split(':').next().unwrap_or("").parse() {
-                Ok(ip) => ip,
-                Err(_) => {
-                    eprintln!("daemon: invalid IPv6 local address: {}", local_addr);
-                    return ExitCode::from(2);
-                }
-            }
+            eprintln!("daemon: invalid babel group address");
+            return ExitCode::from(2);
         }
     };
-    // A link-local address carries its interface scope in the `%iface`
-    // suffix; `Ipv6Addr` drops it, so parse it from the original string.
-    // Without it the socket binds scope 0 (kernel default) and the
-    // multicast join goes to the wrong interface.
-    let scope_id = local_addr
-        .trim_start_matches('[')
-        .split(['%', ']'])
-        .nth(1)
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(0);
-    let port = cfg.babel_port;
-    let bind_addr =
-        std::net::SocketAddr::V6(std::net::SocketAddrV6::new(local_ip, port, 0, scope_id));
-    let sock = match UdpSocket::bind(bind_addr) {
+    if group.is_ipv4() != local.is_ipv4() {
+        eprintln!("daemon: babel group and local address families differ");
+        return ExitCode::from(2);
+    }
+
+    // ---- authentication ----
+    let mut auth = build_babel_auth_interface(cfg);
+    if let Some(iface) = &auth {
+        let algorithms: Vec<&str> = iface
+            .config()
+            .keys
+            .iter()
+            .map(|k| k.algorithm.as_str())
+            .collect();
+        println!(
+            "daemon: babel MAC auth enabled ({} key(s): {}), RFC 9467 split {}, window {}",
+            algorithms.len(),
+            algorithms.join(","),
+            if cfg.babel_split_unicast_multicast {
+                "on"
+            } else {
+                "off"
+            },
+            cfg.babel_pc_window
+        );
+    }
+
+    // ---- sockets ----
+    // Unicast socket: bound to the local address. In unsigned mode this is
+    // also the multicast receiver (historical behaviour).
+    let uc_bind = match local {
+        std::net::IpAddr::V4(v4) => std::net::SocketAddr::from((v4, port)),
+        std::net::IpAddr::V6(v6) => {
+            std::net::SocketAddr::V6(std::net::SocketAddrV6::new(v6, port, 0, scope_id))
+        }
+    };
+    let uc = match bind_babel_socket(uc_bind, true) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("daemon: babel bind {} failed: {}", bind_addr, e);
+            eprintln!("daemon: babel bind {} failed: {}", uc_bind, e);
             return ExitCode::from(1);
         }
     };
-    println!("daemon: babel listening on {}", bind_addr);
+    let _ = uc.set_ttl(255);
+    let _ = uc.set_multicast_loop_v6(true);
 
-    // Join the Babel multicast group (ff02::1:6, RFC 8966 §2.1).
-    let group: std::net::Ipv6Addr = cfg
-        .babel_group
-        .as_deref()
-        .unwrap_or("ff02::1:6")
-        .parse()
-        .unwrap_or_else(|_| "ff02::1:6".parse().unwrap());
-    // The interface index is the scope ID of the bind address (Babel
-    // defaults to link-local, so the interface is mandatory for the join).
-    if let Err(e) = sock.join_multicast_v6(&group, scope_id) {
-        eprintln!("daemon: babel multicast join failed: {}", e);
-        // Non-fatal: the daemon can still receive unicast.
-    }
-    // Set the multicast hop limit to 255 (Babel requirement, RFC 8966
-    // §2.1: "The hop limit MUST be set to 255").
-    let _ = sock.set_multicast_loop_v6(false);
-    let _ = sock.set_ttl(255);
+    // Multicast socket: bound to the group address so every received
+    // datagram's destination class is exact (RFC 9467 §3.1) — a socket
+    // bound to a unicast address does not receive multicast on Linux.
+    // The interface is mandatory for the membership join: v6 uses the
+    // %scope ifindex, v4 the local address as the membership interface.
+    let mc_bind = match group {
+        std::net::IpAddr::V4(v4) => std::net::SocketAddr::from((v4, port)),
+        std::net::IpAddr::V6(v6) => {
+            std::net::SocketAddr::V6(std::net::SocketAddrV6::new(v6, port, 0, scope_id))
+        }
+    };
+    let mc = match bind_babel_socket(mc_bind, true) {
+        Ok(s) => {
+            let joined = match (group, local) {
+                (std::net::IpAddr::V4(g), std::net::IpAddr::V4(l)) => {
+                    s.join_multicast_v4(&g, &l).is_ok()
+                }
+                (std::net::IpAddr::V6(g), _) => s.join_multicast_v6(&g, scope_id).is_ok(),
+                _ => false,
+            };
+            if !joined {
+                eprintln!("daemon: babel multicast join failed (group {})", group);
+                // Non-fatal: unicast traffic still works.
+            }
+            Some(s)
+        }
+        Err(e) => {
+            eprintln!("daemon: babel multicast bind {} failed: {}", mc_bind, e);
+            return ExitCode::from(1);
+        }
+    };
+    println!("daemon: babel listening on {} (group {})", uc_bind, group);
 
     // Set up the router with a Babel session.
     let router = Arc::new(Mutex::new(DefaultRouter::new()));
-    let babel_local = lr_core::addr::IpAddr::V6(local_ip.octets());
+    let babel_local = lr_ip(local);
     let sc = SessionConfig::babel(babel_local);
     let h = {
         let mut r = router.lock().unwrap();
@@ -1687,6 +1813,22 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
     {
         let mut r = router.lock().unwrap();
         r.start_session(h).unwrap();
+    }
+    // Locally originated networks enter the Loc-RIB and are announced as
+    // Babel Updates (RFC 8966 §3.7) on the periodic announcement tick.
+    {
+        let mut r = router.lock().unwrap();
+        for net in &cfg.networks {
+            match Prefix::from_str(net) {
+                Ok(p) => {
+                    let (p, family) = originate_family_for(p);
+                    let nh = originate_next_hop(cfg, family).or(Some(lr_ip(local)));
+                    let _key = r.originate_family(p, family, nh);
+                    println!("daemon: originating {}", p);
+                }
+                Err(_) => eprintln!("daemon: invalid network '{}'", net),
+            }
+        }
     }
 
     // Signal handling.
@@ -1729,42 +1871,350 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
         });
     }
 
-    // Non-blocking read loop.
-    let _ = sock.set_nonblocking(true);
+    let mc_sock = mc.as_ref();
+    let _ = uc.set_nonblocking(true);
+    if let Some(s) = mc_sock {
+        let _ = s.set_nonblocking(true);
+    }
     let mut buf = [0u8; 65535];
+    let mut last_gc_ms: u64 = 0;
+    let mut dropped: u64 = 0;
+    let start = WallClock::now();
+    // Periodic announcement state: RFC 8966 §3.4 Hellos keep the adjacency
+    // alive; §3.7 Updates advertise the Loc-RIB (originated networks and
+    // non-Babel routes — split horizon keeps babel-learned routes from
+    // echoing back).
+    let mut boot_nonce = lr_babel::SystemNonceSource::new();
+    use lr_babel::NonceSource;
+    let mut boot_bytes = [0u8; 8];
+    boot_nonce.fill(&mut boot_bytes);
+    let babel_router_id = babel_router_id_for(local, boot_bytes);
+    let mut babel_seqno: u16 = 0;
+    let mut last_announce_ms: u64 = 0;
+
     while running.load(Ordering::Relaxed) {
         dispatch_signals(&runtime);
         if !running.load(Ordering::Relaxed) {
             break;
         }
-        // Read inbound.
-        match sock.recv_from(&mut buf) {
-            Ok((n, _peer)) => {
-                let mut r = router.lock().unwrap();
-                let _ = r.feed_input(h, &buf[..n]);
-            }
-            Err(e)
-                if e.kind() == std::io::ErrorKind::WouldBlock
-                    || e.kind() == std::io::ErrorKind::TimedOut => {}
-            Err(e) => {
-                eprintln!("daemon: babel recv failed: {}", e);
-                thread::sleep(Duration::from_millis(100));
+        let now_ms = start.elapsed().as_millis() as u64;
+
+        // Periodic announcement (Hello + Router-Id + Next-Hop + Updates).
+        if now_ms >= last_announce_ms + BABEL_HELLO_INTERVAL_MS {
+            last_announce_ms = now_ms;
+            babel_seqno = babel_seqno.wrapping_add(1);
+            let announce = {
+                let r = router.lock().unwrap();
+                build_babel_announcement(&r, local, babel_router_id, babel_seqno)
+            };
+            let dest = match group {
+                std::net::IpAddr::V4(g) => std::net::SocketAddr::from((g, port)),
+                std::net::IpAddr::V6(g) => {
+                    std::net::SocketAddr::V6(std::net::SocketAddrV6::new(g, port, 0, scope_id))
+                }
+            };
+            let payload = match &mut auth {
+                Some(iface) => {
+                    let ph = lr_babel::BabelPseudoHeader {
+                        source: lr_ip(local),
+                        source_port: port,
+                        destination: lr_ip(group),
+                        destination_port: port,
+                    };
+                    match iface.authenticate_packet(&announce, ph) {
+                        Ok(signed) => signed,
+                        Err(e) => {
+                            eprintln!("daemon: babel authenticate failed: {}", e);
+                            continue;
+                        }
+                    }
+                }
+                None => announce,
+            };
+            let _ = uc.send_to(&payload, dest);
+        }
+
+        // Receive inbound. Two paths in authenticated mode: multicast
+        // (exact group destination) and unicast (exact local destination).
+        for (sock, is_multicast) in std::iter::once((&uc, false)).chain(mc_sock.map(|s| (s, true)))
+        {
+            loop {
+                match sock.recv_from(&mut buf) {
+                    Ok((n, peer)) => {
+                        if n == 0 {
+                            continue;
+                        }
+                        // RFC 8966 §4.1: the source port MUST be the Babel
+                        // port; our own datagrams are skipped (multicast
+                        // loop is on so same-host links deliver them).
+                        if peer.port() != port || peer.ip() == local {
+                            continue;
+                        }
+                        let dest = if is_multicast { group } else { local };
+                        let ph = lr_babel::BabelPseudoHeader {
+                            source: lr_ip(peer.ip()),
+                            source_port: peer.port(),
+                            destination: lr_ip(dest),
+                            destination_port: port,
+                        };
+                        let mut r = router.lock().unwrap();
+                        match &mut auth {
+                            Some(iface) => {
+                                let out = iface.verify(&buf[..n], ph, now_ms);
+                                for action in out.actions {
+                                    if let Some(pkt) = build_challenge_packet(
+                                        iface,
+                                        &action,
+                                        local,
+                                        peer.ip(),
+                                        port,
+                                    ) {
+                                        let dst = match peer {
+                                            std::net::SocketAddr::V6(v6) => {
+                                                std::net::SocketAddr::V6(
+                                                    std::net::SocketAddrV6::new(
+                                                        *v6.ip(),
+                                                        port,
+                                                        0,
+                                                        v6.scope_id(),
+                                                    ),
+                                                )
+                                            }
+                                            std::net::SocketAddr::V4(v4) => {
+                                                std::net::SocketAddr::from((*v4.ip(), port))
+                                            }
+                                        };
+                                        let _ = uc.send_to(&pkt, dst);
+                                    }
+                                }
+                                match out.accepted {
+                                    Some(plain) => {
+                                        let _ = r.feed_input(h, &plain);
+                                    }
+                                    None => dropped += 1,
+                                }
+                            }
+                            None => {
+                                let _ = r.feed_input(h, &buf[..n]);
+                            }
+                        }
+                    }
+                    Err(e)
+                        if e.kind() == std::io::ErrorKind::WouldBlock
+                            || e.kind() == std::io::ErrorKind::TimedOut =>
+                    {
+                        break;
+                    }
+                    Err(_) => {
+                        break;
+                    }
+                }
             }
         }
-        // Drain outbound.
+
+        // Periodic neighbour-state expiry (RFC 8967 §4.4).
+        if auth.is_some() && now_ms >= last_gc_ms + 5_000 {
+            last_gc_ms = now_ms;
+            if let Some(iface) = &mut auth {
+                let _ = iface.gc(now_ms);
+            }
+        }
+
+        // Drain outbound and send it as an authenticated multicast (or
+        // plain in unsigned mode) via the unicast socket: the bound local
+        // address is the datagram source the peers' pseudo-headers see.
         let out = {
             let mut r = router.lock().unwrap();
             r.drain_output(h)
         };
         if !out.is_empty() {
-            // Send to the Babel multicast group on the bound interface.
-            let dest =
-                std::net::SocketAddr::V6(std::net::SocketAddrV6::new(group, port, 0, scope_id));
-            let _ = sock.send_to(&out, dest);
+            let dest = match group {
+                std::net::IpAddr::V4(g) => std::net::SocketAddr::from((g, port)),
+                std::net::IpAddr::V6(g) => {
+                    std::net::SocketAddr::V6(std::net::SocketAddrV6::new(g, port, 0, scope_id))
+                }
+            };
+            let payload = match &mut auth {
+                Some(iface) => {
+                    let ph = lr_babel::BabelPseudoHeader {
+                        source: lr_ip(local),
+                        source_port: port,
+                        destination: lr_ip(group),
+                        destination_port: port,
+                    };
+                    match iface.authenticate_packet(&out, ph) {
+                        Ok(signed) => signed,
+                        Err(e) => {
+                            eprintln!("daemon: babel authenticate failed: {}", e);
+                            continue;
+                        }
+                    }
+                }
+                None => out,
+            };
+            let _ = uc.send_to(&payload, dest);
         }
+    }
+    if dropped > 0 {
+        println!(
+            "daemon: babel dropped {} unauthenticated/replayed datagrams",
+            dropped
+        );
     }
     println!("daemon: babel shutdown complete");
     ExitCode::SUCCESS
+}
+
+/// Babel Hello interval for the daemon transport (RFC 8966 §3.4; the
+/// interval is advertised to peers who derive their hold time from it).
+const BABEL_HELLO_INTERVAL_MS: u64 = 1000;
+
+/// Bind one Babel UDP socket. `reuse` sets SO_REUSEADDR, which several
+/// Babel speakers on one host need to share the multicast group address
+/// and port (RFC 8966 §4: every speaker binds the same port).
+fn bind_babel_socket(
+    addr: std::net::SocketAddr,
+    reuse: bool,
+) -> std::io::Result<std::net::UdpSocket> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let domain = match addr {
+        std::net::SocketAddr::V4(_) => Domain::IPV4,
+        std::net::SocketAddr::V6(_) => Domain::IPV6,
+    };
+    let sock = Socket::new(domain, Type::DGRAM, Some(Protocol::UDP))?;
+    if reuse {
+        sock.set_reuse_address(true)?;
+    }
+    sock.set_nonblocking(false)?;
+    sock.bind(&addr.into())?;
+    Ok(sock.into())
+}
+
+/// Router-Id for the babel transport: the local address identifies the
+/// speaker, and per-boot random octets make every daemon instance a fresh
+/// Babel source (RFC 8966 §3.3 router ids must be unique in the routing
+/// domain; §3.7.1 sources are keyed by router-id, so a restart must not
+/// re-emit stale-looking sequence numbers under the old source key).
+fn babel_router_id_for(local: std::net::IpAddr, boot: [u8; 8]) -> [u8; 8] {
+    let mut id = [0u8; 8];
+    match local {
+        std::net::IpAddr::V4(v4) => {
+            let o = v4.octets();
+            id[..4].copy_from_slice(&o);
+            id[4..].copy_from_slice(&boot[4..8]);
+        }
+        std::net::IpAddr::V6(_) => {
+            id.copy_from_slice(&boot);
+        }
+    }
+    id
+}
+
+/// Build one periodic announcement datagram: Hello + Router-Id + Next-Hop +
+/// Updates for every Loc-RIB route that was not learned over this Babel
+/// session (split horizon).
+///
+/// The frame is returned WITHOUT the MAC trailer; the caller authenticates
+/// it when keys are configured.
+fn build_babel_announcement(
+    router: &DefaultRouter,
+    local: std::net::IpAddr,
+    router_id: [u8; 8],
+    seqno: u16,
+) -> Vec<u8> {
+    use lr_babel::message::{Hello, NextHop, RouterId as RouterIdTlv, Update};
+    use lr_babel::tlv::{Tlv, TlvType};
+
+    let mut frame = lr_babel::BabelFrame::empty();
+    // §3.4: Hello with the advertised interval in centiseconds.
+    frame.body.push(Tlv::new(
+        TlvType::Hello,
+        Hello::new(seqno, (BABEL_HELLO_INTERVAL_MS / 10) as u16)
+            .encode()
+            .to_vec(),
+    ));
+    // §4.6.7 Router-Id — must precede the Updates that depend on it.
+    frame.body.push(Tlv::new(
+        TlvType::RouterId,
+        RouterIdTlv { id: router_id }.encode().to_vec(),
+    ));
+    // §4.6.8 Next-Hop per address family, before the Updates using it.
+    let nh_ae: u8 = if local.is_ipv4() { 1 } else { 2 };
+    frame.body.push(Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: nh_ae,
+            address: lr_ip(local),
+        }
+        .encode(),
+    ));
+
+    // Updates: every Loc-RIB best route that did not come from Babel.
+    // Metric 96 mirrors babeld's default wired-link cost; infinity (0xFFFF)
+    // is never sent here (withdrawals happen by prefix disappearance).
+    const ADVERTISED_METRIC: u16 = 96;
+    const UPDATE_INTERVAL_CS: u16 = 300;
+    let snapshot = router.rib_snapshot();
+    for route in snapshot {
+        if route.protocol == lr_core::rib::Protocol::Babel {
+            continue;
+        }
+        let prefix = &route.key.prefix;
+        let (ae, octets): (u8, Vec<u8>) = match prefix.addr {
+            lr_core::addr::IpAddr::V4(v4) => (1, v4.to_vec()),
+            lr_core::addr::IpAddr::V6(v6) => (2, v6.to_vec()),
+        };
+        let used = (prefix.prefix_len as usize).div_ceil(8).min(octets.len());
+        frame.body.push(Tlv::new(
+            TlvType::Update,
+            Update {
+                ae,
+                flags: 0,
+                prefix_len: prefix.prefix_len,
+                omitted: 0,
+                interval_cs: UPDATE_INTERVAL_CS,
+                seqno,
+                metric: ADVERTISED_METRIC,
+                prefix: octets[..used].to_vec(),
+                src_prefix_len: 0,
+                src_prefix: Vec::new(),
+            }
+            .encode(),
+        ));
+    }
+    lr_babel::BabelCodec::new()
+        .encode_vec(&frame)
+        .unwrap_or_default()
+}
+
+/// Build one authenticated unicast control datagram (Challenge Request or
+/// Challenge Reply) to `peer` — RFC 8967 §4.3.1.1/§4.3.1.2 require these to
+/// be sent promptly to the peer's unicast address, MAC-protected like any
+/// other packet. The pseudo-header source is the local (bound) address.
+fn build_challenge_packet(
+    iface: &mut lr_babel::BabelAuthInterface,
+    action: &lr_babel::BabelAuthAction,
+    local: std::net::IpAddr,
+    peer: std::net::IpAddr,
+    port: u16,
+) -> Option<Vec<u8>> {
+    let mut frame = lr_babel::BabelFrame::empty();
+    match action {
+        lr_babel::BabelAuthAction::SendChallengeRequest(n) => {
+            frame.body.push(lr_babel::challenge_request_tlv(n));
+        }
+        lr_babel::BabelAuthAction::SendChallengeReply(n) => {
+            frame.body.push(lr_babel::challenge_reply_tlv(n));
+        }
+    }
+    let raw = lr_babel::BabelCodec::new().encode_vec(&frame).ok()?;
+    let ph = lr_babel::BabelPseudoHeader {
+        source: lr_ip(local),
+        source_port: port,
+        destination: lr_ip(peer),
+        destination_port: port,
+    };
+    iface.authenticate_packet(&raw, ph).ok()
 }
 
 /// Spawn the BMP sender thread: connects to `target` (host:port) and
