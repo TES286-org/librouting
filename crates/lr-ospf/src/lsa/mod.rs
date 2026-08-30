@@ -183,6 +183,42 @@ pub fn encode_summary_lsa_body(network_mask: u32, metric: u32) -> Vec<u8> {
 /// after encoding if needed.
 pub type V3PrefixOptions = u8;
 
+/// RFC 7684 §3: PrefixOptions bit definitions. These are the bits
+/// inside [`V3PrefixOptions`] (the one-byte prefix-options field that
+/// precedes every OSPFv3 prefix in inter-area-prefix, intra-area-
+/// prefix, AS-external, NSSA, link-LSA and the new RFC 7684
+/// prefix-link-local LSA bodies).
+pub mod v3_prefix_options {
+    /// Propagate (P) bit — RFC 5340 §A.4.1.1. Set on NSSA external
+    /// prefixes that should be translated to AS-external by the
+    /// border router (RFC 3101 §2.4).
+    pub const P_BIT: u8 = 0x08;
+    /// Multicast (MC) bit — RFC 5340 §A.4.1.1. Set when the prefix
+    /// should be included in the multicast topology calculation.
+    pub const MC_BIT: u8 = 0x04;
+    /// Local Address (LA) bit — RFC 5340 §A.4.1.1, clarified by RFC
+    /// 7684 §3. Set when the prefix is a local interface address
+    /// (the router should install it on an interface, not just route
+    /// to it).
+    pub const LA_BIT: u8 = 0x02;
+    /// No Unicast (NU) bit — RFC 5340 §A.4.1.1. Set when the prefix
+    /// should be excluded from the unicast routing calculation.
+    pub const NU_BIT: u8 = 0x01;
+    /// Address Family (Af) bit — RFC 7684 §3. Set when the prefix
+    /// belongs to an address family other than IPv6 unicast (the
+    /// default). The Af-bit + a one-byte Address Family ID in the
+    /// prefix body extends the prefix to carry non-IPv6-unicast
+    /// prefixes.
+    pub const AF_BIT: u8 = 0x80;
+    /// Route (R) bit — RFC 7684 §3. Set when the prefix should be
+    /// included in the routing calculation even when the NU-bit is
+    /// also set (the prefix carries reachability info for a specific
+    /// purpose, e.g. multicast RPF).
+    pub const R_BIT: u8 = 0x10;
+    /// All known prefix-option bits (for masking / display).
+    pub const ALL_KNOWN: u8 = P_BIT | MC_BIT | LA_BIT | NU_BIT | AF_BIT | R_BIT;
+}
+
 /// Encode the body of an OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5).
 ///
 /// The body carries a single prefix with its metric:
@@ -342,6 +378,13 @@ pub enum LsaTypeV3 {
     LinkLsa = 0x0008,
     /// Intra-Area-Prefix-LSA (scope: area). RFC 5340 §A.4.10.
     IntraAreaPrefixLsa = 0x2009,
+    /// OSPFv3 Prefix Link-Local Attributes LSA (scope: AS, function 4).
+    /// RFC 7684 §2.1 — carries the link-local address prefix options
+    /// (LA bit, Af bit) for inter-area and external prefixes that need
+    /// to carry link-local attributes across the AS. The U-bit is 0
+    /// (peers that do not recognise the type flood it as if it were
+    /// an AS-External-LSA).
+    PrefixLinkLocalAsLsa = 0x4004,
 }
 
 impl LsaTypeV3 {
@@ -357,6 +400,7 @@ impl LsaTypeV3 {
             0x2007 => Self::NssaLsa,
             0x0008 => Self::LinkLsa,
             0x2009 => Self::IntraAreaPrefixLsa,
+            0x4004 => Self::PrefixLinkLocalAsLsa,
             _ => return None,
         })
     }
@@ -381,6 +425,7 @@ impl fmt::Display for LsaTypeV3 {
             Self::NssaLsa => "NSSA-LSA(v3)",
             Self::LinkLsa => "Link-LSA",
             Self::IntraAreaPrefixLsa => "IntraArea-Prefix-LSA",
+            Self::PrefixLinkLocalAsLsa => "Prefix-LinkLocal-AS-LSA",
         })
     }
 }
@@ -498,5 +543,229 @@ impl fmt::Display for LsaTypeV2 {
             Self::OpaqueAreaLsa => "Opaque-Area-LSA",
             Self::OpaqueAsLsa => "Opaque-AS-LSA",
         })
+    }
+}
+
+// ---------------------------------------------------------------------------
+// OSPFv3 Prefix Link-Local Attributes LSA (RFC 7684)
+// ---------------------------------------------------------------------------
+
+/// One prefix entry inside a RFC 7684 prefix-link-local LSA body. The
+/// `prefix_options` byte carries the [`v3_prefix_options`] bits
+/// (including the RFC 7684 Af and R bits). When the Af-bit is set an
+/// extra one-byte Address Family ID follows the prefix options.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V3PrefixLinkLocalEntry {
+    pub prefix_len: u8,
+    pub prefix_options: u8,
+    /// Address Family ID — only present when the Af-bit is set in
+    /// `prefix_options`. Stored as `Option<u8>` so the codec emits
+    /// the byte only when the Af-bit is on, matching the wire format.
+    pub address_family_id: Option<u8>,
+    /// The address prefix, ceil(PL/8) bytes, zero-padded to the byte
+    /// boundary.
+    pub prefix_bytes: Vec<u8>,
+}
+
+/// Encode a single RFC 7684 prefix entry: `<prefix_len:1>
+/// <prefix_options:1> [<af_id:1> when Af-bit set] <prefix:N>`.
+pub fn encode_v3_prefix_link_local_entry(entry: &V3PrefixLinkLocalEntry) -> Vec<u8> {
+    let n = (entry.prefix_len as usize).div_ceil(8);
+    let af = (entry.prefix_options & v3_prefix_options::AF_BIT) != 0;
+    let mut v = Vec::with_capacity(2 + (af as usize) + n);
+    v.push(entry.prefix_len);
+    v.push(entry.prefix_options);
+    if af {
+        v.push(entry.address_family_id.unwrap_or(0));
+    }
+    v.extend_from_slice(&entry.prefix_bytes[..n.min(entry.prefix_bytes.len())]);
+    v
+}
+
+/// Decode a single RFC 7684 prefix entry from `body` starting at
+/// `offset`. Returns `(entry, next_offset)` on success, or `None`
+/// when the body is truncated.
+pub fn decode_v3_prefix_link_local_entry(
+    body: &[u8],
+    offset: usize,
+) -> Option<(V3PrefixLinkLocalEntry, usize)> {
+    if offset + 2 > body.len() {
+        return None;
+    }
+    let prefix_len = body[offset];
+    let prefix_options = body[offset + 1];
+    let af = (prefix_options & v3_prefix_options::AF_BIT) != 0;
+    let mut i = offset + 2;
+    let address_family_id = if af {
+        if i >= body.len() {
+            return None;
+        }
+        let id = body[i];
+        i += 1;
+        Some(id)
+    } else {
+        None
+    };
+    let n = (prefix_len as usize).div_ceil(8);
+    if i + n > body.len() {
+        return None;
+    }
+    let prefix_bytes = body[i..i + n].to_vec();
+    Some((
+        V3PrefixLinkLocalEntry {
+            prefix_len,
+            prefix_options,
+            address_family_id,
+            prefix_bytes,
+        },
+        i + n,
+    ))
+}
+
+/// Encode the body of an OSPFv3 prefix-link-local LSA (RFC 7684 §2).
+/// The body is a sequence of prefix entries. Callers that need a
+/// single prefix can pass a one-element slice.
+pub fn encode_v3_prefix_link_local_body(entries: &[V3PrefixLinkLocalEntry]) -> Vec<u8> {
+    let mut v = Vec::new();
+    for e in entries {
+        v.extend_from_slice(&encode_v3_prefix_link_local_entry(e));
+    }
+    v
+}
+
+/// Decode the body of an OSPFv3 prefix-link-local LSA (RFC 7684 §2).
+/// Walks the prefix entries until the body is exhausted. Returns
+/// `None` when a prefix entry is truncated.
+pub fn decode_v3_prefix_link_local_body(body: &[u8]) -> Option<Vec<V3PrefixLinkLocalEntry>> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < body.len() {
+        let (entry, next) = decode_v3_prefix_link_local_entry(body, i)?;
+        out.push(entry);
+        i = next;
+    }
+    Some(out)
+}
+
+#[cfg(test)]
+mod v3_prefix_link_local_tests {
+    use super::*;
+
+    #[test]
+    fn prefix_options_bits_defined() {
+        // RFC 5340 §A.4.1.1 bits.
+        assert_eq!(v3_prefix_options::P_BIT, 0x08);
+        assert_eq!(v3_prefix_options::MC_BIT, 0x04);
+        assert_eq!(v3_prefix_options::LA_BIT, 0x02);
+        assert_eq!(v3_prefix_options::NU_BIT, 0x01);
+        // RFC 7684 §3 new bits.
+        assert_eq!(v3_prefix_options::AF_BIT, 0x80);
+        assert_eq!(v3_prefix_options::R_BIT, 0x10);
+    }
+
+    #[test]
+    fn prefix_entry_roundtrip_basic() {
+        let entry = V3PrefixLinkLocalEntry {
+            prefix_len: 64,
+            prefix_options: v3_prefix_options::LA_BIT,
+            address_family_id: None,
+            prefix_bytes: vec![0xfe, 0x80, 0, 0, 0, 0, 0, 0],
+        };
+        let wire = encode_v3_prefix_link_local_entry(&entry);
+        let (dec, next) = decode_v3_prefix_link_local_entry(&wire, 0).expect("decode");
+        assert_eq!(dec, entry);
+        assert_eq!(next, wire.len());
+    }
+
+    #[test]
+    fn prefix_entry_roundtrip_with_af_bit() {
+        // Af-bit set → a one-byte Address Family ID follows the
+        // prefix options byte.
+        let entry = V3PrefixLinkLocalEntry {
+            prefix_len: 48,
+            prefix_options: v3_prefix_options::AF_BIT | v3_prefix_options::LA_BIT,
+            address_family_id: Some(1), // IPv4
+            prefix_bytes: vec![0xfe, 0x80, 0, 0, 0, 0],
+        };
+        let wire = encode_v3_prefix_link_local_entry(&entry);
+        assert_eq!(
+            wire.len(),
+            2 + 1 + 6, // prefix_len + prefix_options + af_id + 6 bytes
+            "Af-bit adds one byte after prefix_options"
+        );
+        let (dec, next) = decode_v3_prefix_link_local_entry(&wire, 0).expect("decode");
+        assert_eq!(dec, entry);
+        assert_eq!(next, wire.len());
+    }
+
+    #[test]
+    fn prefix_entry_roundtrip_no_af_bit_omits_af_id() {
+        // Af-bit clear → no Address Family ID byte on the wire.
+        let entry = V3PrefixLinkLocalEntry {
+            prefix_len: 128,
+            prefix_options: v3_prefix_options::LA_BIT | v3_prefix_options::NU_BIT,
+            address_family_id: None,
+            prefix_bytes: (0..16).collect(),
+        };
+        let wire = encode_v3_prefix_link_local_entry(&entry);
+        assert_eq!(wire.len(), 2 + 16, "no Af-bit means no af_id byte");
+        let (dec, _) = decode_v3_prefix_link_local_entry(&wire, 0).expect("decode");
+        assert_eq!(dec, entry);
+    }
+
+    #[test]
+    fn prefix_body_roundtrip_multi_entry() {
+        let entries = vec![
+            V3PrefixLinkLocalEntry {
+                prefix_len: 64,
+                prefix_options: v3_prefix_options::LA_BIT,
+                address_family_id: None,
+                prefix_bytes: vec![0xfe, 0x80, 0, 0, 0, 0, 0, 0],
+            },
+            V3PrefixLinkLocalEntry {
+                prefix_len: 128,
+                prefix_options: v3_prefix_options::LA_BIT | v3_prefix_options::NU_BIT,
+                address_family_id: None,
+                prefix_bytes: (0..16).collect(),
+            },
+            V3PrefixLinkLocalEntry {
+                prefix_len: 0,
+                prefix_options: 0,
+                address_family_id: None,
+                prefix_bytes: vec![],
+            },
+        ];
+        let body = encode_v3_prefix_link_local_body(&entries);
+        let dec = decode_v3_prefix_link_local_body(&body).expect("decode");
+        assert_eq!(dec, entries);
+    }
+
+    #[test]
+    fn prefix_body_decode_truncated_returns_none() {
+        // Truncated at the prefix-options byte.
+        assert!(decode_v3_prefix_link_local_entry(&[64], 0).is_none());
+        // Truncated in the middle of the prefix bytes.
+        let wire = vec![64, v3_prefix_options::LA_BIT]; // prefix_len=64 → 8 bytes, but body has 0
+        assert!(decode_v3_prefix_link_local_entry(&wire, 0).is_none());
+        // Af-bit set but no af_id byte.
+        let wire = vec![64, v3_prefix_options::AF_BIT];
+        assert!(decode_v3_prefix_link_local_entry(&wire, 0).is_none());
+    }
+
+    #[test]
+    fn prefix_body_decode_empty_body() {
+        // An empty body decodes to an empty entry list (no prefixes).
+        let dec = decode_v3_prefix_link_local_body(&[]).expect("empty body");
+        assert!(dec.is_empty());
+    }
+
+    #[test]
+    fn new_lsa_type_parses_and_displays() {
+        let t = LsaTypeV3::from_u16(0x4004).expect("RFC 7684 LSA type");
+        assert_eq!(t, LsaTypeV3::PrefixLinkLocalAsLsa);
+        assert_eq!(t.function_code(), 0x04);
+        assert_eq!(t.to_string(), "Prefix-LinkLocal-AS-LSA");
+        // Unknown 16-bit value → None.
+        assert!(LsaTypeV3::from_u16(0x9999).is_none());
     }
 }
