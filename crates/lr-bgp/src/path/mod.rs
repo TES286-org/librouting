@@ -10,6 +10,7 @@
 
 pub mod as_path;
 pub mod communities;
+#[cfg(feature = "labeled_unicast")]
 pub mod labeled_nlri;
 pub mod mp_nlri;
 pub mod well_known;
