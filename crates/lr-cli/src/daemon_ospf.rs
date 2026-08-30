@@ -56,8 +56,7 @@ use lr_core::error::EncodeError;
 use lr_ospf::codec::OspfCodec;
 use lr_ospf::lsa::Lsa;
 use lr_ospf::origination::{
-    finalize_v2_packet, originate_router_lsa, v2_packet_checksum_ok,
-    RouterLsaLink,
+    finalize_v2_packet, originate_router_lsa, v2_packet_checksum_ok, RouterLsaLink,
 };
 use lr_ospf::packet::{HelloBody, LsUpdateBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType};
 use lr_osroute::ospf_transport::{
