@@ -528,7 +528,12 @@ Highest-value missing/partial standards, in rough order:
    Af-bit + without Af-bit), multi-entry body roundtrip, truncated
    body failure (prefix-options byte, prefix bytes, Af-bit af_id),
    empty body, new LSA type parse + display.
-6. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
+6. **Babel-MAC completion** — the DTLS-less MAC variant is RFC 8967
+   (not "RFC 9289", which is an ONC-RPC/TLS document and was a wrong
+   citation here). Remaining: the RFC 8967 §4.3.1 Challenge
+   Request/Reply resynchronization mechanism, §5 incremental
+   deployment, keyed BLAKE2s-128 (§4.1 SHOULD), and RFC 9467 relaxed
+   PC verification (unicast/multicast split + window).
 7. ~~**RFC 8277** BGP labeled prefixes (BGP-LU)~~ — done: new `lr-mpls`
    crate (RFC 3032 label + label-stack codec, 4- and 3-octet wire
    forms); `lr-bgp::path::labeled_nlri` (RFC 8277 §3 NLRI codec with
