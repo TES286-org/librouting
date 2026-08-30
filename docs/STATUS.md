@@ -80,6 +80,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer), RFC 7166 v3 auth trailer (SA-ID + 64-bit crypto-seq + MAC), anti-replay; 22 unit tests |
 | OSPFv3 inter-area-prefix-LSA (0x2003) | ✅ 🧪 | `originate_v3_inter_area_prefix_lsa` ABR origination; v3 LSA type enum; body encode/decode with IPv6 prefix support |
 | Grace-LSA codec (RFC 3623 / RFC 5187) | ✅ | `lr-ospf::lsa::grace` — body TLV encode/decode, Opaque LSA ID packing, O-bit options helpers, `originate_grace_lsa_v2`; 15 unit tests; full GR future work |
+| Prefix Link-Local LSA (RFC 7684) | ✅ | `LsaTypeV3::PrefixLinkLocalAsLsa = 0x4004` + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec with optional Address Family ID; 8 unit tests |
 
 ### Babel (`lr-babel`)
 
@@ -511,8 +512,21 @@ Highest-value missing/partial standards, in rough order:
    Hello O-bit advertisement, daemon integration) remains future
    work — this slice is the wire-level foundation both BIRD and FRR
    require for interop.
-5. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
-   (0x4004/0x2007 options carrying).
+5. ~~**RFC 7684** OSPFv3 prefix link-local attribute LSA types~~
+   — done: `LsaTypeV3` gained `PrefixLinkLocalAsLsa = 0x4004`
+   (AS-scope, function 4 — RFC 7684 §2.1) with `from_u16`,
+   `function_code`, and `Display` support. The `v3_prefix_options`
+   module documents all RFC 5340 §A.4.1.1 bits (P, MC, LA, NU) and
+   the two RFC 7684 §3 additions (Af-bit `0x80`, R-bit `0x10`). New
+   `V3PrefixLinkLocalEntry` struct + `encode_v3_prefix_link_local_entry`
+   / `decode_v3_prefix_link_local_entry` / `encode_v3_prefix_link_local_body`
+   / `decode_v3_prefix_link_local_body` codec handles the
+   variable-length prefix body with the optional one-byte Address
+   Family ID (present only when the Af-bit is set). 8 unit tests:
+   prefix-options bit values, single-entry roundtrip (basic + with
+   Af-bit + without Af-bit), multi-entry body roundtrip, truncated
+   body failure (prefix-options byte, prefix bytes, Af-bit af_id),
+   empty body, new LSA type parse + display.
 6. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
 7. ~~**RFC 8277** BGP labeled prefixes (BGP-LU)~~ — done: new `lr-mpls`
    crate (RFC 3032 label + label-stack codec, 4- and 3-octet wire

@@ -61,7 +61,7 @@ implements, or references. It is grouped by protocol family.
 | 7166   | Support for the Auth Trailer in OSPFv3               | ✓ (SA-ID + 64-bit crypto-seq + HMAC-SHA, IPv6 pseudo-header, anti-replay) | `lr-ospf::auth::v3_auth` |
 | 7471   | OSPF TE MIB                                           | partial      | —                                    |
 | 7506   | OSPFv3 Auto-Configuration                             | partial      | —                                    |
-| 7684   | OSPFv3 Prefix Link-Local Attributes                  | partial      | —                                    |
+| 7684   | OSPFv3 Prefix Link-Local Attributes                  | ✓ LSA type 0x4004 (AS-scope, function 4) + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec (W3.5) | `lr-ospf::lsa::{LsaTypeV3::PrefixLinkLocalAsLsa, v3_prefix_options, encode/decode_v3_prefix_link_local_*}` |
 | 7770   | OSPF Node Admin Tags                                 | partial      | —                                    |
 | 8036   | Multi-Area OSPF                                       | partial      | —                                    |
 | 8362   | OSPFv3 over IPv6 (revised)                            | ✓            | `lr-ospf::packet`                   |
