@@ -4,17 +4,17 @@ librouting is verified against real-world routing stacks, not just against
 itself. Three layers of interop testing run in CI (`.github/workflows/ci.yml`,
 job `interop`) and can all be reproduced locally:
 
-| Test | Script | Peers | What it proves |
-|------|--------|-------|----------------|
-| Two-daemon | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP | FSM + codec consistency in both roles |
-| OSPF two-daemon | `tests/interop/ospf.sh` | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5) | OSPF daemon mode end-to-end: Hello exchange, real DBD/LSR exchange to Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown |
-| OSPF x BIRD | `tests/interop/ospf_bird.sh` | lr-daemon ↔ BIRD 2 (ospf v2, ptp) over a veth pair | Wire compatibility with BIRD's OSPF: DBD master/slave negotiation, header exchange, LSR loading to **Full on both sides**, stub nets propagated in both directions (birdc-verified) |
-| MRT | `tests/interop/mrt.sh` | BIRD 2 `protocol mrt` → `lr mrt rib`; lr-daemon → `lr mrt rib` | RFC 6396 compatibility: BIRD's dump decoded (peer table + prefixes); the daemon's Loc-RIB export round-trips with AS path + next hop |
-| BMP | `tests/interop/bmp.sh` | lr-daemon `--bmp-target` → lr-daemon `--protocol bmp` collector | BMP end-to-end: station connect, Peer Up ordering, Route Monitoring carrying the full UPDATE, collector serving routes + MRT dump via the runtime API |
-| BIRD | `tests/interop/bird.sh` | lr-daemon ↔ BIRD 2 (eBGP, multihop) | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions** |
-| BIRD LLGR | `tests/interop/bird_llgr.sh` | lr-daemon ↔ BIRD 2 (RFC 9494) | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge |
-| BFD x BIRD | `tests/interop/bfd_bird.sh` | lr-daemon ↔ BIRD 2 (`protocol bfd` + `bfd on`) over a veth pair in netns | BFD wire compatibility (RFC 5880): both sessions reach Up, BGP rides `bfd on`, and a frozen peer (SIGSTOP — TCP still open) is torn down in ~0.5s by BFD at 100ms×3 vs a 60s hold timer; phase 2 proves RFC 5883 multihop mode (UDP 4784, off-link address pair) |
-| FRR | `tests/interop/frr.sh` | lr-daemon ↔ FRR bgpd (eBGP, multihop) | Wire compatibility with FRR bgpd incl. its stricter next-hop validation |
+| Test            | Script                        | Peers                                                                    | What it proves                                                                                                                                                                                                                                                   |
+| --------------- | ----------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Two-daemon      | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP                                      | FSM + codec consistency in both roles                                                                                                                                                                                                                            |
+| OSPF two-daemon | `tests/interop/ospf.sh`       | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5)        | OSPF daemon mode end-to-end: Hello exchange, real DBD/LSR exchange to Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown                                                                  |
+| OSPF x BIRD     | `tests/interop/ospf_bird.sh`  | lr-daemon ↔ BIRD 2 (ospf v2, ptp) over a veth pair                       | Wire compatibility with BIRD's OSPF: DBD master/slave negotiation, header exchange, LSR loading to **Full on both sides**, stub nets propagated in both directions (birdc-verified)                                                                              |
+| MRT             | `tests/interop/mrt.sh`        | BIRD 2 `protocol mrt` → `lr mrt rib`; lr-daemon → `lr mrt rib`           | RFC 6396 compatibility: BIRD's dump decoded (peer table + prefixes); the daemon's Loc-RIB export round-trips with AS path + next hop                                                                                                                             |
+| BMP             | `tests/interop/bmp.sh`        | lr-daemon `--bmp-target` → lr-daemon `--protocol bmp` collector          | BMP end-to-end: station connect, Peer Up ordering, Route Monitoring carrying the full UPDATE, collector serving routes + MRT dump via the runtime API                                                                                                            |
+| BIRD            | `tests/interop/bird.sh`       | lr-daemon ↔ BIRD 2 (eBGP, multihop)                                      | Wire compatibility with BIRD: OPEN/capability negotiation, UPDATE encoding, route exchange **in both directions**                                                                                                                                                |
+| BIRD LLGR       | `tests/interop/bird_llgr.sh`  | lr-daemon ↔ BIRD 2 (RFC 9494)                                            | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge                                                                                                         |
+| BFD x BIRD      | `tests/interop/bfd_bird.sh`   | lr-daemon ↔ BIRD 2 (`protocol bfd` + `bfd on`) over a veth pair in netns | BFD wire compatibility (RFC 5880): both sessions reach Up, BGP rides `bfd on`, and a frozen peer (SIGSTOP — TCP still open) is torn down in ~0.5s by BFD at 100ms×3 vs a 60s hold timer; phase 2 proves RFC 5883 multihop mode (UDP 4784, off-link address pair) |
+| FRR             | `tests/interop/frr.sh`        | lr-daemon ↔ FRR bgpd (eBGP, multihop)                                    | Wire compatibility with FRR bgpd incl. its stricter next-hop validation                                                                                                                                                                                          |
 
 > **RFC 8212 note.** The daemon's default eBGP route behavior is
 > deny-in/deny-out for peers without explicit import/export route-maps
@@ -32,7 +32,7 @@ For every peer pair, all of the following must hold:
    negotiation (MP-BGP for IPv4 unicast, 4-octet AS), KEEPALIVE cadence
    within the negotiated hold time.
 2. **lr → peer propagation** — a locally originated prefix
-   (`203.0.113.0/24`) appears in the *peer's* table:
+   (`203.0.113.0/24`) appears in the _peer's_ table:
    `birdc show route` / bgpd's `show ip bgp`.
 3. **peer → lr propagation** — a prefix originated by the peer
    (`198.51.100.0/24`, static in BIRD / `network` statement in FRR)
@@ -58,11 +58,11 @@ cargo build -p lr-cli                       # builds target/debug/lr-daemon
 
 The scripts auto-detect the reference daemons:
 
-* If `bird`/`birdc`/`bgpd` are on `PATH` (CI installs them via apt), they
+- If `bird`/`birdc`/`bgpd` are on `PATH` (CI installs them via apt), they
   are used directly.
-* Otherwise a user-space extraction under `/home/z/opt/{bird,frr}` is
+- Otherwise a user-space extraction under `/home/z/opt/{bird,frr}` is
   used when present (see below).
-* If neither is found the script prints `SKIP: ...` and exits 0, so the
+- If neither is found the script prints `SKIP: ...` and exits 0, so the
   suite degrades gracefully on restricted runners.
 
 ### OSPF lab specifics
@@ -91,13 +91,13 @@ when a BMP-enabled BIRD is packaged or built from source.
 
 Both scripts deliberately avoid privileged ports:
 
-* **BIRD** uses the per-protocol `local port 17992` (its own listener) and
+- **BIRD** uses the per-protocol `local port 17992` (its own listener) and
   `neighbor 127.0.0.1 port 17993` (lr-daemon's listener). This syntax
   works on every BIRD 2.x from 2.0.8 to 2.17+.
-* **bgpd** is started with `-p 17995` (BGP listen port), `-P 2615` (vty
+- **bgpd** is started with `-p 17995` (BGP listen port), `-P 2615` (vty
   TCP port), `--vty_socket` (unix socket path), `-Z` (no zebra), `-n`
   (no kernel), `-S` (skip runas) — so it runs as any user.
-* lr-daemon always listens on a high port and never installs kernel
+- lr-daemon always listens on a high port and never installs kernel
   routes unless `--install-kernel-routes` is passed.
 
 ### User-space reference daemons (no root, no system install)
@@ -165,10 +165,10 @@ route-map lr-out permit 10
 ### Why the synthetic next hops (192.0.2.x)
 
 Both stacks apply next-hop sanity checks on loopback-only test beds:
-BIRD refuses to *export* a next hop equal to the neighbor address, and
-FRR rejects loopback next hops as *martian* on receipt. The scripts
+BIRD refuses to _export_ a next hop equal to the neighbor address, and
+FRR rejects loopback next hops as _martian_ on receipt. The scripts
 therefore advertise RFC 5737 documentation addresses, which carry fine
-over eBGP — the next hop is reachability *information*, it does not have
+over eBGP — the next hop is reachability _information_, it does not have
 to be resolvable in the test environment for the control plane to
 converge. In a production deployment the daemon's `--local-address`
 should be the real interface address (which it is, by default, when
@@ -218,7 +218,7 @@ mind when embedding librouting or extending the BGP code:
    RFC 5880 §6.8.6 maps Down+received-Init and Init+received-Init both
    straight to Up; mapping either to Init (an intuitive-looking
    simplification) deadlocks two Active peers in Init forever. The
-   detection time is the *peer's* detect multiplier × the negotiated
+   detection time is the _peer's_ detect multiplier × the negotiated
    interval — not min(local, peer) — and the single-hop TTL filter
    (RFC 5881 §5) must accept exactly 255, while multihop (RFC 5883)
    accepts anything on UDP 4784. BIRD drops Poll+Final set together
@@ -233,7 +233,7 @@ Add a new reference daemon by following the existing pattern:
 1. Write a generator for its config (unique AS number, high ports,
    static export prefix).
 2. Start it with output redirected under `/tmp/lr_<name>_interop/`.
-3. Poll *its* table (CLI socket, vty, HTTP API — whatever it exposes)
+3. Poll _its_ table (CLI socket, vty, HTTP API — whatever it exposes)
    for `203.0.113.0/24` and lr-daemon's log for `198.51.100.0/24`.
 4. Print both logs and `PASS`/`FAIL` lines with distinct failure
    reasons; exit non-zero on failure, zero on skip.

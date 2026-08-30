@@ -14,32 +14,32 @@ that is not covered out of the box**.
                          | OsRouteTable::{add,delete,list}_route
                          v
 +---------------------------------------------------+
-|                   lr-osroute                       |
-|   OsRouteTable trait   |  backends:                |
+|                   lr-osroute                      |
+|   OsRouteTable trait   |  backends:               |
 |   (portable contract) |   linux::RtNetlink        |
-|                        |   bsd::RouteSocket        |
-|                        |   windows::IpHelper       |
-|                        |   stub::StubRouteTable    |
+|                        |   bsd::RouteSocket       |
+|                        |   windows::IpHelper      |
+|                        |   stub::StubRouteTable   |
 +------------------------+--------------------------+
                          | syscalls / FFI
                          v
 +---------------------------------------------------+
-|                kernel routing table                |
+|                kernel routing table               |
 |   (rtnetlink / route(4) socket / IP Helper API)   |
 +---------------------------------------------------+
 ```
 
 ## Backend status matrix
 
-| Platform | Backend | Add | Delete | List | Verification |
-|----------|---------|-----|--------|------|--------------|
-| Linux | `linux::RtNetlink` (rtnetlink) | ✅ | ✅ | ✅ | E2E tested on Linux CI + `--install-kernel-routes` |
-| FreeBSD | `bsd::RouteSocket` (route(4) socket) | ✅ | ✅ | ✅ | Cross-compile checked; layout verified against `sys/net/route.h` |
-| NetBSD | `bsd::RouteSocket` | ✅ | ✅ | ✅ | Cross-compile checked; layout verified against `sys/net/route.h` |
-| OpenBSD | `bsd::RouteSocket` | ✅ | ✅ | ✅ | Source-level verification (no prebuilt Rust std for the target from a Linux host) |
-| macOS | `bsd::RouteSocket` | ✅ | ✅ | ✅ | Source-level verification against xnu `bsd/net/route.h` |
-| Windows | `windows::IpHelper` (IP Helper API) | ✅ | ✅ | ✅ | Cross-compile checked (x86_64-pc-windows-gnu), full link against `iphlpapi` |
-| other | `stub::StubRouteTable` | — | — | — | Compile-only stub; returns errors at runtime |
+| Platform | Backend                              | Add | Delete | List | Verification                                                                      |
+| -------- | ------------------------------------ | --- | ------ | ---- | --------------------------------------------------------------------------------- |
+| Linux    | `linux::RtNetlink` (rtnetlink)       | ✅  | ✅     | ✅   | E2E tested on Linux CI + `--install-kernel-routes`                                |
+| FreeBSD  | `bsd::RouteSocket` (route(4) socket) | ✅  | ✅     | ✅   | Cross-compile checked; layout verified against `sys/net/route.h`                  |
+| NetBSD   | `bsd::RouteSocket`                   | ✅  | ✅     | ✅   | Cross-compile checked; layout verified against `sys/net/route.h`                  |
+| OpenBSD  | `bsd::RouteSocket`                   | ✅  | ✅     | ✅   | Source-level verification (no prebuilt Rust std for the target from a Linux host) |
+| macOS    | `bsd::RouteSocket`                   | ✅  | ✅     | ✅   | Source-level verification against xnu `bsd/net/route.h`                           |
+| Windows  | `windows::IpHelper` (IP Helper API)  | ✅  | ✅     | ✅   | Cross-compile checked (x86_64-pc-windows-gnu), full link against `iphlpapi`       |
+| other    | `stub::StubRouteTable`               | —   | —      | —    | Compile-only stub; returns errors at runtime                                      |
 
 The unified entry point is the type alias `lr_osroute::SystemRouteTable`,
 which resolves to the native backend of the compilation target. The
@@ -78,12 +78,12 @@ The header layout **drifted between the BSDs**, so per-OS compile-time
 constants pin the exact sizes and field offsets (verified against each
 system's `sys/net/route.h`):
 
-| OS | `sizeof(rt_msghdr)` | `RTM_VERSION` | `AF_INET6` | quirks |
-|----|--------------------:|--------------:|-----------:|--------|
-| FreeBSD 13/14 | 152 | 5 | 28 | `_rtm_spare1`, `rtm_fmask`, `u_long rtm_inits` |
-| OpenBSD 7.x | 96 | 5 | 24 | `rtm_hdrlen` must be set to the header size |
-| NetBSD 10 | 120 | 4 | 24 | `__align64` members |
-| macOS (xnu) | 92 | 5 | 30 | classic 4.4BSD layout |
+| OS            | `sizeof(rt_msghdr)` | `RTM_VERSION` | `AF_INET6` | quirks                                         |
+| ------------- | ------------------: | ------------: | ---------: | ---------------------------------------------- |
+| FreeBSD 13/14 |                 152 |             5 |         28 | `_rtm_spare1`, `rtm_fmask`, `u_long rtm_inits` |
+| OpenBSD 7.x   |                  96 |             5 |         24 | `rtm_hdrlen` must be set to the header size    |
+| NetBSD 10     |                 120 |             4 |         24 | `__align64` members                            |
+| macOS (xnu)   |                  92 |             5 |         30 | classic 4.4BSD layout                          |
 
 Sockaddrs inside a message are padded to `sizeof(long)` (8 bytes on
 64-bit): `sockaddr_in` stays 16 bytes, `sockaddr_in6` (28) becomes 32.
@@ -96,22 +96,22 @@ reconciliation loops are idempotent.
 
 Windows' FIB lives behind `iphlpapi.dll`:
 
-* `CreateIpForwardEntry2` / `DeleteIpForwardEntry2` modify rows described
+- `CreateIpForwardEntry2` / `DeleteIpForwardEntry2` modify rows described
   by `MIB_IPFORWARD_ROW2` (104 bytes; layout asserted at compile time).
-* `GetIpForwardTable2` snapshots the whole table; `FreeMibTable` releases
+- `GetIpForwardTable2` snapshots the whole table; `FreeMibTable` releases
   the buffer.
-* Rows are initialised with the same defaults as the documented
+- Rows are initialised with the same defaults as the documented
   `InitializeIpForwardEntry` (infinite lifetimes, `Publish=FALSE`,
   `Immortal=TRUE`) so we do not depend on that export.
-* `NL_ROUTE_PROTOCOL` is set to `MIB_PROTOCOL_BGP` (14) — matching what
+- `NL_ROUTE_PROTOCOL` is set to `MIB_PROTOCOL_BGP` (14) — matching what
   `Get-NetRoute -Protocol` reports for BGP-learned routes.
-* When `if_index == 0` the interface is resolved by longest-prefix match
+- When `if_index == 0` the interface is resolved by longest-prefix match
   for the next hop against the current table, mirroring
   `route add ... mask ... gw` behaviour.
-* Deletes scan the table and only remove rows **we** installed
+- Deletes scan the table and only remove rows **we** installed
   (`Protocol == BGP`) — foreign rows are never touched.
 
-Notes: routes created this way are *not* boot-persistent; a daemon should
+Notes: routes created this way are _not_ boot-persistent; a daemon should
 re-install its best paths after restart (which `lr-daemon` does whenever
 the RIB converges). Requires elevation to modify the table.
 
@@ -155,7 +155,7 @@ Guidelines distilled from the three in-tree backends:
 
 ### Worked example: illumos/Solaris
 
- illumos exposes routes through a PF_ROUTE-compatible routing socket
+illumos exposes routes through a PF_ROUTE-compatible routing socket
 (derived from the same 4.4BSD lineage) plus `UDP` routing-socket
 extensions. A minimal port would:
 
@@ -197,23 +197,23 @@ Quagga ports worked on several proprietary platforms.
 
 ## Testing backends
 
-* **Unit tests** build synthetic messages and assert they parse (see
+- **Unit tests** build synthetic messages and assert they parse (see
   `bsd.rs::tests::dump_parser_synthetic_v4` and
   `windows.rs::tests::struct_sizes_match_sdk`).
-* **Cross-compile checks** catch cfg/layout mistakes even without access
+- **Cross-compile checks** catch cfg/layout mistakes even without access
   to the target OS — the CI `cross` job builds the full workspace for
   `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-gnu`; run locally
   with `cargo check -p lr-osroute --target x86_64-unknown-freebsd`.
-* **E2E**: `lr-daemon --install-kernel-routes` against any peers, then
+- **E2E**: `lr-daemon --install-kernel-routes` against any peers, then
   verify with the platform's own tooling (`ip route`, `netstat -rn`,
   `route print`, `Get-NetRoute`).
 
 ## Troubleshooting
 
-| Symptom | Cause | Fix |
-|---------|-------|-----|
-| `socket(AF_NETLINK): Permission denied` | sandboxed container | run privileged or keep `install: false` |
-| `RTM_ADD …: Operation not permitted` (BSD) | non-root | route changes need root on stock BSDs |
-| `CreateIpForwardEntry2 failed: error 5` | Windows without elevation | run elevated |
-| `cannot find Scrt1.o` (cross build) | missing target libc dev files | `apt install libc6-dev-arm64-cross` |
-| Duplicate/`EEXIST` errors on add | reconciler re-adds | treat `EEXIST` as success in your embedder (the daemon logs and moves on) |
+| Symptom                                    | Cause                         | Fix                                                                       |
+| ------------------------------------------ | ----------------------------- | ------------------------------------------------------------------------- |
+| `socket(AF_NETLINK): Permission denied`    | sandboxed container           | run privileged or keep `install: false`                                   |
+| `RTM_ADD …: Operation not permitted` (BSD) | non-root                      | route changes need root on stock BSDs                                     |
+| `CreateIpForwardEntry2 failed: error 5`    | Windows without elevation     | run elevated                                                              |
+| `cannot find Scrt1.o` (cross build)        | missing target libc dev files | `apt install libc6-dev-arm64-cross`                                       |
+| Duplicate/`EEXIST` errors on add           | reconciler re-adds            | treat `EEXIST` as success in your embedder (the daemon logs and moves on) |

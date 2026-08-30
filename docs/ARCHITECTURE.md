@@ -24,18 +24,18 @@ embedders.
             +------------------+------------------+----------------+
             |                  |                  |                |
             v                  v                  v                v
-    +---------------+   +---------------+   +----------------+  +---------+
-    |   lr-rib      |   |   lr-policy  |   |   lr-bfd       |  | lr-bmp  |
-    | (Adj-RIB-In, |   | (route-maps, |   | (peer failure  |  | (RFC    |
-    |  Loc-RIB,    |   |  prefix lists,|  |  detection)    |  |  7854   |
-    |  Adj-RIB-Out)|   |  AS filters,  |  +----------------+  |  sink)  |
-    +-------+------+   |  safety net)  |                      +---------+
+    +---------------+  +---------------+  +----------------+  +---------+
+    |   lr-rib      |  |   lr-policy   |  |   lr-bfd       |  | lr-bmp  |
+    | (Adj-RIB-In,  |  | (route-maps,  |  | (peer failure  |  | (RFC    |
+    |  Loc-RIB,     |  |  prefix lists,|  |  detection)    |  |  7854   |
+    |  Adj-RIB-Out) |  |  AS filters,  |  +----------------+  |  sink)  |
+    +-------+-------+  |  safety net)  |                      +---------+
             |          +-------+-------+
             |                  |
             v                  v
             +------------------+
-            |   lr-osroute    |  <- optional OS kernel interface
-            | (Linux rtnetlink)
+            |   lr-osroute     |  <- optional OS kernel interface
+            | (Linux rtnetlink)|
             +------------------+
 ```
 
@@ -50,11 +50,11 @@ top.
 Every protocol crate is structured so embedders can stop at the right level
 of abstraction:
 
-| Layer | Description                                    | Example API           |
-|-------|------------------------------------------------|------------------------|
-|   1   | Pure codec — encode/decode wire bytes         | `BgpCodec`, `BfdCodec` |
-|   2   | Protocol FSM — state machine driving actions  | `BgpPeer::step`        |
-|   3   | Orchestrator — wires sessions + RIB + timers  | `DefaultRouter`       |
+| Layer | Description                                  | Example API            |
+| ----- | -------------------------------------------- | ---------------------- |
+| 1     | Pure codec — encode/decode wire bytes        | `BgpCodec`, `BfdCodec` |
+| 2     | Protocol FSM — state machine driving actions | `BgpPeer::step`        |
+| 3     | Orchestrator — wires sessions + RIB + timers | `DefaultRouter`        |
 
 Layer 1 is for analyzers (pcap processors, route collectors).
 Layer 2 is for embedders that own their event loop but want protocol logic.
@@ -90,6 +90,7 @@ re-runs, and peers that previously received the route get a wire
 withdrawal.
 
 Each stage is replaceable via traits:
+
 - `ImportHook` / `ExportHook` — arbitrary Rust code that may drop or mutate
   routes (`DefaultRouter::hooks_mut()`).
 - `SelectionHook` — override the comparator (e.g. prefer routes from a
@@ -123,13 +124,13 @@ guess the wire format of a route's provenance.
 
 ## Extension points
 
-| Hook trait            | Stage             | Crate      |
-|-----------------------|-------------------|------------|
-| `ImportHook`          | post-decode       | lr-policy  |
-| `SelectionHook`       | best-path         | lr-policy  |
-| `ExportHook`          | pre-encode        | lr-policy  |
-| `SafetyNet`           | post-decode       | lr-policy  |
-| `OsRouteTable`         | kernel install    | lr-osroute |
+| Hook trait      | Stage          | Crate      |
+| --------------- | -------------- | ---------- |
+| `ImportHook`    | post-decode    | lr-policy  |
+| `SelectionHook` | best-path      | lr-policy  |
+| `ExportHook`    | pre-encode     | lr-policy  |
+| `SafetyNet`     | post-decode    | lr-policy  |
+| `OsRouteTable`  | kernel install | lr-osroute |
 
 ## BGP topology
 
@@ -199,7 +200,7 @@ connector holds off reconnecting while BFD is down.
 
 ## Damping integration
 
-`lr-damping` implements RFC 2439 route flap damping. It is *opt-in* and
+`lr-damping` implements RFC 2439 route flap damping. It is _opt-in_ and
 **deprecated by RFC 8326** for BGP. Use it for OSPF / Babel where there is
 no AS_PATH loop detection to absorb transient flaps, or as a
 defensive-safety mechanism during incidents.
@@ -257,6 +258,7 @@ embedders. Notable toggles:
 ## CI/CD
 
 `.github/workflows/`:
+
 - `ci.yml` — fmt + clippy + tests + C harness + Go + Python + MSRV + cross
 - `nightly.yml` — miri for unsafe audit
 - `release.yml` — cross-compiled binaries + cargo publish

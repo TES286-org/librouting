@@ -11,11 +11,11 @@ rtnetlink) are provided as opt-in crates.
 
 Three-layer API:
 
-| Layer | Crate | Purpose |
-|-------|-------|---------|
-| 1 | `lr-core::codec` + per-protocol codec modules | Stateless wire codec |
-| 2 | `lr-bgp::fsm`, `lr-ospf::neighbor`, `lr-babel::neighbor`, `lr-bfd::session` | Peer FSM + transport abstraction |
-| 3 | `lr-router::instance` | High-level router instance tying sessions, RIB and policies |
+| Layer | Crate                                                                       | Purpose                                                     |
+| ----- | --------------------------------------------------------------------------- | ----------------------------------------------------------- |
+| 1     | `lr-core::codec` + per-protocol codec modules                               | Stateless wire codec                                        |
+| 2     | `lr-bgp::fsm`, `lr-ospf::neighbor`, `lr-babel::neighbor`, `lr-bfd::session` | Peer FSM + transport abstraction                            |
+| 3     | `lr-router::instance`                                                       | High-level router instance tying sessions, RIB and policies |
 
 The four-tier RIB model (Adj-RIB-In, Adj-RIB-Out, Loc-RIB, with cross-protocol
 merging via admin distance) is captured in `lr-rib`. Policy framework (route
@@ -36,24 +36,24 @@ library without depending on the Rust toolchain at runtime.
 
 ## Crates
 
-| Crate | Path | Purpose |
-|-------|------|---------|
-| `lr-core` | `crates/lr-core` | Shared foundation: types, codec traits, generic FSM, RIB traits, timers, wire utilities |
-| `lr-bgp` | `crates/lr-bgp` | BGP-4 codec, path attributes, peer FSM, capabilities, MP-BGP, AddPath, 4-byte ASN, iBGP/eBGP roles, Route Reflector (RFC 4456), Confederations (RFC 6793), Route Server (RFC 7947), OTC (RFC 9234), Extended Next-Hop (RFC 5549), RFC 8277 labelled unicast (BGP-LU), best-path with multipath (RFC 4271 §9.1.2 / RFC 4784) |
-| `lr-ospf` | `crates/lr-ospf` | OSPFv2/v3 codec, LSAs, link-state DB, neighbor FSM, SPF, areas, auth |
-| `lr-babel` | `crates/lr-babel` | Babel codec, TLVs, neighbor FSM, route table, source-specific routing |
-| `lr-rib` | `crates/lr-rib` | Adj-RIB-In, Adj-RIB-Out, Loc-RIB, route selection, cross-protocol merging |
-| `lr-policy` | `crates/lr-policy` | Route maps, prefix lists, AS-path filters, community lists, import/export/selection hooks, safety net |
-| `lr-router` | `crates/lr-router` | Layer-3 router instance, sessions, scheduler, event dispatch |
-| `lr-bfd` | `crates/lr-bfd` | BFD Control packet codec (RFC 5880 §4), session FSM with negotiated timing + Poll/Final (§6.8), auth sections (§4.2-§4.4) |
-| `lr-mpls` | `crates/lr-mpls` | MPLS label + label-stack codec (RFC 3032): 4-octet wire form, 3-octet NLRI form (RFC 8277 §3.2), reserved-label constants |
-| `lr-osroute` | `crates/lr-osroute` | OS route integration + protocol transports: rtnetlink/route(4)/IPHelper, TCP MD5/TCP-AO (`tcp_auth`), GTSM (`gtsm`), BFD UDP (`bfd_transport`, RFC 5881/5883), OSPF raw sockets (`ospf_transport`), Linux AF_MPLS LSP install (`mpls_route`) |
-| `lr-mrt` | `crates/lr-mrt` | MRT dump format (RFC 6396): TABLE_DUMP_V2 read/write, BGP4MP decode |
-| `lr-bmp` | `crates/lr-bmp` | BGP Monitoring Protocol (RFC 7854): BMP message codec + router sink |
-| `lr-damping` | `crates/lr-damping` | Route flap damping (RFC 2439) |
-| `lr-cli` | `crates/lr-cli` | `lr` CLI tool (decode/routes) + `lr-daemon` reference wiring |
-| `lr-ffi` | `crates/lr-ffi` | C ABI bindings (cbindgen-generated header) |
-| `lr-tests` | `crates/lr-tests` | Cross-crate integration tests |
+| Crate        | Path                | Purpose                                                                                                                                                                                                                                                                                                                     |
+| ------------ | ------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lr-core`    | `crates/lr-core`    | Shared foundation: types, codec traits, generic FSM, RIB traits, timers, wire utilities                                                                                                                                                                                                                                     |
+| `lr-bgp`     | `crates/lr-bgp`     | BGP-4 codec, path attributes, peer FSM, capabilities, MP-BGP, AddPath, 4-byte ASN, iBGP/eBGP roles, Route Reflector (RFC 4456), Confederations (RFC 6793), Route Server (RFC 7947), OTC (RFC 9234), Extended Next-Hop (RFC 5549), RFC 8277 labelled unicast (BGP-LU), best-path with multipath (RFC 4271 §9.1.2 / RFC 4784) |
+| `lr-ospf`    | `crates/lr-ospf`    | OSPFv2/v3 codec, LSAs, link-state DB, neighbor FSM, SPF, areas, auth                                                                                                                                                                                                                                                        |
+| `lr-babel`   | `crates/lr-babel`   | Babel codec, TLVs, neighbor FSM, route table, source-specific routing                                                                                                                                                                                                                                                       |
+| `lr-rib`     | `crates/lr-rib`     | Adj-RIB-In, Adj-RIB-Out, Loc-RIB, route selection, cross-protocol merging                                                                                                                                                                                                                                                   |
+| `lr-policy`  | `crates/lr-policy`  | Route maps, prefix lists, AS-path filters, community lists, import/export/selection hooks, safety net                                                                                                                                                                                                                       |
+| `lr-router`  | `crates/lr-router`  | Layer-3 router instance, sessions, scheduler, event dispatch                                                                                                                                                                                                                                                                |
+| `lr-bfd`     | `crates/lr-bfd`     | BFD Control packet codec (RFC 5880 §4), session FSM with negotiated timing + Poll/Final (§6.8), auth sections (§4.2-§4.4)                                                                                                                                                                                                   |
+| `lr-mpls`    | `crates/lr-mpls`    | MPLS label + label-stack codec (RFC 3032): 4-octet wire form, 3-octet NLRI form (RFC 8277 §3.2), reserved-label constants                                                                                                                                                                                                   |
+| `lr-osroute` | `crates/lr-osroute` | OS route integration + protocol transports: rtnetlink/route(4)/IPHelper, TCP MD5/TCP-AO (`tcp_auth`), GTSM (`gtsm`), BFD UDP (`bfd_transport`, RFC 5881/5883), OSPF raw sockets (`ospf_transport`), Linux AF_MPLS LSP install (`mpls_route`)                                                                                |
+| `lr-mrt`     | `crates/lr-mrt`     | MRT dump format (RFC 6396): TABLE_DUMP_V2 read/write, BGP4MP decode                                                                                                                                                                                                                                                         |
+| `lr-bmp`     | `crates/lr-bmp`     | BGP Monitoring Protocol (RFC 7854): BMP message codec + router sink                                                                                                                                                                                                                                                         |
+| `lr-damping` | `crates/lr-damping` | Route flap damping (RFC 2439)                                                                                                                                                                                                                                                                                               |
+| `lr-cli`     | `crates/lr-cli`     | `lr` CLI tool (decode/routes) + `lr-daemon` reference wiring                                                                                                                                                                                                                                                                |
+| `lr-ffi`     | `crates/lr-ffi`     | C ABI bindings (cbindgen-generated header)                                                                                                                                                                                                                                                                                  |
+| `lr-tests`   | `crates/lr-tests`   | Cross-crate integration tests                                                                                                                                                                                                                                                                                               |
 
 ## The daemon
 
@@ -148,7 +148,7 @@ unshare -Urn lr-daemon --protocol ospf --router-id 1.1.1.1 \
 **Operational tooling.** The daemon dumps its Loc-RIB as an MRT file
 (RFC 6396 — the format BIRD's `protocol mrt` and every route-analysis
 tool speaks) through the runtime API, and mirrors BMP (RFC 7854) to a
-monitoring station or *acts as one*:
+monitoring station or _acts as one_:
 
 ```bash
 echo "mrt /tmp/rib.mrt" | socat - UNIX-CONNECT:/run/lr-daemon.api
@@ -183,18 +183,18 @@ librouting/
 
 ## Documentation
 
-| Document | Path |
-|----------|------|
-| Documentation index | `docs/README.md` |
-| Architecture | `docs/ARCHITECTURE.md` |
-| RFC reference map | `docs/RFC_MAP.md` |
-| Public API tour | `docs/API.md` |
-| Implemented-vs-missing gap analysis | `docs/STATUS.md` |
-| OS route-table integration guide (Linux/BSD/Windows + porting) | `docs/OS-INTEGRATION.md` |
-| Interop testing guide (BIRD / FRR) | `docs/INTEROP.md` |
-| Scaffolding guide | `docs/scaffolding/README.md` |
-| Examples | `docs/examples/*.md` |
-| Templates | `templates/*/` |
+| Document                                                       | Path                         |
+| -------------------------------------------------------------- | ---------------------------- |
+| Documentation index                                            | `docs/README.md`             |
+| Architecture                                                   | `docs/ARCHITECTURE.md`       |
+| RFC reference map                                              | `docs/RFC_MAP.md`            |
+| Public API tour                                                | `docs/API.md`                |
+| Implemented-vs-missing gap analysis                            | `docs/STATUS.md`             |
+| OS route-table integration guide (Linux/BSD/Windows + porting) | `docs/OS-INTEGRATION.md`     |
+| Interop testing guide (BIRD / FRR)                             | `docs/INTEROP.md`            |
+| Scaffolding guide                                              | `docs/scaffolding/README.md` |
+| Examples                                                       | `docs/examples/*.md`         |
+| Templates                                                      | `templates/*/`               |
 
 ## BGP topology support
 
@@ -210,7 +210,7 @@ librouting/
 - **Route Server / IX** (RFC 7947): transparent mode (no AS_PATH prepend,
   NEXT_HOP preserved) + per-client filter chains.
 - **BGP Role / OTC** (RFC 9234): `OtcRole` (Provider/Customer/Peer/RS/RsClient)
-  + valley-free advertisement enforcement.
+  - valley-free advertisement enforcement.
 - **Graceful Restart** (RFC 4724): per-family capability advertisement,
   stale-route retention for the negotiated restart window and End-of-RIB
   driven resynchronization.

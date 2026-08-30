@@ -6,32 +6,32 @@ the protocol crates.
 
 ## Orientation
 
-| Document | Audience | Contents |
-|----------|----------|----------|
-| [`../README.md`](../README.md) | everyone | Project overview, crate map, quick-start daemon example |
+| Document                             | Audience                | Contents                                                         |
+| ------------------------------------ | ----------------------- | ---------------------------------------------------------------- |
+| [`../README.md`](../README.md)       | everyone                | Project overview, crate map, quick-start daemon example          |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | contributors, embedders | Layering, RIB pipeline diagram, extension points, testing layout |
-| [`STATUS.md`](STATUS.md) | everyone | Implemented-vs-missing gap analysis + the active roadmap |
-| [`RFC_MAP.md`](RFC_MAP.md) | contributors | RFC-by-RFC coverage table with crate paths |
+| [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + the active roadmap         |
+| [`RFC_MAP.md`](RFC_MAP.md)           | contributors            | RFC-by-RFC coverage table with crate paths                       |
 
 ## Embedding the library
 
-| Document | Contents |
-|----------|----------|
-| [`API.md`](API.md) | Public API tour, layer by layer, with code snippets |
-| [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/` (analyzer, RR, BFD, OS integration) |
-| [`examples/`](examples/) | Per-scenario walkthroughs: route reflector, confederation, route server, BFD, OS integration |
+| Document                                         | Contents                                                                                     |
+| ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
+| [`API.md`](API.md)                               | Public API tour, layer by layer, with code snippets                                          |
+| [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/` (analyzer, RR, BFD, OS integration)            |
+| [`examples/`](examples/)                         | Per-scenario walkthroughs: route reflector, confederation, route server, BFD, OS integration |
 
 ## Running the daemon
 
-| Document | Contents |
-|----------|----------|
-| `templates/daemon.toml` | Fully commented reference configuration (every key explained) |
+| Document                   | Contents                                                             |
+| -------------------------- | -------------------------------------------------------------------- |
+| `templates/daemon.toml`    | Fully commented reference configuration (every key explained)        |
 | [`INTEROP.md`](INTEROP.md) | Interop lab against BIRD / FRR: what is verified, how to run locally |
 
 ## Platform porting
 
-| Document | Contents |
-|----------|----------|
+| Document                                 | Contents                                                                                                        |
+| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | [`OS-INTEGRATION.md`](OS-INTEGRATION.md) | Kernel route-table backends (Linux rtnetlink, BSD route(4), Windows IP Helper), layout tables, porting a new OS |
 
 ## Standing rules

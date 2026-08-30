@@ -153,7 +153,7 @@ let events = session.tick(Instant(200));
 
 `feed_bytes` applies the RFC 5880 §6.8.6 MUST-discard rules and drives
 the exact §6.8.6 state machine (Down+Init→Up, Init+Init→Up). The
-detection time is the *peer's* detect multiplier ×
+detection time is the _peer's_ detect multiplier ×
 `max(required rx, peer desired tx)` (§6.8.4); the transmit interval is
 `max(desired tx, peer required rx)` with 0-25% jitter (§6.8.7) and a
 one-second floor while not Up (§6.8.3). Interval changes while Up go
@@ -215,7 +215,7 @@ transmit, unit-tested through both role assignments.
 
 ## OSPF origination + raw transport (speaker building blocks)
 
-The router pipeline is receive-driven; a real OSPF *speaker* additionally
+The router pipeline is receive-driven; a real OSPF _speaker_ additionally
 produces its own artifacts. `lr-ospf::origination` and
 `lr-osroute::ospf_transport` are the two halves `lr-daemon --protocol ospf`
 is built from — and embedders can reuse them directly:
@@ -255,7 +255,7 @@ missing `CAP_NET_RAW` so callers can degrade gracefully.
 ## OSPF external routes (RFC 2328 §12.4.3 / §16.4)
 
 `DefaultRouter::ospf_redistribute` injects an external destination into
-OSPF as a type-5 AS-external-LSA, originated into every attached *regular*
+OSPF as a type-5 AS-external-LSA, originated into every attached _regular_
 OSPFv2 area (AS flooding scope) with the requested metric type
 (`ExternalMetricType::Type1`/`Type2`), forwarding address and route tag.
 In NSSA areas the destination is originated as an area-scoped type-7 LSA
@@ -560,15 +560,15 @@ r.set_add_path_max_paths(4);
 `SessionConfig` exposes three builders for the dual-stack / MP-BGP / ENH
 session modes:
 
-* `with_mp_families(families)` — override the MP-BGP family list
+- `with_mp_families(families)` — override the MP-BGP family list
   advertised in OPEN (default: IPv4 unicast only).
-* `with_extended_next_hop()` — advertise the canonical RFC 5549
+- `with_extended_next_hop()` — advertise the canonical RFC 5549
   `(1, 1, 2)` tuple (IPv4 unicast over an IPv6 next-hop). Use
   `with_extended_next_hop_tuple(afi, safi, nh_afi)` for non-canonical
   tuples. On the wire the tuples use the RFC 5549 §4 / RFC 8950 §4
   6-byte form `<AFI:2, SAFI:2, NH-AFI:2>` — byte-identical to what
   BIRD 2.x and FRR send and the only form both accept.
-* `with_local_address(ip)` — local source for next-hop-self egress.
+- `with_local_address(ip)` — local source for next-hop-self egress.
   For ENH over IPv6 pass an IPv6 literal; the eBGP egress path then
   rewrites IPv4 NLRI's NEXT_HOP to a 16-byte IPv6 address.
 
@@ -650,7 +650,7 @@ teardown|restart`, `--max-prefix-threshold P` (TOML:
 ### RFC 8212 default eBGP route behaviors
 
 `DefaultRouter::set_ebgp_requires_policy(true)` arms the RFC 8212 §3
-defaults (updating RFC 4271 §9.1/§9.1.3): an *external* BGP session —
+defaults (updating RFC 4271 §9.1/§9.1.3): an _external_ BGP session —
 eBGP **or** a confederation boundary, per §1 — whose embedder declared
 no explicit import policy discards every received route before
 Adj-RIB-In, and one without an explicit export policy advertises
@@ -798,7 +798,7 @@ Python (`Router.set_soft_reconfig_inbound` /
 
 `DefaultRouter::set_enforce_first_as(true)` arms the FRR
 `bgp enforce-first-as` import-time safety check: an UPDATE from an
-*external* BGP peer — eBGP **or** a confederation boundary, mirroring
+_external_ BGP peer — eBGP **or** a confederation boundary, mirroring
 the [`set_ebgp_requires_policy`](#rfc-8212-default-ebgp-route-behaviors)
 scope — whose leftmost AS_PATH sequence segment's first AS is not the
 peer's negotiated AS is dropped before Adj-RIB-In, and the rejection
@@ -879,6 +879,7 @@ r.add_redistribution_pipe(
 `add_aggregate(prefix)` registers a BGP route aggregate. When the
 Loc-RIB contains at least one route more specific than the aggregate,
 the router originates the aggregate with:
+
 - AS_PATH zeroed (empty AS_SEQUENCE)
 - ATOMIC_AGGREGATE attribute
 - AGGREGATOR attribute (local AS + router ID)
