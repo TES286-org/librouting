@@ -461,12 +461,15 @@ impl BgpPeer {
         // is only used when *both* speakers advertised the capability. Our
         // OPEN was already sent with the AS4 capability when configured; if
         // the peer did not offer it, downgrade both directions to the
-        // 2-byte width for the lifetime of this session.
+        // 2-byte width for the lifetime of this session. The downgrade is
+        // applied to the codec only — `cfg.asn4` keeps the configured
+        // value so a later re-establishment re-negotiates fresh (RFC 6793
+        // negotiation is per-session).
         let peer_offered_as4 = caps
             .iter()
             .any(|c| c.code == crate::capabilities::CapabilityCode::FourOctetAs);
-        self.cfg.asn4 = self.cfg.asn4 && peer_offered_as4;
-        self.codec.set_asn4(self.cfg.asn4);
+        let session_asn4 = self.cfg.asn4 && peer_offered_as4;
+        self.codec.set_asn4(session_asn4);
         if let Some(c) = caps
             .iter()
             .find(|c| c.code == crate::capabilities::CapabilityCode::FourOctetAs)
@@ -520,28 +523,25 @@ impl BgpPeer {
         self.extended_next_hop =
             crate::extensions::extended_next_hop::negotiated_tuples(&self.cfg, &peer_enh);
 
-        self.negotiated_hold_time = if open.hold_time == 0 {
-            self.cfg.hold_time
-        } else {
-            open.hold_time.min(self.cfg.hold_time)
-        };
-        if self.negotiated_hold_time == 0 {
-            self.negotiated_hold_time = self.cfg.hold_time;
-        }
+        // RFC 4271 §4.2: the Hold Timer is the smaller of our configured
+        // hold time and the peer's. A zero received hold time disables the
+        // hold timer entirely (and with it KEEPALIVEs, per §4.4) — we must
+        // not substitute our own value.
+        self.negotiated_hold_time = open.hold_time.min(self.cfg.hold_time);
         self.hold_remaining = (self.negotiated_hold_time as u64) * 1000;
         self.keepalive_remaining = (self.cfg.keepalive_interval() as u64) * 1000;
-        self.enqueue_keepalive();
         let mut actions = vec![];
         if self.negotiated_hold_time > 0 {
+            self.enqueue_keepalive();
             actions.push(BgpAction::SetTimer(
                 timer_ids::HOLD,
                 TimerSpec::once(self.hold_remaining),
             ));
+            actions.push(BgpAction::SetTimer(
+                timer_ids::KEEPALIVE,
+                TimerSpec::once(self.keepalive_remaining),
+            ));
         }
-        actions.push(BgpAction::SetTimer(
-            timer_ids::KEEPALIVE,
-            TimerSpec::once(self.keepalive_remaining),
-        ));
         (BgpState::OpenConfirm, actions)
     }
 
@@ -818,18 +818,22 @@ impl BgpPeer {
         // Normalize the attribute bag: the route's internal AS_PATH is
         // always 4-byte-encoded (canonical form) so that downstream
         // consumers (best-path, safety net, egress) never have to guess the
-        // wire width. AS4_PATH (RFC 6793 transition) is merged in and
+        // wire width. AS4_PATH (RFC 6793 transition) is merged in per
+        // §4.2.3 (count comparison + leading-segment reconstruction) and
         // dropped.
         let mut normalized: PathAttributes = u.attributes.clone();
         let wire_path = normalized.as_path_wire(self.cfg.asn4);
         let as4 = normalized.as4_path();
-        let canonical_path = as4.or(wire_path);
+        let canonical_path = match &wire_path {
+            Some(w) => crate::path::as_path::reconcile_as4(w, as4.as_ref()),
+            None => as4.unwrap_or_default(),
+        };
         normalized.remove(AttrType::As4Path);
-        if let Some(path) = &canonical_path {
+        if !canonical_path.segments.is_empty() {
             normalized.insert(PathAttribute::new(
                 PathAttrFlags::new().set_transitive(true),
                 AttrType::AsPath,
-                path.encode_4(),
+                canonical_path.encode_4(),
             ));
         }
 
@@ -841,10 +845,7 @@ impl BgpPeer {
             if !attrs_ok {
                 return;
             }
-            let metric = canonical_path
-                .as_ref()
-                .map(|p| p.length() as u32)
-                .unwrap_or(0);
+            let metric = canonical_path.length() as u32;
             let route = Route {
                 key: RouteKey::new(prefix, family),
                 origin,
@@ -897,10 +898,7 @@ impl BgpPeer {
                         for e in &entries {
                             let mut attrs = normalized.clone();
                             attrs.set_label_stack(&e.label_stack);
-                            let metric = canonical_path
-                                .as_ref()
-                                .map(|p| p.length() as u32)
-                                .unwrap_or(0);
+                            let metric = canonical_path.length() as u32;
                             if attrs_ok {
                                 let route = Route {
                                     key: RouteKey::new(e.prefix, family),
@@ -1073,7 +1071,14 @@ mod tests {
             (peer.state(), actions)
         };
         let _ = state;
-        assert!(!peer.cfg.asn4, "session must downgrade to 2-byte AS_PATH");
+        // The downgrade applies to the codec for the session's lifetime,
+        // not to the configured capability — a re-establishment must
+        // re-negotiate fresh (RFC 6793 negotiation is per-session).
+        assert!(peer.cfg.asn4, "configured capability is unchanged");
+        assert!(
+            !peer.codec.asn4_active(),
+            "session codec must downgrade to 2-byte AS_PATH"
+        );
     }
 
     /// RFC 4271 §6.8: a NOTIFICATION received in Established tears the

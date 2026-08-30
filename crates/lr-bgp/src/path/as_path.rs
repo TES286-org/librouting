@@ -56,13 +56,32 @@ impl AsPath {
         }
     }
 
-    /// Length of the AS_PATH in number of AS hops (counting only sequence
-    /// segments, per RFC 4271 §9.1.2.2).
+    /// Length of the AS_PATH in number of AS hops per RFC 4271 §9.1.2.2(a):
+    /// each AS in an AS_SEQUENCE counts as one and an AS_SET counts as 1
+    /// regardless of how many ASes it contains. AS_CONFED_SEQUENCE and
+    /// AS_CONFED_SET segments are not counted (RFC 5065 §5.3).
     pub fn length(&self) -> usize {
         self.segments
             .iter()
-            .filter(|s| s.kind == AsPathType::Sequence || s.kind == AsPathType::ConfedSequence)
-            .map(|s| s.ases.len())
+            .map(|s| match s.kind {
+                AsPathType::Sequence => s.ases.len(),
+                AsPathType::Set => 1,
+                AsPathType::ConfedSequence | AsPathType::ConfedSet => 0,
+            })
+            .sum()
+    }
+
+    /// Length of the AS_PATH counting every member of every segment
+    /// (used when the operator opts into counting confederation segments
+    /// via `BestPathConfig::count_confed_in_path_len`; the AS_SET rule
+    /// from RFC 4271 §9.1.2.2(a) still applies).
+    pub fn length_with_confed(&self) -> usize {
+        self.segments
+            .iter()
+            .map(|s| match s.kind {
+                AsPathType::Sequence | AsPathType::ConfedSequence => s.ases.len(),
+                AsPathType::Set | AsPathType::ConfedSet => 1,
+            })
             .sum()
     }
 
@@ -170,6 +189,93 @@ impl AsPath {
     }
 }
 
+/// Reconstruct the canonical (4-byte) AS path from the 2-byte AS_PATH and
+/// the AS4_PATH attributes per RFC 6793 §4.2.3.
+///
+/// Rules applied:
+/// - If `as4` is absent, the wire path is the answer.
+/// - If the AS_PATH count is smaller than the AS4_PATH count, the AS4_PATH
+///   is ignored and the wire path is used.
+/// - Otherwise the leading `count(AS_PATH) − count(AS4_PATH)` AS numbers
+///   (whole leading segments, per the RFC's segment rule) are taken from
+///   the wire path and prepended to the AS4_PATH.
+///
+/// Both inputs are already decoded; `wire` is the AS_PATH decoded at the
+/// session's negotiated width (2-byte when talking to an OLD speaker).
+pub fn reconcile_as4(wire: &AsPath, as4: Option<&AsPath>) -> AsPath {
+    let as4 = match as4 {
+        Some(a) if !a.segments.is_empty() => a,
+        _ => return wire.clone(),
+    };
+    let wire_count = as_path_count(wire);
+    let as4_count = as_path_count(as4);
+    if wire_count < as4_count {
+        return wire.clone();
+    }
+    if wire_count == as4_count {
+        return as4.clone();
+    }
+
+    // Take whole leading segments from the wire path until we have taken
+    // `need` AS numbers, then prepend them to the AS4_PATH.
+    let need = wire_count - as4_count;
+    let mut taken = Vec::new();
+    let mut taken_count = 0usize;
+    for seg in &wire.segments {
+        if taken_count >= need {
+            break;
+        }
+        // Only sequence/set segments carry count; confed segments are
+        // prepended when adjacent per the RFC, so include them whole.
+        let seg_count = match seg.kind {
+            AsPathType::Sequence | AsPathType::ConfedSequence => seg.ases.len(),
+            AsPathType::Set | AsPathType::ConfedSet => 1,
+        };
+        if taken_count + seg_count > need {
+            break;
+        }
+        taken.push(seg.clone());
+        taken_count += seg_count;
+    }
+    // If whole segments were not enough (mid-segment split needed), fall
+    // back to prepending the remainder of the path count via a truncated
+    // leading sequence — the RFC allows taking "as many ... as necessary".
+    let mut result = AsPath {
+        segments: taken,
+    };
+    if taken_count < need {
+        let deficit = need - taken_count;
+        for seg in &wire.segments {
+            if seg.kind != AsPathType::Sequence {
+                continue;
+            }
+            let take = seg.ases.len().min(deficit);
+            if take > 0 {
+                result.segments.push(AsPathSegment {
+                    kind: AsPathType::Sequence,
+                    ases: seg.ases[..take].to_vec(),
+                });
+                break;
+            }
+        }
+    }
+    result.segments.extend(as4.segments.clone());
+    result
+}
+
+/// RFC 4271 §9.1.2.2(a) AS count: AS_SEQUENCE members + 1 per AS_SET;
+/// confederation segments count per RFC 5065 §5.3(3) as zero.
+fn as_path_count(path: &AsPath) -> usize {
+    path.segments
+        .iter()
+        .map(|s| match s.kind {
+            AsPathType::Sequence => s.ases.len(),
+            AsPathType::Set => 1,
+            AsPathType::ConfedSequence | AsPathType::ConfedSet => 0,
+        })
+        .sum()
+}
+
 impl fmt::Display for AsPath {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         for (i, seg) in self.segments.iter().enumerate() {
@@ -242,7 +348,99 @@ mod tests {
         let enc = p.encode_4();
         let dec = AsPath::decode_4(&enc).unwrap();
         assert_eq!(dec, p);
-        // length counts only sequence segments
+        // RFC 4271 §9.1.2.2(a): an AS_SET counts as 1 regardless of size.
+        assert_eq!(p.length(), 3);
+    }
+
+    #[test]
+    fn confed_segments_not_counted_by_default() {
+        // RFC 5065 §5.3(3): AS_CONFED_SEQUENCE / AS_CONFED_SET SHOULD NOT
+        // be counted when comparing AS_PATH length.
+        let p = AsPath {
+            segments: vec![
+                AsPathSegment {
+                    kind: AsPathType::ConfedSequence,
+                    ases: vec![Asn(65001), Asn(65002)],
+                },
+                AsPathSegment {
+                    kind: AsPathType::Sequence,
+                    ases: vec![Asn(100), Asn(200)],
+                },
+            ],
+        };
         assert_eq!(p.length(), 2);
+        assert_eq!(p.length_with_confed(), 4);
+    }
+
+    /// RFC 6793 §4.2.3: when AS4_PATH is present and its AS count is
+    /// smaller than the wire AS_PATH's, the leading wire-path segments are
+    /// prepended so the reconstructed path has the wire-path count.
+    #[test]
+    fn reconcile_as4_prepends_leading_segments() {
+        let wire = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(23456), Asn(200)],
+            }],
+        };
+        let as4 = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(70000)],
+            }],
+        };
+        let merged = reconcile_as4(&wire, Some(&as4));
+        assert_eq!(merged.length(), 2);
+        assert_eq!(merged.segments[0].ases, vec![Asn(23456)]);
+        assert_eq!(merged.segments[1].ases, vec![Asn(70000)]);
+    }
+
+    /// RFC 6793 §4.2.3: an AS4_PATH with more ASes than the wire AS_PATH
+    /// is ignored — the wire path wins.
+    #[test]
+    fn reconcile_as4_ignores_larger_as4() {
+        let wire = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(100)],
+            }],
+        };
+        let as4 = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(1), Asn(2), Asn(3)],
+            }],
+        };
+        assert_eq!(reconcile_as4(&wire, Some(&as4)), wire);
+    }
+
+    /// RFC 6793 §4.2.3: equal counts → AS4_PATH alone is the answer.
+    #[test]
+    fn reconcile_as4_equal_counts_uses_as4() {
+        let wire = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(23456)],
+            }],
+        };
+        let as4 = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(70000)],
+            }],
+        };
+        assert_eq!(reconcile_as4(&wire, Some(&as4)), as4);
+    }
+
+    /// No AS4_PATH → the wire path passes through unchanged.
+    #[test]
+    fn reconcile_as4_without_as4_returns_wire() {
+        let wire = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(100), Asn(200)],
+            }],
+        };
+        assert_eq!(reconcile_as4(&wire, None), wire);
     }
 }

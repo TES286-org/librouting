@@ -37,8 +37,9 @@ pub struct BestPathConfig {
     /// Prefer externally-learned routes over iBGP routes when everything else
     /// is equal (default true; aligns with FRR's "external route preference").
     pub prefer_externals: bool,
-    /// Allow AS path to include AS_CONFED_SEQUENCE in length computation
-    /// (default true; per RFC 6793 §7).
+    /// Count AS_CONFED_SEQUENCE / AS_CONFED_SET members in the AS_PATH
+    /// length (default false — RFC 5065 §5.3(3) says they SHOULD NOT be
+    /// counted; FRR's `bgp bestpath as-path confed` opts in).
     pub count_confed_in_path_len: bool,
     /// Whether multipath load-balancing is enabled and how many equal-cost
     /// paths may be installed. Default 1 (no multipath).
@@ -55,7 +56,7 @@ impl Default for BestPathConfig {
             missing_med_as_infinity: false,
             deterministic_router_id: true,
             prefer_externals: true,
-            count_confed_in_path_len: true,
+            count_confed_in_path_len: false,
             multipath: 1,
             multipath_relax: false,
         }
@@ -351,16 +352,13 @@ impl BestPath {
 
     fn as_path_len(path: &AsPath, cfg: &BestPathConfig) -> usize {
         if cfg.count_confed_in_path_len {
-            path.length()
+            // Operator opted into FRR `bgp bestpath as-path confed`:
+            // count confederation members too. AS_SET still counts as 1.
+            path.length_with_confed()
         } else {
-            path.segments
-                .iter()
-                .filter(|s| {
-                    s.kind == crate::path::AsPathType::Sequence
-                        || s.kind == crate::path::AsPathType::Set
-                })
-                .map(|s| s.ases.len())
-                .sum()
+            // RFC 4271 §9.1.2.2(a) + RFC 5065 §5.3(3): AS_SET counts as 1,
+            // confederation segments are not counted.
+            path.length()
         }
     }
 

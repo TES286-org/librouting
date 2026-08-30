@@ -64,6 +64,12 @@ impl BgpCodec {
         self.asn4 = v;
     }
 
+    /// Whether the codec currently encodes 4-byte AS_PATH (the negotiated
+    /// session width, which may differ from the configured capability).
+    pub fn asn4_active(&self) -> bool {
+        self.asn4
+    }
+
     /// Set the address families whose NLRI carries RFC 7911 path
     /// identifiers in each direction (call after OPEN negotiation).
     pub fn set_add_path(&mut self, tx: Vec<NlriFamily>, rx: Vec<NlriFamily>) {
