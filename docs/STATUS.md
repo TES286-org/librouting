@@ -79,6 +79,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
 | Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer), RFC 7166 v3 auth trailer (SA-ID + 64-bit crypto-seq + MAC), anti-replay; 22 unit tests |
 | OSPFv3 inter-area-prefix-LSA (0x2003) | ✅ 🧪 | `originate_v3_inter_area_prefix_lsa` ABR origination; v3 LSA type enum; body encode/decode with IPv6 prefix support |
+| Grace-LSA codec (RFC 3623 / RFC 5187) | ✅ | `lr-ospf::lsa::grace` — body TLV encode/decode, Opaque LSA ID packing, O-bit options helpers, `originate_grace_lsa_v2`; 15 unit tests; full GR future work |
 
 ### Babel (`lr-babel`)
 
@@ -493,8 +494,23 @@ Highest-value missing/partial standards, in rough order:
    propagated in both directions — OSPF interop is unlocked. FRR
    interop and DR-election segments (broadcast networks) remain
    open; OSPFv3 exchange needs v3 DBD semantics.
-4. **RFC 5187** OSPFv3 graceful restart (and RFC 3623 for v2) —
-   planned restart signalling for OSPF.
+4. ~~**RFC 5187 / RFC 3623** OSPF graceful restart — Grace-LSA codec~~
+   — foundation slice done: new `lr-ospf::lsa::grace` module
+   implements the Grace-LSA body codec (TLV encode/decode for Grace
+   Period, Reason, IPv4/IPv6 Interface Address, Address Family), the
+   Opaque LSA ID packing (RFC 5250 §3.1 — 8-bit Opaque Type `3` +
+   24-bit Opaque ID), the O-bit helpers for the OSPF options field
+   (RFC 3623 §1 / RFC 5187 §1), and `originate_grace_lsa_v2()`
+   (builds a finalized Opaque-AS-LSA with the right LS type, LS ID
+   packing, and §C.4 checksum). 15 unit tests: TLV roundtrips
+   (minimal, full v2 with IPv4 + AF, v3 with IPv6), missing-mandatory
+   failure, unknown-TLV skip, truncated-TLV failure, Opaque ID
+   packing, O-bit helpers, sequence advance, LSA checksum
+   validation, interface-address TLV helper, GraceReason
+   roundtrips. The full graceful restart (neighbour LSA retention,
+   Hello O-bit advertisement, daemon integration) remains future
+   work — this slice is the wire-level foundation both BIRD and FRR
+   require for interop.
 5. **RFC 7684** OSPFv3 prefix link-local attribute LSA types
    (0x4004/0x2007 options carrying).
 6. **RFC 9289** Babel-MAC completion (the DTLS-less MAC variant).
