@@ -21,7 +21,7 @@ pub struct PeerConfig {
     pub hold_time: u16,
     /// True if this is a route-reflector client (RFC 4456).
     pub route_reflector_client: bool,
-    /// True if this is a confederation peer (RFC 3065).
+    /// True if this is a confederation peer (RFC 5065 / RFC 6793).
     pub confederation_member: bool,
     /// Optional: override the peer's BGP identifier.
     pub peer_bgp_id: Option<RouterId>,

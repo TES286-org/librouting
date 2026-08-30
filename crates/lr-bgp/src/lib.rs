@@ -3,7 +3,7 @@
 //! Implements RFC 4271 (BGP-4) message codec, peer FSM, path attributes and
 //! capability negotiation. Optional extensions under feature flags:
 //!
-//! - `asn4` (default) — RFC 4893 4-byte AS
+//! - `asn4` (default) — 4-byte AS (RFC 6793)
 //! - `mp_bgp` (default) — RFC 4760 multiprotocol BGP
 //! - `addpath` (default) — RFC 7911 AddPath
 //! - `graceful_restart` (default) — RFC 4724
