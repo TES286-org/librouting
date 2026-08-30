@@ -4663,6 +4663,29 @@ impl DefaultRouter {
     /// changed in) the Loc-RIB. Called from `apply_selection` when the
     /// best route for a prefix changes.
     fn redistribute_route(&mut self, route: &Route) {
+        // Terminate the apply_selection → redistribute_route feedback
+        // loop: a stored copy is locally originated (proto 2), so it
+        // outranks the peer path that produced it, becomes the Loc-RIB
+        // best and re-enters this function with the copy itself. The
+        // copy is the engine's own output — re-running it through the
+        // pipes would be a feedback cycle. The `unchanged` guard in the
+        // BGP arm below is not sufficient on its own: under
+        // `MetricPolicy::Add(N)` the metric grows on every pass, so the
+        // produced copy never equals the stored one and the recursion
+        // only stops when the stack overflows.
+        if self
+            .redistributed_bgp
+            .get(&route.key)
+            .is_some_and(|existing| {
+                existing.protocol == route.protocol
+                    && existing.origin == route.origin
+                    && existing.preference == route.preference
+                    && existing.attributes == route.attributes
+                    && existing.next_hop == route.next_hop
+            })
+        {
+            return;
+        }
         // Collect matching pipes first to avoid borrowing self.pipes
         // while we mutate self via ospf_redistribute.
         let matches: Vec<crate::redistribution::RedistributionPipe> = self
