@@ -246,10 +246,13 @@ fn decode_body(kind: u8, body: &[u8], rx_v4_add_path: bool) -> Result<BgpMessage
         BgpMessageType::Update => Ok(BgpMessage::Update(decode_update(body, rx_v4_add_path)?)),
         BgpMessageType::Notification => Ok(BgpMessage::Notification(decode_notification(body))),
         BgpMessageType::Keepalive => {
+            // RFC 4271 §6.1: a KEEPALIVE with a non-empty body is a
+            // Bad Message Length header error.
             if !body.is_empty() {
-                return Err(BgpError::Codec(format!(
-                    "KEEPALIVE body must be empty (got {} bytes)",
-                    body.len()
+                return Err(BgpError::Notification(BgpNotification::new(
+                    crate::error::BgpErrorCode::Header as u8,
+                    crate::error::BgpHeaderErrorSubcode::BadMessageLength as u8,
+                    vec![],
                 )));
             }
             Ok(BgpMessage::Keepalive(Keepalive))
@@ -285,8 +288,15 @@ fn decode_open(body: &[u8]) -> Result<Open, BgpError> {
         let pt = body[i];
         let pl = body[i + 1] as usize;
         i += 2;
-        if i + pl > body.len() {
-            break;
+        // A parameter value must fit inside the declared
+        // Optional-Parameters-Length region; extending past it is a
+        // Bad OPEN Length error, not silently accepted (RFC 4271 §6.2).
+        if i + pl > end {
+            return Err(BgpError::Notification(BgpNotification::new(
+                crate::error::BgpErrorCode::Open as u8,
+                crate::error::BgpOpenErrorSubcode::BadOpenLength as u8,
+                vec![],
+            )));
         }
         params.push(OpenParam {
             param_type: pt,
@@ -441,8 +451,15 @@ fn decode_path_attributes(bytes: &[u8]) -> Result<PathAttributes, BgpError> {
 }
 
 fn decode_notification(body: &[u8]) -> BgpNotification {
+    // RFC 4271 §4.5: a NOTIFICATION body is code(1) + subcode(1) + data.
+    // A shorter body is a header error (Bad Message Length) rather than
+    // a valid notification with code 0.
     if body.len() < 2 {
-        return BgpNotification::new(0, 0, body.to_vec());
+        return BgpNotification {
+            error_code: crate::error::BgpErrorCode::Header as u8,
+            error_subcode: crate::error::BgpHeaderErrorSubcode::BadMessageLength as u8,
+            data: Vec::new(),
+        };
     }
     let code = body[0];
     let sub = body[1];
@@ -451,21 +468,22 @@ fn decode_notification(body: &[u8]) -> BgpNotification {
 }
 
 fn decode_route_refresh(body: &[u8]) -> Result<RouteRefresh, BgpError> {
-    if body.len() < 4 {
-        return Err(BgpError::Codec(format!(
-            "ROUTE-REFRESH body too short: {}",
-            body.len()
+    // RFC 2918 §3: a ROUTE-REFRESH message is exactly 4 bytes
+    // (AFI:2, subtype:1, SAFI:1); RFC 7313 BoRR/EoRR share the layout.
+    // Anything else is a Bad Message Length header error (RFC 4271 §6.1).
+    if body.len() != 4 {
+        return Err(BgpError::Notification(BgpNotification::new(
+            crate::error::BgpErrorCode::Header as u8,
+            crate::error::BgpHeaderErrorSubcode::BadMessageLength as u8,
+            vec![],
         )));
     }
     let afi = u16::from_be_bytes([body[0], body[1]]);
-    if body.len() != 4 {
-        return Err(BgpError::Codec(format!(
-            "invalid ROUTE-REFRESH body length: {}",
-            body.len()
-        )));
-    }
+    // RFC 7313 §3.2: a ROUTE-REFRESH with an unknown subtype MUST be
+    // ignored — surface it as an unknown subtype the FSM skips rather
+    // than tearing the session down.
     let subtype = crate::message::RouteRefreshSubtype::from_u8(body[2])
-        .ok_or_else(|| BgpError::Codec(format!("invalid ROUTE-REFRESH subtype: {}", body[2])))?;
+        .unwrap_or(crate::message::RouteRefreshSubtype::Unknown);
     let safi = body[3];
     Ok(RouteRefresh {
         family: NlriFamily { afi, safi },
@@ -788,9 +806,16 @@ mod tests {
     }
 
     #[test]
-    fn route_refresh_rejects_invalid_subtype_and_length() {
-        assert!(decode_route_refresh(&[0, 1, 3, 1]).is_err());
+    fn route_refresh_rejects_invalid_length() {
         assert!(decode_route_refresh(&[0, 1, 0, 1, 0]).is_err());
+        assert!(decode_route_refresh(&[0, 1, 3]).is_err());
+    }
+
+    /// RFC 7313 §3.2: an unknown subtype is silently ignored, not an error.
+    #[test]
+    fn route_refresh_unknown_subtype_is_ignored() {
+        let r = decode_route_refresh(&[0, 1, 3, 1]).unwrap();
+        assert_eq!(r.subtype, crate::message::RouteRefreshSubtype::Unknown);
     }
 
     #[test]

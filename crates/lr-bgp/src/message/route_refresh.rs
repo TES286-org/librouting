@@ -16,6 +16,10 @@ pub enum RouteRefreshSubtype {
     BeginOfRib = 1,
     /// End-of-RIB marker (EoRR).
     EndOfRib = 2,
+    /// Unknown subtype — RFC 7313 §3.2 requires the message to be
+    /// silently ignored, so the decoder maps unrecognized values here
+    /// instead of failing.
+    Unknown = 0xff,
 }
 
 impl RouteRefreshSubtype {
