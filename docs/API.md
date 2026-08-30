@@ -381,10 +381,12 @@ let frame = BabelCodec::new().decode_authenticated_slice(
 ## OSPF authentication (RFC 5709 / RFC 7166)
 
 OSPFv2 crypto auth (`CryptoAuth`, AuType 2) and OSPFv3 auth trailer
-(`V3Auth`, RFC 7166) both use HMAC-SHA-1 or HMAC-SHA-256. The MAC is
-computed over the packet (with checksum/auth fields zeroed) plus an
-optional IP pseudo-header. Anti-replay is enforced via a monotonic
-cryptographic sequence number.
+(`V3Auth`, RFC 7166) both use HMAC-SHA-1 or HMAC-SHA-256 with the
+RFC 5709 §3.3 / RFC 7166 §4.5 Ko/Apad construction (the digest is
+computed over the packet with the checksum/auth fields zeroed and the
+trailer filled with the Apad constant; the v3 MAC additionally embeds
+the IPv6 source address in Apad). Anti-replay is enforced via a
+monotonic cryptographic sequence number.
 
 ```rust
 use lr_ospf::auth::{CryptoAuth, V3Auth};
@@ -395,18 +397,21 @@ v2.advance_seq();
 let trailer = v2.sign_trailer(&header_bytes, &body_bytes);
 // ... append `trailer` after the OSPF body on the wire ...
 
-// OSPFv3: SA-ID + HMAC-SHA-256, 64-bit crypto-seq.
+// OSPFv3: SA-ID + HMAC-SHA-256, 64-bit crypto-seq. The IPv6 source
+// address is required for the RFC 7166 §4.5 Apad construction.
 let mut v3 = V3Auth::new(1, b"shared-secret".to_vec())
-    .with_addresses(src_v6, dst_v6);
+    .with_source(src_v6);
 v3.advance_seq();
-let trailer = v3.sign_trailer(&packet); // header + body
+let trailer = v3.sign_trailer(&packet, &[]); // header + body, no LLS
 ```
 
 ## OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5)
 
 An OSPFv3 ABR re-advertises reachability between areas using
-inter-area-prefix-LSAs (type 0x2003). The body carries a 3-byte metric,
-the prefix length, prefix options, and the truncated address prefix.
+inter-area-prefix-LSAs (type 0x2003). The body is
+`Reserved(1) | Metric(3) | PrefixLength(1) | PrefixOptions(1) |
+Reserved(2) | prefix padded to a 32-bit boundary` (the metric is the
+24-bit cost to the prefix).
 
 ```rust
 use lr_ospf::abr::{originate_v3_inter_area_prefix_lsa, SummaryDestination};

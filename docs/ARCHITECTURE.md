@@ -143,7 +143,8 @@ A `PeerTopology` carries the relationship of the local speaker to the peer:
 
 The topology drives AS_PATH mutation, NEXT_HOP rewriting, and reachability
 checks (`can_advertise()` enforces iBGP full-mesh + RR rules + OTC
-valley-free).
+valley-free: a route carrying OTC may only be advertised to Customers and
+RS-clients, per RFC 9234 §5 egress rule 2).
 
 ## Best-path comparator
 
@@ -151,7 +152,7 @@ valley-free).
 
 1. Weight (vendor-specific; set via policy).
 2. LOCAL_PREF (iBGP only; eBGP approximated as 100).
-3. AS_PATH length (counting AS_CONFED_SEQUENCE per RFC 6793).
+3. AS_PATH length (AS_SET counts as 1, RFC 4271 §9.1.2.2(a); confederation segments not counted — RFC 5065 §5.3(3) — unless `count_confed_in_path_len`).
 4. ORIGIN (IGP < EGP < INCOMPLETE).
 5. MED (only when same neighboring AS, unless `always_compare_med`).
 6. eBGP over iBGP (unless `prefer_externals=false`).
@@ -228,7 +229,7 @@ embedders. Notable toggles:
 ## Testing
 
 - Unit tests live alongside the source (`#[cfg(test)]` modules).
-- End-to-end tests live in `crates/lr-tests/tests/` — currently 13 files:
+- End-to-end tests live in `crates/lr-tests/tests/` — currently 14 files:
   - `tcp_smoke.rs` — two librouting BGP peers exchange OPEN+KEEPALIVE over
     real TCP.
   - `route_propagation.rs` — originate → Adj-RIB-In → Loc-RIB →
@@ -236,6 +237,7 @@ embedders. Notable toggles:
   - `protocol_runtimes.rs` — OSPF and Babel delta integration into Loc-RIB.
   - `add_path.rs` — RFC 7911 multi-path propagation.
   - `bgp_session_modes.rs` — the 8 dual-stack / MP-BGP / ENH session modes.
+  - `bgp_labeled_unicast.rs` — RFC 8277 labelled unicast (BGP-LU).
   - `gtsm_max_prefix.rs` — RFC 5082 GTSM + per-peer maximum-prefix.
   - `redistribution.rs` — cross-protocol pipes.
   - `route_aggregation.rs` — RFC 4271 §9.2.2.2 aggregate lifecycle.
@@ -249,7 +251,7 @@ embedders. Notable toggles:
   rejection, per-peer config inheritance).
 - Interop scripts against the BIRD and FRR reference routers live in
   `tests/interop/` (run in CI when Docker is available).
-- Total: 443 tests across 43 test binaries in 14 crates.
+- Total: 705 tests across 35 test binaries (16 crates + doc-tests).
 
 ## CI/CD
 
