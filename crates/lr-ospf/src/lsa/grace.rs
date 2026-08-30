@@ -1,17 +1,19 @@
 //! OSPF Grace-LSA — RFC 3623 (OSPFv2) and RFC 5187 (OSPFv3).
 //!
-//! The Grace-LSA is an AS-scope Opaque-LSA (RFC 5250) that a restarting
-//! router floods to announce its planned shutdown and request that
-//! neighbors retain its LSAs for a grace period. The body is a
+//! The Grace-LSA is a **link-local** scoped Opaque-LSA (RFC 5250 type 9,
+//! Opaque Type 3, Opaque ID 0) that a restarting router floods to
+//! announce its planned shutdown and request that neighbors retain its
+//! LSAs for a grace period (RFC 3623 Appendix A). The body is a
 //! sequence of TLVs (RFC 3623 §3 / RFC 5187 §3):
 //!
-//! | Type | Name                       | Width | Required |
-//! |------|----------------------------|-------|----------|
-//! | 1    | Address Family             | 4     | optional (v2) |
-//! | 2    | Grace Period               | 4     | mandatory |
-//! | 3    | Graceful Restart Reason    | 1     | mandatory |
-//! | 4    | IPv4 Interface Address     | 4     | optional (v2) |
-//! | 5    | IPv6 Interface Address     | 16    | optional (v3) |
+//! | Type | Name                     | Width | Required |
+//! |------|--------------------------|-------|----------|
+//! | 1    | Grace Period             | 4     | mandatory |
+//! | 2    | Graceful Restart Reason  | 1     | mandatory |
+//! | 3    | IP Interface Address     | 4 (v2) / 16 (v3) | optional |
+//!
+//! TLVs are padded to four-octet alignment; the padding is not included
+//! in the Length field (RFC 3623 Appendix A).
 //!
 //! ## Opaque LSA ID packing (RFC 5250 §3.1)
 //!
@@ -53,39 +55,30 @@ pub fn unpack_opaque_lsa_id(link_state_id: u32) -> (u8, u32) {
     (opaque_type, opaque_id)
 }
 
-/// Grace-LSA TLV type codes (RFC 3623 §3 / RFC 5187 §3).
+/// Grace-LSA TLV type codes (RFC 3623 Appendix A / RFC 5187 §3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u16)]
 pub enum GraceTlvType {
-    /// Address Family (4 bytes). When present the value is 1 for
-    /// IPv4 (RFC 3623 §3.1). Optional for v2.
-    AddressFamily = 1,
     /// Grace Period (4 bytes, in seconds). Mandatory. The restarting
     /// router asks neighbours to retain its LSAs for at most this
-    /// long after the shutdown (RFC 3623 §3.2).
-    GracePeriod = 2,
+    /// long after the shutdown (RFC 3623 §3.1).
+    GracePeriod = 1,
     /// Graceful Restart Reason (1 byte). Mandatory. 0=unknown,
     /// 1=software restart, 2=software reload/upgrade, 3=switchover
-    /// to a redundant control processor (RFC 3623 §3.3).
-    Reason = 3,
-    /// IPv4 Interface Address (4 bytes). Optional for v2; the IPv4
-    /// address of the restarting router's interface on the network
-    /// (RFC 3623 §3.4).
-    Ipv4Address = 4,
-    /// IPv6 Interface Address (16 bytes). Optional for v3; the IPv6
-    /// address of the restarting router's interface on the network
-    /// (RFC 5187 §3).
-    Ipv6Address = 5,
+    /// to a redundant control processor (RFC 3623 §3.2).
+    Reason = 2,
+    /// IP Interface Address. Optional; the IPv4 interface address of
+    /// the restarting router on the segment (RFC 3623 §3.3, length 4),
+    /// or its IPv6 interface address (RFC 5187 §3, length 16).
+    IpInterfaceAddress = 3,
 }
 
 impl GraceTlvType {
     pub fn from_u16(v: u16) -> Option<Self> {
         Some(match v {
-            1 => Self::AddressFamily,
-            2 => Self::GracePeriod,
-            3 => Self::Reason,
-            4 => Self::Ipv4Address,
-            5 => Self::Ipv6Address,
+            1 => Self::GracePeriod,
+            2 => Self::Reason,
+            3 => Self::IpInterfaceAddress,
             _ => return None,
         })
     }
@@ -121,53 +114,46 @@ impl GraceReason {
 /// stay `None`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GraceLsaBody {
-    /// Grace Period in seconds (mandatory, TLV 2).
+    /// Grace Period in seconds (mandatory, TLV 1).
     pub grace_period: u32,
-    /// Graceful Restart Reason (mandatory, TLV 3).
+    /// Graceful Restart Reason (mandatory, TLV 2).
     pub reason: GraceReason,
     /// IPv4 address of the restarting router's interface (optional,
-    /// TLV 4). Present for OSPFv2 when the restarting router wants
-    /// neighbours to verify the source of the Grace-LSA.
+    /// TLV 3 with a 4-octet value). Present for OSPFv2 when the
+    /// restarting router wants neighbours to verify the source of the
+    /// Grace-LSA.
     pub ipv4_address: Option<[u8; 4]>,
     /// IPv6 address of the restarting router's interface (optional,
-    /// TLV 5). Present for OSPFv3.
+    /// TLV 3 with a 16-octet value, RFC 5187 §3). Present for OSPFv3.
     pub ipv6_address: Option<[u8; 16]>,
-    /// Address Family (optional, TLV 1). When present the value is 1
-    /// for IPv4 (RFC 3623 §3.1). Stored as the raw 4-byte value so
-    /// future address families are not silently lost.
-    pub address_family: Option<u32>,
 }
 
 impl GraceLsaBody {
     /// Encode the Grace-LSA body into the wire form: a sequence of
-    /// `<type:2> <length:2> <value:N>` TLVs. The mandatory TLVs
+    /// `<type:2> <length:2> <value:N> <padding>` TLVs (RFC 3623
+    /// Appendix A). Each TLV is padded to four-octet alignment; the
+    /// padding is not included in the Length field. The mandatory TLVs
     /// (Grace Period + Reason) are emitted first, then the optional
-    /// ones in the order they appear on the struct.
+    /// interface-address TLV.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(64);
-        // Mandatory: Grace Period (type 2, length 4).
+        // Mandatory: Grace Period (type 1, length 4).
         out.extend_from_slice(&(GraceTlvType::GracePeriod as u16).to_be_bytes());
         out.extend_from_slice(&4u16.to_be_bytes());
         out.extend_from_slice(&self.grace_period.to_be_bytes());
-        // Mandatory: Reason (type 3, length 1).
+        // Mandatory: Reason (type 2, length 1) + 3 octets of padding.
         out.extend_from_slice(&(GraceTlvType::Reason as u16).to_be_bytes());
         out.extend_from_slice(&1u16.to_be_bytes());
         out.push(self.reason as u8);
-        // Optional: Address Family (type 1, length 4).
-        if let Some(af) = self.address_family {
-            out.extend_from_slice(&(GraceTlvType::AddressFamily as u16).to_be_bytes());
-            out.extend_from_slice(&4u16.to_be_bytes());
-            out.extend_from_slice(&af.to_be_bytes());
-        }
-        // Optional: IPv4 Interface Address (type 4, length 4).
+        out.extend_from_slice(&[0, 0, 0]); // 4-octet alignment
+        // Optional: IP Interface Address (type 3, length 4 or 16).
         if let Some(addr) = self.ipv4_address {
-            out.extend_from_slice(&(GraceTlvType::Ipv4Address as u16).to_be_bytes());
+            out.extend_from_slice(&(GraceTlvType::IpInterfaceAddress as u16).to_be_bytes());
             out.extend_from_slice(&4u16.to_be_bytes());
             out.extend_from_slice(&addr);
         }
-        // Optional: IPv6 Interface Address (type 5, length 16).
         if let Some(addr) = self.ipv6_address {
-            out.extend_from_slice(&(GraceTlvType::Ipv6Address as u16).to_be_bytes());
+            out.extend_from_slice(&(GraceTlvType::IpInterfaceAddress as u16).to_be_bytes());
             out.extend_from_slice(&16u16.to_be_bytes());
             out.extend_from_slice(&addr);
         }
@@ -184,7 +170,6 @@ impl GraceLsaBody {
         let mut reason: Option<GraceReason> = None;
         let mut ipv4_address: Option<[u8; 4]> = None;
         let mut ipv6_address: Option<[u8; 16]> = None;
-        let mut address_family: Option<u32> = None;
         let mut i = 0;
         while i + 4 <= body.len() {
             let tlv_type = u16::from_be_bytes([body[i], body[i + 1]]);
@@ -205,26 +190,18 @@ impl GraceLsaBody {
                 Some(GraceTlvType::Reason) if tlv_len == 1 => {
                     reason = Some(GraceReason::from_u8(body[i]));
                 }
-                Some(GraceTlvType::AddressFamily) if tlv_len == 4 => {
-                    address_family = Some(u32::from_be_bytes([
-                        body[i],
-                        body[i + 1],
-                        body[i + 2],
-                        body[i + 3],
-                    ]));
-                }
-                Some(GraceTlvType::Ipv4Address) if tlv_len == 4 => {
+                Some(GraceTlvType::IpInterfaceAddress) if tlv_len == 4 => {
                     let mut a = [0u8; 4];
                     a.copy_from_slice(&body[i..i + 4]);
                     ipv4_address = Some(a);
                 }
-                Some(GraceTlvType::Ipv6Address) if tlv_len == 16 => {
+                Some(GraceTlvType::IpInterfaceAddress) if tlv_len == 16 => {
                     let mut a = [0u8; 16];
                     a.copy_from_slice(&body[i..i + 16]);
                     ipv6_address = Some(a);
                 }
                 // Unknown TLV type or wrong length — skip it. RFC 3623
-                // §3 says unknown TLVs "MUST be ignored", so we do not
+                // says unknown TLVs "MUST be ignored", so we do not
                 // fail the whole decode for forward-compat with future
                 // extensions. A known type with the wrong length is
                 // also skipped (rather than failing) so a peer's
@@ -232,7 +209,10 @@ impl GraceLsaBody {
                 // fields.
                 _ => {}
             }
+            // Advance past the value and its 4-octet-alignment padding
+            // (padding is not counted in the Length field).
             i += tlv_len;
+            i = i.next_multiple_of(4);
         }
         let grace_period = grace_period?;
         let reason = reason?;
@@ -241,14 +221,13 @@ impl GraceLsaBody {
             reason,
             ipv4_address,
             ipv6_address,
-            address_family,
         })
     }
 }
 
-/// Build a complete OSPFv2 Grace-LSA (RFC 3623 §2). The LSA is an
-/// AS-scope Opaque-LSA (type 11) with the Opaque Type set to `3`
-/// (Grace-LSA) in the top 8 bits of the link_state_id.
+/// Build a complete OSPFv2 Grace-LSA (RFC 3623 §2, Appendix A). The LSA
+/// is a **link-local** scoped Opaque-LSA (type 9) with the Opaque Type
+/// set to `3` (Grace-LSA) in the top 8 bits of the link_state_id.
 ///
 /// The returned LSA is finalized — length fixed, RFC 2328 §C.4
 /// checksum computed.
@@ -267,7 +246,7 @@ pub fn originate_grace_lsa_v2(
         header: LsaHeader {
             ls_age: 0,
             options: 0x02, // E-bit: the area can carry external routes
-            ls_type: LsaTypeV2::OpaqueAsLsa as u8,
+            ls_type: LsaTypeV2::OpaqueLinkLsa as u16,
             link_state_id: opaque_lsa_id(OPAQUE_TYPE_GRACE, 0),
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -343,7 +322,6 @@ mod tests {
             reason: GraceReason::SoftwareRestart,
             ipv4_address: None,
             ipv6_address: None,
-            address_family: None,
         };
         let wire = body.encode();
         let dec = GraceLsaBody::decode(&wire).expect("decode");
@@ -357,7 +335,6 @@ mod tests {
             reason: GraceReason::RedundantSwitchover,
             ipv4_address: Some([10, 0, 0, 1]),
             ipv6_address: None,
-            address_family: Some(1), // IPv4
         };
         let wire = body.encode();
         let dec = GraceLsaBody::decode(&wire).expect("decode");
@@ -371,7 +348,6 @@ mod tests {
             reason: GraceReason::SoftwareReload,
             ipv4_address: None,
             ipv6_address: Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-            address_family: None,
         };
         let wire = body.encode();
         let dec = GraceLsaBody::decode(&wire).expect("decode");
@@ -379,18 +355,47 @@ mod tests {
     }
 
     #[test]
+    fn grace_tlv_numbers_and_padding_match_rfc3623() {
+        // RFC 3623 Appendix A: 1 = Grace Period, 2 = Graceful Restart
+        // Reason, 3 = IP interface address; each TLV is padded to
+        // four-octet alignment (padding not counted in the length).
+        let body = GraceLsaBody {
+            grace_period: 120,
+            reason: GraceReason::SoftwareRestart,
+            ipv4_address: Some([192, 0, 2, 1]),
+            ipv6_address: None,
+        };
+        let wire = body.encode();
+        // TLV 1: Grace Period (type 1, len 4, value 120).
+        assert_eq!(&wire[0..2], &[0, 1], "Grace Period type must be 1");
+        assert_eq!(&wire[2..4], &[0, 4]);
+        assert_eq!(&wire[4..8], &120u32.to_be_bytes());
+        // TLV 2: Reason (type 2, len 1, value 1, padded with 3 octets).
+        assert_eq!(&wire[8..10], &[0, 2], "Reason type must be 2");
+        assert_eq!(&wire[10..12], &[0, 1], "1-octet value");
+        assert_eq!(wire[12], GraceReason::SoftwareRestart as u8);
+        assert_eq!(&wire[13..16], &[0, 0, 0], "3 octets of padding");
+        // TLV 3: IP interface address (type 3, len 4).
+        assert_eq!(&wire[16..18], &[0, 3], "IP interface address type must be 3");
+        assert_eq!(&wire[18..20], &[0, 4]);
+        assert_eq!(&wire[20..24], &[192, 0, 2, 1]);
+        assert_eq!(wire.len(), 24);
+    }
+
+    #[test]
     fn grace_lsa_body_decode_missing_mandatory_tlv_fails() {
-        // Missing Grace Period (type 2) — only Reason present.
+        // Missing Grace Period (type 1) — only Reason present.
         let mut wire = Vec::new();
         wire.extend_from_slice(&(GraceTlvType::Reason as u16).to_be_bytes());
         wire.extend_from_slice(&1u16.to_be_bytes());
         wire.push(GraceReason::Unknown as u8);
+        wire.extend_from_slice(&[0, 0, 0]); // padding
         assert!(GraceLsaBody::decode(&wire).is_none());
     }
 
     #[test]
     fn grace_lsa_body_decode_missing_reason_fails() {
-        // Missing Reason (type 3) — only Grace Period present.
+        // Missing Reason (type 2) — only Grace Period present.
         let mut wire = Vec::new();
         wire.extend_from_slice(&(GraceTlvType::GracePeriod as u16).to_be_bytes());
         wire.extend_from_slice(&4u16.to_be_bytes());
@@ -401,18 +406,20 @@ mod tests {
     #[test]
     fn grace_lsa_body_decode_skips_unknown_tlv() {
         // A future-extension TLV (type 99) must be skipped so the
-        // mandatory fields still parse (RFC 3623 §3: unknown TLVs
+        // mandatory fields still parse (RFC 3623: unknown TLVs
         // "MUST be ignored").
         let mut wire = Vec::new();
         wire.extend_from_slice(&99u16.to_be_bytes()); // unknown type
         wire.extend_from_slice(&2u16.to_be_bytes());
         wire.extend_from_slice(&0xbeef_u16.to_be_bytes());
+        wire.extend_from_slice(&[0, 0]); // padding to 4-octet alignment
         wire.extend_from_slice(&(GraceTlvType::GracePeriod as u16).to_be_bytes());
         wire.extend_from_slice(&4u16.to_be_bytes());
         wire.extend_from_slice(&120u32.to_be_bytes());
         wire.extend_from_slice(&(GraceTlvType::Reason as u16).to_be_bytes());
         wire.extend_from_slice(&1u16.to_be_bytes());
         wire.push(GraceReason::SoftwareRestart as u8);
+        wire.extend_from_slice(&[0, 0, 0]); // padding
         let dec = GraceLsaBody::decode(&wire).expect("decode despite unknown TLV");
         assert_eq!(dec.grace_period, 120);
         assert_eq!(dec.reason, GraceReason::SoftwareRestart);
@@ -429,16 +436,17 @@ mod tests {
     }
 
     #[test]
-    fn originate_grace_lsa_v2_builds_finalized_opaque_as_lsa() {
+    fn originate_grace_lsa_v2_builds_finalized_link_local_opaque_lsa() {
         let body = GraceLsaBody {
             grace_period: 180,
             reason: GraceReason::SoftwareRestart,
             ipv4_address: Some([192, 0, 2, 1]),
             ipv6_address: None,
-            address_family: Some(1),
         };
         let lsa = originate_grace_lsa_v2(0x0a00_0001, &body, None).expect("originate");
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::OpaqueAsLsa as u8);
+        // RFC 3623 Appendix A: the grace-LSA is a link-local Opaque-LSA
+        // (type 9), not the AS-scope opaque (type 11).
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::OpaqueLinkLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0x0300_0000);
         assert_eq!(lsa.header.advertising_router, 0x0a00_0001);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
@@ -447,6 +455,9 @@ mod tests {
             LsaHeader::LEN + body.encode().len()
         );
         assert!(lsa.checksum_ok(), "LSA checksum must validate");
+        // The wire header byte 3 carries type 9 (v2 layout).
+        let wire = lsa.to_wire();
+        assert_eq!(wire[3], 9);
         // Round-trip the body.
         let dec = GraceLsaBody::decode(&lsa.body).expect("body round-trips");
         assert_eq!(dec, body);
@@ -459,7 +470,6 @@ mod tests {
             reason: GraceReason::Unknown,
             ipv4_address: None,
             ipv6_address: None,
-            address_family: None,
         };
         let lsa1 = originate_grace_lsa_v2(1, &body, None).unwrap();
         let lsa2 = originate_grace_lsa_v2(1, &body, Some(lsa1.header.ls_sequence_number)).unwrap();

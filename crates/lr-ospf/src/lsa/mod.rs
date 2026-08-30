@@ -17,13 +17,25 @@ pub use grace::{
 /// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.
 pub use crate::lsdb::MAX_AGE_SECS;
 
-/// LSA header (RFC 2328 §A.4.1). 20 bytes.
+/// LSA header (RFC 2328 §A.4.1 for v2, RFC 5340 §A.4.2 for v3). 20 bytes.
+///
+/// The two versions differ only in bytes 2-3: v2 has an 8-bit `options`
+/// byte followed by an 8-bit LS type; v3 has no options byte and carries
+/// the full 16-bit LS type there (e.g. `0x2003` for an inter-area-prefix
+/// LSA). We store the type widened to `u16` so v3 types key correctly:
+/// for v2 the value is the 8-bit type (1..=11), for v3 the full 16-bit
+/// value. `options` is meaningful for v2 only and MUST be 0 for v3
+/// headers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LsaHeader {
     /// Age in seconds (top 2 bits are DoNotAge per RFC 4136 — left to caller).
     pub ls_age: u16,
+    /// OSPFv2 options byte. For OSPFv3 there is no options field in the
+    /// LSA header; keep this 0.
     pub options: u8,
-    pub ls_type: u8,
+    /// LSA type: OSPFv2 8-bit type (1..=11) or OSPFv3 full 16-bit type
+    /// (e.g. 0x2003, 0x4005).
+    pub ls_type: u16,
     pub link_state_id: u32,
     pub advertising_router: u32,
     pub ls_sequence_number: u32,
@@ -35,10 +47,12 @@ impl LsaHeader {
     pub const LEN: usize = 20;
 }
 
-/// Common LSA key used by the LSDB.
+/// Common LSA key used by the LSDB. `ls_type` is `u16` so OSPFv3 LSAs
+/// (whose types are 16-bit, e.g. 0x2003) do not collide with OSPFv2
+/// types (1..=11).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct LsaKey {
-    pub ls_type: u8,
+    pub ls_type: u16,
     pub link_state_id: u32,
     pub advertising_router: u32,
 }
@@ -70,11 +84,26 @@ impl Lsa {
     /// The header fields (including `length` and `ls_checksum`) are
     /// written exactly as stored — this is a faithful serialization, not
     /// a normalizing one.
+    ///
+    /// Bytes 2-3 differ by version: OSPFv2 writes `[options][type]`
+    /// (type is 8 bits); OSPFv3 writes the full 16-bit type. The two
+    /// layouts coincide because v3 types whose high byte is zero (only
+    /// the link-local Link-LSA, 0x0008) are emitted through the v2
+    /// branch with `options == 0`, producing the same `[0x00][0x08]`
+    /// bytes. Types above 0xff can only be OSPFv3 (v2 types are 8-bit),
+    /// so the 16-bit branch is unambiguous.
     pub fn to_wire(&self) -> Vec<u8> {
         let mut v = Vec::with_capacity(LsaHeader::LEN + self.body.len());
         v.extend_from_slice(&self.header.ls_age.to_be_bytes());
-        v.push(self.header.options);
-        v.push(self.header.ls_type);
+        if self.header.ls_type > 0xff {
+            // OSPFv3: the 16-bit LS type occupies header bytes 2-3.
+            v.extend_from_slice(&self.header.ls_type.to_be_bytes());
+        } else {
+            // OSPFv2 (or OSPFv3 link-local types with a zero high byte):
+            // options byte followed by the low byte of the type.
+            v.push(self.header.options);
+            v.push(self.header.ls_type as u8);
+        }
         v.extend_from_slice(&self.header.link_state_id.to_be_bytes());
         v.extend_from_slice(&self.header.advertising_router.to_be_bytes());
         v.extend_from_slice(&self.header.ls_sequence_number.to_be_bytes());
@@ -221,24 +250,43 @@ pub mod v3_prefix_options {
 
 /// Encode the body of an OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5).
 ///
-/// The body carries a single prefix with its metric:
-/// - Metric (3 bytes, big-endian) — capped at `0x00ff_ffff`
-/// - PrefixLength (1 byte)
-/// - PrefixOptions (1 byte)
-/// - Address Prefix (ceil(PL/8) bytes, zero-padded)
+/// The body carries a single prefix with its metric. RFC 5340 §A.4.5:
+///
+/// ```text
+///   0                   1                   2                   3
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  |      0        |                  Metric                       |
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  | PrefixLength  | PrefixOptions |              0                |
+///  +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+///  |                        Address Prefix                         |
+/// ```
+///
+/// - byte 0: reserved, 0
+/// - bytes 1-3: 24-bit big-endian metric — capped just below LSInfinity
+///   (`0x00ff_ffff`), the reserved "unreachable" value
+/// - byte 4: PrefixLength
+/// - byte 5: PrefixOptions (0)
+/// - bytes 6-7: reserved, 0
+/// - bytes 8+: Address Prefix — ceil(PL/8) bytes zero-padded to a 32-bit
+///   boundary (RFC 5340 §4.4.3.4: "The prefix is padded out to an even
+///   number of 32-bit words"; §A.4.1: `((PL + 31) / 32)` words).
 ///
 /// The link-state ID of the enclosing LSA is an arbitrary 32-bit ID
 /// assigned by the ABR (RFC 5340 uses a counter, not the network
 /// address, because v3 prefixes are 128 bits wide).
 pub fn encode_v3_inter_area_prefix_body(prefix: &lr_core::addr::Prefix, metric: u32) -> Vec<u8> {
     let metric = metric.min(0x00ff_fffe);
-    let mut v = Vec::with_capacity(5 + 16);
-    // 3-byte big-endian metric
+    let mut v = Vec::with_capacity(8 + 16);
+    // 4-byte metric word with a zero reserved top byte (24-bit metric).
+    v.push(0);
     v.extend_from_slice(&metric.to_be_bytes()[1..]);
     v.push(prefix.prefix_len);
     v.push(0); // PrefixOptions — all zero
-               // Address prefix: ceil(PL/8) bytes, zero-padded to the byte boundary.
+    v.extend_from_slice(&0u16.to_be_bytes()); // reserved
+    // Address prefix: ceil(PL/8) bytes, zero-padded to a 32-bit boundary.
     let n = (prefix.prefix_len as usize).div_ceil(8);
+    let padded = n.next_multiple_of(4);
     match &prefix.addr {
         lr_core::addr::IpAddr::V4(b) => {
             v.extend_from_slice(&b[..n.min(4)]);
@@ -247,6 +295,7 @@ pub fn encode_v3_inter_area_prefix_body(prefix: &lr_core::addr::Prefix, metric: 
             v.extend_from_slice(&b[..n.min(16)]);
         }
     }
+    v.resize(v.len() + (padded - n), 0);
     v
 }
 
@@ -256,25 +305,26 @@ pub struct V3InterAreaPrefixBody {
     pub metric: u32,
     pub prefix_len: u8,
     pub prefix_options: u8,
-    /// The address prefix, zero-padded to 16 bytes for IPv6 or 4 bytes
-    /// for IPv4 (the caller matches on length).
+    /// The address prefix, ceil(PL/8) bytes (the trailing 32-bit padding
+    /// on the wire is not stored).
     pub prefix_bytes: Vec<u8>,
 }
 
 /// Decode the body of an OSPFv3 inter-area-prefix-LSA. Returns `None`
 /// when the body is truncated.
 pub fn decode_v3_inter_area_prefix_body(body: &[u8]) -> Option<V3InterAreaPrefixBody> {
-    if body.len() < 5 {
+    if body.len() < 8 {
         return None;
     }
-    let metric = u32::from_be_bytes([0, body[0], body[1], body[2]]);
-    let prefix_len = body[3];
-    let prefix_options = body[4];
+    let metric = u32::from_be_bytes([0, body[1], body[2], body[3]]);
+    let prefix_len = body[4];
+    let prefix_options = body[5];
     let n = (prefix_len as usize).div_ceil(8);
-    if body.len() < 5 + n {
+    let padded = n.next_multiple_of(4);
+    if body.len() < 8 + padded {
         return None;
     }
-    let prefix_bytes = body[5..5 + n].to_vec();
+    let prefix_bytes = body[8..8 + n].to_vec();
     Some(V3InterAreaPrefixBody {
         metric,
         prefix_len,
@@ -405,10 +455,10 @@ impl LsaTypeV3 {
         })
     }
 
-    /// The low byte (function code) of this LSA type — the value stored
-    /// in the `ls_type` field of the v3 LSA header (which is only 8 bits
-    /// wide in the shared header layout, but v3 uses the options byte
-    /// to carry the high byte for non-standard types).
+    /// The low byte (function code) of this 16-bit v3 LSA type. Retained
+    /// for callers that only need the function code; the full 16-bit
+    /// value (e.g. `0x2003`) is what `LsaHeader::ls_type` carries and
+    /// what the wire format uses.
     pub fn function_code(self) -> u8 {
         (self as u16) as u8
     }

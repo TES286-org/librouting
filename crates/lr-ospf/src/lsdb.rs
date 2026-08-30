@@ -9,6 +9,23 @@ use crate::lsa::{Lsa, LsaHeader, LsaKey};
 pub const MAX_AGE_SECS: u16 = 3_600;
 /// RFC 2328 §14.1: default self-originated LSA refresh interval.
 pub const LS_REFRESH_TIME_SECS: u16 = 1_800;
+/// RFC 2328 §12.1.2: the first sequence number of a newly originated LSA.
+const INITIAL_SEQUENCE_NUMBER: u32 = 0x8000_0001;
+/// RFC 2328 §12.1.2: the largest sequence number an LSA may carry.
+const MAX_SEQUENCE_NUMBER: u32 = 0x7fff_ffff;
+
+/// Whether an LSA sequence number is inside the usable space
+/// `0x80000001..=0x7fffffff` (RFC 2328 §12.1.2). `0x80000000` is
+/// reserved and must never be used. Values in the low half of the
+/// circular space (`0x00000000..=0x7ffffffe`) cannot be produced by
+/// legitimate origination — LSAs are started at `0x80000001` and
+/// flushed rather than wrapped past `0x7fffffff` — so they are treated
+/// as malformed instead of being compared (an instance such as
+/// `0x00000001` would otherwise compare "newer" than a stored
+/// `0x80000001` and poison the watermark).
+fn sequence_in_range(seq: u32) -> bool {
+    seq >= INITIAL_SEQUENCE_NUMBER || seq == MAX_SEQUENCE_NUMBER
+}
 
 /// Outcome of installing one LSA instance (RFC 2328 §13).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -75,7 +92,14 @@ impl Lsdb {
                 InstallOutcome::Ignored
             };
         }
-        // Accept if newer than what we have (signed sequence space, §12.1.2).
+        // Accept if newer than what we have (signed sequence space,
+        // §12.1.2). Out-of-range sequence numbers (the reserved
+        // 0x80000000 and the unreachable wrap region) are rejected
+        // outright — never compared, so a malformed instance cannot be
+        // treated as newer than a valid one or poison the watermark.
+        if !sequence_in_range(lsa.header.ls_sequence_number) {
+            return InstallOutcome::Ignored;
+        }
         let prev_seq = self.seq_watermark.get(&key).copied().unwrap_or(0);
         if (lsa.header.ls_sequence_number as i32) <= (prev_seq as i32) && prev_seq != 0 {
             return InstallOutcome::Ignored;
@@ -136,6 +160,12 @@ impl Lsdb {
             let Some(sequence) = lsa.header.ls_sequence_number.checked_add(1) else {
                 continue;
             };
+            if !sequence_in_range(sequence) {
+                // §14.1: at MAX_SEQUENCE_NUMBER the LSA must be flushed
+                // rather than refreshed (the next value would be the
+                // reserved 0x80000000, §12.1.2).
+                continue;
+            }
             lsa.header.ls_sequence_number = sequence;
             lsa.header.ls_age = 0;
             lsa.finalize(); // length + §C.4 checksum cover the new instance
@@ -312,5 +342,44 @@ mod tests {
         let removed = db.age_out(3_600_000);
         assert_eq!(removed.len(), 1);
         assert!(db.is_empty());
+    }
+
+    #[test]
+    fn out_of_range_sequence_rejected() {
+        let mut db = Lsdb::new();
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000001), 0),
+            InstallOutcome::New
+        );
+        // The reserved sequence number (RFC 2328 §12.1.2) is rejected.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000000), 5),
+            InstallOutcome::Ignored
+        );
+        // An instance from the unreachable wrap region must not compare
+        // "newer" than a stored 0x80000001 (audit D1) — it is rejected
+        // outright so the watermark cannot be poisoned.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x00000001), 6),
+            InstallOutcome::Ignored
+        );
+        // The legitimate instance after the stored one still installs.
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x80000002), 7),
+            InstallOutcome::Replaced
+        );
+    }
+
+    #[test]
+    fn max_sequence_number_is_accepted_but_not_refreshed() {
+        let mut db = Lsdb::new();
+        // 0x7fffffff is the legitimate maximum (RFC 2328 §12.1.2).
+        assert_eq!(
+            db.install(make_lsa(1, 2, 0x7fffffff), 0),
+            InstallOutcome::New
+        );
+        // Refreshing it would produce the reserved 0x80000000 — the
+        // refresh is skipped instead (the LSA must be flushed, §14.1).
+        assert!(db.refresh_due(2, 1_800_000).is_empty());
     }
 }

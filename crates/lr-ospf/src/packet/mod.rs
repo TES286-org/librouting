@@ -98,9 +98,12 @@ pub enum OspfBody {
 /// Hello packet body (RFC 2328 §A.3.2 / RFC 5340 §A.3.2.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelloBody {
-    pub network_mask: u32, // v2 only
+    /// v2: network mask. v3: the 4-byte Interface ID (there is no
+    /// network mask in v3 Hellos).
+    pub network_mask: u32,
     pub hello_interval: u16,
-    pub options: u8,
+    /// v2: 8-bit options. v3: 24-bit options (stored in the low 24 bits).
+    pub options: u32,
     pub priority: u8,
     pub dead_interval: u32,
     pub dr: u32,
@@ -108,20 +111,23 @@ pub struct HelloBody {
     pub neighbors: Vec<u32>,
 }
 
-/// Database Description (RFC 2328 §A.3.3).
+/// Database Description (RFC 2328 §A.3.3 / RFC 5340 §A.3.3).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbDescBody {
     pub mtu: u16,
-    pub options: u8,
+    /// v2: 8-bit options. v3: 24-bit options (stored in the low 24 bits).
+    pub options: u32,
     pub flags: u8, // bits: I, M, MS
     pub dd_seq: u32,
     pub lsa_headers: Vec<crate::lsa::LsaHeader>,
 }
 
-/// LS-Request entry (RFC 2328 §A.3.4): (LS type, LS ID, Adv Router).
+/// LS-Request entry (RFC 2328 §A.3.4: (LS type, LS ID, Adv Router);
+/// RFC 5340 §A.3.4: (LS type, unused, LS ID, Adv Router)). The type is
+/// widened to `u16` so v3's 16-bit LS types (e.g. 0x2003) are preserved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LsRequestEntry {
-    pub ls_type: u8,
+    pub ls_type: u16,
     pub ls_id: u32,
     pub adv_router: u32,
 }

@@ -112,7 +112,7 @@ pub fn originate_router_lsa(
         header: LsaHeader {
             ls_age: 0,
             options: 0x02, // E-bit: the area can carry external routes
-            ls_type: LsaTypeV2::RouterLsa as u8,
+            ls_type: LsaTypeV2::RouterLsa as u16,
             link_state_id: router_id,
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -308,7 +308,7 @@ mod tests {
             None,
         )
         .unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::RouterLsa as u8);
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::RouterLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0x0a00_0001);
         assert_eq!(lsa.header.advertising_router, 0x0a00_0001);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);

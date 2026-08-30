@@ -123,7 +123,7 @@ pub fn originate_nssa_lsa(
         header: LsaHeader {
             ls_age: 0,
             options: if dest.p_bit { N_P_BIT } else { 0 },
-            ls_type: LsaTypeV2::NssaExternalLsa as u8,
+            ls_type: LsaTypeV2::NssaExternalLsa as u16,
             link_state_id: network,
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -200,7 +200,7 @@ pub fn nssa_routes(lsdb: &Lsdb, spf_result: &SpfResult, opts: NssaCalcOpts) -> V
     // construction entirely.
     if !lsdb
         .iter()
-        .any(|(key, _)| key.ls_type == LsaTypeV2::NssaExternalLsa as u8)
+        .any(|(key, _)| key.ls_type == LsaTypeV2::NssaExternalLsa as u16)
     {
         return Vec::new();
     }
@@ -217,7 +217,7 @@ pub fn nssa_routes(lsdb: &Lsdb, spf_result: &SpfResult, opts: NssaCalcOpts) -> V
 
     let mut best: BTreeMap<Prefix, ExternalRoute> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LsaTypeV2::NssaExternalLsa as u8 {
+        if key.ls_type != LsaTypeV2::NssaExternalLsa as u16 {
             continue;
         }
         let Some(body) = decode_as_external_body(&entry.lsa.body) else {
@@ -295,7 +295,7 @@ pub fn nssa_routes(lsdb: &Lsdb, spf_result: &SpfResult, opts: NssaCalcOpts) -> V
 /// and is the common FRR/BIRD configuration.
 pub fn is_elected_translator(lsdb: &Lsdb, router_id: u32) -> bool {
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LsaTypeV2::RouterLsa as u8 || key.advertising_router == router_id {
+        if key.ls_type != LsaTypeV2::RouterLsa as u16 || key.advertising_router == router_id {
             continue;
         }
         let Some(flags) = crate::lsa::router_lsa_flags_byte(&entry.lsa.body) else {
@@ -342,7 +342,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: rid,
                 advertising_router: rid,
                 ls_sequence_number: 0x8000_0001,
@@ -359,7 +359,7 @@ mod tests {
             ExternalDestination::new(net(0xc000_0200, 24), 40, ExternalMetricType::Type2);
         dest.forwarding_addr = 0x0a40_4001; // required with the P-bit set
         let lsa = originate_nssa_lsa(0x0202_0202, &dest, None).unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::NssaExternalLsa as u8);
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::NssaExternalLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0xc000_0200);
         assert_eq!(lsa.header.advertising_router, 0x0202_0202);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
@@ -407,7 +407,7 @@ mod tests {
     #[test]
     fn nssa_default_lsa_has_clear_p_and_zero_forwarding() {
         let lsa = originate_nssa_default_lsa(0x0101_0101, &NssaDefault::new(10), None).unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::NssaExternalLsa as u8);
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::NssaExternalLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0);
         assert!(
             !p_bit_set(&lsa),
@@ -461,7 +461,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 5,
                 advertising_router: 5,
                 ls_sequence_number: 0x8000_0001,
@@ -579,7 +579,7 @@ mod tests {
                     header: LsaHeader {
                         ls_age: 0,
                         options: 0x02,
-                        ls_type: LsaTypeV2::RouterLsa as u8,
+                        ls_type: LsaTypeV2::RouterLsa as u16,
                         link_state_id: 5,
                         advertising_router: 5,
                         ls_sequence_number: 0x8000_0001,

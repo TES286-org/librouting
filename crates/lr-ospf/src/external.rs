@@ -139,7 +139,7 @@ pub fn originate_external_lsa(
         header: LsaHeader {
             ls_age: 0,
             options: 0x02,
-            ls_type: LsaTypeV2::AsExternalLsa as u8,
+            ls_type: LsaTypeV2::AsExternalLsa as u16,
             link_state_id: network,
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -196,7 +196,7 @@ pub fn originate_summary_asbr_lsa(
         header: LsaHeader {
             ls_age: 0,
             options: 0x02,
-            ls_type: LsaTypeV2::SummaryAsbrLsa as u8,
+            ls_type: LsaTypeV2::SummaryAsbrLsa as u16,
             link_state_id: dest.asbr,
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -273,8 +273,8 @@ pub fn external_routes(lsdb: &Lsdb, spf_result: &SpfResult) -> Vec<ExternalRoute
     // Fast path: areas without any type-5/type-4 LSAs skip the covering
     // table construction entirely (summary routes are not needed).
     let has_externals = lsdb.iter().any(|(key, _)| {
-        key.ls_type == LsaTypeV2::AsExternalLsa as u8
-            || key.ls_type == LsaTypeV2::SummaryAsbrLsa as u8
+        key.ls_type == LsaTypeV2::AsExternalLsa as u16
+            || key.ls_type == LsaTypeV2::SummaryAsbrLsa as u16
     });
     if !has_externals {
         return Vec::new();
@@ -283,7 +283,7 @@ pub fn external_routes(lsdb: &Lsdb, spf_result: &SpfResult) -> Vec<ExternalRoute
     // §16.4 (b): inter-area ASBR legs from type-4 summary-ASBR-LSAs.
     let mut asbr_legs: BTreeMap<u32, AsbrLeg> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LsaTypeV2::SummaryAsbrLsa as u8 {
+        if key.ls_type != LsaTypeV2::SummaryAsbrLsa as u16 {
             continue;
         }
         let Some(&dist) = spf_result
@@ -328,7 +328,7 @@ pub fn external_routes(lsdb: &Lsdb, spf_result: &SpfResult) -> Vec<ExternalRoute
 
     let mut best: BTreeMap<Prefix, ExternalRoute> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LsaTypeV2::AsExternalLsa as u8 {
+        if key.ls_type != LsaTypeV2::AsExternalLsa as u16 {
             continue;
         }
         let Some(body) = decode_as_external_body(&entry.lsa.body) else {
@@ -427,7 +427,7 @@ mod tests {
     fn originate_external_type2_sets_e_bit() {
         let dest = ExternalDestination::new(net(0xc000_0200, 24), 100, ExternalMetricType::Type2);
         let lsa = originate_external_lsa(0x01020304, &dest, None).unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::AsExternalLsa as u8);
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::AsExternalLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0xc000_0200);
         assert_eq!(lsa.header.advertising_router, 0x01020304);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
@@ -482,7 +482,7 @@ mod tests {
     fn originate_summary_asbr_uses_router_id_as_ls_id() {
         let dest = AsbrDestination::new(0x09090909, 30);
         let lsa = originate_summary_asbr_lsa(0x01020304, &dest, None).unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::SummaryAsbrLsa as u8);
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::SummaryAsbrLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0x09090909);
         assert_eq!(lsa.header.length, 28); // 20 header + 8 body
         assert!(lsa.checksum_ok());
@@ -501,7 +501,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 1,
                 advertising_router: 1,
                 ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -526,7 +526,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 2,
                 advertising_router: 2,
                 ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -574,7 +574,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 1,
                 advertising_router: 1,
                 ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -598,7 +598,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 2,
                 advertising_router: 2,
                 ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -659,7 +659,7 @@ mod tests {
                 header: LsaHeader {
                     ls_age: 0,
                     options: 0x02,
-                    ls_type: LsaTypeV2::RouterLsa as u8,
+                    ls_type: LsaTypeV2::RouterLsa as u16,
                     link_state_id: adv,
                     advertising_router: adv,
                     ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -725,7 +725,7 @@ mod tests {
                 header: LsaHeader {
                     ls_age: 0,
                     options: 0x02,
-                    ls_type: LsaTypeV2::RouterLsa as u8,
+                    ls_type: LsaTypeV2::RouterLsa as u16,
                     link_state_id: adv,
                     advertising_router: adv,
                     ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -778,7 +778,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 1,
                 advertising_router: 1,
                 ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
@@ -803,7 +803,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::RouterLsa as u8,
+                ls_type: LsaTypeV2::RouterLsa as u16,
                 link_state_id: 2,
                 advertising_router: 2,
                 ls_sequence_number: INITIAL_SEQUENCE_NUMBER,

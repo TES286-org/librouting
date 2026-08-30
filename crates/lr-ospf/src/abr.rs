@@ -82,7 +82,7 @@ pub fn originate_summary_lsa(
         header: LsaHeader {
             ls_age: 0,
             options: 0x02,
-            ls_type: LsaTypeV2::SummaryIpLsa as u8,
+            ls_type: LsaTypeV2::SummaryIpLsa as u16,
             link_state_id: network,
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -138,8 +138,8 @@ pub fn originate_v3_inter_area_prefix_lsa(
     let mut lsa = Lsa {
         header: LsaHeader {
             ls_age: 0,
-            options: 0x00, // v3 options — the embedder can set V/E/x bits
-            ls_type: LsaTypeV3::InterAreaPrefixLsa.function_code(),
+            options: 0x00, // v3 LSA headers have no options field
+            ls_type: LsaTypeV3::InterAreaPrefixLsa as u16, // full 0x2003
             link_state_id: ls_id,
             advertising_router: router_id,
             ls_sequence_number: seq,
@@ -169,7 +169,7 @@ mod tests {
     fn originate_first_instance() {
         let dest = SummaryDestination::new(net(0x0a0a0a00, 24), 10);
         let lsa = originate_summary_lsa(0x01020304, &dest, None).unwrap();
-        assert_eq!(lsa.header.ls_type, LsaTypeV2::SummaryIpLsa as u8);
+        assert_eq!(lsa.header.ls_type, LsaTypeV2::SummaryIpLsa as u16);
         assert_eq!(lsa.header.link_state_id, 0x0a0a0a00);
         assert_eq!(lsa.header.advertising_router, 0x01020304);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
@@ -258,15 +258,18 @@ mod tests {
             10,
         );
         let lsa = originate_v3_inter_area_prefix_lsa(0x01020304, 1, &dest, None).unwrap();
-        assert_eq!(
-            lsa.header.ls_type,
-            LsaTypeV3::InterAreaPrefixLsa.function_code()
-        );
+        assert_eq!(lsa.header.ls_type, LsaTypeV3::InterAreaPrefixLsa as u16);
+        assert_eq!(lsa.header.options, 0, "v3 headers have no options field");
         assert_eq!(lsa.header.link_state_id, 1); // arbitrary LS-ID
         assert_eq!(lsa.header.advertising_router, 0x01020304);
         assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
         assert_eq!(lsa.header.ls_age, 0);
         assert!(lsa.checksum_ok(), "v3 LSA must carry a valid checksum");
+
+        // The full 16-bit type must reach the wire: bytes 2-3 = 0x2003
+        // (RFC 5340 §A.4.2 — no options byte in the v3 LSA header).
+        let wire = lsa.to_wire();
+        assert_eq!(&wire[2..4], &[0x20, 0x03]);
 
         let body = crate::lsa::decode_v3_inter_area_prefix_body(&lsa.body).unwrap();
         assert_eq!(body.metric, 10);
@@ -305,6 +308,8 @@ mod tests {
         assert_eq!(dest.metric, 0x00ff_fffe);
         let lsa = originate_v3_inter_area_prefix_lsa(1, 1, &dest, None).unwrap();
         let body = crate::lsa::decode_v3_inter_area_prefix_body(&lsa.body).unwrap();
+        // The v3 inter-area-prefix metric is a 24-bit field (RFC 5340
+        // §A.4.5); the encoder caps just below LSInfinity (0x00ff_ffff).
         assert_eq!(body.metric, 0x00ff_fffe);
     }
 
@@ -320,6 +325,36 @@ mod tests {
         assert!(
             originate_v3_inter_area_prefix_lsa(1, 1, &dest, Some(MAX_SEQUENCE_NUMBER)).is_none()
         );
+    }
+
+    #[test]
+    fn v3_inter_area_body_matches_literal_rfc5340_layout() {
+        // RFC 5340 §A.4.5 + §4.4.3.4, using the RFC's own worked example
+        // (metric 4, prefix 2001:0db8:c001::/48 padded to 64 bits):
+        //
+        //   0(1) | Metric(3) | PrefixLength(1) | PrefixOptions(1) |
+        //   0(2) | Address Prefix (32-bit padded)
+        let dest = SummaryDestination::new(
+            v6_prefix(
+                [0x20, 0x01, 0x0d, 0xb8, 0xc0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                48,
+            ),
+            4,
+        );
+        let body = crate::lsa::encode_v3_inter_area_prefix_body(&dest.prefix, dest.metric);
+        let expected: [u8; 16] = [
+            0x00, 0x00, 0x00, 0x04, // reserved | metric(24)
+            0x30, // PrefixLength = 48
+            0x00, // PrefixOptions
+            0x00, 0x00, // reserved
+            0x20, 0x01, 0x0d, 0xb8, 0xc0, 0x01, 0x00, 0x00, // /48 padded to 64 bits
+        ];
+        assert_eq!(body, expected.to_vec(), "literal RFC 5340 A.4.5 layout");
+        let decoded = crate::lsa::decode_v3_inter_area_prefix_body(&body).unwrap();
+        assert_eq!(decoded.metric, 4);
+        assert_eq!(decoded.prefix_len, 48);
+        assert_eq!(decoded.prefix_bytes.len(), 6);
+        assert_eq!(&decoded.prefix_bytes, &[0x20, 0x01, 0x0d, 0xb8, 0xc0, 0x01]);
     }
 
     #[test]

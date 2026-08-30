@@ -122,7 +122,12 @@ pub struct DbExchange {
 }
 
 impl DbExchange {
+    /// Create the driver. `iface_mtu` is clamped to at least
+    /// [`DD_OVERHEAD`] so the DBD/LSU paging arithmetic
+    /// (`iface_mtu - DD_OVERHEAD`) can never underflow for tiny MTUs
+    /// (audit E1).
     pub fn new(router_id: u32, area_id: u32, iface_mtu: u16) -> Self {
+        let iface_mtu = iface_mtu.max(DD_OVERHEAD as u16);
         Self {
             router_id,
             area_id,
@@ -335,7 +340,8 @@ impl DbExchange {
                 }
             }
         }
-        // Page the answer: one LSU per MTU-sized batch.
+        // Page the answer: one LSU per MTU-sized batch. The MTU is
+        // clamped at construction, so this cannot underflow.
         let max_bytes = self.iface_mtu as usize - DD_OVERHEAD;
         let mut batch: Vec<Lsa> = Vec::new();
         let mut batch_bytes = 0usize;
@@ -491,7 +497,10 @@ impl DbExchange {
 
     /// The next page of our LSA headers (`our_cursor` walks the LSDB).
     fn next_our_chunk(&mut self, lsdb: &Lsdb) -> (Vec<LsaHeader>, bool) {
-        let per_page = ((self.iface_mtu as usize - DD_OVERHEAD) / LSA_HEADER_LEN).max(1);
+        // Saturating so a degenerate MTU can never underflow (the MTU is
+        // also clamped at construction).
+        let per_page = ((self.iface_mtu as usize).saturating_sub(DD_OVERHEAD) / LSA_HEADER_LEN)
+            .max(1);
         let mut headers = Vec::with_capacity(per_page);
         let mut iter = lsdb.headers().into_iter().skip(self.our_cursor);
         for h in iter.by_ref().take(per_page) {
@@ -500,7 +509,6 @@ impl DbExchange {
         let consumed = headers.len();
         self.our_cursor += consumed;
         self.our_more = self.our_cursor < lsdb.len();
-        let _ = iter;
         (headers, self.our_more)
     }
 

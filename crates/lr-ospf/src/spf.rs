@@ -93,7 +93,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
             VertexId::Router(rid) => {
                 // Process this router's Router-LSA.
                 for (key, entry) in lsdb.iter() {
-                    if key.ls_type != LsaTypeV2::RouterLsa as u8 || key.advertising_router != rid {
+                    if key.ls_type != LsaTypeV2::RouterLsa as u16 || key.advertising_router != rid {
                         continue;
                     }
                     // Parse router-LSA body for links.
@@ -154,7 +154,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
             VertexId::Network(ls_id) => {
                 // Network-LSA: list of attached routers.
                 for (key, entry) in lsdb.iter() {
-                    if key.ls_type != LsaTypeV2::NetworkLsa as u8 || key.link_state_id != ls_id {
+                    if key.ls_type != LsaTypeV2::NetworkLsa as u16 || key.link_state_id != ls_id {
                         continue;
                     }
                     for attached in decode_network_attached_routers(&entry.lsa.body) {
@@ -198,7 +198,7 @@ pub fn summary_routes(lsdb: &Lsdb, result: &SpfResult) -> Vec<SpfRoute> {
     // (route, advertising border router) — the router ID breaks ties.
     let mut best: BTreeMap<Prefix, (SpfRoute, u32)> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LsaTypeV2::SummaryIpLsa as u8 {
+        if key.ls_type != LsaTypeV2::SummaryIpLsa as u16 {
             continue;
         }
         // (a) The border router must be reachable via intra-area paths.
@@ -437,7 +437,7 @@ mod tests {
             header: LsaHeader {
                 ls_age: 0,
                 options: 0x02,
-                ls_type: LsaTypeV2::SummaryIpLsa as u8,
+                ls_type: LsaTypeV2::SummaryIpLsa as u16,
                 link_state_id: network,
                 advertising_router: adv,
                 ls_sequence_number: seq,
