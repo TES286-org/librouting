@@ -15,9 +15,7 @@ cargo run --release -- --pcap capture.pcap
 | Template            | Description                                          |
 |---------------------|------------------------------------------------------|
 | `analyzer/`         | Pcap-reading tool that decodes BGP/OSPF/Babel traffic. |
-| `bgp-route-server/` | IX route server with community rewriting.            |
 | `bgp-rr/`           | iBGP route reflector cluster with multiple clients.   |
-| `bgp-confederation/`| BGP confederation for AS-bypass.                       |
 | `os-integration/`   | librouting + Linux rtnetlink (install routes to FIB). |
 | `bfd-integration/`  | BGP peer with BFD for sub-second failure detection.   |
 
