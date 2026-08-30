@@ -80,6 +80,15 @@ hold_time = 90
 # CLI: --allow-local-as [N] / --allowas-any
 # allow_local_as = 0
 
+# FRR `bgp soft-reconfiguration inbound` (W2.4): retain the pre-policy
+# Adj-RIB-In for every BGP peer — the raw received routes before the
+# import hook chain runs — so a policy reconfiguration can be applied
+# without re-fetching from the peer (`clear ip bgp * soft in`). Off by
+# default (FRR's default; the cost is duplicate RIB memory per peer).
+# Per-peer override: `[peer.X] soft_reconfig_inbound = true`.
+# CLI: --soft-reconfig-inbound / --no-soft-reconfig-inbound
+# soft_reconfig_inbound = false
+
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
 # window after a session loss.

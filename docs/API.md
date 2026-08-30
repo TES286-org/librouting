@@ -747,6 +747,48 @@ and a per-peer override `[peer] allow_local_as`. The FFI mirrors it as
 (`Router.SetLocalAsTolerance`) and Python
 (`Router.set_local_as_tolerance`) bindings.
 
+### FRR `neighbor X soft-reconfiguration inbound` (W2.4)
+
+`PeerConfig::soft_reconfig_inbound` (default `false` — FRR's default)
+controls whether the router retains the **pre-policy** Adj-RIB-In for
+this peer — the raw received routes before the import hook chain
+runs — so a policy reconfiguration can be applied without re-fetching
+from the peer (`clear ip bgp * soft in`). The cost is duplicate RIB
+memory per peer, which is why it is opt-in.
+
+```rust
+let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1])))?;
+// Retain the pre-policy view so a later policy change can be
+// applied without a ROUTE_REFRESH round-trip.
+r.set_session_soft_reconfig_inbound(h, true)?;
+// ... later, after a policy change:
+let n = r.soft_reconfig_inbound(h)?; // re-evaluate, returns count
+// The pre-policy view is also available for introspection:
+let snapshot = r.adj_rib_in_snapshot(h);
+```
+
+The router's `import_route` populates the pre-policy RIB before any
+safety net or import hook runs; `withdraw_from_session` and
+`session_down_cleanup` purge it in lockstep with the post-policy RIB.
+`DefaultRouter::soft_reconfig_inbound(h)` is the FRR `clear ip bgp *
+soft in` op: it re-runs the import hooks against the stored pre-policy
+routes, replaces the session's entries in the post-policy `adj_rib_in`,
+and re-selects every affected prefix. It does NOT re-run the safety
+net / enforce-first-as / RFC 8212 checks — those are invariant under a
+policy change (they reject routes for protocol-level reasons, not
+policy reasons). `DefaultRouter::adj_rib_in_snapshot(h)` exposes the
+pre-policy view.
+
+The shipped daemon exposes it as `[bgp] soft_reconfig_inbound = bool`
+(default `false`) with the CLI `--soft-reconfig-inbound` /
+`--no-soft-reconfig-inbound` flags and a per-peer override
+`[peer] soft_reconfig_inbound`. The FFI mirrors it as
+`lr_router_set_soft_reconfig_inbound` +
+`lr_router_soft_reconfig_inbound`, as do the Go
+(`Router.SetSoftReconfigInbound` / `Router.SoftReconfigInbound`) and
+Python (`Router.set_soft_reconfig_inbound` /
+`Router.soft_reconfig_inbound`) bindings.
+
 ### FRR `bgp enforce-first-as` (W2.2)
 
 `DefaultRouter::set_enforce_first_as(true)` arms the FRR

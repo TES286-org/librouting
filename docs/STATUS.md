@@ -404,9 +404,36 @@ flags; never break standards compliance by default.
    `rejects_as_loop` test (2-byte path) plus the new router tests
    (4-byte path). The extended-community syntax sugar
    (`rt:`/`ro:` literals) already parses; no further action needed.
-4. Soft reconfiguration inbound (`neighbor X soft-reconfiguration
-   inbound`): keep the pre-policy Adj-RIB-In view — the data model
-   already supports it; expose per-session snapshots.
+4. ~~**Soft reconfiguration inbound**~~ — done: the router gained a
+   `pre_policy_adj_rib_in` storage (a second `AdjRibIn` instance)
+   that retains the **raw** received routes before the safety net
+   or import hook chain runs, for peers with `soft_reconfig_inbound`
+   enabled. `PeerConfig` gained `soft_reconfig_inbound: bool` (default
+   off — FRR's default; the cost is duplicate RIB memory per peer);
+   `SessionConfig` carries the field through `add_session`;
+   `DefaultRouter::set_session_soft_reconfig_inbound(h, on)` is the
+   post-`add_session` mutator. `import_route` populates the pre-policy
+   RIB before any safety net or import hook runs; `withdraw_from_session`
+   and `session_down_cleanup` purge it in lockstep with the post-policy
+   RIB. `DefaultRouter::soft_reconfig_inbound(h)` is the FRR `clear ip
+   bgp * soft in` op: it re-runs the import hooks against the stored
+   pre-policy routes, replaces the session's entries in the post-policy
+   `adj_rib_in`, and re-selects every affected prefix — without
+   re-fetching from the peer. `DefaultRouter::adj_rib_in_snapshot(h)`
+   exposes the pre-policy view to embedders / the runtime API. The
+   daemon wires the router-wide `[bgp] soft_reconfig_inbound = bool`
+   (default off) + CLI `--soft-reconfig-inbound` /
+   `--no-soft-reconfig-inbound` + per-peer override
+   `[peer] soft_reconfig_inbound`. FFI:
+   `lr_router_set_soft_reconfig_inbound` +
+   `lr_router_soft_reconfig_inbound`, with Go
+   (`Router.SetSoftReconfigInbound` / `Router.SoftReconfigInbound`) and
+   Python (`Router.set_soft_reconfig_inbound` /
+   `Router.soft_reconfig_inbound`) mirrors. Verified by 7 router unit
+   tests (retains-pre-policy-view, off-does-not-retain,
+   re-evaluates-after-policy-change, noop-when-flag-off,
+   unknown-handle-noop, mutator-unknown-handle-fail-closed,
+   mutator-post-start-fail-closed) and the C/Go/Python binding smokes.
 5. Maintain the interop scripts (`tests/interop/*`) as the acceptance
    gate for every compatibility item.
 

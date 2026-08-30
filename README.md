@@ -313,6 +313,20 @@ iBGP is exempt. The shipped daemon exposes it as `[bgp] allow_local_as`
 net's `local_as_count` that silently broke `reject_as_loop` for routes
 from any modern peer sending 4-byte AS_PATH.
 
+### FRR `soft-reconfiguration inbound`
+
+`PeerConfig::soft_reconfig_inbound` (default `false` — FRR's default)
+controls whether the router retains the **pre-policy** Adj-RIB-In for
+this peer — the raw received routes before the import hook chain
+runs — so a policy reconfiguration can be applied without re-fetching
+from the peer (`clear ip bgp * soft in`). The cost is duplicate RIB
+memory per peer, which is why it is opt-in.
+`DefaultRouter::soft_reconfig_inbound(h)` is the op that re-evaluates
+the import policy against the stored pre-policy routes. The shipped
+daemon exposes it as `[bgp] soft_reconfig_inbound` (default `false`)
+with per-peer override; CLI `--soft-reconfig-inbound` /
+`--no-soft-reconfig-inbound`.
+
 ## Safety net
 
 Protocol-level invariants (RFC compliance requirements) are enforced by
