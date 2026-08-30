@@ -85,16 +85,14 @@ impl BgpCodec {
         // Append incoming bytes to the carryover, then attempt decode.
         self.carryover.extend_from_slice(buf);
         let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
-        let consumed = match try_decode_frame(&self.carryover, rx_v4)? {
+        match try_decode_frame(&self.carryover, rx_v4)? {
             Some((n, msg)) => {
                 // Drain the consumed prefix.
                 self.carryover.drain(0..n);
-                return Ok(Some(msg));
+                Ok(Some(msg))
             }
-            None => 0,
-        };
-        let _ = consumed;
-        Ok(None)
+            None => Ok(None),
+        }
     }
 
     /// Direct encode of a message to a fresh Vec.
@@ -181,8 +179,14 @@ impl Decoder<BgpMessage> for BgpCodec {
         &mut self,
         src: &mut ReadBuf<'_>,
     ) -> Result<Option<BgpMessage>, lr_core::error::ParseError> {
-        // Append the slice into carryover and try decode.
+        // Append the whole chunk into the carryover and mark it consumed in
+        // the caller's view. Frames are then pulled out of the carryover one
+        // at a time: a feed that contains several complete frames (or that
+        // completes a frame started by an earlier feed) is drained across
+        // successive decode() calls without the tail being re-appended.
         self.carryover.extend_from_slice(src.chunk());
+        let all = src.remaining();
+        src.advance(all);
         let rx_v4 = self.rx_add_path(NlriFamily::IPV4_UNICAST);
         let result = try_decode_frame(&self.carryover, rx_v4).map_err(|e| match e {
             BgpError::Notification(n) => {
@@ -197,18 +201,9 @@ impl Decoder<BgpMessage> for BgpCodec {
         match result {
             Some((n, msg)) => {
                 self.carryover.drain(0..n);
-                // Reflect consumption on the caller's source buffer too.
-                let consume = src.remaining().min(n);
-                src.advance(consume);
                 Ok(Some(msg))
             }
-            None => {
-                // Source bytes already appended to carryover; mark them consumed
-                // in the caller's view to prevent double-counting.
-                let consume = src.remaining();
-                src.advance(consume);
-                Ok(None)
-            }
+            None => Ok(None),
         }
     }
 }
@@ -331,7 +326,8 @@ fn decode_update(body: &[u8], rx_v4_add_path: bool) -> Result<Update, BgpError> 
 
 /// Decode the plain IPv4 NLRI section. With RFC 7911 Add-Path active each
 /// entry is `<path-id:4, prefix-len:1, prefix>`; otherwise `<prefix-len:1,
-/// prefix>`.
+/// prefix>`. A prefix length above 32 bits is invalid for IPv4 (RFC 4271
+/// §4.3) and rejects the whole set — it must never panic.
 fn decode_nlri_set(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, String> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -348,6 +344,9 @@ fn decode_nlri_set(bytes: &[u8], add_path: bool) -> Result<Vec<Nlri>, String> {
         };
         let pl = bytes[i];
         i += 1;
+        if pl > 32 {
+            return Err(format!("invalid IPv4 prefix length {} at offset {}", pl, i));
+        }
         let n = (pl as usize).div_ceil(8);
         if i + n > bytes.len() {
             return Err(format!("truncated NLRI at offset {}", i));
@@ -775,5 +774,65 @@ mod tests {
         let bad = vec![0u8; 19];
         let res = c.decode_slice(&bad);
         assert!(res.is_err());
+    }
+
+    /// Regression: an IPv4 prefix length above 32 bits is invalid (RFC 4271
+    /// §4.3) and must be rejected — never panic on the fixed-size address
+    /// buffer (a crafted UPDATE used to crash the process).
+    #[test]
+    fn legacy_nlri_rejects_prefix_length_above_32() {
+        // Hand-build an UPDATE: withdrawn(0) + attrs(0) + NLRI with plen=255
+        // followed by 32 address octets. The old decoder indexed a [u8; 4]
+        // buffer with n = ceil(255/8) = 32 → panic.
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u16.to_be_bytes()); // withdrawn len
+        body.extend_from_slice(&0u16.to_be_bytes()); // path attrs len
+        body.push(255); // invalid prefix length
+        body.extend_from_slice(&[0xab; 32]);
+
+        let mut frame = vec![0xffu8; 16];
+        let len = 19 + body.len();
+        frame.extend_from_slice(&(len as u16).to_be_bytes());
+        frame.push(2); // UPDATE
+        frame.extend_from_slice(&body);
+
+        let mut c = BgpCodec::new();
+        let res = c.decode_slice(&frame);
+        assert!(res.is_err(), "invalid prefix length must error, not panic");
+    }
+
+    /// Regression: when a feed completes a frame started by an earlier feed
+    /// and contains more complete frames, every complete frame must decode
+    /// exactly once. The old decoder re-appended the source tail to the
+    /// carryover and decoded phantom messages.
+    #[test]
+    fn streaming_decoder_splits_feed_without_duplication() {
+        let codec = BgpCodec::new();
+        let msg = BgpMessage::Keepalive(Keepalive);
+        let bytes = codec.encode_vec(&msg).unwrap();
+        // Three complete frames back to back.
+        let mut three = bytes.clone();
+        three.extend_from_slice(&bytes);
+        three.extend_from_slice(&bytes);
+
+        let mut c = BgpCodec::new();
+        // Feed a partial prefix of the first frame.
+        assert!(c.decode_slice(&three[..10]).unwrap().is_none());
+        // Feed the rest: completes frame 1 and contains frames 2 and 3.
+        let mut decoded = Vec::new();
+        let mut remaining = &three[10..];
+        loop {
+            match c.decode_slice(remaining).unwrap() {
+                Some(m) => {
+                    decoded.push(m);
+                    remaining = &[];
+                }
+                None => break,
+            }
+        }
+        assert_eq!(decoded.len(), 3, "three frames must decode, not more");
+        for m in &decoded {
+            assert!(matches!(m, BgpMessage::Keepalive(_)));
+        }
     }
 }

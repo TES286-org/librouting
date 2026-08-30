@@ -19,12 +19,18 @@ pub fn encode_ipv4_nlri(prefixes: &[Prefix]) -> Vec<u8> {
 }
 
 /// Decode a slice of IPv4 NLRI prefixes.
+///
+/// A prefix length above 32 bits is invalid for IPv4 (RFC 4271 §4.3) and
+/// makes the caller reject the whole set — it must never panic.
 pub fn decode_ipv4_nlri(bytes: &[u8]) -> Option<Vec<Prefix>> {
     let mut out = Vec::new();
     let mut i = 0;
     while i < bytes.len() {
         let pl = bytes[i];
         i += 1;
+        if pl > 32 {
+            return None;
+        }
         let n = (pl as usize).div_ceil(8);
         if i + n > bytes.len() {
             return None;
