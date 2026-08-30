@@ -4,6 +4,16 @@ use core::fmt;
 
 use lr_core::util::fletcher;
 
+/// Grace-LSA (RFC 3623 for v2 / RFC 5187 for v3): the Opaque-AS-LSA
+/// a restarting router floods to announce its planned shutdown and
+/// request that neighbours retain its LSAs for a grace period.
+pub mod grace;
+pub use grace::{
+    is_grace_restart_capable, opaque_lsa_id, originate_grace_lsa_v2, unpack_opaque_lsa_id,
+    with_grace_restart_capable, GraceLsaBody, GraceReason, GraceTlvType, OPAQUE_TYPE_GRACE,
+    OPTIONS_O_BIT,
+};
+
 /// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.
 pub use crate::lsdb::MAX_AGE_SECS;
 
