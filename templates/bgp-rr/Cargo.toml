@@ -7,3 +7,5 @@ edition = "2021"
 lr-core = { path = "../../crates/lr-core" }
 lr-bgp = { path = "../../crates/lr-bgp" }
 lr-router = { path = "../../crates/lr-router" }
+
+[workspace]

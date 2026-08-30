@@ -6,3 +6,5 @@ edition = "2021"
 [dependencies]
 lr-core = { path = "../../crates/lr-core" }
 lr-osroute = { path = "../../crates/lr-osroute" }
+
+[workspace]

@@ -8,3 +8,5 @@ lr-core = { path = "../../crates/lr-core" }
 lr-bgp = { path = "../../crates/lr-bgp" }
 lr-ospf = { path = "../../crates/lr-ospf" }
 lr-babel = { path = "../../crates/lr-babel" }
+
+[workspace]
