@@ -361,11 +361,28 @@ mod imp {
             let ask = |conn: &mut UnixStream, cmd: &str| -> String {
                 conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
                 conn.flush().unwrap();
-                // Give the server a beat, then read what arrived.
-                thread::sleep(Duration::from_millis(100));
+                // Poll for the response with a timeout — robust under
+                // CI load where the original fixed 100ms sleep was
+                // too short. Read in a loop until the socket has no
+                // more data (non-blocking read returns WouldBlock).
+                use std::io::ErrorKind;
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
                 let mut buf = Vec::new();
                 conn.set_nonblocking(true).unwrap();
-                let _ = conn.read_to_end(&mut buf);
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    match conn.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                            if !buf.is_empty() || std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
                 conn.set_nonblocking(false).unwrap();
                 String::from_utf8_lossy(&buf).into_owned()
             };
