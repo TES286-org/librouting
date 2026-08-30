@@ -158,6 +158,8 @@ jobs:
         run: ./tests/interop/labeled_unicast.sh
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         run: ./tests/interop/ospf.sh
+      - name: Babel MAC auth e2e (RFC 8967 + RFC 9467, two daemons)
+        run: ./tests/interop/babel_auth.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)
         run: ./tests/interop/ospf_bird.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
