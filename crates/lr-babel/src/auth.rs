@@ -1056,6 +1056,8 @@ impl BabelAuthInterface {
                 entry.pcm.reset_to(pc);
                 entry.pcu.reset_to(pc);
                 entry.last_activity_ms = now_ms;
+                let body_len = (plain.len() - BODY_OFFSET) as u16;
+                plain[2..4].copy_from_slice(&body_len.to_be_bytes());
                 out.accepted = Some(plain);
                 return out;
             }
@@ -1112,6 +1114,11 @@ impl BabelAuthInterface {
             entry.pcu.commit(pc);
         }
         entry.last_activity_ms = now_ms;
+        // The plain body lost the PC (and any stray challenge) TLVs, so the
+        // header's Body Length — which covered the authenticated body — must
+        // be repointed at the stripped body the codec is about to parse.
+        let body_len = (plain.len() - BODY_OFFSET) as u16;
+        plain[2..4].copy_from_slice(&body_len.to_be_bytes());
         out.accepted = Some(plain);
         out
     }
