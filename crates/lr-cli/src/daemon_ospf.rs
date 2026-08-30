@@ -56,7 +56,7 @@ use lr_core::error::EncodeError;
 use lr_ospf::codec::OspfCodec;
 use lr_ospf::lsa::Lsa;
 use lr_ospf::origination::{
-    finalize_v2_packet, finalize_v2_stream, originate_router_lsa, v2_packet_checksum_ok,
+    finalize_v2_packet, originate_router_lsa, v2_packet_checksum_ok,
     RouterLsaLink,
 };
 use lr_ospf::packet::{HelloBody, LsUpdateBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType};
@@ -687,11 +687,14 @@ impl OspfDaemon {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.lock().unwrap();
             for n in self.neighbors.values() {
-                let mut stream = router.drain_output(n.handle);
+                let stream = router.drain_output(n.handle);
                 if stream.is_empty() {
                     continue;
                 }
-                finalize_v2_stream(&mut stream);
+                // The router finalizes the RFC 2328 §A.1 checksum on every
+                // OSPFv2 packet it emits (feed_input, tick exchange, flood).
+                // Finalizing again would zero the checksum — the second pass
+                // folds the already-set field and recomputes a wrong value.
                 let mut off = 0usize;
                 while off + lr_ospf::packet::OspfHeader::LEN <= stream.len() {
                     let len = u16::from_be_bytes([stream[off + 2], stream[off + 3]]) as usize;
