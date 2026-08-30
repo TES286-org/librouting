@@ -882,14 +882,9 @@ mod tests {
         // Feed the rest: completes frame 1 and contains frames 2 and 3.
         let mut decoded = Vec::new();
         let mut remaining = &three[10..];
-        loop {
-            match c.decode_slice(remaining).unwrap() {
-                Some(m) => {
-                    decoded.push(m);
-                    remaining = &[];
-                }
-                None => break,
-            }
+        while let Some(m) = c.decode_slice(remaining).unwrap() {
+            decoded.push(m);
+            remaining = &[];
         }
         assert_eq!(decoded.len(), 3, "three frames must decode, not more");
         for m in &decoded {

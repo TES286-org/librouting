@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn ipv6_mixed_form() {
         let a: IpAddr = "::ffff:1.2.3.4".parse().unwrap();
-        eprintln!("parsed: {:02x?} -> {}", a.octets(), a.to_string());
+        eprintln!("parsed: {:02x?} -> {}", a.octets(), a);
         assert!(a.is_ipv4_mapped_ipv6());
         assert_eq!(a.to_string(), "::ffff:1.2.3.4");
 

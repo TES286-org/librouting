@@ -513,7 +513,7 @@ mod tests {
 
     /// Patch the v2 checksum into an encoded packet so the receive-side
     /// validation (RFC 2328 §8.2) accepts it.
-    fn finalized_v2(bytes: &mut Vec<u8>) {
+    fn finalized_v2(bytes: &mut [u8]) {
         assert!(crate::origination::finalize_v2_packet(bytes));
     }
 
@@ -652,7 +652,7 @@ mod tests {
         match p2.body {
             OspfBody::Hello(h) => {
                 assert_eq!(h.network_mask, 7);
-                assert_eq!(h.options, 0x0002_01);
+                assert_eq!(h.options, 0x0000_0201);
                 assert_eq!(h.priority, 3);
                 assert_eq!(h.dr, 0x0a00_0001);
                 assert_eq!(h.neighbors, vec![0x0a00_0002]);
@@ -687,7 +687,7 @@ mod tests {
         match p2.body {
             OspfBody::DbDesc(d) => {
                 assert_eq!(d.mtu, 1500);
-                assert_eq!(d.options, 0x0002_01);
+                assert_eq!(d.options, 0x0000_0201);
                 assert_eq!(d.flags, 0x07);
                 assert_eq!(d.dd_seq, 0x1122_3344);
             }
@@ -814,7 +814,7 @@ mod tests {
         // The decoder must not re-parse the bad frame forever: a valid
         // packet offered afterwards decodes fine.
         let codec_e = OspfCodec::v2();
-        let mut pkt = OspfPacket {
+        let pkt = OspfPacket {
             header: header(1, 0x01020304),
             body: OspfBody::Hello(HelloBody {
                 network_mask: 0xffffff00,

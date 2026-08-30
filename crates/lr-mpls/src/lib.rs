@@ -554,8 +554,8 @@ mod tests {
         );
         // The unchecked const constructors keep working (they mask on
         // encode), but the decoded value is truncated to 20 bits.
-        assert_eq!(Label::new_value(0x1_0000_0).value, 0x1_0000_0);
-        let enc = Label::new_value(0x1_0000_0).encode_3octet(true);
+        assert_eq!(Label::new_value(0x0010_0000).value, 0x0010_0000);
+        let enc = Label::new_value(0x0010_0000).encode_3octet(true);
         assert_eq!(
             LabelStack::decode_3octet(&enc).unwrap().labels()[0].value,
             0
