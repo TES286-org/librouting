@@ -622,7 +622,7 @@ mod tests {
         // nlmsghdr + rtmsg fields.
         assert_eq!(req[16], AF_MPLS); // rtm_family
         assert_eq!(req[17], MPLS_LABEL_LEN); // rtm_dst_len
-        // RTA_DST: 4-octet in-label (kernel `nla_get_labels` shifts >> 12).
+                                             // RTA_DST: 4-octet in-label (kernel `nla_get_labels` shifts >> 12).
         let dst = find_attr(&req, RTA_DST).expect("RTA_DST");
         assert_eq!(dst.len(), 4);
         assert_eq!(u32::from_be_bytes(dst.try_into().unwrap()) >> 12, 100);
@@ -643,9 +643,7 @@ mod tests {
         let route = MplsRoute::swap(
             Label::new(100),
             LabelStack::from_values([200]),
-            IpAddr::V6([
-                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-            ]),
+            IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
             3,
         );
         let req = nl

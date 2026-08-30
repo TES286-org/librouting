@@ -1212,7 +1212,7 @@ mod tests {
     fn set_local_address_rejects_bad_length_without_ub() {
         let r = lr_router_new();
         let bytes = [1u8, 2, 3]; // 3 bytes: neither 4 (v4) nor 16 (v6)
-        // Must fail with -3 before any slice of length 3 is constructed.
+                                 // Must fail with -3 before any slice of length 3 is constructed.
         assert_eq!(
             unsafe { lr_router_set_local_address(r, 0, 1, bytes.as_ptr(), 3) },
             -3
@@ -1282,7 +1282,19 @@ mod tests {
         assert_eq!(
             unsafe {
                 lr_router_add_bgp_session_ext(
-                    r, 64512, 64513, 0x0a00_0001, 90, 30, 1, 1, 120, 0, 0, 0, &mut h,
+                    r,
+                    64512,
+                    64513,
+                    0x0a00_0001,
+                    90,
+                    30,
+                    1,
+                    1,
+                    120,
+                    0,
+                    0,
+                    0,
+                    &mut h,
                 )
             },
             0
@@ -1310,7 +1322,19 @@ mod tests {
         assert_eq!(
             unsafe {
                 lr_router_add_bgp_session_ext(
-                    r, 64512, 64513, 0x0a00_0002, 90, 30, 1, 1, 120, 0, 0, 0, &mut h,
+                    r,
+                    64512,
+                    64513,
+                    0x0a00_0002,
+                    90,
+                    30,
+                    1,
+                    1,
+                    120,
+                    0,
+                    0,
+                    0,
+                    &mut h,
                 )
             },
             0
@@ -1319,7 +1343,10 @@ mod tests {
         // equivalent of FRR `no bgp default ipv4-unicast` with no
         // `neighbor X address-family`).
         assert_eq!(lr_router_set_default_ipv4_unicast(r, h, 0), 0);
-        assert_eq!(unsafe { lr_router_set_mp_families(r, h, std::ptr::null(), 0) }, 0);
+        assert_eq!(
+            unsafe { lr_router_set_mp_families(r, h, std::ptr::null(), 0) },
+            0
+        );
         assert_eq!(lr_router_start_session(r, h), 0);
         let open = drain_all(r, h);
         let mp_v4: &[u8] = &[0x01, 0x04, 0x00, 0x01, 0x00, 0x01];

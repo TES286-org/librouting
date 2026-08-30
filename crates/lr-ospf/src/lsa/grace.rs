@@ -146,7 +146,7 @@ impl GraceLsaBody {
         out.extend_from_slice(&1u16.to_be_bytes());
         out.push(self.reason as u8);
         out.extend_from_slice(&[0, 0, 0]); // 4-octet alignment
-        // Optional: IP Interface Address (type 3, length 4 or 16).
+                                           // Optional: IP Interface Address (type 3, length 4 or 16).
         if let Some(addr) = self.ipv4_address {
             out.extend_from_slice(&(GraceTlvType::IpInterfaceAddress as u16).to_be_bytes());
             out.extend_from_slice(&4u16.to_be_bytes());
@@ -376,7 +376,11 @@ mod tests {
         assert_eq!(wire[12], GraceReason::SoftwareRestart as u8);
         assert_eq!(&wire[13..16], &[0, 0, 0], "3 octets of padding");
         // TLV 3: IP interface address (type 3, len 4).
-        assert_eq!(&wire[16..18], &[0, 3], "IP interface address type must be 3");
+        assert_eq!(
+            &wire[16..18],
+            &[0, 3],
+            "IP interface address type must be 3"
+        );
         assert_eq!(&wire[18..20], &[0, 4]);
         assert_eq!(&wire[20..24], &[192, 0, 2, 1]);
         assert_eq!(wire.len(), 24);

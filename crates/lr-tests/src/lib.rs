@@ -125,9 +125,7 @@ mod tests {
         let mut frame = BabelFrame::empty();
         frame.body.push(Tlv::new(
             TlvType::Hello,
-            Hello::new(1, 200)
-            .encode()
-            .to_vec(),
+            Hello::new(1, 200).encode().to_vec(),
         ));
         let codec = BabelCodec::new();
         let bytes = codec.encode_vec(&frame).unwrap();

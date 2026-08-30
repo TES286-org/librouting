@@ -284,7 +284,7 @@ pub fn encode_v3_inter_area_prefix_body(prefix: &lr_core::addr::Prefix, metric: 
     v.push(prefix.prefix_len);
     v.push(0); // PrefixOptions — all zero
     v.extend_from_slice(&0u16.to_be_bytes()); // reserved
-    // Address prefix: ceil(PL/8) bytes, zero-padded to a 32-bit boundary.
+                                              // Address prefix: ceil(PL/8) bytes, zero-padded to a 32-bit boundary.
     let n = (prefix.prefix_len as usize).div_ceil(8);
     let padded = n.next_multiple_of(4);
     match &prefix.addr {

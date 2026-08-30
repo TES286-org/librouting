@@ -4729,15 +4729,12 @@ impl DefaultRouter {
                     // also terminates the apply_selection →
                     // redistribute_route cycle when the copy itself is
                     // the Loc-RIB best and re-matches its own pipe.
-                    let unchanged = self
-                        .redistributed_bgp
-                        .get(&key)
-                        .is_some_and(|existing| {
-                            existing.origin == bgp_route.origin
-                                && existing.preference == bgp_route.preference
-                                && existing.attributes == bgp_route.attributes
-                                && existing.next_hop == bgp_route.next_hop
-                        });
+                    let unchanged = self.redistributed_bgp.get(&key).is_some_and(|existing| {
+                        existing.origin == bgp_route.origin
+                            && existing.preference == bgp_route.preference
+                            && existing.attributes == bgp_route.attributes
+                            && existing.next_hop == bgp_route.next_hop
+                    });
                     if unchanged {
                         continue;
                     }
@@ -4756,21 +4753,19 @@ impl DefaultRouter {
                         .cloned()
                         .collect();
                     candidates.push(bgp_route);
-                    let ranked: Vec<Route> = if candidates
-                        .iter()
-                        .all(|r| r.protocol == Protocol::Bgp)
-                    {
-                        BestPath::rank(&candidates, &self.best_path_cfg)
-                            .into_iter()
-                            .take(self.add_path_max_paths)
-                            .cloned()
-                            .collect()
-                    } else {
-                        RouteSelector::select(&candidates)
-                            .into_iter()
-                            .cloned()
-                            .collect()
-                    };
+                    let ranked: Vec<Route> =
+                        if candidates.iter().all(|r| r.protocol == Protocol::Bgp) {
+                            BestPath::rank(&candidates, &self.best_path_cfg)
+                                .into_iter()
+                                .take(self.add_path_max_paths)
+                                .cloned()
+                                .collect()
+                        } else {
+                            RouteSelector::select(&candidates)
+                                .into_iter()
+                                .cloned()
+                                .collect()
+                        };
                     self.apply_selection(&key, ranked);
                     self.pending_events.push(RouterEvent::Log(format!(
                         "redistribute: {} -> BGP (metric={})",
@@ -7044,9 +7039,13 @@ mod tests {
         assert_eq!(a.rib_len(), 0, "peer's routes must not survive Close");
         assert!(a.adj_rib_in.is_empty(), "Adj-RIB-In purged");
         assert!(
-            !a.sessions
-                .get(&a_session.0)
-                .is_some_and(|s| matches!(s, SessionState::Bgp { established: true, .. })),
+            !a.sessions.get(&a_session.0).is_some_and(|s| matches!(
+                s,
+                SessionState::Bgp {
+                    established: true,
+                    ..
+                }
+            )),
             "established latch cleared"
         );
     }
@@ -7108,7 +7107,13 @@ mod tests {
         // steady-state export path (RFC 4271 §9.1.3 Phase 3).
         assert!(
             a.adj_rib_out
-                .paths_for(RouteOrigin { proto: 0, peer: a_session.0 }, &key)
+                .paths_for(
+                    RouteOrigin {
+                        proto: 0,
+                        peer: a_session.0
+                    },
+                    &key
+                )
                 .is_empty(),
             "the origin session's Adj-RIB-Out must not carry its own retained route"
         );
@@ -7266,8 +7271,13 @@ mod tests {
         assert_eq!(a.adj_rib_in_snapshot(a_session).len(), 1);
         // Seed the bookkeeping that used to leak.
         a.llgr_caps.insert(a_session.0, 5);
-        a.max_prefix_state
-            .insert(a_session.0, MaxPrefixState { count: 1, ..Default::default() });
+        a.max_prefix_state.insert(
+            a_session.0,
+            MaxPrefixState {
+                count: 1,
+                ..Default::default()
+            },
+        );
 
         a.remove_session(a_session).unwrap();
         assert!(a.adj_rib_in.is_empty(), "Adj-RIB-In purged");

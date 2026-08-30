@@ -1641,12 +1641,8 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
         .and_then(|s| s.parse::<u32>().ok())
         .unwrap_or(0);
     let port = cfg.babel_port;
-    let bind_addr = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
-        local_ip,
-        port,
-        0,
-        scope_id,
-    ));
+    let bind_addr =
+        std::net::SocketAddr::V6(std::net::SocketAddrV6::new(local_ip, port, 0, scope_id));
     let sock = match UdpSocket::bind(bind_addr) {
         Ok(s) => s,
         Err(e) => {
@@ -1762,9 +1758,8 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
         };
         if !out.is_empty() {
             // Send to the Babel multicast group on the bound interface.
-            let dest = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
-                group, port, 0, scope_id,
-            ));
+            let dest =
+                std::net::SocketAddr::V6(std::net::SocketAddrV6::new(group, port, 0, scope_id));
             let _ = sock.send_to(&out, dest);
         }
     }
@@ -1858,7 +1853,6 @@ pub(crate) fn write_mrt_rib_dump(
         asn: lr_core::addr::Asn(0),
     });
     // One peer per BGP session that contributed at least one route.
-    let summaries = summaries;
     let mut session_peer: std::collections::BTreeMap<u64, u16> = std::collections::BTreeMap::new();
     for s in summaries {
         if s.kind != "bgp" {

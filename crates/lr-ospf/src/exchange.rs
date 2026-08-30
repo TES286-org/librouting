@@ -499,8 +499,8 @@ impl DbExchange {
     fn next_our_chunk(&mut self, lsdb: &Lsdb) -> (Vec<LsaHeader>, bool) {
         // Saturating so a degenerate MTU can never underflow (the MTU is
         // also clamped at construction).
-        let per_page = ((self.iface_mtu as usize).saturating_sub(DD_OVERHEAD) / LSA_HEADER_LEN)
-            .max(1);
+        let per_page =
+            ((self.iface_mtu as usize).saturating_sub(DD_OVERHEAD) / LSA_HEADER_LEN).max(1);
         let mut headers = Vec::with_capacity(per_page);
         let mut iter = lsdb.headers().into_iter().skip(self.our_cursor);
         for h in iter.by_ref().take(per_page) {

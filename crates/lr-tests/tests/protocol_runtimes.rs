@@ -143,9 +143,7 @@ fn babel_update_installs_route() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello::new(1, 400)
-        .encode()
-        .to_vec(),
+        Hello::new(1, 400).encode().to_vec(),
     ));
     frame.body.push(Tlv::new(
         TlvType::RouterId,
@@ -205,9 +203,7 @@ fn babel_infinity_metric_retracts() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello::new(1, 400)
-        .encode()
-        .to_vec(),
+        Hello::new(1, 400).encode().to_vec(),
     ));
     frame.body.push(Tlv::new(
         TlvType::NextHop,
@@ -323,9 +319,7 @@ fn ospf_lsa_update_installs_stub_route() {
             lsas: vec![lsa],
         }),
     };
-    let mut bytes = lr_ospf::codec::OspfCodec::v2()
-        .encode_vec(&pkt)
-        .unwrap();
+    let mut bytes = lr_ospf::codec::OspfCodec::v2().encode_vec(&pkt).unwrap();
     // The codec zeroes the packet checksum; the router validates it on
     // receive (RFC 2328 §8.2).
     assert!(lr_ospf::origination::finalize_v2_packet(&mut bytes));
@@ -361,9 +355,7 @@ fn cross_protocol_bgp_wins_over_babel() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello::new(1, 400)
-        .encode()
-        .to_vec(),
+        Hello::new(1, 400).encode().to_vec(),
     ));
     frame.body.push(Tlv::new(
         TlvType::NextHop,
@@ -448,9 +440,7 @@ fn events_carry_route_keys() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello::new(1, 400)
-        .encode()
-        .to_vec(),
+        Hello::new(1, 400).encode().to_vec(),
     ));
     frame.body.push(Tlv::new(
         TlvType::NextHop,

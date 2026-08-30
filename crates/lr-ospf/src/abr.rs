@@ -336,7 +336,9 @@ mod tests {
         //   0(2) | Address Prefix (32-bit padded)
         let dest = SummaryDestination::new(
             v6_prefix(
-                [0x20, 0x01, 0x0d, 0xb8, 0xc0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                [
+                    0x20, 0x01, 0x0d, 0xb8, 0xc0, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+                ],
                 48,
             ),
             4,

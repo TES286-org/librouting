@@ -119,7 +119,6 @@ mod imp {
                     let router = Arc::clone(&router);
                     let running = Arc::clone(&running);
                     let reload = Arc::clone(&reload);
-                    let started = started;
                     let path_owned = path_owned.clone();
                     thread::Builder::new()
                         .name("lr-api-conn".into())
@@ -239,7 +238,10 @@ mod imp {
                     let (routes, summaries) = {
                         let r = router.lock().unwrap();
                         (
-                            r.rib_paths_snapshot().into_iter().cloned().collect::<Vec<_>>(),
+                            r.rib_paths_snapshot()
+                                .into_iter()
+                                .cloned()
+                                .collect::<Vec<_>>(),
                             r.session_summaries(),
                         )
                     };

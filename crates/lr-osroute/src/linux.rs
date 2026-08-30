@@ -269,7 +269,9 @@ impl RtNetlink {
             if n == 0 {
                 // Netlink has no EOF semantics; a zero-length datagram is
                 // malformed — bail rather than spin.
-                return Err(OsRouteError("recv: zero-length netlink datagram".to_string()));
+                return Err(OsRouteError(
+                    "recv: zero-length netlink datagram".to_string(),
+                ));
             }
             out.extend_from_slice(&chunk[..n as usize]);
             if dump_contains_done(&out) {

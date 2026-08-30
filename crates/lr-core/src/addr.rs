@@ -297,11 +297,7 @@ fn to_ipv6_string(b: &[u8; 16]) -> String {
         // The 5 zero groups compress to "::"; then "ffff" + the quad.
         head.push_str("::ffff:");
         use core::fmt::Write;
-        let _ = write!(
-            head,
-            "{}.{}.{}.{}",
-            b[12], b[13], b[14], b[15]
-        );
+        let _ = write!(head, "{}.{}.{}.{}", b[12], b[13], b[14], b[15]);
         return head;
     }
 

@@ -66,10 +66,7 @@ pub struct Elector {
 /// claims) if it is eligible — routers with priority 0 never participate
 /// (§9.4.1 step 1).
 pub fn elect(electors: &[Elector], our_id: u32) -> (u32, u32) {
-    let eligible: Vec<&Elector> = electors
-        .iter()
-        .filter(|e| e.priority > 0)
-        .collect();
+    let eligible: Vec<&Elector> = electors.iter().filter(|e| e.priority > 0).collect();
 
     // Step 1: BDR — pick the router that declared itself BDR (and is in our
     // list), with highest priority, then highest router-id. If none declared

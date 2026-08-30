@@ -357,7 +357,10 @@ fn bgp4mp_state_change_as4_subtype_5_decodes() {
     assert_eq!(sc.common.peer_as, Asn(65010));
     assert_eq!(sc.common.local_as, Asn(65000));
     assert_eq!(sc.common.af, 2);
-    assert_eq!(sc.common.peer_ip, IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]));
+    assert_eq!(
+        sc.common.peer_ip,
+        IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+    );
     assert_eq!(sc.old_state, 2);
     assert_eq!(sc.new_state, 6);
 }

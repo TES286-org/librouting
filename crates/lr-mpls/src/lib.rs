@@ -203,9 +203,7 @@ impl fmt::Display for LabelStackError {
         match self {
             Self::TooShort => f.write_str("label stack input is empty"),
             Self::UnevenLength => f.write_str("label stack input is not a multiple of entry width"),
-            Self::MidStackBottom => {
-                f.write_str("bottom-of-stack bit set on a non-bottom entry")
-            }
+            Self::MidStackBottom => f.write_str("bottom-of-stack bit set on a non-bottom entry"),
             Self::ValueOutOfRange(v) => write!(f, "label value {} exceeds the 20-bit range", v),
         }
     }
@@ -558,7 +556,10 @@ mod tests {
         // encode), but the decoded value is truncated to 20 bits.
         assert_eq!(Label::new_value(0x1_0000_0).value, 0x1_0000_0);
         let enc = Label::new_value(0x1_0000_0).encode_3octet(true);
-        assert_eq!(LabelStack::decode_3octet(&enc).unwrap().labels()[0].value, 0);
+        assert_eq!(
+            LabelStack::decode_3octet(&enc).unwrap().labels()[0].value,
+            0
+        );
     }
 
     #[test]

@@ -285,10 +285,11 @@ BIRD/FRR-style, without an embedder writing code.
    namespace each, rootless via `unshare -Urn`) reach Full adjacency,
    exchange stub nets both directions (10.99.2.0/24 ↔ 10.99.3.0/24)
    and tear the session down on the dead timer. Scope notes: OSPFv2
-   only (v3 needs Link-LSAs); no DR election — segments behave p2p
-   (DR/BDR stay 0.0.0.0; BIRD sees our Hellos and reaches ExStart,
-   but Full interop waits on real DBD/LSR exchange, tracked below);
-   auth and reload are not wired into the daemon yet.
+   only (v3 needs Link-LSAs); no DR election in the daemon — segments
+   behave p2p (DR/BDR stay 0.0.0.0; the library's `interface` module
+   implements §9.4.1 election and the DR/Backup FSM states for
+   broadcast segments); auth and reload are not wired into the daemon
+   yet.
 6. ~~**Operational tooling**~~ — done: the `lr-mrt` crate (RFC 6396)
    reads and writes TABLE_DUMP_V2 dumps (peer index tables,
    RIB_IPV4/IPv6_UNICAST incl. the ADDPATH variants; BGP4MP decode for

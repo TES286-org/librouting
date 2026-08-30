@@ -1146,13 +1146,17 @@ mod tests {
         frame.push(2); // UPDATE
         frame.extend_from_slice(&0u16.to_be_bytes()); // withdrawn len
         frame.extend_from_slice(&8u16.to_be_bytes()); // attrs len
-        // ORIGIN(1) flags=0x40, len=1, value=0
+                                                      // ORIGIN(1) flags=0x40, len=1, value=0
         frame.extend_from_slice(&[0x40, 1, 1, 0]);
         // ORIGIN(1) again — duplicate.
         frame.extend_from_slice(&[0x40, 1, 1, 0]);
         // No NLRI.
         let actions = a.feed_bytes(&frame).unwrap();
-        assert_eq!(a.state(), BgpState::Idle, "malformed UPDATE must close the session");
+        assert_eq!(
+            a.state(),
+            BgpState::Idle,
+            "malformed UPDATE must close the session"
+        );
         assert!(!a.is_established());
         assert!(actions.iter().any(|x| matches!(x, BgpAction::Close)));
         // The peer must receive the NOTIFICATION (Malformed Attribute List:

@@ -328,4 +328,5 @@ permit = false
 # cost = 10                   # Router-LSA link metric
 # hello_interval = 10         # inherits [ospf]
 # dead_interval = 40          # inherits [ospf]
-# priority = 1                # DR election priority (future)
+# priority = 1                # DR election priority (the daemon runs
+                              # p2p segments only, so this is inert today)

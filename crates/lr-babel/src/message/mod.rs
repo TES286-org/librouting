@@ -576,10 +576,7 @@ mod tests {
         assert_eq!(u16::from_be_bytes([enc[8], enc[9]]), 100); // Metric
         let dec = Update::decode(&enc).unwrap();
         assert_eq!(dec, u);
-        assert_eq!(
-            u.prefix_value(),
-            Some(Prefix::new_v4([203, 0, 113, 0], 24))
-        );
+        assert_eq!(u.prefix_value(), Some(Prefix::new_v4([203, 0, 113, 0], 24)));
     }
 
     #[test]

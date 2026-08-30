@@ -128,7 +128,8 @@ fn encode_hello(
     } else {
         // v3 has a 4-byte Interface ID instead of the network mask
         // (RFC 5340 §A.3.2).
-        out.put_u32_be(h.network_mask).ok_or(EncodeError::BufferFull)?;
+        out.put_u32_be(h.network_mask)
+            .ok_or(EncodeError::BufferFull)?;
     }
     out.put_u16_be(h.hello_interval)
         .ok_or(EncodeError::BufferFull)?;
@@ -200,7 +201,11 @@ fn encode_lsreq(
     Ok(())
 }
 
-fn encode_lsupdate(u: &LsUpdateBody, _version: OspfVersion, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+fn encode_lsupdate(
+    u: &LsUpdateBody,
+    _version: OspfVersion,
+    out: &mut WriteBuf<'_>,
+) -> Result<(), EncodeError> {
     out.put_u32_be(u.lsa_count).ok_or(EncodeError::BufferFull)?;
     for lsa in &u.lsas {
         out.put_bytes(&lsa.to_wire())
@@ -209,14 +214,22 @@ fn encode_lsupdate(u: &LsUpdateBody, _version: OspfVersion, out: &mut WriteBuf<'
     Ok(())
 }
 
-fn encode_lsack(a: &LsAckBody, version: OspfVersion, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+fn encode_lsack(
+    a: &LsAckBody,
+    version: OspfVersion,
+    out: &mut WriteBuf<'_>,
+) -> Result<(), EncodeError> {
     for h in &a.lsa_headers {
         encode_lsa_header(h, version, out)?;
     }
     Ok(())
 }
 
-fn encode_lsa_header(h: &LsaHeader, version: OspfVersion, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+fn encode_lsa_header(
+    h: &LsaHeader,
+    version: OspfVersion,
+    out: &mut WriteBuf<'_>,
+) -> Result<(), EncodeError> {
     out.put_u16_be(h.ls_age).ok_or(EncodeError::BufferFull)?;
     if version == OspfVersion::V2 {
         // RFC 2328 §A.4.1: age(2) | options(1) | type(1).
@@ -300,24 +313,9 @@ fn decode_hello(b: &[u8], version: OspfVersion) -> Result<HelloBody, ParseError>
     } else {
         (u32::from_be_bytes([0, b[6], b[7], b[8]]), b[9], 10usize)
     };
-    let dead_interval = u32::from_be_bytes([
-        b[fixed],
-        b[fixed + 1],
-        b[fixed + 2],
-        b[fixed + 3],
-    ]);
-    let dr = u32::from_be_bytes([
-        b[fixed + 4],
-        b[fixed + 5],
-        b[fixed + 6],
-        b[fixed + 7],
-    ]);
-    let bdr = u32::from_be_bytes([
-        b[fixed + 8],
-        b[fixed + 9],
-        b[fixed + 10],
-        b[fixed + 11],
-    ]);
+    let dead_interval = u32::from_be_bytes([b[fixed], b[fixed + 1], b[fixed + 2], b[fixed + 3]]);
+    let dr = u32::from_be_bytes([b[fixed + 4], b[fixed + 5], b[fixed + 6], b[fixed + 7]]);
+    let bdr = u32::from_be_bytes([b[fixed + 8], b[fixed + 9], b[fixed + 10], b[fixed + 11]]);
     let mut neighbors = Vec::new();
     let mut i = fixed + 12;
     while i + 4 <= b.len() {
@@ -352,7 +350,12 @@ fn decode_dbdesc(b: &[u8], version: OspfVersion) -> Result<DbDescBody, ParseErro
         _ => u32::from_be_bytes([0, b[opt_off], b[opt_off + 1], b[opt_off + 2]]),
     };
     let flags = b[flags_off];
-    let dd_seq = u32::from_be_bytes([b[flags_off + 1], b[flags_off + 2], b[flags_off + 3], b[flags_off + 4]]);
+    let dd_seq = u32::from_be_bytes([
+        b[flags_off + 1],
+        b[flags_off + 2],
+        b[flags_off + 3],
+        b[flags_off + 4],
+    ]);
     let mut lsa_headers = Vec::new();
     let mut i = fixed;
     while i + LsaHeader::LEN <= b.len() {

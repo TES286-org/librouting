@@ -314,7 +314,11 @@ mod tests {
         let auth = V3Auth::new(7, b"key".to_vec()).with_source(src());
         let packet = make_v3_packet();
         let trailer = auth.sign_trailer(&packet, &[]);
-        assert_eq!(&trailer[0..2], &1u16.to_be_bytes(), "Authentication Type = 1");
+        assert_eq!(
+            &trailer[0..2],
+            &1u16.to_be_bytes(),
+            "Authentication Type = 1"
+        );
         assert_eq!(
             &trailer[2..4],
             &(auth.trailer_len() as u16).to_be_bytes(),
@@ -339,10 +343,14 @@ mod tests {
 
     #[test]
     fn sign_and_verify_roundtrip_sha1() {
-        let auth = V3Auth::new(1, b"key".to_vec()).with_sha1().with_source(src());
+        let auth = V3Auth::new(1, b"key".to_vec())
+            .with_sha1()
+            .with_source(src());
         let packet = make_v3_packet();
         let trailer = auth.sign_trailer(&packet, &[]);
-        let mut verifier = V3Auth::new(1, b"key".to_vec()).with_sha1().with_source(src());
+        let mut verifier = V3Auth::new(1, b"key".to_vec())
+            .with_sha1()
+            .with_source(src());
         assert!(verifier.verify(&packet, &[], &trailer));
     }
 
@@ -363,7 +371,10 @@ mod tests {
         let trailer = auth.sign_trailer(&packet, &[]);
 
         let mut verifier = V3Auth::new(1, b"key".to_vec()).with_source(src());
-        assert!(verifier.verify(&packet, &[], &trailer), "first packet accepted");
+        assert!(
+            verifier.verify(&packet, &[], &trailer),
+            "first packet accepted"
+        );
         assert!(!verifier.verify(&packet, &[], &trailer), "replay must fail");
     }
 
@@ -376,7 +387,10 @@ mod tests {
         let trailer = auth.sign_trailer(&packet, &[]);
 
         let mut verifier = V3Auth::new(1, b"key".to_vec()).with_source(src());
-        assert!(verifier.verify(&packet, &[], &trailer), "first seq-0 accepted");
+        assert!(
+            verifier.verify(&packet, &[], &trailer),
+            "first seq-0 accepted"
+        );
         assert!(
             !verifier.verify(&packet, &[], &trailer),
             "replayed seq-0 must be rejected"
@@ -405,7 +419,10 @@ mod tests {
         let trailer = auth.sign_trailer(&packet, &[]);
 
         let mut verifier = V3Auth::new(1, b"key".to_vec()).with_source(src_a);
-        assert!(verifier.verify(&packet, &[], &trailer), "same source verifies");
+        assert!(
+            verifier.verify(&packet, &[], &trailer),
+            "same source verifies"
+        );
 
         let mut verifier2 = V3Auth::new(1, b"key".to_vec()).with_source(src_b);
         assert!(
@@ -438,7 +455,9 @@ mod tests {
         let auth = V3Auth::new(1, b"key".to_vec()).with_source(src()); // SHA-256
         let packet = make_v3_packet();
         let trailer = auth.sign_trailer(&packet, &[]);
-        let mut verifier = V3Auth::new(1, b"key".to_vec()).with_sha1().with_source(src());
+        let mut verifier = V3Auth::new(1, b"key".to_vec())
+            .with_sha1()
+            .with_source(src());
         assert!(!verifier.verify(&packet, &[], &trailer));
     }
 

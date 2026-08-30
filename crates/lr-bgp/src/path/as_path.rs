@@ -240,9 +240,7 @@ pub fn reconcile_as4(wire: &AsPath, as4: Option<&AsPath>) -> AsPath {
     // If whole segments were not enough (mid-segment split needed), fall
     // back to prepending the remainder of the path count via a truncated
     // leading sequence — the RFC allows taking "as many ... as necessary".
-    let mut result = AsPath {
-        segments: taken,
-    };
+    let mut result = AsPath { segments: taken };
     if taken_count < need {
         let deficit = need - taken_count;
         for seg in &wire.segments {

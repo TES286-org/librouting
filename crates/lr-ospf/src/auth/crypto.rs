@@ -351,8 +351,16 @@ mod tests {
         let header = make_header(2, auth_field(1, auth.algorithm.digest_len() as u8, seq));
         let body: Vec<u8> = vec![0xDE, 0xAD, 0xBE, 0xEF];
         let trailer = auth.sign_trailer(&header, &body);
-        assert_eq!(trailer.len(), auth.algorithm.trailer_len(), "38 for SHA-256");
-        assert_eq!(trailer[1], auth.algorithm.digest_len() as u8, "field = 32, not 38");
+        assert_eq!(
+            trailer.len(),
+            auth.algorithm.trailer_len(),
+            "38 for SHA-256"
+        );
+        assert_eq!(
+            trailer[1],
+            auth.algorithm.digest_len() as u8,
+            "field = 32, not 38"
+        );
         // Verify against a trailer whose field were the full size.
         let mut wrong = trailer.clone();
         wrong[1] = wrong.len() as u8;
@@ -427,7 +435,10 @@ mod tests {
         packet.extend_from_slice(&body);
 
         let mut verifier = CryptoAuth::new(1, b"key".to_vec());
-        assert!(verifier.verify(&packet, &trailer), "first seq-0 packet accepted");
+        assert!(
+            verifier.verify(&packet, &trailer),
+            "first seq-0 packet accepted"
+        );
         assert!(
             !verifier.verify(&packet, &trailer),
             "replayed seq-0 packet must be rejected"
@@ -463,7 +474,8 @@ mod tests {
     fn long_key_is_hashed_to_digest_length() {
         // RFC 5709 §3.3 (1): keys longer than L octets are folded with
         // H(K); both sides must derive the same Ko.
-        let long_key = b"this-is-a-very-long-shared-secret-key-that-exceeds-thirty-two-bytes!".to_vec();
+        let long_key =
+            b"this-is-a-very-long-shared-secret-key-that-exceeds-thirty-two-bytes!".to_vec();
         let auth = CryptoAuth::new(1, long_key.clone());
         let header = make_header(2, auth_field(1, auth.algorithm.digest_len() as u8, 0));
         let body: Vec<u8> = vec![9, 9, 9];
