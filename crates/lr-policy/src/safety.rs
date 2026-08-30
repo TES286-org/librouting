@@ -253,9 +253,16 @@ impl SafetyNet {
         }
     }
 
-    /// Decode AS_PATH from the route's attributes (treats attr tag 2 as
-    /// 2-byte AS_PATH and tag 17 as 4-byte AS4_PATH). Returns the number of
-    /// ASes in sequence segments, or None if neither attribute is present.
+    /// Decode AS_PATH from the route's attributes and return its length
+    /// (RFC 4271 §9.1.2.2(a): sequence members + 1 per AS_SET).
+    ///
+    /// With the `bgp` feature the route's AS_PATH is canonical 4-byte after
+    /// the FSM normalizes the attribute bag; a 2-byte legacy form is
+    /// accepted as a fallback for raw bags (tests, embedder-supplied
+    /// routes). The previous manual walker guessed the width from the
+    /// attribute tag, which mis-parsed the post-normalization 4-byte
+    /// AS_PATH as 2-byte and undercounted.
+    #[cfg(feature = "bgp")]
     fn as_path_len(&self, route: &Route) -> Option<usize> {
         let attr_2 = route.attributes.get(lr_core::attr::AttrTag(2));
         let attr_17 = route.attributes.get(lr_core::attr::AttrTag(17));
@@ -267,6 +274,25 @@ impl SafetyNet {
             .or_else(|| lr_bgp::path::AsPath::decode(&attr.value))?;
         // RFC 4271 §9.1.2.2(a): AS_SET counts as 1 regardless of size.
         Some(path.length())
+    }
+
+    /// Non-BGP build: walk the AS_PATH attribute's segment headers. The
+    /// wire width is 2-byte without the FSM's normalization.
+    #[cfg(not(feature = "bgp"))]
+    fn as_path_len(&self, route: &Route) -> Option<usize> {
+        let attr = route
+            .attributes
+            .get(lr_core::attr::AttrTag(2))
+            .or_else(|| route.attributes.get(lr_core::attr::AttrTag(17)))?;
+        let v = &attr.value;
+        let mut len = 0usize;
+        let mut i = 0;
+        while i + 1 < v.len() {
+            let count = v[i + 1] as usize;
+            len += count;
+            i += 2 + count * 2;
+        }
+        Some(len)
     }
 
     /// Count how many times `local_as` appears in the AS_PATH. Used by both
