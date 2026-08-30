@@ -103,9 +103,17 @@ mod tests {
             }),
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
+        // The codec zeroes the checksum; the decoder now validates it on
+        // receive (RFC 2328 §8.2), so finalize before round-tripping.
+        let mut finalized = bytes.clone();
+        assert!(lr_ospf::origination::finalize_v2_packet(&mut finalized));
         let mut dec = OspfCodec::v2();
-        let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
+        let p2 = dec.decode_slice(&finalized).unwrap().unwrap();
         assert_eq!(p2.header.router_id, pkt.header.router_id);
+        // A packet with a bad checksum must be rejected on decode.
+        let mut bad = finalized.clone();
+        bad[10] ^= 0xff;
+        assert!(dec.decode_slice(&bad).is_err());
     }
 
     /// Sanity: Babel frame roundtrips.
@@ -117,10 +125,7 @@ mod tests {
         let mut frame = BabelFrame::empty();
         frame.body.push(Tlv::new(
             TlvType::Hello,
-            Hello {
-                seqno: 1,
-                interval_cs: 200,
-            }
+            Hello::new(1, 200)
             .encode()
             .to_vec(),
         ));

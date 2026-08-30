@@ -536,6 +536,15 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
     if over.bfd_multihop.is_none() {
         over.bfd_multihop = base.bfd_multihop;
     }
+    if over.default_ipv4_unicast.is_none() {
+        over.default_ipv4_unicast = base.default_ipv4_unicast;
+    }
+    if over.allow_local_as.is_none() {
+        over.allow_local_as = base.allow_local_as;
+    }
+    if over.soft_reconfig_inbound.is_none() {
+        over.soft_reconfig_inbound = base.soft_reconfig_inbound;
+    }
 }
 
 fn parse_bool(value: &str) -> bool {

@@ -3,9 +3,7 @@
 //! Subcommands:
 //!
 //! - `lr decode <kind> <hex>` — decode a wire message and print its fields.
-//!   `<kind>` is one of `bgp-open`, `bgp-keepalive`, `bgp-update`, `bfd`,
-//!   `ospf-hello`, `babel-tlv`.
-//! - `lr encode <kind> <json>` — encode a wire message from a JSON spec.
+//!   `<kind>` is one of `bgp-open`, `bgp-keepalive`, `bfd`.
 //! - `lr version` — print the library version + feature flags.
 //! - `lr routes list` — dump the kernel routing table (Linux only).
 //! - `lr routes add <prefix> <gw> <if_index>` — add a route to the kernel.

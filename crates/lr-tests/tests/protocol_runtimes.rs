@@ -143,10 +143,7 @@ fn babel_update_installs_route() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello {
-            seqno: 1,
-            interval_cs: 400,
-        }
+        Hello::new(1, 400)
         .encode()
         .to_vec(),
     ));
@@ -171,12 +168,15 @@ fn babel_update_installs_route() {
         TlvType::Update,
         Update {
             ae: 1,
-            src_prefix_len: 0,
-            src_prefix: Vec::new(),
+            flags: 0,
+            omitted: 0,
+            interval_cs: 0,
             prefix_len: 24,
             prefix: vec![203, 0, 113],
             metric: 100,
             seqno: 5,
+            src_prefix_len: 0,
+            src_prefix: Vec::new(),
         }
         .encode()
         .to_vec(),
@@ -205,10 +205,7 @@ fn babel_infinity_metric_retracts() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello {
-            seqno: 1,
-            interval_cs: 400,
-        }
+        Hello::new(1, 400)
         .encode()
         .to_vec(),
     ));
@@ -225,12 +222,15 @@ fn babel_infinity_metric_retracts() {
         TlvType::Update,
         Update {
             ae: 1,
-            src_prefix_len: 0,
-            src_prefix: Vec::new(),
+            flags: 0,
+            omitted: 0,
+            interval_cs: 0,
             prefix_len: 24,
             prefix: vec![203, 0, 113],
             metric: 100,
             seqno: 5,
+            src_prefix_len: 0,
+            src_prefix: Vec::new(),
         }
         .encode()
         .to_vec(),
@@ -245,6 +245,9 @@ fn babel_infinity_metric_retracts() {
         TlvType::Update,
         Update {
             ae: 1,
+            flags: 0,
+            omitted: 0,
+            interval_cs: 0,
             src_prefix_len: 0,
             src_prefix: Vec::new(),
             prefix_len: 24,
@@ -294,7 +297,7 @@ fn ospf_lsa_update_installs_stub_route() {
         header: LsaHeader {
             ls_age: 1,
             options: 0x02,
-            ls_type: LsaTypeV2::RouterLsa as u8,
+            ls_type: LsaTypeV2::RouterLsa as u16,
             link_state_id: u32::from_be_bytes([1, 1, 1, 1]),
             advertising_router: u32::from_be_bytes([1, 1, 1, 1]),
             ls_sequence_number: 0x80000001,
@@ -320,7 +323,12 @@ fn ospf_lsa_update_installs_stub_route() {
             lsas: vec![lsa],
         }),
     };
-    let bytes = lr_ospf::codec::OspfCodec::v2().encode_vec(&pkt).unwrap();
+    let mut bytes = lr_ospf::codec::OspfCodec::v2()
+        .encode_vec(&pkt)
+        .unwrap();
+    // The codec zeroes the packet checksum; the router validates it on
+    // receive (RFC 2328 §8.2).
+    assert!(lr_ospf::origination::finalize_v2_packet(&mut bytes));
     r.feed_input(h, &bytes).unwrap();
 
     let snap = r.rib_snapshot();
@@ -353,10 +361,7 @@ fn cross_protocol_bgp_wins_over_babel() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello {
-            seqno: 1,
-            interval_cs: 400,
-        }
+        Hello::new(1, 400)
         .encode()
         .to_vec(),
     ));
@@ -373,6 +378,9 @@ fn cross_protocol_bgp_wins_over_babel() {
         TlvType::Update,
         Update {
             ae: 1,
+            flags: 0,
+            omitted: 0,
+            interval_cs: 0,
             src_prefix_len: 0,
             src_prefix: Vec::new(),
             prefix_len: 24,
@@ -440,10 +448,7 @@ fn events_carry_route_keys() {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
-        Hello {
-            seqno: 1,
-            interval_cs: 400,
-        }
+        Hello::new(1, 400)
         .encode()
         .to_vec(),
     ));
@@ -460,12 +465,15 @@ fn events_carry_route_keys() {
         TlvType::Update,
         Update {
             ae: 1,
-            src_prefix_len: 0,
-            src_prefix: Vec::new(),
+            flags: 0,
+            omitted: 0,
+            interval_cs: 0,
             prefix_len: 24,
             prefix: vec![203, 0, 113],
             metric: 100,
             seqno: 5,
+            src_prefix_len: 0,
+            src_prefix: Vec::new(),
         }
         .encode()
         .to_vec(),

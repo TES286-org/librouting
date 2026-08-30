@@ -308,7 +308,7 @@ permit = false
 # dynamically, originates a Router-LSA per area (stub links from the
 # interface addresses + p2p links per Full adjacency) and runs the dead
 # timer per interface. See docs/STATUS.md (W1.5) for the current scope:
-# OSPFv2, no DR election (segments behave p2p), simplified DBD exchange.
+# OSPFv2, no DR election (segments behave p2p).
 
 # [ospf]
 # hello_interval = 10        # per-interface default (RFC 2328 default)

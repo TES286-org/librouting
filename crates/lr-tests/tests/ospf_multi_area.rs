@@ -31,7 +31,7 @@ fn router_lsa(rid: u32, links: Vec<(u32, u32, u8, u16)>) -> Lsa {
         header: LsaHeader {
             ls_age: 0,
             options: 0x02,
-            ls_type: LsaTypeV2::RouterLsa as u8,
+            ls_type: LsaTypeV2::RouterLsa as u16,
             link_state_id: rid,
             advertising_router: rid,
             ls_sequence_number: 0x8000_0001,
@@ -60,9 +60,13 @@ fn lsu(sender: u32, area: u32, lsas: Vec<Lsa>) -> Vec<u8> {
             lsas,
         }),
     };
-    lr_ospf::codec::OspfCodec::v2()
+    let mut bytes = lr_ospf::codec::OspfCodec::v2()
         .encode_vec(&packet)
-        .expect("encode LS-Update")
+        .expect("encode LS-Update");
+    // The codec zeroes the packet checksum; the router validates it on
+    // receive (RFC 2328 §8.2).
+    assert!(lr_ospf::origination::finalize_v2_packet(&mut bytes));
+    bytes
 }
 
 /// Decode every LS-Update from a drained output stream.
@@ -129,7 +133,7 @@ fn ospf_area_lsa_sharing_and_abr_summary() {
     let updates = decode_lsus(&r.drain_output(backbone));
     assert_eq!(updates.len(), 1, "one summary LS-Update");
     let lsa = &updates[0].lsas[0];
-    assert_eq!(lsa.header.ls_type, LsaTypeV2::SummaryIpLsa as u8);
+    assert_eq!(lsa.header.ls_type, LsaTypeV2::SummaryIpLsa as u16);
     assert_eq!(lsa.header.advertising_router, ROOT);
     assert_eq!(lsa.header.link_state_id, 0x0a0a_0a00);
     assert_eq!(lsa.header.ls_sequence_number, 0x8000_0001);
@@ -263,7 +267,7 @@ fn ospf_summary_flush_lifecycle_e2e() {
     let flushed = updates
         .iter()
         .flat_map(|u| u.lsas.iter())
-        .find(|l| l.header.ls_type == LsaTypeV2::SummaryIpLsa as u8)
+        .find(|l| l.header.ls_type == LsaTypeV2::SummaryIpLsa as u16)
         .expect("backbone summary must be flushed");
     assert_eq!(flushed.header.ls_age, lr_ospf::lsdb::MAX_AGE_SECS);
     assert_eq!(flushed.header.link_state_id, 0x0a0a_0a00);

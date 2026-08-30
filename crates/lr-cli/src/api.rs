@@ -113,7 +113,19 @@ mod imp {
             .name("lr-api".into())
             .spawn(move || {
                 accept_loop(&listener, &running, |stream| {
-                    serve_connection(stream, &info, &router, &running, &reload, started);
+                    // Serve each connection on its own thread so a slow or
+                    // idle client cannot hold the management socket hostage.
+                    let info = Arc::clone(&info);
+                    let router = Arc::clone(&router);
+                    let running = Arc::clone(&running);
+                    let reload = Arc::clone(&reload);
+                    let started = started;
+                    thread::Builder::new()
+                        .name("lr-api-conn".into())
+                        .spawn(move || {
+                            serve_connection(stream, &info, &router, &running, &reload, started);
+                        })
+                        .ok();
                 });
                 let _ = std::fs::remove_file(&path_owned);
             })
@@ -159,10 +171,20 @@ mod imp {
             line.clear();
             // Tolerate idle clients without blocking shutdown forever:
             // read timeouts return 0 bytes; check `running` between tries.
+            // Cap the command length so a slow-drip client cannot grow
+            // the line unboundedly.
+            const MAX_CMD: usize = 4096;
             let mut idle_rounds = 0;
-            let n = loop {
+            let mut n = 0usize;
+            loop {
                 match reader.read_line(&mut line) {
-                    Ok(n) => break n,
+                    Ok(0) => break, // EOF
+                    Ok(read) => {
+                        n += read;
+                        if line.ends_with('\n') || n >= MAX_CMD {
+                            break;
+                        }
+                    }
                     Err(e)
                         if e.kind() == std::io::ErrorKind::WouldBlock
                             || e.kind() == std::io::ErrorKind::TimedOut =>
@@ -174,9 +196,14 @@ mod imp {
                     }
                     Err(_) => return,
                 }
-            };
+            }
             if n == 0 {
                 return; // EOF
+            }
+            if n >= MAX_CMD && !line.ends_with('\n') {
+                let _ = writeln!(out, "error: command too long");
+                let _ = out.flush();
+                continue; // discard the oversized line
             }
             let cmd = line.trim();
             if cmd.is_empty() {
@@ -191,10 +218,18 @@ mod imp {
                 } else {
                     let router_id = core::str::FromStr::from_str(&info.router_id)
                         .unwrap_or(lr_core::addr::RouterId::from_u32(0));
-                    let records = {
+                    // Copy the RIB snapshot and session summaries under the
+                    // lock, then write the file outside it: disk I/O on a
+                    // hung filesystem must not stall the router (BGP hold
+                    // timers expire).
+                    let (routes, summaries) = {
                         let r = router.lock().unwrap();
-                        crate::write_mrt_rib_dump(&r, router_id, path)
+                        (
+                            r.rib_paths_snapshot().into_iter().cloned().collect::<Vec<_>>(),
+                            r.session_summaries(),
+                        )
                     };
+                    let records = crate::write_mrt_rib_dump(&routes, &summaries, router_id, path);
                     match records {
                         Ok(n) => {
                             let _ = writeln!(out, "mrt-dump {path} records={n}");

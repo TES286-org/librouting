@@ -35,7 +35,7 @@ fn router_lsa(rid: u32, links: Vec<(u32, u32, u8, u16)>) -> Lsa {
         header: LsaHeader {
             ls_age: 0,
             options: 0x02,
-            ls_type: LsaTypeV2::RouterLsa as u8,
+            ls_type: LsaTypeV2::RouterLsa as u16,
             link_state_id: rid,
             advertising_router: rid,
             ls_sequence_number: 0x8000_0001,
@@ -64,9 +64,13 @@ fn lsu(sender: u32, area: u32, lsas: Vec<Lsa>) -> Vec<u8> {
             lsas,
         }),
     };
-    lr_ospf::codec::OspfCodec::v2()
+    let mut bytes = lr_ospf::codec::OspfCodec::v2()
         .encode_vec(&packet)
-        .expect("encode LS-Update")
+        .expect("encode LS-Update");
+    // The codec zeroes the packet checksum; the router validates it on
+    // receive (RFC 2328 §8.2), so finalize before feeding.
+    assert!(lr_ospf::origination::finalize_v2_packet(&mut bytes));
+    bytes
 }
 
 /// The three-router topology with LSDBs primed to convergence before any

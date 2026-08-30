@@ -1630,8 +1630,23 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
             }
         }
     };
+    // A link-local address carries its interface scope in the `%iface`
+    // suffix; `Ipv6Addr` drops it, so parse it from the original string.
+    // Without it the socket binds scope 0 (kernel default) and the
+    // multicast join goes to the wrong interface.
+    let scope_id = local_addr
+        .trim_start_matches('[')
+        .split(['%', ']'])
+        .nth(1)
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(0);
     let port = cfg.babel_port;
-    let bind_addr = std::net::SocketAddr::new(std::net::IpAddr::V6(local_ip), port);
+    let bind_addr = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+        local_ip,
+        port,
+        0,
+        scope_id,
+    ));
     let sock = match UdpSocket::bind(bind_addr) {
         Ok(s) => s,
         Err(e) => {
@@ -1648,10 +1663,9 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
         .unwrap_or("ff02::1:6")
         .parse()
         .unwrap_or_else(|_| "ff02::1:6".parse().unwrap());
-    // The interface index is derived from the scope ID of the bind
-    // address. `Ipv6Addr` does not carry a scope ID, so we use 0
-    // (the default interface) when the address has no scope.
-    if let Err(e) = sock.join_multicast_v6(&group, 0) {
+    // The interface index is the scope ID of the bind address (Babel
+    // defaults to link-local, so the interface is mandatory for the join).
+    if let Err(e) = sock.join_multicast_v6(&group, scope_id) {
         eprintln!("daemon: babel multicast join failed: {}", e);
         // Non-fatal: the daemon can still receive unicast.
     }
@@ -1747,8 +1761,10 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
             r.drain_output(h)
         };
         if !out.is_empty() {
-            // Send to the Babel multicast group.
-            let dest = std::net::SocketAddr::new(std::net::IpAddr::V6(group), port);
+            // Send to the Babel multicast group on the bound interface.
+            let dest = std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                group, port, 0, scope_id,
+            ));
             let _ = sock.send_to(&out, dest);
         }
     }
@@ -1816,8 +1832,14 @@ fn spawn_bmp_sender(target: &str, router: &Arc<Mutex<DefaultRouter>>) -> Result<
 /// number of RIB records written.
 /// Unix-only: the runtime API that drives it is Unix-gated.
 #[cfg(unix)]
+/// Write the Loc-RIB as an RFC 6396 TABLE_DUMP_V2 dump.
+///
+/// `routes` and `summaries` are caller-provided snapshots so the file I/O
+/// (which can block on a slow or hung filesystem) never runs while the
+/// router lock is held.
 pub(crate) fn write_mrt_rib_dump(
-    router: &DefaultRouter,
+    routes: &[lr_core::rib::Route],
+    summaries: &[lr_router::SessionSummary],
     router_id: lr_core::addr::RouterId,
     path: &str,
 ) -> Result<usize, String> {
@@ -1828,7 +1850,6 @@ pub(crate) fn write_mrt_rib_dump(
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as u32)
         .unwrap_or(0);
-    let summaries = router.session_summaries();
     let mut dump = MrtRibDump::new(router_id.as_u32(), "loc-rib");
     // Peer 0: the synthetic local source (BIRD convention: ::, AS 0).
     dump.add_peer(PeerEntry {
@@ -1837,9 +1858,9 @@ pub(crate) fn write_mrt_rib_dump(
         asn: lr_core::addr::Asn(0),
     });
     // One peer per BGP session that contributed at least one route.
-    let routes = router.rib_paths_snapshot();
+    let summaries = summaries;
     let mut session_peer: std::collections::BTreeMap<u64, u16> = std::collections::BTreeMap::new();
-    for s in &summaries {
+    for s in summaries {
         if s.kind != "bgp" {
             continue;
         }
@@ -1864,7 +1885,7 @@ pub(crate) fn write_mrt_rib_dump(
     // Flatten into prefix-keyed entries, then split plain / add-path.
     let mut by_prefix: std::collections::BTreeMap<lr_core::addr::Prefix, Vec<RibEntry>> =
         std::collections::BTreeMap::new();
-    for r in &routes {
+    for r in routes {
         let entry = RibEntry {
             peer_index: match (r.protocol, session_peer.get(&r.origin.peer)) {
                 (Protocol::Bgp, Some(idx)) => *idx,
