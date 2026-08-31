@@ -264,6 +264,13 @@ impl LabelStack {
         &self.labels
     }
 
+    /// True when the stack contains `label` anywhere. Note that `Label`
+    /// equality includes the TC and TTL fields — compare on `value` if
+    /// only the 20-bit label matters.
+    pub fn contains(&self, label: &Label) -> bool {
+        self.labels.contains(label)
+    }
+
     /// Take the underlying Vec.
     pub fn into_vec(self) -> Vec<Label> {
         self.labels

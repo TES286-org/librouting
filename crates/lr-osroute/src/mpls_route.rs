@@ -15,7 +15,14 @@
 //! | Action                  | RTA_DST | RTA_VIA | RTA_NEWDST | RTA_OIF |
 //! |-------------------------|---------|---------|------------|---------|
 //! | Pop  (label → IP)       | in-label | gw     | —          | ifindex |
+//! | Pop  (label → local)    | in-label | —      | —          | ifindex |
 //! | Swap (label → label)    | in-label | gw     | new-stack  | ifindex |
+//!
+//! A Pop route *without* `RTA_VIA` forwards the decapsulated packet to
+//! the output device's own link address (`af_mpls.c`: "If via wasn't
+//! specified then send out using device address") — on `lo` that is
+//! local delivery, the same shape the kernel uses for its reserved
+//! explicit-null routes (labels 0/2, `mpls_init_klabels`).
 //!
 //! `RTA_VIA` is the gateway as a `struct rtvia` payload: 2-byte family
 //! (`sa_family_t`, host byte order — the kernel's `nla_put_via` /
@@ -23,12 +30,19 @@
 //! address (6 bytes total for IPv4, 18 for IPv6). `RTA_NEWDST` is the
 //! new label stack to push, in
 //! the 4-octet-per-entry wire form of RFC 3032 §2.1. Push (IP → label)
-//! is configured differently — via `ip route add <prefix> encap mpls
-//! <stack>` on the IP route, not through `AF_MPLS`. The router layer
-//! handles the IP-route side via [`crate::RtNetlink`]; this module owns
-//! the LSP side.
+//! rides on an ordinary IP route with an MPLS lightweight tunnel —
+//! `ip route add <prefix> encap mpls <stack> via ...` — encoded as
+//! `RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_MPLS` plus a nested `RTA_ENCAP`
+//! carrying `MPLS_IPTUNNEL_DST`; [`MplsNetlink::add_encap_route`]
+//! builds that form.
 //!
-//! References: Linux `uapi/linux/mpls.h`, `net/mpls/mpls_routes.c`,
+//! Label attributes (`RTA_DST`, `RTA_NEWDST`, `MPLS_IPTUNNEL_DST`) all
+//! go through the kernel's `nla_get_labels()`: 4 bytes per entry, the
+//! bottom-of-stack bit set on the *last* entry only, TTL and TC clear,
+//! and label 3 (implicit null) rejected outright.
+//!
+//! References: Linux `uapi/linux/mpls.h`, `uapi/linux/mpls_iptunnel.h`,
+//! `net/mpls/af_mpls.c`, `net/mpls/mpls_iptunnel.c`,
 //! `Documentation/networking/mpls-sysctl.rst`.
 
 use std::fs;
@@ -56,13 +70,26 @@ const RTM_GETROUTE: u16 = 26;
 // rtnetlink RTA types (uapi/linux/rtnetlink.h).
 const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
+const RTA_GATEWAY: u16 = 5;
 const RTA_VIA: u16 = 18;
 const RTA_NEWDST: u16 = 19;
+const RTA_ENCAP_TYPE: u16 = 21;
+const RTA_ENCAP: u16 = 22;
 
 // Address families (2-byte `sa_family_t` in `struct rtvia`).
 const AF_INET: u16 = 2;
 const AF_INET6: u16 = 10;
 const AF_MPLS: u8 = 28;
+
+// rtmsg fields shared by the AF_MPLS and IP-encap request builders
+// (values match `linux::RtNetlink`).
+const RTN_UNICAST: u8 = 1;
+const RT_TABLE_MAIN: u8 = 254;
+const RTPROT_BGP: u8 = 186;
+
+// Lightweight-tunnel encap (uapi/linux/lwtunnel.h, mpls_iptunnel.h).
+const LWTUNNEL_ENCAP_MPLS: u32 = 1;
+const MPLS_IPTUNNEL_DST: u16 = 1;
 
 // Netlink flags.
 const NLM_F_REQUEST: u16 = 0x01;
@@ -97,6 +124,14 @@ pub enum MplsRouteError {
     Kernel(String),
     /// The label stack is empty — MPLS routes need at least one label.
     EmptyLabelStack,
+    /// The stack contains label 3 (implicit null) — the kernel's
+    /// `nla_get_labels()` rejects it: implicit null never appears in an
+    /// encapsulation (RFC 3032 §2.1).
+    ImplicitNullLabel,
+    /// A Pop route without a `RTA_VIA` gateway needs an output device:
+    /// the kernel forwards the decapsulated packet to the device's own
+    /// link address, so `RTA_OIF` is mandatory in that shape.
+    MissingOutputInterface,
 }
 
 impl std::fmt::Display for MplsRouteError {
@@ -109,6 +144,12 @@ impl std::fmt::Display for MplsRouteError {
             Self::Syscall(s) => write!(f, "mpls netlink syscall: {}", s),
             Self::Kernel(s) => write!(f, "mpls kernel error: {}", s),
             Self::EmptyLabelStack => f.write_str("MPLS route requires a non-empty label stack"),
+            Self::ImplicitNullLabel => {
+                f.write_str("implicit null label (3) cannot appear in a label encapsulation")
+            }
+            Self::MissingOutputInterface => {
+                f.write_str("an MPLS pop route without a via gateway requires an output interface")
+            }
         }
     }
 }
@@ -125,13 +166,15 @@ impl From<std::io::Error> for MplsRouteError {
 ///
 /// Matches the kernel's `RTA_VIA` + `RTA_NEWDST` matrix:
 /// - [`MplsRouteAction::Pop`] — pop the label, forward the IP packet
-///   to the gateway. (`RTA_VIA` + `RTA_OIF`, no `RTA_NEWDST`.)
+///   to the gateway (`RTA_VIA` + `RTA_OIF`, no `RTA_NEWDST`), or —
+///   with `next_hop: None` — to the output device's own link address
+///   (local delivery on `lo`; `RTA_OIF` required).
 /// - [`MplsRouteAction::Swap`] — replace the top label with a new stack
 ///   and forward to the gateway. (`RTA_VIA` + `RTA_OIF` + `RTA_NEWDST`.)
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MplsRouteAction {
     Pop {
-        next_hop: IpAddr,
+        next_hop: Option<IpAddr>,
         if_index: u32,
     },
     Swap {
@@ -142,9 +185,10 @@ pub enum MplsRouteAction {
 }
 
 impl MplsRouteAction {
-    pub fn next_hop(&self) -> IpAddr {
+    pub fn next_hop(&self) -> Option<IpAddr> {
         match self {
-            Self::Pop { next_hop, .. } | Self::Swap { next_hop, .. } => *next_hop,
+            Self::Pop { next_hop, .. } => *next_hop,
+            Self::Swap { next_hop, .. } => Some(*next_hop),
         }
     }
     pub fn if_index(&self) -> u32 {
@@ -162,11 +206,28 @@ pub struct MplsRoute {
 }
 
 impl MplsRoute {
-    /// Convenience: pop-and-forward.
+    /// Convenience: pop-and-forward to a gateway.
     pub fn pop(in_label: Label, next_hop: IpAddr, if_index: u32) -> Self {
         Self {
             in_label,
-            action: MplsRouteAction::Pop { next_hop, if_index },
+            action: MplsRouteAction::Pop {
+                next_hop: Some(next_hop),
+                if_index,
+            },
+        }
+    }
+
+    /// Convenience: pop-and-deliver — no `RTA_VIA`, the kernel forwards
+    /// the decapsulated packet to the output device's own link address
+    /// (`af_mpls.c`). On `lo` this is local delivery, the tail-side LSP
+    /// shape for an egress PE. `if_index` must be non-zero.
+    pub fn pop_local(in_label: Label, if_index: u32) -> Self {
+        Self {
+            in_label,
+            action: MplsRouteAction::Pop {
+                next_hop: None,
+                if_index,
+            },
         }
     }
 
@@ -207,6 +268,45 @@ pub struct MplsNetlink {
     fd: RawFd,
     seq: AtomicU32,
     pid: u32,
+}
+
+/// A netlink label attribute carries only the label value and the
+/// bottom-of-stack bit: the kernel's `nla_get_labels()` rejects any
+/// nonzero TTL ("TTL in label must be 0") or TC ("Traffic class in
+/// label must be 0") — netlink is the control plane, the kernel owns
+/// the data-plane TTL (it propagates or sets it per route policy).
+/// Labels built for the data plane (e.g. `Label::new`, TTL 64) are
+/// therefore re-encoded control-plane style here.
+fn nl_label_entry(l: Label, bottom: bool) -> [u8; 4] {
+    Label {
+        value: l.value,
+        tc: 0,
+        ttl: 0,
+    }
+    .encode_4octet(bottom)
+}
+
+/// Encode a whole stack in the kernel's `nla_get_labels()` form:
+/// 4 bytes per entry, bottom-of-stack on the last entry only.
+fn nl_label_stack(stack: &LabelStack) -> Vec<u8> {
+    let mut out = Vec::with_capacity(stack.len() * 4);
+    let last = stack.len().saturating_sub(1);
+    for (i, l) in stack.labels().iter().enumerate() {
+        out.extend_from_slice(&nl_label_entry(*l, i == last));
+    }
+    out
+}
+
+/// True when the stack carries label 3 anywhere — implicit null never
+/// appears in an encapsulation (RFC 3032 §2.1) and the kernel's
+/// `nla_get_labels()` rejects the attribute. Compared on the label
+/// VALUE: `Label` equality includes the data-plane TTL field, which is
+/// irrelevant here.
+fn stack_has_implicit_null(stack: &LabelStack) -> bool {
+    stack
+        .labels()
+        .iter()
+        .any(|l| l.value == Label::IMPLICIT_NULL.value)
 }
 
 impl MplsNetlink {
@@ -266,7 +366,6 @@ impl MplsNetlink {
     fn next_seq(&self) -> u32 {
         self.seq.fetch_add(1, Ordering::SeqCst)
     }
-
     fn sendmsg_and_recv(&self, buf: &[u8]) -> Result<Vec<u8>, MplsRouteError> {
         let dest = libc_sockaddr_nl {
             nl_family: AF_NETLINK as u16,
@@ -323,14 +422,21 @@ impl MplsNetlink {
         flags: u16,
         route: &MplsRoute,
     ) -> Result<Vec<u8>, MplsRouteError> {
-        // RTA_DST = 4-byte in-label (top of stack, S=1).
-        let in_label_bytes = route.in_label.encode_4octet(true);
+        // RTA_DST = 4-byte in-label (top of stack, S=1, TTL/TC clear).
+        let in_label_bytes = nl_label_entry(route.in_label, true);
         let mut attrs = Vec::new();
         attrs.extend(Self::build_rta_attribute(RTA_DST, &in_label_bytes));
 
         match &route.action {
             MplsRouteAction::Pop { next_hop, if_index } => {
-                attrs.extend(Self::build_rta_via(*next_hop));
+                match next_hop {
+                    Some(nh) => attrs.extend(Self::build_rta_via(*nh)),
+                    // No via: the kernel sends the decapsulated packet to
+                    // the output device's own link address, so the device
+                    // is mandatory (`mpls_nh_assign_dev` fails without).
+                    None if *if_index == 0 => return Err(MplsRouteError::MissingOutputInterface),
+                    None => {}
+                }
                 if *if_index != 0 {
                     attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
                 }
@@ -343,7 +449,10 @@ impl MplsNetlink {
                 if new_stack.is_empty() {
                     return Err(MplsRouteError::EmptyLabelStack);
                 }
-                let new_dst = new_stack.encode_4octet();
+                if stack_has_implicit_null(new_stack) {
+                    return Err(MplsRouteError::ImplicitNullLabel);
+                }
+                let new_dst = nl_label_stack(new_stack);
                 attrs.extend(Self::build_rta_attribute(RTA_NEWDST, &new_dst));
                 attrs.extend(Self::build_rta_via(*next_hop));
                 if *if_index != 0 {
@@ -372,10 +481,85 @@ impl MplsNetlink {
         buf[17] = MPLS_LABEL_LEN; // rtm_dst_len
         buf[18] = 0; // rtm_src_len
         buf[19] = 0; // rtm_tos
-        buf[20] = 254; // RT_TABLE_MAIN
+        buf[20] = RT_TABLE_MAIN;
         buf[21] = 4; // RTPROT_STATIC — MPLS routes are admin-configured
         buf[22] = 0; // RT_SCOPE_UNIVERSE
-        buf[23] = 1; // RTN_UNICAST
+        buf[23] = RTN_UNICAST;
+        buf[24..28].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
+        buf[28..28 + attrs.len()].copy_from_slice(&attrs);
+        Ok(buf)
+    }
+
+    /// Build the rtnetlink request for an IP route with an MPLS push
+    /// encapsulation — the LSP head-end (`ip route add <prefix> encap
+    /// mpls <stack> via <nh> dev <oif>`).
+    ///
+    /// Wire shape: an ordinary `AF_INET`/`AF_INET6` `RTM_NEWROUTE` with
+    /// `RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_MPLS` and a nested `RTA_ENCAP`
+    /// carrying `MPLS_IPTUNNEL_DST` — the label stack in the kernel's
+    /// `nla_get_labels()` form (4 bytes per entry, bottom-of-stack on the
+    /// last entry, TTL/TC clear, label 3 rejected).
+    fn build_encap_request(
+        &self,
+        msg_type: u16,
+        flags: u16,
+        prefix: &lr_core::addr::Prefix,
+        stack: &LabelStack,
+        next_hop: IpAddr,
+        if_index: u32,
+    ) -> Result<Vec<u8>, MplsRouteError> {
+        if stack.is_empty() {
+            return Err(MplsRouteError::EmptyLabelStack);
+        }
+        if stack_has_implicit_null(stack) {
+            return Err(MplsRouteError::ImplicitNullLabel);
+        }
+        let (family, addr) = match prefix.addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        };
+        let mut attrs = Vec::new();
+        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
+        attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, next_hop.octets()));
+        // With no explicit output interface the kernel resolves the
+        // gateway against the existing table (`ip route add ... via GW`
+        // semantics); passing RTA_OIF=0 would be rejected with EINVAL.
+        if if_index != 0 {
+            attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
+        }
+        attrs.extend(Self::build_rta_attribute(
+            RTA_ENCAP_TYPE,
+            &LWTUNNEL_ENCAP_MPLS.to_ne_bytes(),
+        ));
+        // RTA_ENCAP is nested: the payload is itself a list of netlink
+        // attributes (here a single MPLS_IPTUNNEL_DST label-stack entry).
+        let encap = Self::build_rta_attribute(MPLS_IPTUNNEL_DST, &nl_label_stack(stack));
+        attrs.extend(Self::build_rta_attribute(RTA_ENCAP, &encap));
+
+        // Pad to 4-byte alignment.
+        while attrs.len() % 4 != 0 {
+            attrs.push(0);
+        }
+
+        let total_len = 16 + 12 + attrs.len();
+        let aligned = (total_len + 3) & !3;
+        let mut buf = vec![0u8; aligned];
+        // nlmsghdr (16 bytes):
+        buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&msg_type.to_ne_bytes());
+        buf[6..8].copy_from_slice(&flags.to_ne_bytes());
+        let seq = self.next_seq();
+        buf[8..12].copy_from_slice(&seq.to_ne_bytes());
+        buf[12..16].copy_from_slice(&self.pid.to_ne_bytes());
+        // rtmsg (12 bytes):
+        buf[16] = family as u8; // rtm_family
+        buf[17] = prefix.prefix_len; // rtm_dst_len
+        buf[18] = 0; // rtm_src_len
+        buf[19] = 0; // rtm_tos
+        buf[20] = RT_TABLE_MAIN;
+        buf[21] = RTPROT_BGP; // routes mirrored from BGP-LU
+        buf[22] = 0; // RT_SCOPE_UNIVERSE
+        buf[23] = RTN_UNICAST;
         buf[24..28].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
         buf[28..28 + attrs.len()].copy_from_slice(&attrs);
         Ok(buf)
@@ -428,11 +612,70 @@ impl MplsNetlink {
         let placeholder = MplsRoute {
             in_label,
             action: MplsRouteAction::Pop {
-                next_hop: IpAddr::V4([0, 0, 0, 0]),
+                next_hop: Some(IpAddr::V4([0, 0, 0, 0])),
                 if_index: 0,
             },
         };
         let buf = self.build_request(RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK, &placeholder)?;
+        let resp = self.sendmsg_and_recv(&buf)?;
+        check_ack(&resp)
+    }
+
+    /// Install the LSP head-end: route `prefix` via `next_hop`, pushing
+    /// `stack` — `ip route add <prefix> encap mpls <stack> via <nh>`.
+    /// Replaces any existing route for the same prefix (CREATE+REPLACE).
+    ///
+    /// This is what an LER programs when a labelled BGP route (RFC 8277)
+    /// becomes the best route: IP packets toward `prefix` enter the LSP.
+    pub fn add_encap_route(
+        &mut self,
+        prefix: &lr_core::addr::Prefix,
+        stack: &LabelStack,
+        next_hop: IpAddr,
+        if_index: u32,
+    ) -> Result<(), MplsRouteError> {
+        let buf = self.build_encap_request(
+            RTM_NEWROUTE,
+            ADD_ROUTE_FLAGS,
+            prefix,
+            stack,
+            next_hop,
+            if_index,
+        )?;
+        let resp = self.sendmsg_and_recv(&buf)?;
+        check_ack(&resp)
+    }
+
+    /// Delete the IP route (encap or plain) for `prefix`. Deletion keys
+    /// on the destination prefix alone — the kernel matches on
+    /// `(family, dst_len, dst)` the same way `ip route del <prefix>` does.
+    pub fn delete_encap_route(
+        &mut self,
+        prefix: &lr_core::addr::Prefix,
+    ) -> Result<(), MplsRouteError> {
+        let (family, addr) = match prefix.addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        };
+        let mut attrs = Vec::new();
+        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
+        while attrs.len() % 4 != 0 {
+            attrs.push(0);
+        }
+        let total_len = 16 + 12 + attrs.len();
+        let aligned = (total_len + 3) & !3;
+        let mut buf = vec![0u8; aligned];
+        buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&RTM_DELROUTE.to_ne_bytes());
+        buf[6..8].copy_from_slice(&(NLM_F_REQUEST | NLM_F_ACK).to_ne_bytes());
+        let seq = self.next_seq();
+        buf[8..12].copy_from_slice(&seq.to_ne_bytes());
+        buf[12..16].copy_from_slice(&self.pid.to_ne_bytes());
+        buf[16] = family as u8;
+        buf[17] = prefix.prefix_len;
+        buf[20] = RT_TABLE_MAIN;
+        buf[23] = RTN_UNICAST;
+        buf[28..28 + attrs.len()].copy_from_slice(&attrs);
         let resp = self.sendmsg_and_recv(&buf)?;
         check_ack(&resp)
     }
@@ -692,5 +935,144 @@ mod tests {
         assert_ne!(ADD_ROUTE_FLAGS & NLM_F_ACK, 0);
         assert_ne!(ADD_ROUTE_FLAGS & NLM_F_CREATE, 0);
         assert_ne!(ADD_ROUTE_FLAGS & NLM_F_REPLACE, 0);
+    }
+
+    /// Pop *without* a via gateway (`pop_local`): no RTA_VIA, RTA_OIF
+    /// present. The kernel forwards the decapsulated packet to the
+    /// output device's own link address — local delivery on `lo`.
+    #[test]
+    fn build_request_pop_local_route_omits_via() {
+        let nl = test_netlink();
+        let route = MplsRoute::pop_local(Label::new(100), 1);
+        let req = nl
+            .build_request(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, &route)
+            .unwrap();
+        assert!(find_attr(&req, RTA_VIA).is_none(), "no RTA_VIA expected");
+        let oif = find_attr(&req, RTA_OIF).expect("RTA_OIF");
+        assert_eq!(u32::from_ne_bytes(oif.try_into().unwrap()), 1);
+    }
+
+    /// The kernel assigns the output device in `mpls_nh_assign_dev` —
+    /// with no via and no device there is nothing to assign, so the
+    /// request builder must refuse the shape before the syscall.
+    #[test]
+    fn build_request_pop_local_requires_oif() {
+        let nl = test_netlink();
+        let route = MplsRoute::pop_local(Label::new(100), 0);
+        match nl.build_request(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, &route) {
+            Err(MplsRouteError::MissingOutputInterface) => { /* expected */ }
+            other => panic!("expected MissingOutputInterface, got {:?}", other),
+        }
+    }
+
+    /// LSP head-end request for an IPv4 prefix: an AF_INET route with
+    /// RTA_DST + RTA_GATEWAY + RTA_ENCAP_TYPE=MPLS + a nested RTA_ENCAP
+    /// carrying MPLS_IPTUNNEL_DST.
+    #[test]
+    fn build_encap_request_ipv4_layout() {
+        let nl = test_netlink();
+        let prefix: lr_core::addr::Prefix = "198.51.100.0/24".parse().unwrap();
+        let req = nl
+            .build_encap_request(
+                RTM_NEWROUTE,
+                ADD_ROUTE_FLAGS,
+                &prefix,
+                &LabelStack::from_values([100]),
+                IpAddr::V4([192, 0, 2, 1]),
+                0,
+            )
+            .unwrap();
+        assert_eq!(req[16], 2); // rtm_family = AF_INET
+        assert_eq!(req[17], 24); // rtm_dst_len
+        assert_eq!(req[21], RTPROT_BGP);
+        let dst = find_attr(&req, RTA_DST).expect("RTA_DST");
+        assert_eq!(dst, &[198, 51, 100, 0]);
+        let gw = find_attr(&req, RTA_GATEWAY).expect("RTA_GATEWAY");
+        assert_eq!(gw, &[192, 0, 2, 1]);
+        assert!(find_attr(&req, RTA_OIF).is_none(), "OIF=0 must be omitted");
+        let encap_type = find_attr(&req, RTA_ENCAP_TYPE).expect("RTA_ENCAP_TYPE");
+        assert_eq!(
+            u32::from_ne_bytes(encap_type.try_into().unwrap()),
+            LWTUNNEL_ENCAP_MPLS
+        );
+        // The nested RTA_ENCAP payload is itself a netlink attribute list:
+        // MPLS_IPTUNNEL_DST with the 4-byte label entry.
+        let encap = find_attr(&req, RTA_ENCAP).expect("RTA_ENCAP");
+        let inner_len = u16::from_ne_bytes([encap[0], encap[1]]) as usize;
+        assert_eq!(u16::from_ne_bytes([encap[2], encap[3]]), MPLS_IPTUNNEL_DST);
+        let label_entry = &encap[4..inner_len];
+        assert_eq!(label_entry.len(), 4);
+        let entry = u32::from_be_bytes(label_entry.try_into().unwrap());
+        assert_eq!(entry >> 12, 100); // label value
+        assert_eq!(entry & 0x100, 0x100); // bottom-of-stack set on the last entry
+        assert_eq!(entry & 0xff, 0); // TTL clear
+    }
+
+    /// Same shape for IPv6, with a two-label stack: 8 bytes in
+    /// MPLS_IPTUNNEL_DST, bottom-of-stack only on the last entry.
+    #[test]
+    fn build_encap_request_ipv6_multilabel_layout() {
+        let nl = test_netlink();
+        let prefix: lr_core::addr::Prefix = "2001:db8:1::/48".parse().unwrap();
+        let req = nl
+            .build_encap_request(
+                RTM_NEWROUTE,
+                ADD_ROUTE_FLAGS,
+                &prefix,
+                &LabelStack::from_values([100, 200]),
+                IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+                0,
+            )
+            .unwrap();
+        assert_eq!(req[16], 10); // rtm_family = AF_INET6
+        assert_eq!(req[17], 48); // rtm_dst_len
+        let dst = find_attr(&req, RTA_DST).expect("RTA_DST");
+        assert_eq!(dst.len(), 16);
+        let encap = find_attr(&req, RTA_ENCAP).expect("RTA_ENCAP");
+        let inner_len = u16::from_ne_bytes([encap[0], encap[1]]) as usize;
+        let label_entry = &encap[4..inner_len];
+        assert_eq!(label_entry.len(), 8);
+        let first = u32::from_be_bytes(label_entry[0..4].try_into().unwrap());
+        let last = u32::from_be_bytes(label_entry[4..8].try_into().unwrap());
+        assert_eq!(first >> 12, 100);
+        assert_eq!(first & 0x100, 0, "non-bottom label must not carry BOS");
+        assert_eq!(last >> 12, 200);
+        assert_eq!(last & 0x100, 0x100, "last label must carry BOS");
+    }
+
+    /// Label 3 never appears in an encapsulation (kernel `nla_get_labels`
+    /// rejects it outright; RFC 3032 §2.1) — fail before the syscall.
+    #[test]
+    fn build_encap_request_rejects_implicit_null() {
+        let nl = test_netlink();
+        let prefix: lr_core::addr::Prefix = "198.51.100.0/24".parse().unwrap();
+        match nl.build_encap_request(
+            RTM_NEWROUTE,
+            ADD_ROUTE_FLAGS,
+            &prefix,
+            &LabelStack::from_values([Label::IMPLICIT_NULL.value]),
+            IpAddr::V4([192, 0, 2, 1]),
+            0,
+        ) {
+            Err(MplsRouteError::ImplicitNullLabel) => { /* expected */ }
+            other => panic!("expected ImplicitNullLabel, got {:?}", other),
+        }
+    }
+
+    /// RTA_NEWDST (swap) goes through the same `nla_get_labels()` —
+    /// implicit null is rejected there too.
+    #[test]
+    fn build_request_swap_rejects_implicit_null() {
+        let nl = test_netlink();
+        let route = MplsRoute::swap(
+            Label::new(100),
+            LabelStack::from_values([Label::IMPLICIT_NULL.value]),
+            IpAddr::V4([192, 0, 2, 1]),
+            2,
+        );
+        match nl.build_request(RTM_NEWROUTE, NLM_F_REQUEST | NLM_F_ACK, &route) {
+            Err(MplsRouteError::ImplicitNullLabel) => { /* expected */ }
+            other => panic!("expected ImplicitNullLabel, got {:?}", other),
+        }
     }
 }
