@@ -205,12 +205,25 @@ impl MatchResolver for PolicySet {
 }
 
 /// Dispatch hook pair: applies per-session route-maps at the import
-/// and export stages. Register one instance per stage:
+/// and export stages. Build the set, bind the per-session maps, then
+/// take the hook pair:
 ///
-/// ```ignore
+/// ```no_run
+/// use lr_policy::{PolicySet, RouteMap};
+///
+/// let mut set = PolicySet::new();
+/// set.add_route_map("peer-in", RouteMap::new());
+/// set.add_route_map("peer-out", RouteMap::new());
+/// set.bind_import(1, "peer-in");
+/// set.bind_export(1, "peer-out");
+/// set.validate().expect("dangling policy reference");
+///
 /// let hooks = set.hooks();
-/// router.hooks_mut().import.push(Box::new(hooks.clone()));
-/// router.hooks_mut().export.push(Box::new(hooks));
+/// // Register with the router pipeline (lr-router's Router exposes
+/// // the same hook vectors via `hooks_mut()` — lr-policy cannot
+/// // depend on it without a cycle, so the push lines stay callers'):
+/// // router.hooks_mut().import.push(Box::new(hooks.clone()));
+/// // router.hooks_mut().export.push(Box::new(hooks));
 /// ```
 ///
 /// Routes whose session has no binding pass through untouched, so
