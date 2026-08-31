@@ -18,8 +18,10 @@
 //! | Swap (label → label)    | in-label | gw     | new-stack  | ifindex |
 //!
 //! `RTA_VIA` is the gateway as a `struct rtvia` payload: 2-byte family
-//! (`sa_family_t`, network byte order) + address (6 bytes total for
-//! IPv4, 18 for IPv6). `RTA_NEWDST` is the new label stack to push, in
+//! (`sa_family_t`, host byte order — the kernel's `nla_put_via` /
+//! `nla_get_via` treat it as a plain C assignment with no `ntohs`) +
+//! address (6 bytes total for IPv4, 18 for IPv6). `RTA_NEWDST` is the
+//! new label stack to push, in
 //! the 4-octet-per-entry wire form of RFC 3032 §2.1. Push (IP → label)
 //! is configured differently — via `ip route add <prefix> encap mpls
 //! <stack>` on the IP route, not through `AF_MPLS`. The router layer
@@ -381,16 +383,22 @@ impl MplsNetlink {
 
     /// Build a `RTA_VIA` attribute: `<family:2> <addr:4 or 16>`. The
     /// family is the kernel's `struct rtvia { __kernel_sa_family_t
-    /// rtvia_family; __u8 rtvia_addr[]; }` — a 2-byte `sa_family_t`,
-    /// encoded in network byte order (AF_INET=2, AF_INET6=10), followed
-    /// by the raw address bytes (6 bytes total for IPv4, 18 for IPv6).
+    /// rtvia_family; __u8 rtvia_addr[]; }` — a 2-byte `sa_family_t` in
+    /// **host** byte order (AF_INET=2, AF_INET6=10), followed by the raw
+    /// address bytes (6 bytes total for IPv4, 18 for IPv6).
+    ///
+    /// Byte order is host, not network: the kernel writes the family with
+    /// a plain C assignment in `nla_put_via()` (`via->rtvia_family =
+    /// family`, net/mpls/af_mpls.c) and reads it back with a plain
+    /// `switch (via->rtvia_family)` in `nla_get_via()` — no `ntohs()` on
+    /// either side. iproute2 does the same when parsing `via inet ...`.
     fn build_rta_via(next_hop: IpAddr) -> Vec<u8> {
         let (family, addr) = match next_hop {
             IpAddr::V4(b) => (AF_INET, b.to_vec()),
             IpAddr::V6(b) => (AF_INET6, b.to_vec()),
         };
         let mut data = Vec::with_capacity(2 + addr.len());
-        data.extend_from_slice(&family.to_be_bytes());
+        data.extend_from_slice(&family.to_ne_bytes());
         data.extend_from_slice(&addr);
         Self::build_rta_attribute(RTA_VIA, &data)
     }
@@ -584,7 +592,10 @@ mod tests {
     }
 
     /// The kernel `struct rtvia` has a 2-byte `sa_family_t` — the RTA_VIA
-    /// payload must be `<family:2 BE> <addr>`, not `<family:1> <addr>`.
+    /// payload must be `<family:2> <addr>`, not `<family:1> <addr>`. The
+    /// family is in HOST byte order (kernel `nla_put_via`/`nla_get_via`
+    /// treat it as a plain `sa_family_t`, no `ntohs`), matching how
+    /// sockaddr families are read everywhere else in the socket API.
     #[test]
     fn build_rta_via_ipv4_layout() {
         let via = MplsNetlink::build_rta_via(IpAddr::V4([192, 0, 2, 1]));
@@ -592,8 +603,8 @@ mod tests {
         assert_eq!(via.len(), 12);
         assert_eq!(u16::from_ne_bytes([via[0], via[1]]), 10);
         assert_eq!(u16::from_ne_bytes([via[2], via[3]]), RTA_VIA);
-        // family is a 2-byte sa_family_t in network byte order
-        assert_eq!(u16::from_be_bytes([via[4], via[5]]), AF_INET);
+        // family is a 2-byte sa_family_t in host byte order
+        assert_eq!(u16::from_ne_bytes([via[4], via[5]]), AF_INET);
         assert_eq!(&via[6..10], &[192, 0, 2, 1]);
     }
 
@@ -605,7 +616,7 @@ mod tests {
         assert_eq!(via.len(), 24);
         assert_eq!(u16::from_ne_bytes([via[0], via[1]]), 22);
         assert_eq!(u16::from_ne_bytes([via[2], via[3]]), RTA_VIA);
-        assert_eq!(u16::from_be_bytes([via[4], via[5]]), AF_INET6);
+        assert_eq!(u16::from_ne_bytes([via[4], via[5]]), AF_INET6);
         assert_eq!(&via[6..22], &addr);
     }
 
@@ -626,10 +637,10 @@ mod tests {
         let dst = find_attr(&req, RTA_DST).expect("RTA_DST");
         assert_eq!(dst.len(), 4);
         assert_eq!(u32::from_be_bytes(dst.try_into().unwrap()) >> 12, 100);
-        // RTA_VIA: 2-byte BE family + 4 address bytes.
+        // RTA_VIA: 2-byte host-order family + 4 address bytes.
         let via = find_attr(&req, RTA_VIA).expect("RTA_VIA");
         assert_eq!(via.len(), 6);
-        assert_eq!(u16::from_be_bytes([via[0], via[1]]), AF_INET);
+        assert_eq!(u16::from_ne_bytes([via[0], via[1]]), AF_INET);
         assert_eq!(&via[2..6], &[192, 0, 2, 1]);
         // RTA_OIF present.
         assert_eq!(find_attr(&req, RTA_OIF).expect("RTA_OIF").len(), 4);
@@ -654,7 +665,7 @@ mod tests {
         assert_eq!(u32::from_be_bytes(new_dst.try_into().unwrap()) >> 12, 200);
         let via = find_attr(&req, RTA_VIA).expect("RTA_VIA");
         assert_eq!(via.len(), 18);
-        assert_eq!(u16::from_be_bytes([via[0], via[1]]), AF_INET6);
+        assert_eq!(u16::from_ne_bytes([via[0], via[1]]), AF_INET6);
     }
 
     #[test]
