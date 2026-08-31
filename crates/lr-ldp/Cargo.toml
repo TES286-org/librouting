@@ -1,0 +1,20 @@
+[package]
+name = "lr-ldp"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "LDP - Label Distribution Protocol (RFC 5036) codec and session state machines for librouting"
+keywords = ["ldp", "mpls", "label-distribution", "routing"]
+categories = ["network-programming", "parser-implementations"]
+
+[features]
+default = ["std"]
+std = ["lr-core/std"]
+no_std = []
+
+[dependencies]
+lr-core = { workspace = true }

@@ -368,6 +368,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "lr-ldp"
+version = "0.1.0"
+dependencies = [
+ "lr-core",
+]
+
+[[package]]
 name = "lr-mpls"
 version = "0.1.0"
 dependencies = [
