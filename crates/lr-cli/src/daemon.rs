@@ -54,6 +54,7 @@ use std::collections::HashMap;
 mod api;
 mod daemon_bfd;
 mod daemon_config;
+mod daemon_ldp;
 mod daemon_ospf;
 mod daemon_policy;
 mod privdrop;
@@ -125,7 +126,7 @@ fn print_usage() {
          --bfd-min-tx-ms MS       BFD transmit interval (default 100)\n  \
          --bfd-min-rx-ms MS       BFD receive interval (default 100)\n  \
          --bfd-multiplier N       BFD detection multiplier (default 3)\n  \
-         --protocol PROTO         bgp (default) | babel | ospf | bmp\n  \
+         --protocol PROTO         bgp (default) | babel | ospf | bmp | ldp\n  \
          --babel-group ADDR       Babel multicast group (ff02::1:6 v6, 224.0.0.111 v4)\n  \
          --babel-port PORT        Babel UDP port (6696)\n  \
          --babel-key SECRET       RFC 8967 MAC key (repeatable; one MAC per\n  \
@@ -142,6 +143,16 @@ fn print_usage() {
          integer or dotted quad)\n  \
          --ospf-hello-interval S  OSPF hello interval (default 10)\n  \
          --ospf-dead-interval S   OSPF dead interval (default 40)\n  \
+         --ldp-transport ADDR     LDP transport address advertised in\n  \
+                                  Hellos (default: first interface addr)\n  \
+         --ldp-port PORT          LDP UDP/TCP port (646)\n  \
+         --ldp-keepalive SEC      Session KeepAlive Time (default 15)\n  \
+         --ldp-link-hold SEC      Link Hello hold time (default 15)\n  \
+         --ldp-targeted-hold SEC  Targeted Hello hold time (default 45)\n  \
+         --ldp-interface NAME     LDP link-discovery interface (repeatable)\n  \
+         --ldp-targeted ADDR      Extended-discovery peer (repeatable)\n  \
+         --ldp-bind PFX[=LABEL]   Advertise FEC binding (repeatable;\n  \
+                                  LABEL auto-allocates from 16)\n  \
          --bmp-target ADDR:PORT  Mirror Peer Up/Down + Route Monitoring\n  \
          to a BMP monitoring station (RFC 7854)\n  \
          --install-kernel-routes  Install best routes into the kernel FIB\n  \
@@ -170,9 +181,12 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
     // Fail closed on a typo'd --protocol instead of silently running BGP.
-    if !matches!(cfg.protocol.as_str(), "bgp" | "babel" | "ospf" | "bmp") {
+    if !matches!(
+        cfg.protocol.as_str(),
+        "bgp" | "babel" | "ospf" | "bmp" | "ldp"
+    ) {
         eprintln!(
-            "error: unknown --protocol '{}' (bgp | babel | ospf | bmp)",
+            "error: unknown --protocol '{}' (bgp | babel | ospf | bmp | ldp)",
             cfg.protocol
         );
         return ExitCode::from(2);
@@ -198,6 +212,10 @@ fn main() -> ExitCode {
     // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
     if cfg.protocol == "ospf" {
         return daemon_ospf::run_ospf_daemon(&cfg, rid);
+    }
+    // LDP mode: UDP discovery + TCP session transport around LdpEngine.
+    if cfg.protocol == "ldp" {
+        return daemon_ldp::run_ldp_daemon(&cfg, rid);
     }
     // BMP collector mode: accept monitoring sessions from routers.
     if cfg.protocol == "bmp" {
@@ -579,6 +597,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }),
         router,
         running: Arc::clone(&running),
+        status_lines: Arc::new(Vec::new),
     });
 
     // --- Ticker thread: pump the router clock every 50 ms. It is the
@@ -1605,6 +1624,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         reload: Arc::new(|| vec!["bmp: configuration reload is not supported".to_string()]),
         router: Arc::clone(&router),
         running: Arc::clone(&running),
+        status_lines: Arc::new(Vec::new),
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
         eprintln!("daemon: {}", e);
@@ -2035,6 +2055,7 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
         }),
         router: Arc::clone(&router),
         running: Arc::clone(&running),
+        status_lines: Arc::new(Vec::new),
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
         eprintln!("daemon: {}", e);
@@ -2691,6 +2712,9 @@ struct Runtime {
     running: Arc<AtomicBool>,
     /// Re-apply the configuration file (SIGHUP / API `reload`).
     reload: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Protocol-specific extra `status` lines for the runtime API
+    /// (e.g. LDP counters). Empty for the BGP/Babel/OSPF/BMP modes.
+    status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
 }
 
 /// Act on every pending signal. SIGTERM/SIGINT trigger a graceful stop
@@ -2757,6 +2781,10 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
         reload: Box::new({
             let rt = Arc::clone(rt);
             move || (rt.reload)()
+        }),
+        status_lines: Box::new({
+            let rt = Arc::clone(rt);
+            move || (rt.status_lines)()
         }),
     };
     api::spawn(path, ctx)

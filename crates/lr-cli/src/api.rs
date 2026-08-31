@@ -59,6 +59,9 @@ pub struct ApiContext {
     /// Re-apply configuration (SIGHUP equivalent); returns the log
     /// lines describing what was (not) applied.
     pub reload: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Protocol-specific extra `status` lines (e.g. LDP adjacency /
+    /// session / binding counters). Returns the lines verbatim.
+    pub status_lines: Box<dyn Fn() -> Vec<String> + Send + Sync>,
 }
 
 #[cfg(unix)]
@@ -107,6 +110,7 @@ mod imp {
         let router = Arc::clone(&ctx.router);
         let running = Arc::clone(&ctx.running);
         let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
+        let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
         let started = std::time::Instant::now();
 
         thread::Builder::new()
@@ -119,21 +123,23 @@ mod imp {
                     let router = Arc::clone(&router);
                     let running = Arc::clone(&running);
                     let reload = Arc::clone(&reload);
+                    let status_lines = Arc::clone(&status_lines);
                     let path_owned = path_owned.clone();
                     thread::Builder::new()
                         .name("lr-api-conn".into())
                         .spawn(move || {
                             // `shutdown` removes the socket file itself so
                             // the cleanup does not race the process exit.
-                            serve_connection(
-                                stream,
-                                &info,
-                                &router,
-                                &running,
-                                &reload,
+                            let deps = ConnDeps {
+                                info: &info,
+                                router: &router,
+                                running: &running,
+                                reload: &reload,
+                                status_lines: &status_lines,
                                 started,
-                                Some(&path_owned),
-                            );
+                                socket_path: Some(&path_owned),
+                            };
+                            serve_connection(stream, &deps);
                         })
                         .ok();
                 });
@@ -161,18 +167,23 @@ mod imp {
         }
     }
 
-    /// One connection: read a command line, answer, repeat.
-    /// `socket_path` lets the `shutdown` command remove the socket file
-    /// synchronously (the accept loop's cleanup may race process exit).
-    fn serve_connection(
-        stream: UnixStream,
-        info: &DaemonInfo,
-        router: &Arc<Mutex<DefaultRouter>>,
-        running: &Arc<AtomicBool>,
-        reload: &Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Shared state one API connection reads. Bundled so the serve
+    /// function keeps a short parameter list as per-protocol surfaces
+    /// grow (`status_lines`, …).
+    struct ConnDeps<'a> {
+        info: &'a DaemonInfo,
+        router: &'a Arc<Mutex<DefaultRouter>>,
+        running: &'a Arc<AtomicBool>,
+        reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+        status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         started: std::time::Instant,
-        socket_path: Option<&str>,
-    ) {
+        /// The `shutdown` command removes the socket file itself so the
+        /// cleanup does not race the process exit.
+        socket_path: Option<&'a str>,
+    }
+
+    /// One connection: read a command line, answer, repeat.
+    fn serve_connection(stream: UnixStream, deps: &ConnDeps<'_>) {
         let _ = stream.set_read_timeout(Some(Duration::from_millis(250)));
         let Ok(write_half) = stream.try_clone() else {
             return;
@@ -208,7 +219,7 @@ mod imp {
                             || e.kind() == std::io::ErrorKind::TimedOut =>
                     {
                         idle_rounds += 1;
-                        if idle_rounds > 40 || !running.load(Ordering::Relaxed) {
+                        if idle_rounds > 40 || !deps.running.load(Ordering::Relaxed) {
                             return; // ~10 s idle timeout or shutdown
                         }
                     }
@@ -234,14 +245,14 @@ mod imp {
                 if path.is_empty() {
                     let _ = writeln!(out, "usage: mrt <path>");
                 } else {
-                    let router_id = core::str::FromStr::from_str(&info.router_id)
+                    let router_id = core::str::FromStr::from_str(&deps.info.router_id)
                         .unwrap_or(lr_core::addr::RouterId::from_u32(0));
                     // Copy the RIB snapshot and session summaries under the
                     // lock, then write the file outside it: disk I/O on a
                     // hung filesystem must not stall the router (BGP hold
                     // timers expire).
                     let (routes, summaries) = {
-                        let r = router.lock().unwrap();
+                        let r = deps.router.lock().unwrap();
                         (
                             r.rib_paths_snapshot()
                                 .into_iter()
@@ -283,24 +294,27 @@ mod imp {
                 }
                 "status" => {
                     let (sessions, rib) = {
-                        let r = router.lock().unwrap();
+                        let r = deps.router.lock().unwrap();
                         (r.session_summaries().len(), r.rib_len())
                     };
-                    let _ = writeln!(out, "version {}", info.version);
-                    let _ = writeln!(out, "local-as {}", info.local_as);
-                    let _ = writeln!(out, "peer-as {}", info.peer_as);
-                    let _ = writeln!(out, "router-id {}", info.router_id);
+                    let _ = writeln!(out, "version {}", deps.info.version);
+                    let _ = writeln!(out, "local-as {}", deps.info.local_as);
+                    let _ = writeln!(out, "peer-as {}", deps.info.peer_as);
+                    let _ = writeln!(out, "router-id {}", deps.info.router_id);
                     let _ = writeln!(
                         out,
                         "config {}",
-                        info.config_path.as_deref().unwrap_or("(none)")
+                        deps.info.config_path.as_deref().unwrap_or("(none)")
                     );
-                    let _ = writeln!(out, "uptime-secs {}", started.elapsed().as_secs());
+                    let _ = writeln!(out, "uptime-secs {}", deps.started.elapsed().as_secs());
                     let _ = writeln!(out, "sessions {}", sessions);
                     let _ = writeln!(out, "rib-entries {}", rib);
+                    for line in (deps.status_lines)() {
+                        let _ = writeln!(out, "{line}");
+                    }
                 }
                 "sessions" => {
-                    let summaries = router.lock().unwrap().session_summaries();
+                    let summaries = deps.router.lock().unwrap().session_summaries();
                     for s in summaries {
                         let _ = writeln!(
                             out,
@@ -327,7 +341,7 @@ mod imp {
                     // borrows from the router. One line per path: with
                     // RFC 7911 Add-Path a prefix can hold several ranked
                     // paths, distinguished by their path identifiers.
-                    let r = router.lock().unwrap();
+                    let r = deps.router.lock().unwrap();
                     for route in r.rib_paths_snapshot() {
                         let _ = writeln!(
                             out,
@@ -344,15 +358,15 @@ mod imp {
                     }
                 }
                 "reload" => {
-                    for line in reload() {
+                    for line in (deps.reload)() {
                         let _ = writeln!(out, "{}", line);
                     }
                 }
                 "shutdown" => {
-                    running.store(false, Ordering::Relaxed);
+                    deps.running.store(false, Ordering::Relaxed);
                     let _ = writeln!(out, "shutting down");
                     let _ = out.flush();
-                    if let Some(path) = socket_path {
+                    if let Some(path) = deps.socket_path {
                         let _ = std::fs::remove_file(path);
                     }
                     return;
@@ -383,6 +397,7 @@ mod imp {
                 router,
                 running,
                 reload: Box::new(|| vec!["reloaded".into()]),
+                status_lines: Box::new(Vec::new),
             }
         }
 

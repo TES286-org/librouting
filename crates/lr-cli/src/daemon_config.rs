@@ -180,7 +180,9 @@ impl LdpIfSpec {
 /// (RFC 5036 §3.5.2, LDP-over-TCP without a shared link).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct LdpTargetedSpec {
-    /// Peer transport address for targeted Hellos (required).
+    /// Peer transport address, optionally with a port suffix
+    /// (`"10.0.0.2"` or `"10.0.0.2:646"`). Without a port the local
+    /// LDP port is used (the standard symmetric deployment).
     pub address: Option<String>,
 }
 
@@ -1759,7 +1761,6 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 // interface.
                 cfg.ldp_interfaces.push(LdpIfSpec {
                     name: Some(args[i + 1].clone()),
-                    ..Default::default()
                 });
                 i += 2;
             }

@@ -323,6 +323,7 @@ dependencies = [
  "lr-bgp",
  "lr-bmp",
  "lr-core",
+ "lr-ldp",
  "lr-mpls",
  "lr-mrt",
  "lr-ospf",

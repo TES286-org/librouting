@@ -239,6 +239,14 @@ impl LdpEngine {
         let mut read = ReadBuf::new(datagram);
         // A datagram carries at most one PDU; decode and ignore the rest.
         if let Ok(Some(pdu)) = self.codec.decode(&mut read) {
+            // Self-Hello protection: a datagram carrying our own LDP
+            // Identifier is our own Hello echoed back (multicast loop,
+            // a miswired shared host, …). An adjacency with our own
+            // label space is meaningless — drop it before discovery
+            // state is created.
+            if pdu.sender == self.cfg.local_id {
+                return;
+            }
             for msg in &pdu.messages {
                 if let LdpMessage::Hello(hello) = msg {
                     let events = self.discovery.feed_hello(now, &pdu, hello, from);
@@ -339,6 +347,15 @@ impl LdpEngine {
             path_vector_limit: 0,
         });
         self.register_session(peer_id, conn, session, now);
+    }
+
+    /// An active-role TCP connection attempt failed. The peer returns
+    /// to "awaiting transport": the next Hello re-runs the §2.5.2 role
+    /// decision and re-emits [`EngineEvent::EstablishTransport`], so an
+    /// embedder that surfaces connect errors through this method gets
+    /// natural reconnect-on-hello behavior instead of a stuck peer.
+    pub fn on_connect_failed(&mut self, peer_id: LdpId) {
+        self.pending_connect.retain(|p| *p != peer_id);
     }
 
     /// A passive-role connection was accepted. The peer is unknown
@@ -1021,5 +1038,28 @@ mod tests {
         }
         // The drained queue is empty afterwards.
         assert!(engine.drain_udp().is_empty());
+    }
+
+    #[test]
+    fn self_hello_is_ignored() {
+        let local = LdpId::new([1, 1, 1, 1], 0);
+        let mut cfg = LdpEngineConfig::new(local, IpAddr::V4([127, 0, 0, 1]));
+        cfg.targeted_peers = Vec::from([IpAddr::V4([127, 0, 0, 2])]);
+        let mut engine = LdpEngine::new(cfg);
+
+        // Take one of our own outgoing Hellos and feed it back as if a
+        // loop or miswired host echoed it: no adjacency may form with
+        // our own label space.
+        engine.tick(Instant::from_millis(0));
+        let echoed: Vec<(IpAddr, Vec<u8>)> = engine.drain_udp();
+        assert!(!echoed.is_empty());
+        for (_, bytes) in echoed {
+            engine.feed_udp(Instant::from_millis(1), IpAddr::V4([127, 0, 0, 1]), &bytes);
+        }
+        assert!(
+            engine.adjacencies().is_empty(),
+            "own Hellos must not create adjacencies"
+        );
+        assert!(engine.take_events().is_empty());
     }
 }
