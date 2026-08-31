@@ -156,6 +156,8 @@ jobs:
         run: ./tests/interop/two_daemon.sh
       - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)
         run: ./tests/interop/labeled_unicast.sh
+      - name: RFC 8277 BGP-LU -> MPLS dataplane interop (kernel-gated, user namespace)
+        run: ./tests/interop/mpls_lsp.sh
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         run: ./tests/interop/ospf.sh
       - name: Babel MAC auth e2e (RFC 8967 + RFC 9467, two daemons)
