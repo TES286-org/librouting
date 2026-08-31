@@ -34,6 +34,7 @@
 //! The daemon does **not** install routes into the kernel by default (safe
 //! in any environment). `--install-kernel-routes` enables it (root + Linux).
 
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
@@ -1294,21 +1295,7 @@ fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>)
     thread::Builder::new()
         .name("lr-ticker".into())
         .spawn(move || {
-            let mut os_table: Option<
-                Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
-            > = None;
-            if install_kernel {
-                match lr_osroute::SystemRouteTable::connect() {
-                    Ok(t) => {
-                        println!("daemon: os route table connected — installing kernel routes");
-                        os_table = Some(Box::new(t));
-                    }
-                    Err(e) => eprintln!(
-                        "daemon: os route table unavailable ({}); kernel install disabled",
-                        e
-                    ),
-                }
-            }
+            let mut mirror = KernelMirror::new(install_kernel);
             let start = WallClock::now();
             loop {
                 let shutting_down = !rt.running.load(Ordering::Relaxed);
@@ -1323,7 +1310,7 @@ fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>)
                     for ev in &events {
                         log_event(ev);
                     }
-                    install_kernel_routes(&mut os_table, &events);
+                    mirror.apply(&events);
                 }
                 if shutting_down {
                     // Bounded shutdown cadence: the main thread exits the
@@ -1340,32 +1327,212 @@ fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>)
                 for ev in &events {
                     log_event(ev);
                 }
-                install_kernel_routes(&mut os_table, &events);
+                mirror.apply(&events);
             }
         })
         .expect("spawn ticker thread");
 }
 
-/// Mirror Loc-RIB events into the kernel FIB (best-effort: a failed
-/// install is logged by rtnetlink itself and retried on the next event).
-fn install_kernel_routes(
-    table: &mut Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
-    events: &[RouterEvent],
-) {
-    let Some(table) = table else {
-        return;
+/// The private `lr-bgp` attribute tag that carries an RFC 8277 label
+/// stack through the Loc-RIB (never transmitted on the wire).
+const LR_MPLS_LABEL_STACK_TAG: u8 = 251; // pinned to AttrType::LrMplsLabelStack by a test
+
+/// Linux loopback is always ifindex 1 inside a network namespace: the
+/// loopback device registers at netns creation before any other device.
+/// The LSP tail (pop, no via) needs that device for local delivery.
+#[cfg(target_os = "linux")]
+const LO_IF_INDEX: u32 = 1;
+
+/// What the kernel dataplane should do for a Loc-RIB best route
+/// (RFC 8277 BGP-LU → Linux MPLS, W3-extra.3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LspDecision {
+    /// LSP **tail**: a locally originated labelled route carries the
+    /// label remote peers use to reach the prefix — install the AF_MPLS
+    /// pop route (in-label → `lo`, local delivery; PHP-style tails
+    /// originate implicit-null instead and never take this branch).
+    PopLocal(lr_mpls::Label),
+    /// LSP **head**: a peer-advertised labelled route — install the
+    /// encap route pushing `stack` toward the BGP next hop, so locally
+    /// generated / forwarded IP traffic enters the LSP.
+    Push(lr_mpls::LabelStack),
+    /// Nothing labelled: plain IP install (or nothing).
+    Plain,
+}
+
+/// Classify a best route for the LSP mirror. Pure — no I/O.
+///
+/// The label stack rides the private `LrMplsLabelStack` attribute the
+/// protocol layer attaches to BGP-LU routes (both originated and
+/// received). An implicit-null top label (3, RFC 3032 §2.1) means
+/// penultimate-hop popping: the head must NOT push, plain forwarding is
+/// correct. Received routes without a resolvable next hop are left
+/// alone — there is nothing to point the encap route at.
+fn lsp_decision(route: &lr_core::rib::Route) -> LspDecision {
+    let Some(attr) = route
+        .attributes
+        .get(lr_core::attr::AttrTag(LR_MPLS_LABEL_STACK_TAG))
+    else {
+        return LspDecision::Plain;
     };
-    for ev in events {
-        match ev {
-            RouterEvent::RouteInstalled(r) => {
-                if let Some(nh) = r.next_hop {
-                    let _ = table.add_route(r.key.prefix, nh, 0);
+    let Ok(stack) = lr_mpls::LabelStack::decode_4octet(&attr.value) else {
+        return LspDecision::Plain;
+    };
+    let Some(top) = stack.labels().first() else {
+        return LspDecision::Plain;
+    };
+    if top.value == lr_mpls::Label::IMPLICIT_NULL.value {
+        return LspDecision::Plain; // PHP: forward unlabeled
+    }
+    if route.origin.proto == 2 {
+        // Locally originated: this node is the LSP tail.
+        return LspDecision::PopLocal(lr_mpls::Label::new_value(top.value));
+    }
+    if route.next_hop.is_some() {
+        return LspDecision::Push(stack);
+    }
+    LspDecision::Plain
+}
+
+/// Mirrors Loc-RIB best routes into the kernel: the plain IP FIB (best
+/// effort, failures retried on the next event) and — when the kernel
+/// has MPLS routing enabled (Linux `mpls_router`) — the RFC 8277 LSP
+/// endpoints for labelled routes: a pop route per locally originated
+/// label (tail) and an encap route per received labelled prefix (head).
+/// Withdrawals reverse both halves.
+struct KernelMirror {
+    ip_table: Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
+    /// Locally originated in-labels currently installed, keyed by
+    /// prefix — `RouteWithdrawn` carries only the key, so the tail half
+    /// needs this side table to know which label to delete.
+    tails: HashMap<Prefix, lr_mpls::Label>,
+    #[cfg(target_os = "linux")]
+    mpls: Option<lr_osroute::mpls_route::MplsNetlink>,
+}
+
+impl KernelMirror {
+    fn new(install_kernel: bool) -> Self {
+        let mut ip_table = None;
+        #[cfg(target_os = "linux")]
+        let mut mpls = None;
+        if install_kernel {
+            match lr_osroute::SystemRouteTable::connect() {
+                Ok(t) => {
+                    println!("daemon: os route table connected — installing kernel routes");
+                    ip_table = Some(Box::new(t)
+                        as Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>);
                 }
+                Err(e) => eprintln!(
+                    "daemon: os route table unavailable ({}); kernel install disabled",
+                    e
+                ),
             }
-            RouterEvent::RouteWithdrawn(k) => {
-                let _ = table.delete_route(k.prefix);
+            #[cfg(target_os = "linux")]
+            match lr_osroute::mpls_route::MplsNetlink::connect() {
+                Ok(t) => {
+                    println!("daemon: mpls route table connected — installing BGP-LU LSPs");
+                    mpls = Some(t);
+                }
+                Err(e) => eprintln!(
+                    "daemon: mpls route table unavailable ({}); LSP install disabled",
+                    e
+                ),
             }
-            _ => {}
+        }
+        Self {
+            ip_table,
+            tails: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            mpls,
+        }
+    }
+
+    fn apply(&mut self, events: &[RouterEvent]) {
+        for ev in events {
+            match ev {
+                RouterEvent::RouteInstalled(r) => {
+                    let mut mirrored = false;
+                    #[cfg(target_os = "linux")]
+                    if let Some(mpls) = self.mpls.as_mut() {
+                        match lsp_decision(r) {
+                            LspDecision::PopLocal(label) => {
+                                let lsp = lr_osroute::mpls_route::MplsRoute::pop_local(
+                                    label,
+                                    LO_IF_INDEX,
+                                );
+                                match mpls.add_route(&lsp) {
+                                    Ok(()) => {
+                                        println!(
+                                            "lsp: in-label {} -> pop (local delivery) for {}",
+                                            label.value, r.key.prefix
+                                        );
+                                        self.tails.insert(r.key.prefix, label);
+                                        mirrored = true;
+                                    }
+                                    Err(e) => eprintln!(
+                                        "lsp: pop install for {} failed: {}",
+                                        r.key.prefix, e
+                                    ),
+                                }
+                            }
+                            LspDecision::Push(stack) => {
+                                if let Some(nh) = r.next_hop {
+                                    match mpls.add_encap_route(&r.key.prefix, &stack, nh, 0) {
+                                        Ok(()) => {
+                                            println!(
+                                                "lsp: {} encap mpls [{}] via {}",
+                                                r.key.prefix,
+                                                stack
+                                                    .labels()
+                                                    .iter()
+                                                    .map(|l| l.value.to_string())
+                                                    .collect::<Vec<_>>()
+                                                    .join(","),
+                                                nh
+                                            );
+                                            mirrored = true;
+                                        }
+                                        Err(e) => eprintln!(
+                                            "lsp: encap install for {} failed ({}); \
+                                             falling back to plain",
+                                            r.key.prefix, e
+                                        ),
+                                    }
+                                }
+                            }
+                            LspDecision::Plain => {}
+                        }
+                    }
+                    // Plain IP fallback: for unlabelled routes, and for
+                    // labelled routes when MPLS is unavailable or the
+                    // encap install failed (reachability first, labels
+                    // second — BIRD behaves the same way).
+                    if !mirrored {
+                        if let Some(nh) = r.next_hop {
+                            if let Some(table) = self.ip_table.as_mut() {
+                                let _ = table.add_route(r.key.prefix, nh, 0);
+                            }
+                        }
+                    }
+                }
+                RouterEvent::RouteWithdrawn(k) => {
+                    #[cfg(target_os = "linux")]
+                    if let Some(label) = self.tails.remove(&k.prefix) {
+                        if let Some(mpls) = self.mpls.as_mut() {
+                            if let Err(e) = mpls.delete_route(label) {
+                                eprintln!(
+                                    "lsp: pop removal for label {} failed: {}",
+                                    label.value, e
+                                );
+                            }
+                        }
+                    }
+                    if let Some(table) = self.ip_table.as_mut() {
+                        let _ = table.delete_route(k.prefix);
+                    }
+                }
+                _ => {}
+            }
         }
     }
 }
@@ -2669,5 +2836,121 @@ fn wait_for_shutdown(rt: &Runtime) {
     while rt.running.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
         dispatch_signals(rt);
+    }
+}
+
+#[cfg(test)]
+mod lsp_tests {
+    use super::*;
+
+    /// The private tag is a magic byte by necessity (const context);
+    /// this pins it to the lr-bgp definition so a renumbering breaks
+    /// the build's tests, not the dataplane.
+    #[test]
+    fn label_stack_tag_matches_lr_bgp() {
+        assert_eq!(
+            LR_MPLS_LABEL_STACK_TAG,
+            lr_bgp::path::AttrType::LrMplsLabelStack.to_u8()
+        );
+    }
+
+    /// Build a best route shaped like the router pipeline emits it:
+    /// `proto` 2 = locally originated, anything else = peer-learned.
+    fn route(
+        origin_proto: u32,
+        next_hop: Option<IpAddr>,
+        stack: Option<&lr_mpls::LabelStack>,
+    ) -> lr_core::rib::Route {
+        let mut attrs = lr_core::attr::Attributes::new();
+        if let Some(s) = stack {
+            attrs.insert(lr_core::attr::Attribute {
+                tag: lr_core::attr::AttrTag(LR_MPLS_LABEL_STACK_TAG),
+                flags: 0x20, // optional (matches PathAttribute::set_label_stack)
+                value: s.encode_4octet(),
+            });
+        }
+        lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(
+                "198.51.100.0/24".parse().unwrap(),
+                NlriFamily::IPV4_LABELED_UNICAST,
+            ),
+            origin: lr_core::rib::RouteOrigin {
+                proto: origin_proto,
+                peer: 0,
+            },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(
+                lr_core::rib::Protocol::Bgp.default_admin_distance(),
+                0,
+            ),
+            next_hop,
+            attributes: attrs,
+            age_ms: 0,
+            path_id: 0,
+        }
+    }
+
+    #[test]
+    fn plain_when_no_label_stack() {
+        let r = route(0, Some(IpAddr::V4([192, 0, 2, 1])), None);
+        assert_eq!(lsp_decision(&r), LspDecision::Plain);
+    }
+
+    #[test]
+    fn push_for_received_labelled_route() {
+        let stack = lr_mpls::LabelStack::from_values([100]);
+        let r = route(0, Some(IpAddr::V4([192, 0, 2, 1])), Some(&stack));
+        assert_eq!(lsp_decision(&r), LspDecision::Push(stack));
+    }
+
+    #[test]
+    fn pop_local_for_originated_labelled_route() {
+        let stack = lr_mpls::LabelStack::from_values([100]);
+        let r = route(2, None, Some(&stack));
+        assert_eq!(
+            lsp_decision(&r),
+            LspDecision::PopLocal(lr_mpls::Label::new_value(100))
+        );
+    }
+
+    #[test]
+    fn plain_for_implicit_null_top_label() {
+        // PHP: the tail advertises implicit null, the head must not push.
+        let stack = lr_mpls::LabelStack::from_values([lr_mpls::Label::IMPLICIT_NULL.value]);
+        let r = route(0, Some(IpAddr::V4([192, 0, 2, 1])), Some(&stack));
+        assert_eq!(lsp_decision(&r), LspDecision::Plain);
+    }
+
+    #[test]
+    fn plain_when_received_route_has_no_next_hop() {
+        let stack = lr_mpls::LabelStack::from_values([100]);
+        let r = route(0, None, Some(&stack));
+        assert_eq!(lsp_decision(&r), LspDecision::Plain);
+    }
+
+    #[test]
+    fn garbled_stack_attribute_is_ignored() {
+        let mut r = route(0, Some(IpAddr::V4([192, 0, 2, 1])), None);
+        r.attributes.insert(lr_core::attr::Attribute {
+            tag: lr_core::attr::AttrTag(LR_MPLS_LABEL_STACK_TAG),
+            flags: 0x20,
+            value: vec![0xff; 3], // not a multiple of 4 → decode failure
+        });
+        assert_eq!(lsp_decision(&r), LspDecision::Plain);
+    }
+
+    #[test]
+    fn multi_label_stack_round_trips() {
+        let stack = lr_mpls::LabelStack::from_values([100, 200]);
+        let r = route(0, Some(IpAddr::V4([192, 0, 2, 1])), Some(&stack));
+        match lsp_decision(&r) {
+            LspDecision::Push(s) => {
+                assert_eq!(
+                    s.labels().iter().map(|l| l.value).collect::<Vec<_>>(),
+                    [100, 200]
+                );
+            }
+            other => panic!("expected Push, got {:?}", other),
+        }
     }
 }
