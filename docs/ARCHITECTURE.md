@@ -226,6 +226,7 @@ embedders. Notable toggles:
 - `lr-bgp` — `asn4` / `mp_bgp` / `addpath` / `graceful_restart` /
   `enhanced_rr` / `extended_communities` / `long_lived` / `labeled_unicast`.
 - `lr-bfd` — `std` / `no_std`.
+- `lr-ldp` — `std` / `no_std`.
 
 ## Testing
 

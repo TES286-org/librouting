@@ -541,6 +541,56 @@ null) refused — `add_encap_route` and `swap` return
 `RTA_VIA` family field is host byte order, exactly like every other
 `sa_family_t`.
 
+## LDP — label distribution (RFC 5036 foundation)
+
+```rust
+use lr_core::addr::Prefix;
+use lr_ldp::{GenericLabel, IpAddr, LdpEngine, LdpEngineConfig, LdpId};
+
+let mut cfg = LdpEngineConfig::new(
+    LdpId::new([10, 0, 0, 1], 0),
+    IpAddr::V4([10, 0, 0, 1]),
+);
+// Extended (targeted) discovery toward a peer; link discovery needs
+// nothing extra — both ride the same UDP socket (port 646).
+cfg.targeted_peers = Vec::from([IpAddr::V4([10, 0, 0, 2])]);
+cfg.interface_addresses = Vec::from([IpAddr::V4([10, 0, 0, 1])]);
+let mut engine = LdpEngine::new(cfg);
+
+// Per pump round: advance timers, move bytes, handle events.
+engine.tick(now);
+for (dest, datagram) in engine.drain_udp() { /* transmit (Hellos) */ }
+// engine.feed_udp(now, source, &datagram);   // received Hellos
+// Open/accept the TCP transport as `EngineEvent::EstablishTransport`
+// directs (§2.5.2 role decision), then:
+// engine.on_connected(now, conn, peer_id);   // active connect done
+// engine.on_accepted(conn);                  // passive accept done
+// engine.feed_tcp(now, conn, &bytes);        // received stream bytes
+for ev in engine.take_events() {
+    // AdjacencyUp / SessionUp(negotiated) / AddressReceived /
+    // MappingLearned / MappingWithdrawn / MappingReleased / ...
+}
+
+// Advertise a local binding to every operational peer (DU, label 100):
+engine.advertise_mapping(Prefix::new_v4([198, 51, 100, 0], 24), GenericLabel(100));
+// Withdraw it: peers answer with Label Release (§3.5.10.1).
+engine.withdraw_mapping(Prefix::new_v4([198, 51, 100, 0], 24));
+
+// Introspection:
+// engine.session_state(peer) -> Option<SessionState>
+// engine.lib().label_from(peer, &FecKey::new(prefix)) -> Option<GenericLabel>
+```
+
+The crate is protocol-only: it never opens a socket. The embedder owns
+UDP 646 (Hellos) and TCP 646 (the transport), feeds bytes in and drains
+bytes out. Queued session messages are batched into PDUs that respect
+the negotiated Max PDU Length, and a received PDU over that cap is met
+with a fatal Bad PDU Length Notification (§3.5.3). A daemon transport
+(`--protocol ldp`) is the next slice; the `lr-ldp` test suite includes
+a two-speaker e2e over real loopback sockets that runs the whole
+lifecycle (discovery → session → label exchange → withdrawal →
+keepalive expiry / shutdown).
+
 ## BGP labelled unicast (RFC 8277)
 
 ```rust

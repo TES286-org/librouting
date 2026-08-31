@@ -47,6 +47,7 @@ library without depending on the Rust toolchain at runtime.
 | `lr-router`  | `crates/lr-router`  | Layer-3 router instance, sessions, scheduler, event dispatch                                                                                                                                                                                                                                                                |
 | `lr-bfd`     | `crates/lr-bfd`     | BFD Control packet codec (RFC 5880 §4), session FSM with negotiated timing + Poll/Final (§6.8), auth sections (§4.2-§4.4)                                                                                                                                                                                                   |
 | `lr-mpls`    | `crates/lr-mpls`    | MPLS label + label-stack codec (RFC 3032): 4-octet wire form, 3-octet NLRI form (RFC 8277 §3.2), reserved-label constants                                                                                                                                                                                                   |
+| `lr-ldp`     | `crates/lr-ldp`     | LDP codec + state machines (RFC 5036): PDU/TLV/message framing, §2.5.4 session FSM with negotiation, §3.5.2 discovery (link + targeted), per-peer label information base (DU), `LdpEngine` glue                                                                                                                              |
 | `lr-osroute` | `crates/lr-osroute` | OS route integration + protocol transports: rtnetlink/route(4)/IPHelper, TCP MD5/TCP-AO (`tcp_auth`), GTSM (`gtsm`), BFD UDP (`bfd_transport`, RFC 5881/5883), OSPF raw sockets (`ospf_transport`), Linux AF_MPLS LSP install (`mpls_route`)                                                                                |
 | `lr-mrt`     | `crates/lr-mrt`     | MRT dump format (RFC 6396): TABLE_DUMP_V2 read/write, BGP4MP decode                                                                                                                                                                                                                                                         |
 | `lr-bmp`     | `crates/lr-bmp`     | BGP Monitoring Protocol (RFC 7854): BMP message codec + router sink                                                                                                                                                                                                                                                         |
@@ -164,7 +165,7 @@ librouting/
 ├── Cargo.toml
 ├── crates/{lr-core, lr-bgp, lr-ospf, lr-babel, lr-rib, lr-policy,
 │           lr-router, lr-bfd, lr-bmp, lr-damping, lr-osroute, lr-mpls,
-│           lr-cli, lr-ffi, lr-tests}/
+│           lr-ldp, lr-cli, lr-ffi, lr-tests}/
 ├── bindings/{lr-go, lr-python}/
 ├── docs/
 │   ├── ARCHITECTURE.md

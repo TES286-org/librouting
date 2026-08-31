@@ -94,6 +94,19 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 9467 relaxed PC verification | ✅ 🧪 | §3.1 unicast/multicast PC split (PCm/PCu, RECOMMENDED, default on), §3.2 window verification (OPTIONAL, configurable S), §3.3 combined mode with two windows; successful Challenge Replies seed both fields; covered by unit tests and the two-daemon e2e |
 | Babel daemon transport (IPv6 link-local + IPv4 local networks) | ✅ 🧪 | daemon `--protocol babel` mode: UDP 6696, TTL=255 (RFC 8966 §2.1/§4), `%iface` scope carried into bind/join/send; two-socket transport (unicast on the local address + multicast on the group address — ff02::1:6 v6 / 224.0.0.111 v4 — with SO_REUSEADDR) so the destination class is exact; periodic Hello + Router-Id + Next-Hop + Update announcements (Loc-RIB minus babel-learned routes, split horizon, boot-unique router-id); `--network` origination; source-port/self-datagram filtering (§4.1); RFC 8967 auth wired in with per-neighbour state and challenge traffic unicast to the peer; `tests/interop/babel_auth.sh` (four phases) |
 
+### LDP (`lr-ldp`)
+
+| Capability | Status | Notes |
+|-----------|:------:|-------|
+| RFC 5036 codec (PDU / TLV / all 11 message types) | ✅ 🧪 | streaming `LdpCodec` (split feed/next-PDU), U/F-bit passthrough, FEC element set (prefix, wildcard, RD-free §3.4.1 subset), generic label, Status TLVs with the §3.9 status-code registry; no-std |
+| §2.5.4 session FSM + §3.5.3 parameter negotiation | ✅ 🧪 | active/passive roles, Init validation (version, keepalive, advertisement discipline resolution, receiver label-space match), min-of-proposals negotiation, KeepAlive send/hold timers with expiry teardown |
+| §3.5.2 discovery (link + targeted) | ✅ 🧪 | UDP Hellos with hold/refresh timers, adjacency creation + expiry, extended (targeted) discovery with accept policy, §2.5.2 active-role decision by transport-address comparison, session teardown when the last adjacency for a label space drops |
+| Label bookkeeping (downstream unsolicited) | ✅ 🧪 | per-peer LIB (learn/advertise/withdraw), §3.5.8.1 request→mapping/No-Route answers, §3.5.10.1 withdraw→release, wildcard withdraw handling, Address message exchange before mappings (§3.5.5.1), address-based session matching |
+| §3.5.3 Max PDU Length enforcement | ✅ 🧪 | TX: session messages batch into PDUs capped at the negotiated Max PDU Length; RX: an over-long PDU is answered with a fatal Bad PDU Length Notification before the session drops (FRR `S_BAD_PDU_LEN` parity) |
+| Engine glue (`LdpEngine`) | ✅ 🧪 | embedder moves bytes; TCP connection lifecycle (EstablishTransport/on_connected/on_accepted), session collision + No-Hello (§2.5.3) rejection, events for adjacency/session/address/label churn; two-speaker loopback e2e covers the full lifecycle plus keepalive expiry and both shutdown paths |
+| RFC 7552 IPv6 dual-stack procedures | ❌ | codec/FSMs are address-family agnostic; §2.4/§5 dual-stack selection not implemented |
+| Daemon transport (`--protocol ldp`, TCP/UDP 646) + FRR ldpd interop | ❌ | next slice |
+
 ## Layer 3 — router pipeline (`lr-router`)
 
 | Capability | Status | Notes |
@@ -133,7 +146,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 39 binaries / 782 tests |
+| Unit tests (workspace) | ✅ 41 binaries / 842 tests |
 | Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
 | Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
 | Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
@@ -601,7 +614,15 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    table); per-prefix label *allocation* for transit LSR roles (swap
    toward a labelled next hop) remains future work.
 4. **LDP (RFC 5036)** — label distribution protocol for non-BGP MPLS
-   LSPs. Future work; would sit in a new `lr-ldp` crate.
+   LSPs. Foundation slice landed in the new `lr-ldp` crate: the
+   RFC 5036 codec (PDU/TLV/message), the §2.5.4 session FSM with
+   §3.5.3 negotiation, §3.5.2 discovery (link + targeted) with the
+   §2.5.2 role decision, a per-peer label information base with DU
+   bookkeeping (§3.5.8.1 / §3.5.10.1), §3.5.3 Max PDU Length
+   enforcement in both directions, and the `LdpEngine` glue — all
+   no-std and covered by a two-speaker loopback e2e. Remaining:
+   daemon transport (`--protocol ldp`, TCP/UDP 646), FRR ldpd
+   interop, and the RFC 7552 IPv6 procedures.
 5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
    Future work; depends on RFC 9256 (Segment Routing Policy) once an
    embedder asks.
