@@ -511,16 +511,35 @@ if !mpls_enabled() {
 let mut mpls = MplsNetlink::connect()?;
 
 // Pop: incoming label 100 → forward IP to 192.0.2.1 on if 2.
-mpls.add_route(&MplsRoute::pop(Label::new(100), IpAddr::V4([192, 0, 2, 1]), 2))?;
+mpls.add_route(&MplsRoute::pop(Label::new_value(100), IpAddr::V4([192, 0, 2, 1]), 2))?;
+
+// Pop-local: incoming label 100 → decapsulate and deliver locally
+// (no RTA_VIA; the kernel sends the inner packet to the device's own
+// link address, i.e. local delivery on `lo` — the egress-PE tail).
+mpls.add_route(&MplsRoute::pop_local(Label::new_value(100), 1))?; // ifindex 1 = lo
 
 // Swap: incoming label 200 → push [300, 400], forward to 198.51.100.1.
-let new_stack = LabelStack::from_labels([Label::new(300), Label::new(400)]);
-mpls.add_route(&MplsRoute::swap(Label::new(200), new_stack,
+let new_stack = LabelStack::from_labels([Label::new_value(300), Label::new_value(400)]);
+mpls.add_route(&MplsRoute::swap(Label::new_value(200), new_stack,
                                 IpAddr::V4([198, 51, 100, 1]), 2))?;
 
-// Remove by in-label.
-mpls.delete_route(Label::new(100))?;
+// LSP head-end: route 198.51.100.0/24 via 192.0.2.1, pushing label 100
+// (the `ip route add 198.51.100.0/24 encap mpls 100 via 192.0.2.1` form).
+let prefix: lr_core::addr::Prefix = "198.51.100.0/24".parse().unwrap();
+mpls.add_encap_route(&prefix, &LabelStack::from_labels([Label::new_value(100)]),
+                     IpAddr::V4([192, 0, 2, 1]), 0)?;
+// Remove the IP route (encap or plain) by prefix, the in-label by label.
+mpls.delete_encap_route(&prefix)?;
+mpls.delete_route(Label::new_value(100))?;
 ```
+
+Netlink label attributes follow the kernel's `nla_get_labels()` rules:
+4 bytes per entry, bottom-of-stack on the last entry, TTL and TC
+cleared (the kernel owns the data-plane TTL), and label 3 (implicit
+null) refused — `add_encap_route` and `swap` return
+`MplsRouteError::ImplicitNullLabel` instead of making the syscall. The
+`RTA_VIA` family field is host byte order, exactly like every other
+`sa_family_t`.
 
 ## BGP labelled unicast (RFC 8277)
 

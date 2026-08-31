@@ -54,6 +54,7 @@ cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/bird_enh.sh                 # needs bird2 (or skips) — RFC 5549 ENH
 ./tests/interop/bfd_bird.sh                 # needs bird2 + user namespaces (or skips) — BFD RFC 5880/5881/5883
 ./tests/interop/frr.sh                      # needs FRR bgpd (or skips)
+./tests/interop/mpls_lsp.sh                 # needs iproute2 + user namespaces; dataplane phase needs the mpls_router module
 ```
 
 The scripts auto-detect the reference daemons:
@@ -120,6 +121,22 @@ LD_LIBRARY_PATH=/tmp/frrroot/usr/lib/x86_64-linux-gnu/frr:/tmp/frrroot/usr/lib/x
 `/home/z/opt/{bird,frr}/root` for such extractions.
 
 ## Configuration used
+
+### The BGP-LU → MPLS dataplane lab (`mpls_lsp.sh`)
+
+Two rootless network namespaces joined by a veth pair, one daemon each:
+
+- `r1` (LSP tail) originates `198.51.100.0/24` with label 100 and mirrors
+  it to an `AF_MPLS` pop route (in-label 100 → `lo`, local delivery).
+- `r2` (LSP head) receives the labelled route and mirrors it to an
+  encap route (`198.51.100.0/24 encap mpls 100 via 10.99.1.1`).
+
+With the kernel `mpls_router` module loaded (CI does `sudo modprobe`
+before the lab starts; the per-netns `platform_labels`/`input` sysctls
+are writable inside the user namespace), the script asserts the kernel
+state on both sides and pushes a real ICMP echo through the LSP.
+Without the module it degrades to the control-plane phase and SKIPs the
+rest, like `tcp_ao.sh`.
 
 ### BIRD side (`bird.sh` generates this)
 
