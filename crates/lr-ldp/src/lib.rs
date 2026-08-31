@@ -20,9 +20,16 @@
 //!   request-id TLVs. RFC 7552 IPv6 transport addresses are supported.
 //! - [`message`] — the eleven LDP messages and the `LdpCodec` framing
 //!   (one PDU per decode, `Ok(None)` on truncation).
+//! - [`session`] — the RFC 5036 §2.5.4 session initialization state
+//!   machine (NON_EXISTENT → INITIALIZED → OPENREC/OPENSENT →
+//!   OPERATIONAL) with KeepAlive timers and parameter negotiation.
+//! - [`discovery`] — the §3.5.2.1 Hello adjacency bookkeeping (hold
+//!   time negotiation, refresh and expiry, targeted-accept policy).
+//! - [`mapping`] — the label information base: bindings received from
+//!   and advertised to each peer.
 //!
-//! Session FSM, hello discovery and the engine glue land in the
-//! follow-up commits of the LDP foundation slice.
+//! The engine glue that combines all of the above (and the two-speaker
+//! E2E) lands in the follow-up commit of the LDP foundation slice.
 //!
 //! ## Usage
 //!
@@ -36,8 +43,11 @@
 
 extern crate alloc;
 
+pub mod discovery;
+pub mod mapping;
 pub mod message;
 pub mod pdu;
+pub mod session;
 pub mod tlv;
 
 pub use message::{LdpCodec, LdpMessage, LdpPdu, RawMessage};
@@ -46,6 +56,7 @@ pub use pdu::{
     DEFAULT_LINK_HELLO_HOLD, DEFAULT_MAX_PDU_LEN, DEFAULT_TARGETED_HELLO_HOLD, LDP_PORT,
     LDP_VERSION,
 };
+pub use session::{SessionRole, SessionState};
 pub use tlv::{Fec, FecElement, GenericLabel, RawTlv, StatusCode};
 
 /// Re-export `lr-core` address types so embedders can stay on one

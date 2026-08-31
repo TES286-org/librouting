@@ -14,12 +14,12 @@
 //! Message ID (§3.8).
 
 use crate::pdu::{tlv_header_word, AdvertisementMode, LdpId, TlvType, LDP_VERSION};
-use lr_core::addr::{IpAddr, Prefix};
-use lr_core::buf::WriteBuf;
-#[cfg(not(feature = "std"))]
-use alloc::string::ToString;
 #[cfg(not(feature = "std"))]
 use alloc::format;
+#[cfg(not(feature = "std"))]
+use alloc::string::ToString;
+use lr_core::addr::{IpAddr, Prefix};
+use lr_core::buf::WriteBuf;
 use lr_core::error::{EncodeError, ErrorKind, ParseError};
 
 // ---------------------------------------------------------------------------
