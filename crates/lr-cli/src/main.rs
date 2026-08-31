@@ -38,7 +38,7 @@ fn main() -> ExitCode {
     match cmd {
         "version" | "--version" | "-v" => {
             println!("librouting {}", VERSION);
-            println!("crates: lr-core, lr-bgp, lr-ospf, lr-babel, lr-rib, lr-policy, lr-router, lr-bfd, lr-damping, lr-osroute, lr-ffi");
+            println!("crates: lr-core, lr-bgp, lr-ospf, lr-babel, lr-ldp, lr-bfd, lr-rib, lr-policy, lr-router, lr-damping, lr-mpls, lr-mrt, lr-bmp, lr-osroute, lr-ffi");
             ExitCode::SUCCESS
         }
         "decode" => decode(rest),

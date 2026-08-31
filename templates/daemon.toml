@@ -330,3 +330,40 @@ permit = false
 # dead_interval = 40          # inherits [ospf]
 # priority = 1                # DR election priority (the daemon runs
                               # p2p segments only, so this is inert today)
+
+# ---------------------------------------------------------------------------
+# LDP daemon mode (run with --protocol ldp; BGP/OSPF tables above are ignored)
+# ---------------------------------------------------------------------------
+# CLI equivalent:
+#   lr-daemon --protocol ldp --router-id 10.0.0.1 \
+#             --ldp-interface eth0 --ldp-bind 203.0.113.0/24=24000
+#
+# UDP port 646 is privileged: run as root, or inside a user/network
+# namespace (`unshare -Urn lr-daemon --protocol ldp ...`), or override
+# the port with --ldp-port / [ldp] port for shared-host labs.
+# See docs/STATUS.md (W3-extra.4) for the current scope: RFC 7552 IPv6
+# discovery, kernel MPLS installation of learned bindings and automatic
+# label allocation from a range are future work.
+
+# [ldp]
+# transport = "10.0.0.1"      # advertised transport address (default:
+#                             # first [[ldp.interface]] address)
+# port = 646                  # LDP UDP/TCP port (RFC 5036 §3.10.1)
+# keepalive_time = 15         # session KeepAlive Time (§3.5.3, non-zero)
+# link_hold_time = 15         # link Hello hold time (§3.5.2.1)
+# targeted_hold_time = 45     # targeted Hello hold time
+
+# Basic (link) discovery interfaces — multicast Hellos to 224.0.0.2.
+# [[ldp.interface]]
+# name = "eth0"               # kernel interface (required)
+
+# Extended (targeted) discovery peers — unicast Hellos; ADDR:PORT
+# selects a peer whose LDP transport runs on a different port.
+# [[ldp.targeted]]
+# address = "192.0.2.5"
+
+# Local FEC-label bindings, advertised downstream-unsolicited to every
+# operational peer. label 0 auto-allocates from 16.
+# [[ldp.bind]]
+# prefix = "203.0.113.0/24"
+# label = 24000

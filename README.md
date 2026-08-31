@@ -146,6 +146,30 @@ unshare -Urn lr-daemon --protocol ospf --router-id 1.1.1.1 \
 # → daemon: route installed 10.99.3.0/24 via (none)
 ```
 
+**LDP mode.** `--protocol ldp` runs the reference daemon as an MPLS
+LSR (RFC 5036): a UDP socket on port 646 joined to the all-routers
+group (224.0.0.2) per configured interface originates link Hellos
+every hold-time third with TTL 1, targeted Hellos reach peers without
+a shared link, and the TCP session transport carries Initialization,
+Address and Label Mapping messages (§2.5.4 negotiation, downstream
+unsolicited). Configured FEC-label bindings (`[[ldp.bind]]`, label
+16..=1048575 with `0` auto-allocating from 16) are advertised to every
+operational peer; learned bindings surface as events and in the
+runtime API status. Verified against FRR 10 ldpd (see
+`tests/interop/ldp_frr.sh`) and two-daemon over a veth pair
+(`tests/interop/ldp.sh`). IPv6 discovery (RFC 7552) and kernel MPLS
+installation of learned bindings are future work — full details in
+`docs/STATUS.md` (W3-extra.4).
+
+```bash
+# Two LSRs on a veth pair, each in its own network namespace:
+unshare -Urn lr-daemon --protocol ldp --router-id 1.1.1.1 \
+                       --ldp-interface veth0 \
+                       --ldp-bind 203.0.113.0/24=24000
+# → ldp: session up peer 10.99.1.2:0 keepalive 15s max-pdu 4096
+# → ldp: mapping learned 10.99.1.0/24 label 3 from 10.99.1.2:0
+```
+
 **Operational tooling.** The daemon dumps its Loc-RIB as an MRT file
 (RFC 6396 — the format BIRD's `protocol mrt` and every route-analysis
 tool speaks) through the runtime API, and mirrors BMP (RFC 7854) to a
