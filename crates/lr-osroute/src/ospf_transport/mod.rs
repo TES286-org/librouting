@@ -114,6 +114,33 @@ impl InterfaceV4Addr {
     }
 }
 
+/// One IPv6 address of an interface, with its prefix length and the
+/// scope id a link-local address is bound to (the interface index).
+/// RFC 7552 §6.1 rule 5 classifies addresses for the LDP transport:
+/// prefer a global unicast address over unique-local or link-local.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InterfaceV6Addr {
+    pub addr: std::net::Ipv6Addr,
+    pub prefix_len: u8,
+    /// The sin6_scope_id of the address (non-zero for link-local).
+    pub scope_id: u32,
+}
+
+impl InterfaceV6Addr {
+    /// Global unicast (2000::/3) — the address family an RFC 7552
+    /// §6.1 LDP transport address should come from.
+    pub fn is_global_unicast(&self) -> bool {
+        (self.addr.segments()[0] & 0xe000) == 0x2000
+    }
+
+    /// Link-local (fe80::/10). Not usable as an LDP targeted-Hello
+    /// endpoint (RFC 7552 §5.2) and never preferred for the transport
+    /// address TLV (§6.1 rule 5).
+    pub fn is_link_local(&self) -> bool {
+        (self.addr.segments()[0] & 0xffc0) == 0xfe80
+    }
+}
+
 /// The dotted-quad mask for a prefix length (invalid lengths saturate:
 /// >32 becomes /32; the wire encoder rejects them earlier anyway).
 pub fn prefix_mask(prefix_len: u8) -> u32 {
@@ -132,12 +159,12 @@ pub fn prefix_mask(prefix_len: u8) -> u32 {
 #[path = "imp_linux.rs"]
 mod imp;
 #[cfg(all(feature = "std", target_os = "linux"))]
-pub use imp::{interface_v4_addrs, OspfV2Transport};
+pub use imp::{ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport};
 
 #[cfg(all(feature = "std", not(target_os = "linux")))]
 mod stub;
 #[cfg(all(feature = "std", not(target_os = "linux")))]
-pub use stub::{interface_v4_addrs, OspfV2Transport};
+pub use stub::{ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport};
 
 #[cfg(test)]
 mod tests {

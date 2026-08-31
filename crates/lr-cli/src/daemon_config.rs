@@ -372,6 +372,15 @@ pub(crate) struct DaemonConfig {
     /// TCP session transport (`--ldp-transport`). When unset it
     /// defaults to the first `[[ldp.interface]]` address.
     pub ldp_transport: Option<String>,
+    /// IPv6 TCP session transport (`--ldp-transport-v6`, RFC 7552
+    /// §6.1 rule 5: a global unicast address). When unset it defaults
+    /// to the first global unicast address of the `[[ldp.interface]]`
+    /// set; when neither exists the speaker stays IPv4-only.
+    pub ldp_transport_v6: Option<String>,
+    /// The RFC 7552 §6.1.1 transport-connection preference for
+    /// dual-stack peers (the RFC default is LDPoIPv6;
+    /// `--ldp-prefer-ipv4` flips it).
+    pub ldp_prefer_ipv6: bool,
     /// LDP UDP/TCP port (RFC 5036 §3.10.1: 646; overridable for
     /// multi-instance testing on shared hosts).
     pub ldp_port: u16,
@@ -446,6 +455,8 @@ impl DaemonConfig {
             ospf_dead_interval: 40,
             ospf_area: 0,
             ldp_port: 646,
+            ldp_transport_v6: None,
+            ldp_prefer_ipv6: true,
             ldp_keepalive_time: 15,
             ldp_link_hold: 15,
             ldp_targeted_hold: 45,
@@ -1307,6 +1318,38 @@ fn apply_ospf_key(
     Ok(true)
 }
 
+/// Parse a targeted-peer spec (`ADDR`, `ADDR:PORT`, `[V6]:PORT`)
+/// into its address and optional port. The bracketed form exists
+/// because a bare IPv6 already uses colons; RFC 7552 makes v6 targeted
+/// peers a first-class deployment.
+pub(crate) fn parse_targeted_spec(spec: &str) -> Option<(lr_core::addr::IpAddr, Option<u16>)> {
+    use std::str::FromStr;
+    // Bracketed IPv6: `[2001:db8::1]` or `[2001:db8::1]:646`.
+    if let Some(rest) = spec.strip_prefix('[') {
+        let (inner, after) = rest.split_once(']')?;
+        let addr = lr_core::addr::IpAddr::from_str(inner).ok()?;
+        let port = match after.strip_prefix(':') {
+            Some(p) => Some(p.parse().ok()?),
+            None if after.is_empty() => None,
+            _ => return None,
+        };
+        return Some((addr, port));
+    }
+    match spec.rsplit_once(':') {
+        // `ADDR:PORT` — only when both halves parse; a bare IPv6 has
+        // colons but no parseable port after the last one.
+        Some((a, p)) => match (lr_core::addr::IpAddr::from_str(a), p.parse::<u16>()) {
+            (Ok(addr), Ok(port)) => Some((addr, Some(port))),
+            _ => lr_core::addr::IpAddr::from_str(spec)
+                .ok()
+                .map(|addr| (addr, None)),
+        },
+        None => lr_core::addr::IpAddr::from_str(spec)
+            .ok()
+            .map(|addr| (addr, None)),
+    }
+}
+
 /// Apply one `key = value` pair to the LDP schema: the `[ldp]`
 /// globals plus the `[[ldp.interface]]` / `[[ldp.targeted]]` /
 /// `[[ldp.bind]]` tables. Unknown keys are errors (fail closed — see
@@ -1321,6 +1364,12 @@ fn apply_ldp_key(
     match section {
         "ldp" => match key {
             "transport" => cfg.ldp_transport = Some(value.to_string()),
+            "transport_v6" => cfg.ldp_transport_v6 = Some(value.to_string()),
+            "prefer_ipv6" => {
+                cfg.ldp_prefer_ipv6 = value
+                    .parse()
+                    .map_err(|_| format!("bad prefer_ipv6 '{value}' (true|false)"))?;
+            }
             "port" => {
                 cfg.ldp_port = value
                     .parse()
@@ -1739,6 +1788,14 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--ldp-transport" if i + 1 < args.len() => {
                 cfg.ldp_transport = Some(args[i + 1].clone());
                 i += 2;
+            }
+            "--ldp-transport-v6" if i + 1 < args.len() => {
+                cfg.ldp_transport_v6 = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--ldp-prefer-ipv4" => {
+                cfg.ldp_prefer_ipv6 = false;
+                i += 1;
             }
             "--ldp-port" if i + 1 < args.len() => {
                 cfg.ldp_port = args[i + 1].parse().unwrap_or(646);

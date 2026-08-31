@@ -3,12 +3,16 @@
 //! for interface address enumeration.
 
 use std::ffi::c_char;
-use std::net::Ipv4Addr;
+use std::net::{Ipv4Addr, Ipv6Addr};
 
-use super::{InterfaceV4Addr, OspfTransportError, ALL_D_ROUTERS, ALL_SPF_ROUTERS, IPPROTO_OSPF};
+use super::{
+    InterfaceV4Addr, InterfaceV6Addr, OspfTransportError, ALL_D_ROUTERS, ALL_SPF_ROUTERS,
+    IPPROTO_OSPF,
+};
 
 // socket(2) / fcntl(2) constants (Linux).
 const AF_INET: i32 = 2;
+const AF_INET6: i32 = 10;
 const SOCK_RAW: i32 = 3;
 const SOL_SOCKET: i32 = 1;
 const SO_BINDTODEVICE: i32 = 25;
@@ -33,6 +37,17 @@ struct SockaddrIn {
     sin_port: u16,
     sin_addr: [u8; 4],
     sin_zero: [u8; 8],
+}
+
+/// `struct sockaddr_in6` (only the fields this module reads; the
+/// layout matches glibc's netinet/in.h).
+#[repr(C)]
+struct SockaddrIn6 {
+    sin6_family: u16,
+    sin6_port: u16,
+    sin6_flowinfo: u32,
+    sin6_addr: [u8; 16],
+    sin6_scope_id: u32,
 }
 
 impl SockaddrIn {
@@ -99,6 +114,18 @@ extern "C" {
     fn freeifaddrs(ifa: *mut Ifaddrs);
 }
 
+/// Resolve an interface name to its kernel index (0 = unknown).
+pub fn ifindex_of(interface: &str) -> Option<u32> {
+    let cname = std::ffi::CString::new(interface).ok()?;
+    // SAFETY: plain syscall with a valid NUL-terminated name.
+    let idx = unsafe { if_nametoindex(cname.as_ptr()) };
+    if idx == 0 {
+        None
+    } else {
+        Some(idx)
+    }
+}
+
 fn errno() -> i32 {
     std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
 }
@@ -129,6 +156,107 @@ unsafe fn sockaddr_ipv4(ptr: *mut core::ffi::c_void) -> Option<[u8; 4]> {
     // address field sits at offset 4..8.
     let s = unsafe { &*(ptr as *const SockaddrIn) };
     Some(s.sin_addr)
+}
+
+/// Read the `sin6_addr` octets, prefix length (from the netmask) and
+/// scope id out of AF_INET6 `struct sockaddr*` pointers.
+///
+/// # Safety
+/// `addr`/`mask` must be NULL or point at valid `struct sockaddr`s.
+unsafe fn sockaddr_ipv6(
+    addr: *mut core::ffi::c_void,
+    mask: *mut core::ffi::c_void,
+) -> Option<([u8; 16], u8, u32)> {
+    if addr.is_null() {
+        return None;
+    }
+    // SAFETY: the leading family field is alignment-safe to read.
+    let family = unsafe { *(addr as *const u16) };
+    if family != AF_INET6 as u16 {
+        return None;
+    }
+    // SAFETY: for AF_INET6 the pointer is a sockaddr_in6: address at
+    // offset 8..24, scope id at 24..28.
+    let s = unsafe { &*(addr as *const SockaddrIn6) };
+    let prefix_len = if mask.is_null() {
+        128
+    } else {
+        // SAFETY: the netmask pointer shares the sockaddr_in6 layout.
+        let m = unsafe { &*(mask as *const SockaddrIn6) };
+        v6_mask_to_prefix_len(m.sin6_addr)
+    };
+    Some((s.sin6_addr, prefix_len, s.sin6_scope_id))
+}
+
+/// Prefix length of a (contiguous, network-byte-order) IPv6 netmask.
+fn v6_mask_to_prefix_len(mask: [u8; 16]) -> u8 {
+    let mut len: u8 = 0;
+    let mut seen_zero = false;
+    for byte in mask {
+        for bit in (0..8).rev() {
+            let set = (byte >> bit) & 1 == 1;
+            if set {
+                if seen_zero {
+                    return len; // gap: treat the prefix as counted so far
+                }
+                len += 1;
+            } else {
+                seen_zero = true;
+            }
+        }
+    }
+    len
+}
+
+/// Enumerate the IPv6 addresses and prefix lengths of `interface`.
+///
+/// Loopback (::1) is skipped; link-local entries carry their scope id
+/// (the interface index) so callers can scope multicast operations and
+/// connect() calls. An interface that exists but has no IPv6 address
+/// yields an empty vector; a missing interface is an error.
+pub fn interface_v6_addrs(interface: &str) -> Result<Vec<InterfaceV6Addr>, OspfTransportError> {
+    let mut head: *mut Ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs writes one fresh, self-linked list into head.
+    let rc = unsafe { getifaddrs(&mut head) };
+    if rc != 0 {
+        return Err(os_error("getifaddrs"));
+    }
+    let mut out = Vec::new();
+    let mut exists = false;
+    // SAFETY: the list stays valid until freeifaddrs below.
+    unsafe {
+        let mut cur = head;
+        while !cur.is_null() {
+            let entry = &*cur;
+            // SAFETY: ifa_name is a NUL-terminated C string owned by
+            // the list.
+            let name = std::ffi::CStr::from_ptr(entry.ifa_name);
+            if name.to_bytes() == interface.as_bytes() {
+                exists = true;
+                if let Some((addr, prefix_len, scope_id)) =
+                    sockaddr_ipv6(entry.ifa_addr, entry.ifa_netmask)
+                {
+                    let ip = Ipv6Addr::from(addr);
+                    if ip.is_loopback() {
+                        cur = entry.ifa_next;
+                        continue;
+                    }
+                    out.push(InterfaceV6Addr {
+                        addr: ip,
+                        prefix_len,
+                        scope_id,
+                    });
+                }
+            }
+            cur = entry.ifa_next;
+        }
+    }
+    // SAFETY: hand the borrowed list back.
+    unsafe { freeifaddrs(head) };
+    if !exists {
+        return Err(OspfTransportError::UnknownInterface(interface.to_string()));
+    }
+    Ok(out)
 }
 
 /// Enumerate the IPv4 addresses and prefix lengths of `interface`.

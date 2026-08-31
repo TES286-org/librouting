@@ -3,12 +3,22 @@
 //! embedders on other systems provide their own transport and feed
 //! bytes through the router's session API (see docs/OS-INTEGRATION.md).
 
-use super::{InterfaceV4Addr, OspfTransportError};
+use super::{InterfaceV4Addr, InterfaceV6Addr, OspfTransportError};
 
 pub fn interface_v4_addrs(_interface: &str) -> Result<Vec<InterfaceV4Addr>, OspfTransportError> {
     Err(OspfTransportError::Unsupported(
         "OSPF raw sockets exist only on Linux in librouting",
     ))
+}
+
+pub fn interface_v6_addrs(_interface: &str) -> Result<Vec<InterfaceV6Addr>, OspfTransportError> {
+    Err(OspfTransportError::Unsupported(
+        "OSPF raw sockets exist only on Linux in librouting",
+    ))
+}
+
+pub fn ifindex_of(_interface: &str) -> Option<u32> {
+    None
 }
 
 pub struct OspfV2Transport {

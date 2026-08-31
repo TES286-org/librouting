@@ -157,9 +157,12 @@ unsolicited). Configured FEC-label bindings (`[[ldp.bind]]`, label
 operational peer; learned bindings surface as events and in the
 runtime API status. Verified against FRR 10 ldpd (see
 `tests/interop/ldp_frr.sh`) and two-daemon over a veth pair
-(`tests/interop/ldp.sh`). IPv6 discovery (RFC 7552) and kernel MPLS
-installation of learned bindings are future work — full details in
-`docs/STATUS.md` (W3-extra.4).
+(`tests/interop/ldp.sh`). RFC 7552 IPv6 discovery is implemented —
+ff02::2 link Hellos with the §5.1 hop-limit-255 check, the §6.1.1
+Dual-Stack capability with transport-preference enforcement, and
+dual-stack UDP/TCP daemon transports (`--ldp-transport-v6`,
+`--ldp-prefer-ipv4`). Kernel MPLS installation of learned bindings
+remains future work — full details in `docs/STATUS.md` (W3-extra.4).
 
 ```bash
 # Two LSRs on a veth pair, each in its own network namespace:

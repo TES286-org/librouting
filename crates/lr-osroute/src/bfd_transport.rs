@@ -124,6 +124,12 @@ pub fn ttl_check_enforced() -> bool {
     cfg!(all(feature = "std", target_os = "linux"))
 }
 
+// Re-exported for other daemons that need the received TTL / hop
+// limit (the LDP daemon applies the same RFC 5082-style check to IPv6
+// link Hellos per RFC 7552 §5.1).
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub use imp::{arm_ttl_rx, recv_from_with_ttl};
+
 // ---------------------------------------------------------------------------
 // Linux: socket options + recvmsg with the TTL ancillary message.
 // ---------------------------------------------------------------------------

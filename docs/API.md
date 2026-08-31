@@ -564,7 +564,7 @@ for (dest, datagram) in engine.drain_udp() { /* transmit (Hellos) */ }
 // Open/accept the TCP transport as `EngineEvent::EstablishTransport`
 // directs (§2.5.2 role decision), then:
 // engine.on_connected(now, conn, peer_id);   // active connect done
-// engine.on_accepted(conn);                  // passive accept done
+// engine.on_accepted(conn, local_addr);      // passive accept done
 // engine.feed_tcp(now, conn, &bytes);        // received stream bytes
 for ev in engine.take_events() {
     // AdjacencyUp / SessionUp(negotiated) / AddressReceived /
@@ -581,13 +581,22 @@ engine.withdraw_mapping(Prefix::new_v4([198, 51, 100, 0], 24));
 // engine.lib().label_from(peer, &FecKey::new(prefix)) -> Option<GenericLabel>
 ```
 
+RFC 7552 (LDP over IPv6) is built in: set
+`cfg.transport_addr_v6` (or construct the engine with an IPv6
+`transport_addr` for a single-stack IPv6 speaker) and the engine
+carries the §6.1.1 Dual-Stack capability in every Hello, applies the
+per-family Transport-Address-TLV rules, scopes Address messages and
+IPv6 bindings per peer (legacy v4 peers never receive IPv6 state), and
+enforces the TR transport-preference — a mismatch resets the session
+with the fatal Transport Connection Mismatch notification.
+
 The crate is protocol-only: it never opens a socket. The embedder owns
 UDP 646 (Hellos) and TCP 646 (the transport), feeds bytes in and drains
 bytes out. Queued session messages are batched into PDUs that respect
 the negotiated Max PDU Length, and a received PDU over that cap is met
-with a fatal Bad PDU Length Notification (§3.5.3). A daemon transport
-(`--protocol ldp`) is the next slice; the `lr-ldp` test suite includes
-a two-speaker e2e over real loopback sockets that runs the whole
+with a fatal Bad PDU Length Notification (§3.5.3). The `lr-ldp` test
+suite includes two-speaker e2e over real loopback sockets (IPv4 and
+IPv6) that runs the whole
 lifecycle (discovery → session → label exchange → withdrawal →
 keepalive expiry / shutdown).
 
