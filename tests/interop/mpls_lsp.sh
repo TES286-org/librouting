@@ -60,8 +60,10 @@ unshare -Urn true 2>/dev/null || {
 
 # The MPLS sysctl tree (/proc/sys/net/mpls) exists only once the
 # `mpls_router` module is loaded — a host-level operation. Try to load
-# it via root/sudo (CI runners have passwordless sudo); a host without
-# the module just skips the dataplane phase.
+# it via root/sudo (CI runners have passwordless sudo); when the running
+# kernel ships a trimmed module set (GitHub's ubuntu images use the
+# azure flavour), install the full module package best-effort first. A
+# host without the module just skips the dataplane phase.
 if [ ! -e /proc/sys/net/mpls/platform_labels ]; then
     if [ "$(id -u)" -eq 0 ]; then
         modprobe mpls_router 2>/dev/null || true
@@ -69,6 +71,12 @@ if [ ! -e /proc/sys/net/mpls/platform_labels ]; then
     elif sudo -n true 2>/dev/null; then
         sudo modprobe mpls_router 2>/dev/null || true
         sudo modprobe mpls_iptunnel 2>/dev/null || true
+        if [ ! -e /proc/sys/net/mpls/platform_labels ]; then
+            sudo apt-get install -y --no-install-recommends \
+                "linux-modules-extra-$(uname -r)" >/dev/null 2>&1 || true
+            sudo modprobe mpls_router 2>/dev/null || true
+            sudo modprobe mpls_iptunnel 2>/dev/null || true
+        fi
     fi
 fi
 MPLS=0
@@ -90,7 +98,7 @@ STUB=198.51.100.1
 if [ "$MPLS" -eq 1 ]; then
     echo "== dataplane phase enabled (kernel MPLS sysctls present) =="
 else
-    echo "== kernel MPLS unavailable — control-plane phase only =="
+    echo "== kernel MPLS unavailable (no mpls_router module, or no host root to load it) — control-plane phase only =="
 fi
 
 echo "== building the two-router lab (veth pair, one netns per router) =="
