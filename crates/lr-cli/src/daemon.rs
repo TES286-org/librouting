@@ -34,7 +34,6 @@
 //! The daemon does **not** install routes into the kernel by default (safe
 //! in any environment). `--install-kernel-routes` enables it (root + Linux).
 
-use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
@@ -49,6 +48,8 @@ use lr_core::nlri::NlriFamily;
 use lr_osroute::gtsm::Gtsm;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
 use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
+#[cfg(target_os = "linux")]
+use std::collections::HashMap;
 
 mod api;
 mod daemon_bfd;
@@ -1405,6 +1406,7 @@ struct KernelMirror {
     /// Locally originated in-labels currently installed, keyed by
     /// prefix — `RouteWithdrawn` carries only the key, so the tail half
     /// needs this side table to know which label to delete.
+    #[cfg(target_os = "linux")]
     tails: HashMap<Prefix, lr_mpls::Label>,
     #[cfg(target_os = "linux")]
     mpls: Option<lr_osroute::mpls_route::MplsNetlink>,
@@ -1441,6 +1443,7 @@ impl KernelMirror {
         }
         Self {
             ip_table,
+            #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
             mpls,
@@ -1451,11 +1454,16 @@ impl KernelMirror {
         for ev in events {
             match ev {
                 RouterEvent::RouteInstalled(r) => {
+                    // Classify on every platform (pure); the netlink
+                    // half of the mirror exists only on Linux, where
+                    // `mirrored` marks a route whose LSP took over the
+                    // prefix (no plain-IP fallback needed).
+                    #[allow(unused_mut)]
                     let mut mirrored = false;
-                    #[cfg(target_os = "linux")]
-                    if let Some(mpls) = self.mpls.as_mut() {
-                        match lsp_decision(r) {
-                            LspDecision::PopLocal(label) => {
+                    match lsp_decision(r) {
+                        #[cfg(target_os = "linux")]
+                        LspDecision::PopLocal(label) => {
+                            if let Some(mpls) = self.mpls.as_mut() {
                                 let lsp = lr_osroute::mpls_route::MplsRoute::pop_local(
                                     label,
                                     LO_IF_INDEX,
@@ -1475,33 +1483,48 @@ impl KernelMirror {
                                     ),
                                 }
                             }
-                            LspDecision::Push(stack) => {
-                                if let Some(nh) = r.next_hop {
-                                    match mpls.add_encap_route(&r.key.prefix, &stack, nh, 0) {
-                                        Ok(()) => {
-                                            println!(
-                                                "lsp: {} encap mpls [{}] via {}",
-                                                r.key.prefix,
-                                                stack
-                                                    .labels()
-                                                    .iter()
-                                                    .map(|l| l.value.to_string())
-                                                    .collect::<Vec<_>>()
-                                                    .join(","),
-                                                nh
-                                            );
-                                            mirrored = true;
-                                        }
-                                        Err(e) => eprintln!(
-                                            "lsp: encap install for {} failed ({}); \
-                                             falling back to plain",
-                                            r.key.prefix, e
-                                        ),
+                            // Tail routes carry no next hop, so the
+                            // plain fallback below is a no-op for them.
+                        }
+                        #[cfg(not(target_os = "linux"))]
+                        LspDecision::PopLocal(_) => {
+                            // Tail routes carry no next hop: nothing to
+                            // install off-Linux.
+                        }
+                        #[cfg(target_os = "linux")]
+                        LspDecision::Push(stack) => {
+                            if let (Some(mpls), Some(nh)) = (self.mpls.as_mut(), r.next_hop) {
+                                match mpls.add_encap_route(&r.key.prefix, &stack, nh, 0) {
+                                    Ok(()) => {
+                                        println!(
+                                            "lsp: {} encap mpls [{}] via {}",
+                                            r.key.prefix,
+                                            stack
+                                                .labels()
+                                                .iter()
+                                                .map(|l| l.value.to_string())
+                                                .collect::<Vec<_>>()
+                                                .join(","),
+                                            nh
+                                        );
+                                        mirrored = true;
                                     }
+                                    Err(e) => eprintln!(
+                                        "lsp: encap install for {} failed ({}); \
+                                         falling back to plain",
+                                        r.key.prefix, e
+                                    ),
                                 }
                             }
-                            LspDecision::Plain => {}
+                            // Failed encap: fall through to the plain
+                            // install for reachability.
                         }
+                        #[cfg(not(target_os = "linux"))]
+                        LspDecision::Push(_) => {
+                            // No netlink mirror off-Linux: the plain-IP
+                            // fallback below keeps the prefix reachable.
+                        }
+                        LspDecision::Plain => {}
                     }
                     // Plain IP fallback: for unlabelled routes, and for
                     // labelled routes when MPLS is unavailable or the

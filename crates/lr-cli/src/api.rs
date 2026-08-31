@@ -63,7 +63,7 @@ pub struct ApiContext {
 
 #[cfg(unix)]
 mod imp {
-    use std::io::{BufRead, BufReader, Write};
+    use std::io::{BufRead, BufReader, BufWriter, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::{Arc, Mutex};
@@ -178,7 +178,12 @@ mod imp {
             return;
         };
         let mut reader = BufReader::new(stream);
-        let mut out = write_half;
+        // Buffer each command's response and push it with a single write
+        // at the bottom of the loop: per-line write syscalls let a fast
+        // reader observe a half-written response (the tarpaulin run hit
+        // exactly that — `status` split after `local-as`, so the client's
+        // "stop at the first quiet read" loop never saw `rib-entries`).
+        let mut out = BufWriter::new(write_half);
         let mut line = String::new();
         loop {
             line.clear();
@@ -346,6 +351,7 @@ mod imp {
                 "shutdown" => {
                     running.store(false, Ordering::Relaxed);
                     let _ = writeln!(out, "shutting down");
+                    let _ = out.flush();
                     if let Some(path) = socket_path {
                         let _ = std::fs::remove_file(path);
                     }
