@@ -190,9 +190,16 @@ monitoring station or _acts as one_:
 ```bash
 echo "mrt /tmp/rib.mrt" | socat - UNIX-CONNECT:/run/lr-daemon.api
 lr mrt rib /tmp/rib.mrt          # parse any MRT dump (BIRD, FRR, ours)
+lr mrt diff bird.mrt ours.mrt    # content-diff two dumps (exit 1 = differ)
 lr-daemon --local-as ... --bmp-target 10.0.0.9:1170   # BMP egress
 lr-daemon --protocol bmp --listen 0.0.0.0:1170        # BMP collector
 ```
+
+**Wire-level parity harness.** `tests/parity/capture_proxy.py` records
+the BGP messages of a live session per direction; `lr parity-replay`
+replays a capture into an offline router and dumps its Loc-RIB as MRT,
+so `lr mrt diff` can prove the replay reproduces the reference
+implementation's own RIB view (`tests/interop/parity.sh`, W5.3).
 
 ## Workspace Layout
 

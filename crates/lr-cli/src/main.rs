@@ -13,6 +13,13 @@
 //!   state changes / messages.
 //! - `lr mrt rib <file>` — print the routing table an MRT RIB dump
 //!   carries (prefix, peer, AS path, next hop).
+//! - `lr mrt diff <a> <b>` — compare two MRT RIB dumps on route
+//!   content (per prefix: AS path, next hop, local-pref, MED,
+//!   communities); exit 1 when they differ.
+//! - `lr parity-replay …` — wire-level parity harness (W5.3): replay a
+//!   captured BGP message stream into an offline router and dump the
+//!   resulting Loc-RIB as MRT, ready to diff against the reference
+//!   implementation's own dump.
 //!
 //! This is a *demonstration* CLI — it intentionally has no dependencies on
 //! argument-parsing libraries (clap, structopt) to keep the build fast.
@@ -24,6 +31,8 @@ use std::process::ExitCode;
 
 use lr_core::buf::ReadBuf;
 use lr_core::codec::Decoder;
+
+mod parity;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -44,6 +53,7 @@ fn main() -> ExitCode {
         "decode" => decode(rest),
         "routes" => routes(rest),
         "mrt" => mrt(rest),
+        "parity-replay" => parity::cmd_parity_replay(rest),
         "help" | "--help" | "-h" => {
             print_usage();
             ExitCode::SUCCESS
@@ -72,6 +82,9 @@ fn print_usage() {
     println!("    routes del <prefix> Delete a route from the kernel");
     println!("    mrt parse <file>    Decode an MRT dump record by record");
     println!("    mrt rib <file>      Print the RIB an MRT dump carries");
+    println!("    mrt diff <a> <b>    Content-diff two MRT RIB dumps");
+    println!("    parity-replay       Replay a captured BGP stream into an");
+    println!("                       offline router, dump the Loc-RIB as MRT");
     println!("    help                Show this message");
 }
 
@@ -250,10 +263,17 @@ fn routes(args: &[String]) -> ExitCode {
 /// `lr mrt <parse|rib> <file>` — MRT dump tooling on top of `lr-mrt`.
 fn mrt(args: &[String]) -> ExitCode {
     if args.len() < 2 {
-        eprintln!("usage: lr mrt <parse|rib> <file.mrt>");
+        eprintln!("usage: lr mrt <parse|rib> <file.mrt> | lr mrt diff <a.mrt> <b.mrt>");
         return ExitCode::from(2);
     }
     let sub = args[0].as_str();
+    if sub == "diff" {
+        if args.len() < 3 {
+            eprintln!("usage: lr mrt diff <a.mrt> <b.mrt>");
+            return ExitCode::from(2);
+        }
+        return parity::cmd_mrt_diff(&args[1], &args[2]);
+    }
     let path = args[1].as_str();
     let records = match lr_mrt::parse_file(path) {
         Ok(r) => r,

@@ -701,8 +701,21 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    deterministic router-ID) and the transport-knob mapping (GTSM,
    MD5, TCP-AO, BFD, maximum-prefix). Sources are the upstream docs
    themselves, not folklore.
-3. Wire-level parity harness: replay captured UPDATE streams against
-   both lr and the reference implementation and diff the Loc-RIBs.
+3. ~~**Wire-level parity harness**~~ — done: `lr parity-replay`
+   replays a captured BGP message stream (JSONL, one hex message per
+   line) into an offline `DefaultRouter` and dumps the resulting
+   Loc-RIB as MRT TABLE_DUMP_V2; `lr mrt diff A B` content-compares
+   two dumps (per prefix: AS path, next hop, MED, communities —
+   LOCAL_PREF excluded: it is iBGP-only on the wire and dump-side
+   values are the viewer's internal default, not the sender's).
+   `tests/parity/capture_proxy.py` records per-direction BGP messages
+   off a live TCP session (RFC 4271 reassembly, TCP-coalescing safe)
+   and `tests/interop/parity.sh` runs the full loop against BIRD 2:
+   lr-daemon originates two prefixes through the proxy, BIRD's own
+   `protocol mrt` view (filtered to the lr protocol) is the ground
+   truth, and the replay must come out IDENTICAL. In-process parity
+   (capture → replay → diff against the original receiver) is covered
+   by unit tests in `crates/lr-cli/src/parity.rs`.
 
 ### W6 — Research: BGP defects and a private exchange plane
 

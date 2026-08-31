@@ -166,6 +166,8 @@ jobs:
         run: ./tests/interop/ospf_bird.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
         run: ./tests/interop/mrt.sh
+      - name: Wire-level parity harness (replay captured stream, diff Loc-RIBs)
+        run: ./tests/interop/parity.sh
       - name: BMP collector e2e (daemon mirroring -> daemon collector)
         run: ./tests/interop/bmp.sh
       - name: BGP MD5 auth interop (RFC 2385)
