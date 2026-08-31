@@ -242,6 +242,7 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }),
         router: Arc::clone(&daemon.router),
         running: Arc::clone(&running),
+        status_lines: Arc::new(Vec::new),
     });
     if let Err(e) = crate::spawn_api(cfg, &runtime) {
         eprintln!("daemon: {}", e);
