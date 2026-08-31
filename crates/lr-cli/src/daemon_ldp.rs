@@ -51,7 +51,6 @@
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
-use std::os::fd::AsRawFd;
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -565,92 +564,35 @@ fn bind_ldp_udp_v6(
         Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => return Ok((None, None)),
         Err(e) => return Err(e),
     };
-    // Only protocol constants socket2 does not expose:
-    const IPPROTO_IPV6: i32 = 41;
-    const IPV6_MULTICAST_IF: i32 = 17;
-    const IPV6_MULTICAST_LOOP: i32 = 19;
-    const IPV6_JOIN_GROUP: i32 = 12;
     sock.set_reuse_address(true)?;
     sock.set_nonblocking(true)?;
     let bind_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
     sock.bind(&bind_addr.into())?;
     // The dual-stack TCP listener relies on V6ONLY=0; keep the UDP
     // socket IPv6-only so the v4 socket stays the sole v4 endpoint.
-    unsafe {
-        setsockopt_int(sock.as_raw_fd(), IPPROTO_IPV6, 26, 0); // IPV6_V6ONLY = 26
-    }
+    sock.set_only_v6(false)?;
     let group = std::net::Ipv6Addr::from(ALL_ROUTERS_V6);
     for iface in interfaces {
         if iface.v6_addrs.is_empty() || iface.ifindex == 0 {
             continue;
         }
-        // ipv6_mreq { ipv6mr_multiaddr, ipv6mr_interface }.
-        let mreq = Ipv6Mreq {
-            multiaddr: group.octets(),
-            interface: iface.ifindex,
-        };
-        let rc = unsafe {
-            setsockopt(
-                sock.as_raw_fd(),
-                IPPROTO_IPV6,
-                IPV6_JOIN_GROUP,
-                &mreq as *const Ipv6Mreq as *const core::ffi::c_void,
-                core::mem::size_of::<Ipv6Mreq>() as u32,
-            )
-        };
-        if rc < 0 {
+        if let Err(e) = sock.join_multicast_v6(&group, iface.ifindex) {
             eprintln!(
                 "daemon: ldp IPv6 multicast join ff02::2 on {}: {} (link discovery \
                  may not receive Hellos on this interface)",
-                iface.name,
-                std::io::Error::last_os_error()
+                iface.name, e
             );
         }
     }
-    unsafe {
-        setsockopt_int(sock.as_raw_fd(), IPPROTO_IPV6, IPV6_MULTICAST_LOOP, 0);
-        setsockopt_int(sock.as_raw_fd(), IPPROTO_IPV6, IPV6_MULTICAST_IF, 0);
-    }
+    let _ = sock.set_multicast_loop_v6(false);
+    let _ = sock.set_multicast_if_v6(0);
     let rx: UdpSocket = sock.try_clone()?.into();
     rx.set_nonblocking(true)?;
     // §5.1: check the hop limit of received link Hellos — the kernel
-    // attaches it as an ancillary message.
+    // attaches it as an ancillary message (Linux; elsewhere the check
+    // degrades to the source-address rules).
     let _ = arm_ttl_rx(&rx, true);
     Ok((Some(sock), Some(rx)))
-}
-
-/// Raw `setsockopt` for an integer socket option (the handful of
-/// IPV6 options socket2 does not model).
-///
-/// # Safety
-/// `fd` must be a valid socket file descriptor.
-unsafe fn setsockopt_int(fd: i32, level: i32, optname: i32, value: i32) {
-    let rc = unsafe {
-        setsockopt(
-            fd,
-            level,
-            optname,
-            &value as *const i32 as *const core::ffi::c_void,
-            4,
-        )
-    };
-    let _ = rc;
-}
-
-#[repr(C)]
-struct Ipv6Mreq {
-    multiaddr: [u8; 16],
-    interface: u32,
-}
-
-extern "C" {
-    fn setsockopt(
-        fd: i32,
-        level: i32,
-        optname: i32,
-        optval: *const core::ffi::c_void,
-        optlen: u32,
-    ) -> i32;
 }
 
 impl LdpDaemon {
@@ -669,7 +611,10 @@ impl LdpDaemon {
     /// families). IPv6 datagrams arrive with their hop limit and get
     /// the RFC 7552 §5.1 GTSM check: a link Hello (link-local source —
     /// §5.2 reserves link-local for link discovery) MUST carry hop
-    /// limit 255 and is dropped otherwise.
+    /// limit 255 and is dropped otherwise. The hop limit is only
+    /// known where the kernel exposes it (Linux); the portable
+    /// fallback reports `None` and the check degrades to the
+    /// source-address rules.
     fn pump_udp(&mut self, now: Instant) {
         let mut buf = [0u8; 65535];
         loop {
@@ -700,11 +645,14 @@ impl LdpDaemon {
                     };
                     // §5.2: link-local sources only ever carry link
                     // Hellos, and §5.1 requires hop limit 255 on them.
+                    // Only reject on a KNOWN bad hop limit — the
+                    // portable fallback reports `None` and leaves the
+                    // verdict to the source-address rules.
                     let link_local = match from.ip() {
                         std::net::IpAddr::V6(v6) => (v6.segments()[0] & 0xffc0) == 0xfe80,
                         _ => false,
                     };
-                    if link_local && hop_limit != Some(255) {
+                    if link_local && hop_limit.is_some_and(|h| h != 255) {
                         eprintln!(
                             "daemon: ldp dropped IPv6 Hello from {} (hop limit {:?} != 255, RFC 7552 §5.1)",
                             from.ip(),
@@ -845,25 +793,15 @@ impl LdpDaemon {
     /// unicast targeted Hello follows the default (RFC 7552 §5.1
     /// requires 255 only on link Hellos, which are multicast).
     fn transmit_v6(&self, iface: &LdpInterface, dest: &IpAddr, bytes: &[u8]) {
-        const IPPROTO_IPV6: i32 = 41;
-        const IPV6_MULTICAST_IF: i32 = 17;
-        const IPV6_MULTICAST_HOPS: i32 = 18;
         let Some(tx) = self.udp_tx_v6.as_ref() else {
             return;
         };
         let std_dest = crate::to_std_ip(*dest);
         let sock_addr = std::net::SocketAddr::from((std_dest, self.port));
         if std_dest.is_multicast() {
-            // SAFETY: plain integer setsockopt on a valid socket.
-            unsafe {
-                setsockopt_int(
-                    tx.as_raw_fd(),
-                    IPPROTO_IPV6,
-                    IPV6_MULTICAST_IF,
-                    iface.ifindex as i32,
-                )
-            };
-            unsafe { setsockopt_int(tx.as_raw_fd(), IPPROTO_IPV6, IPV6_MULTICAST_HOPS, 1) };
+            // Portable socket2 wrappers for the raw IPV6 options.
+            let _ = tx.set_multicast_if_v6(iface.ifindex);
+            let _ = tx.set_multicast_hops_v6(1);
         }
         let _ = tx.send_to(bytes, &sock_addr.into());
     }

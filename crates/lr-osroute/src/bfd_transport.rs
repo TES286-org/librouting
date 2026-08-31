@@ -126,8 +126,10 @@ pub fn ttl_check_enforced() -> bool {
 
 // Re-exported for other daemons that need the received TTL / hop
 // limit (the LDP daemon applies the same RFC 5082-style check to IPv6
-// link Hellos per RFC 7552 §5.1).
-#[cfg(all(feature = "std", target_os = "linux"))]
+// link Hellos per RFC 7552 §5.1). On non-Linux platforms the portable
+// fallback reports an unknown hop limit and `arm_ttl_rx` is a no-op —
+// see `ttl_check_enforced`.
+#[cfg(feature = "std")]
 pub use imp::{arm_ttl_rx, recv_from_with_ttl};
 
 // ---------------------------------------------------------------------------
@@ -357,6 +359,14 @@ mod imp {
         } else {
             sock.set_ttl(255).map_err(|_| os_error("IP_TTL"))
         }
+    }
+
+    pub fn arm_ttl_rx(_sock: &UdpSocket, _v6: bool) -> Result<(), BfdTransportError> {
+        // No portable std API for receive-side TTL info (IP_RECVTTL /
+        // IPV6_RECVHOPLIMIT are ancillary-message territory). The
+        // GTSM hop-limit check degrades to the source-address rules
+        // only on this platform — same posture as `arm_ttl_tx`.
+        Ok(())
     }
 
     pub fn recv_from_with_ttl(
