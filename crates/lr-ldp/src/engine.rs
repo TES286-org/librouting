@@ -33,14 +33,14 @@ use crate::discovery::{
 };
 use crate::mapping::{FecKey, LabelMappingStore};
 use crate::message::{
-    LabelMappingMsg, LabelReleaseMsg, LabelWithdrawMsg, LdpCodec, LdpMessage, LdpPdu,
+    HelloMsg, LabelMappingMsg, LabelReleaseMsg, LabelWithdrawMsg, LdpCodec, LdpMessage, LdpPdu,
     NotificationMsg, RawMessage,
 };
-use crate::pdu::{AdvertisementMode, LdpId, MessageType};
+use crate::pdu::{AdvertisementMode, LdpId, MessageType, LDP_VERSION};
 use crate::session::{
     role_for, SessionConfig, SessionDownReason, SessionEvent, SessionRole, SessionState,
 };
-use crate::tlv::{AddressList, GenericLabel, Status, StatusCode};
+use crate::tlv::{AddressList, GenericLabel, HelloParams, Status, StatusCode, TransportAddress};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -781,6 +781,37 @@ impl LdpEngine {
         }
     }
 
+    /// Queue a link Hello (basic discovery, RFC 5036 §3.5.2) to `dest`.
+    ///
+    /// The engine schedules *targeted* Hellos itself, but link Hellos
+    /// are interface-scoped: the embedder owns the interfaces, so it
+    /// calls this on its discovery cadence (at most one Hello per
+    /// hold-time third, §3.5.2.1) per attached link and transmits the
+    /// drained datagram with an IP TTL of 1. `dest` is the link's
+    /// all-routers multicast group (224.0.0.2 / ff02::2) or a unicast
+    /// address for testing.
+    pub fn send_link_hello(&mut self, dest: IpAddr) {
+        let message_id = self.alloc_id();
+        let hello = HelloMsg {
+            message_id,
+            params: HelloParams {
+                hold_time: self.cfg.link_hello_hold,
+                targeted: false,
+                request_targeted: false,
+            },
+            transport_addr: Some(TransportAddress(self.cfg.transport_addr)),
+            config_seq: None,
+            unknown_tlvs: Vec::new(),
+        };
+        let pdu = LdpPdu {
+            version: LDP_VERSION,
+            sender: self.cfg.local_id,
+            messages: vec![LdpMessage::Hello(hello)],
+        };
+        let bytes = self.encode_pdu(&pdu);
+        self.out_udp.push((dest, bytes));
+    }
+
     /// Send a targeted Shutdown to one peer and tear the session down.
     pub fn shutdown_peer(&mut self, now: Instant, peer: LdpId) {
         if let Some(st) = self.sessions.remove(&peer) {
@@ -946,5 +977,49 @@ fn close_pdu(cur: &mut [u8], body: usize) {
     let pdu_len = 6u32 + body as u32;
     if let Some(slot) = cur.get_mut(2..4) {
         slot.copy_from_slice(&(pdu_len as u16).to_be_bytes());
+    }
+}
+
+#[cfg(all(test, feature = "std"))]
+mod tests {
+    use super::*;
+    use crate::pdu::DEFAULT_LINK_HELLO_HOLD;
+    use lr_core::buf::ReadBuf;
+    use lr_core::codec::Decoder;
+
+    #[test]
+    fn link_hello_encodes_discovery_parameters() {
+        let local = LdpId::new([1, 1, 1, 1], 0);
+        let mut cfg = LdpEngineConfig::new(local, IpAddr::V4([10, 0, 0, 1]));
+        cfg.link_hello_hold = 15;
+        let mut engine = LdpEngine::new(cfg);
+
+        // Queue a link Hello to the all-routers multicast group and
+        // decode what the embedder would transmit.
+        engine.send_link_hello(IpAddr::V4([224, 0, 0, 2]));
+        let out = engine.drain_udp();
+        assert_eq!(out.len(), 1);
+        let (dest, bytes) = &out[0];
+        assert_eq!(*dest, IpAddr::V4([224, 0, 0, 2]));
+
+        let mut read = ReadBuf::new(bytes);
+        let pdu = LdpCodec.decode(&mut read).unwrap().unwrap();
+        assert_eq!(pdu.sender, local);
+        assert_eq!(pdu.messages.len(), 1);
+        match &pdu.messages[0] {
+            LdpMessage::Hello(hello) => {
+                assert!(!hello.params.targeted, "a link Hello is not targeted");
+                assert!(!hello.params.request_targeted);
+                assert_eq!(hello.params.hold_time, DEFAULT_LINK_HELLO_HOLD);
+                assert_eq!(
+                    hello.transport_addr,
+                    Some(TransportAddress(IpAddr::V4([10, 0, 0, 1]))),
+                    "the Hello advertises the session transport address"
+                );
+            }
+            other => panic!("expected a Hello, got {other:?}"),
+        }
+        // The drained queue is empty afterwards.
+        assert!(engine.drain_udp().is_empty());
     }
 }
