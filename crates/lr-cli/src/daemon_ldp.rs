@@ -87,6 +87,10 @@ const ALL_ROUTERS_V4: [u8; 4] = [224, 0, 0, 2];
 /// source).
 const ALL_ROUTERS_V6: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x02];
 
+/// Loopback interface index (pop-to-local-delivery egress).
+#[cfg(target_os = "linux")]
+const LO_IF_INDEX: u32 = 1;
+
 /// Parse an address literal (`A.B.C.D`, `2001:db8::1`, `[::1]`).
 fn parse_addr(s: &str) -> Option<IpAddr> {
     use std::str::FromStr;
@@ -164,6 +168,22 @@ struct LdpDaemon {
     peer_ports: HashMap<IpAddr, u16>,
     counters: Arc<LdpCounters>,
     port: u16,
+    /// Kernel MPLS mirror (`[ldp] install_kernel`, Linux only): a pop
+    /// route per local binding label (tail) and an encap route per
+    /// learned binding (head) — the LDP counterpart of the BGP-LU
+    /// dataplane mirror.
+    #[cfg(target_os = "linux")]
+    mpls: Option<lr_osroute::mpls_route::MplsNetlink>,
+    /// Installed tail in-labels, keyed by prefix (deletion needs the
+    /// label when the binding goes away).
+    #[cfg(target_os = "linux")]
+    tails: HashMap<Prefix, GenericLabel>,
+    /// Installed head encap routes, keyed by prefix: (peer label, peer
+    /// id) so withdrawals and session teardown reverse the right LSP.
+    #[cfg(target_os = "linux")]
+    heads: HashMap<Prefix, (GenericLabel, LdpId)>,
+    /// Peer transport addresses, for the encap-route next hop.
+    peers_transport: HashMap<LdpId, IpAddr>,
 }
 
 /// Entry point from `daemon.rs`.
@@ -415,6 +435,25 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    #[cfg(target_os = "linux")]
+    let mpls = if cfg.ldp_install_kernel {
+        match lr_osroute::mpls_route::MplsNetlink::connect() {
+            Ok(t) => {
+                println!("daemon: mpls route table connected — installing LDP LSPs");
+                Some(t)
+            }
+            Err(e) => {
+                eprintln!(
+                    "daemon: mpls route table unavailable ({}); LSP install disabled",
+                    e
+                );
+                None
+            }
+        }
+    } else {
+        None
+    };
+
     let mut daemon = LdpDaemon {
         engine,
         udp_tx,
@@ -430,7 +469,24 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         peer_ports,
         counters,
         port,
+        #[cfg(target_os = "linux")]
+        mpls,
+        #[cfg(target_os = "linux")]
+        tails: HashMap::new(),
+        #[cfg(target_os = "linux")]
+        heads: HashMap::new(),
+        peers_transport: HashMap::new(),
     };
+
+    // Tail half of the kernel mirror: local bindings deliver locally
+    // (the kernel's own explicit-null shape) once MPLS is enabled.
+    #[cfg(target_os = "linux")]
+    {
+        let binds = daemon.binds.clone();
+        for (prefix, label) in &binds {
+            daemon.install_tail(prefix, *label);
+        }
+    }
 
     // ---- Main loop. ----
     let start = std::time::Instant::now();
@@ -851,6 +907,7 @@ impl LdpDaemon {
                     peer_id,
                     transport_addr,
                 } => {
+                    self.peers_transport.insert(peer_id, transport_addr);
                     self.connect_peer(now, peer_id, transport_addr);
                 }
                 EngineEvent::SessionUp {
@@ -881,6 +938,20 @@ impl LdpDaemon {
                     self.counters
                         .sessions
                         .store(self.peers_up.len(), Ordering::Relaxed);
+                    // The learned bindings died with the session: undo
+                    // the head half of the kernel mirror for this peer.
+                    #[cfg(target_os = "linux")]
+                    {
+                        let affected: Vec<Prefix> = self
+                            .heads
+                            .iter()
+                            .filter(|(_, (_, p))| *p == peer_id)
+                            .map(|(k, _)| *k)
+                            .collect();
+                        for prefix in affected {
+                            self.uninstall_head(&prefix);
+                        }
+                    }
                 }
                 EngineEvent::CloseConnection(conn) => {
                     // Deliver any queued bytes (fatal Notification)
@@ -902,6 +973,12 @@ impl LdpDaemon {
                     self.counters
                         .mappings_learned
                         .fetch_add(1, Ordering::Relaxed);
+                    // Head half of the kernel mirror: forward IP
+                    // traffic for the prefix into the LSP toward the
+                    // peer with the peer's label.
+                    #[cfg(target_os = "linux")]
+                    self.install_head(prefix, label, peer_id);
+                    let _ = (&prefix, &label, &peer_id);
                 }
                 EngineEvent::MappingWithdrawn { peer_id, prefixes } => {
                     for prefix in &prefixes {
@@ -910,6 +987,12 @@ impl LdpDaemon {
                     self.counters
                         .mappings_withdrawn
                         .fetch_add(prefixes.len(), Ordering::Relaxed);
+                    #[cfg(target_os = "linux")]
+                    for prefix in &prefixes {
+                        self.uninstall_head(prefix);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = peer_id;
                 }
                 EngineEvent::MappingReleased { peer_id, prefix } => {
                     println!("ldp: mapping released {} by {}", prefix, peer_id);
@@ -987,7 +1070,9 @@ impl LdpDaemon {
     }
 
     /// Graceful shutdown: targeted Shutdown to every operational peer
-    /// (§3.5.1.2.1.4), deliver the notifications, close the sockets.
+    /// (§3.5.1.2.1.4), deliver the notifications, close the sockets,
+    /// and undo the kernel mirror (the operator restarts into a clean
+    /// dataplane instead of inheriting stale LSPs).
     fn shutdown(&mut self, now: Instant) {
         let peers: Vec<LdpId> = std::mem::take(&mut self.peers_up).into_iter().collect();
         for peer in peers {
@@ -995,6 +1080,91 @@ impl LdpDaemon {
         }
         self.flush_tcp();
         self.conns.clear();
+        #[cfg(target_os = "linux")]
+        {
+            let heads: Vec<Prefix> = self.heads.keys().copied().collect();
+            for prefix in heads {
+                self.uninstall_head(&prefix);
+            }
+            let tails: Vec<Prefix> = self.tails.keys().copied().collect();
+            for prefix in tails {
+                self.uninstall_tail(&prefix);
+            }
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // Kernel MPLS mirror (Linux, [ldp] install_kernel)
+    // ------------------------------------------------------------------
+
+    /// Tail half: in-label pop to local delivery for a locally bound
+    /// prefix (the same shape the BGP-LU mirror programs for
+    /// originated labels).
+    #[cfg(target_os = "linux")]
+    fn install_tail(&mut self, prefix: &Prefix, label: GenericLabel) {
+        let Some(mpls) = self.mpls.as_mut() else {
+            return;
+        };
+        let lsp =
+            lr_osroute::mpls_route::MplsRoute::pop_local(lr_mpls::Label::new(label.0), LO_IF_INDEX);
+        match mpls.add_route(&lsp) {
+            Ok(()) => {
+                println!(
+                    "ldp: in-label {} -> pop (local delivery) for {}",
+                    label.0, prefix
+                );
+                self.tails.insert(*prefix, label);
+            }
+            Err(e) => eprintln!("ldp: pop install for {} failed: {}", prefix, e),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn uninstall_tail(&mut self, prefix: &Prefix) {
+        if let Some(label) = self.tails.remove(prefix) {
+            if let Some(mpls) = self.mpls.as_mut() {
+                if let Err(e) = mpls.delete_route(lr_mpls::Label::new(label.0)) {
+                    eprintln!("ldp: pop delete for {} failed: {}", prefix, e);
+                }
+            }
+        }
+    }
+
+    /// Head half: encap route pushing the peer's label toward the
+    /// prefix via the peer's transport address.
+    #[cfg(target_os = "linux")]
+    fn install_head(&mut self, prefix: Prefix, label: GenericLabel, peer: LdpId) {
+        let Some(mpls) = self.mpls.as_mut() else {
+            return;
+        };
+        let Some(nh) = self.peers_transport.get(&peer).copied().or_else(|| {
+            self.engine
+                .adjacencies()
+                .iter()
+                .find(|a| a.peer_id == peer)
+                .map(|a| a.transport_addr)
+        }) else {
+            return;
+        };
+        let stack = lr_mpls::LabelStack::from_values([label.0]);
+        match mpls.add_encap_route(&prefix, &stack, nh, 0) {
+            Ok(()) => {
+                println!("ldp: {} encap mpls [{}] via {}", prefix, label.0, nh);
+                self.heads.insert(prefix, (label, peer));
+            }
+            Err(e) => eprintln!("ldp: encap install for {} failed: {}", prefix, e),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn uninstall_head(&mut self, prefix: &Prefix) {
+        if self.heads.remove(prefix).is_some() {
+            if let Some(mpls) = self.mpls.as_mut() {
+                if let Err(e) = mpls.delete_encap_route(prefix) {
+                    eprintln!("ldp: encap delete for {} failed: {}", prefix, e);
+                }
+            }
+        }
     }
 }
 

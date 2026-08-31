@@ -161,8 +161,11 @@ runtime API status. Verified against FRR 10 ldpd (see
 ff02::2 link Hellos with the §5.1 hop-limit-255 check, the §6.1.1
 Dual-Stack capability with transport-preference enforcement, and
 dual-stack UDP/TCP daemon transports (`--ldp-transport-v6`,
-`--ldp-prefer-ipv4`). Kernel MPLS installation of learned bindings
-remains future work — full details in `docs/STATUS.md` (W3-extra.4).
+`--ldp-prefer-ipv4`). With `[ldp] install_kernel` the daemon mirrors
+learned bindings into the Linux MPLS dataplane (pop route per local
+label, encap route per learned FEC) and allocates automatic labels
+from a configurable range (`[ldp] label_min`/`label_max`) — full
+details in `docs/STATUS.md` (W3-extra.4).
 
 ```bash
 # Two LSRs on a veth pair, each in its own network namespace:

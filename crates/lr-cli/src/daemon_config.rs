@@ -381,6 +381,16 @@ pub(crate) struct DaemonConfig {
     /// dual-stack peers (the RFC default is LDPoIPv6;
     /// `--ldp-prefer-ipv4` flips it).
     pub ldp_prefer_ipv6: bool,
+    /// Mirror the LDP dataplane into the kernel: a pop route per
+    /// local binding label and an encap route per learned binding
+    /// (Linux `AF_MPLS`, the `install_kernel` counterpart of the
+    /// BGP-LU mirror). Off by default.
+    pub ldp_install_kernel: bool,
+    /// Inclusive bounds of the automatic label allocation range
+    /// (RFC 3032 platform-wide range; FRR `mpls label range` parity).
+    pub ldp_label_min: u32,
+    /// See `ldp_label_min`.
+    pub ldp_label_max: u32,
     /// LDP UDP/TCP port (RFC 5036 §3.10.1: 646; overridable for
     /// multi-instance testing on shared hosts).
     pub ldp_port: u16,
@@ -457,6 +467,9 @@ impl DaemonConfig {
             ldp_port: 646,
             ldp_transport_v6: None,
             ldp_prefer_ipv6: true,
+            ldp_install_kernel: false,
+            ldp_label_min: 16,
+            ldp_label_max: 1048575,
             ldp_keepalive_time: 15,
             ldp_link_hold: 15,
             ldp_targeted_hold: 45,
@@ -598,8 +611,21 @@ impl DaemonConfig {
             }
         }
         for peer in &self.ldp_targeted {
-            if peer.address.as_deref().is_none_or(str::is_empty) {
+            let spec = peer.address.as_deref().unwrap_or_default();
+            if spec.is_empty() {
                 return Err("[[ldp.targeted]] without 'address'".to_string());
+            }
+            // RFC 7552 §5.2: link-local addresses MUST NOT be used as
+            // targeted-Hello source or destination. Reject them at
+            // parse time (fail closed) instead of discovering the
+            // problem on the wire.
+            if let Some((lr_core::addr::IpAddr::V6(octets), _)) = parse_targeted_spec(spec) {
+                if (u16::from_be_bytes([octets[0], octets[1]]) & 0xffc0) == 0xfe80 {
+                    return Err(format!(
+                        "[[ldp.targeted]] {spec}: link-local addresses must not be \
+                         used for targeted discovery (RFC 7552 §5.2)"
+                    ));
+                }
             }
         }
         for bind in &self.ldp_binds {
@@ -620,12 +646,32 @@ impl DaemonConfig {
         // Label allocation: an explicit label must sit in the
         // platform-writable range (16..=1048575 per RFC 3032 §1.2 —
         // 0..=15 are reserved; 0 in the config means "allocate"). Auto
-        // labels hand out the first free value from 16.
-        let mut next_auto = 16u32;
+        // labels hand out the first free value inside the configured
+        // range ([ldp] label_min..=label_max), skipping explicit ones.
+        if self.ldp_label_min < 16
+            || self.ldp_label_min > 1048575
+            || self.ldp_label_max < 16
+            || self.ldp_label_max > 1048575
+            || self.ldp_label_min > self.ldp_label_max
+        {
+            return Err(format!(
+                "[ldp] label range {}..={} is invalid (both bounds must be \
+                 16..=1048575 and min <= max, RFC 3032 §1.2)",
+                self.ldp_label_min, self.ldp_label_max
+            ));
+        }
+        let mut next_auto = self.ldp_label_min;
         for idx in 0..self.ldp_binds.len() {
             if self.ldp_binds[idx].label == 0 {
                 while self.ldp_binds.iter().any(|b| b.label == next_auto) {
                     next_auto += 1;
+                }
+                if next_auto > self.ldp_label_max {
+                    return Err(format!(
+                        "[ldp] automatic label allocation exhausted the range \
+                         {}..={} — add explicit labels or widen it",
+                        self.ldp_label_min, self.ldp_label_max
+                    ));
                 }
                 self.ldp_binds[idx].label = next_auto;
             } else if self.ldp_binds[idx].label > 1048575 {
@@ -1370,6 +1416,21 @@ fn apply_ldp_key(
                     .parse()
                     .map_err(|_| format!("bad prefer_ipv6 '{value}' (true|false)"))?;
             }
+            "install_kernel" => {
+                cfg.ldp_install_kernel = value
+                    .parse()
+                    .map_err(|_| format!("bad install_kernel '{value}' (true|false)"))?;
+            }
+            "label_min" => {
+                cfg.ldp_label_min = value
+                    .parse()
+                    .map_err(|_| format!("bad label_min '{value}'"))?;
+            }
+            "label_max" => {
+                cfg.ldp_label_max = value
+                    .parse()
+                    .map_err(|_| format!("bad label_max '{value}'"))?;
+            }
             "port" => {
                 cfg.ldp_port = value
                     .parse()
@@ -1796,6 +1857,18 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--ldp-prefer-ipv4" => {
                 cfg.ldp_prefer_ipv6 = false;
                 i += 1;
+            }
+            "--ldp-install-kernel" => {
+                cfg.ldp_install_kernel = true;
+                i += 1;
+            }
+            "--ldp-label-min" if i + 1 < args.len() => {
+                cfg.ldp_label_min = args[i + 1].parse().unwrap_or(16);
+                i += 2;
+            }
+            "--ldp-label-max" if i + 1 < args.len() => {
+                cfg.ldp_label_max = args[i + 1].parse().unwrap_or(1048575);
+                i += 2;
             }
             "--ldp-port" if i + 1 < args.len() => {
                 cfg.ldp_port = args[i + 1].parse().unwrap_or(646);
@@ -2259,17 +2332,22 @@ mod tests {
         cfg.protocol = "ldp".to_string();
         parse_toml_subset(
             "[ldp]\ntransport = \"10.99.1.1\"\nport = 646\nkeepalive_time = 15\n\
-             link_hold_time = 15\ntargeted_hold_time = 45\n\n\
+             link_hold_time = 15\ntargeted_hold_time = 45\ninstall_kernel = true\n\
+             label_min = 100\nlabel_max = 999\n\n\
              [[ldp.interface]]\nname = \"veth0\"\n\n\
              [[ldp.interface]]\nname = \"veth1\"\n\n\
              [[ldp.targeted]]\naddress = \"10.99.1.2\"\n\n\
              [[ldp.bind]]\nprefix = \"203.0.113.0/24\"\nlabel = 24000\n\n\
-             [[ldp.bind]]\nprefix = \"198.51.100.0/24\"\n",
+             [[ldp.bind]]\nprefix = \"198.51.100.0/24\"\n\n\
+             [[ldp.bind]]\nprefix = \"192.0.2.0/24\"\n",
             &mut cfg,
         )
         .unwrap();
         cfg.finalize().unwrap();
         assert_eq!(cfg.ldp_transport.as_deref(), Some("10.99.1.1"));
+        assert!(cfg.ldp_install_kernel);
+        assert_eq!(cfg.ldp_label_min, 100);
+        assert_eq!(cfg.ldp_label_max, 999);
         assert_eq!(cfg.ldp_port, 646);
         assert_eq!(cfg.ldp_keepalive_time, 15);
         assert_eq!(cfg.ldp_link_hold, 15);
@@ -2277,12 +2355,85 @@ mod tests {
         assert_eq!(cfg.ldp_interfaces.len(), 2);
         assert_eq!(cfg.ldp_interfaces[0].name.as_deref(), Some("veth0"));
         assert_eq!(cfg.ldp_targeted[0].address.as_deref(), Some("10.99.1.2"));
-        assert_eq!(cfg.ldp_binds.len(), 2);
+        assert_eq!(cfg.ldp_binds.len(), 3);
         assert_eq!(cfg.ldp_binds[0].prefix.as_deref(), Some("203.0.113.0/24"));
         assert_eq!(cfg.ldp_binds[0].label, 24000);
-        // Auto allocation: label 0 picks the first free value from 16.
-        assert_eq!(cfg.ldp_binds[1].label, 16);
+        // Auto allocation: label 0 picks the first free value inside
+        // the configured range, skipping the explicit 24000.
+        assert_eq!(cfg.ldp_binds[1].label, 100);
+        assert_eq!(cfg.ldp_binds[2].label, 101);
         assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+    }
+
+    #[test]
+    fn ldp_label_range_validation() {
+        // Out-of-bounds bounds.
+        for (min, max) in [(15u32, 100u32), (100, 1048576), (500, 100), (0, 1048575)] {
+            let mut cfg = DaemonConfig::with_defaults();
+            cfg.protocol = "ldp".to_string();
+            parse_toml_subset(
+                &format!("[ldp]\nlabel_min = {min}\nlabel_max = {max}\n"),
+                &mut cfg,
+            )
+            .unwrap();
+            let err = cfg.finalize().expect_err("bad label range must fail");
+            assert!(err.contains("label range"), "{min}..{max}: {err}");
+        }
+    }
+
+    #[test]
+    fn ldp_label_range_exhaustion_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset(
+            "[ldp]\nlabel_min = 16\nlabel_max = 17\n\n\
+             [[ldp.bind]]\nprefix = \"203.0.113.0/24\"\nlabel = 16\n\n\
+             [[ldp.bind]]\nprefix = \"198.51.100.0/24\"\nlabel = 17\n\n\
+             [[ldp.bind]]\nprefix = \"192.0.2.0/24\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("exhausted range must fail");
+        assert!(err.contains("exhausted"), "{err}");
+    }
+
+    #[test]
+    fn ldp_targeted_link_local_rejected() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset("[[ldp.targeted]]\naddress = \"fe80::1\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("link-local targeted must fail");
+        assert!(err.contains("link-local"), "{err}");
+        // The bracketed v6 form parses and passes for global addresses.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset(
+            "[[ldp.targeted]]\naddress = \"[2001:db8::1]:646\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(
+            cfg.ldp_targeted[0].address.as_deref(),
+            Some("[2001:db8::1]:646")
+        );
+    }
+
+    #[test]
+    fn ldp_bracketed_v6_targeted_parses_port() {
+        assert_eq!(
+            parse_targeted_spec("[2001:db8::1]:646").map(|(a, p)| (a.to_string(), p)),
+            Some(("2001:db8::1".to_string(), Some(646)))
+        );
+        assert_eq!(
+            parse_targeted_spec("2001:db8::1").map(|(a, p)| (a.to_string(), p)),
+            Some(("2001:db8::1".to_string(), None))
+        );
+        assert_eq!(
+            parse_targeted_spec("10.0.0.1:646").map(|(a, p)| (a.to_string(), p)),
+            Some(("10.0.0.1".to_string(), Some(646)))
+        );
+        assert_eq!(parse_targeted_spec("not-an-address"), None);
     }
 
     #[test]
