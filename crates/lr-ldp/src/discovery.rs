@@ -16,7 +16,7 @@
 
 use crate::message::{HelloMsg, LdpMessage};
 use crate::pdu::{LdpId, DEFAULT_LINK_HELLO_HOLD, DEFAULT_TARGETED_HELLO_HOLD};
-use crate::tlv::{HelloParams, TransportAddress};
+use crate::tlv::{DualStackCapability, HelloParams, TransportAddress, TransportPreference};
 use alloc::vec::Vec;
 use lr_core::addr::IpAddr;
 use lr_core::time::{Duration, Instant};
@@ -40,7 +40,8 @@ pub struct HelloAdjacency {
     /// The UDP source address of the Hellos.
     pub source: IpAddr,
     /// The transport address the peer advertises for its TCP endpoint
-    /// (Transport Address TLV, falling back to the Hello source).
+    /// (Transport Address TLV of the Hello's own address family per
+    /// RFC 7552 §6.1, falling back to the Hello source).
     pub transport_addr: IpAddr,
     /// The negotiated hold time.
     pub hold_time: Duration,
@@ -48,6 +49,12 @@ pub struct HelloAdjacency {
     pub last_seen: Instant,
     /// The peer's Configuration Sequence Number, when sent.
     pub config_seq: Option<u32>,
+    /// The RFC 7552 §6.1.1 Dual-Stack capability the peer advertises
+    /// in these Hellos, when present. `None` on none: a peer heard in
+    /// both address families without this capability is a
+    /// noncompliant dual-stack neighbor (§6.1.1 rule 3c) and must not
+    /// get a session.
+    pub dual_stack: Option<TransportPreference>,
 }
 
 /// Events from the discovery machinery.
@@ -64,6 +71,14 @@ pub enum DiscoveryEvent {
     /// A targeted Hello requested that we send targeted Hellos back
     /// (R=1) and we accepted: respond in kind.
     TargetedHelloRequested { source: IpAddr, peer_id: LdpId },
+    /// A Hello was discarded: the embedder should log it. Reasons are
+    /// the RFC 7552 §6.1.1 checks (preference mismatch, capability
+    /// inconsistency).
+    HelloDiscarded {
+        peer_id: LdpId,
+        source: IpAddr,
+        reason: &'static str,
+    },
 }
 
 /// An outbound Hello the embedder should transmit.
@@ -82,8 +97,18 @@ pub struct OutgoingHello {
 pub struct LdpDiscoveryConfig {
     /// The local label space advertised in Hello PDU headers.
     pub local_id: LdpId,
-    /// The transport address advertised in Hellos (the TCP endpoint).
+    /// The IPv4 transport address advertised in IPv4 Hellos (the TCP
+    /// endpoint).
     pub transport_addr: IpAddr,
+    /// The IPv6 transport address advertised in IPv6 Hellos (RFC
+    /// 7552 §6.1 rule 5: a global unicast address, preferred over
+    /// unique-local or link-local). `None` = single-stack IPv4
+    /// speaker.
+    pub transport_addr_v6: Option<IpAddr>,
+    /// The §6.1.1 transport-connection preference sent in the
+    /// Dual-Stack capability (only carried by dual-stack speakers).
+    /// The RFC default is LDPoIPv6.
+    pub prefer_ipv6: bool,
     /// Proposed Link Hello hold time (0 → 15 s default).
     pub link_hello_hold: u16,
     /// Proposed Targeted Hello hold time (0 → 45 s default).
@@ -100,6 +125,8 @@ impl Default for LdpDiscoveryConfig {
         Self {
             local_id: LdpId::default(),
             transport_addr: IpAddr::V4([0, 0, 0, 0]),
+            transport_addr_v6: None,
+            prefer_ipv6: true,
             link_hello_hold: DEFAULT_LINK_HELLO_HOLD,
             targeted_hello_hold: DEFAULT_TARGETED_HELLO_HOLD,
             targeted_peers: Vec::new(),
@@ -188,7 +215,29 @@ impl LdpDiscovery {
         } else {
             DiscoveryKind::Link
         };
-        let transport_addr = hello.transport_addr.map(|t| t.0).unwrap_or(source);
+        // RFC 7552 §6.1.1: a dual-stack LSR MUST check the Dual-Stack
+        // capability in received Hellos. When the local speaker is
+        // dual-stack for this peer, a capability whose preference does
+        // not match (or is not recognized) means the Hello MUST be
+        // discarded. An unrecognized TR value already fails the TLV
+        // parse, so a parsed capability always has a known preference.
+        if let Some(cap) = hello.dual_stack {
+            if self.is_dual_stack() && cap.preference != self.local_preference() {
+                events.push(DiscoveryEvent::HelloDiscarded {
+                    peer_id: pdu.sender,
+                    source,
+                    reason: "dual-stack transport preference mismatch",
+                });
+                return events;
+            }
+        }
+        // Transport address (§3.5.2.1 + RFC 7552 §6.1): only the TLV
+        // of the carrying packet's family counts; fall back to the UDP
+        // source when none was carried.
+        let transport_addr = hello
+            .transport_addr_for(&source)
+            .map(|t| t.0)
+            .unwrap_or(source);
         let hold = Self::effective_hold(
             hello.params.hold_time,
             match kind {
@@ -206,6 +255,7 @@ impl LdpDiscovery {
             adj.transport_addr = transport_addr;
             adj.hold_time = hold;
             adj.config_seq = hello.config_seq.map(|c| c.0);
+            adj.dual_stack = hello.dual_stack.map(|c| c.preference);
         } else {
             let adjacency = HelloAdjacency {
                 peer_id: pdu.sender,
@@ -215,6 +265,7 @@ impl LdpDiscovery {
                 hold_time: hold,
                 last_seen: now,
                 config_seq: hello.config_seq.map(|c| c.0),
+                dual_stack: hello.dual_stack.map(|c| c.preference),
             };
             self.adjacencies.push(adjacency.clone());
             events.push(DiscoveryEvent::AdjacencyUp(adjacency));
@@ -274,21 +325,16 @@ impl LdpDiscovery {
             if let Some(entry) = self.targeted_targets.iter_mut().find(|(t, _)| *t == target) {
                 entry.1 = Some(now);
             }
-            let message_id = self.alloc_message_id();
-            self.outgoing.push(OutgoingHello {
-                dest: target,
-                message: LdpMessage::Hello(HelloMsg {
-                    message_id,
-                    params: HelloParams {
-                        hold_time: self.cfg.targeted_hello_hold,
-                        targeted: true,
-                        request_targeted: false,
-                    },
-                    transport_addr: Some(TransportAddress(self.cfg.transport_addr)),
-                    config_seq: None,
-                    unknown_tlvs: Vec::new(),
-                }),
-            });
+            // Per-family transport TLV + the dual-stack capability;
+            // None = no local address in the target's family (skip —
+            // the embedder should not have us targeted over an AF it
+            // did not configure).
+            if let Some(message) = self.build_hello(&target, true) {
+                self.outgoing.push(OutgoingHello {
+                    dest: target,
+                    message: LdpMessage::Hello(message),
+                });
+            }
         }
         events
     }
@@ -296,6 +342,89 @@ impl LdpDiscovery {
     /// Drain outbound Hellos.
     pub fn drain_outgoing(&mut self) -> Vec<OutgoingHello> {
         core::mem::take(&mut self.outgoing)
+    }
+
+    /// Whether the local speaker runs dual-stack LDP (both transport
+    /// addresses configured). Dual-stack LSRs carry the RFC 7552
+    /// §6.1.1 Dual-Stack capability in every Hello.
+    fn is_dual_stack(&self) -> bool {
+        self.cfg.transport_addr_v6.is_some()
+    }
+
+    /// The local §6.1.1 transport-connection preference.
+    fn local_preference(&self) -> TransportPreference {
+        if self.cfg.prefer_ipv6 {
+            TransportPreference::Ipv6
+        } else {
+            TransportPreference::Ipv4
+        }
+    }
+
+    /// The transport address of `dest`'s address family (RFC 7552
+    /// §6.1 rule 1: a Hello carries only the transport address of its
+    /// own family). The primary `transport_addr` serves its own
+    /// family — a speaker may legitimately be IPv6-only with only
+    /// that field set. `None` = the speaker has no address in that
+    /// family and must not originate the Hello.
+    fn transport_for_af(&self, dest: &IpAddr) -> Option<TransportAddress> {
+        self.local_transport(matches!(dest, IpAddr::V6(_)))
+            .map(TransportAddress)
+    }
+
+    /// The local transport address of one address family.
+    fn local_transport(&self, af_v6: bool) -> Option<IpAddr> {
+        if af_v6 {
+            match self.cfg.transport_addr_v6 {
+                Some(v6) => Some(v6),
+                None => match self.cfg.transport_addr {
+                    IpAddr::V6(_) => Some(self.cfg.transport_addr),
+                    IpAddr::V4(_) => None,
+                },
+            }
+        } else {
+            match self.cfg.transport_addr {
+                IpAddr::V4(_) => Some(self.cfg.transport_addr),
+                IpAddr::V6(_) => None,
+            }
+        }
+    }
+
+    /// Build one Hello message for `dest`, with the family-correct
+    /// transport address TLV and — on dual-stack speakers — the RFC
+    /// 7552 §6.1.1 Dual-Stack capability.
+    pub(crate) fn build_hello(&mut self, dest: &IpAddr, targeted: bool) -> Option<HelloMsg> {
+        let transport_addr = self.transport_for_af(dest)?;
+        let message_id = self.alloc_message_id();
+        let dual_stack = if self.is_dual_stack() {
+            Some(DualStackCapability {
+                preference: self.local_preference(),
+            })
+        } else {
+            None
+        };
+        Some(HelloMsg {
+            message_id,
+            params: HelloParams {
+                hold_time: if targeted {
+                    self.cfg.targeted_hello_hold
+                } else {
+                    self.cfg.link_hello_hold
+                },
+                targeted,
+                request_targeted: false,
+            },
+            transport_addr: match transport_addr {
+                TransportAddress(IpAddr::V4(_)) => Some(transport_addr),
+                _ => None,
+            },
+            transport_addr_v6: match transport_addr {
+                TransportAddress(IpAddr::V6(_)) => Some(transport_addr),
+                _ => None,
+            },
+            config_seq: None,
+            dual_stack,
+            unknown_tlvs: Vec::new(),
+        })
     }
 
     fn alloc_message_id(&mut self) -> u32 {
@@ -346,7 +475,9 @@ mod tests {
                 request_targeted: false,
             },
             transport_addr: transport.map(TransportAddress),
+            transport_addr_v6: None,
             config_seq: None,
+            dual_stack: None,
             unknown_tlvs: Vec::new(),
         };
         let pdu = LdpPdu {
@@ -492,7 +623,9 @@ mod tests {
                 request_targeted: true,
             },
             transport_addr: None,
+            transport_addr_v6: None,
             config_seq: None,
+            dual_stack: None,
             unknown_tlvs: Vec::new(),
         };
         let pdu = LdpPdu {
@@ -526,7 +659,9 @@ mod tests {
                 request_targeted: false,
             },
             transport_addr: None,
+            transport_addr_v6: None,
             config_seq: Some(ConfigSequenceNumber(7)),
+            dual_stack: None,
             unknown_tlvs: Vec::new(),
         };
         let pdu = LdpPdu {
@@ -548,5 +683,205 @@ mod tests {
             d.adjacencies()[0].transport_addr,
             IpAddr::V4([192, 0, 2, 8])
         );
+    }
+
+    // ---- RFC 7552 §6.1: per-family transport-address handling ----
+
+    fn hello_pdu_full(
+        sender: LdpId,
+        targeted: bool,
+        hold: u16,
+        transport_v4: Option<IpAddr>,
+        transport_v6: Option<IpAddr>,
+        dual_stack: Option<TransportPreference>,
+    ) -> (LdpPdu, HelloMsg) {
+        let msg = HelloMsg {
+            message_id: 1,
+            params: HelloParams {
+                hold_time: hold,
+                targeted,
+                request_targeted: false,
+            },
+            transport_addr: transport_v4.map(TransportAddress),
+            transport_addr_v6: transport_v6.map(TransportAddress),
+            config_seq: None,
+            dual_stack: dual_stack.map(|preference| DualStackCapability { preference }),
+            unknown_tlvs: Vec::new(),
+        };
+        let pdu = LdpPdu {
+            version: 1,
+            sender,
+            messages: vec![LdpMessage::Hello(msg.clone())],
+        };
+        (pdu, msg)
+    }
+
+    fn dual_cfg() -> LdpDiscoveryConfig {
+        LdpDiscoveryConfig {
+            local_id: id(1),
+            transport_addr: IpAddr::V4([192, 0, 2, 1]),
+            transport_addr_v6: Some(IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ])),
+            ..LdpDiscoveryConfig::default()
+        }
+    }
+
+    #[test]
+    fn rfc7552_same_af_transport_tlv_wins() {
+        // A (noncompliant) Hello carrying both families inside an IPv6
+        // datagram: only the v6 transport address may be used (§6.1
+        // rule 2).
+        let now = Instant::from_secs(0);
+        let mut d = LdpDiscovery::new(dual_cfg());
+        let (pdu, msg) = hello_pdu_full(
+            id(2),
+            true,
+            45,
+            Some(IpAddr::V4([192, 0, 2, 2])),
+            Some(IpAddr::V6([
+                0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+            ])),
+            Some(TransportPreference::Ipv6),
+        );
+        let _ = d.feed_hello(
+            now,
+            &pdu,
+            &msg,
+            IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        );
+        let adj = &d.adjacencies()[0];
+        assert_eq!(
+            adj.transport_addr,
+            IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2])
+        );
+        assert_eq!(adj.dual_stack, Some(TransportPreference::Ipv6));
+    }
+
+    #[test]
+    fn rfc7552_dual_stack_v6_hello_without_v6_tlv_uses_source() {
+        // A v6 Hello with no v6 transport TLV: the source-address
+        // fallback of §3.5.2.1 applies (not the v4 TLV!).
+        let now = Instant::from_secs(0);
+        let mut d = LdpDiscovery::new(dual_cfg());
+        let (pdu, msg) = hello_pdu_full(
+            id(2),
+            true,
+            45,
+            Some(IpAddr::V4([192, 0, 2, 2])),
+            None,
+            None,
+        );
+        let _ = d.feed_hello(
+            now,
+            &pdu,
+            &msg,
+            IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9]),
+        );
+        assert_eq!(
+            d.adjacencies()[0].transport_addr,
+            IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 9])
+        );
+    }
+
+    #[test]
+    fn rfc7552_preference_mismatch_discards_hello() {
+        // §6.1.1 rule 1: local prefers IPv6, the peer advertises
+        // TR=LDPoIPv4 — the Hello MUST be discarded and an error
+        // logged.
+        let now = Instant::from_secs(0);
+        let mut d = LdpDiscovery::new(dual_cfg()); // prefer_ipv6 default true
+        let (pdu, msg) = hello_pdu_full(
+            id(2),
+            true,
+            45,
+            Some(IpAddr::V4([192, 0, 2, 2])),
+            None,
+            Some(TransportPreference::Ipv4),
+        );
+        let events = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 2]));
+        assert!(
+            matches!(events[0], DiscoveryEvent::HelloDiscarded { .. }),
+            "mismatched preference must surface HelloDiscarded"
+        );
+        assert!(d.adjacencies().is_empty());
+    }
+
+    #[test]
+    fn rfc7552_matching_preference_creates_adjacency() {
+        let now = Instant::from_secs(0);
+        let mut d = LdpDiscovery::new(dual_cfg());
+        let (pdu, msg) = hello_pdu_full(
+            id(2),
+            true,
+            45,
+            Some(IpAddr::V4([192, 0, 2, 2])),
+            None,
+            Some(TransportPreference::Ipv6),
+        );
+        let events = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 2]));
+        assert!(matches!(events[0], DiscoveryEvent::AdjacencyUp(_)));
+        assert_eq!(
+            d.adjacencies()[0].dual_stack,
+            Some(TransportPreference::Ipv6)
+        );
+    }
+
+    #[test]
+    fn rfc7552_single_stack_speaker_ignores_capability() {
+        // §6.1.1: "A Single-stack LSR ... SHOULD ignore this
+        // capability if received" — no preference enforcement.
+        let now = Instant::from_secs(0);
+        let mut d = LdpDiscovery::new(cfg()); // v4-only speaker
+        let (pdu, msg) = hello_pdu_full(
+            id(2),
+            true,
+            45,
+            Some(IpAddr::V4([192, 0, 2, 2])),
+            None,
+            Some(TransportPreference::Ipv6),
+        );
+        let events = d.feed_hello(now, &pdu, &msg, IpAddr::V4([192, 0, 2, 2]));
+        assert!(matches!(events[0], DiscoveryEvent::AdjacencyUp(_)));
+    }
+
+    #[test]
+    fn rfc7552_targeted_hello_per_family_transport() {
+        // Targeted Hellos to a v6 destination carry the v6 transport
+        // address; a v4-only speaker emits none for a v6 target.
+        let now = Instant::from_secs(0);
+        let mut dual = dual_cfg();
+        dual.targeted_peers = vec![IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99,
+        ])];
+        let mut d = LdpDiscovery::new(dual);
+        let _ = d.tick(now);
+        let out = d.drain_outgoing();
+        assert_eq!(out.len(), 1);
+        let LdpMessage::Hello(hello) = &out[0].message else {
+            panic!("expected a Hello");
+        };
+        match hello.transport_addr_v6 {
+            Some(TransportAddress(IpAddr::V6(b))) => assert_eq!(b[1], 1),
+            other => panic!("expected a v6 transport TLV, got {other:?}"),
+        }
+        assert!(hello.transport_addr.is_none());
+        // The dual-stack capability rides along (§6.1.1: "in all of
+        // its LDP Hellos").
+        assert_eq!(
+            hello.dual_stack.map(|c| c.preference),
+            Some(TransportPreference::Ipv6)
+        );
+
+        // A v4-only speaker must not emit a Hello it cannot sign with
+        // a v6 transport address.
+        let now = Instant::from_secs(0);
+        let mut single = cfg();
+        single.targeted_peers = vec![IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 99,
+        ])];
+        let mut d = LdpDiscovery::new(single);
+        let _ = d.tick(now);
+        assert!(d.drain_outgoing().is_empty());
     }
 }

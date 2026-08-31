@@ -33,14 +33,14 @@ use crate::discovery::{
 };
 use crate::mapping::{FecKey, LabelMappingStore};
 use crate::message::{
-    HelloMsg, LabelMappingMsg, LabelReleaseMsg, LabelWithdrawMsg, LdpCodec, LdpMessage, LdpPdu,
+    LabelMappingMsg, LabelReleaseMsg, LabelWithdrawMsg, LdpCodec, LdpMessage, LdpPdu,
     NotificationMsg, RawMessage,
 };
 use crate::pdu::{AdvertisementMode, LdpId, MessageType, LDP_VERSION};
 use crate::session::{
     role_for, SessionConfig, SessionDownReason, SessionEvent, SessionRole, SessionState,
 };
-use crate::tlv::{AddressList, GenericLabel, HelloParams, Status, StatusCode, TransportAddress};
+use crate::tlv::{AddressList, GenericLabel, Status, StatusCode, TransportPreference};
 use alloc::collections::{BTreeMap, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
@@ -54,9 +54,15 @@ use lr_core::time::Instant;
 pub struct LdpEngineConfig {
     /// The local label space (platform-wide spaces use label space 0).
     pub local_id: LdpId,
-    /// The transport address advertised in Hellos and used for the
-    /// §2.5.2 role decision.
+    /// The IPv4 transport address advertised in IPv4 Hellos and used
+    /// for the §2.5.2 role decision on IPv4 adjacencies.
     pub transport_addr: IpAddr,
+    /// The IPv6 transport address advertised in IPv6 Hellos (RFC
+    /// 7552). `None` = single-stack IPv4 speaker.
+    pub transport_addr_v6: Option<IpAddr>,
+    /// The §6.1.1 transport-connection preference for dual-stack
+    /// peers (the RFC default is LDPoIPv6).
+    pub prefer_ipv6: bool,
     /// Proposed KeepAlive Time in seconds (§3.5.3).
     pub keepalive_time: u16,
     /// Proposed Max PDU Length.
@@ -81,6 +87,8 @@ impl LdpEngineConfig {
         Self {
             local_id,
             transport_addr,
+            transport_addr_v6: None,
+            prefer_ipv6: true,
             keepalive_time: crate::pdu::DEFAULT_KEEPALIVE_TIME,
             max_pdu_len: crate::pdu::DEFAULT_MAX_PDU_LEN,
             advertisement: AdvertisementMode::DownstreamUnsolicited,
@@ -105,6 +113,12 @@ pub enum EngineEvent {
     TargetedHelloRequested {
         source: IpAddr,
         peer_id: LdpId,
+    },
+    /// A Hello was discarded (RFC 7552 §6.1.1 checks) — for logging.
+    HelloDiscarded {
+        peer_id: LdpId,
+        source: IpAddr,
+        reason: &'static str,
     },
     /// Open a TCP connection to the peer's transport address (port per
     /// the deployment; 646 per RFC 5036 §3.10.1). Call `on_connected`
@@ -155,10 +169,19 @@ pub enum EngineEvent {
     },
 }
 
-/// A session plus the connection it rides on.
+/// A session plus the connection it rides on, with the RFC 7552
+/// context needed for per-family behavior: which address family the
+/// transport rides on and whether the peer advertised the Dual-Stack
+/// capability (a peer without it is a legacy single-stack LSR per
+/// §7 — IPv6 bindings must not be sent to it).
 struct LdpSessionState {
     session: crate::session::LdpSession,
     conn: u64,
+    /// The session's transport rides on IPv6 (else IPv4).
+    af_v6: bool,
+    /// The peer advertised the RFC 7552 §6.1.1 Dual-Stack capability
+    /// in its Hellos.
+    peer_dual_stack: bool,
 }
 
 /// One LDP speaker engine.
@@ -168,10 +191,15 @@ pub struct LdpEngine {
     sessions: BTreeMap<LdpId, LdpSessionState>,
     /// Passive-role connections that have not decoded their first PDU
     /// yet (the peer is unknown until the Initialization arrives,
-    /// §2.5.3).
-    awaiting_init: BTreeMap<u64, crate::session::LdpSession>,
+    /// §2.5.3), remembering which address family the accepted socket
+    /// rides on (RFC 7552 §7.1 address-distribution rules).
+    awaiting_init: BTreeMap<u64, (crate::session::LdpSession, bool)>,
     /// Active-role establishments awaiting a successful connect.
     pending_connect: Vec<LdpId>,
+    /// Peers found noncompliant with RFC 7552 §6.1.1 (both address
+    /// families of Hellos, no Dual-Stack capability): no session is
+    /// ever established with them, and the verdict is reported once.
+    noncompliant_peers: Vec<LdpId>,
     lib: LabelMappingStore,
     /// Per-connection TCP input accumulation.
     in_bufs: BTreeMap<u64, Vec<u8>>,
@@ -190,6 +218,8 @@ impl LdpEngine {
         let discovery = LdpDiscovery::new(LdpDiscoveryConfig {
             local_id: cfg.local_id,
             transport_addr: cfg.transport_addr,
+            transport_addr_v6: cfg.transport_addr_v6,
+            prefer_ipv6: cfg.prefer_ipv6,
             link_hello_hold: cfg.link_hello_hold,
             targeted_hello_hold: cfg.targeted_hello_hold,
             targeted_peers: cfg.targeted_peers.clone(),
@@ -201,6 +231,7 @@ impl LdpEngine {
             sessions: BTreeMap::new(),
             awaiting_init: BTreeMap::new(),
             pending_connect: Vec::new(),
+            noncompliant_peers: Vec::new(),
             lib: LabelMappingStore::new(),
             in_bufs: BTreeMap::new(),
             out_bufs: BTreeMap::new(),
@@ -278,6 +309,7 @@ impl LdpEngine {
                     // the session down (§3.5.2.1 "Maintaining Hello
                     // Adjacencies").
                     if self.discovery.adjacency_for_peer(peer_id).is_none() {
+                        self.noncompliant_peers.retain(|p| *p != peer_id);
                         if let Some(st) = self.sessions.remove(&peer_id) {
                             let conn = st.conn;
                             let mut session = st.session;
@@ -295,24 +327,147 @@ impl LdpEngine {
                     self.events
                         .push_back(EngineEvent::TargetedHelloRequested { source, peer_id });
                 }
+                DiscoveryEvent::HelloDiscarded {
+                    peer_id,
+                    source,
+                    reason,
+                } => {
+                    // RFC 7552 §6.1.1 rule 1: a preference mismatch on
+                    // a peer with an established session sends a fatal
+                    // Transport Connection Mismatch notification and
+                    // resets the session.
+                    if reason == "dual-stack transport preference mismatch" {
+                        if let Some(st) = self.sessions.remove(&peer_id) {
+                            let conn = st.conn;
+                            let mut session = st.session;
+                            let max_pdu_len = Self::effective_max_pdu(&session);
+                            session.enqueue_notification(Status {
+                                code: StatusCode::TRANSPORT_CONNECTION_MISMATCH,
+                                message_id: 0,
+                                message_type: 0,
+                            });
+                            let down_events = session.shutdown(now);
+                            let outgoing = session.drain_outgoing();
+                            self.absorb_session_events(peer_id, conn, down_events);
+                            self.encode_outgoing(conn, outgoing, max_pdu_len);
+                            self.lib.unlearn_peer(peer_id);
+                            self.events.push_back(EngineEvent::CloseConnection(conn));
+                        }
+                    }
+                    self.events.push_back(EngineEvent::HelloDiscarded {
+                        peer_id,
+                        source,
+                        reason,
+                    });
+                }
             }
         }
     }
 
     /// Run the §2.5.2 role decision for adjacencies without sessions.
+    /// With RFC 7552, a dual-stack peer heard in both address families
+    /// gets exactly one session (§6.1 rule 7): the transport family is
+    /// the §6.1.1 preference (which both sides must agree on), the
+    /// §2.5.2 comparison runs within that family, and a peer heard in
+    /// both families without the Dual-Stack capability is noncompliant
+    /// (§6.1.1 rule 3c) and gets no session at all.
     fn establish_sessions(&mut self) {
-        let adjacencies: Vec<HelloAdjacency> = self.discovery.adjacencies().to_vec();
-        for adj in adjacencies {
-            if self.sessions.contains_key(&adj.peer_id)
-                || self.pending_connect.contains(&adj.peer_id)
+        // One decision per peer, not per adjacency.
+        let mut peers: Vec<LdpId> = Vec::new();
+        for adj in self.discovery.adjacencies() {
+            if !peers.contains(&adj.peer_id) {
+                peers.push(adj.peer_id);
+            }
+        }
+        for peer_id in peers {
+            if self.sessions.contains_key(&peer_id)
+                || self.pending_connect.contains(&peer_id)
+                || self.noncompliant_peers.contains(&peer_id)
             {
                 continue;
             }
-            match role_for(&self.cfg.transport_addr, &adj.transport_addr) {
+            let adjacencies: Vec<HelloAdjacency> = self
+                .discovery
+                .adjacencies()
+                .iter()
+                .filter(|a| a.peer_id == peer_id)
+                .cloned()
+                .collect();
+            let has_v4 = adjacencies
+                .iter()
+                .any(|a| matches!(a.source, IpAddr::V4(_)));
+            let has_v6 = adjacencies
+                .iter()
+                .any(|a| matches!(a.source, IpAddr::V6(_)));
+            // §6.1.1: the capability must be uniform (§2.5.5 matching
+            // Hellos: either all carry it with the same TR or none do).
+            let caps: Vec<Option<TransportPreference>> =
+                adjacencies.iter().map(|a| a.dual_stack).collect();
+            if caps.iter().any(|c| c.is_some()) && caps.iter().any(|c| c.is_none()) {
+                self.events.push_back(EngineEvent::HelloDiscarded {
+                    peer_id,
+                    source: adjacencies[0].source,
+                    reason: "inconsistent Dual-Stack capability across Hellos",
+                });
+                continue;
+            }
+            // The transport family for the §2.5.2 decision.
+            let prefer_v6 = self.cfg.prefer_ipv6;
+            let local_dual = self.cfg.transport_addr_v6.is_some();
+            let use_v6 = if has_v4 && has_v6 {
+                if local_dual {
+                    if caps[0].is_none() {
+                        // §6.1.1 rule 3c: both families, no
+                        // capability — noncompliant neighbor.
+                        self.noncompliant_peers.push(peer_id);
+                        self.events.push_back(EngineEvent::HelloDiscarded {
+                            peer_id,
+                            source: adjacencies[0].source,
+                            reason: "dual-stack noncompliance (both AFs, no capability)",
+                        });
+                        continue;
+                    }
+                    prefer_v6
+                } else {
+                    // Single-stack local speaker: only its own family
+                    // is enabled (the embedder filters Hellos).
+                    self.cfg.transport_addr_v6.is_some() && prefer_v6
+                }
+            } else {
+                has_v6
+            };
+            let adj = adjacencies
+                .iter()
+                .find(|a| matches!(a.source, IpAddr::V6(_)) == use_v6)
+                .cloned();
+            let Some(adj) = adj else {
+                continue;
+            };
+            // The role comparison runs within the chosen family: the
+            // local transport address of that family vs the peer's
+            // advertised one (RFC 7552 §6.1.1 rule 2a/2b). A
+            // single-stack IPv6 speaker keeps its address in the
+            // primary field.
+            let local = if use_v6 {
+                match self.cfg.transport_addr_v6 {
+                    Some(v6) => Some(v6),
+                    None => match self.cfg.transport_addr {
+                        IpAddr::V6(_) => Some(self.cfg.transport_addr),
+                        IpAddr::V4(_) => None,
+                    },
+                }
+            } else {
+                match self.cfg.transport_addr {
+                    IpAddr::V4(_) => Some(self.cfg.transport_addr),
+                    IpAddr::V6(_) => None,
+                }
+            };
+            let Some(local) = local else { continue };
+            match role_for(&local, &adj.transport_addr) {
                 Some(SessionRole::Active) => {
-                    self.pending_connect.push(adj.peer_id);
+                    self.pending_connect.push(peer_id);
                     self.events.push_back(EngineEvent::EstablishTransport {
-                        peer_id: adj.peer_id,
+                        peer_id,
                         transport_addr: adj.transport_addr,
                     });
                 }
@@ -334,6 +489,13 @@ impl LdpEngine {
             self.events.push_back(EngineEvent::CloseConnection(conn));
             return;
         }
+        // The chosen adjacency's family (the establish_sessions
+        // decision) tells which transport the connection rides on.
+        let (af_v6, peer_dual_stack) = self
+            .discovery
+            .adjacency_for_peer(peer_id)
+            .map(|a| (matches!(a.source, IpAddr::V6(_)), a.dual_stack.is_some()))
+            .unwrap_or((false, false));
         let session = crate::session::LdpSession::new(SessionConfig {
             local_id: self.cfg.local_id,
             role: SessionRole::Active,
@@ -346,7 +508,7 @@ impl LdpEngine {
             loop_detection: false,
             path_vector_limit: 0,
         });
-        self.register_session(peer_id, conn, session, now);
+        self.register_session(peer_id, conn, session, af_v6, peer_dual_stack, now);
     }
 
     /// An active-role TCP connection attempt failed. The peer returns
@@ -359,8 +521,11 @@ impl LdpEngine {
     }
 
     /// A passive-role connection was accepted. The peer is unknown
-    /// until its Initialization arrives (§2.5.3).
-    pub fn on_accepted(&mut self, conn: u64) {
+    /// until its Initialization arrives (§2.5.3); `local_addr` is the
+    /// local endpoint of the accepted socket and fixes the session's
+    /// address family for the RFC 7552 §7.1 rules.
+    pub fn on_accepted(&mut self, conn: u64, local_addr: IpAddr) {
+        let af_v6 = matches!(local_addr, IpAddr::V6(_));
         let session = crate::session::LdpSession::new(SessionConfig {
             local_id: self.cfg.local_id,
             role: SessionRole::Passive,
@@ -373,7 +538,7 @@ impl LdpEngine {
             loop_detection: false,
             path_vector_limit: 0,
         });
-        self.awaiting_init.insert(conn, session);
+        self.awaiting_init.insert(conn, (session, af_v6));
         self.in_bufs.entry(conn).or_default();
         self.out_bufs.entry(conn).or_default();
     }
@@ -442,8 +607,7 @@ impl LdpEngine {
 
     fn handle_session_pdu(&mut self, now: Instant, conn: u64, pdu: LdpPdu, pdu_len: usize) {
         // Passive sessions waiting for their first PDU: bind the peer.
-        if self.awaiting_init.contains_key(&conn) {
-            let session = self.awaiting_init.remove(&conn).unwrap();
+        if let Some((session, af_v6)) = self.awaiting_init.remove(&conn) {
             // §2.5.3: the passive LSR matches the sender's label space
             // against a Hello adjacency; without one, reject.
             if self.discovery.adjacency_for_peer(pdu.sender).is_none() {
@@ -474,7 +638,12 @@ impl LdpEngine {
                 self.events.push_back(EngineEvent::CloseConnection(conn));
                 return;
             }
-            self.register_session(peer, conn, session, now);
+            let peer_dual_stack = self
+                .discovery
+                .adjacency_for_peer(peer)
+                .map(|a| a.dual_stack.is_some())
+                .unwrap_or(false);
+            self.register_session(peer, conn, session, af_v6, peer_dual_stack, now);
         }
 
         let peer = pdu.sender;
@@ -531,11 +700,20 @@ impl LdpEngine {
         peer: LdpId,
         conn: u64,
         mut session: crate::session::LdpSession,
+        af_v6: bool,
+        peer_dual_stack: bool,
         now: Instant,
     ) {
         let events = session.start(now);
-        self.sessions
-            .insert(peer, LdpSessionState { session, conn });
+        self.sessions.insert(
+            peer,
+            LdpSessionState {
+                session,
+                conn,
+                af_v6,
+                peer_dual_stack,
+            },
+        );
         self.in_bufs.entry(conn).or_default();
         self.out_bufs.entry(conn).or_default();
         let down = self.absorb_session_events(peer, conn, events);
@@ -560,13 +738,31 @@ impl LdpEngine {
                         params,
                     });
                     // §3.5.5.1: advertise interface addresses before any
-                    // Label Mapping.
+                    // Label Mapping. RFC 7552 §7.1 scopes the set per
+                    // peer: with the Dual-Stack capability both
+                    // families flow; without it the session carries
+                    // only addresses of its own transport family (a
+                    // legacy IPv4-only peer must never receive IPv6
+                    // addresses).
                     if !self.cfg.interface_addresses.is_empty() {
-                        let addrs = AddressList {
-                            addresses: self.cfg.interface_addresses.clone(),
+                        let (af_v6, peer_dual_stack) = match self.sessions.get(&peer) {
+                            Some(st) => (st.af_v6, st.peer_dual_stack),
+                            None => (false, false),
                         };
-                        if let Some(st) = self.sessions.get_mut(&peer) {
-                            st.session.send_address_message(addrs);
+                        let addresses: Vec<IpAddr> = self
+                            .cfg
+                            .interface_addresses
+                            .iter()
+                            .filter(|a| match a {
+                                IpAddr::V6(_) => af_v6 || peer_dual_stack,
+                                IpAddr::V4(_) => !af_v6 || peer_dual_stack,
+                            })
+                            .copied()
+                            .collect();
+                        if !addresses.is_empty() {
+                            if let Some(st) = self.sessions.get_mut(&peer) {
+                                st.session.send_address_message(AddressList { addresses });
+                            }
                         }
                     }
                 }
@@ -753,6 +949,10 @@ impl LdpEngine {
             .sessions
             .iter()
             .filter(|(_, st)| st.session.is_operational())
+            // RFC 7552 §7: an LSR MUST NOT send IPv6 bindings to a
+            // legacy peer (an IPv4-transport session whose peer never
+            // advertised the Dual-Stack capability).
+            .filter(|(_, st)| !prefix.addr.is_ipv6() || st.af_v6 || st.peer_dual_stack)
             .map(|(k, _)| *k)
             .collect();
         for peer in peers {
@@ -808,25 +1008,19 @@ impl LdpEngine {
     /// all-routers multicast group (224.0.0.2 / ff02::2) or a unicast
     /// address for testing.
     pub fn send_link_hello(&mut self, dest: IpAddr) {
-        let message_id = self.alloc_id();
-        let hello = HelloMsg {
-            message_id,
-            params: HelloParams {
-                hold_time: self.cfg.link_hello_hold,
-                targeted: false,
-                request_targeted: false,
-            },
-            transport_addr: Some(TransportAddress(self.cfg.transport_addr)),
-            config_seq: None,
-            unknown_tlvs: Vec::new(),
-        };
-        let pdu = LdpPdu {
-            version: LDP_VERSION,
-            sender: self.cfg.local_id,
-            messages: vec![LdpMessage::Hello(hello)],
-        };
-        let bytes = self.encode_pdu(&pdu);
-        self.out_udp.push((dest, bytes));
+        // Per-family transport TLV + the RFC 7552 Dual-Stack
+        // capability on dual-stack speakers; None = no local address
+        // in the destination family (skip — e.g. an IPv6 multicast
+        // Hello from a single-stack IPv4 speaker).
+        if let Some(message) = self.discovery.build_hello(&dest, false) {
+            let pdu = LdpPdu {
+                version: LDP_VERSION,
+                sender: self.cfg.local_id,
+                messages: vec![LdpMessage::Hello(message)],
+            };
+            let bytes = self.encode_pdu(&pdu);
+            self.out_udp.push((dest, bytes));
+        }
     }
 
     /// Send a targeted Shutdown to one peer and tear the session down.
@@ -1001,6 +1195,7 @@ fn close_pdu(cur: &mut [u8], body: usize) {
 mod tests {
     use super::*;
     use crate::pdu::DEFAULT_LINK_HELLO_HOLD;
+    use crate::tlv::TransportAddress;
     use lr_core::buf::ReadBuf;
     use lr_core::codec::Decoder;
 

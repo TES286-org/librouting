@@ -13,10 +13,14 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::time::{Duration, Instant as StdInstant};
 
 use lr_core::addr::Prefix;
+use lr_core::buf::WriteBuf;
+use lr_core::codec::Encoder;
 use lr_core::time::Instant;
 use lr_ldp::engine::{EngineEvent, LdpEngine, LdpEngineConfig};
 use lr_ldp::mapping::FecKey;
+use lr_ldp::message::{HelloMsg, LdpCodec, LdpMessage, LdpPdu};
 use lr_ldp::session::{SessionDownReason, SessionState};
+use lr_ldp::tlv::{DualStackCapability, HelloParams, TransportAddress, TransportPreference};
 use lr_ldp::{GenericLabel, IpAddr, LdpId, StatusCode};
 
 struct Speaker {
@@ -31,6 +35,11 @@ struct Speaker {
     peer_tcp_port: u16,
     conns: HashMap<u64, TcpStream>,
     next_conn: u64,
+    /// The peer's transport address as the engines see it: inbound
+    /// datagrams are attributed to it (the RFC 7552 tests below run
+    /// both families over one loopback endpoint, so the harness — not
+    /// the kernel — supplies the family-correct source).
+    logical_peer: IpAddr,
 }
 
 impl Speaker {
@@ -42,9 +51,17 @@ impl Speaker {
         cfg.targeted_hello_hold = 9; // hello every hold/3 = 3s
         cfg.interface_addresses = interface_addrs;
         let engine = LdpEngine::new(cfg);
-        let udp = UdpSocket::bind("0.0.0.0:0").unwrap();
+        let (udp, listener) = match addr {
+            IpAddr::V6(_) => (
+                UdpSocket::bind("[::1]:0").unwrap(),
+                TcpListener::bind("[::1]:0").unwrap(),
+            ),
+            IpAddr::V4(_) => (
+                UdpSocket::bind("0.0.0.0:0").unwrap(),
+                TcpListener::bind("127.0.0.1:0").unwrap(),
+            ),
+        };
         udp.set_nonblocking(true).unwrap();
-        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         listener.set_nonblocking(true).unwrap();
         let tcp_port = listener.local_addr().unwrap().port();
         Speaker {
@@ -56,6 +73,7 @@ impl Speaker {
             peer_tcp_port: 0,
             conns: HashMap::new(),
             next_conn: 1,
+            logical_peer: peer_addr,
         }
     }
 
@@ -63,32 +81,66 @@ impl Speaker {
         self.udp.local_addr().unwrap().port()
     }
 
+    /// A dual-stack speaker: IPv4 transport plus an explicit IPv6
+    /// transport address (RFC 7552 §6.1.1 dual-stack LSR).
+    fn new_dual_stack(
+        lsr_id: [u8; 4],
+        addr: IpAddr,
+        addr_v6: Option<IpAddr>,
+        peer_addr: IpAddr,
+        interface_addrs: Vec<IpAddr>,
+    ) -> Self {
+        let mut speaker = Self::new(lsr_id, addr, peer_addr, interface_addrs);
+        let mut cfg = LdpEngineConfig::new(LdpId::new(lsr_id, 0), addr);
+        cfg.transport_addr_v6 = addr_v6;
+        cfg.prefer_ipv6 = true;
+        cfg.targeted_peers = Vec::from([peer_addr]);
+        cfg.accept_targeted = true;
+        cfg.keepalive_time = 2;
+        cfg.targeted_hello_hold = 9;
+        cfg.interface_addresses = Vec::from([IpAddr::V4([10, 99, 1, 1])]);
+        speaker.engine = LdpEngine::new(cfg);
+        speaker
+    }
+
     /// One pump round: timers, socket I/O, engine event handling.
     fn pump(&mut self, now: Instant) -> Vec<EngineEvent> {
         self.engine.tick(now);
 
-        // Outbound UDP.
+        // Outbound UDP. A v6 logical destination other than ::1 (the
+        // only host loopback address the sandbox grants) rides the
+        // ::1 endpoint — the engines only ever see the logical
+        // address.
         for (dest, bytes) in self.engine.drain_udp() {
-            let sock = dest_socket_addr(&dest, self.peer_udp_port);
+            let real = match dest {
+                IpAddr::V6(o) if o != [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] => {
+                    IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+                }
+                other => other,
+            };
+            let sock = dest_socket_addr(&real, self.peer_udp_port);
             let _ = self.udp.send_to(&bytes, sock);
         }
 
         // Outbound TCP.
         self.flush_tcp();
 
-        // Inbound UDP.
+        // Inbound UDP, attributed to the peer's transport address (the
+        // RFC 7552 tests run both families over one loopback endpoint,
+        // so the harness supplies the family-correct logical source).
         let mut buf = [0u8; 65535];
-        while let Ok((n, from)) = self.udp.recv_from(&mut buf) {
-            self.engine.feed_udp(now, sock_to_ip(from), &buf[..n]);
+        while let Ok((n, _from)) = self.udp.recv_from(&mut buf) {
+            self.engine.feed_udp(now, self.logical_peer, &buf[..n]);
         }
 
         // Accept passive connections.
         while let Ok((stream, _peer)) = self.listener.accept() {
             stream.set_nonblocking(true).unwrap();
+            let local = sock_to_ip(stream.local_addr().unwrap());
             let conn = self.next_conn;
             self.next_conn += 1;
             self.conns.insert(conn, stream);
-            self.engine.on_accepted(conn);
+            self.engine.on_accepted(conn, local);
         }
 
         // Inbound TCP (established connections only).
@@ -249,6 +301,13 @@ const A_ID: [u8; 4] = [1, 1, 1, 1];
 const B_ID: [u8; 4] = [2, 2, 2, 2];
 const A_TRANSPORT: IpAddr = IpAddr::V4([127, 0, 0, 1]);
 const B_TRANSPORT: IpAddr = IpAddr::V4([127, 0, 0, 2]);
+// RFC 7552 speakers. Both live on ::1 in reality (the only loopback
+// v6 address the sandbox grants); the engines see the documentation
+// addresses 2001:db8::1/:2 and the harness maps the wire traffic.
+const A_TRANSPORT_V6: IpAddr =
+    IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+const B_TRANSPORT_V6: IpAddr =
+    IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
 
 /// Build the two speakers with each other's ports wired in.
 fn build_pair() -> (Speaker, Speaker) {
@@ -515,4 +574,246 @@ fn frozen_peer_times_the_session_out() {
     assert_eq!(a.engine.session_state(peer_b), None);
     // The LIB entries learned from the dead peer are purged.
     assert_eq!(a.engine.lib().bindings_from(peer_b).count(), 0);
+}
+
+/// Two IPv6-only LSRs (RFC 7552 §6.1 rule 6: a single-stack LSR
+/// establishes an LDPoIPv6 session per the enabled family) run the
+/// discovery -> session -> binding lifecycle entirely over IPv6.
+#[test]
+fn ipv6_only_speakers_full_lifecycle() {
+    let mut a_cfg_speaker = Speaker::new(
+        A_ID,
+        A_TRANSPORT_V6,
+        B_TRANSPORT_V6,
+        Vec::from([IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+        ])]),
+    );
+    let mut b_speaker = Speaker::new(
+        B_ID,
+        B_TRANSPORT_V6,
+        A_TRANSPORT_V6,
+        Vec::from([IpAddr::V6([
+            0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2,
+        ])]),
+    );
+    a_cfg_speaker.peer_udp_port = b_speaker.udp_port();
+    a_cfg_speaker.peer_tcp_port = b_speaker.tcp_port;
+    b_speaker.peer_udp_port = a_cfg_speaker.udp_port();
+    b_speaker.peer_tcp_port = a_cfg_speaker.tcp_port;
+    let peer_a = LdpId::new(A_ID, 0);
+    let peer_b = LdpId::new(B_ID, 0);
+
+    let events = wait_for(
+        &mut a_cfg_speaker,
+        &mut b_speaker,
+        Duration::from_secs(10),
+        |events| has_session_up(events, peer_a) && has_session_up(events, peer_b),
+    );
+    assert!(
+        has_session_up(&events, peer_a) && has_session_up(&events, peer_b),
+        "both IPv6 sessions must come up"
+    );
+    // §2.5.2 within IPv6: B (::2) > A (::1) — B is active and
+    // connects to A's IPv6 transport address.
+    assert!(events.iter().any(|e| matches!(
+        e,
+        EngineEvent::EstablishTransport { peer_id, transport_addr }
+            if *peer_id == peer_a && *transport_addr == A_TRANSPORT_V6
+    )));
+
+    // A label binding flows A -> B over the IPv6 session.
+    a_cfg_speaker.engine.advertise_mapping(
+        Prefix::new_v6([0x20, 1, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 48),
+        GenericLabel(24001),
+    );
+    let events = wait_for(
+        &mut a_cfg_speaker,
+        &mut b_speaker,
+        Duration::from_secs(5),
+        |events| {
+            events.iter().any(|e| {
+                matches!(
+                    e,
+                    EngineEvent::MappingLearned { peer_id, prefix, .. }
+                        if *peer_id == peer_a && matches!(prefix.addr, IpAddr::V6(_))
+                )
+            })
+        },
+    );
+    assert_eq!(
+        b_speaker.engine.session_state(peer_a),
+        Some(SessionState::Operational)
+    );
+    // The binding sits in B's LIB under A's id.
+    assert_eq!(
+        b_speaker
+            .engine
+            .lib()
+            .bindings_from(peer_a)
+            .filter(|(p, _)| p.prefix.addr.is_ipv6())
+            .count(),
+        1
+    );
+    let _ = events;
+}
+
+/// RFC 7552 §6.1.1 rule 1: a dual-stack LSR discards a Hello whose
+/// Dual-Stack capability preference does not match its own — and if a
+/// session was already in place, resets it with the fatal Transport
+/// Connection Mismatch notification (0x00000032).
+#[test]
+fn dual_stack_preference_mismatch_resets_session() {
+    // A is dual-stack (v4 transport + a v6 transport, preferring
+    // LDPoIPv6 — the RFC default); B is a v4 speaker that advertises
+    // TR = LDPoIPv4.
+    let mut a = Speaker::new_dual_stack(
+        A_ID,
+        A_TRANSPORT,
+        Some(A_TRANSPORT_V6),
+        B_TRANSPORT,
+        Vec::from([IpAddr::V4([10, 99, 1, 1])]),
+    );
+    let mut b = Speaker::new(
+        B_ID,
+        B_TRANSPORT,
+        A_TRANSPORT,
+        Vec::from([IpAddr::V4([10, 99, 2, 1])]),
+    );
+    a.peer_udp_port = b.udp_port();
+    a.peer_tcp_port = b.tcp_port;
+    b.peer_udp_port = a.udp_port();
+    b.peer_tcp_port = a.tcp_port;
+    let peer_a = LdpId::new(A_ID, 0);
+    let peer_b = LdpId::new(B_ID, 0);
+
+    // The v4-only adjacency (B never says anything dual-stack in its
+    // discovery) still establishes a session: single-AF deployments
+    // are legitimate.
+    let events = wait_for(&mut a, &mut b, Duration::from_secs(10), |events| {
+        has_session_up(events, peer_a) && has_session_up(events, peer_b)
+    });
+    assert!(has_session_up(&events, peer_a));
+
+    // Now B sends a Hello advertising TR = LDPoIPv4 — the opposite of
+    // A's preference. A must tear the session down with the fatal
+    // notification (§6.1.1 rule 1).
+    let hello = build_dual_stack_hello(B_ID, peer_a, TransportPreference::Ipv4);
+    b.udp
+        .send_to(&hello, dest_socket_addr(&A_TRANSPORT, a.udp_port()))
+        .unwrap();
+    let events = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                EngineEvent::NotificationReceived { peer_id, status }
+                    if *peer_id == peer_b
+                        && status.code == StatusCode::TRANSPORT_CONNECTION_MISMATCH
+            )
+        }) || events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::SessionDown { peer_id, .. } if *peer_id == peer_b))
+    });
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::SessionDown { peer_id, .. } if *peer_id == peer_b
+        )),
+        "the session must be reset after the preference mismatch"
+    );
+}
+
+/// RFC 7552 §6.1.1 rule 3c: a peer heard in BOTH address families
+/// without the Dual-Stack capability is a noncompliant dual-stack
+/// neighbor and must never get a session.
+#[test]
+fn dual_stack_noncompliance_blocks_session() {
+    use lr_ldp::engine::LdpEngineConfig as Cfg;
+    // Engine-level: feed one engine Hellos from the same peer id in
+    // both families, no capability.
+    let mut cfg = Cfg::new(LdpId::new(A_ID, 0), A_TRANSPORT);
+    cfg.transport_addr_v6 = Some(A_TRANSPORT_V6);
+    cfg.prefer_ipv6 = true;
+    let mut a = LdpEngine::new(cfg);
+    let now = Instant::from_millis(logical_now());
+
+    let v4_hello = hello_pdu_from(B_ID, Some(B_TRANSPORT), None, None);
+    let v6_hello = hello_pdu_from(B_ID, None, Some(B_TRANSPORT_V6), None);
+    a.feed_udp(now, B_TRANSPORT, &v4_hello);
+    a.feed_udp(now, B_TRANSPORT_V6, &v6_hello);
+    a.tick(now);
+
+    let events = a.take_events();
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::HelloDiscarded { reason, .. }
+                if reason.contains("noncompliance")
+        )),
+        "the noncompliance must be surfaced: {events:?}"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e, EngineEvent::EstablishTransport { .. })),
+        "no transport connection may be attempted"
+    );
+}
+
+/// Encode a targeted Hello carrying the Dual-Stack capability, as a
+/// noncompliant speaker would put on the wire.
+fn build_dual_stack_hello(from: [u8; 4], _to: LdpId, preference: TransportPreference) -> Vec<u8> {
+    let pdu = LdpPdu {
+        version: 1,
+        sender: LdpId::new(from, 0),
+        messages: vec![LdpMessage::Hello(HelloMsg {
+            message_id: 7,
+            params: HelloParams {
+                hold_time: 15,
+                targeted: true,
+                request_targeted: false,
+            },
+            transport_addr: Some(TransportAddress(IpAddr::V4([127, 0, 0, 2]))),
+            transport_addr_v6: None,
+            config_seq: None,
+            dual_stack: Some(DualStackCapability { preference }),
+            unknown_tlvs: Vec::new(),
+        })],
+    };
+    let mut out = vec![0u8; 4096];
+    let mut w = WriteBuf::new(&mut out);
+    let n = LdpCodec.encode(&pdu, &mut w).unwrap();
+    out.truncate(n);
+    out
+}
+
+/// Encode a plain targeted Hello with the given transport TLVs.
+fn hello_pdu_from(
+    from: [u8; 4],
+    v4: Option<IpAddr>,
+    v6: Option<IpAddr>,
+    ds: Option<TransportPreference>,
+) -> Vec<u8> {
+    let pdu = LdpPdu {
+        version: 1,
+        sender: LdpId::new(from, 0),
+        messages: vec![LdpMessage::Hello(HelloMsg {
+            message_id: 9,
+            params: HelloParams {
+                hold_time: 15,
+                targeted: true,
+                request_targeted: false,
+            },
+            transport_addr: v4.map(TransportAddress),
+            transport_addr_v6: v6.map(TransportAddress),
+            config_seq: None,
+            dual_stack: ds.map(|preference| DualStackCapability { preference }),
+            unknown_tlvs: Vec::new(),
+        })],
+    };
+    let mut out = vec![0u8; 4096];
+    let mut w = WriteBuf::new(&mut out);
+    let n = LdpCodec.encode(&pdu, &mut w).unwrap();
+    out.truncate(n);
+    out
 }

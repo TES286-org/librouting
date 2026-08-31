@@ -196,6 +196,9 @@ pub enum TlvType {
     FrameRelaySessionParameters = 0x0502,
     LabelRequestMessageId = 0x0600,
     LdpCapability = 0x0601,
+    /// Dual-Stack capability (RFC 7552 §6.1.1). Carried in Hellos with
+    /// U=1, F=0.
+    DualStackCapability = 0x0701,
 }
 
 impl TlvType {
@@ -222,6 +225,7 @@ impl TlvType {
             0x0502 => Self::FrameRelaySessionParameters,
             0x0600 => Self::LabelRequestMessageId,
             0x0601 => Self::LdpCapability,
+            0x0701 => Self::DualStackCapability,
             _ => return None,
         })
     }

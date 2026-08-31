@@ -347,6 +347,15 @@ impl StatusCode {
     pub const UNSUPPORTED_ADDRESS_FAMILY: Self = Self(0x0000_0017);
     pub const SESSION_REJECTED_BAD_KEEPALIVE_TIME: Self = Self::fatal(0x0000_0018);
     pub const INTERNAL_ERROR: Self = Self::fatal(0x0000_0019);
+    /// Transport Connection Mismatch (RFC 7552 §6.1.1): the peer's
+    /// Dual-Stack capability preference does not match the local one.
+    /// RFC 7552 says the notification is fatal.
+    pub const TRANSPORT_CONNECTION_MISMATCH: Self = Self::fatal(0x0000_0032);
+    /// Dual-Stack Noncompliance (RFC 7552 §6.1.1): both address
+    /// families of Hellos received without a Dual-Stack capability, or
+    /// the other family appearing mid-session from a legacy neighbor —
+    /// the RFC requires a fatal notification in both cases.
+    pub const DUAL_STACK_NONCOMPLIANCE: Self = Self::fatal(0x0000_0033);
 
     /// E-bit: this is a fatal error notification.
     pub const fn is_fatal(self) -> bool {
@@ -409,6 +418,86 @@ impl TransportAddress {
             IpAddr::V4(_) => TlvType::Ipv4TransportAddress,
             IpAddr::V6(_) => TlvType::Ipv6TransportAddress,
         }
+    }
+}
+
+/// The transport-connection preference carried in the RFC 7552 §6.1.1
+/// Dual-Stack capability TLV. On the wire the 4-bit TR field takes the
+/// values `0100` (LDPoIPv4) and `0110` (LDPoIPv6 — the RFC default).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum TransportPreference {
+    Ipv4,
+    Ipv6,
+}
+
+impl TransportPreference {
+    /// The RFC 7552 default is LDPoIPv6 (§6.1.1: "The default
+    /// preference is LDPoIPv6").
+    pub const fn default_preference() -> Self {
+        Self::Ipv6
+    }
+
+    /// Decode the TR field (top nibble of the capability's first value
+    /// octet).
+    pub fn from_tr_nibble(nibble: u8) -> Option<Self> {
+        match nibble {
+            0x4 => Some(Self::Ipv4),
+            0x6 => Some(Self::Ipv6),
+            _ => None,
+        }
+    }
+
+    /// The 4-bit TR wire value.
+    pub const fn tr_nibble(self) -> u8 {
+        match self {
+            Self::Ipv4 => 0x4,
+            Self::Ipv6 => 0x6,
+        }
+    }
+}
+
+/// The Dual-Stack capability TLV (RFC 7552 §6.1.1, type 0x0701):
+/// conveys which address family an LSR prefers for the transport
+/// connection when both are possible.
+///
+/// ```text
+///  |1|0|  Dual-Stack capability |        Length (4)           |
+///  |TR  |        Reserved       |           MBZ               |
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct DualStackCapability {
+    pub preference: TransportPreference,
+}
+
+impl DualStackCapability {
+    /// Value octets: TR in the top nibble of byte 0, everything else
+    /// zero (RFC 7552 §6.1.1: "It MUST be set to zero on transmission
+    /// and ignored on receipt").
+    pub fn encode_value(&self, out: &mut alloc::vec::Vec<u8>) {
+        out.push(self.preference.tr_nibble() << 4);
+        out.extend_from_slice(&[0, 0, 0]);
+    }
+
+    /// Decode the 4 value octets. An unrecognized TR value fails the
+    /// parse — the caller discards the Hello and logs (RFC 7552
+    /// §6.1.1: "or does not get recognized").
+    pub fn decode_value(value: &[u8]) -> Result<Self, ParseError> {
+        if value.len() < 4 {
+            return Err(ParseError::new(
+                ErrorKind::BadLength,
+                0,
+                "Dual-Stack capability value shorter than 4 octets",
+            ));
+        }
+        TransportPreference::from_tr_nibble(value[0] >> 4)
+            .map(|preference| Self { preference })
+            .ok_or_else(|| {
+                ParseError::new(
+                    ErrorKind::InvalidValue,
+                    0,
+                    "unrecognized TR value in Dual-Stack capability",
+                )
+            })
     }
 }
 
@@ -527,6 +616,15 @@ pub mod wire {
             IpAddr::V4(b) => out.put_bytes(&b).ok_or(EncodeError::BufferFull),
             IpAddr::V6(b) => out.put_bytes(&b).ok_or(EncodeError::BufferFull),
         }
+    }
+
+    pub fn dual_stack_capability(
+        out: &mut WriteBuf<'_>,
+        c: &DualStackCapability,
+    ) -> Result<(), EncodeError> {
+        let mut value = alloc::vec::Vec::with_capacity(4);
+        c.encode_value(&mut value);
+        out.put_bytes(&value).ok_or(EncodeError::BufferFull)
     }
 }
 
@@ -851,5 +949,55 @@ mod tests {
         assert_eq!(p.protocol_version, 1);
         assert_eq!(p.receiver, LdpId::default());
         assert_eq!(p.max_pdu_len, 4096);
+    }
+
+    #[test]
+    fn dual_stack_capability_roundtrip() {
+        // RFC 7552 §6.1.1 Figure 5: value = TR in the top nibble, the
+        // rest zero; LDPoIPv6 is the default (0110).
+        let v6 = DualStackCapability {
+            preference: TransportPreference::Ipv6,
+        };
+        let mut buf = Vec::new();
+        v6.encode_value(&mut buf);
+        assert_eq!(buf, [0x60, 0, 0, 0]);
+        let back = DualStackCapability::decode_value(&buf).unwrap();
+        assert_eq!(back, v6);
+
+        let v4 = DualStackCapability {
+            preference: TransportPreference::Ipv4,
+        };
+        let mut buf = Vec::new();
+        v4.encode_value(&mut buf);
+        assert_eq!(buf, [0x40, 0, 0, 0]);
+        assert_eq!(DualStackCapability::decode_value(&buf).unwrap(), v4);
+    }
+
+    #[test]
+    fn dual_stack_capability_rejects_unknown_tr() {
+        // TR=0101 is not one of the two defined values: the LSR MUST
+        // discard the Hello, so the parse must fail.
+        let err = DualStackCapability::decode_value(&[0x50, 0, 0, 0]).unwrap_err();
+        assert_eq!(err.kind, ErrorKind::InvalidValue);
+        // Short value: same fate.
+        assert!(DualStackCapability::decode_value(&[0x60, 0]).is_err());
+    }
+
+    #[test]
+    fn transport_preference_defaults_to_ipv6() {
+        // RFC 7552 §6.1.1: "The default preference is LDPoIPv6".
+        assert_eq!(
+            TransportPreference::default_preference(),
+            TransportPreference::Ipv6
+        );
+    }
+
+    #[test]
+    fn rfc7552_status_codes() {
+        // §6.1.1: both are sent as fatal notifications.
+        assert!(StatusCode::TRANSPORT_CONNECTION_MISMATCH.is_fatal());
+        assert_eq!(StatusCode::TRANSPORT_CONNECTION_MISMATCH.data(), 0x32);
+        assert!(StatusCode::DUAL_STACK_NONCOMPLIANCE.is_fatal());
+        assert_eq!(StatusCode::DUAL_STACK_NONCOMPLIANCE.data(), 0x33);
     }
 }

@@ -17,8 +17,8 @@ use crate::pdu::{
     message_header_word, tlv_header_word, LdpId, MessageType, TlvClass, TlvType, LDP_VERSION,
 };
 use crate::tlv::{
-    wire, AddressList, ConfigSequenceNumber, Fec, GenericLabel, HelloParams, HopCount,
-    LabelRequestMessageId, PathVector, RawTlv, SessionParams, Status, TransportAddress,
+    wire, AddressList, ConfigSequenceNumber, DualStackCapability, Fec, GenericLabel, HelloParams,
+    HopCount, LabelRequestMessageId, PathVector, RawTlv, SessionParams, Status, TransportAddress,
 };
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
@@ -41,15 +41,43 @@ pub struct NotificationMsg {
 }
 
 /// Hello (0x0100): discovery, sent over UDP (§3.5.2).
+///
+/// RFC 7552 §6.1: a Hello MUST carry at most one Transport Address
+/// optional object, and only the one whose address family matches the
+/// carrying IP packet. The codec keeps the two families apart so a
+/// (noncompliant) Hello carrying both can still be accepted with the
+/// same-AF one honoured — see [`HelloMsg::transport_addr_for`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HelloMsg {
     pub message_id: u32,
     pub params: HelloParams,
-    /// Optional IPv4/IPv6 Transport Address TLV.
+    /// IPv4 Transport Address TLV (0x0401), when one was present.
     pub transport_addr: Option<TransportAddress>,
+    /// IPv6 Transport Address TLV (0x0403, RFC 7552), when one was
+    /// present.
+    pub transport_addr_v6: Option<TransportAddress>,
     /// Optional Configuration Sequence Number TLV.
     pub config_seq: Option<ConfigSequenceNumber>,
+    /// RFC 7552 §6.1.1 Dual-Stack capability (U=1, F=0), when present.
+    pub dual_stack: Option<DualStackCapability>,
     pub unknown_tlvs: Vec<RawTlv>,
+}
+
+impl HelloMsg {
+    /// The transport address whose family matches `carrying_af` —
+    /// RFC 7552 §6.1 rule 2: from a (possibly noncompliant) Hello
+    /// carrying both families, only the same-AF one is ever used.
+    /// `None` means "no same-AF TLV was carried": the discovery layer
+    /// falls back to the Hello source per RFC 5036 §3.5.2.1.
+    pub fn transport_addr_for(
+        &self,
+        carrying_af: &lr_core::addr::IpAddr,
+    ) -> Option<TransportAddress> {
+        match carrying_af {
+            lr_core::addr::IpAddr::V4(_) => self.transport_addr,
+            lr_core::addr::IpAddr::V6(_) => self.transport_addr_v6,
+        }
+    }
 }
 
 /// Initialization (0x0200): session parameter negotiation (§3.5.3).
@@ -333,6 +361,21 @@ fn encode_message_body(msg: &LdpMessage, out: &mut WriteBuf<'_>) -> Result<(), E
                     wire::transport_address(out, t)
                 })?;
             }
+            if let Some(t) = &m.transport_addr_v6 {
+                write_tlv(out, false, false, t.tlv_type() as u16, |out| {
+                    wire::transport_address(out, t)
+                })?;
+            }
+            if let Some(c) = &m.dual_stack {
+                // RFC 7552 §6.1.1: U=1, F=0.
+                write_tlv(
+                    out,
+                    true,
+                    false,
+                    TlvType::DualStackCapability as u16,
+                    |out| wire::dual_stack_capability(out, c),
+                )?;
+            }
             if let Some(c) = &m.config_seq {
                 write_tlv(
                     out,
@@ -499,6 +542,7 @@ enum ParsedTlv {
     TransportAddress(TransportAddress),
     ConfigSequenceNumber(ConfigSequenceNumber),
     LabelRequestMessageId(LabelRequestMessageId),
+    DualStackCapability(DualStackCapability),
     Raw(RawTlv),
 }
 
@@ -567,6 +611,11 @@ fn parse_tlv_stream(body: &[u8]) -> Result<Vec<ParsedTlv>, ParseError> {
             TlvClass::Known(TlvType::LabelRequestMessageId) => {
                 out.push(ParsedTlv::LabelRequestMessageId(
                     LabelRequestMessageId::decode_value(value)?,
+                ));
+            }
+            TlvClass::Known(TlvType::DualStackCapability) => {
+                out.push(ParsedTlv::DualStackCapability(
+                    DualStackCapability::decode_value(value)?,
                 ));
             }
             class => {
@@ -666,19 +715,37 @@ fn parse_message(body: &[u8]) -> Result<LdpMessage, ParseError> {
                         "Hello without Common Hello Parameters TLV",
                     )
                 })?;
+            // RFC 7552 §6.1 rule 2: accept (noncompliant) Hellos
+            // carrying both families but keep only the first transport
+            // address per family; the same-AF one is honoured at use
+            // time.
             let transport_addr = tlvs.iter().find_map(|t| match t {
-                ParsedTlv::TransportAddress(a) => Some(*a),
+                ParsedTlv::TransportAddress(a) if matches!(a.0, lr_core::addr::IpAddr::V4(_)) => {
+                    Some(*a)
+                }
+                _ => None,
+            });
+            let transport_addr_v6 = tlvs.iter().find_map(|t| match t {
+                ParsedTlv::TransportAddress(a) if matches!(a.0, lr_core::addr::IpAddr::V6(_)) => {
+                    Some(*a)
+                }
                 _ => None,
             });
             let config_seq = tlvs.iter().find_map(|t| match t {
                 ParsedTlv::ConfigSequenceNumber(c) => Some(*c),
                 _ => None,
             });
+            let dual_stack = tlvs.iter().find_map(|t| match t {
+                ParsedTlv::DualStackCapability(c) => Some(*c),
+                _ => None,
+            });
             LdpMessage::Hello(HelloMsg {
                 message_id,
                 params,
                 transport_addr,
+                transport_addr_v6,
                 config_seq,
+                dual_stack,
                 unknown_tlvs: unknown,
             })
         }
@@ -1071,7 +1138,9 @@ mod tests {
                     request_targeted: true,
                 },
                 transport_addr: Some(TransportAddress(lr_core::addr::IpAddr::V4([192, 0, 2, 9]))),
+                transport_addr_v6: None,
                 config_seq: Some(ConfigSequenceNumber(42)),
+                dual_stack: None,
                 unknown_tlvs: vec![],
             })],
         };
@@ -1363,16 +1432,18 @@ mod tests {
                     targeted: true,
                     request_targeted: false,
                 },
-                transport_addr: Some(TransportAddress(lr_core::addr::IpAddr::V6([
+                transport_addr: None,
+                transport_addr_v6: Some(TransportAddress(lr_core::addr::IpAddr::V6([
                     0x20, 0x01, 0xd, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
                 ]))),
                 config_seq: None,
+                dual_stack: None,
                 unknown_tlvs: vec![],
             })],
         };
         let out = roundtrip(&pdu);
         match &out.messages[0] {
-            LdpMessage::Hello(h) => match h.transport_addr {
+            LdpMessage::Hello(h) => match h.transport_addr_v6 {
                 Some(TransportAddress(lr_core::addr::IpAddr::V6(b))) => {
                     assert_eq!(b[0], 0x20);
                     assert_eq!(b[15], 1);
