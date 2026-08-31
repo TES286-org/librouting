@@ -689,9 +689,18 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    global) instead of being dropped silently; FRR peers without a
    `remote-as` and dangling policy references are dropped with notes
    because the daemon would refuse to start them (fail-closed policy
-   resolution). Remaining in W5: items 2 and 3 below.
-2. Behaviour parity flags documented side-by-side with the source
-   implementation's semantics.
+   resolution). Remaining in W5: item 3 below.
+2. ~~**Behaviour parity flags documented side-by-side**~~ — done:
+   `docs/PARITY.md` catalogs every behaviour-compatibility knob
+   (RFC 8212 mode, enforce-first-as, deterministic router-ID
+   tie-break, implicit IPv4 unicast, local-AS tolerance, soft
+   reconfiguration, Babel §5 incremental deployment) against the
+   BIRD 2.17.5 and FRR 10.3 documented semantics — including the
+   default differences (FRR defaults enforce-first-as on, BIRD/lr
+   off; FRR defaults the RFC 5004 older-route tie-break, BIRD/lr the
+   deterministic router-ID) and the transport-knob mapping (GTSM,
+   MD5, TCP-AO, BFD, maximum-prefix). Sources are the upstream docs
+   themselves, not folklore.
 3. Wire-level parity harness: replay captured UPDATE streams against
    both lr and the reference implementation and diff the Loc-RIBs.
 

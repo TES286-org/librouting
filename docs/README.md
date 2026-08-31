@@ -26,6 +26,7 @@ the protocol crates.
 | Document                   | Contents                                                             |
 | -------------------------- | -------------------------------------------------------------------- |
 | `templates/daemon.toml`    | Fully commented reference configuration (every key explained)        |
+| [`PARITY.md`](PARITY.md)   | Behaviour knobs vs. BIRD 2 / FRR 10: RFC latitude, defaults, mapping |
 | [`INTEROP.md`](INTEROP.md) | Interop lab against BIRD / FRR: what is verified, how to run locally |
 
 ## Platform porting
