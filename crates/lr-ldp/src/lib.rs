@@ -27,16 +27,27 @@
 //!   time negotiation, refresh and expiry, targeted-accept policy).
 //! - [`mapping`] — the label information base: bindings received from
 //!   and advertised to each peer.
-//!
-//! The engine glue that combines all of the above (and the two-speaker
-//! E2E) lands in the follow-up commit of the LDP foundation slice.
+//! - [`engine`] — the glue: [`LdpEngine`](engine::LdpEngine) feeds on
+//!   datagrams / stream bytes and connection events, drives all
+//!   sessions and adjacencies, and drains outgoing datagrams / stream
+//!   bytes. The embedder only moves bytes between the engine and the
+//!   network.
 //!
 //! ## Usage
 //!
-//! 1. Build an [`LdpPdu`] with the messages to send.
-//! 2. Encode with [`LdpCodec`] into an output buffer.
-//! 3. Decode received bytes with [`LdpCodec`]; it returns `Ok(None)`
-//!    until a complete PDU is buffered.
+//! 1. Build an [`engine::LdpEngine`] with the local transport address
+//!    and LDP Identifier.
+//! 2. Feed UDP datagrams via [`engine::LdpEngine::feed_udp`] (Hellos)
+//!    and TCP stream bytes via [`engine::LdpEngine::feed_tcp`].
+//! 3. Drain outgoing datagrams / stream bytes and deliver them; open /
+//!    accept TCP connections as the engine directs (the role decision
+//!    is the RFC 5036 §2.5.2 transport-address comparison).
+//! 4. Drive [`engine::LdpEngine::tick`] with the current time so hello
+//!    refreshes, KeepAlives and hold timers run.
+//! 5. Handle [`engine::EngineEvent`] to see adjacencies, sessions,
+//!    address and label-mapping churn; call
+//!    [`engine::LdpEngine::advertise_mapping`] /
+//!    [`engine::LdpEngine::withdraw_mapping`] to push local bindings.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(not(feature = "std"), no_std)]
@@ -44,12 +55,14 @@
 extern crate alloc;
 
 pub mod discovery;
+pub mod engine;
 pub mod mapping;
 pub mod message;
 pub mod pdu;
 pub mod session;
 pub mod tlv;
 
+pub use engine::{EngineEvent, LdpEngine, LdpEngineConfig};
 pub use message::{LdpCodec, LdpMessage, LdpPdu, RawMessage};
 pub use pdu::{
     AdvertisementMode, LdpId, MessageType, TlvType, DEFAULT_KEEPALIVE_TIME,

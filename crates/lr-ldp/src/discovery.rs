@@ -274,11 +274,11 @@ impl LdpDiscovery {
             if let Some(entry) = self.targeted_targets.iter_mut().find(|(t, _)| *t == target) {
                 entry.1 = Some(now);
             }
-            let __msg_id279 = self.alloc_message_id();
+            let message_id = self.alloc_message_id();
             self.outgoing.push(OutgoingHello {
                 dest: target,
                 message: LdpMessage::Hello(HelloMsg {
-                    message_id: __msg_id279,
+                    message_id,
                     params: HelloParams {
                         hold_time: self.cfg.targeted_hello_hold,
                         targeted: true,

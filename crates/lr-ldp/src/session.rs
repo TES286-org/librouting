@@ -60,6 +60,10 @@ pub struct SessionConfig {
     /// The local label space for the session.
     pub local_id: LdpId,
     pub role: SessionRole,
+    /// The peer's label space. Known up front for the active role
+    /// (from the Hello adjacency); learned from the first PDU for the
+    /// passive role.
+    pub peer: Option<LdpId>,
     /// Proposed KeepAlive Time in seconds (§3.5.3).
     pub keepalive_time: u16,
     /// Proposed Max PDU Length in octets.
@@ -81,6 +85,7 @@ impl Default for SessionConfig {
         Self {
             local_id: LdpId::default(),
             role: SessionRole::Passive,
+            peer: None,
             keepalive_time: crate::pdu::DEFAULT_KEEPALIVE_TIME,
             max_pdu_len: crate::pdu::DEFAULT_MAX_PDU_LEN,
             advertisement: AdvertisementMode::DownstreamUnsolicited,
@@ -198,8 +203,9 @@ impl LdpSession {
         debug_assert_eq!(self.state, SessionState::NonExistent);
         self.state = SessionState::Initialized;
         if self.cfg.role == SessionRole::Active {
+            let message_id = self.alloc_message_id();
             let init = LdpMessage::Initialization(InitMsg {
-                message_id: self.alloc_message_id(),
+                message_id,
                 params: SessionParams {
                     protocol_version: LDP_VERSION,
                     keepalive_time: self.cfg.keepalive_time,
@@ -207,7 +213,9 @@ impl LdpSession {
                     loop_detection: self.cfg.loop_detection,
                     path_vector_limit: self.cfg.path_vector_limit,
                     max_pdu_len: self.cfg.max_pdu_len,
-                    receiver: self.cfg.local_id,
+                    // The receiver field identifies the *passive* LSR's
+                    // label space (§3.5.3).
+                    receiver: self.cfg.peer.unwrap_or_default(),
                 },
                 unknown_tlvs: Vec::new(),
             });
@@ -379,20 +387,18 @@ impl LdpSession {
                     unknown_tlvs: Vec::new(),
                 });
                 self.outgoing.push(reply);
-                let __msg_id386 = self.alloc_message_id();
-                self.outgoing.push(LdpMessage::KeepAlive(KeepAliveMsg {
-                    message_id: __msg_id386,
-                }));
+                let message_id = self.alloc_message_id();
+                self.outgoing
+                    .push(LdpMessage::KeepAlive(KeepAliveMsg { message_id }));
                 self.last_tx = now;
                 self.state = SessionState::OpenRec;
             }
             SessionRole::Active => {
                 // §2.5.4: receive acceptable Init (in OPENSENT);
                 // transmit KeepAlive msg.
-                let __msg_id395 = self.alloc_message_id();
-                self.outgoing.push(LdpMessage::KeepAlive(KeepAliveMsg {
-                    message_id: __msg_id395,
-                }));
+                let message_id = self.alloc_message_id();
+                self.outgoing
+                    .push(LdpMessage::KeepAlive(KeepAliveMsg { message_id }));
                 self.last_tx = now;
                 self.state = SessionState::OpenRec;
             }
@@ -464,10 +470,10 @@ impl LdpSession {
                     events.push(SessionEvent::UnknownMessage(raw.clone()));
                 } else {
                     // U=0: notify the originator (§3.5) and keep going.
-                    let __msg_id462 = self.alloc_message_id();
+                    let message_id = self.alloc_message_id();
                     self.outgoing
                         .push(LdpMessage::Notification(NotificationMsg {
-                            message_id: __msg_id462,
+                            message_id,
                             status: Status {
                                 code: StatusCode::UNKNOWN_MESSAGE_TYPE,
                                 message_id: raw.message_id,
@@ -506,10 +512,9 @@ impl LdpSession {
         if self.keepalive_send_interval > 0
             && now.saturating_sub(self.last_tx).as_millis() >= self.keepalive_send_interval
         {
-            let __msg_id502 = self.alloc_message_id();
-            self.outgoing.push(LdpMessage::KeepAlive(KeepAliveMsg {
-                message_id: __msg_id502,
-            }));
+            let message_id = self.alloc_message_id();
+            self.outgoing
+                .push(LdpMessage::KeepAlive(KeepAliveMsg { message_id }));
             self.last_tx = now;
         }
         events
@@ -547,11 +552,23 @@ impl LdpSession {
     }
 
     pub fn send_address_message(&mut self, addresses: AddressList) {
-        let __msg_id545 = self.alloc_message_id();
+        let message_id = self.alloc_message_id();
         self.outgoing
             .push(LdpMessage::Address(crate::message::AddressMsg {
-                message_id: __msg_id545,
+                message_id,
                 addresses,
+                unknown_tlvs: Vec::new(),
+            }));
+    }
+
+    /// Queue a Notification carrying one Status TLV (used e.g. for the
+    /// No Route answer to a Label Request, §3.5.8.1).
+    pub fn enqueue_notification(&mut self, status: Status) {
+        let message_id = self.alloc_message_id();
+        self.outgoing
+            .push(LdpMessage::Notification(NotificationMsg {
+                message_id,
+                status,
                 unknown_tlvs: Vec::new(),
             }));
     }
@@ -568,10 +585,10 @@ impl LdpSession {
     }
 
     fn send_shutdown(&mut self, now: Instant, code: StatusCode) {
-        let __msg_id564 = self.alloc_message_id();
+        let message_id = self.alloc_message_id();
         self.outgoing
             .push(LdpMessage::Notification(NotificationMsg {
-                message_id: __msg_id564,
+                message_id,
                 status: Status {
                     code,
                     message_id: 0,
@@ -586,16 +603,16 @@ impl LdpSession {
         &mut self,
         now: Instant,
         code: StatusCode,
-        message_id: u32,
+        reported_message_id: u32,
         events: &mut Vec<SessionEvent>,
     ) {
-        let __msg_id577 = self.alloc_message_id();
+        let message_id = self.alloc_message_id();
         self.outgoing
             .push(LdpMessage::Notification(NotificationMsg {
-                message_id: __msg_id577,
+                message_id,
                 status: Status {
                     code,
-                    message_id,
+                    message_id: reported_message_id,
                     message_type: crate::pdu::MessageType::Initialization as u16,
                 },
                 unknown_tlvs: Vec::new(),
@@ -608,18 +625,18 @@ impl LdpSession {
         &mut self,
         now: Instant,
         code: StatusCode,
-        message_id: u32,
+        reported_message_id: u32,
         message_type: u16,
         events: &mut Vec<SessionEvent>,
         reason: SessionDownReason,
     ) {
-        let __msg_id599 = self.alloc_message_id();
+        let message_id = self.alloc_message_id();
         self.outgoing
             .push(LdpMessage::Notification(NotificationMsg {
-                message_id: __msg_id599,
+                message_id,
                 status: Status {
                     code,
-                    message_id,
+                    message_id: reported_message_id,
                     message_type,
                 },
                 unknown_tlvs: Vec::new(),
@@ -714,6 +731,9 @@ mod tests {
         SessionConfig {
             local_id: id(1),
             role: SessionRole::Active,
+            // The active role knows the passive peer up front from its
+            // Hello adjacency (§2.5.2 / §3.5.3).
+            peer: Some(id(2)),
             ..SessionConfig::default()
         }
     }
@@ -757,7 +777,9 @@ mod tests {
         assert_eq!(out.len(), 1);
         match &out[0] {
             LdpMessage::Initialization(i) => {
-                assert_eq!(i.params.receiver, id(1));
+                // The Init's Receiver LDP Identifier identifies the
+                // passive peer's label space (RFC 5036 §3.5.3).
+                assert_eq!(i.params.receiver, id(2));
                 assert_eq!(i.params.keepalive_time, DEFAULT_KEEPALIVE_TIME);
             }
             other => panic!("wrong message {other:?}"),
