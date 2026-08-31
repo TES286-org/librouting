@@ -59,6 +59,7 @@ mod daemon_ospf;
 mod daemon_policy;
 mod privdrop;
 mod signal;
+mod translate;
 
 use daemon_bfd::BfdFlags;
 use daemon_config::{DaemonConfig, PeerSpec};
@@ -70,7 +71,12 @@ fn print_usage() {
          lr-daemon --local-as AS --peer-as AS --router-id A.B.C.D \
          [--peer ADDR:PORT]... [--listen ADDR:PORT] [--network PREFIX]...\n         \
          [--hold-time SEC]\n         \
-         lr-daemon --config daemon.toml [--install-kernel-routes]\n\n\
+         lr-daemon --config daemon.toml [--install-kernel-routes]\n         \
+         lr-daemon translate <bird|frr> <config-file>\n\n\
+         SUBCOMMANDS:\n  \
+         translate bird|frr FILE  Best-effort conversion of a BIRD 2 or\n  \
+         FRR BGP config into lr daemon TOML (unmappable lines are kept\n  \
+         as `# UNMAPPED:` comments; review before use)\n\n\
          OPTIONS:\n  \
          --config PATH            Load TOML configuration\n  \
          --peer ADDR:PORT         Remote BGP peer to connect to (repeatable;\n  \
@@ -167,6 +173,13 @@ fn print_usage() {
 }
 
 fn main() -> ExitCode {
+    // `lr-daemon translate <dialect> <file>` — the W5.1 config
+    // converter rides the daemon binary so it can reuse the daemon's
+    // config schema (and round-trip test against the real parser).
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.len() >= 2 && argv[1] == "translate" {
+        return translate::translate(&argv[2..]);
+    }
     let mut cfg = match daemon_config::parse_args() {
         Ok(c) => c,
         Err(code) => {
