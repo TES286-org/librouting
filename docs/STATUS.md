@@ -658,8 +658,30 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
 
 ### W5 — Compatibility layer
 
-1. `lr-cli translate bird|frr <config>` — best-effort conversion of
-   BIRD/FRR protocol configs into lr TOML (peers, auth, filters).
+1. **`lr-daemon translate bird|frr <config>`** — best-effort
+   conversion of BIRD 2 / FRR BGP configs into lr daemon TOML, riding
+   the daemon binary so the output is round-trip-tested against the
+   real config parser in every test run. Mapped: router id / local AS,
+   peers (`neighbor … as`, `remote-as`, non-default ports →
+   `remote` ADDR:PORT), MD5 auth (FRR type-0 passwords; type-7 is
+   noted), local address / update-source, hold time, BFD, the
+   `import|export none|all` idioms (`none` → generated deny-all
+   route-map, `all` → nothing because the emitted
+   `ebgp_policy = "accept-all"` already means exactly that — the
+   daemon's rfc8212 default would otherwise silently drop routes the
+   source config accepted), prefix-lists, as-path access-lists,
+   standard community-lists, route-map `match`/`set` clauses
+   (prefix-list / as-path / community matches; next-hop,
+   local-pref, MED, as-path prepend, add-community), FRR `network`
+   and BIRD static-protocol `route` prefixes → `networks`, BIRD
+   `ipv4`/`ipv6` channels → `mp_families` (an ipv6-only channel also
+   sets `default_ipv4_unicast = false`), and FRR
+   `address-family ipv6 unicast` activation. Anything unmappable is
+   kept as an explicit `# UNMAPPED:` comment (per-line, per-entry, or
+   global) instead of being dropped silently; FRR peers without a
+   `remote-as` and dangling policy references are dropped with notes
+   because the daemon would refuse to start them (fail-closed policy
+   resolution). Remaining in W5: items 2 and 3 below.
 2. Behaviour parity flags documented side-by-side with the source
    implementation's semantics.
 3. Wire-level parity harness: replay captured UPDATE streams against

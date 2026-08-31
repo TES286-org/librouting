@@ -65,6 +65,12 @@ listen), poll-driven router, ticker thread, reconnect with backoff, RFC
 TCP-AO session authentication (`--md5-key SECRET`, `--tcp-ao-key
 ID:SECRET`), and optional kernel route installation via rtnetlink.
 
+Migrating from BIRD 2 or FRR? `lr-daemon translate bird|frr <config>`
+converts a BGP configuration into lr daemon TOML — peers, auth, ports,
+policies and originated prefixes map over; anything without an lr
+equivalent is kept as an explicit `# UNMAPPED:` comment for review
+instead of being dropped silently.
+
 ```bash
 # Terminal 1 — speaker A (listens, originates a prefix)
 lr-daemon --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
