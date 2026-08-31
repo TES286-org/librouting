@@ -160,6 +160,50 @@ pub(crate) struct BabelKeySpec {
     pub algorithm: Option<String>,
 }
 
+/// One `[[ldp.interface]]` table (or `--ldp-interface` flag): an
+/// interface running basic (link) discovery, RFC 5036 §3.5.2.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LdpIfSpec {
+    /// Kernel interface name (required).
+    pub name: Option<String>,
+}
+
+impl LdpIfSpec {
+    /// Human-readable label for log lines.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or("(unnamed)")
+    }
+}
+
+/// One `[[ldp.targeted]]` table (or `--ldp-targeted` flag): an
+/// extended-discovery peer — periodic targeted Hellos to `address`
+/// (RFC 5036 §3.5.2, LDP-over-TCP without a shared link).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LdpTargetedSpec {
+    /// Peer transport address for targeted Hellos (required).
+    pub address: Option<String>,
+}
+
+impl LdpTargetedSpec {
+    /// Human-readable label for log lines.
+    pub fn label(&self) -> &str {
+        self.address.as_deref().unwrap_or("(unnamed)")
+    }
+}
+
+/// One `[[ldp.bind]]` table (or `--ldp-bind` flag): a local FEC-label
+/// binding advertised downstream-unsolicited to every operational
+/// peer. Explicit (deterministic) label allocation; automatic
+/// allocation from a label range is future work.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct LdpBindSpec {
+    /// FEC prefix (`"203.0.113.0/24"`), required.
+    pub prefix: Option<String>,
+    /// MPLS label value, 16..=1048575 (0..=15 are reserved per
+    /// RFC 3032 §1.2), required.
+    pub label: u32,
+}
+
 /// Parse an OSPF area ID: dotted quad (`"0.0.0.1"`) or integer
 /// (`"1"`). Both BIRD and FRR accept the two spellings.
 pub(crate) fn parse_area_id(value: &str) -> Option<u32> {
@@ -322,6 +366,30 @@ pub(crate) struct DaemonConfig {
     /// `[[ospf.interface]]` tables / `--ospf-interface` flags.
     pub ospf_interfaces: Vec<OspfIfSpec>,
 
+    /// LDP transport address advertised in Hellos and used for the
+    /// TCP session transport (`--ldp-transport`). When unset it
+    /// defaults to the first `[[ldp.interface]]` address.
+    pub ldp_transport: Option<String>,
+    /// LDP UDP/TCP port (RFC 5036 §3.10.1: 646; overridable for
+    /// multi-instance testing on shared hosts).
+    pub ldp_port: u16,
+    /// Session KeepAlive Time proposal in seconds (§3.5.3; 15 default).
+    pub ldp_keepalive_time: u16,
+    /// Link Hello hold time proposal in seconds (§3.5.2.1; 15 default).
+    pub ldp_link_hold: u16,
+    /// Targeted Hello hold time proposal in seconds (§3.5.2.1; 45
+    /// default).
+    pub ldp_targeted_hold: u16,
+    /// `[[ldp.interface]]` tables / `--ldp-interface` flags (basic
+    /// discovery).
+    pub ldp_interfaces: Vec<LdpIfSpec>,
+    /// `[[ldp.targeted]]` tables / `--ldp-targeted` flags (extended
+    /// discovery peers).
+    pub ldp_targeted: Vec<LdpTargetedSpec>,
+    /// `[[ldp.bind]]` tables / `--ldp-bind` flags: local FEC-label
+    /// bindings advertised downstream-unsolicited.
+    pub ldp_binds: Vec<LdpBindSpec>,
+
     /// Explicit `[[peer]]` entries and repeatable `--peer` flags.
     /// Post-parse, [`DaemonConfig::finalize`] also synthesises the
     /// legacy single-peer entry when this is empty.
@@ -375,6 +443,10 @@ impl DaemonConfig {
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
+            ldp_port: 646,
+            ldp_keepalive_time: 15,
+            ldp_link_hold: 15,
+            ldp_targeted_hold: 45,
             ..Default::default()
         }
     }
@@ -421,6 +493,7 @@ impl DaemonConfig {
             self.peers[idx] = resolved;
         }
         self.finalize_ospf()?;
+        self.finalize_ldp()?;
         Ok(())
     }
 
@@ -479,6 +552,94 @@ impl DaemonConfig {
                 ));
             }
             iface.area = Some(area);
+        }
+        Ok(())
+    }
+
+    /// Validate and complete the LDP configuration (only meaningful
+    /// with `--protocol ldp`; other protocols get a warning when LDP
+    /// tables are present). Fail-closed rules: named interfaces,
+    /// addressed targeted peers, valid bind prefixes and labels
+    /// (16..=1048575 per RFC 3032 — 0..=15 are reserved), KeepAlive
+    /// Time non-zero (§3.5.3), and at least one discovery source
+    /// (interface or targeted peer) when the mode runs.
+    fn finalize_ldp(&mut self) -> Result<(), String> {
+        if self.ldp_interfaces.is_empty()
+            && self.ldp_targeted.is_empty()
+            && self.ldp_binds.is_empty()
+            && self.ldp_transport.is_none()
+            && self.protocol != "ldp"
+        {
+            return Ok(());
+        }
+        if self.protocol != "ldp" {
+            self.warnings.push(format!(
+                "LDP tables present but --protocol is '{}' (ignored)",
+                self.protocol
+            ));
+            return Ok(());
+        }
+        for iface in &self.ldp_interfaces {
+            if iface.name.as_deref().is_none_or(str::is_empty) {
+                return Err("[[ldp.interface]] without 'name'".to_string());
+            }
+        }
+        for peer in &self.ldp_targeted {
+            if peer.address.as_deref().is_none_or(str::is_empty) {
+                return Err("[[ldp.targeted]] without 'address'".to_string());
+            }
+        }
+        for bind in &self.ldp_binds {
+            let Some(p) = bind.prefix.as_deref() else {
+                return Err("[[ldp.bind]] without 'prefix'".to_string());
+            };
+            if p.parse::<lr_core::addr::Prefix>().is_err() {
+                return Err(format!("[[ldp.bind]] invalid prefix '{p}'"));
+            }
+        }
+        let mut seen_prefixes = std::collections::BTreeSet::new();
+        for bind in &self.ldp_binds {
+            let p = bind.prefix.as_deref().unwrap_or_default();
+            if !seen_prefixes.insert(p.to_string()) {
+                return Err(format!("[[ldp.bind]] prefix {p} bound twice"));
+            }
+        }
+        // Label allocation: an explicit label must sit in the
+        // platform-writable range (16..=1048575 per RFC 3032 §1.2 —
+        // 0..=15 are reserved; 0 in the config means "allocate"). Auto
+        // labels hand out the first free value from 16.
+        let mut next_auto = 16u32;
+        for idx in 0..self.ldp_binds.len() {
+            if self.ldp_binds[idx].label == 0 {
+                while self.ldp_binds.iter().any(|b| b.label == next_auto) {
+                    next_auto += 1;
+                }
+                self.ldp_binds[idx].label = next_auto;
+            } else if self.ldp_binds[idx].label > 1048575 {
+                return Err(format!(
+                    "[[ldp.bind]] label {} out of range (16..=1048575, RFC 3032)",
+                    self.ldp_binds[idx].label
+                ));
+            } else if self.ldp_binds[idx].label < 16 {
+                return Err(format!(
+                    "[[ldp.bind]] label {} is reserved (RFC 3032 §1.2: 0..=15)",
+                    self.ldp_binds[idx].label
+                ));
+            }
+        }
+        if self.ldp_keepalive_time == 0 {
+            return Err("[ldp] keepalive_time must be non-zero (RFC 5036 §3.5.3)".to_string());
+        }
+        if self.ldp_link_hold == 0 || self.ldp_targeted_hold == 0 {
+            return Err("[ldp] hold times must be non-zero (RFC 5036 §3.5.2.1)".to_string());
+        }
+        if self.ldp_interfaces.is_empty() && self.ldp_targeted.is_empty() {
+            return Err(
+                "--protocol ldp needs at least one discovery source: an interface \
+                 (--ldp-interface / [[ldp.interface]]) or a targeted peer \
+                 (--ldp-targeted / [[ldp.targeted]])"
+                    .to_string(),
+            );
         }
         Ok(())
     }
@@ -647,6 +808,18 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.babel_keys.push(BabelKeySpec::default());
                     section = "babel.key".to_string();
                 }
+                "ldp.interface" => {
+                    cfg.ldp_interfaces.push(LdpIfSpec::default());
+                    section = "ldp.interface".to_string();
+                }
+                "ldp.targeted" => {
+                    cfg.ldp_targeted.push(LdpTargetedSpec::default());
+                    section = "ldp.targeted".to_string();
+                }
+                "ldp.bind" => {
+                    cfg.ldp_binds.push(LdpBindSpec::default());
+                    section = "ldp.bind".to_string();
+                }
                 _ => {
                     // Unknown array table: tolerate (forward compatibility),
                     // but leave peer context so keys do not leak into one.
@@ -676,6 +849,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             } else if section != "bgp"
                 && section != "ospf"
                 && section != "babel"
+                && section != "ldp"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -741,6 +915,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         // an unknown key is a typo that could silently alter adjacency
         // behaviour (hello intervals, area types), so it is an error.
         if apply_ospf_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        // LDP tables and globals: same fail-closed posture — a typo'd
+        // hold time or a mis-spelled bind silently changes discovery
+        // or label origination.
+        if apply_ldp_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -1123,6 +1305,93 @@ fn apply_ospf_key(
     Ok(true)
 }
 
+/// Apply one `key = value` pair to the LDP schema: the `[ldp]`
+/// globals plus the `[[ldp.interface]]` / `[[ldp.targeted]]` /
+/// `[[ldp.bind]]` tables. Unknown keys are errors (fail closed — see
+/// the parser). Returns `Ok(false)` for non-LDP sections so the caller
+/// falls through.
+fn apply_ldp_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    match section {
+        "ldp" => match key {
+            "transport" => cfg.ldp_transport = Some(value.to_string()),
+            "port" => {
+                cfg.ldp_port = value
+                    .parse()
+                    .map_err(|_| format!("bad ldp port '{value}'"))?;
+            }
+            "keepalive_time" => {
+                cfg.ldp_keepalive_time = value
+                    .parse()
+                    .map_err(|_| format!("bad keepalive_time '{value}'"))?;
+            }
+            "link_hold_time" => {
+                cfg.ldp_link_hold = value
+                    .parse()
+                    .map_err(|_| format!("bad link_hold_time '{value}'"))?;
+            }
+            "targeted_hold_time" => {
+                cfg.ldp_targeted_hold = value
+                    .parse()
+                    .map_err(|_| format!("bad targeted_hold_time '{value}'"))?;
+            }
+            _ => {
+                return Err(format!(
+                    "unknown [ldp] key '{key}' (typo protection; LDP config fails closed)"
+                ))
+            }
+        },
+        "ldp.interface" => {
+            let Some(iface) = cfg.ldp_interfaces.last_mut() else {
+                return Err("key outside a [[ldp.interface]] table".into());
+            };
+            match key {
+                "name" => iface.name = Some(value.to_string()),
+                _ => {
+                    return Err(format!(
+                        "unknown [[ldp.interface]] key '{key}' (typo protection; LDP config fails closed)"
+                    ))
+                }
+            }
+        }
+        "ldp.targeted" => {
+            let Some(peer) = cfg.ldp_targeted.last_mut() else {
+                return Err("key outside a [[ldp.targeted]] table".into());
+            };
+            match key {
+                "address" => peer.address = Some(value.to_string()),
+                _ => {
+                    return Err(format!(
+                        "unknown [[ldp.targeted]] key '{key}' (typo protection; LDP config fails closed)"
+                    ))
+                }
+            }
+        }
+        "ldp.bind" => {
+            let Some(bind) = cfg.ldp_binds.last_mut() else {
+                return Err("key outside a [[ldp.bind]] table".into());
+            };
+            match key {
+                "prefix" => bind.prefix = Some(value.to_string()),
+                "label" => {
+                    bind.label = value.parse().map_err(|_| format!("bad label '{value}'"))?;
+                }
+                _ => {
+                    return Err(format!(
+                    "unknown [[ldp.bind]] key '{key}' (typo protection; LDP config fails closed)"
+                ))
+                }
+            }
+        }
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
 /// Apply one `key = value` pair to the current `[[peer]]` entry.
 /// Returns `Ok(false)` when the key is not part of the schema so the
 /// caller can surface an unknown-key warning.
@@ -1463,6 +1732,62 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--ospf-dead-interval" if i + 1 < args.len() => {
                 cfg.ospf_dead_interval = args[i + 1].parse().unwrap_or(40);
+                i += 2;
+            }
+            "--ldp-transport" if i + 1 < args.len() => {
+                cfg.ldp_transport = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--ldp-port" if i + 1 < args.len() => {
+                cfg.ldp_port = args[i + 1].parse().unwrap_or(646);
+                i += 2;
+            }
+            "--ldp-keepalive" if i + 1 < args.len() => {
+                cfg.ldp_keepalive_time = args[i + 1].parse().unwrap_or(15);
+                i += 2;
+            }
+            "--ldp-link-hold" if i + 1 < args.len() => {
+                cfg.ldp_link_hold = args[i + 1].parse().unwrap_or(15);
+                i += 2;
+            }
+            "--ldp-targeted-hold" if i + 1 < args.len() => {
+                cfg.ldp_targeted_hold = args[i + 1].parse().unwrap_or(45);
+                i += 2;
+            }
+            "--ldp-interface" if i + 1 < args.len() => {
+                // Repeatable: every flag adds one basic-discovery
+                // interface.
+                cfg.ldp_interfaces.push(LdpIfSpec {
+                    name: Some(args[i + 1].clone()),
+                    ..Default::default()
+                });
+                i += 2;
+            }
+            "--ldp-targeted" if i + 1 < args.len() => {
+                // Repeatable: every flag adds one extended-discovery
+                // peer.
+                cfg.ldp_targeted.push(LdpTargetedSpec {
+                    address: Some(args[i + 1].clone()),
+                });
+                i += 2;
+            }
+            "--ldp-bind" if i + 1 < args.len() => {
+                // Repeatable `prefix=label` (label optional → auto-pick
+                // the next free label from 16).
+                let (prefix, label) = match args[i + 1].split_once('=') {
+                    Some((p, l)) => match l.parse::<u32>() {
+                        Ok(n) => (p.to_string(), n),
+                        Err(_) => {
+                            eprintln!("invalid --ldp-bind label '{}'", l);
+                            return Err(ExitCode::from(2));
+                        }
+                    },
+                    None => (args[i + 1].clone(), 0),
+                };
+                cfg.ldp_binds.push(LdpBindSpec {
+                    prefix: Some(prefix),
+                    label,
+                });
                 i += 2;
             }
             "--user" if i + 1 < args.len() => {
@@ -1863,6 +2188,121 @@ mod tests {
             cfg.warnings
                 .iter()
                 .any(|w| w.contains("OSPF tables present but --protocol")),
+            "{:?}",
+            cfg.warnings
+        );
+    }
+
+    // ---- LDP configuration ----
+
+    #[test]
+    fn ldp_tables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset(
+            "[ldp]\ntransport = \"10.99.1.1\"\nport = 646\nkeepalive_time = 15\n\
+             link_hold_time = 15\ntargeted_hold_time = 45\n\n\
+             [[ldp.interface]]\nname = \"veth0\"\n\n\
+             [[ldp.interface]]\nname = \"veth1\"\n\n\
+             [[ldp.targeted]]\naddress = \"10.99.1.2\"\n\n\
+             [[ldp.bind]]\nprefix = \"203.0.113.0/24\"\nlabel = 24000\n\n\
+             [[ldp.bind]]\nprefix = \"198.51.100.0/24\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.ldp_transport.as_deref(), Some("10.99.1.1"));
+        assert_eq!(cfg.ldp_port, 646);
+        assert_eq!(cfg.ldp_keepalive_time, 15);
+        assert_eq!(cfg.ldp_link_hold, 15);
+        assert_eq!(cfg.ldp_targeted_hold, 45);
+        assert_eq!(cfg.ldp_interfaces.len(), 2);
+        assert_eq!(cfg.ldp_interfaces[0].name.as_deref(), Some("veth0"));
+        assert_eq!(cfg.ldp_targeted[0].address.as_deref(), Some("10.99.1.2"));
+        assert_eq!(cfg.ldp_binds.len(), 2);
+        assert_eq!(cfg.ldp_binds[0].prefix.as_deref(), Some("203.0.113.0/24"));
+        assert_eq!(cfg.ldp_binds[0].label, 24000);
+        // Auto allocation: label 0 picks the first free value from 16.
+        assert_eq!(cfg.ldp_binds[1].label, 16);
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+    }
+
+    #[test]
+    fn ldp_unknown_keys_are_errors() {
+        for (section, key) in [
+            ("[ldp]", "trasport"),
+            ("[[ldp.interface]]", "nam"),
+            ("[[ldp.targeted]]", "host"),
+            ("[[ldp.bind]]", "lbl"),
+        ] {
+            let mut cfg = DaemonConfig::with_defaults();
+            let err = parse_toml_subset(&format!("{section}\n{key} = 1\n"), &mut cfg);
+            let err = err.expect_err("unknown LDP key must fail");
+            assert!(err.contains("typo protection"), "{section}.{key}: {err}");
+        }
+    }
+
+    #[test]
+    fn ldp_reserved_and_oversized_labels_fail() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset(
+            "[[ldp.bind]]\nprefix = \"203.0.113.0/24\"\nlabel = 3\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("reserved label must fail");
+        assert!(err.contains("reserved"), "{err}");
+
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset(
+            "[[ldp.bind]]\nprefix = \"203.0.113.0/24\"\nlabel = 2000000\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("oversized label must fail");
+        assert!(err.contains("out of range"), "{err}");
+    }
+
+    #[test]
+    fn ldp_duplicate_and_invalid_bind_prefixes_fail() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset(
+            "[[ldp.bind]]\nprefix = \"203.0.113.0/24\"\n\n\
+             [[ldp.bind]]\nprefix = \"203.0.113.0/24\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("duplicate bind must fail");
+        assert!(err.contains("twice"), "{err}");
+
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset("[[ldp.bind]]\nprefix = \"203.0.113.0/33\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("invalid prefix must fail");
+        assert!(err.contains("invalid prefix"), "{err}");
+    }
+
+    #[test]
+    fn ldp_zero_keepalive_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ldp".to_string();
+        parse_toml_subset("[ldp]\nkeepalive_time = 0\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("zero keepalive must fail");
+        assert!(err.contains("non-zero"), "{err}");
+    }
+
+    #[test]
+    fn ldp_tables_in_bgp_mode_warn() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[ldp.interface]]\nname = \"eth0\"\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert!(
+            cfg.warnings
+                .iter()
+                .any(|w| w.contains("LDP tables present but --protocol")),
             "{:?}",
             cfg.warnings
         );
