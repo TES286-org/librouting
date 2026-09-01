@@ -21,8 +21,10 @@ use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::lsa::{Lsa, LsaHeader, LsaTypeV2, RouterLink, RouterLinkType};
 
 /// One entry in a Router-LSA under construction: one [`Stub`] per
-/// attached network plus one [`PointToPoint`] per adjacent neighbor
-/// (raw links cover transit networks and virtual links).
+/// attached network plus one [`PointToPoint`] per adjacent neighbor.
+/// Broadcast/NBMA segments with an elected DR advertise a [`Transit`]
+/// link instead of a p2p link (RFC 2328 §12.4.1.2); raw links cover
+/// virtual links.
 ///
 /// [`Stub`]: RouterLsaLink::Stub
 /// [`PointToPoint`]: RouterLsaLink::PointToPoint
@@ -43,7 +45,16 @@ pub enum RouterLsaLink {
         local_addr: u32,
         metric: u16,
     },
-    /// Raw link with explicit fields (transit networks, virtual links).
+    /// Transit network link (type 2, RFC 2328 §12.4.1.2): `dr_addr` is
+    /// the DR's IP interface address on the segment (our own address
+    /// when we are the DR), `local_addr` is our interface address,
+    /// `metric` = interface cost.
+    Transit {
+        dr_addr: u32,
+        local_addr: u32,
+        metric: u16,
+    },
+    /// Raw link with explicit fields (virtual links).
     Raw(RouterLink),
 }
 
@@ -69,6 +80,17 @@ impl RouterLsaLink {
                 link_id: neighbor,
                 link_data: local_addr,
                 link_type: RouterLinkType::PointToPoint as u8,
+                tos: 0,
+                metric,
+            },
+            Self::Transit {
+                dr_addr,
+                local_addr,
+                metric,
+            } => RouterLink {
+                link_id: dr_addr,
+                link_data: local_addr,
+                link_type: RouterLinkType::TransitNetwork as u8,
                 tos: 0,
                 metric,
             },
@@ -115,6 +137,59 @@ pub fn originate_router_lsa(
             ls_type: LsaTypeV2::RouterLsa as u16,
             link_state_id: router_id,
             advertising_router: router_id,
+            ls_sequence_number: seq,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body,
+    };
+    lsa.finalize();
+    Some(lsa)
+}
+
+/// Originate a Network-LSA for a transit broadcast/NBMA segment where
+/// this router is the Designated Router (RFC 2328 §12.4.2).
+///
+/// `dr_router_id` is the DR's OSPF Router ID (the LSA's Advertising
+/// Router, §12.1.4); `dr_addr` is the DR's IP interface address on the
+/// segment — the Link State ID (§12.4.2: "The Link State ID for a
+/// network-LSA is the IP interface address of the Designated Router").
+/// The two differ in general; the RFC's example shows the same value
+/// only because RT4's router-id happens to equal its interface
+/// address. `mask` is the network's address mask; `attached_routers`
+/// are the router-ids of every router fully adjacent to the DR
+/// **including the DR itself** (§12.4.2: "The Designated Router
+/// includes itself in this list"). The caller only originates when at
+/// least one other router is fully adjacent (§12.4.2).
+///
+/// `prev_seq` carries the sequence number of the current instance (if
+/// any) so re-origination advances the sequence space. The returned LSA
+/// is finalized — length fixed, RFC 2328 §C.4 checksum computed.
+/// Returns `None` only when the sequence space is exhausted (§12.1.2).
+pub fn originate_network_lsa(
+    dr_router_id: u32,
+    dr_addr: u32,
+    mask: u32,
+    attached_routers: &[u32],
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    let seq = match prev_seq {
+        None => INITIAL_SEQUENCE_NUMBER,
+        Some(MAX_SEQUENCE_NUMBER) => return None,
+        Some(p) => p + 1,
+    };
+    let mut body = Vec::with_capacity(4 + attached_routers.len() * 4);
+    body.extend_from_slice(&mask.to_be_bytes());
+    for rid in attached_routers {
+        body.extend_from_slice(&rid.to_be_bytes());
+    }
+    let mut lsa = Lsa {
+        header: LsaHeader {
+            ls_age: 0,
+            options: 0x02, // E-bit: the area can carry external routes
+            ls_type: LsaTypeV2::NetworkLsa as u16,
+            link_state_id: dr_addr,
+            advertising_router: dr_router_id,
             ls_sequence_number: seq,
             ls_checksum: 0,
             length: 0,

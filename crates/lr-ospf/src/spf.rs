@@ -152,10 +152,29 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                 }
             }
             VertexId::Network(ls_id) => {
-                // Network-LSA: list of attached routers.
+                // Network-LSA: list of attached routers. Only the first
+                // LSA instance matching the Link State ID is used — the
+                // current DR is its sole originator (§12.4.2).
                 for (key, entry) in lsdb.iter() {
                     if key.ls_type != LsaTypeV2::NetworkLsa as u16 || key.link_state_id != ls_id {
                         continue;
+                    }
+                    // The transit network itself is a destination: its
+                    // prefix is the DR's interface address masked by the
+                    // network mask (§12.4.2) at the vertex distance —
+                    // the broadcast counterpart of a stub link, which
+                    // §12.4.1.2 no longer advertises once the transit
+                    // link appears (BIRD spfa_process_net parity).
+                    if entry.lsa.body.len() >= 4 {
+                        let mask =
+                            u32::from_be_bytes([entry.lsa.body[0], entry.lsa.body[1], entry.lsa.body[2], entry.lsa.body[3]]);
+                        let net = ls_id & mask;
+                        result.transit_routes.push(SpfRoute {
+                            prefix: Prefix::new_v4(net.to_be_bytes(), mask_to_pl(mask)),
+                            metric: current_dist,
+                            next_hop: None,
+                            border_router: None,
+                        });
                     }
                     for attached in decode_network_attached_routers(&entry.lsa.body) {
                         let target = VertexId::Router(attached);
@@ -169,6 +188,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                             });
                         }
                     }
+                    break;
                 }
             }
         }
