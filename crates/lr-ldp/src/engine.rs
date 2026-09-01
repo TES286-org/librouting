@@ -79,6 +79,21 @@ pub struct LdpEngineConfig {
     pub link_hello_hold: u16,
     /// Proposed Targeted Hello hold time.
     pub targeted_hello_hold: u16,
+    /// RFC 5036 §2.8: Loop Detection is a configurable option. When
+    /// on, the Init proposes the D bit with `path_vector_limit` as
+    /// PVLim, and received Label Mapping / Label Request attributes
+    /// are checked per §3.4.4.1 / A.2.6 (the local configuration
+    /// governs enforcement — the D bit is not negotiated).
+    pub loop_detection: bool,
+    /// RFC 5036 §2.8: the configured maximum Hop Count. A received
+    /// Hop Count TLV above it behaves like a loop (0 = unknown, never
+    /// enforced). Only meaningful with `loop_detection` on.
+    pub hop_count_limit: u8,
+    /// RFC 5036 §2.8: the maximum allowable Path Vector length. A
+    /// received Path Vector at or above its own LSR Id or exceeding
+    /// this length behaves like a loop. Only meaningful with
+    /// `loop_detection` on.
+    pub path_vector_limit: u8,
 }
 
 impl LdpEngineConfig {
@@ -97,6 +112,9 @@ impl LdpEngineConfig {
             interface_addresses: Vec::new(),
             link_hello_hold: crate::pdu::DEFAULT_LINK_HELLO_HOLD,
             targeted_hello_hold: crate::pdu::DEFAULT_TARGETED_HELLO_HOLD,
+            loop_detection: false,
+            hop_count_limit: 32,
+            path_vector_limit: 32,
         }
     }
 }
@@ -118,6 +136,17 @@ pub enum EngineEvent {
     HelloDiscarded {
         peer_id: LdpId,
         source: IpAddr,
+        reason: &'static str,
+    },
+    /// RFC 5036 §2.8: a received Label Mapping or Label Request
+    /// triggered the §3.4.4.1/A.2.6 loop check (Hop Count over the
+    /// limit, or a Path Vector containing our LSR Id / over the
+    /// limit). The offending message was dropped and Loop Detected
+    /// was signaled to the source; a looping mapping is not installed
+    /// (and an existing one for the FEC is released).
+    LoopDetected {
+        peer_id: LdpId,
+        prefix: Prefix,
         reason: &'static str,
     },
     /// Open a TCP connection to the peer's transport address (port per
@@ -505,8 +534,8 @@ impl LdpEngine {
             advertisement: self.cfg.advertisement,
             supports_downstream_unsolicited: true,
             supports_downstream_on_demand: true,
-            loop_detection: false,
-            path_vector_limit: 0,
+            loop_detection: self.cfg.loop_detection,
+            path_vector_limit: self.cfg.path_vector_limit,
         });
         self.register_session(peer_id, conn, session, af_v6, peer_dual_stack, now);
     }
@@ -535,8 +564,8 @@ impl LdpEngine {
             advertisement: self.cfg.advertisement,
             supports_downstream_unsolicited: true,
             supports_downstream_on_demand: true,
-            loop_detection: false,
-            path_vector_limit: 0,
+            loop_detection: self.cfg.loop_detection,
+            path_vector_limit: self.cfg.path_vector_limit,
         });
         self.awaiting_init.insert(conn, (session, af_v6));
         self.in_bufs.entry(conn).or_default();
@@ -791,45 +820,109 @@ impl LdpEngine {
                     // No address database in this slice; ignored.
                 }
                 SessionEvent::LabelMappingReceived(m) => {
-                    for el in &m.fec.elements {
-                        if let crate::tlv::FecElement::Prefix(p) = el {
-                            let key = FecKey::new(*p);
-                            if self.lib.learn(peer, key, m.label) {
-                                self.events.push_back(EngineEvent::MappingLearned {
+                    // RFC 5036 §3.4.5.1.2 + A.2.6: check the received
+                    // attributes when Loop Detection is configured. On a
+                    // loop: stop using the label, reject the mapping by
+                    // releasing it with a Loop Detected Status TLV, and
+                    // never install it.
+                    let reason =
+                        self.check_received_attributes(m.hop_count, m.path_vector.as_ref());
+                    if let Some(reason) = reason {
+                        for el in &m.fec.elements {
+                            if let crate::tlv::FecElement::Prefix(p) = el {
+                                let key = FecKey::new(*p);
+                                // §3.4.5.1.2 step 3: unsplice the LSP —
+                                // drop any mapping learned for this FEC.
+                                self.lib.unlearn(peer, &key);
+                                let release_id = self.alloc_id();
+                                if let Some(st) = self.sessions.get_mut(&peer) {
+                                    st.session.send_label_release(
+                                        crate::message::LabelReleaseMsg {
+                                            message_id: release_id,
+                                            fec: crate::tlv::Fec::prefix(*p),
+                                            label: Some(m.label),
+                                            status: Some(crate::tlv::Status {
+                                                code: StatusCode::LOOP_DETECTED,
+                                                message_id: m.message_id,
+                                                message_type: MessageType::LabelMapping as u16,
+                                            }),
+                                            unknown_tlvs: Vec::new(),
+                                        },
+                                    );
+                                }
+                                self.events.push_back(EngineEvent::LoopDetected {
                                     peer_id: peer,
                                     prefix: *p,
-                                    label: m.label,
+                                    reason,
                                 });
+                            }
+                        }
+                    } else {
+                        for el in &m.fec.elements {
+                            if let crate::tlv::FecElement::Prefix(p) = el {
+                                let key = FecKey::new(*p);
+                                if self.lib.learn(peer, key, m.label) {
+                                    self.events.push_back(EngineEvent::MappingLearned {
+                                        peer_id: peer,
+                                        prefix: *p,
+                                        label: m.label,
+                                    });
+                                }
                             }
                         }
                     }
                 }
                 SessionEvent::LabelRequestReceived(m) => {
-                    // DU-mode answer: map when we advertise the FEC,
-                    // No Route otherwise (§3.5.8.1).
-                    for el in &m.fec.elements {
-                        if let crate::tlv::FecElement::Prefix(p) = el {
-                            let key = FecKey::new(*p);
-                            let message_id = self.alloc_id();
-                            if let Some(st) = self.sessions.get_mut(&peer) {
-                                if let Some(label) = self.lib.advertised_label(&key) {
-                                    st.session.send_label_mapping(LabelMappingMsg {
-                                        message_id,
-                                        fec: crate::tlv::Fec::prefix(*p),
-                                        label,
-                                        hop_count: Some(crate::tlv::HopCount(1)),
-                                        path_vector: None,
-                                        request_message_id: Some(
-                                            crate::tlv::LabelRequestMessageId(m.message_id),
-                                        ),
-                                        unknown_tlvs: Vec::new(),
-                                    });
-                                } else {
-                                    st.session.enqueue_notification(Status {
-                                        code: StatusCode::NO_ROUTE,
-                                        message_id: m.message_id,
-                                        message_type: MessageType::LabelRequest as u16,
-                                    });
+                    // RFC 5036 §3.4.5.1.1 + A.2.6: a looping Label
+                    // Request is answered with a Loop Detected
+                    // Notification and dropped — no mapping, no
+                    // propagation.
+                    let reason =
+                        self.check_received_attributes(m.hop_count, m.path_vector.as_ref());
+                    if let Some(reason) = reason {
+                        if let Some(st) = self.sessions.get_mut(&peer) {
+                            st.session.enqueue_notification(crate::tlv::Status {
+                                code: StatusCode::LOOP_DETECTED,
+                                message_id: m.message_id,
+                                message_type: MessageType::LabelRequest as u16,
+                            });
+                        }
+                        for el in &m.fec.elements {
+                            if let crate::tlv::FecElement::Prefix(p) = el {
+                                self.events.push_back(EngineEvent::LoopDetected {
+                                    peer_id: peer,
+                                    prefix: *p,
+                                    reason,
+                                });
+                            }
+                        }
+                    } else {
+                        // DU-mode answer: map when we advertise the FEC,
+                        // No Route otherwise (§3.5.8.1).
+                        for el in &m.fec.elements {
+                            if let crate::tlv::FecElement::Prefix(p) = el {
+                                let key = FecKey::new(*p);
+                                let message_id = self.alloc_id();
+                                if let Some(st) = self.sessions.get_mut(&peer) {
+                                    if let Some(label) = self.lib.advertised_label(&key) {
+                                        st.session.send_label_mapping(LabelMappingMsg {
+                                            message_id,
+                                            fec: crate::tlv::Fec::prefix(*p),
+                                            label,
+                                            hop_count: Some(crate::tlv::HopCount(1)),
+                                            path_vector: None,
+                                            request_message_id: Some(
+                                                crate::tlv::LabelRequestMessageId(m.message_id),
+                                            ),
+                                            unknown_tlvs: Vec::new(),
+                                        });
+                                    } else {
+                                        st.session.enqueue_notification(Status {
+                                            code: StatusCode::NO_ROUTE,
+                                            message_id: m.message_id,
+                                            message_type: MessageType::LabelRequest as u16,
+                                        });
+                                    }
                                 }
                             }
                         }
@@ -867,6 +960,7 @@ impl LdpEngine {
                             message_id,
                             fec: m.fec.clone(),
                             label: m.label,
+                            status: None,
                             unknown_tlvs: Vec::new(),
                         });
                     }
@@ -1159,6 +1253,43 @@ impl LdpEngine {
             .map(|n| n.max_pdu_len)
             .unwrap_or(crate::pdu::DEFAULT_MAX_PDU_LEN)
     }
+
+    /// RFC 5036 A.2.6 `Check_Received_Attributes` (§3.4.4.1 / §2.8):
+    /// when Loop Detection is configured, a received Label Mapping or
+    /// Label Request carrying a Hop Count over `hop_count_limit` (a
+    /// value of 0 means unknown and is never enforced), or a Path
+    /// Vector containing our own LSR Id or longer than
+    /// `path_vector_limit`, has traversed a loop. Returns the reason
+    /// for the event log when the message must be rejected, `None`
+    /// when it may be processed (also `None` when Loop Detection is
+    /// off — the TLVs are then informational only).
+    fn check_received_attributes(
+        &self,
+        hop_count: Option<crate::tlv::HopCount>,
+        path_vector: Option<&crate::tlv::PathVector>,
+    ) -> Option<&'static str> {
+        if !self.cfg.loop_detection {
+            return None;
+        }
+        let own = u32::from_be_bytes(self.cfg.local_id.lsr_id);
+        if let Some(hc) = hop_count {
+            // §3.4.4.1: a count of 0 is "unknown" — incrementing and
+            // enforcing it would reject every mapping; the RFC treats
+            // only known values over the maximum as a loop.
+            if hc.0 != 0 && hc.0 > self.cfg.hop_count_limit {
+                return Some("hop count exceeds the configured maximum");
+            }
+        }
+        if let Some(pv) = path_vector {
+            if pv.0.contains(&own) {
+                return Some("path vector contains the local LSR Id");
+            }
+            if pv.0.len() > self.cfg.path_vector_limit as usize {
+                return Some("path vector exceeds the maximum allowable length");
+            }
+        }
+        None
+    }
 }
 
 fn peer_conn_of(sessions: &BTreeMap<LdpId, LdpSessionState>, peer: LdpId) -> u64 {
@@ -1233,6 +1364,64 @@ mod tests {
         }
         // The drained queue is empty afterwards.
         assert!(engine.drain_udp().is_empty());
+    }
+
+    #[test]
+    fn loop_check_gates_on_local_configuration() {
+        // RFC 5036 §2.8: the local configuration governs enforcement
+        // (A.2.6 "Is Loop Detection configured on LSR?") — the D bit
+        // is not negotiated.
+        let local = LdpId::new([2, 2, 2, 2], 0);
+        let mut cfg = LdpEngineConfig::new(local, IpAddr::V4([10, 0, 0, 2]));
+        cfg.loop_detection = true;
+        cfg.hop_count_limit = 32;
+        cfg.path_vector_limit = 32;
+        let engine = LdpEngine::new(cfg);
+
+        let own_pv = crate::tlv::PathVector(Vec::from([0x0202_0202]));
+        let other_pv = crate::tlv::PathVector(Vec::from([0x0101_0101]));
+        let long_pv = crate::tlv::PathVector(Vec::from([0x0a0a_0a0a; 33]));
+
+        // Hop Count: over the limit is a loop; 0 is "unknown" (§3.4.4.1)
+        // and never enforced; within the limit is fine.
+        assert_eq!(
+            engine.check_received_attributes(Some(crate::tlv::HopCount(33)), None),
+            Some("hop count exceeds the configured maximum")
+        );
+        assert_eq!(
+            engine.check_received_attributes(Some(crate::tlv::HopCount(0)), None),
+            None
+        );
+        assert_eq!(
+            engine.check_received_attributes(Some(crate::tlv::HopCount(32)), None),
+            None
+        );
+
+        // Path Vector: containing our own LSR Id or exceeding the
+        // maximum length is a loop; another LSR's Id is fine.
+        assert_eq!(
+            engine.check_received_attributes(None, Some(&own_pv)),
+            Some("path vector contains the local LSR Id")
+        );
+        assert_eq!(
+            engine.check_received_attributes(None, Some(&long_pv)),
+            Some("path vector exceeds the maximum allowable length")
+        );
+        assert_eq!(
+            engine.check_received_attributes(None, Some(&other_pv)),
+            None
+        );
+
+        // No attributes at all: nothing to reject.
+        assert_eq!(engine.check_received_attributes(None, None), None);
+
+        // With Loop Detection off, the same looping attributes are
+        // informational only (§2.8: "MUST if configured").
+        let plain = LdpEngine::new(LdpEngineConfig::new(local, IpAddr::V4([10, 0, 0, 2])));
+        assert_eq!(
+            plain.check_received_attributes(Some(crate::tlv::HopCount(255)), Some(&own_pv)),
+            None
+        );
     }
 
     #[test]

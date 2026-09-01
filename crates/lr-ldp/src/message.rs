@@ -146,11 +146,16 @@ pub struct LabelWithdrawMsg {
 }
 
 /// Label Release (0x0403): the peer no longer needs mappings (§3.5.11).
+///
+/// `status` carries the optional Status TLV of §3.5.11.2 — the Loop
+/// Detected release of §3.4.5.1.2 (a receiver of a looping Label
+/// Mapping rejects it by releasing the label with the status code).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LabelReleaseMsg {
     pub message_id: u32,
     pub fec: Fec,
     pub label: Option<GenericLabel>,
+    pub status: Option<Status>,
     pub unknown_tlvs: Vec<RawTlv>,
 }
 
@@ -485,6 +490,11 @@ fn encode_message_body(msg: &LdpMessage, out: &mut WriteBuf<'_>) -> Result<(), E
             if let Some(l) = &m.label {
                 write_tlv(out, false, false, TlvType::GenericLabel as u16, |out| {
                     wire::generic_label(out, l)
+                })?;
+            }
+            if let Some(st) = &m.status {
+                write_tlv(out, false, false, TlvType::Status as u16, |out| {
+                    wire::status(out, st)
                 })?;
             }
             for raw in &m.unknown_tlvs {
@@ -884,10 +894,15 @@ fn parse_message(body: &[u8]) -> Result<LdpMessage, ParseError> {
         }
         Some(MessageType::LabelRelease) => {
             let (fec, label) = parse_fec_label(&tlvs, "Label Release")?;
+            let status = tlvs.iter().find_map(|t| match t {
+                ParsedTlv::Status(s) => Some(*s),
+                _ => None,
+            });
             LdpMessage::LabelRelease(LabelReleaseMsg {
                 message_id,
                 fec,
                 label,
+                status,
                 unknown_tlvs: unknown,
             })
         }
@@ -1225,6 +1240,7 @@ mod tests {
                     message_id: 4,
                     fec,
                     label: None,
+                    status: None,
                     unknown_tlvs: vec![],
                 }),
                 LdpMessage::LabelAbortRequest(LabelAbortMsg {
@@ -1470,5 +1486,41 @@ mod tests {
         let err = Fec::decode_value(&fec_bytes[4..]);
         assert!(err.is_err());
         let _ = FecElement::Wildcard; // silence unused when feature-gated
+    }
+
+    #[test]
+    fn label_release_with_loop_detected_status_roundtrip() {
+        // RFC 5036 §3.4.5.1.2 + §3.5.11.2: the Loop Detected release
+        // carries a Status TLV referencing the rejected Label Mapping.
+        let pdu = LdpPdu {
+            version: 1,
+            sender: sample_id(3),
+            messages: vec![LdpMessage::LabelRelease(LabelReleaseMsg {
+                message_id: 42,
+                fec: Fec::prefix(Prefix::new_v4([10, 40, 0, 0], 24)),
+                label: Some(GenericLabel(301)),
+                status: Some(Status {
+                    code: StatusCode::LOOP_DETECTED,
+                    message_id: 77,
+                    message_type: MessageType::LabelMapping as u16,
+                }),
+                unknown_tlvs: vec![],
+            })],
+        };
+        let out = roundtrip(&pdu);
+        match &out.messages[0] {
+            LdpMessage::LabelRelease(rel) => {
+                assert_eq!(rel.message_id, 42);
+                assert_eq!(rel.label, Some(GenericLabel(301)));
+                let st = rel
+                    .status
+                    .expect("the Status TLV must survive the roundtrip");
+                assert_eq!(st.code, StatusCode::LOOP_DETECTED);
+                assert!(!st.code.is_fatal(), "Loop Detected is E=0");
+                assert_eq!(st.message_id, 77);
+                assert_eq!(st.message_type, MessageType::LabelMapping as u16);
+            }
+            other => panic!("expected a Label Release, got {other:?}"),
+        }
     }
 }

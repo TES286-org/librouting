@@ -103,6 +103,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | §3.5.2 discovery (link + targeted) | ✅ 🧪 | UDP Hellos with hold/refresh timers, adjacency creation + expiry, extended (targeted) discovery with accept policy, §2.5.2 active-role decision by transport-address comparison, session teardown when the last adjacency for a label space drops |
 | Label bookkeeping (downstream unsolicited) | ✅ 🧪 | per-peer LIB (learn/advertise/withdraw), §3.5.8.1 request→mapping/No-Route answers, §3.5.10.1 withdraw→release, wildcard withdraw handling, Address message exchange before mappings (§3.5.5.1), address-based session matching |
 | §3.5.3 Max PDU Length enforcement | ✅ 🧪 | TX: session messages batch into PDUs capped at the negotiated Max PDU Length; RX: an over-long PDU is answered with a fatal Bad PDU Length Notification before the session drops (FRR `S_BAD_PDU_LEN` parity) |
+| §3.5.4 / §3.4.4.1 loop detection (Hop Count + Path Vector) | ✅ 🧪 | configurable per engine (`loop_detection`, default off per RFC 2.8); the Init proposes the D bit with PVLim; with it on, received Label Mappings and Label Requests are checked per A.2.6 (local config governs — the D bit is not negotiated): a Hop Count over the limit (0 = unknown, exempt), a Path Vector containing our LSR Id, or a Path Vector over the limit rejects the message — a looping Mapping is dropped and rejected with a Label Release carrying the Loop Detected Status TLV (E=0, non-fatal), a looping Request is answered with a Loop Detected Notification; `EngineEvent::LoopDetected` surfaces both; e2e over real sockets + unit tests |
 | Engine glue (`LdpEngine`) | ✅ 🧪 | embedder moves bytes; TCP connection lifecycle (EstablishTransport/on_connected/on_accepted), session collision + No-Hello (§2.5.3) rejection, events for adjacency/session/address/label churn; two-speaker loopback e2e covers the full lifecycle plus keepalive expiry and both shutdown paths |
 | Daemon transport (`--protocol ldp`, TCP/UDP 646) + FRR ldpd interop | ✅ 🧪 | wildcard UDP socket joins 224.0.0.2 per interface, link Hellos every hold-time third with TTL 1 and per-interface egress (`send_link_hello`), targeted Hellos unicast; TCP listener + active connects driven by `EstablishTransport` (connect failures return the peer to the engine for a retry on the next Hello); `[[ldp.bind]]` FEC-label pairs advertised downstream-unsolicited and re-advertised on every fresh SessionUp; self-Hello protection (PDUs carrying our own LDP Identifier are dropped); runtime API status counters; verified two-daemon over a veth pair (`tests/interop/ldp.sh`) and against FRR 10 ldpd (`tests/interop/ldp_frr.sh` — lr learns FRR's imp-null connected-FEC binding, FRR learns lr's explicit binding) |
 | RFC 7552 IPv6 dual-stack procedures | ✅ 🧪 | §5.1 IPv6 basic discovery (ff02::2 link Hellos, hop-limit-255 GTSM check, link-local sources), §5.2 targeted over global unicast only (link-local rejected at config parse), §6.1 Dual-Stack capability TLV (0x0701) with the TR transport-connection preference (LDPoIPv6 default per §6.1.1), per-family Transport Address TLV handling (same-AF only, first-per-family accepted from noncompliant senders), one session per LDP Identifier, §6.1.1 dual-stack role decision (noncompliant both-AF/no-capability neighbours never get a session, preference mismatch resets with the fatal 0x32 notification), §7.1 per-family Address-message scoping, §7 IPv6 FEC bindings never advertised to legacy v4-only peers; single-stack IPv6 speakers supported; daemon: dual-stack UDP/TCP transports with a V6ONLY=0 listener; 13 unit tests + 3 loopback v6 e2e (not yet verified against an external dual-stack LDP implementation) |
@@ -641,12 +642,16 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    IPv6 dual-stack procedures (library + daemon transport, see the
    LDP capability table), the `[ldp] install_kernel` AF_MPLS mirror
    of learned bindings, and automatic label allocation from the
-   `[ldp] label_min/label_max` range. Still open: full §3.5.4
-   loop-detection procedures (Hop Count/Path Vector TLV codec and
-   negotiation fields exist, the walk is not enforced), RFC 3478
-   graceful restart, per-prefix label allocation for transit LSR
-   roles (swap toward a labelled next hop), and external dual-stack
-   interop verification.
+   `[ldp] label_min/label_max` range. RFC 5036 §3.5.4 loop detection
+   landed on top: `[ldp] loop_detection` (+ `loop_hop_count_limit` /
+   `loop_path_vector_limit`, CLI `--ldp-loop-detection`) proposes the
+   D bit with PVLim and enforces the §3.4.4.1/A.2.6 checks — a looping
+   Mapping is rejected with a Label Release carrying the Loop Detected
+   Status TLV, a looping Request
+   answered with the non-fatal Loop Detected Notification. Still open:
+   RFC 3478 graceful restart, per-prefix label allocation for transit
+   LSR roles (swap toward a labelled next hop), and external
+   dual-stack interop verification.
 5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
    Future work; depends on RFC 9256 (Segment Routing Policy) once an
    embedder asks.

@@ -303,6 +303,12 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     engine_cfg.keepalive_time = cfg.ldp_keepalive_time;
     engine_cfg.link_hello_hold = cfg.ldp_link_hold;
     engine_cfg.targeted_hello_hold = cfg.ldp_targeted_hold;
+    // RFC 5036 §2.8: Loop Detection is a per-domain option — the Init
+    // proposes the D bit and received attributes are checked per
+    // §3.4.4.1/A.2.6 when it is on.
+    engine_cfg.loop_detection = cfg.ldp_loop_detection;
+    engine_cfg.hop_count_limit = cfg.ldp_loop_hc_limit;
+    engine_cfg.path_vector_limit = cfg.ldp_loop_pv_limit;
     // Targeted peers: `ADDR`, `ADDR:PORT` or `[V6]:PORT`. The engine
     // deals in addresses; a port override means that peer runs its LDP
     // transport on a different port (asymmetric deployments on shared
@@ -944,6 +950,17 @@ impl LdpDaemon {
                     println!(
                         "ldp: notification from {} status 0x{:08x}",
                         peer_id, status.code.0
+                    );
+                }
+                EngineEvent::LoopDetected {
+                    peer_id,
+                    prefix,
+                    reason,
+                } => {
+                    println!(
+                        "ldp: LOOP DETECTED from {} for {} ({}); message rejected, \
+                         Loop Detected signaled",
+                        peer_id, prefix, reason
                     );
                 }
                 EngineEvent::UnknownMessage { peer_id, message } => {

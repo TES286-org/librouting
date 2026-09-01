@@ -391,6 +391,18 @@ pub(crate) struct DaemonConfig {
     pub ldp_label_min: u32,
     /// See `ldp_label_min`.
     pub ldp_label_max: u32,
+    /// RFC 5036 §2.8 Loop Detection: propose the D bit (PVLim =
+    /// `ldp_loop_pv_limit`) in the Init and enforce the §3.4.4.1/A.2.6
+    /// Hop Count and Path Vector checks on received Label Mapping and
+    /// Label Request messages. Off by default (a per-domain option:
+    /// enable on all LSRs in the domain or not at all).
+    pub ldp_loop_detection: bool,
+    /// Maximum Hop Count accepted on received messages (RFC 5036
+    /// §2.8.1 "configured maximum value"; a value of 0 means unknown).
+    pub ldp_loop_hc_limit: u8,
+    /// Maximum Path Vector length accepted (PVLim proposed in the
+    /// Init; RFC 5036 §2.8.2 "maximum allowable length").
+    pub ldp_loop_pv_limit: u8,
     /// LDP UDP/TCP port (RFC 5036 §3.10.1: 646; overridable for
     /// multi-instance testing on shared hosts).
     pub ldp_port: u16,
@@ -470,6 +482,9 @@ impl DaemonConfig {
             ldp_install_kernel: false,
             ldp_label_min: 16,
             ldp_label_max: 1048575,
+            ldp_loop_detection: false,
+            ldp_loop_hc_limit: 32,
+            ldp_loop_pv_limit: 32,
             ldp_keepalive_time: 15,
             ldp_link_hold: 15,
             ldp_targeted_hold: 45,
@@ -1451,6 +1466,21 @@ fn apply_ldp_key(
                     .parse()
                     .map_err(|_| format!("bad targeted_hold_time '{value}'"))?;
             }
+            "loop_detection" => {
+                cfg.ldp_loop_detection = value
+                    .parse()
+                    .map_err(|_| format!("bad loop_detection '{value}' (true|false)"))?;
+            }
+            "loop_hop_count_limit" => {
+                cfg.ldp_loop_hc_limit = value
+                    .parse()
+                    .map_err(|_| format!("bad loop_hop_count_limit '{value}'"))?;
+            }
+            "loop_path_vector_limit" => {
+                cfg.ldp_loop_pv_limit = value
+                    .parse()
+                    .map_err(|_| format!("bad loop_path_vector_limit '{value}'"))?;
+            }
             _ => {
                 return Err(format!(
                     "unknown [ldp] key '{key}' (typo protection; LDP config fails closed)"
@@ -1857,6 +1887,18 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--ldp-prefer-ipv4" => {
                 cfg.ldp_prefer_ipv6 = false;
                 i += 1;
+            }
+            "--ldp-loop-detection" => {
+                cfg.ldp_loop_detection = true;
+                i += 1;
+            }
+            "--ldp-loop-hc-limit" if i + 1 < args.len() => {
+                cfg.ldp_loop_hc_limit = args[i + 1].parse().unwrap_or(32);
+                i += 2;
+            }
+            "--ldp-loop-pv-limit" if i + 1 < args.len() => {
+                cfg.ldp_loop_pv_limit = args[i + 1].parse().unwrap_or(32);
+                i += 2;
             }
             "--ldp-install-kernel" => {
                 cfg.ldp_install_kernel = true;

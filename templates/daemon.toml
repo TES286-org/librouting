@@ -341,9 +341,10 @@ permit = false
 # UDP port 646 is privileged: run as root, or inside a user/network
 # namespace (`unshare -Urn lr-daemon --protocol ldp ...`), or override
 # the port with --ldp-port / [ldp] port for shared-host labs.
-# See docs/STATUS.md (W3-extra.4) for the current scope: RFC 7552 IPv6
-# discovery, kernel MPLS installation of learned bindings and automatic
-# label allocation from a range are future work.
+# Landed scope: RFC 7552 IPv6 discovery, kernel MPLS installation of
+# learned bindings ([ldp] install_kernel), automatic label allocation
+# from a range ([ldp] label_min/label_max) and RFC 5036 §2.8 loop
+# detection ([ldp] loop_detection).
 
 # [ldp]
 # transport = "10.0.0.1"      # advertised transport address (default:
@@ -352,6 +353,10 @@ permit = false
 # keepalive_time = 15         # session KeepAlive Time (§3.5.3, non-zero)
 # link_hold_time = 15         # link Hello hold time (§3.5.2.1)
 # targeted_hold_time = 45     # targeted Hello hold time
+# loop_detection = false      # RFC 5036 §2.8 (a per-domain option:
+#                             # enable on all LSRs or none)
+# loop_hop_count_limit = 32   # max accepted Hop Count (0 = unknown)
+# loop_path_vector_limit = 32 # max Path Vector length (PVLim)
 
 # Basic (link) discovery interfaces — multicast Hellos to 224.0.0.2.
 # [[ldp.interface]]

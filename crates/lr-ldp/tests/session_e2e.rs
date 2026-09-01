@@ -44,12 +44,26 @@ struct Speaker {
 
 impl Speaker {
     fn new(lsr_id: [u8; 4], addr: IpAddr, peer_addr: IpAddr, interface_addrs: Vec<IpAddr>) -> Self {
+        Self::new_with(lsr_id, addr, peer_addr, interface_addrs, |_| {})
+    }
+
+    /// Like [`Speaker::new`] but lets the caller tweak the engine
+    /// config before the engine is constructed (e.g. RFC 5036 §2.8
+    /// Loop Detection settings).
+    fn new_with(
+        lsr_id: [u8; 4],
+        addr: IpAddr,
+        peer_addr: IpAddr,
+        interface_addrs: Vec<IpAddr>,
+        tweak: impl FnOnce(&mut LdpEngineConfig),
+    ) -> Self {
         let mut cfg = LdpEngineConfig::new(LdpId::new(lsr_id, 0), addr);
         cfg.targeted_peers = Vec::from([peer_addr]);
         cfg.accept_targeted = true;
         cfg.keepalive_time = 2; // short for test pacing (§3.5.3: non-zero)
         cfg.targeted_hello_hold = 9; // hello every hold/3 = 3s
         cfg.interface_addresses = interface_addrs;
+        tweak(&mut cfg);
         let engine = LdpEngine::new(cfg);
         let (udp, listener) = match addr {
             IpAddr::V6(_) => (
@@ -816,4 +830,233 @@ fn hello_pdu_from(
     let n = LdpCodec.encode(&pdu, &mut w).unwrap();
     out.truncate(n);
     out
+}
+
+// ---------------------------------------------------------------------------
+// RFC 5036 §2.8 / §3.4.4.1 / A.2.6 — Loop Detection
+// ---------------------------------------------------------------------------
+
+use lr_ldp::message::{LabelMappingMsg, LabelRequestMsg};
+use lr_ldp::tlv::{Fec, HopCount, PathVector};
+
+fn build_pair_with_loop_detection_on_b() -> (Speaker, Speaker) {
+    let mut a = Speaker::new(
+        A_ID,
+        A_TRANSPORT,
+        B_TRANSPORT,
+        Vec::from([IpAddr::V4([10, 99, 1, 1])]),
+    );
+    let mut b = Speaker::new_with(
+        B_ID,
+        B_TRANSPORT,
+        A_TRANSPORT,
+        Vec::from([IpAddr::V4([10, 99, 2, 1])]),
+        |cfg| {
+            cfg.loop_detection = true;
+            cfg.hop_count_limit = 32;
+            cfg.path_vector_limit = 32;
+        },
+    );
+    a.peer_udp_port = b.udp_port();
+    a.peer_tcp_port = b.tcp_port;
+    b.peer_udp_port = a.udp_port();
+    b.peer_tcp_port = a.tcp_port;
+    (a, b)
+}
+
+/// Encode a one-message PDU as speaker `from` would send it.
+fn craft_pdu(from: [u8; 4], message: LdpMessage) -> Vec<u8> {
+    let pdu = LdpPdu {
+        version: 1,
+        sender: LdpId::new(from, 0),
+        messages: vec![message],
+    };
+    let mut out = vec![0u8; 4096];
+    let mut w = WriteBuf::new(&mut out);
+    let n = LdpCodec.encode(&pdu, &mut w).unwrap();
+    out.truncate(n);
+    out
+}
+
+/// Inject raw bytes into speaker `a`'s session connection (the embedder
+/// write path — the engine sees the bytes on the next pump).
+fn inject_tcp(a: &mut Speaker, bytes: &[u8]) {
+    let conn = *a.conns.keys().next().expect("session connection");
+    use std::io::Write;
+    a.conns
+        .get_mut(&conn)
+        .expect("connection stream")
+        .write_all(bytes)
+        .unwrap();
+}
+
+#[test]
+fn loop_detection_rejects_mapping_over_hop_count_limit() {
+    let (mut a, mut b) = build_pair_with_loop_detection_on_b();
+    let peer_a = LdpId::new(A_ID, 0);
+    let peer_b = LdpId::new(B_ID, 0);
+
+    wait_for(&mut a, &mut b, Duration::from_secs(10), |events| {
+        has_session_up(events, peer_a) && has_session_up(events, peer_b)
+    });
+
+    // A normal mapping (Hop Count 1) is still learned with Loop
+    // Detection configured.
+    a.engine
+        .advertise_mapping(Prefix::new_v4([10, 30, 0, 0], 24), GenericLabel(300));
+    wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                EngineEvent::MappingLearned { peer_id, prefix, .. }
+                    if *peer_id == peer_a && *prefix == Prefix::new_v4([10, 30, 0, 0], 24)
+            )
+        })
+    });
+
+    // A looping mapping (Hop Count 33 > the limit of 32) crafted on
+    // the wire: B must reject it, release the label with Loop
+    // Detected, and keep the session up.
+    inject_tcp(
+        &mut a,
+        &craft_pdu(
+            A_ID,
+            LdpMessage::LabelMapping(LabelMappingMsg {
+                message_id: 77,
+                fec: Fec::prefix(Prefix::new_v4([10, 31, 0, 0], 24)),
+                label: GenericLabel(301),
+                hop_count: Some(HopCount(33)),
+                path_vector: None,
+                request_message_id: None,
+                unknown_tlvs: vec![],
+            }),
+        ),
+    );
+    let events = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                EngineEvent::LoopDetected { peer_id, prefix, .. }
+                    if *peer_id == peer_a && *prefix == Prefix::new_v4([10, 31, 0, 0], 24)
+            )
+        })
+    });
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::LoopDetected { reason, .. }
+                if *reason == "hop count exceeds the configured maximum"
+        )),
+        "the rejection reason must be reported: {events:?}"
+    );
+    // The looping binding never entered B's LIB.
+    assert_eq!(
+        b.engine
+            .lib()
+            .label_from(peer_a, &FecKey::new(Prefix::new_v4([10, 31, 0, 0], 24))),
+        None
+    );
+    // The healthy binding from before survives.
+    assert_eq!(
+        b.engine
+            .lib()
+            .label_from(peer_a, &FecKey::new(Prefix::new_v4([10, 30, 0, 0], 24))),
+        Some(GenericLabel(300))
+    );
+    // A learns of the rejection via the §3.4.5.1.2 Label Release
+    // carrying the Loop Detected Status TLV.
+    let events_a = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                EngineEvent::MappingReleased { peer_id, prefix }
+                    if *peer_id == peer_b && *prefix == Prefix::new_v4([10, 31, 0, 0], 24)
+            )
+        })
+    });
+    assert!(
+        events_a.iter().any(|e| matches!(
+            e,
+            EngineEvent::MappingReleased { peer_id, prefix }
+                if *peer_id == peer_b && *prefix == Prefix::new_v4([10, 31, 0, 0], 24)
+        )),
+        "A must see the loop-detected release for the FEC"
+    );
+    // The session stays up (Loop Detected is non-fatal, E=0).
+    assert_eq!(
+        b.engine.session_state(peer_a),
+        Some(SessionState::Operational)
+    );
+}
+
+#[test]
+fn loop_detection_rejects_request_with_own_path_vector() {
+    let (mut a, mut b) = build_pair_with_loop_detection_on_b();
+    let peer_a = LdpId::new(A_ID, 0);
+    let peer_b = LdpId::new(B_ID, 0);
+
+    wait_for(&mut a, &mut b, Duration::from_secs(10), |events| {
+        has_session_up(events, peer_a) && has_session_up(events, peer_b)
+    });
+
+    // A Label Request whose Path Vector already contains B's LSR Id
+    // (0x02020202) has traversed a loop: B answers with a Loop
+    // Detected Notification instead of a mapping.
+    inject_tcp(
+        &mut a,
+        &craft_pdu(
+            A_ID,
+            LdpMessage::LabelRequest(LabelRequestMsg {
+                message_id: 88,
+                fec: Fec::prefix(Prefix::new_v4([10, 32, 0, 0], 24)),
+                hop_count: Some(HopCount(3)),
+                path_vector: Some(PathVector(Vec::from([0x0303_0303, 0x0202_0202]))),
+                unknown_tlvs: vec![],
+            }),
+        ),
+    );
+    let events = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                EngineEvent::LoopDetected { peer_id, prefix, .. }
+                    if *peer_id == peer_a && *prefix == Prefix::new_v4([10, 32, 0, 0], 24)
+            )
+        })
+    });
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            EngineEvent::LoopDetected { reason, .. }
+                if *reason == "path vector contains the local LSR Id"
+        )),
+        "the rejection reason must be reported"
+    );
+    // A receives the non-fatal Loop Detected notification (0x0B).
+    let events_a = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
+        events.iter().any(|e| {
+            matches!(
+                e,
+                EngineEvent::NotificationReceived { peer_id, status }
+                    if *peer_id == peer_b && status.code == StatusCode::LOOP_DETECTED
+            )
+        })
+    });
+    assert!(
+        events_a.iter().any(|e| matches!(
+            e,
+            EngineEvent::NotificationReceived { peer_id, status }
+                if *peer_id == peer_b && status.code == StatusCode::LOOP_DETECTED
+        )),
+        "A must receive the Loop Detected notification"
+    );
+    // The session survives (§3.9: Loop Detected, E = 0).
+    assert_eq!(
+        b.engine.session_state(peer_a),
+        Some(SessionState::Operational)
+    );
+    assert_eq!(
+        a.engine.session_state(peer_b),
+        Some(SessionState::Operational)
+    );
 }
