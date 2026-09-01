@@ -71,10 +71,11 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Summary-ASBR LSAs (type-4, §12.4.3) | ✅ 🧪 | ABR origination for inter-area-only ASBRs, ASBR leg resolution in §16.4 (b) |
 | External route redistribution API | ✅ 🧪 | `DefaultRouter::ospf_redistribute`/`ospf_unredistribute` |
 | Cross-protocol redistribution engine | ✅ 🧪 | `RedistributionPipe` (BIRD `pipe` / FRR `redistribute`); BGP↔BGP, BGP→OSPF, OSPF→BGP; metric policy (Inherit/Fixed/Add); prefix-list filter; withdrawal propagation; 7 e2e tests |
-| Designated-router election | ✅ | |
+| Designated-router election | ✅ 🧪 | `lr-ospf::interface::elect` implements §9.4 step-by-step (IP-identity electors per §A.3.2, BDR candidates exclude DR-declarers, DR falls back to the elected BDR, step-4 re-election so no router claims both DR and BDR) — cross-checked against BIRD 2 `ospf_dr_election` and FRR 10 `ospf_dr_election`; §10.4 adjacency gate in the router (`adjacency_viable`, Waiting blocks adjacency like BIRD `can_do_adj`), AdjOK? re-evaluation via `DefaultRouter::set_ospf_dr_state` (§9.4 step 7: promotion to ExStart with the initial DBD, demotion to 2-Way with the exchange reset); daemon broadcast mode end-to-end (`tests/interop/ospf_broadcast.sh`) |
+| Network-LSA (§12.4.2) + transit links (§12.4.1.2) | ✅ 🧪 | `originate_network_lsa` (LS ID = the DR's IP interface address, Advertising Router = its router-id — they differ in general), `RouterLsaLink::Transit`; the DR originates the Network-LSA only when fully adjacent to ≥ 1 other router and flushes it (MaxAge) when that stops; the SPF derives the transit network's own prefix (LS ID masked by the network mask — BIRD `spfa_process_net` parity) and secondary addresses on the interface stay stub links |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area-prefix-LSA (0x2003) origination via `originate_v3_inter_area_prefix_lsa` |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
-| Daemon transport (`--protocol ospf`) | ✅ 🧪 | `lr-osroute::ospf_transport`: raw `IPPROTO_OSPF` socket per interface, `SO_BINDTODEVICE` + `ip_mreqn` membership (224.0.0.5/6), TTL 1; `lr-ospf::origination`: Router-LSA builder + §A.1 packet checksum; two-daemon e2e over a veth pair (user namespaces, rootless) |
+| Daemon transport (`--protocol ospf`) | ✅ 🧪 | `lr-osroute::ospf_transport`: raw `IPPROTO_OSPF` socket per interface, `SO_BINDTODEVICE` + `ip_mreqn` membership (224.0.0.5/6), TTL 1; `lr-ospf::origination`: Router-LSA builder + §A.1 packet checksum; two-daemon e2e over a veth pair (user namespaces, rootless); per-interface `network_type = "broadcast"` (TOML) runs the §9.4 election — Hello DR/BDR fields, §10.4 adjacency, transit links and Network-LSA end-to-end, with BIRD 2 on its default broadcast type (`tests/interop/ospf_broadcast.sh`) |
 | Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
 | Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer; Ko/Apad MAC per §3.3, Auth Data Len = digest), RFC 7166 v3 auth trailer (RFC 7166 layout with 16-bit SA ID + 64-bit crypto-seq; §4.5 Apad MAC embedding the IPv6 source), anti-replay; unit tests |
@@ -163,6 +164,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪 | `lr-tests/tests/bmp_monitoring.rs` |
 | Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪 | `lr-cli` integration tests |
 | OSPF two-daemon E2E (raw-socket multicast adjacency, stub-net propagation both ways, dead-timer teardown) | ✅ 🧪 | `tests/interop/ospf.sh` — veth pair, one network namespace per daemon, rootless via `unshare -Urn` |
+| OSPF broadcast-segment E2E (§9.4 DR/BDR election, §10.4 adjacency, Network-LSA + transit links, BIRD default-broadcast interop) | ✅ 🧪 | `tests/interop/ospf_broadcast.sh` — phase 1: two lr-daemons; phase 2: lr ↔ BIRD 2 on BIRD's default (broadcast) type |
 | OSPF x BIRD E2E (real DBD/LSR exchange to Full adjacency, stub nets propagated in BOTH directions via birdc) | ✅ 🧪 | `tests/interop/ospf_bird.sh` — lr-daemon ↔ BIRD 2 over a veth pair |
 | Babel MAC auth E2E (two-daemon: propagation, restart challenge resync, wrong-key fail-closed, RFC 8967 §5 incremental deployment) | ✅ 🧪 | `tests/interop/babel_auth.sh` — IPv4 multicast over loopback, rootless netns |
 | LDP two-daemon E2E (multicast link-Hello discovery over a veth pair, TCP 646 session, bindings both directions, hold-time teardown) | ✅ 🧪 | `tests/interop/ldp.sh` — rootless netns, one LSR per namespace |
@@ -304,12 +306,11 @@ BIRD/FRR-style, without an embedder writing code.
    `tests/interop/ospf.sh`: two daemons over a veth pair (one network
    namespace each, rootless via `unshare -Urn`) reach Full adjacency,
    exchange stub nets both directions (10.99.2.0/24 ↔ 10.99.3.0/24)
-   and tear the session down on the dead timer. Scope notes: OSPFv2
-   only (v3 needs Link-LSAs); no DR election in the daemon — segments
-   behave p2p (DR/BDR stay 0.0.0.0; the library's `interface` module
-   implements §9.4.1 election and the DR/Backup FSM states for
-   broadcast segments); auth and reload are not wired into the daemon
-   yet.
+   and tear the session down on the dead timer. Broadcast segments
+   (`network_type = "broadcast"`) run the RFC 2328 §9.4 DR/BDR
+   election end-to-end — see the OSPF capability table. Scope notes:
+   OSPFv2 only (v3 needs Link-LSAs); auth and reload are not wired
+   into the daemon yet.
 6. ~~**Operational tooling**~~ — done: the `lr-mrt` crate (RFC 6396)
    reads and writes TABLE_DUMP_V2 dumps (peer index tables,
    RIB_IPV4/IPv6_UNICAST incl. the ADDPATH variants; BGP4MP decode for
@@ -514,8 +515,10 @@ Highest-value missing/partial standards, in rough order:
    re-origination (§14). Verified by `tests/interop/ospf_bird.sh`:
    Full adjacency with BIRD over a veth pair and stub nets
    propagated in both directions — OSPF interop is unlocked. FRR
-   interop and DR-election segments (broadcast networks) remain
-   open; OSPFv3 exchange needs v3 DBD semantics.
+   interop and OSPFv3 exchange remain open. Broadcast-segment DR
+   election landed on top (see the OSPF capability table and
+   `tests/interop/ospf_broadcast.sh` — BIRD's default broadcast type
+   included).
 4. ~~**RFC 5187 / RFC 3623** OSPF graceful restart — Grace-LSA codec~~
    — foundation slice done: new `lr-ospf::lsa::grace` module
    implements the Grace-LSA body codec (TLV encode/decode for Grace

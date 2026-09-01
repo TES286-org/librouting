@@ -9,7 +9,6 @@
 //! goes away (§9.4 step 7).
 
 use lr_core::addr::{Prefix, RouterId};
-use lr_core::rib::RouteKey;
 use lr_router::{DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle};
 
 fn broadcast_config(our_rid: [u8; 4], our_ip: u32, peer_ip: u32) -> SessionConfig {
@@ -215,7 +214,7 @@ fn broadcast_dbd_does_not_bypass_the_gate() {
 #[test]
 fn network_lsa_derives_transit_prefix_route() {
     use lr_ospf::lsa::{Lsa, LsaHeader, LsaTypeV2};
-    use lr_ospf::packet::{LsUpdateBody, OspfBody, OspfHeader, OspfPacket};
+    use lr_ospf::packet::{LsUpdateBody, OspfHeader, OspfPacket};
 
     let mut r = DefaultRouter::new();
     let h = r

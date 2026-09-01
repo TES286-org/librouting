@@ -140,9 +140,12 @@ are configured with `[[ospf.interface]]` / `[[ospf.area]]` tables
 `--ospf-area` CLI flags; BGP tables in the same file are ignored in
 OSPF mode. Raw sockets need root or a user/network namespace — the
 interop lab runs the whole thing rootless via `unshare -Urn` (see
-`tests/interop/ospf.sh`). Current scope: OSPFv2, point-to-point
-segments (no DR election) — full details in `docs/STATUS.md`
-(W1.5/W3.3).
+`tests/interop/ospf.sh`). Current scope: OSPFv2; segments behave
+point-to-point by default, and `network_type = "broadcast"` per
+interface runs the RFC 2328 §9.4 DR/BDR election (§10.4 adjacency,
+§12.4.2 Network-LSA, BIRD-default-broadcast interop verified — see
+`tests/interop/ospf_broadcast.sh`); full details in
+`docs/STATUS.md` (W1.5/W3.3).
 
 ```bash
 # Two routers on a veth pair, each in its own network namespace:

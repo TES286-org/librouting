@@ -252,6 +252,44 @@ as RFC 2328 §A.1 prescribes. On non-Linux platforms the transport returns
 `OspfTransportError::Unsupported`; `is_permission_denied()` detects a
 missing `CAP_NET_RAW` so callers can degrade gracefully.
 
+## OSPF broadcast segments — DR/BDR election (RFC 2328 §9.4/§10.4)
+
+Broadcast segments elect a Designated Router; adjacencies then follow
+the §10.4 relationship. The library keeps the election pure
+(`lr_ospf::interface::elect`) and the session state in the router; the
+embedder drives it:
+
+```rust
+use lr_router::{OspfNetworkType, SessionConfig};
+
+// 1. Configure the session as broadcast, carrying the segment
+//    identities (our interface IP, the neighbor's interface IP).
+let h = router.add_session(
+    SessionConfig::ospfv2(router_id, 0)
+        .with_ospf_network_type(OspfNetworkType::Broadcast)
+        .with_ospf_interface_ip(0x0a63_0101)   // 10.99.1.1
+        .with_ospf_neighbor_ip(0x0a63_0102)?, // 10.99.1.2
+)?;
+
+// 2. Run the §9.4 election over the bidirectional neighbors (parsed
+//    from their Hellos) plus ourselves, and push the result in.
+use lr_ospf::interface::{elect, Elector};
+let (dr, bdr) = elect(&electors_with_self, our_ip);
+router.set_ospf_dr_state(h, dr, bdr)?;   // re-runs §10.4 (AdjOK?)
+```
+
+`set_ospf_dr_state` returns `Ok(false)` when the pair is unchanged.
+When it changes, the router re-runs the §10.4 decision for the
+neighbor: a 2-Way neighbor that now qualifies advances to ExStart
+(queuing the initial DBD), and one that no longer qualifies demotes to
+2-Way with the DBD exchange state reset (§9.4 step 7 — the AdjOK?
+event). Hellos carry the elected DR/BDR as IP interface addresses
+(§A.3.2); while no DR is elected (interface Waiting) no adjacency
+forms. The DR originates the Network-LSA (`originate_network_lsa`) and
+describes the segment with a transit link (`RouterLsaLink::Transit`);
+`lr-daemon --protocol ospf` wires all of this behind
+`[[ospf.interface]] network_type = "broadcast"`.
+
 ## OSPF external routes (RFC 2328 §12.4.3 / §16.4)
 
 `DefaultRouter::ospf_redistribute` injects an external destination into

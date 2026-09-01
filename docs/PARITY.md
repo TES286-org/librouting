@@ -181,6 +181,28 @@ in the ecosystem — lr and BIRD 2.16+ speak it on Linux, FRR 10.3 does
 not; the kernel must be ≥ 6.7 (`tests/interop/tcp_ao.sh` probes and
 skips gracefully elsewhere).
 
+## 9. OSPF network type & DR election (RFC 2328 §9.4/§10.4)
+
+| Speaker | Broadcast knob | Default network type | DR election |
+|---------|----------------|----------------------|-------------|
+| lr | `[[ospf.interface]] network_type = "broadcast"` (per interface; `p2p` = default) | point-to-point | full §9.4 — Waiting window, BackupSeen/WaitTimer, §9.4 step-4 re-election, §10.4 gate, §12.4.2 Network-LSA |
+| BIRD 2 | interface `type broadcast` (or auto-classified) | auto: broadcast for multiaccess+multicast media, ptp otherwise | full §9.4 (`ospf_dr_election`) |
+| FRR 10 | `ip ospf network broadcast` | auto: broadcast on ethernet-classed media | full §9.4 (`ospf_dr_election`) |
+
+* lr's daemon historically behaved p2p everywhere; broadcast is now
+  available per interface but stays opt-in so existing labs keep their
+  adjacency behavior. The election itself follows the RFC step order
+  and was cross-checked line-by-line against BIRD's `elect_bdr` /
+  `elect_dr` / `can_do_adj` and FRR's `ospf_dr_election` (identity =
+  the IP interface address per §A.3.2, tie-break by router-id).
+* While an lr broadcast interface is Waiting (RouterDeadInterval after
+  ifup, §9.3) no adjacency forms — same as BIRD's `can_do_adj` in
+  `OSPF_IS_WAITING`.
+* Secondary addresses on a broadcast interface stay type-3 stub links
+  when the primary address is described by a transit link (BIRD models
+  each address as its own OSPF interface; FRR keeps one oi per
+  connected prefix — in both, the extra prefixes remain routed).
+
 ## Deliberate non-parities
 
 Recorded so nobody "fixes" them by accident:
