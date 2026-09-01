@@ -59,10 +59,12 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 echo "== building the two-router lab (veth pair, one netns per router) =="
 ip link set lo up
 ip link add veth0 type veth peer name veth1
-# Holder processes keep the two router namespaces alive.
-unshare -n sleep 180 &
+# Holder processes keep the two router namespaces alive (the script
+# itself `wait`s only for the daemons — a bare `wait` would block here
+# until the holders exit and destroy the namespaces).
+unshare -n sleep 420 &
 R1=$!
-unshare -n sleep 180 &
+unshare -n sleep 420 &
 R2=$!
 cleanup() {
     kill "${LR_PID:-}" "${BIRD_PID:-}" 2>/dev/null || true
@@ -142,7 +144,9 @@ wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 dead (area" 25
 echo "   dead timer: OK"
 
 kill "$LR_PID" 2>/dev/null || true
-wait 2>/dev/null || true
+# Wait ONLY for the daemon — a bare `wait` would also wait out the
+# namespace holders (sleep N), leaving no namespaces for phase 2.
+wait "$LR_PID" 2>/dev/null || true
 sleep 0.5
 echo "phase 1: PASS"
 
@@ -154,6 +158,10 @@ if [ -z "$BIRD" ] || [ -z "$BIRDC" ]; then
     echo "    dead-timer teardown works"
     exit 0
 fi
+
+# The namespaces must still be alive for phase 2.
+kill -0 "$R1" 2>/dev/null || { echo "namespace holder r1 died"; exit 1; }
+kill -0 "$R2" 2>/dev/null || { echo "namespace holder r2 died"; exit 1; }
 
 echo "== phase 2: lr-daemon ↔ BIRD 2 on BIRD's default (broadcast) type =="
 # Rebuild the lab: fresh addressing in the same two namespaces. BIRD
