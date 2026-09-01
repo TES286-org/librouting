@@ -15,5 +15,6 @@ pub use event::{EventSink, RouterEvent};
 pub use instance::{DefaultRouter, RouterInstance};
 pub use redistribution::{MetricPolicy, RedistributionPipe};
 pub use session::{
-    OspfAreaType, Session, SessionConfig, SessionHandle, SessionKind, SessionSummary,
+    OspfAreaType, OspfNetworkType, Session, SessionConfig, SessionHandle, SessionKind,
+    SessionSummary,
 };

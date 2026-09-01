@@ -196,6 +196,23 @@ struct OspfRuntime {
     /// RFC 2328 §7.2 database synchronization driver: DBD negotiation,
     /// header exchange and LS-Request loading up to Full.
     exchange: lr_ospf::exchange::DbExchange,
+    /// Interface MTU (kept so the exchange can be rebuilt fresh when a
+    /// §10.4 demotion resets the adjacency).
+    iface_mtu: u16,
+    /// Interface network type (RFC 2328 §9.4) — drives the §10.4
+    /// adjacency decision.
+    network_type: crate::session::OspfNetworkType,
+    /// Our own IPv4 interface address on the segment (§10.4 identity;
+    /// `0` = not supplied — treated as DR-Other).
+    our_ip: u32,
+    /// The neighbor's IPv4 interface address on the segment.
+    neighbor_ip: u32,
+    /// Elected Designated Router — IP interface address per §A.3.2
+    /// (0.0.0.0 = none / still Waiting). Pushed by the embedder after
+    /// every election round via `DefaultRouter::set_ospf_dr_state`.
+    dr: u32,
+    /// Elected Backup Designated Router (IP interface address).
+    bdr: u32,
 }
 
 /// One configured virtual link (RFC 2328 §15): a backbone adjacency
@@ -354,7 +371,15 @@ impl OspfTableEntry {
 }
 
 impl OspfRuntime {
-    fn new(router_id: u32, area_id: u32, v3: bool, iface_mtu: u16) -> Self {
+    fn new(
+        router_id: u32,
+        area_id: u32,
+        v3: bool,
+        iface_mtu: u16,
+        network_type: crate::session::OspfNetworkType,
+        our_ip: Option<u32>,
+        neighbor_ip: Option<u32>,
+    ) -> Self {
         Self {
             router_id,
             area_id,
@@ -370,6 +395,33 @@ impl OspfRuntime {
                 lr_ospf::codec::OspfCodec::v2()
             },
             exchange: lr_ospf::exchange::DbExchange::new(router_id, area_id, iface_mtu),
+            iface_mtu,
+            network_type,
+            our_ip: our_ip.unwrap_or(0),
+            neighbor_ip: neighbor_ip.unwrap_or(0),
+            dr: 0,
+            bdr: 0,
+        }
+    }
+
+    /// RFC 2328 §10.4 — whether we should become adjacent with this
+    /// bidirectional neighbor. Point-to-point (and Point-to-MultiPoint /
+    /// virtual) links always become adjacent; broadcast/NBMA segments
+    /// require one side to be the elected DR or BDR. While the segment
+    /// has not elected a DR (interface Waiting, §9.4) no adjacency
+    /// forms — mirroring BIRD's `can_do_adj`.
+    fn adjacency_viable(&self) -> bool {
+        match self.network_type {
+            crate::session::OspfNetworkType::PointToPoint => true,
+            crate::session::OspfNetworkType::Broadcast => {
+                if self.dr == 0 && self.bdr == 0 {
+                    return false; // Waiting, or nothing elected yet
+                }
+                // The router itself is the DR/BDR...
+                (self.our_ip != 0 && (self.our_ip == self.dr || self.our_ip == self.bdr))
+                    // ...or the neighboring router is.
+                    || (self.neighbor_ip != 0 && (self.neighbor_ip == self.dr || self.neighbor_ip == self.bdr))
+            }
         }
     }
 
@@ -398,10 +450,12 @@ impl OspfRuntime {
                     return OspfStep::default();
                 };
                 let _ = self.neighbor.step(ev);
-                // §10.2: 2-Way + adjacency decision → ExStart. ptp
-                // segments always adjoint (no DR election yet).
+                // §10.2: 2-Way + adjacency decision → ExStart. The
+                // decision is §10.4: ptp always adjoints; broadcast
+                // segments require the DR/BDR relationship.
                 if self.neighbor.state == NeighborState::TwoWay {
-                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed: true });
+                    let proceed = self.adjacency_viable();
+                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed });
                 }
                 // Entering ExStart emits the initial DBD (§10.3); after
                 // a sequence-mismatch restart the exchange driver
@@ -427,7 +481,8 @@ impl OspfRuntime {
                     });
                 }
                 if self.neighbor.state == NeighborState::TwoWay {
-                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed: true });
+                    let proceed = self.adjacency_viable();
+                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed });
                 }
                 self.exchange
                     .on_db_desc(d, pkt.header.router_id, lsdb, &mut self.neighbor, now_ms)
@@ -3287,6 +3342,9 @@ impl RouterInstance for DefaultRouter {
                     cfg.area_id,
                     protocol == Protocol::Ospfv3,
                     cfg.ospf_mtu,
+                    cfg.ospf_network_type,
+                    cfg.ospf_interface_ip,
+                    cfg.ospf_neighbor_ip,
                 );
                 self.sessions.insert(
                     h.0,
@@ -5138,6 +5196,77 @@ impl DefaultRouter {
         true
     }
 
+    /// Push the current DR/BDR election result (RFC 2328 §9.4) for the
+    /// segment a session's interface attaches to. The embedder (the
+    /// daemon or an OSPF-speaking embedder) runs the election over the
+    /// bidirectional neighbors — [`lr_ospf::interface::elect`] is the
+    /// reference algorithm — and reports the elected routers here as
+    /// their IP interface addresses (§A.3.2 wire identity).
+    ///
+    /// When the result changes, this re-runs the §10.4 adjacency
+    /// decision for the session's neighbor (§9.4 step 7 — the AdjOK?
+    /// event): a bidirectional neighbor that now qualifies advances to
+    /// ExStart (the initial DBD is queued), and one that no longer
+    /// qualifies drops back to 2-Way with its exchange state reset.
+    ///
+    /// Returns whether the DR/BDR pair changed. Unknown handles and
+    /// non-OSPF sessions return `Err`.
+    pub fn set_ospf_dr_state(
+        &mut self,
+        h: SessionHandle,
+        dr: u32,
+        bdr: u32,
+    ) -> Result<bool, String> {
+        let mut outbound: Vec<u8> = Vec::new();
+        {
+            let state = self
+                .sessions
+                .get_mut(&h.0)
+                .ok_or_else(|| format!("no session {}", h.0))?;
+            let SessionState::Ospf { runtime, conn } = state else {
+                return Err(format!("session {} is not an OSPF session", h.0));
+            };
+            if runtime.dr == dr && runtime.bdr == bdr {
+                return Ok(false);
+            }
+            runtime.dr = dr;
+            runtime.bdr = bdr;
+            // §9.4 step 7 / §10.3: the AdjOK? event re-examines the
+            // adjacency eligibility of the neighbor.
+            let was = runtime.neighbor.state;
+            if was == NeighborState::TwoWay && runtime.adjacency_viable() {
+                let _ = runtime
+                    .neighbor
+                    .step(NeighborEvent::AdjOk { proceed: true });
+            } else if was >= NeighborState::ExStart && !runtime.adjacency_viable() {
+                let _ = runtime
+                    .neighbor
+                    .step(NeighborEvent::AdjOk { proceed: false });
+                // BIRD's INM_ADJOK demotion resets the exchange lists so
+                // a later re-adjacency starts a fresh DBD negotiation.
+                runtime.exchange = lr_ospf::exchange::DbExchange::new(
+                    runtime.router_id,
+                    runtime.area_id,
+                    runtime.iface_mtu,
+                );
+            }
+            // Entering ExStart emits the initial DBD (§10.3), exactly
+            // like the Hello path.
+            if runtime.neighbor.state == NeighborState::ExStart && !runtime.exchange.started() {
+                let seq = self.now_ms as u32 ^ runtime.router_id | 1;
+                let pkt = runtime.exchange.initial_db_desc(seq, self.now_ms);
+                if let Ok(bytes) = runtime.codec.encode_vec(&pkt) {
+                    outbound.extend_from_slice(&bytes);
+                }
+            }
+            if !outbound.is_empty() {
+                Self::finalize_ospf_v2_egress(runtime.protocol, &mut outbound);
+                conn.put_output(&outbound);
+            }
+        }
+        Ok(true)
+    }
+
     // ------------------------------------------------------------------
     // Virtual links (RFC 2328 §15)
     // ------------------------------------------------------------------
@@ -5267,7 +5396,17 @@ impl DefaultRouter {
                         protocol: Protocol::Ospfv2,
                         kind: OspfAreaType::Normal,
                     });
-                    let runtime = OspfRuntime::new(router_id, 0, false, 1500);
+                    // Virtual links are point-to-point by definition
+                    // (RFC 2328 §10.4) — no DR relationship applies.
+                    let runtime = OspfRuntime::new(
+                        router_id,
+                        0,
+                        false,
+                        1500,
+                        crate::session::OspfNetworkType::PointToPoint,
+                        None,
+                        None,
+                    );
                     self.sessions.insert(
                         handle.0,
                         SessionState::Ospf {

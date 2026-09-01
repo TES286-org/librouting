@@ -5,8 +5,10 @@ use core::fmt;
 use lr_core::addr::RouterId;
 use lr_core::fsm::{Action, StateId, StateMachine};
 
-/// Neighbor FSM states (RFC 2328 §10.1).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Neighbor FSM states (RFC 2328 §10.1). The declaration order is the
+/// RFC's progress order (BIRD/FRR compare neighbor states with `>=`,
+/// e.g. `state >= 2-Way` in the DR election input).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 #[repr(u8)]
 pub enum NeighborState {
     Down = 1,
@@ -118,6 +120,24 @@ impl StateMachine for OspfNeighbor {
                 NeighborState::ExStart
             }
             (NeighborState::TwoWay, NeighborEvent::AdjOk { proceed: false }) => {
+                NeighborState::TwoWay
+            }
+            // RFC 2328 §9.4 step 7 / §10.3: an AdjOK? with a negative
+            // decision (the DR/BDR relationship changed) breaks an
+            // existing adjacency back down to 2-Way — the exchange and
+            // loading states all demote (BIRD's INM_ADJOK does
+            // `reset_lists` + NEIGHBOR_2WAY).
+            (
+                NeighborState::ExStart
+                | NeighborState::Exchange
+                | NeighborState::Loading
+                | NeighborState::Full,
+                NeighborEvent::AdjOk { proceed: false },
+            ) => {
+                actions.push(Action::EmitEvent(lr_core::event::Event::Log(format!(
+                    "OSPF neighbor {} adjacency broken (no longer DR/BDR related)",
+                    self.router_id
+                ))));
                 NeighborState::TwoWay
             }
             (NeighborState::ExStart, NeighborEvent::NegotiationDone) => NeighborState::Exchange,

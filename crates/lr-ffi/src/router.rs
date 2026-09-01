@@ -5,7 +5,8 @@
 use lr_core::addr::{Asn, RouterId};
 use lr_core::time::Instant;
 use lr_router::{
-    DefaultRouter, OspfAreaType, RouterInstance, SessionConfig, SessionHandle, SessionKind,
+    DefaultRouter, OspfAreaType, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
+    SessionKind,
 };
 
 use crate::error::{set_last_error, LR_ERR_PANIC};
@@ -161,6 +162,9 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
                 area_id: 0,
                 ospf_area_type: OspfAreaType::Normal,
                 ospf_mtu: 1500,
+                ospf_network_type: OspfNetworkType::PointToPoint,
+                ospf_interface_ip: None,
+                ospf_neighbor_ip: None,
                 maximum_prefix: None,
                 maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
                 maximum_prefix_threshold: 75,

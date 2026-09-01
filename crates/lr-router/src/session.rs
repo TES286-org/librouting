@@ -113,6 +113,32 @@ impl OspfAreaType {
     }
 }
 
+/// OSPF interface network type (RFC 2328 §9.1/§9.4). Determines how
+/// adjacencies form on the segment: point-to-point links always become
+/// adjacent, broadcast segments elect a DR/BDR and only become adjacent
+/// with them (§10.4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OspfNetworkType {
+    /// RFC 2328 §9.1 point-to-point: every bidirectional neighbor
+    /// becomes adjacent (the historical lr behavior — matches the
+    /// `type ptp` BIRD/FRR configurations the interop labs pin).
+    PointToPoint,
+    /// RFC 2328 §9.1 broadcast: the segment elects a DR/BDR
+    /// (§9.4) and adjacencies follow §10.4. Hellos carry the elected
+    /// DR/BDR IP interface addresses (§A.3.2) and the DR originates
+    /// the Network-LSA (§12.4.2).
+    Broadcast,
+}
+
+impl OspfNetworkType {
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::PointToPoint => "point-to-point",
+            Self::Broadcast => "broadcast",
+        }
+    }
+}
+
 /// Configuration for a new session.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -186,6 +212,21 @@ pub struct SessionConfig {
     /// peers reject DBDs announcing a larger MTU). The daemon fills
     /// this from the kernel interface.
     pub ospf_mtu: u16,
+    /// OSPF interface network type (RFC 2328 §9.4). `PointToPoint`
+    /// (the default) always becomes adjacent with every bidirectional
+    /// neighbor; `Broadcast` gates adjacency on the §10.4 DR/BDR
+    /// relationship driven by the election results pushed via
+    /// `DefaultRouter::set_ospf_dr_state`.
+    pub ospf_network_type: OspfNetworkType,
+    /// Our own IPv4 interface address on the segment (RFC 2328 §12.4.1.2
+    /// transit-link Link Data; the identity the election compares
+    /// against when deciding whether *we* are DR/BDR). `None` = the
+    /// embedder has not supplied one (§10.4 treats us as DR-Other).
+    pub ospf_interface_ip: Option<u32>,
+    /// The neighbor's IPv4 interface address on the segment (the
+    /// election identity a received Hello's DR/BDR fields are compared
+    /// against when deciding whether the *neighbor* is DR/BDR).
+    pub ospf_neighbor_ip: Option<u32>,
     /// Per-peer maximum-prefix limit (BIRD `maximum prefix`, FRR
     /// `maximum-prefix`). `None` = no limit.
     pub maximum_prefix: Option<u32>,
@@ -233,6 +274,9 @@ impl SessionConfig {
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
             ospf_mtu: 1500,
+            ospf_network_type: OspfNetworkType::PointToPoint,
+            ospf_interface_ip: None,
+            ospf_neighbor_ip: None,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
@@ -346,6 +390,28 @@ impl SessionConfig {
         self
     }
 
+    /// Set the OSPF interface network type (RFC 2328 §9.4). Broadcast
+    /// segments gate adjacency on the elected DR/BDR (§10.4) and take
+    /// part in Network-LSA origination (§12.4.2) on the daemon side.
+    pub fn with_ospf_network_type(mut self, network: OspfNetworkType) -> Self {
+        self.ospf_network_type = network;
+        self
+    }
+
+    /// Set our own IPv4 interface address on the OSPF segment (the
+    /// §10.4 identity and the transit-link Link Data, §12.4.1.2).
+    pub fn with_ospf_interface_ip(mut self, ip: u32) -> Self {
+        self.ospf_interface_ip = Some(ip);
+        self
+    }
+
+    /// Set the neighbor's IPv4 interface address on the OSPF segment
+    /// (the identity the elected DR/BDR is compared against, §10.4).
+    pub fn with_ospf_neighbor_ip(mut self, ip: u32) -> Self {
+        self.ospf_neighbor_ip = Some(ip);
+        self
+    }
+
     /// Build an OSPFv2 session config.
     pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
         Self {
@@ -374,6 +440,9 @@ impl SessionConfig {
             area_id,
             ospf_area_type: OspfAreaType::Normal,
             ospf_mtu: 1500,
+            ospf_network_type: OspfNetworkType::PointToPoint,
+            ospf_interface_ip: None,
+            ospf_neighbor_ip: None,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
@@ -408,6 +477,9 @@ impl SessionConfig {
             area_id: 0,
             ospf_area_type: OspfAreaType::Normal,
             ospf_mtu: 1500,
+            ospf_network_type: OspfNetworkType::PointToPoint,
+            ospf_interface_ip: None,
+            ospf_neighbor_ip: None,
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
