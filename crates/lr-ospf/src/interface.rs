@@ -156,10 +156,10 @@ pub fn elect(electors: &[Elector], self_ip: u32) -> (u32, u32) {
                             Elector {
                                 stated_dr: dr,
                                 stated_bdr: bdr,
-                                ..e.clone()
+                                ..*e
                             }
                         } else {
-                            e.clone()
+                            *e
                         }
                     })
                     .collect();

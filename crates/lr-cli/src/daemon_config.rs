@@ -139,6 +139,10 @@ pub(crate) struct OspfIfSpec {
     pub dead_interval: Option<u32>,
     /// DR election priority (default 1).
     pub priority: Option<u8>,
+    /// RFC 2328 §9.1 network type: "p2p" (default) or "broadcast".
+    /// Broadcast runs the §9.4 DR/BDR election and gates adjacency per
+    /// §10.4.
+    pub network_type: Option<String>,
 }
 
 impl OspfIfSpec {
@@ -1366,6 +1370,15 @@ fn apply_ospf_key(
                             .parse()
                             .map_err(|_| format!("bad priority '{value}'"))?,
                     );
+                }
+                "network_type" => {
+                    let v = value.trim().trim_matches('"');
+                    if !matches!(v, "p2p" | "point-to-point" | "broadcast") {
+                        return Err(format!(
+                            "bad network_type '{v}' (use \"p2p\" or \"broadcast\")"
+                        ));
+                    }
+                    iface.network_type = Some(v.to_string());
                 }
                 _ => {
                     return Err(format!(
