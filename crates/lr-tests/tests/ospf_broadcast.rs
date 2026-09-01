@@ -10,9 +10,7 @@
 
 use lr_core::addr::{Prefix, RouterId};
 use lr_core::rib::RouteKey;
-use lr_router::{
-    DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
-};
+use lr_router::{DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle};
 
 fn broadcast_config(our_rid: [u8; 4], our_ip: u32, peer_ip: u32) -> SessionConfig {
     SessionConfig::ospfv2(RouterId::from_v4(our_rid), 0)

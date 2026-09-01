@@ -414,8 +414,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<OspfInterf
         // RouterDeadInterval before electing (p2p has no DR election;
         // priority-0 routers skip Waiting per §9.4 — they are never
         // eligible, BIRD goes straight to DR-Other too).
-        if_state: if network_type == OspfNetworkType::Broadcast && spec.priority.unwrap_or(1) > 0
-        {
+        if_state: if network_type == OspfNetworkType::Broadcast && spec.priority.unwrap_or(1) > 0 {
             IfState::Waiting
         } else {
             IfState::DrOther
@@ -1127,6 +1126,28 @@ impl OspfDaemon {
                             });
                         }
                     } else {
+                        // The transit link describes the connection to
+                        // the transit network itself (its prefix is
+                        // recovered from the Network-LSA). Secondary
+                        // addresses on the interface are separate
+                        // attached networks — they stay stub links
+                        // (BIRD models them as one broadcast interface
+                        // per address; FRR keeps one oi per connected
+                        // prefix — both keep the extra prefixes routed).
+                        let primary_net = iface
+                            .addrs
+                            .first()
+                            .map(|a| u32::from(a.network()))
+                            .unwrap_or(0);
+                        for addr in &iface.addrs {
+                            if u32::from(addr.network()) != primary_net {
+                                links.push(RouterLsaLink::Stub {
+                                    network: u32::from(addr.network()),
+                                    mask: prefix_mask(addr.prefix_len),
+                                    metric: iface.cost,
+                                });
+                            }
+                        }
                         // §12.4.1.2: transit link with Link ID = the DR's
                         // interface address (our own when we are the DR)
                         // and Link Data = our interface address.

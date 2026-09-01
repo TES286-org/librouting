@@ -166,8 +166,12 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                     // §12.4.1.2 no longer advertises once the transit
                     // link appears (BIRD spfa_process_net parity).
                     if entry.lsa.body.len() >= 4 {
-                        let mask =
-                            u32::from_be_bytes([entry.lsa.body[0], entry.lsa.body[1], entry.lsa.body[2], entry.lsa.body[3]]);
+                        let mask = u32::from_be_bytes([
+                            entry.lsa.body[0],
+                            entry.lsa.body[1],
+                            entry.lsa.body[2],
+                            entry.lsa.body[3],
+                        ]);
                         let net = ls_id & mask;
                         result.transit_routes.push(SpfRoute {
                             prefix: Prefix::new_v4(net.to_be_bytes(), mask_to_pl(mask)),
