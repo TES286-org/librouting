@@ -51,90 +51,126 @@ pub enum IfEvent {
 }
 
 /// One entry in DR/BDR election input (RFC 2328 §9.4.1).
+///
+/// On broadcast and NBMA networks a router is identified on the
+/// segment by its **IP interface address** (RFC 2328 §A.3.2 — the
+/// Hello's DR/BDR fields carry addresses, not router-ids), so `ip` is
+/// the election identity while `router_id` only breaks priority ties
+/// (BIRD `elect_bdr`/`elect_dr` and FRR's `ospf_dr_election_sub` both
+/// fall back to the router-id). `stated_dr`/`stated_bdr` carry the
+/// addresses the elector currently claims in its own Hellos.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Elector {
     pub router_id: u32,
+    /// This elector's IP interface address on the segment (identity).
+    pub ip: u32,
     pub priority: u8,
     pub stated_dr: u32,
     pub stated_bdr: u32,
 }
 
-/// Run the DR/BDR election algorithm (RFC 2328 §9.4.1). Returns (dr, bdr).
+/// Pick the highest-priority elector, ties broken by the highest
+/// router-id (RFC 2328 §9.4 steps 2/3; BIRD `max` in `elect_bdr` and
+/// `elect_dr`, FRR `ospf_dr_election_sub`).
+fn pick(candidates: &[&Elector]) -> Option<u32> {
+    candidates
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            a.priority
+                .cmp(&b.priority)
+                .then(a.router_id.cmp(&b.router_id))
+        })
+        .map(|e| e.ip)
+}
+
+/// Run the DR/BDR election algorithm (RFC 2328 §9.4). Returns
+/// `(dr_ip, bdr_ip)` — the IP interface addresses of the elected
+/// Designated Router and Backup Designated Router (0.0.0.0 when no
+/// router is elected).
 ///
-/// `our_id` is this router's own BGP/OSPF identifier; the caller includes
-/// itself in `electors` (with `stated_dr`/`stated_bdr` as this router
-/// claims) if it is eligible — routers with priority 0 never participate
-/// (§9.4.1 step 1).
-pub fn elect(electors: &[Elector], our_id: u32) -> (u32, u32) {
-    let eligible: Vec<&Elector> = electors.iter().filter(|e| e.priority > 0).collect();
-
-    // Step 1: BDR — pick the router that declared itself BDR (and is in our
-    // list), with highest priority, then highest router-id. If none declared
-    // themselves BDR, pick the highest-priority among the rest.
-    let mut bdr_candidates: Vec<&Elector> = eligible
+/// `electors` must contain every bidirectional neighbor (state ≥
+/// 2-Way) plus this router itself; routers with priority 0 are
+/// ineligible (§9.4 step 1: "Discard all routers from the list that
+/// are ineligible"). `self_ip` is this router's own identity on the
+/// segment and drives the §9.4 step-4 re-election: when the result
+/// newly makes (or un-makes) this router DR or BDR, the algorithm
+/// repeats with the router claiming the round-1 result — this
+/// guarantees no router ends up declaring itself both DR and BDR.
+pub fn elect(electors: &[Elector], self_ip: u32) -> (u32, u32) {
+    // §9.4 step 1: drop ineligible (priority 0) routers. The caller
+    // supplies only bidirectional neighbors; bidirectionality itself is
+    // not re-checked here.
+    let eligible: Vec<Elector> = electors
         .iter()
-        .copied()
-        .filter(|e| e.stated_bdr == e.router_id)
+        .filter(|e| e.priority > 0)
+        .cloned()
         .collect();
-    bdr_candidates.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
-            .then(b.router_id.cmp(&a.router_id))
-    });
-    let bdr = bdr_candidates.first().map(|e| e.router_id).unwrap_or(0);
 
-    // Step 2: DR — pick the router that declared itself DR (and is in our
-    // list). Fall back to the elected BDR.
-    let mut dr_candidates: Vec<&Elector> = eligible
-        .iter()
-        .copied()
-        .filter(|e| e.stated_dr == e.router_id)
-        .collect();
-    dr_candidates.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
-            .then(b.router_id.cmp(&a.router_id))
-    });
-    let dr = dr_candidates.first().map(|e| e.router_id).unwrap_or(bdr);
+    // One election round (§9.4 steps 2-3): BDR first, then DR. Split
+    // out so the step-4 repeat can re-run it with updated claims.
+    fn round(eligible: &[Elector]) -> (u32, u32) {
+        // Step 2: BDR. "Only those routers on the list that have not
+        // declared themselves to be Designated Router are eligible."
+        let not_dr: Vec<&Elector> = eligible.iter().filter(|e| e.stated_dr != e.ip).collect();
+        let bdr = {
+            let declared: Vec<&Elector> = not_dr
+                .iter()
+                .copied()
+                .filter(|e| e.stated_bdr == e.ip)
+                .collect();
+            pick(&declared).unwrap_or_else(|| {
+                // "If no routers have declared themselves Backup
+                // Designated Router, choose the router having highest
+                // Router Priority (again excluding those routers who
+                // have declared themselves Designated Router)."
+                pick(&not_dr).unwrap_or(0)
+            })
+        };
+        // Step 3: DR. Routers that declared themselves DR; if none,
+        // "assign the Designated Router to be the same as the newly
+        // elected Backup Designated Router".
+        let dr = {
+            let declared: Vec<&Elector> = eligible.iter().filter(|e| e.stated_dr == e.ip).collect();
+            pick(&declared).unwrap_or(bdr)
+        };
+        (dr, bdr)
+    }
 
-    // Step 3: recompute BDR — pick the highest priority that is not the
-    // elected DR, excluding routers with priority 0.
-    let mut bdr2_candidates: Vec<&Elector> = eligible
-        .iter()
-        .copied()
-        .filter(|e| e.router_id != dr)
-        .collect();
-    bdr2_candidates.sort_by(|a, b| {
-        b.priority
-            .cmp(&a.priority)
-            .then(b.router_id.cmp(&a.router_id))
-    });
-    // If the recomputation selected us, the RFC repeats with ourselves
-    // excluded (§9.4.1 step 3) — but only when there is another eligible
-    // router; a lone router still becomes DR.
-    let bdr_final = bdr2_candidates
-        .first()
-        .map(|e| e.router_id)
-        .unwrap_or(our_id);
-    let bdr_final = if bdr_final == our_id && bdr2_candidates.len() > 1 {
-        bdr2_candidates
-            .iter()
-            .find(|e| e.router_id != our_id)
-            .map(|e| e.router_id)
-            .unwrap_or(our_id)
-    } else {
-        bdr_final
-    };
+    let self_entry = eligible.iter().find(|e| e.ip == self_ip);
+    let (mut dr, mut bdr) = round(&eligible);
 
-    // A lone router on the segment (no other elector) is both DR and BDR.
-    let dr = if dr == 0 && bdr == 0 && !eligible.is_empty() {
-        // Electors exist but none declared themselves DR/BDR: we become DR.
-        our_id
-    } else {
-        dr
-    };
+    // Step 4: "If Router X is now newly the Designated Router or newly
+    // the Backup Designated Router, or is now no longer the Designated
+    // Router or no longer the Backup Designated Router, repeat steps 2
+    // and 3" — with X claiming the round-1 result (BIRD updates the
+    // `me` entry's dr/bdr before re-running the election).
+    let newly = |cur: u32, got: u32| (cur == self_ip) != (got == self_ip);
+    if self_ip != 0 {
+        if let Some(me) = self_entry {
+            if newly(me.stated_dr, dr) || newly(me.stated_bdr, bdr) {
+                let updated: Vec<Elector> = eligible
+                    .iter()
+                    .map(|e| {
+                        if e.ip == self_ip {
+                            Elector {
+                                stated_dr: dr,
+                                stated_bdr: bdr,
+                                ..e.clone()
+                            }
+                        } else {
+                            e.clone()
+                        }
+                    })
+                    .collect();
+                let (dr2, bdr2) = round(&updated);
+                dr = if dr2 == 0 { bdr2 } else { dr2 };
+                bdr = bdr2;
+            }
+        }
+    }
 
-    (dr, if bdr == 0 { bdr_final } else { bdr })
+    (dr, bdr)
 }
 
 /// Per-interface FSM. Stays minimal — full interface FSM lives in `lr-router`.
@@ -143,12 +179,17 @@ pub struct OspfInterface {
     pub priority: u8,
     pub hello_interval: u16,
     pub dead_interval: u32,
+    /// Elected Designated Router — its IP interface address on the
+    /// segment (§9.1 identity; 0.0.0.0 = none elected yet).
     pub dr: u32,
+    /// Elected Backup Designated Router (IP interface address).
     pub bdr: u32,
     pub area_id: u32,
-    /// This router's own identifier (used as the self candidate in
-    /// DR/BDR election).
+    /// This router's own identifier (tie-break input; election identity
+    /// is the interface's IP, kept by the caller in `Elector::ip`).
     pub router_id: u32,
+    /// This router's own IP interface address on the segment.
+    pub ip: u32,
 }
 
 impl OspfInterface {
@@ -162,6 +203,7 @@ impl OspfInterface {
             bdr: 0,
             area_id,
             router_id: 0,
+            ip: 0,
         }
     }
 }
@@ -182,21 +224,25 @@ impl StateMachine for OspfInterface {
             (_s, IfEvent::InterfaceDown) => IfState::Down,
             (_s, IfEvent::NeighborChange { elector }) => {
                 // Elect including ourselves (the router is eligible while
-                // priority > 0; the RFC's step 3 self-exclusion is handled
+                // priority > 0; the RFC's step-4 self-exclusion is handled
                 // inside `elect`).
                 let mut all = elector.clone();
                 all.push(Elector {
                     router_id: self.router_id,
+                    ip: self.ip,
                     priority: self.priority,
                     stated_dr: self.dr,
                     stated_bdr: self.bdr,
                 });
-                let (dr, bdr) = elect(&all, self.router_id);
+                let (dr, bdr) = elect(&all, self.ip);
                 self.dr = dr;
                 self.bdr = bdr;
-                if self.router_id == dr {
+                // Role follows the IP identity (§9.1: on broadcast
+                // networks the DR is identified by its interface
+                // address, not the router-id).
+                if self.ip != 0 && self.ip == dr {
                     IfState::Dr
-                } else if self.router_id == bdr {
+                } else if self.ip != 0 && self.ip == bdr {
                     IfState::Backup
                 } else {
                     IfState::DrOther
@@ -222,78 +268,152 @@ impl StateMachine for OspfInterface {
 mod tests {
     use super::*;
 
+    fn el(router_id: u32, ip: u32, priority: u8, stated_dr: u32, stated_bdr: u32) -> Elector {
+        Elector {
+            router_id,
+            ip,
+            priority,
+            stated_dr,
+            stated_bdr,
+        }
+    }
+
+    /// §9.4 step 2: routers that declared themselves BDR (but not DR)
+    /// win BDR election; step 3: self-declared DR wins DR election.
     #[test]
     fn elect_basic() {
         let electors = vec![
-            Elector {
-                router_id: 1,
-                priority: 1,
-                stated_dr: 1,
-                stated_bdr: 0,
-            },
-            Elector {
-                router_id: 2,
-                priority: 1,
-                stated_dr: 0,
-                stated_bdr: 2,
-            },
-            Elector {
-                router_id: 3,
-                priority: 200,
-                stated_dr: 0,
-                stated_bdr: 0,
-            },
+            el(1, 0x0a00_0001, 1, 0x0a00_0001, 0),
+            el(2, 0x0a00_0002, 1, 0, 0x0a00_0002),
+            el(3, 0x0a00_0003, 200, 0, 0),
         ];
-        let (dr, bdr) = elect(&electors, 99);
-        assert_eq!(dr, 1);
-        // bdr: 2 declared itself BDR; we should prefer 2 over fallback 3 even
-        // though 3 has higher priority? Per RFC §9.4.1 step 1, only routers
-        // that declared themselves BDR are eligible. So 2 wins.
-        assert_eq!(bdr, 2);
+        let (dr, bdr) = elect(&electors, 0x0a00_0063);
+        assert_eq!(dr, 0x0a00_0001);
+        // bdr: 2 declared itself BDR; per §9.4 step 2, only routers that
+        // declared themselves BDR (and not DR) are eligible — so 2 wins
+        // over the higher-priority 3.
+        assert_eq!(bdr, 0x0a00_0002);
     }
 
+    /// §9.4 step 2 fallback: nobody declares BDR → highest priority
+    /// among the non-DR-declarers, router-id breaking ties.
     #[test]
-    fn elect_with_higher_priority_no_declared() {
-        // None declares; should elect by priority then router-id.
+    fn elect_bdr_fallback_priority() {
         let electors = vec![
-            Elector {
-                router_id: 1,
-                priority: 1,
-                stated_dr: 0,
-                stated_bdr: 0,
-            },
-            Elector {
-                router_id: 3,
-                priority: 200,
-                stated_dr: 0,
-                stated_bdr: 0,
-            },
+            el(1, 0x0a00_0001, 1, 0, 0),
+            el(3, 0x0a00_0003, 200, 0, 0),
+            el(2, 0x0a00_0002, 200, 0, 0),
         ];
-        let (_dr, bdr) = elect(&electors, 99);
-        // _dr would be our_id (no candidate declared). We test BDR.
-        assert_eq!(bdr, 3);
+        let (_dr, bdr) = elect(&electors, 0x0a00_0063);
+        // 3 and 2 tie on priority → highest router-id wins.
+        assert_eq!(bdr, 0x0a00_0003);
     }
 
-    /// RFC 2328 §9.4.1: routers with priority 0 never take part.
+    /// §9.4 step 3 fallback: nobody declares DR → DR = newly elected
+    /// BDR (the same neighbor identity, not 0).
+    #[test]
+    fn elect_dr_falls_back_to_bdr() {
+        let electors = vec![el(1, 0x0a00_0001, 1, 0, 0), el(2, 0x0a00_0002, 100, 0, 0)];
+        let (dr, bdr) = elect(&electors, 0x0a00_0001);
+        assert_eq!(bdr, 0x0a00_0002);
+        assert_eq!(dr, 0x0a00_0002, "DR must fall back to the elected BDR");
+    }
+
+    /// §9.4 step 4: a router that ends up claiming both DR and BDR in
+    /// round 1 must re-run the election claiming itself DR — the BDR
+    /// then moves to another router (BIRD's second round in
+    /// ospf_dr_election).
+    #[test]
+    fn elect_step4_repeat_resolves_double_claim() {
+        // Two fresh routers (no claims yet): the higher router-id wins
+        // round 1 (as BDR and by DR fallback), i.e. router 2. Router 2
+        // (self here) must then re-run claiming itself DR so router 1
+        // becomes BDR instead of the double claim (DR=2, BDR=2).
+        let electors = vec![el(1, 0x0a00_0001, 1, 0, 0), el(2, 0x0a00_0002, 1, 0, 0)];
+        let (dr, bdr) = elect(&electors, 0x0a00_0002);
+        assert_eq!(dr, 0x0a00_0002);
+        assert_eq!(
+            bdr, 0x0a00_0001,
+            "step-4 repeat must promote the other router to BDR"
+        );
+    }
+
+    /// §9.4 step 4 must NOT fire when our status is unchanged: a DR
+    /// already claiming itself stays, and the BDR is picked normally.
+    #[test]
+    fn elect_step4_stable_when_unchanged() {
+        let electors = vec![
+            el(1, 0x0a00_0001, 1, 0x0a00_0001, 0),
+            el(2, 0x0a00_0002, 1, 0, 0x0a00_0002),
+            el(9, 0x0a00_0009, 5, 0, 0),
+        ];
+        // Self = router 9 (no claims): round 1 yields DR=1, BDR=2; we
+        // are neither → no repeat.
+        let (dr, bdr) = elect(&electors, 0x0a00_0009);
+        assert_eq!(dr, 0x0a00_0001);
+        assert_eq!(bdr, 0x0a00_0002);
+    }
+
+    /// §9.4 step 1: routers with priority 0 never take part — not as
+    /// DR, not as BDR, and they are excluded from the fallback pools.
     #[test]
     fn elect_excludes_priority_zero() {
         let electors = vec![
-            Elector {
-                router_id: 1,
-                priority: 0,
-                stated_dr: 1,
-                stated_bdr: 1,
-            },
-            Elector {
-                router_id: 2,
-                priority: 1,
-                stated_dr: 0,
-                stated_bdr: 2,
-            },
+            el(1, 0x0a00_0001, 0, 0x0a00_0001, 0x0a00_0001),
+            el(2, 0x0a00_0002, 1, 0, 0),
         ];
-        let (dr, bdr) = elect(&electors, 99);
-        assert_eq!(dr, 2, "priority-0 router must not become DR");
-        assert_eq!(bdr, 2);
+        let (dr, bdr) = elect(&electors, 0x0a00_0063);
+        assert_eq!(dr, 0x0a00_0002, "priority-0 router must not become DR");
+        assert_eq!(bdr, 0x0a00_0002);
+    }
+
+    /// A lone eligible router elects itself DR. The BDR is none
+    /// (0.0.0.0): after the step-4 repeat the router claims itself DR,
+    /// leaving nobody eligible for BDR — same outcome as BIRD's second
+    /// election round (nbdr = NULL) and RFC 2328 §9.4 step 2 (the
+    /// fallback pool excludes DR-declarers).
+    #[test]
+    fn elect_lone_router_is_dr() {
+        let electors = vec![el(9, 0x0a00_0009, 1, 0, 0)];
+        let (dr, bdr) = elect(&electors, 0x0a00_0009);
+        assert_eq!(dr, 0x0a00_0009);
+        assert_eq!(bdr, 0);
+    }
+
+    /// DR death transition: the old DR stops claiming; the BDR takes
+    /// over (step 3) and a new BDR is picked (step 4 repeat when we
+    /// were the old BDR and now become DR).
+    #[test]
+    fn elect_dr_death_promotes_bdr() {
+        // Self = router 2, currently BDR (claiming itself BDR). Router 1
+        // (DR) died: its elector is gone. We should become DR (we claim
+        // BDR... no router claims DR) and the repeat fixes our double
+        // claim, promoting router 3 to BDR.
+        let electors = vec![
+            el(2, 0x0a00_0002, 1, 0, 0x0a00_0002),
+            el(3, 0x0a00_0003, 1, 0, 0),
+        ];
+        let (dr, bdr) = elect(&electors, 0x0a00_0002);
+        assert_eq!(
+            dr, 0x0a00_0002,
+            "the old BDR becomes DR via step 3 fallback"
+        );
+        assert_eq!(
+            bdr, 0x0a00_0003,
+            "step-4 repeat must promote router 3 to BDR"
+        );
+    }
+
+    /// Priority beats router-id: a lower-id router with higher priority
+    /// wins the election.
+    #[test]
+    fn elect_priority_beats_router_id() {
+        let electors = vec![
+            el(1, 0x0a00_0001, 1, 0x0a00_0001, 0),
+            el(2, 0x0a00_0002, 255, 0x0a00_0002, 0),
+        ];
+        let (dr, _) = elect(&electors, 0x0a00_0063);
+        assert_eq!(dr, 0x0a00_0002);
     }
 
     /// The FSM must reach DR/Backup when we win the election.
@@ -301,6 +421,7 @@ mod tests {
     fn fsm_enters_dr_and_backup() {
         let mut iface = OspfInterface::new(0);
         iface.router_id = 9;
+        iface.ip = 0x0a00_0009;
         iface.priority = 100;
         iface.step(IfEvent::InterfaceUp);
         assert_eq!(iface.state, IfState::Waiting);
@@ -308,20 +429,16 @@ mod tests {
         // Only we are present and eligible → we become DR.
         iface.step(IfEvent::NeighborChange { elector: vec![] });
         assert_eq!(iface.state, IfState::Dr);
-        assert_eq!(iface.dr, 9);
+        assert_eq!(iface.dr, 0x0a00_0009);
 
-        // A higher-priority router appears → we drop to DR-Other and it
-        // becomes DR; we are Backup.
+        // A higher-priority router appears → it becomes DR; we drop to
+        // Backup (we claim DR from the previous round, so the step-4
+        // repeat reclassifies us as its BDR).
         iface.step(IfEvent::NeighborChange {
-            elector: vec![Elector {
-                router_id: 5,
-                priority: 200,
-                stated_dr: 5,
-                stated_bdr: 0,
-            }],
+            elector: vec![el(5, 0x0a00_0005, 200, 0x0a00_0005, 0)],
         });
-        assert_eq!(iface.dr, 5);
-        assert_eq!(iface.bdr, 9);
+        assert_eq!(iface.dr, 0x0a00_0005);
+        assert_eq!(iface.bdr, 0x0a00_0009);
         assert_eq!(iface.state, IfState::Backup);
     }
 }
