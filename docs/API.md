@@ -619,6 +619,26 @@ engine.withdraw_mapping(Prefix::new_v4([198, 51, 100, 0], 24));
 // engine.lib().label_from(peer, &FecKey::new(prefix)) -> Option<GenericLabel>
 ```
 
+Transit-LSR label allocation (RFC 5036 §3.5.7.1.1, independent
+control) is built into the engine behind
+`cfg.transit_allocation` (default off in the library — the daemon
+turns it on): every FEC learned from a peer gets one locally
+allocated label (`cfg.label_min..=cfg.label_max`, with
+`cfg.reserved_labels` excluded) that is re-advertised upstream to
+every operational peer with the §3.4.4.1 incremented Hop Count and —
+when loop detection is configured — the §A.2.6.4 Path Vector extended
+with the local LSR Id. The embedder sees the resulting LSP state as
+`EngineEvent::TransitSwapChanged { prefix, in_label, next_hop,
+out_label }` (mirror it into the dataplane as a swap) and
+`EngineEvent::TransitSwapRemoved { prefix, in_label }` (the last
+non-reflected downstream binding disappeared: the label is released
+and the FEC withdrawn upstream);
+`EngineEvent::TransitLabelExhausted { prefix }` reports an exhausted
+label range. `engine.transit_label_of(&prefix)` and
+`engine.transit_next_hop(&prefix)` introspect the state; FEC keys are
+normalized to the §3.4.1.1 wire form, so an advertised
+`10.0.0.1/24` and a peer's `10.0.0.0/24` are the same FEC.
+
 RFC 7552 (LDP over IPv6) is built in: set
 `cfg.transport_addr_v6` (or construct the engine with an IPv6
 `transport_addr` for a single-stack IPv6 speaker) and the engine

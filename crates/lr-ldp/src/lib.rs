@@ -61,6 +61,7 @@ pub mod message;
 pub mod pdu;
 pub mod session;
 pub mod tlv;
+pub mod transit;
 
 pub use engine::{EngineEvent, LdpEngine, LdpEngineConfig};
 pub use message::{LdpCodec, LdpMessage, LdpPdu, RawMessage};

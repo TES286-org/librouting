@@ -395,6 +395,14 @@ pub(crate) struct DaemonConfig {
     pub ldp_label_min: u32,
     /// See `ldp_label_min`.
     pub ldp_label_max: u32,
+    /// RFC 5036 §3.5.7.1.1 transit-LSR label allocation: allocate one
+    /// local label per FEC learned from peers, re-advertise it
+    /// upstream and (with `ldp_install_kernel`) mirror the resulting
+    /// swap into the kernel MPLS dataplane. Default on — a real LSR
+    /// forwards labeled traffic; `[ldp] transit_allocation = false`
+    /// (or `--ldp-no-transit`) pins the daemon to the egress/ingress
+    /// roles of its explicitly configured bindings only.
+    pub ldp_transit_allocation: bool,
     /// RFC 5036 §2.8 Loop Detection: propose the D bit (PVLim =
     /// `ldp_loop_pv_limit`) in the Init and enforce the §3.4.4.1/A.2.6
     /// Hop Count and Path Vector checks on received Label Mapping and
@@ -486,6 +494,7 @@ impl DaemonConfig {
             ldp_install_kernel: false,
             ldp_label_min: 16,
             ldp_label_max: 1048575,
+            ldp_transit_allocation: true,
             ldp_loop_detection: false,
             ldp_loop_hc_limit: 32,
             ldp_loop_pv_limit: 32,
@@ -1459,6 +1468,11 @@ fn apply_ldp_key(
                     .parse()
                     .map_err(|_| format!("bad label_max '{value}'"))?;
             }
+            "transit_allocation" => {
+                cfg.ldp_transit_allocation = value
+                    .parse()
+                    .map_err(|_| format!("bad transit_allocation '{value}' (true|false)"))?;
+            }
             "port" => {
                 cfg.ldp_port = value
                     .parse()
@@ -1924,6 +1938,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--ldp-label-max" if i + 1 < args.len() => {
                 cfg.ldp_label_max = args[i + 1].parse().unwrap_or(1048575);
                 i += 2;
+            }
+            "--ldp-no-transit" => {
+                cfg.ldp_transit_allocation = false;
+                i += 1;
             }
             "--ldp-port" if i + 1 < args.len() => {
                 cfg.ldp_port = args[i + 1].parse().unwrap_or(646);
@@ -2504,6 +2522,22 @@ mod tests {
             let err = err.expect_err("unknown LDP key must fail");
             assert!(err.contains("typo protection"), "{section}.{key}: {err}");
         }
+    }
+
+    #[test]
+    fn ldp_transit_allocation_defaults_on_and_parses() {
+        // Default: transit allocation is on (a real LSR forwards).
+        let mut cfg = DaemonConfig::with_defaults();
+        assert!(cfg.ldp_transit_allocation);
+        parse_toml_subset("[ldp]\ntransit_allocation = false\n", &mut cfg).unwrap();
+        assert!(!cfg.ldp_transit_allocation);
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[ldp]\ntransit_allocation = true\n", &mut cfg).unwrap();
+        assert!(cfg.ldp_transit_allocation);
+        // Bad value fails closed.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[ldp]\ntransit_allocation = \"yes\"\n", &mut cfg).unwrap_err();
+        assert!(err.contains("transit_allocation"), "{err}");
     }
 
     #[test]

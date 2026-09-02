@@ -109,6 +109,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Daemon transport (`--protocol ldp`, TCP/UDP 646) + FRR ldpd interop | ✅ 🧪 | wildcard UDP socket joins 224.0.0.2 per interface, link Hellos every hold-time third with TTL 1 and per-interface egress (`send_link_hello`), targeted Hellos unicast; TCP listener + active connects driven by `EstablishTransport` (connect failures return the peer to the engine for a retry on the next Hello); `[[ldp.bind]]` FEC-label pairs advertised downstream-unsolicited and re-advertised on every fresh SessionUp; self-Hello protection (PDUs carrying our own LDP Identifier are dropped); runtime API status counters; verified two-daemon over a veth pair (`tests/interop/ldp.sh`) and against FRR 10 ldpd (`tests/interop/ldp_frr.sh` — lr learns FRR's imp-null connected-FEC binding, FRR learns lr's explicit binding) |
 | RFC 7552 IPv6 dual-stack procedures | ✅ 🧪 | §5.1 IPv6 basic discovery (ff02::2 link Hellos, hop-limit-255 GTSM check, link-local sources), §5.2 targeted over global unicast only (link-local rejected at config parse), §6.1 Dual-Stack capability TLV (0x0701) with the TR transport-connection preference (LDPoIPv6 default per §6.1.1), per-family Transport Address TLV handling (same-AF only, first-per-family accepted from noncompliant senders), one session per LDP Identifier, §6.1.1 dual-stack role decision (noncompliant both-AF/no-capability neighbours never get a session, preference mismatch resets with the fatal 0x32 notification), §7.1 per-family Address-message scoping, §7 IPv6 FEC bindings never advertised to legacy v4-only peers; single-stack IPv6 speakers supported; daemon: dual-stack UDP/TCP transports with a V6ONLY=0 listener; 13 unit tests + 3 loopback v6 e2e (not yet verified against an external dual-stack LDP implementation) |
 | Kernel MPLS mirror + label range allocation | ✅ 🧪 | `[ldp] install_kernel` mirrors the LIB into the Linux AF_MPLS dataplane — pop route per local binding (tail, local delivery via `lo`) and encap route per learned binding (head, pushing the peer's label toward its transport address); MappingWithdrawn and session teardown reverse both halves, graceful shutdown cleans up. `[ldp] label_min/label_max` (16..=1048575, fail-closed validation) drive automatic allocation for label-0 binds — the first free value inside the range, exhaustion is a startup error; `tests/interop/ldp.sh` phase 3 asserts kernel LSP state on both LSRs, an end-to-end ICMP echo through the LSP, and teardown reverting the encap route (gated on `mpls_router`) |
+| §3.5.7.1.1 transit-LSR label allocation (independent control) | ✅ 🧪 | the engine allocates one local label per FEC learned from peers (platform range 16..=1048575, explicitly configured bind labels reserved), re-advertises it upstream to every operational peer with the §3.4.4.1 incremented hop count (unknown stays unknown; 255 stops propagation) and the §A.2.6.4 Path Vector + own LSR Id when loop detection is on, answers Label Requests with it, and re-pushes the full transit LIB on every fresh SessionUp; egress FECs (locally bound) are excluded, a FEC whose last non-reflected downstream binding disappears is withdrawn upstream and its label recycled. Next-hop selection without an IGP view: the first peer that advertised the FEC wins (bindings propagate outward from the egress, so the first mapping is causally the closest to it); on its loss the fallback picks the lowest LDP Id among *non-reflected* bindings only (arrived before the local allocation — a post-allocation mapping is the upstream echo of our own advertisement, and using it would loop the exchange); if none remains the LSP is torn down and reflected bindings are released. FEC keys are normalized to the §3.4.1.1 wire form (host bits never fit the encoding). Engine state surfaces as `TransitSwapChanged` / `TransitSwapRemoved` / `TransitLabelExhausted`; the daemon mirrors the swap into the kernel (`MplsRoute::swap` via a cached FIB lookup for the output interface, routed peers refused with a note) and exposes `ldp-transit-labels` in the runtime API; `[ldp] transit_allocation` (default on) / `--ldp-no-transit` disable it. Verified by a three-speaker loopback e2e (allocation, hop-count propagation, withdrawal cascade + label reuse, bind exclusion, transport-close teardown) and `tests/interop/ldp.sh` phase 3c: r2 — the middle LSR of a three-LSR chain — transit-allocates for r3's FEC and re-advertises to r1, r3's death tears the LSP down, and with kernel MPLS an ICMP echo crosses the full r1→r2(swap)→r3 LSP (gated on `mpls_router`) |
 
 ## Layer 3 — router pipeline (`lr-router`)
 
@@ -149,7 +150,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Item | Status |
 |------|:------:|
-| Unit tests (workspace) | ✅ 41 binaries / 850 tests |
+| Unit tests (workspace) | ✅ 42 binaries / 900+ tests |
 | Two-daemon TCP E2E | ✅ 🧪 | `lr-tests/tests/tcp_smoke.rs` |
 | Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪 | `lr-tests/tests/route_propagation.rs` |
 | Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪 | `lr-tests/tests/protocol_runtimes.rs` |
@@ -168,6 +169,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | OSPF x BIRD E2E (real DBD/LSR exchange to Full adjacency, stub nets propagated in BOTH directions via birdc) | ✅ 🧪 | `tests/interop/ospf_bird.sh` — lr-daemon ↔ BIRD 2 over a veth pair |
 | Babel MAC auth E2E (two-daemon: propagation, restart challenge resync, wrong-key fail-closed, RFC 8967 §5 incremental deployment) | ✅ 🧪 | `tests/interop/babel_auth.sh` — IPv4 multicast over loopback, rootless netns |
 | LDP two-daemon E2E (multicast link-Hello discovery over a veth pair, TCP 646 session, bindings both directions, hold-time teardown) | ✅ 🧪 | `tests/interop/ldp.sh` — rootless netns, one LSR per namespace |
+| LDP transit-LSR E2E (three-LSR chain: middle LSR transit-allocates and re-advertises upstream, peer death tears the LSP down and withdraws it; kernel-gated ICMP echo across the full r1→r2(swap)→r3 LSP) | ✅ 🧪 | `tests/interop/ldp.sh` phase 3c |
 | MRT interop (BIRD 2 `protocol mrt` dump decoded by `lr mrt rib`; daemon Loc-RIB export round-trip with AS path + next hop) | ✅ 🧪 | `tests/interop/mrt.sh` |
 | BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪 | `tests/interop/bmp.sh` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
@@ -641,20 +643,23 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    FRR 10 ldpd (`tests/interop/ldp_frr.sh`: lr learns FRR's
    implicit-null connected-FEC binding, FRR's LIB carries lr's
    explicit 24000 binding) and two-daemon over a veth pair
-   (`tests/interop/ldp.sh`). Three follow-up slices landed: RFC 7552
+   (`tests/interop/ldp.sh`). Four follow-up slices landed: RFC 7552
    IPv6 dual-stack procedures (library + daemon transport, see the
    LDP capability table), the `[ldp] install_kernel` AF_MPLS mirror
-   of learned bindings, and automatic label allocation from the
-   `[ldp] label_min/label_max` range. RFC 5036 §3.5.4 loop detection
+   of learned bindings, automatic label allocation from the
+   `[ldp] label_min/label_max` range, and §3.5.7.1.1 transit-LSR
+   label allocation (one local label per learned FEC,
+   re-advertised upstream with propagated Hop Count / Path Vector,
+   reflected-binding-safe next-hop fallback, kernel swap mirror —
+   see the LDP capability table). RFC 5036 §3.5.4 loop detection
    landed on top: `[ldp] loop_detection` (+ `loop_hop_count_limit` /
    `loop_path_vector_limit`, CLI `--ldp-loop-detection`) proposes the
    D bit with PVLim and enforces the §3.4.4.1/A.2.6 checks — a looping
    Mapping is rejected with a Label Release carrying the Loop Detected
    Status TLV, a looping Request
    answered with the non-fatal Loop Detected Notification. Still open:
-   RFC 3478 graceful restart, per-prefix label allocation for transit
-   LSR roles (swap toward a labelled next hop), and external
-   dual-stack interop verification.
+   RFC 3478 graceful restart and external dual-stack interop
+   verification.
 5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
    Future work; depends on RFC 9256 (Segment Routing Policy) once an
    embedder asks.

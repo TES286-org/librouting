@@ -45,13 +45,18 @@ impl LabelMappingStore {
     }
 
     /// Record a binding learned from a peer (Label Mapping). Returns
-    /// `true` when the binding is new for that (peer, FEC) pair.
+    /// `true` when the binding is new for that (peer, FEC) pair **or
+    /// changed** (the peer re-advertised a different label) — both
+    /// require the embedder to re-evaluate the FEC. An identical
+    /// re-advertisement returns `false`.
     pub fn learn(&mut self, peer: LdpId, key: FecKey, label: GenericLabel) -> bool {
-        self.received
-            .entry(peer)
-            .or_default()
-            .insert(key, label)
-            .is_none()
+        if let Some(old) = self.received.get(&peer).and_then(|m| m.get(&key)) {
+            if *old == label {
+                return false;
+            }
+        }
+        self.received.entry(peer).or_default().insert(key, label);
+        true
     }
 
     /// Remove a binding learned from a peer (Label Withdraw / Release).

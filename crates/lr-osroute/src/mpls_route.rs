@@ -244,6 +244,89 @@ impl MplsRoute {
     }
 }
 
+/// The kernel's answer to a FIB lookup (`ip route get <addr>` shape):
+/// the output interface the traffic leaves on and — when the
+/// destination is behind a gateway rather than directly connected —
+/// that gateway. MPLS swap programming needs the interface; the
+/// gateway distinguishes an on-link LDP peer from a routed one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NexthopInfo {
+    pub if_index: u32,
+    pub gateway: Option<IpAddr>,
+    /// The source address the kernel would pick for this destination.
+    pub prefsrc: Option<IpAddr>,
+}
+
+/// Parse the kernel's reply to a `resolve_nexthop` FIB lookup: a
+/// single `RTM_NEWROUTE` message carrying `RTA_OIF` (and optionally
+/// `RTA_GATEWAY` / `RTA_PREFSRC`), or an `NLMSG_ERROR` (e.g.
+/// `ENETUNREACH` for no route). Exposed for unit tests.
+fn parse_getroute_reply(resp: &[u8], queried: IpAddr) -> Result<NexthopInfo, MplsRouteError> {
+    if resp.len() < 16 {
+        return Err(MplsRouteError::Syscall(format!(
+            "getroute: short reply ({})",
+            resp.len()
+        )));
+    }
+    let nlmsg_type = u16::from_ne_bytes([resp[4], resp[5]]);
+    if nlmsg_type == NLMSG_ERROR {
+        // nlmsgerr: <error:i32> — negative errno on failure.
+        let errno = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
+        let kind = if errno == 0 { "ack" } else { "error" };
+        return Err(MplsRouteError::Syscall(format!(
+            "getroute {}: {} (no route to {queried}?)",
+            kind,
+            std::io::Error::from_raw_os_error(-errno)
+        )));
+    }
+    // Walk the attributes after the 16-byte nlmsghdr + 12-byte rtmsg.
+    let mut if_index = 0;
+    let mut gateway = None;
+    let mut prefsrc = None;
+    let mut cursor = 28;
+    while cursor + 4 <= resp.len() {
+        let rta_len = u16::from_ne_bytes([resp[cursor], resp[cursor + 1]]) as usize;
+        let rta_type = u16::from_ne_bytes([resp[cursor + 2], resp[cursor + 3]]);
+        if rta_len < 4 || cursor + rta_len > resp.len() {
+            break;
+        }
+        let data = &resp[cursor + 4..cursor + rta_len];
+        match rta_type {
+            RTA_OIF if data.len() >= 4 => {
+                if_index = u32::from_ne_bytes([data[0], data[1], data[2], data[3]]);
+            }
+            RTA_GATEWAY => match queried {
+                IpAddr::V4(_) if data.len() >= 4 => {
+                    gateway = Some(IpAddr::V4([data[0], data[1], data[2], data[3]]))
+                }
+                IpAddr::V6(_) if data.len() >= 16 => {
+                    let mut o = [0u8; 16];
+                    o.copy_from_slice(&data[..16]);
+                    gateway = Some(IpAddr::V6(o));
+                }
+                _ => {}
+            },
+            7 if data.len() >= 4 => {
+                // RTA_PREFSRC (not named above — lookup replies carry it
+                // for directly connected destinations).
+                prefsrc = Some(IpAddr::V4([data[0], data[1], data[2], data[3]]));
+            }
+            _ => {}
+        }
+        cursor += (rta_len + 3) & !3;
+    }
+    if if_index == 0 {
+        return Err(MplsRouteError::Syscall(format!(
+            "getroute: reply carries no output interface ({queried})",
+        )));
+    }
+    Ok(NexthopInfo {
+        if_index,
+        gateway,
+        prefsrc,
+    })
+}
+
 /// Read `/proc/sys/net/mpls/platform_labels` and return the label-bit
 /// width the kernel supports (typically 16 or 20). Returns 0 when MPLS
 /// routing is not enabled or the platform is not Linux.
@@ -605,6 +688,40 @@ impl MplsNetlink {
         let buf = self.build_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, route)?;
         let resp = self.sendmsg_and_recv(&buf)?;
         check_ack(&resp)
+    }
+
+    /// Resolve the L3 path toward `addr` with a FIB lookup — the
+    /// rtnetlink equivalent of `ip route get <addr>` (RTM_GETROUTE
+    /// without NLM_F_DUMP: the kernel answers with the route it would
+    /// use, including the output interface and, for routed
+    /// destinations, the gateway). MPLS swap actions need the output
+    /// interface (`RTA_VIA` without `RTA_OIF` is rejected by
+    /// `mpls_build_route`), so a transit LSR resolves it once per next
+    /// hop instead of guessing.
+    pub fn resolve_nexthop(&mut self, addr: IpAddr) -> Result<NexthopInfo, MplsRouteError> {
+        let (family, dst, dst_len) = match addr {
+            IpAddr::V4(b) => (AF_INET as u8, b.to_vec(), 32u8),
+            IpAddr::V6(b) => (AF_INET6 as u8, b.to_vec(), 128u8),
+        };
+        let mut attrs = Self::build_rta_attribute(RTA_DST, &dst);
+        while attrs.len() % 4 != 0 {
+            attrs.push(0);
+        }
+        let total_len = 16 + 12 + attrs.len();
+        let aligned = (total_len + 3) & !3;
+        let mut buf = vec![0u8; aligned];
+        buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&RTM_GETROUTE.to_ne_bytes());
+        buf[6..8].copy_from_slice(&NLM_F_REQUEST.to_ne_bytes());
+        let seq = self.next_seq();
+        buf[8..12].copy_from_slice(&seq.to_ne_bytes());
+        buf[12..16].copy_from_slice(&self.pid.to_ne_bytes());
+        buf[16] = family;
+        buf[17] = dst_len;
+        // rtm_table/protocol/scope/type: zeros are fine for a lookup.
+        buf[28..28 + attrs.len()].copy_from_slice(&attrs);
+        let resp = self.sendmsg_and_recv(&buf)?;
+        parse_getroute_reply(&resp, addr)
     }
 
     /// Delete the MPLS route keyed by `in_label`.
@@ -1074,5 +1191,75 @@ mod tests {
             Err(MplsRouteError::ImplicitNullLabel) => { /* expected */ }
             other => panic!("expected ImplicitNullLabel, got {:?}", other),
         }
+    }
+
+    /// Build a synthetic `RTM_GETROUTE` reply (nlmsghdr + rtmsg +
+    /// attributes) the way the kernel answers a FIB lookup.
+    fn getroute_reply(attrs: &[(&u16, &[u8])]) -> Vec<u8> {
+        let mut body = Vec::new();
+        for (t, data) in attrs {
+            body.extend(MplsNetlink::build_rta_attribute(**t, data));
+        }
+        let total_len = 16 + 12 + body.len();
+        let mut buf = vec![0u8; total_len];
+        buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&RTM_NEWROUTE.to_ne_bytes());
+        buf[16] = AF_INET as u8;
+        buf[17] = 32;
+        buf[28..].copy_from_slice(&body);
+        buf
+    }
+
+    #[test]
+    fn parse_getroute_reply_reads_oif_gateway_prefsrc() {
+        let oif = 5u32.to_ne_bytes();
+        let gw = [10u8, 0, 0, 1];
+        let prefsrc = [192u8, 0, 2, 254];
+        let reply = getroute_reply(&[
+            (&RTA_OIF, &oif),
+            (&RTA_GATEWAY, &gw),
+            (&7, &prefsrc), // RTA_PREFSRC
+        ]);
+        let info = parse_getroute_reply(&reply, IpAddr::V4([10, 0, 0, 9])).unwrap();
+        assert_eq!(info.if_index, 5);
+        assert_eq!(info.gateway, Some(IpAddr::V4([10, 0, 0, 1])));
+        assert_eq!(info.prefsrc, Some(IpAddr::V4([192, 0, 2, 254])));
+    }
+
+    #[test]
+    fn parse_getroute_reply_directly_connected_has_no_gateway() {
+        let oif = 7u32.to_ne_bytes();
+        let reply = getroute_reply(&[(&RTA_OIF, &oif)]);
+        let info = parse_getroute_reply(&reply, IpAddr::V4([10, 0, 0, 9])).unwrap();
+        assert_eq!(info.if_index, 7);
+        assert_eq!(info.gateway, None);
+    }
+
+    #[test]
+    fn parse_getroute_reply_error_message_is_an_error() {
+        // NLMSG_ERROR with EINVAL.
+        let mut buf = vec![0u8; 28];
+        buf[0..4].copy_from_slice(&28u32.to_ne_bytes());
+        buf[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        buf[16..20].copy_from_slice(&(-22i32).to_ne_bytes());
+        assert!(parse_getroute_reply(&buf, IpAddr::V4([10, 0, 0, 9])).is_err());
+    }
+
+    #[test]
+    fn parse_getroute_reply_requires_an_oif() {
+        let prefsrc = [192u8, 0, 2, 254];
+        let reply = getroute_reply(&[(&7, &prefsrc)]);
+        assert!(parse_getroute_reply(&reply, IpAddr::V4([10, 0, 0, 9])).is_err());
+    }
+
+    #[test]
+    fn parse_getroute_reply_handles_v6_gateway() {
+        let oif = 3u32.to_ne_bytes();
+        let gw: [u8; 16] = core::array::from_fn(|i| i as u8);
+        let reply = getroute_reply(&[(&RTA_OIF, &oif), (&RTA_GATEWAY, &gw)]);
+        let queried = IpAddr::V6([0x20, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let info = parse_getroute_reply(&reply, queried).unwrap();
+        assert_eq!(info.if_index, 3);
+        assert_eq!(info.gateway, Some(IpAddr::V6(gw)));
     }
 }

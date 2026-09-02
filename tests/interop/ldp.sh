@@ -20,7 +20,15 @@
 #      198.51.100.0/24, r2 mirrors both, and a real ICMP echo crosses
 #      the LSP (r2 pushes 24000 toward the learned FEC, r1 pops and
 #      delivers locally).
-#   4. Killing r2 expires the adjacency and tears r1's session down,
+#   4. r3 (3.3.3.3) joins behind r2 binding 192.0.2.0/24 → 20000: r2 —
+#      the transit LSR — allocates its own label for the FEC and
+#      re-advertises it upstream to r1 (RFC 5036 §3.5.7.1.1, DU +
+#      independent control); with kernel MPLS a real ICMP echo crosses
+#      the THREE-LSR LSP (r1 pushes r2's transit label, r2 swaps to
+#      20000, r3 pops and delivers locally).
+#   5. Killing r3 tears r2's transit LSP down (label released, upstream
+#      withdrawn) and r1 unlearns the FEC.
+#   6. Killing r2 expires the adjacency and tears r1's session down,
 #      withdrawing the learned bindings and their kernel encap route.
 #
 # LDP uses port 646, which is privileged: the whole lab runs inside
@@ -89,29 +97,45 @@ fi
 echo "== building the two-LSR lab (veth pair, one netns per router) =="
 ip link set lo up
 ip link add veth0 type veth peer name veth1
+ip link add veth2 type veth peer name veth3
 # Holder processes keep the two router namespaces alive.
 unshare -n sleep 120 &
 R1=$!
 unshare -n sleep 120 &
 R2=$!
+unshare -n sleep 120 &
+R3=$!
 cleanup() {
-    kill "${DAEMON_A:-}" "${DAEMON_B:-}" 2>/dev/null || true
-    kill "$R1" "$R2" 2>/dev/null || true
+    kill "${DAEMON_A:-}" "${DAEMON_B:-}" "${DAEMON_C:-}" 2>/dev/null || true
+    kill "$R1" "$R2" "$R3" 2>/dev/null || true
 }
 trap cleanup EXIT
 sleep 0.3
 ip link set veth0 netns "$R1"
 ip link set veth1 netns "$R2"
+ip link set veth2 netns "$R2"
+ip link set veth3 netns "$R3"
 nsenter -t "$R1" -n ip link set lo up
 nsenter -t "$R2" -n ip link set lo up
+nsenter -t "$R3" -n ip link set lo up
 nsenter -t "$R1" -n ip addr add 10.99.1.1/24 dev veth0
 nsenter -t "$R1" -n ip link set veth0 up
 nsenter -t "$R2" -n ip addr add 10.99.1.2/24 dev veth1
+nsenter -t "$R2" -n ip addr add 10.99.2.2/24 dev veth2
 nsenter -t "$R2" -n ip link set veth1 up
+nsenter -t "$R2" -n ip link set veth2 up
+nsenter -t "$R3" -n ip addr add 10.99.2.3/24 dev veth3
+nsenter -t "$R3" -n ip link set veth3 up
+# r2 is the multi-link LSR: its LDP transport address lives on lo (the
+# FRR `mpls ldp router-id lo` convention); the spoke LSRs route to it.
+nsenter -t "$R2" -n ip addr add 2.2.2.2/32 dev lo
+nsenter -t "$R1" -n ip route add 2.2.2.2/32 via 10.99.1.2
+nsenter -t "$R3" -n ip route add 2.2.2.2/32 via 10.99.2.2
 # Dataplane phase: stub addresses behind each LSR (the FEC destinations).
 if [ "$MPLS" -eq 1 ]; then
     nsenter -t "$R1" -n ip addr add 203.0.113.1/32 dev lo
     nsenter -t "$R2" -n ip addr add 198.51.100.1/32 dev lo
+    nsenter -t "$R3" -n ip addr add 192.0.2.1/32 dev lo
     # platform_labels is per-netns; the rootless user namespace owns
     # its netns sysctls, so no host root is needed from here on.
     # 1048575 = the RFC 3032 platform maximum, so the default LDP label
@@ -120,15 +144,29 @@ if [ "$MPLS" -eq 1 ]; then
     # EINVAL).
     nsenter -t "$R1" -n sh -c 'echo 1048575 > /proc/sys/net/mpls/platform_labels'
     nsenter -t "$R2" -n sh -c 'echo 1048575 > /proc/sys/net/mpls/platform_labels'
-    # Labelled packets arrive on the transit veth of both LSRs.
+    nsenter -t "$R3" -n sh -c 'echo 1048575 > /proc/sys/net/mpls/platform_labels'
+    # Labelled packets arrive on the transit veth of every LSR.
     nsenter -t "$R1" -n sh -c 'echo 1 > /proc/sys/net/mpls/conf/veth0/input' 2>/dev/null || true
     nsenter -t "$R2" -n sh -c 'echo 1 > /proc/sys/net/mpls/conf/veth1/input' 2>/dev/null || true
+    nsenter -t "$R2" -n sh -c 'echo 1 > /proc/sys/net/mpls/conf/veth2/input' 2>/dev/null || true
+    nsenter -t "$R3" -n sh -c 'echo 1 > /proc/sys/net/mpls/conf/veth3/input' 2>/dev/null || true
 fi
 
 wait_log() { # <file> <pattern> [timeout-seconds]
     local file=$1 pat=$2 tmo=${3:-20} i
     for ((i = 0; i < tmo * 10; i++)); do
         grep -qF "$pat" "$file" && return 0
+        sleep 0.1
+    done
+    echo "-- $file --"
+    cat "$file"
+    return 1
+}
+
+wait_log_re() { # <file> <regex> [timeout-seconds]
+    local file=$1 pat=$2 tmo=${3:-20} i
+    for ((i = 0; i < tmo * 10; i++)); do
+        grep -qE "$pat" "$file" && return 0
         sleep 0.1
     done
     echo "-- $file --"
@@ -147,7 +185,8 @@ DAEMON_A=$!
 
 echo "== starting LSR r2 (2.2.2.2, binds 198.51.100.0/24 -> 16) =="
 nsenter -t "$R2" -n "$BIN" --protocol ldp --router-id 2.2.2.2 \
-    --ldp-interface veth1 --ldp-link-hold 9 --ldp-keepalive 3 \
+    --ldp-transport 2.2.2.2 \
+    --ldp-interface veth1 --ldp-interface veth2 --ldp-link-hold 9 --ldp-keepalive 3 \
     --ldp-bind 198.51.100.0/24=16 \
     "${FLAGS[@]}" \
     --api-socket "$OUT/r2.ctl" >"$OUT/r2.log" 2>&1 &
@@ -207,6 +246,63 @@ else
         exit 1
     fi
 fi
+
+# ---------------------------------------------------------------------------
+# Phase 3c: transit LSR (RFC 5036 §3.5.7.1.1). r2 — the middle LSR —
+# allocates its own label for the FEC r3 advertises and re-advertises
+# it upstream to r1; killing r3 tears the transit LSP down in r2 and
+# withdraws the FEC from r1.
+# ---------------------------------------------------------------------------
+echo "== starting LSR r3 (3.3.3.3, binds 192.0.2.0/24 -> 20000) =="
+nsenter -t "$R3" -n "$BIN" --protocol ldp --router-id 3.3.3.3 \
+    --ldp-interface veth3 --ldp-link-hold 9 --ldp-keepalive 3 \
+    --ldp-bind 192.0.2.0/24=20000 \
+    "${FLAGS[@]}" \
+    --api-socket "$OUT/r3.ctl" >"$OUT/r3.log" 2>&1 &
+DAEMON_C=$!
+
+wait_log "$OUT/r2.log" "session up peer 3.3.3.3:0" || exit 1
+wait_log "$OUT/r3.log" "session up peer 2.2.2.2:0" || exit 1
+echo "PASS: r2/r3 adjacency + session established"
+
+# r2 learns r3's binding, transit-allocates (16 is reserved by r2's own
+# bind; the 203.0.113.0/24 transit allocation takes 17, so 192.0.2.0/24
+# gets the next free label), and re-advertises upstream to r1.
+wait_log_re "$OUT/r2.log" "transit swap for 192.0.2.0/24 in-label [0-9]+ via 10.99.2.3 out-label 20000" || exit 1
+wait_log_re "$OUT/r1.log" "mapping learned 192.0.2.0/24 label [0-9]+" || exit 1
+echo "PASS: transit LSR allocates and re-advertises the FEC upstream"
+
+if [ "$MPLS" -eq 1 ]; then
+    R2_TRANSIT=$(grep -oE "transit swap for 192.0.2.0/24 in-label [0-9]+" "$OUT/r2.log" | head -1 | grep -oE "[0-9]+$")
+    R1_TRANSIT=$(grep -oE "mapping learned 192.0.2.0/24 label [0-9]+" "$OUT/r1.log" | head -1 | grep -oE "[0-9]+$")
+    if ! nsenter -t "$R2" -n ip -f mpls route show | grep -qE "^${R2_TRANSIT} .*swap 20000"; then
+        echo "FAIL: kernel MPLS table in r2 lacks the transit swap ${R2_TRANSIT}->20000:"
+        nsenter -t "$R2" -n ip -f mpls route show
+        exit 1
+    fi
+    echo "PASS: transit swap mirrored into the kernel (${R2_TRANSIT} -> 20000)"
+
+    echo "== pinging through the three-LSR LSP (r1 -> r2 swap -> r3 -> stub) =="
+    if nsenter -t "$R1" -n ping -c 3 -W 2 192.0.2.1 >"$OUT/ping3.log" 2>&1; then
+        echo "PASS: end-to-end labelled ping across the transit LSR"
+    else
+        echo "FAIL: ping through the transit LSP failed:"
+        cat "$OUT/ping3.log"
+        echo "== kernel state r1 =="
+        nsenter -t "$R1" -n ip -f mpls route show
+        nsenter -t "$R1" -n ip route show 192.0.2.0/24
+        echo "== kernel state r2 =="
+        nsenter -t "$R2" -n ip -f mpls route show
+        echo "== kernel state r3 =="
+        nsenter -t "$R3" -n ip -f mpls route show
+        exit 1
+    fi
+fi
+
+kill -9 "$DAEMON_C" 2>/dev/null || true
+wait_log "$OUT/r2.log" "transit swap for 192.0.2.0/24 removed" 15 || exit 1
+wait_log "$OUT/r1.log" "mapping withdrawn 192.0.2.0/24" 10 || exit 1
+echo "PASS: r3 death releases the transit label and withdraws upstream"
 
 # ---------------------------------------------------------------------------
 # Phase 4: hold-time expiry tears the session down (and uninstalls the

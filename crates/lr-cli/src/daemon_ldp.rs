@@ -128,6 +128,7 @@ struct LdpCounters {
     sessions: AtomicUsize,
     mappings_learned: AtomicUsize,
     mappings_withdrawn: AtomicUsize,
+    transit_labels: AtomicUsize,
 }
 
 impl LdpCounters {
@@ -137,6 +138,7 @@ impl LdpCounters {
             sessions: AtomicUsize::new(0),
             mappings_learned: AtomicUsize::new(0),
             mappings_withdrawn: AtomicUsize::new(0),
+            transit_labels: AtomicUsize::new(0),
         }
     }
 }
@@ -181,6 +183,15 @@ struct LdpDaemon {
     /// id) so withdrawals and session teardown reverse the right LSP.
     #[cfg(target_os = "linux")]
     heads: HashMap<Prefix, (GenericLabel, LdpId)>,
+    /// Installed transit swap routes, keyed by prefix: (in-label, next
+    /// hop) so next-hop changes replace the right route and teardown
+    /// deletes it.
+    #[cfg(target_os = "linux")]
+    swaps: HashMap<Prefix, (GenericLabel, IpAddr)>,
+    /// FIB-lookup cache for swap next hops (address → resolved
+    /// output interface + gateway; `None` = unroutable, logged once).
+    #[cfg(target_os = "linux")]
+    nh_resolved: HashMap<IpAddr, Option<(u32, Option<IpAddr>)>>,
     /// Peer transport addresses, for the encap-route next hop.
     peers_transport: HashMap<LdpId, IpAddr>,
 }
@@ -298,6 +309,25 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         return ExitCode::from(1);
     }
 
+    // ---- Local bindings (parsed before the engine: their labels are
+    // reserved out of the transit allocator's range). ----
+    let mut binds: Vec<(Prefix, GenericLabel)> = Vec::new();
+    for bind in &cfg.ldp_binds {
+        let Some(p) = bind.prefix.as_deref() else {
+            continue; // finalize() already rejected this
+        };
+        match Prefix::from_str(p) {
+            Ok(prefix) => binds.push((prefix, GenericLabel(bind.label))),
+            Err(e) => {
+                eprintln!("daemon: ldp bind {}: {}", p, e);
+                return ExitCode::from(1);
+            }
+        }
+    }
+    for (prefix, label) in &binds {
+        println!("daemon: ldp binding {} label {}", prefix, label.0);
+    }
+
     // ---- Engine. ----
     let mut engine_cfg = LdpEngineConfig::new(local_id, transport);
     engine_cfg.keepalive_time = cfg.ldp_keepalive_time;
@@ -309,6 +339,13 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     engine_cfg.loop_detection = cfg.ldp_loop_detection;
     engine_cfg.hop_count_limit = cfg.ldp_loop_hc_limit;
     engine_cfg.path_vector_limit = cfg.ldp_loop_pv_limit;
+    // RFC 5036 §3.5.7.1.1 transit-LSR allocation: one local label per
+    // learned FEC, re-advertised upstream; the explicitly configured
+    // binding labels are reserved out of the allocation range.
+    engine_cfg.transit_allocation = cfg.ldp_transit_allocation;
+    engine_cfg.label_min = cfg.ldp_label_min;
+    engine_cfg.label_max = cfg.ldp_label_max;
+    engine_cfg.reserved_labels = binds.iter().map(|(_, l)| l.0).collect();
     // Targeted peers: `ADDR`, `ADDR:PORT` or `[V6]:PORT`. The engine
     // deals in addresses; a port override means that peer runs its LDP
     // transport on a different port (asymmetric deployments on shared
@@ -373,24 +410,15 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     interface_ips.dedup();
     interface_ips.push(transport);
     engine_cfg.interface_addresses = interface_ips;
-    let engine = LdpEngine::new(engine_cfg);
+    let mut engine = LdpEngine::new(engine_cfg);
 
-    // ---- Local bindings. ----
-    let mut binds: Vec<(Prefix, GenericLabel)> = Vec::new();
-    for bind in &cfg.ldp_binds {
-        let Some(p) = bind.prefix.as_deref() else {
-            continue; // finalize() already rejected this
-        };
-        match Prefix::from_str(p) {
-            Ok(prefix) => binds.push((prefix, GenericLabel(bind.label))),
-            Err(e) => {
-                eprintln!("daemon: ldp bind {}: {}", p, e);
-                return ExitCode::from(1);
-            }
-        }
-    }
+    // Register the local bindings in the LIB before any session comes
+    // up: the transit allocator consults the advertised half to keep
+    // its hands off egress FECs, and §3.5.7.1.1 #1 advertises a
+    // recognized FEC once a session is operational (the SessionUp
+    // handler re-pushes below).
     for (prefix, label) in &binds {
-        println!("daemon: ldp binding {} label {}", prefix, label.0);
+        engine.advertise_mapping(*prefix, *label);
     }
 
     // Privileged work is done (both sockets bound): honor the privilege
@@ -426,6 +454,10 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     format!(
                         "ldp-mappings-withdrawn {}",
                         counters.mappings_withdrawn.load(Ordering::Relaxed)
+                    ),
+                    format!(
+                        "ldp-transit-labels {}",
+                        counters.transit_labels.load(Ordering::Relaxed)
                     ),
                 ]
             }
@@ -480,6 +512,10 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         tails: HashMap::new(),
         #[cfg(target_os = "linux")]
         heads: HashMap::new(),
+        #[cfg(target_os = "linux")]
+        swaps: HashMap::new(),
+        #[cfg(target_os = "linux")]
+        nh_resolved: HashMap::new(),
         peers_transport: HashMap::new(),
     };
 
@@ -496,10 +532,16 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     // ---- Main loop. ----
     let start = std::time::Instant::now();
     println!(
-        "daemon: ldp main loop started (transport {}, {} interface(s), {} targeted peer(s))",
+        "daemon: ldp main loop started (transport {}, {} interface(s), {} targeted peer(s), \
+         transit allocation {})",
         transport,
         daemon.interfaces.len(),
-        cfg.ldp_targeted.len()
+        cfg.ldp_targeted.len(),
+        if cfg.ldp_transit_allocation {
+            "on"
+        } else {
+            "off"
+        }
     );
     while running.load(Ordering::Relaxed) {
         crate::dispatch_signals(&runtime);
@@ -963,6 +1005,63 @@ impl LdpDaemon {
                         peer_id, prefix, reason
                     );
                 }
+                EngineEvent::TransitSwapChanged {
+                    prefix,
+                    in_label,
+                    next_hop,
+                    out_label,
+                } => {
+                    println!(
+                        "ldp: transit swap for {} in-label {} via {} out-label {}",
+                        prefix, in_label.0, next_hop, out_label.0
+                    );
+                    self.counters
+                        .transit_labels
+                        .store(self.engine.transit_label_count(), Ordering::Relaxed);
+                    // The ingress half follows the same next hop: when
+                    // a head exists for this prefix (or the FEC is not
+                    // locally bound) refresh it so IP traffic enters
+                    // the LSP at the current next hop.
+                    #[cfg(target_os = "linux")]
+                    {
+                        // The ingress half follows the same next hop:
+                        // refresh it for non-bound FECs (transit-owned)
+                        // and for bound FECs that already carry a head,
+                        // so IP traffic enters the LSP at the current
+                        // next hop. Bound FECs keep their own head.
+                        let bound = self.binds.iter().any(|(p, _)| *p == prefix);
+                        if !bound || self.heads.contains_key(&prefix) {
+                            self.install_head_route(prefix, out_label, next_hop);
+                        }
+                        self.install_swap(prefix, in_label, out_label, next_hop);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = (&prefix, &in_label, &out_label, &next_hop);
+                }
+                EngineEvent::TransitSwapRemoved { prefix, in_label } => {
+                    println!(
+                        "ldp: transit swap for {} removed (in-label {} released, \
+                         upstream withdrawn)",
+                        prefix, in_label.0
+                    );
+                    self.counters
+                        .transit_labels
+                        .store(self.engine.transit_label_count(), Ordering::Relaxed);
+                    #[cfg(target_os = "linux")]
+                    {
+                        self.uninstall_swap(&prefix);
+                        self.uninstall_head(&prefix);
+                    }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = (&prefix, &in_label);
+                }
+                EngineEvent::TransitLabelExhausted { prefix } => {
+                    eprintln!(
+                        "ldp: transit label range exhausted — {} gets no LSP \
+                         (widen [ldp] label_min/label_max)",
+                        prefix
+                    );
+                }
                 EngineEvent::UnknownMessage { peer_id, message } => {
                     println!(
                         "ldp: unknown message type 0x{:04x} from {} (ignored, U=1)",
@@ -1089,9 +1188,6 @@ impl LdpDaemon {
     /// prefix via the peer's transport address.
     #[cfg(target_os = "linux")]
     fn install_head(&mut self, prefix: Prefix, label: GenericLabel, peer: LdpId) {
-        let Some(mpls) = self.mpls.as_mut() else {
-            return;
-        };
         let Some(nh) = self.peers_transport.get(&peer).copied().or_else(|| {
             self.engine
                 .adjacencies()
@@ -1101,11 +1197,23 @@ impl LdpDaemon {
         }) else {
             return;
         };
+        self.install_head_route(prefix, label, nh);
+    }
+
+    /// Head half, next-hop-address flavor: the transit allocator
+    /// reports the next hop directly (the learning peer may not be the
+    /// selected next hop), so the refresh path installs by address.
+    #[cfg(target_os = "linux")]
+    fn install_head_route(&mut self, prefix: Prefix, label: GenericLabel, nh: IpAddr) {
+        let Some(mpls) = self.mpls.as_mut() else {
+            return;
+        };
         let stack = lr_mpls::LabelStack::from_values([label.0]);
         match mpls.add_encap_route(&prefix, &stack, nh, 0) {
             Ok(()) => {
                 println!("ldp: {} encap mpls [{}] via {}", prefix, label.0, nh);
-                self.heads.insert(prefix, (label, peer));
+                self.heads
+                    .insert(prefix, (label, LdpId::new([0, 0, 0, 0], 0)));
             }
             Err(e) => eprintln!("ldp: encap install for {} failed: {}", prefix, e),
         }
@@ -1120,6 +1228,94 @@ impl LdpDaemon {
                 }
             }
         }
+    }
+
+    /// Transit half: swap an arriving packet's `in_label` for the next
+    /// hop's `out_label` and forward it toward `nh`. The kernel needs
+    /// the output interface for a via-route, so the address is resolved
+    /// once per next hop through a FIB lookup (`ip route get` shape)
+    /// and cached. Routed (non-adjacent) next hops are refused with a
+    /// note: an LDP label binding is meaningful only toward the
+    /// advertising LSR itself.
+    #[cfg(target_os = "linux")]
+    fn install_swap(
+        &mut self,
+        prefix: Prefix,
+        in_label: GenericLabel,
+        out_label: GenericLabel,
+        nh: IpAddr,
+    ) {
+        let Some((if_index, gateway)) = self.resolve_nh(nh) else {
+            return;
+        };
+        let Some(mpls) = self.mpls.as_mut() else {
+            return;
+        };
+        // Directly connected next hop: the via carries the peer's own
+        // address. A gateway means the peer is behind a router — the
+        // label was allocated for the peer's link, so routing the
+        // labeled frame elsewhere would blackhole it.
+        if let Some(gw) = gateway {
+            if gw != nh {
+                eprintln!(
+                    "ldp: transit swap for {} via routed peer {} (gateway {}) — \
+                     no install (an LDP binding is only valid toward the \
+                     advertising LSR)",
+                    prefix, nh, gw
+                );
+                return;
+            }
+        }
+        let stack = lr_mpls::LabelStack::from_values([out_label.0]);
+        let route = lr_osroute::mpls_route::MplsRoute::swap(
+            lr_mpls::Label::new(in_label.0),
+            stack,
+            nh,
+            if_index,
+        );
+        match mpls.add_route(&route) {
+            Ok(()) => {
+                println!(
+                    "ldp: swap in-label {} -> [{}] via {} dev #{} for {}",
+                    in_label.0, out_label.0, nh, if_index, prefix
+                );
+                self.swaps.insert(prefix, (in_label, nh));
+            }
+            Err(e) => eprintln!("ldp: swap install for {} failed: {}", prefix, e),
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    fn uninstall_swap(&mut self, prefix: &Prefix) {
+        if let Some((in_label, _)) = self.swaps.remove(prefix) {
+            if let Some(mpls) = self.mpls.as_mut() {
+                if let Err(e) = mpls.delete_route(lr_mpls::Label::new(in_label.0)) {
+                    eprintln!("ldp: swap delete for {} failed: {}", prefix, e);
+                }
+            }
+        }
+    }
+
+    /// FIB-lookup (cached) for a swap next hop: (output interface,
+    /// gateway). Failures are remembered so an unroutable next hop
+    /// logs once instead of once per mapping refresh.
+    #[cfg(target_os = "linux")]
+    fn resolve_nh(&mut self, nh: IpAddr) -> Option<(u32, Option<IpAddr>)> {
+        if let Some(cached) = self.nh_resolved.get(&nh) {
+            return *cached;
+        }
+        let resolved = match self.mpls.as_mut() {
+            Some(mpls) => match mpls.resolve_nexthop(nh) {
+                Ok(info) => Some((info.if_index, info.gateway)),
+                Err(e) => {
+                    eprintln!("ldp: no route toward LDP peer {}: {}", nh, e);
+                    None
+                }
+            },
+            None => None,
+        };
+        self.nh_resolved.insert(nh, resolved);
+        resolved
     }
 }
 
