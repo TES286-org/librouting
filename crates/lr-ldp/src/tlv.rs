@@ -469,6 +469,58 @@ pub struct DualStackCapability {
     pub preference: TransportPreference,
 }
 
+/// FT Session TLV value (RFC 3479 §8.2) — the graceful-restart
+/// advertisement of RFC 3478 §2, carried as an optional parameter of
+/// the Initialization message.
+///
+/// ```text
+///  |1|0|  FT Session TLV (0x0503)  |        Length (12)          |
+///  |R|          Reserved       |S|A|C|L|        Reserved         |
+///  |        FT Reconnect Timeout (ms)  |  Recovery Time (ms)      |
+/// ```
+///
+/// RFC 3478 §2 sends it with the L (Learn from Network) flag set and
+/// every other flag clear; the senders' timers are in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FtSessionParams {
+    /// FT Reconnect Timeout: how long the receiver should keep the
+    /// forwarding state for this sender's LSPs after the session fails.
+    pub reconnect_ms: u32,
+    /// Recovery Time (meaningful for a restarting LSR): how long this
+    /// sender keeps its preserved forwarding state after sending the
+    /// Init. 0 = the sender did not preserve its state (§3.3: the
+    /// receiver then deletes the stale bindings immediately).
+    pub recovery_ms: u32,
+}
+
+impl FtSessionParams {
+    /// The RFC 3478 flag word: L=1, everything else clear ("The rest
+    /// of the FT flags are set to 0 by a sender and ignored on
+    /// receipt").
+    const L_FLAG: u16 = 0x0001;
+
+    pub fn encode_value(&self, out: &mut alloc::vec::Vec<u8>) {
+        out.extend_from_slice(&Self::L_FLAG.to_be_bytes());
+        out.extend_from_slice(&[0, 0]); // reserved
+        out.extend_from_slice(&self.reconnect_ms.to_be_bytes());
+        out.extend_from_slice(&self.recovery_ms.to_be_bytes());
+    }
+
+    pub fn decode_value(value: &[u8]) -> Result<Self, ParseError> {
+        if value.len() != 12 {
+            return Err(ParseError::new(
+                ErrorKind::BadLength,
+                0,
+                "FT Session TLV value must be 12 octets",
+            ));
+        }
+        Ok(Self {
+            reconnect_ms: u32::from_be_bytes([value[4], value[5], value[6], value[7]]),
+            recovery_ms: u32::from_be_bytes([value[8], value[9], value[10], value[11]]),
+        })
+    }
+}
+
 impl DualStackCapability {
     /// Value octets: TR in the top nibble of byte 0, everything else
     /// zero (RFC 7552 §6.1.1: "It MUST be set to zero on transmission
@@ -581,6 +633,14 @@ pub mod wire {
             .ok_or(EncodeError::BufferFull)?;
         out.put_u16_be(s.message_type)
             .ok_or(EncodeError::BufferFull)
+    }
+
+    /// FT Session TLV value (RFC 3479 §8.2): flags with the RFC 3478 L
+    /// bit, reserved, then the two timers in milliseconds.
+    pub fn ft_session(out: &mut WriteBuf<'_>, f: &FtSessionParams) -> Result<(), EncodeError> {
+        let mut value = alloc::vec::Vec::with_capacity(12);
+        f.encode_value(&mut value);
+        out.put_bytes(&value).ok_or(EncodeError::BufferFull)
     }
 
     pub fn hop_count(out: &mut WriteBuf<'_>, h: &HopCount) -> Result<(), EncodeError> {

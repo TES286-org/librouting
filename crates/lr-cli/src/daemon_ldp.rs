@@ -346,6 +346,11 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     engine_cfg.label_min = cfg.ldp_label_min;
     engine_cfg.label_max = cfg.ldp_label_max;
     engine_cfg.reserved_labels = binds.iter().map(|(_, l)| l.0).collect();
+    // RFC 3478 graceful restart: advertise the FT Session TLV and
+    // retain a failed peer's bindings (§3.3) when enabled.
+    engine_cfg.graceful_restart = cfg.ldp_graceful_restart;
+    engine_cfg.gr_reconnect_ms = cfg.ldp_gr_reconnect_ms;
+    engine_cfg.gr_recovery_ms = cfg.ldp_gr_recovery_ms;
     // Targeted peers: `ADDR`, `ADDR:PORT` or `[V6]:PORT`. The engine
     // deals in addresses; a port override means that peer runs its LDP
     // transport on a different port (asymmetric deployments on shared
@@ -914,11 +919,20 @@ impl LdpDaemon {
                         self.engine.advertise_mapping(prefix, label);
                     }
                 }
-                EngineEvent::SessionDown { peer_id, reason } => {
+                EngineEvent::SessionDown {
+                    peer_id,
+                    reason,
+                    graceful,
+                } => {
                     println!(
-                        "ldp: session down peer {} ({})",
+                        "ldp: session down peer {} ({}){}",
                         peer_id,
-                        down_reason_label(reason)
+                        down_reason_label(reason),
+                        if graceful {
+                            " — RFC 3478 bindings retained (stale)"
+                        } else {
+                            ""
+                        }
                     );
                     self.peers_up.remove(&peer_id);
                     self.counters
@@ -926,8 +940,12 @@ impl LdpDaemon {
                         .store(self.peers_up.len(), Ordering::Relaxed);
                     // The learned bindings died with the session: undo
                     // the head half of the kernel mirror for this peer.
+                    // With RFC 3478 graceful retention the LSPs stay
+                    // programmed — they are reverted only when the
+                    // stale bindings are actually withdrawn
+                    // (MappingWithdrawn / TransitSwapRemoved).
                     #[cfg(target_os = "linux")]
-                    {
+                    if !graceful {
                         let affected: Vec<Prefix> = self
                             .heads
                             .iter()
@@ -938,6 +956,8 @@ impl LdpDaemon {
                             self.uninstall_head(&prefix);
                         }
                     }
+                    #[cfg(not(target_os = "linux"))]
+                    let _ = graceful;
                 }
                 EngineEvent::CloseConnection(conn) => {
                     // Deliver any queued bytes (fatal Notification)

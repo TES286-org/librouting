@@ -17,8 +17,9 @@ use crate::pdu::{
     message_header_word, tlv_header_word, LdpId, MessageType, TlvClass, TlvType, LDP_VERSION,
 };
 use crate::tlv::{
-    wire, AddressList, ConfigSequenceNumber, DualStackCapability, Fec, GenericLabel, HelloParams,
-    HopCount, LabelRequestMessageId, PathVector, RawTlv, SessionParams, Status, TransportAddress,
+    wire, AddressList, ConfigSequenceNumber, DualStackCapability, Fec, FtSessionParams,
+    GenericLabel, HelloParams, HopCount, LabelRequestMessageId, PathVector, RawTlv, SessionParams,
+    Status, TransportAddress,
 };
 #[cfg(not(feature = "std"))]
 use alloc::string::ToString;
@@ -85,6 +86,9 @@ impl HelloMsg {
 pub struct InitMsg {
     pub message_id: u32,
     pub params: SessionParams,
+    /// FT Session TLV (RFC 3478 §2 / RFC 3479 §8.2) — graceful-restart
+    /// advertisement, when the session is configured for it.
+    pub ft_session: Option<FtSessionParams>,
     /// Optional parameters (e.g. RFC 5561 LDP Capability TLVs).
     pub unknown_tlvs: Vec<RawTlv>,
 }
@@ -403,6 +407,12 @@ fn encode_message_body(msg: &LdpMessage, out: &mut WriteBuf<'_>) -> Result<(), E
                 TlvType::CommonSessionParameters as u16,
                 |out| wire::session_params(out, &m.params),
             )?;
+            if let Some(ft) = &m.ft_session {
+                // RFC 3479 §8.2: U=1, F=0.
+                write_tlv(out, true, false, TlvType::FtSession as u16, |out| {
+                    wire::ft_session(out, ft)
+                })?;
+            }
             for raw in &m.unknown_tlvs {
                 write_raw_tlv(out, raw)?;
             }
@@ -546,6 +556,7 @@ enum ParsedTlv {
     GenericLabel(GenericLabel),
     HelloParams(HelloParams),
     SessionParams(SessionParams),
+    FtSession(FtSessionParams),
     Status(Status),
     HopCount(HopCount),
     PathVector(PathVector),
@@ -597,6 +608,9 @@ fn parse_tlv_stream(body: &[u8]) -> Result<Vec<ParsedTlv>, ParseError> {
                 out.push(ParsedTlv::SessionParams(SessionParams::decode_value(
                     value,
                 )?));
+            }
+            TlvClass::Known(TlvType::FtSession) => {
+                out.push(ParsedTlv::FtSession(FtSessionParams::decode_value(value)?));
             }
             TlvClass::Known(TlvType::Status) => {
                 out.push(ParsedTlv::Status(Status::decode_value(value)?));
@@ -773,9 +787,14 @@ fn parse_message(body: &[u8]) -> Result<LdpMessage, ParseError> {
                         "Initialization without Common Session Parameters TLV",
                     )
                 })?;
+            let ft_session = tlvs.iter().find_map(|t| match t {
+                ParsedTlv::FtSession(f) => Some(*f),
+                _ => None,
+            });
             LdpMessage::Initialization(InitMsg {
                 message_id,
                 params,
+                ft_session,
                 unknown_tlvs: unknown,
             })
         }
@@ -1112,6 +1131,44 @@ mod tests {
     use crate::AdvertisementMode;
     use lr_core::addr::Prefix;
 
+    #[test]
+    fn init_ft_session_tlv_roundtrip() {
+        let pdu = LdpPdu {
+            version: 1,
+            sender: LdpId::new([1, 0, 0, 1], 0),
+            messages: vec![LdpMessage::Initialization(InitMsg {
+                message_id: 7,
+                params: SessionParams {
+                    protocol_version: 1,
+                    keepalive_time: 15,
+                    advertisement: AdvertisementMode::DownstreamUnsolicited,
+                    loop_detection: false,
+                    path_vector_limit: 0,
+                    max_pdu_len: 4096,
+                    receiver: LdpId::new([2, 0, 0, 1], 0),
+                },
+                ft_session: Some(crate::tlv::FtSessionParams {
+                    reconnect_ms: 15000,
+                    recovery_ms: 120000,
+                }),
+                unknown_tlvs: Vec::new(),
+            })],
+        };
+        let decoded = roundtrip(&pdu);
+        match &decoded.messages[0] {
+            LdpMessage::Initialization(init) => {
+                assert_eq!(
+                    init.ft_session,
+                    Some(crate::tlv::FtSessionParams {
+                        reconnect_ms: 15000,
+                        recovery_ms: 120000,
+                    })
+                );
+            }
+            other => panic!("wrong message: {other:?}"),
+        }
+    }
+
     fn roundtrip(pdu: &LdpPdu) -> LdpPdu {
         let mut buf = [0u8; 4096];
         let mut w = WriteBuf::new(&mut buf);
@@ -1197,6 +1254,7 @@ mod tests {
             messages: vec![LdpMessage::Initialization(InitMsg {
                 message_id: 5,
                 params,
+                ft_session: None,
                 unknown_tlvs: vec![],
             })],
         };

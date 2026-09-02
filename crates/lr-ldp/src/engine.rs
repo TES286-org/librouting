@@ -42,7 +42,7 @@ use crate::session::{
 };
 use crate::tlv::{AddressList, GenericLabel, Status, StatusCode, TransportPreference};
 use crate::transit::PeerBinding;
-use alloc::collections::{BTreeMap, VecDeque};
+use alloc::collections::{BTreeMap, BTreeSet, VecDeque};
 use alloc::vec;
 use alloc::vec::Vec;
 use lr_core::addr::{IpAddr, Prefix};
@@ -112,6 +112,34 @@ pub struct LdpEngineConfig {
     /// Label values already promised to embedder-configured bindings;
     /// the transit allocator never hands them out.
     pub reserved_labels: Vec<u32>,
+    /// RFC 3478 graceful restart. When on, the Initialization message
+    /// carries the FT Session TLV (§2) and a peer's bindings are
+    /// retained across an unexpected session failure (§3.3) instead of
+    /// being purged: they are marked stale, kept for the lesser of the
+    /// peer's advertised FT Reconnect Timeout and
+    /// [`Self::gr_neighbor_liveness_ms`], and either refreshed (the
+    /// peer came back within the window and preserved its forwarding
+    /// state) or deleted (window expired, or the peer came back with a
+    /// zero Recovery Time).
+    pub graceful_restart: bool,
+    /// Advertised FT Reconnect Timeout in milliseconds (§2): how long
+    /// a peer should keep the forwarding state for OUR LSPs when the
+    /// session with us fails. 0 = don't bother waiting (we still
+    /// support the §3.3 procedures for them).
+    pub gr_reconnect_ms: u32,
+    /// Advertised Recovery Time in milliseconds (§2). 0 = honest
+    /// default: this speaker does not preserve MPLS forwarding state
+    /// across its own restart (the daemon deletes the kernel mirror on
+    /// shutdown), so peers delete their stale bindings for us on
+    /// reconnection and relearn from our re-advertisements.
+    pub gr_recovery_ms: u32,
+    /// Local Neighbor Liveness Timer in milliseconds (§3.3): the cap
+    /// on how long stale bindings of a failed peer are kept, no matter
+    /// what the peer advertised.
+    pub gr_neighbor_liveness_ms: u64,
+    /// Local Maximum Recovery Time in milliseconds (§3.3): the cap on
+    /// the recovery window of a reconnected peer.
+    pub gr_max_recovery_ms: u64,
 }
 
 impl LdpEngineConfig {
@@ -137,6 +165,11 @@ impl LdpEngineConfig {
             label_min: 16,
             label_max: 1_048_575,
             reserved_labels: Vec::new(),
+            graceful_restart: false,
+            gr_reconnect_ms: 15_000,
+            gr_recovery_ms: 0,
+            gr_neighbor_liveness_ms: 15_000,
+            gr_max_recovery_ms: 120_000,
         }
     }
 }
@@ -186,6 +219,13 @@ pub enum EngineEvent {
     SessionDown {
         peer_id: LdpId,
         reason: SessionDownReason,
+        /// RFC 3478 §3.3: the bindings learned from this peer were
+        /// retained (marked stale) because the failure was unexpected
+        /// and the peer advertised graceful restart. The embedder must
+        /// keep the dataplane state for this peer's LSPs; they are
+        /// either refreshed when the session recovers or withdrawn via
+        /// a later `MappingWithdrawn` when the stale window expires.
+        graceful: bool,
     },
     /// The embedder must close this connection.
     CloseConnection(u64),
@@ -271,6 +311,25 @@ struct TransitFec {
     allocated_seq: Option<u64>,
 }
 
+/// RFC 3478 §3.3: bindings retained for a peer whose session failed
+/// unexpectedly. The FECs remain in the LIB (and in the transit state)
+/// so the dataplane keeps forwarding; this entry only carries the
+/// bookkeeping: which FECs are stale and when to give up waiting.
+#[derive(Debug)]
+struct GrStaleState {
+    fecs: BTreeSet<FecKey>,
+    deadline: Instant,
+}
+
+/// RFC 3478 §3.3: a recovered session whose peer preserved its
+/// forwarding state. Stale FECs are un-marked as their mappings
+/// re-arrive; the leftovers are deleted at the deadline.
+#[derive(Debug)]
+struct GrRecoveryState {
+    fecs: BTreeSet<FecKey>,
+    deadline: Instant,
+}
+
 /// A session plus the connection it rides on, with the RFC 7552
 /// context needed for per-family behavior: which address family the
 /// transport rides on and whether the peer advertised the Dual-Stack
@@ -322,6 +381,17 @@ pub struct LdpEngine {
     /// Monotonic receive-order counter for transit bookkeeping (see
     /// `TransitFec`).
     transit_seq: u64,
+    /// RFC 3478 §3.3 stale bindings per peer whose session failed
+    /// unexpectedly: the FECs stay in the LIB (and the transit state
+    /// stays) until the reconnect window expires or the session
+    /// recovers.
+    gr_stale: BTreeMap<LdpId, GrStaleState>,
+    /// RFC 3478 §3.3 recovery: the peer's session was re-established
+    /// within the reconnect window and it preserved its forwarding
+    /// state. The stale FECs are refreshed by the peer's
+    /// re-advertisements; whatever is still stale when the recovery
+    /// window expires is deleted.
+    gr_recovering: BTreeMap<LdpId, GrRecoveryState>,
     out_udp: Vec<(IpAddr, Vec<u8>)>,
     events: VecDeque<EngineEvent>,
     codec: LdpCodec,
@@ -359,6 +429,8 @@ impl LdpEngine {
             out_bufs: BTreeMap::new(),
             enc_scratch: Vec::new(),
             transit_seq: 0,
+            gr_stale: BTreeMap::new(),
+            gr_recovering: BTreeMap::new(),
             out_udp: Vec::new(),
             events: VecDeque::new(),
             codec: LdpCodec,
@@ -458,7 +530,7 @@ impl LdpEngine {
                             let max_pdu_len = Self::effective_max_pdu(&session);
                             let down_events = session.shutdown(now);
                             let outgoing = session.drain_outgoing();
-                            self.absorb_session_events(peer_id, conn, down_events);
+                            self.absorb_session_events(now, peer_id, conn, down_events);
                             self.encode_outgoing(conn, outgoing, max_pdu_len);
                             self.lib.unlearn_peer(peer_id);
                         }
@@ -490,7 +562,7 @@ impl LdpEngine {
                             });
                             let down_events = session.shutdown(now);
                             let outgoing = session.drain_outgoing();
-                            self.absorb_session_events(peer_id, conn, down_events);
+                            self.absorb_session_events(now, peer_id, conn, down_events);
                             self.encode_outgoing(conn, outgoing, max_pdu_len);
                             self.lib.unlearn_peer(peer_id);
                             self.events.push_back(EngineEvent::CloseConnection(conn));
@@ -649,6 +721,7 @@ impl LdpEngine {
             supports_downstream_on_demand: true,
             loop_detection: self.cfg.loop_detection,
             path_vector_limit: self.cfg.path_vector_limit,
+            graceful_restart: self.gr_advise(),
         });
         self.register_session(peer_id, conn, session, af_v6, peer_dual_stack, now);
     }
@@ -679,6 +752,7 @@ impl LdpEngine {
             supports_downstream_on_demand: true,
             loop_detection: self.cfg.loop_detection,
             path_vector_limit: self.cfg.path_vector_limit,
+            graceful_restart: self.gr_advise(),
         });
         self.awaiting_init.insert(conn, (session, af_v6));
         self.in_bufs.entry(conn).or_default();
@@ -704,26 +778,21 @@ impl LdpEngine {
             .find(|(_, st)| st.conn == conn)
             .map(|(k, _)| *k);
         if let Some(peer_id) = peer {
-            if let Some(mut st) = self.sessions.remove(&peer_id) {
-                let mut events = Vec::new();
+            // Route the failure through the shared SessionDown path so
+            // RFC 3478 retention applies here too.
+            let mut events = Vec::new();
+            if let Some(st) = self.sessions.get_mut(&peer_id) {
                 st.session.transport_closed(&mut events);
-                self.events.push_back(EngineEvent::SessionDown {
-                    peer_id,
-                    reason: SessionDownReason::TransportClosed,
-                });
-                self.lib.unlearn_peer(peer_id);
-                // Transit bookkeeping (same as the SessionDown event
-                // path): every FEC the peer had a binding for may need
-                // a new next hop or lose its LSP entirely
-                // (§3.5.7.1.1).
-                let prefixes: Vec<Prefix> = self.transit.keys().copied().collect();
-                for prefix in prefixes {
-                    self.transit_on_unlearn(peer_id, prefix);
+            }
+            let down = self.absorb_session_events(now, peer_id, conn, events);
+            if down {
+                if let Some(mut st) = self.sessions.remove(&peer_id) {
+                    let max_pdu_len = Self::effective_max_pdu(&st.session);
+                    self.encode_outgoing(conn, st.session.drain_outgoing(), max_pdu_len);
                 }
             }
             return;
         }
-        let _ = now;
         // Awaiting-init connection: no session was established.
         self.awaiting_init.remove(&conn);
     }
@@ -825,7 +894,10 @@ impl LdpEngine {
                 self.events.push_back(EngineEvent::SessionDown {
                     peer_id: peer,
                     reason: SessionDownReason::ProtocolError,
+                    graceful: false,
                 });
+                self.gr_stale.remove(&peer);
+                self.gr_recovering.remove(&peer);
                 self.lib.unlearn_peer(peer);
                 return;
             }
@@ -833,7 +905,7 @@ impl LdpEngine {
         if let Some(st) = self.sessions.get_mut(&peer) {
             let events = st.session.feed_pdu(&pdu, now);
             let conn = st.conn;
-            let down = self.absorb_session_events(peer, conn, events);
+            let down = self.absorb_session_events(now, peer, conn, events);
             if down {
                 if let Some(mut st) = self.sessions.remove(&peer) {
                     let max_pdu_len = Self::effective_max_pdu(&st.session);
@@ -866,7 +938,7 @@ impl LdpEngine {
         );
         self.in_bufs.entry(conn).or_default();
         self.out_bufs.entry(conn).or_default();
-        let down = self.absorb_session_events(peer, conn, events);
+        let down = self.absorb_session_events(now, peer, conn, events);
         if down {
             if let Some(mut st) = self.sessions.remove(&peer) {
                 let max_pdu_len = Self::effective_max_pdu(&st.session);
@@ -877,7 +949,13 @@ impl LdpEngine {
         }
     }
 
-    fn absorb_session_events(&mut self, peer: LdpId, conn: u64, events: Vec<SessionEvent>) -> bool {
+    fn absorb_session_events(
+        &mut self,
+        now: Instant,
+        peer: LdpId,
+        conn: u64,
+        events: Vec<SessionEvent>,
+    ) -> bool {
         let mut down = false;
         for ev in events {
             match ev {
@@ -887,6 +965,7 @@ impl LdpEngine {
                         conn,
                         params,
                     });
+                    self.gr_on_session_up(now, peer, params.peer_graceful_restart);
                     // §3.5.5.1: advertise interface addresses before any
                     // Label Mapping. RFC 7552 §7.1 scopes the set per
                     // peer: with the Dual-Stack capability both
@@ -969,17 +1048,45 @@ impl LdpEngine {
                 SessionEvent::SessionDown(reason) => {
                     down = true;
                     self.events.push_back(EngineEvent::CloseConnection(conn));
-                    self.events.push_back(EngineEvent::SessionDown {
-                        peer_id: peer,
-                        reason,
-                    });
-                    self.lib.unlearn_peer(peer);
-                    // Transit bookkeeping: every FEC the peer had a
-                    // binding for may need a new next hop (or lose its
-                    // LSP entirely, §3.5.7.1.1).
-                    let prefixes: Vec<Prefix> = self.transit.keys().copied().collect();
-                    for prefix in prefixes {
-                        self.transit_on_unlearn(peer, prefix);
+                    let peer_gr = self
+                        .sessions
+                        .get(&peer)
+                        .and_then(|st| st.session.negotiated())
+                        .and_then(|n| n.peer_graceful_restart);
+                    // RFC 3478 §3.3: retain the bindings (marked
+                    // stale) for an unexpected failure of a
+                    // graceful-restart-capable peer. A deliberate
+                    // Shutdown, a local shutdown, or a pre-operational
+                    // error purges as before.
+                    if self.gr_should_retain(reason, peer_gr) {
+                        let fecs: BTreeSet<FecKey> =
+                            self.lib.bindings_from(peer).map(|(k, _)| *k).collect();
+                        let window = (peer_gr.map(|g| g.reconnect_ms as u64).unwrap_or(0))
+                            .min(self.cfg.gr_neighbor_liveness_ms);
+                        let deadline = Instant::from_millis(now.as_millis() + window);
+                        self.gr_stale.insert(peer, GrStaleState { fecs, deadline });
+                        self.gr_recovering.remove(&peer);
+                        self.events.push_back(EngineEvent::SessionDown {
+                            peer_id: peer,
+                            reason,
+                            graceful: true,
+                        });
+                    } else {
+                        self.events.push_back(EngineEvent::SessionDown {
+                            peer_id: peer,
+                            reason,
+                            graceful: false,
+                        });
+                        self.gr_stale.remove(&peer);
+                        self.gr_recovering.remove(&peer);
+                        self.lib.unlearn_peer(peer);
+                        // Transit bookkeeping: every FEC the peer had a
+                        // binding for may need a new next hop (or lose
+                        // its LSP entirely, §3.5.7.1.1).
+                        let prefixes: Vec<Prefix> = self.transit.keys().copied().collect();
+                        for prefix in prefixes {
+                            self.transit_on_unlearn(peer, prefix);
+                        }
                     }
                 }
                 SessionEvent::NotificationReceived(status) => {
@@ -1055,6 +1162,10 @@ impl LdpEngine {
                                         m.path_vector.as_ref().map(|pv| pv.0.as_slice()),
                                     );
                                 }
+                                // RFC 3478 §3.3 (b)/(c): a mapping
+                                // received during recovery refreshes
+                                // the stale entry.
+                                self.gr_on_mapping_received(peer, *p);
                             }
                         }
                     }
@@ -1218,6 +1329,8 @@ impl LdpEngine {
     // ------------------------------------------------------------------
 
     pub fn tick(&mut self, now: Instant) {
+        // RFC 3478: reconnect/recovery window expiry.
+        self.gr_tick(now);
         // Discovery: adjacency expiry + hello scheduling.
         let events = self.discovery.tick(now);
         self.absorb_discovery_events(events, now);
@@ -1238,7 +1351,7 @@ impl LdpEngine {
                 Some(st) => (st.session.tick(now), st.conn),
                 None => continue,
             };
-            let down = self.absorb_session_events(peer, conn, events);
+            let down = self.absorb_session_events(now, peer, conn, events);
             if down {
                 if let Some(mut st) = self.sessions.remove(&peer) {
                     let max_pdu_len = Self::effective_max_pdu(&st.session);
@@ -1584,6 +1697,150 @@ impl LdpEngine {
         }
     }
 
+    /// Whether the bindings of a failed session are retained (RFC
+    /// 3478 §3.3): the peer advertised the FT Session TLV and the
+    /// failure was unexpected. A deliberate Shutdown means the peer is
+    /// going away on purpose; local shutdowns and pre-operational
+    /// errors are never covered.
+    fn gr_should_retain(
+        &self,
+        reason: SessionDownReason,
+        peer_gr: Option<crate::tlv::FtSessionParams>,
+    ) -> bool {
+        let unexpected = matches!(
+            reason,
+            SessionDownReason::TransportClosed | SessionDownReason::KeepAliveExpired
+        );
+        unexpected && self.cfg.graceful_restart && peer_gr.is_some()
+    }
+
+    /// The session with `peer` is operational again while its bindings
+    /// are retained (RFC 3478 §3.3): the peer's fresh Recovery Time
+    /// decides between recovery (keep the stale bindings for
+    /// min(recovery, Maximum Recovery Time) and let the peer's
+    /// re-advertisements refresh them) and immediate deletion (zero
+    /// Recovery Time — the peer did not preserve its forwarding
+    /// state).
+    fn gr_on_session_up(
+        &mut self,
+        now: Instant,
+        peer: LdpId,
+        peer_gr: Option<crate::tlv::FtSessionParams>,
+    ) {
+        let Some(stale) = self.gr_stale.remove(&peer) else {
+            // Bindings for the peer were purged while the session was
+            // down (the reconnect window expired) — or there never
+            // were any: normal (re)learning applies.
+            self.gr_recovering.remove(&peer);
+            return;
+        };
+        let recovery_ms = peer_gr.map(|g| g.recovery_ms as u64).unwrap_or(0);
+        if recovery_ms == 0 {
+            // §3.3: "the LSR SHOULD immediately delete all the stale
+            // label-FEC bindings received from that neighbor" — the
+            // peer did not preserve its forwarding state. Surface the
+            // withdrawals so the embedder reverts the dataplane; the
+            // peer's fresh re-advertisements re-learn everything.
+            let prefixes = self.gr_purge_stale(peer, stale.fecs);
+            if !prefixes.is_empty() {
+                self.events.push_back(EngineEvent::MappingWithdrawn {
+                    peer_id: peer,
+                    prefixes,
+                });
+            }
+            self.gr_recovering.remove(&peer);
+            return;
+        }
+        let window = recovery_ms.min(self.cfg.gr_max_recovery_ms);
+        let deadline = Instant::from_millis(now.as_millis() + window);
+        self.gr_recovering.insert(
+            peer,
+            GrRecoveryState {
+                fecs: stale.fecs,
+                deadline,
+            },
+        );
+    }
+
+    /// A mapping arrived from a peer in recovery: refresh the stale
+    /// entry (§3.3 (b)/(c)) — the LIB update already happened.
+    fn gr_on_mapping_received(&mut self, peer: LdpId, prefix: Prefix) {
+        if let Some(rec) = self.gr_recovering.get_mut(&peer) {
+            rec.fecs.remove(&FecKey::new(prefix));
+        }
+        // A fresh mapping from a session that just re-established
+        // while the stale set is still pending is treated the same
+        // way once recovery starts (the SessionUp handler moves the
+        // whole set).
+    }
+
+    /// Expire the RFC 3478 timers: reconnect windows of peers that
+    /// never came back, and recovery windows of peers that did not
+    /// refresh every binding in time. Returns the purge events.
+    fn gr_tick(&mut self, now: Instant) {
+        let now_ms = now.as_millis();
+        let expired_reconnect: Vec<LdpId> = self
+            .gr_stale
+            .iter()
+            .filter(|(_, st)| st.deadline.as_millis() <= now_ms)
+            .map(|(k, _)| *k)
+            .collect();
+        for peer in expired_reconnect {
+            let stale = self.gr_stale.remove(&peer).expect("just checked");
+            let prefixes = self.gr_purge_stale(peer, stale.fecs);
+            if !prefixes.is_empty() {
+                self.events.push_back(EngineEvent::MappingWithdrawn {
+                    peer_id: peer,
+                    prefixes,
+                });
+            }
+        }
+        let expired_recovery: Vec<LdpId> = self
+            .gr_recovering
+            .iter()
+            .filter(|(_, st)| st.deadline.as_millis() <= now_ms)
+            .map(|(k, _)| *k)
+            .collect();
+        for peer in expired_recovery {
+            let rec = self.gr_recovering.remove(&peer).expect("just checked");
+            let prefixes = self.gr_purge_stale(peer, rec.fecs);
+            if !prefixes.is_empty() {
+                self.events.push_back(EngineEvent::MappingWithdrawn {
+                    peer_id: peer,
+                    prefixes,
+                });
+            }
+        }
+    }
+
+    /// Remove `fecs` from a peer's LIB and transit state (the
+    /// dataplane mirror goes away with the MappingWithdrawn events the
+    /// caller emits).
+    fn gr_purge_stale(&mut self, peer: LdpId, fecs: BTreeSet<FecKey>) -> Vec<Prefix> {
+        let mut prefixes = Vec::new();
+        for fec in fecs {
+            if self.lib.unlearn(peer, &fec).is_some() {
+                prefixes.push(fec.prefix);
+            }
+        }
+        for prefix in prefixes.clone() {
+            self.transit_on_unlearn(peer, prefix);
+        }
+        prefixes
+    }
+
+    /// The FT Session TLV timers to advertise (RFC 3478 §2), when
+    /// graceful restart is configured.
+    fn gr_advise(&self) -> Option<crate::session::GrAdvise> {
+        if !self.cfg.graceful_restart {
+            return None;
+        }
+        Some(crate::session::GrAdvise {
+            reconnect_ms: self.cfg.gr_reconnect_ms,
+            recovery_ms: self.cfg.gr_recovery_ms,
+        })
+    }
+
     /// The address traffic toward `peer` is sent to: its advertised
     /// transport address (the TCP endpoint; the adjacency falls back
     /// to the Hello source when the peer sent no Transport Address
@@ -1629,7 +1886,7 @@ impl LdpEngine {
             let max_pdu_len = Self::effective_max_pdu(&session);
             let down_events = session.shutdown(now);
             let outgoing = session.drain_outgoing();
-            self.absorb_session_events(peer, conn, down_events);
+            self.absorb_session_events(now, peer, conn, down_events);
             self.encode_outgoing(conn, outgoing, max_pdu_len);
             self.events.push_back(EngineEvent::CloseConnection(conn));
             self.lib.unlearn_peer(peer);

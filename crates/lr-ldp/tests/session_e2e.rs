@@ -475,7 +475,7 @@ fn two_speakers_full_lifecycle() {
     let events = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
         events.iter().any(|e| matches!(
             e,
-            EngineEvent::SessionDown { peer_id, reason }
+            EngineEvent::SessionDown { peer_id, reason, .. }
                 if *peer_id == peer_a && matches!(reason, SessionDownReason::PeerNotification(_))
         ))
     });
@@ -533,12 +533,12 @@ fn oversized_pdu_kills_the_session() {
     let events = wait_for(&mut a, &mut b, Duration::from_secs(5), |events| {
         events.iter().any(|e| matches!(
             e,
-            EngineEvent::SessionDown { peer_id, reason: SessionDownReason::ProtocolError }
+            EngineEvent::SessionDown { peer_id, reason: SessionDownReason::ProtocolError, .. }
                 if *peer_id == peer_b
         ))
             && events.iter().any(|e| matches!(
                 e,
-                EngineEvent::SessionDown { peer_id, reason: SessionDownReason::PeerNotification(code) }
+                EngineEvent::SessionDown { peer_id, reason: SessionDownReason::PeerNotification(code), .. }
                     if *peer_id == peer_a && *code == StatusCode::BAD_PDU_LENGTH
             ))
     });

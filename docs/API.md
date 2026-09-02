@@ -639,6 +639,17 @@ label range. `engine.transit_label_of(&prefix)` and
 normalized to the §3.4.1.1 wire form, so an advertised
 `10.0.0.1/24` and a peer's `10.0.0.0/24` are the same FEC.
 
+RFC 3478 graceful restart rides on top: set `cfg.graceful_restart`
+(the timers default to FRR's — a 15 s advertised Reconnect Timeout, an
+honest Recovery Time of 0) and the Init carries the FT Session TLV.
+When a graceful-restart-capable peer's session then fails unexpectedly
+(`EngineEvent::SessionDown { graceful: true, .. }` — transport closed
+or keepalive expiry), the peer's bindings are retained and the
+dataplane keeps forwarding: they are refreshed if the session
+re-establishes within the reconnect window and the peer preserved its
+forwarding state, and withdrawn through ordinary
+`MappingWithdrawn`/`TransitSwapRemoved` events when it did not.
+
 RFC 7552 (LDP over IPv6) is built in: set
 `cfg.transport_addr_v6` (or construct the engine with an IPv6
 `transport_addr` for a single-stack IPv6 speaker) and the engine

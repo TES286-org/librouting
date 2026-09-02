@@ -199,6 +199,10 @@ pub enum TlvType {
     /// Dual-Stack capability (RFC 7552 §6.1.1). Carried in Hellos with
     /// U=1, F=0.
     DualStackCapability = 0x0701,
+    /// FT Session TLV (RFC 3479 §8.2) — the LDP graceful-restart
+    /// capability advertisement (RFC 3478 §2). Carried in
+    /// Initialization messages with U=1, F=0.
+    FtSession = 0x0503,
 }
 
 impl TlvType {
@@ -223,6 +227,7 @@ impl TlvType {
             0x0500 => Self::CommonSessionParameters,
             0x0501 => Self::AtmSessionParameters,
             0x0502 => Self::FrameRelaySessionParameters,
+            0x0503 => Self::FtSession,
             0x0600 => Self::LabelRequestMessageId,
             0x0601 => Self::LdpCapability,
             0x0701 => Self::DualStackCapability,

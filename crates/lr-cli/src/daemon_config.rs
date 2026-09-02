@@ -403,6 +403,23 @@ pub(crate) struct DaemonConfig {
     /// (or `--ldp-no-transit`) pins the daemon to the egress/ingress
     /// roles of its explicitly configured bindings only.
     pub ldp_transit_allocation: bool,
+    /// RFC 3478 LDP graceful restart (`[ldp] graceful_restart`,
+    /// `--ldp-graceful-restart`; off by default — matches FRR's
+    /// `mpls ldp graceful-restart`). When on, the Init advertises the
+    /// FT Session TLV and an unexpected session failure retains the
+    /// failed peer's bindings (marked stale) instead of purging them:
+    /// the kernel LSPs keep forwarding while the peer restarts.
+    pub ldp_graceful_restart: bool,
+    /// Advertised FT Reconnect Timeout in milliseconds (RFC 3478 §2):
+    /// how long a peer should keep its forwarding state for our LSPs
+    /// when the session with us fails. FRR's default is 15000.
+    pub ldp_gr_reconnect_ms: u32,
+    /// Advertised Recovery Time in milliseconds (RFC 3478 §2). The
+    /// honest default is 0: the daemon does not preserve its MPLS
+    /// forwarding state across its own restart (the kernel mirror is
+    /// deleted on shutdown), so peers delete their stale bindings for
+    /// us on reconnection and relearn from our re-advertisements.
+    pub ldp_gr_recovery_ms: u32,
     /// RFC 5036 §2.8 Loop Detection: propose the D bit (PVLim =
     /// `ldp_loop_pv_limit`) in the Init and enforce the §3.4.4.1/A.2.6
     /// Hop Count and Path Vector checks on received Label Mapping and
@@ -495,6 +512,9 @@ impl DaemonConfig {
             ldp_label_min: 16,
             ldp_label_max: 1048575,
             ldp_transit_allocation: true,
+            ldp_graceful_restart: false,
+            ldp_gr_reconnect_ms: 15000,
+            ldp_gr_recovery_ms: 0,
             ldp_loop_detection: false,
             ldp_loop_hc_limit: 32,
             ldp_loop_pv_limit: 32,
@@ -1473,6 +1493,21 @@ fn apply_ldp_key(
                     .parse()
                     .map_err(|_| format!("bad transit_allocation '{value}' (true|false)"))?;
             }
+            "graceful_restart" => {
+                cfg.ldp_graceful_restart = value
+                    .parse()
+                    .map_err(|_| format!("bad graceful_restart '{value}' (true|false)"))?;
+            }
+            "gr_reconnect_ms" => {
+                cfg.ldp_gr_reconnect_ms = value
+                    .parse()
+                    .map_err(|_| format!("bad gr_reconnect_ms '{value}'"))?;
+            }
+            "gr_recovery_ms" => {
+                cfg.ldp_gr_recovery_ms = value
+                    .parse()
+                    .map_err(|_| format!("bad gr_recovery_ms '{value}'"))?;
+            }
             "port" => {
                 cfg.ldp_port = value
                     .parse()
@@ -1941,6 +1976,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--ldp-no-transit" => {
                 cfg.ldp_transit_allocation = false;
+                i += 1;
+            }
+            "--ldp-graceful-restart" => {
+                cfg.ldp_graceful_restart = true;
                 i += 1;
             }
             "--ldp-port" if i + 1 < args.len() => {

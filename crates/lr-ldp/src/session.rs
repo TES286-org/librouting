@@ -78,6 +78,24 @@ pub struct SessionConfig {
     pub loop_detection: bool,
     /// Path Vector Limit proposal; 0 when loop detection is off.
     pub path_vector_limit: u8,
+    /// RFC 3478 §2 graceful-restart advertisement: when `Some`, the
+    /// Initialization message carries the FT Session TLV with the
+    /// configured timers (the L flag is always set).
+    pub graceful_restart: Option<GrAdvise>,
+}
+
+/// The FT Session TLV timers this speaker advertises (RFC 3478 §2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct GrAdvise {
+    /// FT Reconnect Timeout (ms): how long a peer should wait — and
+    /// keep the forwarding state for our LSPs — when the session with
+    /// us fails.
+    pub reconnect_ms: u32,
+    /// Recovery Time (ms): how long this speaker would keep its own
+    /// preserved forwarding state after a restart. 0 = "not
+    /// preserved" — peers delete their stale bindings for us as soon
+    /// as the session is re-established (§3.3).
+    pub recovery_ms: u32,
 }
 
 impl Default for SessionConfig {
@@ -93,6 +111,7 @@ impl Default for SessionConfig {
             supports_downstream_on_demand: true,
             loop_detection: false,
             path_vector_limit: 0,
+            graceful_restart: None,
         }
     }
 }
@@ -105,6 +124,12 @@ pub struct NegotiatedParams {
     pub advertisement: AdvertisementMode,
     pub loop_detection: bool,
     pub peer_path_vector_limit: u8,
+    /// The peer's FT Session TLV from its Initialization, when it sent
+    /// one (RFC 3478 §2). The Reconnect Timeout caps how long this
+    /// speaker retains the peer's bindings after the session fails
+    /// (§3.3); the Recovery Time of a re-established session decides
+    /// whether the stale bindings are kept (recovery) or deleted.
+    pub peer_graceful_restart: Option<crate::tlv::FtSessionParams>,
 }
 
 /// Why a session went down.
@@ -217,6 +242,13 @@ impl LdpSession {
                     // label space (§3.5.3).
                     receiver: self.cfg.peer.unwrap_or_default(),
                 },
+                ft_session: self
+                    .cfg
+                    .graceful_restart
+                    .map(|gr| crate::tlv::FtSessionParams {
+                        reconnect_ms: gr.reconnect_ms,
+                        recovery_ms: gr.recovery_ms,
+                    }),
                 unknown_tlvs: Vec::new(),
             });
             self.outgoing.push(init);
@@ -366,6 +398,7 @@ impl LdpSession {
             advertisement: resolved,
             loop_detection: params.loop_detection && self.cfg.loop_detection,
             peer_path_vector_limit: params.path_vector_limit,
+            peer_graceful_restart: init.ft_session,
         };
         self.negotiated = Some(negotiated);
 
@@ -384,6 +417,13 @@ impl LdpSession {
                         max_pdu_len: self.cfg.max_pdu_len,
                         receiver: self.peer.unwrap_or(params.receiver),
                     },
+                    ft_session: self
+                        .cfg
+                        .graceful_restart
+                        .map(|gr| crate::tlv::FtSessionParams {
+                            reconnect_ms: gr.reconnect_ms,
+                            recovery_ms: gr.recovery_ms,
+                        }),
                     unknown_tlvs: Vec::new(),
                 });
                 self.outgoing.push(reply);
@@ -706,6 +746,7 @@ mod tests {
                     max_pdu_len: crate::pdu::DEFAULT_MAX_PDU_LEN,
                     receiver,
                 },
+                ft_session: None,
                 unknown_tlvs: Vec::new(),
             })],
         }
@@ -890,6 +931,7 @@ mod tests {
                     max_pdu_len: crate::pdu::DEFAULT_MAX_PDU_LEN,
                     receiver: id(1),
                 },
+                ft_session: None,
                 unknown_tlvs: Vec::new(),
             })],
         };

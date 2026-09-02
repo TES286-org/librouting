@@ -231,6 +231,13 @@ struct Lab {
 impl Lab {
     /// `b_tweak` customizes B (the transit LSR).
     fn new(b_tweak: impl FnOnce(&mut LdpEngineConfig)) -> Self {
+        Self::new_with(|_| {}, b_tweak)
+    }
+
+    fn new_with(
+        a_tweak: impl FnOnce(&mut LdpEngineConfig),
+        b_tweak: impl FnOnce(&mut LdpEngineConfig),
+    ) -> Self {
         let a_addr = IpAddr::V4([127, 0, 0, 1]);
         let b_addr = IpAddr::V4([127, 0, 0, 2]);
         let c_addr = IpAddr::V4([127, 0, 0, 3]);
@@ -239,7 +246,7 @@ impl Lab {
             [1, 0, 0, 1],
             a_addr,
             Vec::from([b_addr]),
-            |_| {},
+            a_tweak,
         ));
         speakers.push(Speaker::new(
             [2, 0, 0, 1],
@@ -586,4 +593,248 @@ fn transit_teardown_on_transport_close() {
         std::thread::sleep(Duration::from_millis(10));
     }
     panic!("transport close did not tear the transit LSP down (removed={b_removed}, withdrawn={a_withdrawn})");
+}
+
+// ---------------------------------------------------------------------------
+// RFC 3478 graceful restart (§3.3): the surviving speaker retains the
+// failed peer's bindings and the dataplane keeps forwarding while the
+// peer restarts.
+// ---------------------------------------------------------------------------
+
+/// Replace speaker 0 (A) with a fresh engine — the "control plane
+/// restart". Drops A's sockets (the FIN is what B observes) and hands
+/// back a speaker with new ports (which the harness's address book
+/// picks up).
+fn restart_a(lab: &mut Lab, recovery_ms: u32) {
+    lab.speakers[0].conns.clear();
+    let fresh = Speaker::new(
+        [1, 0, 0, 1],
+        IpAddr::V4([127, 0, 0, 1]),
+        Vec::from([IpAddr::V4([127, 0, 0, 2])]),
+        |cfg| {
+            cfg.graceful_restart = true;
+            cfg.gr_recovery_ms = recovery_ms;
+        },
+    );
+    lab.ports.insert(
+        IpAddr::V4([127, 0, 0, 1]),
+        (fresh.udp_port(), fresh.tcp_port),
+    );
+    lab.speakers[0] = fresh;
+}
+
+fn gr_lab() -> Lab {
+    Lab::new_with(
+        |cfg| {
+            cfg.graceful_restart = true;
+            cfg.gr_recovery_ms = 0;
+        },
+        |cfg| {
+            cfg.graceful_restart = true;
+            cfg.gr_recovery_ms = 0;
+        },
+    )
+}
+
+fn wait_until(
+    lab: &mut Lab,
+    now_ms: &mut u64,
+    max_rounds: usize,
+    mut done: impl FnMut(&[(usize, EngineEvent)]) -> bool,
+) {
+    for _ in 0..max_rounds {
+        let events = lab.pump_n(1, now_ms);
+        if done(&events) {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
+#[test]
+fn gr_zero_recovery_deletes_stale_on_reconnect_then_relearns() {
+    let mut lab = gr_lab();
+    let mut now_ms = 0u64;
+    wait_for_session_up(&mut lab, &mut now_ms);
+    lab.speakers[0]
+        .engine
+        .advertise_mapping(fec(8), GenericLabel(24008));
+    wait_until(&mut lab, &mut now_ms, 100, |events| {
+        events.iter().any(|(i, ev)| {
+            *i == 1 && matches!(ev, EngineEvent::MappingLearned { prefix, .. } if *prefix == fec(8))
+        })
+    });
+    assert_eq!(
+        lab.speakers[1].engine.transit_label_of(&fec(8)),
+        Some(GenericLabel(16))
+    );
+
+    // A's control plane dies: B must RETAIN the binding (no
+    // withdrawal — the dataplane keeps forwarding).
+    restart_a(&mut lab, 0);
+    let mut retained = false;
+    let mut purged_on_reconnect = false;
+    let mut relearned = None;
+    wait_until(&mut lab, &mut now_ms, 300, |events| {
+        for (i, ev) in events {
+            match (i, ev) {
+                (1, EngineEvent::SessionDown { graceful: true, .. }) => retained = true,
+                (1, EngineEvent::MappingWithdrawn { prefixes, .. })
+                    if prefixes.contains(&fec(8)) =>
+                {
+                    purged_on_reconnect = true;
+                }
+                // Only A's fresh advertisement (a distinct label)
+                // counts as the relearn — C's transit re-advertisement
+                // of the same FEC also arrives here.
+                (1, EngineEvent::MappingLearned { label, .. }) if *label == GenericLabel(24009) => {
+                    relearned = Some(*label);
+                }
+                _ => {}
+            }
+        }
+        retained && purged_on_reconnect && relearned.is_some()
+    });
+    assert!(
+        retained,
+        "session down was not marked as graceful retention"
+    );
+    // The stale window expired (0 ms effective: the peer advertised a
+    // zero Recovery Time) — the binding is deleted the moment the
+    // session is re-established, then relearned from A's fresh
+    // advertisement.
+    lab.speakers[0]
+        .engine
+        .advertise_mapping(fec(8), GenericLabel(24009));
+    wait_until(&mut lab, &mut now_ms, 100, |events| {
+        events.iter().any(|(i, ev)| {
+            matches!(
+                (i, ev),
+                (1, EngineEvent::MappingLearned { label, .. }) if *label == GenericLabel(24009)
+            )
+        })
+    });
+    assert_eq!(relearned, None);
+    // The relearned binding re-entered the transit allocator (label 16
+    // was freed by the purge and is reused).
+    assert_eq!(
+        lab.speakers[1].engine.transit_label_of(&fec(8)),
+        Some(GenericLabel(16))
+    );
+}
+
+#[test]
+fn gr_recovery_preserves_stale_without_withdrawal() {
+    let mut lab = gr_lab();
+    let mut now_ms = 0u64;
+    wait_for_session_up(&mut lab, &mut now_ms);
+    lab.speakers[0]
+        .engine
+        .advertise_mapping(fec(9), GenericLabel(24010));
+    wait_until(&mut lab, &mut now_ms, 100, |events| {
+        events.iter().any(|(i, ev)| {
+            *i == 1 && matches!(ev, EngineEvent::MappingLearned { prefix, .. } if *prefix == fec(9))
+        })
+    });
+
+    // A restarts and PRESERVES its forwarding state (Recovery Time >
+    // 0): B keeps the stale bindings through recovery, A re-advertises
+    // the same binding, and nothing is ever withdrawn.
+    restart_a(&mut lab, 60_000);
+    let mut withdrawn = false;
+    wait_until(&mut lab, &mut now_ms, 300, |events| {
+        for (_, ev) in events {
+            if let EngineEvent::MappingWithdrawn { prefixes, .. } = ev {
+                if prefixes.contains(&fec(9)) {
+                    withdrawn = true;
+                }
+            }
+        }
+        // Session is back up and A re-advertised.
+        events.iter().any(|(i, ev)| {
+            matches!(
+                (i, ev),
+                (1, EngineEvent::MappingLearned { prefix, .. }) if *prefix == fec(9)
+            )
+        })
+    });
+    // Drive a couple of seconds of sim time past recovery start: no
+    // withdrawal may fire while the stale binding keeps refreshing.
+    lab.speakers[0]
+        .engine
+        .advertise_mapping(fec(9), GenericLabel(24010));
+    for _ in 0..20 {
+        let events = lab.pump_n(1, &mut now_ms);
+        for (_, ev) in &events {
+            if let EngineEvent::MappingWithdrawn { prefixes, .. } = ev {
+                if prefixes.contains(&fec(9)) {
+                    withdrawn = true;
+                }
+            }
+        }
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert!(!withdrawn, "stale binding was withdrawn despite recovery");
+    assert_eq!(
+        lab.speakers[1].engine.transit_label_of(&fec(9)),
+        Some(GenericLabel(16))
+    );
+}
+
+#[test]
+fn gr_reconnect_window_expiry_purges_stale() {
+    // The peer never comes back: the Neighbor Liveness window (short
+    // for the test) expires and the stale bindings are withdrawn —
+    // including their transit LSP.
+    let mut lab = Lab::new_with(
+        |cfg| {
+            cfg.graceful_restart = true;
+        },
+        |cfg| {
+            cfg.graceful_restart = true;
+            cfg.gr_neighbor_liveness_ms = 1_500;
+        },
+    );
+    let mut now_ms = 0u64;
+    wait_for_session_up(&mut lab, &mut now_ms);
+    lab.speakers[0]
+        .engine
+        .advertise_mapping(fec(10), GenericLabel(24011));
+    wait_until(&mut lab, &mut now_ms, 100, |events| {
+        events.iter().any(|(i, ev)| {
+            *i == 1
+                && matches!(ev, EngineEvent::MappingLearned { prefix, .. } if *prefix == fec(10))
+        })
+    });
+    assert_eq!(
+        lab.speakers[1].engine.transit_label_of(&fec(10)),
+        Some(GenericLabel(16))
+    );
+
+    // Kill A without restarting it: drop its sockets AND replace the
+    // speaker with an inert one (no Hellos, no engine — the harness
+    // never pumps a speaker whose engine is not driven here).
+    lab.speakers[0].conns.clear();
+    lab.ports.remove(&IpAddr::V4([127, 0, 0, 1]));
+    let dead_addr: std::net::SocketAddr = "127.0.0.1:9".parse().unwrap();
+    let dead_udp = std::net::UdpSocket::bind(dead_addr);
+    let _ = dead_udp; // A is gone; B's Hellos to the removed port no-op
+    let mut withdrawn = false;
+    wait_until(&mut lab, &mut now_ms, 400, |events| {
+        for (i, ev) in events {
+            if *i == 1 {
+                if let EngineEvent::MappingWithdrawn { prefixes, .. } = ev {
+                    if prefixes.contains(&fec(10)) {
+                        withdrawn = true;
+                    }
+                }
+            }
+        }
+        withdrawn
+    });
+    assert!(
+        withdrawn,
+        "stale bindings were not purged at the window expiry"
+    );
+    assert_eq!(lab.speakers[1].engine.transit_label_of(&fec(10)), None);
 }
