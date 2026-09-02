@@ -231,6 +231,17 @@ else
         nsenter -t "$R2" -n ip route show 203.0.113.0/24
         exit 1
     fi
+    # The mirror side of the same adjacency: r1 pushes 16 toward r2.
+    if ! grep -qF "ldp: 198.51.100.0/24 encap mpls [16] via 10.99.1.2" "$OUT/r1.log"; then
+        echo "FAIL: r1 did not install the encap LSP for r2's binding:"
+        cat "$OUT/r1.log"
+        exit 1
+    fi
+    if ! nsenter -t "$R1" -n ip route show 198.51.100.0/24 | grep -qE "encap mpls"; then
+        echo "FAIL: kernel route in r1 lacks the MPLS encap:"
+        nsenter -t "$R1" -n ip route show 198.51.100.0/24
+        exit 1
+    fi
     echo "PASS: phase 3a — kernel LSP state matches the LIB on both sides"
 
     echo "== pinging through the LSP (r2 -> label 24000 -> r1 -> stub) =="
@@ -243,6 +254,10 @@ else
         nsenter -t "$R1" -n ip -f mpls route show
         echo "== kernel state r2 =="
         nsenter -t "$R2" -n ip route show 203.0.113.0/24
+        echo "== r1 daemon log tail =="
+        tail -25 "$OUT/r1.log"
+        echo "== r2 daemon log tail =="
+        tail -25 "$OUT/r2.log"
         exit 1
     fi
 fi
@@ -285,6 +300,16 @@ if [ "$MPLS" -eq 1 ]; then
     fi
     echo "PASS: transit swap mirrored into the kernel (${R2_TRANSIT} -> 20000)"
 
+    # r1's ingress half: push the transit label toward r2 (the Hello
+    # source — r2's transport address is its loopback 2.2.2.2, which is
+    # not an LSP next hop).
+    if ! nsenter -t "$R1" -n ip route show 192.0.2.0/24 | grep -qE "encap mpls"; then
+        echo "FAIL: kernel route in r1 lacks the MPLS encap for the transit FEC:"
+        nsenter -t "$R1" -n ip route show 192.0.2.0/24
+        tail -25 "$OUT/r1.log"
+        exit 1
+    fi
+
     echo "== pinging through the three-LSR LSP (r1 -> r2 swap -> r3 -> stub) =="
     if nsenter -t "$R1" -n ping -c 3 -W 2 192.0.2.1 >"$OUT/ping3.log" 2>&1; then
         echo "PASS: end-to-end labelled ping across the transit LSR"
@@ -298,6 +323,12 @@ if [ "$MPLS" -eq 1 ]; then
         nsenter -t "$R2" -n ip -f mpls route show
         echo "== kernel state r3 =="
         nsenter -t "$R3" -n ip -f mpls route show
+        echo "== r1 daemon log tail =="
+        tail -25 "$OUT/r1.log"
+        echo "== r2 daemon log tail =="
+        tail -25 "$OUT/r2.log"
+        echo "== r3 daemon log tail =="
+        tail -25 "$OUT/r3.log"
         exit 1
     fi
 fi
