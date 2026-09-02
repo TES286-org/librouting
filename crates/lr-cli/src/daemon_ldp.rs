@@ -179,10 +179,10 @@ struct LdpDaemon {
     /// label when the binding goes away).
     #[cfg(target_os = "linux")]
     tails: HashMap<Prefix, GenericLabel>,
-    /// Installed head encap routes, keyed by prefix: (peer label, peer
-    /// id) so withdrawals and session teardown reverse the right LSP.
+    /// Installed head encap routes, keyed by prefix: (peer label, next
+    /// hop) so withdrawals and session teardown reverse the right LSP.
     #[cfg(target_os = "linux")]
-    heads: HashMap<Prefix, (GenericLabel, LdpId)>,
+    heads: HashMap<Prefix, (GenericLabel, IpAddr)>,
     /// Installed transit swap routes, keyed by prefix: (in-label, next
     /// hop) so next-hop changes replace the right route and teardown
     /// deletes it.
@@ -946,10 +946,14 @@ impl LdpDaemon {
                     // (MappingWithdrawn / TransitSwapRemoved).
                     #[cfg(target_os = "linux")]
                     if !graceful {
+                        // The heads routed through this peer: match on
+                        // its data-plane address (the same rule the
+                        // installs used), not on the session transport.
+                        let reach = self.peer_reach(peer_id);
                         let affected: Vec<Prefix> = self
                             .heads
                             .iter()
-                            .filter(|(_, (_, p))| *p == peer_id)
+                            .filter(|(_, (_, nh))| Some(*nh) == reach)
                             .map(|(k, _)| *k)
                             .collect();
                         for prefix in affected {
@@ -1205,19 +1209,41 @@ impl LdpDaemon {
     }
 
     /// Head half: encap route pushing the peer's label toward the
-    /// prefix via the peer's transport address.
+    /// prefix. The gateway is the peer's *data-plane* address (see
+    /// [`Self::peer_reach`]): for a Link adjacency the Hello source —
+    /// the directly connected neighbor —, not the TCP transport
+    /// address, which is frequently a loopback (the FRR `mpls ldp
+    /// router-id lo` convention) and is rejected by the kernel as an
+    /// IPv4 encap gateway when it is not on-link.
     #[cfg(target_os = "linux")]
     fn install_head(&mut self, prefix: Prefix, label: GenericLabel, peer: LdpId) {
-        let Some(nh) = self.peers_transport.get(&peer).copied().or_else(|| {
-            self.engine
-                .adjacencies()
-                .iter()
-                .find(|a| a.peer_id == peer)
-                .map(|a| a.transport_addr)
-        }) else {
+        let Some(nh) = self.peer_reach(peer) else {
             return;
         };
         self.install_head_route(prefix, label, nh);
+    }
+
+    /// The LSP next hop toward `peer`: a Link adjacency's Hello source
+    /// (the directly connected neighbor — label mappings follow the
+    /// hop-by-hop route, RFC 5036 §2.6.1.2), else a Targeted
+    /// adjacency's transport address (resolved via the FIB), else the
+    /// session transport bookkeeping. Mirrors
+    /// `lr_ldp::LdpEngine`'s reach-address rule used for
+    /// `TransitSwapChanged::next_hop`.
+    #[cfg(target_os = "linux")]
+    fn peer_reach(&self, peer: LdpId) -> Option<IpAddr> {
+        let adjs = self.engine.adjacencies();
+        let adj = adjs
+            .iter()
+            .find(|a| a.peer_id == peer && a.kind == lr_ldp::discovery::DiscoveryKind::Link)
+            .or_else(|| adjs.iter().find(|a| a.peer_id == peer));
+        match adj {
+            Some(a) => Some(match a.kind {
+                lr_ldp::discovery::DiscoveryKind::Link => a.source,
+                lr_ldp::discovery::DiscoveryKind::Targeted => a.transport_addr,
+            }),
+            None => self.peers_transport.get(&peer).copied(),
+        }
     }
 
     /// Head half, next-hop-address flavor: the transit allocator
@@ -1232,8 +1258,7 @@ impl LdpDaemon {
         match mpls.add_encap_route(&prefix, &stack, nh, 0) {
             Ok(()) => {
                 println!("ldp: {} encap mpls [{}] via {}", prefix, label.0, nh);
-                self.heads
-                    .insert(prefix, (label, LdpId::new([0, 0, 0, 0], 0)));
+                self.heads.insert(prefix, (label, nh));
             }
             Err(e) => eprintln!("ldp: encap install for {} failed: {}", prefix, e),
         }

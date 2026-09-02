@@ -1841,16 +1841,29 @@ impl LdpEngine {
         })
     }
 
-    /// The address traffic toward `peer` is sent to: its advertised
-    /// transport address (the TCP endpoint; the adjacency falls back
-    /// to the Hello source when the peer sent no Transport Address
-    /// TLV).
+    /// The address the data plane toward `peer` is sent to. For a Link
+    /// adjacency that is the Hello source — the directly connected
+    /// neighbor itself, which is the LSP next hop: label mappings
+    /// follow the hop-by-hop route (RFC 5036 §2.6.1.2), and the
+    /// labeled frame must leave toward the LSR that advertised the
+    /// label. The peer's *transport* address would only coincide with
+    /// it when the peer puts its interface address in the Transport
+    /// Address TLV; a loopback transport (the FRR `mpls ldp router-id
+    /// lo` convention) is not an LSP next hop and, not being on-link,
+    /// is rejected as a gateway by the kernel's MPLS/IP route install.
+    /// For a Targeted adjacency the peer is remote by definition: its
+    /// transport address is the right target and the embedder resolves
+    /// it against the routing table.
     fn peer_reach_addr(&self, peer: LdpId) -> Option<IpAddr> {
-        self.discovery
-            .adjacencies()
+        let adjs = self.discovery.adjacencies();
+        let adj = adjs
             .iter()
-            .find(|a| a.peer_id == peer)
-            .map(|a| a.transport_addr)
+            .find(|a| a.peer_id == peer && a.kind == DiscoveryKind::Link)
+            .or_else(|| adjs.iter().find(|a| a.peer_id == peer))?;
+        Some(match adj.kind {
+            DiscoveryKind::Link => adj.source,
+            DiscoveryKind::Targeted => adj.transport_addr,
+        })
     }
 
     /// Queue a link Hello (basic discovery, RFC 5036 §3.5.2) to `dest`.
