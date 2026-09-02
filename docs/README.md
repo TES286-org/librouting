@@ -35,6 +35,12 @@ the protocol crates.
 | ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
 | [`OS-INTEGRATION.md`](OS-INTEGRATION.md) | Kernel route-table backends (Linux rtnetlink, BSD route(4), Windows IP Helper), layout tables, porting a new OS |
 
+## Research
+
+| Document                                          | Contents                                                                                      |
+| ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
+| [`research/BGP-DEFECTS.md`](research/BGP-DEFECTS.md) | BGP's protocol-inherent defects: mechanisms, primary evidence, standard mitigations, lr status |
+
 ## Standing rules
 
 1. Every landed feature updates `STATUS.md` and `RFC_MAP.md` in the same

@@ -734,11 +734,23 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
 
 ### W6 — Research: BGP defects and a private exchange plane
 
-1. `docs/research/BGP-DEFECTS.md` — catalogue BGP's inherent
-   weaknesses with references: slow convergence/path-vector latency,
-   withdrawal propagation storms, route leaks (policy opacity),
-   AS-path forgery pre-RPKI, full-mesh/RR scaling limits, MRAI vs
-   churn trade-offs, MED oscillation.
+1. ~~**`docs/research/BGP-DEFECTS.md`**~~ — done: catalogues BGP's
+   inherent weaknesses with verified references (RFC sections checked
+   against the published text; the paper citations taken from the RFCs'
+   own reference lists): slow convergence/path-vector latency
+   (Labovitz 2000, Griffin 1999/2002, Gao-Rexford), withdrawal
+   propagation storms, route leaks (RFC 7908 taxonomy, RFC 9234 role
+   gap), origin/path forgery (RFC 6811/8205/7132), full-mesh/RR
+   scaling limits (RFC 4456, RFC 3345), MRAI vs churn trade-offs
+   (RFC 4271 §9.2.1.1, RFC 7196 — not RFC 8326, which is Graceful BGP
+   Session Shutdown and unimplemented), MED oscillation (RFC 3345
+   Type I/II, RFC 5004). Each entry maps the defect to the standard
+   mitigation and to lr's current coverage; the summary table flags
+   the three unmitigated-in-practice defects the EXCHANGE-PLANE design
+   targets. Writing it flushed out four wrong RFC 8326 citations
+   (lr-damping doc comment, `lr-bgp::best_path` module doc,
+   ARCHITECTURE.md, RFC_MAP.md's 8326 row claimed implemented) — all
+   fixed in the same series.
 2. `docs/research/EXCHANGE-PLANE.md` — design a private data
    exchange plane negotiated between lr speakers via a capability:
    richer state (feasibility hints, policy intent, provenance
