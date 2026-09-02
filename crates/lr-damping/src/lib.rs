@@ -35,11 +35,14 @@
 //!
 //! ## Note on RFC 2439 status
 //!
-//! Route flap damping is *deprecated* by RFC 8326 (2018) for BGP because it
-//! harms convergence during BGP-related incidents. It is still useful for
-//! OSPF/Babel where it has no equivalent of AS_PATH loop detection to absorb
-//! transient failures. The module is provided here as an *opt-in* mechanism
-//! controlled by the policy chain.
+//! Route flap damping with the RFC 2439 defaults is documented as harmful
+//! by RFC 7196: the penalty model "severely penalize[s] sites for being
+//! well connected" (each path explored during a convergence event
+//! re-triggers the figure of merit), which is why most operators turn RFD
+//! off on Internet-facing eBGP. RFC 7196 prescribes the conservative
+//! parameter changes that make it usable; [`DampingConfig`] exposes them.
+//! The module is provided here as an *opt-in* mechanism controlled by the
+//! policy chain, off by default.
 
 #![forbid(unsafe_code)]
 

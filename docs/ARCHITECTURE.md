@@ -201,9 +201,13 @@ connector holds off reconnecting while BFD is down.
 ## Damping integration
 
 `lr-damping` implements RFC 2439 route flap damping. It is _opt-in_ and
-**deprecated by RFC 8326** for BGP. Use it for OSPF / Babel where there is
-no AS_PATH loop detection to absorb transient flaps, or as a
-defensive-safety mechanism during incidents.
+off by default: **RFC 7196 documents that RFD with the RFC 2439 default
+parameters penalizes well-connected networks** (each alternate path
+explored during convergence re-triggers the penalty), which is why most
+operators disable it on Internet-facing eBGP. The `lr-damping`
+configuration knobs cover the RFC 7196 conservative settings. Use it
+for OSPF / Babel where there is no AS_PATH loop detection to absorb
+transient flaps, or as a defensive-safety mechanism during incidents.
 
 ## FFI and bindings
 

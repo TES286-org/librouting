@@ -1,4 +1,4 @@
-//! Best-path selection (RFC 4271 §9.1.2 + RFC 8326 / RFC 7911 / multipath).
+//! Best-path selection (RFC 4271 §9.1.2 + RFC 5004 / RFC 7911 / multipath).
 //!
 //! The BGP decision process is a deterministic 14-step comparison. The
 //! implementation here mirrors the canonical order used by FRRouting, BIRD
