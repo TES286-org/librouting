@@ -275,7 +275,10 @@ echo "PASS: transit LSR allocates and re-advertises the FEC upstream"
 if [ "$MPLS" -eq 1 ]; then
     R2_TRANSIT=$(grep -oE "transit swap for 192.0.2.0/24 in-label [0-9]+" "$OUT/r2.log" | head -1 | grep -oE "[0-9]+$")
     R1_TRANSIT=$(grep -oE "mapping learned 192.0.2.0/24 label [0-9]+" "$OUT/r1.log" | head -1 | grep -oE "[0-9]+$")
-    if ! nsenter -t "$R2" -n ip -f mpls route show | grep -qE "^${R2_TRANSIT} .*swap 20000"; then
+    # iproute2 dumps a swap (RTA_NEWDST) op as "as to <label>" on every
+    # version this suite runs on (5.x-6.x); accept "swap <label>" too in
+    # case a future release renames the wording.
+    if ! nsenter -t "$R2" -n ip -f mpls route show | grep -qE "^${R2_TRANSIT} .*(as to|swap) 20000"; then
         echo "FAIL: kernel MPLS table in r2 lacks the transit swap ${R2_TRANSIT}->20000:"
         nsenter -t "$R2" -n ip -f mpls route show
         exit 1
