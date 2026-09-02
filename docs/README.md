@@ -40,6 +40,7 @@ the protocol crates.
 | Document                                          | Contents                                                                                      |
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | [`research/BGP-DEFECTS.md`](research/BGP-DEFECTS.md) | BGP's protocol-inherent defects: mechanisms, primary evidence, standard mitigations, lr status |
+| [`research/EXCHANGE-PLANE.md`](research/EXCHANGE-PLANE.md) | Capability-negotiated private exchange plane design: feasibility hints, policy intent, provenance proofs |
 
 ## Standing rules
 

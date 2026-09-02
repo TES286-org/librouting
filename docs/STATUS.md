@@ -751,10 +751,25 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    (lr-damping doc comment, `lr-bgp::best_path` module doc,
    ARCHITECTURE.md, RFC_MAP.md's 8326 row claimed implemented) — all
    fixed in the same series.
-2. `docs/research/EXCHANGE-PLANE.md` — design a private data
-   exchange plane negotiated between lr speakers via a capability:
-   richer state (feasibility hints, policy intent, provenance
-   proofs) exchanged alongside UPDATEs, with transparent fallback
-   to pure standard BGP when the peer does not participate.
+2. ~~**`docs/research/EXCHANGE-PLANE.md`**~~ — done: the design review
+   document for a capability-negotiated private exchange plane
+   (LRXP). Grounded in verified first-hand facts — RFC 5492 §3
+   (unknown capabilities are inert, the transparent-fallback hook),
+   RFC 4271 §5 (unknown optional-transitive attributes forward with
+   the Partial bit, so records survive non-lr transit), the IANA
+   "Capability Codes" registry (239-254 reserved for experimental
+   use; the prototype claims 251) and the unassigned path-attribute
+   range (prototype type 251, both with an RFC 7120 early-allocation
+   path to production). Three record classes: scope-1 feasibility
+   hints (best-path rank, damping FoM, IGP cost), scope-1 policy
+   intent (RFC 9234 role claim + import/export filter digests), and
+   propagated, per-hop re-signed provenance proofs (origin
+   attestation + a BGPsec-shaped digest chain over lr hops only).
+   Session binding via OPEN nonces, monotonic sequences and HMAC-SHA256
+   tags (the primitive lr-babel's RFC 8967 code already ships);
+   fail-open for route data, fail-closed for trust assertions;
+   aggregation strips provenance. Includes the W6.3 prototype plan
+   (module layout, feature flag, config keys, five-phase test plan)
+   and the open questions for the design review.
 3. Prototype the plane inside `lr-bgp::extensions` once the design
    review converges; gate behind a feature flag.
