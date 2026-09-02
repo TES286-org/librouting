@@ -310,8 +310,20 @@ if [ "$MPLS" -eq 1 ]; then
         exit 1
     fi
 
+    # r3's return-direction LSP: the reply to a ping sourced from
+    # r1's stub (203.0.113.1) rides r3's encap route for the FEC r1
+    # originated — the two unidirectional LSPs make the round trip.
+    if ! nsenter -t "$R3" -n ip route show 203.0.113.0/24 | grep -qE "encap mpls"; then
+        echo "FAIL: kernel route in r3 lacks the return-direction MPLS encap:"
+        nsenter -t "$R3" -n ip route show 203.0.113.0/24
+        tail -25 "$OUT/r3.log"
+        exit 1
+    fi
+
     echo "== pinging through the three-LSR LSP (r1 -> r2 swap -> r3 -> stub) =="
-    if nsenter -t "$R1" -n ping -c 3 -W 2 192.0.2.1 >"$OUT/ping3.log" 2>&1; then
+    # Source on r1's stub: r3 has no route to r1's link address (no IGP
+    # in the lab), but the stub FEC's LSP carries the reply back.
+    if nsenter -t "$R1" -n ping -c 3 -W 2 -I 203.0.113.1 192.0.2.1 >"$OUT/ping3.log" 2>&1; then
         echo "PASS: end-to-end labelled ping across the transit LSR"
     else
         echo "FAIL: ping through the transit LSP failed:"

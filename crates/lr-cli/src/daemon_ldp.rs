@@ -194,6 +194,12 @@ struct LdpDaemon {
     nh_resolved: HashMap<IpAddr, Option<(u32, Option<IpAddr>)>>,
     /// Peer transport addresses, for the encap-route next hop.
     peers_transport: HashMap<LdpId, IpAddr>,
+    /// Peer data-plane addresses (Link adjacency Hello sources), keyed
+    /// by peer id. Cached on AdjacencyUp so the session-down teardown
+    /// can still resolve the address after the adjacency itself has
+    /// expired — the session and adjacency hold timers fire on the
+    /// same silence, and the backstop must not race them.
+    peers_dataplane: HashMap<LdpId, IpAddr>,
 }
 
 /// Entry point from `daemon.rs`.
@@ -522,6 +528,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         #[cfg(target_os = "linux")]
         nh_resolved: HashMap::new(),
         peers_transport: HashMap::new(),
+        peers_dataplane: HashMap::new(),
     };
 
     // Tail half of the kernel mirror: local bindings deliver locally
@@ -871,6 +878,9 @@ impl LdpDaemon {
                         "ldp: adjacency up peer {} kind {:?} source {} hold {:?}",
                         a.peer_id, a.kind, a.source, a.hold_time
                     );
+                    if a.kind == lr_ldp::discovery::DiscoveryKind::Link {
+                        self.peers_dataplane.insert(a.peer_id, a.source);
+                    }
                     self.counters
                         .adjacencies
                         .store(self.engine.adjacencies().len(), Ordering::Relaxed);
@@ -949,7 +959,10 @@ impl LdpDaemon {
                         // The heads routed through this peer: match on
                         // its data-plane address (the same rule the
                         // installs used), not on the session transport.
-                        let reach = self.peer_reach(peer_id);
+                        // Cached at AdjacencyUp — the adjacency may
+                        // have expired by the time the session down
+                        // event is processed.
+                        let reach = self.peers_dataplane.get(&peer_id).copied();
                         let affected: Vec<Prefix> = self
                             .heads
                             .iter()
@@ -1227,9 +1240,9 @@ impl LdpDaemon {
     /// (the directly connected neighbor — label mappings follow the
     /// hop-by-hop route, RFC 5036 §2.6.1.2), else a Targeted
     /// adjacency's transport address (resolved via the FIB), else the
-    /// session transport bookkeeping. Mirrors
-    /// `lr_ldp::LdpEngine`'s reach-address rule used for
-    /// `TransitSwapChanged::next_hop`.
+    /// cached data-plane address from AdjacencyUp, else the session
+    /// transport bookkeeping. Mirrors `lr_ldp::LdpEngine`'s
+    /// reach-address rule used for `TransitSwapChanged::next_hop`.
     #[cfg(target_os = "linux")]
     fn peer_reach(&self, peer: LdpId) -> Option<IpAddr> {
         let adjs = self.engine.adjacencies();
@@ -1242,7 +1255,11 @@ impl LdpDaemon {
                 lr_ldp::discovery::DiscoveryKind::Link => a.source,
                 lr_ldp::discovery::DiscoveryKind::Targeted => a.transport_addr,
             }),
-            None => self.peers_transport.get(&peer).copied(),
+            None => self
+                .peers_dataplane
+                .get(&peer)
+                .copied()
+                .or_else(|| self.peers_transport.get(&peer).copied()),
         }
     }
 
