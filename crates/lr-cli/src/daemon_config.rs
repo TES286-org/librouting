@@ -2851,8 +2851,10 @@ mod tests {
         // Unset inherits (effective value resolved at wiring time).
         assert_eq!(cfg.peers[1].exchange_plane, None);
         // Template inheritance reaches the per-peer knob.
-        let mut base = PeerSpec::default();
-        base.exchange_plane = Some(true);
+        let base = PeerSpec {
+            exchange_plane: Some(true),
+            ..Default::default()
+        };
         let mut over = PeerSpec::default();
         merge_spec(&mut over, &base);
         assert_eq!(over.exchange_plane, Some(true));

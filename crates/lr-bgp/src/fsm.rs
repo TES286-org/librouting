@@ -1960,8 +1960,6 @@ mod tests {
     #[cfg(feature = "exchange-plane")]
     #[test]
     fn exchange_plane_replay_across_sessions_is_dropped() {
-        use crate::extensions::exchange_plane as xp;
-
         let (mut a, mut b) = establish_pair_with_plane(
             Some(xp_config([1u8; 8], "alpha")),
             Some(xp_config([2u8; 8], "alpha")),
@@ -1992,8 +1990,6 @@ mod tests {
     #[cfg(feature = "exchange-plane")]
     #[test]
     fn exchange_plane_tampered_record_is_dropped() {
-        use crate::extensions::exchange_plane as xp;
-
         let (mut a, mut b) = establish_pair_with_plane(
             Some(xp_config([1u8; 8], "alpha")),
             Some(xp_config([2u8; 8], "alpha")),
@@ -2013,7 +2009,7 @@ mod tests {
             .expect("record attribute");
         let tag_start = attr.value.len() - 32;
         attr.value[tag_start] ^= 0x01;
-        let mut codec = BgpCodec::new().with_asn4(true);
+        let codec = BgpCodec::new().with_asn4(true);
         let wire = codec.encode_vec(&BgpMessage::Update(u.clone())).unwrap();
 
         let actions = b.feed_bytes(&wire).unwrap();
@@ -2085,7 +2081,7 @@ mod tests {
         ));
         u.nlri
             .push(Nlri::plain(Prefix::new_v4([198, 51, 100, 0], 24)));
-        let mut codec = BgpCodec::new().with_asn4(true);
+        let codec = BgpCodec::new().with_asn4(true);
         let wire = codec.encode_vec(&BgpMessage::Update(u)).unwrap();
         let actions = a.feed_bytes(&wire).unwrap();
         let installed = actions
