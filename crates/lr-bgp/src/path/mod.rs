@@ -108,9 +108,28 @@ pub enum AttrType {
     /// at encode time so peers never see it. Lives only in the Loc-RIB to
     /// let the router carry the label stack from a received BGP-LU UPDATE
     /// through to a re-advertised one.
-    LrMplsLabelStack = 251,
-    /// Unknown attribute code.
-    Other(u8),
+    ///
+    /// 255 is an internal-only code point: it never appears on the wire
+    /// (the codec strips it at encode) and it deliberately avoids the
+    /// 244-254 unassigned range that the W6.3 exchange-plane prototype
+    /// rides on for its wire attribute (type 251).
+    LrMplsLabelStack = 255,
+    /// librouting-private exchange-plane record store (W6.3 prototype,
+    /// feature `exchange-plane`). Carries the last received exchange-plane
+    /// record set for a route through the Loc-RIB so egress can forward
+    /// the provenance chain (re-signed) and the router can expose the
+    /// scope-1 records to embedders. *Never* transmitted on the wire —
+    /// the wire form is the optional-transitive attribute type 251 the
+    /// egress path builds fresh from this store; the codec filters this
+    /// tag out at encode time. Value layout: kind(1) + payload, kind 0 =
+    /// verified record set (`ExchangeRecord::encode()` body), kind 1 =
+    /// raw wire body of an attribute that arrived with the Partial bit
+    /// set (forwarding material, design §7).
+    LrExchangePlaneRecords = 254,
+    /// Unknown attribute code. The explicit discriminant keeps the
+    /// data-carrying variant out of the unit-like variants' implicit
+    /// numbering (the two private tags above sit at 254/255).
+    Other(u8) = 0,
 }
 
 impl AttrType {
@@ -136,7 +155,8 @@ impl AttrType {
             24 => Self::TrafficEngineering,
             32 => Self::LargeCommunities,
             35 => Self::Otc,
-            251 => Self::LrMplsLabelStack,
+            254 => Self::LrExchangePlaneRecords,
+            255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
     }
@@ -163,7 +183,8 @@ impl AttrType {
             Self::TrafficEngineering => 24,
             Self::LargeCommunities => 32,
             Self::Otc => 35,
-            Self::LrMplsLabelStack => 251,
+            Self::LrExchangePlaneRecords => 254,
+            Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }
     }
@@ -241,8 +262,16 @@ impl PathAttributes {
         Some(self.attrs.remove(idx))
     }
 
+    pub fn get_mut(&mut self, t: AttrType) -> Option<&mut PathAttribute> {
+        self.attrs.iter_mut().find(|a| a.attr_type == t)
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &PathAttribute> {
         self.attrs.iter()
+    }
+
+    pub fn iter_mut(&mut self) -> impl Iterator<Item = &mut PathAttribute> {
+        self.attrs.iter_mut()
     }
 
     pub fn is_empty(&self) -> bool {

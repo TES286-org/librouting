@@ -30,7 +30,7 @@
 #![allow(dead_code)]
 
 use hmac::{Hmac, Mac};
-use sha2::Sha256;
+use sha2::{Digest, Sha256};
 
 use crate::capabilities::Capability;
 
@@ -158,6 +158,26 @@ pub struct ExchangePlaneConfig {
     pub nonce: [u8; NONCE_LEN],
     /// Verification/signing keys, ordered by key id.
     pub keys: Vec<ExchangeKey>,
+    /// RFC 9234 role claimed for this session in the policy-intent
+    /// record (design §5.2). `None` = no policy record is attached.
+    pub policy_role: Option<u8>,
+    /// SipHash-2-4 digest over the sender's canonical import filter
+    /// set (design §5.2; computed by the embedder — the FSM never
+    /// sees policy). `None` = no policy record is attached.
+    pub policy_import_digest: Option<[u8; 8]>,
+    /// See `policy_import_digest`.
+    pub policy_export_digest: Option<[u8; 8]>,
+    /// Provenance hop budget (design §4 scope field): the scope value
+    /// the ORIGINATOR puts on a fresh record set. Every forwarding lr
+    /// hop decrements it; a set whose scope reaches 0 is stripped.
+    pub provenance_scope: u8,
+    /// Wall-clock seconds at configuration time (embedder-supplied;
+    /// the library stays clock-free). Origin-attestation expiry is
+    /// `origin_base_secs + origin_ttl_secs`.
+    pub origin_base_secs: u64,
+    /// Origin-attestation lifetime (design §5.3 expiry field,
+    /// seconds). 86400 (24 h) is the prototype default.
+    pub origin_ttl_secs: u32,
 }
 
 impl ExchangePlaneConfig {
@@ -167,6 +187,12 @@ impl ExchangePlaneConfig {
             provenance: true,
             nonce,
             keys: Vec::new(),
+            policy_role: None,
+            policy_import_digest: None,
+            policy_export_digest: None,
+            provenance_scope: 8,
+            origin_base_secs: 0,
+            origin_ttl_secs: 86_400,
         }
     }
 
@@ -676,6 +702,295 @@ impl ReplayTracker {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Egress record-set construction (design §5, §7 — the attach hook)
+// ---------------------------------------------------------------------------
+
+/// Provenance chain digest over an origin attestation (design §5.3):
+/// `digest_0 = SHA-256(origin attestation TLV value)`. Every path
+/// segment signature chains from it, so a receiver holding the key
+/// block can recompute the whole chain from the record set alone.
+pub fn origin_digest(origin: &OriginAttestation) -> [u8; 32] {
+    let mut tlv = Vec::with_capacity(9);
+    tlv.extend_from_slice(&origin.origin_as.to_be_bytes());
+    tlv.push(origin.max_valid_len);
+    tlv.extend_from_slice(&origin.expiry.to_be_bytes());
+    let mut hasher = Sha256::new();
+    hasher.update(&tlv);
+    hasher.finalize().into()
+}
+
+/// One hop's path-segment digest (design §5.3): the hop signs
+/// `(its own AS, the digest it received, the AS it learned from)` with
+/// the negotiated key. The previous hop's AS is the previous segment's
+/// `asn` (or the origin AS for the first signature) — the chain is
+/// therefore fully recomputable from the record set.
+pub fn hop_digest(
+    key: &ExchangeKey,
+    asn: u32,
+    received_digest: &[u8; 32],
+    learned_from: u32,
+) -> [u8; TAG_LEN] {
+    let mut data = Vec::with_capacity(4 + 32 + 4);
+    data.extend_from_slice(&asn.to_be_bytes());
+    data.extend_from_slice(received_digest);
+    data.extend_from_slice(&learned_from.to_be_bytes());
+    compute_tag(key, &data)
+}
+
+/// Walk a provenance chain the way a validating receiver does: recompute
+/// `digest_0` from the origin attestation, then each hop's HMAC from the
+/// previous hop's digest and AS. `keys` maps the signing hop's AS to its
+/// verification key (distribution is configuration, design §8). Returns
+/// the verified path as `(asn, learned_from)` pairs, or the prefix of the
+/// chain that verified before the first failure — a chain crossing a
+/// non-lr hop is verifiable up to that hop and detectably incomplete
+/// past it (design §5.3).
+pub fn verify_provenance_chain(
+    records: &[Record],
+    keys: &[(u32, ExchangeKey)],
+) -> (Vec<(u32, u32)>, Option<usize>) {
+    let mut origin = None;
+    let mut segments: Vec<&PathSegmentSig> = Vec::new();
+    for r in records {
+        match r {
+            Record::Origin(o) => origin = Some(*o),
+            Record::Segment(s) => segments.push(s),
+            _ => {}
+        }
+    }
+    let Some(origin) = origin else {
+        return (Vec::new(), None);
+    };
+    let mut digest = origin_digest(&origin);
+    let mut learned_from = origin.origin_as;
+    let mut verified = Vec::with_capacity(segments.len());
+    for (i, seg) in segments.iter().enumerate() {
+        let Some((_, key)) = keys.iter().find(|(asn, _)| *asn == seg.asn) else {
+            return (verified, Some(i));
+        };
+        let expected = hop_digest(key, seg.asn, &digest, learned_from);
+        if seg.digest != expected {
+            return (verified, Some(i));
+        }
+        digest = seg.digest;
+        verified.push((seg.asn, learned_from));
+        learned_from = seg.asn;
+    }
+    (verified, None)
+}
+
+/// The egress inputs for one advertised route (design §5 + §7).
+pub struct EgressInput<'a> {
+    /// The local speaker's AS (origin attestation + hop signatures).
+    pub local_as: u32,
+    /// The route's locally-originated flag (`route.origin.proto == 2`):
+    /// a locally originated route gets a fresh origin attestation.
+    pub locally_originated: bool,
+    /// The announced prefix (max-valid-len and chain digest inputs).
+    pub prefix: &'a lr_core::addr::Prefix,
+    /// The provenance records the route already carries (decoded from
+    /// the private record store by the caller), if any.
+    pub received: Option<&'a ExchangeRecord>,
+    /// The peer AS this session talks to (the record set is addressed
+    /// to this receiver; its OPEN nonce is echoed).
+    pub peer_as: u32,
+}
+
+/// What the egress attach hook produced.
+pub struct EgressOutput {
+    /// The record set to encode as the wire attribute (already signed).
+    pub record: ExchangeRecord,
+    /// The key id the set is signed under.
+    pub key_id: u16,
+}
+
+/// Build the wire record set for one advertised route, or `None` when
+/// nothing should be attached (no enabled record class, or the
+/// provenance budget ran out). Implements design §5 (record classes),
+/// §6 (sequence + nonce echo) and §7 (scope decrement, per-hop re-sign):
+///
+/// * scope-1 records are rebuilt fresh from the local configuration —
+///   received ones are never re-sent (§7: consumed by the receiver);
+/// * received provenance records (origin attestation + upstream segment
+///   signatures) ride along with the scope decremented by one;
+/// * a locally originated route gets a fresh origin attestation at the
+///   configured budget;
+/// * this hop's segment signature chains onto the received set (or onto
+///   the fresh attestation) and the whole set is re-signed with the
+///   session key.
+pub fn build_record_set(
+    local: &ExchangePlaneConfig,
+    session: &ExchangePlaneSession,
+    input: &EgressInput<'_>,
+    sequence: u32,
+) -> Option<EgressOutput> {
+    let key = session.keys.first()?;
+    let mut records: Vec<Record> = Vec::new();
+
+    // --- scope-1 classes (rebuilt fresh, never relayed) ---
+    if local.hints && session.peer_flags & FLAG_HINTS_CAPABLE != 0 {
+        // Prototype rank semantics: the decision process is untouched
+        // and every route handed to egress is by definition the sender's
+        // rank-1 path for this peer (design §5.1). Damping and IGP
+        // integration are future work — 0 is the documented "off" value.
+        records.push(Record::Hint(HintRecord {
+            rank: 1,
+            damp_fom: 0,
+            igp_cost: 0,
+        }));
+        if let (Some(role), Some(import), Some(export)) = (
+            local.policy_role,
+            local.policy_import_digest,
+            local.policy_export_digest,
+        ) {
+            records.push(Record::Policy(PolicyIntent {
+                role,
+                import_digest: import,
+                export_digest: export,
+            }));
+        }
+    }
+
+    // --- provenance (scope N, re-signed per hop) ---
+    let mut scope = 0u8;
+    // The provenance records this hop forwards/originates, kept apart
+    // from the scope-1 set so a headless chain (segments without an
+    // origin anchor) is dropped as a whole instead of leaking.
+    let mut provenance: Vec<Record> = Vec::new();
+    let mut chain_from: Option<(u32, [u8; TAG_LEN])> = None; // (asn, digest)
+    if local.provenance && session.peer_flags & FLAG_PROVENANCE_CAPABLE != 0 {
+        match input.received {
+            Some(received) if received.scope > 1 => {
+                // Forward the upstream chain with the budget decremented
+                // (design §7). Scope-1 records in the received set are
+                // never re-sent.
+                scope = received.scope - 1;
+                let mut origin_seen = false;
+                for r in &received.records {
+                    match r {
+                        Record::Origin(o) => {
+                            origin_seen = true;
+                            provenance.push(Record::Origin(*o));
+                        }
+                        Record::Segment(s) => {
+                            chain_from = Some((s.asn, s.digest));
+                            provenance.push(Record::Segment(*s));
+                        }
+                        Record::Hint(_) | Record::Policy(_) => {}
+                    }
+                }
+                if !origin_seen {
+                    // A chain without an anchor cannot be validated —
+                    // strip instead of forwarding a headless tail.
+                    provenance.clear();
+                    chain_from = None;
+                    scope = 0;
+                }
+            }
+            Some(_) => {
+                // Budget exhausted (§7: scope 0 strips the attribute).
+            }
+            None if input.locally_originated => {
+                // New origin (design §5.3): attest the announcement set
+                // for exactly this prefix length, expiring at
+                // configuration time + TTL.
+                scope = local.provenance_scope.max(1);
+                let attestation = OriginAttestation {
+                    origin_as: input.local_as,
+                    max_valid_len: input.prefix.prefix_len,
+                    expiry: (local.origin_base_secs + local.origin_ttl_secs as u64) as u32,
+                };
+                provenance.push(Record::Origin(attestation));
+            }
+            None => {}
+        }
+        if scope > 0 {
+            // Our hop's signature: chain onto the last received segment
+            // (or onto the fresh origin attestation) — design §5.3.
+            let digest = match (&chain_from, input.received) {
+                (Some((asn, d)), _) => hop_digest(key, input.local_as, d, *asn),
+                (None, Some(_received)) => {
+                    // Upstream set had provenance but no origin anchor:
+                    // handled above (scope stripped) — unreachable here.
+                    return None;
+                }
+                (None, _) => {
+                    // Fresh origination: chain from digest_0 (the origin
+                    // attestation we just built).
+                    let Some(Record::Origin(o)) =
+                        provenance.iter().find(|r| matches!(r, Record::Origin(_)))
+                    else {
+                        return None;
+                    };
+                    let d0 = origin_digest(o);
+                    hop_digest(key, input.local_as, &d0, o.origin_as)
+                }
+            };
+            provenance.push(Record::Segment(PathSegmentSig {
+                asn: input.local_as,
+                digest,
+            }));
+        }
+        records.extend(provenance);
+    }
+
+    if records.is_empty() {
+        return None;
+    }
+    let mut record = ExchangeRecord::new(scope.max(1), key.id, session.peer_nonce, sequence);
+    record.records = records;
+    record.sign(key);
+    Some(EgressOutput {
+        record,
+        key_id: key.id,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Private record store (the Loc-RIB carrier between ingress and egress)
+// ---------------------------------------------------------------------------
+
+/// Store kind prefix: a verified (tag-checked, replay-checked) record
+/// set follows, encoded with [`ExchangeRecord::encode`].
+pub const STORE_VERIFIED: u8 = 0;
+/// Store kind prefix: the raw wire body of an attribute that arrived
+/// with the Partial bit set — forwarding material (design §7), never
+/// consumed or re-signed, re-emitted byte-identically downstream.
+pub const STORE_PARTIAL_RAW: u8 = 1;
+
+/// Encode a verified record set for the private record store.
+pub fn store_verified(record: &ExchangeRecord) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + 64);
+    out.push(STORE_VERIFIED);
+    out.extend_from_slice(&record.encode());
+    out
+}
+
+/// Encode a partial-transit raw body for the private record store.
+pub fn store_partial_raw(wire_body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(1 + wire_body.len());
+    out.push(STORE_PARTIAL_RAW);
+    out.extend_from_slice(wire_body);
+    out
+}
+
+/// Decode the private record store. Returns the kind prefix plus the
+/// payload (`(STORE_VERIFIED, decoded record set)` or
+/// `(STORE_PARTIAL_RAW, raw wire body)`), or `None` for a malformed
+/// store (treated as absent — the route's standard content survives).
+pub fn load_store(value: &[u8]) -> Option<(u8, &[u8])> {
+    let (&kind, payload) = value.split_first()?;
+    match kind {
+        STORE_VERIFIED => {
+            ExchangeRecord::decode(payload).ok()?;
+            Some((kind, payload))
+        }
+        STORE_PARTIAL_RAW => Some((kind, payload)),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     extern crate std;
@@ -691,6 +1006,12 @@ mod tests {
                 ExchangeKey::hmac_sha256(1, "alpha"),
                 ExchangeKey::hmac_sha256(2, "beta"),
             ],
+            policy_role: None,
+            policy_import_digest: None,
+            policy_export_digest: None,
+            provenance_scope: 8,
+            origin_base_secs: 1_700_000_000,
+            origin_ttl_secs: 86_400,
         }
     }
 
@@ -703,6 +1024,12 @@ mod tests {
                 ExchangeKey::hmac_sha256(2, "beta"),
                 ExchangeKey::hmac_sha256(3, "gamma"),
             ],
+            policy_role: None,
+            policy_import_digest: None,
+            policy_export_digest: None,
+            provenance_scope: 8,
+            origin_base_secs: 1_700_000_000,
+            origin_ttl_secs: 86_400,
         }
     }
 
@@ -927,5 +1254,259 @@ mod tests {
             tracker.accept(1, 1, &local_nonce, &local_nonce),
             ReplayDecision::Accept
         );
+    }
+
+    // ----- egress record-set construction (W6.3 follow-up) -----
+
+    fn session_for(local: &ExchangePlaneConfig, peer_nonce: [u8; 8]) -> ExchangePlaneSession {
+        ExchangePlaneSession {
+            version: VERSION,
+            peer_flags: FLAG_HINTS_CAPABLE | FLAG_PROVENANCE_CAPABLE,
+            peer_nonce,
+            local_nonce: local.nonce,
+            keys: local.keys.clone(),
+        }
+    }
+
+    fn egress_prefix() -> lr_core::addr::Prefix {
+        lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24)
+    }
+
+    #[test]
+    fn build_record_set_originates_full_set() {
+        let local = config_a();
+        let session = session_for(&local, [0xAA; NONCE_LEN]);
+        let mut local = local;
+        local.policy_role = Some(ROLE_CUSTOMER);
+        local.policy_import_digest = Some([1; 8]);
+        local.policy_export_digest = Some([2; 8]);
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: true,
+            prefix: &egress_prefix(),
+            received: None,
+            peer_as: 64513,
+        };
+        let out = build_record_set(&local, &session, &input, 1).expect("records attached");
+        // Hint + policy (scope 1) + origin attestation + our segment sig.
+        assert!(matches!(out.record.records[0], Record::Hint(_)));
+        assert!(matches!(out.record.records[1], Record::Policy(p) if p.role == ROLE_CUSTOMER));
+        let origin = out
+            .record
+            .records
+            .iter()
+            .find_map(|r| match r {
+                Record::Origin(o) => Some(*o),
+                _ => None,
+            })
+            .expect("origin attestation");
+        assert_eq!(origin.origin_as, 64512);
+        assert_eq!(origin.max_valid_len, 24);
+        assert_eq!(origin.expiry, 1_700_000_000 + 86_400);
+        assert!(matches!(
+            out.record.records.last(),
+            Some(Record::Segment(s)) if s.asn == 64512
+        ));
+        // Scope carries the originator's budget.
+        assert_eq!(out.record.scope, 8);
+        // The tag verifies under the negotiated key and echoes the peer
+        // nonce (design §6).
+        assert_eq!(out.record.nonce_echo, [0xAA; NONCE_LEN]);
+        assert!(out.record.verify(&session.keys[0]));
+    }
+
+    #[test]
+    fn build_record_set_skips_unenabled_classes() {
+        let mut local = config_a();
+        local.hints = false;
+        local.provenance = false;
+        let session = session_for(&local, [0xAA; NONCE_LEN]);
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: true,
+            prefix: &egress_prefix(),
+            received: None,
+            peer_as: 64513,
+        };
+        assert!(build_record_set(&local, &session, &input, 1).is_none());
+    }
+
+    #[test]
+    fn build_record_set_gates_on_peer_flags() {
+        // The peer did not advertise the provenance flag: no provenance
+        // records even though the local side is willing (design §5 —
+        // every class is only meaningful with the receiver's consent).
+        let local = config_a();
+        let mut session = session_for(&local, [0xAA; NONCE_LEN]);
+        session.peer_flags = FLAG_HINTS_CAPABLE;
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: true,
+            prefix: &egress_prefix(),
+            received: None,
+            peer_as: 64513,
+        };
+        let out = build_record_set(&local, &session, &input, 1).expect("hint still attached");
+        assert_eq!(out.record.records.len(), 1);
+        assert!(matches!(out.record.records[0], Record::Hint(_)));
+        assert_eq!(out.record.scope, 1);
+    }
+
+    #[test]
+    fn build_record_set_exhausted_scope_strips_provenance() {
+        let local = config_a();
+        let session = session_for(&local, [0xAA; NONCE_LEN]);
+        // A received set at scope 1 has no budget left (§7: scope 0
+        // strips the attribute entirely).
+        let mut received = ExchangeRecord::new(1, 1, [0xAA; NONCE_LEN], 5);
+        received.records.push(Record::Origin(OriginAttestation {
+            origin_as: 65000,
+            max_valid_len: 24,
+            expiry: 999,
+        }));
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: false,
+            prefix: &egress_prefix(),
+            received: Some(&received),
+            peer_as: 64513,
+        };
+        // Hints are still rebuilt fresh (they are ours, not relayed).
+        let out = build_record_set(&local, &session, &input, 1).expect("hint attached");
+        assert!(out
+            .record
+            .records
+            .iter()
+            .all(|r| matches!(r, Record::Hint(_) | Record::Policy(_)),));
+    }
+
+    #[test]
+    fn build_record_set_relays_and_re_signs_chain() {
+        let upstream = config_a();
+        let upstream_session = session_for(&upstream, [0xBB; NONCE_LEN]);
+        let upstream_input = EgressInput {
+            local_as: 65000,
+            locally_originated: true,
+            prefix: &egress_prefix(),
+            received: None,
+            peer_as: 64512,
+        };
+        let first =
+            build_record_set(&upstream, &upstream_session, &upstream_input, 1).expect("origin");
+
+        // The downstream hop forwards the received chain with the scope
+        // decremented and its own signature appended.
+        let down = config_b();
+        let mut down = down;
+        down.provenance = true;
+        let down_session = session_for(&down, [0xCC; NONCE_LEN]);
+        let down_input = EgressInput {
+            local_as: 64512,
+            locally_originated: false,
+            prefix: &egress_prefix(),
+            received: Some(&first.record),
+            peer_as: 64513,
+        };
+        let second =
+            build_record_set(&down, &down_session, &down_input, 1).expect("chain forwarded");
+        assert_eq!(second.record.scope, first.record.scope - 1);
+        // Origin attestation + upstream segment + own segment.
+        let segments: Vec<&PathSegmentSig> = second
+            .record
+            .records
+            .iter()
+            .filter_map(|r| match r {
+                Record::Segment(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[1].asn, 64512);
+        // The whole chain verifies with both hops' keys (the receiver's
+        // validation walk, design §5.3).
+        let keys = vec![
+            (65000u32, upstream_session.keys[0].clone()),
+            (64512u32, down_session.keys[0].clone()),
+        ];
+        let (path, broken) = verify_provenance_chain(&second.record.records, &keys);
+        assert!(broken.is_none());
+        assert_eq!(path, vec![(65000, 65000), (64512, 65000)]);
+    }
+
+    #[test]
+    fn build_record_set_drops_headless_chain() {
+        let local = config_a();
+        let session = session_for(&local, [0xAA; NONCE_LEN]);
+        // A received set whose origin attestation went missing (e.g. a
+        // truncated hop) is not forwardable.
+        let mut received = ExchangeRecord::new(4, 1, [0xAA; NONCE_LEN], 5);
+        received.records.push(Record::Segment(PathSegmentSig {
+            asn: 65000,
+            digest: [7; 32],
+        }));
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: false,
+            prefix: &egress_prefix(),
+            received: Some(&received),
+            peer_as: 64513,
+        };
+        let out = build_record_set(&local, &session, &input, 1).expect("hint still attached");
+        assert!(!out
+            .record
+            .records
+            .iter()
+            .any(|r| matches!(r, Record::Origin(_) | Record::Segment(_))));
+    }
+
+    #[test]
+    fn store_roundtrips() {
+        let local = config_a();
+        let session = session_for(&local, [0xAA; NONCE_LEN]);
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: true,
+            prefix: &egress_prefix(),
+            received: None,
+            peer_as: 64513,
+        };
+        let out = build_record_set(&local, &session, &input, 1).expect("records");
+        let stored = store_verified(&out.record);
+        let (kind, payload) = load_store(&stored).expect("verified store");
+        assert_eq!(kind, STORE_VERIFIED);
+        let decoded = ExchangeRecord::decode(payload).unwrap();
+        assert_eq!(decoded, out.record);
+
+        let raw_store = store_partial_raw(&[1, 2, 3]);
+        let (kind, raw) = load_store(&raw_store).expect("raw store");
+        assert_eq!(kind, STORE_PARTIAL_RAW);
+        assert_eq!(raw, &[1, 2, 3]);
+
+        assert!(load_store(&[9, 0]).is_none(), "unknown kind rejected");
+    }
+
+    #[test]
+    fn chain_verification_detects_tampering() {
+        let local = config_a();
+        let session = session_for(&local, [0xAA; NONCE_LEN]);
+        let input = EgressInput {
+            local_as: 64512,
+            locally_originated: true,
+            prefix: &egress_prefix(),
+            received: None,
+            peer_as: 64513,
+        };
+        let out = build_record_set(&local, &session, &input, 1).expect("records");
+        let keys = vec![(64512u32, session.keys[0].clone())];
+        let (path, broken) = verify_provenance_chain(&out.record.records, &keys);
+        assert!(broken.is_none() && path.len() == 1);
+
+        // Flip one bit in the segment digest: the chain breaks there.
+        let mut tampered = out.record.records.clone();
+        if let Some(Record::Segment(s)) = tampered.last_mut() {
+            s.digest[0] ^= 0x01;
+        }
+        let (_, broken) = verify_provenance_chain(&tampered, &keys);
+        assert_eq!(broken, Some(0));
     }
 }

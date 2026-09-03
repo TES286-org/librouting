@@ -531,10 +531,15 @@ fn encode_update(
     let attr_len_pos = out.reserve(2).ok_or(EncodeError::BufferFull)?;
     let attr_start = out.position();
     for a in u.attributes.iter() {
-        // The private LrMplsLabelStack tag carries the RFC 8277 label
-        // stack inside the Loc-RIB only — it is never sent on the wire
-        // (the labels live in the NLRI). Skip it during encode.
-        if a.attr_type == crate::path::AttrType::LrMplsLabelStack {
+        // The private LrMplsLabelStack / LrExchangePlaneRecords tags carry
+        // router-internal state inside the Loc-RIB only — they are never
+        // sent on the wire (the label stack lives in the NLRI; the
+        // exchange-plane wire form is the fresh type-251 attribute the
+        // egress path builds). Skip both during encode.
+        if matches!(
+            a.attr_type,
+            crate::path::AttrType::LrMplsLabelStack | crate::path::AttrType::LrExchangePlaneRecords
+        ) {
             continue;
         }
         encode_path_attribute(a, out)?;

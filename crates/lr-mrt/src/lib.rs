@@ -599,6 +599,14 @@ const ATTR_FLAG_EXT_LEN: u8 = 0x10;
 pub fn encode_attributes(attrs: &lr_core::attr::Attributes) -> Vec<u8> {
     let mut out = Vec::new();
     for a in attrs.iter() {
+        // librouting-private tags (the RFC 8277 label stack and the W6.3
+        // exchange-plane record store) live in the Loc-RIB only and must
+        // never appear in a dump: MRT attribute sets hold wire-form path
+        // attributes, and a dump is byte-compared against reference
+        // implementations by the parity harness.
+        if a.tag.0 >= 254 {
+            continue;
+        }
         // RFC 4271 §4.3: values longer than 255 octets use the
         // extended-length form — a 3-octet length AND the extended-length
         // flag bit (0x10) set in the flags octet. A decoder honoring the

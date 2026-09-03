@@ -1368,7 +1368,7 @@ fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>)
 
 /// The private `lr-bgp` attribute tag that carries an RFC 8277 label
 /// stack through the Loc-RIB (never transmitted on the wire).
-const LR_MPLS_LABEL_STACK_TAG: u8 = 251; // pinned to AttrType::LrMplsLabelStack by a test
+const LR_MPLS_LABEL_STACK_TAG: u8 = 255; // pinned to AttrType::LrMplsLabelStack by a test
 
 /// Linux loopback is always ifindex 1 inside a network namespace: the
 /// loopback device registers at netns creation before any other device.

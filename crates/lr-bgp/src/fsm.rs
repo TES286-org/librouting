@@ -131,6 +131,16 @@ pub struct BgpPeer {
     /// (`docs/research/EXCHANGE-PLANE.md` §3).
     #[cfg(feature = "exchange-plane")]
     exchange_plane_session: Option<crate::extensions::exchange_plane::ExchangePlaneSession>,
+    /// W6.3 exchange-plane prototype: the per-sender monotonic record
+    /// sequence (design §6) — strictly increasing across every record
+    /// set this session sends.
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane_sequence: u32,
+    /// W6.3 exchange-plane prototype: inbound replay protection
+    /// (design §6) — highest accepted sequence per key id, bound to
+    /// the current session instance's OPEN nonce.
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane_replay: crate::extensions::exchange_plane::ReplayTracker,
     pub(crate) out_buf: Vec<u8>,
     hold_remaining: u64,
     keepalive_remaining: u64,
@@ -164,6 +174,10 @@ impl BgpPeer {
             exchange_plane: None,
             #[cfg(feature = "exchange-plane")]
             exchange_plane_session: None,
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane_sequence: 0,
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane_replay: crate::extensions::exchange_plane::ReplayTracker::new(),
             out_buf: Vec::new(),
             hold_remaining: 0,
             keepalive_remaining: 0,
@@ -497,6 +511,178 @@ impl BgpPeer {
         }
     }
 
+    /// W6.3 exchange-plane ingress (feature `exchange-plane`): take
+    /// over a received type-251 attribute. Returns the private record
+    /// store attribute to ride the route bag (`None` = drop the
+    /// records; the route's standard content always survives — design
+    /// §8 fail-open for route data). Verification order per design §6:
+    /// nonce echo, then sequence, then the authentication tag.
+    ///
+    /// `actions` collects `Event::Log` lines for verification failures
+    /// so embedders can see tampering/replay attempts without the
+    /// session being affected.
+    #[cfg(feature = "exchange-plane")]
+    pub(crate) fn consume_exchange_plane(
+        &mut self,
+        wire: Option<&crate::path::PathAttribute>,
+        actions: &mut Vec<BgpAction>,
+    ) -> Option<crate::path::PathAttribute> {
+        use crate::extensions::exchange_plane as xp;
+
+        let wire = wire?;
+        let Some(session) = self.exchange_plane_session.as_ref() else {
+            // Plane inactive on this session (not configured, or the
+            // negotiation did not activate): the attribute is unknown
+            // optional-transitive forwarding material — keep it in the
+            // bag; the §5.3 relay pass marks it Partial.
+            return Some(wire.clone());
+        };
+
+        // Design §7: a Partial-bit record is forwarding material — the
+        // attribute crossed a non-lr speaker, so it is not consumed and
+        // not verifiable here (the tag was computed against the last lr
+        // hop's receiver nonce, not ours). Park the raw body so egress
+        // can re-emit it byte-identically.
+        if wire.flags.partial() {
+            return Some(crate::path::PathAttribute::new(
+                crate::path::PathAttrFlags::new().set_optional(true),
+                AttrType::LrExchangePlaneRecords,
+                xp::store_partial_raw(&wire.value),
+            ));
+        }
+
+        let record = match xp::ExchangeRecord::decode(&wire.value) {
+            Ok(r) => r,
+            Err(e) => {
+                actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                    "exchange-plane: dropping malformed record set on session {}: {:?}",
+                    self.cfg.peer_id, e
+                ))));
+                return None;
+            }
+        };
+        // Design §6 order: (1) the nonce echo must match our OPEN nonce
+        // (a record captured from another session instance replays into
+        // a dead corner); (2) the sequence must be strictly greater than
+        // the last accepted one for this key id; (3) the tag must verify.
+        if record.nonce_echo != session.local_nonce {
+            actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                "exchange-plane: dropped record with foreign-session nonce on session {}",
+                self.cfg.peer_id
+            ))));
+            return None;
+        }
+        if self.exchange_plane_replay.accept(
+            record.key_id,
+            record.sequence,
+            &record.nonce_echo,
+            &session.local_nonce,
+        ) != xp::ReplayDecision::Accept
+        {
+            actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                "exchange-plane: dropped stale sequence {} (replay?) on session {}",
+                record.sequence, self.cfg.peer_id
+            ))));
+            return None;
+        }
+        let Some(key) = session.keys.iter().find(|k| k.id == record.key_id) else {
+            actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                "exchange-plane: dropped record signed under unknown key id {} on session {}",
+                record.key_id, self.cfg.peer_id
+            ))));
+            return None;
+        };
+        if !record.verify(key) {
+            actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                "exchange-plane: authentication tag mismatch on session {} (tampering?)",
+                self.cfg.peer_id
+            ))));
+            return None;
+        }
+        Some(crate::path::PathAttribute::new(
+            crate::path::PathAttrFlags::new().set_optional(true),
+            AttrType::LrExchangePlaneRecords,
+            xp::store_verified(&record),
+        ))
+    }
+
+    /// W6.3 exchange-plane egress (feature `exchange-plane`): attach the
+    /// wire record-set attribute to an advertised route, or forward the
+    /// route's existing type-251 attribute as-is when it carries
+    /// forwarding material this session did not consume. Called after
+    /// all the early-return egress gates, before the UPDATE is encoded.
+    #[cfg(feature = "exchange-plane")]
+    pub(crate) fn attach_exchange_plane(
+        &mut self,
+        attrs: &mut crate::path::PathAttributes,
+        route: &Route,
+    ) {
+        use crate::extensions::exchange_plane as xp;
+
+        // The private record store never leaves this speaker.
+        let store = attrs.remove(AttrType::LrExchangePlaneRecords);
+
+        // A wire attribute the session did not consume at ingress (the
+        // plane was inactive then, or the peer is not an lr speaker) is
+        // forwarding material: re-emit byte-identically and never stack
+        // a second type-251 attribute on top (RFC 4271 §6.3 duplicate
+        // attribute check).
+        if let Some(received) = attrs.remove(AttrType::Other(xp::ATTRIBUTE_TYPE)) {
+            attrs.insert(received);
+            return;
+        }
+
+        let (Some(local), Some(session)) = (&self.exchange_plane, &self.exchange_plane_session)
+        else {
+            return;
+        };
+
+        // Decode the parked record set (if any) so build_record_set can
+        // forward the provenance chain with the scope decremented.
+        let received = match store.as_ref().map(|a| xp::load_store(&a.value)) {
+            Some(Some((xp::STORE_VERIFIED, payload))) => xp::ExchangeRecord::decode(payload).ok(),
+            Some(Some((xp::STORE_PARTIAL_RAW, raw))) => {
+                // Forwarding material from an inactive ingress: re-emit
+                // with the Partial bit set (§5.3).
+                attrs.insert(crate::path::PathAttribute::new(
+                    crate::path::PathAttrFlags::new()
+                        .set_optional(true)
+                        .set_transitive(true)
+                        .set_partial(true),
+                    AttrType::Other(xp::ATTRIBUTE_TYPE),
+                    raw.to_vec(),
+                ));
+                return;
+            }
+            _ => None,
+        };
+
+        // The outbound sequence is per-session monotonic (design §6); a
+        // u32 counter exhausted means the plane stops attaching rather
+        // than wrapping into replayed sequence space.
+        let Some(sequence) = self.exchange_plane_sequence.checked_add(1) else {
+            return;
+        };
+        let input = xp::EgressInput {
+            local_as: self.cfg.local_as.as_u32(),
+            locally_originated: route.origin.proto == 2,
+            prefix: &route.key.prefix,
+            received: received.as_ref(),
+            peer_as: self.cfg.peer_as.as_u32(),
+        };
+        let Some(out) = xp::build_record_set(local, session, &input, sequence) else {
+            return;
+        };
+        self.exchange_plane_sequence = sequence;
+        attrs.insert(crate::path::PathAttribute::new(
+            crate::path::PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(true),
+            AttrType::Other(xp::ATTRIBUTE_TYPE),
+            out.record.encode(),
+        ));
+    }
+
     pub fn enqueue_notification(&mut self, code: BgpErrorCode, subcode: u8) {
         let n = BgpNotification::new(code as u8, subcode, vec![]);
         if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Notification(n)) {
@@ -585,7 +771,9 @@ impl BgpPeer {
         // W6.3 exchange-plane prototype: activate only when both sides
         // advertised the capability with the same version and a
         // non-empty key intersection (design §3). Otherwise the plane
-        // stays off — the session is unaffected either way.
+        // stays off — the session is unaffected either way. Each new
+        // OPEN nonce is a fresh sequence space (design §6): the replay
+        // window and the outbound sequence counter reset with it.
         #[cfg(feature = "exchange-plane")]
         {
             self.exchange_plane_session = match self.exchange_plane.as_ref() {
@@ -598,6 +786,8 @@ impl BgpPeer {
                     }),
                 None => None,
             };
+            self.exchange_plane_replay.reset();
+            self.exchange_plane_sequence = 0;
         }
 
         // RFC 4271 §4.2: the Hold Timer is the smaller of our configured
@@ -899,6 +1089,51 @@ impl BgpPeer {
         // §4.2.3 (count comparison + leading-segment reconstruction) and
         // dropped.
         let mut normalized: PathAttributes = u.attributes.clone();
+
+        // W6.3 exchange-plane ingress (feature `exchange-plane`): take
+        // over the wire attribute (type 251) before the bag is normalized
+        // into route state. When the plane is active on this session the
+        // records are verified (nonce echo → sequence → tag, design §6)
+        // and parked in the private record store so the router can expose
+        // the scope-1 classes and egress can re-sign the provenance
+        // chain (design §7). When the plane is inactive the attribute is
+        // left in the bag as unknown optional-transitive forwarding
+        // material — the §5.3 relay pass below marks it Partial, exactly
+        // like any other attribute this session does not understand.
+        #[cfg(feature = "exchange-plane")]
+        {
+            let wire = normalized.remove(AttrType::Other(
+                crate::extensions::exchange_plane::ATTRIBUTE_TYPE,
+            ));
+            if let Some(store) = self.consume_exchange_plane(wire.as_ref(), &mut actions) {
+                normalized.insert(store);
+            }
+        }
+
+        // RFC 4271 §5.3 relay processing for unknown optional attributes:
+        // a transitive attribute this speaker does not interpret is
+        // forwarded with the Partial bit set; an optional NON-transitive
+        // attribute is never propagated (locally significant to the
+        // peering). Without this the bag would silently re-emit received
+        // unknown attributes with their original flags.
+        let unknown_non_transitive: Vec<AttrType> = normalized
+            .iter_mut()
+            .filter_map(|a| {
+                if !matches!(a.attr_type, AttrType::Other(_)) {
+                    return None;
+                }
+                if a.flags.transitive() {
+                    a.flags = a.flags.set_partial(true);
+                    None
+                } else {
+                    Some(a.attr_type)
+                }
+            })
+            .collect();
+        for t in unknown_non_transitive {
+            normalized.remove(t);
+        }
+
         let wire_path = normalized.as_path_wire(self.cfg.asn4);
         let as4 = normalized.as4_path();
         let canonical_path = match &wire_path {
@@ -1060,6 +1295,9 @@ impl StateMachine for BgpPeer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::message::update::Nlri;
+    use crate::path::AsPath;
+    use lr_core::addr::{IpAddr, Prefix};
 
     fn make_peer_pair() -> (BgpPeer, BgpPeer) {
         let cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
@@ -1408,6 +1646,399 @@ mod tests {
         assert!(a.is_established() && b.is_established());
         assert!(a.exchange_plane_session().is_none());
         assert!(b.exchange_plane_session().is_none());
+    }
+
+    // ----- W6.3 follow-up: attach/detach hooks over a live FSM pair -----
+
+    #[cfg(feature = "exchange-plane")]
+    fn establish_pair_with_plane(
+        xp_a: Option<crate::extensions::exchange_plane::ExchangePlaneConfig>,
+        xp_b: Option<crate::extensions::exchange_plane::ExchangePlaneConfig>,
+    ) -> (BgpPeer, BgpPeer) {
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+        if let Some(x) = xp_a {
+            a.set_exchange_plane(x);
+        }
+        if let Some(x) = xp_b {
+            b.set_exchange_plane(x);
+        }
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established() && b.is_established());
+        (a, b)
+    }
+
+    #[cfg(feature = "exchange-plane")]
+    fn xp_config(
+        nonce: [u8; 8],
+        key_secret: &str,
+    ) -> crate::extensions::exchange_plane::ExchangePlaneConfig {
+        use crate::extensions::exchange_plane::{ExchangeKey, ExchangePlaneConfig};
+        let mut cfg = ExchangePlaneConfig::new(nonce);
+        cfg.keys = vec![ExchangeKey::hmac_sha256(1, key_secret)];
+        cfg.origin_base_secs = 1_700_000_000;
+        cfg
+    }
+
+    #[cfg(feature = "exchange-plane")]
+    fn local_route(origin_proto: u32) -> Route {
+        let mut attrs = PathAttributes::new();
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        let path = AsPath::from_sequence([64512].iter().copied().map(Asn));
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            path.encode_4(),
+        ));
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![10, 0, 0, 1],
+        ));
+        Route {
+            key: RouteKey::new(
+                Prefix::new_v4([203, 0, 113, 0], 24),
+                NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin {
+                proto: origin_proto,
+                peer: 7,
+            },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 1),
+            next_hop: Some(IpAddr::V4([10, 0, 0, 1])),
+            attributes: attrs.into(),
+            age_ms: 0,
+            path_id: 0,
+        }
+    }
+
+    #[cfg(feature = "exchange-plane")]
+    fn decode_updates(bytes: &[u8]) -> Vec<Update> {
+        use lr_core::codec::Decoder;
+        let mut codec = BgpCodec::new().with_asn4(true);
+        let mut out = Vec::new();
+        let mut r = lr_core::buf::ReadBuf::new(bytes);
+        while let Ok(Some(BgpMessage::Update(u))) = codec.decode(&mut r) {
+            out.push(u);
+        }
+        out
+    }
+
+    /// The attach hook: a locally originated route advertised over a
+    /// plane-active session carries the signed record-set attribute;
+    /// the receiving peer verifies it and parks the record set in the
+    /// private store on the installed route (no wire 251 in the bag).
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_attaches_and_verifies_over_live_session() {
+        use crate::extensions::exchange_plane as xp;
+
+        let (mut a, mut b) = establish_pair_with_plane(
+            Some(xp_config([1u8; 8], "alpha")),
+            Some(xp_config([2u8; 8], "alpha")),
+        );
+        let route = local_route(2); // locally originated
+        assert!(a.advertise(&route));
+        let bytes = a.drain_outgoing();
+
+        // The wire UPDATE carries the exchange-plane attribute.
+        let updates = decode_updates(&bytes);
+        assert!(!updates.is_empty());
+        let wire_attr = updates[0]
+            .attributes
+            .get(AttrType::Other(xp::ATTRIBUTE_TYPE))
+            .expect("record-set attribute attached");
+        let record = xp::ExchangeRecord::decode(&wire_attr.value).unwrap();
+        assert!(
+            record.verify(&crate::extensions::exchange_plane::ExchangeKey::hmac_sha256(1, "alpha"))
+        );
+        // Hint + origin attestation + our segment signature.
+        assert!(matches!(record.records.first(), Some(xp::Record::Hint(_))));
+        assert!(record
+            .records
+            .iter()
+            .any(|r| matches!(r, xp::Record::Origin(_))));
+        assert!(record
+            .records
+            .iter()
+            .any(|r| matches!(r, xp::Record::Segment(_))));
+
+        // B consumes the attribute: the installed route carries the
+        // private store (verified kind) and no wire 251.
+        let actions = b.feed_bytes(&bytes).unwrap();
+        let installed = actions
+            .iter()
+            .find_map(|a| match a {
+                BgpAction::InstallRoute(r) => Some(r.clone()),
+                _ => None,
+            })
+            .expect("route installed");
+        let bag: crate::path::PathAttributes = installed.attributes.into();
+        assert!(bag.get(AttrType::Other(xp::ATTRIBUTE_TYPE)).is_none());
+        let stored = bag
+            .get(AttrType::LrExchangePlaneRecords)
+            .expect("record store parked");
+        let (kind, payload) = xp::load_store(&stored.value).expect("well-formed store");
+        assert_eq!(kind, xp::STORE_VERIFIED);
+        let stored_record = xp::ExchangeRecord::decode(payload).unwrap();
+        assert_eq!(stored_record.records.len(), record.records.len());
+    }
+
+    /// The detach hook strips the wire attribute: egress rebuilds from
+    /// the store, so a re-advertised route never carries the received
+    /// scope-1 records (design §7) — and never two type-251 attributes.
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_scope1_records_do_not_leak() {
+        use crate::extensions::exchange_plane as xp;
+
+        let (mut a, mut b) = establish_pair_with_plane(
+            Some(xp_config([1u8; 8], "alpha")),
+            Some(xp_config([2u8; 8], "alpha")),
+        );
+        // A -> B: a transit-learned route (proto 0) still gets fresh
+        // scope-1 records but no origin attestation.
+        assert!(a.advertise(&local_route(0)));
+        let bytes = a.drain_outgoing();
+        let actions = b.feed_bytes(&bytes).unwrap();
+        let installed = actions
+            .iter()
+            .find_map(|a| match a {
+                BgpAction::InstallRoute(r) => Some(r.clone()),
+                _ => None,
+            })
+            .expect("route installed");
+        let bag: crate::path::PathAttributes = installed.attributes.into();
+        let stored = bag.get(AttrType::LrExchangePlaneRecords).unwrap();
+        let (_, payload) = xp::load_store(&stored.value).unwrap();
+        let record = xp::ExchangeRecord::decode(payload).unwrap();
+        assert!(record
+            .records
+            .iter()
+            .any(|r| matches!(r, xp::Record::Hint(_))));
+        assert!(!record
+            .records
+            .iter()
+            .any(|r| matches!(r, xp::Record::Origin(_))));
+    }
+
+    /// Flag off = byte-identical egress: with the peer not advertising
+    /// the capability, a session with the plane configured emits exactly
+    /// the bytes a session without the plane emits.
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_one_sided_is_byte_identical() {
+        // `a`: the plane is configured, but the dummy partner below does
+        // not advertise the capability — the negotiation stays off.
+        let (mut a, _b) = establish_pair_with_plane(Some(xp_config([1u8; 8], "alpha")), None);
+        // `plain`: same peer config, no plane at all, established
+        // against the same shape of dummy partner.
+        let mut plain_cfg =
+            PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        plain_cfg.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut dummy = BgpPeer::new(PeerConfig::new(
+            Asn(64513),
+            Asn(64512),
+            RouterId::from_v4([10, 9, 9, 9]),
+        ));
+        let mut plain = BgpPeer::new(plain_cfg);
+        plain.step(BgpEvent::ManualStart);
+        plain.step(BgpEvent::TransportOpen);
+        dummy.step(BgpEvent::ManualStart);
+        dummy.step(BgpEvent::TransportOpen);
+        let p_open = plain.drain_outgoing();
+        let d_open = dummy.drain_outgoing();
+        let _ = plain.feed_bytes(&d_open).unwrap();
+        let _ = dummy.feed_bytes(&p_open).unwrap();
+        let p_ka = plain.drain_outgoing();
+        let d_ka = dummy.drain_outgoing();
+        let _ = plain.feed_bytes(&d_ka).unwrap();
+        let _ = dummy.feed_bytes(&p_ka).unwrap();
+        assert!(plain.is_established());
+
+        let route = local_route(2);
+        let a_with = {
+            let _ = a.advertise(&route);
+            a.drain_outgoing()
+        };
+        let a_without = {
+            let _ = plain.advertise(&route);
+            plain.drain_outgoing()
+        };
+        assert_eq!(
+            a_with, a_without,
+            "one-sided plane must not change egress bytes"
+        );
+    }
+
+    /// A record captured from one session instance replays into a fresh
+    /// one (new OPEN nonces) and is dropped on the nonce check (design §6).
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_replay_across_sessions_is_dropped() {
+        use crate::extensions::exchange_plane as xp;
+
+        let (mut a, mut b) = establish_pair_with_plane(
+            Some(xp_config([1u8; 8], "alpha")),
+            Some(xp_config([2u8; 8], "alpha")),
+        );
+        assert!(a.advertise(&local_route(2)));
+        let captured = a.drain_outgoing();
+        let _ = b.feed_bytes(&captured).unwrap();
+
+        // A fresh session instance: new OPEN nonces both sides.
+        let (_a2, mut b2) = establish_pair_with_plane(
+            Some(xp_config([9u8; 8], "alpha")),
+            Some(xp_config([7u8; 8], "alpha")),
+        );
+        let actions = b2.feed_bytes(&captured).unwrap();
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            BgpAction::Emit(lr_core::event::Event::Log(msg))
+                if msg.contains("foreign-session nonce")
+        )));
+        // The route's standard content survives (fail-open, design §8).
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, BgpAction::InstallRoute(_))));
+    }
+
+    /// A tampered record body fails the tag check and is dropped with a
+    /// log line, while the route itself still installs.
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_tampered_record_is_dropped() {
+        use crate::extensions::exchange_plane as xp;
+
+        let (mut a, mut b) = establish_pair_with_plane(
+            Some(xp_config([1u8; 8], "alpha")),
+            Some(xp_config([2u8; 8], "alpha")),
+        );
+        assert!(a.advertise(&local_route(2)));
+        let bytes = a.drain_outgoing();
+
+        // Decode the UPDATE, flip a bit inside the record-set value (the
+        // authentication tag covers it) and re-encode.
+        let mut updates = decode_updates(&bytes);
+        let u = updates.last_mut().expect("update present");
+        let attr = u
+            .attributes
+            .get_mut(AttrType::Other(
+                crate::extensions::exchange_plane::ATTRIBUTE_TYPE,
+            ))
+            .expect("record attribute");
+        let tag_start = attr.value.len() - 32;
+        attr.value[tag_start] ^= 0x01;
+        let mut codec = BgpCodec::new().with_asn4(true);
+        let wire = codec.encode_vec(&BgpMessage::Update(u.clone())).unwrap();
+
+        let actions = b.feed_bytes(&wire).unwrap();
+        assert!(actions.iter().any(|a| matches!(
+            a,
+            BgpAction::Emit(lr_core::event::Event::Log(msg))
+                if msg.contains("tag mismatch") || msg.contains("malformed")
+        )));
+        assert!(actions
+            .iter()
+            .any(|a| matches!(a, BgpAction::InstallRoute(_))));
+    }
+
+    /// RFC 4271 §5.3 relay processing: an unknown optional-transitive
+    /// attribute is forwarded with Partial set; an optional
+    /// NON-transitive one is not propagated. (Unconditional code —
+    /// tested without the exchange-plane feature too.)
+    #[test]
+    fn unknown_attribute_relay_sets_partial_and_drops_non_transitive() {
+        let (mut a, _b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        let mut dummy = BgpPeer::new(PeerConfig::new(
+            Asn(64513),
+            Asn(64512),
+            RouterId::from_v4([10, 9, 9, 9]),
+        ));
+        dummy.step(BgpEvent::ManualStart);
+        dummy.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let d_open = dummy.drain_outgoing();
+        let _ = a.feed_bytes(&d_open).unwrap();
+        let _ = dummy.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let d_ka = dummy.drain_outgoing();
+        let _ = a.feed_bytes(&d_ka).unwrap();
+        let _ = dummy.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established());
+
+        // Build an UPDATE carrying (1) an unknown transitive attr with
+        // flags 0xC0 and (2) an unknown optional non-transitive attr
+        // with flags 0x80.
+        let mut u = Update::new();
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::Other(250),
+            vec![1, 2, 3],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::Other(249),
+            vec![4, 5],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        let path = AsPath::from_sequence([64513].iter().copied().map(Asn));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            path.encode_4(),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![10, 0, 0, 2],
+        ));
+        u.nlri
+            .push(Nlri::plain(Prefix::new_v4([198, 51, 100, 0], 24)));
+        let mut codec = BgpCodec::new().with_asn4(true);
+        let wire = codec.encode_vec(&BgpMessage::Update(u)).unwrap();
+        let actions = a.feed_bytes(&wire).unwrap();
+        let installed = actions
+            .iter()
+            .find_map(|a| match a {
+                BgpAction::InstallRoute(r) => Some(r.clone()),
+                _ => None,
+            })
+            .expect("route installed");
+        let bag: crate::path::PathAttributes = installed.attributes.into();
+        let relayed = bag
+            .get(AttrType::Other(250))
+            .expect("transitive unknown forwarded");
+        assert!(relayed.flags.partial(), "Partial bit set per RFC 4271 §5.3");
+        assert!(
+            bag.get(AttrType::Other(249)).is_none(),
+            "optional non-transitive unknown not propagated"
+        );
     }
 
     fn establish_llgr_pair() -> (BgpPeer, BgpPeer) {

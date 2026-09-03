@@ -79,6 +79,15 @@ impl BgpPeer {
             return false;
         }
 
+        // W6.3 exchange-plane (feature `exchange-plane`): attach the
+        // record-set attribute (or forward the received type-251
+        // forwarding material) after every early-return egress gate —
+        // only UPDATEs that actually go out carry records, and
+        // withdrawals/EoR never do (design §4: attached to NLRI-carrying
+        // UPDATEs).
+        #[cfg(feature = "exchange-plane")]
+        self.attach_exchange_plane(&mut attrs, route);
+
         // --- AS_PATH ---
         let mut as_path = attrs.as_path().unwrap_or_default();
         if topo.role.prepends_as_path() {
