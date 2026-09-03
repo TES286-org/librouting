@@ -192,6 +192,19 @@ jobs:
         run: ./tests/interop/ldp_frr.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         run: ./tests/interop/frr.sh
+      # W6.3 exchange-plane exit criteria (docs/research/EXCHANGE-PLANE.md
+      # §10): rebuild the daemon with the feature, then
+      #   - the W5.3 parity harness (flag off) must stay byte-identical,
+      #   - a plane-enabled daemon must peer with plain BIRD unchanged
+      #     (the RFC 5492 §3 fallback gate). The flag-off interop steps
+      #     above were run against the plain build; the loopback e2e
+      #     with the flag on lives in crates/lr-cli/tests (rust-tests).
+      - name: Rebuild lr-daemon with the exchange-plane feature
+        run: cargo build -p lr-cli --features exchange-plane
+      - name: Wire-level parity gate with the exchange-plane build (flag off)
+        run: ./tests/interop/parity.sh
+      - name: Exchange-plane fallback gate (plane on ↔ plain BIRD 2)
+        run: ./tests/interop/exchange_plane.sh
 
   # TCP-AO needs Linux >= 6.7: ubuntu-24.04 ships a 6.8 kernel. The
   # script itself skips gracefully when the option is missing, so this
