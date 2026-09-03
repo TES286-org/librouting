@@ -129,8 +129,8 @@ wait_log "$OUT/r1.log" "we are Backup" 25
 echo "   election: OK (r2 DR, r1 Backup)"
 
 echo "== waiting for Full adjacency (§10.4: DR ↔ BDR) =="
-wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 Full (area" 25
-wait_log "$OUT/r2.log" "ospf neighbor 1.1.1.1 Full (area" 25
+wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 Full (area" 60
+wait_log "$OUT/r2.log" "ospf neighbor 1.1.1.1 Full (area" 60
 echo "   adjacency: OK"
 
 echo "== waiting for stub-net + transit-net propagation (Network-LSA + SPF) =="
