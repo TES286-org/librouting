@@ -86,3 +86,12 @@ are available through the C ABI directly
 throwing nothing and returning `int32_t` codes, so wrap them in a
 helper that converts to `librouting::Error` when the wrapper grows
 one.
+
+## CI coverage
+
+`tests/ffi/harness.cpp` exercises the wrapper end-to-end (RAII
+lifecycle, exception safety, OPEN/KEEPALIVE round trip with LLGR
+capability check, `set_extended_next_hop`/`set_mp_families`/
+`set_local_address` setters, error-path throws). The CI job
+`rust-tests` builds it with `c++ -std=c++17` against `liblr_ffi.so`
+after the Rust workspace tests; failures fail the build.

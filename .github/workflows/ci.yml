@@ -50,6 +50,14 @@ jobs:
           # reference its symbols.
           cc -Iinclude tests/ffi/harness.c -Ltarget/release -llr_ffi -o /tmp/lr_harness
           LD_LIBRARY_PATH=target/release /tmp/lr_harness
+      - name: C++ harness (librouting.hpp RAII wrapper)
+        run: |
+          # The C++ wrapper is header-only (include/librouting.hpp).
+          # This step exercises the same FFI surface as the C harness but
+          # through the RAII unique_ptr + throwing-API path, so the
+          # wrapper itself is covered in CI.
+          c++ -std=c++17 -Iinclude tests/ffi/harness.cpp -Ltarget/release -llr_ffi -o /tmp/lr_harness_cpp
+          LD_LIBRARY_PATH=target/release /tmp/lr_harness_cpp
       - name: Python bindings test
         run: |
           /tmp/venv/bin/python -m pytest bindings/lr-python/tests -v
