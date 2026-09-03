@@ -34,7 +34,12 @@ lr-ldp = { workspace = true }
 lr-mrt = { workspace = true }
 lr-osroute = { workspace = true }
 lr-mpls = { workspace = true }
+siphasher.workspace = true
 
 [features]
 default = ["std"]
 std = []
+# W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md):
+# forwards to lr-router -> lr-bgp. Off by default; the release build
+# carries none of the exchange-plane code until enabled.
+exchange-plane = ["lr-router/exchange-plane"]

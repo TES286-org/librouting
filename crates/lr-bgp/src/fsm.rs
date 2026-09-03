@@ -141,6 +141,18 @@ pub struct BgpPeer {
     /// the current session instance's OPEN nonce.
     #[cfg(feature = "exchange-plane")]
     exchange_plane_replay: crate::extensions::exchange_plane::ReplayTracker,
+    /// W6.3 exchange-plane prototype: the OPEN nonce in effect for the
+    /// current session instance — the configured nonce mixed with the
+    /// per-OPEN counter. The nonce is a session-instance tag (it
+    /// travels in the clear), so uniqueness across instances is what
+    /// matters for replay protection; mixing the OPEN counter delivers
+    /// that without an RNG in the no-std FSM.
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane_open_nonce: [u8; 8],
+    /// W6.3 exchange-plane prototype: how many OPENs this FSM sent
+    /// (session instances).
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane_open_count: u32,
     pub(crate) out_buf: Vec<u8>,
     hold_remaining: u64,
     keepalive_remaining: u64,
@@ -178,6 +190,10 @@ impl BgpPeer {
             exchange_plane_sequence: 0,
             #[cfg(feature = "exchange-plane")]
             exchange_plane_replay: crate::extensions::exchange_plane::ReplayTracker::new(),
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane_open_nonce: [0u8; 8],
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane_open_count: 0,
             out_buf: Vec::new(),
             hold_remaining: 0,
             keepalive_remaining: 0,
@@ -489,9 +505,12 @@ impl BgpPeer {
         }
         // W6.3 exchange-plane prototype: advertise when configured
         // (feature-gated; RFC 5492 §3 makes the unknown capability
-        // inert for peers without it).
+        // inert for peers without it). Each OPEN bumps the instance
+        // counter and mixes it into the advertised nonce — a fresh
+        // session instance gets a fresh nonce, which is what makes
+        // cross-instance replay detectable (design §6).
         #[cfg(feature = "exchange-plane")]
-        if let Some(xp) = &self.exchange_plane {
+        if let Some(xp) = self.exchange_plane_for_open() {
             caps.push(xp.capability());
         }
         let param_value = Capability::encode_set(&caps);
@@ -509,6 +528,35 @@ impl BgpPeer {
         if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Keepalive(Keepalive)) {
             self.out_buf.extend_from_slice(&bytes);
         }
+    }
+
+    /// W6.3 exchange-plane (feature `exchange-plane`): the effective
+    /// OPEN-time plane configuration — the configured nonce mixed with
+    /// the OPEN instance counter. Returns a clone carrying the nonce
+    /// this session instance advertises (used for both the capability
+    /// value and the negotiation's local_nonce).
+    #[cfg(feature = "exchange-plane")]
+    fn exchange_plane_for_open(
+        &mut self,
+    ) -> Option<crate::extensions::exchange_plane::ExchangePlaneConfig> {
+        self.exchange_plane_open_count = self.exchange_plane_open_count.wrapping_add(1);
+        let mut nonce = self
+            .exchange_plane
+            .as_ref()
+            .map(|c| c.nonce)
+            .unwrap_or([0u8; 8]);
+        // Mix the instance counter into the last four octets: an XOR of
+        // a be-encoded counter is enough to make per-instance nonces
+        // distinct (the nonce tags the session instance; it is not a
+        // secret).
+        let count = self.exchange_plane_open_count.to_be_bytes();
+        for (i, b) in count.iter().enumerate() {
+            nonce[4 + i] ^= b;
+        }
+        self.exchange_plane_open_nonce = nonce;
+        let mut cfg = self.exchange_plane.clone()?;
+        cfg.nonce = nonce;
+        Some(cfg)
     }
 
     /// W6.3 exchange-plane ingress (feature `exchange-plane`): take
@@ -776,13 +824,21 @@ impl BgpPeer {
         // window and the outbound sequence counter reset with it.
         #[cfg(feature = "exchange-plane")]
         {
-            self.exchange_plane_session = match self.exchange_plane.as_ref() {
+            // Negotiate against the nonce this session instance actually
+            // advertised (the OPEN counter is mixed in — see
+            // `exchange_plane_for_open`).
+            let local = self.exchange_plane.as_ref().map(|c| {
+                let mut l = c.clone();
+                l.nonce = self.exchange_plane_open_nonce;
+                l
+            });
+            self.exchange_plane_session = match local {
                 Some(local) => self
                     .peer_capabilities
                     .iter()
                     .find_map(crate::extensions::exchange_plane::parse_capability)
                     .and_then(|peer_open| {
-                        crate::extensions::exchange_plane::negotiate(local, &peer_open)
+                        crate::extensions::exchange_plane::negotiate(&local, &peer_open)
                     }),
                 None => None,
             };
@@ -1599,15 +1655,24 @@ mod tests {
         b.feed_bytes(&a_ka).unwrap();
         assert!(a.is_established() && b.is_established());
 
+        // Each side mixes its OPEN instance counter into the advertised
+        // nonce (first OPEN = counter 1 → the last four octets differ
+        // from the configured nonce by 0x00000001). The session binds to
+        // the advertised values.
+        let mixed = |n: [u8; 8]| {
+            let mut m = n;
+            m[7] ^= 1;
+            m
+        };
         let session_a = a.exchange_plane_session().expect("activated on a");
-        assert_eq!(session_a.peer_nonce, nonce_b);
-        assert_eq!(session_a.local_nonce, nonce_a);
+        assert_eq!(session_a.peer_nonce, mixed(nonce_b));
+        assert_eq!(session_a.local_nonce, mixed(nonce_a));
         assert_eq!(session_a.keys.len(), 1);
         assert_eq!(session_a.keys[0].id, 1);
 
         let session_b = b.exchange_plane_session().expect("activated on b");
-        assert_eq!(session_b.peer_nonce, nonce_a);
-        assert_eq!(session_b.local_nonce, nonce_b);
+        assert_eq!(session_b.peer_nonce, mixed(nonce_a));
+        assert_eq!(session_b.local_nonce, mixed(nonce_b));
     }
 
     /// W6.3 exchange-plane prototype: only one side configures the

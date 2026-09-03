@@ -334,6 +334,26 @@ mod imp {
                             hold = s.negotiated_hold_time,
                             ar = s.adj_rib_in_len,
                         );
+                        // W6.3 exchange-plane (feature `exchange-plane`):
+                        // per-session record stats — how many prefixes
+                        // carry a verified record set from this peer and
+                        // how many partial-transit sets arrived (design
+                        // §7). Printed only when non-zero so the default
+                        // output stays unchanged.
+                        #[cfg(feature = "exchange-plane")]
+                        {
+                            let r = deps.router.lock().unwrap();
+                            let h = s.handle;
+                            let records = r.exchange_plane_records(h).len();
+                            let partial = r.exchange_plane_partial_transit(h);
+                            if records > 0 || partial > 0 {
+                                let _ = writeln!(
+                                    out,
+                                    "  exchange-plane: records={} partial-transit={}",
+                                    records, partial
+                                );
+                            }
+                        }
                     }
                 }
                 "routes" => {

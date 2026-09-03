@@ -398,6 +398,31 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                             );
                         }
                     }
+                    // W6.3 exchange-plane (feature `exchange-plane`):
+                    // activate the record plane for peers that opted
+                    // in. Fail closed on a feature-less binary, on a
+                    // missing key block, or on a bad key — never run
+                    // half-configured.
+                    #[cfg(feature = "exchange-plane")]
+                    if spec.exchange_plane.unwrap_or(cfg.exchange_plane) {
+                        if let Err(e) = wire_exchange_plane(&mut r, h, cfg, spec) {
+                            eprintln!("daemon: peer {}: {}", spec.label(), e);
+                            return ExitCode::from(2);
+                        }
+                    }
+                    #[cfg(not(feature = "exchange-plane"))]
+                    {
+                        let xp_requested = spec.exchange_plane.unwrap_or(cfg.exchange_plane)
+                            || !cfg.exchange_plane_keys.is_empty();
+                        if xp_requested {
+                            eprintln!(
+                                "daemon: peer {}: exchange_plane requested but this binary \
+                                 was built without the exchange-plane feature",
+                                spec.label()
+                            );
+                            return ExitCode::from(2);
+                        }
+                    }
                     entries.push(PeerEntry {
                         spec: spec.clone(),
                         handle: h,
@@ -490,6 +515,20 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     };
     println!("  allow-local-as: {}", allowas_label);
     println!("  soft-reconfig-in: {}", cfg.soft_reconfig_inbound);
+    {
+        // W6.3 exchange-plane posture at startup (feature `exchange-plane`
+        // builds only; a feature-less binary fails earlier on the flag).
+        let xp = cfg.exchange_plane || cfg.peers.iter().any(|p| p.exchange_plane == Some(true));
+        println!(
+            "  exchange-plane: {}{}",
+            if xp { "on" } else { "off" },
+            if cfg.exchange_plane_keys.is_empty() {
+                String::new()
+            } else {
+                format!(" ({} key(s))", cfg.exchange_plane_keys.len())
+            }
+        );
+    }
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -926,6 +965,208 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         }
     }
     sc
+}
+
+/// W6.3 exchange-plane (feature `exchange-plane`): parse one
+/// `"id:secret"` key pair. HMAC-SHA256 is the prototype's only
+/// algorithm (design §8); ids share the TCP-AO range (1..=65535).
+#[cfg(feature = "exchange-plane")]
+fn parse_exchange_key(
+    spec_str: &str,
+) -> Result<lr_bgp::extensions::exchange_plane::ExchangeKey, String> {
+    use lr_bgp::extensions::exchange_plane::ExchangeKey;
+    let (id_str, secret) = spec_str
+        .split_once(':')
+        .ok_or_else(|| format!("expected 'id:secret', got '{}'", spec_str))?;
+    let id: u16 = id_str
+        .parse()
+        .map_err(|_| format!("bad key id '{}' (expected 0..=65535)", id_str))?;
+    if secret.is_empty() {
+        return Err("empty key secret".to_string());
+    }
+    Ok(ExchangeKey::hmac_sha256(id, secret.as_bytes().to_vec()))
+}
+
+/// W6.3 exchange-plane (feature `exchange-plane`): the canonical
+/// description of one route-map's effective filter/action set — the
+/// map's entries plus the definitions of the lists they reference.
+/// The SipHash-2-4 digest over the sorted lines is the policy-intent
+/// record's fingerprint (design §5.2): two sessions reporting the same
+/// digest announce the same effective filter, and a digest change
+/// between one sender's consecutive records signals a policy edit.
+#[cfg(feature = "exchange-plane")]
+fn canonical_policy_lines(cfg: &DaemonConfig, map_name: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut entries: Vec<&crate::daemon_policy::RouteMapSpec> = cfg
+        .route_maps
+        .iter()
+        .filter(|r| r.name == map_name)
+        .collect();
+    entries.sort_by_key(|r| r.entry);
+    for e in entries {
+        lines.push(format!(
+            "map {} entry {} {}",
+            e.name,
+            e.entry,
+            if e.permit.unwrap_or(true) {
+                "permit"
+            } else {
+                "deny"
+            }
+        ));
+        if let Some(m) = &e.match_prefix {
+            lines.push(format!("match-prefix {}", m));
+            for pl in &cfg.prefix_lists {
+                if &pl.name == m {
+                    lines.push(format!(
+                        "prefix-list {} {} ge={} le={} {}",
+                        pl.name,
+                        pl.prefix,
+                        pl.ge.unwrap_or(0),
+                        pl.le.unwrap_or(0),
+                        if pl.permit.unwrap_or(true) {
+                            "permit"
+                        } else {
+                            "deny"
+                        }
+                    ));
+                }
+            }
+        }
+        if let Some(m) = &e.match_as_path {
+            lines.push(format!("match-as-path {}", m));
+            for l in &cfg.as_path_lists {
+                if &l.name == m {
+                    lines.push(format!(
+                        "as-path-list {} {} {}",
+                        l.name,
+                        l.pattern,
+                        if l.permit.unwrap_or(true) {
+                            "permit"
+                        } else {
+                            "deny"
+                        }
+                    ));
+                }
+            }
+        }
+        if let Some(m) = &e.match_community {
+            lines.push(format!("match-community {}", m));
+            for l in &cfg.community_lists {
+                if &l.name == m {
+                    lines.push(format!(
+                        "community-list {} {:?} {}",
+                        l.name,
+                        {
+                            let mut c = l.communities.clone();
+                            c.sort();
+                            c
+                        },
+                        if l.permit.unwrap_or(true) {
+                            "permit"
+                        } else {
+                            "deny"
+                        }
+                    ));
+                }
+            }
+        }
+        if let Some(v) = e.set_local_pref {
+            lines.push(format!("set local-pref {}", v));
+        }
+        if let Some(v) = e.set_med {
+            lines.push(format!("set med {}", v));
+        }
+        if let Some(v) = e.set_metric {
+            lines.push(format!("set metric {}", v));
+        }
+        if let Some(v) = &e.set_next_hop {
+            lines.push(format!("set next-hop {}", v));
+        }
+        if let Some(v) = &e.prepend {
+            lines.push(format!("set as-path prepend {}", v));
+        }
+        if let Some(v) = &e.add_community {
+            lines.push(format!("set community {}", v));
+        }
+    }
+    lines.sort();
+    lines
+}
+
+/// W6.3 exchange-plane (feature `exchange-plane`): SipHash-2-4 over the
+/// canonical policy description, keyed with the per-boot nonce (the
+/// design's "keyed per session from the capability nonce" — the nonce
+/// is per boot + per OPEN instance in this prototype, which is enough
+/// for the digest's actual use: change detection between one sender's
+/// consecutive records).
+#[cfg(feature = "exchange-plane")]
+fn exchange_plane_policy_digest(
+    cfg: &DaemonConfig,
+    spec: &PeerSpec,
+    import: bool,
+    nonce: &[u8; 8],
+) -> Option<[u8; 8]> {
+    use siphasher::sip::SipHasher;
+    use std::hash::Hasher;
+
+    let map_name = if import {
+        spec.import.as_deref()?
+    } else {
+        spec.export.as_deref()?
+    };
+    let lines = canonical_policy_lines(cfg, map_name);
+    let k0 = u64::from_be_bytes(*nonce);
+    let mut hasher = SipHasher::new_with_keys(k0, !k0);
+    for line in &lines {
+        hasher.write(line.as_bytes());
+        hasher.write(&[0]);
+    }
+    let h = hasher.finish();
+    Some(h.to_be_bytes())
+}
+
+/// W6.3 exchange-plane (feature `exchange-plane`): build the per-session
+/// plane configuration and attach it to the router session. The local
+/// OPEN nonce mixes the per-boot nonce with the FSM's per-instance OPEN
+/// counter (the nonce is a session-instance tag, not a secret).
+#[cfg(feature = "exchange-plane")]
+fn wire_exchange_plane(
+    r: &mut lr_router::DefaultRouter,
+    h: lr_router::SessionHandle,
+    g: &DaemonConfig,
+    p: &PeerSpec,
+) -> Result<(), String> {
+    use lr_bgp::extensions::exchange_plane::{ExchangePlaneConfig, ROLE_UNSET};
+
+    if g.exchange_plane_keys.is_empty() {
+        return Err(
+            "exchange_plane needs at least one key (--exchange-plane-key id:secret \
+             or [bgp] exchange_plane_keys)"
+                .to_string(),
+        );
+    }
+    let mut keys = Vec::new();
+    for k in &g.exchange_plane_keys {
+        keys.push(parse_exchange_key(k)?);
+    }
+    // Per-boot random nonce (uniqueness across daemon restarts comes
+    // from here; uniqueness across session instances from the FSM's
+    // OPEN counter mixed in at each OPEN).
+    let mut nonce = [0u8; 8];
+    {
+        use lr_babel::NonceSource;
+        lr_babel::SystemNonceSource::new().fill(&mut nonce);
+    }
+    let mut xp = ExchangePlaneConfig::new(nonce);
+    xp.keys = keys;
+    // Policy intent (design §5.2): lr's daemon does not configure RFC
+    // 9234 roles yet, so the claim is ROLE_UNSET; the digests fingerprint
+    // the effective import/export filter sets when a route-map is bound.
+    xp.policy_role = Some(ROLE_UNSET);
+    xp.policy_import_digest = exchange_plane_policy_digest(g, p, true, &nonce);
+    xp.policy_export_digest = exchange_plane_policy_digest(g, p, false, &nonce);
+    r.set_session_exchange_plane(h, xp)
 }
 
 /// Per-peer transport authentication (RFC 2385 / RFC 5925). MD5 and

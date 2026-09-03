@@ -86,6 +86,10 @@ pub(crate) struct PeerSpec {
     /// BFD multihop mode (RFC 5883 — UDP 4784, no TTL check).
     /// `None` inherits the global setting.
     pub bfd_multihop: Option<bool>,
+    /// W6.3 exchange-plane prototype (`exchange_plane = true`): per-peer
+    /// override of the router-wide default. `None` inherits the global.
+    /// Requires a binary built with the `exchange-plane` feature.
+    pub exchange_plane: Option<bool>,
 }
 
 impl PeerSpec {
@@ -360,6 +364,20 @@ pub(crate) struct DaemonConfig {
     /// default (FRR's default; the cost is duplicate RIB memory per
     /// peer). Per-peer overrides via `[peer] soft_reconfig_inbound`.
     pub soft_reconfig_inbound: bool,
+    /// W6.3 exchange-plane prototype (`[bgp] exchange_plane`,
+    /// `--exchange-plane`): advertise the LRXP capability (code 251) on
+    /// every BGP peer and activate the record plane where the peer
+    /// negotiates it. Off by default. Requires a binary built with the
+    /// `exchange-plane` feature; enabling it on a feature-less binary
+    /// is a startup error (fail closed).
+    pub exchange_plane: bool,
+    /// Exchange-plane record keys as `"id:secret"` pairs
+    /// (`[[bgp] exchange_plane_keys]` / repeatable
+    /// `--exchange-plane-key`). HMAC-SHA256 (design §8 prototype
+    /// trust); the key-id intersection with the peer's advertisement
+    /// decides activation, and every negotiated key id stays valid
+    /// while rotating (new key id added before the old one removed).
+    pub exchange_plane_keys: Vec<String>,
 
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
@@ -502,6 +520,8 @@ impl DaemonConfig {
             default_ipv4_unicast: true,
             allow_local_as: 0,
             soft_reconfig_inbound: false,
+            exchange_plane: false,
+            exchange_plane_keys: Vec::new(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -844,6 +864,9 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
     if over.soft_reconfig_inbound.is_none() {
         over.soft_reconfig_inbound = base.soft_reconfig_inbound;
     }
+    if over.exchange_plane.is_none() {
+        over.exchange_plane = base.exchange_plane;
+    }
 }
 
 fn parse_bool(value: &str) -> bool {
@@ -1125,6 +1148,8 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 };
             }
             "bgp.soft_reconfig_inbound" => cfg.soft_reconfig_inbound = parse_bool(value),
+            "bgp.exchange_plane" => cfg.exchange_plane = parse_bool(value),
+            "bgp.exchange_plane_keys" => cfg.exchange_plane_keys = parse_str_array(value),
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -1641,6 +1666,7 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
             });
         }
         "soft_reconfig_inbound" => peer.soft_reconfig_inbound = Some(parse_bool(value)),
+        "exchange_plane" => peer.exchange_plane = Some(parse_bool(value)),
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
@@ -1808,6 +1834,18 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--no-soft-reconfig-inbound" => {
                 cfg.soft_reconfig_inbound = false;
                 i += 1;
+            }
+            "--exchange-plane" => {
+                cfg.exchange_plane = true;
+                i += 1;
+            }
+            "--no-exchange-plane" => {
+                cfg.exchange_plane = false;
+                i += 1;
+            }
+            "--exchange-plane-key" if i + 1 < args.len() => {
+                cfg.exchange_plane_keys.push(args[i + 1].clone());
+                i += 2;
             }
             "--install-kernel-routes" => {
                 cfg.install_kernel = true;
@@ -2784,5 +2822,39 @@ mod tests {
             ok
         };
         assert!(!built);
+    }
+
+    #[test]
+    fn exchange_plane_globals_and_peers_parse() {
+        // Defaults off, no keys.
+        let fresh = DaemonConfig::with_defaults();
+        assert!(!fresh.exchange_plane);
+        assert!(fresh.exchange_plane_keys.is_empty());
+
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\npeer_as = 65001\nrouter_id = \"10.0.0.1\"\n\
+             exchange_plane = true\nexchange_plane_keys = [\"1:alpha\", \"2:beta\"]\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\nexchange_plane = false\n\n\
+             [[peer]]\naddress = \"192.0.2.3\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert!(cfg.exchange_plane);
+        assert_eq!(
+            cfg.exchange_plane_keys,
+            vec!["1:alpha".to_string(), "2:beta".to_string()]
+        );
+        // Per-peer override beats the global default.
+        assert_eq!(cfg.peers[0].exchange_plane, Some(false));
+        // Unset inherits (effective value resolved at wiring time).
+        assert_eq!(cfg.peers[1].exchange_plane, None);
+        // Template inheritance reaches the per-peer knob.
+        let mut base = PeerSpec::default();
+        base.exchange_plane = Some(true);
+        let mut over = PeerSpec::default();
+        merge_spec(&mut over, &base);
+        assert_eq!(over.exchange_plane, Some(true));
     }
 }
