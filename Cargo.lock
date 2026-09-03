@@ -300,8 +300,10 @@ name = "lr-bgp"
 version = "0.1.0"
 dependencies = [
  "bytes",
+ "hmac",
  "lr-core",
  "lr-mpls",
+ "sha2",
  "thiserror",
  "tracing",
 ]

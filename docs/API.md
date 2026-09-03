@@ -177,6 +177,33 @@ negotiated restart window expires; expiry purges both eBGP and iBGP route
 origins. A successful reconnect cancels retention. The embedder must continue
 calling `DefaultRouter::tick` so expiry is enforced.
 
+## Exchange-plane prototype (feature `exchange-plane`)
+
+The W6.3 prototype of the private exchange plane
+(`docs/research/EXCHANGE-PLANE.md`) ships behind the `exchange-plane`
+feature of `lr-bgp` (off by default; the wire format uses experimental
+IANA code points 251 until an RFC 7120 early allocation). The surface:
+
+* `lr_bgp::extensions::exchange_plane` — the codec. `ExchangePlaneConfig`
+  (nonce + keys + record-class switches) advertises via
+  `ExchangePlaneConfig::capability()`; the peer's OPEN parses with
+  `parse_capability`; `negotiate` applies the activation rule (same
+  version + non-empty key intersection). `ExchangeRecord` encodes and
+  decodes the attribute body carrying `Record::{Hint, Policy, Origin,
+  Segment}` TLVs, `sign`/`verify` add and check the HMAC-SHA256 tag,
+  and `ReplayTracker` enforces the OPEN-nonce binding and the
+  monotonic per-key sequence (design §6).
+* `BgpPeer::set_exchange_plane(cfg)` — advertise the capability in
+  OPEN for this session; `BgpPeer::exchange_plane_session()` — the
+  negotiation result after OPEN (`None` when the peer did not
+  participate; the session itself is unaffected either way, per RFC
+  5492 §3).
+
+The decision process is untouched in the prototype: records are
+produced and consumed by the embedder through the codec; a follow-up
+slice wires daemon config (`[peer] exchange_plane`) and the UPDATE
+attach/detach hooks.
+
 ## OSPF LSA lifecycle
 
 `DefaultRouter::tick` applies RFC 2328 LSA lifecycle processing to OSPF

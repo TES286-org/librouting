@@ -121,6 +121,16 @@ pub struct BgpPeer {
     /// (intersection of our advertised tuples and the peer's). Empty when
     /// the capability was not advertised by either side.
     extended_next_hop: Vec<ExtNextHopTuple>,
+    /// W6.3 exchange-plane prototype (feature `exchange-plane`): the
+    /// local configuration advertised in OPEN, when enabled.
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane: Option<crate::extensions::exchange_plane::ExchangePlaneConfig>,
+    /// W6.3 exchange-plane prototype: the negotiation result — `Some`
+    /// only when both OPENs carried the capability with the same
+    /// version and a non-empty key intersection
+    /// (`docs/research/EXCHANGE-PLANE.md` §3).
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane_session: Option<crate::extensions::exchange_plane::ExchangePlaneSession>,
     pub(crate) out_buf: Vec<u8>,
     hold_remaining: u64,
     keepalive_remaining: u64,
@@ -150,6 +160,10 @@ impl BgpPeer {
             add_path_tx: Vec::new(),
             add_path_rx: Vec::new(),
             extended_next_hop: Vec::new(),
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane: None,
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane_session: None,
             out_buf: Vec::new(),
             hold_remaining: 0,
             keepalive_remaining: 0,
@@ -218,6 +232,28 @@ impl BgpPeer {
             nlri_safi,
             nexthop_afi,
         )
+    }
+
+    /// W6.3 exchange-plane prototype (feature `exchange-plane`):
+    /// enable the plane for this session. The capability is advertised
+    /// in the next OPEN; the plane activates only when the peer
+    /// advertises it too (design §3). Off by default.
+    #[cfg(feature = "exchange-plane")]
+    pub fn set_exchange_plane(
+        &mut self,
+        cfg: crate::extensions::exchange_plane::ExchangePlaneConfig,
+    ) {
+        self.exchange_plane = Some(cfg);
+    }
+
+    /// W6.3 exchange-plane prototype: the negotiation result.
+    /// `Some` only after OPEN when both speakers advertised the
+    /// capability and the key intersection is non-empty.
+    #[cfg(feature = "exchange-plane")]
+    pub fn exchange_plane_session(
+        &self,
+    ) -> Option<&crate::extensions::exchange_plane::ExchangePlaneSession> {
+        self.exchange_plane_session.as_ref()
     }
 
     /// Whether both speakers negotiated the RFC 2918 route-refresh capability.
@@ -437,6 +473,13 @@ impl BgpPeer {
                 .collect();
             caps.push(Capability::extended_next_hop(&raw));
         }
+        // W6.3 exchange-plane prototype: advertise when configured
+        // (feature-gated; RFC 5492 §3 makes the unknown capability
+        // inert for peers without it).
+        #[cfg(feature = "exchange-plane")]
+        if let Some(xp) = &self.exchange_plane {
+            caps.push(xp.capability());
+        }
         let param_value = Capability::encode_set(&caps);
         let mut open = Open::new(self.cfg.local_as, self.cfg.hold_time, self.cfg.local_bgp_id);
         open.params.push(crate::message::open::OpenParam {
@@ -538,6 +581,24 @@ impl BgpPeer {
             .collect();
         self.extended_next_hop =
             crate::extensions::extended_next_hop::negotiated_tuples(&self.cfg, &peer_enh);
+
+        // W6.3 exchange-plane prototype: activate only when both sides
+        // advertised the capability with the same version and a
+        // non-empty key intersection (design §3). Otherwise the plane
+        // stays off — the session is unaffected either way.
+        #[cfg(feature = "exchange-plane")]
+        {
+            self.exchange_plane_session = match self.exchange_plane.as_ref() {
+                Some(local) => self
+                    .peer_capabilities
+                    .iter()
+                    .find_map(crate::extensions::exchange_plane::parse_capability)
+                    .and_then(|peer_open| {
+                        crate::extensions::exchange_plane::negotiate(local, &peer_open)
+                    }),
+                None => None,
+            };
+        }
 
         // RFC 4271 §4.2: the Hold Timer is the smaller of our configured
         // hold time and the peer's. A zero received hold time disables the
@@ -1258,6 +1319,95 @@ mod tests {
         });
         peer.step(BgpEvent::Message(BgpMessage::Open(open)));
         assert!(peer.cfg.asn4, "4-byte encoding must be negotiated up");
+    }
+
+    /// W6.3 exchange-plane prototype: both speakers configure the plane
+    /// and exchange OPENs — the negotiation activates with the shared
+    /// key and each side's nonces in the right places.
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_negotiates_when_both_sides_advertise() {
+        use crate::extensions::exchange_plane::{ExchangeKey, ExchangePlaneConfig};
+
+        let nonce_a = [1u8; 8];
+        let nonce_b = [2u8; 8];
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+
+        let mut xp_a = ExchangePlaneConfig::new(nonce_a);
+        xp_a.keys = vec![ExchangeKey::hmac_sha256(1, "alpha")];
+        let mut xp_b = ExchangePlaneConfig::new(nonce_b);
+        xp_b.keys = vec![
+            ExchangeKey::hmac_sha256(1, "alpha"),
+            ExchangeKey::hmac_sha256(2, "beta"),
+        ];
+        a.set_exchange_plane(xp_a);
+        b.set_exchange_plane(xp_b);
+
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established() && b.is_established());
+
+        let session_a = a.exchange_plane_session().expect("activated on a");
+        assert_eq!(session_a.peer_nonce, nonce_b);
+        assert_eq!(session_a.local_nonce, nonce_a);
+        assert_eq!(session_a.keys.len(), 1);
+        assert_eq!(session_a.keys[0].id, 1);
+
+        let session_b = b.exchange_plane_session().expect("activated on b");
+        assert_eq!(session_b.peer_nonce, nonce_a);
+        assert_eq!(session_b.local_nonce, nonce_b);
+    }
+
+    /// W6.3 exchange-plane prototype: only one side configures the
+    /// plane — the capability is advertised (RFC 5492 §3 makes it
+    /// inert for the peer) but the negotiation stays off, and the
+    /// session establishes normally.
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_stays_off_when_peer_lacks_capability() {
+        use crate::extensions::exchange_plane::{ExchangeKey, ExchangePlaneConfig};
+
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.mp_families = vec![NlriFamily::IPV4_UNICAST];
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+
+        let mut xp = ExchangePlaneConfig::new([5u8; 8]);
+        xp.keys = vec![ExchangeKey::hmac_sha256(1, "alpha")];
+        a.set_exchange_plane(xp);
+
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        // b has no exchange-plane config: b's OPEN handling must not
+        // trip over a's capability (RFC 5492 §3 ignore rule).
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established() && b.is_established());
+        assert!(a.exchange_plane_session().is_none());
+        assert!(b.exchange_plane_session().is_none());
     }
 
     fn establish_llgr_pair() -> (BgpPeer, BgpPeer) {

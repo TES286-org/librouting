@@ -19,6 +19,10 @@ enhanced_rr = []
 extended_communities = []
 long_lived = []
 labeled_unicast = ["dep:lr-mpls"]
+# W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md) — off
+# by default; the wire format uses experimental code points until an
+# RFC 7120 early allocation settles them.
+exchange-plane = ["dep:hmac", "dep:sha2"]
 
 [dependencies]
 lr-core = { workspace = true }
@@ -26,3 +30,5 @@ lr-mpls = { workspace = true, optional = true }
 bytes.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+hmac = { workspace = true, optional = true }
+sha2 = { workspace = true, optional = true }

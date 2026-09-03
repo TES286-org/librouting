@@ -771,5 +771,31 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    aggregation strips provenance. Includes the W6.3 prototype plan
    (module layout, feature flag, config keys, five-phase test plan)
    and the open questions for the design review.
-3. Prototype the plane inside `lr-bgp::extensions` once the design
-   review converges; gate behind a feature flag.
+3. ~~**Prototype the plane inside `lr-bgp::extensions`**~~ — done as
+   the first slice, behind the `exchange-plane` feature flag (off by
+   default; the wire format uses the IANA experimental capability
+   range 239-254 — the prototype claims 251 — and path-attribute type
+   251, both pending an RFC 7120 early allocation):
+   `lr-bgp::extensions::exchange_plane` implements the full codec —
+   capability value (version/flags/nonce/key block), the
+   optional-transitive attribute body (header + record TLVs), all
+   three record classes (scope-1 hints, scope-1 policy intent,
+   scope-N provenance with origin attestations and per-hop segment
+   signatures), HMAC-SHA256 signing/verification with constant-time
+   comparison (the same primitive lr-babel's RFC 8967 code uses), the
+   OPEN-nonce replay tracker with per-key monotonic sequences, and
+   the §3 activation rule (same version + non-empty key
+   intersection). FSM wiring: `BgpPeer::set_exchange_plane`
+   advertises the capability in OPEN, `exchange_plane_session()`
+   exposes the negotiation result — RFC 5492 §3 keeps a one-sided
+   advertisement inert, so sessions with non-participating peers
+   (BIRD, FRR) are byte-identical to before. 20 new unit tests
+   (codec roundtrips, unknown-TLV skip, truncation/version/duplicate-
+   tag errors, sign/verify tamper detection, replay decisions,
+   activation rules) plus 2 FSM tests (both-sides activation,
+   one-sided fallback) — all behind the feature, 147 lr-bgp tests
+   with it on and the default build unchanged. The decision process
+   is untouched; the follow-up slice wires daemon config
+   (`[peer] exchange_plane` + key block) and the UPDATE
+   attach/detach hooks, then the design's interop gate (flag off =
+   byte-identical UPDATE streams via the W5.3 parity harness).
