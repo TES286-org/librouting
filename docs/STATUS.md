@@ -678,8 +678,16 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    runs the tutorial's code verbatim — the tutorial cannot drift
    from the API without breaking a test. Indexed at the top of
    `docs/README.md`.
-2. Per-protocol deep dives extending `docs/examples/` (BGP roles,
-   OSPF ABR/NSSA scenarios, Babel source-specific routing).
+2. ~~**Per-protocol deep dives extending `docs/examples/`**~~ — done:
+   `bgp_roles_otc.md` (RFC 9234 role configuration + the OTC
+   lifecycle table — egress enforcement live in `lr-bgp::advertise`,
+   the §5 ingress helper shipped with FSM enforcement noted as
+   future work), `ospf_abr_nssa.md` (type-3 summary origination and
+   flush with the backbone-only rule, the stub/NSSA filter map),
+   and `babel_source_specific.md` (RFC 9079 source-keyed route
+   table with the wire form — Source Prefix sub-TLV 128 — verified
+   against `lr-router`'s babel `apply_update`, plus the kernel
+   `from`-route caveat).
 3. ~~**Binding guides per language (Go / Python / C / C++)**~~ — done:
    `docs/bindings/{go,python,c,cpp}.md`, one page each with a
    complete program (router + eBGP session + originate + wire-byte
