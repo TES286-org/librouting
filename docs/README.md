@@ -19,6 +19,7 @@ the protocol crates.
 | Document                                         | Contents                                                                                     |
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
 | [`API.md`](API.md)                               | Public API tour, layer by layer, with code snippets                                          |
+| [`bindings/`](bindings/)                         | Per-language guides with complete, verified programs (Go / Python / C / C++)                  |
 | [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/` (analyzer, RR, BFD, OS integration)            |
 | [`examples/`](examples/)                         | Per-scenario walkthroughs: route reflector, confederation, route server, BFD, OS integration |
 

@@ -680,8 +680,17 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    `docs/README.md`.
 2. Per-protocol deep dives extending `docs/examples/` (BGP roles,
    OSPF ABR/NSSA scenarios, Babel source-specific routing).
-3. Binding guides per language (Go / Python / C / C++), one page
-   each with a complete program.
+3. ~~**Binding guides per language (Go / Python / C / C++)**~~ — done:
+   `docs/bindings/{go,python,c,cpp}.md`, one page each with a
+   complete program (router + eBGP session + originate + wire-byte
+   dump) and its exact build/run commands. All four programs were
+   compiled and executed against the real `lr-ffi` release build
+   during the docs work — each prints the same OPEN wire bytes and
+   the guides match the shipped binding APIs (Go's
+   finalizer-based cleanup, Python's context-manager Router, C's
+   owned `lr_bytes_t` discipline and link-order caveat, C++'s RAII
+   wrapper with the raw-ABI escape hatch). Indexed under
+   `docs/README.md` §Embedding the library.
 4. Operations runbook: daemon config reference, runtime API,
    troubleshooting FAQ, interop lab setup (BIRD + FRR).
 5. Keep `STATUS.md` / `RFC_MAP.md` / `API.md` synchronized with
