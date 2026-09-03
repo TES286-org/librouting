@@ -17,7 +17,6 @@ nssa = []
 te = []
 hmac_sha = []
 graceful_restart = []
-ospfv3_extended_lsa = []
 
 [dependencies]
 lr-core = { workspace = true }
