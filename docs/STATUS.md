@@ -691,8 +691,19 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    owned `lr_bytes_t` discipline and link-order caveat, C++'s RAII
    wrapper with the raw-ABI escape hatch). Indexed under
    `docs/README.md` §Embedding the library.
-4. Operations runbook: daemon config reference, runtime API,
-   troubleshooting FAQ, interop lab setup (BIRD + FRR).
+4. ~~**Operations runbook**~~ — done: `docs/RUNBOOK.md` — daemon
+   lifecycle (signals, privilege drop, the fatal-by-design API
+   socket), the runtime API command reference (`status`/`sessions`/
+   `routes`/`mrt`/`reload`/`shutdown`, verified against `api.rs`'s
+   dispatch), and a troubleshooting FAQ covering the failure modes
+   operators hit first: RFC 8212's deny-by-default eBGP, unknown-key
+   config warnings, Connect/Active hangs (GTSM TTL, auth arming),
+   TCP-AO kernel requirements, rootless-netns raw sockets, the
+   host-level `mpls_router` load, kernel-FIB installation being
+   opt-in, and reload's networks-only scope. Config reference stays
+   in `templates/daemon.toml`, interop lab in `docs/INTEROP.md` —
+   the runbook links instead of duplicating. Indexed under
+   `docs/README.md` §Running the daemon.
 5. Keep `STATUS.md` / `RFC_MAP.md` / `API.md` synchronized with
    every landed feature (standing rule, enforced at review).
 
