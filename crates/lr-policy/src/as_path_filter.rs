@@ -246,6 +246,7 @@ mod tests {
             attributes: lr_core::attr::Attributes::new(),
             age_ms: 0,
             path_id: 0,
+            tag: None,
         };
         let wire =
             lr_bgp::path::as_path::AsPath::from_sequence([Asn(65001), Asn(65002)]).encode_4();

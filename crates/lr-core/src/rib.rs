@@ -108,4 +108,12 @@ pub struct Route {
     /// by this speaker it is the identifier this speaker assigned for the
     /// egress session.
     pub path_id: u32,
+    /// Operator-assigned route tag (RFC 4271 §9.1.2 path attribute space;
+    /// OSPF external/NSSA LSAs carry it as the 32-bit External Route Tag
+    /// per RFC 2328 §A.4.5 / RFC 3101 §2.3). `None` means no tag is
+    /// attached. Set by the `SetTag` policy action and consulted by the
+    /// OSPF external-LSA origination path; cross-protocol redistribution
+    /// pipes also use this field to carry the source protocol's tag
+    /// through.
+    pub tag: Option<u32>,
 }

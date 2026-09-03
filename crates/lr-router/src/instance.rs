@@ -730,6 +730,7 @@ impl BabelRuntime {
                     attributes: lr_core::attr::Attributes::new(),
                     age_ms: 0,
                     path_id: 0,
+                    tag: None,
                 }
             })
             .collect()
@@ -1632,6 +1633,7 @@ impl DefaultRouter {
             attributes: attrs.into(),
             age_ms: 0,
             path_id: 0,
+            tag: None,
         };
         self.loc_rib.install_set(&key, vec![route.clone()]);
         self.originated.insert(key.clone(), route.clone());
@@ -1675,6 +1677,7 @@ impl DefaultRouter {
             attributes: attrs.into(),
             age_ms: 0,
             path_id: 0,
+            tag: None,
         };
         self.loc_rib.install_set(&key, vec![route.clone()]);
         self.originated.insert(key.clone(), route.clone());
@@ -1726,6 +1729,7 @@ impl DefaultRouter {
             attributes: attrs.into(),
             age_ms: 0,
             path_id: 0,
+            tag: None,
         };
         self.loc_rib.install_set(&key, vec![route.clone()]);
         self.originated.insert(key.clone(), route.clone());
@@ -1847,6 +1851,7 @@ impl DefaultRouter {
                     attributes: attrs.into(),
                     age_ms: self.now_ms,
                     path_id: 0,
+                    tag: None,
                 };
                 self.loc_rib.install_set(&key, vec![route.clone()]);
                 self.originated.insert(key.clone(), route.clone());
@@ -4163,6 +4168,7 @@ impl DefaultRouter {
                     attributes: lr_core::attr::Attributes::new(),
                     age_ms: 0,
                     path_id: 0,
+                    tag: None,
                 };
                 (key, route)
             })
@@ -4969,6 +4975,7 @@ impl DefaultRouter {
                         attributes: attrs.into(),
                         age_ms: self.now_ms,
                         path_id: 0,
+                        tag: None,
                     };
                     let key = route.key.clone();
                     // No-op when the copy is unchanged (age aside). This

@@ -133,6 +133,7 @@ mod tests {
             attributes: lr_core::attr::Attributes::new(),
             age_ms: 0,
             path_id,
+            tag: None,
         }
     }
 

@@ -402,6 +402,7 @@ mod tests {
             attributes: attrs,
             age_ms: 0,
             path_id: 0,
+            tag: None,
         }
     }
 

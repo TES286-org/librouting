@@ -1223,6 +1223,7 @@ impl BgpPeer {
                 attributes: normalized.clone().into(),
                 age_ms: 0, // stamped by the router when it imports
                 path_id,
+                tag: None,
             };
             actions.push(BgpAction::InstallRoute(route));
         };
@@ -1280,6 +1281,7 @@ impl BgpPeer {
                                     attributes: attrs.into(),
                                     age_ms: 0,
                                     path_id: e.path_id,
+                                    tag: None,
                                 };
                                 actions.push(BgpAction::InstallRoute(route));
                             }
@@ -1793,6 +1795,7 @@ mod tests {
             attributes: attrs.into(),
             age_ms: 0,
             path_id: 0,
+            tag: None,
         }
     }
 

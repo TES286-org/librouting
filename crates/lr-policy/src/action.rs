@@ -73,7 +73,7 @@ pub fn apply_set(action: &SetAction, route: &mut Route) {
         #[cfg(not(feature = "bgp"))]
         SetAction::AddCommunity(_, _) => { /* needs the bgp feature: no-op */ }
         SetAction::SetMetric(v) => route.preference.metric = *v,
-        SetAction::SetTag(_) => { /* TODO: route tags */ }
+        SetAction::SetTag(v) => route.tag = Some(*v),
     }
 }
 
@@ -86,5 +86,54 @@ fn proto_id(p: lr_core::rib::Protocol) -> u8 {
         lr_core::rib::Protocol::Static => 5,
         lr_core::rib::Protocol::Connected => 6,
         lr_core::rib::Protocol::Other(_) => 0xff,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lr_core::nlri::NlriFamily;
+    use lr_core::rib::{Preference, Protocol, RouteKey, RouteOrigin};
+
+    fn empty_route() -> Route {
+        Route {
+            key: RouteKey::new(
+                Prefix::new_v4([203, 0, 113, 0], 24),
+                NlriFamily::IPV4_UNICAST,
+            ),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn set_tag_assigns_route_tag() {
+        let mut r = empty_route();
+        assert_eq!(r.tag, None);
+        apply_set(&SetAction::SetTag(0xdead_beef), &mut r);
+        assert_eq!(r.tag, Some(0xdead_beef));
+    }
+
+    #[test]
+    fn set_tag_overwrites_previous_tag() {
+        let mut r = empty_route();
+        apply_set(&SetAction::SetTag(1), &mut r);
+        apply_set(&SetAction::SetTag(2), &mut r);
+        assert_eq!(r.tag, Some(2));
+    }
+
+    #[test]
+    fn set_metric_is_independent_of_tag() {
+        let mut r = empty_route();
+        apply_set(&SetAction::SetTag(99), &mut r);
+        apply_set(&SetAction::SetMetric(42), &mut r);
+        assert_eq!(r.tag, Some(99));
+        assert_eq!(r.preference.metric, 42);
     }
 }

@@ -159,6 +159,7 @@ mod tests {
             attributes: lr_core::attr::Attributes::new(),
             age_ms: 0,
             path_id: 0,
+            tag: None,
         };
         for a in attrs {
             r.attributes.insert(a);
