@@ -835,3 +835,65 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    (`[peer] exchange_plane` + key block) and the UPDATE
    attach/detach hooks, then the design's interop gate (flag off =
    byte-identical UPDATE streams via the W5.3 parity harness).
+4. ~~**Daemon integration: config, attach/detach hooks, interop
+   gate**~~ — done (the follow-up slice named above), still behind
+   the `exchange-plane` feature (off by default end to end):
+   * Egress attach (`BgpPeer::advertise`): plane-active sessions get
+     a fresh signed record set per UPDATE — scope-1 hint rebuilt
+     (rank 1, the sender's chosen path; damping/IGP integration is
+     future work), §5.2 policy intent from embedder-supplied role +
+     digests, provenance for locally originated routes (fresh origin
+     attestation at the configured scope budget, expiry =
+     configured wall clock + TTL) with received chains forwarded
+     scope-decremented and re-signed per hop (design §7); headless
+     chains and exhausted budgets strip provenance. Withdrawals and
+     EoR never carry records. The per-session OPEN nonce mixes an
+     OPEN-instance counter, so every session instance is
+     replay-distinct without an RNG in the no-std FSM.
+   * Ingress detach (`handle_update_in_established`): verified sets
+     (nonce echo → sequence → tag, design §6) park in a private
+     record store on the route bag; Partial-bit arrivals park as raw
+     forwarding material; verification failures log + drop the
+     records while the route survives (design §8). Scope-1 records
+     are consumed — they never leak into re-advertisements (§7).
+   * Router plumbing: `DefaultRouter::set_session_exchange_plane`
+     (pre-start, fail-closed), `exchange_plane_records(h)` typed
+     accessor (last verified set per prefix), the §7
+     `exchange_plane_partial_transit(h)` counter, and store pruning
+     on withdrawal/teardown. Records of policy/safety-dropped routes
+     die with the route.
+   * Daemon: `[bgp] exchange_plane` + `[bgp] exchange_plane_keys`
+     (`"id:secret"` HMAC-SHA256 pairs) / `--exchange-plane`
+     / `--no-exchange-plane` / repeatable `--exchange-plane-key`,
+     per-peer `[peer] exchange_plane` override (template inheritance
+     included); enabling on a feature-less binary is a startup error
+     (fail closed). The §5.2 policy digests are SipHash-2-4 over the
+     canonical description of the peer's bound route-maps (entries +
+     referenced list definitions), role claimed ROLE_UNSET while the
+     daemon has no role config. The runtime API `sessions` command
+     reports per-session record counts + the partial-transit counter
+     when non-zero.
+   * RFC 4271 §5.3 relay fix (unconditional, not feature-gated):
+     unknown optional-transitive attributes forward with the Partial
+     bit set; unknown optional NON-transitive attributes are no
+     longer propagated. The internal `LrMplsLabelStack` tag moved
+     251 → 255 (it collided with the exchange-plane wire attribute),
+     and the MRT writer filters the private tags out of dumps.
+   * Tests: 8 codec tests (record-set construction across all
+     classes, scope exhaustion, headless chains, store roundtrips,
+     chain verification + tamper detection), 5 FSM tests (attach /
+     detach over a live pair, scope-1 no-leak, one-sided
+     byte-identical egress, cross-instance replay drop, tamper
+     drop), 4 router tests (records surface, plane-off clean,
+     three-speaker chain re-sign with end-to-end chain
+     verification, partial-transit counting), 1 parser test, and 3
+     daemon e2e tests (all-classes flow, wrong-key fail-open, one
+     -sided inert).
+   * Interop gate (design §10 exit criteria): the CI interop job
+     rebuilds the daemon with the feature and runs the W5.3 parity
+     harness (flag off = replayed Loc-RIB IDENTICAL against BIRD
+     2.17.5) plus `tests/interop/exchange_plane.sh` — the plane-on
+     daemon peers with plain BIRD unchanged (the RFC 5492 §3
+     fallback gate), verified locally against BIRD 2.17.5. The
+     loopback e2e with the flag on demonstrates all three record
+     classes (`crates/lr-cli/tests/daemon_exchange_plane.rs`).

@@ -89,6 +89,19 @@ hold_time = 90
 # CLI: --soft-reconfig-inbound / --no-soft-reconfig-inbound
 # soft_reconfig_inbound = false
 
+# W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md).
+# Experimental: the wire format rides IANA experimental code points
+# (capability + path-attribute 251) pending an RFC 7120 early
+# allocation, and the plane only activates between two lr speakers
+# that both opt in with a shared key id — non-lr peers (BIRD, FRR)
+# are completely unaffected (RFC 5492 §3 inert capability). Requires
+# a binary built with `--features exchange-plane`; enabling it on a
+# feature-less build is a startup error.
+# exchange_plane = true
+# exchange_plane_keys = ["1:first-secret", "2:second-secret"]
+# Per-peer override: `[peer.X] exchange_plane = false`.
+# CLI: --exchange-plane / --no-exchange-plane / --exchange-plane-key 1:secret
+
 # RFC 4724 graceful restart: restart time advertised to the peer, in
 # seconds (0 disables). Stale routes from the peer are retained for this
 # window after a session loss.

@@ -16,6 +16,7 @@ job `interop`) and can all be reproduced locally:
 | BIRD LLGR       | `tests/interop/bird_llgr.sh`  | lr-daemon ↔ BIRD 2 (RFC 9494)                                            | Full Long-Lived Graceful Restart lifecycle in **both helper roles**: capability negotiation, retention, `LLGR_STALE` marking and stale-time expiry purge                                                                                                         |
 | BFD x BIRD      | `tests/interop/bfd_bird.sh`   | lr-daemon ↔ BIRD 2 (`protocol bfd` + `bfd on`) over a veth pair in netns | BFD wire compatibility (RFC 5880): both sessions reach Up, BGP rides `bfd on`, and a frozen peer (SIGSTOP — TCP still open) is torn down in ~0.5s by BFD at 100ms×3 vs a 60s hold timer; phase 2 proves RFC 5883 multihop mode (UDP 4784, off-link address pair) |
 | FRR             | `tests/interop/frr.sh`        | lr-daemon ↔ FRR bgpd (eBGP, multihop)                                    | Wire compatibility with FRR bgpd incl. its stricter next-hop validation                                                                                                                                                                                          |
+| Exchange plane  | `tests/interop/exchange_plane.sh` | lr-daemon (`--exchange-plane`) ↔ BIRD 2 (plain)                      | W6.3 fallback gate: the plane-enabled daemon peers with a non-lr speaker unchanged — the capability stays inert (RFC 5492 §3), routes flow both directions, and no records surface. Needs the `exchange-plane` feature build (or skips)                          |
 
 > **RFC 8212 note.** The daemon's default eBGP route behavior is
 > deny-in/deny-out for peers without explicit import/export route-maps
@@ -54,6 +55,7 @@ cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/bird.sh                     # needs bird2 (or skips)
 ./tests/interop/bird_enh.sh                 # needs bird2 (or skips) — RFC 5549 ENH
 ./tests/interop/bfd_bird.sh                 # needs bird2 + user namespaces (or skips) — BFD RFC 5880/5881/5883
+./tests/interop/exchange_plane.sh           # needs bird2 + the exchange-plane feature build (or skips)
 ./tests/interop/frr.sh                      # needs FRR bgpd (or skips)
 ./tests/interop/mpls_lsp.sh                 # needs iproute2 + user namespaces; dataplane phase needs the mpls_router module
 ```

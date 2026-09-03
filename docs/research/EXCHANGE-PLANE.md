@@ -331,6 +331,20 @@ which is longer than the session's when provenance propagates.
 
 ## 10. Prototype plan (W6.3)
 
+> **Status.** The prototype and the daemon integration are landed
+> behind the `exchange-plane` feature (off by default): the codec +
+> negotiation + replay tracker (first slice), the UPDATE attach/detach
+> hooks with per-hop re-signing (second slice), and the daemon
+> config/CLI/runtime-API wiring plus the interop gate (third slice).
+> The exit criteria below are met: the W5.3 parity harness replays a
+> captured lr→BIRD stream into an IDENTICAL Loc-RIB with the flag off,
+> `tests/interop/exchange_plane.sh` proves the fallback against plain
+> BIRD 2 with the flag on, and the loopback e2e
+> (`crates/lr-cli/tests/daemon_exchange_plane.rs`) demonstrates all
+> three record classes. Config keys: `[bgp] exchange_plane` +
+> `exchange_plane_keys`, per-peer `[peer] exchange_plane`; see
+> `templates/daemon.toml`.
+
 * **Module layout**: `lr-bgp::extensions::exchange_plane` (capability
   codec in `capabilities.rs`, record codec in the new module; no-std,
   like the rest of lr-bgp). Router plumbing: records surface as
