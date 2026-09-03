@@ -844,6 +844,26 @@ pub struct DefaultRouter {
     /// latches (a full table from a policy-less peer must not produce
     /// one log event per route).
     session_policy: BTreeMap<u64, SessionPolicy>,
+    /// W6.3 exchange-plane state per BGP session (feature
+    /// `exchange-plane`): the last verified record set per prefix and
+    /// the partial-transit counter (design §7).
+    #[cfg(feature = "exchange-plane")]
+    exchange_plane_state: BTreeMap<u64, ExchangePlaneState>,
+}
+
+/// W6.3 exchange-plane bookkeeping for one BGP session (feature
+/// `exchange-plane`).
+#[cfg(feature = "exchange-plane")]
+#[derive(Debug, Clone, Default)]
+struct ExchangePlaneState {
+    /// The last verified record set per announced prefix (design §5:
+    /// hints are per prefix, policy intent per session — the latest
+    /// record set a session sent replaces its previous entries).
+    records: BTreeMap<lr_core::addr::Prefix, lr_bgp::extensions::exchange_plane::ExchangeRecord>,
+    /// Number of record sets that arrived with the Partial bit set on
+    /// this session — provenance that crossed a non-lr transit speaker
+    /// (design §7, reported in the runtime API).
+    partial_transit: u64,
 }
 
 /// RFC 8212 bookkeeping for one BGP session.
@@ -911,6 +931,8 @@ impl Default for DefaultRouter {
             ebgp_requires_policy: false,
             enforce_first_as: false,
             session_policy: BTreeMap::new(),
+            #[cfg(feature = "exchange-plane")]
+            exchange_plane_state: BTreeMap::new(),
         }
     }
 }
@@ -1401,6 +1423,67 @@ impl DefaultRouter {
         }
     }
 
+    /// W6.3 exchange-plane (feature `exchange-plane`): attach the
+    /// plane configuration to a single BGP session. The config is
+    /// advertised in OPEN (capability 251) and — when the peer also
+    /// advertises it with a shared key id — activates the record
+    /// attach/detach hooks for the session
+    /// (`docs/research/EXCHANGE-PLANE.md`). Sessions without a config
+    /// never advertise the capability and are byte-identical to a
+    /// build without the feature.
+    ///
+    /// Must be called after `add_session` and before `start_session`;
+    /// unknown handles or already-established sessions return Err.
+    #[cfg(feature = "exchange-plane")]
+    pub fn set_session_exchange_plane(
+        &mut self,
+        h: SessionHandle,
+        cfg: lr_bgp::extensions::exchange_plane::ExchangePlaneConfig,
+    ) -> Result<(), String> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => {
+                if peer.is_established() {
+                    return Err(format!(
+                        "session {} already established: exchange_plane must be set before start",
+                        h.0
+                    ));
+                }
+                peer.set_exchange_plane(cfg);
+                Ok(())
+            }
+            _ => Err(format!("BGP session {} not found", h.0)),
+        }
+    }
+
+    /// W6.3 exchange-plane (feature `exchange-plane`): the last
+    /// verified record set per prefix the session `h` sent us, most
+    /// recent first. Empty when the plane never activated for the
+    /// session or nothing was received yet.
+    #[cfg(feature = "exchange-plane")]
+    pub fn exchange_plane_records(
+        &self,
+        h: SessionHandle,
+    ) -> Vec<(
+        lr_core::addr::Prefix,
+        lr_bgp::extensions::exchange_plane::ExchangeRecord,
+    )> {
+        self.exchange_plane_state
+            .get(&h.0)
+            .map(|st| st.records.iter().map(|(k, v)| (*k, v.clone())).collect())
+            .unwrap_or_default()
+    }
+
+    /// W6.3 exchange-plane (feature `exchange-plane`): how many record
+    /// sets arrived with the Partial bit set on session `h` —
+    /// provenance that crossed a non-lr transit speaker (design §7).
+    #[cfg(feature = "exchange-plane")]
+    pub fn exchange_plane_partial_transit(&self, h: SessionHandle) -> u64 {
+        self.exchange_plane_state
+            .get(&h.0)
+            .map(|st| st.partial_transit)
+            .unwrap_or(0)
+    }
+
     /// FRR `clear ip bgp * soft in` (W2.4): re-evaluate the import
     /// policy against the pre-policy Adj-RIB-In for `h`, replacing the
     /// session's entries in the post-policy `adj_rib_in` with the
@@ -1866,6 +1949,20 @@ impl DefaultRouter {
 
     fn import_route(&mut self, route: Route) {
         let is_ebgp = route.protocol == Protocol::Bgp && route.origin.proto == 0;
+        // W6.3 exchange-plane (feature `exchange-plane`): snapshot the
+        // private record store off the raw route before the admission
+        // gates run — the store is surfaced only if the route is
+        // admitted, but the route is consumed by the pipeline.
+        #[cfg(feature = "exchange-plane")]
+        let xp_store: Option<(u8, std::vec::Vec<u8>)> = route
+            .attributes
+            .get(lr_core::attr::AttrTag(
+                lr_bgp::path::AttrType::LrExchangePlaneRecords.to_u8(),
+            ))
+            .and_then(|a| {
+                lr_bgp::extensions::exchange_plane::load_store(&a.value)
+                    .map(|(k, payload)| (k, payload.to_vec()))
+            });
         // W2.4 — FRR soft-reconfiguration inbound: retain the raw
         // received route in the pre-policy RIB before any safety net
         // or import hook runs. Only peers with `soft_reconfig_inbound`
@@ -2001,6 +2098,63 @@ impl DefaultRouter {
         // after the install; if the count crosses the threshold or the
         // hard limit, fire the corresponding event.
         self.check_max_prefix(session);
+        // W6.3 exchange-plane (feature `exchange-plane`): surface the
+        // record set the route carried. Only admitted routes reach this
+        // point — records of routes dropped by policy/safety die with
+        // them.
+        #[cfg(feature = "exchange-plane")]
+        self.consume_exchange_plane_store(session, &key, xp_store);
+    }
+
+    /// W6.3 exchange-plane (feature `exchange-plane`): expose a record
+    /// set from a freshly admitted route — the scope-1 classes go to
+    /// the log + the typed accessor, Partial-bit forwarding material
+    /// bumps the partial-transit counter (design §7). The store itself
+    /// stays on the route for the egress re-sign path.
+    #[cfg(feature = "exchange-plane")]
+    fn consume_exchange_plane_store(
+        &mut self,
+        session: u64,
+        key: &RouteKey,
+        xp_store: Option<(u8, std::vec::Vec<u8>)>,
+    ) {
+        use lr_bgp::extensions::exchange_plane as xp;
+
+        let Some((kind, payload)) = xp_store else {
+            return;
+        };
+        let state = self.exchange_plane_state.entry(session).or_default();
+        match kind {
+            xp::STORE_VERIFIED => {
+                let Ok(record) = xp::ExchangeRecord::decode(&payload) else {
+                    return;
+                };
+                // One log line per record set (not per prefix per second:
+                // a full table from a plane-active peer would flood).
+                let summary = record
+                    .records
+                    .iter()
+                    .map(|r| match r {
+                        xp::Record::Hint(_) => "hint",
+                        xp::Record::Policy(_) => "policy",
+                        xp::Record::Origin(_) => "origin",
+                        xp::Record::Segment(_) => "segment",
+                    })
+                    .collect::<Vec<_>>()
+                    .join("+");
+                self.pending_events.push(RouterEvent::Log(format!(
+                    "exchange-plane: session {session} {} records for {} [{}]",
+                    record.records.len(),
+                    key.prefix,
+                    summary
+                )));
+                state.records.insert(key.prefix, record);
+            }
+            xp::STORE_PARTIAL_RAW => {
+                state.partial_transit = state.partial_transit.saturating_add(1);
+            }
+            _ => {}
+        }
     }
 
     /// FRR `bgp enforce-first-as` check: return `Some(log)` when the
@@ -2187,6 +2341,12 @@ impl DefaultRouter {
                 st.count = st.count.saturating_sub(1);
             }
             self.reselect(key);
+        }
+        // W6.3 exchange-plane: the prefix's record set leaves with the
+        // route that carried it (feature `exchange-plane`).
+        #[cfg(feature = "exchange-plane")]
+        if let Some(st) = self.exchange_plane_state.get_mut(&origin.peer) {
+            st.records.remove(&key.prefix);
         }
     }
 
@@ -2874,6 +3034,11 @@ impl DefaultRouter {
             state.exceeded = false;
             state.threshold_warned = false;
         }
+        // W6.3 exchange-plane: the record sets a session sent leave with
+        // it; the partial-transit counter resets too (feature
+        // `exchange-plane`).
+        #[cfg(feature = "exchange-plane")]
+        self.exchange_plane_state.remove(&session);
         // Compute the retention windows from the peer's negotiated
         // GR/LLGR values. The FSM step that produced Close clears
         // nothing, but keep the ordering explicit: this must run before
@@ -7451,5 +7616,240 @@ mod tests {
         assert!(!a.llgr_caps.contains_key(&a_session.0));
         assert!(!a.max_prefix_state.contains_key(&a_session.0));
         assert!(!a.mrai.contains_key(&a_session.0));
+    }
+
+    // ----- W6.3 exchange-plane (feature `exchange-plane`): router-level
+    // record plumbing — exposure, cross-hop re-signing, partial transit.
+
+    #[cfg(feature = "exchange-plane")]
+    fn xp_cfg(nonce: u8) -> lr_bgp::extensions::exchange_plane::ExchangePlaneConfig {
+        use lr_bgp::extensions::exchange_plane::{ExchangeKey, ExchangePlaneConfig};
+        let mut cfg = ExchangePlaneConfig::new([nonce; 8]);
+        cfg.keys = vec![ExchangeKey::hmac_sha256(1, "alpha")];
+        cfg.origin_base_secs = 1_700_000_000;
+        cfg
+    }
+
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_records_surface_on_import() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_exchange_plane(a_session, xp_cfg(1)).unwrap();
+        b.set_session_exchange_plane(b_session, xp_cfg(2)).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let advertisement = a.drain_output(a_session);
+        b.feed_input(b_session, &advertisement).unwrap();
+        assert_eq!(b.rib_len(), 1);
+
+        // The typed accessor exposes the verified record set per prefix.
+        let records = b.exchange_plane_records(b_session);
+        assert_eq!(records.len(), 1);
+        let (prefix, record) = &records[0];
+        assert_eq!(prefix, &Prefix::new_v4([203, 0, 113, 0], 24));
+        assert!(record
+            .records
+            .iter()
+            .any(|r| matches!(r, lr_bgp::extensions::exchange_plane::Record::Hint(_))));
+        assert!(record
+            .records
+            .iter()
+            .any(|r| matches!(r, lr_bgp::extensions::exchange_plane::Record::Origin(_))));
+        assert_eq!(
+            b.exchange_plane_partial_transit(b_session),
+            0,
+            "direct lr-to-lr exchange sets no Partial bit"
+        );
+        assert!(
+            logs_contain(&mut b, "exchange-plane"),
+            "the record set is surfaced as a log event"
+        );
+    }
+
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_plane_off_sessions_stay_record_free() {
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        // Neither side configures the plane: the default build shape.
+        establish(&mut a, a_session, &mut b, b_session);
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let advertisement = a.drain_output(a_session);
+        b.feed_input(b_session, &advertisement).unwrap();
+        assert_eq!(b.rib_len(), 1);
+        assert!(b.exchange_plane_records(b_session).is_empty());
+    }
+
+    /// Three lr speakers in a chain: the middle hop forwards the
+    /// provenance chain with the scope decremented and its own segment
+    /// signature appended (design §7); the end receiver can verify the
+    /// whole chain from the record set alone (design §5.3).
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_three_speaker_chain_re_signs() {
+        use lr_bgp::extensions::exchange_plane as xp;
+
+        // Speakers: a (AS 64512) -> b (AS 64513) -> c (AS 64514).
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let mut c = DefaultRouter::new();
+        let a_s = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        let b_s1 = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        let b_s2 = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64514), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        let c_s = c
+            .add_session(
+                SessionConfig::bgp(Asn(64514), Asn(64513), RouterId::from_v4([10, 0, 0, 3]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        a.set_session_exchange_plane(a_s, xp_cfg(1)).unwrap();
+        b.set_session_exchange_plane(b_s1, xp_cfg(2)).unwrap();
+        b.set_session_exchange_plane(b_s2, xp_cfg(3)).unwrap();
+        c.set_session_exchange_plane(c_s, xp_cfg(4)).unwrap();
+        establish(&mut a, a_s, &mut b, b_s1);
+        establish(&mut b, b_s2, &mut c, c_s);
+
+        a.originate(
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 1])),
+        );
+        let hop1 = a.drain_output(a_s);
+        b.feed_input(b_s1, &hop1).unwrap();
+        assert_eq!(b.rib_len(), 1);
+
+        // b re-advertises toward c; the UPDATE carries a fresh record
+        // set (b's scope-1 records + the forwarded chain, re-signed).
+        let hop2 = b.drain_output(b_s2);
+        assert!(!hop2.is_empty(), "b re-advertises the learned route");
+        c.feed_input(c_s, &hop2).unwrap();
+        assert_eq!(c.rib_len(), 1);
+
+        let records = c.exchange_plane_records(c_s);
+        assert_eq!(records.len(), 1);
+        let (_, record) = &records[0];
+        // Origin attestation from a + segment signatures from a and b.
+        let origin = record
+            .records
+            .iter()
+            .find_map(|r| match r {
+                xp::Record::Origin(o) => Some(*o),
+                _ => None,
+            })
+            .expect("origin attestation propagated");
+        assert_eq!(origin.origin_as, 64512);
+        let segments: Vec<&xp::PathSegmentSig> = record
+            .records
+            .iter()
+            .filter_map(|r| match r {
+                xp::Record::Segment(s) => Some(s),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(segments.len(), 2, "origin hop + middle hop signatures");
+        // The scope decremented once per lr hop (8 at the originator).
+        assert_eq!(record.scope, 7);
+
+        // The end receiver validates the chain with both hops' keys.
+        let keys = vec![
+            (64512u32, xp::ExchangeKey::hmac_sha256(1, "alpha")),
+            (64513u32, xp::ExchangeKey::hmac_sha256(1, "alpha")),
+        ];
+        let (path, broken) = xp::verify_provenance_chain(&record.records, &keys);
+        assert!(broken.is_none(), "chain verifies end to end");
+        assert_eq!(path, vec![(64512, 64512), (64513, 64512)]);
+
+        // Scope-1 hints never propagate past the first receiver: c's
+        // set carries the ORIGIN's provenance but b's fresh hint, not
+        // a's (b rebuilt its own scope-1 records).
+        assert!(record
+            .records
+            .iter()
+            .any(|r| matches!(r, xp::Record::Hint(_))));
+    }
+
+    /// A Partial-bit record set arriving on a *negotiated* session is
+    /// forwarding material: parked raw, never consumed, and counted
+    /// (design §7 — the runtime API exposes the partial-transit
+    /// counter).
+    #[cfg(feature = "exchange-plane")]
+    #[test]
+    fn exchange_plane_partial_transit_is_counted() {
+        use lr_bgp::extensions::exchange_plane as xp;
+
+        let (mut a, a_session, mut b, b_session) = ebgp_pair();
+        a.set_session_exchange_plane(a_session, xp_cfg(1)).unwrap();
+        b.set_session_exchange_plane(b_session, xp_cfg(2)).unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+
+        // Hand-craft the forwarding-material shape: an UPDATE whose
+        // type-251 attribute carries the Partial bit, as it would after
+        // crossing a non-lr transit speaker upstream of a.
+        let mut u = lr_bgp::message::update::Update::new();
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(true)
+                .set_partial(true),
+            AttrType::Other(xp::ATTRIBUTE_TYPE),
+            xp::store_partial_raw(&xp::ExchangeRecord::new(3, 1, [9; 8], 42).encode()),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            lr_bgp::path::AsPath::from_sequence([64512].iter().copied().map(Asn)).encode_4(),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![10, 0, 0, 1],
+        ));
+        u.nlri
+            .push(lr_bgp::message::update::Nlri::plain(Prefix::new_v4(
+                [198, 51, 100, 0],
+                24,
+            )));
+        let wire = lr_bgp::codec::BgpCodec::new()
+            .with_asn4(true)
+            .encode_vec(&lr_bgp::message::BgpMessage::Update(u))
+            .unwrap();
+        b.feed_input(b_session, &wire).unwrap();
+        assert_eq!(b.rib_len(), 1);
+
+        // Forwarding material: not consumed, not in the accessor.
+        assert!(
+            b.exchange_plane_records(b_session).is_empty(),
+            "partial-bit records are forwarding material only"
+        );
+        assert_eq!(b.exchange_plane_partial_transit(b_session), 1);
     }
 }
