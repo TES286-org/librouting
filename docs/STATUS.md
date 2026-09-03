@@ -668,8 +668,16 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
 
 ### W4 — Documentation, guides, tutorials
 
-1. A book-style tutorial (`docs/tutorial.md`): wire decode → two
-   peer FSMs → the full router pipeline, runnable end-to-end.
+1. ~~**A book-style tutorial (`docs/tutorial.md`)**~~ — done: three
+   chapters from raw bytes to the router pipeline — wire decode (the
+   codec, a hand-built UPDATE read back through the attribute bag),
+   two peer FSMs (in-memory session establishment to Established),
+   and the router pipeline (sessions, originate → propagate →
+   install → withdraw with RIB snapshots and events). Every snippet
+   is pinned by `crates/lr-tests/tests/tutorial_snippets.rs`, which
+   runs the tutorial's code verbatim — the tutorial cannot drift
+   from the API without breaking a test. Indexed at the top of
+   `docs/README.md`.
 2. Per-protocol deep dives extending `docs/examples/` (BGP roles,
    OSPF ABR/NSSA scenarios, Babel source-specific routing).
 3. Binding guides per language (Go / Python / C / C++), one page

@@ -6,9 +6,10 @@ the protocol crates.
 
 ## Orientation
 
-| Document                             | Audience                | Contents                                                         |
-| ------------------------------------ | ----------------------- | ---------------------------------------------------------------- |
+| Document                                         | Audience                | Contents                                                         |
+| ------------------------------------------------ | ----------------------- | ---------------------------------------------------------------- |
 | [`../README.md`](../README.md)       | everyone                | Project overview, crate map, quick-start daemon example          |
+| [`tutorial.md`](tutorial.md)         | newcomers               | Book-style tutorial: wire decode → two FSMs → the router pipeline |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | contributors, embedders | Layering, RIB pipeline diagram, extension points, testing layout |
 | [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + the active roadmap         |
 | [`RFC_MAP.md`](RFC_MAP.md)           | contributors            | RFC-by-RFC coverage table with crate paths                       |
