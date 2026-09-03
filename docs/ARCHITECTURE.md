@@ -7,13 +7,13 @@ embedders.
 ## High-level layout
 
 ```
-+----------------+    +----------------+    +----------------+
-|   lr-bgp       |    |   lr-ospf      |    |   lr-babel     |
-| (RFC 4271 +    |    | (RFC 2328 /    |    | (RFC 8966 +    |
-|  extensions)   |    |  RFC 5340)     |    |  RFC 9079)     |
-+-------+--------+    +-------+--------+    +-------+--------+
-        |                     |                     |
-        +---------------------+---------------------+
++----------------+    +----------------+    +----------------+    +---------+
+|   lr-bgp       |    |   lr-ospf      |    |   lr-babel     |    | lr-ldp  |
+| (RFC 4271 +    |    | (RFC 2328 /    |    | (RFC 8966 +    |    | (RFC    |
+|  extensions)   |    |  RFC 5340)     |    |  RFC 9079)     |    |  5036)  |
++-------+--------+    +-------+--------+    +-------+--------+    +----+----+
+        |                     |                     |                  |
+        +---------------------+---------------------+------------------+
                               |
                               v
                     +---------------------+
@@ -35,15 +35,20 @@ embedders.
             v                  v
             +------------------+
             |   lr-osroute     |  <- optional OS kernel interface
-            | (Linux rtnetlink)|
+            | (Linux rtnetlink,|
+            |  BSD route(4),   |
+            |  Windows IPHelper|
+            |  + MPLS dataplane)|
             +------------------+
 ```
 
 All crates depend on `lr-core` for shared primitives (`IpAddr`, `Prefix`,
 `Asn`, `RouterId`, `Route`, `Attributes`, codec traits, FSM/timer traits).
-`lr-damping` (RFC 2439 flap damping) plugs into the selection stage via
-`lr-policy` hooks. `lr-ffi` exposes a C ABI; Go/Python/C++ bindings sit on
-top.
+`lr-mpls` provides the RFC 3032 label + label-stack codec shared by
+`lr-ldp` and `lr-bgp` (BGP-LU, RFC 8277). `lr-mrt` (RFC 6396) and `lr-bmp`
+(RFC 7854) feed monitoring / dump tooling. `lr-damping` (RFC 2439 flap
+damping) plugs into the selection stage via `lr-policy` hooks. `lr-ffi`
+exposes a C ABI; Go/Python/C/C++ bindings sit on top.
 
 ## Three-layer API
 
@@ -228,14 +233,16 @@ embedders. Notable toggles:
 
 - `lr-core` — `std` (default) / `no_std` (for embedded analyzers).
 - `lr-bgp` — `asn4` / `mp_bgp` / `addpath` / `graceful_restart` /
-  `enhanced_rr` / `extended_communities` / `long_lived` / `labeled_unicast`.
+  `enhanced_rr` / `extended_communities` / `long_lived` / `labeled_unicast` /
+  `exchange-plane` (off by default; the LRXP private capability prototype).
+- `lr-ospf` — `v2` / `v3` / `nssa` / `te` / `hmac_sha` / `graceful_restart`.
 - `lr-bfd` — `std` / `no_std`.
 - `lr-ldp` — `std` / `no_std`.
 
 ## Testing
 
 - Unit tests live alongside the source (`#[cfg(test)]` modules).
-- End-to-end tests live in `crates/lr-tests/tests/` — currently 14 files:
+- End-to-end tests live in `crates/lr-tests/tests/` — currently 16 files:
   - `tcp_smoke.rs` — two librouting BGP peers exchange OPEN+KEEPALIVE over
     real TCP.
   - `route_propagation.rs` — originate → Adj-RIB-In → Loc-RIB →
@@ -248,17 +255,21 @@ embedders. Notable toggles:
   - `redistribution.rs` — cross-protocol pipes.
   - `route_aggregation.rs` — RFC 4271 §9.2.2.2 aggregate lifecycle.
   - `bmp_monitoring.rs` — RFC 7854 Peer Up/Down + Route Monitoring.
+  - `ospf_broadcast.rs` — RFC 2328 §10.4 adjacency gating on broadcast segments.
   - `ospf_multi_area.rs`, `ospf_external.rs`, `ospf_stub_nssa.rs`,
     `ospf_virtual_link.rs` — OSPF area/ABR/NSSA/§15 coverage.
-- Daemon-level integration tests in `crates/lr-cli/tests/daemon_runtime.rs`
+  - `tutorial_snippets.rs` — compile-and-run anchors for `docs/tutorial.md`.
+- Daemon-level integration tests in `crates/lr-cli/tests/` (8 files)
   spawn the real `lr-daemon` binary (runtime API, signals, reload,
-  privilege drop); `crates/lr-cli/tests/daemon_multi_peer.rs` covers the
-  multi-peer daemon (fan-out/transit, inbound matching, fail-closed
-  rejection, per-peer config inheritance).
+  privilege drop, multi-peer fan-out, RFC 8212 policy, FRR parity knobs,
+  exchange-plane prototype, BFD fast-fail).
+- `crates/lr-ldp/tests/` carries the LDP session-FSM and transit-LSR e2e
+  suites (two binaries, ~5 KLOC).
 - Interop scripts against the BIRD and FRR reference routers live in
   `tests/interop/` (run in CI on ubuntu runners with the reference
   daemons installed via apt; they skip gracefully when absent).
-- Total: 705 tests across 35 test binaries (16 crates + doc-tests).
+- Total: 971 unit + integration tests across 61 test binaries (16 crates
+  + doc-tests + interop scripts).
 
 ## CI/CD
 

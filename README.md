@@ -1,11 +1,15 @@
 # librouting
 
 Platform-independent routing protocol library implemented in Rust. Provides
-BGP (RFC 4271 and extensions), OSPFv2/v3 (RFC 2328/5340 and extensions) and
-Babel (RFC 8966 and extensions) parsing, finite-state machine interaction and
-route calculation. BFD (RFC 5880) for fast peer failure detection, route flap
-damping (RFC 2439), and an OS route table reference implementation (Linux
-rtnetlink) are provided as opt-in crates.
+BGP (RFC 4271 and extensions), OSPFv2/v3 (RFC 2328/5340 and extensions),
+Babel (RFC 8966 and extensions), LDP (RFC 5036 and extensions), and the
+MPLS label codec (RFC 3032) — each with parsing, finite-state machine
+interaction and route/label calculation. BFD (RFC 5880) drives fast peer
+failure detection, route flap damping (RFC 2439) is available, and an OS
+route-table reference implementation (Linux rtnetlink, BSD route(4),
+Windows IP Helper) plus a Linux MPLS dataplane mirror are provided as
+opt-in crates. The library is verified bidirectionally against BIRD 2 and
+FRR 10 in CI.
 
 ## Design
 
@@ -210,38 +214,52 @@ implementation's own RIB view (`tests/interop/parity.sh`, W5.3).
 librouting/
 ├── Cargo.toml
 ├── crates/{lr-core, lr-bgp, lr-ospf, lr-babel, lr-rib, lr-policy,
-│           lr-router, lr-bfd, lr-bmp, lr-damping, lr-osroute, lr-mpls,
-│           lr-ldp, lr-cli, lr-ffi, lr-tests}/
-├── bindings/{lr-go, lr-python}/
+│           lr-router, lr-bfd, lr-bmp, lr-mrt, lr-damping, lr-osroute,
+│           lr-mpls, lr-ldp, lr-cli, lr-ffi, lr-tests}/
+├── bindings/{lr-go, lr-python}/        # Go (cgo) and Python (cffi) wrappers
 ├── docs/
-│   ├── ARCHITECTURE.md
-│   ├── RFC_MAP.md
-│   ├── API.md
-│   ├── STATUS.md
-│   ├── INTEROP.md
-│   ├── OS-INTEGRATION.md
-│   ├── examples/
-│   └── scaffolding/
-├── templates/                  # scaffolding templates + daemon.toml
-├── tests/                      # FFI harness + interop scripts (BIRD/FRR)
-├── include/{lr_ffi.h, librouting.hpp}
-└── .github/workflows/
+│   ├── README.md                        # documentation index — start here
+│   ├── ARCHITECTURE.md                  # layering, RIB pipeline, extension points
+│   ├── RFC_MAP.md                       # RFC-by-RFC coverage table
+│   ├── API.md                           # public API tour with code snippets
+│   ├── STATUS.md                        # implemented-vs-missing gap analysis + roadmap
+│   ├── INTEROP.md                       # BIRD/FRR interop lab guide
+│   ├── PARITY.md                        # behaviour knobs vs BIRD 2 / FRR 10
+│   ├── RUNBOOK.md                       # operations: lifecycle, runtime API, FAQ
+│   ├── OS-INTEGRATION.md                # kernel backends + porting guide
+│   ├── tutorial.md                      # book-style tutorial (compile-anchored)
+│   ├── bindings/{c,go,python,cpp}.md    # per-language binding guides
+│   ├── examples/*.md                    # per-scenario deep dives
+│   ├── research/{BGP-DEFECTS,EXCHANGE-PLANE}.md
+│   └── scaffolding/README.md            # starter project generator
+├── templates/                            # scaffolding templates + daemon.toml
+├── tests/                                # FFI harness + interop scripts (BIRD/FRR)
+├── include/{lr_ffi.h, librouting.hpp}   # C ABI header + C++ RAII wrapper
+└── .github/workflows/                    # ci.yml + nightly miri + release.yml
 ```
 
 ## Documentation
 
-| Document                                                       | Path                         |
-| -------------------------------------------------------------- | ---------------------------- |
-| Documentation index                                            | `docs/README.md`             |
-| Architecture                                                   | `docs/ARCHITECTURE.md`       |
-| RFC reference map                                              | `docs/RFC_MAP.md`            |
-| Public API tour                                                | `docs/API.md`                |
-| Implemented-vs-missing gap analysis                            | `docs/STATUS.md`             |
-| OS route-table integration guide (Linux/BSD/Windows + porting) | `docs/OS-INTEGRATION.md`     |
-| Interop testing guide (BIRD / FRR)                             | `docs/INTEROP.md`            |
-| Scaffolding guide                                              | `docs/scaffolding/README.md` |
-| Examples                                                       | `docs/examples/*.md`         |
-| Templates                                                      | `templates/*/`               |
+The documentation index at [`docs/README.md`](docs/README.md) orients new
+readers by audience. The canonical references:
+
+| Document                                                       | Path                                       | Audience      |
+| -------------------------------------------------------------- | ------------------------------------------ | ------------- |
+| Documentation index                                            | [`docs/README.md`](docs/README.md)         | everyone      |
+| Architecture (layering, RIB pipeline, extension points)        | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | contributors  |
+| RFC reference map (per-RFC coverage)                           | [`docs/RFC_MAP.md`](docs/RFC_MAP.md)       | contributors  |
+| Public API tour (per-crate, with snippets)                     | [`docs/API.md`](docs/API.md)               | embedders     |
+| Implemented-vs-missing gap analysis + roadmap                  | [`docs/STATUS.md`](docs/STATUS.md)         | everyone      |
+| OS route-table integration guide (Linux/BSD/Windows + porting) | [`docs/OS-INTEGRATION.md`](docs/OS-INTEGRATION.md) | embedders      |
+| Interop testing guide (BIRD/FRR lab)                           | [`docs/INTEROP.md`](docs/INTEROP.md)       | contributors  |
+| Behaviour parity flags vs BIRD 2 / FRR 10                     | [`docs/PARITY.md`](docs/PARITY.md)         | operators     |
+| Operations runbook (lifecycle, runtime API, FAQ)               | [`docs/RUNBOOK.md`](docs/RUNBOOK.md)       | operators     |
+| Book-style tutorial                                            | [`docs/tutorial.md`](docs/tutorial.md)     | newcomers     |
+| Per-language binding guides (Go / Python / C / C++)            | [`docs/bindings/`](docs/bindings/)         | embedders     |
+| Per-scenario example walkthroughs                              | [`docs/examples/`](docs/examples/)         | operators     |
+| BGP defects catalogue + exchange-plane design                 | [`docs/research/`](docs/research/)         | contributors  |
+| Scaffolding guide (starter projects)                           | [`docs/scaffolding/README.md`](docs/scaffolding/README.md) | contributors  |
+| Templates (incl. fully-commented `daemon.toml`)                | [`templates/`](templates/)                 | operators     |
 
 ## BGP topology support
 
