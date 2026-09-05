@@ -33,6 +33,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | RFC 5065 confederations | ✅ | |
 | RFC 7947 route server mode | ✅ | |
 | RFC 9234 OTC / roles | ✅ | |
+| RFC 4271 §6.8 connection collision detection | ✅ 🧪 | router-level resolver over sessions sharing a `SessionConfig::collision_group` (the group is the §6.8 "BGP Identifier known by means outside of the protocol"); sibling roles from `locally_initiated`; retains the connection initiated by the higher-BGP-Identifier speaker (FRR `bgp_collision_detect` parity, incl. examining OpenSent siblings), Established siblings always win, loser gets Cease / Connection Collision Resolution (RFC 4486 subcode 7) + teardown; equal BGP Identifiers are rejected by OPEN validation (FRR `BGP_NOTIFY_OPEN_BAD_BGP_ID` parity); daemon: bidirectional peers (`remote` + `address`) run both transports and converge to exactly one Established session; 5 router unit tests + 1 daemon e2e (`crates/lr-cli/tests/daemon_collision.rs`) |
 | RFC 7911 Add-Path | ✅ 🧪 | capability negotiation (per-family send/receive), path-id NLRI framing (plain + MP), Adj-RIB-In keyed by path id, ranked N-path selection (`add_path_max_paths`), per-path export/withdrawal with rank-slot transmit ids, MRAI path sets, GR/LLGR per-path retention; two-daemon + full-stack e2e |
 | RFC 5549 Extended Next-Hop | ✅ 🧪 | capability code 5 with `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples in the RFC 5549 §4 / RFC 8950 §4 6-byte wire form (AFI:2, SAFI:2, NH-AFI:2 — byte-identical to BIRD 2.x and FRR, both of which OPEN-error non-multiples of 6); OPEN negotiation as the intersection of local + peer tuples (§4); 16-byte NEXT_HOP for IPv4 NLRI decoded as `V4OverV6`, MP_REACH `(AFI=1, 16B)` accepted; eBGP egress rewrites IPv4 NEXT_HOP to IPv6 when `(1,1,2)` is negotiated and `local_address` is IPv6; daemon `--extended-next-hop` / `--local-address-v6` / `--mp-family ipv6-unicast`; e2e coverage of all 8 dual-stack / MP-BGP / ENH / pure-v6 session modes + real BIRD interop (`tests/interop/bird_enh.sh`, unskipped) |
 | RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
@@ -236,8 +237,13 @@ BIRD/FRR-style, without an embedder writing code.
    parse. Verified by 6 parser unit tests + 4 daemon E2E tests
    (fan-out/transit, inbound matching, unmatched rejection, per-peer
    hold time). Bidirectional peers (`remote` + `address` on one peer)
-   wait for RFC 4271 §6.8 collision detection; heterogeneous listener
-   auth keys are still future work.
+   landed on top: the daemon runs the two transports on separate
+   sessions in one collision group and resolves a connection collision
+   per RFC 4271 §6.8 — the connection initiated by the speaker with
+   the higher BGP Identifier survives, the loser gets a Cease /
+   Connection Collision Resolution NOTIFICATION (see the BGP
+   capability table and `crates/lr-cli/tests/daemon_collision.rs`).
+   Heterogeneous listener auth keys are still future work.
 2. ~~**Config completeness**~~ — done: the previously-ignored documented
    keys (`graceful_restart_time`, `llgr_stale_time`,
    `llgr_max_stale_time`, `install_kernel`) parse, and unknown keys /

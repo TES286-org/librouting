@@ -206,8 +206,12 @@ networks = ["203.0.113.0/24"]
 # the [bgp] globals above. A peer is either outbound (`remote` — the
 # daemon dials it, with its own reconnect thread and backoff) or inbound
 # (`address` — the expected source IP of connections the listener matches
-# to this peer). Configuring both on one peer waits for RFC 4271 §6.8
-# collision detection (future work).
+# to this peer). Combining both on one peer makes it bidirectional: the
+# daemon runs the two transports on separate sessions and resolves a
+# connection collision per RFC 4271 §6.8 — the connection initiated by
+# the speaker with the higher BGP Identifier survives, the loser gets a
+# Cease / Connection Collision Resolution NOTIFICATION (RFC 4486
+# subcode 7).
 #
 # Reusable defaults: [peer-template.<name>] tables hold any [[peer]]
 # key; peers pull them in with extends = "<name>" and override
