@@ -168,6 +168,11 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
                 maximum_prefix: None,
                 maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
                 maximum_prefix_threshold: 75,
+                // RFC 4271 §6.8: FFI sessions are single-transport; the
+                // collision group is reserved for embedders that run
+                // both transports of a bidirectional peer (the daemon).
+                collision_group: None,
+                locally_initiated: false,
             };
             match router.add_session(cfg) {
                 Ok(h) => {

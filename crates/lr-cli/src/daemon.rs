@@ -256,11 +256,20 @@ fn main() -> ExitCode {
     run_bgp_daemon(&cfg, rid)
 }
 
-/// One configured BGP peer: its router session, transport security and
-/// the busy flag serialising inbound connections on the session.
+/// One configured BGP peer: its router session(s), transport security
+/// and the busy flag serialising inbound connections on the session.
 struct PeerEntry {
     spec: PeerSpec,
+    /// Primary session. For bidirectional peers (both `remote` and
+    /// `address`) this carries the OUTBOUND transport (locally
+    /// initiated); unidirectional peers use it for their single
+    /// direction.
     handle: SessionHandle,
+    /// RFC 4271 §6.8 challenger session for bidirectional peers: the
+    /// session the accept loop binds inbound transports to, so an
+    /// inbound connection can coexist with the outbound one while the
+    /// router resolves the collision. `None` = single-transport peer.
+    handle_in: Option<SessionHandle>,
     auth: TcpAuth,
     gtsm: Gtsm,
     /// BFD liveness flags when the peer runs `bfd = true`.
@@ -322,15 +331,6 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 );
                 return ExitCode::from(2);
             }
-            if spec.is_outbound() && spec.is_inbound() {
-                eprintln!(
-                    "daemon: peer {}: 'remote' and 'address' together are not \
-                     supported yet (RFC 4271 §6.8 collision detection is \
-                     future work); configure one direction",
-                    spec.label()
-                );
-                return ExitCode::from(2);
-            }
             if cfg.effective_peer_as(spec) == 0 {
                 eprintln!(
                     "daemon: peer {}: no peer AS configured (set peer_as or \
@@ -355,6 +355,27 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             };
             let gtsm = build_peer_gtsm(cfg, spec);
             let sc = build_session_config(cfg, spec, rid);
+            // RFC 4271 §6.8: a bidirectional peer (both `remote` and
+            // `address`) gets TWO identical sessions in one collision
+            // group — the outbound transport runs on the primary
+            // (locally initiated), inbound connections land on the
+            // challenger (remotely initiated) and the router resolves
+            // the collision when the OPENs arrive, closing the loser
+            // with a Cease / Connection Collision Resolution
+            // NOTIFICATION. Single-direction peers carry no group and
+            // never collide.
+            let bidirectional = spec.is_outbound() && spec.is_inbound();
+            let group = (entries.len() + 1) as u64;
+            let mut sc_out = sc.clone();
+            let mut sc_in: Option<SessionConfig> = None;
+            if bidirectional {
+                sc_out.collision_group = Some(group);
+                sc_out.locally_initiated = true;
+                let mut c = sc.clone();
+                c.collision_group = Some(group);
+                c.locally_initiated = false;
+                sc_in = Some(c);
+            }
             // eBGP without a source address: egress keeps the received
             // NEXT_HOP, which peers usually reject — warn loudly.
             if cfg.effective_peer_as(spec) != cfg.local_as
@@ -368,19 +389,63 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     spec.label()
                 );
             }
-            match r.add_session(sc) {
+            match r.add_session(sc_out) {
                 Ok(h) => {
-                    // RFC 8212 §3: declare the policy presence of this
-                    // peer so the router knows which directions carry
-                    // an explicit route-map. External peers missing a
-                    // direction get the default deny (with an
-                    // Appendix-A-style warning so the incomplete
-                    // configuration is visible at startup).
-                    if let Err(e) =
-                        r.set_session_policy(h, spec.import.is_some(), spec.export.is_some())
+                    // RFC 4271 §6.8 challenger for bidirectional peers.
+                    let handle_in = match sc_in {
+                        Some(c) => match r.add_session(c) {
+                            Ok(h2) => Some(h2),
+                            Err(e) => {
+                                eprintln!(
+                                    "daemon: peer {}: add_session (collision \
+                                     challenger) failed: {}",
+                                    spec.label(),
+                                    e
+                                );
+                                return ExitCode::from(1);
+                            }
+                        },
+                        None => None,
+                    };
+                    let handles = core::iter::once(h).chain(handle_in);
+                    for hh in handles {
+                        // RFC 8212 §3: declare the policy presence of this
+                        // peer so the router knows which directions carry
+                        // an explicit route-map. External peers missing a
+                        // direction get the default deny (with an
+                        // Appendix-A-style warning so the incomplete
+                        // configuration is visible at startup).
+                        if let Err(e) =
+                            r.set_session_policy(hh, spec.import.is_some(), spec.export.is_some())
+                        {
+                            eprintln!("daemon: peer {}: {}", spec.label(), e);
+                            return ExitCode::from(1);
+                        }
+                        // W6.3 exchange-plane (feature `exchange-plane`):
+                        // activate the record plane for peers that opted
+                        // in. Fail closed on a feature-less binary, on a
+                        // missing key block, or on a bad key — never run
+                        // half-configured.
+                        #[cfg(feature = "exchange-plane")]
+                        if spec.exchange_plane.unwrap_or(cfg.exchange_plane) {
+                            if let Err(e) = wire_exchange_plane(&mut r, hh, cfg, spec) {
+                                eprintln!("daemon: peer {}: {}", spec.label(), e);
+                                return ExitCode::from(2);
+                            }
+                        }
+                    }
+                    #[cfg(not(feature = "exchange-plane"))]
                     {
-                        eprintln!("daemon: peer {}: {}", spec.label(), e);
-                        return ExitCode::from(1);
+                        let xp_requested = spec.exchange_plane.unwrap_or(cfg.exchange_plane)
+                            || !cfg.exchange_plane_keys.is_empty();
+                        if xp_requested {
+                            eprintln!(
+                                "daemon: peer {}: exchange_plane requested but this binary \
+                                 was built without the exchange-plane feature",
+                                spec.label()
+                            );
+                            return ExitCode::from(2);
+                        }
                     }
                     if rfc8212 && cfg.effective_peer_as(spec) != cfg.local_as {
                         if spec.import.is_none() {
@@ -398,34 +463,20 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                             );
                         }
                     }
-                    // W6.3 exchange-plane (feature `exchange-plane`):
-                    // activate the record plane for peers that opted
-                    // in. Fail closed on a feature-less binary, on a
-                    // missing key block, or on a bad key — never run
-                    // half-configured.
-                    #[cfg(feature = "exchange-plane")]
-                    if spec.exchange_plane.unwrap_or(cfg.exchange_plane) {
-                        if let Err(e) = wire_exchange_plane(&mut r, h, cfg, spec) {
-                            eprintln!("daemon: peer {}: {}", spec.label(), e);
-                            return ExitCode::from(2);
-                        }
-                    }
-                    #[cfg(not(feature = "exchange-plane"))]
-                    {
-                        let xp_requested = spec.exchange_plane.unwrap_or(cfg.exchange_plane)
-                            || !cfg.exchange_plane_keys.is_empty();
-                        if xp_requested {
-                            eprintln!(
-                                "daemon: peer {}: exchange_plane requested but this binary \
-                                 was built without the exchange-plane feature",
-                                spec.label()
-                            );
-                            return ExitCode::from(2);
-                        }
+                    if let Some(h2) = handle_in {
+                        println!(
+                            "daemon: peer {}: bidirectional (remote + address); \
+                             collision resolution per RFC 4271 §6.8 on sessions \
+                             #{} / #{}",
+                            spec.label(),
+                            h.0,
+                            h2.0
+                        );
                     }
                     entries.push(PeerEntry {
                         spec: spec.clone(),
                         handle: h,
+                        handle_in,
                         auth,
                         gtsm,
                         bfd: None,
@@ -779,10 +830,14 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                         );
                         continue;
                     }
+                    // RFC 4271 §6.8: a bidirectional peer's inbound
+                    // connections run on the challenger session so they
+                    // can coexist with the outbound transport while the
+                    // router resolves the collision.
+                    let handle = entry.handle_in.unwrap_or(entry.handle);
                     let rt = Arc::clone(&runtime);
                     let busy = Arc::clone(&entry.busy);
                     let live = Arc::clone(&live_sessions);
-                    let handle = entry.handle;
                     let bfd = entry.bfd.clone();
                     live.fetch_add(1, Ordering::Relaxed);
                     let spawned = thread::Builder::new()
@@ -1399,6 +1454,12 @@ fn spawn_connector(
     let auth = entry.auth.clone();
     let gtsm = entry.gtsm;
     let handle = entry.handle;
+    // RFC 4271 §6.8 churn guard: a bidirectional peer's inbound session
+    // suppresses fresh outbound attempts while it is Established — the
+    // router would close every new connection with a Cease/7 the moment
+    // its OPEN arrived (the Established-wins rule), and retrying against
+    // a live winner would only churn both daemons.
+    let sibling_in = entry.handle_in;
     let label = entry.spec.label().to_string();
     let bfd = entry.bfd.clone();
     // Source the connection from the configured local address when
@@ -1420,6 +1481,21 @@ fn spawn_connector(
                 if let Some(bfd) = &bfd {
                     if bfd.ever_up.load(Ordering::Relaxed) && !bfd.up.load(Ordering::Relaxed) {
                         sleep_interruptible(&rt, Duration::from_millis(200));
+                        continue;
+                    }
+                }
+                // RFC 4271 §6.8 churn guard: the sibling inbound session
+                // is Established — stay passive until it goes away.
+                if let Some(hin) = sibling_in {
+                    let sibling_up = rt
+                        .router
+                        .lock()
+                        .unwrap()
+                        .session_peer_state(hin)
+                        .map(|s| s == "Established")
+                        .unwrap_or(false);
+                    if sibling_up {
+                        sleep_interruptible(&rt, Duration::from_millis(500));
                         continue;
                     }
                 }
@@ -1544,14 +1620,24 @@ fn pump_session(
         }
 
         // 2. Drain router output → write to peer.
-        let out = {
+        let (out, closed_by_router) = {
             let mut r = router.lock().unwrap();
-            r.drain_output(session)
+            let out = r.drain_output(session);
+            // RFC 4271 §6.8: the router may have just closed this
+            // session while the TCP connection is still alive — this
+            // transport lost the collision and the Cease / Connection
+            // Collision Resolution NOTIFICATION is part of `out`. Flush
+            // it below, then unwind so the socket closes.
+            let closed = r.session_peer_state(session) == Some("Idle");
+            (out, closed)
         };
         if !out.is_empty() {
             stream
                 .write_all(&out)
                 .map_err(|e| format!("write: {}", e))?;
+        }
+        if closed_by_router {
+            return Err("connection lost the RFC 4271 §6.8 collision resolution".into());
         }
     }
     Ok(())

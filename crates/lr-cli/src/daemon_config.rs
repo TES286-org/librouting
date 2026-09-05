@@ -19,9 +19,13 @@ use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, Ro
 pub(crate) struct PeerSpec {
     /// Human-readable label used in logs (defaults to remote/address).
     pub name: Option<String>,
-    /// Remote `host:port` to connect to (outbound peer). Mutually
-    /// exclusive with `address` until RFC 4271 §6.8 collision detection
-    /// is implemented.
+    /// Remote `host:port` to connect to (outbound peer). Combining
+    /// `remote` and `address` on one peer makes it bidirectional: the
+    /// daemon connects out AND accepts inbound connections for it,
+    /// running the two transports on separate sessions and resolving
+    /// them per RFC 4271 §6.8 (the connection initiated by the speaker
+    /// with the higher BGP Identifier survives; the loser gets a Cease
+    /// / Connection Collision Resolution NOTIFICATION).
     pub remote: Option<String>,
     /// Expected source IP of inbound connections (listen-only peer).
     pub address: Option<String>,
