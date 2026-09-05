@@ -724,10 +724,13 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
 
 ### W5 — Compatibility layer
 
-1. **`lr-daemon translate bird|frr <config>`** — best-effort
+1. ~~**`lr-daemon translate bird|frr <config>`**~~ — done (commit
+   `ed37db6`, landed 2026-08-31 but the strike-through was never
+   applied here — caught by a docs audit): best-effort
    conversion of BIRD 2 / FRR BGP configs into lr daemon TOML, riding
    the daemon binary so the output is round-trip-tested against the
-   real config parser in every test run. Mapped: router id / local AS,
+   real config parser in every test run (16 unit tests in
+   `crates/lr-cli/src/translate.rs`). Mapped: router id / local AS,
    peers (`neighbor … as`, `remote-as`, non-default ports →
    `remote` ADDR:PORT), MD5 auth (FRR type-0 passwords; type-7 is
    noted), local address / update-source, hold time, BFD, the
