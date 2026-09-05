@@ -22,3 +22,26 @@ jobs:
       - name: Miri test
         run: cargo miri test -p lr-ffi --all-features
         continue-on-error: true # nightly + experimental
+
+  # Self-test of the tests/vm harness: boot a minimal initramfs VM with
+  # the runner's own kernel (6.8 has TCP-AO + the MPLS modules) and run
+  # the kernel-gated interop scripts (tcp_ao.sh, mpls_lsp.sh, ldp.sh)
+  # inside it as root — the same path restricted environments use.
+  vm-kernel-gated:
+    name: VM harness (kernel-gated interop, QEMU)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Rebuild the module index
+        run: sudo depmod -a "$(uname -r)"
+      - name: Run kernel-gated interop in the VM
+        env:
+          LR_VM_KERNEL: /
+          LR_VM_PROFILE: release
+          LR_VM_TIMEOUT: 1500
+        run: tests/vm/run_vm.sh
