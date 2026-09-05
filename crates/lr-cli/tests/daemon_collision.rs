@@ -122,17 +122,30 @@ fn bidirectional_collision_converges_to_one_session() {
     wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
 
     // The collision was detected and resolved by the router (RFC 4271
-    // §6.8) on at least one side.
-    let a_text = std::fs::read_to_string(&a.log).unwrap();
-    let b_text = std::fs::read_to_string(&b.log).unwrap();
-    assert!(
-        a_text.contains("connection collision") || b_text.contains("connection collision"),
-        "neither daemon logged a collision resolution; a:\n{a_text}\nb:\n{b_text}"
-    );
+    // §6.8) on at least one side. Under slow/skewed scheduling (e.g.
+    // coverage instrumentation) the first dial may fail with ECONNREFUSED
+    // before the other listener is up; the retry then collides with the
+    // now-established winner, so wait a bounded while for the evidence
+    // on either daemon.
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let a_text = std::fs::read_to_string(&a.log).unwrap();
+        let b_text = std::fs::read_to_string(&b.log).unwrap();
+        if a_text.contains("connection collision") || b_text.contains("connection collision") {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "neither daemon logged a collision resolution; a:\n{a_text}\nb:\n{b_text}"
+        );
+        thread::sleep(Duration::from_millis(100));
+    }
 
     // The losing transports never established: A's outbound (#1) and
     // B's inbound challenger (#2) stay out of the Established state for
     // the whole run.
+    let a_text = std::fs::read_to_string(&a.log).unwrap();
+    let b_text = std::fs::read_to_string(&b.log).unwrap();
     assert!(
         !a_text.contains("session #1 → Established"),
         "A's losing outbound transport must not establish:\n{a_text}"

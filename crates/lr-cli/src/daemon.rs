@@ -277,6 +277,16 @@ struct PeerEntry {
     /// True while a transport thread owns this session — prevents two
     /// concurrent connections racing one FSM.
     busy: Arc<AtomicBool>,
+    /// Set once the outbound transport has LOST a §6.8 collision (the
+    /// connector's session was closed by the router's resolver). Until
+    /// this latches, the connector always dials: the §6.8 convention
+    /// needs the higher-BGP-Identifier speaker's first dial to happen —
+    /// suppressing it would turn "higher ID wins" into "first dial
+    /// wins". After a loss, holding off while the sibling (the
+    /// surviving pair) is Established prevents endless
+    /// dial-into-Established-winner churn (every retry would only earn
+    /// another Cease/7).
+    outbound_lost_collision: Arc<AtomicBool>,
 }
 
 impl PeerEntry {
@@ -481,6 +491,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                         gtsm,
                         bfd: None,
                         busy: Arc::new(AtomicBool::new(false)),
+                        outbound_lost_collision: Arc::new(AtomicBool::new(false)),
                     })
                 }
                 Err(e) => {
@@ -1455,11 +1466,12 @@ fn spawn_connector(
     let gtsm = entry.gtsm;
     let handle = entry.handle;
     // RFC 4271 §6.8 churn guard: a bidirectional peer's inbound session
-    // suppresses fresh outbound attempts while it is Established — the
-    // router would close every new connection with a Cease/7 the moment
-    // its OPEN arrived (the Established-wins rule), and retrying against
-    // a live winner would only churn both daemons.
+    // suppresses fresh outbound attempts only after this outbound
+    // transport has actually LOST a collision — until then the §6.8
+    // convention needs the dial to happen (the higher-BGP-Identifier
+    // speaker's initiated connection must get its chance to win).
     let sibling_in = entry.handle_in;
+    let lost_once = Arc::clone(&entry.outbound_lost_collision);
     let label = entry.spec.label().to_string();
     let bfd = entry.bfd.clone();
     // Source the connection from the configured local address when
@@ -1485,16 +1497,18 @@ fn spawn_connector(
                     }
                 }
                 // RFC 4271 §6.8 churn guard: the sibling inbound session
-                // is Established — stay passive until it goes away.
+                // is Established AND this transport already lost a
+                // collision — stay passive until the winner goes away.
                 if let Some(hin) = sibling_in {
-                    let sibling_up = rt
-                        .router
-                        .lock()
-                        .unwrap()
-                        .session_peer_state(hin)
-                        .map(|s| s == "Established")
-                        .unwrap_or(false);
-                    if sibling_up {
+                    let hold_off = lost_once.load(Ordering::Relaxed)
+                        && rt
+                            .router
+                            .lock()
+                            .unwrap()
+                            .session_peer_state(hin)
+                            .map(|s| s == "Established")
+                            .unwrap_or(false);
+                    if hold_off {
                         sleep_interruptible(&rt, Duration::from_millis(500));
                         continue;
                     }
@@ -1515,6 +1529,11 @@ fn spawn_connector(
                         let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
                         live.fetch_sub(1, Ordering::Relaxed);
                         if let Err(e) = result {
+                            // Latch a §6.8 collision loss so the churn guard
+                            // above engages (see PeerEntry docs).
+                            if e.contains("collision resolution") {
+                                lost_once.store(true, Ordering::Relaxed);
+                            }
                             eprintln!("daemon: peer {}: session ended: {}", label, e);
                         }
                         if !rt.running.load(Ordering::Relaxed) {
