@@ -123,6 +123,32 @@ LD_LIBRARY_PATH=/tmp/frrroot/usr/lib/x86_64-linux-gnu/frr:/tmp/frrroot/usr/lib/x
 `tests/interop/bird.sh` and `frr.sh` already look in
 `/home/z/opt/{bird,frr}/root` for such extractions.
 
+### Kernel-gated tests in a QEMU VM (no root, no suitable host kernel)
+
+Three scripts additionally need kernel features: `tcp_ao.sh` (TCP-AO,
+Linux >= 6.7), and the dataplane phases of `mpls_lsp.sh` / `ldp.sh`
+(the `mpls_router` / `mpls_iptunnel` modules). When the host kernel
+lacks them (or you cannot `modprobe`), `tests/vm/run_vm.sh` boots a
+minimal initramfs QEMU VM — no disk image, no system installation —
+where the three scripts run as real root against a kernel that has
+everything enabled, and reports a single aggregate pass/fail:
+
+```bash
+# one-time: extract a kernel with TCP-AO + MPLS (Ubuntu 24.04's 6.8 works;
+# Debian 13's 6.12 ships without TCP-AO)
+mkdir -p /opt/lr-kernel
+for d in linux-image-6.8.0-139-generic linux-modules-6.8.0-139-generic \
+         linux-modules-extra-6.8.0-139-generic; do
+    apt-get download "$d" && dpkg-deb -x "${d}"_*.deb /opt/lr-kernel/
+done
+
+LR_VM_KERNEL=/opt/lr-kernel tests/vm/run_vm.sh
+```
+
+See `tests/vm/README.md` for requirements and knobs. CI self-tests the
+harness on `ubuntu-24.04` (nightly `vm-kernel-gated` job, which boots
+the runner's own kernel).
+
 ## Configuration used
 
 ### The BGP-LU → MPLS dataplane lab (`mpls_lsp.sh`)
