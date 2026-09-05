@@ -50,8 +50,9 @@ use lr_core::timer::TimerQueue;
 
 use lr_babel::{BabelCodec, BabelFrame, BabelNeighbor, BabelRoute, BabelRouteTable};
 use lr_bgp::best_path::{BestPath, BestPathConfig};
+use lr_bgp::error::{BgpCeaseSubcode, BgpErrorCode};
 use lr_bgp::path::{AttrType, Community, PathAttrFlags, PathAttribute, PathAttributes};
-use lr_bgp::{BgpAction, BgpEvent, BgpPeer, PeerConfig as BgpPeerConfig};
+use lr_bgp::{BgpAction, BgpEvent, BgpPeer, BgpState, PeerConfig as BgpPeerConfig};
 use lr_ospf::abr::{flush_summary_lsa, originate_summary_lsa, SummaryDestination};
 use lr_ospf::external::{
     external_routes, flush_external_lsa, originate_external_lsa, originate_summary_asbr_lsa,
@@ -90,6 +91,16 @@ pub trait RouterInstance {
     fn set_mrai(&mut self, h: SessionHandle, interval_ms: u64) -> Result<(), String>;
     fn poll_events(&mut self) -> Vec<RouterEvent>;
     fn rib_snapshot(&self) -> Vec<&Route>;
+
+    /// Current BGP FSM state name of a session ("Idle", "Connect", …,
+    /// "Established"), or `None` for non-BGP / unknown sessions.
+    /// Embedders use it to notice a transport the router closed while
+    /// the TCP connection is still alive — the RFC 4271 §6.8 collision
+    /// loser: the Cease NOTIFICATION was queued and must be flushed,
+    /// then the socket goes away.
+    fn session_peer_state(&self, _h: SessionHandle) -> Option<&'static str> {
+        None
+    }
 
     /// Every path of every prefix (the RFC 7911 Add-Path view of the
     /// Loc-RIB). Defaults to the best-path snapshot for implementors
@@ -804,6 +815,11 @@ pub struct DefaultRouter {
     /// event fires only once per session lifetime. `threshold_warned`
     /// is latched when the early-warning percentage is crossed.
     max_prefix_state: BTreeMap<u64, MaxPrefixState>,
+    /// RFC 4271 §6.8 connection-collision bookkeeping for BGP sessions
+    /// with a `collision_group`, keyed by session:
+    /// `(group, locally_initiated)`. Sessions absent from the map never
+    /// participate in collision resolution.
+    collision_meta: BTreeMap<u64, (u64, bool)>,
     /// Configured redistribution pipes (BIRD `pipe` / FRR `redistribute`).
     /// Each pipe bridges routes from `source` to `target` protocol.
     pipes: Vec<crate::redistribution::RedistributionPipe>,
@@ -925,6 +941,7 @@ impl Default for DefaultRouter {
             graceful_restart: BTreeMap::new(),
             llgr_caps: BTreeMap::new(),
             max_prefix_state: BTreeMap::new(),
+            collision_meta: BTreeMap::new(),
             pipes: Vec::new(),
             redistributed_bgp: BTreeMap::new(),
             bmp_sink: None,
@@ -3019,6 +3036,164 @@ impl DefaultRouter {
         self.dispatch_bgp_actions(h.0, actions);
     }
 
+    /// RFC 4271 §6.8 connection collision resolution. Called after an
+    /// OPEN advanced `session` out of OpenSent (it is in OpenConfirm or
+    /// — with an OPEN+KEEPALIVE in one read — Established).
+    ///
+    /// A sibling session collides when it belongs to the same
+    /// `collision_group`, speaks BGP to a remote whose BGP Identifier
+    /// equals the one in the just-received OPEN, and is in OpenSent or
+    /// OpenConfirm (§6.8: OpenConfirm MUST be examined, OpenSent MAY —
+    /// we follow FRR `bgp_collision_detect` and examine both; the
+    /// OPEN-bearing sibling's role settles the winner without racy
+    /// arrival-order assumptions). An Established sibling always wins:
+    /// "unless allowed via configuration, a connection collision with
+    /// an existing BGP connection that is in the Established state
+    /// causes closing of the newly created connection".
+    ///
+    /// Resolution follows the convention — retain the connection
+    /// initiated by the speaker with the higher BGP Identifier
+    /// (4-octet unsigned comparison, RFC 4271 §6.8 step 1) — expressed
+    /// through the sessions' TCP initiator roles, which is the
+    /// convergent reading of the (erratum-corrected) steps 2/3 and
+    /// exactly what FRR implements. Identical BGP Identifiers never
+    /// reach this path: the FSM's OPEN validation rejects a peer
+    ///Identifier equal to the local one (FRR
+    /// `BGP_NOTIFY_OPEN_BAD_BGP_ID` parity) before OpenConfirm; the AS
+    /// tie-break below remains as a defensive fallback.
+    ///
+    /// The losing side gets its FSM-buffered OPEN reply dropped, a
+    /// Cease / Connection Collision Resolution NOTIFICATION (RFC 4486
+    /// subcode 7) queued, and a full teardown — the embedder flushes
+    /// the notification and closes the transport.
+    ///
+    /// Returns `true` when `session` itself lost: the caller must drop
+    /// the pending actions its feed produced (the FSM already moved to
+    /// Idle here).
+    fn resolve_connection_collision(&mut self, session: u64) -> bool {
+        // Sessions without a group never collide (the zero-overhead path
+        // for every single-transport peer).
+        let Some((group, s_locally_initiated)) = self.collision_meta.get(&session).copied() else {
+            return false;
+        };
+        let Some(SessionState::Bgp { peer, .. }) = self.sessions.get(&session) else {
+            return false;
+        };
+        let Some(remote_id) = peer.peer_bgp_id() else {
+            return false;
+        };
+        let local_id = peer.config().local_bgp_id;
+        let local_as = peer.config().local_as;
+        let peer_as = peer.config().peer_as;
+
+        let siblings: Vec<u64> = self
+            .collision_meta
+            .iter()
+            .filter(|(sid, (g, _))| **sid != session && *g == group)
+            .map(|(sid, _)| *sid)
+            .collect();
+
+        for t in siblings {
+            let Some(SessionState::Bgp { peer: t_peer, .. }) = self.sessions.get(&t) else {
+                continue;
+            };
+            // §6.8: only a connection to a speaker whose BGP Identifier
+            // equals the one in the OPEN message collides. An OpenSent
+            // sibling has not received an OPEN yet, so it cannot carry
+            // its peer's Identifier — but the shared collision group is
+            // precisely the "BGP Identifier of the peer known by means
+            // outside of the protocol" the RFC's OpenSent clause asks
+            // for: the embedder declared both sessions to be the same
+            // peer.
+            if t_peer.state() != BgpState::OpenSent && t_peer.peer_bgp_id() != Some(remote_id) {
+                continue;
+            }
+            match t_peer.state() {
+                BgpState::Established => {
+                    self.close_collision_loser(
+                        session,
+                        t,
+                        "an Established connection wins (RFC 4271 §6.8)",
+                    );
+                    return true;
+                }
+                BgpState::OpenSent | BgpState::OpenConfirm => {
+                    let t_locally_initiated = self
+                        .collision_meta
+                        .get(&t)
+                        .map(|(_, li)| *li)
+                        .unwrap_or(false);
+                    if t_locally_initiated == s_locally_initiated {
+                        // Both sides play the same transport role — the
+                        // §6.8 convention cannot rank them; leave the
+                        // embedder's configuration alone.
+                        continue;
+                    }
+                    let remote_initiated_wins = if local_id.0 < remote_id.0 {
+                        true
+                    } else if local_id.0 > remote_id.0 {
+                        false
+                    } else {
+                        // Identical BGP Identifiers are a misconfiguration;
+                        // FRR tie-breaks by AS number and logs loudly.
+                        self.pending_events.push(RouterEvent::Log(format!(
+                            "connection collision: peer's router-id {remote_id} equals ours \
+                             (RFC 4271 §6.8); tie-breaking by AS number"
+                        )));
+                        local_as < peer_as
+                    };
+                    let session_wins = if s_locally_initiated {
+                        !remote_initiated_wins
+                    } else {
+                        remote_initiated_wins
+                    };
+                    if session_wins {
+                        self.close_collision_loser(
+                            t,
+                            session,
+                            "the connection initiated by the higher BGP Identifier wins \
+                             (RFC 4271 §6.8)",
+                        );
+                    } else {
+                        self.close_collision_loser(
+                            session,
+                            t,
+                            "the connection initiated by the higher BGP Identifier wins \
+                             (RFC 4271 §6.8)",
+                        );
+                        return true;
+                    }
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Close one side of a resolved §6.8 collision: drop any
+    /// FSM-buffered reply (the KEEPALIVE an OpenConfirm peer already
+    /// queued), queue the Cease / Connection Collision Resolution
+    /// NOTIFICATION (RFC 4486 subcode 7), drive the FSM to Idle and run
+    /// the ordinary teardown. `winner` only feeds the log line.
+    fn close_collision_loser(&mut self, loser: u64, winner: u64, why: &str) {
+        let actions = if let Some(SessionState::Bgp { peer, .. }) = self.sessions.get_mut(&loser) {
+            peer.drain_outgoing();
+            peer.enqueue_notification(
+                BgpErrorCode::Cease,
+                BgpCeaseSubcode::ConnectionCollision as u8,
+            );
+            peer.step(BgpEvent::ManualStop)
+        } else {
+            return;
+        };
+        self.pending_events.push(RouterEvent::Log(format!(
+            "connection collision between sessions #{loser} and #{winner} resolved: \
+             closing #{loser} — {why}"
+        )));
+        self.dispatch_bgp_actions(loser, actions);
+    }
+
     /// Common teardown for a BGP session that went down — whether the
     /// FSM itself reported it via [`BgpAction::Close`] or the transport
     /// closed underneath us (see [`Self::close_session`]). Clears the
@@ -3442,6 +3617,10 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.maximum_prefix_action = cfg.maximum_prefix_action;
                 p_cfg.maximum_prefix_threshold = cfg.maximum_prefix_threshold;
                 let peer = BgpPeer::new(p_cfg);
+                if let Some(group) = cfg.collision_group {
+                    self.collision_meta
+                        .insert(h.0, (group, cfg.locally_initiated));
+                }
                 self.sessions.insert(
                     h.0,
                     SessionState::Bgp {
@@ -3570,6 +3749,9 @@ impl RouterInstance for DefaultRouter {
         // max-prefix state and the Adj-RIB-Out / pre-policy slices.
         self.llgr_caps.remove(&h.0);
         self.max_prefix_state.remove(&h.0);
+        // §6.8 bookkeeping must not outlive the session either — a stale
+        // group entry would make a future session collide with a ghost.
+        self.collision_meta.remove(&h.0);
         for origin in [
             RouteOrigin {
                 proto: 0,
@@ -3657,6 +3839,11 @@ impl RouterInstance for DefaultRouter {
             Bgp {
                 actions: Vec<BgpAction>,
                 newly_established: bool,
+                /// FSM state before/after the feed — the RFC 4271 §6.8
+                /// collision hook keys on an OpenSent → OpenConfirm
+                /// (or Established) transition.
+                prev_state: BgpState,
+                post_state: BgpState,
             },
             Other {
                 delta: RuntimeDelta,
@@ -3681,12 +3868,16 @@ impl RouterInstance for DefaultRouter {
                     if input.is_empty() {
                         return Ok(());
                     }
+                    let prev_state = peer.state();
                     let actions = peer.feed_bytes(&input).map_err(|e| e.to_string())?;
                     let was_established = *established;
                     *established = peer.is_established();
+                    let post_state = peer.state();
                     Pending::Bgp {
                         actions,
                         newly_established: *established && !was_established,
+                        prev_state,
+                        post_state,
                     }
                 }
                 SessionState::Ospf { runtime, conn } => {
@@ -3743,12 +3934,37 @@ impl RouterInstance for DefaultRouter {
                 }
             }
         };
+        // Phase 1.5 (borrow released): RFC 4271 §6.8 collision
+        // resolution. Runs before any of the fresh actions dispatch so
+        // a losing session never emits its OPEN-confirm state or arms
+        // its timers.
+        let collision_lost = match &pending {
+            Pending::Bgp {
+                prev_state,
+                post_state,
+                ..
+            } => {
+                *prev_state == BgpState::OpenSent
+                    && matches!(post_state, BgpState::OpenConfirm | BgpState::Established)
+                    && self.resolve_connection_collision(h.0)
+            }
+            _ => false,
+        };
         // Phase 2 (borrow released): apply results to the RIB pipeline.
         match pending {
             Pending::Bgp {
                 actions,
                 newly_established,
+                ..
             } => {
+                if collision_lost {
+                    // This session lost the §6.8 collision: the resolver
+                    // already queued the Cease/7 NOTIFICATION, drove the
+                    // FSM to Idle and tore the session down. The actions
+                    // the feed produced (OPEN-confirm timer arms, …) are
+                    // stale — drop them.
+                    return Ok(());
+                }
                 if newly_established {
                     // BMP (RFC 7854 §4.6): the Peer Up event mirrors
                     // *before* any Route Monitoring from the same batch
@@ -3953,6 +4169,13 @@ impl RouterInstance for DefaultRouter {
 
     fn rib_paths_snapshot(&self) -> Vec<&Route> {
         self.loc_rib.iter_paths().collect()
+    }
+
+    fn session_peer_state(&self, h: SessionHandle) -> Option<&'static str> {
+        match self.sessions.get(&h.0) {
+            Some(SessionState::Bgp { peer, .. }) => Some(peer.state().name()),
+            _ => None,
+        }
     }
 }
 
@@ -7858,5 +8081,190 @@ mod tests {
             "partial-bit records are forwarding material only"
         );
         assert_eq!(b.exchange_plane_partial_transit(b_session), 1);
+    }
+}
+
+#[cfg(test)]
+mod collision_tests {
+    use super::*;
+
+    // ===== RFC 4271 §6.8 connection collision resolution =====
+
+    /// One side of the simulated peer. Every instance carries the same BGP
+    /// Identifier — from the router under test's perspective they are the
+    /// same speaker seen over two transports, which is exactly what a
+    /// connection collision looks like.
+    fn collision_peer(bgp_id: [u8; 4]) -> (DefaultRouter, SessionHandle) {
+        let mut p = DefaultRouter::new();
+        let s = p
+            .add_session(SessionConfig::bgp(
+                Asn(64513),
+                Asn(64512),
+                RouterId::from_v4(bgp_id),
+            ))
+            .unwrap();
+        (p, s)
+    }
+
+    /// A router-under-test session in the §6.8 collision group 1.
+    fn collision_session(
+        r: &mut DefaultRouter,
+        locally_initiated: bool,
+        local_id: [u8; 4],
+    ) -> SessionHandle {
+        let mut cfg = SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4(local_id));
+        cfg.collision_group = Some(1);
+        cfg.locally_initiated = locally_initiated;
+        r.add_session(cfg).unwrap()
+    }
+
+    /// Handshake one connection up to Established (or stop early when the
+    /// router closes it mid-handshake). Returns the peer's final state.
+    fn handshake(
+        r: &mut DefaultRouter,
+        r_session: SessionHandle,
+        p: &mut DefaultRouter,
+        p_session: SessionHandle,
+    ) -> &'static str {
+        p.start_session(p_session).unwrap();
+        r.start_session(r_session).unwrap();
+        // The peer's OPEN arrives on our transport.
+        let p_open = p.drain_output(p_session);
+        r.feed_input(r_session, &p_open).unwrap();
+        // Our reply: KEEPALIVE when we survived the §6.8 check, the Cease
+        // NOTIFICATION when we lost.
+        let reply = r.drain_output(r_session);
+        p.feed_input(p_session, &reply).unwrap();
+        if !matches!(
+            r.session_peer_state(r_session),
+            Some("OpenConfirm") | Some("Established")
+        ) {
+            return p.session_peer_state(p_session).unwrap_or("Idle");
+        }
+        // Complete the handshake in both directions.
+        let p_keepalive = p.drain_output(p_session);
+        r.feed_input(r_session, &p_keepalive).unwrap();
+        let _ = r.drain_output(r_session);
+        r.session_peer_state(r_session).unwrap_or("Idle")
+    }
+
+    /// Collect (code, subcode) of every NOTIFICATION in a wire chunk.
+    fn notification_codes(bytes: &[u8]) -> Vec<(u8, u8)> {
+        use lr_core::codec::Decoder;
+        let mut out = Vec::new();
+        let mut r = lr_core::buf::ReadBuf::new(bytes);
+        let mut codec = lr_bgp::codec::BgpCodec::new();
+        while let Ok(Some(m)) = codec.decode(&mut r) {
+            if let lr_bgp::message::BgpMessage::Notification(n) = m {
+                out.push((n.error_code, n.error_subcode));
+            }
+        }
+        out
+    }
+
+    /// The router's BGP Identifier is LOWER than the peer's: the
+    /// remotely-initiated connection wins, so the outbound (locally
+    /// initiated) transport is closed with Cease/7 while the inbound one
+    /// completes the handshake.
+    #[test]
+    fn collision_lower_local_id_loses_outbound_transport() {
+        let mut r = DefaultRouter::new();
+        // 10.0.0.1 < 10.0.0.9 — the locally initiated session must lose.
+        let s_out = collision_session(&mut r, true, [10, 0, 0, 1]);
+        let s_in = collision_session(&mut r, false, [10, 0, 0, 1]);
+        let (mut a, a_session) = collision_peer([10, 0, 0, 9]);
+        let (mut b, b_session) = collision_peer([10, 0, 0, 9]);
+
+        r.start_session(s_out).unwrap();
+        r.start_session(s_in).unwrap();
+        // The outbound transport's OPEN reply arrives first.
+        a.start_session(a_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        r.feed_input(s_out, &a_open).unwrap();
+        // §6.8: the sibling (inbound, remotely initiated, OpenSent) wins.
+        assert_eq!(r.session_peer_state(s_out), Some("Idle"));
+        let loss = r.drain_output(s_out);
+        assert_eq!(
+            notification_codes(&loss),
+            vec![(6, 7)],
+            "Cease / Connection Collision Resolution expected"
+        );
+        // The inbound transport completes its handshake untouched.
+        let outcome = handshake(&mut r, s_in, &mut b, b_session);
+        assert_eq!(outcome, "Established");
+    }
+
+    /// The router's BGP Identifier is HIGHER than the peer's: the locally
+    /// initiated connection survives and the inbound challenger is closed.
+    #[test]
+    fn collision_higher_local_id_keeps_outbound_transport() {
+        let mut r = DefaultRouter::new();
+        let s_out = collision_session(&mut r, true, [10, 0, 0, 9]);
+        let s_in = collision_session(&mut r, false, [10, 0, 0, 9]);
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+        let _b = collision_peer([10, 0, 0, 1]);
+
+        r.start_session(s_out).unwrap();
+        r.start_session(s_in).unwrap();
+        a.start_session(a_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        r.feed_input(s_out, &a_open).unwrap();
+        // §6.8: our outbound connection (locally initiated, higher ID wins)
+        // survives; the inbound challenger is closed.
+        assert_eq!(r.session_peer_state(s_in), Some("Idle"));
+        let loss = r.drain_output(s_in);
+        assert_eq!(notification_codes(&loss), vec![(6, 7)]);
+        // The outbound transport completes its handshake.
+        let outcome = handshake(&mut r, s_out, &mut a, a_session);
+        assert_eq!(outcome, "Established");
+        assert_eq!(r.session_peer_state(s_out), Some("Established"));
+    }
+
+    /// A collision against an Established sibling always closes the new
+    /// connection, regardless of BGP Identifier ordering.
+    #[test]
+    fn collision_established_sibling_wins() {
+        let mut r = DefaultRouter::new();
+        let s_out = collision_session(&mut r, true, [10, 0, 0, 9]);
+        let s_in = collision_session(&mut r, false, [10, 0, 0, 9]);
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+        let (mut b, b_session) = collision_peer([10, 0, 0, 1]);
+
+        // Bring the outbound transport fully up first.
+        assert_eq!(handshake(&mut r, s_out, &mut a, a_session), "Established");
+        // Now the inbound challenger arrives — the Established connection
+        // wins, the challenger gets Cease/7.
+        r.start_session(s_in).unwrap();
+        b.start_session(b_session).unwrap();
+        let b_open = b.drain_output(b_session);
+        r.feed_input(s_in, &b_open).unwrap();
+        assert_eq!(r.session_peer_state(s_in), Some("Idle"));
+        let loss = r.drain_output(s_in);
+        assert_eq!(notification_codes(&loss), vec![(6, 7)]);
+        assert_eq!(r.session_peer_state(s_out), Some("Established"));
+    }
+
+    /// Sessions without a collision group never interfere, even with
+    /// identical peer BGP Identifiers.
+    #[test]
+    fn no_collision_group_means_no_resolution() {
+        let mut r = DefaultRouter::new();
+        let plain_cfg = |r: &mut DefaultRouter| {
+            r.add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 1]),
+            ))
+            .unwrap()
+        };
+        let s1 = plain_cfg(&mut r);
+        let s2 = plain_cfg(&mut r);
+        let (mut a, a_session) = collision_peer([10, 0, 0, 9]);
+        let (mut b, b_session) = collision_peer([10, 0, 0, 9]);
+
+        assert_eq!(handshake(&mut r, s1, &mut a, a_session), "Established");
+        assert_eq!(handshake(&mut r, s2, &mut b, b_session), "Established");
+        assert_eq!(r.session_peer_state(s1), Some("Established"));
+        assert_eq!(r.session_peer_state(s2), Some("Established"));
     }
 }

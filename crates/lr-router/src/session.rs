@@ -234,6 +234,23 @@ pub struct SessionConfig {
     pub maximum_prefix_action: lr_bgp::MaxPrefixAction,
     /// Early-warning threshold percentage (0..=100). 0 disables.
     pub maximum_prefix_threshold: u8,
+    /// RFC 4271 §6.8 connection-collision group: BGP sessions sharing a
+    /// group number are collision candidates. When an OPEN advances one
+    /// of them out of OpenSent, the router examines the group siblings
+    /// (§6.8: OpenConfirm MUST, OpenSent MAY — FRR parity) and closes
+    /// the losing transport with a Cease / Connection Collision
+    /// Resolution NOTIFICATION (RFC 4486 subcode 7). `None` (the
+    /// default) excludes a session from collision resolution entirely —
+    /// single-transport peers never collide.
+    pub collision_group: Option<u64>,
+    /// §6.8 TCP initiator role: `true` for a session whose transport the
+    /// local system connected out on, `false` for an accepted (passive)
+    /// transport. The §6.8 convention — retain the connection initiated
+    /// by the speaker with the higher BGP Identifier — is a statement
+    /// about transport roles, which the router core cannot observe on
+    /// its own (it is transport-agnostic), so the embedder supplies it.
+    /// Only meaningful together with `collision_group`.
+    pub locally_initiated: bool,
 }
 
 impl SessionConfig {
@@ -280,6 +297,8 @@ impl SessionConfig {
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            collision_group: None,
+            locally_initiated: false,
         }
     }
 
@@ -446,6 +465,8 @@ impl SessionConfig {
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            collision_group: None,
+            locally_initiated: false,
         }
     }
 
@@ -483,6 +504,8 @@ impl SessionConfig {
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            collision_group: None,
+            locally_initiated: false,
         }
     }
 }
