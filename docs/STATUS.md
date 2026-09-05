@@ -741,7 +741,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    global) instead of being dropped silently; FRR peers without a
    `remote-as` and dangling policy references are dropped with notes
    because the daemon would refuse to start them (fail-closed policy
-   resolution). Remaining in W5: item 3 below.
+   resolution).
 2. ~~**Behaviour parity flags documented side-by-side**~~ — done:
    `docs/PARITY.md` catalogs every behaviour-compatibility knob
    (RFC 8212 mode, enforce-first-as, deterministic router-ID
