@@ -50,6 +50,33 @@ pub enum RouterEvent {
         limit: u32,
         pct: u8,
     },
+    /// A Grace-LSA (RFC 3623 / RFC 5187: OSPFv2 type-9 opaque-LSA with
+    /// Opaque Type 3, or the OSPFv3 equivalent) was received on an OSPF
+    /// session. Emitted once per *changed* instance (a duplicate — same
+    /// sequence — emits nothing). `purged` is set when the instance
+    /// carries MaxAge, signalling the restarting router flushed its
+    /// Grace-LSA and graceful restart ended (RFC 3623 §3.2 (1)).
+    /// Grace-LSAs are link-scoped: the router does not install them
+    /// into the area LSDB nor re-flood them (RFC 5250 §3.1); the event
+    /// is the only surface — embedders run their helper-mode policy on
+    /// it.
+    OspfGraceLsa {
+        area: u32,
+        /// The restarting router (Advertising Router of the LSA).
+        advertising_router: u32,
+        /// Requested grace period, seconds (Grace-LSA TLV 1).
+        grace_period_secs: u32,
+        /// Restart reason (TLV 2): 0 unknown, 1 software restart,
+        /// 2 software reload/upgrade, 3 redundant switchover.
+        reason: u8,
+        /// The restarting router's IPv4 interface address on the
+        /// segment (TLV 3, broadcast/NBMA/PtMP identity), if present.
+        interface_addr: Option<[u8; 4]>,
+        /// LS age of the received instance (grace already elapsed).
+        ls_age_secs: u16,
+        /// MaxAge instance: the restart ended, helpers exit (flush).
+        purged: bool,
+    },
 }
 
 impl From<Event> for RouterEvent {
