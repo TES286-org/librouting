@@ -21,13 +21,19 @@
 //! - Opaque Type (8 MSBs) — `3` for the Grace-LSA (RFC 3623 §2.1).
 //! - Opaque ID (24 LSBs) — typically `0` for the Grace-LSA.
 //!
-//! ## OSPF options O-bit
+//! ## Capability signalling — what neighbours actually look at
 //!
-//! The Graceful Restart capability is signalled via the O-bit in the
-//! OSPF options field (RFC 3623 §1 for v2 bit 0x40; RFC 5187 §1 for
-//! v3 bit 0x40 of the v3 options). Neighbours that see the O-bit set
-//! in a Hello know the peer is capable of Graceful Restart and must
-//! honour a Grace-LSA should one arrive.
+//! Neither RFC 3623 nor RFC 5187 defines a Graceful Restart capability
+//! bit in the OSPF options field: the Grace-LSA itself is the signal
+//! (a router that can act as a helper reacts to receiving one, RFC
+//! 3623 §3.1). The O-bit in the OSPFv2 options field belongs to RFC
+//! 5250 and means *Opaque LSA capability*, and per RFC 5250 §3 it is
+//! meaningful in Database Description packets only ("the O-bit SHOULD
+//! NOT be set and MUST be ignored when received in packets other than
+//! Database Description packets"). FRR spells it out on the receive
+//! side ("O-bit abuse?") and sets it only in opaque-LSA headers and
+//! DBDs; BIRD masks it into DD packets only. The helpers here follow
+//! the RFC 5250 reading — see [`OPTIONS_O_BIT`].
 
 use lr_core::addr::IpAddr;
 
@@ -37,9 +43,19 @@ use crate::lsa::{Lsa, LsaHeader, LsaTypeV2};
 /// Opaque Type for the Grace-LSA (RFC 3623 §2.1).
 pub const OPAQUE_TYPE_GRACE: u8 = 3;
 
-/// OSPF options O-bit — set in the Hello/DBD options field to signal
-/// Graceful Restart capability (RFC 3623 §1 for v2, RFC 5187 §1 for v3).
-/// Bit 0x40 of the options byte.
+/// The OSPFv2 LS type a Grace-LSA rides on: type 9, the link-local
+/// scoped Opaque-LSA (RFC 5250 §3, RFC 3623 §2.1).
+pub fn grace_lsa_type() -> u16 {
+    LsaTypeV2::OpaqueLinkLsa as u16
+}
+
+/// The OSPFv2 options-field O-bit — RFC 5250 §3: the sender is willing
+/// to receive and forward Opaque LSAs. Meaningful in Database
+/// Description packets (and opaque-LSA headers); RFC 5250 §3 says it
+/// "SHOULD NOT be set and MUST be ignored when received in packets
+/// other than Database Description packets". This is *not* a
+/// Graceful-Restart capability signal — RFC 3623/5187 define none; the
+/// Grace-LSA itself is the signal (see the module docs).
 pub const OPTIONS_O_BIT: u8 = 0x40;
 
 /// Pack the Opaque LSA ID (RFC 5250 §3.1): 8-bit Opaque Type in the
@@ -245,7 +261,12 @@ pub fn originate_grace_lsa_v2(
     let mut lsa = Lsa {
         header: LsaHeader {
             ls_age: 0,
-            options: 0x02, // E-bit: the area can carry external routes
+            // E-bit (area carries external routes) plus the RFC 5250
+            // O-bit, matching FRR's `ospf_gr.c` opaque-LSA header
+            // (`options |= OSPF_OPTION_O`). BIRD leaves the options at
+            // 0 here — the header options field is informational for
+            // link-local opaque LSAs, so either form interoperates.
+            options: 0x02 | OPTIONS_O_BIT,
             ls_type: LsaTypeV2::OpaqueLinkLsa as u16,
             link_state_id: opaque_lsa_id(OPAQUE_TYPE_GRACE, 0),
             advertising_router: router_id,
@@ -259,16 +280,16 @@ pub fn originate_grace_lsa_v2(
     Some(lsa)
 }
 
-/// Convenience: set the O-bit on an OSPF options byte (RFC 3623 §1 /
-/// RFC 5187 §1). Callers that already compute their own options can
-/// OR in [`OPTIONS_O_BIT`] directly; this helper makes the intent
-/// explicit.
+/// Set the RFC 5250 O-bit on an OSPF options byte (see
+/// [`OPTIONS_O_BIT`] — Opaque-LSA capability, DBD scope). Callers that
+/// already compute their own options can OR in [`OPTIONS_O_BIT`]
+/// directly; this helper makes the intent explicit.
 pub fn with_grace_restart_capable(options: u8) -> u8 {
     options | OPTIONS_O_BIT
 }
 
-/// True when the O-bit is set in an OSPF options byte — the peer is
-/// Graceful Restart capable (RFC 3623 §1 / RFC 5187 §1).
+/// True when the O-bit is set in an OSPF options byte — the sender is
+/// Opaque-LSA capable (RFC 5250 §3). Not a Graceful Restart signal.
 pub fn is_grace_restart_capable(options: u8) -> bool {
     options & OPTIONS_O_BIT != 0
 }
@@ -309,6 +330,7 @@ mod tests {
 
     #[test]
     fn options_o_bit_helper() {
+        // RFC 5250 §3: the O-bit marks Opaque-LSA capability.
         let opts = with_grace_restart_capable(0x02);
         assert!(is_grace_restart_capable(opts));
         assert!(!is_grace_restart_capable(0x02));

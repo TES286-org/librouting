@@ -28,6 +28,9 @@ pub mod auth;
 pub mod codec;
 pub mod exchange;
 pub mod external;
+/// Graceful restart (RFC 3623): helper-neighbour and restarting-router
+/// state machines on top of the [`lsa::grace`] Grace-LSA codec.
+pub mod gr;
 pub mod interface;
 pub mod lsa;
 pub mod lsdb;

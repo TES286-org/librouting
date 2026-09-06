@@ -264,8 +264,10 @@ pub fn summary_routes(lsdb: &Lsdb, result: &SpfResult) -> Vec<SpfRoute> {
     best.into_values().map(|(route, _)| route).collect()
 }
 
-/// Decode Router-LSA links from the body. RFC 2328 §A.4.2.
-fn decode_router_links(body: &[u8]) -> Vec<RouterLink> {
+/// Decode Router-LSA links from the body. RFC 2328 §A.4.2. Public:
+/// graceful-restart code (RFC 3623 §2.2) walks the pre-restart
+/// router-LSA's links to decide whether every adjacency is back.
+pub fn decode_router_links(body: &[u8]) -> Vec<RouterLink> {
     let mut out = Vec::new();
     if body.len() < 4 {
         return out;
