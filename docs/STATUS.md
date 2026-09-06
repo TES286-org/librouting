@@ -81,7 +81,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
 | Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer; Ko/Apad MAC per §3.3, Auth Data Len = digest), RFC 7166 v3 auth trailer (RFC 7166 layout with 16-bit SA ID + 64-bit crypto-seq; §4.5 Apad MAC embedding the IPv6 source), anti-replay; unit tests |
 | OSPFv3 inter-area-prefix-LSA (0x2003) | ✅ 🧪 | `originate_v3_inter_area_prefix_lsa` ABR origination; v3 LSA type enum; body encode/decode with IPv6 prefix support |
-| Grace-LSA codec (RFC 3623 / RFC 5187) | ✅ | `lr-ospf::lsa::grace` — link-local opaque type 9 with Opaque Type 3 / ID packing (RFC 5250 §3.1), TLV numbers 1=Grace Period / 2=Reason / 3=IP interface address, 4-octet TLV padding, O-bit options helpers, `originate_grace_lsa_v2`; full GR future work |
+| Grace-LSA codec (RFC 3623 / RFC 5187) | ✅ 🧪 | `lr-ospf::lsa::grace` — link-local opaque type 9 with Opaque Type 3 / ID packing (RFC 5250 §3.1), TLV numbers 1=Grace Period / 2=Reason / 3=IP interface address, 4-octet TLV padding, `originate_grace_lsa_v2`; O-bit = RFC 5250 Opaque-LSA capability (DBD scope), NOT a GR signal |
+| GR helper mode (RFC 3623 §3) | ✅ 🧪 | `lr-ospf::gr::HelperEntry` + daemon wiring — §3.1 checks, dead-timer retention, adjacency kept in the Router-LSA, §3.2 exits (flush/timeout/topology change via per-area topology versions), FRR `supported_grace_time` cap; default on (`--ospf-no-gr-helper`); BIRD-verified (`tests/interop/ospf_gr_bird.sh`) |
+| GR restarting router (RFC 3623 §2) | ✅ 🧪 | state-file-persisted grace deadline, shutdown Grace-LSA flood, recovery with origination suppression + §2.2 adjacency/back-link verification, §2.3 flush + re-origination above the retained sequence floor; `tests/interop/ospf_gr.sh` |
 | Prefix Link-Local LSA (RFC 7684) | ✅ | `LsaTypeV3::PrefixLinkLocalAsLsa = 0x4004` + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec with optional Address Family ID; 8 unit tests |
 
 ### Babel (`lr-babel`)
@@ -529,23 +531,63 @@ Highest-value missing/partial standards, in rough order:
    election landed on top (see the OSPF capability table and
    `tests/interop/ospf_broadcast.sh` — BIRD's default broadcast type
    included).
-4. ~~**RFC 5187 / RFC 3623** OSPF graceful restart — Grace-LSA codec~~
-   — foundation slice done: new `lr-ospf::lsa::grace` module
-   implements the Grace-LSA body codec (TLV encode/decode for Grace
-   Period, Reason, IPv4/IPv6 Interface Address, Address Family), the
-   Opaque LSA ID packing (RFC 5250 §3.1 — 8-bit Opaque Type `3` +
-   24-bit Opaque ID), the O-bit helpers for the OSPF options field
-   (RFC 3623 §1 / RFC 5187 §1), and `originate_grace_lsa_v2()`
-   (builds a finalized Opaque-AS-LSA with the right LS type, LS ID
-   packing, and §C.4 checksum). 15 unit tests: TLV roundtrips
-   (minimal, full v2 with IPv4 + AF, v3 with IPv6), missing-mandatory
-   failure, unknown-TLV skip, truncated-TLV failure, Opaque ID
-   packing, O-bit helpers, sequence advance, LSA checksum
-   validation, interface-address TLV helper, GraceReason
-   roundtrips. The full graceful restart (neighbour LSA retention,
-   Hello O-bit advertisement, daemon integration) remains future
-   work — this slice is the wire-level foundation both BIRD and FRR
-   require for interop.
+4. ~~**RFC 5187 / RFC 3623** OSPF graceful restart~~ — done, in
+   three slices (wire codec → state machines → daemon + interop):
+   * `lr-ospf::lsa::grace` — the Grace-LSA body codec (TLV
+     encode/decode for Grace Period, Reason, IPv4/IPv6 Interface
+     Address, Address Family), the Opaque LSA ID packing (RFC 5250
+     §3.1 — 8-bit Opaque Type `3` + 24-bit Opaque ID), and
+     `originate_grace_lsa_v2()` (a finalized link-local Opaque-LSA
+     with the §C.4 checksum). O-bit doc audit: the earlier claim
+     that RFC 3623 §1 / RFC 5187 §1 define a GR capability O-bit was
+     **wrong** — neither RFC mentions any O-bit; the options-field
+     O-bit is RFC 5250's *Opaque-LSA capability* (DBD scope only,
+     "SHOULD NOT be set and MUST be ignored when received in packets
+     other than Database Description packets"; FRR flags Hello
+     O-bits as "abuse"). The Grace-LSA itself is the only GR signal;
+     the helpers now carry the corrected RFC 5250 semantics.
+   * `lr-ospf::gr` — the RFC 3623 state machines: `HelperEntry`
+     (§3.1 entry checks 1-5 + the already-helping refresh exception,
+     §3.2 exits on flush / grace timeout / topology change, FRR
+     `supported_grace_time` clamping) and `RestartTracker` (§2.2
+     exit conditions with a latched §2.3 outcome). 15 unit tests.
+   * `lr-router` — Grace-LSAs are link-scoped (RFC 5250 §3.1): at
+     LSU ingest they never enter the area LSDB and are never
+     re-flooded; each *changed instance* (RFC 2328 §13 identity:
+     sequence + age + checksum + length — not sequence alone)
+     surfaces as a `RouterEvent::OspfGraceLsa` with the decoded
+     period/reason/address and a `purged` flag for MaxAge flushes.
+     Per-area `topology_version` counters bump on content changes
+     of topology LSAs (types 1-5, 7; periodic refreshes excluded)
+     — the §3.2 (3) helper-exit signal, polled via
+     `ospf_area_topology_version()`. `ospf_area_lsa()` reads the
+     LSDB for the §2.2 (1) pre-restart router-LSA walk.
+   * Daemon (`--protocol ospf`): the restarting side
+     (`[ospf] graceful_restart` + `grace_period`, 1..=1800 per
+     §2.1; BIRD/FRR default 120) — on SIGTERM, persist the grace
+     deadline to a state file (`gr_state_file`, default
+     `<api-socket>.gr`), originate Grace-LSAs per interface
+     (retransmitted — the flood path is fire-and-forget) with a
+     wallclock-derived sequence lineage that survives the restart,
+     and exit *without* the session-close teardown so the kernel
+     FIB persists; on restart, resume recovery from the state file
+     (topology-LSA origination suppressed per §2 (1), adjacency
+     back-link verification per §2.2 (2)), and on exit flush the
+     Grace-LSAs (§2.3 (6)) with re-origination sequenced above the
+     retained pre-restart instances. The helper side (default on —
+     BIRD `AWARE`/FRR helper parity; `--ospf-no-gr-helper`,
+     `--ospf-helper-grace-cap`): dead-timer retention of helping
+     neighbours, Router-LSA keeps advertising the adjacency as if
+     Full, §3.2 exits re-run the election + re-origination and reap
+     sessions that stayed silent. Runtime API `status` reports
+     recovery + active helpers.
+   * Verified by `tests/interop/ospf_gr.sh` (two daemons: planned
+     restart with retention across the dead interval, recovery
+     exit, flush release, and the grace-timeout teardown with route
+     withdrawal) and `tests/interop/ospf_gr_bird.sh` (lr restart ×
+     BIRD 2.17.5 as the helper: "started/finished graceful restart"
+     in BIRD's log, 10.99.2.0/24 retained through the whole
+     restart).
 5. ~~**RFC 7684** OSPFv3 prefix link-local attribute LSA types~~
    — done: `LsaTypeV3` gained `PrefixLinkLocalAsLsa = 0x4004`
    (AS-scope, function 4 — RFC 7684 §2.1) with `from_u16`,
