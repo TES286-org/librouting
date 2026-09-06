@@ -393,6 +393,32 @@ pub(crate) struct DaemonConfig {
     pub ospf_areas: Vec<OspfAreaSpec>,
     /// `[[ospf.interface]]` tables / `--ospf-interface` flags.
     pub ospf_interfaces: Vec<OspfIfSpec>,
+    /// OSPF graceful restart, restarting side (RFC 3623 §2): on
+    /// shutdown, originate Grace-LSAs per interface and exit without
+    /// the session-close teardown (kernel routes persist); after the
+    /// restart, suppress topology-LSA origination until every
+    /// pre-restart adjacency is Full again (`--ospf-graceful-restart`).
+    pub ospf_graceful_restart: bool,
+    /// Grace period offered in the Grace-LSAs (`--ospf-grace-period`,
+    /// seconds, 1..=1800 per RFC 3623 §2.1; BIRD/FRR default 120).
+    pub ospf_grace_period: u32,
+    /// OSPF graceful restart helper mode (RFC 3623 §3, default on —
+    /// BIRD `AWARE`/FRR helper default): retain a restarting
+    /// neighbour's adjacency and LSAs for the grace period
+    /// (`--ospf-no-gr-helper` to refuse).
+    pub ospf_gr_helper: bool,
+    /// Helper ceiling: the maximum grace period this router will
+    /// honour (`--ospf-helper-grace-cap`, seconds; FRR
+    /// `supported_grace_time`, default 120 — longer requests are
+    /// clamped, not refused).
+    pub ospf_helper_grace_cap: u32,
+    /// Graceful-restart state file (`--ospf-gr-state-file`,
+    /// `[ospf] gr_state_file`): written at graceful shutdown with the
+    /// grace deadline, consumed by the restarted process to resume
+    /// RFC 3623 §2 recovery. Defaults to `<api-socket>.gr` when the
+    /// runtime API socket is configured; absent → restarts re-sync
+    /// without the §2 origination suppression.
+    pub ospf_gr_state_file: Option<String>,
 
     /// LDP transport address advertised in Hellos and used for the
     /// TCP session transport (`--ldp-transport`). When unset it
@@ -529,6 +555,11 @@ impl DaemonConfig {
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
+            ospf_graceful_restart: false,
+            ospf_grace_period: lr_ospf::gr::DEFAULT_GRACE_PERIOD_SECS,
+            ospf_gr_helper: true,
+            ospf_helper_grace_cap: lr_ospf::gr::DEFAULT_GRACE_PERIOD_SECS,
+            ospf_gr_state_file: None,
             ldp_port: 646,
             ldp_transport_v6: None,
             ldp_prefer_ipv6: true,
@@ -1361,6 +1392,39 @@ fn apply_ospf_key(
                     .parse()
                     .map_err(|_| format!("bad dead_interval '{value}'"))?;
             }
+            "graceful_restart" => {
+                cfg.ospf_graceful_restart = parse_bool(value);
+            }
+            "grace_period" => {
+                let secs: u32 = value
+                    .parse()
+                    .map_err(|_| format!("bad grace_period '{value}'"))?;
+                if !(1..=lr_ospf::gr::MAX_GRACE_PERIOD_SECS).contains(&secs) {
+                    return Err(format!(
+                        "grace_period {secs} outside RFC 3623 §2.1 range 1..={}",
+                        lr_ospf::gr::MAX_GRACE_PERIOD_SECS
+                    ));
+                }
+                cfg.ospf_grace_period = secs;
+            }
+            "graceful_restart_helper" => {
+                cfg.ospf_gr_helper = parse_bool(value);
+            }
+            "helper_grace_cap" => {
+                let secs: u32 = value
+                    .parse()
+                    .map_err(|_| format!("bad helper_grace_cap '{value}'"))?;
+                if !(1..=lr_ospf::gr::MAX_GRACE_PERIOD_SECS).contains(&secs) {
+                    return Err(format!(
+                        "helper_grace_cap {secs} outside RFC 3623 §2.1 range 1..={}",
+                        lr_ospf::gr::MAX_GRACE_PERIOD_SECS
+                    ));
+                }
+                cfg.ospf_helper_grace_cap = secs;
+            }
+            "gr_state_file" => {
+                cfg.ospf_gr_state_file = Some(value.to_string());
+            }
             _ => {
                 return Err(format!(
                     "unknown [ospf] key '{key}' (typo protection; OSPF config fails closed)"
@@ -1980,6 +2044,31 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.ospf_dead_interval = args[i + 1].parse().unwrap_or(40);
                 i += 2;
             }
+            // RFC 3623 graceful restart (restarting + helper sides).
+            "--ospf-graceful-restart" => {
+                cfg.ospf_graceful_restart = true;
+                i += 1;
+            }
+            "--ospf-no-graceful-restart" => {
+                cfg.ospf_graceful_restart = false;
+                i += 1;
+            }
+            "--ospf-grace-period" if i + 1 < args.len() => {
+                cfg.ospf_grace_period = args[i + 1].parse().unwrap_or(120);
+                i += 2;
+            }
+            "--ospf-no-gr-helper" => {
+                cfg.ospf_gr_helper = false;
+                i += 1;
+            }
+            "--ospf-helper-grace-cap" if i + 1 < args.len() => {
+                cfg.ospf_helper_grace_cap = args[i + 1].parse().unwrap_or(120);
+                i += 2;
+            }
+            "--ospf-gr-state-file" if i + 1 < args.len() => {
+                cfg.ospf_gr_state_file = Some(args[i + 1].clone());
+                i += 2;
+            }
             "--ldp-transport" if i + 1 < args.len() => {
                 cfg.ldp_transport = Some(args[i + 1].clone());
                 i += 2;
@@ -2370,6 +2459,48 @@ mod tests {
         assert_eq!(parse_area_id("10.1.0.0"), Some(0x0a01_0000));
         assert_eq!(parse_area_id("x"), None);
         assert_eq!(parse_area_id("1.2.3"), None);
+    }
+
+    #[test]
+    fn ospf_graceful_restart_keys_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\ngraceful_restart = true\ngrace_period = 30\n\
+             graceful_restart_helper = false\nhelper_grace_cap = 45\n\
+             gr_state_file = \"/run/lr/ospf.gr\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert!(cfg.ospf_graceful_restart);
+        assert_eq!(cfg.ospf_grace_period, 30);
+        assert!(!cfg.ospf_gr_helper);
+        assert_eq!(cfg.ospf_helper_grace_cap, 45);
+        assert_eq!(cfg.ospf_gr_state_file.as_deref(), Some("/run/lr/ospf.gr"));
+    }
+
+    #[test]
+    fn ospf_grace_period_out_of_range_is_rejected() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        let err = parse_toml_subset("[ospf]\ngrace_period = 1801\n", &mut cfg).unwrap_err();
+        assert!(err.contains("RFC 3623"), "fail-closed error: {err}");
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        assert!(parse_toml_subset("[ospf]\nhelper_grace_cap = 0\n", &mut cfg).is_err());
+    }
+
+    #[test]
+    fn ospf_gr_defaults_match_bird_frr() {
+        let cfg = DaemonConfig::with_defaults();
+        // BIRD OSPF_DEFAULT_GR_TIME / FRR supported_grace_time: 120 s.
+        assert_eq!(cfg.ospf_grace_period, 120);
+        assert_eq!(cfg.ospf_helper_grace_cap, 120);
+        // Helper mode defaults on (BIRD AWARE / FRR helper default).
+        assert!(cfg.ospf_gr_helper);
+        assert!(!cfg.ospf_graceful_restart);
+        assert!(cfg.ospf_gr_state_file.is_none());
     }
 
     #[test]
