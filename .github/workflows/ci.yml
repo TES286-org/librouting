@@ -102,7 +102,10 @@ jobs:
       - name: Install tarpaulin
         run: cargo install cargo-tarpaulin --version 0.30.0
       - name: Run coverage
-        run: cargo tarpaulin --workspace --all-features --out xml
+        # --timeout is per-test-process (default 60s); the daemon e2e
+        # suites spawn real lr-daemon pairs and under tarpaulin's
+        # instrumentation the collision e2e alone can exceed 60s.
+        run: cargo tarpaulin --workspace --all-features --out xml --timeout 600
       - uses: codecov/codecov-action@v4
         with:
           files: ./tarpaulin-report.xml

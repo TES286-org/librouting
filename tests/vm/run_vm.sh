@@ -29,6 +29,22 @@ KVER=$(uname -r)
 VMKERNEL="/boot/vmlinuz-$KVER"
 [ -f "$VMKERNEL" ] || VMKERNEL=$(ls "$LR_VM_KERNEL"/boot/vmlinuz-* | head -1)
 
+# Some CI runners (GitHub ubuntu-24.04 since mid-2026) ship /boot/vmlinuz-*
+# as mode 0600 root:root, so the unprivileged QEMU process cannot open the
+# file even though it exists. Stage a readable copy when possible; QEMU
+# needs no write access, only read.
+if [ -f "$VMKERNEL" ] && [ ! -r "$VMKERNEL" ]; then
+    STAGED=/tmp/lr-vm-vmlinuz
+    if command -v sudo >/dev/null 2>&1 && sudo -n install -m 0644 "$VMKERNEL" "$STAGED" 2>/dev/null; then
+        echo "== kernel not readable by this user; staged readable copy: $STAGED =="
+        VMKERNEL=$STAGED
+    else
+        echo "FATAL: kernel image $VMKERNEL is not readable by this user" >&2
+        echo "       (copy/chmod it readable, or set LR_VM_KERNEL to a tree with a readable vmlinuz)" >&2
+        exit 1
+    fi
+fi
+
 rm -f "$LR_VM_LOG"
 # -serial file: is unbuffered; stdio redirection loses output when the
 # host reaps qemu before the guest finishes
