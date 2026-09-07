@@ -175,6 +175,8 @@ jobs:
         run: ./tests/interop/babel_auth.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)
         run: ./tests/interop/ospf_bird.sh
+      - name: OSPF x FRR interop (real DBD/LSR exchange, RFC 2328 7.2)
+        run: ./tests/interop/ospf_frr.sh
       - name: OSPF broadcast interop (RFC 2328 9.4 DR election, lr x lr + lr x BIRD)
         run: ./tests/interop/ospf_broadcast.sh
       - name: OSPF graceful restart interop (RFC 3623, two daemons)

@@ -63,7 +63,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 |-----------|:------:|-------|
 | Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ 🧪 | hello, DBD, LSR, LSU, LSAck; version-dispatched DBD (v3 24-bit options, 10-byte body) and LSR (v3 16-bit LS type) layouts; v2 receive checksum validation (§8.2); LSR wire format (12-byte entries, §A.3.4) interop-verified |
 | Neighbor FSM | ✅ | incl. §10.9 restart-to-ExStart on sequence mismatch (Fig. 12) |
-| DBD/LSR exchange (§7.2, §10.3–§10.8) | ✅ 🧪 | `lr-ospf::exchange::DbExchange` + router wiring: master/slave election, header paging by MTU, LSR loading to Full, duplicate handling, RxmtInterval retransmit; BIRD 2 interop-verified (Full adjacency + bidirectional routes) |
+| DBD/LSR exchange (§7.2, §10.3–§10.8) | ✅ 🧪 | `lr-ospf::exchange::DbExchange` + router wiring: master/slave election, header paging by MTU, LSR loading to Full, duplicate handling, RxmtInterval retransmit; BIRD 2 and FRR 10 interop-verified (Full adjacency + bidirectional routes + dead-timer teardown) |
 | LSDB + LSA flooding | ✅ | per-area shared LSDB; same-area sessions flood to each other (§13.3 simplified) |
 | SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
 | Inter-area routes from summary-LSAs (§16.2) | ✅ 🧪 | reachable-border check, dist-to-border + summary metric, LSInfinity skip |
@@ -527,7 +527,11 @@ Highest-value missing/partial standards, in rough order:
    re-origination (§14). Verified by `tests/interop/ospf_bird.sh`:
    Full adjacency with BIRD over a veth pair and stub nets
    propagated in both directions — OSPF interop is unlocked. FRR
-   interop and OSPFv3 exchange remain open. Broadcast-segment DR
+   interop landed later as `tests/interop/ospf_frr.sh` (zebra + ospfd
+   10.3 in a netns, ptp network type, Full adjacency, bidirectional
+   stub-net propagation, dead-timer teardown observed by ospfd).
+   OSPFv3 exchange remains open.
+   Broadcast-segment DR
    election landed on top (see the OSPF capability table and
    `tests/interop/ospf_broadcast.sh` — BIRD's default broadcast type
    included).
