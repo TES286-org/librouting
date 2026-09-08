@@ -53,6 +53,16 @@ impl OspfV2Transport {
         ))
     }
 
+    pub fn send_unicast(
+        &self,
+        _dst: core::net::Ipv4Addr,
+        _bytes: &[u8],
+    ) -> Result<usize, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
     pub fn ifindex(&self) -> u32 {
         0
     }

@@ -49,6 +49,12 @@ unshare -Urn true 2>/dev/null || {
 REPO=$(pwd)
 BIRD=$(command -v bird || true)
 BIRDC=$(command -v birdc || true)
+if [ -z "$BIRD" ] && [ -x /home/z/opt/bird/root/usr/sbin/bird ]; then
+    # extracted (non-installed) BIRD — same convention as the other
+    # interop scripts for environments without root
+    BIRD=/home/z/opt/bird/root/usr/sbin/bird
+    BIRDC=/home/z/opt/bird/root/usr/sbin/birdc
+fi
 export REPO BIN BIRD BIRDC
 
 exec unshare -Urn bash -euo pipefail <<'INNER'

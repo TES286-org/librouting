@@ -564,6 +564,35 @@ impl OspfV2Transport {
         Ok(n as usize)
     }
 
+    /// Unicast `bytes` to `dst` on the bound interface (RFC 2328
+    /// §13.5: the direct form of flooding — LS retransmissions on
+    /// broadcast networks go straight to the neighbor's address). The
+    /// raw socket's `SO_BINDTODEVICE` scopes egress to the interface
+    /// without a routing-table lookup.
+    pub fn send_unicast(
+        &self,
+        dst: core::net::Ipv4Addr,
+        bytes: &[u8],
+    ) -> Result<usize, OspfTransportError> {
+        let o = dst.octets();
+        let dest = SockaddrIn::new(o);
+        // SAFETY: bytes and dest outlive the call.
+        let n = unsafe {
+            sendto(
+                self.fd,
+                bytes.as_ptr() as *const core::ffi::c_void,
+                bytes.len(),
+                0,
+                &dest,
+                std::mem::size_of::<SockaddrIn>() as u32,
+            )
+        };
+        if n < 0 {
+            return Err(os_error("sendto"));
+        }
+        Ok(n as usize)
+    }
+
     /// The kernel interface index the socket is bound to.
     pub fn ifindex(&self) -> u32 {
         self.ifindex

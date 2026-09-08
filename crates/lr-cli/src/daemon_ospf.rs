@@ -99,7 +99,7 @@ const REORIGINATE_DELAY_MS: u64 = 1_500;
 /// (RFC 3623 §2.1: "retransmit the grace-LSAs until they are
 /// acknowledged"; the flood path is fire-and-forget, so a bounded
 /// repeat covers the ack-less gap) and their spacing.
-const GRACE_FLOOD_REPEATS: usize = 3;
+const GRACE_FLOOD_REPEATS: usize = 5;
 const GRACE_FLOOD_INTERVAL_MS: u64 = 1_000;
 
 /// A Grace-LSA sequence base that survives the restart: derived from
@@ -1846,6 +1846,24 @@ impl OspfDaemon {
                     finalize_v2_packet(&mut bytes);
                     if let Err(e) = iface.transport.send_multicast(&bytes) {
                         eprintln!("daemon: ospf grace-LSA send {}: {}", iface.name, e);
+                    }
+                    // RFC 2328 §13.5 direct flooding: every
+                    // bidirectional neighbour on this interface also
+                    // gets a unicast copy — the helper election must
+                    // not hinge on one multicast surviving a loaded
+                    // scheduler (RFC 3623 §2.1: retransmit until
+                    // received).
+                    let heard: Vec<u32> = iface
+                        .heard
+                        .values()
+                        .filter(|n| n.bidirectional)
+                        .map(|n| n.ip)
+                        .collect();
+                    for ip in heard {
+                        let dst = core::net::Ipv4Addr::from(ip);
+                        if let Err(e) = iface.transport.send_unicast(dst, &bytes) {
+                            eprintln!("daemon: ospf grace-LSA unicast {}: {}", dst, e);
+                        }
                     }
                 }
                 Err(e) => eprintln!("daemon: ospf grace-LSA encode: {}", e),
