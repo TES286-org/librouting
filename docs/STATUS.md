@@ -47,7 +47,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4); `BestPathConfig::deterministic_router_id` exposed to daemon as FRR `bgp bestpath compare-routerid` (W2.2) |
 | Route damping (`lr-damping`) | ✅ | RFC 2439-style figure-of-merit |
 | BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard rules, Simple Password auth; `lr-osroute::bfd_transport` sockets (3784/4784, TTL 255, ephemeral source ports); daemon `--bfd` fast-fails BGP on BFD Down (BIRD-verified) |
-| Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community set actions; route tags (`set tag`) still open
+| Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, substring parity incl. the bare-literal footgun), MED/prepend/add-community/set-tag set actions (`SetTag` writes the `Route.tag` field) |
 | Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled; FRR `bgp enforce-first-as` (W2.2) — router-level flag rejects eBGP UPDATEs whose leftmost AS_PATH AS != peer AS; FRR `allowas-in N` / BIRD `allow local as` (W2.3) — per-peer AS-loop tolerance; `local_as_count` fixed to use the FSM-normalized 4-byte AS_PATH |
 | RFC 8212 default eBGP route behaviors | ✅ 🧪 | `lr-router` `set_ebgp_requires_policy` + per-session `set_session_policy`: external sessions (eBGP *and* confederation boundaries, §1) without explicit import policy discard received routes before Adj-RIB-In; without export policy advertise nothing — enforced at all three egress paths (per-prefix export, RFC 2918/7313 reannounce, initial dump; EoR still flows) with stale Adj-RIB-Out entries withdrawn; iBGP exempt; daemon default-on via `[bgp] ebgp_policy` with `accept-all` as the §3/Appendix-A deviation; FFI + Go/Python bindings |
 | iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 | |
@@ -272,8 +272,8 @@ BIRD/FRR-style, without an embedder writing code.
    IANA auth type codes, §4.2-§4.4 auth section layouts, and the
    §6.8.6 state machine (Down+Init→Up / Init+Init→Up — the old
    mapping deadlocked two conforming peers in Init forever).
-4. **Policy in config + reuse** (external request) — three slices,
-   in order:
+4. ~~**Policy in config + reuse** (external request)~~ — done, three
+   slices, in order:
    a. ~~**Policy engine completion**~~ — done: new `lr-policy::bgp`
       module decodes/encodes AS_PATH, COMMUNITIES and MED straight
       on the raw attribute bag (no whole-bag conversion); community
@@ -674,10 +674,15 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    both sides, and an ICMP echo pushed through the LSP (kernel-gated,
    the tcp_ao.sh skip pattern). Router-level LSP *withdrawal*
    bookkeeping lives in the daemon's mirror (prefix → in-label side
-   table); per-prefix label *allocation* for transit LSR roles (swap
-   toward a labelled next hop) remains future work.
-4. **LDP (RFC 5036)** — label distribution protocol for non-BGP MPLS
-   LSPs. Foundation slice landed in the new `lr-ldp` crate: the
+   table). Per-prefix label *allocation* for transit LSR roles landed
+   afterwards through the LDP workstream's §3.5.7.1.1 slice (the
+   `lr-ldp` engine allocates one local label per learned FEC and the
+   daemon mirrors the swap into the kernel — see the LDP capability
+   table); the BGP-LU mirror itself keeps its tail-pop / head-encap
+   shape.
+4. ~~**LDP (RFC 5036)**~~ — done: label distribution protocol for
+   non-BGP MPLS LSPs. Foundation slice landed in the new `lr-ldp`
+   crate: the
    RFC 5036 codec (PDU/TLV/message), the §2.5.4 session FSM with
    §3.5.3 negotiation, §3.5.2 discovery (link + targeted) with the
    §2.5.2 role decision, a per-peer label information base with DU
