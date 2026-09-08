@@ -581,7 +581,19 @@ impl DbExchange {
             header: self.base_header(OspfPacketType::DatabaseDescription),
             body: OspfBody::DbDesc(DbDescBody {
                 mtu: self.iface_mtu,
-                options: 0x02, // E-bit (normal area)
+                // E-bit (normal area) plus the RFC 5250 §3 O-bit: this
+                // router originates and floods Opaque-LSAs (the RFC
+                // 3623/5187 Grace-LSA), so DD packets must announce
+                // opaque capability. Peers gate opaque flooding on this
+                // bit — BIRD captures it from DD packets only
+                // (proto/ospf/dbdes.c: n->options = rcv_options) and
+                // skips neighbours without it when retransmitting
+                // opaque LSAs (lsa_is_acceptable, lsupd.c); FRR's
+                // ospf_gr.c likewise refuses to originate a Grace-LSA
+                // without OSPF_OPAQUE_CAPABLE. RFC 5250 §3: the bit is
+                // meaningful in DD packets only — Hellos keep the
+                // plain E-bit.
+                options: 0x02 | u32::from(crate::lsa::grace::OPTIONS_O_BIT),
                 flags,
                 dd_seq: seq,
                 lsa_headers: headers,
