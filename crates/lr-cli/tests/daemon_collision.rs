@@ -3,12 +3,27 @@
 //! other (`remote` + `address` on one `[[peer]]`), both connectors
 //! dialing simultaneously, so a genuine connection collision occurs.
 //!
-//! The convention — retain the connection initiated by the speaker with
-//! the higher BGP Identifier — makes the outcome deterministic: B
-//! (10.0.0.2 > 10.0.0.1) initiates the surviving connection, so B's
-//! outbound session (#1) and A's inbound challenger (#2) end up
-//! Established while the other two transports are closed with a
-//! Cease / Connection Collision Resolution NOTIFICATION.
+//! Two §6.8-legal outcomes exist, and the test asserts the invariants
+//! they share instead of picking a winner:
+//!
+//! - **Truly simultaneous dials** — both sides hold two half-open
+//!   connections and compare BGP Identifiers: the connection initiated
+//!   by the higher identifier survives (B, 10.0.0.2 > 10.0.0.1), so
+//!   B's outbound session (#1) and A's inbound challenger (#2)
+//!   establish while the other two transports close with a
+//!   Cease / Connection Collision Resolution NOTIFICATION. The
+//!   selection rule itself is pinned by the `collision_tests` unit
+//!   tests in `lr-router`.
+//! - **Desynchronized dials** (skewed or heavily instrumented
+//!   scheduling, e.g. tarpaulin): the first connection to complete its
+//!   handshake reaches Established, and the late arrival is closed by
+//!   the "an Established connection wins" rule — whichever transport
+//!   happened to finish first survives.
+//!
+//! Either way each daemon must converge to exactly one Established
+//! session for the peer, the collision must be resolved by the router
+//! (not by accident of transport failure), and both prefixes must
+//! propagate across the surviving connection.
 
 #![cfg(unix)]
 
@@ -72,6 +87,21 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
     panic!("log never contained all of {needles:?}; last: {text}");
 }
 
+/// Read a log file until it contains any one of the needles (bounded
+/// wait); returns the needle that matched.
+fn wait_log_any(path: &std::path::Path, needles: &[&str]) -> String {
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut text = String::new();
+    while Instant::now() < deadline {
+        text = std::fs::read_to_string(path).unwrap_or_default();
+        if let Some(hit) = needles.iter().find(|n| text.contains(*n)) {
+            return (*hit).to_string();
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+    panic!("log never contained any of {needles:?}; last: {text}");
+}
+
 /// Bidirectional peers: both daemons dial and listen at the same time.
 /// The higher BGP Identifier (B) initiates the surviving connection, so
 /// exactly one session per side reaches Established and both prefixes
@@ -111,11 +141,17 @@ fn bidirectional_collision_converges_to_one_session() {
     let a = Daemon::spawn(&["--config", conf_a.to_str().unwrap()], "a");
     let b = Daemon::spawn(&["--config", conf_b.to_str().unwrap()], "b");
 
-    // Convergence: B's outbound session (#1) and A's inbound challenger
-    // (#2) carry the surviving connection. The losers must never reach
-    // Established.
-    wait_log_all(&a.log, &["session #2 → Established"]);
-    wait_log_all(&b.log, &["session #1 → Established"]);
+    // Convergence: exactly one session per daemon reaches Established —
+    // either transport may legally win (see the module docs). Wait for
+    // whichever appears, then verify the other never establishes.
+    wait_log_any(
+        &a.log,
+        &["session #1 → Established", "session #2 → Established"],
+    );
+    wait_log_any(
+        &b.log,
+        &["session #1 → Established", "session #2 → Established"],
+    );
 
     // Both prefixes propagate across the surviving connection.
     wait_log_all(&a.log, &["route installed 198.51.100.0/24"]);
@@ -141,19 +177,19 @@ fn bidirectional_collision_converges_to_one_session() {
         thread::sleep(Duration::from_millis(100));
     }
 
-    // The losing transports never established: A's outbound (#1) and
-    // B's inbound challenger (#2) stay out of the Established state for
-    // the whole run.
-    let a_text = std::fs::read_to_string(&a.log).unwrap();
-    let b_text = std::fs::read_to_string(&b.log).unwrap();
-    assert!(
-        !a_text.contains("session #1 → Established"),
-        "A's losing outbound transport must not establish:\n{a_text}"
-    );
-    assert!(
-        !b_text.contains("session #2 → Established"),
-        "B's losing inbound challenger must not establish:\n{b_text}"
-    );
+    // Exactly one Established session per daemon: the losing transport
+    // — whichever it was — never reaches Established for the whole run.
+    // (Two Established sessions for one peer would mean the collision
+    // resolution failed to converge, not just a different winner.)
+    for log in [&a.log, &b.log] {
+        let text = std::fs::read_to_string(log).unwrap();
+        let one = text.contains("session #1 → Established");
+        let two = text.contains("session #2 → Established");
+        assert!(
+            one ^ two,
+            "expected exactly one of the two sessions Established, got #1={one} #2={two}; log:\n{text}"
+        );
+    }
 
     let _ = std::fs::remove_dir_all(&dir);
 }
