@@ -211,6 +211,8 @@ jobs:
         run: ./tests/interop/ldp_frr_v6.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         run: ./tests/interop/frr.sh
+      - name: YANG surface gate (RFC 9647 + RFC 8177, libyang when present)
+        run: ./tests/interop/yang.sh
       # W6.3 exchange-plane exit criteria (docs/research/EXCHANGE-PLANE.md
       # §10): rebuild the daemon with the feature, then
       #   - the W5.3 parity harness (flag off) must stay byte-identical,

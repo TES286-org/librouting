@@ -60,6 +60,7 @@ mod daemon_policy;
 mod privdrop;
 mod signal;
 mod translate;
+mod yang;
 
 use daemon_bfd::BfdFlags;
 use daemon_config::{DaemonConfig, PeerSpec};
@@ -73,10 +74,15 @@ fn print_usage() {
          [--hold-time SEC]\n         \
          lr-daemon --config daemon.toml [--install-kernel-routes]\n         \
          lr-daemon translate <bird|frr> <config-file>\n\n\
+         lr-daemon yang render <config-file> [--model babel|keychain|all]\n\n\
          SUBCOMMANDS:\n  \
          translate bird|frr FILE  Best-effort conversion of a BIRD 2 or\n  \
          FRR BGP config into lr daemon TOML (unmappable lines are kept\n  \
-         as `# UNMAPPED:` comments; review before use)\n\n\
+         as `# UNMAPPED:` comments; review before use)\n  \
+         yang render FILE   Render the Babel subset of a daemon TOML\n  \
+         config as XML instance data for the YANG models in yang/\n  \
+         (RFC 9647 ietf-babel, RFC 8177 ietf-key-chain; NETCONF-style\n  \
+         <config> wrapper with --model all, the default)\n\n\
          OPTIONS:\n  \
          --config PATH            Load TOML configuration\n  \
          --peer ADDR:PORT         Remote BGP peer to connect to (repeatable;\n  \
@@ -179,6 +185,12 @@ fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().collect();
     if argv.len() >= 2 && argv[1] == "translate" {
         return translate::translate(&argv[2..]);
+    }
+    // `lr-daemon yang render <file>` — the W3.8 YANG surface rides the
+    // daemon binary for the same reason: it renders the real config
+    // schema into RFC 9647 / RFC 8177 XML instance data.
+    if argv.len() >= 2 && argv[1] == "yang" {
+        return yang::cmd_yang(&argv[2..]);
     }
     let mut cfg = match daemon_config::parse_args() {
         Ok(c) => c,

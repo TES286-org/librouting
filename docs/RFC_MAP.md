@@ -76,7 +76,7 @@ implements, or references. It is grouped by protocol family.
 | 8967 | Babel MAC Cryptographic Auth                         | ✓ (stateful §4.3 interface, §4.3.1 challenge handshake, §4.4 expiry, §5 incremental deployment, HMAC-SHA256 + keyed BLAKE2s-128)        | `lr-babel::auth`                        |
 | 9079 | Babel Source-Specific Routing                        | ✓ (Source Prefix sub-TLV 128 inside Update / Route Request / Seqno Request, IPv6 source prefixes, route table keyed by (dest, source)) | `lr-babel::source`, `lr-babel::message` |
 | 9467 | Relaxed Packet Counter Verification for Babel MAC    | ✓ (§3.1 unicast/multicast split, §3.2 window, §3.3 combined)                                                                           | `lr-babel::auth`                        |
-| 9647 | Babel YANG Data Model                                | partial                                                                                                                                | TBD                                     |
+| 9647 | Babel YANG Data Model                                | ✓ (verbatim `ietf-babel@2024-10-10.yang` in `yang/`; `lr-daemon yang render` emits libyang-validated XML instance data for the babel container — NMDA envelope, constants, mac-key-set) | `lr-cli` (`yang` module), `yang/`, `tests/interop/yang.sh` |
 
 ## BFD — RFC 5880 + extensions
 
@@ -126,4 +126,4 @@ and optional; multihop MUST NOT use it, RFC 5883 §3).
 | ---- | -------------------------------------------- | -------- | -------------- |
 | 2622 | Routing Policy Specification Language (RPSL) | not impl | —              |
 | 8195 | Identifiers for BGP-4                        | partial  | `lr-bgp::path` |
-| 8177 | YANG Data Model for Key Chains               | partial  | TBD            |
+| 8177 | YANG Data Model for Key Chains               | ✓ (verbatim `ietf-key-chain@2017-06-15.yang` in `yang/`; babel MAC keys render as a key chain via `lr-daemon yang render --model keychain`; BLAKE2s fails closed — no RFC 8177 identity) | `lr-cli` (`yang` module), `yang/`, `tests/interop/yang.sh` |

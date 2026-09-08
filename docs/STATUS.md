@@ -645,8 +645,23 @@ Highest-value missing/partial standards, in rough order:
    `ipv6-labeled-unicast`; 4 e2e tests + a two-daemon interop script
    (`tests/interop/labeled_unicast.sh`). RFC 5666 EPE remains future
    work.
-8. YANG models (RFC 9647 Babel, key chains RFC 8177) — low priority
-   unless an embedder asks.
+8. ~~**YANG models (RFC 9647 Babel, key chains RFC 8177)**~~ — done:
+   the verbatim `ietf-babel@2024-10-10.yang` (RFC 9647) and
+   `ietf-key-chain@2017-06-15.yang` (RFC 8177) modules ship in `yang/`
+   (libyang-validated), and `lr-daemon yang render <config.toml>
+   [--model babel|keychain|all]` renders the Babel config subset as XML
+   instance data conforming to them: the NMDA
+   `/routing/control-plane-protocols/control-plane-protocol` envelope
+   with `babel:babel` as the protocol type, `constants` (UDP port,
+   multicast group), one `mac-key-set` with a `keys` entry per
+   `[[babel.key]]` (base64 key bytes, `babel:hmac-sha256` /
+   `babel:blake2s` identities), and the same keys as an RFC 8177 key
+   chain (`key-chain:hmac-sha-256`, always-valid send-accept lifetime);
+   BLAKE2s keys fail closed in the key-chain view (RFC 8177 defines no
+   identity for them). The full mapping is documented in
+   `yang/README.md`; unit tests pin the wire shapes and
+   `tests/interop/yang.sh` validates the output with libyang
+   `yanglint` when the tool is present.
 
 ### W3-extra — Comprehensive MPLS support (new)
 
