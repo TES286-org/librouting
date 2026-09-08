@@ -1355,7 +1355,9 @@ mod tests {
     use super::*;
     use crate::message::update::Nlri;
     use crate::path::AsPath;
-    use lr_core::addr::{IpAddr, Prefix};
+    #[cfg(feature = "exchange-plane")]
+    use lr_core::addr::IpAddr;
+    use lr_core::addr::Prefix;
 
     fn make_peer_pair() -> (BgpPeer, BgpPeer) {
         let cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
