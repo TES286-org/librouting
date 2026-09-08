@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Wire-level parity harness (STATUS.md W5.3): replay a captured UPDATE
+# Wire-level parity harness (ROADMAP.md W5.3): replay a captured UPDATE
 # stream and diff the Loc-RIBs.
 #
 #   1. lr-daemon listens on LPORT and originates two IPv4 prefixes.

@@ -149,7 +149,7 @@ point-to-point by default, and `network_type = "broadcast"` per
 interface runs the RFC 2328 §9.4 DR/BDR election (§10.4 adjacency,
 §12.4.2 Network-LSA, BIRD-default-broadcast interop verified — see
 `tests/interop/ospf_broadcast.sh`); full details in
-`docs/STATUS.md` (W1.5/W3.3).
+`docs/ROADMAP.md` (W1.5/W3.3).
 
 ```bash
 # Two routers on a veth pair, each in its own network namespace:
@@ -178,7 +178,7 @@ dual-stack UDP/TCP daemon transports (`--ldp-transport-v6`,
 learned bindings into the Linux MPLS dataplane (pop route per local
 label, encap route per learned FEC) and allocates automatic labels
 from a configurable range (`[ldp] label_min`/`label_max`) — full
-details in `docs/STATUS.md` (W3-extra.4).
+details in `docs/ROADMAP.md` (W3-extra.4).
 
 ```bash
 # Two LSRs on a veth pair, each in its own network namespace:
@@ -222,7 +222,8 @@ librouting/
 │   ├── ARCHITECTURE.md                  # layering, RIB pipeline, extension points
 │   ├── RFC_MAP.md                       # RFC-by-RFC coverage table
 │   ├── API.md                           # public API tour with code snippets
-│   ├── STATUS.md                        # implemented-vs-missing gap analysis + roadmap
+│   ├── STATUS.md                        # implemented-vs-missing gap analysis + roadmap state
+│   ├── ROADMAP.md                       # roadmap v2 workstream landing log
 │   ├── INTEROP.md                       # BIRD/FRR interop lab guide
 │   ├── PARITY.md                        # behaviour knobs vs BIRD 2 / FRR 10
 │   ├── RUNBOOK.md                       # operations: lifecycle, runtime API, FAQ
@@ -249,7 +250,8 @@ readers by audience. The canonical references:
 | Architecture (layering, RIB pipeline, extension points)        | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | contributors  |
 | RFC reference map (per-RFC coverage)                           | [`docs/RFC_MAP.md`](docs/RFC_MAP.md)       | contributors  |
 | Public API tour (per-crate, with snippets)                     | [`docs/API.md`](docs/API.md)               | embedders     |
-| Implemented-vs-missing gap analysis + roadmap                  | [`docs/STATUS.md`](docs/STATUS.md)         | everyone      |
+| Implemented-vs-missing gap analysis + roadmap state           | [`docs/STATUS.md`](docs/STATUS.md)         | everyone      |
+| Roadmap v2 landing log (design decisions, evidence)          | [`docs/ROADMAP.md`](docs/ROADMAP.md)       | contributors   |
 | OS route-table integration guide (Linux/BSD/Windows + porting) | [`docs/OS-INTEGRATION.md`](docs/OS-INTEGRATION.md) | embedders      |
 | Interop testing guide (BIRD/FRR lab)                           | [`docs/INTEROP.md`](docs/INTEROP.md)       | contributors  |
 | Behaviour parity flags vs BIRD 2 / FRR 10                     | [`docs/PARITY.md`](docs/PARITY.md)         | operators     |
@@ -426,9 +428,9 @@ Implemented and missing features are tracked in detail in
 - OS route-table integration for **Linux (rtnetlink)**, the **BSD family
   (route(4) socket)** and **Windows (IP Helper API)**, plus a porting guide
   for other systems (`docs/OS-INTEGRATION.md`).
-- Not yet production-ready: see the roadmap at the end of `STATUS.md`
-  (OSPF depth is the main remaining gap). The C ABI is **unstable** until
-  v0.5.
+- Not yet production-ready: see the open items in `docs/ROADMAP.md`
+  (OSPFv3 daemon depth and SR-MPLS are the main remaining gaps). The C
+  ABI is **unstable** until v0.5.
 
 ## CI/CD
 

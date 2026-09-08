@@ -324,7 +324,7 @@ permit = false
 # The daemon sends Hellos per hello_interval, discovers neighbors
 # dynamically, originates a Router-LSA per area (stub links from the
 # interface addresses + p2p links per Full adjacency) and runs the dead
-# timer per interface. See docs/STATUS.md (W1.5) for the current scope:
+# timer per interface. See docs/ROADMAP.md (W1.5) for the current scope:
 # OSPFv2, no DR election (segments behave p2p).
 
 # [ospf]

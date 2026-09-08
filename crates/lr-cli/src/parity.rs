@@ -1,4 +1,4 @@
-//! Wire-level parity harness (STATUS.md W5.3): capture a BGP message
+//! Wire-level parity harness (ROADMAP.md W5.3): capture a BGP message
 //! stream, replay it into an offline `lr-router` pipeline and diff the
 //! resulting Loc-RIB against the reference implementation's dump.
 //!
@@ -440,7 +440,7 @@ Replay a captured BGP message stream (one JSON line per message, as
 recorded by tests/parity/capture_proxy.py) into an offline librouting
 router and dump the resulting Loc-RIB as an MRT TABLE_DUMP_V2 file.
 Compare against the reference implementation's own dump with
-`lr mrt diff` — see docs/PARITY.md and STATUS.md W5.3.";
+`lr mrt diff` — see docs/PARITY.md and ROADMAP.md W5.3.";
 
 pub fn cmd_parity_replay(args: &[String]) -> ExitCode {
     let mut cfg = ReplayConfig {

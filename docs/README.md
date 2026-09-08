@@ -11,7 +11,8 @@ the protocol crates.
 | [`../README.md`](../README.md)       | everyone                | Project overview, crate map, quick-start daemon example          |
 | [`tutorial.md`](tutorial.md)         | newcomers               | Book-style tutorial: wire decode → two FSMs → the router pipeline |
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | contributors, embedders | Layering, RIB pipeline diagram, extension points, testing layout |
-| [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + the active roadmap         |
+| [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + roadmap state summary      |
+| [`ROADMAP.md`](ROADMAP.md)           | contributors            | Roadmap v2 workstream landing log: design decisions, evidence    |
 | [`RFC_MAP.md`](RFC_MAP.md)           | contributors            | RFC-by-RFC coverage table with crate paths                       |
 
 ## Embedding the library
@@ -47,7 +48,8 @@ the protocol crates.
 
 ## Standing rules
 
-1. Every landed feature updates `STATUS.md` and `RFC_MAP.md` in the same
-   series of commits (enforced at review).
+1. Every landed feature updates `STATUS.md` (capability tables) and
+   `RFC_MAP.md` in the same series of commits; the workstream
+   narrative lands in `ROADMAP.md` (enforced at review).
 2. `API.md` gains a section whenever a new public API surface appears.
 3. Documents are English-only; keep lines under ~80 characters.

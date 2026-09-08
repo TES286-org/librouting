@@ -7,7 +7,7 @@ BGP message per direction. The recording feeds `lr parity-replay`,
 which replays the captured stream into an offline router and dumps the
 resulting Loc-RIB as MRT; `lr mrt diff` then compares it against the
 reference implementation's own dump. See tests/interop/parity.sh and
-docs/STATUS.md (W5.3).
+docs/ROADMAP.md (W5.3).
 
 The proxy speaks no BGP: it reassembles messages from the byte streams
 using the RFC 4271 framing (16-octet marker, 2-octet length) purely so

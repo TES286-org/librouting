@@ -12,7 +12,7 @@ Design ground rules, in priority order:
 
 1. **Standards compliance by default.** The plane is off until both
    speakers advertise the capability. Off means *zero* wire difference
-   from RFC 4271 — the fallback requirement in `STATUS.md` W6.2. No
+   from RFC 4271 — the fallback requirement in `ROADMAP.md` W6.2. No
    experimental code path may alter standard behavior for a
    non-participating peer, ever.
 2. **Additive, never load-bearing.** The route data plane (NLRI,

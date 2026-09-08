@@ -8,7 +8,7 @@ semantics of BIRD 2 and FRR 10, taken from their own documentation
 (BIRD `doc/bird.sgml` at v2.17.5, FRR `doc/user/bgp.rst` at frr-10.3)
 rather than from folklore.
 
-Standing rule (from `STATUS.md` W2): support a reference
+Standing rule (from `ROADMAP.md` W2): support a reference
 implementation's behaviour behind an explicit flag and never break
 standards compliance by default. When lr's default differs from FRR's,
 the difference is intentional and listed below.
