@@ -16,6 +16,17 @@ const AF_INET6: i32 = 10;
 const SOCK_RAW: i32 = 3;
 const SOL_SOCKET: i32 = 1;
 const SO_BINDTODEVICE: i32 = 25;
+const SO_RCVBUF: i32 = 8;
+
+/// Receive-buffer target for the raw OSPF socket (bytes). The kernel
+/// doubles the value and caps it at net.core.rmem_max; 1 MiB absorbs
+/// bursty flooding (DBD/LSU exchanges plus Hello background) on
+/// loaded machines where the default (~200 KiB) can overflow and
+/// silently drop an LS-Update — an unacknowledged LSA keeps the
+/// peer's retransmission list occupied, which RFC 3623 §3.1 (2)
+/// helper checks (BIRD `changes_in_lsrtl`) read as a topology change
+/// and refuse the helper role.
+const RCVBUF_TARGET: i32 = 1024 * 1024;
 const F_GETFL: i32 = 3;
 const F_SETFL: i32 = 4;
 const O_NONBLOCK: i32 = 0o4000;
@@ -369,6 +380,9 @@ impl OspfV2Transport {
             unsafe { close(fd) };
             return Err(e);
         }
+        // Deep receive queue: flooding bursts on loaded machines must
+        // not overflow the default buffer (see RCVBUF_TARGET).
+        let _ = transport.set_sockopt_i32(SOL_SOCKET, SO_RCVBUF, RCVBUF_TARGET);
         // Multicast egress: choose the interface by index (works on
         // unnumbered links), TTL 1 (link-local groups, RFC 2328 A.1),
         // loopback per caller.
@@ -452,6 +466,28 @@ impl OspfV2Transport {
                 optname,
                 &value as *const u8 as *const core::ffi::c_void,
                 std::mem::size_of::<u8>() as u32,
+            )
+        };
+        if rc != 0 {
+            return Err(os_error("setsockopt"));
+        }
+        Ok(())
+    }
+
+    fn set_sockopt_i32(
+        &self,
+        level: i32,
+        optname: i32,
+        value: i32,
+    ) -> Result<(), OspfTransportError> {
+        // SAFETY: fd and optval are valid for the duration of the call.
+        let rc = unsafe {
+            setsockopt(
+                self.fd,
+                level,
+                optname,
+                &value as *const i32 as *const core::ffi::c_void,
+                std::mem::size_of::<i32>() as u32,
             )
         };
         if rc != 0 {
