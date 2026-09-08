@@ -102,6 +102,14 @@ const REORIGINATE_DELAY_MS: u64 = 1_500;
 const GRACE_FLOOD_REPEATS: usize = 5;
 const GRACE_FLOOD_INTERVAL_MS: u64 = 1_000;
 
+/// How often the graceful-shutdown flood services the protocol
+/// between rounds (see `pump_grace_quiet`): a small slice keeps the
+/// ACK latency for a peer's in-flight LSA refresh well under one
+/// flood round, so the very next Grace-LSA instance re-runs the
+/// peer's RFC 3623 §3.1 helper checks against a drained LS
+/// retransmission list.
+const GRACE_PUMP_SLICE_MS: u64 = 50;
+
 /// A Grace-LSA sequence base that survives the restart: derived from
 /// the wallclock (seconds since the Unix epoch) so the flush the
 /// restarting router sends after recovery is always *newer* than the
@@ -483,10 +491,14 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     // (retransmitted a few times — the flood path has no acks) and
     // exit *without* closing sessions, so no Loc-RIB withdrawals fire
     // and the kernel FIB the forwarding plane relies on survives the
-    // restart. Without it: close every session so the router emits
-    // the down events, then let the ticker drain them.
+    // restart. Between flood rounds the daemon keeps servicing the
+    // protocol (see `graceful_shutdown_flood`) so peers whose LSA
+    // refresh is still un-ACKed can drain their retransmission lists
+    // and engage helper mode on a later round. Without it: close every
+    // session so the router emits the down events, then let the ticker
+    // drain them.
     if cfg.ospf_graceful_restart {
-        daemon.graceful_shutdown_flood();
+        daemon.graceful_shutdown_flood(&mut recv_buf, &start);
         let period = lr_ospf::gr::clamp_grace_period(cfg.ospf_grace_period);
         println!(
             "daemon: ospf graceful shutdown complete (neighbours asked to retain LSAs for {period}s)"
@@ -1879,12 +1891,27 @@ impl OspfDaemon {
     /// the grace state file so the restarted process knows to enter
     /// recovery (deadline, grace period) — the non-volatile-storage
     /// note of RFC 3623 §2.1 / BIRD's ospf.c.
-    fn graceful_shutdown_flood(&mut self) {
+    fn graceful_shutdown_flood(&mut self, recv_buf: &mut [u8], start: &std::time::Instant) {
         let period = lr_ospf::gr::clamp_grace_period(self.gr_grace_period);
         for attempt in 0..GRACE_FLOOD_REPEATS {
             self.send_grace_lsas(false);
             if attempt + 1 < GRACE_FLOOD_REPEATS {
-                std::thread::sleep(Duration::from_millis(GRACE_FLOOD_INTERVAL_MS));
+                let next_round =
+                    std::time::Instant::now() + Duration::from_millis(GRACE_FLOOD_INTERVAL_MS);
+                // Service the protocol while the flood window runs:
+                // a peer that just re-originated its Router-LSA (the
+                // post-Full refresh) has it on its LS retransmission
+                // list for us, and RFC 3623 §3.1 (2) makes it refuse
+                // helper mode until the ACK arrives. Pumping input
+                // between rounds sends that ACK, keeps our Hellos
+                // flowing so the peer's neighbour state stays Full
+                // (§3.1 (1)), and lets the next round's fresh
+                // Grace-LSA instance re-run the helper checks.
+                while std::time::Instant::now() < next_round {
+                    let now_ms = start.elapsed().as_millis() as u64;
+                    self.pump_grace_quiet(recv_buf, now_ms);
+                    std::thread::sleep(Duration::from_millis(GRACE_PUMP_SLICE_MS));
+                }
             }
         }
         // Persist the grace state AFTER the flood so the sequence
@@ -1901,6 +1928,19 @@ impl OspfDaemon {
                 eprintln!("daemon: ospf grace state write {state}: {e}");
             }
         }
+    }
+
+    /// Minimal protocol servicing during the graceful-shutdown flood
+    /// window: receive (so in-flight peer LSAs get ACKed by the session
+    /// machinery), Hellos (keep the peer's view of us Full, RFC 3623
+    /// §3.1 (1)), outbound. Everything that mutates the pre-restart
+    /// topology — re-origination, DR election, adjacency teardown — is
+    /// deliberately skipped: §2.1 wants the router's LSAs frozen while
+    /// the Grace-LSAs are announced and acknowledged.
+    fn pump_grace_quiet(&mut self, recv_buf: &mut [u8], now_ms: u64) {
+        self.pump_inbound(recv_buf, now_ms);
+        self.pump_hellos(now_ms);
+        self.pump_outbound();
     }
 
     /// Refresh the runtime-API status snapshot (cheap: a small vec).
