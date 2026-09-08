@@ -294,10 +294,30 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     // both families; otherwise plain IPv4. ----
     let dual_stack = udp_tx_v6.is_some();
     let listener = if dual_stack {
-        match TcpListener::bind(("::", port)) {
-            Ok(l) => l,
+        // Bind via socket2 so the SYN-ACKs the listener's kernel
+        // generates carry the GTSM hop limit (the accepted sockets set
+        // their own below).
+        match Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
+            Ok(s) => {
+                set_v6_session_hops(&s);
+                match s.bind(
+                    &std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into(),
+                ) {
+                    Ok(()) => match s.listen(128) {
+                        Ok(()) => TcpListener::from(s),
+                        Err(e) => {
+                            eprintln!("daemon: ldp TCP listen [::]:{} failed: {}", port, e);
+                            return ExitCode::from(1);
+                        }
+                    },
+                    Err(e) => {
+                        eprintln!("daemon: ldp TCP bind [::]:{} failed: {}", port, e);
+                        return ExitCode::from(1);
+                    }
+                }
+            }
             Err(e) => {
-                eprintln!("daemon: ldp TCP bind [::]:{} failed: {}", port, e);
+                eprintln!("daemon: ldp TCP socket [::]:{} failed: {}", port, e);
                 return ExitCode::from(1);
             }
         }
@@ -607,11 +627,26 @@ fn bind_ldp_udp(port: u16, interfaces: &[LdpInterface]) -> std::io::Result<(Sock
     Ok((sock, rx))
 }
 
-/// Bind the IPv6 UDP discovery socket (RFC 7552 §5.1): one socket on
-/// the LDP port, joined to ff02::2 on every interface that has IPv6
-/// addresses, multicast loop disabled, and the received hop limit
-/// requested as an ancillary message for the §5.1 GTSM-style check.
-/// Returns `None`-pair when the system has no IPv6 support.
+/// RFC 7552 §9 (with RFC 6720): GTSM on the LDPoIPv6 session transport
+/// is recommended — FRR ldpd enforces it by default on IPv6 sessions
+/// (`nbr_gtsm_enabled` returns true for AF_INET6), dropping session
+/// TCP packets that arrive with a hop limit below 255. Every TCP
+/// socket riding an IPv6 LDP session therefore sends with hop limit
+/// 255: the listener (so the SYN-ACK passes the peer's check), the
+/// accepted sockets (SYN-ACK options are not inherited), and active
+/// connects. The peer's SYN-ACK similarly arrives at 255 only if it
+/// does the same; lr does not enforce the receive side (fail-open),
+/// matching an FRR deployment without `[no] gtsm`.
+fn set_v6_session_hops(sock: &Socket) {
+    if let Err(e) = sock.set_unicast_hops_v6(255) {
+        eprintln!(
+            "daemon: ldp IPv6 session hop limit 255 failed: {} (interop with \
+             GTSM-enforcing peers may need an explicit gtsm disable)",
+            e
+        );
+    }
+}
+
 fn bind_ldp_udp_v6(
     port: u16,
     interfaces: &[LdpInterface],
@@ -626,11 +661,13 @@ fn bind_ldp_udp_v6(
     };
     sock.set_reuse_address(true)?;
     sock.set_nonblocking(true)?;
+    // The dual-stack TCP listener relies on V6ONLY=0; keep this UDP
+    // socket IPv6-only so the v4 socket stays the sole v4 endpoint.
+    // IPV6_V6ONLY must be set before the bind (Linux rejects the
+    // change on a bound socket with EINVAL).
+    sock.set_only_v6(true)?;
     let bind_addr = std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port));
     sock.bind(&bind_addr.into())?;
-    // The dual-stack TCP listener relies on V6ONLY=0; keep the UDP
-    // socket IPv6-only so the v4 socket stays the sole v4 endpoint.
-    sock.set_only_v6(false)?;
     let group = std::net::Ipv6Addr::from(ALL_ROUTERS_V6);
     for iface in interfaces {
         if iface.v6_addrs.is_empty() || iface.ifindex == 0 {
@@ -734,8 +771,35 @@ impl LdpDaemon {
 
     /// Accept passive connections, read active ones, detect closures.
     fn pump_tcp(&mut self, now: Instant) {
-        while let Ok((stream, _peer)) = self.listener.accept() {
+        while let Ok((stream, peer)) = self.listener.accept() {
+            println!("ldp: accepted connection from {}", peer);
             let _ = stream.set_nonblocking(true);
+            // RFC 7552 §9: session TCPs over IPv6 send with the GTSM
+            // hop limit (accepted sockets do not inherit the
+            // listener's hop-limit option). v4-mapped endpoints are
+            // IPv4 sessions, not IPv6 ones.
+            let peer_v6 = match peer.ip() {
+                std::net::IpAddr::V6(v6) => v6.to_ipv4().is_none(),
+                std::net::IpAddr::V4(_) => false,
+            };
+            if peer_v6 {
+                let sock = Socket::from(stream);
+                set_v6_session_hops(&sock);
+                let s = TcpStream::from(sock);
+                let _ = s.set_nonblocking(true);
+                let local = s
+                    .local_addr()
+                    .map(|a| match a.ip() {
+                        std::net::IpAddr::V4(v4) => IpAddr::V4(v4.octets()),
+                        std::net::IpAddr::V6(v6) => normalize_v6(v6),
+                    })
+                    .unwrap_or(IpAddr::V4([0, 0, 0, 0]));
+                let conn = self.next_conn;
+                self.next_conn += 1;
+                self.conns.insert(conn, s);
+                self.engine.on_accepted(conn, local);
+                continue;
+            }
             // The accepted socket's local address fixes the session's
             // address family (RFC 7552 §7.1); normalize v4-mapped
             // endpoints back to IPv4.
@@ -1126,6 +1190,22 @@ impl LdpDaemon {
         ) {
             Ok(stream) => {
                 let _ = stream.set_nonblocking(true);
+                // RFC 7552 §9: an active IPv6 session connect sends
+                // with the GTSM hop limit (the SYN must pass the
+                // peer's receive-side check, and FRR's listener is
+                // min-hop-count 255 by default over IPv6).
+                if matches!(transport_addr, IpAddr::V6(_)) {
+                    let sock = Socket::from(stream);
+                    set_v6_session_hops(&sock);
+                    let s = TcpStream::from(sock);
+                    let _ = s.set_nonblocking(true);
+                    let conn = self.next_conn;
+                    self.next_conn += 1;
+                    self.conns.insert(conn, s);
+                    self.engine.on_connected(now, conn, peer_id);
+                    println!("ldp: connected to {} for peer {}", std_addr, peer_id);
+                    return;
+                }
                 let conn = self.next_conn;
                 self.next_conn += 1;
                 self.conns.insert(conn, stream);

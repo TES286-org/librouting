@@ -207,6 +207,8 @@ jobs:
         run: ./tests/interop/ldp.sh
       - name: LDP interop (librouting ↔ FRR ldpd, RFC 5036)
         run: ./tests/interop/ldp_frr.sh
+      - name: LDP x FRR dual-stack interop (RFC 7552, zebra + ldpd)
+        run: ./tests/interop/ldp_frr_v6.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         run: ./tests/interop/frr.sh
       # W6.3 exchange-plane exit criteria (docs/research/EXCHANGE-PLANE.md
