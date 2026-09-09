@@ -193,6 +193,10 @@ jobs:
         run: ./tests/interop/md5.sh
       - name: BIRD interop (librouting ↔ BIRD)
         run: ./tests/interop/bird.sh
+      - name: BIRD compat interop (lr-daemon runs a BIRD config natively ↔ BIRD)
+        run: ./tests/interop/compat_bird.sh
+      - name: FRR compat interop (lr-daemon runs an FRR config natively ↔ bgpd)
+        run: ./tests/interop/compat_frr.sh
       - name: BIRD IPv6 interop (librouting ↔ BIRD, pure IPv6)
         run: ./tests/interop/bird_ipv6.sh
       - name: BIRD GTSM interop (librouting ↔ BIRD, RFC 5082)
