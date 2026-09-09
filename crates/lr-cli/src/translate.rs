@@ -860,6 +860,18 @@ fn apply_frr_neighbor(
 ) {
     let addr = addr.to_string();
     let rest: Vec<&str> = tokens.to_vec();
+    // `remote-as` may ride anywhere on the line — FRR's own output
+    // gives it a dedicated line, but hand-written configs combine it
+    // with the other attributes (`neighbor A port P remote-as N`).
+    // Extract it first so the per-attribute dispatch below only owns
+    // the rest; the leading-token arm stays for the common shape.
+    for (i, t) in rest.iter().enumerate().skip(1) {
+        if *t == "remote-as" {
+            if let Some(peer) = peer_for_or_create(out, &addr) {
+                peer.peer_as = rest.get(i + 1).and_then(|s| s.parse().ok());
+            }
+        }
+    }
     if negated {
         match rest[0] {
             // `no neighbor ADDR activate` inside `address-family ipv4
@@ -1596,6 +1608,28 @@ route-map FILTER-IN permit 10
              address-family ipv4 unicast\n  no neighbor 10.0.0.2 activate\n",
         );
         assert_eq!(out.peers[0].default_ipv4_unicast, Some(false));
+    }
+
+    /// `remote-as` combined with other attributes on one line — the
+    /// e2e compat test surfaced this hand-written shape, where the
+    /// old first-token-only dispatch silently dropped the peer AS.
+    #[test]
+    fn frr_combined_neighbor_line_keeps_remote_as() {
+        let out = translate_frr("router bgp 64512\n neighbor 10.0.0.2 port 1179 remote-as 64513\n");
+        assert_eq!(out.peers.len(), 1);
+        assert_eq!(out.peers[0].peer_as, Some(64513));
+        assert_eq!(out.peers[0].remote.as_deref(), Some("10.0.0.2"));
+        assert_eq!(out.peers[0].remote_port.as_deref(), Some("1179"));
+    }
+
+    /// FRR dialect defaults: `router bgp` implies FRR's documented
+    /// `bgp enforce-first-as` on; BIRD keeps lr's default (off).
+    #[test]
+    fn frr_enforce_first_as_default_is_on() {
+        let out = translate_frr("router bgp 64512\n neighbor 10.0.0.2 remote-as 64513\n");
+        assert_eq!(out.enforce_first_as, Some(true));
+        let bird = translate_bird("router id 10.0.0.1\n");
+        assert_eq!(bird.enforce_first_as, None);
     }
 
     #[test]
