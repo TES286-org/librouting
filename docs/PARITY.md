@@ -203,6 +203,25 @@ skips gracefully elsewhere).
   each address as its own OSPF interface; FRR keeps one oi per
   connected prefix — in both, the extra prefixes remain routed).
 
+## 10. Dialect defaults in compat mode (native BIRD/FRR config run)
+
+The compat surface (`lr-daemon --config bird.conf|frr.conf`, see
+[`COMPAT.md`](COMPAT.md)) makes the defaults above *follow the file's
+dialect*, so a migrated config behaves as it did on the source
+implementation:
+
+| Knob | lr TOML default | BIRD file | FRR file |
+|------|-----------------|-----------|----------|
+| eBGP policy without filters (§1) | `rfc8212` | accept-all | accept-all |
+| enforce-first-as (§2) | off | off | **on** |
+| implicit IPv4 unicast (§4) | on | on (channels refine) | on |
+
+The FRR enforce-first-as default is applied by the converter itself
+(`translate frr` emits `enforce_first_as = true`), so a converted TOML
+and a natively-run FRR file behave identically. An `lr:` directive
+(`# lr: ebgp-policy rfc8212`) overrides the dialect default explicitly.
+
+
 ## Deliberate non-parities
 
 Recorded so nobody "fixes" them by accident:
@@ -218,3 +237,4 @@ Recorded so nobody "fixes" them by accident:
    — the same `default_ipv4_unicast` flag therefore produces
    capability-list differences per peer dialect (see §4). This is a
    wire-level necessity, not a policy difference.
+

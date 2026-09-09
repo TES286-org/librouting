@@ -57,6 +57,8 @@ cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/mrt.sh                      # BIRD phase needs bird2 (or skips)
 ./tests/interop/bmp.sh                      # no external dependencies
 ./tests/interop/bird.sh                     # needs bird2 (or skips)
+./tests/interop/compat_bird.sh              # needs bird2 (or skips) — compat surface: lr runs a BIRD config natively
+./tests/interop/compat_frr.sh               # needs FRR bgpd (or skips) — compat surface: lr runs an FRR config natively
 ./tests/interop/bird_enh.sh                 # needs bird2 (or skips) — RFC 5549 ENH
 ./tests/interop/bfd_bird.sh                 # needs bird2 + user namespaces (or skips) — BFD RFC 5880/5881/5883
 ./tests/interop/exchange_plane.sh           # needs bird2 + the exchange-plane feature build (or skips)
@@ -223,6 +225,20 @@ to be resolvable in the test environment for the control plane to
 converge. In a production deployment the daemon's `--local-address`
 should be the real interface address (which it is, by default, when
 connecting over that interface).
+
+### Compat-surface labs (`compat_bird.sh`, `compat_frr.sh`)
+
+These run the W5.4 compat surface end to end against the real
+reference daemons: `lr-daemon --config` loads a **BIRD-shaped** (or
+FRR-shaped) configuration file directly — no conversion step — and the
+session must establish with real BIRD 2 / bgpd, exchange routes in
+both directions, apply the dialect defaults (the startup warning
+`bird dialect defaults applied` / `frr dialect defaults applied` is
+asserted) and honour an `lr:` comment directive (`api-socket`, whose
+socket file must appear). The FRR lab reuses frr.sh's vty harness and
+its martian-next-hop pinning (`update-source 192.0.2.1` on the lr
+side, the `lr-out` route-map on the bgpd side). See `docs/COMPAT.md`
+for the full compat surface documentation.
 
 ## Compatibility notes learned from these tests
 

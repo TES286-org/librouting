@@ -7,6 +7,7 @@ authoritative documents; this page adds only what those do not cover.
 | Task                        | Authoritative source            |
 | --------------------------- | ------------------------------- |
 | Every config key explained  | `templates/daemon.toml`         |
+| Running BIRD/FRR configs    | `docs/COMPAT.md`                |
 | Behaviour knobs vs BIRD/FRR | `docs/PARITY.md`                |
 | Interop lab (BIRD + FRR)    | `docs/INTEROP.md`               |
 | Embedded (library) use      | `docs/API.md`, `docs/tutorial.md` |
@@ -17,7 +18,16 @@ authoritative documents; this page adds only what those do not cover.
 # Build once; the binary is crates/lr-cli's.
 cargo build --release -p lr-cli
 ./target/release/lr-daemon --protocol bgp -c /etc/lr/daemon.toml
+# Migrating from BIRD 2 or FRR: the daemon reads those configs too.
+./target/release/lr-daemon --config /etc/bird/bird.conf
+./target/release/lr-daemon --config /etc/frr/frr.conf
 ```
+
+The dialect (lr TOML, BIRD 2, FRR) is recognised from the file's
+content; a compat-loaded config keeps its dialect for `SIGHUP`
+reloads. Unmapped constructs and non-BGP stanzas in a BIRD/FRR file
+become startup warnings — see `docs/COMPAT.md` for the full surface
+and the `lr:` extension directives.
 
 * `SIGTERM` / `SIGINT` — graceful: every session receives a
   NOTIFICATION CEASE (RFC 4271 §6.4), the Loc-RIB is torn down

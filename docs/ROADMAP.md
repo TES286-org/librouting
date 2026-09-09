@@ -666,6 +666,57 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    truth, and the replay must come out IDENTICAL. In-process parity
    (capture → replay → diff against the original receiver) is covered
    by unit tests in `crates/lr-cli/src/parity.rs`.
+4. ~~**Native BIRD/FRR config run — the compat surface**~~ — done:
+   `lr-daemon --config bird.conf|frr.conf` parses the source dialect
+   and runs the daemon directly in the *compatible form* (W5.1's
+   converter remains for operators who want a reviewable TOML):
+   * Dialect auto-detection from the file content (lr TOML / BIRD 2 /
+     FRR keyed on lines only the respective dialect uses), fail-closed
+     on unknown content, `--config-dialect bird|frr|toml` to force.
+   * One mapping, no drift: the native load runs the W5.1
+     parse → render pipeline and feeds the rendered TOML through the
+     daemon's regular loader, so compat mode and `lr translate`
+     produce byte-identical semantics by construction.
+   * Dialect-correct defaults, the "compatible form" core: both
+     dialects get the accept-all eBGP policy (BIRD/FRR natively admit
+     every route without filters — the daemon's RFC 8212 deny-by-default
+     would silently drop routes the source config accepts), and FRR
+     keeps its documented `bgp enforce-first-as` default (on); the
+     converter now emits that too. BIRD channel families and FRR
+     address-family activation carry over as before.
+   * lr-specific extensions ride `lr:` comment directives — invisible
+     to real BIRD and FRR, so a config carrying them still loads in
+     the reference implementations. Globals: `listen`, `install-kernel`,
+     `api-socket`, `user`/`group`, `bmp-target`, `graceful-restart`,
+     `llgr`, `llgr-max-stale`, `add-path`, `add-path-max`,
+     `max-prefixes`, `max-prefix-action`, `gtsm`, `ebgp-policy`
+     (override the dialect default), `soft-reconfig-inbound`. Per-peer
+     (BIRD stanza scope / FRR `lr: neighbor ADDR` form): `add-path`,
+     `add-path-max`, `max-prefixes`, `max-prefix-action`,
+     `max-prefix-threshold`, `gtsm`, `mp-family` (repeatable),
+     `tcp-ao-key` (repeatable), `extended-next-hop`, `allow-local-as`,
+     `local-address`, `soft-reconfig-inbound`. Unknown keys and bad
+     values surface as warnings — never silently dropped.
+   * Honesty channel: in native-run mode there is no TOML file to
+     review, so every UNMAPPED note and every non-BGP routing stanza
+     (BIRD `protocol ospf …`, FRR `router ospf …`) becomes a startup
+     warning; `protocol device` is skipped silently as BIRD
+     housekeeping.
+   * SIGHUP / runtime-API reload re-parses through the same dialect
+     path (the daemon remembers its config dialect), so compat-mode
+     daemons reload like TOML ones.
+   * Tests: 16 unit tests in `compat.rs` (detection, directives,
+     defaults, drift-guard) + converter unit tests; `daemon_compat.rs`
+     e2e (BIRD config runs and exchanges routes with a flag-spawned
+     peer, FRR config ditto with per-peer directives, non-BGP stanzas
+     warn without blocking); `tests/interop/compat_bird.sh` and
+     `compat_frr.sh` run compat-mode lr-daemons against real
+     BIRD 2.17.5 / FRR 10 bgpd (both directions of route flow, the
+     dialect-defaults warnings, the `api-socket` side effect), wired
+     into the CI interop job. The e2e flushed out a latent FRR-parser
+     gap — a combined `neighbor A port P remote-as N` line never set
+     the peer AS (first-token dispatch only handled the
+     dedicated-line shape) — fixed and pinned.
 
 ### W6 — Research: BGP defects and a private exchange plane
 

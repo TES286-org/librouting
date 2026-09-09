@@ -30,6 +30,7 @@ the protocol crates.
 | -------------------------- | -------------------------------------------------------------------- |
 | `templates/daemon.toml`    | Fully commented reference configuration (every key explained)        |
 | [`RUNBOOK.md`](RUNBOOK.md) | Operations runbook: lifecycle, runtime API, troubleshooting FAQ      |
+| [`COMPAT.md`](COMPAT.md)   | Running BIRD 2 / FRR configs natively: dialects, defaults, `lr:` extensions |
 | [`PARITY.md`](PARITY.md)   | Behaviour knobs vs. BIRD 2 / FRR 10: RFC latitude, defaults, mapping |
 | [`INTEROP.md`](INTEROP.md) | Interop lab against BIRD / FRR: what is verified, how to run locally |
 
