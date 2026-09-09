@@ -45,15 +45,40 @@
 //! (rfc8212 deny-by-default) would silently drop routes the source
 //! config would have accepted. Explicit maps, including the generated
 //! deny-alls for `import none`, are still applied in accept-all mode.
+//! Dialect defaults are applied so the output runs with the source
+//! implementation's semantics: an FRR config keeps FRR's
+//! `bgp enforce-first-as` default (on), BIRD keeps it off.
+//!
+//! lr-specific extensions: `lr:` comment directives ride along in both
+//! dialects (`# lr: …` in BIRD and FRR, `! lr: …` also accepted in
+//! FRR) and map onto the daemon's TOML schema — see `LrDirective`.
+//! Inside a BIRD `protocol bgp` block a directive scopes to that
+//! peer; in FRR the `# lr: neighbor ADDR …` form scopes to a peer.
+//! Directives are invisible to the reference implementations, so a
+//! config carrying them still loads in real BIRD / FRR.
 //!
 //! Not mapped (no lr equivalent): BIRD `multihop`, `rr client`,
 //! FRR `ebgp-multihop`, `shutdown`, VRFs, route reflector/cluster
-//! knobs, and anything inside non-BGP protocol stanzas. Lines inside
-//! a BGP stanza that have no mapping are kept as `# UNMAPPED:`
-//! comments; FRR peers whose `remote-as` never appears are dropped
-//! with a note instead of emitting a peer that cannot start.
+//! knobs, and anything inside non-BGP protocol stanzas. Non-BGP
+//! routing protocols (`protocol ospf …`, `router ospf`, …) are
+//! reported as ignored — the converter covers the BGP control plane.
+//! Lines inside a BGP stanza that have no mapping are kept as
+//! `# UNMAPPED:` comments; FRR peers whose `remote-as` never appears
+//! are dropped with a note instead of emitting a peer that cannot
+//! start.
 
 use std::process::ExitCode;
+
+/// One lr-specific `lr:` comment directive: `key` (normalised to
+/// snake_case) plus its optional value (the whitespace-joined
+/// remainder, quotes stripped). Resolved against the TOML schema at
+/// render time by [`directive_toml`]; unknown keys or bad values
+/// surface as visible notes instead of being applied.
+#[derive(Debug, Clone)]
+struct LrDirective {
+    key: String,
+    value: Option<String>,
+}
 
 /// One peer extracted from the source config.
 #[derive(Debug, Default, Clone)]
@@ -80,6 +105,12 @@ struct PeerOut {
     /// to the family mapping above. Always false for FRR peers.
     channel_v4: bool,
     channel_v6: bool,
+    /// lr TCP-AO keys attached via `lr: tcp-ao-key ID:SECRET`
+    /// directives (the dialects have no TCP-AO syntax).
+    tcp_ao_keys: Vec<String>,
+    /// `lr:` directives scoped to this peer (inside the BIRD BGP
+    /// stanza / FRR `neighbor ADDR` form).
+    ext: Vec<LrDirective>,
     /// Source lines with no lr equivalent.
     unmapped: Vec<String>,
 }
@@ -142,9 +173,10 @@ struct CommunityListRow {
     permit: bool,
 }
 
-/// The converted configuration before rendering.
+/// The converted configuration before rendering. Visible to `compat`
+/// so the native-run surface can reuse the parse/render pipeline.
 #[derive(Debug, Default)]
-struct ConfigOut {
+pub(super) struct ConfigOut {
     local_as: Option<u32>,
     router_id: Option<String>,
     /// Locally originated prefixes (FRR `network`, BIRD static
@@ -159,6 +191,15 @@ struct ConfigOut {
     /// because they can never start, e.g. FRR stubs without a
     /// `remote-as`).
     unmapped_global: Vec<String>,
+    /// `lr:` directives at global scope (outside any BGP stanza).
+    ext_global: Vec<LrDirective>,
+    /// Non-BGP routing protocols seen in the source config — reported
+    /// as ignored (the converter covers the BGP control plane).
+    /// Read by `compat` to surface them as operator warnings.
+    pub(super) ignored_protocols: Vec<String>,
+    /// Dialect-specific default that differs from lr's: FRR runs with
+    /// `bgp enforce-first-as` on, so an FRR config keeps that.
+    enforce_first_as: Option<bool>,
 }
 
 /// Entry point: `lr translate <bird|frr> <file>`.
@@ -183,8 +224,38 @@ pub(super) fn translate(args: &[String]) -> ExitCode {
             return ExitCode::from(2);
         }
     };
+    // Non-BGP protocols are reported even in the standalone converter —
+    // a silent omission here would look like lost routing config.
+    for proto in &out.ignored_protocols {
+        eprintln!(
+            "translate: note: `{proto}` ignored — the compat surface runs the BGP control plane only"
+        );
+    }
     print!("{}", render(out));
     ExitCode::SUCCESS
+}
+
+// ---------------------------------------------------------------------------
+// Native-run surface (compat mode) — used by crate::compat
+// ---------------------------------------------------------------------------
+
+/// Parse a BIRD 2 config into the intermediate form. `pub(super)` so
+/// `compat` can run the same parse the converter uses, then feed the
+/// rendered TOML straight into the daemon's loader.
+pub(super) fn parse_bird_config(text: &str) -> ConfigOut {
+    translate_bird(text)
+}
+
+/// Parse an FRR config into the intermediate form (see
+/// [`parse_bird_config`]).
+pub(super) fn parse_frr_config(text: &str) -> ConfigOut {
+    translate_frr(text)
+}
+
+/// Render the intermediate form as daemon TOML (see
+/// [`parse_bird_config`]).
+pub(super) fn render_config(out: ConfigOut) -> String {
+    render(out)
 }
 
 // ---------------------------------------------------------------------------
@@ -208,6 +279,15 @@ fn translate_bird(text: &str) -> ConfigOut {
     let mut static_depth = 0usize;
 
     for raw in text.lines() {
+        // `lr:` directives live in comments that strip_comments would
+        // eat — scan the raw line first. Inside `protocol bgp` a
+        // directive scopes to that peer, outside it is global.
+        if let Some(d) = extract_lr_directive(raw, "#") {
+            match current.as_mut() {
+                Some(peer) => attach_peer_directive(peer, d),
+                None => out.ext_global.push(d),
+            }
+        }
         let line = strip_comments(raw);
         let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.is_empty() {
@@ -237,6 +317,22 @@ fn translate_bird(text: &str) -> ConfigOut {
                     name,
                     ..PeerOut::default()
                 });
+            }
+            // Non-BGP routing protocols are reported as ignored instead
+            // of vanishing silently — the converter covers the BGP
+            // control plane. `protocol device` is BIRD housekeeping
+            // with no routing meaning: skipped without a note.
+            "protocol" if tokens.len() >= 3 && tokens[1] != "static" => {
+                if tokens[1] != "device" {
+                    out.ignored_protocols.push(format!(
+                        "protocol {} {}",
+                        tokens[1],
+                        tokens
+                            .get(2)
+                            .map(|n| n.trim_end_matches(|c| c == '{' || c == ';'))
+                            .unwrap_or("")
+                    ));
+                }
             }
             // Full `local` clause: `local [address A] [port P] [as ASN]`
             // in any order (the interop configs use `local port P as N`).
@@ -498,6 +594,24 @@ fn translate_frr(text: &str) -> ConfigOut {
     // matching `address-family …` block, `None` in router context.
     let mut af_ctx: Option<String> = None;
     for raw in text.lines() {
+        // FRR directive scan: `# lr: KEY [VALUE]` / `! lr: …` are
+        // global; `# lr: neighbor ADDR KEY [VALUE]` scopes to that
+        // peer (FRR has no stanza braces to inherit scope from).
+        if let Some(body) = lr_marker_body(raw, "#!") {
+            let tokens: Vec<&str> = body.split_whitespace().collect();
+            if tokens.len() >= 2 && tokens[0].trim_end_matches(';') == "neighbor" {
+                let addr = tokens[1];
+                let d = parse_lr_body(&tokens[2..].join(" "));
+                if d.key.is_empty() {
+                    out.unmapped_global
+                        .push(format!("lr: neighbor {addr} — no directive given"));
+                } else if let Some(peer) = peer_for_or_create(&mut out, addr) {
+                    attach_peer_directive(peer, d);
+                }
+            } else {
+                out.ext_global.push(parse_lr_body(&body));
+            }
+        }
         let line = strip_comments(raw);
         let line = line.trim();
         let tokens: Vec<&str> = line.split_whitespace().collect();
@@ -507,6 +621,16 @@ fn translate_frr(text: &str) -> ConfigOut {
         match tokens[0] {
             "router" if tokens.len() >= 3 && tokens[1] == "bgp" => {
                 out.local_as = tokens[2].parse().ok();
+                // FRR's documented default: `bgp enforce-first-as` is
+                // ON. The native run keeps the source implementation's
+                // semantics, so the rendered config turns it on too.
+                out.enforce_first_as = Some(true);
+            }
+            // Non-BGP routing protocols (`router ospf`, `router isis`,
+            // …) are reported as ignored instead of vanishing
+            // silently — the converter covers the BGP control plane.
+            "router" if tokens.len() >= 2 => {
+                out.ignored_protocols.push(format!("router {}", tokens[1]));
             }
             "bgp" if tokens.len() >= 3 && tokens[1] == "router-id" => {
                 out.router_id = Some(tokens[2].to_string());
@@ -888,6 +1012,24 @@ fn render(out: ConfigOut) -> String {
     for note in &out.unmapped_global {
         s.push_str(&format!("# UNMAPPED: {note}\n"));
     }
+    for proto in &out.ignored_protocols {
+        s.push_str(&format!(
+            "# UNMAPPED: {proto} — the lr compat surface runs the BGP control plane only\n"
+        ));
+    }
+    // Global `lr:` directives that map onto top-level (bare) TOML keys
+    // must precede the `[bgp]` header — inside it they would parse as
+    // `bgp.api_socket` and be rejected as unknown.
+    let mut bgp_ext: Vec<(String, String)> = Vec::new();
+    for d in &out.ext_global {
+        match directive_toml(d, DirScope::Global) {
+            Ok((k, v)) if matches!(k.as_str(), "api_socket" | "user" | "group") => {
+                s.push_str(&format!("{k} = {v}\n"));
+            }
+            Ok((k, v)) => bgp_ext.push((k, v)),
+            Err(note) => s.push_str(&format!("# UNMAPPED: {note}\n")),
+        }
+    }
     s.push('\n');
     s.push_str("[bgp]\n");
     if let Some(asn) = out.local_as {
@@ -911,6 +1053,16 @@ fn render(out: ConfigOut) -> String {
     // maps, explicit or generated, still apply under accept-all, so
     // `import none` conversions keep their deny-all behaviour.
     s.push_str("ebgp_policy = \"accept-all\"\n");
+    if out.enforce_first_as == Some(true) {
+        // Dialect default: FRR runs `bgp enforce-first-as` on, BIRD
+        // has no such check. Emitted only when the source dialect
+        // differs from the lr default (off).
+        s.push_str("enforce_first_as = true\n");
+    }
+    // Remaining global `lr:` directives land in the [bgp] section.
+    for (k, v) in &bgp_ext {
+        s.push_str(&format!("{k} = {v}\n"));
+    }
     s.push('\n');
 
     // lr prefix-lists evaluate in document order — emit them sorted
@@ -1038,6 +1190,23 @@ fn render(out: ConfigOut) -> String {
                 .join(", ");
             s.push_str(&format!("mp_families = [{list}]\n"));
         }
+        if !peer.tcp_ao_keys.is_empty() {
+            let list = peer
+                .tcp_ao_keys
+                .iter()
+                .map(|k| toml_str(k))
+                .collect::<Vec<_>>()
+                .join(", ");
+            s.push_str(&format!("tcp_ao_keys = [{list}]\n"));
+        }
+        // Peer-scoped `lr:` directives resolve against the [[peer]]
+        // schema; unknown keys or bad values stay visible as notes.
+        for d in &peer.ext {
+            match directive_toml(d, DirScope::Peer) {
+                Ok((k, v)) => s.push_str(&format!("{k} = {v}\n")),
+                Err(note) => s.push_str(&format!("# UNMAPPED: {note}\n")),
+            }
+        }
         if let Some(i) = &peer.import {
             s.push_str(&format!("import = \"{i}\"\n"));
         }
@@ -1075,6 +1244,222 @@ fn unquote(s: &str) -> String {
 /// quotes so passwords and regex patterns cannot break the output).
 fn toml_str(s: &str) -> String {
     format!("\"{}\"", s.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+// ---------------------------------------------------------------------------
+// lr: comment directives (the lr-specific extension channel)
+// ---------------------------------------------------------------------------
+
+/// Return the directive body after the `lr:` marker, if the raw line
+/// carries one. `comment_chars` is the dialect's comment introducers:
+/// `#` for BIRD, `#` and `!` for FRR. A directive may ride on its own
+/// comment line or trail real code (`ipv4 { # lr: add-path`); the
+/// caller keeps parsing the code part. Trailing `;` is tolerated so
+/// BIRD-styled `# lr: gtsm 2;` reads naturally.
+fn lr_marker_body(raw: &str, comment_chars: &str) -> Option<String> {
+    let start = raw.find(|c| comment_chars.contains(c))?;
+    let comment = raw[start + 1..].trim_start();
+    let rest = comment.strip_prefix("lr:")?;
+    let body = rest.trim();
+    if body.is_empty() {
+        None
+    } else {
+        Some(body.to_string())
+    }
+}
+
+/// Split a directive body into its normalised key (snake_case) and
+/// optional value (whitespace-joined remainder, quotes stripped).
+fn parse_lr_body(body: &str) -> LrDirective {
+    let mut parts = body.split_whitespace();
+    let key = parts
+        .next()
+        .unwrap_or("")
+        .trim_end_matches(';')
+        .to_lowercase()
+        .replace('-', "_");
+    let value_raw = parts.collect::<Vec<_>>().join(" ");
+    let value = if value_raw.is_empty() {
+        None
+    } else {
+        Some(unquote(value_raw.trim_end_matches(';').trim()))
+    };
+    LrDirective { key, value }
+}
+
+/// BIRD-side extraction: stanza scope decides global vs peer.
+fn extract_lr_directive(raw: &str, comment_chars: &str) -> Option<LrDirective> {
+    lr_marker_body(raw, comment_chars).map(|body| parse_lr_body(&body))
+}
+
+/// Attach a peer-scoped directive: list-shaped ones (`mp-family`,
+/// `tcp-ao-key`) fold into the peer's arrays immediately; scalar ones
+/// resolve against the peer TOML schema at render time. Unknown keys
+/// surface as UNMAPPED notes at render — never silently dropped.
+fn attach_peer_directive(peer: &mut PeerOut, d: LrDirective) {
+    match fold_peer_list_directive(peer, &d) {
+        Ok(()) => {}
+        Err(_) => peer.ext.push(d),
+    }
+}
+
+/// Where a directive was found — decides the TOML schema it resolves
+/// against (the `[bgp]`/top-level globals vs the `[[peer]]` table).
+#[derive(Clone, Copy, PartialEq)]
+enum DirScope {
+    Global,
+    Peer,
+}
+
+/// Resolve one directive to a `(toml key, toml value literal)` pair.
+/// List-shaped directives (`mp-family`, `tcp-ao-key`) are NOT handled
+/// here — the callers fold them into the peer's existing arrays.
+/// `Err` carries a human-readable note that the callers render as an
+/// UNMAPPED comment instead of applying the directive.
+fn directive_toml(d: &LrDirective, scope: DirScope) -> Result<(String, String), String> {
+    use DirScope::*;
+    let val = d.value.as_deref();
+    // Bool-shaped: bare directive means true; "true"/"false" accepted.
+    let bool_val = |v: Option<&str>| -> Result<String, String> {
+        match v {
+            None => Ok("true".into()),
+            Some("true") => Ok("true".into()),
+            Some("false") => Ok("false".into()),
+            Some(other) => Err(format!("lr: bad bool value '{other}' for {}", d.key)),
+        }
+    };
+    // Number-shaped: parse + range check, so a typo never lands in
+    // the TOML as an unloadable or silently-wrong value.
+    let num_val = |v: Option<&str>, min: i64, max: i64| -> Result<String, String> {
+        match v.and_then(|s| s.parse::<i64>().ok()) {
+            Some(n) if (min..=max).contains(&n) => Ok(n.to_string()),
+            _ => Err(format!(
+                "lr: bad value '{}' for {} (expected integer {}..={})",
+                val.unwrap_or(""),
+                d.key,
+                min,
+                max
+            )),
+        }
+    };
+    let str_val = |v: Option<&str>| -> Result<String, String> {
+        v.map(toml_str)
+            .ok_or_else(|| format!("lr: {} needs a value", d.key))
+    };
+    match (scope, d.key.as_str()) {
+        // ---- globals ----
+        (Global, "install_kernel") => Ok(("install_kernel".into(), bool_val(val)?)),
+        (Global, "api_socket") => Ok(("api_socket".into(), str_val(val)?)),
+        (Global, "user") => Ok(("user".into(), str_val(val)?)),
+        (Global, "group") => Ok(("group".into(), str_val(val)?)),
+        (Global, "listen") => Ok(("listen_addr".into(), str_val(val)?)),
+        (Global, "bmp_target") => Ok(("bmp_target".into(), str_val(val)?)),
+        (Global, "graceful_restart") => {
+            Ok(("graceful_restart_time".into(), num_val(val, 0, 4095)?))
+        }
+        (Global, "llgr") => Ok(("llgr_stale_time".into(), num_val(val, 0, 65535)?)),
+        (Global, "llgr_max_stale") => Ok(("llgr_max_stale_time".into(), num_val(val, 0, 65535)?)),
+        (Global, "add_path") => Ok(("add_path".into(), bool_val(val)?)),
+        (Global, "add_path_max") => Ok(("add_path_max_paths".into(), num_val(val, 1, 255)?)),
+        (Global, "max_prefixes") => Ok(("max_prefixes".into(), num_val(val, 1, u32::MAX as i64)?)),
+        (Global, "max_prefix_action") => {
+            let s = val.ok_or_else(|| format!("lr: {} needs a value", d.key))?;
+            if !matches!(s, "warn" | "teardown" | "restart") {
+                return Err(format!(
+                    "lr: bad max_prefix_action '{s}' (warn|teardown|restart)"
+                ));
+            }
+            Ok(("max_prefix_action".into(), toml_str(s)))
+        }
+        (Global, "gtsm") => match val {
+            None => Ok(("gtsm".into(), "true".into())),
+            Some(n) => Ok(("gtsm".into(), num_val(Some(n), 1, 255)?)),
+        },
+        (Global, "ebgp_policy") => {
+            let s = val.ok_or_else(|| format!("lr: {} needs a value", d.key))?;
+            if s != "rfc8212" && s != "accept-all" {
+                return Err(format!("lr: bad ebgp_policy '{s}' (rfc8212|accept-all)"));
+            }
+            Ok(("ebgp_policy".into(), toml_str(s)))
+        }
+        (Global, "soft_reconfig_inbound") => Ok(("soft_reconfig_inbound".into(), bool_val(val)?)),
+        // ---- per-peer ----
+        (Peer, "add_path") => Ok(("add_path".into(), bool_val(val)?)),
+        (Peer, "add_path_max") => Ok(("add_path_max_paths".into(), num_val(val, 1, 255)?)),
+        (Peer, "max_prefixes") => Ok(("max_prefixes".into(), num_val(val, 1, u32::MAX as i64)?)),
+        (Peer, "max_prefix_action") => {
+            let s = val.ok_or_else(|| format!("lr: {} needs a value", d.key))?;
+            if !matches!(s, "warn" | "teardown" | "restart") {
+                return Err(format!(
+                    "lr: bad max_prefix_action '{s}' (warn|teardown|restart)"
+                ));
+            }
+            Ok(("max_prefix_action".into(), toml_str(s)))
+        }
+        (Peer, "max_prefix_threshold") => {
+            Ok(("max_prefix_threshold".into(), num_val(val, 0, 100)?))
+        }
+        (Peer, "gtsm") => match val {
+            None => Ok(("gtsm".into(), "true".into())),
+            Some(n) => Ok(("gtsm".into(), num_val(Some(n), 1, 255)?)),
+        },
+        (Peer, "extended_next_hop") => Ok(("extended_next_hop".into(), bool_val(val)?)),
+        (Peer, "allow_local_as") => match val {
+            None => Ok(("allow_local_as".into(), "1".into())),
+            Some("any") => Ok(("allow_local_as".into(), "\"any\"".into())),
+            Some(n) => Ok((
+                "allow_local_as".into(),
+                num_val(Some(n), 0, u32::MAX as i64)?,
+            )),
+        },
+        (Peer, "local_address") => Ok(("local_address".into(), str_val(val)?)),
+        (Peer, "soft_reconfig_inbound") => Ok(("soft_reconfig_inbound".into(), bool_val(val)?)),
+        _ => Err(format!(
+            "lr: unknown {} directive '{}' (see docs/COMPAT.md for the vocabulary)",
+            match scope {
+                Global => "global",
+                Peer => "peer",
+            },
+            d.key
+        )),
+    }
+}
+
+/// Apply the list-shaped peer directives that fold into existing
+/// `PeerOut` arrays (`mp-family` → `families`, `tcp-ao-key` →
+/// `tcp_ao_keys`). Returns an error note when the directive is not
+/// list-shaped here or the value is not a known family.
+fn fold_peer_list_directive(peer: &mut PeerOut, d: &LrDirective) -> Result<(), String> {
+    match d.key.as_str() {
+        "mp_family" => {
+            let f = d
+                .value
+                .as_deref()
+                .ok_or_else(|| "lr: mp-family needs a family name".to_string())?;
+            if f != "ipv4-unicast" && f != "ipv6-unicast" {
+                return Err(format!(
+                    "lr: unknown mp-family '{f}' (ipv4-unicast|ipv6-unicast)"
+                ));
+            }
+            if !peer.families.iter().any(|x| x == f) {
+                peer.families.push(f.to_string());
+            }
+            Ok(())
+        }
+        "tcp_ao_key" => {
+            let k = d
+                .value
+                .as_deref()
+                .ok_or_else(|| "lr: tcp-ao-key needs ID:SECRET".to_string())?;
+            // Fail obviously-broken keys (no id prefix) early.
+            if !k.contains(':') {
+                return Err(format!("lr: tcp-ao-key '{k}' is not ID:SECRET"));
+            }
+            peer.tcp_ao_keys.push(k.to_string());
+            Ok(())
+        }
+        _ => Err(format!("lr: directive '{}' not list-shaped", d.key)),
+    }
 }
 
 #[cfg(test)]
