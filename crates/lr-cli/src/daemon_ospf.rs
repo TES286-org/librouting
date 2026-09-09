@@ -59,6 +59,10 @@ use lr_ospf::gr::{HelperCheck, HelperEntry, RestartTracker};
 use lr_ospf::interface::{elect as dr_elect, Elector, IfState};
 use lr_ospf::lsa::grace::{GraceLsaBody, GraceReason};
 use lr_ospf::lsa::Lsa;
+use lr_ospf::lsa::{
+    opaque_lsa_id, originate_sr_prefix_lsa, originate_sr_ri_lsa, OPAQUE_TYPE_EXT_PREFIX,
+    OPAQUE_TYPE_RI,
+};
 use lr_ospf::origination::{
     finalize_v2_packet, originate_network_lsa, originate_router_lsa, v2_packet_checksum_ok,
     RouterLsaLink,
@@ -255,10 +259,32 @@ struct OspfDaemon {
     /// Area → topology version at the last pump pass — the §3.2 (3)
     /// change detector that exits helpers.
     gr_topology: BTreeMap<u32, u64>,
+    /// RFC 8667: this router's SRGB (base, range) when Segment Routing
+    /// is configured. `None` = the node originates no SR LSAs.
+    sr_srgb: Option<(u32, u32)>,
+    /// RFC 8667: the locally originated prefix SIDs (one Extended
+    /// Prefix Opaque LSA each).
+    sr_sids: Vec<SrSidConfig>,
+    /// (area, link_state_id) → last originated sequence number for our
+    /// SR LSAs (RI Opaque Type 4 + Extended Prefix Opaque Type 7). The
+    /// LSDB instance is the floor, mirroring the Router-LSA rule.
+    sr_seq: BTreeMap<(u32, u32), u32>,
     /// Snapshot of the graceful-restart state for the runtime API
     /// `status` command (shared with the API thread).
     gr_status: Arc<std::sync::Mutex<Vec<String>>>,
     router_id: RouterId,
+}
+
+/// One configured prefix SID (RFC 8667 §6): the prefix, its SID index
+/// into the SRGB, whether it is a node segment (RFC 7684 §6 N-flag)
+/// and the stable Opaque ID slot its Extended Prefix Opaque LSA uses.
+#[derive(Debug, Clone)]
+struct SrSidConfig {
+    prefix: [u8; 4],
+    prefix_len: u8,
+    sid: u32,
+    node: bool,
+    opaque_index: u32,
 }
 
 /// Entry point from `daemon.rs`.
@@ -324,6 +350,34 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             .or_else(|| cfg.api_socket.as_ref().map(|s| format!("{s}.gr"))),
         gr_recovery: BTreeMap::new(),
         gr_topology: BTreeMap::new(),
+        sr_srgb: cfg.ospf_srgb_base.zip(cfg.ospf_srgb_range),
+        sr_sids: {
+            let mut sids = Vec::new();
+            for (idx, spec) in cfg.ospf_prefix_sids.iter().enumerate() {
+                let Some(prefix) = spec
+                    .prefix
+                    .as_deref()
+                    .and_then(|p| p.parse::<lr_core::addr::Prefix>().ok())
+                else {
+                    continue; // finalize() already rejected this
+                };
+                let lr_core::addr::IpAddr::V4(octets) = prefix.addr else {
+                    continue;
+                };
+                sids.push(SrSidConfig {
+                    prefix: octets,
+                    prefix_len: prefix.prefix_len,
+                    sid: spec.sid.unwrap_or(0),
+                    node: spec.node.unwrap_or(false),
+                    // Stable per-config-order slot: re-origination
+                    // keeps the same (advertising router, opaque ID)
+                    // key, so a SID change refreshes its own LSA.
+                    opaque_index: (idx + 1) as u32,
+                });
+            }
+            sids
+        },
+        sr_seq: BTreeMap::new(),
         gr_status: Arc::new(std::sync::Mutex::new(Vec::new())),
         router_id: rid,
     };
@@ -467,6 +521,9 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         let areas: Vec<u32> = daemon.anchors.keys().copied().collect();
         for area in areas {
             daemon.reoriginate_area(&mut router, area);
+            // RFC 8667: the SR RI + Extended Prefix LSAs ride the same
+            // startup pass (SR-disabled daemons originate nothing).
+            daemon.reoriginate_sr(&mut router, area);
         }
     }
 
@@ -1039,6 +1096,10 @@ impl OspfDaemon {
         for area in due {
             self.pending_reorig.remove(&area);
             self.reoriginate_area(&mut router, area);
+            // The SR LSAs ride the same re-origination cycle so a
+            // (re)formed adjacency always sees them (RFC 8667 §7:
+            // extended LSAs flood like any area-scoped LSA).
+            self.reoriginate_sr(&mut router, area);
         }
     }
 
@@ -1446,6 +1507,89 @@ impl OspfDaemon {
             .find(|i| i.transport.ifindex() == ifindex)
             .map(|i| i.name.as_str())
             .unwrap_or("?")
+    }
+
+    // -----------------------------------------------------------------
+    // RFC 8667 Segment Routing: RI + Extended Prefix Opaque LSAs
+    // -----------------------------------------------------------------
+
+    /// Originate (or re-originate) the SR LSAs into `area`: the
+    /// area-scoped Router Information LSA carrying the SRGB
+    /// (RFC 8667 §3) plus one Extended Prefix Opaque LSA per configured
+    /// prefix SID (RFC 8667 §6). Follows the Router-LSA self-
+    /// origination path exactly: the LSDB instance is the sequence
+    /// floor (§12.1.2) and the LSU rides the anchor session so the
+    /// router floods it to every neighbour. SR-disabled daemons
+    /// originate nothing (no config → no LSA → no behaviour change).
+    fn reoriginate_sr(&mut self, router: &mut DefaultRouter, area: u32) {
+        let Some((base, range)) = self.sr_srgb else {
+            return;
+        };
+        let Some(&anchor) = self.anchors.get(&area) else {
+            return;
+        };
+        let rid = self.router_id.as_u32();
+        let mut lsas: Vec<Lsa> = Vec::new();
+        // Router Information LSA (Opaque Type 4, Opaque ID 0).
+        let ri_lsid = opaque_lsa_id(OPAQUE_TYPE_RI, 0);
+        let prev = self.sr_prev_seq(router, area, ri_lsid);
+        if let Some(lsa) = originate_sr_ri_lsa(rid, base, range, prev) {
+            self.sr_seq
+                .insert((area, ri_lsid), lsa.header.ls_sequence_number);
+            lsas.push(lsa);
+        }
+        // One Extended Prefix Opaque LSA per configured SID (Opaque
+        // Type 7; the Opaque ID is the config slot, stable across
+        // re-origination so a change refreshes only its own LSA).
+        for cfg in &self.sr_sids {
+            let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_PREFIX, cfg.opaque_index);
+            let prev = self.sr_prev_seq(router, area, lsid);
+            let advert = lr_ospf::lsa::SrPrefixAdvert {
+                // §6: an advertised prefix in the router's own area is
+                // intra-area; the N-flag marks a node segment.
+                route_type: 1,
+                flags: if cfg.node { 0x40 } else { 0x00 },
+                prefix: cfg.prefix,
+                prefix_len: cfg.prefix_len,
+                // PHP by default (FRR's default): NP/E/V/L clear.
+                sid_flags: 0,
+                sid: cfg.sid,
+                algorithm: 0,
+            };
+            if let Some(lsa) = originate_sr_prefix_lsa(rid, &advert, cfg.opaque_index, prev) {
+                self.sr_seq
+                    .insert((area, lsid), lsa.header.ls_sequence_number);
+                lsas.push(lsa);
+            }
+        }
+        if lsas.is_empty() {
+            return;
+        }
+        let packet = self_lsu(self.router_id, area, lsas);
+        match OspfCodec::v2().encode_vec(&packet) {
+            Ok(mut bytes) => {
+                finalize_v2_packet(&mut bytes);
+                if let Err(e) = router.feed_input(anchor, &bytes) {
+                    eprintln!("daemon: ospf sr self-origination feed: {}", e);
+                }
+            }
+            Err(e) => eprintln!("daemon: ospf sr LSA encode: {}", e),
+        }
+    }
+
+    /// The sequence floor for one of our SR LSAs: the newest of our
+    /// last originated instance and the one the area LSDB holds (a
+    /// received-back or pre-restart instance — RFC 2328 §12.1.2 signed
+    /// comparison; a fresh 0x80000001 would be silently older).
+    fn sr_prev_seq(&self, router: &DefaultRouter, area: u32, lsid: u32) -> Option<u32> {
+        let lsdb_seq = router
+            .ospf_area_lsa(area, 10, self.router_id.as_u32(), lsid)
+            .map(|l| l.header.ls_sequence_number);
+        let own = self.sr_seq.get(&(area, lsid)).copied();
+        match (own, lsdb_seq) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (a, b) => a.or(b),
+        }
     }
 
     // -----------------------------------------------------------------

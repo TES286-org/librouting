@@ -134,6 +134,20 @@ pub(crate) struct OspfAreaSpec {
     pub stub_metric: Option<u32>,
 }
 
+/// One `[[ospf.prefix_sid]]` table (RFC 8667 §6): a locally originated
+/// prefix advertised with a Segment Routing Prefix-SID.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct OspfPrefixSidSpec {
+    /// Prefix (IPv4, required).
+    pub prefix: Option<String>,
+    /// SID index into the SRGB (required; the label peers derive is
+    /// `srgb_base + sid`).
+    pub sid: Option<u32>,
+    /// RFC 7684 §6 N-flag: the prefix identifies the node itself (an
+    /// SR-Node / loopback), so peers may treat it as a node segment.
+    pub node: Option<bool>,
+}
+
 /// One `[[ospf.interface]]` table (or `--ospf-interface` flag).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct OspfIfSpec {
@@ -397,6 +411,14 @@ pub(crate) struct DaemonConfig {
     pub ospf_areas: Vec<OspfAreaSpec>,
     /// `[[ospf.interface]]` tables / `--ospf-interface` flags.
     pub ospf_interfaces: Vec<OspfIfSpec>,
+    /// RFC 8667 §3.2: this router's SRGB base label (first label of
+    /// the range). Absent until `[ospf] srgb_base` is configured.
+    pub ospf_srgb_base: Option<u32>,
+    /// RFC 8667 §3.2: SRGB range size (label count).
+    pub ospf_srgb_range: Option<u32>,
+    /// `[[ospf.prefix_sid]]` tables — locally originated prefixes
+    /// advertised with a Prefix-SID in an Extended Prefix Opaque LSA.
+    pub ospf_prefix_sids: Vec<OspfPrefixSidSpec>,
     /// OSPF graceful restart, restarting side (RFC 3623 §2): on
     /// shutdown, originate Grace-LSAs per interface and exit without
     /// the session-close teardown (kernel routes persist); after the
@@ -637,7 +659,12 @@ impl DaemonConfig {
     /// named, non-backbone areas declared exactly once, valid area
     /// types, the backbone never stub/NSSA.
     fn finalize_ospf(&mut self) -> Result<(), String> {
-        if self.ospf_areas.is_empty() && self.ospf_interfaces.is_empty() {
+        if self.ospf_areas.is_empty()
+            && self.ospf_interfaces.is_empty()
+            && self.ospf_prefix_sids.is_empty()
+            && self.ospf_srgb_base.is_none()
+            && self.ospf_srgb_range.is_none()
+        {
             return Ok(());
         }
         if self.protocol != "ospf" {
@@ -685,6 +712,47 @@ impl DaemonConfig {
                 ));
             }
             iface.area = Some(area);
+        }
+        // Segment Routing (RFC 8667): prefix SIDs need an SRGB; a
+        // base without a range (or vice versa) is a config bug. When
+        // only the SRGB is configured (no prefix SIDs yet) it still
+        // gets advertised — the node is SR-capable even before it
+        // originates SIDs (that is what a future mapping server or
+        // Adj-SID slice builds on).
+        if (self.ospf_srgb_base.is_some()) != (self.ospf_srgb_range.is_some()) {
+            return Err("[ospf] srgb_base and srgb_range must be set together".to_string());
+        }
+        for spec in &self.ospf_prefix_sids {
+            let Some(prefix) = spec.prefix.as_deref().filter(|p| !p.is_empty()) else {
+                return Err("[[ospf.prefix_sid]] without 'prefix'".to_string());
+            };
+            prefix
+                .parse::<lr_core::addr::Prefix>()
+                .map_err(|_| format!("[[ospf.prefix_sid]] bad prefix '{prefix}'"))?;
+            spec.sid
+                .ok_or_else(|| format!("[[ospf.prefix_sid]] {prefix} without 'sid'"))?;
+        }
+        if !self.ospf_prefix_sids.is_empty() {
+            // FRR's default SRGB (16000/8000) applies when the
+            // operator configures SIDs without an explicit block.
+            let base = self.ospf_srgb_base.unwrap_or(16_000);
+            let range = self.ospf_srgb_range.unwrap_or(8_000);
+            self.ospf_srgb_base = Some(base);
+            self.ospf_srgb_range = Some(range);
+            if base + range - 1 > 1_048_575 {
+                return Err(format!(
+                    "[ospf] srgb_base {base} + srgb_range {range} overflows the MPLS label space"
+                ));
+            }
+            for spec in &self.ospf_prefix_sids {
+                let sid = spec.sid.unwrap_or(0);
+                if sid >= range {
+                    return Err(format!(
+                        "[[ospf.prefix_sid]] sid {sid} falls outside the SRGB range 0..={}",
+                        range - 1
+                    ));
+                }
+            }
         }
         Ok(())
     }
@@ -972,6 +1040,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 "ospf.interface" => {
                     cfg.ospf_interfaces.push(OspfIfSpec::default());
                     section = "ospf.interface".to_string();
+                }
+                "ospf.prefix_sid" => {
+                    cfg.ospf_prefix_sids.push(OspfPrefixSidSpec::default());
+                    section = "ospf.prefix_sid".to_string();
                 }
                 "babel.key" => {
                     cfg.babel_keys.push(BabelKeySpec::default());
@@ -1429,6 +1501,30 @@ fn apply_ospf_key(
             "gr_state_file" => {
                 cfg.ospf_gr_state_file = Some(value.to_string());
             }
+            // RFC 8667 §3.2: the Segment Routing Global Base this
+            // router advertises in its Router Information LSA. A
+            // base without a range (or vice versa) is a config bug —
+            // rejected, defaulted together in finalize() instead.
+            "srgb_base" => {
+                let base: u32 = value
+                    .parse()
+                    .map_err(|_| format!("bad srgb_base '{value}'"))?;
+                if !(16..=1_048_575).contains(&base) {
+                    return Err(format!(
+                        "srgb_base {base} outside the MPLS label space 16..=1048575"
+                    ));
+                }
+                cfg.ospf_srgb_base = Some(base);
+            }
+            "srgb_range" => {
+                let range: u32 = value
+                    .parse()
+                    .map_err(|_| format!("bad srgb_range '{value}'"))?;
+                if range == 0 {
+                    return Err("srgb_range must be non-zero".into());
+                }
+                cfg.ospf_srgb_range = Some(range);
+            }
             _ => {
                 return Err(format!(
                     "unknown [ospf] key '{key}' (typo protection; OSPF config fails closed)"
@@ -1509,6 +1605,27 @@ fn apply_ospf_key(
                 _ => {
                     return Err(format!(
                         "unknown [[ospf.interface]] key '{key}' (typo protection; OSPF config fails closed)"
+                    ))
+                }
+            }
+        }
+        "ospf.prefix_sid" => {
+            let Some(sid) = cfg.ospf_prefix_sids.last_mut() else {
+                return Err("key outside a [[ospf.prefix_sid]] table".into());
+            };
+            match key {
+                "prefix" => sid.prefix = Some(value.to_string()),
+                "sid" => {
+                    sid.sid = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad sid '{value}'"))?,
+                    );
+                }
+                "node" => sid.node = Some(parse_bool(value)),
+                _ => {
+                    return Err(format!(
+                        "unknown [[ospf.prefix_sid]] key '{key}' (typo protection; OSPF config fails closed)"
                     ))
                 }
             }
@@ -2615,6 +2732,58 @@ mod tests {
         parse_toml_subset("[[ospf.area]]\nid = 0\ntype = \"stub\"\n", &mut cfg).unwrap();
         let err = cfg.finalize().expect_err("stub backbone must fail");
         assert!(err.contains("backbone"), "{err}");
+    }
+
+    /// RFC 8667 config: SRGB + prefix SIDs parse and finalize; the
+    /// FRR-default SRGB (16000/8000) fills in when SIDs are given
+    /// without an explicit block; mismatched half-SRGBs and
+    /// out-of-range SIDs fail closed.
+    #[test]
+    fn ospf_segment_routing_config_validates() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[ospf]\nsrgb_base = 20000\nsrgb_range = 4000\n\n\
+             [[ospf.prefix_sid]]\nprefix = \"10.0.0.0/24\"\nsid = 100\nnode = true\n\n\
+             [[ospf.prefix_sid]]\nprefix = \"10.0.1.0/24\"\nsid = 200\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.ospf_srgb_base, Some(20_000));
+        assert_eq!(cfg.ospf_srgb_range, Some(4_000));
+        assert_eq!(cfg.ospf_prefix_sids.len(), 2);
+        assert_eq!(cfg.ospf_prefix_sids[0].node, Some(true));
+
+        // SIDs without an SRGB get FRR's default block.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[[ospf.prefix_sid]]\nprefix = \"10.0.0.0/24\"\nsid = 5\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.ospf_srgb_base, Some(16_000));
+        assert_eq!(cfg.ospf_srgb_range, Some(8_000));
+
+        // Half an SRGB is a config bug.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[ospf]\nsrgb_base = 16000\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("base without range must fail");
+        assert!(err.contains("together"), "{err}");
+
+        // SID outside the SRGB fails closed.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\nsrgb_base = 16000\nsrgb_range = 100\n\n\
+             [[ospf.prefix_sid]]\nprefix = \"10.0.0.0/24\"\nsid = 500\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("SID outside SRGB must fail");
+        assert!(err.contains("outside the SRGB"), "{err}");
     }
 
     #[test]
