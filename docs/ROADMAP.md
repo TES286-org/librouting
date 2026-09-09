@@ -559,8 +559,41 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    current kernels, silently degrading the daemon to IPv4-only
    discovery).
 5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
-   Future work; depends on RFC 9256 (Segment Routing Policy) once an
-   embedder asks.
+   In progress; slice 1 (control-plane codecs + origination) landed:
+
+   - **Codec** (`lr-ospf::lsa::sr`): the RFC 7684 §6 Extended Prefix
+     Opaque LSA (area-scoped, Opaque Type 7) with the RFC 8667 §5
+     Prefix-SID sub-TLV (NP/M/E/V/L flags, MT-ID, algorithm, 3-octet
+     SID), the RFC 4970 Router Information LSA's SR-Algorithm (type 8)
+     and SRGB Descriptor (type 9) TLVs, and the remote-label mapping
+     (SRGB base + index with the V/L and out-of-range guards from
+     RFC 8667 §6/§8.1). Twelve unit tests pin the wire shapes byte for
+     byte. One bug was flushed out by the reference implementation
+     itself: the first encoder left the *last* TLV/sub-TLV unpadded,
+     so the LSA length was not a multiple of 4 — FRR silently rejected
+     the whole DBD carrying it and the adjacency hung in ExStart (all
+     standard OSPFv2 LSA lengths are 4-aligned; the fix emits the
+     trailing alignment padding).
+   - **Origination** (daemon): `[ospf] srgb_base/srgb_range` +
+     `[[ospf.prefix_sid]]` (prefix/sid/node) config with the FRR
+     default SRGB (16000/8000) when SIDs are configured without an
+     explicit block; the daemon originates the area-scoped RI LSA plus
+     one Extended Prefix LSA per configured SID through the same
+     anchor-LSU path as the Router-LSA (LSDB sequence floor,
+     adjacency-driven re-origination). SR-less configs originate
+     nothing.
+   - **Interop** (`tests/interop/ospf_sr_frr.sh`): lr x FRR 10.3 ospfd
+     over a rootless netns veth pair. FRR requires `capability opaque`
+     (its O-bit clearing in `ospf_db_desc` otherwise poisons the
+     exchange — flushed out by this lab); with it, FRR's LSDB holds
+     both of lr's SR LSAs. The SRDB label-mapping assertion is gated
+     on kernel MPLS (FRR reserves the SRGB through zebra's label
+     manager; same gate as mpls_lsp.sh phase 2).
+   - **Next slice**: reception (Extended Prefix + RI SR parsing into a
+     per-node SR database) → SPF label attach (prefix-SID → MPLS label
+     per next hop) → kernel AF_MPLS mirror (RFC 8660 data plane),
+     Adj-SIDs (RFC 8667 §7), then the mapping-server (M-flag) shapes.
+     RFC 9256 (Segment Routing Policy) builds on the data plane.
 
 ### W4 — Documentation, guides, tutorials
 

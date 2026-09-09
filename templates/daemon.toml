@@ -350,6 +350,23 @@ permit = false
 # gr_state_file = "/run/lr/ospf.gr"  # where the grace deadline survives
                              # the restart (defaults to <api-socket>.gr
                              # when the runtime API socket is set)
+# srgb_base = 16000           # RFC 8667 3.2: the Segment Routing Global
+                             # Block this router advertises in its
+                             # Router Information LSA (base label of
+                             # the range; must pair with srgb_range)
+# srgb_range = 8000           # SRGB size in labels; a peer derives the
+                             # label for a prefix-SID index i as
+                             # srgb_base + i. Defaults to FRR's block
+                             # (16000/8000) when prefix SIDs are
+                             # configured without an explicit SRGB.
+
+# RFC 8667 6: locally originated prefixes advertised with a Segment
+# Routing Prefix-SID (Extended Prefix Opaque LSA, Opaque Type 7).
+# [[ospf.prefix_sid]]
+# prefix = "10.99.2.0/24"     # the advertised prefix (required)
+# sid = 100                   # SID index into the SRGB (required)
+# node = true                 # RFC 7684 6 N-flag: the prefix is a node
+                              # segment (SR-Node / loopback)
 
 # Non-backbone areas must be declared before interfaces reference them;
 # the backbone (area 0) is implicit and always "normal".

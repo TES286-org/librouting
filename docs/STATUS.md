@@ -86,6 +86,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | GR helper mode (RFC 3623 §3) | ✅ 🧪 | `lr-ospf::gr::HelperEntry` + daemon wiring — §3.1 checks, dead-timer retention, adjacency kept in the Router-LSA, §3.2 exits (flush/timeout/topology change via per-area topology versions), FRR `supported_grace_time` cap; default on (`--ospf-no-gr-helper`); BIRD-verified (`tests/interop/ospf_gr_bird.sh`) |
 | GR restarting router (RFC 3623 §2) | ✅ 🧪 | state-file-persisted grace deadline, shutdown Grace-LSA flood, recovery with origination suppression + §2.2 adjacency/back-link verification, §2.3 flush + re-origination above the retained sequence floor; the flood window keeps servicing the protocol (inbound ACKs + Hellos + outbound — no re-origination/election) so a peer's post-Full LSA refresh gets ACKed and its §3.1 (2) helper check passes on a later flood round (this was the CI-red race in `ospf_gr_bird.sh`: 7 consecutive failures because the un-ACKed Router-LSA pinned the peer's LS retransmission list); `tests/interop/ospf_gr.sh` |
 | Prefix Link-Local LSA (RFC 7684) | ✅ | `LsaTypeV3::PrefixLinkLocalAsLsa = 0x4004` + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec with optional Address Family ID; 8 unit tests |
+| Segment Routing control plane (RFC 8667, slice 1) | 🟡 🧪 | `lr-ospf::lsa::sr` — RI LSA SR-Algorithm + SRGB Descriptor TLVs, Extended Prefix Opaque LSA (Opaque Type 7) + Prefix-SID sub-TLV codec with the RFC 7684 §6 4-octet alignment rule, remote-label mapping (SRGB base + index); daemon originates RI + one Ext-Prefix LSA per `[[ospf.prefix_sid]]` (LSDB sequence floor, adjacency-driven re-origination); FRR 10.3 stores both LSAs (`tests/interop/ospf_sr_frr.sh`, LSDB-verified; the SRDB label-mapping phase is kernel-MPLS-gated). Missing: reception → SPF label attach → kernel LSP mirror (RFC 8660 data plane), Adj-SIDs, mapping server |
 
 ### Babel (`lr-babel`)
 
@@ -235,9 +236,13 @@ the state, that file tracks the how and why.
 
 **Remaining open items** (nothing else is queued):
 
-1. **SR-MPLS (RFC 8660/8667)** — Segment Routing MPLS data plane.
-   Future work; depends on RFC 9256 (Segment Routing Policy) once an
-   embedder asks. (`ROADMAP.md` W3-extra item 5.)
+1. **SR-MPLS (RFC 8660/8667)** — the wire codecs, SRGB/prefix-SID
+   configuration and origination have landed (W3-extra.5 slice 1,
+   FRR-verified); the remaining SR-MPLS work is the receive path
+   (Extended Prefix LSA parsing → SPF label attach → kernel AF_MPLS
+   mirror), Adj-SIDs and the mapping-server shapes. RFC 9256 (Segment
+   Routing Policy) builds on that data plane. (`ROADMAP.md`
+   W3-extra item 5.)
 2. **OSPFv3 daemon depth** — the OSPFv3 exchange/daemon mode shares
    v2's machinery but is not yet exercised by the daemon; the v3
    codec and LSA surfaces exist. (Tracked by the capability tables

@@ -88,11 +88,15 @@ pub struct SrPrefixAdvert {
 
 impl SrPrefixAdvert {
     /// Encode the Extended Prefix TLV (RFC 7684 §6) with one
-    /// Prefix-SID sub-TLV (RFC 8667 §5).
+    /// Prefix-SID sub-TLV (RFC 8667 §5). The sub-TLV (6-octet value)
+    /// is padded to four-octet alignment *including the trailing
+    /// instance* — every OSPFv2 LSA length is a multiple of 4, and a
+    /// non-aligned LSA makes strict receivers (FRR) drop the whole
+    /// DBD carrying it.
     pub fn encode_ext_prefix_tlv(&self) -> Vec<u8> {
         // Value: route_type(1) flags(1) af(1) prefix_len(1)
-        //        prefix(4) + sub-TLV(4 + 6 = 10).
-        let mut value = Vec::with_capacity(4 + 4 + 10);
+        //        prefix(4) + sub-TLV(4 + 6, padded to 12).
+        let mut value = Vec::with_capacity(4 + 4 + 12);
         value.push(self.route_type);
         value.push(self.flags);
         value.push(0); // AF: 0 = IPv4 unicast
@@ -106,6 +110,10 @@ impl SrPrefixAdvert {
         value.push(0); // MT-ID 0 (default topology)
         value.push(self.algorithm);
         value.extend_from_slice(&self.sid.to_be_bytes()[1..4]);
+        // Trailing alignment padding: the sub-TLV value is 6 octets,
+        // so two padding octets close the TLV on a 4-octet boundary.
+        let sub_pad = (4 - (value.len() - 8) % 4) % 4;
+        value.resize(value.len() + sub_pad, 0);
         // TLV wrapper.
         let mut out = Vec::with_capacity(4 + value.len());
         out.extend_from_slice(&TLV_EXT_PREFIX.to_be_bytes());
@@ -248,6 +256,10 @@ pub fn encode_ri_sr_lsa_body(srgb_base: u32, srgb_range: u32) -> Option<Vec<u8>>
     out.push(SRGB_FLAG_MPLS);
     out.extend_from_slice(&srgb_range.to_be_bytes()[1..4]);
     out.extend_from_slice(&srgb_base.to_be_bytes()[1..4]);
+    // Trailing alignment padding (value 7 octets → one pad octet):
+    // the LSA length must stay a multiple of 4 or strict receivers
+    // (FRR) drop the LSA and every DBD carrying it.
+    out.push(0);
     Some(out)
 }
 
@@ -414,9 +426,10 @@ mod tests {
     #[test]
     fn ext_prefix_tlv_wire_shape_matches_rfc7684() {
         let wire = sample_advert().encode_ext_prefix_tlv();
-        // TLV type 1, length 18 (4 descriptor + 4 prefix + 10 sub-TLV).
+        // TLV type 1, length 20 (4 descriptor + 4 prefix + 12
+        // sub-TLV including the 2-octet trailing padding).
         assert_eq!(&wire[0..2], &[0, 1]);
-        assert_eq!(&wire[2..4], &18u16.to_be_bytes());
+        assert_eq!(&wire[2..4], &20u16.to_be_bytes());
         // route_type, flags, af, prefix_len.
         assert_eq!(wire[4], 1);
         assert_eq!(wire[5], 0x40);
@@ -433,7 +446,9 @@ mod tests {
         assert_eq!(wire[18], 0);
         // SID 100 in 3 octets.
         assert_eq!(&wire[19..22], &[0, 0, 100]);
-        assert_eq!(wire.len(), 22);
+        // Trailing alignment padding closes the TLV on a multiple of 4.
+        assert_eq!(&wire[22..24], &[0, 0]);
+        assert_eq!(wire.len(), 24);
     }
 
     #[test]
@@ -504,7 +519,9 @@ mod tests {
         assert_eq!(wire[12], SRGB_FLAG_MPLS);
         assert_eq!(&wire[13..16], &8_000u32.to_be_bytes()[1..4]);
         assert_eq!(&wire[16..19], &16_000u32.to_be_bytes()[1..4]);
-        assert_eq!(wire.len(), 19);
+        // Trailing alignment padding: the LSA length stays 4-aligned.
+        assert_eq!(wire[19], 0);
+        assert_eq!(wire.len(), 20);
     }
 
     #[test]
