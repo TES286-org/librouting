@@ -92,7 +92,8 @@ top of the file is global. In FRR everything is line-based, so the
 `neighbor ADDR` form scopes to a peer and the plain form is global.
 
 Keys are matched with `-` and `_` treated as equal
-(`install-kernel` = `install_kernel`). Unknown keys and malformed
+(`install-kernel` = `install_kernel`), and both `key value` and
+`key = value` spellings are accepted. Unknown keys and malformed
 values are reported as warnings; they never silently disappear.
 
 ### Global directives
