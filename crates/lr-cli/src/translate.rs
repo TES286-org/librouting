@@ -329,7 +329,7 @@ fn translate_bird(text: &str) -> ConfigOut {
                         tokens[1],
                         tokens
                             .get(2)
-                            .map(|n| n.trim_end_matches(|c| c == '{' || c == ';'))
+                            .map(|n| n.trim_end_matches(['{', ';']))
                             .unwrap_or("")
                     ));
                 }
@@ -1282,15 +1282,31 @@ fn lr_marker_body(raw: &str, comment_chars: &str) -> Option<String> {
 
 /// Split a directive body into its normalised key (snake_case) and
 /// optional value (whitespace-joined remainder, quotes stripped).
+/// Both `key value` and `key = value` spellings are accepted — the
+/// latter is what operators coming from the TOML schema write
+/// naturally. A bare `=` separator is stripped, `key=` with no value
+/// keeps the empty value (surfaced as "needs a value" at render).
 fn parse_lr_body(body: &str) -> LrDirective {
-    let mut parts = body.split_whitespace();
-    let key = parts
+    let body = body.trim();
+    let (key_part, value_part) = match body.find('=') {
+        Some(i) if i > 0 => (body[..i].trim(), Some(body[i + 1..].trim())),
+        _ => (body, None),
+    };
+    let key = key_part
+        .split_whitespace()
         .next()
         .unwrap_or("")
         .trim_end_matches(';')
         .to_lowercase()
         .replace('-', "_");
-    let value_raw = parts.collect::<Vec<_>>().join(" ");
+    let value_raw = match value_part {
+        Some(v) => v.to_string(),
+        None => key_part
+            .split_whitespace()
+            .skip(1)
+            .collect::<Vec<_>>()
+            .join(" "),
+    };
     let value = if value_raw.is_empty() {
         None
     } else {
@@ -1623,13 +1639,31 @@ route-map FILTER-IN permit 10
     }
 
     /// FRR dialect defaults: `router bgp` implies FRR's documented
-    /// `bgp enforce-first-as` on; BIRD keeps lr's default (off).
+    /// `bgp enforce-first-as` default (on); BIRD keeps lr's default (off).
     #[test]
     fn frr_enforce_first_as_default_is_on() {
         let out = translate_frr("router bgp 64512\n neighbor 10.0.0.2 remote-as 64513\n");
         assert_eq!(out.enforce_first_as, Some(true));
         let bird = translate_bird("router id 10.0.0.1\n");
         assert_eq!(bird.enforce_first_as, None);
+    }
+
+    /// Both `key value` and `key = value` directive spellings work —
+    /// the latter is the natural TOML-shaped habit.
+    #[test]
+    fn directives_accept_assignment_form() {
+        let mut cfg = crate::daemon_config::DaemonConfig::with_defaults();
+        crate::compat::load_config_text(
+            "router bgp 64512\n\
+             neighbor 10.0.0.2 remote-as 64513\n\
+             # lr: graceful_restart = 240\n\
+             # lr: install-kernel\n",
+            Some(crate::compat::Dialect::Frr),
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.gr_restart_time, 240);
+        assert!(cfg.install_kernel);
     }
 
     #[test]
