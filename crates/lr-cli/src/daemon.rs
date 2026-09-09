@@ -52,6 +52,7 @@ use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, Sessi
 use std::collections::HashMap;
 
 mod api;
+mod compat;
 mod daemon_bfd;
 mod daemon_config;
 mod daemon_ldp;
@@ -73,6 +74,8 @@ fn print_usage() {
          [--peer ADDR:PORT]... [--listen ADDR:PORT] [--network PREFIX]...\n         \
          [--hold-time SEC]\n         \
          lr-daemon --config daemon.toml [--install-kernel-routes]\n         \
+         lr-daemon --config bird.conf|frr.conf (the dialect is\n         \
+         auto-detected; --config-dialect bird|frr|toml forces one)\n         \
          lr-daemon translate <bird|frr> <config-file>\n\n\
          lr-daemon yang render <config-file> [--model babel|keychain|all]\n\n\
          SUBCOMMANDS:\n  \
@@ -84,7 +87,12 @@ fn print_usage() {
          (RFC 9647 ietf-babel, RFC 8177 ietf-key-chain; NETCONF-style\n  \
          <config> wrapper with --model all, the default)\n\n\
          OPTIONS:\n  \
-         --config PATH            Load TOML configuration\n  \
+         --config PATH            Load configuration; the dialect (lr\n  \
+         TOML, BIRD 2, FRR) is auto-detected, so a BIRD or FRR file\n  \
+         runs directly in the compatible form (see docs/COMPAT.md)\n  \
+         --config-dialect D       Force the config dialect: bird | frr |\n  \
+         toml (BIRD/FRR files support the lr: comment directives as\n  \
+         the lr-specific extension channel)\n  \
          --peer ADDR:PORT         Remote BGP peer to connect to (repeatable;\n  \
          all peers share --peer-as; per-peer settings need [[peer]])\n  \
          --listen ADDR:PORT       Accept inbound BGP connections\n  \
@@ -719,7 +727,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             let router = Arc::clone(&router);
             let current_networks = Arc::clone(&current_networks);
             let config_path = cfg.config_path.clone();
-            move || reload_config(config_path.as_deref(), &router, &current_networks)
+            let config_dialect = cfg.config_dialect.clone();
+            move || {
+                reload_config(
+                    config_path.as_deref(),
+                    config_dialect.as_deref(),
+                    &router,
+                    &current_networks,
+                )
+            }
         }),
         router,
         running: Arc::clone(&running),
@@ -2422,7 +2438,7 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
     let runtime = Arc::new(Runtime {
         reload: Arc::new({
             let router = Arc::clone(&router);
-            move || reload_config(None, &router, &Arc::new(Mutex::new(Vec::new())))
+            move || reload_config(None, None, &router, &Arc::new(Mutex::new(Vec::new())))
         }),
         router: Arc::clone(&router),
         running: Arc::clone(&running),
@@ -3171,6 +3187,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
 /// half-apply).
 fn reload_config(
     path: Option<&str>,
+    dialect: Option<&str>,
     router: &Arc<Mutex<DefaultRouter>>,
     current_networks: &Arc<Mutex<Vec<String>>>,
 ) -> Vec<String> {
@@ -3187,7 +3204,21 @@ fn reload_config(
         }
     };
     let mut fresh = DaemonConfig::default();
-    if let Err(e) = daemon_config::parse_toml_subset(&text, &mut fresh) {
+    // The reload goes through the same dialect path as startup: a
+    // config loaded from a BIRD/FRR file re-parses as BIRD/FRR, so a
+    // compat-mode daemon does not break on SIGHUP.
+    let forced = match dialect {
+        Some("bird") => Some(crate::compat::Dialect::Bird),
+        Some("frr") => Some(crate::compat::Dialect::Frr),
+        Some("toml") | None => Some(crate::compat::Dialect::Toml),
+        Some(other) => {
+            return vec![format!(
+                "reload: unknown config dialect '{}' (keeping current config)",
+                other
+            )]
+        }
+    };
+    if let Err(e) = crate::compat::load_config_text(&text, forced, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
     let mut lines: Vec<String> = fresh

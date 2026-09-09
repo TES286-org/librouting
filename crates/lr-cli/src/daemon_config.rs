@@ -277,6 +277,10 @@ pub(crate) struct DaemonConfig {
     pub api_socket: Option<String>,
     /// Configuration file the daemon was started with (reload source).
     pub config_path: Option<String>,
+    /// Dialect of the config file: `"toml"` (native), `"bird"` or
+    /// `"frr"` (compat surface). Set at load time; SIGHUP / API
+    /// `reload` re-parse the file through the same dialect path.
+    pub config_dialect: Option<String>,
     /// RFC 7911 Add-Path capability.
     pub add_path: bool,
     /// RFC 7911: how many paths per prefix the decision process keeps.
@@ -1757,12 +1761,23 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
     let args: Vec<String> = std::env::args().collect();
     let mut cfg = DaemonConfig::with_defaults();
     let mut config_path: Option<String> = None;
+    let mut config_dialect: Option<String> = None;
     let mut i = 1;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
             "--config" if i + 1 < args.len() => {
                 config_path = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--config-dialect" if i + 1 < args.len() => {
+                match crate::compat::Dialect::from_flag(&args[i + 1]) {
+                    Ok(_) => config_dialect = Some(args[i + 1].clone()),
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return Err(ExitCode::from(2));
+                    }
+                }
                 i += 2;
             }
             "--local-as" if i + 1 < args.len() => {
@@ -2190,10 +2205,31 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             eprintln!("cannot read config {}: {}", path, e);
             ExitCode::from(1)
         })?;
-        parse_toml_subset(&text, &mut cfg).map_err(|e| {
+        // Dialect resolution: `--config-dialect` forces an
+        // interpretation, otherwise the content is recognised (lr
+        // TOML, BIRD 2 or FRR). Bird/frr files go through the compat
+        // surface (parse → render → the same TOML loader below), so
+        // `lr-daemon --config bird.conf` runs the source config
+        // directly in the compatible form.
+        let forced = match config_dialect.as_deref() {
+            Some(f) => match crate::compat::Dialect::from_flag(f) {
+                Ok(d) => Some(d),
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return Err(ExitCode::from(2));
+                }
+            },
+            None => None,
+        };
+        crate::compat::load_config_text(&text, forced, &mut cfg).map_err(|e| {
             eprintln!("config parse error: {}", e);
             ExitCode::from(1)
         })?;
+        if cfg.config_dialect.is_none() {
+            cfg.config_dialect = forced
+                .map(|d| d.name().to_string())
+                .or_else(|| crate::compat::detect_dialect(&text).map(|d| d.name().to_string()));
+        }
         for w in &cfg.warnings {
             eprintln!("config warning: {}", w);
         }
