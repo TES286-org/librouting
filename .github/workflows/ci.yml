@@ -173,7 +173,12 @@ jobs:
         run: |
           sudo sysctl -w net.ipv6.conf.all.seg6_enabled=1 || true
           sudo sysctl -w net.ipv6.conf.lo.seg6_enabled=1 || true
-          cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture || echo "SRv6 kernel interop skipped (no CAP_NET_ADMIN or no seg6 support)"
+          # The tests are #[ignore] (kernel-gated). They skip cleanly
+          # when seg6 is unavailable or when the process lacks
+          # CAP_NET_ADMIN — the wire format itself is pinned by the
+          # 17 unit tests in seg6_route.rs that run unconditionally in
+          # the cargo test --workspace step above.
+          cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         run: ./tests/interop/ospf.sh
       - name: Babel MAC auth e2e (RFC 8967 + RFC 9467, two daemons)

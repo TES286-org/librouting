@@ -10,11 +10,18 @@
 //! - Skips when `seg6_enabled` is false (set
 //!   `net.ipv6.conf.all.seg6_enabled=1` to enable).
 //! - Skips when `iproute2` (`ip`) is not on PATH.
-//! - Skips when run as a non-root user without `CAP_NET_ADMIN` (the
-//!   route-install syscall needs it).
+//! - Skips when run without `CAP_NET_ADMIN` (the route-install
+//!   syscall returns EPERM). CI runners don't grant this by default;
+//!   operators should run the test locally with `sudo` or inside a
+//!   rootless netns (`unshare -Urn`).
+//!
+//! The wire format itself is pinned by 17 unit tests in
+//! `crates/lr-osroute/src/seg6_route.rs` that run unconditionally in
+//! `cargo test --workspace` — this integration test is *additional*
+//! end-to-end verification against a real kernel, not the only check.
 //!
 //! Run locally with: `sudo sysctl -w net.ipv6.conf.all.seg6_enabled=1
-//! && cargo test --test srv6_kernel -- --ignored --nocapture`.
+//! && sudo cargo test --test srv6_kernel -- --ignored --nocapture`.
 
 #![cfg(target_os = "linux")]
 
@@ -37,16 +44,6 @@ fn iproute2_has_seg6() -> bool {
     combined.contains("seg6")
 }
 
-fn have_net_admin() -> bool {
-    // `ip netns add` requires CAP_NET_ADMIN — if it fails, we don't
-    // have the privilege to install routes either.
-    Command::new("ip")
-        .args(["netns", "list"])
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
-
 fn ip(args: &[&str]) -> String {
     let out = Command::new("ip").args(args).output();
     match out {
@@ -66,29 +63,50 @@ fn show_seg6_routes() -> String {
     s
 }
 
-#[test]
-#[ignore = "kernel-gated: requires seg6_enabled=1 + CAP_NET_ADMIN"]
-fn seg6_route_installs_into_kernel_main_table() {
+/// Skip predicate: returns `Some(reason)` when the kernel cannot
+/// accept SRv6 routes from this process. The reason is logged so a CI
+/// operator can see why the test skipped.
+fn kernel_unavailable() -> Option<&'static str> {
     if !seg6_enabled() {
-        eprintln!("SKIP: net.ipv6.conf.all.seg6_enabled is not 1");
-        return;
+        return Some("net.ipv6.conf.all.seg6_enabled is not 1");
     }
     if !iproute2_has_seg6() {
-        eprintln!(
-            "SKIP: iproute2 lacks seg6 support (need Linux 4.10+ with CONFIG_IPV6_SEG6_LWTUNNEL)"
+        return Some(
+            "iproute2 lacks seg6 support (need Linux 4.10+ with CONFIG_IPV6_SEG6_LWTUNNEL)",
         );
-        return;
     }
-    if !have_net_admin() {
-        eprintln!("SKIP: no CAP_NET_ADMIN (run as root)");
+    None
+}
+
+/// True when the error is a privilege error (EPERM) — the kernel
+/// accepted the wire format but rejected the install because the
+/// process lacks CAP_NET_ADMIN. The test skips in that case rather
+/// than failing: the wire format itself is already verified by the
+/// unit tests in seg6_route.rs.
+fn is_privilege_error(e: &lr_osroute::seg6_route::Seg6RouteError) -> bool {
+    matches!(
+        e,
+        lr_osroute::seg6_route::Seg6RouteError::Kernel(s)
+            if s.contains("EPERM") || s.contains("insufficient privileges")
+    )
+}
+
+#[test]
+#[ignore = "kernel-gated: requires seg6_enabled=1 + CAP_NET_ADMIN (run as root or in a rootless netns)"]
+fn seg6_route_installs_into_kernel_main_table() {
+    if let Some(reason) = kernel_unavailable() {
+        eprintln!("SKIP: {}", reason);
         return;
     }
 
     let mut nl = match Seg6Netlink::connect() {
         Ok(nl) => nl,
         Err(e) => {
-            eprintln!("SKIP: Seg6Netlink::connect failed: {}", e);
-            return;
+            if is_privilege_error(&e) {
+                eprintln!("SKIP: Seg6Netlink::connect returned EPERM (run as root or in a rootless netns)");
+                return;
+            }
+            panic!("Seg6Netlink::connect failed unexpectedly: {}", e);
         }
     };
 
@@ -106,6 +124,10 @@ fn seg6_route_installs_into_kernel_main_table() {
 
     let res = nl.add_seg6_route(&route);
     if let Err(e) = &res {
+        if is_privilege_error(e) {
+            eprintln!("SKIP: add_seg6_route returned EPERM (run as root or in a rootless netns)");
+            return;
+        }
         eprintln!("add_seg6_route failed: {}\n{}", e, show_seg6_routes());
     }
     // Always clean up, even on failure, so the test is idempotent.
@@ -130,26 +152,21 @@ fn seg6_route_installs_into_kernel_main_table() {
 }
 
 #[test]
-#[ignore = "kernel-gated: requires seg6_enabled=1 + CAP_NET_ADMIN"]
+#[ignore = "kernel-gated: requires seg6_enabled=1 + CAP_NET_ADMIN (run as root or in a rootless netns)"]
 fn seg6local_route_installs_into_kernel_local_table() {
-    if !seg6_enabled() {
-        eprintln!("SKIP: net.ipv6.conf.all.seg6_enabled is not 1");
-        return;
-    }
-    if !iproute2_has_seg6() {
-        eprintln!("SKIP: iproute2 lacks seg6 support");
-        return;
-    }
-    if !have_net_admin() {
-        eprintln!("SKIP: no CAP_NET_ADMIN (run as root)");
+    if let Some(reason) = kernel_unavailable() {
+        eprintln!("SKIP: {}", reason);
         return;
     }
 
     let mut nl = match Seg6Netlink::connect() {
         Ok(nl) => nl,
         Err(e) => {
-            eprintln!("SKIP: Seg6Netlink::connect failed: {}", e);
-            return;
+            if is_privilege_error(&e) {
+                eprintln!("SKIP: Seg6Netlink::connect returned EPERM (run as root or in a rootless netns)");
+                return;
+            }
+            panic!("Seg6Netlink::connect failed unexpectedly: {}", e);
         }
     };
 
@@ -161,6 +178,12 @@ fn seg6local_route_installs_into_kernel_local_table() {
 
     let res = nl.add_seg6local_route(&route);
     if let Err(e) = &res {
+        if is_privilege_error(e) {
+            eprintln!(
+                "SKIP: add_seg6local_route returned EPERM (run as root or in a rootless netns)"
+            );
+            return;
+        }
         eprintln!("add_seg6local_route failed: {}\n{}", e, show_seg6_routes());
     }
     let _ = nl.delete_seg6local_route(sid);
