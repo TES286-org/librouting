@@ -568,7 +568,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      SID), the RFC 4970 Router Information LSA's SR-Algorithm (type 8)
      and SRGB Descriptor (type 9) TLVs, and the remote-label mapping
      (SRGB base + index with the V/L and out-of-range guards from
-     RFC 8665 §5/§8.1). Twelve unit tests pin the wire shapes byte for
+     RFC 8665 §5 / RFC 8402 §3.1.1). Twelve unit tests pin the wire shapes byte for
      byte. One bug was flushed out by the reference implementation
      itself: the first encoder left the *last* TLV/sub-TLV unpadded,
      so the LSA length was not a multiple of 4 — FRR silently rejected

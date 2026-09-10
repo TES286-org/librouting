@@ -16,7 +16,7 @@
 //!
 //! The label a receiving router derives for a prefix is the
 //! originating node's SRGB base plus the SID index (RFC 8665 §5,
-//! guarded per §8.1). Selecting among several candidate mappings for
+//! guarded per RFC 8665 §5). Selecting among several candidate mappings for
 //! one prefix needs SPF reachability data, so it lives with the caller
 //! ([`crate::spf::SpfResult`] consumers); this module keeps the
 //! database a pure LSDB projection.
@@ -116,7 +116,7 @@ impl SrDatabase {
     /// forwards unlabeled.
     ///
     /// `None` also when no SR node advertises the prefix, the winning
-    /// SID's index falls outside its originator's SRGB (§8.1: the SID
+    /// SID's index falls outside its originator's advertised range (the SID
     /// is discarded) or the SID carries the V/L flags (an absolute/
     /// local label the global mapping does not apply to — the same
     /// guard [`crate::lsa::sr::remote_label`] enforces).
@@ -140,7 +140,7 @@ impl SrDatabase {
                 continue; // no resolvable first hop: nothing to point the LSP at
             };
             if !self.srgbs.contains_key(&rid) {
-                continue; // originator without an SRGB is not an SR node (§8.1)
+                continue; // originator without an SRGB is not an SR node (RFC 8665 §3.2)
             };
             let better = match best {
                 None => true,
