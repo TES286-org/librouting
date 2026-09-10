@@ -111,6 +111,14 @@ pub mod tcp_bind;
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub mod mpls_route;
 
+/// SRv6 route table installation over Linux `seg6` / `seg6local`
+/// netlink (RFC 8754 SRH encap, RFC 8986 endpoint behaviors). SRv6
+/// netlink is Linux-only — this module is not compiled on other
+/// platforms, so callers must `cfg(target_os = "linux")`-gate their
+/// use of it.
+#[cfg(all(feature = "std", target_os = "linux"))]
+pub mod seg6_route;
+
 #[cfg(all(
     feature = "std",
     any(
