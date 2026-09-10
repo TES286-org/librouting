@@ -1,21 +1,21 @@
 //! Per-node Segment Routing database built from the area LSDB — the
-//! receiving half of RFC 8667 (slice 1 shipped the codec and the
+//! receiving half of RFC 8665 (slice 1 shipped the codec and the
 //! origination half).
 //!
 //! Two LSA families feed it:
 //!
-//! - **Router Information opaque LSAs** (RFC 4970 §2.3 / RFC 8667 §3,
+//! - **Router Information opaque LSAs** (RFC 4970 §2.3 / RFC 8665 §3,
 //!   area-scoped, Opaque Type 4): the SRGB Descriptor TLV binds the
 //!   advertising router to its Segment Routing Global Block. A node
-//!   without an SRGB is not an SR node (RFC 8667 §8.1) and never
+//!   without an SRGB is not an SR node (RFC 8665 §3.2) and never
 //!   contributes labels.
-//! - **Extended Prefix opaque LSAs** (RFC 7684 §6 / RFC 8667 §6,
+//! - **Extended Prefix opaque LSAs** (RFC 7684 §2.1 / RFC 8665 §5,
 //!   area-scoped, Opaque Type 7): one Extended Prefix TLV per
 //!   advertised prefix, carrying the Prefix-SID sub-TLV with the SID
 //!   index and flags.
 //!
 //! The label a receiving router derives for a prefix is the
-//! originating node's SRGB base plus the SID index (RFC 8667 §6,
+//! originating node's SRGB base plus the SID index (RFC 8665 §5,
 //! guarded per §8.1). Selecting among several candidate mappings for
 //! one prefix needs SPF reachability data, so it lives with the caller
 //! ([`crate::spf::SpfResult`] consumers); this module keeps the
@@ -31,16 +31,16 @@ use crate::lsa::LsaTypeV2;
 use crate::lsdb::Lsdb;
 use lr_core::addr::Prefix;
 
-/// One candidate Prefix-SID mapping for a prefix (RFC 8667 §6): who
+/// One candidate Prefix-SID mapping for a prefix (RFC 8665 §5): who
 /// advertised it and with which SID sub-TLV.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrPrefixMapping {
     /// Advertising router of the Extended Prefix Opaque LSA.
     pub advertising_router: u32,
-    /// RFC 7684 §6 route type (1 intra-area, 3 inter-area, 5 external,
+    /// RFC 7684 §2.1 route type (1 intra-area, 3 inter-area, 5 external,
     /// 7 NSSA).
     pub route_type: u8,
-    /// RFC 7684 §6 N-flag: the prefix identifies the advertising node
+    /// RFC 7684 §2.1 N-flag: the prefix identifies the advertising node
     /// itself (an SR-Node / loopback).
     pub node: bool,
     /// The Prefix-SID sub-TLV (flags, MT-ID, algorithm, SID index).
@@ -109,7 +109,7 @@ impl SrDatabase {
     /// to the advertising router, ties broken by the lowest router ID
     /// (deterministic). Returns `(label, next_hop)`.
     ///
-    /// RFC 8667 §5 PHP rule: when the winning Prefix-SID does not
+    /// RFC 8665 §5 PHP rule: when the winning Prefix-SID does not
     /// carry the NP flag and its advertising router is directly
     /// adjacent (one hop away), this router *is* the penultimate hop
     /// and pops instead of pushing — `None` is returned so the caller

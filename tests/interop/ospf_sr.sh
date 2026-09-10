@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OSPF Segment Routing reception (RFC 8667 slice 2): two lr-daemons
+# OSPF Segment Routing reception (RFC 8665 slice 2): two lr-daemons
 # over a veth pair, both sides Segment Routing. This is the receiver
 # half of the ospf_sr_frr.sh lab — srdb + SPF label attach — verified
 # end-to-end through real raw sockets without needing kernel MPLS (the
@@ -159,7 +159,7 @@ wait_log "$OUT/r1.log" "route installed 10.99.3.0/24" 20
 wait_log "$OUT/r2.log" "route installed 10.99.2.0/24" 20
 echo "   propagation: OK"
 
-echo "== SRDB → Loc-RIB labels (RFC 8667 §6 + §5 NP rule) =="
+echo "== SRDB → Loc-RIB labels (RFC 8665 §5 + §5 NP rule) =="
 # Give the SR LSAs one flooding beat beyond the stub routes.
 sleep 2
 api_cmd "$OUT/r2.ctl" "routes" >"$OUT/r2.routes"

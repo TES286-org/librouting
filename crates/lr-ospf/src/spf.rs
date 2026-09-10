@@ -42,7 +42,7 @@ pub struct SpfResult {
     pub next_hops: BTreeMap<VertexId, IpAddr>,
     /// Router vertices one hop from the root: a direct p2p adjacency or
     /// a router on a directly attached transit network. Segment Routing
-    /// uses this for the RFC 8667 §5 PHP rule — the penultimate hop
+    /// uses this for the RFC 8665 §5 PHP rule — the penultimate hop
     /// pops when a Prefix-SID does not carry the NP flag, and a router
     /// in this set *is* the penultimate hop for its own prefix-SIDs.
     pub adjacent_routers: BTreeSet<u32>,
@@ -176,7 +176,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                             if rid == root && link.link_type == RouterLinkType::PointToPoint as u8 {
                                 // One hop away: the penultimate hop for
                                 // this neighbour's own prefix-SIDs
-                                // (RFC 8667 §5 PHP rule).
+                                // (RFC 8665 §5 PHP rule).
                                 result.adjacent_routers.insert(link.link_id);
                             }
                         }

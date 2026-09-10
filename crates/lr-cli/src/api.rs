@@ -372,7 +372,7 @@ mod imp {
                     // borrows from the router. One line per path: with
                     // RFC 7911 Add-Path a prefix can hold several ranked
                     // paths, distinguished by their path identifiers.
-                    // Labelled routes (RFC 8277 BGP-LU, RFC 8667 OSPF
+                    // Labelled routes (RFC 8277 BGP-LU, RFC 8665 OSPF
                     // prefix-SIDs) append `label=<top>` — the MPLS
                     // label the kernel mirror installs, what `show
                     // mpls table` on FRR would print.

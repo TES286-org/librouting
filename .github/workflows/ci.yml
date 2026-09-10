@@ -183,9 +183,9 @@ jobs:
         run: ./tests/interop/ospf_gr.sh
       - name: OSPF graceful restart x BIRD helper (RFC 3623)
         run: ./tests/interop/ospf_gr_bird.sh
-      - name: OSPF Segment Routing interop (RFC 8667 slice 1, lr x FRR ospfd)
+      - name: OSPF Segment Routing interop (RFC 8665 slice 1, lr x FRR ospfd)
         run: ./tests/interop/ospf_sr_frr.sh
-      - name: OSPF Segment Routing interop (RFC 8667 slice 2 reception, lr x lr)
+      - name: OSPF Segment Routing interop (RFC 8665 slice 2 reception, lr x lr)
         run: ./tests/interop/ospf_sr.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
         run: ./tests/interop/mrt.sh

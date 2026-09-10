@@ -134,7 +134,7 @@ pub(crate) struct OspfAreaSpec {
     pub stub_metric: Option<u32>,
 }
 
-/// One `[[ospf.prefix_sid]]` table (RFC 8667 §6): a locally originated
+/// One `[[ospf.prefix_sid]]` table (RFC 8665 §5): a locally originated
 /// prefix advertised with a Segment Routing Prefix-SID.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct OspfPrefixSidSpec {
@@ -143,10 +143,10 @@ pub(crate) struct OspfPrefixSidSpec {
     /// SID index into the SRGB (required; the label peers derive is
     /// `srgb_base + sid`).
     pub sid: Option<u32>,
-    /// RFC 7684 §6 N-flag: the prefix identifies the node itself (an
+    /// RFC 7684 §2.1 N-flag: the prefix identifies the node itself (an
     /// SR-Node / loopback), so peers may treat it as a node segment.
     pub node: Option<bool>,
-    /// RFC 8667 §5 NP flag (FRR `no-php-flag`): the penultimate hop
+    /// RFC 8665 §5 NP flag (FRR `no-php-flag`): the penultimate hop
     /// must NOT pop — neighbours one hop away still push
     /// `srgb_base + sid`. Clear by default (PHP, the FRR default).
     pub no_php: Option<bool>,
@@ -415,15 +415,15 @@ pub(crate) struct DaemonConfig {
     pub ospf_areas: Vec<OspfAreaSpec>,
     /// `[[ospf.interface]]` tables / `--ospf-interface` flags.
     pub ospf_interfaces: Vec<OspfIfSpec>,
-    /// RFC 8667 §3.2: this router's SRGB base label (first label of
+    /// RFC 8665 §3.2: this router's SRGB base label (first label of
     /// the range). Absent until `[ospf] srgb_base` is configured.
     pub ospf_srgb_base: Option<u32>,
-    /// RFC 8667 §3.2: SRGB range size (label count).
+    /// RFC 8665 §3.2: SRGB range size (label count).
     pub ospf_srgb_range: Option<u32>,
     /// `[[ospf.prefix_sid]]` tables — locally originated prefixes
     /// advertised with a Prefix-SID in an Extended Prefix Opaque LSA.
     pub ospf_prefix_sids: Vec<OspfPrefixSidSpec>,
-    /// RFC 8667 reception (`[ospf] sr_receive`): project the area LSDB
+    /// RFC 8665 reception (`[ospf] sr_receive`): project the area LSDB
     /// into a per-node SR database and attach the resolved Prefix-SID
     /// labels (RFC 8660 head end) to the routes they map onto. Off by
     /// default — a router that never enables it stays byte-identical
@@ -724,7 +724,7 @@ impl DaemonConfig {
             }
             iface.area = Some(area);
         }
-        // Segment Routing (RFC 8667): prefix SIDs need an SRGB; a
+        // Segment Routing (RFC 8665): prefix SIDs need an SRGB; a
         // base without a range (or vice versa) is a config bug. When
         // only the SRGB is configured (no prefix SIDs yet) it still
         // gets advertised — the node is SR-capable even before it
@@ -1512,7 +1512,7 @@ fn apply_ospf_key(
             "gr_state_file" => {
                 cfg.ospf_gr_state_file = Some(value.to_string());
             }
-            // RFC 8667 §3.2: the Segment Routing Global Base this
+            // RFC 8665 §3.2: the Segment Routing Global Base this
             // router advertises in its Router Information LSA. A
             // base without a range (or vice versa) is a config bug —
             // rejected, defaulted together in finalize() instead.
@@ -1536,7 +1536,7 @@ fn apply_ospf_key(
                 }
                 cfg.ospf_srgb_range = Some(range);
             }
-            // RFC 8667 reception: resolve Prefix-SIDs learned from the
+            // RFC 8665 reception: resolve Prefix-SIDs learned from the
             // LSDB into MPLS labels and let the kernel mirror install
             // the RFC 8660 encap routes. Off by default (fail closed).
             "sr_receive" => {
@@ -2752,7 +2752,7 @@ mod tests {
         assert!(err.contains("backbone"), "{err}");
     }
 
-    /// RFC 8667 config: SRGB + prefix SIDs parse and finalize; the
+    /// RFC 8665 config: SRGB + prefix SIDs parse and finalize; the
     /// FRR-default SRGB (16000/8000) fills in when SIDs are given
     /// without an explicit block; mismatched half-SRGBs and
     /// out-of-range SIDs fail closed.

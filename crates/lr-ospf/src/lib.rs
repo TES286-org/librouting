@@ -39,7 +39,7 @@ pub mod nssa;
 pub mod origination;
 pub mod packet;
 pub mod spf;
-/// Per-node Segment Routing database (RFC 8667 reception): the SRGBs
+/// Per-node Segment Routing database (RFC 8665 reception): the SRGBs
 /// and Prefix-SID mappings projected from the area LSDB, plus the
 /// §6/§8.1 label resolution the router applies to SPF routes.
 pub mod srdb;

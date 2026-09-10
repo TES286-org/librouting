@@ -14,15 +14,15 @@ pub use grace::{
     OPTIONS_O_BIT,
 };
 
-/// Segment Routing extensions (RFC 8667): the RFC 7684 Extended Prefix
+/// Segment Routing extensions (RFC 8665): the RFC 7684 Extended Prefix
 /// Opaque LSA with the Prefix-SID sub-TLV and the RFC 4970 Router
-/// Information LSA's SR-Algorithm + SRGB TLVs.
+/// Information LSA's SR-Algorithm + SID/Label Range TLVs.
 pub mod sr;
 pub use sr::{
     decode_ext_prefix_lsa_body, decode_ri_sr_lsa_body, encode_ri_sr_lsa_body,
     originate_sr_prefix_lsa, originate_sr_ri_lsa, remote_label, sid_flags, RiSrBlock,
     SrPrefixAdvert, SrPrefixAdvertCore, SrPrefixSidTlv, OPAQUE_TYPE_EXT_PREFIX, OPAQUE_TYPE_RI,
-    SRGB_FLAG_MPLS, SUBTLV_PREFIX_SID, TLV_EXT_PREFIX, TLV_SRGB, TLV_SR_ALGORITHM,
+    SUBTLV_PREFIX_SID, TLV_EXT_PREFIX, TLV_SRGB, TLV_SR_ALGORITHM,
 };
 
 /// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.

@@ -259,10 +259,10 @@ struct OspfDaemon {
     /// Area → topology version at the last pump pass — the §3.2 (3)
     /// change detector that exits helpers.
     gr_topology: BTreeMap<u32, u64>,
-    /// RFC 8667: this router's SRGB (base, range) when Segment Routing
+    /// RFC 8665: this router's SRGB (base, range) when Segment Routing
     /// is configured. `None` = the node originates no SR LSAs.
     sr_srgb: Option<(u32, u32)>,
-    /// RFC 8667: the locally originated prefix SIDs (one Extended
+    /// RFC 8665: the locally originated prefix SIDs (one Extended
     /// Prefix Opaque LSA each).
     sr_sids: Vec<SrSidConfig>,
     /// (area, link_state_id) → last originated sequence number for our
@@ -275,9 +275,9 @@ struct OspfDaemon {
     router_id: RouterId,
 }
 
-/// One configured prefix SID (RFC 8667 §6): the prefix, its SID index
-/// into the SRGB, whether it is a node segment (RFC 7684 §6 N-flag),
-/// whether the penultimate hop must keep the label (RFC 8667 §5 NP
+/// One configured prefix SID (RFC 8665 §5): the prefix, its SID index
+/// into the SRGB, whether it is a node segment (RFC 7684 §2.1 N-flag),
+/// whether the penultimate hop must keep the label (RFC 8665 §5 NP
 /// flag, FRR `no-php-flag`) and the stable Opaque ID slot its Extended
 /// Prefix Opaque LSA uses.
 #[derive(Debug, Clone)]
@@ -484,13 +484,13 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 }
             }
         }
-        // RFC 8667 reception: resolve learned Prefix-SIDs into Loc-RIB
+        // RFC 8665 reception: resolve learned Prefix-SIDs into Loc-RIB
         // labels (the kernel mirror turns them into RFC 8660 encap
         // routes). Off by default; enabling it on a router without SR
         // LSAs in scope changes nothing.
         if cfg.ospf_sr_receive {
             router.set_ospf_sr_receive(true);
-            println!("daemon: ospf SR reception enabled (RFC 8667)");
+            println!("daemon: ospf SR reception enabled (RFC 8665)");
         }
         // RFC 8660 LSP tail: with `install_kernel`, locally originated
         // prefix-SIDs get an AF_MPLS pop route (in-label → local
@@ -567,7 +567,7 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         let areas: Vec<u32> = daemon.anchors.keys().copied().collect();
         for area in areas {
             daemon.reoriginate_area(&mut router, area);
-            // RFC 8667: the SR RI + Extended Prefix LSAs ride the same
+            // RFC 8665: the SR RI + Extended Prefix LSAs ride the same
             // startup pass (SR-disabled daemons originate nothing).
             daemon.reoriginate_sr(&mut router, area);
         }
@@ -1143,7 +1143,7 @@ impl OspfDaemon {
             self.pending_reorig.remove(&area);
             self.reoriginate_area(&mut router, area);
             // The SR LSAs ride the same re-origination cycle so a
-            // (re)formed adjacency always sees them (RFC 8667 §7:
+            // (re)formed adjacency always sees them (RFC 8665 §6:
             // extended LSAs flood like any area-scoped LSA).
             self.reoriginate_sr(&mut router, area);
         }
@@ -1556,13 +1556,13 @@ impl OspfDaemon {
     }
 
     // -----------------------------------------------------------------
-    // RFC 8667 Segment Routing: RI + Extended Prefix Opaque LSAs
+    // RFC 8665 Segment Routing: RI + Extended Prefix Opaque LSAs
     // -----------------------------------------------------------------
 
     /// Originate (or re-originate) the SR LSAs into `area`: the
     /// area-scoped Router Information LSA carrying the SRGB
-    /// (RFC 8667 §3) plus one Extended Prefix Opaque LSA per configured
-    /// prefix SID (RFC 8667 §6). Follows the Router-LSA self-
+    /// (RFC 8665 §3) plus one Extended Prefix Opaque LSA per configured
+    /// prefix SID (RFC 8665 §5). Follows the Router-LSA self-
     /// origination path exactly: the LSDB instance is the sequence
     /// floor (§12.1.2) and the LSU rides the anchor session so the
     /// router floods it to every neighbour. SR-disabled daemons

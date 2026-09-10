@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# OSPF Segment Routing interop (RFC 8667), both directions:
+# OSPF Segment Routing interop (RFC 8665), both directions:
 #
 # Phase 1 — origination (slice 1): lr-daemon originates the area-scoped
 # Router Information LSA (SR-Algorithm + SRGB TLVs) and Extended Prefix
@@ -325,7 +325,7 @@ echo "== lr-daemon log =="
 cat "$OUT/r1.log"
 
 fail=0
-# Phase 2: lr receives FRR's prefix-SID (RFC 8667 reception). The API
+# Phase 2: lr receives FRR's prefix-SID (RFC 8665 reception). The API
 # `routes` dump must map FRR's 10.99.3.0/24 to label 16200 (base + SID
 # 200), and — with install_kernel — the kernel FIB must carry the RFC
 # 8660 encap route.

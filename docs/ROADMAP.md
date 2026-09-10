@@ -563,12 +563,12 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    2 (reception → SRDB → SPF label attach → kernel mirror) landed:
 
    - **Codec** (`lr-ospf::lsa::sr`): the RFC 7684 §6 Extended Prefix
-     Opaque LSA (area-scoped, Opaque Type 7) with the RFC 8667 §5
+     Opaque LSA (area-scoped, Opaque Type 7) with the RFC 8665 §5
      Prefix-SID sub-TLV (NP/M/E/V/L flags, MT-ID, algorithm, 3-octet
      SID), the RFC 4970 Router Information LSA's SR-Algorithm (type 8)
      and SRGB Descriptor (type 9) TLVs, and the remote-label mapping
      (SRGB base + index with the V/L and out-of-range guards from
-     RFC 8667 §6/§8.1). Twelve unit tests pin the wire shapes byte for
+     RFC 8665 §5/§8.1). Twelve unit tests pin the wire shapes byte for
      byte. One bug was flushed out by the reference implementation
      itself: the first encoder left the *last* TLV/sub-TLV unpadded,
      so the LSA length was not a multiple of 4 — FRR silently rejected
@@ -599,7 +599,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      head-end label against the SPF result: among the SPF-algorithm
      mappings whose originator is reachable with a resolvable next
      hop, the closest originator wins (lowest router ID on ties). The
-     RFC 8667 §5 PHP rule is a direct consequence of the adjacency
+     RFC 8665 §5 PHP rule is a direct consequence of the adjacency
      set: an NP-clear SID whose originator is one hop away means this
      router is the penultimate hop and pops, so no label is produced.
      The underlying SPF gained RFC 2328 §16.1.1 next-hop resolution
@@ -627,7 +627,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      FRR `segment-routing on` + `global-block` + `prefix … index 200
      no-php-flag`) asserts lr's Loc-RIB maps FRR's SID to label=16200
      and the kernel FIB carries the encap route.
-   - **Next slice**: Adj-SIDs (RFC 8667 §7), then the mapping-server
+   - **Next slice**: Adj-SIDs (RFC 8665 §6), then the mapping-server
      (M-flag) shapes. RFC 9256 (Segment Routing Policy) builds on the
      data plane.
 

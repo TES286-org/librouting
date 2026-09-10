@@ -327,7 +327,7 @@ fn lsa_topology_changed(
 struct OspfTableEntry {
     metric: u64,
     kind: OspfKind,
-    /// RFC 8667 §6 label the route resolves to (SPF-algorithm Prefix-SID
+    /// RFC 8665 §5 label the route resolves to (SPF-algorithm Prefix-SID
     /// of its originator), when SR reception is enabled and the mapping
     /// is usable. Intra-area and inter-area routes only — external paths
     /// forward to the ASBR / forwarding address, not the originator.
@@ -864,7 +864,7 @@ pub struct DefaultRouter {
     ospf_grace_seen: BTreeMap<(u32, u32), (u32, u16, u16, u16)>,
     /// OSPF router ID (all OSPF sessions must agree on it).
     ospf_router_id: Option<u32>,
-    /// RFC 8667 reception: when on, every area recompute projects the
+    /// RFC 8665 reception: when on, every area recompute projects the
     /// area LSDB into a per-node SR database and attaches the resolved
     /// Prefix-SID labels (RFC 8660 head-end) to the routes they map
     /// onto. Off by default — fail-closed like every behavioural flag.
@@ -4467,7 +4467,7 @@ impl DefaultRouter {
             let spf_result = spf::run_spf(&area.lsdb, router_id);
             let mut table = Self::ospf_area_table(&area.kind, abr, &area.lsdb, &spf_result);
             if self.ospf_sr_receive {
-                // RFC 8667 reception: project the area's SR state and
+                // RFC 8665 reception: project the area's SR state and
                 // attach the resolved labels to the routes they map
                 // onto (fail-soft — an LSDB without SR LSAs yields an
                 // empty database and changes nothing).
@@ -4537,7 +4537,7 @@ impl DefaultRouter {
         self.ospf_diff_published(current)
     }
 
-    /// Attach the RFC 8667 §6 labels an SR database resolves for the
+    /// Attach the RFC 8665 §5 labels an SR database resolves for the
     /// table's prefixes. Only intra-area and inter-area entries are
     /// labelled: their paths follow the prefix-SID originator, while an
     /// external route forwards to the ASBR or the type-5 forwarding
@@ -5693,7 +5693,7 @@ impl DefaultRouter {
         changed
     }
 
-    /// Toggle RFC 8667 SR reception: when on, every OSPF area recompute
+    /// Toggle RFC 8665 SR reception: when on, every OSPF area recompute
     /// projects the area LSDB into a per-node SR database and attaches
     /// the resolved Prefix-SID labels (RFC 8660 head end) to the routes
     /// they map onto. Off by default — the kernel mirror only acts on
@@ -5704,7 +5704,7 @@ impl DefaultRouter {
         self.ospf_sr_receive = on;
     }
 
-    /// Whether RFC 8667 SR reception is enabled (see
+    /// Whether RFC 8665 SR reception is enabled (see
     /// [`Self::set_ospf_sr_receive`]).
     pub fn ospf_sr_receive(&self) -> bool {
         self.ospf_sr_receive
@@ -8570,7 +8570,7 @@ mod tests {
         );
         assert_eq!(b.exchange_plane_partial_transit(b_session), 1);
     }
-    /// RFC 8667 reception, happy path: an SR neighbour's Router
+    /// RFC 8665 reception, happy path: an SR neighbour's Router
     /// Information LSA (SRGB 16000/8000) + Extended Prefix Opaque LSA
     /// (10.20.0.0/24, SID 100, NP) label the stub route the same LSDB
     /// produces — Loc-RIB carries label 16100 and the first hop toward
@@ -8650,7 +8650,7 @@ mod tests {
         assert_eq!(stack.labels()[0].value, 16_100); // 16000 + 100
     }
 
-    /// RFC 8667 §5 PHP: an NP-clear Prefix-SID whose originator is
+    /// RFC 8665 §5 PHP: an NP-clear Prefix-SID whose originator is
     /// directly adjacent makes this router the penultimate hop — no
     /// label is attached and the route forwards unlabeled.
     #[test]

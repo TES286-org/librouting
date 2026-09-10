@@ -1,50 +1,54 @@
-//! OSPFv2 Segment Routing extensions — RFC 8667 (OSPFv2 Prefix-SID),
-//! riding the RFC 7684 Extended Prefix Opaque LSA and the RFC 4970
-//! Router Information LSA.
+//! OSPFv2 Segment Routing extensions — RFC 8665 (OSPF Extensions for
+//! Segment Routing), riding the RFC 7684 Extended Prefix Opaque LSA and
+//! the RFC 4970 Router Information LSA.
 //!
 //! Three wire shapes live here:
 //!
-//! 1. **Extended Prefix Opaque LSA** (RFC 7684 §6, area-scoped:
+//! 1. **Extended Prefix Opaque LSA** (RFC 7684 §2, area-scoped:
 //!    LS type 10 with Opaque Type 7): the body is a sequence of TLVs,
-//!    each **Extended Prefix TLV** (type 1) describing one prefix
-//!    (route type, flags, AF, prefix) plus sub-TLVs.
-//! 2. **Prefix-SID sub-TLV** (RFC 8667 §5, type 2 inside the
-//!    Extended Prefix TLV): flags (NP/M/E/V/L), MT-ID, algorithm and
-//!    the 3-octet SID (an index into the originating node's SRGB when
-//!    the V/L flags are clear — the only shape this crate originates).
-//! 3. **Router Information LSA SR TLVs** (RFC 8667 §3, area-scoped RI
-//!    Opaque LSA with Opaque Type 4): the **SR-Algorithm TLV**
-//!    (RFC 4970/8667 §3.1, type 8) and the **SRGB Descriptor TLV**
-//!    (RFC 8667 §3.2, type 9, MPLS flag + 3-octet range size +
-//!    3-octet first label).
+//!    each **Extended Prefix TLV** (RFC 7684 §2.1, type 1) describing
+//!    one prefix — Route Type, Prefix Length, AF, Flags, Address —
+//!    plus sub-TLVs.
+//! 2. **Prefix-SID sub-TLV** (RFC 8665 §5, type 2 inside the Extended
+//!    Prefix TLV): Flags (NP/M/E/V/L), Reserved, MT-ID, Algorithm and
+//!    the SID/Index/Label field — a 4-octet index when V/L are clear
+//!    (the only shape this crate originates), a 3-octet local label
+//!    when V/L are set.
+//! 3. **Router Information LSA SR TLVs** (RFC 4970 carrier + RFC 8665
+//!    §3, area-scoped RI Opaque LSA with Opaque Type 4): the
+//!    **SR-Algorithm TLV** (RFC 8665 §3.1, type 8) and the **SID/Label
+//!    Range TLV** (RFC 8665 §3.2, type 9 — 3-octet range size,
+//!    reserved, then the §2.1 SID/Label Sub-TLV with the first label).
 //!
-//! A remote node's label for an advertised prefix is
-//! `first_label + sid_index` (RFC 8667 §6 / RFC 8402 §3.1.1; the SID
-//! index must be smaller than the originator's SRGB range size).
+//! A remote node's label for an advertised prefix is `first_label +
+//! sid_index` (RFC 8665 §5 / RFC 8402 §3.1.1; the index must fall
+//! inside the originator's advertised range).
 //!
-//! All TLVs are padded to four-octet alignment like the RFC 3623
-//! Grace-LSA TLVs; the prefix is already 4-octet aligned for IPv4, so
-//! the padding rule only matters for the sub-TLV boundary rounding.
+//! All TLVs are padded to four-octet alignment (RFC 7684 §2.3); the
+//! shapes emitted here are naturally aligned.
 
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::lsa::grace::{opaque_lsa_id, OPTIONS_O_BIT};
 use crate::lsa::{Lsa, LsaHeader, LsaTypeV2};
 
-/// Opaque Type for the Extended Prefix Opaque LSA (RFC 7684 §6).
+/// Opaque Type for the Extended Prefix Opaque LSA (RFC 7684 §2).
 pub const OPAQUE_TYPE_EXT_PREFIX: u8 = 7;
 /// Opaque Type for the Router Information LSA (RFC 4970 §2.3).
 pub const OPAQUE_TYPE_RI: u8 = 4;
 
-/// Extended Prefix TLV type (RFC 7684 §6).
+/// Extended Prefix TLV type (RFC 7684 §2.1).
 pub const TLV_EXT_PREFIX: u16 = 1;
-/// Prefix-SID sub-TLV type (RFC 8667 §5).
+/// Prefix-SID sub-TLV type (RFC 8665 §5).
 pub const SUBTLV_PREFIX_SID: u16 = 2;
-/// SR-Algorithm TLV type (RFC 8667 §3.1).
+/// SR-Algorithm TLV type (RFC 8665 §3.1).
 pub const TLV_SR_ALGORITHM: u16 = 8;
-/// SRGB Descriptor TLV type (RFC 8667 §3.2).
+/// SID/Label Range TLV type (RFC 8665 §3.2).
 pub const TLV_SRGB: u16 = 9;
+/// SID/Label Sub-TLV type (RFC 8665 §2.1), carried by the SID/Label
+/// Range TLV.
+pub const SUBTLV_SID_LABEL: u16 = 1;
 
-/// Prefix-SID sub-TLV flags (RFC 8667 §5).
+/// Prefix-SID sub-TLV flags (RFC 8665 §5).
 pub mod sid_flags {
     /// No-PHP: the penultimate hop must not pop the label.
     pub const NP: u8 = 0x40;
@@ -58,15 +62,11 @@ pub mod sid_flags {
     pub const L: u8 = 0x04;
 }
 
-/// The SRGB Descriptor TLV MPLS flag (RFC 8667 §3.2): the descriptor
-/// describes an MPLS SRGB.
-pub const SRGB_FLAG_MPLS: u8 = 0x80;
-
-/// One prefix advertised with a Prefix-SID (RFC 8667 §6: the Extended
+/// One prefix advertised with a Prefix-SID (RFC 8665 §5: the Extended
 /// Prefix TLV + Prefix-SID sub-TLV pair).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrPrefixAdvert {
-    /// RFC 7684 §6 route type: 1 = intra-area, 3 = inter-area,
+    /// RFC 7684 §2.1 route type: 1 = intra-area, 3 = inter-area,
     /// 5 = external, 7 = NSSA.
     pub route_type: u8,
     /// RFC 7684 §6 flags byte (A = 0x80 attach, N = 0x40 node).
@@ -87,31 +87,34 @@ pub struct SrPrefixAdvert {
 }
 
 impl SrPrefixAdvert {
-    /// Encode the Extended Prefix TLV (RFC 7684 §6) with one
-    /// Prefix-SID sub-TLV (RFC 8667 §5). The sub-TLV (6-octet value)
-    /// is padded to four-octet alignment *including the trailing
-    /// instance* — every OSPFv2 LSA length is a multiple of 4, and a
-    /// non-aligned LSA makes strict receivers (FRR) drop the whole
-    /// DBD carrying it.
+    /// Encode the Extended Prefix TLV (RFC 7684 §2.1: Route Type,
+    /// Prefix Length, AF, Flags, Address) with one Prefix-SID sub-TLV
+    /// (RFC 8665 §5: Flags, Reserved, MT-ID, Algorithm, 4-octet
+    /// SID/Index for the global shape). The descriptor field order is
+    /// load-bearing — FRR reads Prefix Length before Flags and an
+    /// assert in its prefix math aborts the whole daemon on a swapped
+    /// encoding (flushed out by the FRR interop lab).
     pub fn encode_ext_prefix_tlv(&self) -> Vec<u8> {
-        // Value: route_type(1) flags(1) af(1) prefix_len(1)
-        //        prefix(4) + sub-TLV(4 + 6, padded to 12).
+        // Value: route_type(1) prefix_len(1) af(1) flags(1)
+        //        prefix(4) + sub-TLV (4 + 8).
         let mut value = Vec::with_capacity(4 + 4 + 12);
         value.push(self.route_type);
-        value.push(self.flags);
-        value.push(0); // AF: 0 = IPv4 unicast
         value.push(self.prefix_len);
+        value.push(0); // AF: 0 = IPv4 unicast
+        value.push(self.flags);
         value.extend_from_slice(&self.prefix);
-        // Prefix-SID sub-TLV: type(2) len(6) flags(1) mtid(1) algo(1)
-        // sid(3).
+        // Prefix-SID sub-TLV (RFC 8665 §5): type(2) len(8) flags(1)
+        // reserved(1) mt-id(1) algorithm(1) sid/index(4).
         value.extend_from_slice(&SUBTLV_PREFIX_SID.to_be_bytes());
-        value.extend_from_slice(&6u16.to_be_bytes());
+        value.extend_from_slice(&8u16.to_be_bytes());
         value.push(self.sid_flags);
+        value.push(0); // Reserved: zero on transmission (RFC 8665 §5)
         value.push(0); // MT-ID 0 (default topology)
         value.push(self.algorithm);
-        value.extend_from_slice(&self.sid.to_be_bytes()[1..4]);
-        // Trailing alignment padding: the sub-TLV value is 6 octets,
-        // so two padding octets close the TLV on a 4-octet boundary.
+        // V/L clear: a 4-octet index into the originator's SRGB.
+        value.extend_from_slice(&self.sid.to_be_bytes());
+        // The sub-TLV is already 4-octet aligned; keep the guard for
+        // callers that add odd-sized sub-TLVs before the wrapper.
         let sub_pad = (4 - (value.len() - 8) % 4) % 4;
         value.resize(value.len() + sub_pad, 0);
         // TLV wrapper.
@@ -125,9 +128,12 @@ impl SrPrefixAdvert {
     /// Decode one Extended Prefix TLV **value** (after the 4-byte TLV
     /// header). Returns `None` on truncation, a non-IPv4 AF, or a
     /// malformed prefix length. Sub-TLVs other than the Prefix-SID
-    /// are skipped per RFC 8667 §5 (unknown sub-TLVs are ignored);
+    /// are skipped per RFC 8665 §9 (unknown sub-TLVs are ignored);
     /// a missing Prefix-SID sub-TLV is NOT an error — only the prefix
-    /// descriptor is filled and `sid` stays `None`.
+    /// descriptor is filled and `sid` stays `None`. The Prefix-SID
+    /// value is a 4-octet index when its sub-TLV carries length 8 and
+    /// a 3-octet local label when it carries length 7 (RFC 8665 §5);
+    /// other lengths are ignored as malformed.
     pub fn decode_ext_prefix_tlv_value(
         value: &[u8],
     ) -> Option<(SrPrefixAdvertCore, Option<SrPrefixSidTlv>)> {
@@ -135,9 +141,9 @@ impl SrPrefixAdvert {
             return None;
         }
         let route_type = value[0];
-        let flags = value[1];
+        let prefix_len = value[1];
         let af = value[2];
-        let prefix_len = value[3];
+        let flags = value[3];
         if af != 0 || prefix_len > 32 {
             return None;
         }
@@ -159,15 +165,35 @@ impl SrPrefixAdvert {
             if i + st_len > value.len() {
                 return None;
             }
-            if st == SUBTLV_PREFIX_SID && st_len == 6 {
-                sid = Some(SrPrefixSidTlv {
-                    flags: value[i],
-                    mt_id: value[i + 1],
-                    algorithm: value[i + 2],
-                    sid: u32::from_be_bytes([0, value[i + 3], value[i + 4], value[i + 5]]),
-                });
+            if st == SUBTLV_PREFIX_SID {
+                // RFC 8665 §5: Flags, Reserved, MT-ID, Algorithm, then
+                // the SID/Index/Label field (4 octets for an index, 3
+                // for a local label).
+                let parsed = match st_len {
+                    8 => Some(SrPrefixSidTlv {
+                        flags: value[i],
+                        mt_id: value[i + 2],
+                        algorithm: value[i + 3],
+                        sid: u32::from_be_bytes([
+                            value[i + 4],
+                            value[i + 5],
+                            value[i + 6],
+                            value[i + 7],
+                        ]),
+                    }),
+                    7 => Some(SrPrefixSidTlv {
+                        flags: value[i],
+                        mt_id: value[i + 2],
+                        algorithm: value[i + 3],
+                        sid: u32::from_be_bytes([0, value[i + 4], value[i + 5], value[i + 6]]),
+                    }),
+                    _ => None,
+                };
+                if parsed.is_some() {
+                    sid = parsed;
+                }
             }
-            // Round up to the next 4-octet boundary (RFC 7684 §6:
+            // Round up to the next 4-octet boundary (RFC 7684 §2.3:
             // sub-TLVs are padded).
             i += (st_len + 3) & !3;
         }
@@ -175,8 +201,8 @@ impl SrPrefixAdvert {
     }
 }
 
-/// The prefix descriptor part of an Extended Prefix TLV (RFC 7684 §6)
-/// — everything except the sub-TLVs.
+/// The prefix descriptor part of an Extended Prefix TLV (RFC 7684
+/// §2.1) — everything except the sub-TLVs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrPrefixAdvertCore {
     pub route_type: u8,
@@ -185,7 +211,7 @@ pub struct SrPrefixAdvertCore {
     pub prefix_len: u8,
 }
 
-/// A decoded Prefix-SID sub-TLV (RFC 8667 §5).
+/// A decoded Prefix-SID sub-TLV (RFC 8665 §5).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SrPrefixSidTlv {
     /// Flags byte — see [`sid_flags`].
@@ -232,11 +258,12 @@ pub fn decode_ext_prefix_lsa_body(
 }
 
 /// Encode the body of the **area-scoped Router Information LSA** with
-/// the SR TLVs (RFC 8667 §3): SR-Algorithm (type 8, one byte per
-/// algorithm — lr originates algorithm 0, SPF) followed by the SRGB
-/// Descriptor (type 9, one MPLS descriptor: flags 0x80, 3-octet range
-/// size, 3-octet first label). `srgb_base` must be a valid MPLS label
-/// value (16..=1_048_575) and the range must fit under it.
+/// the SR TLVs (RFC 8665 §3): SR-Algorithm (type 8, one byte per
+/// algorithm — lr originates algorithm 0, SPF) followed by the
+/// SID/Label Range TLV (RFC 8665 §3.2, type 9: 3-octet range size,
+/// reserved octet, then the §2.1 SID/Label Sub-TLV carrying the
+/// 32-bit first label of the range). `srgb_base` must be a valid
+/// MPLS label value (16..=1_048_575) and the range must fit under it.
 pub fn encode_ri_sr_lsa_body(srgb_base: u32, srgb_range: u32) -> Option<Vec<u8>> {
     if !(16..=1_048_575).contains(&srgb_base) {
         return None;
@@ -245,21 +272,21 @@ pub fn encode_ri_sr_lsa_body(srgb_base: u32, srgb_range: u32) -> Option<Vec<u8>>
         return None;
     }
     // SR-Algorithm TLV (type 8): one octet per algorithm, value 0.
-    let mut out = Vec::with_capacity(4 + 4 + 4 + 8);
+    let mut out = Vec::with_capacity(8 + 16);
     out.extend_from_slice(&TLV_SR_ALGORITHM.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes());
     out.push(0); // algorithm 0 = SPF
     out.extend_from_slice(&[0, 0, 0]); // 4-octet alignment
-                                       // SRGB Descriptor TLV (type 9): flags(1) range(3) first(3) = 7.
+                                       // SID/Label Range TLV (type 9): range size (3 octets) + reserved
+                                       // (1), then the SID/Label Sub-TLV (type 1, length 4) with the
+                                       // first label of the range as a 32-bit value.
     out.extend_from_slice(&TLV_SRGB.to_be_bytes());
-    out.extend_from_slice(&7u16.to_be_bytes());
-    out.push(SRGB_FLAG_MPLS);
+    out.extend_from_slice(&12u16.to_be_bytes());
     out.extend_from_slice(&srgb_range.to_be_bytes()[1..4]);
-    out.extend_from_slice(&srgb_base.to_be_bytes()[1..4]);
-    // Trailing alignment padding (value 7 octets → one pad octet):
-    // the LSA length must stay a multiple of 4 or strict receivers
-    // (FRR) drop the LSA and every DBD carrying it.
-    out.push(0);
+    out.push(0); // reserved
+    out.extend_from_slice(&SUBTLV_SID_LABEL.to_be_bytes());
+    out.extend_from_slice(&4u16.to_be_bytes());
+    out.extend_from_slice(&srgb_base.to_be_bytes());
     Some(out)
 }
 
@@ -273,8 +300,9 @@ pub struct RiSrBlock {
 
 /// Decode the SR TLVs of a Router Information LSA body. Returns
 /// `None` on malformed TLVs; a body without both the SR-Algorithm and
-/// the SRGB TLV yields `Ok(None)` (the node is not an SR node — per
-/// RFC 8667 §8.1 the SRGB is what makes the node SR-capable).
+/// the SID/Label Range TLV yields `Ok(None)` (the node is not an SR
+/// node — per RFC 8665 §3.2 the advertised range is what makes the
+/// node SR-capable).
 pub fn decode_ri_sr_lsa_body(body: &[u8]) -> Option<Option<RiSrBlock>> {
     let mut algorithm = false;
     let mut srgb: Option<RiSrBlock> = None;
@@ -291,21 +319,38 @@ pub fn decode_ri_sr_lsa_body(body: &[u8]) -> Option<Option<RiSrBlock>> {
                 // At least algorithm 0 present?
                 algorithm = body[i..i + tlv_len].contains(&0);
             }
-            TLV_SRGB => {
-                // One or more 7-byte descriptors; take the first MPLS
-                // one (flags & 0x80).
-                let mut j = i;
-                while j + 7 <= i + tlv_len {
-                    if body[j] & SRGB_FLAG_MPLS != 0 {
-                        let range = u32::from_be_bytes([0, body[j + 1], body[j + 2], body[j + 3]]);
-                        let base = u32::from_be_bytes([0, body[j + 4], body[j + 5], body[j + 6]]);
-                        srgb = Some(RiSrBlock {
-                            srgb_base: base,
-                            srgb_range: range,
-                        });
+            TLV_SRGB if tlv_len >= 4 => {
+                // RFC 8665 §3.2: range size (3 octets) + reserved (1),
+                // then sub-TLVs; the SID/Label Sub-TLV (§2.1, type 1)
+                // carries the first label — a 4-octet value, or a
+                // 3-octet value using the 20 rightmost bits.
+                let range = u32::from_be_bytes([0, body[i], body[i + 1], body[i + 2]]);
+                let mut j = i + 4;
+                while j + 4 <= i + tlv_len {
+                    let st = u16::from_be_bytes([body[j], body[j + 1]]);
+                    let st_len = u16::from_be_bytes([body[j + 2], body[j + 3]]) as usize;
+                    if st == SUBTLV_SID_LABEL {
+                        let base = match st_len {
+                            4 if j + 8 <= i + tlv_len => u32::from_be_bytes([
+                                body[j + 4],
+                                body[j + 5],
+                                body[j + 6],
+                                body[j + 7],
+                            ]),
+                            3 if j + 7 <= i + tlv_len => {
+                                u32::from_be_bytes([0, body[j + 4], body[j + 5], body[j + 6]])
+                            }
+                            _ => 0,
+                        };
+                        if base != 0 {
+                            srgb = Some(RiSrBlock {
+                                srgb_base: base,
+                                srgb_range: range,
+                            });
+                        }
                         break;
                     }
-                    j += 7;
+                    j += 4 + ((st_len + 3) & !3);
                 }
             }
             _ => {}
@@ -320,10 +365,10 @@ pub fn decode_ri_sr_lsa_body(body: &[u8]) -> Option<Option<RiSrBlock>> {
 }
 
 /// The remote label for a prefix advertised with a global Prefix-SID:
-/// the originator's SRGB base + the SID index (RFC 8667 §6). `None`
-/// when the index falls outside the SRGB (RFC 8667 §8.1: the SID is
-/// discarded) or the SID carries the V flag (absolute/local — the
-/// global mapping does not apply).
+/// the originator's SRGB base + the SID index (RFC 8665 §5 / RFC 8402
+/// §3.1.1). `None` when the index falls outside the originator's
+/// advertised range (the mapping is unusable) or the SID carries the
+/// V flag (absolute/local — the global mapping does not apply).
 pub fn remote_label(originator_srgb: &RiSrBlock, sid_tlv: &SrPrefixSidTlv) -> Option<u32> {
     if sid_tlv.flags & (sid_flags::V | sid_flags::L) != 0 {
         return None;
@@ -424,30 +469,29 @@ mod tests {
     }
 
     #[test]
-    fn ext_prefix_tlv_wire_shape_matches_rfc7684() {
+    fn ext_prefix_tlv_wire_shape_matches_rfc7684_8665() {
         let wire = sample_advert().encode_ext_prefix_tlv();
-        // TLV type 1, length 20 (4 descriptor + 4 prefix + 12
-        // sub-TLV including the 2-octet trailing padding).
+        // TLV type 1, length 20 (8 descriptor + 4 prefix + 12
+        // sub-TLV) — the body is a multiple of 4 without padding.
         assert_eq!(&wire[0..2], &[0, 1]);
         assert_eq!(&wire[2..4], &20u16.to_be_bytes());
-        // route_type, flags, af, prefix_len.
+        // RFC 7684 §2.1: route_type, prefix_len, af, flags.
         assert_eq!(wire[4], 1);
-        assert_eq!(wire[5], 0x40);
+        assert_eq!(wire[5], 24);
         assert_eq!(wire[6], 0);
-        assert_eq!(wire[7], 24);
+        assert_eq!(wire[7], 0x40);
         // Prefix.
         assert_eq!(&wire[8..12], &[10, 0, 0, 0]);
-        // Prefix-SID sub-TLV: type 2, len 6.
+        // Prefix-SID sub-TLV: type 2, len 8.
         assert_eq!(&wire[12..14], &[0, 2]);
-        assert_eq!(&wire[14..16], &[0, 6]);
-        // flags, MT-ID, algorithm.
+        assert_eq!(&wire[14..16], &[0, 8]);
+        // RFC 8665 §5: flags, reserved, MT-ID, algorithm, SID/Index(4).
         assert_eq!(wire[16], 0x40); // NP
-        assert_eq!(wire[17], 0);
-        assert_eq!(wire[18], 0);
-        // SID 100 in 3 octets.
-        assert_eq!(&wire[19..22], &[0, 0, 100]);
-        // Trailing alignment padding closes the TLV on a multiple of 4.
-        assert_eq!(&wire[22..24], &[0, 0]);
+        assert_eq!(wire[17], 0); // reserved
+        assert_eq!(wire[18], 0); // MT-ID
+        assert_eq!(wire[19], 0); // algorithm
+                                 // SID 100 as a 4-octet index.
+        assert_eq!(&wire[20..24], &100u32.to_be_bytes());
         assert_eq!(wire.len(), 24);
     }
 
@@ -472,25 +516,39 @@ mod tests {
     fn ext_prefix_lsa_decode_skips_unknown_subtlvs_and_tlbs() {
         // Extended Prefix TLV with the Prefix-SID sub-TLV followed by
         // an unknown sub-TLV (type 0xBEEF): the SID still decodes, the
-        // unknown one is skipped per RFC 8667 SS5. Value length: 4
-        // (descriptor) + 4 (prefix) + 10 (SID sub-TLV, padded to 12)
-        // + 8 (unknown, 1 octet value padded to 4) = 28.
+        // unknown one is skipped per RFC 8665 §9. Value length: 8
+        // (descriptor + prefix) + 12 (SID sub-TLV) + 8 (unknown, 1
+        // octet value padded to 4) = 28.
         let mut wire = Vec::new();
         wire.extend_from_slice(&TLV_EXT_PREFIX.to_be_bytes());
         wire.extend_from_slice(&28u16.to_be_bytes());
-        wire.extend_from_slice(&[1, 0, 0, 32]);
+        wire.extend_from_slice(&[1, 32, 0, 0]);
         wire.extend_from_slice(&[192, 0, 2, 9]);
         wire.extend_from_slice(&SUBTLV_PREFIX_SID.to_be_bytes());
-        wire.extend_from_slice(&6u16.to_be_bytes());
-        wire.extend_from_slice(&[0, 0, 0, 0, 0, 200]);
-        // 2 padding bytes bring the 6-octet sub-TLV body to a
-        // 4-octet boundary before the next sub-TLV.
-        wire.extend_from_slice(&[0, 0]);
+        wire.extend_from_slice(&8u16.to_be_bytes());
+        wire.extend_from_slice(&[0, 0, 0, 0, 0, 0, 0, 200]);
         wire.extend_from_slice(&[0xBE, 0xEF, 0, 1, 0xAA, 0, 0, 0]);
         let decoded = decode_ext_prefix_lsa_body(&wire).expect("decode");
         assert_eq!(decoded.len(), 1);
         assert_eq!(decoded[0].0.prefix, [192, 0, 2, 9]);
         assert_eq!(decoded[0].1.as_ref().expect("sid").sid, 200);
+    }
+
+    #[test]
+    fn ext_prefix_lsa_decode_local_label_shape() {
+        // RFC 8665 §5 length-7 shape: a 3-octet local label (V/L set).
+        let mut wire = Vec::new();
+        wire.extend_from_slice(&TLV_EXT_PREFIX.to_be_bytes());
+        wire.extend_from_slice(&20u16.to_be_bytes());
+        wire.extend_from_slice(&[1, 32, 0, 0]);
+        wire.extend_from_slice(&[192, 0, 2, 9]);
+        wire.extend_from_slice(&SUBTLV_PREFIX_SID.to_be_bytes());
+        wire.extend_from_slice(&7u16.to_be_bytes());
+        wire.extend_from_slice(&[sid_flags::V | sid_flags::L, 0, 0, 0]);
+        wire.extend_from_slice(&[0x00, 0x01, 0x02, 0]); // label + pad
+        let decoded = decode_ext_prefix_lsa_body(&wire).expect("decode");
+        let sid = decoded[0].1.as_ref().expect("sid");
+        assert_eq!(sid.sid, 0x000102);
     }
 
     #[test]
@@ -500,28 +558,29 @@ mod tests {
         let mut wire = Vec::new();
         wire.extend_from_slice(&TLV_EXT_PREFIX.to_be_bytes());
         wire.extend_from_slice(&8u16.to_be_bytes());
-        wire.extend_from_slice(&[1, 0, 0, 24, 10, 0, 0, 0]);
+        wire.extend_from_slice(&[1, 24, 0, 0x40, 10, 0, 0, 0]);
         let decoded = decode_ext_prefix_lsa_body(&wire).expect("decode");
         assert!(decoded[0].1.is_none());
     }
 
     #[test]
-    fn ri_sr_lsa_wire_shape_matches_rfc8667() {
+    fn ri_sr_lsa_wire_shape_matches_rfc8665() {
         let wire = encode_ri_sr_lsa_body(16_000, 8_000).expect("encode");
         // SR-Algorithm TLV: type 8, len 1, value 0, 3 padding.
         assert_eq!(&wire[0..2], &[0, 8]);
         assert_eq!(&wire[2..4], &[0, 1]);
         assert_eq!(wire[4], 0);
         assert_eq!(&wire[5..8], &[0, 0, 0]);
-        // SRGB Descriptor TLV: type 9, len 7, MPLS flag, range, base.
+        // SID/Label Range TLV: type 9, len 12 — range size (3),
+        // reserved (1), SID/Label sub-TLV (type 1, len 4, base).
         assert_eq!(&wire[8..10], &[0, 9]);
-        assert_eq!(&wire[10..12], &[0, 7]);
-        assert_eq!(wire[12], SRGB_FLAG_MPLS);
-        assert_eq!(&wire[13..16], &8_000u32.to_be_bytes()[1..4]);
-        assert_eq!(&wire[16..19], &16_000u32.to_be_bytes()[1..4]);
-        // Trailing alignment padding: the LSA length stays 4-aligned.
-        assert_eq!(wire[19], 0);
-        assert_eq!(wire.len(), 20);
+        assert_eq!(&wire[10..12], &12u16.to_be_bytes());
+        assert_eq!(&wire[12..15], &8_000u32.to_be_bytes()[1..4]);
+        assert_eq!(wire[15], 0); // reserved
+        assert_eq!(&wire[16..18], &[0, 1]);
+        assert_eq!(&wire[18..20], &4u16.to_be_bytes());
+        assert_eq!(&wire[20..24], &16_000u32.to_be_bytes());
+        assert_eq!(wire.len(), 24);
     }
 
     #[test]
