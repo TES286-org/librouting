@@ -187,6 +187,8 @@ jobs:
         run: ./tests/interop/ospf_sr_frr.sh
       - name: OSPF Segment Routing interop (RFC 8665 slice 2 reception, lr x lr)
         run: ./tests/interop/ospf_sr.sh
+      - name: OSPF SR adjacency + mapping server interop (RFC 8665 slice 3, lr x lr)
+        run: ./tests/interop/ospf_sr_adj.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
         run: ./tests/interop/mrt.sh
       - name: Wire-level parity harness (replay captured stream, diff Loc-RIBs)

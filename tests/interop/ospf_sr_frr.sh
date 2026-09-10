@@ -99,7 +99,11 @@ export MPLS
 # netns — decided after zebra starts (see below); defaults to off so a
 # crashy `segment-routing on` never slips through.
 SR_READY=0
-export SR_READY
+# Whether FRR's SR stack itself came up (label manager reachable,
+# SRDB populated) — decided after the SRDB dump; also initialised so
+# `set -u` never trips on the MPLS=1 fast path.
+SR_UP=0
+export SR_READY SR_UP
 
 exec unshare -Urn -m bash -euo pipefail <<'INNER'
 cd "$REPO"
@@ -304,6 +308,7 @@ sr_receive = true
 name = "veth0"
 hello_interval = 1
 dead_interval = 4
+adj_sid = 24000
 
 [[ospf.prefix_sid]]
 prefix = "10.99.2.0/24"
@@ -330,6 +335,10 @@ vty_cmd 26110 "show ip ospf database" >"$OUT/lsdb.txt" 2>/dev/null || true
 cat "$OUT/lsdb.txt"
 vty_cmd 26110 "show ip ospf database opaque-area 7.0.0.1" >"$OUT/lsdb_detail.txt" 2>/dev/null || true
 cat "$OUT/lsdb_detail.txt" || true
+# FRR's decode of lr's Extended Link LSA: the Adj-SID sub-TLV must
+# carry the configured label with the V/L (local) flags.
+vty_cmd 26110 "show ip ospf database opaque-area 8.0.0.3" >"$OUT/lsdb_link.txt" 2>/dev/null || true
+cat "$OUT/lsdb_link.txt" || true
 if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ] && [ "$SR_UP" -eq 1 ]; then
     echo "== FRR SRDB =="
     vty_cmd 26110 "show ip ospf srdb" >"$OUT/srdb.txt" 2>/dev/null || true
@@ -353,6 +362,47 @@ echo "== lr-daemon log =="
 cat "$OUT/r1.log"
 
 fail=0
+# Phase 3 (slice 3, RFC 8665 §6): adjacency segments, both directions.
+# lr originates an Extended Link Opaque LSA (Opaque Type 8) for its
+# configured adjacency SID 24000; FRR's LSDB + SRDB must carry it.
+# With FRR's SR stack up, FRR originates its own Extended Link LSA
+# (its SRLB-allocated adjacency SID) and lr's SRDB exposes it.
+api_cmd() {
+    python3 - "$1" "$2" <<'PYEOF'
+import socket, sys
+path, cmd = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(path)
+s.sendall((cmd + "\n").encode())
+out = b""
+try:
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        out += chunk
+except socket.timeout:
+    pass
+sys.stdout.write(out.decode(errors="replace"))
+PYEOF
+}
+echo "== lr reception of FRR's adjacency segment (phase 3) =="
+api_cmd "$OUT/r1.ctl" "status" >"$OUT/r1.status"
+grep "ospf-sr" "$OUT/r1.status" || true
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ] && [ "$SR_UP" -eq 1 ]; then
+    if ! grep "ospf-sr adj" "$OUT/r1.status" | grep -qF "router=2.2.2.2"; then
+        echo "FAIL: lr's SRDB does not hold FRR's adjacency segment (Extended Link LSA missing or undecoded)"
+        fail=1
+    fi
+    if ! grep -q "24000" "$OUT/srdb.txt"; then
+        echo "FAIL: FRR's SRDB does not carry lr's adjacency SID 24000"
+        fail=1
+    fi
+else
+    echo "NOTE: FRR SR stack unavailable - phase-3 adjacency assertions skipped (same gate as phase 2)"
+fi
+
 # Phase 2: lr receives FRR's prefix-SID (RFC 8665 reception). The API
 # `routes` dump must map FRR's 10.99.3.0/24 to label 16200 (base + SID
 # 200), and — with install_kernel — the kernel FIB must carry the RFC
@@ -396,9 +446,15 @@ sleep 0.5
 
 # The LSDB listing shows the opaque LSAs by Opaque-Type/Id: 4.0.0.0 is
 # our Router Information LSA (SRGB), 7.0.0.1 the Extended Prefix LSA
-# (prefix-SID for 10.99.2.0/24).
+# (prefix-SID for 10.99.2.0/24) and 8.0.0.<ifindex> the Extended Link
+# LSA (adjacency SID 24000 — slice 3). Opaque flooding needs only the
+# opaque capability, so the type-8 check runs ungated.
 if ! grep -q "4.0.0.0" "$OUT/lsdb.txt" || ! grep -q "7.0.0.1" "$OUT/lsdb.txt"; then
     echo "FAIL: FRR's LSDB does not hold lr's RI (4.0.0.0) and Extended Prefix (7.0.0.1) LSAs"
+    fail=1
+fi
+if ! grep -q "8.0.0" "$OUT/lsdb.txt"; then
+    echo "FAIL: FRR's LSDB does not hold lr's Extended Link (8.0.0.*) LSA (adjacency SID)"
     fail=1
 fi
 if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ] && [ "$SR_UP" -eq 1 ]; then
