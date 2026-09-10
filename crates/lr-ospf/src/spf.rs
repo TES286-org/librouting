@@ -5,7 +5,7 @@
 //! [`summary_routes`] derives inter-area candidates from summary-LSAs on
 //! top of an intra-area result (RFC 2328 §16.2).
 
-use std::collections::{BTreeMap, BinaryHeap};
+use std::collections::{BTreeMap, BinaryHeap, BTreeSet};
 
 use crate::lsa::{
     decode_summary_lsa_body, mask_to_prefix_len, LsaTypeV2, RouterLink, RouterLinkType,
@@ -30,6 +30,22 @@ pub struct SpfVertex {
 pub struct SpfResult {
     /// Best distances to each vertex.
     pub vertices: BTreeMap<VertexId, u64>,
+    /// RFC 2328 §16.1.1: the next hop toward each vertex — the IP
+    /// interface address of the first-hop neighbour on the shortest
+    /// path — wherever the LSDB carries it. A direct p2p neighbour
+    /// contributes the Link Data of the p2p link pointing back at the
+    /// root (its own address on the shared link, §16.1.1 (5)); a router
+    /// attached to a directly reachable transit network contributes its
+    /// address on that network (§16.1.1 (4)); deeper vertices inherit
+    /// their parent's next hop (§16.1.1 (2)-(3)). Vertices whose next
+    /// hop the LSDB cannot resolve (unnumbered, Link Data 0) are absent.
+    pub next_hops: BTreeMap<VertexId, IpAddr>,
+    /// Router vertices one hop from the root: a direct p2p adjacency or
+    /// a router on a directly attached transit network. Segment Routing
+    /// uses this for the RFC 8667 §5 PHP rule — the penultimate hop
+    /// pops when a Prefix-SID does not carry the NP flag, and a router
+    /// in this set *is* the penultimate hop for its own prefix-SIDs.
+    pub adjacent_routers: BTreeSet<u32>,
     /// Best next-hop IP for each prefix reachable through a stub network.
     pub stub_routes: Vec<SpfRoute>,
     /// Best next-hop IP for each transit network.
@@ -72,9 +88,41 @@ impl PartialEq for SpfVertex {
 
 /// Run Dijkstra starting at `root` (a Router vertex). Uses Router-LSAs and
 /// Network-LSAs from `lsdb` to construct the shortest-path tree.
+///
+/// The LSDB is pre-scanned into per-type link maps once (one Router-LSA
+/// per advertising router, §12.4.1; one Network-LSA per link-state ID,
+/// §12.4.2) so the relaxation loop never re-walks the whole database per
+/// popped vertex. First-instance wins for duplicate Network-LSA link-state
+/// IDs — the iteration order of [`Lsdb::iter`] and `or_insert` reproduce
+/// the previous first-match-in-database-order rule.
 pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
+    // Pre-scan the database into link maps.
+    let mut router_lsas: BTreeMap<u32, Vec<RouterLink>> = BTreeMap::new();
+    // link-state ID (the DR's IP) → (network mask, attached router IDs).
+    let mut network_lsas: BTreeMap<u32, (u32, Vec<u32>)> = BTreeMap::new();
+    for (key, entry) in lsdb.iter() {
+        if key.ls_type == LsaTypeV2::RouterLsa as u16 {
+            router_lsas
+                .entry(key.advertising_router)
+                .or_default()
+                .extend(decode_router_links(&entry.lsa.body));
+        } else if key.ls_type == LsaTypeV2::NetworkLsa as u16 && entry.lsa.body.len() >= 4 {
+            let mask = u32::from_be_bytes([
+                entry.lsa.body[0],
+                entry.lsa.body[1],
+                entry.lsa.body[2],
+                entry.lsa.body[3],
+            ]);
+            let attached = decode_network_attached_routers(&entry.lsa.body);
+            network_lsas.entry(key.link_state_id).or_insert((mask, attached));
+        }
+    }
+
     let mut result = SpfResult::default();
     let mut heap: BinaryHeap<SpfVertex> = BinaryHeap::new();
+    // First parent on the shortest path — decides next-hop inheritance
+    // and (indirectly, via the root check) adjacency.
+    let mut parents: BTreeMap<VertexId, VertexId> = BTreeMap::new();
     let root_id = VertexId::Router(root);
     heap.push(SpfVertex {
         id: root_id,
@@ -91,113 +139,205 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
         }
         match v.id {
             VertexId::Router(rid) => {
-                // Process this router's Router-LSA.
-                for (key, entry) in lsdb.iter() {
-                    if key.ls_type != LsaTypeV2::RouterLsa as u16 || key.advertising_router != rid {
-                        continue;
-                    }
-                    // Parse router-LSA body for links.
-                    for link in decode_router_links(&entry.lsa.body) {
-                        match link.link_type {
-                            x if x == RouterLinkType::PointToPoint as u8
-                                || x == RouterLinkType::VirtualLink as u8 =>
+                // Process this router's Router-LSA links.
+                for link in router_lsas.get(&rid).into_iter().flatten() {
+                    match link.link_type {
+                        x if x == RouterLinkType::PointToPoint as u8
+                            || x == RouterLinkType::VirtualLink as u8 =>
+                        {
+                            // Link-ID is the neighbor's Router-ID. A
+                            // virtual link (type 4, RFC 2328 §A.4.2)
+                            // only appears in backbone router-LSAs and
+                            // behaves as a point-to-point adjacency —
+                            // its metric is the transit-area path cost
+                            // the endpoint maintains (§15).
+                            let target = VertexId::Router(link.link_id);
+                            // §16.1.1 (5): a direct neighbour's address
+                            // is the Link Data of the p2p link it
+                            // points back at us with. Deeper vertices
+                            // inherit the parent's next hop (§16.1.1
+                            // (2)-(3)).
+                            let next_hop = if rid == root {
+                                router_address_towards(&router_lsas, link.link_id, root)
+                            } else {
+                                result.next_hops.get(&v.id).copied()
+                            };
+                            relax(
+                                &mut result,
+                                &mut parents,
+                                &mut heap,
+                                v.id,
+                                target,
+                                current_dist + link.metric as u64,
+                                next_hop,
+                            );
+                            if rid == root && link.link_type == RouterLinkType::PointToPoint as u8
                             {
-                                // Link-ID is the neighbor's Router-ID. A
-                                // virtual link (type 4, RFC 2328 §A.4.2)
-                                // only appears in backbone router-LSAs and
-                                // behaves as a point-to-point adjacency —
-                                // its metric is the transit-area path cost
-                                // the endpoint maintains (§15).
-                                let target = VertexId::Router(link.link_id);
-                                let new_dist = current_dist + link.metric as u64;
-                                let prev =
-                                    result.vertices.get(&target).copied().unwrap_or(u64::MAX);
-                                if new_dist < prev {
-                                    result.vertices.insert(target, new_dist);
-                                    heap.push(SpfVertex {
-                                        id: target,
-                                        distance: new_dist,
-                                    });
-                                }
+                                // One hop away: the penultimate hop for
+                                // this neighbour's own prefix-SIDs
+                                // (RFC 8667 §5 PHP rule).
+                                result.adjacent_routers.insert(link.link_id);
                             }
-                            x if x == RouterLinkType::TransitNetwork as u8 => {
-                                // Link-ID is the DR's IP.
-                                let target = VertexId::Network(link.link_id);
-                                let new_dist = current_dist + link.metric as u64;
-                                let prev =
-                                    result.vertices.get(&target).copied().unwrap_or(u64::MAX);
-                                if new_dist < prev {
-                                    result.vertices.insert(target, new_dist);
-                                    heap.push(SpfVertex {
-                                        id: target,
-                                        distance: new_dist,
-                                    });
-                                }
-                            }
-                            x if x == RouterLinkType::StubNetwork as u8 => {
-                                // Stub network: link-id is the network/subnet; link-data is the mask.
-                                let mask = link.link_data;
-                                let pl = mask_to_pl(mask);
-                                let prefix = Prefix::new_v4(link.link_id.to_be_bytes(), pl);
-                                result.stub_routes.push(SpfRoute {
-                                    prefix,
-                                    metric: current_dist + link.metric as u64,
-                                    next_hop: None,
-                                    border_router: None,
-                                });
-                            }
-                            _ => {}
                         }
+                        x if x == RouterLinkType::TransitNetwork as u8 => {
+                            // Link-ID is the DR's IP.
+                            let target = VertexId::Network(link.link_id);
+                            // A directly attached transit network is
+                            // connected: no IP next hop toward the
+                            // network itself. Deeper networks inherit.
+                            let next_hop = if rid == root {
+                                None
+                            } else {
+                                result.next_hops.get(&v.id).copied()
+                            };
+                            relax(
+                                &mut result,
+                                &mut parents,
+                                &mut heap,
+                                v.id,
+                                target,
+                                current_dist + link.metric as u64,
+                                next_hop,
+                            );
+                        }
+                        x if x == RouterLinkType::StubNetwork as u8 => {
+                            // Stub network: link-id is the network/subnet; link-data is the mask.
+                            let mask = link.link_data;
+                            let pl = mask_to_pl(mask);
+                            let prefix = Prefix::new_v4(link.link_id.to_be_bytes(), pl);
+                            result.stub_routes.push(SpfRoute {
+                                prefix,
+                                metric: current_dist + link.metric as u64,
+                                next_hop: None,
+                                border_router: None,
+                            });
+                        }
+                        _ => {}
                     }
                 }
             }
             VertexId::Network(ls_id) => {
-                // Network-LSA: list of attached routers. Only the first
-                // LSA instance matching the Link State ID is used — the
-                // current DR is its sole originator (§12.4.2).
-                for (key, entry) in lsdb.iter() {
-                    if key.ls_type != LsaTypeV2::NetworkLsa as u16 || key.link_state_id != ls_id {
-                        continue;
-                    }
-                    // The transit network itself is a destination: its
-                    // prefix is the DR's interface address masked by the
-                    // network mask (§12.4.2) at the vertex distance —
-                    // the broadcast counterpart of a stub link, which
-                    // §12.4.1.2 no longer advertises once the transit
-                    // link appears (BIRD spfa_process_net parity).
-                    if entry.lsa.body.len() >= 4 {
-                        let mask = u32::from_be_bytes([
-                            entry.lsa.body[0],
-                            entry.lsa.body[1],
-                            entry.lsa.body[2],
-                            entry.lsa.body[3],
-                        ]);
-                        let net = ls_id & mask;
-                        result.transit_routes.push(SpfRoute {
-                            prefix: Prefix::new_v4(net.to_be_bytes(), mask_to_pl(mask)),
-                            metric: current_dist,
-                            next_hop: None,
-                            border_router: None,
-                        });
-                    }
-                    for attached in decode_network_attached_routers(&entry.lsa.body) {
-                        let target = VertexId::Router(attached);
-                        let new_dist = current_dist; // transit network has zero metric
-                        let prev = result.vertices.get(&target).copied().unwrap_or(u64::MAX);
-                        if new_dist < prev {
-                            result.vertices.insert(target, new_dist);
-                            heap.push(SpfVertex {
-                                id: target,
-                                distance: new_dist,
-                            });
+                // Network-LSA: list of attached routers. The transit
+                // network itself is a destination: its prefix is the
+                // DR's interface address masked by the network mask
+                // (§12.4.2) at the vertex distance — the broadcast
+                // counterpart of a stub link, which §12.4.1.2 no longer
+                // advertises once the transit link appears (BIRD
+                // spfa_process_net parity).
+                if let Some((mask, attached)) = network_lsas.get(&ls_id) {
+                    let net = ls_id & *mask;
+                    result.transit_routes.push(SpfRoute {
+                        prefix: Prefix::new_v4(net.to_be_bytes(), mask_to_pl(*mask)),
+                        metric: current_dist,
+                        next_hop: None,
+                        border_router: None,
+                    });
+                    // §16.1.1 (4): routers attached to a directly
+                    // reachable transit network are one hop away —
+                    // their address on that network (the Link Data of
+                    // the transit link pointing at the DR) is the next
+                    // hop. Routers behind a deeper network inherit it.
+                    let direct_net = parents.get(&v.id) == Some(&root_id);
+                    for &r in attached {
+                        let target = VertexId::Router(r);
+                        let next_hop = if direct_net {
+                            router_address_on_network(&router_lsas, r, ls_id)
+                        } else {
+                            result.next_hops.get(&v.id).copied()
+                        };
+                        // Transit networks have zero metric (§16.1).
+                        relax(
+                            &mut result,
+                            &mut parents,
+                            &mut heap,
+                            v.id,
+                            target,
+                            current_dist,
+                            next_hop,
+                        );
+                        if direct_net {
+                            result.adjacent_routers.insert(r);
                         }
                     }
-                    break;
                 }
             }
         }
     }
     result
+}
+
+/// Relax the edge `from → target` at `new_dist`: strictly better paths
+/// update the distance, the parent (for next-hop inheritance) and the
+/// resolved next hop; equal-distance paths keep the first parent, so the
+/// result is deterministic for a given LSDB.
+fn relax(
+    result: &mut SpfResult,
+    parents: &mut BTreeMap<VertexId, VertexId>,
+    heap: &mut BinaryHeap<SpfVertex>,
+    from: VertexId,
+    target: VertexId,
+    new_dist: u64,
+    next_hop: Option<IpAddr>,
+) {
+    let prev = result.vertices.get(&target).copied().unwrap_or(u64::MAX);
+    if new_dist < prev {
+        result.vertices.insert(target, new_dist);
+        parents.insert(target, from);
+        match next_hop {
+            Some(nh) => {
+                result.next_hops.insert(target, nh);
+            }
+            None => {
+                result.next_hops.remove(&target);
+            }
+        }
+        heap.push(SpfVertex {
+            id: target,
+            distance: new_dist,
+        });
+    }
+}
+
+/// The address `neighbor` uses on the link back to `towards`: the Link
+/// Data of `neighbor`'s point-to-point or virtual link whose Link ID is
+/// `towards` (RFC 2328 §A.4.2). Link Data 0 (unnumbered, or the link
+/// absent from the neighbour's LSA) yields `None` — the next hop is then
+/// unresolvable from the database alone.
+fn router_address_towards(
+    router_lsas: &BTreeMap<u32, Vec<RouterLink>>,
+    neighbor: u32,
+    towards: u32,
+) -> Option<IpAddr> {
+    for link in router_lsas.get(&neighbor)?.iter() {
+        if (link.link_type == RouterLinkType::PointToPoint as u8
+            || link.link_type == RouterLinkType::VirtualLink as u8)
+            && link.link_id == towards
+            && link.link_data != 0
+        {
+            return Some(IpAddr::V4(link.link_data.to_be_bytes()));
+        }
+    }
+    None
+}
+
+/// The address `router` uses on the transit network whose Designated
+/// Router address is `dr_ip`: the Link Data of its transit link whose
+/// Link ID is the DR's address (RFC 2328 §A.4.2). Link Data 0 or a
+/// missing transit link yields `None`.
+fn router_address_on_network(
+    router_lsas: &BTreeMap<u32, Vec<RouterLink>>,
+    router: u32,
+    dr_ip: u32,
+) -> Option<IpAddr> {
+    for link in router_lsas.get(&router)?.iter() {
+        if link.link_type == RouterLinkType::TransitNetwork as u8
+            && link.link_id == dr_ip
+            && link.link_data != 0
+        {
+            return Some(IpAddr::V4(link.link_data.to_be_bytes()));
+        }
+    }
+    None
 }
 
 fn mask_to_pl(mask: u32) -> u8 {
@@ -410,6 +550,138 @@ mod tests {
         assert_eq!(mask_to_pl(0xff000000), 8);
         assert_eq!(mask_to_pl(0xffffff00), 24);
         assert_eq!(mask_to_pl(0xffffffff), 32);
+    }
+
+    const P2P: u8 = RouterLinkType::PointToPoint as u8;
+    const STUB: u8 = RouterLinkType::StubNetwork as u8;
+    const TRANSIT: u8 = RouterLinkType::TransitNetwork as u8;
+
+    fn ip(octets: [u8; 4]) -> IpAddr {
+        IpAddr::V4(octets)
+    }
+
+    #[test]
+    fn next_hops_resolve_from_the_back_link_and_inherit() {
+        // A (1.1.1.1) —10— B (2.2.2.2) —10— C (3.3.3.3); B's and C's
+        // p2p links carry their own interface addresses as Link Data
+        // (RFC 2328 §A.4.2), A's stay 0 (its own address is not a next
+        // hop for anyone). RFC 2328 §16.1.1 (5)/(2): nh(B) = B's
+        // address on the shared link; nh(C) = nh(B) (inheritance).
+        let mut db = Lsdb::new();
+        db.install(
+            router_lsa(0x01010101, vec![(0x02020202, 0, P2P, 10)]),
+            0,
+        );
+        db.install(
+            router_lsa(
+                0x02020202,
+                vec![
+                    // Back-link toward A: Link Data = B's address on A-B.
+                    (0x01010101, 0x0a000001, P2P, 10),
+                    // Link toward C: Link Data = B's address on B-C.
+                    (0x03030303, 0x0a000102, P2P, 10),
+                    (0x0a140000, 0xffff0000, STUB, 5),
+                ],
+            ),
+            0,
+        );
+        db.install(
+            // C's back-link toward B: Link Data = C's address on B-C.
+            router_lsa(0x03030303, vec![(0x02020202, 0x0a000102, P2P, 10)]),
+            0,
+        );
+        let res = run_spf(&db, 0x01010101);
+        assert_eq!(res.next_hops.get(&VertexId::Router(0x02020202)), Some(&ip([10, 0, 0, 1])));
+        assert_eq!(res.next_hops.get(&VertexId::Router(0x03030303)), Some(&ip([10, 0, 0, 1])));
+        // B's stub network inherits no route next hop (stub routes are
+        // connected through the vertex, not an address).
+        assert!(res.stub_routes.iter().all(|r| r.next_hop.is_none()));
+        assert!(res.adjacent_routers.contains(&0x02020202));
+        assert!(!res.adjacent_routers.contains(&0x03030303));
+    }
+
+    #[test]
+    fn next_hops_via_transit_network_use_the_attached_router_address() {
+        // A (1.1.1.1) has a transit link to the DR address 10.0.0.1;
+        // the Network-LSA (ls_id 10.0.0.1, mask /24) attaches A and
+        // B (2.2.2.2). §16.1.1 (4): nh(B) = B's address on that
+        // network = the Link Data of B's transit link (10.0.0.2).
+        let mut db = Lsdb::new();
+        db.install(
+            router_lsa(0x01010101, vec![(0x0a000001, 0, TRANSIT, 10)]),
+            0,
+        );
+        // B: transit link back to the same DR (its addr 10.0.0.2) plus
+        // a deeper p2p neighbor C whose back-link carries C's address.
+        db.install(
+            router_lsa(
+                0x02020202,
+                vec![
+                    (0x0a000001, 0x0a000002, TRANSIT, 10),
+                    (0x03030303, 0x0a000202, P2P, 10),
+                ],
+            ),
+            0,
+        );
+        db.install(
+            router_lsa(0x03030303, vec![(0x02020202, 0x0a000202, P2P, 10)]),
+            0,
+        );
+        let mut net_body = Vec::new();
+        net_body.extend_from_slice(&0xffff_ff00u32.to_be_bytes());
+        net_body.extend_from_slice(&0x01010101u32.to_be_bytes());
+        net_body.extend_from_slice(&0x02020202u32.to_be_bytes());
+        db.install(
+            Lsa {
+                header: LsaHeader {
+                    ls_age: 0,
+                    options: 2,
+                    ls_type: LsaTypeV2::NetworkLsa as u16,
+                    link_state_id: 0x0a000001,
+                    advertising_router: 0x01010101,
+                    ls_sequence_number: 0x80000001,
+                    ls_checksum: 0,
+                    length: (LsaHeader::LEN + net_body.len()) as u16,
+                },
+                body: net_body,
+            },
+            0,
+        );
+        let res = run_spf(&db, 0x01010101);
+        assert_eq!(res.next_hops.get(&VertexId::Router(0x02020202)), Some(&ip([10, 0, 0, 2])));
+        // C hangs off B: inherits B's next hop (§16.1.1 (2)).
+        assert_eq!(res.next_hops.get(&VertexId::Router(0x03030303)), Some(&ip([10, 0, 0, 2])));
+        // B is one hop away (via the shared network) — penultimate for
+        // its prefix-SIDs; C is not.
+        assert!(res.adjacent_routers.contains(&0x02020202));
+        assert!(!res.adjacent_routers.contains(&0x03030303));
+        // The transit prefix route is still present with no next hop.
+        let net = res
+            .transit_routes
+            .iter()
+            .find(|r| r.prefix == Prefix::new_v4([10, 0, 0, 0], 24))
+            .expect("transit route");
+        assert_eq!(net.metric, 10);
+        assert!(net.next_hop.is_none());
+    }
+
+    #[test]
+    fn zero_link_data_keeps_the_next_hop_unresolved() {
+        // B's back-link carries Link Data 0 (unnumbered): no next hop
+        // can be resolved from the database, so the vertex has none.
+        let mut db = Lsdb::new();
+        db.install(
+            router_lsa(0x01010101, vec![(0x02020202, 0, P2P, 10)]),
+            0,
+        );
+        db.install(
+            router_lsa(0x02020202, vec![(0x01010101, 0, P2P, 10)]),
+            0,
+        );
+        let res = run_spf(&db, 0x01010101);
+        assert!(res.next_hops.get(&VertexId::Router(0x02020202)).is_none());
+        // Topology itself is unaffected.
+        assert_eq!(res.vertices.get(&VertexId::Router(0x02020202)), Some(&10));
     }
 
     #[test]
