@@ -369,6 +369,7 @@ dependencies = [
  "lr-policy",
  "lr-rib",
  "lr-router",
+ "lr-srv6",
 ]
 
 [[package]]
@@ -412,6 +413,7 @@ version = "0.1.0"
 dependencies = [
  "lr-core",
  "lr-mpls",
+ "lr-srv6",
 ]
 
 [[package]]
@@ -444,6 +446,13 @@ dependencies = [
  "lr-policy",
  "lr-rib",
  "tracing",
+]
+
+[[package]]
+name = "lr-srv6"
+version = "0.1.0"
+dependencies = [
+ "lr-core",
 ]
 
 [[package]]

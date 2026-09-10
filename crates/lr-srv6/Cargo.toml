@@ -1,0 +1,18 @@
+[package]
+name = "lr-srv6"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "SRv6 data-plane primitives — SID, locator and Segment Routing Header codec (RFC 8754 / RFC 8402 / RFC 8986) for librouting"
+
+[features]
+default = ["std"]
+std = []
+no_std = []
+
+[dependencies]
+lr-core = { workspace = true }
