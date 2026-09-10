@@ -918,3 +918,869 @@ mod tests {
         assert!(summary_routes(&db, &spf).is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// OSPFv3 SPF (RFC 5340 §4.8)
+// ---------------------------------------------------------------------------
+
+use crate::lsa::{
+    V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody, V3Prefix, V3RouterLsaBody,
+    LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL, LS_TYPE_INTRA_PREFIX,
+    LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_NU,
+};
+
+/// One vertex in the v3 SPF tree. Unlike v2, the Network vertex needs
+/// the full (DR Router ID, DR Interface ID) pair: the v3 Network-LSA is
+/// keyed by the DR's Interface ID as its Link State ID (§A.4.4), and
+/// several transit networks may share the same DR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum V3VertexId {
+    Router(u32),
+    /// (DR Router ID, DR Interface ID).
+    Network(u32, u32),
+}
+
+/// A resolved IPv6 first hop: the neighbor's link-local address (the
+/// only legal unicast next hop for OSPFv3, RFC 5340 §4.2.1) plus the
+/// Interface ID of *our* interface toward it — the value the kernel
+/// mirror needs as the outgoing interface (RTA_OIF for a link-local
+/// gateway). Interface IDs are the kernel ifindex by daemon convention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V3NextHop {
+    pub link_local: IpAddr,
+    pub interface_id: u32,
+}
+
+/// The result of the v3 intra-area calculation. `routes` reuses
+/// [`SpfRoute`] — every v3 intra-area prefix is intra-area by
+/// definition, so `border_router` is always `None`.
+#[derive(Debug, Clone, Default)]
+pub struct SpfResultV3 {
+    pub vertices: BTreeMap<V3VertexId, u64>,
+    /// The resolved first hop per vertex where the LSDB carries one.
+    pub next_hops: BTreeMap<V3VertexId, V3NextHop>,
+    /// Routers one hop from the root (direct p2p adjacency, or routers
+    /// on a directly attached transit network).
+    pub adjacent_routers: BTreeSet<u32>,
+    /// Intra-area prefixes from Intra-Area-Prefix-LSAs (§4.4.3.5),
+    /// deduplicated per prefix keeping the lowest metric.
+    pub routes: Vec<SpfRoute>,
+}
+
+/// The LSDB pre-scan for the v3 calculation: per-type maps built once so
+/// the relaxation loop never re-walks the database.
+struct V3Topology {
+    /// Router-LSAs (0x2001) by advertising router. One LSA per router:
+    /// the first instance in database order wins (fragmented
+    /// Router-LSAs — multiple per router — are not split apart here).
+    router_lsas: BTreeMap<u32, V3RouterLsaBody>,
+    /// Network-LSAs (0x2002) keyed (DR Router ID, DR Interface ID).
+    network_lsas: BTreeMap<(u32, u32), V3NetworkLsaBody>,
+    /// Link-LSAs (0x0008) keyed (Advertising Router, Interface ID) →
+    /// the link-local address. The Interface ID is the Link State ID
+    /// (§A.4.9).
+    link_locals: BTreeMap<(u32, u32), [u8; 16]>,
+    /// Intra-Area-Prefix-LSAs (0x2009), decoded:
+    /// (ref type, ref LS ID, ref Adv Router, prefixes).
+    intra_prefixes: Vec<(u16, u32, u32, Vec<V3Prefix>)>,
+}
+
+impl V3Topology {
+    fn from_lsdb(lsdb: &Lsdb) -> Self {
+        let mut t = Self {
+            router_lsas: BTreeMap::new(),
+            network_lsas: BTreeMap::new(),
+            link_locals: BTreeMap::new(),
+            intra_prefixes: Vec::new(),
+        };
+        for (key, entry) in lsdb.iter() {
+            match key.ls_type {
+                x if x == LS_TYPE_ROUTER => {
+                    if let Some(body) = V3RouterLsaBody::decode(&entry.lsa.body) {
+                        t.router_lsas.entry(key.advertising_router).or_insert(body);
+                    }
+                }
+                x if x == LS_TYPE_NETWORK => {
+                    if let Some(body) = V3NetworkLsaBody::decode(&entry.lsa.body) {
+                        t.network_lsas
+                            .entry((key.advertising_router, key.link_state_id))
+                            .or_insert(body);
+                    }
+                }
+                x if x == LS_TYPE_LINK => {
+                    if let Some(body) = V3LinkLsaBody::decode(&entry.lsa.body) {
+                        t.link_locals
+                            .entry((key.advertising_router, key.link_state_id))
+                            .or_insert(body.link_local);
+                    }
+                }
+                x if x == LS_TYPE_INTRA_PREFIX => {
+                    if let Some(body) = V3IntraAreaPrefixBody::decode(&entry.lsa.body) {
+                        t.intra_prefixes.push((
+                            body.ref_type,
+                            body.ref_ls_id,
+                            body.ref_adv_router,
+                            body.prefixes,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        t
+    }
+
+    /// The neighbor's link-local on the link where it uses interface
+    /// `neighbor_interface_id` (§16.1.1 for v3: read from the
+    /// neighbor's Link-LSA whose Link State ID is that Interface ID).
+    fn link_local_of(&self, router: u32, interface_id: u32) -> Option<[u8; 16]> {
+        self.link_locals.get(&(router, interface_id)).copied()
+    }
+
+    /// The Interface ID `router` uses on the transit network whose DR
+    /// is (`dr_router`, `dr_ifid`): the Interface ID field of the
+    /// transit link in `router`'s own Router-LSA pointing back at the
+    /// network — the v3 counterpart of the v2 `router_address_on_network`
+    /// resolution, and unambiguous where per-link LSDBs are not
+    /// available (an area-LSDB SPF sees every Link-LSA of a shared
+    /// router; the back-link picks the right one).
+    fn interface_on_network(&self, router: u32, dr_router: u32, dr_ifid: u32) -> Option<u32> {
+        self.router_lsas.get(&router)?.links.iter().find_map(|l| {
+            (l.link_type == LINK_TYPE_TRANSIT
+                && l.neighbor_router_id == dr_router
+                && l.neighbor_interface_id == dr_ifid)
+                .then_some(l.interface_id)
+        })
+    }
+
+    /// Bidirectional check (FRR `ospf6_lsdesc_backlink`): a p2p/virtual
+    /// edge R→N counts only when N's Router-LSA has a p2p/virtual link
+    /// back to R.
+    fn has_backlink(&self, neighbor: u32, towards: u32) -> bool {
+        self.router_lsas
+            .get(&neighbor)
+            .map(|b| {
+                b.links.iter().any(|l| {
+                    (l.link_type == LINK_TYPE_POINTTOPOINT || l.link_type == LINK_TYPE_VIRTUAL)
+                        && l.neighbor_router_id == towards
+                })
+            })
+            .unwrap_or(false)
+    }
+}
+
+/// Run the OSPFv3 intra-area shortest-path calculation (RFC 5340 §4.8)
+/// starting at the Router vertex `root`.
+///
+/// The tree is built from Router-LSAs (0x2001) and Network-LSAs (0x2002)
+/// exactly as in v2; the differences are the next-hop model and the
+/// prefix attachment:
+///
+/// - the next hop of a direct p2p neighbor is the neighbor's link-local
+///   address, read from its Link-LSA with Link State ID = the Neighbor
+///   Interface ID of our p2p link (§16.1.1 v3 form), and the outgoing
+///   Interface ID is the Interface ID field of our own p2p link;
+/// - routers on a directly attached transit network resolve their
+///   link-local through their back-link: their Router-LSA transit link
+///   pointing at the network carries the Interface ID they use there,
+///   which indexes their Link-LSA;
+/// - deeper vertices inherit their parent's next hop (§16.1.1 (2)-(3));
+/// - the prefixes themselves arrive via Intra-Area-Prefix-LSAs attached
+///   to Router- or Network-LSAs (§4.4.3.5) — prefixes with the NU or LA
+///   bit set take no part in the unicast calculation (§A.4.1).
+///
+/// Unresolvable next hops (missing Link-LSAs) still admit the vertex to
+/// the tree but leave the route without a gateway — the embedder
+/// decides whether to keep it.
+pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
+    let topo = V3Topology::from_lsdb(lsdb);
+    let mut result = SpfResultV3::default();
+    let mut parents: BTreeMap<V3VertexId, V3VertexId> = BTreeMap::new();
+    let root_id = V3VertexId::Router(root);
+    // Distances keyed by the v3 vertex id.
+    let mut dist: BTreeMap<V3VertexId, u64> = BTreeMap::new();
+    dist.insert(root_id, 0);
+
+    // Min-heap over (distance, vertex) pairs.
+    let mut queue: BinaryHeap<(std::cmp::Reverse<u64>, V3VertexId)> = BinaryHeap::new();
+    queue.push((std::cmp::Reverse(0), root_id));
+
+    let relax = |dist: &mut BTreeMap<V3VertexId, u64>,
+                 result: &mut SpfResultV3,
+                 parents: &mut BTreeMap<V3VertexId, V3VertexId>,
+                 queue: &mut BinaryHeap<(std::cmp::Reverse<u64>, V3VertexId)>,
+                 from: V3VertexId,
+                 target: V3VertexId,
+                 new_dist: u64,
+                 next_hop: Option<V3NextHop>| {
+        let prev = dist.get(&target).copied().unwrap_or(u64::MAX);
+        if new_dist < prev {
+            dist.insert(target, new_dist);
+            result.vertices.insert(target, new_dist);
+            parents.insert(target, from);
+            match next_hop {
+                Some(nh) => {
+                    result.next_hops.insert(target, nh);
+                }
+                None => {
+                    result.next_hops.remove(&target);
+                }
+            }
+            queue.push((std::cmp::Reverse(new_dist), target));
+        }
+    };
+
+    while let Some((_, v_id)) = queue.pop() {
+        let Some(&current_dist) = dist.get(&v_id) else {
+            continue;
+        };
+        match v_id {
+            V3VertexId::Router(rid) => {
+                let Some(body) = topo.router_lsas.get(&rid) else {
+                    continue;
+                };
+                for link in &body.links {
+                    match link.link_type {
+                        x if x == LINK_TYPE_POINTTOPOINT || x == LINK_TYPE_VIRTUAL => {
+                            let target = V3VertexId::Router(link.neighbor_router_id);
+                            if !topo.has_backlink(link.neighbor_router_id, rid) {
+                                continue;
+                            }
+                            let next_hop = if rid == root {
+                                topo.link_local_of(
+                                    link.neighbor_router_id,
+                                    link.neighbor_interface_id,
+                                )
+                                .map(|ll| V3NextHop {
+                                    link_local: IpAddr::V6(ll),
+                                    interface_id: link.interface_id,
+                                })
+                            } else {
+                                result.next_hops.get(&v_id).copied()
+                            };
+                            relax(
+                                &mut dist,
+                                &mut result,
+                                &mut parents,
+                                &mut queue,
+                                v_id,
+                                target,
+                                current_dist + u64::from(link.metric),
+                                next_hop,
+                            );
+                            if rid == root && x == LINK_TYPE_POINTTOPOINT {
+                                result.adjacent_routers.insert(link.neighbor_router_id);
+                            }
+                        }
+                        x if x == LINK_TYPE_TRANSIT => {
+                            let target = V3VertexId::Network(
+                                link.neighbor_router_id,
+                                link.neighbor_interface_id,
+                            );
+                            // Backlink: the Network-LSA must exist and
+                            // list this router as attached (§16.1 for
+                            // v3 — bidirectional connectivity).
+                            let listed = topo
+                                .network_lsas
+                                .get(&(link.neighbor_router_id, link.neighbor_interface_id))
+                                .map(|net| net.routers.contains(&rid))
+                                .unwrap_or(false);
+                            if !listed {
+                                continue;
+                            }
+                            let next_hop = if rid == root {
+                                None // directly connected
+                            } else {
+                                result.next_hops.get(&v_id).copied()
+                            };
+                            relax(
+                                &mut dist,
+                                &mut result,
+                                &mut parents,
+                                &mut queue,
+                                v_id,
+                                target,
+                                current_dist + u64::from(link.metric),
+                                next_hop,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            V3VertexId::Network(dr_rid, dr_ifid) => {
+                let Some(net) = topo.network_lsas.get(&(dr_rid, dr_ifid)) else {
+                    continue;
+                };
+                // §4.8: transit networks cost nothing to traverse —
+                // attached routers relax at the network's distance.
+                let direct_net = parents.get(&v_id) == Some(&V3VertexId::Router(root));
+                for &r in &net.routers {
+                    let target = V3VertexId::Router(r);
+                    let next_hop = if direct_net && r != root {
+                        // Resolve through the back-link transit entry,
+                        // then the Link-LSA (see `interface_on_network`).
+                        topo.interface_on_network(r, dr_rid, dr_ifid)
+                            .and_then(|iface| topo.link_local_of(r, iface))
+                            .map(|ll| V3NextHop {
+                                link_local: IpAddr::V6(ll),
+                                // Our outgoing interface is the Interface
+                                // ID of the ROOT's transit link toward
+                                // this network — recovered from the
+                                // root's own Router-LSA below.
+                                interface_id: topo
+                                    .router_lsas
+                                    .get(&root)
+                                    .and_then(|b| {
+                                        b.links.iter().find_map(|l| {
+                                            (l.link_type == LINK_TYPE_TRANSIT
+                                                && l.neighbor_router_id == dr_rid
+                                                && l.neighbor_interface_id == dr_ifid)
+                                                .then_some(l.interface_id)
+                                        })
+                                    })
+                                    .unwrap_or(0),
+                            })
+                    } else {
+                        result.next_hops.get(&v_id).copied()
+                    };
+                    relax(
+                        &mut dist,
+                        &mut result,
+                        &mut parents,
+                        &mut queue,
+                        v_id,
+                        target,
+                        current_dist,
+                        next_hop,
+                    );
+                    if direct_net && r != root {
+                        result.adjacent_routers.insert(r);
+                    }
+                }
+            }
+        }
+    }
+
+    // Attach the Intra-Area-Prefix-LSA prefixes (§4.8.1): the metric of
+    // a prefix is the distance of its referenced vertex, deduplicated
+    // per prefix keeping the lowest metric (lowest advertising router on
+    // ties, for determinism).
+    let mut best: BTreeMap<Prefix, (SpfRoute, u32)> = BTreeMap::new();
+    for (ref_type, ref_ls_id, ref_adv, prefixes) in &topo.intra_prefixes {
+        let vertex = match *ref_type {
+            x if x == LS_TYPE_ROUTER => V3VertexId::Router(*ref_adv),
+            x if x == LS_TYPE_NETWORK => V3VertexId::Network(*ref_adv, *ref_ls_id),
+            _ => continue,
+        };
+        let Some(&d) = dist.get(&vertex) else {
+            continue;
+        };
+        let next_hop = result.next_hops.get(&vertex).copied();
+        for p in prefixes {
+            // §A.4.1: NU-marked prefixes are excluded from the unicast
+            // calculation; LA-marked prefixes are the advertising
+            // router's own local address, never a forwarding target.
+            if p.options & (PREFIX_OPT_NU | PREFIX_OPT_LA) != 0 {
+                continue;
+            }
+            let prefix = Prefix::new_v6(p.addr, p.prefix_len);
+            let route = SpfRoute {
+                prefix,
+                metric: d,
+                next_hop: next_hop.map(|nh| nh.link_local),
+                border_router: None,
+            };
+            let replace = match best.get(&prefix) {
+                None => true,
+                Some((cur, cur_adv)) => {
+                    route.metric < cur.metric || (route.metric == cur.metric && *ref_adv < *cur_adv)
+                }
+            };
+            if replace {
+                best.insert(prefix, (route, *ref_adv));
+            }
+        }
+    }
+    result.routes = best.into_values().map(|(r, _)| r).collect();
+    result
+}
+
+#[cfg(test)]
+mod v3_tests {
+    use super::*;
+    use crate::lsa::v3::{
+        originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
+        originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LS_TYPE_ROUTER,
+        ROUTER_BIT_V6,
+    };
+
+    /// Two routers on a p2p link (interface ids 5 and 3), each with one
+    /// /64 on the link. r1 must learn r2's prefix via r2's link-local,
+    /// with our outgoing interface id 5.
+    #[test]
+    fn v3_p2p_two_routers_exchange_prefixes() {
+        let mut db = Lsdb::new();
+        let ll2 = fe80(2);
+        let ll1 = fe80(1);
+        // r1's Router-LSA: one p2p link to r2 (metric 10).
+        db.install(
+            originate_v3_router_lsa(
+                0x0a00_0001,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 3,
+                    neighbor_router_id: 0x0a00_0002,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        // r2's Router-LSA: the back-link.
+        db.install(
+            originate_v3_router_lsa(
+                0x0a00_0002,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 10,
+                    interface_id: 3,
+                    neighbor_interface_id: 5,
+                    neighbor_router_id: 0x0a00_0001,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        // Link-LSAs: each router's link-local on the shared link, LS ID
+        // = its interface id there.
+        db.install(
+            originate_v3_link_lsa(0x0a00_0001, 5, 1, 0x13, ll1, vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(0x0a00_0002, 3, 1, 0x13, ll2, vec![], None).unwrap(),
+            0,
+        );
+        // Intra-Area-Prefix-LSAs: each router's own /64 (the addresses
+        // of the link, NU/LA clear).
+        let p1 = net64(1);
+        let p2 = net64(2);
+        db.install(
+            originate_v3_intra_area_prefix_lsa(
+                0x0a00_0001,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                0x0a00_0001,
+                vec![p1.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_intra_area_prefix_lsa(
+                0x0a00_0002,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                0x0a00_0002,
+                vec![p2.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+
+        let spf = run_spf_v3(&db, 0x0a00_0001);
+        // r2 is reachable at cost 10 with r2's link-local as next hop
+        // and our interface 5 as oif.
+        let r2 = V3VertexId::Router(0x0a00_0002);
+        assert_eq!(spf.vertices.get(&r2), Some(&10));
+        let nh = spf.next_hops.get(&r2).expect("next hop resolved");
+        assert_eq!(nh.link_local, IpAddr::V6(ll2));
+        assert_eq!(nh.interface_id, 5, "our p2p link's interface id");
+        assert!(spf.adjacent_routers.contains(&0x0a00_0002));
+        // Routes: r1's own prefix (connected, metric 0) and r2's prefix
+        // (metric 10 via r2's link-local).
+        let find = |p: &Prefix| {
+            spf.routes
+                .iter()
+                .find(|r| r.prefix == *p)
+                .cloned()
+                .unwrap_or_else(|| panic!("route {} missing", p))
+        };
+        let own = find(&route_of(&p1));
+        assert_eq!(own.metric, 0);
+        assert_eq!(own.next_hop, None, "own prefixes are connected");
+        let remote = find(&route_of(&p2));
+        assert_eq!(remote.metric, 10);
+        assert_eq!(remote.next_hop, Some(IpAddr::V6(ll2)));
+    }
+
+    /// A three-router chain r1 - r2 - r3 (p2p): r1 must reach r3 through
+    /// r2's link-local (inherited next hop), at cost 20.
+    #[test]
+    fn v3_three_hop_chain_inherits_next_hop() {
+        let mut db = Lsdb::new();
+        let (r1, r2, r3) = (0x0a00_0001, 0x0a00_0002, 0x0a00_0003);
+        let link = |metric: u16, ifid: u32, nifid: u32, nrid: u32| crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+        };
+        db.install(
+            originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[link(10, 5, 3, r2)], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                &[link(10, 3, 5, r1), link(10, 6, 7, r3)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(r3, ROUTER_BIT_V6, 0x13, &[link(10, 7, 6, r2)], None).unwrap(),
+            0,
+        );
+        // Link-LSAs for every interface.
+        db.install(
+            originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, 6, 1, 0x13, fe80(22), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r3, 7, 1, 0x13, fe80(3), vec![], None).unwrap(),
+            0,
+        );
+        // r3's own /64.
+        let p3 = net64(3);
+        db.install(
+            originate_v3_intra_area_prefix_lsa(
+                r3,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                r3,
+                vec![p3.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+
+        let spf = run_spf_v3(&db, r1);
+        let v3v = V3VertexId::Router(r3);
+        assert_eq!(spf.vertices.get(&v3v), Some(&20), "10 + 10");
+        let nh = spf.next_hops.get(&v3v).expect("inherited next hop");
+        assert_eq!(nh.link_local, IpAddr::V6(fe80(2)), "via r2");
+        let route = spf
+            .routes
+            .iter()
+            .find(|r| r.prefix == route_of(&p3))
+            .expect("r3's prefix");
+        assert_eq!(route.metric, 20);
+        assert_eq!(route.next_hop, Some(IpAddr::V6(fe80(2))));
+    }
+
+    /// A transit segment with an elected DR: the DR originates the
+    /// Network-LSA and the segment's Intra-Area-Prefix-LSA. A router on
+    /// the segment (r1) resolves the other member's (r3's) link-local
+    /// through the back-link, without a p2p adjacency.
+    #[test]
+    fn v3_transit_network_resolves_members() {
+        let mut db = Lsdb::new();
+        let (r1, r2, r3) = (0x0a00_0001, 0x0a00_0002, 0x0a00_0003);
+        // r2 is the DR; its interface id on the segment is 9; r1's is 5,
+        // r3's is 7. r1 and r3 are fully adjacent to r2 only.
+        db.install(
+            originate_v3_router_lsa(
+                r1,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_TRANSIT,
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 9,
+                    neighbor_router_id: r2,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_TRANSIT,
+                    metric: 10,
+                    interface_id: 9,
+                    neighbor_interface_id: 9,
+                    neighbor_router_id: r2,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(
+                r3,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_TRANSIT,
+                    metric: 10,
+                    interface_id: 7,
+                    neighbor_interface_id: 9,
+                    neighbor_router_id: r2,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        // Network-LSA: DR r2, LS ID = its interface id 9, all three
+        // attached.
+        db.install(
+            originate_v3_network_lsa(r2, 9, 0x13, &[r1, r2, r3], None).unwrap(),
+            0,
+        );
+        // Link-LSAs on the segment.
+        db.install(
+            originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, 9, 1, 0x13, fe80(2), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r3, 7, 1, 0x13, fe80(3), vec![], None).unwrap(),
+            0,
+        );
+        // The segment's prefix, attached to the Network-LSA.
+        let seg = net64(9);
+        let seg_prefix = Prefix::new_v6(seg.addr, seg.prefix_len);
+        db.install(
+            originate_v3_intra_area_prefix_lsa(
+                r2,
+                1,
+                crate::lsa::v3::LS_TYPE_NETWORK,
+                9,
+                r2,
+                vec![seg.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+
+        let spf = run_spf_v3(&db, r1);
+        // The network vertex: cost 10.
+        let net = V3VertexId::Network(r2, 9);
+        assert_eq!(spf.vertices.get(&net), Some(&10));
+        // r2 and r3 ride the segment: both at cost 10, r3's link-local
+        // resolved via its back-link transit entry (interface id 7 →
+        // Link-LSA 7).
+        for (rid, ll) in [(r2, fe80(2)), (r3, fe80(3))] {
+            let v = V3VertexId::Router(rid);
+            assert_eq!(spf.vertices.get(&v), Some(&10));
+            let nh = spf
+                .next_hops
+                .get(&v)
+                .unwrap_or_else(|| panic!("nh for {rid}"));
+            assert_eq!(nh.link_local, IpAddr::V6(ll));
+            assert_eq!(nh.interface_id, 5, "our interface on the segment");
+            assert!(spf.adjacent_routers.contains(&rid));
+        }
+        // The segment prefix is connected for r1 (directly attached).
+        let route = spf.routes.iter().find(|r| r.prefix == seg_prefix).unwrap();
+        assert_eq!(route.metric, 10);
+        assert_eq!(route.next_hop, None);
+    }
+
+    /// Prefixes carrying the NU or LA bit are excluded from the unicast
+    /// calculation (§A.4.1).
+    #[test]
+    fn v3_nu_and_la_prefixes_excluded() {
+        let mut db = Lsdb::new();
+        let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+        let link = crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        };
+        db.install(
+            originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[link], None).unwrap(),
+            0,
+        );
+        let back = crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: r1,
+        };
+        db.install(
+            originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[back], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+            0,
+        );
+        // r2 advertises three prefixes: normal, NU, LA.
+        let normal = net64(3);
+        let mut nu = net64(4);
+        nu.options = crate::lsa::v3::PREFIX_OPT_NU;
+        let mut la = net64(5);
+        la.options = crate::lsa::v3::PREFIX_OPT_LA;
+        db.install(
+            originate_v3_intra_area_prefix_lsa(
+                r2,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                r2,
+                vec![normal.clone(), nu, la],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        let spf = run_spf_v3(&db, r1);
+        assert!(spf.routes.iter().any(|r| r.prefix == route_of(&normal)));
+        assert!(!spf.routes.iter().any(|r| r.prefix == route_of(&net64(4))));
+        assert!(!spf.routes.iter().any(|r| r.prefix == route_of(&net64(5))));
+    }
+
+    /// A missing Link-LSA leaves the vertex reachable but without a
+    /// next hop — the route survives without a gateway.
+    #[test]
+    fn v3_missing_link_lsa_yields_no_next_hop() {
+        let mut db = Lsdb::new();
+        let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+        let link = crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        };
+        db.install(
+            originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[link], None).unwrap(),
+            0,
+        );
+        let back = crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: r1,
+        };
+        db.install(
+            originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[back], None).unwrap(),
+            0,
+        );
+        // Only r1's Link-LSA: r2's link-local is unknown.
+        db.install(
+            originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+            0,
+        );
+        let p2 = net64(2);
+        db.install(
+            originate_v3_intra_area_prefix_lsa(
+                r2,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                r2,
+                vec![p2.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        let spf = run_spf_v3(&db, r1);
+        let v2v = V3VertexId::Router(r2);
+        assert_eq!(spf.vertices.get(&v2v), Some(&10), "reachable");
+        assert!(spf.next_hops.get(&v2v).is_none(), "no Link-LSA, no nh");
+        let route = spf
+            .routes
+            .iter()
+            .find(|r| r.prefix == route_of(&p2))
+            .unwrap();
+        assert_eq!(route.next_hop, None);
+    }
+
+    fn route_of(p: &crate::lsa::v3::V3Prefix) -> Prefix {
+        Prefix::new_v6(p.addr, p.prefix_len)
+    }
+
+    fn fe80(host: u8) -> [u8; 16] {
+        let mut a = [0u8; 16];
+        a[0] = 0xfe;
+        a[1] = 0x80;
+        a[15] = host;
+        a
+    }
+
+    fn prefix_from(addr: &[u8; 16], len: u8) -> crate::lsa::v3::V3Prefix {
+        crate::lsa::v3::V3Prefix {
+            prefix_len: len,
+            options: 0,
+            metric: 0,
+            addr: *addr,
+        }
+    }
+
+    /// A /64 whose significant bits fit the 8 wire bytes: 2001:db8:0:hn::/64.
+    fn net64(host: u8) -> crate::lsa::v3::V3Prefix {
+        let mut a = [0u8; 16];
+        a[0] = 0x20;
+        a[1] = 0x01;
+        a[2] = 0x0d;
+        a[3] = 0xb8;
+        a[7] = host;
+        crate::lsa::v3::V3Prefix {
+            prefix_len: 64,
+            options: 0,
+            metric: 0,
+            addr: a,
+        }
+    }
+}
+// quick debug harness appended temporarily
