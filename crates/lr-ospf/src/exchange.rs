@@ -35,7 +35,7 @@ use lr_core::fsm::StateMachine;
 use crate::neighbor::{NeighborEvent, OspfNeighbor};
 use crate::packet::{
     DbDescBody, LsAckBody, LsRequestBody, LsRequestEntry, LsUpdateBody, OspfBody, OspfHeader,
-    OspfPacket, OspfPacketType,
+    OspfPacket, OspfPacketType, OspfVersion, OSPF_V3_OPTIONS_DEFAULT,
 };
 
 /// DBD flag bits (RFC 2328 §A.3.3): the Imms byte carries I at bit 2,
@@ -119,6 +119,11 @@ pub struct DbExchange {
     last_dd: Option<(u8, u32, Vec<LsaHeader>)>,
     last_dd_sent_ms: u64,
     last_lsr_sent_ms: u64,
+    /// Protocol version the session speaks — v3 packets carry the
+    /// 16-byte header (RFC 5340 §A.3.1) and 24-bit options.
+    version: OspfVersion,
+    /// The Options word DD packets advertise (v2: E|O; v3: V6|R|E).
+    options: u32,
 }
 
 impl DbExchange {
@@ -127,6 +132,19 @@ impl DbExchange {
     /// (`iface_mtu - DD_OVERHEAD`) can never underflow for tiny MTUs
     /// (audit E1).
     pub fn new(router_id: u32, area_id: u32, iface_mtu: u16) -> Self {
+        Self::with_version(router_id, area_id, iface_mtu, OspfVersion::V2)
+    }
+
+    /// Create the driver for a specific protocol version. The v3 driver
+    /// emits 16-byte-header packets and advertises the RFC 5340 §A.2
+    /// V6|R|E option set; the v2 driver keeps the E|O (RFC 5250 §3)
+    /// set.
+    pub fn with_version(
+        router_id: u32,
+        area_id: u32,
+        iface_mtu: u16,
+        version: OspfVersion,
+    ) -> Self {
         let iface_mtu = iface_mtu.max(DD_OVERHEAD as u16);
         Self {
             router_id,
@@ -144,6 +162,13 @@ impl DbExchange {
             last_dd: None,
             last_dd_sent_ms: 0,
             last_lsr_sent_ms: 0,
+            version,
+            options: if version == OspfVersion::V3 {
+                // RFC 5340 §A.2: V6 (0x01) | E (0x02) | R (0x10).
+                OSPF_V3_OPTIONS_DEFAULT
+            } else {
+                0x02 | u32::from(crate::lsa::grace::OPTIONS_O_BIT)
+            },
         }
     }
 
@@ -565,7 +590,7 @@ impl DbExchange {
 
     fn base_header(&self, kind: OspfPacketType) -> OspfHeader {
         OspfHeader {
-            version: 2,
+            version: self.version as u8,
             kind: kind as u8,
             length: 0,
             router_id: self.router_id,
@@ -581,9 +606,9 @@ impl DbExchange {
             header: self.base_header(OspfPacketType::DatabaseDescription),
             body: OspfBody::DbDesc(DbDescBody {
                 mtu: self.iface_mtu,
-                // E-bit (normal area) plus the RFC 5250 §3 O-bit: this
-                // router originates and floods Opaque-LSAs (the RFC
-                // 3623/5187 Grace-LSA), so DD packets must announce
+                // v2: E-bit (normal area) plus the RFC 5250 §3 O-bit —
+                // this router originates and floods Opaque-LSAs (the
+                // RFC 3623/5187 Grace-LSA), so DD packets must announce
                 // opaque capability. Peers gate opaque flooding on this
                 // bit — BIRD captures it from DD packets only
                 // (proto/ospf/dbdes.c: n->options = rcv_options) and
@@ -592,8 +617,8 @@ impl DbExchange {
                 // ospf_gr.c likewise refuses to originate a Grace-LSA
                 // without OSPF_OPAQUE_CAPABLE. RFC 5250 §3: the bit is
                 // meaningful in DD packets only — Hellos keep the
-                // plain E-bit.
-                options: 0x02 | u32::from(crate::lsa::grace::OPTIONS_O_BIT),
+                // plain E-bit. v3: the V6|R|E set (see `with_version`).
+                options: self.options,
                 flags,
                 dd_seq: seq,
                 lsa_headers: headers,

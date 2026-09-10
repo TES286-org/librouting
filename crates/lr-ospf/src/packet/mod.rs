@@ -19,8 +19,19 @@ impl OspfVersion {
     }
 }
 
-/// OSPF packet header. v2 and v3 share the same 24-byte structure (v3 has
-/// no Auth fields but has Instance ID + 0 in their place).
+/// The default OSPFv3 Options set a regular router advertises in
+/// Hellos, DBDs and router/network/link LSAs: V6 | E | R
+/// (RFC 5340 §A.2 — 0x01 | 0x02 | 0x10).
+pub const OSPF_V3_OPTIONS_DEFAULT: u32 = 0x01 | 0x02 | 0x10;
+
+/// OSPF packet header. v2 and v3 share the leading fields but differ in
+/// length: v2 (RFC 2328 §A.3.1) is 24 bytes (AuType + 64-bit authentication
+/// trailing), v3 (RFC 5340 §A.3.1) is 16 bytes — the header ends with
+/// Checksum | Instance ID | 0.
+///
+/// For v3 the header is followed *directly* by the body: [`OspfHeader::LEN`]
+/// is the v2 length; use [`OspfHeader::len_for`] wherever the version is
+/// known.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct OspfHeader {
     pub version: u8,
@@ -28,16 +39,29 @@ pub struct OspfHeader {
     pub length: u16,
     pub router_id: u32,
     pub area_id: u32,
-    /// v2: checksum; v3: checksum (computed with pseudo-header).
+    /// v2: packet checksum (RFC 2328 §A.1); v3: IPv6 upper-layer checksum
+    /// over the pseudo-header (RFC 5340 §A.3.1).
     pub checksum: u16,
-    /// v2: AuType; v3: Instance ID.
+    /// v2: AuType; v3: Instance ID (low byte — the wire's byte 15 is the
+    /// reserved zero).
     pub au_type_or_instance: u16,
-    /// v2: Authentication data; v3: zero.
+    /// v2: Authentication data; v3: absent from the wire (kept zero).
     pub auth_data: u64,
 }
 
 impl OspfHeader {
+    /// The v2 header length (RFC 2328 §A.3.1).
     pub const LEN: usize = 24;
+    /// The v3 header length (RFC 5340 §A.3.1).
+    pub const LEN_V3: usize = 16;
+
+    /// The on-wire header length for `version`.
+    pub fn len_for(version: OspfVersion) -> usize {
+        match version {
+            OspfVersion::V2 => Self::LEN,
+            OspfVersion::V3 => Self::LEN_V3,
+        }
+    }
 }
 
 /// OSPF packet type (RFC 2328 §A.3).

@@ -268,6 +268,64 @@ pub fn v2_packet_checksum_ok(bytes: &[u8]) -> bool {
     finish(sum) == 0
 }
 
+/// Patch the OSPFv3 packet checksum into an encoded packet.
+///
+/// RFC 5340 §A.3.1: the v3 checksum is the standard IPv6 upper-layer
+/// checksum (RFC 1071 / RFC 2460 §8.1) — the one's complement of the
+/// one's complement sum over the IPv6 pseudo-header (source, destination,
+/// upper-layer packet length, next header 89) plus the OSPF packet, with
+/// the checksum field itself treated as zero. `src` and `dst` are the
+/// IPv6 addresses the packet is sent from/to (link-local for multicast,
+/// RFC 5340 §4.2.1).
+///
+/// `bytes` must be a complete encoded packet of at least the 16-byte
+/// header. The value at offset 12..14 is overwritten.
+pub fn finalize_v3_packet(bytes: &mut [u8], src: &[u8; 16], dst: &[u8; 16]) -> bool {
+    if bytes.len() < crate::packet::OspfHeader::LEN_V3 {
+        return false;
+    }
+    let sum = v3_packet_checksum(bytes, src, dst);
+    bytes[12..14].copy_from_slice(&sum.to_be_bytes());
+    true
+}
+
+/// Finalize a stream of back-to-back encoded OSPFv3 packets (the shape
+/// `drain_output` produces): each packet's checksum is patched in place,
+/// walking the length-framed stream. Returns the number of finalized
+/// packets.
+pub fn finalize_v3_stream(bytes: &mut [u8], src: &[u8; 16], dst: &[u8; 16]) -> usize {
+    let mut off = 0usize;
+    let mut count = 0usize;
+    while off + crate::packet::OspfHeader::LEN_V3 <= bytes.len() {
+        let len = u16::from_be_bytes([bytes[off + 2], bytes[off + 3]]) as usize;
+        if len < crate::packet::OspfHeader::LEN_V3 || off + len > bytes.len() {
+            break; // malformed tail — leave the rest untouched
+        }
+        finalize_v3_packet(&mut bytes[off..off + len], src, dst);
+        off += len;
+        count += 1;
+    }
+    count
+}
+
+/// The OSPFv3 checksum of one packet: the IPv6 pseudo-header checksum
+/// over `src`/`dst`, next header 89, upper-layer length = packet length,
+/// then the packet bytes with the checksum field zeroed.
+fn v3_packet_checksum(bytes: &[u8], src: &[u8; 16], dst: &[u8; 16]) -> u16 {
+    let mut sum: u32 = 0;
+    // Pseudo-header: source, destination.
+    fold(src, &mut sum);
+    fold(dst, &mut sum);
+    // Upper-layer packet length (4 bytes, big endian).
+    fold(&(bytes.len() as u32).to_be_bytes(), &mut sum);
+    // 3 zero bytes + next header 89 (IPPROTO_OSPFIGP).
+    fold(&[0, 0, 0, 89], &mut sum);
+    // The packet with the checksum field zeroed (offsets 12..14).
+    fold(&bytes[..12], &mut sum);
+    fold(&bytes[14..], &mut sum);
+    finish(sum)
+}
+
 fn fold(bytes: &[u8], sum: &mut u32) {
     let mut i = 0;
     while i + 1 < bytes.len() {
@@ -433,5 +491,39 @@ mod tests {
         // metric field is the last 2 bytes of the link entry
         assert_eq!(&lsa.body[14..16], &99u16.to_be_bytes());
         assert_eq!(lsa.body[12], RouterLinkType::VirtualLink as u8);
+    }
+}
+
+#[cfg(test)]
+mod v3_tests {
+    use super::*;
+
+    /// A zeroed pseudo-header checksum input produces a defined value and
+    /// the verification property holds: summing the finalized packet with
+    /// the same pseudo-header yields 0xffff.
+    #[test]
+    fn v3_checksum_roundtrip() {
+        let mut pkt = vec![0u8; 16 + 20];
+        pkt[0] = 3; // version
+        pkt[1] = 1; // Hello
+        let n = pkt.len() as u16;
+        pkt[2..4].copy_from_slice(&n.to_be_bytes());
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        assert!(finalize_v3_packet(&mut pkt, &src, &dst));
+        let stored = u16::from_be_bytes([pkt[12], pkt[13]]);
+        // Recompute over the finalized packet with the checksum zeroed —
+        // the standard one's-complement verification property.
+        let mut verify = pkt.clone();
+        verify[12] = 0;
+        verify[13] = 0;
+        assert_eq!(v3_packet_checksum(&verify, &src, &dst), stored);
+        // A different pseudo-header must produce a different checksum.
+        let dst2 = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
+        assert_ne!(v3_packet_checksum(&verify, &src, &dst2), stored);
+        // Stream finalization walks every packet.
+        let mut stream = pkt.clone();
+        stream.extend_from_slice(&pkt);
+        assert_eq!(finalize_v3_stream(&mut stream, &src, &dst), 2);
     }
 }

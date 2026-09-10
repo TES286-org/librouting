@@ -33,13 +33,14 @@ impl OspfCodec {
     }
 
     pub fn decode_slice(&mut self, b: &[u8]) -> Result<Option<OspfPacket>, ParseError> {
+        let hdr_len = OspfHeader::len_for(self.version);
         self.carryover.extend_from_slice(b);
-        if self.carryover.len() < OspfHeader::LEN {
+        if self.carryover.len() < hdr_len {
             return Ok(None);
         }
         // Peek length field at offset 2..3.
         let length = u16::from_be_bytes([self.carryover[2], self.carryover[3]]) as usize;
-        if length < OspfHeader::LEN {
+        if length < hdr_len {
             // The declared frame cannot hold even the header — drop the
             // corrupt bytes so the decoder recovers.
             self.carryover.clear();
@@ -111,6 +112,15 @@ fn encode_header(h: &OspfHeader, out: &mut WriteBuf<'_>) -> Result<(), EncodeErr
     out.put_u32_be(h.router_id).ok_or(EncodeError::BufferFull)?;
     out.put_u32_be(h.area_id).ok_or(EncodeError::BufferFull)?;
     out.put_u16_be(h.checksum).ok_or(EncodeError::BufferFull)?;
+    if h.version == OspfVersion::V3 as u8 {
+        // RFC 5340 §A.3.1: the header ends at 16 bytes —
+        // Checksum | Instance ID (1) | 0 (1).
+        out.put_u8(h.au_type_or_instance as u8)
+            .ok_or(EncodeError::BufferFull)?;
+        out.put_u8(0).ok_or(EncodeError::BufferFull)?;
+        return Ok(());
+    }
+    // RFC 2328 §A.3.1: AuType + 64-bit authentication.
     out.put_u16_be(h.au_type_or_instance)
         .ok_or(EncodeError::BufferFull)?;
     out.put_u64_be(h.auth_data).ok_or(EncodeError::BufferFull)?;
@@ -131,21 +141,28 @@ fn encode_hello(
         out.put_u32_be(h.network_mask)
             .ok_or(EncodeError::BufferFull)?;
     }
-    out.put_u16_be(h.hello_interval)
-        .ok_or(EncodeError::BufferFull)?;
     if version == OspfVersion::V2 {
+        out.put_u16_be(h.hello_interval)
+            .ok_or(EncodeError::BufferFull)?;
         out.put_u8(h.options as u8).ok_or(EncodeError::BufferFull)?;
         out.put_u8(h.priority).ok_or(EncodeError::BufferFull)?;
+        out.put_u32_be(h.dead_interval)
+            .ok_or(EncodeError::BufferFull)?;
     } else {
-        // v3 Options are 24 bits, then Rtr Priority (RFC 5340 §A.3.2).
+        // RFC 5340 §A.3.2: Rtr Priority (1) | Options (3) |
+        // Hello Interval (2) | Router Dead Interval (**16-bit**, the
+        // v3 field is half the v2 width — FRR ospf6_make_hello parity)
+        // | DR | BDR.
+        out.put_u8(h.priority).ok_or(EncodeError::BufferFull)?;
         out.put_u8((h.options >> 16) as u8)
             .ok_or(EncodeError::BufferFull)?;
         out.put_u16_be(h.options as u16)
             .ok_or(EncodeError::BufferFull)?;
-        out.put_u8(h.priority).ok_or(EncodeError::BufferFull)?;
+        out.put_u16_be(h.hello_interval)
+            .ok_or(EncodeError::BufferFull)?;
+        out.put_u16_be(h.dead_interval as u16)
+            .ok_or(EncodeError::BufferFull)?;
     }
-    out.put_u32_be(h.dead_interval)
-        .ok_or(EncodeError::BufferFull)?;
     out.put_u32_be(h.dr).ok_or(EncodeError::BufferFull)?;
     out.put_u32_be(h.bdr).ok_or(EncodeError::BufferFull)?;
     for n in &h.neighbors {
@@ -252,7 +269,8 @@ fn encode_lsa_header(
 }
 
 fn decode_packet(b: &[u8], version: OspfVersion) -> Result<OspfPacket, ParseError> {
-    if b.len() < OspfHeader::LEN {
+    let hdr_len = OspfHeader::len_for(version);
+    if b.len() < hdr_len {
         return Err(ParseError::truncated("ospf.header"));
     }
     if b[0] != version as u8 {
@@ -273,6 +291,15 @@ fn decode_packet(b: &[u8], version: OspfVersion) -> Result<OspfPacket, ParseErro
         // RFC 2328 §8.2: packets failing the checksum are discarded.
         return Err(ParseError::invalid(12, "ospf.header.checksum"));
     }
+    let (au_type_or_instance, auth_data) = if version == OspfVersion::V3 {
+        // RFC 5340 §A.3.1: byte 14 = Instance ID, byte 15 = reserved 0.
+        (u16::from(b[14]), 0u64)
+    } else {
+        (
+            u16::from_be_bytes([b[14], b[15]]),
+            u64::from_be_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]),
+        )
+    };
     let header = OspfHeader {
         version: version as u8,
         kind,
@@ -280,10 +307,10 @@ fn decode_packet(b: &[u8], version: OspfVersion) -> Result<OspfPacket, ParseErro
         router_id: u32::from_be_bytes([b[4], b[5], b[6], b[7]]),
         area_id: u32::from_be_bytes([b[8], b[9], b[10], b[11]]),
         checksum: u16::from_be_bytes([b[12], b[13]]),
-        au_type_or_instance: u16::from_be_bytes([b[14], b[15]]),
-        auth_data: u64::from_be_bytes([b[16], b[17], b[18], b[19], b[20], b[21], b[22], b[23]]),
+        au_type_or_instance,
+        auth_data,
     };
-    let body_bytes = &b[OspfHeader::LEN..];
+    let body_bytes = &b[hdr_len..];
     let body = decode_body(kind, body_bytes, version)?;
     Ok(OspfPacket { header, body })
 }
@@ -305,19 +332,30 @@ fn decode_hello(b: &[u8], version: OspfVersion) -> Result<HelloBody, ParseError>
         return Err(ParseError::truncated("ospf.hello.body"));
     }
     let network_mask = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
-    let hello_interval = u16::from_be_bytes([b[4], b[5]]);
-    // The fixed part is 20 bytes in both versions; the option/priority
-    // pair differs (v3 Options are 24 bits wide, RFC 5340 §A.3.2).
-    let (options, priority, fixed) = if version == OspfVersion::V2 {
-        (u32::from(b[6]), b[7], 8usize)
+    // The fixed part is 20 bytes in both versions; the middle fields
+    // differ (RFC 5340 §A.3.2: priority | 24-bit options | hello(2) |
+    // dead(2) — the v3 dead interval is 16 bits wide).
+    let (options, priority, hello_interval, dead_interval, fixed) = if version == OspfVersion::V2 {
+        (
+            u32::from(b[6]),
+            b[7],
+            u16::from_be_bytes([b[4], b[5]]),
+            u32::from_be_bytes([b[8], b[9], b[10], b[11]]),
+            12usize,
+        )
     } else {
-        (u32::from_be_bytes([0, b[6], b[7], b[8]]), b[9], 10usize)
+        (
+            u32::from_be_bytes([0, b[5], b[6], b[7]]),
+            b[4],
+            u16::from_be_bytes([b[8], b[9]]),
+            u32::from(u16::from_be_bytes([b[10], b[11]])),
+            12usize,
+        )
     };
-    let dead_interval = u32::from_be_bytes([b[fixed], b[fixed + 1], b[fixed + 2], b[fixed + 3]]);
-    let dr = u32::from_be_bytes([b[fixed + 4], b[fixed + 5], b[fixed + 6], b[fixed + 7]]);
-    let bdr = u32::from_be_bytes([b[fixed + 8], b[fixed + 9], b[fixed + 10], b[fixed + 11]]);
+    let dr = u32::from_be_bytes([b[fixed], b[fixed + 1], b[fixed + 2], b[fixed + 3]]);
+    let bdr = u32::from_be_bytes([b[fixed + 4], b[fixed + 5], b[fixed + 6], b[fixed + 7]]);
     let mut neighbors = Vec::new();
-    let mut i = fixed + 12;
+    let mut i = fixed + 8;
     while i + 4 <= b.len() {
         neighbors.push(u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]));
         i += 4;
@@ -633,7 +671,7 @@ mod tests {
             body: OspfBody::Hello(HelloBody {
                 network_mask: 0x0000_0007, // Interface ID (v3 has no mask)
                 hello_interval: 10,
-                options: 0x00_02_01, // 24-bit v3 options
+                options: 0x00_00_13, // v3: V6|R|E (RFC 5340 §A.2)
                 priority: 3,
                 dead_interval: 40,
                 dr: 0x0a00_0001,
@@ -642,23 +680,119 @@ mod tests {
             }),
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
-        // v3 Hello: interface-id(4) | hello-interval(2) | options(3) |
-        // priority(1) | dead(4) | dr(4) | bdr(4) | neighbors.
-        assert_eq!(&bytes[24..28], &[0, 0, 0, 7], "interface id");
-        assert_eq!(&bytes[30..33], &[0, 2, 1], "24-bit options at offset 6");
-        assert_eq!(bytes[33], 3, "priority at offset 9");
+        // RFC 5340 §A.3.1: the v3 packet header is 16 bytes, so the body
+        // starts at 16.
+        assert_eq!(bytes.len(), 16 + 20 + 4, "16B header + 20B body + 1 nbr");
+        // Body: interface-id(4) | priority(1) | options(3) |
+        // hello-interval(2) | dead-interval(2, 16-bit) | dr(4) | bdr(4)
+        // | neighbors (FRR ospf6_make_hello layout).
+        assert_eq!(&bytes[16..20], &[0, 0, 0, 7], "interface id");
+        assert_eq!(bytes[20], 3, "priority");
+        assert_eq!(&bytes[21..24], &[0, 0, 0x13], "24-bit options");
+        assert_eq!(&bytes[24..26], &10u16.to_be_bytes(), "hello interval");
+        assert_eq!(&bytes[26..28], &40u16.to_be_bytes(), "dead (16-bit)");
+        assert_eq!(bytes[14], 0, "instance id byte 14 (zero here)");
+        assert_eq!(bytes[15], 0, "reserved byte 15");
         let mut dec = OspfCodec::v3();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
+        assert_eq!(p2.header.router_id, 0x01020304);
+        assert_eq!(p2.header.au_type_or_instance, 0, "instance id low byte");
         match p2.body {
             OspfBody::Hello(h) => {
                 assert_eq!(h.network_mask, 7);
-                assert_eq!(h.options, 0x0000_0201);
+                assert_eq!(h.options, 0x0000_0013);
                 assert_eq!(h.priority, 3);
+                assert_eq!(h.hello_interval, 10);
+                assert_eq!(h.dead_interval, 40);
                 assert_eq!(h.dr, 0x0a00_0001);
                 assert_eq!(h.neighbors, vec![0x0a00_0002]);
             }
             _ => panic!("expected Hello"),
         }
+    }
+
+    /// The v3 Hello wire shape must match FRR's `ospf6_make_hello` byte
+    /// for byte (header + interface_id/priority/options/hello/dead/DR/BDR),
+    /// so this is the shape FRR's `ospf6_packet_examin` accepts (body size
+    /// ≡ 0 mod 4).
+    #[test]
+    fn v3_hello_wire_matches_frr_layout() {
+        let codec = OspfCodec::v3();
+        let pkt = OspfPacket {
+            header: v3_header(1, 0x0a00_0001),
+            body: OspfBody::Hello(HelloBody {
+                network_mask: 5, // Interface ID = ifindex (FRR convention)
+                hello_interval: 10,
+                options: 0x13, // V6|R|E
+                priority: 1,
+                dead_interval: 40,
+                dr: 0,
+                bdr: 0,
+                neighbors: vec![],
+            }),
+        };
+        let bytes = codec.encode_vec(&pkt).unwrap();
+        // FRR: stream_putl(ifindex); putc(priority); 3 option bytes;
+        // putw(hello_interval); putw(dead_interval); put_ipv4(dr);
+        // put_ipv4(bdr) — 20 bytes after the 16-byte header.
+        assert_eq!(
+            &bytes[16..36],
+            &[
+                0, 0, 0, 5, // interface id
+                1, // priority
+                0, 0, 0x13, // options (3)
+                0, 10, // hello interval
+                0, 40, // dead interval (16-bit)
+                0, 0, 0, 0, // DR
+                0, 0, 0, 0, // BDR
+            ]
+        );
+        assert_eq!(u16::from_be_bytes([bytes[2], bytes[3]]), 36, "length");
+    }
+
+    #[test]
+    fn v3_header_is_sixteen_bytes_with_instance_id() {
+        let codec = OspfCodec::v3();
+        let pkt = OspfPacket {
+            header: OspfHeader {
+                version: 3,
+                kind: 1,
+                length: 0,
+                router_id: 0x01020304,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 7, // instance ID 7
+                auth_data: 0xdead_beef,
+            },
+            // 20 zero bytes parse as a degenerate v3 Hello body.
+            body: OspfBody::Raw(vec![0xaa; 20]),
+        };
+        let bytes = codec.encode_vec(&pkt).unwrap();
+        assert_eq!(bytes.len(), 16 + 20, "v3 header must be 16 bytes");
+        assert_eq!(&bytes[12..14], &[0, 0], "checksum zeroed");
+        assert_eq!(bytes[14], 7, "instance id at byte 14");
+        assert_eq!(bytes[15], 0, "byte 15 reserved zero");
+        assert_eq!(&bytes[16..], &[0xaa; 20], "body directly after header");
+        let mut dec = OspfCodec::v3();
+        let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
+        assert_eq!(p2.header.au_type_or_instance, 7);
+        assert_eq!(p2.header.auth_data, 0, "v3 carries no auth data");
+        // v2 header stays 24 bytes with the full auth field.
+        let pkt2 = OspfPacket {
+            header: OspfHeader {
+                version: 2,
+                kind: 1,
+                length: 0,
+                router_id: 0x01020304,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 1,
+                auth_data: 0x1122_3344_5566_7788,
+            },
+            body: OspfBody::Raw(vec![0xaa; 4]),
+        };
+        let bytes2 = OspfCodec::v2().encode_vec(&pkt2).unwrap();
+        assert_eq!(bytes2.len(), 24 + 4, "v2 header stays 24 bytes");
     }
 
     #[test]
@@ -676,11 +810,11 @@ mod tests {
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
         // v3 DBD fixed body is 10 bytes: mtu(2) | options(3) | flags(1) | dd_seq(4).
-        assert_eq!(&bytes[24..26], &1500u16.to_be_bytes());
-        assert_eq!(&bytes[26..29], &[0, 2, 1], "24-bit options");
-        assert_eq!(bytes[29], 0x07, "flags at offset 5 of the body");
-        assert_eq!(&bytes[30..34], &0x1122_3344u32.to_be_bytes(), "dd_seq");
-        assert_eq!(bytes.len(), 24 + 10, "no LSA headers");
+        assert_eq!(&bytes[16..18], &1500u16.to_be_bytes());
+        assert_eq!(&bytes[18..21], &[0, 2, 1], "24-bit options");
+        assert_eq!(bytes[21], 0x07, "flags at offset 5 of the body");
+        assert_eq!(&bytes[22..26], &0x1122_3344u32.to_be_bytes(), "dd_seq");
+        assert_eq!(bytes.len(), 16 + 10, "no LSA headers");
 
         let mut dec = OspfCodec::v3();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
@@ -717,10 +851,10 @@ mod tests {
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
         // v3 entry: LS type(2) | Unused(2) | LS ID(4) | Adv Router(4).
-        assert_eq!(&bytes[24..26], &0x2003u16.to_be_bytes());
-        assert_eq!(&bytes[26..28], &[0, 0], "unused word");
-        assert_eq!(&bytes[28..32], &1u32.to_be_bytes());
-        assert_eq!(&bytes[36..38], &0x4005u16.to_be_bytes());
+        assert_eq!(&bytes[16..18], &0x2003u16.to_be_bytes());
+        assert_eq!(&bytes[18..20], &[0, 0], "unused word");
+        assert_eq!(&bytes[20..24], &1u32.to_be_bytes());
+        assert_eq!(&bytes[28..30], &0x4005u16.to_be_bytes());
 
         let mut dec = OspfCodec::v3();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
@@ -767,7 +901,7 @@ mod tests {
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
         // The LSU body starts with lsa_count(4), then the raw LSA.
-        assert_eq!(&bytes[24 + 4 + 2..24 + 4 + 4], &[0x20, 0x03]);
+        assert_eq!(&bytes[16 + 4 + 2..16 + 4 + 4], &[0x20, 0x03]);
         let mut dec = OspfCodec::v3();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
         match p2.body {
