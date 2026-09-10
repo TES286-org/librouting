@@ -14,6 +14,19 @@ pub use grace::{
     OPTIONS_O_BIT,
 };
 
+/// OSPFv3 LSA bodies (RFC 5340 §A.4): Router-LSA (0x2001), Network-LSA
+/// (0x2002), Link-LSA (0x0008) and Intra-Area-Prefix-LSA (0x2009) codecs
+/// plus the §A.4.1 prefix encoding and self-origination helpers.
+pub mod v3;
+pub use v3::{
+    originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
+    originate_v3_router_lsa, V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody, V3Prefix,
+    V3RouterLink, V3RouterLsaBody, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL,
+    LS_TYPE_AS_EXTERNAL, LS_TYPE_INTER_PREFIX, LS_TYPE_INTER_ROUTER, LS_TYPE_INTRA_PREFIX,
+    LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_MC, PREFIX_OPT_NU,
+    PREFIX_OPT_P, ROUTER_BIT_B, ROUTER_BIT_E, ROUTER_BIT_V6,
+};
+
 /// Segment Routing extensions (RFC 8665): the RFC 7684 Extended Prefix
 /// Opaque LSA with the Prefix-SID sub-TLV and the RFC 4970 Router
 /// Information LSA's SR-Algorithm + SID/Label Range TLVs, the RFC 7684
