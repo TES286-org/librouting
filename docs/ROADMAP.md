@@ -691,8 +691,60 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      kernel-MPLS-gated like phase 2. The `set -u` trap on `SR_UP`
      (unbound whenever MPLS=0 short-circuited the first gated block)
      is fixed alongside.
-   - **Next slice**: SRv6. RFC 9256 (Segment Routing Policy) builds on
-     the data plane.
+   - **Slice 4 — SRv6 data plane (RFC 8754 / RFC 8402 / RFC 8986)** —
+     the IPv6 counterpart to the SR-MPLS slices above. A new
+     `lr-srv6` crate (no_std, mirrors `lr-mpls`) ships the wire
+     primitives: a 128-bit [`Sid`](crate:lr-srv6::Sid) (RFC 8754 §3,
+     structured LOC:FUNCT:ARGS, IPv6 textual form via RFC 5952
+     canonical rendering), a [`Locator`](crate:lr-srv6::Locator)
+     (RFC 8754 §3.1 — IPv6 prefix + block bits, host-bits masking,
+     `from_str`/`Display`, SID-at-index builders for the function
+     space), and an [`Srh`](crate:lr-srv6::Srh) codec (RFC 8754 §2 —
+     the full header: Next Header / Hdr Ext Len / Routing Type 43 /
+     Segments Left / Last Entry / Flags O+H / Tag / Segment List /
+     optional TLV bytes; both encode and decode reject the
+     RFC 8754 §2.3 reserved flag bits on send but accept them on
+     receive per §2.3's MUST-be-ignored rule; the mid-stack
+     bottom-of-stack bit, the `Last Entry`/`Segments Left`
+     consistency, the max-segments bound of 127 from the `Hdr Ext
+     Len` octet, and the RFC 8200 §4.8 length-vs-`Hdr Ext Len`
+     invariant are all enforced). The [`Behavior`](crate:lr-srv6::Behavior)
+     registry enumerates all 32 IANA-assigned RFC 8986 §4 endpoint
+     opcodes (End / End.X / End.T / End.DX6 / End.DX4 / End.DT6 /
+     End.DT4 / End.DT46 / End.DX2 / End.DX2V / End.DT2U / End.DT2M /
+     End.B6.Encaps / End.B6.Encaps.Red / End.BM / End.S / End.B6.Insert
+     / End.B6.Insert.Red / End.Un / End.X.PS / End.X.PSU / End.T.PS
+     / End.T.PSU) with their PSP / USP / USD flavor variants
+     (RFC 8986 §4.16) and the decap / cross-connect / table-lookup
+     classifiers operators use to drive their own pipelines.
+     `lr-osroute::seg6_route` is the kernel mirror:
+     [`Seg6Netlink`](crate:lr-osroute::seg6_route::Seg6Netlink) installs
+     and deletes `seg6` encap routes (`LWTUNNEL_ENCAP_SEG6` + the
+     nested `SEG6_IPTUNNEL_SRH` attribute with the inline/encap mode
+     word, `ip route add <prefix> encap seg6 mode encap segs ...
+     dev ...`) and `seg6local` endpoint routes
+     (`LWTUNNEL_ENCAP_SEG6_LOCAL` + the nested `SEG6_LOCAL_ACTION`
+     attribute with its 4-byte u32 action code and the per-behavior
+     parameter set — `SEG6_LOCAL_NH4` for End.DX4, `SEG6_LOCAL_NH6`
+     for End.DX6, `SEG6_LOCAL_OIF` for End.X, `SEG6_LOCAL_TABLE`
+     for End.DT6/End.DT4/End.DT46). Capability detection via
+     `/proc/sys/net/ipv6/conf/all/seg6_enabled`. The wire shapes
+     match the kernel's `seg6_iptunnel.c` / `seg6_local.c` parser
+     byte for byte — verified by 52 `lr-srv6` unit tests, 17
+     `lr-osroute::seg6_route` wire-shape tests, and 2 kernel-gated
+     interop tests in `crates/lr-osroute/tests/srv6_kernel.rs`
+     (install a `seg6` encap route + a `seg6local` End route,
+     verify with `ip -6 route show`; gated on `seg6_enabled=1` +
+     `CAP_NET_ADMIN`). FFI: `lr_srv6_encode_srh` /
+     `lr_srv6_decode_srh` exposed via C ABI, Python
+     (`encode_srv6_srh` / `decode_srv6_srh`) and Go
+     (`EncodeSRv6SRH` / `DecodeSRv6SRH`) bindings.
+   - **Next slice**: SRv6 control plane — RFC 9352 (OSPFv3 SRv6
+     extensions) needs OSPFv3 daemon mode first (the v2 codec and
+     LSA surfaces exist but the daemon does not run v3); alternatively
+     BGP-LS SRv6 (RFC 9085 §8) and BGP SR Policy (RFC 9256 / 9430)
+     build directly on the slice-1 data plane. RFC 9256 (Segment
+     Routing Policy) is the long-term target.
 
 ### W4 — Documentation, guides, tutorials
 
