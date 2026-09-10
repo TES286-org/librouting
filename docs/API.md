@@ -532,6 +532,53 @@ assert_eq!(lsa.header.ls_type, LsaTypeV3::InterAreaPrefixLsa.function_code());
 assert!(lsa.checksum_ok());
 ```
 
+## OSPF Segment Routing — adjacency segments + mapping server (RFC 8665 §4/§6)
+
+Beyond the Prefix-SID shapes (RFC 7684 §2 / RFC 8665 §5), `lr-ospf::lsa::sr`
+covers the adjacency and mapping-server halves of RFC 8665:
+
+- **Extended Link Opaque LSA** (RFC 7684 §3, Opaque Type 8): one
+  Extended Link TLV per link, each carrying `SrAdjSidTlv` sub-TLVs —
+  the Adj-SID (§6.1) and LAN Adj-SID (§6.2, `neighbor_id` set). V/L
+  flags mean an absolute local label (the length-7/11 encodings);
+  V/L clear mean an index into the originator's SRGB (length-8/12).
+- **Extended Prefix Range TLV** (RFC 8665 §4): the SR Mapping Server's
+  carrier — a contiguous prefix range whose M-flagged Prefix-SID
+  assigns to the range's *first* prefix.
+
+```rust
+use lr_ospf::lsa::sr::{
+    adj_flags, originate_sr_link_lsa, originate_sr_prefix_range_lsa,
+    SrAdjSidTlv, SrLinkAdvert, SrPrefixRangeCore, link_type,
+};
+
+// Originate one adjacency segment (p2p link to 2.2.2.2, label 24000):
+let link = SrLinkAdvert {
+    link_type: link_type::POINT_TO_POINT,
+    link_id: [2, 2, 2, 2],      // the neighbour's Router ID
+    link_data: [10, 0, 0, 1],   // our address on the link
+};
+let adj = SrAdjSidTlv {
+    flags: adj_flags::V | adj_flags::L | adj_flags::P,
+    mt_id: 0,
+    weight: 0,
+    sid: 24000,                 // absolute label (V/L set)
+    neighbor_id: None,          // Some(rid) = the LAN shape (§6.2)
+};
+let lsa = originate_sr_link_lsa(0x0101_0101, &[(link, vec![adj])], 3, None);
+assert!(lsa.is_some());         // finalized, Opaque Type 8
+```
+
+The mapping-server shapes decode out of the same LSDB. `SrDatabase`
+(from `lr_ospf::srdb::SrDatabase::from_lsdb`) exposes `links` (per
+advertising router adjacency segments) and `prefix_ranges`; resolvers:
+`SrDatabase::label_for` (direct Prefix-SIDs), `SrRangeMapping::index_for`
+(`sid + offset` for a prefix inside a range, RFC 8665 §4) and
+`SrDatabase::mapping_label_for` (mapping-server fallback — direct
+advertisements win per RFC 8661 §3.2.3, the LSP rides the prefix's own
+path). Embedders project every area with
+`DefaultRouter::ospf_sr_databases()`.
+
 ## OS routing table
 
 ```rust

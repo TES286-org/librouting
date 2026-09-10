@@ -380,6 +380,22 @@ permit = false
                               # neighbours one hop away push srgb_base+sid
                               # instead of popping (PHP is the default)
 
+# SR Mapping Server (RFC 8665 4 / RFC 8661 3.2): advertise prefix-SID
+# bindings for prefixes this router does not own. Each table
+# originates one Extended Prefix Opaque LSA carrying an Extended
+# Prefix Range TLV whose Prefix-SID has the M-flag set; receivers
+# resolve `srgb_base + sid + offset` for every covered prefix.
+# [[ospf.mapping_server]]
+# prefix = "10.77.0.0/24"     # base prefix of the range (required)
+# sid = 500                   # index of the range's FIRST prefix
+                              # (required; later prefixes shift by
+                              # their offset inside the range)
+# range_size = 4              # consecutive prefixes covered (default 1;
+                              # must fit the prefix's address space and
+                              # the SRGB)
+# no_php = true               # NP flag on the range's Prefix-SID
+                              # (default PHP)
+
 # Non-backbone areas must be declared before interfaces reference them;
 # the backbone (area 0) is implicit and always "normal".
 # [[ospf.area]]
@@ -396,6 +412,12 @@ permit = false
 # dead_interval = 40          # inherits [ospf]
 # priority = 1                # DR election priority (the daemon runs
                               # p2p segments only, so this is inert today)
+# adj_sid = 24000             # RFC 8665 6: the adjacency segment
+                              # advertised for this interface's Full
+                              # adjacencies (an absolute SRLB label,
+                              # 16..=1048575). Originated as an Extended
+                              # Link Opaque LSA once the adjacency is
+                              # Full, withdrawn (MaxAge) when it drops.
 
 # ---------------------------------------------------------------------------
 # LDP daemon mode (run with --protocol ldp; BGP/OSPF tables above are ignored)

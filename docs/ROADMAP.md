@@ -558,9 +558,10 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    set before the bind; the post-bind change died with EINVAL on
    current kernels, silently degrading the daemon to IPv4-only
    discovery).
-5. **SR-MPLS (RFC 8660 / 8665)** — Segment Routing MPLS data plane.
-   In progress; slice 1 (control-plane codecs + origination) and slice
-   2 (reception → SRDB → SPF label attach → kernel mirror) landed:
+5. ~~**SR-MPLS (RFC 8660 / 8665)**~~ — Segment Routing MPLS data
+   plane. Slices 1 (control-plane codecs + origination), 2 (reception
+   → SRDB → SPF label attach → kernel mirror) and 3 (adjacency
+   segments + mapping server) landed:
 
    - **Codec** (`lr-ospf::lsa::sr`): the RFC 7684 §6 Extended Prefix
      Opaque LSA (area-scoped, Opaque Type 7) with the RFC 8665 §5
@@ -627,9 +628,71 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      FRR `segment-routing on` + `global-block` + `prefix … index 200
      no-php-flag`) asserts lr's Loc-RIB maps FRR's SID to label=16200
      and the kernel FIB carries the encap route.
-   - **Next slice**: Adj-SIDs (RFC 8665 §6), then the mapping-server
-     (M-flag) shapes. RFC 9256 (Segment Routing Policy) builds on the
-     data plane.
+   - **Slice 3 — adjacency segments** (RFC 8665 §6): the Extended Link
+     Opaque LSA (RFC 7684 §3, Opaque Type 8) codec — Extended Link TLV
+     (§3.1: link type, reserved, Link ID, Link Data) with the Adj-SID
+     (§6.1, type 2: B/V/L/G/P flags, MT-ID, weight, SID — the length-7
+     label shape when V/L are set, length-8 index shape otherwise) and
+     LAN Adj-SID (§6.2, type 3: plus the 4-octet neighbour Router ID)
+     sub-TLVs, all 4-aligned with the RFC 7684 §2.3 length-excludes-
+     padding rule (FRR's TLV walk rounds the body size up, so both
+     lengths decode). Origination: `[ospf.interface] adj_sid = <label>`
+     — one Extended Link LSA per interface (stable ifindex-derived
+     Opaque ID) with one Extended Link TLV per Full adjacency,
+     originated on the Router-LSA re-origination cadence: p2p links get
+     the V/L/P-shaped Adj-SID (Link ID = the neighbour Router ID, Link
+     Data = our address, §7.4.1); broadcast segments shape the TLV as
+     transit (Link ID = the DR's address) with an Adj-SID toward the DR
+     and LAN Adj-SIDs (neighbour Router ID filled) toward the others,
+     §7.4.2. When the last Full adjacency drops, the LSA is
+     MaxAge-flushed (§7.4.1 "MUST be withdrawn") with the sequence
+     record retained so a later re-origination stays above the
+     neighbours' floor. With `install_kernel` each advertised
+     adjacency mirrors a tail pop (in-label → pop, via the neighbour's
+     Hello address on that interface — the adjacency segment's
+     forwarding instruction is "out that link") and the flush removes
+     it.
+   - **Slice 3 — mapping server** (RFC 8665 §4 / RFC 8661 §3.2): the
+     Extended Prefix Range TLV codec (type 2 of the Extended Prefix
+     LSA: prefix length, AF, Range Size, IA flag, prefix) with the
+     M-flagged Prefix-SID assigning to the range's *first* prefix;
+     `[[ospf.mapping_server]]` (prefix + sid + `range_size` + `no_php`)
+     originates one such LSA per range. Reception:
+     `SrRangeMapping::index_for` computes `sid + offset` for every
+     prefix inside the span (§4's example arithmetic), and
+     `SrDatabase::mapping_label_for` resolves the winning range — a
+     reachable SR-capable server with an SRGB, closest first, lowest
+     router ID on ties — against the server's SRGB (the
+     homogeneous-domain arithmetic RFC 8660 §4.2 backs; the index must
+     fit the advertised range). Direct Prefix-SID advertisements beat
+     server mappings (RFC 8661 §3.2.3), and the mapped route's LSP
+     rides the prefix's *own* path: the SPF now resolves the RFC 2328
+     §16.1.1 owner next hop onto stub/transit routes (previously
+     `None`), which `ospf_attach_sr_labels` pairs with the label
+     (inter-area routes resolve through the border router instead).
+   - **Slice 3 — visibility**: `DefaultRouter::ospf_sr_databases`
+     projects every area's SRDB (SRGBs, prefix mappings, adjacency
+     segments, ranges) for embedders; the OSPF daemon's runtime API
+     `status` gained `ospf-sr srgb/adj/ms` lines.
+   - **Slice 3 — evidence**: `tests/interop/ospf_sr_adj.sh` (two
+     lr-daemons, no kernel MPLS) asserts the adjacency segments both
+     ways through the status lines, the mapped labels 16500/16501
+     (base + offset), direct-beats-mapping on r2's own prefix (16300
+     kept despite the server also mapping it), and the §7.4.1
+     withdrawal after the neighbour dies (r1's own advertisement gone;
+     the killed originator's stale LSA ages out at MaxAge, as
+     link-state flooding dictates). `tests/interop/ospf_sr_frr.sh`
+     phase 3 adds `adj_sid = 24000` to the lr side: FRR 10.3's LSDB
+     stores the Extended Link LSA (Opaque-Type/Id 8.0.0.*) and its
+     `show ip ospf database opaque-area 8.0.0.*` decode reads back the
+     full shape — Link Type 1, Link ID 2.2.2.2, Link data 10.99.1.1,
+     Adj-SID length 7 flags 0x64 label 24000; the FRR SRDB adjacency
+     entry and lr learning FRR's SRLB-allocated Adj-SID are
+     kernel-MPLS-gated like phase 2. The `set -u` trap on `SR_UP`
+     (unbound whenever MPLS=0 short-circuited the first gated block)
+     is fixed alongside.
+   - **Next slice**: SRv6. RFC 9256 (Segment Routing Policy) builds on
+     the data plane.
 
 ### W4 — Documentation, guides, tutorials
 
