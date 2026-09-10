@@ -57,6 +57,7 @@ mod daemon_bfd;
 mod daemon_config;
 mod daemon_ldp;
 mod daemon_ospf;
+mod daemon_ospf3;
 mod daemon_policy;
 mod privdrop;
 mod signal;
@@ -244,6 +245,9 @@ fn main() -> ExitCode {
     };
     // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
     if cfg.protocol == "ospf" {
+        if cfg.ospf_version == "v3" {
+            return daemon_ospf3::run_ospf3_daemon(&cfg, rid);
+        }
         return daemon_ospf::run_ospf_daemon(&cfg, rid);
     }
     // LDP mode: UDP discovery + TCP session transport around LdpEngine.
@@ -1744,6 +1748,22 @@ fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>)
 /// stack through the Loc-RIB (never transmitted on the wire).
 const LR_MPLS_LABEL_STACK_TAG: u8 = 255; // pinned to AttrType::LrMplsLabelStack by a test
 
+/// Link-local IPv6 next hops learned from protocol traffic, mapped to
+/// the outgoing interface index (OSPFv3 daemon writes as it hears
+/// peers; the kernel mirror reads at install time). A link-local
+/// gateway is only routable *through* a specific interface — the
+/// kernel refuses RTM_NEWROUTE with a link-local RTA_GATEWAY and no
+/// RTA_OIF (EINVAL) — so the mirror consults this registry instead of
+/// the per-route ifindex (which plain `Route`s do not carry).
+pub(crate) static V6_NEXTHOP_OIFS: std::sync::OnceLock<
+    std::sync::Mutex<std::collections::BTreeMap<IpAddr, u32>>,
+> = std::sync::OnceLock::new();
+
+pub(crate) fn v6_nexthop_oifs() -> &'static std::sync::Mutex<std::collections::BTreeMap<IpAddr, u32>>
+{
+    V6_NEXTHOP_OIFS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
 /// Linux loopback is always ifindex 1 inside a network namespace: the
 /// loopback device registers at netns creation before any other device.
 /// The LSP tail (pop, no via) needs that device for local delivery.
@@ -1938,8 +1958,20 @@ impl KernelMirror {
                     // second — BIRD behaves the same way).
                     if !mirrored {
                         if let Some(nh) = r.next_hop {
+                            // A link-local gateway only works with its
+                            // outgoing interface (netlink EINVAL
+                            // otherwise); the protocol daemons register
+                            // the mapping as they learn peers.
+                            let oif = match nh {
+                                IpAddr::V6(a) if a[..2] == [0xfe, 0x80] => v6_nexthop_oifs()
+                                    .lock()
+                                    .ok()
+                                    .and_then(|m| m.get(&nh).copied())
+                                    .unwrap_or(0),
+                                _ => 0,
+                            };
                             if let Some(table) = self.ip_table.as_mut() {
-                                let _ = table.add_route(r.key.prefix, nh, 0);
+                                let _ = table.add_route(r.key.prefix, nh, oif);
                             }
                         }
                     }

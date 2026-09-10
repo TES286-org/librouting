@@ -431,6 +431,11 @@ pub(crate) struct DaemonConfig {
     /// while rotating (new key id added before the old one removed).
     pub exchange_plane_keys: Vec<String>,
 
+    /// OSPF protocol version: `"v2"` (default) or `"v3"` (RFC 5340).
+    /// One version per daemon process — the two are independent
+    /// protocols with separate LSDBs (FRR runs ospfd and ospf6d the
+    /// same way).
+    pub ospf_version: String,
     /// OSPF hello interval default (seconds; RFC 2328 default 10).
     pub ospf_hello_interval: u16,
     /// OSPF dead interval default (seconds; RFC 2328 default 4× hello).
@@ -618,6 +623,7 @@ impl DaemonConfig {
             soft_reconfig_inbound: false,
             exchange_plane: false,
             exchange_plane_keys: Vec::new(),
+            ospf_version: "v2".to_string(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
@@ -714,6 +720,50 @@ impl DaemonConfig {
                 self.protocol
             ));
             return Ok(());
+        }
+        // RFC 5340 §A.3.2: the v3 Hello dead interval is a 16-bit field
+        // (half the v2 width), so RouterDeadInterval must fit it.
+        if self.ospf_version == "v3" && self.ospf_dead_interval > 65535 {
+            return Err(format!(
+                "OSPFv3 dead_interval {} exceeds the 16-bit Hello field (max 65535)",
+                self.ospf_dead_interval
+            ));
+        }
+        // OSPFv3 daemon slice 1: p2p segments only, and the v2-scoped
+        // extensions (SR, graceful restart) are not wired — fail closed
+        // instead of silently ignoring configured features.
+        if self.ospf_version == "v3" {
+            for spec in &self.ospf_interfaces {
+                if let Some(nt) = spec.network_type.as_deref() {
+                    if nt == "broadcast" {
+                        return Err(
+                            "OSPFv3 broadcast segments are not supported yet                              (network_type = \"broadcast\")"
+                                .to_string(),
+                        );
+                    }
+                }
+                if spec.adj_sid.is_some() {
+                    return Err(
+                        "OSPFv3 does not support adj_sid (SR is an OSPFv2 extension)".to_string(),
+                    );
+                }
+            }
+            if self.ospf_srgb_base.is_some()
+                || self.ospf_srgb_range.is_some()
+                || !self.ospf_prefix_sids.is_empty()
+                || !self.ospf_mapping_servers.is_empty()
+            {
+                return Err(
+                    "OSPFv3 does not support Segment Routing configuration                      (srgb/prefix_sid/mapping_server are OSPFv2 extensions)"
+                        .to_string(),
+                );
+            }
+            if self.ospf_graceful_restart {
+                return Err(
+                    "OSPFv3 does not support graceful restart yet (RFC 5187 is a later slice)"
+                        .to_string(),
+                );
+            }
         }
         // Areas: id present, unique, kind valid; backbone stays normal.
         let mut seen = std::collections::BTreeSet::new();
@@ -1556,6 +1606,16 @@ fn apply_ospf_key(
 ) -> Result<bool, String> {
     match section {
         "ospf" => match key {
+            "version" => {
+                let v = match value {
+                    "2" | "v2" => "v2",
+                    "3" | "v3" => "v3",
+                    other => {
+                        return Err(format!("bad OSPF version '{other}' (use \"v2\" or \"v3\")"))
+                    }
+                };
+                cfg.ospf_version = v.to_string();
+            }
             "hello_interval" => {
                 cfg.ospf_hello_interval = value
                     .parse()
@@ -2286,6 +2346,17 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 i += 2;
             }
             // Repeatable: each --ospf-interface adds one interface; its
+            "--ospf-version" if i + 1 < args.len() => {
+                match args[i + 1].as_str() {
+                    "2" | "v2" => cfg.ospf_version = "v2".to_string(),
+                    "3" | "v3" => cfg.ospf_version = "v3".to_string(),
+                    other => {
+                        eprintln!("invalid OSPF version '{other}' (use \"v2\" or \"v3\")");
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
             // area defaults to --ospf-area (resolved in finalize).
             "--ospf-interface" if i + 1 < args.len() => {
                 cfg.ospf_interfaces.push(OspfIfSpec {

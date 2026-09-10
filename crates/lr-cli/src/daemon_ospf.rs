@@ -2673,7 +2673,7 @@ fn link_slot(ifindex: u32) -> u32 {
     ifindex & 0x00ff_ffff
 }
 
-fn log_event(ev: &RouterEvent) {
+pub(crate) fn log_event(ev: &RouterEvent) {
     match ev {
         RouterEvent::PeerStateChange { session, state } => {
             println!("daemon: session #{} → {}", session.0, state);
