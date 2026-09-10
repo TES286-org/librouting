@@ -16,13 +16,17 @@ pub use grace::{
 
 /// Segment Routing extensions (RFC 8665): the RFC 7684 Extended Prefix
 /// Opaque LSA with the Prefix-SID sub-TLV and the RFC 4970 Router
-/// Information LSA's SR-Algorithm + SID/Label Range TLVs.
+/// Information LSA's SR-Algorithm + SID/Label Range TLVs, the RFC 7684
+/// Extended Link Opaque LSA with the RFC 8665 §6 Adj-SID / LAN Adj-SID
+/// sub-TLVs, and the RFC 8665 §4 Extended Prefix Range TLV (the SR
+/// Mapping Server carrier).
 pub mod sr;
 pub use sr::{
-    decode_ext_prefix_lsa_body, decode_ri_sr_lsa_body, encode_ri_sr_lsa_body,
-    originate_sr_prefix_lsa, originate_sr_ri_lsa, remote_label, sid_flags, RiSrBlock,
-    SrPrefixAdvert, SrPrefixAdvertCore, SrPrefixSidTlv, OPAQUE_TYPE_EXT_PREFIX, OPAQUE_TYPE_RI,
-    SUBTLV_PREFIX_SID, TLV_EXT_PREFIX, TLV_SRGB, TLV_SR_ALGORITHM,
+    adj_flags, decode_ext_link_lsa_body, decode_ext_prefix_lsa_body, decode_ri_sr_lsa_body,
+    encode_ri_sr_lsa_body, originate_sr_link_lsa, originate_sr_prefix_lsa, originate_sr_ri_lsa,
+    remote_label, sid_flags, RiSrBlock, SrAdjSidTlv, SrLinkAdvert, SrPrefixAdvert,
+    SrPrefixAdvertCore, SrPrefixSidTlv, OPAQUE_TYPE_EXT_LINK, OPAQUE_TYPE_EXT_PREFIX,
+    OPAQUE_TYPE_RI, SUBTLV_PREFIX_SID, TLV_EXT_PREFIX, TLV_SRGB, TLV_SR_ALGORITHM,
 };
 
 /// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.
