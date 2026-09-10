@@ -57,11 +57,14 @@ use lr_core::error::EncodeError;
 use lr_ospf::codec::OspfCodec;
 use lr_ospf::gr::{HelperCheck, HelperEntry, RestartTracker};
 use lr_ospf::interface::{elect as dr_elect, Elector, IfState};
-use lr_ospf::lsa::grace::{GraceLsaBody, GraceReason};
+use lr_ospf::lsa::grace::{GraceLsaBody, GraceReason, OPTIONS_O_BIT};
+use lr_ospf::lsa::sr::originate_sr_prefix_range_lsa;
 use lr_ospf::lsa::Lsa;
+use lr_ospf::lsa::LsaHeader;
+use lr_ospf::lsa::LsaTypeV2;
 use lr_ospf::lsa::{
-    opaque_lsa_id, originate_sr_prefix_lsa, originate_sr_ri_lsa, OPAQUE_TYPE_EXT_PREFIX,
-    OPAQUE_TYPE_RI,
+    opaque_lsa_id, originate_sr_link_lsa, originate_sr_prefix_lsa, originate_sr_ri_lsa,
+    OPAQUE_TYPE_EXT_LINK, OPAQUE_TYPE_EXT_PREFIX, OPAQUE_TYPE_RI,
 };
 use lr_ospf::origination::{
     finalize_v2_packet, originate_network_lsa, originate_router_lsa, v2_packet_checksum_ok,
@@ -168,6 +171,10 @@ struct OspfInterface {
     /// network mask.
     addrs: Vec<InterfaceV4Addr>,
     transport: OspfV2Transport,
+    /// RFC 8665 §6: the adjacency segment advertised for this
+    /// interface's Full adjacencies (an absolute SRLB label). `None` =
+    /// the interface originates no Extended Link LSA.
+    adj_sid: Option<u32>,
     /// Last Hello we sent on this interface (ms since daemon start).
     last_hello_ms: u64,
     /// Router-ids heard on this interface, parsed from their Hellos.
@@ -265,6 +272,21 @@ struct OspfDaemon {
     /// RFC 8665: the locally originated prefix SIDs (one Extended
     /// Prefix Opaque LSA each).
     sr_sids: Vec<SrSidConfig>,
+    /// RFC 8665 §4: the locally originated mapping-server ranges (one
+    /// Extended Prefix Opaque LSA carrying an Extended Prefix Range
+    /// TLV each).
+    sr_ranges: Vec<SrRangeConfig>,
+    /// (area, ifindex) → the interface's Extended Link LSA is active
+    /// (some adjacency on it is Full). Drives the §7.4.1 withdrawal
+    /// when the last Full adjacency drops.
+    sr_link_active: BTreeMap<(u32, u32), bool>,
+    /// (area, ifindex, neighbor rid) → the kernel pop label installed
+    /// for that adjacency's tail (in-label → pop, via the neighbour).
+    /// Mirrored only with `install_kernel` + kernel MPLS available.
+    sr_link_pops: BTreeMap<(u32, u32, u32), u32>,
+    /// `install_kernel` (the daemon-wide kernel-mirror switch) —
+    /// gates the adjacency tail pops alongside the prefix-SID ones.
+    install_kernel_mpls: bool,
     /// (area, link_state_id) → last originated sequence number for our
     /// SR LSAs (RI Opaque Type 4 + Extended Prefix Opaque Type 7). The
     /// LSDB instance is the floor, mirroring the Router-LSA rule.
@@ -287,6 +309,22 @@ struct SrSidConfig {
     sid: u32,
     node: bool,
     no_php: bool,
+    opaque_index: u32,
+}
+
+/// One configured mapping-server range (RFC 8665 §4): the Extended
+/// Prefix Range TLV the daemon originates — `range_size` consecutive
+/// prefixes from `prefix`, the first carrying `sid` (M-flag set on the
+/// wire).
+#[derive(Debug, Clone)]
+struct SrRangeConfig {
+    prefix: [u8; 4],
+    prefix_len: u8,
+    range_size: u32,
+    no_php: bool,
+    sid: u32,
+    /// Stable Opaque ID slot of the carrying Extended Prefix LSA
+    /// (continues after the prefix-SID slots).
     opaque_index: u32,
 }
 
@@ -381,6 +419,37 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             }
             sids
         },
+        sr_ranges: {
+            // Mapping-server ranges continue the Opaque ID space after
+            // the prefix-SID slots so every Extended Prefix LSA keeps a
+            // stable (advertising router, opaque ID) key.
+            let mut ranges = Vec::new();
+            let slot_base = cfg.ospf_prefix_sids.len();
+            for (idx, spec) in cfg.ospf_mapping_servers.iter().enumerate() {
+                let Some(prefix) = spec
+                    .prefix
+                    .as_deref()
+                    .and_then(|p| p.parse::<lr_core::addr::Prefix>().ok())
+                else {
+                    continue; // finalize() already rejected this
+                };
+                let lr_core::addr::IpAddr::V4(octets) = prefix.addr else {
+                    continue;
+                };
+                ranges.push(SrRangeConfig {
+                    prefix: octets,
+                    prefix_len: prefix.prefix_len,
+                    range_size: spec.range_size.unwrap_or(1).max(1),
+                    no_php: spec.no_php.unwrap_or(false),
+                    sid: spec.sid.unwrap_or(0),
+                    opaque_index: (slot_base + idx + 1) as u32,
+                });
+            }
+            ranges
+        },
+        sr_link_active: BTreeMap::new(),
+        sr_link_pops: BTreeMap::new(),
+        install_kernel_mpls: cfg.install_kernel,
         sr_seq: BTreeMap::new(),
         gr_status: Arc::new(std::sync::Mutex::new(Vec::new())),
         router_id: rid,
@@ -546,7 +615,65 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         running: Arc::clone(&running),
         status_lines: {
             let snapshot = Arc::clone(&daemon.gr_status);
-            Arc::new(move || snapshot.lock().map(|s| s.clone()).unwrap_or_default())
+            let router = Arc::clone(&daemon.router);
+            Arc::new(move || {
+                let mut lines = snapshot.lock().map(|s| s.clone()).unwrap_or_default();
+                // RFC 8665 SR view: SRGBs, adjacency segments and
+                // mapping-server ranges projected from the area LSDBs
+                // (the same data the library exposes through
+                // `DefaultRouter::ospf_sr_databases`).
+                let Ok(router) = router.lock() else {
+                    return lines;
+                };
+                for (area, db) in router.ospf_sr_databases() {
+                    for (rid, srgb) in &db.srgbs {
+                        lines.push(format!(
+                            "ospf-sr srgb area={} router={} base={} range={}",
+                            area_label(area),
+                            fmt_rid(*rid),
+                            srgb.srgb_base,
+                            srgb.srgb_range
+                        ));
+                    }
+                    for segments in db.links.values() {
+                        for seg in segments {
+                            let label = db
+                                .srgbs
+                                .get(&seg.advertising_router)
+                                .and_then(|srgb| seg.sid.remote_label(srgb));
+                            lines.push(format!(
+                                "ospf-sr adj area={} router={} label={} type={} \
+                                 link-id={} link-data={}{}",
+                                area_label(area),
+                                fmt_rid(seg.advertising_router),
+                                label.map(|l| l.to_string()).unwrap_or_else(|| "-".into()),
+                                if seg.sid.is_lan() { "lan" } else { "p2p" },
+                                std::net::Ipv4Addr::from(seg.link_id),
+                                std::net::Ipv4Addr::from(seg.link_data),
+                                match (seg.sid.neighbor_id, label) {
+                                    (Some(rid), _) =>
+                                        format!(" neighbor={}", std::net::Ipv4Addr::from(rid)),
+                                    (None, Some(l)) => format!(" via-label={l}"),
+                                    (None, None) => String::new(),
+                                }
+                            ));
+                        }
+                    }
+                    for range in &db.prefix_ranges {
+                        lines.push(format!(
+                            "ospf-sr ms area={} router={} range={}/{} size={} sid={} \
+                             mapping-server=yes",
+                            area_label(area),
+                            fmt_rid(range.advertising_router),
+                            std::net::Ipv4Addr::from(range.range.prefix),
+                            range.range.prefix_len,
+                            range.range.range_size,
+                            range.sid.sid
+                        ));
+                    }
+                }
+                lines
+            })
         },
     });
     if let Err(e) = crate::spawn_api(cfg, &runtime) {
@@ -707,6 +834,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<OspfInterf
         election_dirty: false,
         addrs,
         transport,
+        adj_sid: spec.adj_sid,
         last_hello_ms: 0,
         heard: BTreeMap::new(),
         net_lsa_seq: None,
@@ -1146,6 +1274,10 @@ impl OspfDaemon {
             // (re)formed adjacency always sees them (RFC 8665 §6:
             // extended LSAs flood like any area-scoped LSA).
             self.reoriginate_sr(&mut router, area);
+            // The Extended Link LSAs follow the adjacency state: a
+            // Full adjacency gains its TLV, a drop below Full loses
+            // it, the last drop flushes the LSA (§7.4.1).
+            self.reoriginate_sr_links(&mut router, area, now_ms);
         }
     }
 
@@ -1613,6 +1745,36 @@ impl OspfDaemon {
                 lsas.push(lsa);
             }
         }
+        // One Extended Prefix Opaque LSA per mapping-server range: the
+        // Extended Prefix Range TLV with the M-flagged Prefix-SID
+        // (RFC 8665 §4 / §7.1 — bindings on behalf of the owners).
+        for cfg in &self.sr_ranges {
+            let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_PREFIX, cfg.opaque_index);
+            let prev = self.sr_prev_seq(router, area, lsid);
+            let range = lr_ospf::lsa::sr::SrPrefixRangeCore {
+                prefix_len: cfg.prefix_len,
+                range_size: cfg.range_size as u16,
+                flags: 0,
+                prefix: cfg.prefix,
+            };
+            let sid = lr_ospf::lsa::SrPrefixSidTlv {
+                flags: if cfg.no_php {
+                    lr_ospf::lsa::sr::sid_flags::M | lr_ospf::lsa::sr::sid_flags::NP
+                } else {
+                    lr_ospf::lsa::sr::sid_flags::M
+                },
+                mt_id: 0,
+                algorithm: 0,
+                sid: cfg.sid,
+            };
+            if let Some(lsa) =
+                originate_sr_prefix_range_lsa(rid, &range, &sid, cfg.opaque_index, prev)
+            {
+                self.sr_seq
+                    .insert((area, lsid), lsa.header.ls_sequence_number);
+                lsas.push(lsa);
+            }
+        }
         if lsas.is_empty() {
             return;
         }
@@ -1626,6 +1788,224 @@ impl OspfDaemon {
             }
             Err(e) => eprintln!("daemon: ospf sr LSA encode: {}", e),
         }
+    }
+
+    /// Originate (or withdraw) the RFC 8665 §6 **Extended Link Opaque
+    /// LSAs** for `area`: one LSA per interface with `adj_sid`
+    /// configured, its body listing one Extended Link TLV per Full
+    /// adjacency on that interface (§7.4.1: p2p adjacencies advertise
+    /// the Adj-SID; §7.4.2: on broadcast segments the adjacency to the
+    /// DR gets the Adj-SID and the other neighbours LAN Adj-SIDs).
+    /// Runs on the same adjacency-change cadence as the Router-LSA:
+    /// a Full adjacency adds its TLV, a drop below Full removes it,
+    /// and the last drop flushes the LSA (MaxAge). With
+    /// `install_kernel`, every advertised adjacency also mirrors a
+    /// tail pop route into the kernel dataplane (in-label → pop, via
+    /// the neighbour) and a drop removes it.
+    fn reoriginate_sr_links(&mut self, router: &mut DefaultRouter, area: u32, now_ms: u64) {
+        let Some(&anchor) = self.anchors.get(&area) else {
+            return;
+        };
+        let rid = self.router_id.as_u32();
+        let mut lsas: Vec<Lsa> = Vec::new();
+        let mut installed: BTreeMap<(u32, u32, u32), u32> = BTreeMap::new();
+        for iface in self
+            .interfaces
+            .iter()
+            .filter(|i| i.area == area && i.adj_sid.is_some())
+        {
+            let Some(sid) = iface.adj_sid else { continue };
+            let ifindex = iface.transport.ifindex();
+            let local = iface.addrs.first().map(|a| u32::from(a.addr)).unwrap_or(0);
+            // The interface's Full adjacencies, ordered for a stable
+            // LSA body.
+            let mut full: Vec<(u32, u32)> = self
+                .neighbors
+                .iter()
+                .filter(|((a, r), n)| {
+                    *a == area
+                        && n.ifindex == ifindex
+                        && n.established
+                        && iface.heard.contains_key(r)
+                })
+                .map(|((_, r), _)| (*r, iface.heard.get(r).map(|h| h.ip).unwrap_or(0)))
+                .collect();
+            full.sort_unstable();
+            let key = (area, ifindex);
+            if full.is_empty() {
+                // §7.4.1: below 2-Way the advertisement MUST be
+                // withdrawn. With no Full adjacency left, flush the
+                // interface's LSA (MaxAge) when one is active.
+                if self.sr_link_active.remove(&key).is_some() {
+                    let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_LINK, link_slot(ifindex));
+                    if let Some(prev) = self.sr_prev_seq(router, area, lsid) {
+                        let mut lsa = Lsa {
+                            header: LsaHeader {
+                                ls_age: lr_ospf::lsdb::MAX_AGE_SECS,
+                                options: 0x02 | OPTIONS_O_BIT,
+                                ls_type: LsaTypeV2::OpaqueAreaLsa as u16,
+                                link_state_id: lsid,
+                                advertising_router: rid,
+                                ls_sequence_number: prev,
+                                ls_checksum: 0,
+                                length: 0,
+                            },
+                            body: Vec::new(),
+                        };
+                        lsa.finalize();
+                        lsas.push(lsa);
+                        // The sequence record stays: once the MaxAge
+                        // instance ages out of the LSDB the floor
+                        // would be lost and a fresh 0x80000001
+                        // re-origination would be older than what the
+                        // neighbours still hold (RFC 2328 §12.1.2).
+                    }
+                }
+                // Kernel tails for adjacencies that no longer exist
+                // are dropped by the diff below.
+                continue;
+            }
+            let mut links: Vec<(lr_ospf::lsa::SrLinkAdvert, Vec<lr_ospf::lsa::SrAdjSidTlv>)> =
+                Vec::new();
+            for (neigh_rid, neigh_ip) in &full {
+                // §7.4.2: on a broadcast segment the adjacency to the
+                // DR rides a transit-shaped TLV (Link ID = the DR's
+                // address); every other neighbour is a LAN adjacency.
+                let (link_type, link_id) = match iface.network_type {
+                    OspfNetworkType::Broadcast => {
+                        let is_dr = iface.dr != 0 && iface.dr == *neigh_ip;
+                        let dr_addr = if iface.if_state == IfState::Dr {
+                            local
+                        } else {
+                            iface.dr
+                        };
+                        if is_dr {
+                            (lr_ospf::lsa::sr::link_type::TRANSIT, *neigh_ip)
+                        } else {
+                            (lr_ospf::lsa::sr::link_type::TRANSIT, dr_addr)
+                        }
+                    }
+                    OspfNetworkType::PointToPoint => {
+                        (lr_ospf::lsa::sr::link_type::POINT_TO_POINT, *neigh_rid)
+                    }
+                };
+                let adj = lr_ospf::lsa::SrAdjSidTlv {
+                    // The configured label is local significance
+                    // (SRLB): V/L set, persistent (the config fixes the
+                    // value across restarts).
+                    flags: lr_ospf::lsa::sr::adj_flags::V
+                        | lr_ospf::lsa::sr::adj_flags::L
+                        | lr_ospf::lsa::sr::adj_flags::P,
+                    mt_id: 0,
+                    weight: 0,
+                    sid,
+                    // LAN shape toward non-DR neighbours on broadcast.
+                    neighbor_id: match iface.network_type {
+                        OspfNetworkType::Broadcast if iface.dr == 0 || iface.dr != *neigh_ip => {
+                            Some(neigh_rid.to_be_bytes())
+                        }
+                        _ => None,
+                    },
+                };
+                links.push((
+                    lr_ospf::lsa::SrLinkAdvert {
+                        link_type,
+                        link_id: link_id.to_be_bytes(),
+                        link_data: local.to_be_bytes(),
+                    },
+                    vec![adj],
+                ));
+                installed.insert((area, ifindex, *neigh_rid), sid);
+            }
+            let lsid = opaque_lsa_id(OPAQUE_TYPE_EXT_LINK, link_slot(ifindex));
+            let prev = self.sr_prev_seq(router, area, lsid);
+            if let Some(lsa) = originate_sr_link_lsa(rid, &links, link_slot(ifindex), prev) {
+                self.sr_seq
+                    .insert((area, lsid), lsa.header.ls_sequence_number);
+                self.sr_link_active.insert(key, true);
+                lsas.push(lsa);
+            }
+        }
+        // Kernel tail diff: install pops for new adjacencies, remove
+        // the ones whose adjacency is gone (only with install_kernel —
+        // the mirror is opt-in like every kernel write).
+        let stale: Vec<(u32, u32, u32)> = self
+            .sr_link_pops
+            .keys()
+            .filter(|k| !installed.contains_key(k))
+            .copied()
+            .collect();
+        if !stale.is_empty() || installed.keys().any(|k| !self.sr_link_pops.contains_key(k)) {
+            #[cfg(target_os = "linux")]
+            if self.install_kernel_mpls {
+                match lr_osroute::mpls_route::MplsNetlink::connect() {
+                    Ok(mut mpls) => {
+                        for key in &stale {
+                            if let Some(label) = self.sr_link_pops.remove(key) {
+                                if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label))
+                                {
+                                    eprintln!("lsp: adj pop delete for {label}: {e}");
+                                }
+                            }
+                        }
+                        for (key @ (area, ifindex, neigh), label) in &installed {
+                            if self.sr_link_pops.contains_key(key) {
+                                continue;
+                            }
+                            let Some(nh) = self
+                                .interfaces
+                                .iter()
+                                .find(|i| i.area == *area && i.transport.ifindex() == *ifindex)
+                                .and_then(|i| i.heard.get(neigh))
+                                .map(|h| h.ip)
+                            else {
+                                continue;
+                            };
+                            let route = lr_osroute::mpls_route::MplsRoute::pop(
+                                lr_mpls::Label::new_value(*label),
+                                lr_core::addr::IpAddr::V4(nh.to_be_bytes()),
+                                *ifindex,
+                            );
+                            match mpls.add_route(&route) {
+                                Ok(()) => {
+                                    self.sr_link_pops.insert(*key, *label);
+                                    println!(
+                                        "lsp: in-label {} -> pop via {} (adjacency {}/{})",
+                                        label,
+                                        std::net::Ipv4Addr::from(nh),
+                                        area_label(*area),
+                                        fmt_rid(*neigh)
+                                    );
+                                }
+                                Err(e) => eprintln!("lsp: adj pop install for {label}: {e}"),
+                            }
+                        }
+                    }
+                    Err(e) => eprintln!(
+                        "daemon: mpls route table unavailable ({}); adjacency pops disabled",
+                        e
+                    ),
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            {
+                let _ = (&stale, &installed);
+            }
+        }
+        if lsas.is_empty() {
+            return;
+        }
+        let packet = self_lsu(self.router_id, area, lsas);
+        match OspfCodec::v2().encode_vec(&packet) {
+            Ok(mut bytes) => {
+                finalize_v2_packet(&mut bytes);
+                if let Err(e) = router.feed_input(anchor, &bytes) {
+                    eprintln!("daemon: ospf sr link self-origination feed: {}", e);
+                }
+            }
+            Err(e) => eprintln!("daemon: ospf sr link LSA encode: {}", e),
+        }
+        let _ = now_ms;
     }
 
     /// The sequence floor for one of our SR LSAs: the newest of our
@@ -2285,6 +2665,15 @@ fn parse_hello_body(bytes: &[u8]) -> Option<HelloBody> {
 
 fn fmt_rid(rid: u32) -> String {
     RouterId::from_u32(rid).to_string()
+}
+
+/// The stable Opaque ID slot of an interface's Extended Link Opaque
+/// LSA (RFC 7684 §3: the Opaque ID disambiguates a router's LSAs).
+/// The kernel ifindex is unique per interface and well inside the
+/// 24-bit Opaque ID space; masking keeps a pathological index from
+/// folding into the Opaque Type byte.
+fn link_slot(ifindex: u32) -> u32 {
+    ifindex & 0x00ff_ffff
 }
 
 fn log_event(ev: &RouterEvent) {

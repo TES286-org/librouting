@@ -169,6 +169,12 @@ pub(crate) struct OspfIfSpec {
     /// Broadcast runs the §9.4 DR/BDR election and gates adjacency per
     /// §10.4.
     pub network_type: Option<String>,
+    /// RFC 8665 §6: the local adjacency segment this interface
+    /// advertises once its adjacency is Full — an absolute SRLB label
+    /// (V/L shape). Neighbours steer traffic over the link by pushing
+    /// it. Optional; absent = the interface originates no Extended
+    /// Link LSA.
+    pub adj_sid: Option<u32>,
 }
 
 impl OspfIfSpec {
@@ -176,6 +182,26 @@ impl OspfIfSpec {
     pub fn label(&self) -> &str {
         self.name.as_deref().unwrap_or("(unnamed)")
     }
+}
+
+/// One `[[ospf.mapping_server]]` table (RFC 8665 §4 / RFC 8661 §3.2):
+/// the SR Mapping Server role — advertise prefix→SID bindings for
+/// prefixes this router does not own. The Extended Prefix Range TLV
+/// covers `range_size` consecutive prefixes starting at `prefix`, the
+/// first carrying `sid` (later ones shift by their offset).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct OspfMappingServerSpec {
+    /// Base prefix of the range (IPv4, required).
+    pub prefix: Option<String>,
+    /// SID index assigned to the range's first prefix (required).
+    pub sid: Option<u32>,
+    /// Number of consecutive prefixes covered (default 1; RFC 8665 §4
+    /// Range Size).
+    pub range_size: Option<u32>,
+    /// RFC 8665 §5 NP flag for the range's Prefix-SID (FRR
+    /// `no-php-flag` semantics): set to keep the label on the
+    /// penultimate hop. Clear by default.
+    pub no_php: Option<bool>,
 }
 
 /// One `[[babel.key]]` table (or `--babel-key` flag): a symmetric MAC
@@ -423,6 +449,10 @@ pub(crate) struct DaemonConfig {
     /// `[[ospf.prefix_sid]]` tables — locally originated prefixes
     /// advertised with a Prefix-SID in an Extended Prefix Opaque LSA.
     pub ospf_prefix_sids: Vec<OspfPrefixSidSpec>,
+    /// `[[ospf.mapping_server]]` tables — the SR Mapping Server role
+    /// (RFC 8665 §4): Extended Prefix Range TLVs binding ranges of
+    /// prefixes to SID indexes on behalf of their owners.
+    pub ospf_mapping_servers: Vec<OspfMappingServerSpec>,
     /// RFC 8665 reception (`[ospf] sr_receive`): project the area LSDB
     /// into a per-node SR database and attach the resolved Prefix-SID
     /// labels (RFC 8660 head end) to the routes they map onto. Off by
@@ -743,7 +773,17 @@ impl DaemonConfig {
             spec.sid
                 .ok_or_else(|| format!("[[ospf.prefix_sid]] {prefix} without 'sid'"))?;
         }
-        if !self.ospf_prefix_sids.is_empty() {
+        for spec in &self.ospf_mapping_servers {
+            let Some(prefix) = spec.prefix.as_deref().filter(|p| !p.is_empty()) else {
+                return Err("[[ospf.mapping_server]] without 'prefix'".to_string());
+            };
+            prefix
+                .parse::<lr_core::addr::Prefix>()
+                .map_err(|_| format!("[[ospf.mapping_server]] bad prefix '{prefix}'"))?;
+            spec.sid
+                .ok_or_else(|| format!("[[ospf.mapping_server]] {prefix} without 'sid'"))?;
+        }
+        if !self.ospf_prefix_sids.is_empty() || !self.ospf_mapping_servers.is_empty() {
             // FRR's default SRGB (16000/8000) applies when the
             // operator configures SIDs without an explicit block.
             let base = self.ospf_srgb_base.unwrap_or(16_000);
@@ -761,6 +801,48 @@ impl DaemonConfig {
                     return Err(format!(
                         "[[ospf.prefix_sid]] sid {sid} falls outside the SRGB range 0..={}",
                         range - 1
+                    ));
+                }
+            }
+            for spec in &self.ospf_mapping_servers {
+                let sid = spec.sid.unwrap_or(0);
+                let size = spec.range_size.unwrap_or(1).max(1);
+                if size > range || sid >= range || sid + size > range {
+                    return Err(format!(
+                        "[[ospf.mapping_server]] range sid {sid} + size {size} falls outside \
+                         the SRGB range 0..={}",
+                        range - 1
+                    ));
+                }
+                // RFC 8665 §4: the Range Size must fit the prefix's
+                // address space.
+                let parsed = spec
+                    .prefix
+                    .as_deref()
+                    .unwrap_or("")
+                    .parse::<lr_core::addr::Prefix>()
+                    .map_err(|_| "[[ospf.mapping_server]] bad prefix".to_string())?;
+                if parsed.prefix_len > 32 {
+                    return Err(format!(
+                        "[[ospf.mapping_server]] bad prefix length {}",
+                        parsed.prefix_len
+                    ));
+                }
+                let space: u64 = 1u64 << (32 - u32::from(parsed.prefix_len));
+                if u64::from(size) > space {
+                    return Err(format!(
+                        "[[ospf.mapping_server]] range_size {size} exceeds the /{} address space",
+                        parsed.prefix_len
+                    ));
+                }
+            }
+        }
+        for spec in &self.ospf_interfaces {
+            // RFC 3032 platform label space; 0..=15 are reserved.
+            if let Some(sid) = spec.adj_sid {
+                if !(16..=1_048_575).contains(&sid) {
+                    return Err(format!(
+                        "[[ospf.interface]] adj_sid {sid} outside the MPLS label range 16..=1048575"
                     ));
                 }
             }
@@ -1055,6 +1137,11 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 "ospf.prefix_sid" => {
                     cfg.ospf_prefix_sids.push(OspfPrefixSidSpec::default());
                     section = "ospf.prefix_sid".to_string();
+                }
+                "ospf.mapping_server" => {
+                    cfg.ospf_mapping_servers
+                        .push(OspfMappingServerSpec::default());
+                    section = "ospf.mapping_server".to_string();
                 }
                 "babel.key" => {
                     cfg.babel_keys.push(BabelKeySpec::default());
@@ -1619,9 +1706,40 @@ fn apply_ospf_key(
                     }
                     iface.network_type = Some(v.to_string());
                 }
+                "adj_sid" => {
+                    iface.adj_sid = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad adj_sid '{value}'"))?,
+                    );
+                }
                 _ => {
                     return Err(format!(
                         "unknown [[ospf.interface]] key '{key}' (typo protection; OSPF config fails closed)"
+                    ))
+                }
+            }
+        }
+        "ospf.mapping_server" => {
+            let Some(ms) = cfg.ospf_mapping_servers.last_mut() else {
+                return Err("key outside a [[ospf.mapping_server]] table".into());
+            };
+            match key {
+                "prefix" => ms.prefix = Some(value.to_string()),
+                "sid" => {
+                    ms.sid = Some(value.parse().map_err(|_| format!("bad sid '{value}'"))?);
+                }
+                "range_size" => {
+                    ms.range_size = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad range_size '{value}'"))?,
+                    );
+                }
+                "no_php" => ms.no_php = Some(parse_bool(value)),
+                _ => {
+                    return Err(format!(
+                        "unknown [[ospf.mapping_server]] key '{key}' (typo protection; OSPF config fails closed)"
                     ))
                 }
             }
