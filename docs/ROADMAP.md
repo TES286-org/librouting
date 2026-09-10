@@ -559,7 +559,8 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    current kernels, silently degrading the daemon to IPv4-only
    discovery).
 5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
-   In progress; slice 1 (control-plane codecs + origination) landed:
+   In progress; slice 1 (control-plane codecs + origination) and slice
+   2 (reception → SRDB → SPF label attach → kernel mirror) landed:
 
    - **Codec** (`lr-ospf::lsa::sr`): the RFC 7684 §6 Extended Prefix
      Opaque LSA (area-scoped, Opaque Type 7) with the RFC 8667 §5
@@ -575,25 +576,60 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      standard OSPFv2 LSA lengths are 4-aligned; the fix emits the
      trailing alignment padding).
    - **Origination** (daemon): `[ospf] srgb_base/srgb_range` +
-     `[[ospf.prefix_sid]]` (prefix/sid/node) config with the FRR
+     `[[ospf.prefix_sid]]` (prefix/sid/node, `no_php` for the §5 NP
+     flag — FRR `no-php-flag` parity) config with the FRR
      default SRGB (16000/8000) when SIDs are configured without an
      explicit block; the daemon originates the area-scoped RI LSA plus
      one Extended Prefix LSA per configured SID through the same
      anchor-LSU path as the Router-LSA (LSDB sequence floor,
      adjacency-driven re-origination). SR-less configs originate
      nothing.
-   - **Interop** (`tests/interop/ospf_sr_frr.sh`): lr x FRR 10.3 ospfd
-     over a rootless netns veth pair. FRR requires `capability opaque`
-     (its O-bit clearing in `ospf_db_desc` otherwise poisons the
-     exchange — flushed out by this lab); with it, FRR's LSDB holds
-     both of lr's SR LSAs. The SRDB label-mapping assertion is gated
-     on kernel MPLS (FRR reserves the SRGB through zebra's label
-     manager; same gate as mpls_lsp.sh phase 2).
-   - **Next slice**: reception (Extended Prefix + RI SR parsing into a
-     per-node SR database) → SPF label attach (prefix-SID → MPLS label
-     per next hop) → kernel AF_MPLS mirror (RFC 8660 data plane),
-     Adj-SIDs (RFC 8667 §7), then the mapping-server (M-flag) shapes.
-     RFC 9256 (Segment Routing Policy) builds on the data plane.
+   - **Interop, origination** (`tests/interop/ospf_sr_frr.sh` phase 1):
+     lr x FRR 10.3 ospfd over a rootless netns veth pair. FRR requires
+     `capability opaque` (its O-bit clearing in `ospf_db_desc`
+     otherwise poisons the exchange — flushed out by this lab); with
+     it, FRR's LSDB holds both of lr's SR LSAs. The SRDB
+     label-mapping assertion is gated on kernel MPLS (FRR reserves the
+     SRGB through zebra's label manager; same gate as mpls_lsp.sh
+     phase 2).
+   - **Reception** (slice 2, `lr-ospf::srdb`): the per-node SR
+     database is a pure projection of the area LSDB — SRGBs from RI
+     opaque LSAs (Opaque Type 4), Prefix-SID mappings from Extended
+     Prefix LSAs (Opaque Type 7). `SrDatabase::label_for` resolves the
+     head-end label against the SPF result: among the SPF-algorithm
+     mappings whose originator is reachable with a resolvable next
+     hop, the closest originator wins (lowest router ID on ties). The
+     RFC 8667 §5 PHP rule is a direct consequence of the adjacency
+     set: an NP-clear SID whose originator is one hop away means this
+     router is the penultimate hop and pops, so no label is produced.
+     The underlying SPF gained RFC 2328 §16.1.1 next-hop resolution
+     (back-link Link Data for direct p2p neighbours §16.1.1 (5),
+     transit-network member addresses §16.1.1 (4), parent inheritance
+     §16.1.1 (2)-(3)) plus the adjacent-router set — a pre-scan of the
+     LSDB into per-type link maps also replaced the per-vertex
+     database re-walk.
+   - **Label attach** (`lr-router`): `set_ospf_sr_receive` (off by
+     default, fail closed) makes every area recompute attach the
+     resolved label to intra/inter-area routes behind
+     `[ospf] sr_receive` — via the same private `LrMplsLabelStack`
+     attribute the RFC 8277 mirror already consumes — and set the
+     route's next hop to the first hop toward the originator, so the
+     daemon's existing kernel mirror installs the RFC 8660 encap
+     routes with zero extra plumbing. Route selection (kind, metric)
+     is untouched; externally-forwarded routes are never labelled.
+     Locally originated SIDs additionally get AF_MPLS pop routes (the
+     LSP tail) with `install_kernel`.
+   - **Interop, reception**: `tests/interop/ospf_sr.sh` (two
+     lr-daemons, raw multicast, no kernel MPLS needed) asserts both
+     directions of label resolution through the runtime API —
+     `10.99.2.0/24 … label=16100 via 10.99.1.1` — including the NP
+     rule. `tests/interop/ospf_sr_frr.sh` phase 2 (kernel-MPLS gated,
+     FRR `segment-routing on` + `global-block` + `prefix … index 200
+     no-php-flag`) asserts lr's Loc-RIB maps FRR's SID to label=16200
+     and the kernel FIB carries the encap route.
+   - **Next slice**: Adj-SIDs (RFC 8667 §7), then the mapping-server
+     (M-flag) shapes. RFC 9256 (Segment Routing Policy) builds on the
+     data plane.
 
 ### W4 — Documentation, guides, tutorials
 

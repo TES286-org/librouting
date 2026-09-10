@@ -73,7 +73,7 @@ Command reference:
 | ---------- | --------------------------------------------------------------- |
 | `status`   | version, identity, uptime, session/RIB counters, extras        |
 | `sessions` | one line per configured session (state, hold time)              |
-| `routes`   | Loc-RIB dump, one line per path (`path-id` = RFC 7911 Add-Path) |
+| `routes`   | Loc-RIB dump, one line per path (`path-id` = RFC 7911 Add-Path; labelled routes — BGP-LU, OSPF prefix-SIDs — append `label=<top>`) |
 | `mrt PATH` | write the Loc-RIB as RFC 6396 TABLE_DUMP_V2 (BIRD mrt shape)    |
 | `reload`   | re-apply the config file (SIGHUP equivalent)                    |
 | `shutdown` | graceful shutdown                                               |
@@ -123,9 +123,10 @@ are set by the scripts themselves.
 
 **Routes learned but not in the kernel FIB.**
 Kernel installation is opt-in: `--install-kernel-routes` (or
-`install_kernel = true`). For BGP-LU routes the mirror needs the
-`AF_MPLS` stack (see above); without it only the plain IP routes
-install and the LSP halves log a note.
+`install_kernel = true`). For BGP-LU routes and OSPF Segment Routing
+prefix-SIDs (`[ospf] sr_receive`) the mirror needs the `AF_MPLS` stack
+(see above); without it only the plain IP routes install and the LSP
+halves log a note.
 
 **Reload ignored my peer edits.**
 Reload re-applies `networks` only. Peer, AS, router-id, and auth
