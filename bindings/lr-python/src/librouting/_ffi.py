@@ -117,6 +117,8 @@ int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_bgp_encode_keepalive(lr_bytes_t *out);
 int32_t lr_ospf_decode_v2(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_babel_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
+int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
+int32_t lr_srv6_decode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 """
 
 

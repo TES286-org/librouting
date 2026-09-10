@@ -12,6 +12,8 @@ from .codec import (
     decode_bgp,
     decode_ospf_v2,
     decode_babel,
+    encode_srv6_srh,
+    decode_srv6_srh,
 )
 
 __all__ = [
@@ -20,6 +22,8 @@ __all__ = [
     "decode_bgp",
     "decode_ospf_v2",
     "decode_babel",
+    "encode_srv6_srh",
+    "decode_srv6_srh",
     "abi_version",
     "last_error",
     "mpls_platform_labels",

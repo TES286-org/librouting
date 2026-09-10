@@ -87,6 +87,36 @@ def test_router_labeled_unicast():
         assert mpl in (0, 16, 20), f"unexpected platform_labels={mpl}"
 
 
+def test_srv6_srh_roundtrip():
+    """RFC 8754 SRv6 SRH: encode two SIDs, decode the SRH back, verify
+    the segment list round-trips byte-identically through the C ABI."""
+    # Two SIDs in the documentation prefix (RFC 3849):
+    #   2001:db8:dead:beef::1
+    #   2001:db8:dead:beef::2
+    sid1 = bytes.fromhex("20010db8deadbeef0000000000000001")
+    sid2 = bytes.fromhex("20010db8deadbeef0000000000000002")
+    sids = sid1 + sid2
+    srh = librouting.encode_srv6_srh(sids)
+    # SRH length: 8 fixed + 2*16 segments = 40.
+    assert len(srh) == 40
+    # Routing Type at offset 2 = 43 (RFC 8754 §2).
+    assert srh[2] == 43
+    # Decode back — the returned bytes are the segment list concatenated.
+    decoded = librouting.decode_srv6_srh(srh)
+    assert decoded == sids
+
+
+def test_srv6_srh_rejects_bad_length():
+    """The Python wrapper rejects inputs that aren't a multiple of 16
+    bytes (the SID width) before calling into the C ABI."""
+    bad = b"\x00" * 17  # not a multiple of 16
+    try:
+        librouting.encode_srv6_srh(bad)
+        assert False, "encode_srv6_srh must reject bad length"
+    except librouting.LrError:
+        pass
+
+
 if __name__ == "__main__":
     test_abi_version()
     test_encode_keepalive()
