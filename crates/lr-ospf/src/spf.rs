@@ -5,7 +5,7 @@
 //! [`summary_routes`] derives inter-area candidates from summary-LSAs on
 //! top of an intra-area result (RFC 2328 §16.2).
 
-use std::collections::{BTreeMap, BinaryHeap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, BinaryHeap};
 
 use crate::lsa::{
     decode_summary_lsa_body, mask_to_prefix_len, LsaTypeV2, RouterLink, RouterLinkType,
@@ -114,7 +114,9 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                 entry.lsa.body[3],
             ]);
             let attached = decode_network_attached_routers(&entry.lsa.body);
-            network_lsas.entry(key.link_state_id).or_insert((mask, attached));
+            network_lsas
+                .entry(key.link_state_id)
+                .or_insert((mask, attached));
         }
     }
 
@@ -171,8 +173,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                                 current_dist + link.metric as u64,
                                 next_hop,
                             );
-                            if rid == root && link.link_type == RouterLinkType::PointToPoint as u8
-                            {
+                            if rid == root && link.link_type == RouterLinkType::PointToPoint as u8 {
                                 // One hop away: the penultimate hop for
                                 // this neighbour's own prefix-SIDs
                                 // (RFC 8667 §5 PHP rule).
@@ -602,10 +603,7 @@ mod tests {
         // hop for anyone). RFC 2328 §16.1.1 (5)/(2): nh(B) = B's
         // address on the shared link; nh(C) = nh(B) (inheritance).
         let mut db = Lsdb::new();
-        db.install(
-            router_lsa(0x01010101, vec![(0x02020202, 0, P2P, 10)]),
-            0,
-        );
+        db.install(router_lsa(0x01010101, vec![(0x02020202, 0, P2P, 10)]), 0);
         db.install(
             router_lsa(
                 0x02020202,
@@ -625,8 +623,14 @@ mod tests {
             0,
         );
         let res = run_spf(&db, 0x01010101);
-        assert_eq!(res.next_hops.get(&VertexId::Router(0x02020202)), Some(&ip([10, 0, 0, 1])));
-        assert_eq!(res.next_hops.get(&VertexId::Router(0x03030303)), Some(&ip([10, 0, 0, 1])));
+        assert_eq!(
+            res.next_hops.get(&VertexId::Router(0x02020202)),
+            Some(&ip([10, 0, 0, 1]))
+        );
+        assert_eq!(
+            res.next_hops.get(&VertexId::Router(0x03030303)),
+            Some(&ip([10, 0, 0, 1]))
+        );
         // B's stub network inherits no route next hop (stub routes are
         // connected through the vertex, not an address).
         assert!(res.stub_routes.iter().all(|r| r.next_hop.is_none()));
@@ -682,9 +686,15 @@ mod tests {
             0,
         );
         let res = run_spf(&db, 0x01010101);
-        assert_eq!(res.next_hops.get(&VertexId::Router(0x02020202)), Some(&ip([10, 0, 0, 2])));
+        assert_eq!(
+            res.next_hops.get(&VertexId::Router(0x02020202)),
+            Some(&ip([10, 0, 0, 2]))
+        );
         // C hangs off B: inherits B's next hop (§16.1.1 (2)).
-        assert_eq!(res.next_hops.get(&VertexId::Router(0x03030303)), Some(&ip([10, 0, 0, 2])));
+        assert_eq!(
+            res.next_hops.get(&VertexId::Router(0x03030303)),
+            Some(&ip([10, 0, 0, 2]))
+        );
         // B is one hop away (via the shared network) — penultimate for
         // its prefix-SIDs; C is not.
         assert!(res.adjacent_routers.contains(&0x02020202));
@@ -704,16 +714,10 @@ mod tests {
         // B's back-link carries Link Data 0 (unnumbered): no next hop
         // can be resolved from the database, so the vertex has none.
         let mut db = Lsdb::new();
-        db.install(
-            router_lsa(0x01010101, vec![(0x02020202, 0, P2P, 10)]),
-            0,
-        );
-        db.install(
-            router_lsa(0x02020202, vec![(0x01010101, 0, P2P, 10)]),
-            0,
-        );
+        db.install(router_lsa(0x01010101, vec![(0x02020202, 0, P2P, 10)]), 0);
+        db.install(router_lsa(0x02020202, vec![(0x01010101, 0, P2P, 10)]), 0);
         let res = run_spf(&db, 0x01010101);
-        assert!(res.next_hops.get(&VertexId::Router(0x02020202)).is_none());
+        assert!(!res.next_hops.contains_key(&VertexId::Router(0x02020202)));
         // Topology itself is unaffected.
         assert_eq!(res.vertices.get(&VertexId::Router(0x02020202)), Some(&10));
     }

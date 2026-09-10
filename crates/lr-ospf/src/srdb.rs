@@ -84,12 +84,15 @@ impl SrDatabase {
                                 continue; // prefix descriptor without a SID: no mapping
                             };
                             let prefix = Prefix::new_v4(core.prefix, core.prefix_len);
-                            db.prefixes.entry(prefix).or_default().push(SrPrefixMapping {
-                                advertising_router: key.advertising_router,
-                                route_type: core.route_type,
-                                node: core.flags & 0x40 != 0,
-                                sid,
-                            });
+                            db.prefixes
+                                .entry(prefix)
+                                .or_default()
+                                .push(SrPrefixMapping {
+                                    advertising_router: key.advertising_router,
+                                    route_type: core.route_type,
+                                    node: core.flags & 0x40 != 0,
+                                    sid,
+                                });
                         }
                     }
                 }
@@ -291,10 +294,7 @@ mod tests {
                 ls_age: 0,
                 options: 2,
                 ls_type: LsaTypeV2::OpaqueAreaLsa as u16,
-                link_state_id: crate::lsa::opaque_lsa_id(
-                    crate::lsa::sr::OPAQUE_TYPE_EXT_PREFIX,
-                    9,
-                ),
+                link_state_id: crate::lsa::opaque_lsa_id(crate::lsa::sr::OPAQUE_TYPE_EXT_PREFIX, 9),
                 advertising_router: 0x04040404,
                 ls_sequence_number: 0x80000001,
                 ls_checksum: 0,
@@ -330,7 +330,10 @@ mod tests {
         lsdb.install(
             crate::spf::tests_util::router_lsa(
                 0x02020202,
-                vec![(0x01010101, 0x0a000001, 1, 10), (0x03030303, 0x0a000102, 1, 10)],
+                vec![
+                    (0x01010101, 0x0a000001, 1, 10),
+                    (0x03030303, 0x0a000102, 1, 10),
+                ],
             ),
             0,
         );
@@ -417,7 +420,10 @@ mod tests {
         lsdb.install(
             crate::spf::tests_util::router_lsa(
                 0x01010101,
-                vec![(0x02020202, 0x0a000001, 1, 10), (0x05050505, 0x0a000003, 1, 20)],
+                vec![
+                    (0x02020202, 0x0a000001, 1, 10),
+                    (0x05050505, 0x0a000003, 1, 20),
+                ],
             ),
             0,
         );
@@ -459,7 +465,10 @@ mod tests {
         lsdb.install(
             crate::spf::tests_util::router_lsa(
                 0x01010101,
-                vec![(0x02020202, 0x0a000001, 1, 10), (0x05050505, 0x0a000003, 1, 10)],
+                vec![
+                    (0x02020202, 0x0a000001, 1, 10),
+                    (0x05050505, 0x0a000003, 1, 10),
+                ],
             ),
             0,
         );
@@ -527,7 +536,10 @@ mod tests {
         lsdb.install(
             crate::spf::tests_util::router_lsa(
                 0x01010101,
-                vec![(0x05050505, 0x0a000005, 1, 10), (0x06060606, 0x0a000006, 1, 10)],
+                vec![
+                    (0x05050505, 0x0a000005, 1, 10),
+                    (0x06060606, 0x0a000006, 1, 10),
+                ],
             ),
             0,
         );

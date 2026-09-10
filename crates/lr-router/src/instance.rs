@@ -4551,9 +4551,7 @@ impl DefaultRouter {
         spf: &spf::SpfResult,
     ) {
         for (prefix, entry) in table.iter_mut() {
-            if !entry.is_intra()
-                && !matches!(entry.kind, OspfKind::Inter { .. })
-            {
+            if !entry.is_intra() && !matches!(entry.kind, OspfKind::Inter { .. }) {
                 continue;
             }
             let Some((label, next_hop)) = srdb.label_for(prefix, spf) else {
@@ -8616,7 +8614,7 @@ mod tests {
         };
 
         // Default: SR reception off — the route installs unlabelled.
-        let (mut r, _) = build(false);
+        let (r, _) = build(false);
         let route = r
             .rib_snapshot()
             .into_iter()
@@ -8634,7 +8632,7 @@ mod tests {
         );
 
         // SR reception on: same LSDB, labelled route + next hop.
-        let (mut r, _) = build(true);
+        let (r, _) = build(true);
         let route = r
             .rib_snapshot()
             .into_iter()
@@ -8671,8 +8669,7 @@ mod tests {
                 (0x0a140000, 0xffff_ff00, STUB, 5),
             ],
         );
-        let ri =
-            lr_ospf::lsa::sr::originate_sr_ri_lsa(0x02020202, 16_000, 8_000, None).unwrap();
+        let ri = lr_ospf::lsa::sr::originate_sr_ri_lsa(0x02020202, 16_000, 8_000, None).unwrap();
         let advert = lr_ospf::lsa::sr::SrPrefixAdvert {
             route_type: 1,
             flags: 0x40,
@@ -8682,8 +8679,7 @@ mod tests {
             sid: 100,
             algorithm: 0,
         };
-        let ext =
-            lr_ospf::lsa::sr::originate_sr_prefix_lsa(0x02020202, &advert, 1, None).unwrap();
+        let ext = lr_ospf::lsa::sr::originate_sr_prefix_lsa(0x02020202, &advert, 1, None).unwrap();
         r.feed_input(h, &ospf_lsu_bytes(0x02020202, 0, vec![ours, peer, ri, ext]))
             .unwrap();
         let route = r
@@ -8694,14 +8690,12 @@ mod tests {
         // Penultimate hop: no label, no next hop — the route itself is
         // untouched.
         assert!(route.next_hop.is_none());
-        assert!(
-            route
-                .attributes
-                .get(lr_core::attr::AttrTag(
-                    lr_bgp::path::AttrType::LrMplsLabelStack.to_u8()
-                ))
-                .is_none()
-        );
+        assert!(route
+            .attributes
+            .get(lr_core::attr::AttrTag(
+                lr_bgp::path::AttrType::LrMplsLabelStack.to_u8()
+            ))
+            .is_none());
     }
 }
 
@@ -8888,5 +8882,4 @@ mod collision_tests {
         assert_eq!(r.session_peer_state(s1), Some("Established"));
         assert_eq!(r.session_peer_state(s2), Some("Established"));
     }
-
 }

@@ -497,8 +497,7 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         // delivery), mirroring what peers' encap routes point at. The
         // kernel MPLS availability gates this like every LSP mirror.
         #[cfg(target_os = "linux")]
-        if cfg.install_kernel && daemon.sr_srgb.is_some() {
-            let (base, _) = daemon.sr_srgb.unwrap();
+        if let (true, Some((base, _))) = (cfg.install_kernel, daemon.sr_srgb) {
             match lr_osroute::mpls_route::MplsNetlink::connect() {
                 Ok(mut mpls) => {
                     for sid in &daemon.sr_sids {
