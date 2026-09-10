@@ -60,6 +60,10 @@ use std::net::Ipv4Addr;
 pub const ALL_SPF_ROUTERS: [u8; 4] = [224, 0, 0, 5];
 /// AllDRouters (RFC 2328 §A.1): the DR and BDR only.
 pub const ALL_D_ROUTERS: [u8; 4] = [224, 0, 0, 6];
+/// AllSPFRouters, IPv6 (RFC 5340 §A.3.2 / RFC 4291 link-local multicast).
+pub const ALL_SPF_ROUTERS_V6: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+/// AllDRouters, IPv6 (RFC 5340 §A.3.2).
+pub const ALL_D_ROUTERS_V6: [u8; 16] = [0xff, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 6];
 
 /// IP protocol number assigned to OSPF (IANA).
 pub const IPPROTO_OSPF: i32 = 89;
@@ -159,12 +163,16 @@ pub fn prefix_mask(prefix_len: u8) -> u32 {
 #[path = "imp_linux.rs"]
 mod imp;
 #[cfg(all(feature = "std", target_os = "linux"))]
-pub use imp::{ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport};
+pub use imp::{
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport, OspfV6Transport,
+};
 
 #[cfg(all(feature = "std", not(target_os = "linux")))]
 mod stub;
 #[cfg(all(feature = "std", not(target_os = "linux")))]
-pub use stub::{ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport};
+pub use stub::{
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport, OspfV6Transport,
+};
 
 #[cfg(test)]
 mod tests {

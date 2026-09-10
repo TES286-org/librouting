@@ -73,3 +73,57 @@ impl OspfV2Transport {
         ))
     }
 }
+
+/// Non-Linux placeholder for the OSPFv3 transport (see `imp_linux.rs`).
+pub struct OspfV6Transport {
+    _private: (),
+}
+
+impl OspfV6Transport {
+    pub fn bind(_interface: &str, _multicast_loop: bool) -> Result<Self, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn set_nonblocking(&self, _on: bool) -> Result<(), OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn recv_from(
+        &self,
+        _buf: &mut [u8],
+    ) -> Result<Option<(usize, std::net::Ipv6Addr)>, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn send_multicast(&self, _bytes: &[u8]) -> Result<usize, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn send_unicast(
+        &self,
+        _dst: core::net::Ipv6Addr,
+        _bytes: &[u8],
+    ) -> Result<usize, OspfTransportError> {
+        Err(OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+
+    pub fn ifindex(&self) -> u32 {
+        0
+    }
+
+    pub fn mtu(&self) -> Result<u16, super::OspfTransportError> {
+        Err(super::OspfTransportError::Unsupported(
+            "OSPF raw sockets exist only on Linux in librouting",
+        ))
+    }
+}
