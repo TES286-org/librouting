@@ -1,21 +1,32 @@
 #!/usr/bin/env bash
-# OSPF Segment Routing interop (RFC 8667): lr-daemon originates the
-# area-scoped Router Information LSA (SR-Algorithm + SRGB TLVs) and
-# Extended Prefix Opaque LSAs with Prefix-SID sub-TLVs; FRR's ospfd
-# (segment-routing on, with zebra for the label manager) parses them
-# into its SRDB. The decoded label in FRR's SRDB — SRGB base + SID
-# index — is the wire-format gate.
+# OSPF Segment Routing interop (RFC 8667), both directions:
+#
+# Phase 1 — origination (slice 1): lr-daemon originates the area-scoped
+# Router Information LSA (SR-Algorithm + SRGB TLVs) and Extended Prefix
+# Opaque LSAs with Prefix-SID sub-TLVs; FRR's ospfd (segment-routing on,
+# with zebra for the label manager) parses them into its SRDB. The
+# decoded label in FRR's SRDB — SRGB base + SID index — is the
+# wire-format gate.
+#
+# Phase 2 — reception (slice 2, kernel-MPLS gated): FRR originates its
+# own prefix-SID (10.99.3.0/24 index 200, no-php-flag); lr (sr_receive
+# on) resolves it into Loc-RIB label 16200 and — with install_kernel —
+# installs the RFC 8660 encap route the kernel actually forwards
+# through.
 #
 #   netns r1: lr-daemon 1.1.1.1, SRGB 16000/8000,
 #             prefix-SID 10.99.2.0/24 index 100 (node)
 #        ↑↓ OSPFv2 multicast over the veth pair
-#   netns r2: FRR stack (zebra + ospfd), 2.2.2.2, segment-routing on
+#   netns r2: FRR stack (zebra + ospfd), 2.2.2.2, segment-routing on,
+#             loopback 10.99.3.1/24 with prefix-SID index 200
 #
 # Success criteria:
 #   1. Full adjacency (lr log).
 #   2. FRR's LSDB contains lr's Extended Prefix Opaque LSA.
 #   3. FRR's SRDB carries the SR-Node 1.1.1.1 with the advertised
 #      SRGB (16000/8000) and maps 10.99.2.0/24 to label 16100.
+#   4. (MPLS) lr's Loc-RIB maps FRR's 10.99.3.0/24 to label=16200 and
+#      the kernel FIB carries the encap mpls route (RFC 8660 head end).
 #
 # Rootless: runs inside `unshare -Urn` (CAP_NET_RAW); skips gracefully
 # without user namespaces or FRR.
@@ -140,6 +151,11 @@ nsenter -t "$R1" -n ip addr add 10.99.2.1/24 dev veth0
 nsenter -t "$R1" -n ip link set veth0 up
 nsenter -t "$R2" -n ip addr add 10.99.1.2/24 dev veth1
 nsenter -t "$R2" -n ip link set veth1 up
+# FRR's prefix-SID target (phase 2): a loopback stub FRR announces with
+# SID index 200. lr resolves the mapping into label 16000 + 200.
+if [ "$MPLS" -eq 1 ]; then
+    nsenter -t "$R2" -n ip addr add 10.99.3.1/24 dev lo
+fi
 
 wait_log() { # <file> <pattern> [timeout-seconds]
     local file=$1 pat=$2 tmo=${3:-30} i
@@ -206,9 +222,11 @@ password zebra
 line vty
 !
 EOF
-SR_ON=""
+SR_CONF=""
 if [ "$MPLS" -eq 1 ]; then
-    SR_ON=" segment-routing on"
+    SR_CONF=" segment-routing on
+ segment-routing global-block 16000 8000
+ segment-routing prefix 10.99.3.0/24 index 200 no-php-flag"
 fi
 cat >"$OUT/ospfd.conf" <<EOF
 frr version 10
@@ -225,7 +243,7 @@ router ospf
  ospf router-id 2.2.2.2
  network 10.99.1.0/24 area 0.0.0.0
  capability opaque
-$SR_ON
+$SR_CONF
 !
 line vty
 !
@@ -264,6 +282,7 @@ cat >"$OUT/r1.toml" <<'EOF'
 [ospf]
 srgb_base = 16000
 srgb_range = 8000
+sr_receive = true
 
 [[ospf.interface]]
 name = "veth0"
@@ -277,6 +296,7 @@ node = true
 EOF
 nsenter -t "$R1" -n "$BIN" --protocol ospf --router-id 1.1.1.1 \
     --config "$OUT/r1.toml" \
+    --install-kernel-routes \
     --api-socket "$OUT/r1.ctl" >"$OUT/r1.log" 2>&1 &
 LR_PID=$!
 
@@ -304,10 +324,48 @@ tail -15 "$OUT/ospfd.log" 2>/dev/null || true
 echo "== lr-daemon log =="
 cat "$OUT/r1.log"
 
+fail=0
+# Phase 2: lr receives FRR's prefix-SID (RFC 8667 reception). The API
+# `routes` dump must map FRR's 10.99.3.0/24 to label 16200 (base + SID
+# 200), and — with install_kernel — the kernel FIB must carry the RFC
+# 8660 encap route.
+if [ "$MPLS" -eq 1 ]; then
+    echo "== lr reception of FRR's prefix-SID (phase 2) =="
+    api_cmd() {
+        python3 - "$1" "$2" <<'PYEOF'
+import socket, sys
+path, cmd = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+s.settimeout(5)
+s.connect(path)
+s.sendall((cmd + "\n").encode())
+out = b""
+try:
+    while True:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        out += chunk
+except socket.timeout:
+    pass
+sys.stdout.write(out.decode(errors="replace"))
+PYEOF
+    }
+    api_cmd "$OUT/r1.ctl" "routes" >"$OUT/r1.routes"
+    cat "$OUT/r1.routes"
+    if ! grep "10.99.3.0/24" "$OUT/r1.routes" | grep -qF "label=16200"; then
+        echo "FAIL: lr's Loc-RIB does not map FRR's 10.99.3.0/24 to label=16200 (base + SID 200)"
+        fail=1
+    fi
+    if ! nsenter -t "$R1" -n ip route show | grep -qF "encap mpls"; then
+        echo "FAIL: kernel FIB carries no MPLS-encapped route (RFC 8660 head end)"
+        fail=1
+    fi
+fi
+
 kill "$LR_PID" 2>/dev/null || true
 sleep 0.5
 
-fail=0
 # The LSDB listing shows the opaque LSAs by Opaque-Type/Id: 4.0.0.0 is
 # our Router Information LSA (SRGB), 7.0.0.1 the Extended Prefix LSA
 # (prefix-SID for 10.99.2.0/24).
