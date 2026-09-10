@@ -470,6 +470,17 @@ impl SessionConfig {
         }
     }
 
+    /// Build an OSPFv3 session config (RFC 5340): the same shared-area
+    /// machinery as [`Self::ospfv2`], marked `Ospfv3` so the area runs
+    /// v3 end to end (16-byte packet headers, 16-bit v3 LSA types,
+    /// IPv6 route publication). Router IDs stay 32-bit; interfaces need
+    /// no address at all — Hellos ride IPv6 link-local multicast.
+    pub fn ospfv3(router_id: RouterId, area_id: u32) -> Self {
+        let mut cfg = Self::ospfv2(router_id, area_id);
+        cfg.kind = SessionKind::Ospfv3;
+        cfg
+    }
+
     /// Build a Babel session config.
     pub fn babel(local_addr: lr_core::addr::IpAddr) -> Self {
         Self {

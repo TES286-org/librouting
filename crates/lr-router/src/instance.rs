@@ -255,14 +255,22 @@ struct OspfAreaState {
 /// Whether an area of type `kind` accepts `lsa` (RFC 2328 §3.6, RFC 3101):
 /// stub and NSSA areas refuse type-5 AS-external and type-4 summary-ASBR
 /// LSAs; `no_summary` areas refuse every type-3 summary except the
-/// default; type-7 LSAs only exist inside NSSAs.
+/// default; type-7 LSAs only exist inside NSSAs. The OSPFv3 shapes of
+/// the same classes (0x4005 AS-external, 0x2004 inter-area-router,
+/// 0x2003 inter-area-prefix — RFC 5340 §A.4.5/§A.4.6/§A.4.7) are
+/// filtered identically; v2 and v3 types are distinct 16-bit values so
+/// one match covers both.
 fn ospf_area_accepts(kind: &OspfAreaType, lsa: &Lsa) -> bool {
     match lsa.header.ls_type {
-        t if t == LsaTypeV2::AsExternalLsa as u16 || t == LsaTypeV2::SummaryAsbrLsa as u16 => {
+        t if t == LsaTypeV2::AsExternalLsa as u16
+            || t == LsaTypeV2::SummaryAsbrLsa as u16
+            || t == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER =>
+        {
             !kind.is_stubby()
         }
         t if t == LsaTypeV2::NssaExternalLsa as u16 => kind.is_nssa(),
-        t if t == LsaTypeV2::SummaryIpLsa as u16 => {
+        t if t == LsaTypeV2::SummaryIpLsa as u16 || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX => {
             !kind.no_summary() || lsa.header.link_state_id == 0
         }
         _ => true,
@@ -284,7 +292,8 @@ fn is_grace_lsa(lsa: &Lsa) -> bool {
 /// the LSA have changed; this includes LSAs with no previous instance
 /// and the flushing of LSAs, but excludes periodic LSA refreshes").
 /// `outcome` is the install result and `prev` the replaced instance
-/// (None on `New`). Only topology LSAs (v2 types 1-5, 7) count.
+/// (None on `New`). Only topology LSAs count: v2 types 1-5, 7 and the
+/// v3 router/network/inter-area/external/NSSA shapes (0x2001-0x2009).
 fn lsa_topology_changed(
     prev: Option<&Lsa>,
     new: &Lsa,
@@ -299,6 +308,12 @@ fn lsa_topology_changed(
             || t == LsaTypeV2::SummaryAsbrLsa as u16
             || t == LsaTypeV2::AsExternalLsa as u16
             || t == LsaTypeV2::NssaExternalLsa as u16
+            || t == lr_ospf::lsa::v3::LS_TYPE_ROUTER
+            || t == lr_ospf::lsa::v3::LS_TYPE_NETWORK
+            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX
+            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
+            || t == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+            || t == lr_ospf::lsa::v3::LS_TYPE_INTRA_PREFIX
     );
     if !is_topology {
         return false;
@@ -336,6 +351,10 @@ struct OspfTableEntry {
     /// gateway the RFC 8660 encap route points at. Always `Some` when
     /// `label` is.
     label_nh: Option<IpAddr>,
+    /// The route's own next hop, where the SPF resolved one (OSPFv3
+    /// intra-area routes carry their neighbor's link-local; v2 routes
+    /// resolve on-link and publish None).
+    next_hop: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -363,6 +382,19 @@ impl OspfTableEntry {
             kind: OspfKind::Intra,
             label: None,
             label_nh: None,
+            next_hop: None,
+        }
+    }
+
+    /// An OSPFv3 intra-area entry carrying its resolved link-local next
+    /// hop (RFC 5340 §16.1 v3 form).
+    fn intra_v3(metric: u64, next_hop: Option<IpAddr>) -> Self {
+        Self {
+            metric,
+            kind: OspfKind::Intra,
+            label: None,
+            label_nh: None,
+            next_hop,
         }
     }
 
@@ -374,6 +406,7 @@ impl OspfTableEntry {
             },
             label: None,
             label_nh: None,
+            next_hop: None,
         }
     }
 
@@ -394,6 +427,7 @@ impl OspfTableEntry {
             },
             label: None,
             label_nh: None,
+            next_hop: None,
         }
     }
 
@@ -474,7 +508,16 @@ impl OspfRuntime {
             } else {
                 lr_ospf::codec::OspfCodec::v2()
             },
-            exchange: lr_ospf::exchange::DbExchange::new(router_id, area_id, iface_mtu),
+            exchange: lr_ospf::exchange::DbExchange::with_version(
+                router_id,
+                area_id,
+                iface_mtu,
+                if v3 {
+                    lr_ospf::packet::OspfVersion::V3
+                } else {
+                    lr_ospf::packet::OspfVersion::V2
+                },
+            ),
             iface_mtu,
             network_type,
             our_ip: our_ip.unwrap_or(0),
@@ -4464,6 +4507,29 @@ impl DefaultRouter {
         // Best entry per prefix across areas.
         let mut global: BTreeMap<Prefix, (OspfTableEntry, u32, Protocol)> = BTreeMap::new();
         for (area_id, area) in &self.ospf_areas {
+            if area.protocol == Protocol::Ospfv3 {
+                // OSPFv3 area (RFC 5340): the intra-area calculation
+                // runs over the v3 LSDB; slice-1 scope covers intra-area
+                // prefixes (inter-area summaries and externals ride the
+                // v3 0x2003/0x2004/0x4005 LSAs, a later slice).
+                let spf3 = spf::run_spf_v3(&area.lsdb, router_id);
+                let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
+                for r in &spf3.routes {
+                    table
+                        .entry(r.prefix)
+                        .or_insert_with(|| OspfTableEntry::intra_v3(r.metric, r.next_hop));
+                }
+                for (prefix, entry) in table {
+                    let better = match global.get(&prefix) {
+                        None => true,
+                        Some((prev, _, _)) => entry.beats(prev),
+                    };
+                    if better {
+                        global.insert(prefix, (entry, *area_id, Protocol::Ospfv3));
+                    }
+                }
+                continue;
+            }
             let spf_result = spf::run_spf(&area.lsdb, router_id);
             let mut table = Self::ospf_area_table(&area.kind, abr, &area.lsdb, &spf_result);
             if self.ospf_sr_receive {
@@ -4487,14 +4553,22 @@ impl DefaultRouter {
         let current: BTreeMap<RouteKey, Route> = global
             .into_iter()
             .map(|(prefix, (entry, area_id, protocol))| {
-                let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
+                // OSPFv3 routes are IPv6 routes: the v3 SPF derives
+                // IPv6 prefixes and link-local next hops, so they key
+                // into the v6-unicast family (RFC 5340 §3.1 — OSPF for
+                // IPv6 installs IPv6 routes).
+                let key = if protocol == Protocol::Ospfv3 {
+                    RouteKey::new(prefix, NlriFamily::IPV6_UNICAST)
+                } else {
+                    RouteKey::new(prefix, NlriFamily::IPV4_UNICAST)
+                };
                 // §16.4: an external route with a forwarding address
                 // forwards traffic to that address, not to the ASBR.
                 let mut next_hop = match entry.kind {
                     OspfKind::External {
                         forwarding_addr, ..
                     } if forwarding_addr != 0 => Some(IpAddr::V4(forwarding_addr.to_be_bytes())),
-                    _ => None,
+                    _ => entry.next_hop,
                 };
                 // RFC 8660 head end: an SR-labelled route enters the
                 // LSP — the private LrMplsLabelStack attribute carries
@@ -6822,6 +6896,182 @@ mod tests {
             r.add_session(v3_cfg).is_err(),
             "OSPFv3 must not mix into a v2 area"
         );
+    }
+
+    /// Encode one LS-Update carrying `lsas` as a v3 packet (16-byte
+    /// header, pseudo-header checksum finalized).
+    fn ospf3_lsu_bytes(router_id: u32, area_id: u32, lsas: Vec<Lsa>) -> Vec<u8> {
+        let packet = ospf_ls_update(Protocol::Ospfv3, router_id, area_id, lsas);
+        let mut bytes = lr_ospf::codec::OspfCodec::v3()
+            .encode_vec(&packet)
+            .expect("encode v3 LSU");
+        let src = [0xfe_u8, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
+        lr_ospf::origination::finalize_v3_stream(&mut bytes, &src, &dst);
+        bytes
+    }
+
+    #[test]
+    fn dbg_decode_v3_lsu() {
+        let r2 = 0x0a00_0002u32;
+        use lr_ospf::lsa::v3::originate_v3_router_lsa;
+        let lsa = originate_v3_router_lsa(
+            r2,
+            0x04,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: 1,
+                metric: 10,
+                interface_id: 3,
+                neighbor_interface_id: 5,
+                neighbor_router_id: 1,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(r2, 0, vec![lsa]);
+        eprintln!("total bytes: {}", bytes.len());
+        let mut codec = lr_ospf::codec::OspfCodec::v3();
+        let mut r = lr_core::buf::ReadBuf::new(&bytes);
+        match codec.decode(&mut r) {
+            Ok(Some(pkt)) => eprintln!(
+                "decoded kind={} version={}",
+                pkt.header.kind, pkt.header.version
+            ),
+            Ok(None) => eprintln!("None (incomplete)"),
+            Err(e) => eprintln!("decode err: {:?}", e),
+        }
+    }
+
+    /// A v3 LSU received on a v3 session installs into the area LSDB and
+    /// publishes IPv6 routes: the neighbor's prefixes surface as
+    /// Protocol::Ospfv3 routes in the v6-unicast family with the
+    /// neighbor's link-local next hop (RFC 5340 §3.1, §16.1 v3 form).
+    #[test]
+    fn ospfv3_routes_publish_as_ipv6_with_link_local_next_hop() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::lsa::v3::{
+            originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_router_lsa,
+            LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        // r2's Router-LSA (p2p back to us), Link-LSA (its link-local) and
+        // Intra-Area-Prefix-LSA (one /64).
+        let router_lsa = originate_v3_router_lsa(
+            r2,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 3,
+                neighbor_interface_id: 5,
+                neighbor_router_id: 0x0a00_0001,
+            }],
+            None,
+        )
+        .unwrap();
+        let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        let mut p2 = [0u8; 16];
+        p2[0] = 0x20;
+        p2[1] = 0x01;
+        p2[3] = 0xb8;
+        p2[7] = 2;
+        let prefix = Prefix::new_v6(p2, 64);
+        let iap = originate_v3_intra_area_prefix_lsa(
+            r2,
+            1,
+            lr_ospf::lsa::v3::LS_TYPE_ROUTER,
+            0,
+            r2,
+            vec![lr_ospf::lsa::v3::V3Prefix {
+                prefix_len: 64,
+                options: 0,
+                metric: 0,
+                addr: p2,
+            }],
+            None,
+        )
+        .unwrap();
+
+        // Our own Router-LSA: the daemon originates it on adjacency-up
+        // and feeds it through the anchor session; the SPF needs it as
+        // the outbound edge from the root vertex.
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(r2, 0, vec![router_lsa, link_lsa, iap, own_lsa]);
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let _ = r.drain_output(h);
+
+        let routes = r.rib_snapshot();
+        let got = routes
+            .iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("v3 route published");
+        assert_eq!(got.protocol, Protocol::Ospfv3);
+        assert_eq!(got.key.family, NlriFamily::IPV6_UNICAST, "v6 family");
+        assert_eq!(got.next_hop, Some(IpAddr::V6(ll2)), "link-local next hop");
+        assert_eq!(got.preference.metric, 10, "spf cost");
+    }
+
+    /// Flooding from a v3 session emits v3 packets: the drained output
+    /// parses with the v3 codec (16-byte header) and the v3 version byte.
+    #[test]
+    fn ospfv3_flooded_lsas_carry_v3_wire_shape() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+        use lr_ospf::lsa::v3::{originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6};
+        let lsa = originate_v3_router_lsa(
+            r2,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 3,
+                neighbor_interface_id: 5,
+                neighbor_router_id: 0x0a00_0001,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(r2, 0, vec![lsa]);
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let out = r.drain_output(h);
+        assert!(!out.is_empty(), "flooded back on the same session");
+        let mut codec = lr_ospf::codec::OspfCodec::v3();
+        let mut reader = lr_core::buf::ReadBuf::new(&out);
+        let mut saw_lsack_or_update = false;
+        while let Ok(Some(pkt)) = codec.decode(&mut reader) {
+            assert_eq!(pkt.header.version, 3, "v3 version byte");
+            saw_lsack_or_update = true;
+        }
+        assert!(saw_lsack_or_update);
     }
 
     #[test]
