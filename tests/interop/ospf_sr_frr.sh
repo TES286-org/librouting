@@ -153,7 +153,7 @@ nsenter -t "$R2" -n ip addr add 10.99.1.2/24 dev veth1
 nsenter -t "$R2" -n ip link set veth1 up
 # FRR's prefix-SID target (phase 2): a loopback stub FRR announces with
 # SID index 200. lr resolves the mapping into label 16000 + 200.
-if [ "$MPLS" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
     nsenter -t "$R2" -n ip addr add 10.99.3.1/24 dev lo
 fi
 
@@ -223,7 +223,7 @@ line vty
 !
 EOF
 SR_CONF=""
-if [ "$MPLS" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
     SR_CONF=" segment-routing on
  segment-routing global-block 16000 8000
  segment-routing prefix 10.99.3.0/24 index 200 no-php-flag"
@@ -253,6 +253,17 @@ nsenter -t "$R2" -n "$ZEBRA" -i "$OUT/zebra.pid" \
     --vty_socket "$OUT/vty" --log file:"$OUT/zebra.log" "$MODLD" &
 ZEBRA_PID=$!
 sleep 1.5
+# FRR's SR needs a working kernel MPLS data plane: when zebra cannot
+# use it (e.g. inside a rootless user namespace), enabling
+# `segment-routing on` makes FRR 8.x crash in its own SR code at
+# adjacency bring-up - before any of lr's LSAs are exchanged. Trust
+# zebra's own probe and keep the FRR SR phases gated on it.
+SR_READY=0
+if grep -q "Disabling MPLS support" "$OUT/zebra.log" 2>/dev/null; then
+    echo "NOTE: zebra disabled MPLS support (rootless netns) - FRR SR phases skipped"
+else
+    SR_READY=1
+fi
 nsenter -t "$R2" -n "$OSPFD" -i "$OUT/ospfd.pid" \
     -f "$OUT/ospfd.conf" -P 26110 -A 127.0.0.1 -u root -g root \
     --vty_socket "$OUT/vty" --log file:"$OUT/ospfd.log" "$MODLD" &
@@ -314,7 +325,7 @@ vty_cmd 26110 "show ip ospf database" >"$OUT/lsdb.txt" 2>/dev/null || true
 cat "$OUT/lsdb.txt"
 vty_cmd 26110 "show ip ospf database opaque-area 7.0.0.1" >"$OUT/lsdb_detail.txt" 2>/dev/null || true
 cat "$OUT/lsdb_detail.txt" || true
-if [ "$MPLS" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
     echo "== FRR SRDB =="
     vty_cmd 26110 "show ip ospf srdb" >"$OUT/srdb.txt" 2>/dev/null || true
     cat "$OUT/srdb.txt"
@@ -329,7 +340,7 @@ fail=0
 # `routes` dump must map FRR's 10.99.3.0/24 to label 16200 (base + SID
 # 200), and — with install_kernel — the kernel FIB must carry the RFC
 # 8660 encap route.
-if [ "$MPLS" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
     echo "== lr reception of FRR's prefix-SID (phase 2) =="
     api_cmd() {
         python3 - "$1" "$2" <<'PYEOF'
@@ -373,7 +384,7 @@ if ! grep -q "4.0.0.0" "$OUT/lsdb.txt" || ! grep -q "7.0.0.1" "$OUT/lsdb.txt"; t
     echo "FAIL: FRR's LSDB does not hold lr's RI (4.0.0.0) and Extended Prefix (7.0.0.1) LSAs"
     fail=1
 fi
-if [ "$MPLS" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
     if ! grep -q "16000" "$OUT/srdb.txt" || ! grep -q "8000" "$OUT/srdb.txt"; then
         echo "FAIL: FRR's SRDB does not carry lr's SRGB (16000/8000)"
         fail=1
