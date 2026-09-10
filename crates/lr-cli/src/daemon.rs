@@ -1748,7 +1748,7 @@ const LR_MPLS_LABEL_STACK_TAG: u8 = 255; // pinned to AttrType::LrMplsLabelStack
 /// loopback device registers at netns creation before any other device.
 /// The LSP tail (pop, no via) needs that device for local delivery.
 #[cfg(target_os = "linux")]
-const LO_IF_INDEX: u32 = 1;
+pub(crate) const LO_IF_INDEX: u32 = 1;
 
 /// What the kernel dataplane should do for a Loc-RIB best route
 /// (RFC 8277 BGP-LU → Linux MPLS, W3-extra.3).

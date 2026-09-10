@@ -276,14 +276,17 @@ struct OspfDaemon {
 }
 
 /// One configured prefix SID (RFC 8667 §6): the prefix, its SID index
-/// into the SRGB, whether it is a node segment (RFC 7684 §6 N-flag)
-/// and the stable Opaque ID slot its Extended Prefix Opaque LSA uses.
+/// into the SRGB, whether it is a node segment (RFC 7684 §6 N-flag),
+/// whether the penultimate hop must keep the label (RFC 8667 §5 NP
+/// flag, FRR `no-php-flag`) and the stable Opaque ID slot its Extended
+/// Prefix Opaque LSA uses.
 #[derive(Debug, Clone)]
 struct SrSidConfig {
     prefix: [u8; 4],
     prefix_len: u8,
     sid: u32,
     node: bool,
+    no_php: bool,
     opaque_index: u32,
 }
 
@@ -369,6 +372,7 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     prefix_len: prefix.prefix_len,
                     sid: spec.sid.unwrap_or(0),
                     node: spec.node.unwrap_or(false),
+                    no_php: spec.no_php.unwrap_or(false),
                     // Stable per-config-order slot: re-origination
                     // keeps the same (advertising router, opaque ID)
                     // key, so a SID change refreshes its own LSA.
@@ -478,6 +482,49 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                         area_spec.kind
                     );
                 }
+            }
+        }
+        // RFC 8667 reception: resolve learned Prefix-SIDs into Loc-RIB
+        // labels (the kernel mirror turns them into RFC 8660 encap
+        // routes). Off by default; enabling it on a router without SR
+        // LSAs in scope changes nothing.
+        if cfg.ospf_sr_receive {
+            router.set_ospf_sr_receive(true);
+            println!("daemon: ospf SR reception enabled (RFC 8667)");
+        }
+        // RFC 8660 LSP tail: with `install_kernel`, locally originated
+        // prefix-SIDs get an AF_MPLS pop route (in-label → local
+        // delivery), mirroring what peers' encap routes point at. The
+        // kernel MPLS availability gates this like every LSP mirror.
+        #[cfg(target_os = "linux")]
+        if cfg.install_kernel && daemon.sr_srgb.is_some() {
+            let (base, _) = daemon.sr_srgb.unwrap();
+            match lr_osroute::mpls_route::MplsNetlink::connect() {
+                Ok(mut mpls) => {
+                    for sid in &daemon.sr_sids {
+                        let label = lr_mpls::Label::new_value(base + sid.sid);
+                        let lsp =
+                            lr_osroute::mpls_route::MplsRoute::pop_local(label, crate::LO_IF_INDEX);
+                        match mpls.add_route(&lsp) {
+                            Ok(()) => println!(
+                                "lsp: in-label {} -> pop (local delivery) for {}/{} (prefix-SID)",
+                                label.value,
+                                std::net::Ipv4Addr::from(sid.prefix),
+                                sid.prefix_len
+                            ),
+                            Err(e) => eprintln!(
+                                "lsp: pop install for {}/{} failed: {}",
+                                std::net::Ipv4Addr::from(sid.prefix),
+                                sid.prefix_len,
+                                e
+                            ),
+                        }
+                    }
+                }
+                Err(e) => eprintln!(
+                    "daemon: mpls route table unavailable ({}); SR pop routes disabled",
+                    e
+                ),
             }
         }
     }
@@ -1551,8 +1598,13 @@ impl OspfDaemon {
                 flags: if cfg.node { 0x40 } else { 0x00 },
                 prefix: cfg.prefix,
                 prefix_len: cfg.prefix_len,
-                // PHP by default (FRR's default): NP/E/V/L clear.
-                sid_flags: 0,
+                // PHP by default (FRR's default); NP set keeps the
+                // label on the penultimate hop (FRR `no-php-flag`).
+                sid_flags: if cfg.no_php {
+                    lr_ospf::lsa::sr::sid_flags::NP
+                } else {
+                    0
+                },
                 sid: cfg.sid,
                 algorithm: 0,
             };

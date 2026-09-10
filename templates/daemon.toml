@@ -359,14 +359,26 @@ permit = false
                              # srgb_base + i. Defaults to FRR's block
                              # (16000/8000) when prefix SIDs are
                              # configured without an explicit SRGB.
+# sr_receive = false          # RFC 8667 reception: resolve Prefix-SIDs
+                             # learned from the LSDB into Loc-RIB labels
+                             # and install the RFC 8660 encap routes via
+                             # install_kernel. The PHP rule applies:
+                             # NP-clear SIDs of directly adjacent
+                             # originators forward unlabeled. Off by
+                             # default (fail closed).
 
 # RFC 8667 6: locally originated prefixes advertised with a Segment
 # Routing Prefix-SID (Extended Prefix Opaque LSA, Opaque Type 7).
+# With install_kernel each of these also gets an AF_MPLS pop route
+# (the LSP tail the peers' encap routes point at).
 # [[ospf.prefix_sid]]
 # prefix = "10.99.2.0/24"     # the advertised prefix (required)
 # sid = 100                   # SID index into the SRGB (required)
 # node = true                 # RFC 7684 6 N-flag: the prefix is a node
                               # segment (SR-Node / loopback)
+# no_php = true               # RFC 8667 5 NP flag (FRR no-php-flag):
+                              # neighbours one hop away push srgb_base+sid
+                              # instead of popping (PHP is the default)
 
 # Non-backbone areas must be declared before interfaces reference them;
 # the backbone (area 0) is implicit and always "normal".

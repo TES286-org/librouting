@@ -77,6 +77,17 @@ mod imp {
 
     use super::{ApiContext, DaemonInfo};
 
+    /// The top MPLS label of a route's private label stack (the
+    /// `LrMplsLabelStack` attribute BGP-LU and OSPF SR reception use),
+    /// for the `routes` output. `None` for unlabelled routes.
+    fn route_label(route: &lr_core::rib::Route) -> Option<u32> {
+        let attr = route.attributes.get(lr_core::attr::AttrTag(
+            lr_bgp::path::AttrType::LrMplsLabelStack.to_u8(),
+        ))?;
+        let stack = lr_mpls::LabelStack::decode_4octet(&attr.value).ok()?;
+        stack.labels().first().map(|l| l.value)
+    }
+
     // `Read` is only needed by the test helper below.
     #[cfg(test)]
     use std::io::Read as _;
@@ -361,11 +372,15 @@ mod imp {
                     // borrows from the router. One line per path: with
                     // RFC 7911 Add-Path a prefix can hold several ranked
                     // paths, distinguished by their path identifiers.
+                    // Labelled routes (RFC 8277 BGP-LU, RFC 8667 OSPF
+                    // prefix-SIDs) append `label=<top>` — the MPLS
+                    // label the kernel mirror installs, what `show
+                    // mpls table` on FRR would print.
                     let r = deps.router.lock().unwrap();
                     for route in r.rib_paths_snapshot() {
                         let _ = writeln!(
                             out,
-                            "{} via {} proto={:?} metric={} path-id={}",
+                            "{} via {} proto={:?} metric={} path-id={}{}",
                             route.key.prefix,
                             route
                                 .next_hop
@@ -373,7 +388,11 @@ mod imp {
                                 .unwrap_or_else(|| "(none)".to_string()),
                             route.protocol,
                             route.preference.metric,
-                            route.path_id
+                            route.path_id,
+                            match route_label(route) {
+                                Some(label) => format!(" label={label}"),
+                                None => String::new(),
+                            }
                         );
                     }
                 }

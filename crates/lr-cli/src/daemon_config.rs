@@ -146,6 +146,10 @@ pub(crate) struct OspfPrefixSidSpec {
     /// RFC 7684 §6 N-flag: the prefix identifies the node itself (an
     /// SR-Node / loopback), so peers may treat it as a node segment.
     pub node: Option<bool>,
+    /// RFC 8667 §5 NP flag (FRR `no-php-flag`): the penultimate hop
+    /// must NOT pop — neighbours one hop away still push
+    /// `srgb_base + sid`. Clear by default (PHP, the FRR default).
+    pub no_php: Option<bool>,
 }
 
 /// One `[[ospf.interface]]` table (or `--ospf-interface` flag).
@@ -419,6 +423,12 @@ pub(crate) struct DaemonConfig {
     /// `[[ospf.prefix_sid]]` tables — locally originated prefixes
     /// advertised with a Prefix-SID in an Extended Prefix Opaque LSA.
     pub ospf_prefix_sids: Vec<OspfPrefixSidSpec>,
+    /// RFC 8667 reception (`[ospf] sr_receive`): project the area LSDB
+    /// into a per-node SR database and attach the resolved Prefix-SID
+    /// labels (RFC 8660 head end) to the routes they map onto. Off by
+    /// default — a router that never enables it stays byte-identical
+    /// to a pre-SR one.
+    pub ospf_sr_receive: bool,
     /// OSPF graceful restart, restarting side (RFC 3623 §2): on
     /// shutdown, originate Grace-LSAs per interface and exit without
     /// the session-close teardown (kernel routes persist); after the
@@ -581,6 +591,7 @@ impl DaemonConfig {
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
             ospf_area: 0,
+            ospf_sr_receive: false,
             ospf_graceful_restart: false,
             ospf_grace_period: lr_ospf::gr::DEFAULT_GRACE_PERIOD_SECS,
             ospf_gr_helper: true,
@@ -1525,6 +1536,12 @@ fn apply_ospf_key(
                 }
                 cfg.ospf_srgb_range = Some(range);
             }
+            // RFC 8667 reception: resolve Prefix-SIDs learned from the
+            // LSDB into MPLS labels and let the kernel mirror install
+            // the RFC 8660 encap routes. Off by default (fail closed).
+            "sr_receive" => {
+                cfg.ospf_sr_receive = parse_bool(value);
+            }
             _ => {
                 return Err(format!(
                     "unknown [ospf] key '{key}' (typo protection; OSPF config fails closed)"
@@ -1623,6 +1640,7 @@ fn apply_ospf_key(
                     );
                 }
                 "node" => sid.node = Some(parse_bool(value)),
+                "no_php" => sid.no_php = Some(parse_bool(value)),
                 _ => {
                     return Err(format!(
                         "unknown [[ospf.prefix_sid]] key '{key}' (typo protection; OSPF config fails closed)"
@@ -2784,6 +2802,24 @@ mod tests {
         .unwrap();
         let err = cfg.finalize().expect_err("SID outside SRGB must fail");
         assert!(err.contains("outside the SRGB"), "{err}");
+    }
+
+    #[test]
+    fn ospf_sr_receive_parses_and_defaults_off() {
+        // Default off (fail closed).
+        let cfg = DaemonConfig::with_defaults();
+        assert!(!cfg.ospf_sr_receive);
+
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[ospf]\nsr_receive = true\n", &mut cfg).unwrap();
+        assert!(cfg.ospf_sr_receive);
+
+        // Unknown keys nearby still fail closed (typo protection).
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        let err = parse_toml_subset("[ospf]\nsr_recieve = true\n", &mut cfg).unwrap_err();
+        assert!(err.contains("unknown [ospf] key"), "{err}");
     }
 
     #[test]
