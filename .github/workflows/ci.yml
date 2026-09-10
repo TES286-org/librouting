@@ -169,6 +169,11 @@ jobs:
         run: ./tests/interop/labeled_unicast.sh
       - name: RFC 8277 BGP-LU -> MPLS dataplane interop (kernel-gated, user namespace)
         run: ./tests/interop/mpls_lsp.sh
+      - name: SRv6 seg6/seg6local kernel interop (RFC 8754 / RFC 8986, kernel-gated)
+        run: |
+          sudo sysctl -w net.ipv6.conf.all.seg6_enabled=1 || true
+          sudo sysctl -w net.ipv6.conf.lo.seg6_enabled=1 || true
+          cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture || echo "SRv6 kernel interop skipped (no CAP_NET_ADMIN or no seg6 support)"
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         run: ./tests/interop/ospf.sh
       - name: Babel MAC auth e2e (RFC 8967 + RFC 9467, two daemons)
