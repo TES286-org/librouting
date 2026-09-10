@@ -14,11 +14,12 @@ crate-type = ["cdylib", "staticlib", "rlib"]
 name = "lr_ffi"
 
 [features]
-default = ["router", "bgp", "ospf", "babel"]
+default = ["router", "bgp", "ospf", "babel", "srv6"]
 router = []
 bgp = []
 ospf = []
 babel = []
+srv6 = []
 
 [dependencies]
 lr-core = { workspace = true }
@@ -29,6 +30,7 @@ lr-rib = { workspace = true }
 lr-policy = { workspace = true }
 lr-router = { workspace = true }
 lr-mpls = { workspace = true }
+lr-srv6 = { workspace = true }
 
 [build-dependencies]
 cbindgen = "0.27"

@@ -27,6 +27,7 @@ pub mod codec;
 pub mod error;
 pub mod handle;
 pub mod router;
+pub mod srv6;
 
 use crate::error::set_last_error;
 

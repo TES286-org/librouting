@@ -450,4 +450,32 @@ int32_t lr_router_rib_dump(lr_router_t r, struct lr_bytes_t *out);
  */
 int32_t lr_router_sessions_dump(lr_router_t r, struct lr_bytes_t *out);
 
+/**
+ * Encode an SRH from a list of SID bytes. Each SID is 16 bytes; the
+ * caller passes a flat `data` of `len = n * 16` bytes. The encoded
+ * SRH (RFC 8754 §2 wire form) is written to `*out`.
+ *
+ * Returns 0 on success, negative on error:
+ * - `-1`: null pointer or `len` not a multiple of 16.
+ * - `-4`: panic.
+ * - `-5`: SRH encode error (set via `lr_last_error`).
+ */
+int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
+
+/**
+ * Decode an SRH from `data` (RFC 8754 §2 wire form). On success,
+ * writes a freshly-allocated `lr_bytes_t` to `*out` carrying the
+ * segment list bytes (16 octets per SID, concatenated in wire
+ * order). The TLV bytes are appended after the segment list so the
+ * caller can recover the full SRH body, but the typical caller
+ * only needs the segment list.
+ *
+ * Returns 0 on success, negative on error:
+ * - `-1`: null pointer.
+ * - `-3`: input too short.
+ * - `-4`: panic.
+ * - `-5`: SRH decode error (set via `lr_last_error`).
+ */
+int32_t lr_srv6_decode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
+
 #endif  /* LR_FFI_H */
