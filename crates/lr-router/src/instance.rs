@@ -4545,6 +4545,12 @@ impl DefaultRouter {
     /// label plus its next hop ride the entry (see
     /// [`OspfTableEntry::label`]); the entry kind and metric are
     /// untouched, so route selection is unaffected.
+    ///
+    /// Prefixes without a direct Prefix-SID advertisement fall back to
+    /// the SR Mapping Server's M-flagged ranges (RFC 8665 §4, RFC 8661
+    /// §3.2.3): the LSP rides the prefix's *own* path, so the entry
+    /// keeps the route's regular next hop and only the label is
+    /// attached.
     fn ospf_attach_sr_labels(
         table: &mut BTreeMap<Prefix, OspfTableEntry>,
         srdb: &lr_ospf::srdb::SrDatabase,
@@ -4554,11 +4560,32 @@ impl DefaultRouter {
             if !entry.is_intra() && !matches!(entry.kind, OspfKind::Inter { .. }) {
                 continue;
             }
-            let Some((label, next_hop)) = srdb.label_for(prefix, spf) else {
+            if let Some((label, next_hop)) = srdb.label_for(prefix, spf) {
+                entry.label = Some(label);
+                entry.label_nh = Some(next_hop);
                 continue;
-            };
-            entry.label = Some(label);
-            entry.label_nh = Some(next_hop);
+            }
+            if let Some(label) = srdb.mapping_label_for(prefix, spf) {
+                // RFC 8661 §3.2.2: install the mapping exactly as if
+                // the prefix owner had advertised it — the LSP rides
+                // the prefix's own path (intra: the SPF route's next
+                // hop; inter: the path toward the advertising border
+                // router), not the path toward the mapping server.
+                let next_hop = match entry.kind {
+                    OspfKind::Inter { border_router } => spf
+                        .next_hops
+                        .get(&spf::VertexId::Router(border_router))
+                        .copied(),
+                    _ => spf
+                        .stub_routes
+                        .iter()
+                        .chain(&spf.transit_routes)
+                        .find(|r| r.prefix == *prefix)
+                        .and_then(|r| r.next_hop),
+                };
+                entry.label = Some(label);
+                entry.label_nh = next_hop;
+            }
         }
     }
 
@@ -5708,6 +5735,19 @@ impl DefaultRouter {
     /// [`Self::set_ospf_sr_receive`]).
     pub fn ospf_sr_receive(&self) -> bool {
         self.ospf_sr_receive
+    }
+
+    /// Project every area's SR database (RFC 8665): SRGBs, Prefix-SID
+    /// mappings, adjacency segments (Extended Link LSAs) and
+    /// mapping-server ranges (Extended Prefix Range TLVs). Area ID →
+    /// [`lr_ospf::srdb::SrDatabase`]; empty map when no OSPF areas are
+    /// attached. The daemon's runtime API uses this for its `sr`
+    /// status lines; embedders get the same read-only view.
+    pub fn ospf_sr_databases(&self) -> BTreeMap<u32, lr_ospf::srdb::SrDatabase> {
+        self.ospf_areas
+            .iter()
+            .map(|(id, area)| (*id, lr_ospf::srdb::SrDatabase::from_lsdb(&area.lsdb)))
+            .collect()
     }
 
     /// Change the type policy of an attached OSPF area (RFC 2328 §3.6,
@@ -8696,6 +8736,85 @@ mod tests {
                 lr_bgp::path::AttrType::LrMplsLabelStack.to_u8()
             ))
             .is_none());
+    }
+
+    /// RFC 8665 §4 / RFC 8661 §3.2: an SR Mapping Server's Extended
+    /// Prefix Range TLV labels the covered prefixes exactly as if
+    /// their owners had advertised the SIDs — a prefix inside the
+    /// range resolves `server-SRGB base + index` with the prefix's
+    /// *own* next hop (the path toward the owner, not the server).
+    #[test]
+    fn ospf_sr_mapping_server_range_labels_covered_prefixes() {
+        let mut r = DefaultRouter::new();
+        r.set_ospf_sr_receive(true);
+        let rid = 0x01010101;
+        let h = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+        // Topology: us —10— B (0x02020202), the mapping server; B
+        // advertises two stubs — 10.77.0.0/24 (index 500) and
+        // 10.77.1.0/24 (index 501, inside the range).
+        let ours = router_lsa(rid, vec![(0x02020202, 0, P2P, 10)]);
+        let peer = router_lsa(
+            0x02020202,
+            vec![
+                (rid, 0x0a000002, P2P, 10),
+                (0x0a4d0000, 0xffff_ff00, STUB, 5),
+                (0x0a4d0100, 0xffff_ff00, STUB, 5),
+            ],
+        );
+        let ri = lr_ospf::lsa::sr::originate_sr_ri_lsa(0x02020202, 16_000, 8_000, None).unwrap();
+        let range = lr_ospf::lsa::sr::SrPrefixRangeCore {
+            prefix_len: 24,
+            range_size: 4,
+            flags: 0,
+            prefix: [10, 77, 0, 0],
+        };
+        let sid = lr_ospf::lsa::sr::SrPrefixSidTlv {
+            flags: lr_ospf::lsa::sr::sid_flags::M | lr_ospf::lsa::sr::sid_flags::NP,
+            mt_id: 0,
+            algorithm: 0,
+            sid: 500,
+        };
+        let ext =
+            lr_ospf::lsa::sr::originate_sr_prefix_range_lsa(0x02020202, &range, &sid, 1, None)
+                .unwrap();
+        r.feed_input(h, &ospf_lsu_bytes(0x02020202, 0, vec![ours, peer, ri, ext]))
+            .unwrap();
+
+        for (expect_prefix, expect_label) in [
+            ([10, 77, 0, 0], 16_500), // base + 500
+            ([10, 77, 1, 0], 16_501), // base + 501 (offset 1)
+        ] {
+            let route = r
+                .rib_snapshot()
+                .into_iter()
+                .find(|rt| rt.key.prefix == Prefix::new_v4(expect_prefix, 24))
+                .unwrap_or_else(|| panic!("route for {expect_prefix:?} installed"));
+            assert_eq!(route.preference.metric, 15); // 10 + 5, unchanged
+                                                     // The LSP rides the prefix's own path: via B's address,
+                                                     // not toward the mapping server as such (the same router
+                                                     // here — the assertion is the next hop resolves at all).
+            assert_eq!(route.next_hop, Some(IpAddr::V4([10, 0, 0, 2])));
+            let attr = route
+                .attributes
+                .get(lr_core::attr::AttrTag(
+                    lr_bgp::path::AttrType::LrMplsLabelStack.to_u8(),
+                ))
+                .unwrap_or_else(|| panic!("label attribute for {expect_prefix:?}"));
+            let stack = lr_mpls::LabelStack::decode_4octet(&attr.value).expect("label stack");
+            assert_eq!(stack.labels()[0].value, expect_label);
+        }
+
+        // The SRDB exposure reports the mapping-server range (the
+        // daemon's runtime API view of the same data). An uncovered
+        // prefix resolves nothing — the range guard is unit-tested in
+        // lr-ospf (`range_index_arithmetic_maps_prefixes_inside_the_span`).
+        let srdb = r.ospf_sr_databases().remove(&0).expect("area 0 srdb");
+        assert_eq!(srdb.prefix_ranges.len(), 1);
+        assert_eq!(srdb.prefix_ranges[0].range.range_size, 4);
+        assert_eq!(srdb.prefix_ranges[0].sid.sid, 500);
+        assert!(srdb.prefixes.is_empty()); // range TLVs are not direct mappings
     }
 }
 
