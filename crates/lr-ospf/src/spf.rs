@@ -206,10 +206,20 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                             let mask = link.link_data;
                             let pl = mask_to_pl(mask);
                             let prefix = Prefix::new_v4(link.link_id.to_be_bytes(), pl);
+                            // The path toward the stub is the path
+                            // toward the router advertising it — the
+                            // next hop mapping-server labels ride
+                            // (RFC 8661 §3.2.2: installed exactly as
+                            // if the owner advertised the SID).
+                            let next_hop = if rid == root {
+                                None // connected: no gateway
+                            } else {
+                                result.next_hops.get(&VertexId::Router(rid)).copied()
+                            };
                             result.stub_routes.push(SpfRoute {
                                 prefix,
                                 metric: current_dist + link.metric as u64,
-                                next_hop: None,
+                                next_hop,
                                 border_router: None,
                             });
                         }
@@ -227,10 +237,14 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                 // spfa_process_net parity).
                 if let Some((mask, attached)) = network_lsas.get(&ls_id) {
                     let net = ls_id & *mask;
+                    // The path toward the transit network is the path
+                    // toward the network vertex (the same one a
+                    // mapping-server label for its prefix rides).
+                    let next_hop = result.next_hops.get(&VertexId::Network(ls_id)).copied();
                     result.transit_routes.push(SpfRoute {
                         prefix: Prefix::new_v4(net.to_be_bytes(), mask_to_pl(*mask)),
                         metric: current_dist,
-                        next_hop: None,
+                        next_hop,
                         border_router: None,
                     });
                     // §16.1.1 (4): routers attached to a directly
@@ -631,9 +645,14 @@ mod tests {
             res.next_hops.get(&VertexId::Router(0x03030303)),
             Some(&ip([10, 0, 0, 1]))
         );
-        // B's stub network inherits no route next hop (stub routes are
-        // connected through the vertex, not an address).
-        assert!(res.stub_routes.iter().all(|r| r.next_hop.is_none()));
+        // B's stub network routes forward through B (RFC 2328 §16.1.1:
+        // a stub network inherits the advertising router vertex's next
+        // hop) — the path a mapping-server label rides (RFC 8661
+        // §3.2.2).
+        assert!(res
+            .stub_routes
+            .iter()
+            .all(|r| r.next_hop == Some(ip([10, 0, 0, 1]))));
         assert!(res.adjacent_routers.contains(&0x02020202));
         assert!(!res.adjacent_routers.contains(&0x03030303));
     }
