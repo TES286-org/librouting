@@ -327,6 +327,15 @@ fn lsa_topology_changed(
 struct OspfTableEntry {
     metric: u64,
     kind: OspfKind,
+    /// RFC 8667 §6 label the route resolves to (SPF-algorithm Prefix-SID
+    /// of its originator), when SR reception is enabled and the mapping
+    /// is usable. Intra-area and inter-area routes only — external paths
+    /// forward to the ASBR / forwarding address, not the originator.
+    label: Option<u32>,
+    /// The resolved first hop toward the label's originator — the
+    /// gateway the RFC 8660 encap route points at. Always `Some` when
+    /// `label` is.
+    label_nh: Option<IpAddr>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -352,6 +361,8 @@ impl OspfTableEntry {
         Self {
             metric,
             kind: OspfKind::Intra,
+            label: None,
+            label_nh: None,
         }
     }
 
@@ -361,6 +372,8 @@ impl OspfTableEntry {
             kind: OspfKind::Inter {
                 border_router: border_router.unwrap_or(0),
             },
+            label: None,
+            label_nh: None,
         }
     }
 
@@ -379,6 +392,8 @@ impl OspfTableEntry {
                 forwarding_addr,
                 internal_cost,
             },
+            label: None,
+            label_nh: None,
         }
     }
 
@@ -849,6 +864,11 @@ pub struct DefaultRouter {
     ospf_grace_seen: BTreeMap<(u32, u32), (u32, u16, u16, u16)>,
     /// OSPF router ID (all OSPF sessions must agree on it).
     ospf_router_id: Option<u32>,
+    /// RFC 8667 reception: when on, every area recompute projects the
+    /// area LSDB into a per-node SR database and attaches the resolved
+    /// Prefix-SID labels (RFC 8660 head-end) to the routes they map
+    /// onto. Off by default — fail-closed like every behavioural flag.
+    ospf_sr_receive: bool,
     /// OSPF route table currently published to Loc-RIB: the merged view
     /// across all areas, diffed on every recompute.
     ospf_published: BTreeMap<RouteKey, Route>,
@@ -997,6 +1017,7 @@ impl Default for DefaultRouter {
             ospf_areas: BTreeMap::new(),
             ospf_grace_seen: BTreeMap::new(),
             ospf_router_id: None,
+            ospf_sr_receive: false,
             ospf_published: BTreeMap::new(),
             ospf_externals: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
@@ -4444,7 +4465,16 @@ impl DefaultRouter {
         let mut global: BTreeMap<Prefix, (OspfTableEntry, u32, Protocol)> = BTreeMap::new();
         for (area_id, area) in &self.ospf_areas {
             let spf_result = spf::run_spf(&area.lsdb, router_id);
-            for (prefix, entry) in Self::ospf_area_table(&area.kind, abr, &area.lsdb, &spf_result) {
+            let mut table = Self::ospf_area_table(&area.kind, abr, &area.lsdb, &spf_result);
+            if self.ospf_sr_receive {
+                // RFC 8667 reception: project the area's SR state and
+                // attach the resolved labels to the routes they map
+                // onto (fail-soft — an LSDB without SR LSAs yields an
+                // empty database and changes nothing).
+                let srdb = lr_ospf::srdb::SrDatabase::from_lsdb(&area.lsdb);
+                Self::ospf_attach_sr_labels(&mut table, &srdb, &spf_result);
+            }
+            for (prefix, entry) in table {
                 let better = match global.get(&prefix) {
                     None => true,
                     Some((prev, _, _)) => entry.beats(prev),
@@ -4460,12 +4490,30 @@ impl DefaultRouter {
                 let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
                 // §16.4: an external route with a forwarding address
                 // forwards traffic to that address, not to the ASBR.
-                let next_hop = match entry.kind {
+                let mut next_hop = match entry.kind {
                     OspfKind::External {
                         forwarding_addr, ..
                     } if forwarding_addr != 0 => Some(IpAddr::V4(forwarding_addr.to_be_bytes())),
                     _ => None,
                 };
+                // RFC 8660 head end: an SR-labelled route enters the
+                // LSP — the private LrMplsLabelStack attribute carries
+                // the label to the kernel mirror (same channel the
+                // RFC 8277 BGP-LU routes use), and the next hop is the
+                // first hop toward the prefix-SID originator.
+                let mut attributes = lr_core::attr::Attributes::new();
+                if let (Some(label), Some(nh)) = (entry.label, entry.label_nh) {
+                    let stack =
+                        lr_mpls::LabelStack::from_labels([lr_mpls::Label::new_value(label)]);
+                    let mut attrs = PathAttributes::new();
+                    attrs.insert(PathAttribute::new(
+                        PathAttrFlags::new().set_optional(true),
+                        AttrType::LrMplsLabelStack,
+                        stack.encode_4octet(),
+                    ));
+                    attributes = attrs.into();
+                    next_hop = Some(nh);
+                }
                 let route = Route {
                     key: key.clone(),
                     origin: RouteOrigin {
@@ -4478,7 +4526,7 @@ impl DefaultRouter {
                         entry.metric as u32,
                     ),
                     next_hop,
-                    attributes: lr_core::attr::Attributes::new(),
+                    attributes,
                     age_ms: 0,
                     path_id: 0,
                     tag: None,
@@ -4487,6 +4535,33 @@ impl DefaultRouter {
             })
             .collect();
         self.ospf_diff_published(current)
+    }
+
+    /// Attach the RFC 8667 §6 labels an SR database resolves for the
+    /// table's prefixes. Only intra-area and inter-area entries are
+    /// labelled: their paths follow the prefix-SID originator, while an
+    /// external route forwards to the ASBR or the type-5 forwarding
+    /// address — a different path than the one the SID encodes. The
+    /// label plus its next hop ride the entry (see
+    /// [`OspfTableEntry::label`]); the entry kind and metric are
+    /// untouched, so route selection is unaffected.
+    fn ospf_attach_sr_labels(
+        table: &mut BTreeMap<Prefix, OspfTableEntry>,
+        srdb: &lr_ospf::srdb::SrDatabase,
+        spf: &spf::SpfResult,
+    ) {
+        for (prefix, entry) in table.iter_mut() {
+            if !entry.is_intra()
+                && !matches!(entry.kind, OspfKind::Inter { .. })
+            {
+                continue;
+            }
+            let Some((label, next_hop)) = srdb.label_for(prefix, spf) else {
+                continue;
+            };
+            entry.label = Some(label);
+            entry.label_nh = Some(next_hop);
+        }
     }
 
     /// Diff `current` against the published OSPF table and swap it in.
@@ -5618,6 +5693,23 @@ impl DefaultRouter {
             self.ospf_flood(area_id, &lsas, None);
         }
         changed
+    }
+
+    /// Toggle RFC 8667 SR reception: when on, every OSPF area recompute
+    /// projects the area LSDB into a per-node SR database and attaches
+    /// the resolved Prefix-SID labels (RFC 8660 head end) to the routes
+    /// they map onto. Off by default — the kernel mirror only acts on
+    /// labelled routes, so a router that never enables this stays
+    /// byte-identical to a pre-SR one. Set once at startup, before
+    /// sessions feed the router.
+    pub fn set_ospf_sr_receive(&mut self, on: bool) {
+        self.ospf_sr_receive = on;
+    }
+
+    /// Whether RFC 8667 SR reception is enabled (see
+    /// [`Self::set_ospf_sr_receive`]).
+    pub fn ospf_sr_receive(&self) -> bool {
+        self.ospf_sr_receive
     }
 
     /// Change the type policy of an attached OSPF area (RFC 2328 §3.6,
@@ -8480,6 +8572,137 @@ mod tests {
         );
         assert_eq!(b.exchange_plane_partial_transit(b_session), 1);
     }
+    /// RFC 8667 reception, happy path: an SR neighbour's Router
+    /// Information LSA (SRGB 16000/8000) + Extended Prefix Opaque LSA
+    /// (10.20.0.0/24, SID 100, NP) label the stub route the same LSDB
+    /// produces — Loc-RIB carries label 16100 and the first hop toward
+    /// the originator. Without `set_ospf_sr_receive` the identical
+    /// LSDB installs the same route unlabelled (fail-closed default).
+    #[test]
+    fn ospf_sr_labels_follow_the_prefix_sid_when_enabled() {
+        let build = |sr_receive: bool| {
+            let mut r = DefaultRouter::new();
+            r.set_ospf_sr_receive(sr_receive);
+            let rid = 0x01010101;
+            let h = r
+                .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+                .unwrap();
+            // Topology: us —10— B (0x02020202); B's back-link carries
+            // its address 10.0.0.2 so the next hop resolves (§16.1.1).
+            let ours = router_lsa(rid, vec![(0x02020202, 0, P2P, 10)]);
+            let peer = router_lsa(
+                0x02020202,
+                vec![
+                    (rid, 0x0a000002, P2P, 10),
+                    (0x0a140000, 0xffff_ff00, STUB, 5),
+                ],
+            );
+            let ri =
+                lr_ospf::lsa::sr::originate_sr_ri_lsa(0x02020202, 16_000, 8_000, None).unwrap();
+            let advert = lr_ospf::lsa::sr::SrPrefixAdvert {
+                route_type: 1,
+                flags: 0x40, // N-flag: node segment
+                prefix: [10, 20, 0, 0],
+                prefix_len: 24,
+                sid_flags: lr_ospf::lsa::sr::sid_flags::NP,
+                sid: 100,
+                algorithm: 0,
+            };
+            let ext =
+                lr_ospf::lsa::sr::originate_sr_prefix_lsa(0x02020202, &advert, 1, None).unwrap();
+            r.feed_input(h, &ospf_lsu_bytes(0x02020202, 0, vec![ours, peer, ri, ext]))
+                .unwrap();
+            (r, h)
+        };
+
+        // Default: SR reception off — the route installs unlabelled.
+        let (mut r, _) = build(false);
+        let route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v4([10, 20, 0, 0], 24))
+            .expect("route installed");
+        assert!(route.next_hop.is_none());
+        assert!(
+            route
+                .attributes
+                .get(lr_core::attr::AttrTag(
+                    lr_bgp::path::AttrType::LrMplsLabelStack.to_u8()
+                ))
+                .is_none(),
+            "no label attribute without SR reception"
+        );
+
+        // SR reception on: same LSDB, labelled route + next hop.
+        let (mut r, _) = build(true);
+        let route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v4([10, 20, 0, 0], 24))
+            .expect("route installed");
+        assert_eq!(route.preference.metric, 15); // 10 + 5, unchanged
+        assert_eq!(route.next_hop, Some(IpAddr::V4([10, 0, 0, 2])));
+        let attr = route
+            .attributes
+            .get(lr_core::attr::AttrTag(
+                lr_bgp::path::AttrType::LrMplsLabelStack.to_u8(),
+            ))
+            .expect("label attribute present");
+        let stack = lr_mpls::LabelStack::decode_4octet(&attr.value).expect("label stack");
+        assert_eq!(stack.labels()[0].value, 16_100); // 16000 + 100
+    }
+
+    /// RFC 8667 §5 PHP: an NP-clear Prefix-SID whose originator is
+    /// directly adjacent makes this router the penultimate hop — no
+    /// label is attached and the route forwards unlabeled.
+    #[test]
+    fn ospf_sr_php_drops_the_label_for_adjacent_originators() {
+        let mut r = DefaultRouter::new();
+        r.set_ospf_sr_receive(true);
+        let rid = 0x01010101;
+        let h = r
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(rid), 0))
+            .unwrap();
+        let ours = router_lsa(rid, vec![(0x02020202, 0, P2P, 10)]);
+        let peer = router_lsa(
+            0x02020202,
+            vec![
+                (rid, 0x0a000002, P2P, 10),
+                (0x0a140000, 0xffff_ff00, STUB, 5),
+            ],
+        );
+        let ri =
+            lr_ospf::lsa::sr::originate_sr_ri_lsa(0x02020202, 16_000, 8_000, None).unwrap();
+        let advert = lr_ospf::lsa::sr::SrPrefixAdvert {
+            route_type: 1,
+            flags: 0x40,
+            prefix: [10, 20, 0, 0],
+            prefix_len: 24,
+            sid_flags: 0, // PHP by default (FRR's default too)
+            sid: 100,
+            algorithm: 0,
+        };
+        let ext =
+            lr_ospf::lsa::sr::originate_sr_prefix_lsa(0x02020202, &advert, 1, None).unwrap();
+        r.feed_input(h, &ospf_lsu_bytes(0x02020202, 0, vec![ours, peer, ri, ext]))
+            .unwrap();
+        let route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v4([10, 20, 0, 0], 24))
+            .expect("route installed");
+        // Penultimate hop: no label, no next hop — the route itself is
+        // untouched.
+        assert!(route.next_hop.is_none());
+        assert!(
+            route
+                .attributes
+                .get(lr_core::attr::AttrTag(
+                    lr_bgp::path::AttrType::LrMplsLabelStack.to_u8()
+                ))
+                .is_none()
+        );
+    }
 }
 
 #[cfg(test)]
@@ -8665,4 +8888,5 @@ mod collision_tests {
         assert_eq!(r.session_peer_state(s1), Some("Established"));
         assert_eq!(r.session_peer_state(s2), Some("Established"));
     }
+
 }
