@@ -558,7 +558,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
    set before the bind; the post-bind change died with EINVAL on
    current kernels, silently degrading the daemon to IPv4-only
    discovery).
-5. **SR-MPLS (RFC 8660 / 8667)** — Segment Routing MPLS data plane.
+5. **SR-MPLS (RFC 8660 / 8665)** — Segment Routing MPLS data plane.
    In progress; slice 1 (control-plane codecs + origination) and slice
    2 (reception → SRDB → SPF label attach → kernel mirror) landed:
 

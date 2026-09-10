@@ -236,13 +236,13 @@ the state, that file tracks the how and why.
 
 **Remaining open items** (nothing else is queued):
 
-1. **SR-MPLS (RFC 8660/8667)** — the wire codecs, SRGB/prefix-SID
-   configuration and origination have landed (W3-extra.5 slice 1,
-   FRR-verified); the remaining SR-MPLS work is the receive path
-   (Extended Prefix LSA parsing → SPF label attach → kernel AF_MPLS
-   mirror), Adj-SIDs and the mapping-server shapes. RFC 9256 (Segment
-   Routing Policy) builds on that data plane. (`ROADMAP.md`
-   W3-extra item 5.)
+1. **SR-MPLS (RFC 8660/8665)** — the wire codecs, SRGB/prefix-SID
+   configuration, origination (slice 1, FRR-verified) and the receive
+   path (slice 2: per-node SRDB → SPF label attach → kernel AF_MPLS
+   mirror) have landed (W3-extra.5); the remaining SR-MPLS work is
+   Adj-SIDs (§6), the mapping-server (M-flag) shapes and SRv6. RFC
+   9256 (Segment Routing Policy) builds on that data plane.
+   (`ROADMAP.md` W3-extra item 5.)
 2. **OSPFv3 daemon depth** — the OSPFv3 exchange/daemon mode shares
    v2's machinery but is not yet exercised by the daemon; the v3
    codec and LSA surfaces exist. (Tracked by the capability tables
