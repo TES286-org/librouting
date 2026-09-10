@@ -95,6 +95,11 @@ if [ -e /proc/sys/net/mpls/platform_labels ]; then
     MPLS=1
 fi
 export MPLS
+# Whether FRR's own zebra can use the kernel MPLS data plane inside the
+# netns — decided after zebra starts (see below); defaults to off so a
+# crashy `segment-routing on` never slips through.
+SR_READY=0
+export SR_READY
 
 exec unshare -Urn -m bash -euo pipefail <<'INNER'
 cd "$REPO"
@@ -258,9 +263,9 @@ sleep 1.5
 # `segment-routing on` makes FRR 8.x crash in its own SR code at
 # adjacency bring-up - before any of lr's LSAs are exchanged. Trust
 # zebra's own probe and keep the FRR SR phases gated on it.
-SR_READY=0
 if grep -q "Disabling MPLS support" "$OUT/zebra.log" 2>/dev/null; then
     echo "NOTE: zebra disabled MPLS support (rootless netns) - FRR SR phases skipped"
+    SR_READY=0
 else
     SR_READY=1
 fi
