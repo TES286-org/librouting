@@ -475,6 +475,40 @@ pub fn encode_router_lsa_body(flags: u16, links: Vec<RouterLink>) -> Vec<u8> {
     v
 }
 
+/// Test fixture shared by sibling modules' unit tests (srdb, router
+/// integration tests): a minimal Router-LSA with (link_id, link_data,
+/// link_type, metric) tuples.
+#[cfg(test)]
+pub(crate) mod tests_util {
+    use crate::lsa::{Lsa, LsaHeader, LsaTypeV2};
+
+    pub(crate) fn router_lsa(rid: u32, links: Vec<(u32, u32, u8, u16)>) -> Lsa {
+        let mut body = Vec::new();
+        body.extend_from_slice(&0u16.to_be_bytes()); // flags
+        body.extend_from_slice(&(links.len() as u16).to_be_bytes());
+        for (lid, ldata, ltype, metric) in links {
+            body.extend_from_slice(&lid.to_be_bytes());
+            body.extend_from_slice(&ldata.to_be_bytes());
+            body.push(ltype);
+            body.push(0); // tos
+            body.extend_from_slice(&metric.to_be_bytes());
+        }
+        Lsa {
+            header: LsaHeader {
+                ls_age: 0,
+                options: 0,
+                ls_type: LsaTypeV2::RouterLsa as u16,
+                link_state_id: rid,
+                advertising_router: rid,
+                ls_sequence_number: 0x80000001,
+                ls_checksum: 0,
+                length: (LsaHeader::LEN + body.len()) as u16,
+            },
+            body,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
