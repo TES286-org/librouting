@@ -324,13 +324,24 @@ if ! wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 Full (area" 40; then
 fi
 # Give FRR's SRDB a beat to process the extended LSAs.
 sleep 3
+# FRR's SRDB needs its label manager (zclient -> zebra) to come up
+# inside this netns; that plumbing does not survive every rootless
+# setup even when kernel MPLS works. Detect a disabled FRR SR stack
+# and skip the FRR-side SR assertions instead of failing the lab -
+# the lr x lr lab (ospf_sr.sh) owns the label-resolution coverage.
+SR_UP=0
+if grep -q "Segment Routing functionality is Disabled" "$OUT/ospfd.log" 2>/dev/null; then
+    echo "NOTE: FRR's SR stack did not start in this netns (label manager unavailable) - FRR SRDB + phase-2 assertions skipped"
+else
+    SR_UP=1
+fi
 
 echo "== FRR LSDB (opaque LSAs) =="
 vty_cmd 26110 "show ip ospf database" >"$OUT/lsdb.txt" 2>/dev/null || true
 cat "$OUT/lsdb.txt"
 vty_cmd 26110 "show ip ospf database opaque-area 7.0.0.1" >"$OUT/lsdb_detail.txt" 2>/dev/null || true
 cat "$OUT/lsdb_detail.txt" || true
-if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ] && [ "$SR_UP" -eq 1 ]; then
     echo "== FRR SRDB =="
     vty_cmd 26110 "show ip ospf srdb" >"$OUT/srdb.txt" 2>/dev/null || true
     cat "$OUT/srdb.txt"
@@ -345,7 +356,7 @@ fail=0
 # `routes` dump must map FRR's 10.99.3.0/24 to label 16200 (base + SID
 # 200), and — with install_kernel — the kernel FIB must carry the RFC
 # 8660 encap route.
-if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ] && [ "$SR_UP" -eq 1 ]; then
     echo "== lr reception of FRR's prefix-SID (phase 2) =="
     api_cmd() {
         python3 - "$1" "$2" <<'PYEOF'
@@ -389,7 +400,7 @@ if ! grep -q "4.0.0.0" "$OUT/lsdb.txt" || ! grep -q "7.0.0.1" "$OUT/lsdb.txt"; t
     echo "FAIL: FRR's LSDB does not hold lr's RI (4.0.0.0) and Extended Prefix (7.0.0.1) LSAs"
     fail=1
 fi
-if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ]; then
+if [ "$MPLS" -eq 1 ] && [ "$SR_READY" -eq 1 ] && [ "$SR_UP" -eq 1 ]; then
     if ! grep -q "16000" "$OUT/srdb.txt" || ! grep -q "8000" "$OUT/srdb.txt"; then
         echo "FAIL: FRR's SRDB does not carry lr's SRGB (16000/8000)"
         fail=1
