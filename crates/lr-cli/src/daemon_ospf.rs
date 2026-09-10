@@ -1928,68 +1928,65 @@ impl OspfDaemon {
         }
         // Kernel tail diff: install pops for new adjacencies, remove
         // the ones whose adjacency is gone (only with install_kernel —
-        // the mirror is opt-in like every kernel write).
+        // the mirror is opt-in like every kernel write). AF_MPLS is a
+        // Linux facility; other platforms keep the tails userspace-side
+        // (the LSAs still advertise them).
         let stale: Vec<(u32, u32, u32)> = self
             .sr_link_pops
             .keys()
             .filter(|k| !installed.contains_key(k))
             .copied()
             .collect();
-        if !stale.is_empty() || installed.keys().any(|k| !self.sr_link_pops.contains_key(k)) {
+        let changed =
+            !stale.is_empty() || installed.keys().any(|k| !self.sr_link_pops.contains_key(k));
+        if changed && self.install_kernel_mpls {
             #[cfg(target_os = "linux")]
-            if self.install_kernel_mpls {
-                match lr_osroute::mpls_route::MplsNetlink::connect() {
-                    Ok(mut mpls) => {
-                        for key in &stale {
-                            if let Some(label) = self.sr_link_pops.remove(key) {
-                                if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label))
-                                {
-                                    eprintln!("lsp: adj pop delete for {label}: {e}");
-                                }
-                            }
-                        }
-                        for (key @ (area, ifindex, neigh), label) in &installed {
-                            if self.sr_link_pops.contains_key(key) {
-                                continue;
-                            }
-                            let Some(nh) = self
-                                .interfaces
-                                .iter()
-                                .find(|i| i.area == *area && i.transport.ifindex() == *ifindex)
-                                .and_then(|i| i.heard.get(neigh))
-                                .map(|h| h.ip)
-                            else {
-                                continue;
-                            };
-                            let route = lr_osroute::mpls_route::MplsRoute::pop(
-                                lr_mpls::Label::new_value(*label),
-                                lr_core::addr::IpAddr::V4(nh.to_be_bytes()),
-                                *ifindex,
-                            );
-                            match mpls.add_route(&route) {
-                                Ok(()) => {
-                                    self.sr_link_pops.insert(*key, *label);
-                                    println!(
-                                        "lsp: in-label {} -> pop via {} (adjacency {}/{})",
-                                        label,
-                                        std::net::Ipv4Addr::from(nh),
-                                        area_label(*area),
-                                        fmt_rid(*neigh)
-                                    );
-                                }
-                                Err(e) => eprintln!("lsp: adj pop install for {label}: {e}"),
+            match lr_osroute::mpls_route::MplsNetlink::connect() {
+                Ok(mut mpls) => {
+                    for key in &stale {
+                        if let Some(label) = self.sr_link_pops.remove(key) {
+                            if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label)) {
+                                eprintln!("lsp: adj pop delete for {label}: {e}");
                             }
                         }
                     }
-                    Err(e) => eprintln!(
-                        "daemon: mpls route table unavailable ({}); adjacency pops disabled",
-                        e
-                    ),
+                    for (key @ (area, ifindex, neigh), label) in &installed {
+                        if self.sr_link_pops.contains_key(key) {
+                            continue;
+                        }
+                        let Some(nh) = self
+                            .interfaces
+                            .iter()
+                            .find(|i| i.area == *area && i.transport.ifindex() == *ifindex)
+                            .and_then(|i| i.heard.get(neigh))
+                            .map(|h| h.ip)
+                        else {
+                            continue;
+                        };
+                        let route = lr_osroute::mpls_route::MplsRoute::pop(
+                            lr_mpls::Label::new_value(*label),
+                            lr_core::addr::IpAddr::V4(nh.to_be_bytes()),
+                            *ifindex,
+                        );
+                        match mpls.add_route(&route) {
+                            Ok(()) => {
+                                self.sr_link_pops.insert(*key, *label);
+                                println!(
+                                    "lsp: in-label {} -> pop via {} (adjacency {}/{})",
+                                    label,
+                                    std::net::Ipv4Addr::from(nh),
+                                    area_label(*area),
+                                    fmt_rid(*neigh)
+                                );
+                            }
+                            Err(e) => eprintln!("lsp: adj pop install for {label}: {e}"),
+                        }
+                    }
                 }
-            }
-            #[cfg(not(target_os = "linux"))]
-            {
-                let _ = (&stale, &installed);
+                Err(e) => eprintln!(
+                    "daemon: mpls route table unavailable ({}); adjacency pops disabled",
+                    e
+                ),
             }
         }
         if lsas.is_empty() {
