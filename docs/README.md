@@ -14,6 +14,7 @@ the protocol crates.
 | [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + roadmap state summary      |
 | [`ROADMAP.md`](ROADMAP.md)           | contributors            | Roadmap v2 workstream landing log: design decisions, evidence    |
 | [`RFC_MAP.md`](RFC_MAP.md)           | contributors            | RFC-by-RFC coverage table with crate paths                       |
+| [`RELEASE-PLAN.md`](RELEASE-PLAN.md) | maintainers, embedders  | Semver policy, 1.0 freeze criteria, release flow, post-1.0 governance |
 
 ## Embedding the library
 
@@ -29,6 +30,8 @@ the protocol crates.
 | Document                   | Contents                                                             |
 | -------------------------- | -------------------------------------------------------------------- |
 | `templates/daemon.toml`    | Fully commented reference configuration (every key explained)        |
+| [`lr-cli.md`](lr-cli.md)   | CLI user guide — every `lr` and `lr-daemon` subcommand, flag and example |
+| [`lr-cli-internals.md`](lr-cli-internals.md) | CLI internals — module layout, run paths, extension patterns |
 | [`RUNBOOK.md`](RUNBOOK.md) | Operations runbook: lifecycle, runtime API, troubleshooting FAQ      |
 | [`COMPAT.md`](COMPAT.md)   | Running BIRD 2 / FRR configs natively: dialects, defaults, `lr:` extensions |
 | [`PARITY.md`](PARITY.md)   | Behaviour knobs vs. BIRD 2 / FRR 10: RFC latitude, defaults, mapping |

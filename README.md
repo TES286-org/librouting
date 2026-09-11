@@ -9,7 +9,7 @@ failure detection, route flap damping (RFC 2439) is available, and an OS
 route-table reference implementation (Linux rtnetlink, BSD route(4),
 Windows IP Helper) plus a Linux MPLS dataplane mirror are provided as
 opt-in crates. The library is verified bidirectionally against BIRD 2 and
-FRR 10 in CI.
+FRR 10 in CI on Linux, macOS (Intel + Apple Silicon) and Windows.
 
 ## Design
 
@@ -447,8 +447,34 @@ Implemented and missing features are tracked in detail in
 GitHub Actions workflows live in `.github/workflows/` and run on push to
 `main` and on PRs: fmt + clippy + workspace tests + C harness + Go bindings +
 Python bindings + MSRV + cross-build (aarch64 Linux, Windows) + **interop
-jobs against BIRD and FRR**. Nightly runs `miri` for the unsafe audit on
+jobs against BIRD and FRR** + a **cross-platform matrix** that runs
+`cargo build` and `cargo test` natively on Ubuntu, macOS (Intel + Apple
+Silicon) and Windows. The tag-driven `release.yml` produces a per-OS
+tarball (`liblr_ffi.{so,dylib,dll}` + the static archive + the C / C++
+headers) on each of the four targets and assembles them into a single
+draft GitHub Release. Nightly runs `miri` for the unsafe audit on
 `lr-osroute` FFI.
+
+## Documentation
+
+The documentation set lives under `docs/`. Start at
+[`docs/README.md`](docs/README.md) for the per-audience index:
+
+- User-facing: [`docs/lr-cli.md`](docs/lr-cli.md) (CLI user guide),
+  [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (operations),
+  [`docs/tutorial.md`](docs/tutorial.md) (book-style tutorial),
+  `templates/daemon.toml` (fully-commented reference config).
+- Embedder-facing: [`docs/API.md`](docs/API.md) (public Rust API tour),
+  [`docs/bindings/{c,cpp,go,python}.md`](docs/bindings) (per-language
+  embedding guides), [`docs/examples/`](docs/examples) (worked scenarios).
+- Contributor-facing: [`docs/lr-cli-internals.md`](docs/lr-cli-internals.md)
+  (CLI internals + extension patterns),
+  [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (layering + RIB pipeline),
+  [`docs/STATUS.md`](docs/STATUS.md) (implemented-vs-missing),
+  [`docs/ROADMAP.md`](docs/ROADMAP.md) (workstream landing log),
+  [`docs/RFC_MAP.md`](docs/RFC_MAP.md) (RFC coverage table).
+- Maintainer-facing: [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md)
+  (semver policy, 1.0 freeze criteria, release flow, post-1.0 governance).
 
 ## License
 

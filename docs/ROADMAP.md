@@ -1407,3 +1407,85 @@ interoperable field surface both references implement; the two types
 differ mainly in neighbor discovery, which the daemon's dynamic
 session model already handles), and OSPFv3 virtual links (v2-only
 today - revisit if a multi-area v3 deployment asks for them).
+
+## Phase 4 — pre-1.0 hardening
+
+Where the project stands: every roadmap-v2 workstream (W1-W6) is
+complete, the W3-extra MPLS extension has landed through SRv6 slice 3
+(RFC 9513 OSPFv3 control plane + daemon origination), the OSPFv3
+graceful-restart slice (RFC 5187) closed the v2-exclusive feature
+gap, and the project is at feature parity with BIRD 2 and FRR 10
+for every protocol it implements (only BGPsec is ❌ and deliberately
+out of scope). The honest remaining work to a 1.0 cut is
+engineering hygiene — CI on the desktop platforms, the lr-cli
+documentation surface, and an explicit release flow — not protocol
+coverage. Phase 4 lands that work.
+
+Ordered by user-visible impact (CI first, documentation second,
+release governance third):
+
+1. **CI on Windows + macOS** — done: the `cross-platform` job in
+   `.github/workflows/ci.yml` runs a matrix of `ubuntu-22.04`,
+   `macos-13` (Intel), `macos-14` (Apple Silicon) and `windows-2022`,
+   each running `cargo fmt --check`, `cargo clippy -D warnings`,
+   `cargo build --workspace --all-features` and
+   `cargo test --workspace --all-features`. The workspace's
+   cross-platform surface was already in place (lr-osroute carries
+   Windows IP-Helper, BSD/macOS route-socket, and Linux rtnetlink
+   backends; `lr-cli::signal` splits along `#[cfg(unix)]` /
+   `#[cfg(not(unix))]`; the Linux-only kernel-gated tests
+   (`ospf6_kernel.rs`, `srv6_kernel.rs`) are gated at the file level
+   with `#![cfg(target_os = "linux")]` so the Windows/macOS runners
+   skip them at compile time). The BIRD/FRR interop suite stays on
+   the Linux-only `interop` job — it is not portable to runners
+   without those packages.
+
+2. **`lr-cli` user guide + internals doc** — done:
+   `docs/lr-cli.md` is the user-facing reference for every `lr` and
+   `lr-daemon` subcommand (decode, routes, mrt, parity-replay,
+   translate, yang render, run, plus the full daemon flag surface
+   for BGP, Babel, OSPF, LDP, BMP, and the OSPFv3 SRv6 RFC 9513
+   knobs), and `docs/lr-cli-internals.md` is the contributor-facing
+   module map and extension-pattern doc. Both link to the existing
+   `RUNBOOK.md` (runtime API), `templates/daemon.toml` (every key
+   explained), and `INTEROP.md` (interop matrix) instead of
+   duplicating them.
+
+3. **`RELEASE-PLAN.md`** — done: `docs/RELEASE-PLAN.md` is the
+   canonical reference for the semver policy, the three-tier public
+   API stability contract (Rust library API, C ABI, daemon flag +
+   config surface), the 1.0 freeze criteria (RFC coverage, CI
+   matrix, wire-level parity, ABI version pin, documentation set
+   complete), the release flow (pre-release checks, tagging, the
+   `release.yml` build matrix on Linux + macOS Intel + macOS Apple
+   Silicon + Windows, draft release with auto-generated notes), and
+   the post-1.0 governance rules (stability window, deprecation
+   policy, new-protocol-crate checklist, compatibility matrix
+   against BIRD 2 + FRR 10 + libyang + Linux kernel versions).
+   Items 2.4 (cross-platform CI) and 2.6 (documentation set) in the
+   freeze criteria are checked off by this Phase; 2.7 (the 1.0 cut
+   PR) is the next release-event after one clean week of CI on all
+   three platforms.
+
+4. **Extended release workflow** — done: `.github/workflows/release.yml`
+   now builds `lr-ffi` on a matrix of four native targets (Linux
+   x86_64, macOS x86_64, macOS aarch64, Windows x86_64-MSVC),
+   stages the platform's shared library (`liblr_ffi.so` /
+   `liblr_ffi.dylib` / `lr_ffi.dll`), the static archive where the
+   toolchain emits one, and the C / C++ headers into a tarball
+   (or `.zip` on Windows), uploads each as a build artifact, and a
+   final `publish-release` job flattens them with the standalone
+   headers into a single draft GitHub Release with auto-generated
+   commit-diff release notes. The release body links back to
+   `docs/RELEASE-PLAN.md` and to the per-language binding guides in
+   `docs/bindings/`.
+
+5. Keep `STATUS.md` / `RFC_MAP.md` / `API.md` synchronized with
+   every landed feature (standing rule, enforced at review — and
+   applied here for the Phase 4 landings).
+
+The Phase 3 protocol work (RFC 8362 E-LSA machinery + SRv6 End.X /
+LAN End.X SIDs, BGP-LS, BGP SR Policy) is post-1.0 work: it extends
+the surface but does not block the freeze, because the surface it
+extends is already at parity with BIRD and FRR for the protocols it
+touches.

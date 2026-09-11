@@ -285,3 +285,22 @@ the state, that file tracks the how and why.
    `tests/interop/ospf6_gr_frr.sh`). No v2-only daemon feature
    remains; the v3 codec + LSA + SPF surfaces are in the capability
    tables above.
+3. **Phase 4 — pre-1.0 hardening** — landed: cross-platform CI
+   matrix (Ubuntu, macOS Intel, macOS Apple Silicon, Windows
+   x86_64-MSVC) running `cargo fmt`, `cargo clippy -D warnings`,
+   `cargo build --workspace --all-features`, and
+   `cargo test --workspace --all-features` on each runner in
+   `.github/workflows/ci.yml` (the Linux-only interop suite stays
+   on its existing `interop` job; the Windows/macOS runners skip
+   the Linux-only kernel-gated tests at the file level via
+   `#![cfg(target_os = "linux")]`). `docs/lr-cli.md` and
+   `docs/lr-cli-internals.md` document every CLI subcommand and
+   the daemon's module layout + extension patterns.
+   `docs/RELEASE-PLAN.md` defines the semver policy, the
+   three-tier API stability contract, the 1.0 freeze criteria,
+   the release flow, and the post-1.0 governance rules.
+   `.github/workflows/release.yml` builds `lr-ffi` on the four
+   native targets and assembles them into a single draft GitHub
+   Release with auto-generated commit-diff notes. The 1.0 cut PR
+   is the next release-event after one clean week of CI on all
+   three platforms.
