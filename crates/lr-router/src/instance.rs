@@ -219,16 +219,20 @@ struct OspfRuntime {
     /// Interface network type (RFC 2328 §9.4) — drives the §10.4
     /// adjacency decision.
     network_type: crate::session::OspfNetworkType,
-    /// Our own IPv4 interface address on the segment (§10.4 identity;
-    /// `0` = not supplied — treated as DR-Other).
+    /// This router's own segment identity (§10.4): the IPv4 interface
+    /// address for v2 sessions (§A.3.2 — the Hello DR/BDR wire form),
+    /// the Router ID for v3 sessions (RFC 5340 §4.1.2). `0` = not
+    /// supplied — treated as DR-Other.
     our_ip: u32,
-    /// The neighbor's IPv4 interface address on the segment.
+    /// The neighbor's segment identity (the v2 interface address / the
+    /// v3 Router ID).
     neighbor_ip: u32,
-    /// Elected Designated Router — IP interface address per §A.3.2
-    /// (0.0.0.0 = none / still Waiting). Pushed by the embedder after
+    /// Elected Designated Router in the segment identity — IP
+    /// interface address per §A.3.2 on v2, Router ID on v3 (RFC 5340
+    /// §4.1.2). 0 = none / still Waiting. Pushed by the embedder after
     /// every election round via `DefaultRouter::set_ospf_dr_state`.
     dr: u32,
-    /// Elected Backup Designated Router (IP interface address).
+    /// Elected Backup Designated Router (segment identity, as above).
     bdr: u32,
 }
 
@@ -551,7 +555,10 @@ impl OspfRuntime {
     /// virtual) links always become adjacent; broadcast/NBMA segments
     /// require one side to be the elected DR or BDR. While the segment
     /// has not elected a DR (interface Waiting, §9.4) no adjacency
-    /// forms — mirroring BIRD's `can_do_adj`.
+    /// forms — mirroring BIRD's `can_do_adj`. The comparison runs on
+    /// the segment identity: IP interface addresses on v2 (§A.3.2),
+    /// Router IDs on v3 (RFC 5340 §4.1.2) — the embedder supplies them
+    /// through the session config and `set_ospf_dr_state`.
     fn adjacency_viable(&self) -> bool {
         match self.network_type {
             crate::session::OspfNetworkType::PointToPoint => true,

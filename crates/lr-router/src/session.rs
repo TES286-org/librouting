@@ -218,14 +218,16 @@ pub struct SessionConfig {
     /// relationship driven by the election results pushed via
     /// `DefaultRouter::set_ospf_dr_state`.
     pub ospf_network_type: OspfNetworkType,
-    /// Our own IPv4 interface address on the segment (RFC 2328 §12.4.1.2
-    /// transit-link Link Data; the identity the election compares
-    /// against when deciding whether *we* are DR/BDR). `None` = the
-    /// embedder has not supplied one (§10.4 treats us as DR-Other).
+    /// Our own segment identity (RFC 2328 §12.4.1.2 transit-link Link
+    /// Data on v2 — the IPv4 interface address; RFC 5340 §4.1.2 on v3 —
+    /// the Router ID). This is the value the §10.4 adjacency decision
+    /// compares against the elected DR/BDR when deciding whether *we*
+    /// are one of them. `None` = the embedder has not supplied one
+    /// (§10.4 treats us as DR-Other).
     pub ospf_interface_ip: Option<u32>,
-    /// The neighbor's IPv4 interface address on the segment (the
-    /// election identity a received Hello's DR/BDR fields are compared
-    /// against when deciding whether the *neighbor* is DR/BDR).
+    /// The neighbor's segment identity (the v2 interface address / the
+    /// v3 Router ID) — what a received Hello's DR/BDR fields are
+    /// compared against when deciding whether the *neighbor* is DR/BDR.
     pub ospf_neighbor_ip: Option<u32>,
     /// Per-peer maximum-prefix limit (BIRD `maximum prefix`, FRR
     /// `maximum-prefix`). `None` = no limit.
@@ -417,15 +419,17 @@ impl SessionConfig {
         self
     }
 
-    /// Set our own IPv4 interface address on the OSPF segment (the
-    /// §10.4 identity and the transit-link Link Data, §12.4.1.2).
+    /// Set our own identity on the OSPF segment: the IPv4 interface
+    /// address on v2 (§10.4 identity and transit-link Link Data,
+    /// §12.4.1.2) or the Router ID on v3 (RFC 5340 §4.1.2).
     pub fn with_ospf_interface_ip(mut self, ip: u32) -> Self {
         self.ospf_interface_ip = Some(ip);
         self
     }
 
-    /// Set the neighbor's IPv4 interface address on the OSPF segment
-    /// (the identity the elected DR/BDR is compared against, §10.4).
+    /// Set the neighbor's identity on the OSPF segment (the v2
+    /// interface address / the v3 Router ID — what the elected DR/BDR
+    /// is compared against, §10.4).
     pub fn with_ospf_neighbor_ip(mut self, ip: u32) -> Self {
         self.ospf_neighbor_ip = Some(ip);
         self

@@ -792,19 +792,12 @@ impl DaemonConfig {
                 self.ospf_dead_interval
             ));
         }
-        // OSPFv3 daemon slice 1: p2p segments only, and the v2-scoped
-        // extensions (SR, graceful restart) are not wired — fail closed
-        // instead of silently ignoring configured features.
+        // OSPFv3 daemon: the v2-scoped extensions (SR-MPLS, graceful
+        // restart, Adj-SIDs) are not wired — fail closed instead of
+        // silently ignoring configured features. Broadcast segments
+        // run the RFC 5340 §4.1.2 election (Router-ID identity).
         if self.ospf_version == "v3" {
             for spec in &self.ospf_interfaces {
-                if let Some(nt) = spec.network_type.as_deref() {
-                    if nt == "broadcast" {
-                        return Err(
-                            "OSPFv3 broadcast segments are not supported yet                              (network_type = \"broadcast\")"
-                                .to_string(),
-                        );
-                    }
-                }
                 if spec.adj_sid.is_some() {
                     return Err(
                         "OSPFv3 does not support adj_sid (SR is an OSPFv2 extension)".to_string(),
