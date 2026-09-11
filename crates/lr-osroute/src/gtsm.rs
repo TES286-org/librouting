@@ -539,7 +539,12 @@ pub use fallback::{arm_listener_impl as arm_listener_gtsm, connect_impl as conne
 #[cfg(test)]
 mod tests {
     use super::*;
+    // These types are only referenced by the Linux-only live-socket
+    // tests below; gate the imports so non-Linux targets do not
+    // emit an `unused_imports` warning under `-D warnings`.
+    #[cfg(target_os = "linux")]
     use std::net::{TcpListener, TcpStream};
+    #[cfg(target_os = "linux")]
     use std::time::Duration;
 
     #[test]
