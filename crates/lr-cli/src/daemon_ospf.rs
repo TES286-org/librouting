@@ -76,7 +76,8 @@ use lr_osroute::ospf_transport::{
     interface_v4_addrs, prefix_mask, InterfaceV4Addr, OspfV2Transport,
 };
 use lr_router::{
-    DefaultRouter, OspfNetworkType, RouterEvent, RouterInstance, SessionConfig, SessionHandle,
+    DefaultRouter, OspfGraceEvent, OspfNetworkType, RouterEvent, RouterInstance, SessionConfig,
+    SessionHandle,
 };
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfAreaSpec, OspfIfSpec};
@@ -1073,7 +1074,7 @@ impl OspfDaemon {
                 }
             }
             let events = router.poll_events();
-            self.handle_router_events(events, now_ms);
+            self.handle_router_events(events);
         }
         for (ifindex, area, rid) in new_neighbors {
             println!(
@@ -1341,7 +1342,7 @@ impl OspfDaemon {
             }
         }
         let events = router.poll_events();
-        self.handle_router_events(events, now_ms);
+        self.handle_router_events(events);
         // The p2p links to the dead routers are gone from the LSA.
         drop(router);
         let areas: Vec<u32> = self.anchors.keys().copied().collect();
@@ -2024,31 +2025,13 @@ impl OspfDaemon {
     // RFC 3623 graceful restart: helper mode + restarting-recovery
     // -----------------------------------------------------------------
 
-    /// Route polled router events: Grace-LSA events drive the §3
-    /// helper state machines, everything else is logged as before.
-    fn handle_router_events(&mut self, events: Vec<RouterEvent>, now_ms: u64) {
+    /// Route polled router events to the log. Grace-LSA events ride
+    /// their own channel (`drain_ospf_grace_events`, drained in
+    /// pump_gr) so the ticker thread's share of `poll_events()` can
+    /// never swallow one.
+    fn handle_router_events(&mut self, events: Vec<RouterEvent>) {
         for ev in events {
-            match ev {
-                RouterEvent::OspfGraceLsa {
-                    area,
-                    advertising_router,
-                    grace_period_secs,
-                    reason,
-                    interface_addr,
-                    ls_age_secs,
-                    purged,
-                } => self.on_grace_lsa_event(
-                    area,
-                    advertising_router,
-                    grace_period_secs,
-                    reason,
-                    interface_addr,
-                    ls_age_secs,
-                    purged,
-                    now_ms,
-                ),
-                other => log_event(&other),
-            }
+            log_event(&ev);
         }
     }
 
@@ -2056,23 +2039,15 @@ impl OspfDaemon {
     /// it). RFC 3623 §3.1: on a flush (MaxAge) exit helper mode; on a
     /// fresh instance run the entry checks against the neighbour
     /// session and the configured policy.
-    #[allow(clippy::too_many_arguments)]
-    fn on_grace_lsa_event(
-        &mut self,
-        area: u32,
-        advertising_router: u32,
-        grace_period_secs: u32,
-        reason: u8,
-        interface_addr: Option<[u8; 4]>,
-        ls_age_secs: u16,
-        purged: bool,
-        now_ms: u64,
-    ) {
+    fn on_grace_lsa_event(&mut self, ev: &OspfGraceEvent, now_ms: u64) {
+        let area = ev.area;
+        let advertising_router = ev.advertising_router;
         // §3.1 neighbour identity: on broadcast segments the Grace-LSA
         // body's IP interface address identifies the restarting
         // neighbour (its Hellos may not have been heard since); on p2p
         // (and as a fallback) the Advertising Router does.
-        let rid = interface_addr
+        let rid = ev
+            .interface_addr_v4
             .and_then(|a| {
                 let addr = u32::from_be_bytes(a);
                 self.interfaces
@@ -2087,7 +2062,7 @@ impl OspfDaemon {
             })
             .unwrap_or(advertising_router);
         let Some(n) = self.neighbors.get_mut(&(area, rid)) else {
-            if !purged {
+            if !ev.purged {
                 println!(
                     "daemon: ospf grace-LSA from {} (area {}): no session, not helping \
                      (RFC 3623 3.1 (1) — neighbour not Full)",
@@ -2097,7 +2072,7 @@ impl OspfDaemon {
             }
             return;
         };
-        if purged {
+        if ev.purged {
             if let Some(exit) = n.helper.on_flush() {
                 println!(
                     "daemon: ospf neighbor {} (area {}): helper mode exited — {}",
@@ -2110,10 +2085,10 @@ impl OspfDaemon {
             return;
         }
         let body = GraceLsaBody {
-            grace_period: grace_period_secs,
-            reason: GraceReason::from_u8(reason),
-            ipv4_address: interface_addr,
-            ipv6_address: None,
+            grace_period: ev.grace_period_secs,
+            reason: GraceReason::from_u8(ev.reason),
+            ipv4_address: ev.interface_addr_v4,
+            ipv6_address: ev.interface_addr_v6,
         };
         let neighbor_full = n.established;
         let check = HelperCheck {
@@ -2122,7 +2097,7 @@ impl OspfDaemon {
             supported_grace_cap_secs: self.gr_helper_cap,
             self_restarting: self.gr_recovery.contains_key(&area),
             lsa: &body,
-            lsa_age_secs: ls_age_secs,
+            lsa_age_secs: ev.ls_age_secs,
             now_ms,
         };
         let transition = n.helper.on_grace_lsa(check);
@@ -2133,8 +2108,8 @@ impl OspfDaemon {
                      reason {}) — adjacency and LSAs retained",
                     fmt_rid(rid),
                     area_label(area),
-                    grace_period_secs,
-                    match reason {
+                    ev.grace_period_secs,
+                    match ev.reason {
                         1 => "software restart",
                         2 => "software reload/upgrade",
                         3 => "redundant switchover",
@@ -2204,7 +2179,7 @@ impl OspfDaemon {
                 );
                 let events = router.poll_events();
                 drop(router);
-                self.handle_router_events(events, now_ms);
+                self.handle_router_events(events);
             }
             if let Some(iface) = self
                 .interfaces
@@ -2218,10 +2193,24 @@ impl OspfDaemon {
         self.schedule_reoriginate(area, now_ms);
     }
 
-    /// One pump pass of the graceful-restart machines: the §3.2 (3)
-    /// topology-change exits for helpers, the §3.2 (2) grace timeouts,
-    /// and the §2.2 recovery evaluation for the restarting side.
+    /// One pump pass of the graceful-restart machines: the received
+    /// Grace-LSA events (§3.1 helper entry / §3.2 (1) flush exit), the
+    /// §3.2 (3) topology-change exits for helpers, the §3.2 (2) grace
+    /// timeouts, and the §2.2 recovery evaluation for the restarting
+    /// side.
     fn pump_gr(&mut self, now_ms: u64) {
+        // The grace channel first: a flush event must be able to end
+        // helper mode before the topology/timeout machinery below
+        // re-evaluates the same neighbour.
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.lock().unwrap();
+            let grace_events = router.drain_ospf_grace_events();
+            drop(router);
+            for ev in &grace_events {
+                self.on_grace_lsa_event(ev, now_ms);
+            }
+        }
         let mut helper_exits: Vec<(u32, u32, lr_ospf::gr::HelperExit)> = Vec::new();
         let mut gr_recovery_done: Option<lr_ospf::gr::RestartOutcome> = None;
         {

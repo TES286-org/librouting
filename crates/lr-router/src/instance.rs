@@ -36,7 +36,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::connection::{Connection, MemoryConn};
-use crate::event::RouterEvent;
+use crate::event::{OspfGraceEvent, RouterEvent};
 use crate::session::{OspfAreaType, SessionConfig, SessionHandle, SessionKind, SessionSummary};
 
 use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
@@ -298,14 +298,15 @@ fn ospf_area_accepts(kind: &OspfAreaType, lsa: &Lsa) -> bool {
     }
 }
 
-/// Is this LSA a Grace-LSA (RFC 3623 §2.1 / RFC 5187 §2.1): OSPFv2
-/// type-9 (link-local opaque) with Opaque Type 3 in the LS ID's top
-/// octet (RFC 5250 §3.1)? v3 LS types are distinct values with no
-/// opaque-type packing, so v2 is the only relevant form here (the
-/// daemon is v2-only).
+/// Is this LSA a Grace-LSA (RFC 3623 §2.1 / RFC 5187 §2.1)? The OSPFv2
+/// form is a type-9 (link-local opaque) LSA with Opaque Type 3 in the
+/// LS ID's top octet (RFC 5250 §3.1); the OSPFv3 form is the dedicated
+/// link-scoped LS type 0x000b (LSA function code 11 — no opaque-type
+/// packing exists in v3).
 fn is_grace_lsa(lsa: &Lsa) -> bool {
-    lsa.header.ls_type == lr_ospf::lsa::grace::grace_lsa_type()
-        && (lsa.header.link_state_id >> 24) as u8 == lr_ospf::lsa::grace::OPAQUE_TYPE_GRACE
+    lsa.header.ls_type == lr_ospf::lsa::grace::LS_TYPE_GRACE_V3
+        || (lsa.header.ls_type == lr_ospf::lsa::grace::grace_lsa_type()
+            && (lsa.header.link_state_id >> 24) as u8 == lr_ospf::lsa::grace::OPAQUE_TYPE_GRACE)
 }
 
 /// Whether an installed LSA instance is a *content* topology change
@@ -939,13 +940,20 @@ pub struct DefaultRouter {
     ospf_areas: BTreeMap<u32, OspfAreaState>,
     /// OSPF: last Grace-LSA instance seen per (area, advertising
     /// router) — dedup so a retransmitted copy of the same instance
-    /// emits one `RouterEvent::OspfGraceLsa`, not N (RFC 3623 flooding
+    /// emits one [`OspfGraceEvent`], not N (RFC 3623 flooding
     /// is reliable, retransmissions are expected). Instance identity
     /// is the RFC 2328 §13 tuple (sequence, age, checksum, length) —
     /// NOT sequence alone: a flush (MaxAge, empty body) and a fresh
     /// announcement can share a sequence number at second boundaries
     /// of the wallclock-derived lineage and are different LSAs.
     ospf_grace_seen: BTreeMap<(u32, u32), (u32, u16, u16, u16)>,
+    /// OSPF: received Grace-LSA instances (RFC 3623 §3.1 /
+    /// RFC 5187 §2) awaiting the embedder's helper-mode policy — drained
+    /// through [`Self::drain_ospf_grace_events`]. A channel of its own
+    /// (not `pending_events`) so an embedder that delegates event
+    /// consumption to a mirror/ticker thread still sees every grace
+    /// instance.
+    ospf_grace_events: Vec<OspfGraceEvent>,
     /// OSPF router ID (all OSPF sessions must agree on it).
     ospf_router_id: Option<u32>,
     /// RFC 8665 reception: when on, every area recompute projects the
@@ -1120,6 +1128,7 @@ impl Default for DefaultRouter {
             pending_events: Vec::new(),
             ospf_areas: BTreeMap::new(),
             ospf_grace_seen: BTreeMap::new(),
+            ospf_grace_events: Vec::new(),
             ospf_router_id: None,
             ospf_sr_receive: false,
             ospf_srv6_receive: false,
@@ -4185,11 +4194,12 @@ impl RouterInstance for DefaultRouter {
                 // flooded there (§13.3) — stub/NSSA areas refuse them
                 // (RFC 2328 §3.6, RFC 3101 §2.1).
                 //
-                // Grace-LSAs (RFC 3623/5187, OSPFv2 type-9 opaque type 3)
-                // are the exception: link-scoped (RFC 5250 §3.1), never
-                // installed into the area LSDB nor re-flooded — each
-                // changed instance surfaces as a RouterEvent::OspfGraceLsa
-                // for the embedder's helper-mode policy instead.
+                // Grace-LSAs (RFC 3623/5187: OSPFv2 type-9 opaque type 3,
+                // OSPFv3 LS type 0x000b) are the exception: link-scoped
+                // (RFC 5250 §3.1 / RFC 5187 §2.1), never installed into
+                // the area LSDB nor re-flooded — each changed instance
+                // surfaces through drain_ospf_grace_events() for the
+                // embedder's helper-mode policy instead.
                 let Some(SessionState::Ospf { runtime, .. }) = self.sessions.get(&h.0) else {
                     return Ok(()); // session vanished between phases
                 };
@@ -6711,8 +6721,9 @@ impl DefaultRouter {
             .map(|e| e.lsa.clone())
     }
 
-    /// Surface one received Grace-LSA as a [`RouterEvent::OspfGraceLsa`]
-    /// (RFC 3623 §3.1's helper trigger). Deduplicated by sequence
+    /// Surface one received Grace-LSA as an [`OspfGraceEvent`] (the
+    /// RFC 3623 §3.1 / RFC 5187 §2 helper trigger, drained through
+    /// [`Self::drain_ospf_grace_events`]). Deduplicated by sequence
     /// number per (area, advertising router): the restarting router
     /// retransmits its Grace-LSAs until acknowledged, and the helper
     /// decision must run once per instance, not per copy. A MaxAge
@@ -6754,10 +6765,11 @@ impl DefaultRouter {
         // A MaxAge flush does not carry a meaningful body (and a
         // restart-completing router may zero it) — period/reason fall
         // back to the last seen instance's values.
-        let (period, reason, addr, age) = if purged {
+        let (period, reason, addr_v4, addr_v6, age) = if purged {
             (
                 0,
                 GraceReason::Unknown as u8,
+                None,
                 None,
                 lr_ospf::lsdb::MAX_AGE_SECS,
             )
@@ -6767,6 +6779,7 @@ impl DefaultRouter {
                     body.grace_period,
                     body.reason as u8,
                     body.ipv4_address,
+                    body.ipv6_address,
                     lsa.header.ls_age,
                 ),
                 None => {
@@ -6779,15 +6792,28 @@ impl DefaultRouter {
                 }
             }
         };
-        self.pending_events.push(RouterEvent::OspfGraceLsa {
+        self.ospf_grace_events.push(OspfGraceEvent {
             area: area_id,
             advertising_router: adv,
             grace_period_secs: period,
             reason,
-            interface_addr: addr,
+            interface_addr_v4: addr_v4,
+            interface_addr_v6: addr_v6,
             ls_age_secs: age,
             purged,
         });
+    }
+
+    /// Drain the received Grace-LSA events (RFC 3623 §3.1 /
+    /// RFC 5187 §2) accumulated by OSPF LSA processing — one per
+    /// changed instance. Embedders running OSPF graceful-restart
+    /// helper (or restarting-router) policy call this from their poll
+    /// loop; the events never ride `poll_events()` so an embedder
+    /// that delegates general event consumption to a ticker/mirror
+    /// thread (the daemon's shape) still receives every grace
+    /// instance deterministically.
+    pub fn drain_ospf_grace_events(&mut self) -> Vec<OspfGraceEvent> {
+        core::mem::take(&mut self.ospf_grace_events)
     }
 
     /// Push the current DR/BDR election result (RFC 2328 §9.4) for the
@@ -7124,9 +7150,9 @@ mod tests {
     #[test]
     fn ospf_grace_lsa_emits_event_not_installed_not_flooded() {
         // RFC 3623 §3.1: the helper trigger is the received Grace-LSA.
-        // It surfaces as one RouterEvent::OspfGraceLsa; being
-        // link-scoped (RFC 5250 §3.1) it never enters the area LSDB and
-        // is never re-flooded to the area's other sessions.
+        // It surfaces as one OspfGraceEvent; being link-scoped
+        // (RFC 5250 §3.1) it never enters the area LSDB and is never
+        // re-flooded to the area's other sessions.
         let mut r = DefaultRouter::new();
         let rid = RouterId::from_u32(0x01010101);
         let a = r.add_session(SessionConfig::ospfv2(rid, 0)).unwrap();
@@ -7136,32 +7162,18 @@ mod tests {
         let grace_ls_id = lsa.header.link_state_id;
         r.feed_input(a, &ospf_lsu_bytes(peer, 0, vec![lsa]))
             .unwrap();
-        let events = r.poll_events();
-        let grace_events: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, RouterEvent::OspfGraceLsa { .. }))
-            .collect();
+        let _ = r.poll_events();
+        let grace_events = r.drain_ospf_grace_events();
         assert_eq!(grace_events.len(), 1, "one event per instance");
-        match grace_events[0] {
-            RouterEvent::OspfGraceLsa {
-                area,
-                advertising_router,
-                grace_period_secs,
-                reason,
-                interface_addr,
-                ls_age_secs,
-                purged,
-            } => {
-                assert_eq!(*area, 0);
-                assert_eq!(*advertising_router, peer);
-                assert_eq!(*grace_period_secs, 60);
-                assert_eq!(*reason, 1); // software restart
-                assert_eq!(*interface_addr, Some([192, 0, 2, 1]));
-                assert_eq!(*ls_age_secs, 0);
-                assert!(!*purged);
-            }
-            _ => unreachable!("filtered above"),
-        }
+        let ev = &grace_events[0];
+        assert_eq!(ev.area, 0);
+        assert_eq!(ev.advertising_router, peer);
+        assert_eq!(ev.grace_period_secs, 60);
+        assert_eq!(ev.reason, 1); // software restart
+        assert_eq!(ev.interface_addr_v4, Some([192, 0, 2, 1]));
+        assert_eq!(ev.interface_addr_v6, None);
+        assert_eq!(ev.ls_age_secs, 0);
+        assert!(!ev.purged);
         // Not installed into the area LSDB (link-scoped opaque).
         assert!(r
             .ospf_area_lsa(0, lr_ospf::lsa::grace::grace_lsa_type(), grace_ls_id, peer)
@@ -7188,32 +7200,20 @@ mod tests {
         let seq = lsa1.header.ls_sequence_number;
         r.feed_input(a, &ospf_lsu_bytes(peer, 0, vec![lsa1]))
             .unwrap();
-        assert_eq!(
-            r.poll_events()
-                .iter()
-                .filter(|e| matches!(e, RouterEvent::OspfGraceLsa { .. }))
-                .count(),
-            1
-        );
+        let _ = r.poll_events();
+        assert_eq!(r.drain_ospf_grace_events().len(), 1);
         // The retransmitted copy (identical sequence).
         let copy = grace_lsa(peer, 60, Some(seq.wrapping_sub(1)));
         r.feed_input(a, &ospf_lsu_bytes(peer, 0, vec![copy]))
             .unwrap();
-        assert!(r
-            .poll_events()
-            .iter()
-            .all(|e| !matches!(e, RouterEvent::OspfGraceLsa { .. })));
+        let _ = r.poll_events();
+        assert!(r.drain_ospf_grace_events().is_empty());
         // A *newer* instance (the restart was extended) emits again.
         let newer = grace_lsa(peer, 120, Some(seq));
         r.feed_input(a, &ospf_lsu_bytes(peer, 0, vec![newer]))
             .unwrap();
-        assert_eq!(
-            r.poll_events()
-                .iter()
-                .filter(|e| matches!(e, RouterEvent::OspfGraceLsa { .. }))
-                .count(),
-            1
-        );
+        let _ = r.poll_events();
+        assert_eq!(r.drain_ospf_grace_events().len(), 1);
     }
 
     #[test]
@@ -7230,29 +7230,77 @@ mod tests {
         r.feed_input(a, &ospf_lsu_bytes(peer, 0, vec![lsa1]))
             .unwrap();
         let _ = r.poll_events();
+        let _ = r.drain_ospf_grace_events();
         let mut flush = grace_lsa(peer, 0, Some(seq));
         flush.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
         flush.body.clear();
         flush.finalize();
         r.feed_input(a, &ospf_lsu_bytes(peer, 0, vec![flush]))
             .unwrap();
-        let events = r.poll_events();
-        match events
-            .iter()
-            .find(|e| matches!(e, RouterEvent::OspfGraceLsa { .. }))
-        {
-            Some(RouterEvent::OspfGraceLsa {
-                purged,
-                ls_age_secs,
-                advertising_router,
-                ..
-            }) => {
-                assert!(*purged);
-                assert_eq!(*ls_age_secs, lr_ospf::lsdb::MAX_AGE_SECS);
-                assert_eq!(*advertising_router, peer);
-            }
-            _ => panic!("expected a purged grace event"),
-        }
+        let _ = r.poll_events();
+        let grace_events = r.drain_ospf_grace_events();
+        let Some(ev) = grace_events.iter().find(|e| e.purged) else {
+            panic!("expected a purged grace event");
+        };
+        assert_eq!(ev.ls_age_secs, lr_ospf::lsdb::MAX_AGE_SECS);
+        assert_eq!(ev.advertising_router, peer);
+    }
+
+    #[test]
+    fn ospfv3_grace_lsa_emits_event_not_installed() {
+        // RFC 5187 §2: the v3 Grace-LSA (LS type 0x000b, Link State ID
+        // = Interface ID) surfaces as an OspfGraceEvent like the v2
+        // form — link-scoped, never installed, never re-flooded.
+        let mut r = DefaultRouter::new();
+        let rid = RouterId::from_u32(0x01010101);
+        let a = r.add_session(SessionConfig::ospfv3(rid, 0)).unwrap();
+        let peer = 0x02020202u32;
+        let body = lr_ospf::lsa::grace::GraceLsaBody {
+            grace_period: 90,
+            reason: lr_ospf::lsa::grace::GraceReason::SoftwareReload,
+            ipv4_address: None,
+            ipv6_address: Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2a]),
+        };
+        let lsa = lr_ospf::lsa::grace::originate_grace_lsa_v3(peer, 5, &body, None)
+            .expect("v3 grace LSA");
+        r.feed_input(a, &ospf3_lsu_bytes(peer, 0, vec![lsa]))
+            .unwrap();
+        let _ = r.poll_events();
+        let grace_events = r.drain_ospf_grace_events();
+        assert_eq!(grace_events.len(), 1, "one event per instance");
+        let ev = &grace_events[0];
+        assert_eq!(ev.area, 0);
+        assert_eq!(ev.advertising_router, peer);
+        assert_eq!(ev.grace_period_secs, 90);
+        assert_eq!(ev.reason, 2); // software reload
+        assert_eq!(ev.interface_addr_v4, None);
+        assert_eq!(
+            ev.interface_addr_v6,
+            Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2a])
+        );
+        assert_eq!(ev.ls_age_secs, 0);
+        assert!(!ev.purged);
+        // Link-scoped 0x000b: not in the area LSDB.
+        assert!(r
+            .ospf_area_lsa(0, lr_ospf::lsa::grace::LS_TYPE_GRACE_V3, 5, peer)
+            .is_none());
+        // The MaxAge flush form (restart completed) purges.
+        let flush = lr_ospf::lsa::grace::originate_grace_lsa_v3(
+            peer,
+            5,
+            &body,
+            Some(0x8000_005a), // strictly newer than the fresh instance
+        )
+        .expect("flush instance");
+        let mut flush = flush;
+        flush.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+        flush.finalize();
+        r.feed_input(a, &ospf3_lsu_bytes(peer, 0, vec![flush]))
+            .unwrap();
+        let _ = r.poll_events();
+        let grace_events = r.drain_ospf_grace_events();
+        assert_eq!(grace_events.len(), 1);
+        assert!(grace_events[0].purged);
     }
 
     #[test]

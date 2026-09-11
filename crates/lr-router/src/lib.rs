@@ -11,7 +11,7 @@ pub mod instance;
 pub mod redistribution;
 pub mod session;
 
-pub use event::{EventSink, RouterEvent};
+pub use event::{EventSink, OspfGraceEvent, RouterEvent};
 pub use instance::{DefaultRouter, RouterInstance};
 pub use redistribution::{MetricPolicy, RedistributionPipe};
 pub use session::{
