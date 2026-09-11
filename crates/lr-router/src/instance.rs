@@ -912,6 +912,12 @@ pub struct DefaultRouter {
     /// Prefix-SID labels (RFC 8660 head-end) to the routes they map
     /// onto. Off by default — fail-closed like every behavioural flag.
     ospf_sr_receive: bool,
+    /// RFC 9513 §5 reception: when on, every OSPFv3 area recompute
+    /// installs the SRv6 locators of supported algorithms as IPv6
+    /// forwarding entries (the Srv6Database exposes the End SIDs for
+    /// embedders). Off by default — fail-closed like every behavioural
+    /// flag.
+    ospf_srv6_receive: bool,
     /// OSPF route table currently published to Loc-RIB: the merged view
     /// across all areas, diffed on every recompute.
     ospf_published: BTreeMap<RouteKey, Route>,
@@ -1061,6 +1067,7 @@ impl Default for DefaultRouter {
             ospf_grace_seen: BTreeMap::new(),
             ospf_router_id: None,
             ospf_sr_receive: false,
+            ospf_srv6_receive: false,
             ospf_published: BTreeMap::new(),
             ospf_externals: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
@@ -4509,15 +4516,32 @@ impl DefaultRouter {
         for (area_id, area) in &self.ospf_areas {
             if area.protocol == Protocol::Ospfv3 {
                 // OSPFv3 area (RFC 5340): the intra-area calculation
-                // runs over the v3 LSDB; slice-1 scope covers intra-area
-                // prefixes (inter-area summaries and externals ride the
-                // v3 0x2003/0x2004/0x4005 LSAs, a later slice).
+                // runs over the v3 LSDB — intra-area prefixes plus,
+                // with `ospf_srv6_receive` on, the RFC 9513 §5 SRv6
+                // locators (inter-area summaries and externals ride
+                // the v3 0x2003/0x2004/0x4005 LSAs, a later slice).
                 let spf3 = spf::run_spf_v3(&area.lsdb, router_id);
                 let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
                     table
                         .entry(r.prefix)
                         .or_insert_with(|| OspfTableEntry::intra_v3(r.metric, r.next_hop));
+                }
+                if self.ospf_srv6_receive {
+                    // RFC 9513 §5: locators of supported algorithms
+                    // install as forwarding entries. A prefix
+                    // reachability advertisement covering the same
+                    // prefix (the Intra-Area-Prefix routes above)
+                    // MUST be preferred (§5), so this only fills the
+                    // gaps the IAP routes left.
+                    for loc in &spf3.locators {
+                        if !Self::ospf_srv6_algorithm_supported(loc.algorithm) {
+                            continue;
+                        }
+                        table
+                            .entry(loc.prefix)
+                            .or_insert_with(|| OspfTableEntry::intra_v3(loc.metric, loc.next_hop));
+                    }
                 }
                 for (prefix, entry) in table {
                     let better = match global.get(&prefix) {
@@ -5809,6 +5833,43 @@ impl DefaultRouter {
     /// [`Self::set_ospf_sr_receive`]).
     pub fn ospf_sr_receive(&self) -> bool {
         self.ospf_sr_receive
+    }
+
+    /// Toggle RFC 9513 §5 SRv6 reception: when on, every OSPFv3 area
+    /// recompute installs the intra-area SRv6 locators of supported
+    /// algorithms as IPv6 forwarding entries (§5 — a locator route's
+    /// metric is the advertising router's SPF distance). Off by
+    /// default; a router that never enables this stays byte-identical
+    /// to a pre-SRv6 one. Set once at startup, before sessions feed
+    /// the router.
+    pub fn set_ospf_srv6_receive(&mut self, on: bool) {
+        self.ospf_srv6_receive = on;
+    }
+
+    /// Whether RFC 9513 SRv6 reception is enabled (see
+    /// [`Self::set_ospf_srv6_receive`]).
+    pub fn ospf_srv6_receive(&self) -> bool {
+        self.ospf_srv6_receive
+    }
+
+    /// The IGP algorithms this router supports for SRv6 locator
+    /// installation (RFC 9513 §5: locators "associated with algorithms
+    /// supported by the receiving OSPFv3 router" install). Algorithm 0
+    /// (SPF) only — flexible algorithm support is future work.
+    fn ospf_srv6_algorithm_supported(algorithm: u8) -> bool {
+        algorithm == 0
+    }
+
+    /// Project every area's SRv6 database (RFC 9513): capabilities,
+    /// algorithms, MSDs, locators and End SIDs per advertising router.
+    /// Area ID → [`lr_ospf::srv6db::Srv6Database`]; empty map when no
+    /// OSPFv3 areas are attached. The runtime API surfaces this for
+    /// its SRv6 status; embedders get the same read-only view.
+    pub fn ospf_srv6_databases(&self) -> BTreeMap<u32, lr_ospf::srv6db::Srv6Database> {
+        self.ospf_areas
+            .iter()
+            .map(|(id, area)| (*id, lr_ospf::srv6db::Srv6Database::from_lsdb(&area.lsdb)))
+            .collect()
     }
 
     /// Project every area's SR database (RFC 8665): SRGBs, Prefix-SID
@@ -9065,6 +9126,397 @@ mod tests {
         assert_eq!(srdb.prefix_ranges[0].range.range_size, 4);
         assert_eq!(srdb.prefix_ranges[0].sid.sid, 500);
         assert!(srdb.prefixes.is_empty()); // range TLVs are not direct mappings
+    }
+
+    /// RFC 9513 §5 reception over a live v3 exchange: with
+    /// `ospf_srv6_receive` on, a neighbor's SRv6 Locator LSA publishes
+    /// the locator as a Protocol::Ospfv3 IPv6 route (the router's SPF
+    /// distance, its link-local first hop), and the SRv6 database
+    /// exposes the node's capabilities and End SIDs.
+    #[test]
+    fn ospfv3_srv6_locator_publishes_with_receive_on() {
+        let mut r = DefaultRouter::new();
+        r.set_ospf_srv6_receive(true);
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::lsa::srv6::{
+            locator_route_type, originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa,
+            Srv6EndSidSubTlv, Srv6LocatorTlv, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
+        };
+        use lr_ospf::lsa::v3::{
+            originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        let router_lsa = originate_v3_router_lsa(
+            r2,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 3,
+                neighbor_interface_id: 5,
+                neighbor_router_id: 0x0a00_0001,
+            }],
+            None,
+        )
+        .unwrap();
+        let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        // §2: an SRv6-enabled router MUST advertise the SRv6
+        // Capabilities TLV on its Router Information LSA.
+        let ri_lsa = originate_v3_srv6_ri_lsa(r2, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap();
+        // r2's locator 2001:db8:1::/48 with one End SID.
+        let mut prefix_bytes = [0u8; 16];
+        prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        let mut end_sid = [0u8; 16];
+        end_sid[..6].copy_from_slice(&prefix_bytes[..6]);
+        end_sid[15] = 1;
+        let locator_tlv = Srv6LocatorTlv {
+            route_type: locator_route_type::INTRA_AREA,
+            algorithm: 0,
+            locator_len: 48,
+            options: PREFIX_OPT_AC,
+            metric: 0,
+            prefix: prefix_bytes,
+            end_sids: vec![Srv6EndSidSubTlv {
+                flags: 0,
+                behavior: 1, // End
+                sid: end_sid,
+                structure: None,
+            }],
+            fwd_addr: None,
+            route_tag: None,
+        };
+        let locator_lsa =
+            originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&locator_tlv), None).unwrap();
+        // The root's own Router-LSA (the daemon originates it on
+        // adjacency-up; the SPF needs the outbound edge).
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(
+            r2,
+            0,
+            vec![router_lsa, link_lsa, ri_lsa, locator_lsa, own_lsa],
+        );
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let _ = r.drain_output(h);
+
+        let prefix = Prefix::new_v6(prefix_bytes, 48);
+        let got = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("locator published");
+        assert_eq!(got.protocol, Protocol::Ospfv3);
+        assert_eq!(got.key.family, NlriFamily::IPV6_UNICAST);
+        assert_eq!(got.next_hop, Some(IpAddr::V6(ll2)));
+        assert_eq!(got.preference.metric, 10, "the router's SPF distance");
+
+        // The SRv6 database view: r2 is SRv6-enabled with its End SID
+        // under the locator.
+        let db = r.ospf_srv6_databases().remove(&0).expect("area 0 srv6 db");
+        let node = db.node(r2).expect("r2 projected");
+        assert!(node.is_srv6_enabled());
+        assert_eq!(node.locators.len(), 1);
+        assert_eq!(node.locators[0].end_sids.len(), 1);
+        assert_eq!(node.locators[0].end_sids[0].behavior, 1);
+    }
+
+    /// Fail-closed default: without `ospf_srv6_receive` the identical
+    /// exchange publishes no locator route — the router is
+    /// byte-identical to a pre-SRv6 one. (§5 still holds for the
+    /// receiver side: the SIDs are never directly routable, so nothing
+    /// else changes.)
+    #[test]
+    fn ospfv3_srv6_locator_inert_without_receive() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::lsa::srv6::{
+            locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv,
+        };
+        use lr_ospf::lsa::v3::{
+            originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        let router_lsa = originate_v3_router_lsa(
+            r2,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 3,
+                neighbor_interface_id: 5,
+                neighbor_router_id: 0x0a00_0001,
+            }],
+            None,
+        )
+        .unwrap();
+        let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        let mut prefix_bytes = [0u8; 16];
+        prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        let tlv = Srv6LocatorTlv {
+            route_type: locator_route_type::INTRA_AREA,
+            algorithm: 0,
+            locator_len: 48,
+            options: 0,
+            metric: 0,
+            prefix: prefix_bytes,
+            end_sids: vec![],
+            fwd_addr: None,
+            route_tag: None,
+        };
+        let locator_lsa =
+            originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap();
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(r2, 0, vec![router_lsa, link_lsa, locator_lsa, own_lsa]);
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let _ = r.drain_output(h);
+
+        let prefix = Prefix::new_v6(prefix_bytes, 48);
+        assert!(
+            !r.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "no locator route without the flag"
+        );
+    }
+
+    /// §5 preference: a prefix reachability advertisement covering the
+    /// same prefix wins over the locator advertisement — r3's
+    /// Intra-Area-Prefix route (metric 20, through r2-r3) beats r2's
+    /// locator (metric 10) for the same /48, matching the forwarding a
+    /// non-SRv6 router installs from the IAP route alone.
+    #[test]
+    fn ospfv3_srv6_iap_prefix_beats_locator_for_the_same_prefix() {
+        let mut r = DefaultRouter::new();
+        r.set_ospf_srv6_receive(true);
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let (r2, r3) = (0x0a00_0002u32, 0x0a00_0003u32);
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::lsa::srv6::{
+            locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv,
+        };
+        use lr_ospf::lsa::v3::{
+            originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_router_lsa,
+            V3Prefix, V3RouterLink, LINK_TYPE_POINTTOPOINT, LS_TYPE_ROUTER, ROUTER_BIT_V6,
+        };
+        let link = |metric: u16, ifid: u32, nifid: u32, nrid: u32| V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+        };
+        let ll = |host: u8| {
+            let mut a = [0u8; 16];
+            a[0] = 0xfe;
+            a[1] = 0x80;
+            a[15] = host;
+            a
+        };
+        // r1 - 10 - r2 - 10 - r3.
+        let lsas = vec![
+            originate_v3_router_lsa(
+                0x0a00_0001,
+                ROUTER_BIT_V6,
+                0x13,
+                &[link(10, 5, 3, r2)],
+                None,
+            )
+            .unwrap(),
+            originate_v3_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                &[link(10, 3, 5, 0x0a00_0001), link(10, 6, 7, r3)],
+                None,
+            )
+            .unwrap(),
+            originate_v3_router_lsa(r3, ROUTER_BIT_V6, 0x13, &[link(10, 7, 6, r2)], None).unwrap(),
+            originate_v3_link_lsa(0x0a00_0001, 5, 1, 0x13, ll(1), vec![], None).unwrap(),
+            originate_v3_link_lsa(r2, 3, 1, 0x13, ll(2), vec![], None).unwrap(),
+            originate_v3_link_lsa(r2, 6, 1, 0x13, ll(22), vec![], None).unwrap(),
+            originate_v3_link_lsa(r3, 7, 1, 0x13, ll(3), vec![], None).unwrap(),
+        ];
+        // r2's locator 2001:db8:1::/48 (metric 10 from r1)...
+        let mut prefix_bytes = [0u8; 16];
+        prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        let tlv = Srv6LocatorTlv {
+            route_type: locator_route_type::INTRA_AREA,
+            algorithm: 0,
+            locator_len: 48,
+            options: 0,
+            metric: 0,
+            prefix: prefix_bytes,
+            end_sids: vec![],
+            fwd_addr: None,
+            route_tag: None,
+        };
+        let locator_lsa =
+            originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap();
+        // ...and r3's Intra-Area-Prefix-LSA attaching the SAME /48 to
+        // its Router-LSA (metric 20 from r1).
+        let iap = originate_v3_intra_area_prefix_lsa(
+            r3,
+            1,
+            LS_TYPE_ROUTER,
+            0,
+            r3,
+            vec![V3Prefix {
+                prefix_len: 48,
+                options: 0,
+                metric: 0,
+                addr: prefix_bytes,
+            }],
+            None,
+        )
+        .unwrap();
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[link(10, 5, 3, r2)],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(r2, 0, lsas)
+            .into_iter()
+            .chain(ospf3_lsu_bytes(r3, 0, vec![iap]))
+            .chain(ospf3_lsu_bytes(r2, 0, vec![locator_lsa, own_lsa]))
+            .collect::<Vec<u8>>();
+        r.feed_input(h, &bytes).expect("feed v3 LSUs");
+        let _ = r.drain_output(h);
+
+        let prefix = Prefix::new_v6(prefix_bytes, 48);
+        let got = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("the prefix is installed");
+        assert_eq!(
+            got.preference.metric, 20,
+            "the IAP advertisement wins over the metric-10 locator (§5)"
+        );
+    }
+
+    /// §5 algorithm gate: a locator bound to an algorithm the receiver
+    /// does not support (anything beyond SPF, algorithm 0) never
+    /// installs.
+    #[test]
+    fn ospfv3_srv6_unsupported_algorithm_not_installed() {
+        let mut r = DefaultRouter::new();
+        r.set_ospf_srv6_receive(true);
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::lsa::srv6::{
+            locator_route_type, originate_v3_srv6_locator_lsa, Srv6LocatorTlv,
+        };
+        use lr_ospf::lsa::v3::{
+            originate_v3_link_lsa, originate_v3_router_lsa, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        let router_lsa = originate_v3_router_lsa(
+            r2,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 3,
+                neighbor_interface_id: 5,
+                neighbor_router_id: 0x0a00_0001,
+            }],
+            None,
+        )
+        .unwrap();
+        let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        let mut prefix_bytes = [0u8; 16];
+        prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+        let tlv = Srv6LocatorTlv {
+            route_type: locator_route_type::INTRA_AREA,
+            algorithm: 128, // a private/flex-algo value — unsupported
+            locator_len: 48,
+            options: 0,
+            metric: 0,
+            prefix: prefix_bytes,
+            end_sids: vec![],
+            fwd_addr: None,
+            route_tag: None,
+        };
+        let locator_lsa =
+            originate_v3_srv6_locator_lsa(r2, 0, std::slice::from_ref(&tlv), None).unwrap();
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap();
+        let bytes = ospf3_lsu_bytes(r2, 0, vec![router_lsa, link_lsa, locator_lsa, own_lsa]);
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let _ = r.drain_output(h);
+
+        let prefix = Prefix::new_v6(prefix_bytes, 48);
+        assert!(
+            !r.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "an unsupported-algorithm locator never installs"
+        );
     }
 }
 
