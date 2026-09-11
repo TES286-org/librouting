@@ -964,6 +964,10 @@ pub struct SpfResultV3 {
     /// Routers one hop from the root (direct p2p adjacency, or routers
     /// on a directly attached transit network).
     pub adjacent_routers: BTreeSet<u32>,
+    /// The 24-bit options each router's Router-LSA advertises (§A.2) —
+    /// the value an ABR mirrors into a 0x2004 inter-area-router-LSA
+    /// describing that router (§4.4.3.5).
+    pub router_options: BTreeMap<u32, u32>,
     /// Intra-area prefixes from Intra-Area-Prefix-LSAs (§4.4.3.5),
     /// deduplicated per prefix keeping the lowest metric.
     pub routes: Vec<SpfRoute>,
@@ -1001,6 +1005,9 @@ struct V3Topology {
     /// the first instance in database order wins (fragmented
     /// Router-LSAs — multiple per router — are not split apart here).
     router_lsas: BTreeMap<u32, V3RouterLsaBody>,
+    /// The 24-bit options each Router-LSA advertises (§A.2) — what a
+    /// 0x2004 originator mirrors for that router (§4.4.3.5).
+    router_options: BTreeMap<u32, u32>,
     /// Network-LSAs (0x2002) keyed (DR Router ID, DR Interface ID).
     network_lsas: BTreeMap<(u32, u32), V3NetworkLsaBody>,
     /// Link-LSAs (0x0008) keyed (Advertising Router, Interface ID) →
@@ -1016,6 +1023,7 @@ impl V3Topology {
     fn from_lsdb(lsdb: &Lsdb) -> Self {
         let mut t = Self {
             router_lsas: BTreeMap::new(),
+            router_options: BTreeMap::new(),
             network_lsas: BTreeMap::new(),
             link_locals: BTreeMap::new(),
             intra_prefixes: Vec::new(),
@@ -1024,6 +1032,9 @@ impl V3Topology {
             match key.ls_type {
                 x if x == LS_TYPE_ROUTER => {
                     if let Some(body) = V3RouterLsaBody::decode(&entry.lsa.body) {
+                        t.router_options
+                            .entry(key.advertising_router)
+                            .or_insert(body.options);
                         t.router_lsas.entry(key.advertising_router).or_insert(body);
                     }
                 }
@@ -1121,7 +1132,10 @@ impl V3Topology {
 /// decides whether to keep it.
 pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
     let topo = V3Topology::from_lsdb(lsdb);
-    let mut result = SpfResultV3::default();
+    let mut result = SpfResultV3 {
+        router_options: topo.router_options.clone(),
+        ..SpfResultV3::default()
+    };
     let mut parents: BTreeMap<V3VertexId, V3VertexId> = BTreeMap::new();
     let root_id = V3VertexId::Router(root);
     // Distances keyed by the v3 vertex id.

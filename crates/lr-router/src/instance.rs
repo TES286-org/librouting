@@ -53,11 +53,15 @@ use lr_bgp::best_path::{BestPath, BestPathConfig};
 use lr_bgp::error::{BgpCeaseSubcode, BgpErrorCode};
 use lr_bgp::path::{AttrType, Community, PathAttrFlags, PathAttribute, PathAttributes};
 use lr_bgp::{BgpAction, BgpEvent, BgpPeer, BgpState, PeerConfig as BgpPeerConfig};
-use lr_ospf::abr::{flush_summary_lsa, originate_summary_lsa, SummaryDestination};
+use lr_ospf::abr::{
+    flush_summary_lsa, originate_summary_lsa, originate_v3_inter_area_prefix_lsa,
+    SummaryDestination,
+};
 use lr_ospf::external::{
     external_routes, flush_external_lsa, originate_external_lsa, originate_summary_asbr_lsa,
     ExternalDestination, ExternalMetricType,
 };
+use lr_ospf::lsa::v3::originate_v3_inter_area_router_lsa;
 use lr_ospf::lsa::{prefix_len_to_mask, Lsa, LsaTypeV2};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
@@ -939,6 +943,11 @@ pub struct DefaultRouter {
     /// link-state ID (the masked network). Re-originated into every
     /// attached OSPFv2 area so areas that (re)attach later catch up.
     ospf_externals: BTreeMap<u32, ExternalDestination>,
+    /// Stable 0x2003 inter-area-prefix LS IDs per (area, prefix) — the
+    /// v3 LS ID carries no addressing semantics (§4.4.3.4), so the ABR
+    /// must keep a stable prefix → LS ID mapping across
+    /// re-origination (FRR reuses the previous instance's LS ID).
+    ospf_v3_summary_lsids: BTreeMap<u32, BTreeMap<Prefix, u32>>,
     /// Type-7 → type-5 translations this router currently maintains as
     /// an elected NSSA border router (RFC 3101 §3.2), keyed by the
     /// source type-7 (NSSA area ID, link-state ID, advertising router).
@@ -1083,6 +1092,7 @@ impl Default for DefaultRouter {
             ospf_srv6_receive: false,
             ospf_published: BTreeMap::new(),
             ospf_externals: BTreeMap::new(),
+            ospf_v3_summary_lsids: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
             ospf_vlinks: BTreeMap::new(),
             mrai: BTreeMap::new(),
@@ -4418,18 +4428,25 @@ impl DefaultRouter {
         }
     }
 
+    /// Whether this router currently acts as an OSPF area border router
+    /// for `protocol`: attached to the backbone plus at least one other
+    /// area, all areas running that version (RFC 2328 §12.4.3 for v2;
+    /// RFC 5340 §4.4.3.4 for v3). Stub/NSSA summaries, defaults,
+    /// type-7 → type-5 translation and the v3 inter-area/ASBR
+    /// summaries all hinge on border-router status.
+    fn ospf_is_abr_for(&self, protocol: Protocol) -> bool {
+        self.ospf_router_id.is_some()
+            && self.ospf_areas.len() >= 2
+            && self.ospf_areas.contains_key(&0)
+            && self.ospf_areas.values().all(|a| a.protocol == protocol)
+    }
+
     /// Whether this router currently acts as an OSPF area border router:
     /// attached to the backbone plus at least one other area, all v2
     /// (RFC 2328 §12.4.3). Stub/NSSA summaries, defaults and type-7 →
     /// type-5 translation all hinge on border-router status.
     fn ospf_is_abr(&self) -> bool {
-        self.ospf_router_id.is_some()
-            && self.ospf_areas.len() >= 2
-            && self.ospf_areas.contains_key(&0)
-            && self
-                .ospf_areas
-                .values()
-                .all(|a| a.protocol == Protocol::Ospfv2)
+        self.ospf_is_abr_for(Protocol::Ospfv2)
     }
 
     /// Recompute the OSPF route table after any area LSDB changed:
@@ -4771,49 +4788,48 @@ impl DefaultRouter {
         delta
     }
 
-    /// RFC 2328 §12.4.3: originate and flush type-3 summary-LSAs so each
-    /// area learns what is reachable outside it. Rules enforced here:
-    ///
-    /// - ABRs need a backbone attachment (`area 0`) and v2-only areas;
-    ///   otherwise every self-originated summary is flushed (nothing can
-    ///   justify it any more — e.g. after the last session of a remote
-    ///   area went away).
-    /// - Into the backbone: the intra-area networks of each non-backbone
-    ///   area. Into a non-backbone area: backbone intra nets, inter-area
-    ///   routes other ABRs summarized into the backbone, and the intra
-    ///   nets of the remaining non-backbone areas (the mirror of what the
-    ///   router itself injects into the backbone). Routes whose only
-    ///   justification is the router's *own* backbone summary are never
-    ///   sources — that path is exactly the loop a stale summary would
-    ///   otherwise take back into its area of origin.
-    /// - A target area never receives summaries for its own intra-area
-    ///   networks (loop guard, §12.4.3/§16.2).
-    /// - Stub/NSSA targets receive the border-router type-3 default
-    ///   (`0.0.0.0/0` at the configured metric); `no_summary` targets
-    ///   receive the default *only* (RFC 2328 §3.6, RFC 3101 §2.7 —
-    ///   including NSSAs, which switch to a type-3 default when summary
-    ///   import is suppressed).
-    ///
-    /// Originated/flushed LSAs are installed into the target area LSDB and
-    /// queued for flooding on that area's sessions. Returns whether any
-    /// LSDB changed.
+    /// ABR summary origination for both protocol planes (RFC 2328
+    /// §12.4.3 / RFC 5340 §4.4.3.4): each version's ABR machinery runs
+    /// when every attached area speaks it, and its self-originated
+    /// summaries are flushed when it does not (fail-closed — e.g. a
+    /// mixed v2/v3 router acts as an ABR for neither version).
     fn ospf_summarize_areas(&mut self) -> bool {
         let Some(router_id) = self.ospf_router_id else {
             return false;
         };
-        let abr = self.ospf_is_abr();
-        if !abr {
-            // Not a functioning ABR: flush every self-originated summary
-            // (type-3) and summary-ASBR (type-4) LSA.
-            let mut changed = self.ospf_flush_self_lsa_types(router_id, |key| {
+        let mut changed = false;
+        // OSPFv2 plane: type-3 summaries, type-4 ASBR summaries, the
+        // stub/NSSA defaults.
+        if self.ospf_is_abr() {
+            changed |= self.ospf_summarize_areas_v2(router_id);
+        } else {
+            // Not a functioning v2 ABR: flush every self-originated
+            // summary (type-3) and summary-ASBR (type-4) LSA ...
+            changed |= self.ospf_flush_self_lsa_types(router_id, |key| {
                 key.ls_type == LsaTypeV2::SummaryIpLsa as u16
                     || key.ls_type == LsaTypeV2::SummaryAsbrLsa as u16
             });
             // ... and the ABR-injected NSSA defaults lose their
             // justification too (RFC 3101 §2.4).
             changed |= self.ospf_nssa_defaults();
-            return changed;
         }
+        // OSPFv3 plane: 0x2003 inter-area-prefix and 0x2004
+        // inter-area-router summaries (RFC 5340 §4.4.3.4/§4.4.3.5).
+        if self.ospf_is_abr_for(Protocol::Ospfv3) {
+            changed |= self.ospf_summarize_areas_v3(router_id);
+        } else {
+            changed |= self.ospf_flush_self_lsa_types(router_id, |key| {
+                key.ls_type == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX
+                    || key.ls_type == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
+            });
+            self.ospf_v3_summary_lsids.clear();
+        }
+        changed
+    }
+
+    /// OSPFv2 ABR summary origination (RFC 2328 §12.4.3). See
+    /// [`Self::ospf_summarize_areas`] for the dispatch rules.
+    fn ospf_summarize_areas_v2(&mut self, router_id: u32) -> bool {
         // 1. Fresh per-area SPF results and route tables.
         let spf_results: BTreeMap<u32, spf::SpfResult> = self
             .ospf_areas
@@ -5001,6 +5017,408 @@ impl DefaultRouter {
         // §12.4.3: summary-ASBR (type-4) origination for ASBRs that this
         // ABR can reach but the target area cannot (see the helper).
         self.ospf_summarize_asbrs(router_id, &spf_results) | changed | nssa_default_changed
+    }
+
+    /// OSPFv3 ABR summary origination (RFC 5340 §4.4.3.4 and
+    /// §4.4.3.5) — the v3 mirror of [`Self::ospf_summarize_areas_v2`]:
+    ///
+    /// - 0x2003 inter-area-prefix-LSAs follow the v2 type-3 source
+    ///   rules (into the backbone: every non-backbone area's
+    ///   intra-area prefixes; into a non-backbone area: the backbone's
+    ///   intra-area prefixes plus the inter-area routes other ABRs
+    ///   summarized there; the target's own intra-area prefixes are
+    ///   never summarized back; stubby targets receive the configured
+    ///   default instead — a zero-length prefix, the v3 default form).
+    /// - 0x2004 inter-area-router-LSAs advertise ASBRs (the
+    ///   advertisers of 0x4005 LSAs) that are reachable through other
+    ///   areas but not intra-area in the target, at the ABR's own cost
+    ///   — LS ID = the destination router ID.
+    ///
+    /// The 0x2003 LS ID carries no addressing semantics (§4.4.3.4), so
+    /// each prefix keeps a stable per-area LS ID: the previous
+    /// instance's LS ID is reused when one exists, else the next free
+    /// ID is allocated (FRR `ospf6_new_ls_id` parity).
+    fn ospf_summarize_areas_v3(&mut self, router_id: u32) -> bool {
+        // 1. Fresh per-area v3 SPF results and route tables (the same
+        //    merge the recompute uses: intra + inter, externals
+        //    excluded from the sources).
+        let spf_results: BTreeMap<u32, spf::SpfResultV3> = self
+            .ospf_areas
+            .iter()
+            .filter(|(_, area)| area.protocol == Protocol::Ospfv3)
+            .map(|(id, area)| (*id, spf::run_spf_v3(&area.lsdb, router_id)))
+            .collect();
+        let tables: BTreeMap<u32, BTreeMap<Prefix, OspfTableEntry>> = self
+            .ospf_areas
+            .iter()
+            .filter(|(_, area)| area.protocol == Protocol::Ospfv3)
+            .map(|(id, area)| {
+                let spf3 = spf_results.get(id).expect("v3 spf result");
+                let mut t: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
+                for r in &spf3.routes {
+                    t.entry(r.prefix)
+                        .or_insert_with(|| OspfTableEntry::intra_v3(r.metric, r.next_hop));
+                }
+                for r in spf::summary_routes_v3(&area.lsdb, spf3) {
+                    if area.kind.no_summary() && r.prefix.prefix_len != 0 {
+                        continue;
+                    }
+                    t.entry(r.prefix).or_insert_with(|| OspfTableEntry {
+                        metric: r.metric,
+                        kind: OspfKind::Inter {
+                            border_router: r.border_router.unwrap_or(0),
+                        },
+                        label: None,
+                        label_nh: None,
+                        next_hop: r.next_hop,
+                    });
+                }
+                (*id, t)
+            })
+            .collect();
+        let backbone = tables.get(&0).cloned().unwrap_or_default();
+
+        let mut changed = false;
+        let mut floods: Vec<(u32, Vec<Lsa>)> = Vec::new();
+        let areas: Vec<u32> = self.ospf_areas.keys().copied().collect();
+        for &target in &areas {
+            let Some(kind) = self
+                .ospf_areas
+                .get(&target)
+                .filter(|a| a.protocol == Protocol::Ospfv3)
+                .map(|a| a.kind)
+            else {
+                continue;
+            };
+            // Sources: what the target should learn about the outside.
+            let mut sources: BTreeMap<Prefix, u64> = if target == 0 {
+                let mut s = BTreeMap::new();
+                for (id, t) in &tables {
+                    if *id == 0 {
+                        continue;
+                    }
+                    for (p, e) in t {
+                        if e.is_intra() {
+                            s.entry(*p)
+                                .and_modify(|m: &mut u64| *m = (*m).min(e.metric))
+                                .or_insert(e.metric);
+                        }
+                    }
+                }
+                s
+            } else if kind.no_summary() {
+                BTreeMap::new()
+            } else {
+                let mut s = BTreeMap::new();
+                for (p, e) in &backbone {
+                    if e.is_intra() {
+                        s.insert(*p, e.metric);
+                    }
+                }
+                for (p, e) in &backbone {
+                    if !e.is_intra()
+                        && !e.is_own_inter(router_id)
+                        && !matches!(e.kind, OspfKind::External { .. })
+                    {
+                        s.insert(*p, e.metric);
+                    }
+                }
+                for (id, t) in &tables {
+                    if *id == 0 || *id == target {
+                        continue;
+                    }
+                    for (p, e) in t {
+                        if e.is_intra() {
+                            s.entry(*p)
+                                .and_modify(|m: &mut u64| *m = (*m).min(e.metric))
+                                .or_insert(e.metric);
+                        }
+                    }
+                }
+                s
+            };
+            // Stubby v3 targets receive the border-router default (the
+            // zero-length prefix form of §4.4.3.4).
+            if target != 0 {
+                if let Some(metric) = kind.default_metric() {
+                    if kind.is_stub() {
+                        sources.insert(Prefix::new_v6([0u8; 16], 0), u64::from(metric));
+                    }
+                }
+            }
+            // Loop guard: never summarize the target's own intra-area
+            // prefixes back into the target.
+            if let Some(table) = tables.get(&target) {
+                for (p, e) in table {
+                    if e.is_intra() {
+                        sources.remove(p);
+                    }
+                }
+            }
+
+            // Existing self-originated 0x2003s, keyed by LS ID.
+            let existing: BTreeMap<u32, Lsa> = self
+                .ospf_areas
+                .get(&target)
+                .map(|area| {
+                    area.lsdb
+                        .iter()
+                        .filter(|(key, _)| {
+                            key.ls_type == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX
+                                && key.advertising_router == router_id
+                        })
+                        .map(|(key, entry)| (key.link_state_id, entry.lsa.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            // Stable LS ID allocation: the router's mapping first,
+            // else a previous instance advertising the same prefix,
+            // else the lowest free ID.
+            let area_map = self.ospf_v3_summary_lsids.entry(target).or_default();
+            let mut used_lsids: BTreeSet<u32> = BTreeSet::new();
+            let mut to_originate: Vec<Lsa> = Vec::new();
+            for (prefix, metric) in &sources {
+                let ls_id = match area_map.get(prefix) {
+                    Some(&id) => id,
+                    None => {
+                        let reused = existing.iter().find_map(|(id, lsa)| {
+                            lr_ospf::lsa::decode_v3_inter_area_prefix_body(&lsa.body)
+                                .filter(|b| b.to_prefix().as_ref() == Some(prefix))
+                                .map(|_| *id)
+                        });
+                        let id = reused.unwrap_or_else(|| {
+                            (1u32..)
+                                .find(|id| !existing.contains_key(id) && !used_lsids.contains(id))
+                                .unwrap_or(0)
+                        });
+                        area_map.insert(*prefix, id);
+                        id
+                    }
+                };
+                used_lsids.insert(ls_id);
+                let dest = SummaryDestination::new(*prefix, *metric as u32);
+                let prev = existing.get(&ls_id);
+                let unchanged = prev.is_some_and(|lsa| {
+                    lr_ospf::lsa::decode_v3_inter_area_prefix_body(&lsa.body).is_some_and(|b| {
+                        b.metric == dest.metric
+                            && b.prefix_len == dest.prefix.prefix_len
+                            && b.to_prefix().as_ref() == Some(prefix)
+                    })
+                });
+                if unchanged {
+                    continue;
+                }
+                let prev_seq = prev.map(|lsa| lsa.header.ls_sequence_number);
+                if let Some(lsa) =
+                    originate_v3_inter_area_prefix_lsa(router_id, ls_id, &dest, prev_seq)
+                {
+                    to_originate.push(lsa);
+                }
+            }
+            // Flush summaries whose destination disappeared.
+            let mut to_flush: Vec<Lsa> = Vec::new();
+            for (lsid, lsa) in &existing {
+                if !used_lsids.contains(lsid) {
+                    if let Some(flush) = flush_summary_lsa(lsa) {
+                        to_flush.push(flush);
+                    }
+                }
+            }
+
+            if to_originate.is_empty() && to_flush.is_empty() {
+                continue;
+            }
+            let mut flooded = Vec::with_capacity(to_originate.len() + to_flush.len());
+            if let Some(area) = self.ospf_areas.get_mut(&target) {
+                for lsa in to_originate.into_iter().chain(to_flush) {
+                    if area.lsdb.install(lsa.clone(), self.now_ms).changed() {
+                        flooded.push(lsa);
+                        changed = true;
+                    }
+                }
+            }
+            if !flooded.is_empty() {
+                floods.push((target, flooded));
+            }
+        }
+        for (area_id, lsas) in floods {
+            self.ospf_flood(area_id, &lsas, None);
+        }
+        // §4.4.3.5: 0x2004 inter-area-router summaries for ASBRs this
+        // ABR can reach but the target area cannot.
+        self.ospf_summarize_asbrs_v3(router_id, &spf_results) | changed
+    }
+
+    /// RFC 5340 §4.4.3.5 (the v3 type-4): for every ASBR — the
+    /// advertisers of the 0x4005 LSAs present in the v3 LSDBs —
+    /// originate into each attached v3 area an inter-area-router-LSA
+    /// when the ASBR is intra-area reachable through one of the
+    /// router's other areas but not through the target. The advertised
+    /// metric is the ABR's own cost to the ASBR; the Options field
+    /// mirrors the destination's Router-LSA options (§4.4.3.5); the LS
+    /// ID is the destination router ID. Stale self-originated 0x2004s
+    /// whose ASBR lost reachability are flushed.
+    fn ospf_summarize_asbrs_v3(
+        &mut self,
+        router_id: u32,
+        spf_results: &BTreeMap<u32, spf::SpfResultV3>,
+    ) -> bool {
+        // AS-scope 0x4005s are installed in every v3 area; derive the
+        // ASBR set from whichever v3 area has an LSDB (lowest ID).
+        let source_area = self
+            .ospf_areas
+            .iter()
+            .filter(|(_, area)| area.protocol == Protocol::Ospfv3)
+            .map(|(id, _)| *id)
+            .min();
+        let Some(source_area) = source_area else {
+            return false;
+        };
+        let Some(source) = self.ospf_areas.get(&source_area) else {
+            return false;
+        };
+        let asbrs: BTreeSet<u32> = source
+            .lsdb
+            .iter()
+            .filter(|(key, _)| {
+                key.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                    && key.advertising_router != router_id
+            })
+            .map(|(key, _)| key.advertising_router)
+            .collect();
+
+        let mut changed = false;
+        let mut floods: Vec<(u32, Vec<Lsa>)> = Vec::new();
+        let areas: Vec<u32> = self.ospf_areas.keys().copied().collect();
+        for target in areas {
+            let Some(target_kind) = self.ospf_areas.get(&target).map(|a| a.kind) else {
+                continue;
+            };
+            let is_v3 = self
+                .ospf_areas
+                .get(&target)
+                .is_some_and(|a| a.protocol == Protocol::Ospfv3);
+            // Stale self-originated 0x2004s: flushed everywhere when the
+            // target left the v3 plane or went stubby.
+            if !is_v3 || target_kind.is_stubby() {
+                let flushes: Vec<Lsa> = self
+                    .ospf_areas
+                    .get(&target)
+                    .map(|area| {
+                        area.lsdb
+                            .iter()
+                            .filter(|(key, _)| {
+                                key.ls_type == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
+                                    && key.advertising_router == router_id
+                            })
+                            .filter_map(|(_, entry)| flush_summary_lsa(&entry.lsa))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if let Some(area) = self.ospf_areas.get_mut(&target) {
+                    for flush in flushes {
+                        if area.lsdb.install(flush.clone(), self.now_ms).changed() {
+                            floods.push((target, vec![flush]));
+                            changed = true;
+                        }
+                    }
+                }
+                continue;
+            }
+            // Existing self-originated 0x2004s, keyed by destination
+            // (the LS ID is the destination router ID).
+            let existing: BTreeMap<u32, Lsa> = self
+                .ospf_areas
+                .get(&target)
+                .map(|area| {
+                    area.lsdb
+                        .iter()
+                        .filter(|(key, _)| {
+                            key.ls_type == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
+                                && key.advertising_router == router_id
+                        })
+                        .map(|(key, entry)| (key.link_state_id, entry.lsa.clone()))
+                        .collect()
+                })
+                .unwrap_or_default();
+
+            let mut to_originate: Vec<Lsa> = Vec::new();
+            let mut to_flush: Vec<Lsa> = Vec::new();
+            let mut used_lsids: BTreeSet<u32> = BTreeSet::new();
+            for &asbr in &asbrs {
+                if asbr == router_id {
+                    continue;
+                }
+                let intra_here = spf_results
+                    .get(&target)
+                    .is_some_and(|r| r.vertices.contains_key(&spf::V3VertexId::Router(asbr)));
+                if intra_here {
+                    continue; // the target reaches the ASBR itself
+                }
+                let best: Option<(u64, u32)> = spf_results
+                    .iter()
+                    .filter(|(id, _)| **id != target)
+                    .filter_map(|(_, r)| {
+                        let d = r.vertices.get(&spf::V3VertexId::Router(asbr)).copied()?;
+                        // The options the destination's own Router-LSA
+                        // advertises (§4.4.3.5).
+                        let opts = r.router_options.get(&asbr).copied().unwrap_or(0);
+                        Some((d, opts))
+                    })
+                    .min_by_key(|(d, _)| *d);
+                let Some((cost, options)) = best else {
+                    continue; // unreachable through us
+                };
+                used_lsids.insert(asbr);
+                let prev = existing.get(&asbr);
+                let unchanged = prev.is_some_and(|lsa| {
+                    lr_ospf::lsa::v3::V3InterAreaRouterBody::decode(&lsa.body).is_some_and(|b| {
+                        b.metric == cost.min(0x00ff_fffe) as u32 && b.options == options
+                    })
+                });
+                if unchanged {
+                    continue;
+                }
+                let prev_seq = prev.map(|lsa| lsa.header.ls_sequence_number);
+                if let Some(lsa) = originate_v3_inter_area_router_lsa(
+                    router_id,
+                    asbr,
+                    options,
+                    asbr,
+                    cost.min(0x00ff_fffe) as u32,
+                    prev_seq,
+                ) {
+                    to_originate.push(lsa);
+                }
+            }
+            for (lsid, lsa) in &existing {
+                if !used_lsids.contains(lsid) {
+                    if let Some(flush) = flush_summary_lsa(lsa) {
+                        to_flush.push(flush);
+                    }
+                }
+            }
+            if to_originate.is_empty() && to_flush.is_empty() {
+                continue;
+            }
+            let mut flooded = Vec::with_capacity(to_originate.len() + to_flush.len());
+            if let Some(area) = self.ospf_areas.get_mut(&target) {
+                for lsa in to_originate.into_iter().chain(to_flush) {
+                    if area.lsdb.install(lsa.clone(), self.now_ms).changed() {
+                        flooded.push(lsa);
+                        changed = true;
+                    }
+                }
+            }
+            if !flooded.is_empty() {
+                floods.push((target, flooded));
+            }
+        }
+        for (area_id, lsas) in floods {
+            self.ospf_flood(area_id, &lsas, None);
+        }
+        changed
     }
 
     /// MaxAge-flush every self-originated LSA whose key satisfies `pred`
@@ -9487,6 +9905,168 @@ mod tests {
         assert_eq!(route.preference.metric, 30, "type 2: FA leg not added");
         // The FA — not the ASBR's link-local — is the published next hop.
         assert_eq!(route.next_hop, Some(IpAddr::V6(fa)));
+    }
+
+    /// An OSPFv3 ABR (backbone + area 1, both v3) originates a 0x2003
+    /// into the backbone for area 1's intra-area prefixes (RFC 5340
+    /// §4.4.3.4), with a stable LS ID and the area-1 cost.
+    #[test]
+    fn ospfv3_abr_originates_inter_area_prefix() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h0 = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("backbone session");
+        let h1 = r
+            .add_session(SessionConfig::ospfv3(r1, 1).with_ospf_mtu(1500))
+            .expect("area 1 session");
+
+        use lr_ospf::lsa::v3::{
+            originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_router_lsa,
+            V3Prefix, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mk_link = |ifid: u32, nifid: u32, nrid: u32| lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+        };
+        let own_lsa =
+            originate_v3_router_lsa(r1.as_u32(), ROUTER_BIT_V6, 0x13, &[mk_link(5, 3, r2)], None)
+                .unwrap();
+        let r2_lsa =
+            originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[mk_link(3, 5, r1.as_u32())], None)
+                .unwrap();
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        let r2_link = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        // r2's /64 on the link, attached to its Router-LSA.
+        let mut p2 = [0u8; 16];
+        p2[..7].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 2, 2]);
+        let p2_prefix = V3Prefix {
+            prefix_len: 64,
+            options: 0,
+            metric: 0,
+            addr: p2,
+        };
+        let iap = originate_v3_intra_area_prefix_lsa(
+            r2,
+            1,
+            lr_ospf::lsa::v3::LS_TYPE_ROUTER,
+            0,
+            r2,
+            vec![p2_prefix],
+            None,
+        )
+        .unwrap();
+
+        // Area 1 learns r2's topology; the router becomes a v3 ABR
+        // (backbone attached) and must summarize r2's /64 into area 0.
+        let bytes = ospf3_lsu_bytes(r2, 1, vec![own_lsa, r2_lsa, r2_link, iap]);
+        r.feed_input(h1, &bytes).expect("feed area 1 LSU");
+        let _ = r.drain_output(h1);
+        let _ = r.drain_output(h0);
+
+        let summary = r
+            .ospf_area_lsa(0, lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX, 1, r1.as_u32())
+            .expect("0x2003 originated into the backbone");
+        assert!(summary.checksum_ok());
+        let body = lr_ospf::lsa::decode_v3_inter_area_prefix_body(&summary.body).unwrap();
+        assert_eq!(body.metric, 10, "the area-1 cost to r2");
+        assert_eq!(body.prefix_len, 64);
+        assert_eq!(
+            body.to_prefix().unwrap(),
+            Prefix::new_v6(p2, 64),
+            "r2's /64 summarized"
+        );
+        // The backbone itself carries no summary for its own prefixes —
+        // area 0 has no intra nets here, but the loop guard holds by
+        // construction (nothing else was originated).
+        assert!(r
+            .ospf_area_lsa(1, lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX, 1, r1.as_u32())
+            .is_none());
+    }
+
+    /// An OSPFv3 ABR advertises an ASBR (a 0x4005 advertiser) into the
+    /// areas that cannot reach it intra-area (RFC 5340 §4.4.3.5): the
+    /// 0x2004 rides the backbone with LS ID = destination router ID,
+    /// the ABR's cost, and the destination's Router-LSA options.
+    #[test]
+    fn ospfv3_abr_originates_inter_area_router() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let (r2, r3) = (0x0a00_0002u32, 0x0a00_0003u32);
+        let h0 = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("backbone session");
+        let h1 = r
+            .add_session(SessionConfig::ospfv3(r1, 1).with_ospf_mtu(1500))
+            .expect("area 1 session");
+
+        use lr_ospf::lsa::v3::{
+            originate_v3_as_external_lsa, originate_v3_link_lsa, originate_v3_router_lsa,
+            V3ExternalDestination, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mk_link = |ifid: u32, nifid: u32, nrid: u32| lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+        };
+        let own_lsa =
+            originate_v3_router_lsa(r1.as_u32(), ROUTER_BIT_V6, 0x13, &[mk_link(5, 3, r2)], None)
+                .unwrap();
+        // r1 - r2 - r3 chain in area 1: r3 is intra-area reachable there.
+        let r2_lsa = originate_v3_router_lsa(
+            r2,
+            ROUTER_BIT_V6,
+            0x13,
+            &[mk_link(3, 5, r1.as_u32()), mk_link(4, 6, r3)],
+            None,
+        )
+        .unwrap();
+        let r3_lsa =
+            originate_v3_router_lsa(r3, ROUTER_BIT_V6, 0x13, &[mk_link(6, 4, r2)], None).unwrap();
+        let r3_link = originate_v3_link_lsa(r3, 6, 1, 0x13, [0xfe; 16], vec![], None).unwrap();
+        let r2_link = originate_v3_link_lsa(r2, 3, 1, 0x13, [0xfe; 16], vec![], None).unwrap();
+        let r2_link2 = originate_v3_link_lsa(r2, 4, 1, 0x13, [0xfe; 16], vec![], None).unwrap();
+        // r3 is an ASBR: it advertises an external (installed into
+        // area 1, re-flooded to the backbone at AS scope).
+        let mut ep = [0u8; 16];
+        ep[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0xaa, 0x00]);
+        let external = originate_v3_as_external_lsa(
+            r3,
+            1,
+            &V3ExternalDestination::new(Prefix::new_v6(ep, 48), 100, true),
+            None,
+        )
+        .unwrap();
+
+        let bytes = ospf3_lsu_bytes(
+            r3,
+            1,
+            vec![
+                own_lsa, r2_lsa, r2_link, r2_link2, r3_lsa, r3_link, external,
+            ],
+        );
+        r.feed_input(h1, &bytes).expect("feed area 1 LSU");
+        let _ = r.drain_output(h1);
+        let _ = r.drain_output(h0);
+
+        // The backbone cannot reach r3 intra-area (no topology there),
+        // so the ABR advertises r3's location with the area-1 cost.
+        let summary = r
+            .ospf_area_lsa(0, lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER, r3, r1.as_u32())
+            .expect("0x2004 originated into the backbone");
+        let body = lr_ospf::lsa::v3::V3InterAreaRouterBody::decode(&summary.body).unwrap();
+        assert_eq!(body.dest_router_id, r3);
+        assert_eq!(body.metric, 20, "dist(r2) + dist(r3) in area 1");
+        assert_eq!(body.options, 0x13, "r3's Router-LSA options mirrored");
     }
 
     /// Fail-closed default: without `ospf_srv6_receive` the identical
