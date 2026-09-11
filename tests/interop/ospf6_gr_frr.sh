@@ -295,19 +295,20 @@ echo "== SIGTERM lr: the graceful shutdown floods the v3 Grace-LSAs =="
 kill -TERM "$LR_PID"
 wait_log "$OUT/r1.log" "graceful shutdown complete" 15
 sleep 1
-# The JSON form reports the helper session independent of any prior
-# exit (the plain-text "Number of Active neighbours" line only appears
-# after a first exit has already been recorded).
+# The per-neighbour detail lines are the stable surface across FRR
+# versions ("Routerid : <id>" for every active helper; the JSON keys
+# differ between releases — FRR 8.1 spells them differently and has no
+# activeRestarterCnt at all).
 helper_view=""
 for i in $(seq 1 40); do
-    helper_view=$(vty_cmd 26114 "show ipv6 ospf6 graceful-restart helper json" 2>/dev/null || true)
-    if printf '%s' "$helper_view" | grep -q '"activeRestarterCnt":1'; then
+    helper_view=$(vty_cmd 26114 "show ipv6 ospf6 graceful-restart helper detail" 2>/dev/null || true)
+    if printf '%s' "$helper_view" | grep -qF 'Routerid : 1.1.1.1'; then
         break
     fi
     sleep 0.5
 done
 printf '%s\n' "$helper_view" >"$OUT/ospf6d.helper" || true
-grep -q '"activeRestarterCnt":1' "$OUT/ospf6d.helper" || {
+grep -qF 'Routerid : 1.1.1.1' "$OUT/ospf6d.helper" || {
     echo "FAIL: ospf6d did not enter helper mode for lr's Grace-LSA"
     cat "$OUT/ospf6d.helper"
     tail -30 "$OUT/ospf6d.log" 2>/dev/null || true
@@ -324,8 +325,8 @@ grep -q "fd00:20::/64" "$OUT/ospf6d.routes2" || {
     cat "$OUT/ospf6d.routes2"
     exit 1
 }
-helper_still=$(vty_cmd 26114 "show ipv6 ospf6 graceful-restart helper json" 2>/dev/null || true)
-printf '%s\n' "$helper_still" | grep -q '"activeRestarterCnt":1' || {
+helper_still=$(vty_cmd 26114 "show ipv6 ospf6 graceful-restart helper detail" 2>/dev/null || true)
+printf '%s\n' "$helper_still" | grep -qF 'Routerid : 1.1.1.1' || {
     echo "FAIL: ospf6d left helper mode before lr returned"
     printf '%s\n' "$helper_still"
     exit 1
@@ -344,18 +345,18 @@ wait_log "$OUT/r1b.log" "graceful restart recovery started" 10
 wait_log "$OUT/r1b.log" "ospf3 neighbor 2.2.2.2 Full (area" 30
 wait_log "$OUT/r1b.log" "recovery ended — all adjacencies re-established" 30
 echo "PASS: lr's recovery re-established the adjacency through the helper"
-# ospf6d must have left helper mode on the flush (the JSON
-# lastExitReason string for OSPF6_GR_HELPER_COMPLETED).
+# ospf6d must have left helper mode on the flush (the plain-text
+# exit-reason line is byte-identical from FRR 8.1 through 10.3).
 helper_done=""
 for i in $(seq 1 40); do
-    helper_done=$(vty_cmd 26114 "show ipv6 ospf6 graceful-restart helper json" 2>/dev/null || true)
-    if printf '%s' "$helper_done" | grep -q '"lastExitReason":"Successful graceful restart"'; then
+    helper_done=$(vty_cmd 26114 "show ipv6 ospf6 graceful-restart helper" 2>/dev/null || true)
+    if printf '%s' "$helper_done" | grep -qF 'Last Helper exit Reason :Successful graceful restart'; then
         break
     fi
     sleep 0.5
 done
 printf '%s\n' "$helper_done" >"$OUT/ospf6d.helper2" || true
-grep -q '"lastExitReason":"Successful graceful restart"' "$OUT/ospf6d.helper2" || {
+grep -qF 'Last Helper exit Reason :Successful graceful restart' "$OUT/ospf6d.helper2" || {
     echo "FAIL: ospf6d's helper exit was not the completed flush"
     cat "$OUT/ospf6d.helper2"
     exit 1
