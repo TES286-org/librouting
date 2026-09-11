@@ -691,7 +691,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      kernel-MPLS-gated like phase 2. The `set -u` trap on `SR_UP`
      (unbound whenever MPLS=0 short-circuited the first gated block)
      is fixed alongside.
-   - **Slice 4 — SRv6 data plane (RFC 8754 / RFC 8402 / RFC 8986)** —
+   - ~~**Slice 4 — SRv6 data plane (RFC 8754 / RFC 8402 / RFC 8986)**~~ —
      the IPv6 counterpart to the SR-MPLS slices above. A new
      `lr-srv6` crate (no_std, mirrors `lr-mpls`) ships the wire
      primitives: a 128-bit [`Sid`](crate:lr-srv6::Sid) (RFC 8754 §3,
@@ -739,7 +739,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      `lr_srv6_decode_srh` exposed via C ABI, Python
      (`encode_srv6_srh` / `decode_srv6_srh`) and Go
      (`EncodeSRv6SRH` / `DecodeSRv6SRH`) bindings.
-   - **Slice 5 — OSPFv3 SRv6 control plane (RFC 9513)** — done: the
+   - ~~**Slice 5 — OSPFv3 SRv6 control plane (RFC 9513)**~~ — done: the
      locator + End SID reachability core, sliced into independently
      verified commits. A first-hand audit corrected the roadmap's own
      citation: the OSPFv3 SRv6 extensions are **RFC 9513** (Li et al.,
@@ -788,6 +788,49 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      SID one; the daemon `[ospf] srv6` config + origination is slice
      3 of the SRv6 workstream (RFC 9256 / 9430 SR Policy remains the
      long-term BGP-side target).
+   - ~~**Slice 6 — OSPFv3 SRv6 daemon surface (slice 3 of the
+     SRv6 workstream)**~~ — done: the configuration and origination layer on
+     top of slice 2's codec, mirroring the v2 SR-MPLS daemon slices
+     (`[[ospf.prefix_sid]]` → `[[ospf.srv6_locator]]`). Config
+     surface: `[[ospf.srv6_locator]]` tables (IPv6 `prefix`;
+     `algorithm` default 0; `metric`; `anycast` = the §6 AC-bit;
+     `sid` defaulting to the locator prefix itself — the RFC 8986 End
+     behavior on the locator; `behavior` default 1 = End; and the
+     all-or-none §10 SID Structure lengths `block_len`/`node_len`/
+     `function_len`/`argument_len`) plus the `[ospf]` globals
+     `srv6_receive` (the §5 reception gate on the daemon path — the
+     `sr_receive` counterpart), `srv6_o_flag` (§2/RFC 9259), and the
+     Node MSD limits `srv6_max_sl`/`srv6_max_end_pop`/
+     `srv6_max_h_encaps`/`srv6_max_end_d` (RFC 8476 carrier, RFC 9352
+     §4 MSD types); CLI flags `--ospf-srv6-locator` (repeatable),
+     `--ospf-srv6-receive`, `--ospf-srv6-o-flag`. Fail-closed
+     validation: SRv6 config is OSPFv3-only (rejected under v2 — the
+     mirror of the v2-only rejection of the SR-MPLS keys under v3),
+     finalize_ospf() now runs for SRv6-only configuration, and the
+     per-locator checks reject IPv4 prefixes, End-SID-invalid
+     behaviors (§11 Table 1), partial §10 structures, §10 sums above
+     128 bits and duplicate locator prefixes. Origination: with
+     locators configured the v3 daemon resolves them once into wire
+     TLVs and `reoriginate_area` emits, per area and into the same
+     LSU as the topology LSAs, the Router Information LSA (instance
+     ID 0; Capabilities with the optional O-flag, the SR-Algorithm
+     TLV derived from the distinct locator algorithms, the Node MSD
+     TLV from the configured limits) and the Locator LSA (Link State
+     ID 1; one §7.1 TLV per locator with its §8 End SID and optional
+     §10 structure) — sequence floors per area riding the existing
+     adjacency-driven re-origination and §14.1 refresh cadences, so
+     an SRv6 router looks exactly like a slice-1 daemon otherwise.
+     The acceptance gate is the 3-node interop lab
+     `tests/interop/ospf6_frr_srv6.sh`: lr1 originates,
+     FRR 10.3 ospf6d (which has no SRv6 support at all) must store
+     and re-flood the U-bit-set unknown LSAs (RFC 5340 §4.5.2
+     transparency — all five of lr1's LSAs appear in its LSDB), and
+     lr2 with `srv6_receive` installs lr1's locator as an Ospfv3
+     route with a link-local next hop purely through the FRR relay —
+     RFC 9513 §5 route computation against a foreign relay. The lab
+     also flushed out a config-truth detail: a locator written as
+     `2001:db8:a:1::/48` normalizes to `2001:db8:a::/48` (the fourth
+     hextet is host bits at /48) — the lab uses a clean /64.
 
 ### W4 — Documentation, guides, tutorials
 
