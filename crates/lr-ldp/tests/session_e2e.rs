@@ -371,9 +371,29 @@ fn two_speakers_full_lifecycle() {
     let peer_a = LdpId::new(A_ID, 0);
     let peer_b = LdpId::new(B_ID, 0);
 
-    // Phase 1: discovery + session establishment.
+    // Phase 1: discovery + session establishment, and the Address
+    // messages each side sends once the session is Operational. The
+    // predicate requires both SessionUp AND AddressReceived — without
+    // the Address requirement, wait_for could return as soon as the
+    // session-up event arrived but before the Address messages flowed,
+    // and the assertion below would race (the macOS Apple Silicon CI
+    // leg reproduced exactly that: session up in one pump, Address
+    // message in the next, wait_for returned in between).
     let events = wait_for(&mut a, &mut b, Duration::from_secs(10), |events| {
-        has_session_up(events, peer_a) && has_session_up(events, peer_b)
+        has_session_up(events, peer_a)
+            && has_session_up(events, peer_b)
+            && events.iter().any(|e| {
+                matches!(
+                    e,
+                    EngineEvent::AddressReceived { peer_id, .. } if *peer_id == peer_a
+                )
+            })
+            && events.iter().any(|e| {
+                matches!(
+                    e,
+                    EngineEvent::AddressReceived { peer_id, .. } if *peer_id == peer_b
+                )
+            })
     });
     assert!(
         has_session_up(&events, peer_a) && has_session_up(&events, peer_b),
