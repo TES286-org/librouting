@@ -739,12 +739,55 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      `lr_srv6_decode_srh` exposed via C ABI, Python
      (`encode_srv6_srh` / `decode_srv6_srh`) and Go
      (`EncodeSRv6SRH` / `DecodeSRv6SRH`) bindings.
-   - **Next slice**: SRv6 control plane — RFC 9352 (OSPFv3 SRv6
-     extensions) needs OSPFv3 daemon mode first (the v2 codec and
-     LSA surfaces exist but the daemon does not run v3); alternatively
-     BGP-LS SRv6 (RFC 9085 §8) and BGP SR Policy (RFC 9256 / 9430)
-     build directly on the slice-1 data plane. RFC 9256 (Segment
-     Routing Policy) is the long-term target.
+   - **Slice 5 — OSPFv3 SRv6 control plane (RFC 9513)** — done: the
+     locator + End SID reachability core, sliced into independently
+     verified commits. A first-hand audit corrected the roadmap's own
+     citation: the OSPFv3 SRv6 extensions are **RFC 9513** (Li et al.,
+     December 2023) — RFC 9352, which every doc here had cited, is the
+     IS-IS SRv6 sibling (Psenak et al., February 2023). The wire
+     codecs (`lr-ospf::lsa::srv6`) pin every shape byte-for-byte
+     against the RFC figures: the SRv6 Capabilities TLV (§2, type 20,
+     O-flag bit 1) on the OSPFv3 Router Information LSA (RFC 7770
+     §2.2, function code 12 — 0xA00C area-scoped, LS ID = Instance
+     ID), with the SR-Algorithm TLV (type 8, the RFC 8665 one) and
+     the Node MSD TLV (RFC 8476 §2 type 12; the SRv6 MSD types 41 /
+     42 / 44 / 45 come from the shared IGP MSD-Types registry RFC
+     9513 §4 reuses from RFC 9352 §4 — verified against both texts);
+     the SRv6 Locator LSA (§7, function code 42 — 0xA02A area-scoped,
+     U-bit set) carrying the Locator TLV (§7.1: route types 1-6,
+     anything else ignores the TLV; locator length 1-128; metric
+     0xFFFFFFFF = unreachable; the §A.4.1 prefix-word encoding); the
+     End SID sub-TLV (§8, type 1 of the Locator LSA sub-TLV registry)
+     with the RFC 8986 behavior code points gated per §11 Table 1
+     (End 1-4/28-31 and End.DT6/DT4/DT64 18-20 — End.X-family values
+     are invalid inside an End SID); the SID Structure sub-TLV (§10,
+     type 10 — length MUST be 4, the four bit-lengths sum ≤ 128, at
+     most once per parent, violations ignore the parent); and the §6
+     AC prefix option (0x80). Origination helpers follow the crate
+     sequence convention. The receiving half is `lr-ospf::srv6db`, a
+     pure LSDB projection applying the §2/§7.1 duplicate preference
+     (area scope beats link/AS across flooding scopes, then the
+     numerically smallest LS ID, then the first occurrence within an
+     LSA) and the §5/§8 gates (SIDs are never directly routable; an
+     End SID outside its covering locator — computed on the masked
+     prefix — is ignored). `run_spf_v3` grew a locator phase: an
+     intra-area locator's route metric is the advertising router's
+     SPF distance and its first hop the router's resolved link-local
+     (the root's own locator is connected). `DefaultRouter` gates
+     publication behind `set_ospf_srv6_receive` (off by default,
+     fail-closed): supported algorithms only (algorithm 0 — flexible
+     algorithms are future work), and §5's rule that a prefix
+     reachability advertisement beats the locator advertisement for
+     the same prefix (an e2e pins a metric-20 IAP route beating a
+     metric-10 locator). No reference implementation exists — FRR
+     ospf6d has no SRv6 files — so the acceptance is the RFC-figure-
+     pinned unit tests (29 in lr-ospf) plus 4 router-level e2e tests
+     over live v3 exchanges. End.X / LAN End.X SIDs (§9.1/§9.2, types
+     31/32) ride the RFC 8362 E-Router-Link TLV and are a later
+     slice, mirroring how the v2 Adj-SID slice followed the Prefix-
+     SID one; the daemon `[ospf] srv6` config + origination is slice
+     3 of the SRv6 workstream (RFC 9256 / 9430 SR Policy remains the
+     long-term BGP-side target).
 
 ### W4 — Documentation, guides, tutorials
 
@@ -1036,7 +1079,7 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
 
 5. **OSPFv3 daemon mode** — the v2 daemon ran, but the v3 codec
    surfaces that predated it had never touched a real peer (STATUS
-   open item 2, and the named prerequisite of the RFC 9352 SRv6
+   open item 2, and the named prerequisite of the RFC 9513 SRv6
    slice). Landed as a wire audit + codec repair + a purpose-built
    daemon module, sliced into independently verified commits:
 

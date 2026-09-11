@@ -21,14 +21,19 @@
 //! `no_std`-compatible and shares the `lr-core` conventions (mirrors
 //! how `lr-mpls` sits next to the protocol crates).
 //!
-//! ## Slice 1 scope
+//! ## Slices
 //!
-//! This is the first SRv6 slice. It delivers the data-plane codec
-//! and the type system. Slice 2 (future) will add the control-plane
-//! extensions — OSPFv3 SRv6 (RFC 9352), BGP-LS SRv6, BGP SR Policy
-//! (RFC 9256 / 9430) — riding on this codec. Slice 3 (future) will
-//! add the daemon's `--srv6-locator` / `--srv6-endpoint` CLI and the
-//! kernel `seg6`/`seg6local` route mirror in `lr-osroute`.
+//! Slice 1 delivered the data-plane codec and the type system (this
+//! crate). Slice 2 landed the OSPFv3 SRv6 control plane (RFC 9513 —
+//! the repo previously miscited RFC 9352, which is the IS-IS SRv6
+//! sibling): `lr-ospf::lsa::srv6` (Locator LSA + End SID codecs),
+//! `lr-ospf::srv6db` (the per-node LSDB projection) and the locator
+//! routes in `lr-ospf::spf::run_spf_v3` all ride on the primitives
+//! here. Still ahead: the End.X / LAN End.X SIDs (RFC 9513 §9 on the
+//! RFC 8362 Extended LSAs), BGP-LS SRv6 and BGP SR Policy (RFC 9256 /
+//! 9430), and slice 3's daemon `--srv6-locator` CLI + origination;
+//! the kernel `seg6`/`seg6local` route mirror already exists in
+//! `lr-osroute` from slice 1.
 //!
 //! ## Wire layout (RFC 8754 §2)
 //!
