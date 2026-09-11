@@ -133,6 +133,105 @@ Reload re-applies `networks` only. Peer, AS, router-id, and auth
 changes are restart-only by design; the reload output lists what
 was applied and reminds about the rest.
 
+## Deeper troubleshooting
+
+**BGP session flapping (Established → Idle → Established every
+~90 s).**
+This is almost always a hold-timer mismatch or an auth failure. Check
+the daemon log for:
+- `session N: hold time expired` — the peer's KEEPALIVE cadence is
+  slower than the negotiated hold time / 3. Lower `--hold-time` or
+  fix the peer's KEEPALIVE interval.
+- `session auth arming failed` — MD5 or TCP-AO key mismatch. The
+  TCP handshake never completes; the BGP FSM sits in Active and
+  retries with backoff. Verify the shared secret with the peer
+  operator; for TCP-AO also verify the key ID and the algorithm
+  (`hmac-sha1` default, `cmac-aes` optional).
+- `session N: NOTIFICATION received (Cease/ConnectionCollision)` —
+  both sides are dialing each other simultaneously and the
+  lower-BGP-Identifier speaker loses per RFC 4271 §6.8. This is
+  expected once per startup; if it repeats, the losing side's
+  outbound transport is flapping (check the underlying TCP
+  reachability).
+
+**OSPF adjacency stuck in ExStart.**
+The DBD exchange (RFC 2328 §7.2 / RFC 5340 §A.5) never advances past
+ExStart when:
+- The **MTU** disagrees between the two sides (the DBD packet is
+  larger than the peer's interface MTU; the large-DBD never lands).
+  Check `ip link show <if>` (Linux) — both sides must agree.
+- The **Router ID** is duplicated (the §10.6 election cannot pick a
+  master). Check the daemon log: `ospf: neighbor <ip> router-id
+  <id>` — the IDs must differ.
+- The **interface type** disagrees (one side is broadcast, the other
+  point-to-point). The §9.4 DR election only runs on broadcast;
+  a p2p side does not send the DR/BDR fields and the broadcast side
+  waits forever. Check `network_type` per interface in the TOML.
+
+**OSPF adjacency stuck in Exchange (DBD exchange never completes).**
+Usually a **dead interval mismatch**: the neighbor's Hello dead
+timer does not match ours, so the kernel drops the adjacency before
+the DBD sequence finishes. Verify `dead_interval` per interface
+(default 40 s) matches the peer. Also check the **area ID** — a
+mismatched area ID (e.g. `0.0.0.0` vs `0.0.0.1`) puts the neighbor
+in a different area and the DBD exchange is rejected.
+
+**LDP label binding not propagating.**
+The DU mode (RFC 5036 §3.5.7.1.1) requires both sides to advertise
+the binding independently. Check:
+- `ldp: peer <ip> -> Operational` in the daemon log — the TCP
+  session must be up first. If not, check the UDP Hello exchange
+  (`ldp: hello <ip> hold=N`); a missing Hello is usually a
+  multicast-routing or firewall issue (LDP uses 224.0.0.106 v4 /
+  ff02::1:6 v6).
+- `ldp: mapping <prefix> label=N -> <peer>` — the local binding
+  was advertised. If the peer's LIB does not show the binding, the
+  peer's `advertise_mapping` was not called or the FEC was
+  withdrawn.
+- On Linux, `mpls -l` (iproute2) shows the installed LSP. If the
+  binding is in the LIB but not in the kernel, the `AF_MPLS` stack
+  is missing (see above) or `--install-kernel-routes` was not set.
+
+**Route flap damping too aggressive (legitimate routes suppressed).**
+RFC 2439's defaults are known to over-damp (RFC 7196 documents the
+harm). The daemon ships with damping **off** by default; enabling it
+requires explicit configuration. If you enabled it and routes are
+suppressed:
+- Lower `max-suppress` (the ceiling in seconds) — 30 s is the
+  modern recommendation, not RFC 2439's 60 s.
+- Raise `reuse-limit` above the route's flap history (the default
+  is 750; a prefix that flaps 4×/hour can exceed it).
+- Check `daemon: route <prefix> suppressed (decay=N)` in the log —
+  the figure of merit is printed at suppression time.
+
+**Memory growth over time (Adj-RIB-In unbounded).**
+For a full-table peer (800k+ prefixes), the Adj-RIB-In is the
+dominant memory consumer. Mitigations:
+- Disable `--soft-reconfig-inbound` if enabled (it retains the
+  pre-policy Adj-RIB-In per peer, doubling the memory cost). The
+  trade-off is that a soft reconfig requires a route-refresh from
+  the peer instead of a local re-evaluation.
+- Add an import route-map that rejects unwanted prefixes early
+  (before Adj-RIB-In). The safety net + import hooks run before
+  the RIB entry is created.
+- Use `--max-prefixes N` to cap the per-peer prefix count and
+  tear down the session when exceeded (FRR `maximum-prefix`).
+
+**Daemon CPU spike during full-table reconvergence.**
+A session reset without GR (RFC 4724) drops every learned prefix at
+once and the decision process runs flat-out. Mitigations:
+- Enable `--graceful-restart SEC` (RFC 4724, default 120 s) so the
+  peer retains the forwarding state across the restart.
+- Enable `--llgr SEC` (RFC 9494) for the long-lived stale variant
+  on address families that need it (VPN, EVPN).
+- Add BFD (`--bfd`) so the failure is detected before the hold
+  timer expires and the peer has time to retain the state.
+
+**MRT dump grows the disk.**
+The runtime API `mrt PATH` writes a TABLE_DUMP_V2 file (RFC 6396)
+of the current Loc-RIB. The file grows with the RIB size; a full
+table is ~200 MB. Rotate with `logrotate` or write to a tmpfs.
+
 ## Where the verification lives
 
 Every behavior above is pinned by a test: session lifecycle and
