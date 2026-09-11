@@ -832,6 +832,41 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      `2001:db8:a:1::/48` normalizes to `2001:db8:a::/48` (the fourth
      hextet is host bits at /48) — the lab uses a clean /64.
 
+  - **Slice 7 — OSPFv3 inter-area + AS-externals (RFC 5340
+    §4.4.3.4/§4.4.3.5/§4.4.3.6, §4.8.3, §4.8.5)** — done: the biggest
+    remaining parity gap versus the v2 plane closed. Codecs: the
+    Inter-Area-Router-LSA (0x2004 — `0|options(3)|0|metric(3)|dest
+    router ID`, 12 bytes, the destination travels in the body per
+    §4.4.3.5) and the AS-External-LSA (0x4005 — the E/F/T flags ride
+    byte 0 of the metric word at 0x04/0x02/0x01, FRR
+    `ospf6_asbr.h` parity and *unlike* the v2 top-bit E form, the
+    Referenced LS Type occupies the prefix's trailing §A.4.1 word, and
+    the forwarding address is a 16-byte global address gated by the F
+    bit). Route calculation: `summary_routes_v3` (§4.8.3 — the §16.2
+    form with body prefixes, NU-bit exclusion and the border router's
+    link-local first hop on each candidate) and `external_routes_v3`
+    (§4.8.5 — the §16.4 form: ASBR legs intra-area from the tree or
+    inter-area via 0x2004 *bodies*, FAs validated against the
+    intra+summary covering table with the illegal forms refused,
+    type-1/2 semantics, the §16.4 (6) preference). Router install: the
+    v3 recompute merges intra > inter > external, `OspfKind::External`
+    generalizes the forwarding address to `Option<IpAddr>` (a v6 FA
+    publishes as the next hop), 0x4005s re-flood across attached v3
+    areas, and the `no_summary` acceptance gate now decodes the v3
+    default (a zero-length body prefix — the v2 LS-ID heuristic is
+    meaningless in v3). Origination: a v3 ABR (all areas v3,
+    backbone-attached — mixed v2/v3 routers act as an ABR for neither
+    version, fail-closed) originates 0x2003s under the v2 type-3
+    source rules with stable per-(area, prefix) LS IDs (previous
+    instance reuse, then lowest free ID — FRR `ospf6_new_ls_id`
+    parity) and 0x2004s with LS ID = destination router ID and the
+    destination's Router-LSA options mirrored (§4.4.3.5, FRR parity);
+    `ospf_redistribute_v3`/`ospf_unredistribute_v3` cover the ASBR
+    side (stable per-prefix LS ID across areas, illegal FAs refused at
+    the API, MaxAge withdrawal, `refresh_due` covers the periodic
+    re-origination), and redistribution pipes targeting `Ospfv3`
+    bridge v6 routes.
+
 ### W4 — Documentation, guides, tutorials
 
 1. ~~**A book-style tutorial (`docs/tutorial.md`)**~~ — done: three
