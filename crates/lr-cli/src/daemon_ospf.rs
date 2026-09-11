@@ -1605,12 +1605,35 @@ impl OspfDaemon {
                             .first()
                             .map(|a| prefix_mask(a.prefix_len))
                             .unwrap_or(0xffff_ffff);
+                        // Sequence floor: after a graceful-restart
+                        // recovery the pre-restart Network-LSA the
+                        // helpers re-delivered through the database
+                        // exchange is the floor — a fresh 0x80000001
+                        // would be older than every neighbour's copy
+                        // and silently ignored (RFC 2328 §12.1.2),
+                        // so the LSA would never refresh and age out
+                        // an hour later (same pattern as the
+                        // Router-LSA floor above).
+                        let net_seq = match (
+                            iface.net_lsa_seq,
+                            router
+                                .ospf_area_lsa(
+                                    area,
+                                    LsaTypeV2::NetworkLsa as u16,
+                                    local,
+                                    self.router_id.as_u32(),
+                                )
+                                .map(|l| l.header.ls_sequence_number),
+                        ) {
+                            (Some(a), Some(b)) => Some(a.max(b)),
+                            (a, b) => a.or(b),
+                        };
                         match originate_network_lsa(
                             self.router_id.as_u32(),
                             local,
                             mask,
                             &attached,
-                            iface.net_lsa_seq,
+                            net_seq,
                         ) {
                             Some(lsa) => {
                                 iface.net_lsa_seq = Some(lsa.header.ls_sequence_number);
