@@ -304,3 +304,20 @@ the state, that file tracks the how and why.
    Release with auto-generated commit-diff notes. The 1.0 cut PR
    is the next release-event after one clean week of CI on all
    three platforms.
+4. **Phase 5 — CI matrix hardening + documentation expansion** —
+   landed: dropped `macos-13` (Intel) from the cross-platform
+   matrix (GitHub Actions retired the Intel runner pool; the
+   runner was queued-for-hours every CI run since Phase 4 landed
+   while the same code paths ran green on `macos-14`). Added a
+   new `cross-macos-intel` job that cross-compiles
+   `x86_64-apple-darwin` from a `macos-14` runner (the universal
+   Apple clang targets both arches natively), so Intel macOS
+   compilation is still covered. Filled the example-doc gaps with
+   three new walkthroughs: `docs/examples/ldp_basic.md` (RFC 5036
+   LDP label distribution + the kernel MPLS dataplane mirror),
+   `docs/examples/bgp_labeled_unicast.md` (RFC 8277 BGP-LU → MPLS
+   dataplane, the LSP tail/head classification), and
+   `docs/examples/ospfv3_srv6.md` (RFC 9513 OSPFv3 SRv6 — the
+   RI LSA + Locator LSA origination signatures and the
+   `srv6db` reception path). Indexed all three in
+   `docs/README.md`.

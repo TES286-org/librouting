@@ -1489,3 +1489,71 @@ LAN End.X SIDs, BGP-LS, BGP SR Policy) is post-1.0 work: it extends
 the surface but does not block the freeze, because the surface it
 extends is already at parity with BIRD and FRR for the protocols it
 touches.
+
+## Phase 5 — CI matrix hardening + documentation expansion
+
+Where the project stands: Phase 4 landed the cross-platform CI
+matrix (Ubuntu + macOS Apple Silicon + Windows) plus the lr-cli
+documentation surface and the RELEASE-PLAN. The first week of CI
+on the new matrix flushed five real cross-platform bugs (gtsm
+test imports, api.rs idle-spin, daemon_bfd Linux-specific
+assumptions, lr-ldp 127.0.0.2 send/bind, daemon_runtime API
+timing) — all fixed. The remaining work is hygiene, not protocol
+coverage: retire the macos-13 (Intel) native job (its runner was
+queued-for-hours every CI run since Phase 4 landed, blocking the
+signal while the same code paths ran green on macos-14), and fill
+the example-doc gaps that surfaced during the Phase 4 docs work
+(LDP, BGP-LU + MPLS, OSPFv3 SRv6 had no walkthrough docs).
+
+Ordered by user-visible impact:
+
+1. **Drop `macos-13` from the cross-platform matrix** — done:
+   GitHub Actions retired the Intel `macos-13` runner pool
+   during 2025. The runner was queued-for-hours (sometimes days)
+   on every CI run since the Phase 4 matrix landed, blocking the
+   cross-platform signal while the same code paths ran green on
+   `macos-14` (Apple Silicon). Dropped from the cross-platform
+   job. Intel macOS compilation is still covered by the new
+   `cross-macos-intel` job that cross-compiles
+   `x86_64-apple-darwin` from a `macos-14` (Apple Silicon)
+   runner — the universal Apple clang on `macos-14` targets both
+   arches natively. The `lr-osroute` BSD backend has no
+   Intel/Apple-Silicon conditional code (the route(4) socket
+   ABI is the same), so a build check is sufficient coverage for
+   the Intel macOS path. Native test execution on Intel macOS is
+   dropped (the kernel-gated tests were already Linux-only at
+   the file level).
+
+2. **Three new example docs filling the doc-set gaps** — done:
+   - `docs/examples/ldp_basic.md` — LDP label distribution
+     (RFC 5036): the byte-pump pattern over UDP discovery + TCP
+     session, the FEC/label advertise + withdraw lifecycle, and
+     the kernel MPLS dataplane mirror on Linux. Cross-links to
+     the daemon's `daemon_ldp.rs` and the `ldp_frr*.sh` interop
+     labs.
+   - `docs/examples/bgp_labeled_unicast.md` — RFC 8277 BGP-LU →
+     MPLS dataplane: the `LrMplsLabelStack` private attribute,
+     the LSP tail (locally originated, install pop) and LSP head
+     (peer-advertised, install encap) classification, and the
+     `KernelMirror` decision table. Cross-links to the
+     `labeled_unicast.sh` and `mpls_lsp.sh` interop labs.
+   - `docs/examples/ospfv3_srv6.md` — RFC 9513 OSPFv3 SRv6: the
+     LOC:FUNCT:ARGS model, the RI LSA + Locator LSA origination
+     at the library level (using the real
+     `originate_v3_srv6_ri_lsa` + `originate_v3_srv6_locator_lsa`
+     signatures), the `srv6db` reception path, and the
+     `--ospf-srv6-*` CLI surface. Cross-links to the
+     `ospf6_frr_srv6.sh` 3-node interop lab and the next-slice
+     roadmap (RFC 8362 E-LSA + End.X SIDs).
+
+3. Keep `STATUS.md` / `RFC_MAP.md` / `API.md` synchronized (the
+   standing rule — applied here for the Phase 5 landings: the new
+   example docs are indexed in `docs/README.md` and the macOS CI
+   change is recorded here).
+
+The Phase 3 protocol work (RFC 8362 E-LSA machinery + SRv6 End.X /
+LAN End.X SIDs, BGP-LS, BGP SR Policy) remains post-1.0 work; the
+documentation surface it needs (the `ospfv3_srv6.md` example plus
+the existing `OS-INTEGRATION.md` SRv6 section + the
+`docs/research/EXCHANGE-PLANE.md` design notes) is now in place
+for the next implementer to pick up.
