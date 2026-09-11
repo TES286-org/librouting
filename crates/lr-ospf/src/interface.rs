@@ -173,6 +173,49 @@ pub fn elect(electors: &[Elector], self_ip: u32) -> (u32, u32) {
     (dr, bdr)
 }
 
+/// One entry in the OSPFv3 DR/BDR election input (RFC 5340 §4.1.2).
+///
+/// The v3 interface state machine and the §9.4 election algorithm are
+/// the IPv4 ones "remain unchanged" — but the segment identity is the
+/// **Router ID**: an OSPFv3 Hello carries Router IDs in its DR/BDR
+/// fields (§A.3.2), unlike the v2 wire form's IP interface addresses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V3Elector {
+    /// The elector's Router ID — the OSPFv3 segment identity.
+    pub router_id: u32,
+    pub priority: u8,
+    /// The Router ID the elector currently claims as DR in its Hellos.
+    pub stated_dr: u32,
+    /// The Router ID the elector currently claims as BDR.
+    pub stated_bdr: u32,
+}
+
+/// Run the DR/BDR election algorithm on an OSPFv3 broadcast segment —
+/// the RFC 2328 §9.4 algorithm of [`elect`], keyed by Router IDs
+/// (RFC 5340 §4.1.2, §A.3.2; FRR ospf6d `dr_election` parity).
+/// Returns `(dr_rid, bdr_rid)` — the elected Designated Router and
+/// Backup Designated Router as Router IDs (0 = none elected).
+///
+/// `electors` must contain every bidirectional neighbor (state ≥
+/// 2-Way) plus this router itself; routers with priority 0 are
+/// ineligible (§9.4 step 1). `self_router_id` drives the §9.4 step-4
+/// re-election exactly like the v2 form.
+pub fn elect_v3(electors: &[V3Elector], self_router_id: u32) -> (u32, u32) {
+    // The §9.4 core is identity-agnostic: present the v3 electors in
+    // the shared shape with the Router ID as the identity.
+    let inner: Vec<Elector> = electors
+        .iter()
+        .map(|e| Elector {
+            router_id: e.router_id,
+            ip: e.router_id,
+            priority: e.priority,
+            stated_dr: e.stated_dr,
+            stated_bdr: e.stated_bdr,
+        })
+        .collect();
+    elect(&inner, self_router_id)
+}
+
 /// Per-interface FSM. Stays minimal — full interface FSM lives in `lr-router`.
 pub struct OspfInterface {
     pub state: IfState,
@@ -440,5 +483,98 @@ mod tests {
         assert_eq!(iface.dr, 0x0a00_0005);
         assert_eq!(iface.bdr, 0x0a00_0009);
         assert_eq!(iface.state, IfState::Backup);
+    }
+
+    // ---- OSPFv3 election (RFC 5340 §4.1.2 — identity = Router ID) ----
+
+    fn el3(router_id: u32, priority: u8, stated_dr: u32, stated_bdr: u32) -> V3Elector {
+        V3Elector {
+            router_id,
+            priority,
+            stated_dr,
+            stated_bdr,
+        }
+    }
+
+    /// §9.4 steps 2/3 on Router-ID identity over a fresh two-router
+    /// segment — and the convergence across rounds the claims exchange
+    /// produces. Round 1 at the *lower* Router ID elects router 2 into
+    /// both roles (no step-4 repeat fires for a DR-Other router); the
+    /// next election, run once the Hellos carry router 2's own repeat
+    /// result (it claims DR, router 1 is its BDR), converges both
+    /// routers on (DR=2, BDR=1) — the same two-round convergence FRR's
+    /// `dr_election` produces.
+    #[test]
+    fn elect_v3_fresh_segment() {
+        let electors = vec![el3(1, 1, 0, 0), el3(2, 1, 0, 0)];
+        // Router 1, first election: router 2 wins BDR by Router ID and
+        // DR via the step-3 fallback; router 1 is DR-Other, so its own
+        // step 4 does not repeat.
+        let (dr, bdr) = elect_v3(&electors, 1);
+        assert_eq!(dr, 2);
+        assert_eq!(bdr, 2);
+        // Router 2's first election: it is newly DR *and* newly BDR, so
+        // its own step 4 repeats the round claiming itself DR.
+        let (dr2, bdr2) = elect_v3(&electors, 2);
+        assert_eq!(dr2, 2);
+        assert_eq!(bdr2, 1);
+        // Router 1's next election, with the claims now on the wire
+        // (router 2 claims DR; router 1 still advertises the round-1
+        // view where neither is a self-claim):
+        let converged = vec![el3(1, 1, 2, 2), el3(2, 1, 2, 1)];
+        let (dr3, bdr3) = elect_v3(&converged, 1);
+        assert_eq!(dr3, 2);
+        assert_eq!(bdr3, 1);
+    }
+
+    /// Priority beats Router ID on the v3 identity too, and a router
+    /// claiming DR keeps the role (step 2 excludes DR-declarers from
+    /// the BDR pool).
+    #[test]
+    fn elect_v3_priority_and_claims() {
+        let electors = vec![
+            el3(1, 1, 1, 0),
+            el3(2, 200, 0, 2),
+            el3(3, 255, 0, 0),
+        ];
+        let (dr, bdr) = elect_v3(&electors, 3);
+        assert_eq!(dr, 1, "the DR claimant keeps the role");
+        assert_eq!(bdr, 2, "the BDR claimant beats higher-priority router 3");
+    }
+
+    /// §9.4 step 4 v3 form: the router that ends up claiming both roles
+    /// re-runs the election so the BDR moves to the other router.
+    #[test]
+    fn elect_v3_step4_resolves_double_claim() {
+        let electors = vec![el3(9, 100, 0, 0), el3(3, 1, 0, 0)];
+        let (dr, bdr) = elect_v3(&electors, 9);
+        assert_eq!(dr, 9);
+        assert_eq!(bdr, 3);
+    }
+
+    /// Priority-0 routers are ineligible (§9.4 step 1) and a lone
+    /// eligible router elects itself DR with no BDR.
+    #[test]
+    fn elect_v3_excludes_priority_zero_and_lone_router() {
+        let electors = vec![el3(1, 0, 1, 1), el3(2, 1, 0, 0)];
+        let (dr, bdr) = elect_v3(&electors, 2);
+        assert_eq!(dr, 2);
+        assert_eq!(bdr, 0);
+
+        let (lone_dr, lone_bdr) = elect_v3(&[el3(7, 1, 0, 0)], 7);
+        assert_eq!(lone_dr, 7);
+        assert_eq!(lone_bdr, 0);
+    }
+
+    /// DR death: the old DR's elector disappears; the BDR claimant
+    /// promotes to DR and the step-4 repeat promotes the remaining
+    /// router to BDR.
+    #[test]
+    fn elect_v3_dr_death_promotes() {
+        // Self = router 2 (was BDR), router 1 (DR) died.
+        let electors = vec![el3(2, 1, 0, 2), el3(3, 1, 0, 0)];
+        let (dr, bdr) = elect_v3(&electors, 2);
+        assert_eq!(dr, 2);
+        assert_eq!(bdr, 3);
     }
 }
