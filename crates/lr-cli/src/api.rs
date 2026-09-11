@@ -233,6 +233,20 @@ mod imp {
                         if idle_rounds > 40 || !deps.running.load(Ordering::Relaxed) {
                             return; // ~10 s idle timeout or shutdown
                         }
+                        // Defensive throttle: `set_read_timeout` is
+                        // honored as 250 ms per call on Linux (giving
+                        // the nominal 10 s idle window) but on macOS
+                        // SO_RCVTIMEO is not applied to AF_UNIX socket
+                        // reads the same way — `read_line` can return
+                        // `WouldBlock` immediately, which would
+                        // accumulate `idle_rounds` to the 40 cap in
+                        // microseconds and close the connection out
+                        // from under a slow client (the macOS CI leg
+                        // of the new cross-platform matrix reproduced
+                        // exactly that). Sleep briefly so the spin is
+                        // bounded regardless of whether the kernel
+                        // honors the timeout.
+                        thread::sleep(Duration::from_millis(50));
                     }
                     Err(_) => return,
                 }
