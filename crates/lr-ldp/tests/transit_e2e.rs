@@ -7,6 +7,19 @@
 //! control). The tests pin the whole transit lifecycle: allocation,
 //! §3.4.4.1 hop-count propagation, next-hop fallback on withdrawal,
 //! label release, bind exclusion and session re-establishment.
+//!
+//! Linux-only: each speaker binds its UDP/TCP sockets to its own
+//! 127.0.0.X address (so the kernel-supplied source on inbound
+//! datagrams carries the speaker identity). Linux carries the whole
+//! 127/8 prefix on `lo` so 127.0.0.2 / 127.0.0.3 are loopback; macOS
+//! only carries 127.0.0.1 on `lo0` by default (an `ifconfig lo0
+//! alias` step needs root, unavailable on CI runners). Making the
+//! test portable would require a port-to-peer reverse map and
+//! source-address rewriting — invasive enough to defer. The transit
+//! behavior this test pins is covered end-to-end on Linux by the
+//! `tests/interop/ldp_frr.sh` interop lab as well.
+
+#![cfg(target_os = "linux")]
 
 use std::collections::HashMap;
 use std::io::{Read, Write};
