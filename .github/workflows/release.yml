@@ -29,7 +29,13 @@ jobs:
             target: x86_64-unknown-linux-gnu
             archive: librouting-linux-x86_64.tar.gz
             lib: liblr_ffi.so
-          - os: macos-13
+          # macOS Intel: cross-compile from macos-14 (Apple Silicon).
+          # GitHub Actions retired the macos-13 (Intel) runner pool
+          # during 2025; the universal Apple clang on macos-14 targets
+          # both arches natively, so x86_64-apple-darwin builds fine
+          # there. See the cross-macos-intel job in ci.yml for the
+          # same pattern.
+          - os: macos-14
             target: x86_64-apple-darwin
             archive: librouting-macos-x86_64.tar.gz
             lib: liblr_ffi.dylib
