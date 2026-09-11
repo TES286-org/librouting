@@ -633,6 +633,21 @@ impl OspfRuntime {
                     let proceed = self.adjacency_viable();
                     let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed });
                 }
+                // §10.6: Database Description packets carry exchange
+                // state only from ExStart on. A neighbor that never
+                // made it past 2-Way (the §10.4 gate is closed — on a
+                // broadcast segment before the segment elected its
+                // DR/BDR, §9.4) must NOT start the exchange on a
+                // peer's behalf: the peer may already be the elected
+                // DR and eager to exchange (FRR fires its initial DBD
+                // the moment it sees us bidirectional), and absorbing
+                // it here leaves the exchange half-negotiated with no
+                // one to drive it to Full. The adjacency re-opens
+                // through set_ospf_dr_state (§9.4 step 7) or the next
+                // Hello, both of which emit the initial DBD.
+                if self.neighbor.state < NeighborState::ExStart {
+                    return OspfStep::default();
+                }
                 self.exchange
                     .on_db_desc(d, pkt.header.router_id, lsdb, &mut self.neighbor, now_ms)
                     .into()
