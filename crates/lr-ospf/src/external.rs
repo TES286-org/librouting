@@ -447,6 +447,12 @@ pub struct ExternalRouteV3 {
     /// The global IPv6 forwarding address (F bit); `None` forwards to
     /// the ASBR.
     pub forwarding_addr: Option<IpAddr>,
+    /// The resolved link-local first hop along the ASBR path — the
+    /// border router's for inter-area legs, else the ASBR's own (the
+    /// v3 next-hop model). Installers override it with the forwarding
+    /// address when the F bit is set (a global address needs no
+    /// interface disambiguation).
+    pub next_hop: Option<IpAddr>,
 }
 
 impl ExternalRouteV3 {
@@ -610,6 +616,13 @@ pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<External
             ExternalMetricType::Type2 => external_metric,
         };
         let prefix = Prefix::new_v6(body.prefix.addr, body.prefix.prefix_len);
+        // The next hop follows the ASBR path: the border router for an
+        // inter-area leg, else the ASBR itself.
+        let nh_router = border_router.unwrap_or(key.advertising_router);
+        let next_hop = spf_result
+            .next_hops
+            .get(&V3VertexId::Router(nh_router))
+            .map(|nh| nh.link_local);
         let candidate = ExternalRouteV3 {
             prefix,
             metric,
@@ -618,6 +631,7 @@ pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<External
             asbr,
             border_router,
             forwarding_addr: body.forwarding_addr.map(IpAddr::V6),
+            next_hop,
         };
         let replace = match best.get(&prefix) {
             None => true,

@@ -271,7 +271,18 @@ fn ospf_area_accepts(kind: &OspfAreaType, lsa: &Lsa) -> bool {
         }
         t if t == LsaTypeV2::NssaExternalLsa as u16 => kind.is_nssa(),
         t if t == LsaTypeV2::SummaryIpLsa as u16 || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX => {
-            !kind.no_summary() || lsa.header.link_state_id == 0
+            if !kind.no_summary() {
+                true
+            } else if t == LsaTypeV2::SummaryIpLsa as u16 {
+                // v2: the default summary's LS ID is 0.0.0.0.
+                lsa.header.link_state_id == 0
+            } else {
+                // v3 (RFC 5340 §4.4.3.4): the LS ID has no addressing
+                // semantics — the default is a zero-length prefix in
+                // the body.
+                lr_ospf::lsa::decode_v3_inter_area_prefix_body(&lsa.body)
+                    .is_some_and(|b| b.prefix_len == 0)
+            }
         }
         _ => true,
     }
@@ -368,8 +379,10 @@ enum OspfKind {
         metric_type: ExternalMetricType,
         /// Advertising ASBR of the type-5 LSA.
         asbr: u32,
-        /// Forwarding address from the type-5 LSA (0 = ASBR itself).
-        forwarding_addr: u32,
+        /// Forwarding address from the external LSA: the v2 u32 form
+        /// (RFC 2328 §A.4.5, 0 = the ASBR) or the v3 global IPv6 form
+        /// (RFC 5340 §A.4.7, F bit) — `None` means the ASBR itself.
+        forwarding_addr: Option<IpAddr>,
         /// Internal cost to the ASBR — type-2 tie-breaker (§16.4 (6)).
         internal_cost: u64,
     },
@@ -414,7 +427,7 @@ impl OspfTableEntry {
         metric: u64,
         metric_type: ExternalMetricType,
         asbr: u32,
-        forwarding_addr: u32,
+        forwarding_addr: Option<IpAddr>,
         internal_cost: u64,
     ) -> Self {
         Self {
@@ -4167,7 +4180,9 @@ impl RouterInstance for DefaultRouter {
                             if lsa_topology_changed(prev.as_ref(), &lsa, outcome) {
                                 area.topology_version += 1;
                             }
-                            if lsa.header.ls_type == LsaTypeV2::AsExternalLsa as u16 {
+                            if lsa.header.ls_type == LsaTypeV2::AsExternalLsa as u16
+                                || lsa.header.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                            {
                                 as_scope.push(lsa.clone());
                             }
                             to_flood.push(lsa);
@@ -4180,14 +4195,23 @@ impl RouterInstance for DefaultRouter {
                 }
                 if !as_scope.is_empty() {
                     // v2 type-5 bodies never enter OSPFv3 areas and are
-                    // refused by stub/NSSA areas.
+                    // refused by stub/NSSA areas; v3 0x4005 LSAs mirror
+                    // them onto the v3 areas (RFC 5340 §4.4.3.6 — AS
+                    // flooding scope).
                     let others: Vec<u32> = self
                         .ospf_areas
                         .iter()
                         .filter(|(a, area)| {
                             **a != area_id
-                                && area.protocol == Protocol::Ospfv2
                                 && !area.kind.is_stubby()
+                                && area.protocol
+                                    == if as_scope[0].header.ls_type
+                                        == LsaTypeV2::AsExternalLsa as u16
+                                    {
+                                        Protocol::Ospfv2
+                                    } else {
+                                        Protocol::Ospfv3
+                                    }
                         })
                         .map(|(a, _)| *a)
                         .collect();
@@ -4470,7 +4494,8 @@ impl DefaultRouter {
                             r.metric,
                             r.metric_type,
                             r.asbr,
-                            r.forwarding_addr,
+                            (r.forwarding_addr != 0)
+                                .then(|| IpAddr::V4(r.forwarding_addr.to_be_bytes())),
                             r.internal_cost,
                         )
                     });
@@ -4490,7 +4515,8 @@ impl DefaultRouter {
                             r.metric,
                             r.metric_type,
                             r.asbr,
-                            r.forwarding_addr,
+                            (r.forwarding_addr != 0)
+                                .then(|| IpAddr::V4(r.forwarding_addr.to_be_bytes())),
                             r.internal_cost,
                         )
                     });
@@ -4518,8 +4544,8 @@ impl DefaultRouter {
                 // OSPFv3 area (RFC 5340): the intra-area calculation
                 // runs over the v3 LSDB — intra-area prefixes plus,
                 // with `ospf_srv6_receive` on, the RFC 9513 §5 SRv6
-                // locators (inter-area summaries and externals ride
-                // the v3 0x2003/0x2004/0x4005 LSAs, a later slice).
+                // locators; then the inter-area summaries (§4.8.3,
+                // 0x2003) and AS externals (§4.8.5, 0x4005).
                 let spf3 = spf::run_spf_v3(&area.lsdb, router_id);
                 let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
@@ -4542,6 +4568,42 @@ impl DefaultRouter {
                             .entry(loc.prefix)
                             .or_insert_with(|| OspfTableEntry::intra_v3(loc.metric, loc.next_hop));
                     }
+                }
+                // §4.8.3: inter-area routes from 0x2003 summaries —
+                // intra-area paths win per prefix (§16.2 (b)), and
+                // `no_summary` areas derive only the default (the same
+                // rule the v2 area table applies).
+                for r in spf::summary_routes_v3(&area.lsdb, &spf3) {
+                    if area.kind.no_summary() && r.prefix.prefix_len != 0 {
+                        continue;
+                    }
+                    table.entry(r.prefix).or_insert_with(|| OspfTableEntry {
+                        metric: r.metric,
+                        kind: OspfKind::Inter {
+                            border_router: r.border_router.unwrap_or(0),
+                        },
+                        label: None,
+                        label_nh: None,
+                        next_hop: r.next_hop,
+                    });
+                }
+                // §4.8.5: AS externals from 0x4005 — `external_routes_v3`
+                // resolves the §16.4 (6) preference among candidates, and
+                // the entry only fills prefixes without an internal or
+                // inter-area route (§11 path preference).
+                for r in lr_ospf::external::external_routes_v3(&area.lsdb, &spf3) {
+                    table.entry(r.prefix).or_insert_with(|| OspfTableEntry {
+                        metric: r.metric,
+                        kind: OspfKind::External {
+                            metric_type: r.metric_type,
+                            asbr: r.asbr,
+                            forwarding_addr: r.forwarding_addr,
+                            internal_cost: r.internal_cost,
+                        },
+                        label: None,
+                        label_nh: None,
+                        next_hop: r.next_hop,
+                    });
                 }
                 for (prefix, entry) in table {
                     let better = match global.get(&prefix) {
@@ -4590,8 +4652,9 @@ impl DefaultRouter {
                 // forwards traffic to that address, not to the ASBR.
                 let mut next_hop = match entry.kind {
                     OspfKind::External {
-                        forwarding_addr, ..
-                    } if forwarding_addr != 0 => Some(IpAddr::V4(forwarding_addr.to_be_bytes())),
+                        forwarding_addr: Some(fa),
+                        ..
+                    } => Some(fa),
                     _ => entry.next_hop,
                 };
                 // RFC 8660 head end: an SR-labelled route enters the
@@ -9239,6 +9302,191 @@ mod tests {
         assert_eq!(node.locators.len(), 1);
         assert_eq!(node.locators[0].end_sids.len(), 1);
         assert_eq!(node.locators[0].end_sids[0].behavior, 1);
+    }
+
+    /// §4.8.3/§4.8.5 over a live v3 exchange: a 0x2003 summary from the
+    /// neighbor publishes an inter-area Ospfv3 route at
+    /// dist(border) + metric with the border router's link-local next
+    /// hop; a 0x4005 from the same neighbor publishes an external route
+    /// at the type-2 external metric; the 0x4005's F-bit forwarding
+    /// address form publishes with the forwarding address as next hop.
+    #[test]
+    fn ospfv3_inter_area_and_external_routes_published() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::abr::originate_v3_inter_area_prefix_lsa;
+        use lr_ospf::lsa::v3::{
+            originate_v3_as_external_lsa, originate_v3_link_lsa, originate_v3_router_lsa,
+            V3ExternalDestination, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        let link = lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0a00_0001,
+        };
+        let router_lsa = originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[link], None).unwrap();
+        let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        // The root's own Router-LSA (adjacency-up origination).
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap();
+        // r2's 0x2003 for 2001:db8:a::/48 at metric 7 (LS ID arbitrary).
+        let mut p6 = [0u8; 16];
+        p6[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x0a]);
+        let summary = originate_v3_inter_area_prefix_lsa(
+            r2,
+            1,
+            &lr_ospf::abr::SummaryDestination {
+                prefix: Prefix::new_v6(p6, 48),
+                metric: 7,
+            },
+            None,
+        )
+        .unwrap();
+        // r2's 0x4005: type 2 metric 100 for 2001:db8:b::/48.
+        let mut ep = [0u8; 16];
+        ep[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x0b]);
+        let ext_dest = V3ExternalDestination::new(Prefix::new_v6(ep, 48), 100, true);
+        let external = originate_v3_as_external_lsa(r2, 1, &ext_dest, None).unwrap();
+
+        let bytes = ospf3_lsu_bytes(
+            r2,
+            0,
+            vec![router_lsa, link_lsa, own_lsa, summary, external],
+        );
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let _ = r.drain_output(h);
+
+        // Inter-area: dist(r2)=10 + 7, via r2's link-local.
+        let summary_route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v6(p6, 48))
+            .expect("inter-area route published");
+        assert_eq!(summary_route.protocol, Protocol::Ospfv3);
+        assert_eq!(summary_route.preference.metric, 17);
+        assert_eq!(summary_route.next_hop, Some(IpAddr::V6(ll2)));
+        // External: type 2 → the external metric alone, via the ASBR's
+        // link-local.
+        let external_route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v6(ep, 48))
+            .expect("external route published");
+        assert_eq!(external_route.protocol, Protocol::Ospfv3);
+        assert_eq!(external_route.preference.metric, 100);
+        assert_eq!(external_route.next_hop, Some(IpAddr::V6(ll2)));
+    }
+
+    /// An F-bit 0x4005 publishes with the global forwarding address as
+    /// the next hop — the §16.4 (c) v3 form, where the FA (covered by
+    /// the neighbor's intra-area prefix) resolves the internal leg.
+    #[test]
+    fn ospfv3_external_forwarding_address_next_hop() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let r2 = 0x0a00_0002u32;
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+
+        use lr_ospf::lsa::v3::{
+            originate_v3_as_external_lsa, originate_v3_intra_area_prefix_lsa,
+            originate_v3_link_lsa, originate_v3_router_lsa, V3ExternalDestination, V3Prefix,
+            LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+        };
+        let mut ll2 = [0u8; 16];
+        ll2[0] = 0xfe;
+        ll2[1] = 0x80;
+        ll2[15] = 2;
+        let link = lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 3,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0a00_0001,
+        };
+        let router_lsa = originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[link], None).unwrap();
+        let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+        let own_lsa = originate_v3_router_lsa(
+            0x0a00_0001,
+            ROUTER_BIT_V6,
+            0x13,
+            &[lr_ospf::lsa::v3::V3RouterLink {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: r2,
+            }],
+            None,
+        )
+        .unwrap();
+        // r2's own /64 on the link: covers the forwarding address below.
+        let mut own_prefix = [0u8; 16];
+        own_prefix[..7].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0x02]);
+        let mut own_p = V3Prefix {
+            prefix_len: 64,
+            options: 0,
+            metric: 0,
+            addr: own_prefix,
+        };
+        own_p.prefix_len = 64;
+        let iap = originate_v3_intra_area_prefix_lsa(
+            r2,
+            1,
+            lr_ospf::lsa::v3::LS_TYPE_ROUTER,
+            0,
+            r2,
+            vec![own_p.clone()],
+            None,
+        )
+        .unwrap();
+        // The external with the FA inside r2's /64 (a global address).
+        let mut fa = [0u8; 16];
+        fa[..8].copy_from_slice(&own_prefix[..8]);
+        fa[15] = 1;
+        let mut ep = [0u8; 16];
+        ep[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x0c]);
+        let mut ext_dest = V3ExternalDestination::new(Prefix::new_v6(ep, 48), 30, true);
+        ext_dest.forwarding_addr = Some(fa);
+        let external = originate_v3_as_external_lsa(r2, 1, &ext_dest, None).unwrap();
+
+        let bytes = ospf3_lsu_bytes(r2, 0, vec![router_lsa, link_lsa, own_lsa, iap, external]);
+        r.feed_input(h, &bytes).expect("feed v3 LSU");
+        let _ = r.drain_output(h);
+
+        let route = r
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == Prefix::new_v6(ep, 48))
+            .expect("external route published");
+        assert_eq!(route.protocol, Protocol::Ospfv3);
+        assert_eq!(route.preference.metric, 30, "type 2: FA leg not added");
+        // The FA — not the ASBR's link-local — is the published next hop.
+        assert_eq!(route.next_hop, Some(IpAddr::V6(fa)));
     }
 
     /// Fail-closed default: without `ospf_srv6_receive` the identical
