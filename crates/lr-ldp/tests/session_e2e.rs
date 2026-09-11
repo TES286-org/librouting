@@ -206,12 +206,8 @@ impl Speaker {
                     // 127.0.0.1:0, so the destination port is what
                     // distinguishes the speakers, not the address.
                     let real = match transport_addr {
-                        IpAddr::V4(b) if *b != [127, 0, 0, 1] => {
-                            IpAddr::V4([127, 0, 0, 1])
-                        }
-                        IpAddr::V6(o)
-                            if *o != [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] =>
-                        {
+                        IpAddr::V4(b) if *b != [127, 0, 0, 1] => IpAddr::V4([127, 0, 0, 1]),
+                        IpAddr::V6(o) if *o != [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] => {
                             IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
                         }
                         other => *other,
