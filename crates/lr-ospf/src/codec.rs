@@ -176,20 +176,27 @@ fn encode_dbdesc(
     version: OspfVersion,
     out: &mut WriteBuf<'_>,
 ) -> Result<(), EncodeError> {
-    out.put_u16_be(d.mtu).ok_or(EncodeError::BufferFull)?;
     if version == OspfVersion::V2 {
         // RFC 2328 §A.3.3: mtu(2) | options(1) | flags(1) | dd_seq(4).
+        out.put_u16_be(d.mtu).ok_or(EncodeError::BufferFull)?;
         out.put_u8(d.options as u8).ok_or(EncodeError::BufferFull)?;
         out.put_u8(d.flags).ok_or(EncodeError::BufferFull)?;
+        out.put_u32_be(d.dd_seq).ok_or(EncodeError::BufferFull)?;
     } else {
-        // RFC 5340 §A.3.3: mtu(2) | options(3) | flags(1) | dd_seq(4).
+        // RFC 5340 §A.3.3: 0(1) | options(3) | mtu(2) | 0(1) | flags(1)
+        // | dd_seq(4) — 12 bytes, the v3 shape FRR's ospf6_make_dbdesc
+        // emits byte for byte (the reserved word leads, the MTU follows
+        // the options — unlike v2's order).
+        out.put_u8(0).ok_or(EncodeError::BufferFull)?;
         out.put_u8((d.options >> 16) as u8)
             .ok_or(EncodeError::BufferFull)?;
         out.put_u16_be(d.options as u16)
             .ok_or(EncodeError::BufferFull)?;
+        out.put_u16_be(d.mtu).ok_or(EncodeError::BufferFull)?;
+        out.put_u8(0).ok_or(EncodeError::BufferFull)?;
         out.put_u8(d.flags).ok_or(EncodeError::BufferFull)?;
+        out.put_u32_be(d.dd_seq).ok_or(EncodeError::BufferFull)?;
     }
-    out.put_u32_be(d.dd_seq).ok_or(EncodeError::BufferFull)?;
     for h in &d.lsa_headers {
         encode_lsa_header(h, version, out)?;
     }
@@ -207,9 +214,11 @@ fn encode_lsreq(
             out.put_u32_be(u32::from(e.ls_type))
                 .ok_or(EncodeError::BufferFull)?;
         } else {
-            // RFC 5340 §A.3.4: LS type(2) | Unused(2) | LS ID(4) | Adv Router(4).
-            out.put_u16_be(e.ls_type).ok_or(EncodeError::BufferFull)?;
+            // RFC 5340 §A.3.4: 0(2) | LS type(2) | LS ID(4) | Adv Router(4)
+            // — the reserved word LEADS the 16-bit type (FRR
+            // ospf6_lsreq_entry parity).
             out.put_u16_be(0).ok_or(EncodeError::BufferFull)?;
+            out.put_u16_be(e.ls_type).ok_or(EncodeError::BufferFull)?;
         }
         out.put_u32_be(e.ls_id).ok_or(EncodeError::BufferFull)?;
         out.put_u32_be(e.adv_router)
@@ -374,15 +383,18 @@ fn decode_hello(b: &[u8], version: OspfVersion) -> Result<HelloBody, ParseError>
 }
 
 fn decode_dbdesc(b: &[u8], version: OspfVersion) -> Result<DbDescBody, ParseError> {
-    let (fixed, opt_off, opt_len, flags_off) = if version == OspfVersion::V2 {
-        (8usize, 2usize, 1usize, 3usize)
+    let (fixed, opt_off, opt_len, mtu_off, flags_off) = if version == OspfVersion::V2 {
+        (8usize, 2usize, 1usize, 0usize, 3usize)
     } else {
-        (10usize, 2usize, 3usize, 5usize)
+        // RFC 5340 §A.3.3: 0(1) | options(3) | mtu(2) | 0(1) | flags(1)
+        // | dd_seq(4) — the reserved word leads, the MTU follows the
+        // options.
+        (12usize, 1usize, 3usize, 4usize, 7usize)
     };
     if b.len() < fixed {
         return Err(ParseError::truncated("ospf.dbdesc.body"));
     }
-    let mtu = u16::from_be_bytes([b[0], b[1]]);
+    let mtu = u16::from_be_bytes([b[mtu_off], b[mtu_off + 1]]);
     let options = match opt_len {
         1 => u32::from(b[opt_off]),
         _ => u32::from_be_bytes([0, b[opt_off], b[opt_off + 1], b[opt_off + 2]]),
@@ -419,9 +431,9 @@ fn decode_lsreq(b: &[u8], version: OspfVersion) -> Result<LsRequestBody, ParseEr
             // RFC 2328 §A.3.4: LS type is a 4-byte word.
             u32::from_be_bytes([b[i], b[i + 1], b[i + 2], b[i + 3]]) as u16
         } else {
-            // RFC 5340 §A.3.4: LS type(2) | Unused(2) — the 16-bit type
-            // is at the start of the entry.
-            u16::from_be_bytes([b[i], b[i + 1]])
+            // RFC 5340 §A.3.4: 0(2) | LS type(2) — the 16-bit type
+            // follows the reserved word.
+            u16::from_be_bytes([b[i + 2], b[i + 3]])
         };
         let ls_id = u32::from_be_bytes([b[i + 4], b[i + 5], b[i + 6], b[i + 7]]);
         let adv_router = u32::from_be_bytes([b[i + 8], b[i + 9], b[i + 10], b[i + 11]]);
@@ -809,12 +821,15 @@ mod tests {
             }),
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
-        // v3 DBD fixed body is 10 bytes: mtu(2) | options(3) | flags(1) | dd_seq(4).
-        assert_eq!(&bytes[16..18], &1500u16.to_be_bytes());
-        assert_eq!(&bytes[18..21], &[0, 2, 1], "24-bit options");
-        assert_eq!(bytes[21], 0x07, "flags at offset 5 of the body");
-        assert_eq!(&bytes[22..26], &0x1122_3344u32.to_be_bytes(), "dd_seq");
-        assert_eq!(bytes.len(), 16 + 10, "no LSA headers");
+        // RFC 5340 §A.3.3: the v3 DBD body is 12 bytes: 0(1) |
+        // options(3) | mtu(2) | 0(1) | flags(1) | dd_seq(4).
+        assert_eq!(bytes[16], 0, "reserved word");
+        assert_eq!(&bytes[17..20], &[0, 2, 1], "24-bit options");
+        assert_eq!(&bytes[20..22], &1500u16.to_be_bytes(), "mtu after options");
+        assert_eq!(bytes[22], 0, "reserved byte");
+        assert_eq!(bytes[23], 0x07, "flags at offset 7 of the body");
+        assert_eq!(&bytes[24..28], &0x1122_3344u32.to_be_bytes(), "dd_seq");
+        assert_eq!(bytes.len(), 16 + 12, "no LSA headers");
 
         let mut dec = OspfCodec::v3();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();
@@ -830,7 +845,7 @@ mod tests {
     }
 
     #[test]
-    fn v3_ls_request_uses_16bit_type_at_entry_start() {
+    fn v3_ls_request_reserved_word_leads_16bit_type() {
         let codec = OspfCodec::v3();
         let pkt = OspfPacket {
             header: v3_header(3, 0x01020304),
@@ -850,11 +865,14 @@ mod tests {
             }),
         };
         let bytes = codec.encode_vec(&pkt).unwrap();
-        // v3 entry: LS type(2) | Unused(2) | LS ID(4) | Adv Router(4).
-        assert_eq!(&bytes[16..18], &0x2003u16.to_be_bytes());
-        assert_eq!(&bytes[18..20], &[0, 0], "unused word");
+        // v3 entry: 0(2) | LS type(2) | LS ID(4) | Adv Router(4) — the
+        // reserved word leads (RFC 5340 §A.3.4).
+        assert_eq!(&bytes[16..18], &[0, 0], "reserved word leads");
+        assert_eq!(&bytes[18..20], &0x2003u16.to_be_bytes());
         assert_eq!(&bytes[20..24], &1u32.to_be_bytes());
-        assert_eq!(&bytes[28..30], &0x4005u16.to_be_bytes());
+        assert_eq!(&bytes[24..28], &0x0a00_0002u32.to_be_bytes(), "adv router");
+        assert_eq!(&bytes[28..30], &[0, 0], "second reserved word");
+        assert_eq!(&bytes[30..32], &0x4005u16.to_be_bytes());
 
         let mut dec = OspfCodec::v3();
         let p2 = dec.decode_slice(&bytes).unwrap().unwrap();

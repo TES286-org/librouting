@@ -1971,7 +1971,12 @@ impl KernelMirror {
                                 _ => 0,
                             };
                             if let Some(table) = self.ip_table.as_mut() {
-                                let _ = table.add_route(r.key.prefix, nh, oif);
+                                if let Err(e) = table.add_route(r.key.prefix, nh, oif) {
+                                    eprintln!(
+                                        "mirror: route install failed for {} via {} oif {}: {}",
+                                        r.key.prefix, nh, oif, e
+                                    );
+                                }
                             }
                         }
                     }

@@ -49,7 +49,7 @@ use lr_ospf::lsa::v3::{
 use lr_ospf::origination::finalize_v3_packet;
 use lr_ospf::packet::{HelloBody, OspfBody, OspfPacketType, OSPF_V3_OPTIONS_DEFAULT};
 use lr_osroute::ospf_transport::{interface_v6_addrs, OspfV6Transport};
-use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
+use lr_router::{DefaultRouter, RouterInstance, SessionConfig, SessionHandle};
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec};
 
@@ -528,8 +528,9 @@ impl Ospf3Daemon {
                 eprintln!("daemon: ospf3 feed_input: {e}");
             }
         }
-        let events = router.poll_events();
-        self.handle_router_events(events, now_ms);
+        // Events are consumed (logged + kernel-mirrored) solely by the
+        // ticker thread — the daemon would race it here and steal
+        // RouteInstalled events before the mirror sees them.
     }
 
     /// Track Full transitions via session summaries (the v2 pattern)
@@ -595,8 +596,6 @@ impl Ospf3Daemon {
                 );
             }
         }
-        let events = router.poll_events();
-        self.handle_router_events(events, now_ms);
         drop(router);
         let areas: Vec<u32> = self.anchors.keys().copied().collect();
         for area in areas {
@@ -634,8 +633,6 @@ impl Ospf3Daemon {
             self.pending_reorig.remove(&area);
             self.reoriginate_area(&mut router, area, now_ms);
         }
-        let events = router.poll_events();
-        self.handle_router_events(events, now_ms);
     }
 
     fn schedule_reoriginate(&mut self, area: u32, now_ms: u64) {
@@ -906,12 +903,6 @@ impl Ospf3Daemon {
                 }
             }
             Err(e) => eprintln!("daemon: ospf3 self-origination encode: {e}"),
-        }
-    }
-
-    fn handle_router_events(&mut self, events: Vec<RouterEvent>, _now_ms: u64) {
-        for ev in events {
-            crate::daemon_ospf::log_event(&ev);
         }
     }
 }

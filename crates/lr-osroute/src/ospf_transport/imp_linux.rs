@@ -684,9 +684,12 @@ impl SockaddrIn6 {
     }
 }
 
+// The same libc symbols as the v4 declarations above, retyped for
+// sockaddr_in6 (the address family lives in the struct, not the ABI —
+// sockaddr_in and sockaddr_in6 share the 16-byte leading layout the
+// kernel reads, and the ABI passes pointers).
+#[allow(clashing_extern_declarations)]
 extern "C" {
-    // The same libc symbols as the v4 declarations above, retyped for
-    // sockaddr_in6 (the address family lives in the struct, not the ABI).
     #[link_name = "sendto"]
     fn sendto6(
         fd: i32,
