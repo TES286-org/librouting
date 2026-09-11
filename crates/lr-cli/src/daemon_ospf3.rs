@@ -31,8 +31,14 @@
 //!
 //! Scope of slice 1 (see docs/STATUS.md): point-to-point segments only
 //! (broadcast/DR election, inter-area summaries and AS externals are
-//! later slices), no graceful restart, no SR — the config finalizer
-//! rejects those combinations outright.
+//! later slices), no graceful restart. Slice 3 adds the RFC 9513 SRv6
+//! surface: with `[[ospf.srv6_locator]]` configuration the daemon
+//! originates the area-scoped Router Information LSA (the SRv6
+//! Capabilities, SR-Algorithm and Node MSD TLVs, RFC 9513 §2-§4) and
+//! the SRv6 Locator LSA (§7, with the §8 End SID and the optional §10
+//! SID Structure) alongside the topology LSAs, and `[ospf]
+//! srv6_receive` opens the §5 locator-reception gate on the router
+//! pipeline.
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
@@ -42,9 +48,14 @@ use std::time::Duration;
 
 use lr_core::addr::{IpAddr, RouterId};
 use lr_ospf::codec::OspfCodec;
+use lr_ospf::lsa::srv6::{locator_route_type, msd_type, NodeMsd};
 use lr_ospf::lsa::v3::{
     originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_router_lsa, V3Prefix,
     LINK_TYPE_POINTTOPOINT, LS_TYPE_ROUTER, ROUTER_BIT_E, ROUTER_BIT_V6,
+};
+use lr_ospf::lsa::{
+    originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorTlv,
+    Srv6SidStructure, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
 };
 use lr_ospf::origination::finalize_v3_packet;
 use lr_ospf::packet::{HelloBody, OspfBody, OspfPacketType, OSPF_V3_OPTIONS_DEFAULT};
@@ -151,15 +162,137 @@ struct Ospf3Daemon {
     /// rides it, output discarded).
     anchors: BTreeMap<u32, SessionHandle>,
     /// Per-LSA sequence floors: area → Router-LSA, (area, ifindex) →
-    /// Link-LSA, (area, ls_id) → Intra-Area-Prefix-LSA.
+    /// Link-LSA, (area, ls_id) → Intra-Area-Prefix-LSA, area →
+    /// SRv6 Router-Information-LSA, area → SRv6 Locator-LSA.
     router_lsa_seq: BTreeMap<u32, u32>,
     link_lsa_seq: BTreeMap<(u32, u32), u32>,
     iap_lsa_seq: BTreeMap<(u32, u32), u32>,
+    ri_lsa_seq: BTreeMap<u32, u32>,
+    srv6_lsa_seq: BTreeMap<u32, u32>,
     /// Last self-origination per area (ms) — the §14.1 refresh cadence.
     last_orig_ms: BTreeMap<u32, u64>,
+    /// RFC 9513 origination state (`None` = SRv6 off — the daemon stays
+    /// byte-identical to a pre-SRv6 one).
+    srv6: Option<Srv6Origination>,
     router_id: RouterId,
     /// Snapshot for the runtime API `status` command.
     status: Arc<Mutex<Vec<String>>>,
+}
+
+/// The resolved RFC 9513 origination state: what `reoriginate_area`
+/// advertises in every configured area. Built once from the validated
+/// config (§7.1 locators resolved to wire TLVs with their §8 End SIDs).
+struct Srv6Origination {
+    /// SRv6 Capabilities TLV flags (RFC 9513 §2; the O-flag).
+    capabilities: u16,
+    /// SR-Algorithm TLV values (RFC 8665 §3.1): the distinct locator
+    /// algorithms, ascending.
+    algorithms: Vec<u8>,
+    /// Node MSD TLV pairs (RFC 8476 §2), MSD-type order 41/42/44/45.
+    msds: Vec<NodeMsd>,
+    /// The §7.1 Locator TLVs, one per configured locator.
+    locators: Vec<Srv6LocatorTlv>,
+}
+
+impl Srv6Origination {
+    /// Resolve the validated `[[ospf.srv6_locator]]` configuration into
+    /// the origination state. Parse failures cannot happen (finalize
+    /// rejected them) but are handled fail-soft: the offending locator
+    /// is dropped with a log line, never a panic.
+    fn from_config(cfg: &DaemonConfig) -> Self {
+        let capabilities = if cfg.ospf_srv6_o_flag {
+            SRV6_CAP_O_FLAG
+        } else {
+            0
+        };
+        let mut algorithms = std::collections::BTreeSet::new();
+        let mut locators = Vec::new();
+        for spec in &cfg.ospf_srv6_locators {
+            let Some(text) = spec.prefix.as_deref() else {
+                continue; // finalize() already rejected this
+            };
+            let Ok(prefix) = text.parse::<lr_core::addr::Prefix>() else {
+                continue;
+            };
+            let lr_core::addr::IpAddr::V6(octets) = prefix.addr else {
+                continue;
+            };
+            // §7.1: the locator prefix is advertised with the host
+            // bits zeroed (the crate's Prefix keeps them that way).
+            let algorithm = spec.algorithm.unwrap_or(0);
+            algorithms.insert(algorithm);
+            // §8: the End SID value defaults to the locator prefix
+            // itself (the RFC 8986 End behavior on the locator).
+            let sid = match spec.sid.as_deref() {
+                Some(text) => match text.parse::<lr_core::addr::IpAddr>() {
+                    Ok(IpAddr::V6(octets)) => octets,
+                    _ => {
+                        eprintln!("daemon: ospf3 srv6 locator {text}: bad sid, locator skipped");
+                        continue;
+                    }
+                },
+                None => octets,
+            };
+            let structure = match (
+                spec.block_len,
+                spec.node_len,
+                spec.function_len,
+                spec.argument_len,
+            ) {
+                (Some(lb), Some(ln), Some(f), Some(a)) => Some(Srv6SidStructure {
+                    lb_len: lb,
+                    ln_len: ln,
+                    func_len: f,
+                    arg_len: a,
+                }),
+                _ => None,
+            };
+            locators.push(Srv6LocatorTlv {
+                route_type: locator_route_type::INTRA_AREA,
+                algorithm,
+                locator_len: prefix.prefix_len,
+                options: if spec.anycast.unwrap_or(false) {
+                    PREFIX_OPT_AC
+                } else {
+                    0
+                },
+                metric: spec.metric.unwrap_or(0),
+                prefix: octets,
+                end_sids: vec![Srv6EndSidSubTlv {
+                    flags: 0,
+                    behavior: spec.behavior.unwrap_or(1), // 1 = End
+                    sid,
+                    structure,
+                }],
+                fwd_addr: None,
+                route_tag: None,
+            });
+        }
+        let mut msds = Vec::new();
+        for (msd, value) in [
+            (msd_type::SRH_MAX_SL, cfg.ospf_srv6_max_sl),
+            (msd_type::SRH_MAX_END_POP, cfg.ospf_srv6_max_end_pop),
+            (msd_type::SRH_MAX_H_ENCAPS, cfg.ospf_srv6_max_h_encaps),
+            (msd_type::SRH_MAX_END_D, cfg.ospf_srv6_max_end_d),
+        ] {
+            if let Some(v) = value {
+                msds.push((msd, v));
+            }
+        }
+        Self {
+            capabilities,
+            algorithms: algorithms.into_iter().collect(),
+            msds,
+            locators,
+        }
+    }
+
+    /// The origination gate: SRv6 state exists only when locators are
+    /// configured — reception alone never turns a daemon into an
+    /// SRv6 originator (fail-closed default).
+    fn maybe_from_config(cfg: &DaemonConfig) -> Option<Self> {
+        (!cfg.ospf_srv6_locators.is_empty()).then(|| Self::from_config(cfg))
+    }
 }
 
 /// `lr-daemon --protocol ospf` with `[ospf] version = "v3"`.
@@ -204,15 +337,34 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         router_lsa_seq: BTreeMap::new(),
         link_lsa_seq: BTreeMap::new(),
         iap_lsa_seq: BTreeMap::new(),
+        ri_lsa_seq: BTreeMap::new(),
+        srv6_lsa_seq: BTreeMap::new(),
         last_orig_ms: BTreeMap::new(),
+        srv6: Srv6Origination::maybe_from_config(cfg),
         router_id: rid,
         status: Arc::new(Mutex::new(Vec::new())),
     };
+    if let Some(s) = &daemon.srv6 {
+        println!(
+            "daemon: ospf3 SRv6 origination on — {} locator(s), algorithms {:?}, \
+             o-flag {}, {} MSD limit(s)",
+            s.locators.len(),
+            s.algorithms,
+            if cfg.ospf_srv6_o_flag { "on" } else { "off" },
+            s.msds.len(),
+        );
+    }
     // ---- Router: one anchor session per area (v3). ----
     let iface_mtu = daemon.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
     {
         let router_arc = Arc::clone(&daemon.router);
         let mut router = router_arc.lock().unwrap();
+        if cfg.ospf_srv6_receive {
+            // RFC 9513 §5 reception: project learned Locator LSAs into
+            // the per-node SRv6 database and install the §5 locator
+            // routes (fail-closed off by default, like `sr_receive`).
+            router.set_ospf_srv6_receive(true);
+        }
         for area in daemon.interfaces.iter().map(|i| i.area) {
             if daemon.anchors.contains_key(&area) {
                 continue;
@@ -877,6 +1029,42 @@ impl Ospf3Daemon {
             }
         }
         self.last_orig_ms.insert(area, now_ms);
+        // RFC 9513 slice 3: the SRv6 Router Information LSA (§2-§4,
+        // instance ID 0) and the Locator LSA (§7, all locators, Link
+        // State ID 1) ride the same LSU as the topology LSAs, so a
+        // locator change refreshes through the normal re-origination
+        // and §14.1 cadences.
+        if let Some(s) = &self.srv6 {
+            let ri_seq = self.ri_lsa_seq.get(&area).copied();
+            match originate_v3_srv6_ri_lsa(
+                self.router_id.as_u32(),
+                s.capabilities,
+                &s.algorithms,
+                &s.msds,
+                ri_seq,
+            ) {
+                Some(ri) => {
+                    self.ri_lsa_seq.insert(area, ri.header.ls_sequence_number);
+                    lsas.push(ri);
+                }
+                None => eprintln!(
+                    "daemon: ospf3 SRv6 RI-LSA sequence space exhausted for area {}",
+                    area_label(area)
+                ),
+            }
+            let loc_seq = self.srv6_lsa_seq.get(&area).copied();
+            match originate_v3_srv6_locator_lsa(self.router_id.as_u32(), 1, &s.locators, loc_seq) {
+                Some(loc_lsa) => {
+                    self.srv6_lsa_seq
+                        .insert(area, loc_lsa.header.ls_sequence_number);
+                    lsas.push(loc_lsa);
+                }
+                None => eprintln!(
+                    "daemon: ospf3 SRv6 Locator-LSA sequence space exhausted for area {}",
+                    area_label(area)
+                ),
+            }
+        }
         let Some(&anchor) = self.anchors.get(&area) else {
             return;
         };
@@ -950,4 +1138,120 @@ fn demux_header(bytes: &[u8]) -> Option<(u32, u32, u16)> {
 
 fn fmt_rid(rid: u32) -> String {
     RouterId::from_u32(rid).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::daemon_config::{DaemonConfig, OspfSrv6LocatorSpec};
+
+    fn locator_spec(prefix: &str) -> OspfSrv6LocatorSpec {
+        OspfSrv6LocatorSpec {
+            prefix: Some(prefix.to_string()),
+            ..Default::default()
+        }
+    }
+
+    fn v6_octets(text: &str) -> [u8; 16] {
+        match text.parse::<IpAddr>().expect("valid v6") {
+            IpAddr::V6(o) => o,
+            _ => panic!("not v6"),
+        }
+    }
+
+    #[test]
+    fn srv6_off_without_locators() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        cfg.ospf_srv6_receive = true;
+        // Reception alone does not turn origination on: the daemon
+        // carries SRv6 state only when locators are configured.
+        assert!(Srv6Origination::maybe_from_config(&cfg).is_none());
+        cfg.ospf_srv6_locators = vec![locator_spec("2001:db8:a:1::/48")];
+        assert!(Srv6Origination::maybe_from_config(&cfg).is_some());
+    }
+
+    #[test]
+    fn srv6_origination_defaults() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        cfg.ospf_srv6_locators = vec![locator_spec("2001:db8:a:1::/48")];
+        let s = Srv6Origination::from_config(&cfg);
+        // No O-flag by default; algorithm 0 derived from the locator.
+        assert_eq!(s.capabilities, 0);
+        assert_eq!(s.algorithms, vec![0]);
+        assert!(s.msds.is_empty());
+        assert_eq!(s.locators.len(), 1);
+        let loc = &s.locators[0];
+        assert_eq!(loc.route_type, locator_route_type::INTRA_AREA);
+        assert_eq!(loc.algorithm, 0);
+        assert_eq!(loc.locator_len, 48);
+        assert_eq!(loc.options, 0);
+        assert_eq!(loc.metric, 0);
+        assert_eq!(loc.prefix, v6_octets("2001:db8:a:1::"));
+        // The End SID defaults to the locator prefix, behavior End,
+        // no SID Structure sub-TLV.
+        assert_eq!(loc.end_sids.len(), 1);
+        let sid = &loc.end_sids[0];
+        assert_eq!(sid.behavior, 1);
+        assert_eq!(sid.sid, v6_octets("2001:db8:a:1::"));
+        assert!(sid.structure.is_none());
+        // The encoded TLV round-trips through the slice-2 decoder.
+        let mut wire = Vec::new();
+        loc.encode(&mut wire);
+        let (decoded, _) = Srv6LocatorTlv::decode(&wire, 0).expect("decodable");
+        assert_eq!(&decoded, loc);
+    }
+
+    #[test]
+    fn srv6_origination_full_attributes() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        cfg.ospf_srv6_o_flag = true;
+        cfg.ospf_srv6_max_sl = Some(8);
+        cfg.ospf_srv6_max_end_d = Some(6);
+        cfg.ospf_srv6_locators = vec![
+            OspfSrv6LocatorSpec {
+                prefix: Some("2001:db8:a:1::/64".to_string()),
+                algorithm: Some(128), // flexible-algorithm space
+                metric: Some(30),
+                anycast: Some(true),
+                sid: Some("2001:db8:a:1:f00d::".to_string()),
+                behavior: Some(1),
+                block_len: Some(32),
+                node_len: Some(16),
+                function_len: Some(16),
+                argument_len: Some(0),
+            },
+            locator_spec("2001:db8:a:2::/64"),
+        ];
+        let s = Srv6Origination::from_config(&cfg);
+        assert_eq!(s.capabilities, SRV6_CAP_O_FLAG);
+        // Distinct algorithms, ascending (BTreeSet order).
+        assert_eq!(s.algorithms, vec![0, 128]);
+        // MSD pairs in the 41/42/44/45 wire order, only the configured ones.
+        assert_eq!(
+            s.msds,
+            vec![(msd_type::SRH_MAX_SL, 8), (msd_type::SRH_MAX_END_D, 6)]
+        );
+        assert_eq!(s.locators.len(), 2);
+        let first = &s.locators[0];
+        assert_eq!(first.options, PREFIX_OPT_AC);
+        assert_eq!(first.metric, 30);
+        assert_eq!(first.end_sids[0].sid, v6_octets("2001:db8:a:1:f00d::"));
+        assert_eq!(
+            first.end_sids[0].structure,
+            Some(Srv6SidStructure {
+                lb_len: 32,
+                ln_len: 16,
+                func_len: 16,
+                arg_len: 0,
+            })
+        );
+        // The full TLV round-trips through the slice-2 decoder.
+        let mut wire = Vec::new();
+        first.encode(&mut wire);
+        let (decoded, _) = Srv6LocatorTlv::decode(&wire, 0).expect("decodable");
+        assert_eq!(&decoded, first);
+    }
 }
