@@ -1,10 +1,14 @@
 //! OSPF Grace-LSA — RFC 3623 (OSPFv2) and RFC 5187 (OSPFv3).
 //!
-//! The Grace-LSA is a **link-local** scoped Opaque-LSA (RFC 5250 type 9,
-//! Opaque Type 3, Opaque ID 0) that a restarting router floods to
-//! announce its planned shutdown and request that neighbors retain its
-//! LSAs for a grace period (RFC 3623 Appendix A). The body is a
-//! sequence of TLVs (RFC 3623 §3 / RFC 5187 §3):
+//! The v2 Grace-LSA is a **link-local** scoped Opaque-LSA (RFC 5250
+//! type 9, Opaque Type 3, Opaque ID 0) that a restarting router floods
+//! to announce its planned shutdown and request that neighbors retain
+//! its LSAs for a grace period (RFC 3623 Appendix A). The v3
+//! counterpart is the dedicated link-scoped LS type **0x000b** with
+//! the Link State ID carrying the originating Interface ID (RFC 5187
+//! §2.1/§2.2 — no opaque-type packing, v3 has no RFC 5250). The body
+//! is the same TLV sequence in both versions (RFC 3623 §3 /
+//! RFC 5187 §2.2):
 //!
 //! | Type | Name                     | Width | Required |
 //! |------|--------------------------|-------|----------|
@@ -15,9 +19,9 @@
 //! TLVs are padded to four-octet alignment; the padding is not included
 //! in the Length field (RFC 3623 Appendix A).
 //!
-//! ## Opaque LSA ID packing (RFC 5250 §3.1)
+//! ## Opaque LSA ID packing (RFC 5250 §3.1 — OSPFv2 only)
 //!
-//! The 32-bit `link_state_id` of an Opaque LSA is partitioned into:
+//! The 32-bit `link_state_id` of a v2 Opaque LSA is partitioned into:
 //! - Opaque Type (8 MSBs) — `3` for the Grace-LSA (RFC 3623 §2.1).
 //! - Opaque ID (24 LSBs) — typically `0` for the Grace-LSA.
 //!
@@ -26,14 +30,17 @@
 //! Neither RFC 3623 nor RFC 5187 defines a Graceful Restart capability
 //! bit in the OSPF options field: the Grace-LSA itself is the signal
 //! (a router that can act as a helper reacts to receiving one, RFC
-//! 3623 §3.1). The O-bit in the OSPFv2 options field belongs to RFC
-//! 5250 and means *Opaque LSA capability*, and per RFC 5250 §3 it is
-//! meaningful in Database Description packets only ("the O-bit SHOULD
-//! NOT be set and MUST be ignored when received in packets other than
-//! Database Description packets"). FRR spells it out on the receive
-//! side ("O-bit abuse?") and sets it only in opaque-LSA headers and
-//! DBDs; BIRD masks it into DD packets only. The helpers here follow
-//! the RFC 5250 reading — see [`OPTIONS_O_BIT`].
+//! 3623 §3.1 — the same for v3 per RFC 5187 §1). The O-bit in the
+//! OSPFv2 options field belongs to RFC 5250 and means *Opaque LSA
+//! capability*, and per RFC 5250 §3 it is meaningful in Database
+//! Description packets only ("the O-bit SHOULD NOT be set and MUST be
+//! ignored when received in packets other than Database Description
+//! packets"). FRR spells it out on the receive side ("O-bit abuse?")
+//! and sets it only in opaque-LSA headers and DBDs; BIRD masks it into
+//! DD packets only. The helpers here follow the RFC 5250 reading —
+//! see [`OPTIONS_O_BIT`]. OSPFv3 has no opaque-LSA machinery at all
+//! (flooding scope lives in the LS type's S-bits), so no equivalent
+//! bit exists on the v3 wire.
 
 use lr_core::addr::IpAddr;
 
@@ -42,6 +49,11 @@ use crate::lsa::{Lsa, LsaHeader, LsaTypeV2};
 
 /// Opaque Type for the Grace-LSA (RFC 3623 §2.1).
 pub const OPAQUE_TYPE_GRACE: u8 = 3;
+
+/// The OSPFv3 LS type of the Grace-LSA (RFC 5187 §2.1): LSA function
+/// code 11, S2/S1 = 0 (link-local flooding scope), U-bit = 0 (not
+/// applicable to link-scoped LSAs). FRR parity: `OSPF6_LSTYPE_GRACE_LSA`.
+pub const LS_TYPE_GRACE_V3: u16 = 0x000b;
 
 /// The OSPFv2 LS type a Grace-LSA rides on: type 9, the link-local
 /// scoped Opaque-LSA (RFC 5250 §3, RFC 3623 §2.1).
@@ -269,6 +281,56 @@ pub fn originate_grace_lsa_v2(
             options: 0x02 | OPTIONS_O_BIT,
             ls_type: LsaTypeV2::OpaqueLinkLsa as u16,
             link_state_id: opaque_lsa_id(OPAQUE_TYPE_GRACE, 0),
+            advertising_router: router_id,
+            ls_sequence_number: seq,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body: wire_body,
+    };
+    lsa.finalize();
+    Some(lsa)
+}
+
+/// Build a complete OSPFv3 Grace-LSA (RFC 5187 §2). The LSA carries
+/// the dedicated link-scoped LS type 0x000b and — unlike v2's opaque
+/// ID packing — the **Interface ID** of the originating interface as
+/// the Link State ID (RFC 5187 §2.2: "The Link State ID of a
+/// grace-LSA in OSPFv3 is the Interface ID of the interface
+/// originating the LSA", matching FRR's `ospf6_gr_lsa_originate`).
+/// `interface_id` is therefore also the LSA's identity for sequence
+/// lineage: one Grace-LSA per interface.
+///
+/// The body carries the same TLVs as v2; RFC 5187 §1 notes the
+/// router-address TLV is *not required* for v3 (neighbours are
+/// Router-ID identified), so `ipv6_address: None` is the
+/// interoperable default — set it only when a receiver needs the
+/// extra source verification.
+///
+/// The returned LSA is finalized — length fixed, RFC 2328 §C.4
+/// checksum computed (RFC 5340 keeps the v2 LSA checksum algorithm).
+pub fn originate_grace_lsa_v3(
+    router_id: u32,
+    interface_id: u32,
+    body: &GraceLsaBody,
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    let seq = match prev_seq {
+        None => INITIAL_SEQUENCE_NUMBER,
+        Some(MAX_SEQUENCE_NUMBER) => return None,
+        Some(p) => p + 1,
+    };
+    let wire_body = body.encode();
+    let mut lsa = Lsa {
+        header: LsaHeader {
+            ls_age: 0,
+            // v3 headers have no options byte (RFC 5340 §A.4.2);
+            // `to_wire` emits the full 16-bit type for values > 0xff
+            // and the zero-high-byte form for 0x000b through the v2
+            // branch with options == 0 — the correct [0x00][0x0b].
+            options: 0,
+            ls_type: LS_TYPE_GRACE_V3,
+            link_state_id: interface_id,
             advertising_router: router_id,
             ls_sequence_number: seq,
             ls_checksum: 0,
@@ -522,6 +584,83 @@ mod tests {
             v6,
             Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
         );
+    }
+
+    #[test]
+    fn originate_grace_lsa_v3_builds_link_scoped_grace_lsa() {
+        let body = GraceLsaBody {
+            grace_period: 120,
+            reason: GraceReason::SoftwareRestart,
+            // RFC 5187 §1: the router-address TLV is not required for
+            // v3 — neighbours are Router-ID identified.
+            ipv4_address: None,
+            ipv6_address: None,
+        };
+        let lsa = originate_grace_lsa_v3(0x0a00_0001, 42, &body, None).expect("originate");
+        // RFC 5187 §2.1: LS type 0x000b (function code 11, link-local
+        // scope, U-bit 0) — not v2's opaque type 9.
+        assert_eq!(lsa.header.ls_type, LS_TYPE_GRACE_V3);
+        // RFC 5187 §2.2: the Link State ID is the Interface ID of the
+        // originating interface (FRR: lsa_header->id = ifindex).
+        assert_eq!(lsa.header.link_state_id, 42);
+        assert_eq!(lsa.header.advertising_router, 0x0a00_0001);
+        // v3 headers carry no options byte.
+        assert_eq!(lsa.header.options, 0);
+        assert_eq!(lsa.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
+        assert_eq!(
+            lsa.header.length as usize,
+            LsaHeader::LEN + body.encode().len()
+        );
+        assert!(lsa.checksum_ok(), "LSA checksum must validate");
+        // The wire header bytes 2-3 carry the 16-bit type [0x00][0x0b].
+        let wire = lsa.to_wire();
+        assert_eq!(&wire[2..4], &[0x00, 0x0b]);
+        // Body round-trips (mandatory TLVs only, FRR's minimal shape).
+        let dec = GraceLsaBody::decode(&lsa.body).expect("body round-trips");
+        assert_eq!(dec, body);
+    }
+
+    #[test]
+    fn originate_grace_lsa_v3_ipv6_address_tlv_optional() {
+        let body = GraceLsaBody {
+            grace_period: 60,
+            reason: GraceReason::RedundantSwitchover,
+            ipv4_address: None,
+            ipv6_address: Some([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x2a]),
+        };
+        let lsa = originate_grace_lsa_v3(1, 7, &body, None).expect("originate");
+        let dec = GraceLsaBody::decode(&lsa.body).expect("body round-trips");
+        assert_eq!(dec, body);
+        // The 16-octet address TLV must not be parsed as a v4 one.
+        assert!(dec.ipv4_address.is_none());
+        assert!(dec.ipv6_address.is_some());
+    }
+
+    #[test]
+    fn originate_grace_lsa_v3_advances_sequence_per_interface() {
+        let body = GraceLsaBody {
+            grace_period: 90,
+            reason: GraceReason::SoftwareReload,
+            ipv4_address: None,
+            ipv6_address: None,
+        };
+        // The Interface ID is the LSA identity: two interfaces hold
+        // independent lineages.
+        let a1 = originate_grace_lsa_v3(1, 10, &body, None).unwrap();
+        let a2 = originate_grace_lsa_v3(1, 10, &body, Some(a1.header.ls_sequence_number)).unwrap();
+        assert_eq!(
+            a2.header.ls_sequence_number,
+            a1.header.ls_sequence_number + 1
+        );
+        let b1 = originate_grace_lsa_v3(1, 11, &body, None).unwrap();
+        assert_eq!(b1.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER);
+        // MaxAge flush form: age to MaxAge and re-finalize.
+        let mut flush = originate_grace_lsa_v3(1, 10, &body, Some(a2.header.ls_sequence_number))
+            .expect("originate");
+        flush.header.ls_age = crate::lsdb::MAX_AGE_SECS;
+        flush.finalize();
+        assert!(flush.checksum_ok());
+        assert_eq!(flush.header.ls_age, crate::lsdb::MAX_AGE_SECS);
     }
 
     #[test]

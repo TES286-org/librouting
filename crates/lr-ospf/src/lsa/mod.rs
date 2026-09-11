@@ -9,9 +9,9 @@ use lr_core::util::fletcher;
 /// request that neighbours retain its LSAs for a grace period.
 pub mod grace;
 pub use grace::{
-    is_grace_restart_capable, opaque_lsa_id, originate_grace_lsa_v2, unpack_opaque_lsa_id,
-    with_grace_restart_capable, GraceLsaBody, GraceReason, GraceTlvType, OPAQUE_TYPE_GRACE,
-    OPTIONS_O_BIT,
+    is_grace_restart_capable, opaque_lsa_id, originate_grace_lsa_v2, originate_grace_lsa_v3,
+    unpack_opaque_lsa_id, with_grace_restart_capable, GraceLsaBody, GraceReason, GraceTlvType,
+    LS_TYPE_GRACE_V3, OPAQUE_TYPE_GRACE, OPTIONS_O_BIT,
 };
 
 /// OSPFv3 LSA bodies (RFC 5340 §A.4): Router-LSA (0x2001), Network-LSA
