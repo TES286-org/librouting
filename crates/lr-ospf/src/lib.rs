@@ -44,6 +44,11 @@ pub mod spf;
 /// §5 label resolution the router applies to SPF routes.
 pub mod srdb;
 
+/// Per-node SRv6 database (RFC 9513 reception): the SRv6 capabilities,
+/// algorithms, MSDs, locators and End SIDs projected from the OSPFv3
+/// area LSDB — the receiving half of the OSPFv3 SRv6 control plane.
+pub mod srv6db;
+
 pub use codec::OspfCodec;
 pub use neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
 pub use packet::{OspfHeader, OspfPacket, OspfVersion};

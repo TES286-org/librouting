@@ -436,7 +436,12 @@ impl Srv6LocatorTlv {
     /// panics on out-of-range input.
     pub fn encode(&self, out: &mut Vec<u8>) {
         // Route Type | Algorithm | Locator Length | PrefixOptions.
-        let mut value = vec![self.route_type, self.algorithm, self.locator_len, self.options];
+        let mut value = vec![
+            self.route_type,
+            self.algorithm,
+            self.locator_len,
+            self.options,
+        ];
         value.extend_from_slice(&self.metric.to_be_bytes());
         let n = V3Prefix::addr_bytes_len(self.locator_len.min(128));
         value.extend_from_slice(&self.prefix[..n]);
