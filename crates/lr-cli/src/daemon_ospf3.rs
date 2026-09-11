@@ -15,11 +15,23 @@
 //!   neighbor's Interface ID comes from its Hello's Interface ID field,
 //!   which is exactly what our Router-LSA's p2p link descriptions need
 //!   (§A.4.3).
-//! - **Self-origination** — a Router-LSA per area (one p2p link per
-//!   Full adjacency), a Link-LSA per interface (the RFC 5340 §4.4.3.4
-//!   MUST, carrying the link-local address and the interface's global
-//!   prefixes), and one Intra-Area-Prefix-LSA per area attaching the
-//!   global prefixes to the Router-LSA (§4.4.3.5).
+//! - **Self-origination** — a Router-LSA per area (p2p links per Full
+//!   adjacency, or the RFC 5340 §4.4.3.2 transit links on broadcast
+//!   segments), a Link-LSA per interface (the §4.4.3.4 MUST, carrying
+//!   the link-local address and the interface's global prefixes), and
+//!   the Intra-Area-Prefix-LSAs attaching the global prefixes to the
+//!   Router-LSA (§4.4.3.5) — plus, as the elected DR of a broadcast
+//!   segment, the Network-LSA (§4.4.3.3) and the network-referenced
+//!   Intra-Area-Prefix-LSA carrying the segment's prefixes.
+//! - **Broadcast segments** — `network_type = "broadcast"` runs the
+//!   RFC 5340 §4.1.2 interface FSM over the RFC 2328 §9.4 election
+//!   (Router-ID identity, [`lr_ospf::interface::elect_v3`]): Waiting
+//!   → DR/BDR/DR-Other, Hello DR/BDR fields (§A.3.2), the §10.4
+//!   adjacency gate pushed through `set_ospf_dr_state`, the §12.4.2
+//!   (v3 §4.4.3.3) Network-LSA lifecycle and the §4.4.3.5
+//!   network-referenced prefix split (the DR advertises the segment's
+//!   prefixes; transit-reported interfaces stay out of the router's
+//!   own Intra-Area-Prefix-LSA).
 //! - **Checksum egress** — every packet's IPv6 upper-layer checksum is
 //!   finalized with the pseudo-header (source link-local, destination
 //!   ff02::5) right before the sendto (RFC 5340 §A.3.1); receive-side
@@ -29,9 +41,10 @@
 //!   [`crate::v6_nexthop_oifs`], so the kernel mirror can attach the
 //!   RTA_OIF a link-local gateway needs.
 //!
-//! Scope of slice 1 (see docs/STATUS.md): point-to-point segments only
-//! (broadcast/DR election, inter-area summaries and AS externals are
-//! later slices), no graceful restart. Slice 3 adds the RFC 9513 SRv6
+//! Scope of slice 1 was point-to-point segments only; broadcast
+//! segments (DR election, Network-LSAs, network-referenced
+//! Intra-Area-Prefix-LSAs) are the current slice. No graceful restart
+//! (RFC 5187 is a later slice). Slice 3 adds the RFC 9513 SRv6
 //! surface: with `[[ospf.srv6_locator]]` configuration the daemon
 //! originates the area-scoped Router Information LSA (the SRv6
 //! Capabilities, SR-Algorithm and Node MSD TLVs, RFC 9513 §2-§4) and
@@ -48,19 +61,23 @@ use std::time::Duration;
 
 use lr_core::addr::{IpAddr, RouterId};
 use lr_ospf::codec::OspfCodec;
+use lr_ospf::interface::{elect_v3, IfState, V3Elector};
 use lr_ospf::lsa::srv6::{locator_route_type, msd_type, NodeMsd};
 use lr_ospf::lsa::v3::{
-    originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_router_lsa, V3Prefix,
-    LINK_TYPE_POINTTOPOINT, LS_TYPE_ROUTER, ROUTER_BIT_E, ROUTER_BIT_V6,
+    originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
+    originate_v3_router_lsa, V3LinkLsaBody, V3Prefix, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT,
+    LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, ROUTER_BIT_E, ROUTER_BIT_V6,
 };
 use lr_ospf::lsa::{
     originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorTlv,
-    Srv6SidStructure, PREFIX_OPT_AC, SRV6_CAP_O_FLAG,
+    Srv6SidStructure, PREFIX_OPT_AC, PREFIX_OPT_LA, PREFIX_OPT_NU, SRV6_CAP_O_FLAG,
 };
 use lr_ospf::origination::finalize_v3_packet;
 use lr_ospf::packet::{HelloBody, OspfBody, OspfPacketType, OSPF_V3_OPTIONS_DEFAULT};
 use lr_osroute::ospf_transport::{interface_v6_addrs, OspfV6Transport};
-use lr_router::{DefaultRouter, RouterInstance, SessionConfig, SessionHandle};
+use lr_router::{
+    DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
+};
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec};
 
@@ -126,12 +143,43 @@ struct Ospf3Interface {
     last_hello_ms: u64,
     /// Router-ids heard on this interface (from their Hellos).
     heard: BTreeMap<u32, HeardNeighbor>,
+    /// RFC 2328 §9.1 network type: p2p (default) or broadcast. Only
+    /// broadcast segments run the §9.4 DR/BDR election (RFC 5340
+    /// §4.1.2 keeps the v2 election on Router-ID identity).
+    network_type: OspfNetworkType,
+    /// Router Priority advertised in Hellos (§A.3.2; 0 = never DR/BDR).
+    priority: u8,
+    /// Interface FSM state (§9.1): Waiting until the WaitTimer or
+    /// BackupSeen, then DR/Backup/DR-Other from the election. p2p
+    /// interfaces stay PointToPoint.
+    if_state: IfState,
+    /// Elected DR — its Router ID (the v3 §10.4 identity; 0 = none).
+    dr: u32,
+    /// Elected Backup Designated Router (Router ID; 0 = none).
+    bdr: u32,
+    /// When the §9.3 WaitTimer fires (ms since daemon start).
+    wait_deadline_ms: u64,
+    /// Set when a received Hello changes the election input (a
+    /// neighbor became bidirectional, or its DR/BDR declarations or
+    /// priority changed — §9.3 NeighborChange); the next pump
+    /// re-runs the election.
+    election_dirty: bool,
+    /// Sequence number of our current Network-LSA for this segment
+    /// (§4.4.3.3) and whether one is live in the area LSDB.
+    net_lsa_seq: Option<u32>,
+    net_lsa_active: bool,
+    /// Sequence number of our current network-referenced
+    /// Intra-Area-Prefix-LSA (§4.4.3.5) and whether one is live.
+    net_iap_seq: Option<u32>,
+    net_iap_active: bool,
 }
 
 /// One neighbor heard on an interface. The v3-specific datum is the
 /// neighbor's Interface ID on the shared link, from its Hello's
 /// Interface ID field — the Neighbor Interface ID of our p2p link
-/// description (§A.4.3) and the key to its Link-LSA.
+/// description (§A.4.3) and the key to its Link-LSA. On broadcast
+/// segments the Hello's DR/BDR fields (Router IDs, §A.3.2) and the
+/// Router Priority feed the §9.4 election.
 #[derive(Debug, Clone, Copy)]
 struct HeardNeighbor {
     /// The neighbor's Interface ID on this link.
@@ -142,6 +190,10 @@ struct HeardNeighbor {
     last_ms: u64,
     /// The neighbor lists our router-id (state ≥ 2-Way, §10.1).
     bidirectional: bool,
+    /// The DR the neighbor claims in its Hellos (Router ID; 0 = none).
+    stated_dr: u32,
+    /// The BDR the neighbor claims in its Hellos (Router ID).
+    stated_bdr: u32,
 }
 
 /// One dynamic neighbor session, keyed `(area, router-id)`.
@@ -310,7 +362,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             Ok(iface) => {
                 println!(
                     "daemon: ospf3 interface {} area {} — ifindex {} (interface id), \
-                     link-local {}, {} global prefix(es), cost {}, hello {}s dead {}s",
+                     link-local {}, {} global prefix(es), cost {}, hello {}s dead {}s, {}",
                     iface.name,
                     area_label(iface.area),
                     iface.interface_id,
@@ -319,6 +371,10 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     iface.cost,
                     iface.hello_interval,
                     iface.dead_interval,
+                    match iface.network_type {
+                        OspfNetworkType::PointToPoint => "point-to-point",
+                        OspfNetworkType::Broadcast => "broadcast",
+                    },
                 );
                 interfaces.push(iface);
             }
@@ -503,7 +559,18 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
         .dead_interval
         .unwrap_or(cfg.ospf_dead_interval)
         .max(u32::from(hello));
-    // Slice 1 is p2p-only; the finalizer already rejects "broadcast".
+    // RFC 2328 §9.1 network type (the §9.4 election applies only on
+    // broadcast segments; RFC 5340 §4.1.2 keeps the v2 algorithm).
+    let network_type = match spec.network_type.as_deref() {
+        None | Some("p2p") | Some("point-to-point") | Some("") => OspfNetworkType::PointToPoint,
+        Some("broadcast") => OspfNetworkType::Broadcast,
+        Some(other) => {
+            return Err(format!(
+                "unknown network_type '{other}' (use \"p2p\" or \"broadcast\")"
+            ))
+        }
+    };
+    let priority = spec.priority.unwrap_or(1);
     let interface_id = transport.ifindex();
     Ok(Ospf3Interface {
         name,
@@ -518,6 +585,32 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
         transport,
         last_hello_ms: 0,
         heard: BTreeMap::new(),
+        network_type,
+        priority,
+        // §9.3: broadcast interfaces come up in Waiting and wait
+        // RouterDeadInterval before electing (p2p has no election;
+        // priority-0 routers skip Waiting per §9.4 — never eligible,
+        // BIRD/FRR go straight to DR-Other too).
+        if_state: if network_type == OspfNetworkType::Broadcast && priority > 0 {
+            IfState::Waiting
+        } else {
+            IfState::DrOther
+        },
+        dr: 0,
+        bdr: 0,
+        // §9.3: the WaitTimer runs RouterDeadInterval from ifup. The
+        // main-loop clock starts right after resolve, so the deadline
+        // is the dead interval itself.
+        wait_deadline_ms: if network_type == OspfNetworkType::Broadcast && priority > 0 {
+            u64::from(dead) * 1000
+        } else {
+            0
+        },
+        election_dirty: false,
+        net_lsa_seq: None,
+        net_lsa_active: false,
+        net_iap_seq: None,
+        net_iap_active: false,
     })
 }
 
@@ -525,6 +618,12 @@ impl Ospf3Interface {
     /// §10.5: fold one received Hello into the interface's neighbor
     /// table. The v3 identity inputs are the neighbor's Interface ID
     /// (Hello Interface ID field) and its link-local source address.
+    /// On broadcast segments the Hello's DR/BDR claims (Router IDs)
+    /// and Router Priority feed the §9.4 election: the interface is
+    /// flagged election-dirty when the neighbor became bidirectional
+    /// (the elector set grew) or its DR/BDR declarations or priority
+    /// changed (§9.3 NeighborChange — BIRD hello.c parity: only
+    /// declare-transitions matter, not every claim value change).
     fn track_hello(
         &mut self,
         rid: u32,
@@ -534,30 +633,170 @@ impl Ospf3Interface {
         now_ms: u64,
     ) {
         let bidirectional = body.neighbors.contains(&our_rid);
+        let became_bidirectional = match self.heard.get(&rid) {
+            Some(prev) => {
+                if self.network_type == OspfNetworkType::Broadcast
+                    && (prev.priority != body.priority
+                        || (prev.stated_dr == rid) != (body.dr == rid)
+                        || (prev.stated_bdr == rid) != (body.bdr == rid))
+                {
+                    self.election_dirty = true;
+                }
+                bidirectional && !prev.bidirectional
+            }
+            None => bidirectional,
+        };
+        if became_bidirectional {
+            self.election_dirty = true;
+        }
         let entry = self.heard.entry(rid).or_insert(HeardNeighbor {
             interface_id: body.network_mask, // v3: Interface ID slot
             priority: body.priority,
             link_local,
             last_ms: now_ms,
             bidirectional,
+            stated_dr: body.dr,
+            stated_bdr: body.bdr,
         });
         entry.interface_id = body.network_mask;
         entry.priority = body.priority;
         entry.link_local = link_local;
         entry.last_ms = now_ms;
         entry.bidirectional = bidirectional;
-        let _ = bidirectional; // p2p segments have no election to dirty
+        entry.stated_dr = body.dr;
+        entry.stated_bdr = body.bdr;
     }
 }
 
 impl Ospf3Daemon {
     fn pump(&mut self, recv_buf: &mut [u8], now_ms: u64) {
         self.pump_inbound(recv_buf, now_ms);
+        self.pump_election(now_ms);
         self.pump_adjacency(now_ms);
         self.pump_dead_timer(now_ms);
         self.pump_reoriginate(now_ms);
         self.pump_hellos(now_ms);
         self.pump_outbound();
+    }
+
+    /// Drive the interface FSM and the DR/BDR election on broadcast
+    /// segments (RFC 2328 §9.3/§9.4 over the RFC 5340 §4.1.2
+    /// Router-ID identity). p2p interfaces never elect (§9.4 does not
+    /// apply) and are skipped.
+    fn pump_election(&mut self, now_ms: u64) {
+        let mut changed_areas: Vec<u32> = Vec::new();
+        let self_rid = self.router_id.as_u32();
+        for iface in &mut self.interfaces {
+            if iface.network_type != OspfNetworkType::Broadcast {
+                continue;
+            }
+            let fire = match iface.if_state {
+                IfState::Waiting => {
+                    // §9.3 BackupSeen: a bidirectional neighbor declared
+                    // itself BDR, or declared itself DR with no BDR —
+                    // track_hello flags both by dirtying the interface.
+                    iface.election_dirty
+                        || (iface.wait_deadline_ms != 0 && now_ms >= iface.wait_deadline_ms)
+                }
+                IfState::DrOther | IfState::Backup | IfState::Dr => {
+                    // §9.3 NeighborChange: the DR/BDR relationship of a
+                    // neighbor (or the bidirectional set) changed.
+                    iface.election_dirty
+                }
+                _ => false,
+            };
+            if fire {
+                iface.wait_deadline_ms = 0;
+                iface.election_dirty = false;
+                if Self::run_election(iface, &mut self.neighbors, &self.router, self_rid, now_ms)
+                {
+                    // The transit-link set (§4.4.3.2) and the
+                    // Network-LSA membership (§4.4.3.3) may have
+                    // changed.
+                    if !changed_areas.contains(&iface.area) {
+                        changed_areas.push(iface.area);
+                    }
+                }
+            }
+        }
+        let now = now_ms;
+        for area in changed_areas {
+            self.schedule_reoriginate(area, now);
+        }
+    }
+
+    /// One §9.4 election round on `iface`: the elector list is the
+    /// bidirectional neighbors heard within the dead window plus this
+    /// router itself, keyed by Router IDs (the RFC 5340 §4.1.2
+    /// identity). The result lands in the Hello DR/BDR fields (§A.3.2)
+    /// and is pushed into every session on the segment, whose §10.4
+    /// adjacency gate the router re-runs (§9.4 step 7).
+    ///
+    /// Returns whether the elected pair (or our role) changed.
+    fn run_election(
+        iface: &mut Ospf3Interface,
+        neighbors: &mut BTreeMap<(u32, u32), Neighbor>,
+        router: &Mutex<DefaultRouter>,
+        self_rid: u32,
+        now_ms: u64,
+    ) -> bool {
+        let dead_ms = u64::from(iface.dead_interval) * 1000;
+        let mut electors: Vec<V3Elector> = iface
+            .heard
+            .iter()
+            .filter(|(_, h)| h.bidirectional && now_ms.saturating_sub(h.last_ms) <= dead_ms)
+            .map(|(&rid, h)| V3Elector {
+                router_id: rid,
+                priority: h.priority,
+                stated_dr: h.stated_dr,
+                stated_bdr: h.stated_bdr,
+            })
+            .collect();
+        // Router X itself is on the list (§9.4), claiming its current
+        // view of the segment.
+        electors.push(V3Elector {
+            router_id: self_rid,
+            priority: iface.priority,
+            stated_dr: iface.dr,
+            stated_bdr: iface.bdr,
+        });
+        let (dr, bdr) = elect_v3(&electors, self_rid);
+        let changed = dr != iface.dr || bdr != iface.bdr;
+        iface.dr = dr;
+        iface.bdr = bdr;
+        // §9.4 step 5: derive our interface state from the result.
+        let next_state = if self_rid == dr {
+            IfState::Dr
+        } else if self_rid == bdr {
+            IfState::Backup
+        } else {
+            IfState::DrOther
+        };
+        let role_changed = next_state != iface.if_state;
+        iface.if_state = next_state;
+        // §9.4 step 7: the AdjOK? event on every neighbor — pushed via
+        // set_ospf_dr_state, which re-runs the §10.4 decision per
+        // session (advance to ExStart or demote to 2-Way).
+        let mut router = router.lock().unwrap();
+        for ((area, _rid), n) in neighbors.iter_mut() {
+            if *area != iface.area || n.ifindex != iface.interface_id {
+                continue;
+            }
+            match router.set_ospf_dr_state(n.handle, dr, bdr) {
+                Ok(_) => {}
+                Err(e) => eprintln!("daemon: ospf3 dr state: {}", e),
+            }
+        }
+        if changed || role_changed {
+            println!(
+                "daemon: ospf3 iface {} elected DR {} / BDR {} — we are {}",
+                iface.name,
+                fmt_rid(dr),
+                fmt_rid(bdr),
+                iface.if_state.name()
+            );
+        }
+        changed || role_changed
     }
 
     /// Receive every pending datagram and feed it into the matching
@@ -647,9 +886,41 @@ impl Ospf3Daemon {
         for (interface_id, area, rid, idx, mtu) in accepted {
             let key = (area, rid);
             if !self.neighbors.contains_key(&key) {
-                let cfg = SessionConfig::ospfv3(self.router_id, area).with_ospf_mtu(mtu);
-                match router.add_session(cfg) {
+                // Broadcast segments carry the network type and the
+                // segment identities into the session: §10.4 gates
+                // adjacency on the elected DR/BDR, identified by
+                // Router ID (RFC 5340 §4.1.2 — the v3 Hello's DR/BDR
+                // fields are Router IDs, §A.3.2).
+                let cfg_build = self
+                    .interfaces
+                    .iter()
+                    .find(|i| i.interface_id == interface_id)
+                    .map(|iface| {
+                        let cfg = SessionConfig::ospfv3(self.router_id, area)
+                            .with_ospf_mtu(mtu)
+                            .with_ospf_network_type(iface.network_type);
+                        match iface.network_type {
+                            OspfNetworkType::Broadcast => cfg
+                                .with_ospf_interface_ip(self.router_id.as_u32())
+                                .with_ospf_neighbor_ip(rid),
+                            OspfNetworkType::PointToPoint => cfg,
+                        }
+                    })
+                    .unwrap_or_else(|| SessionConfig::ospfv3(self.router_id, area));
+                match router.add_session(cfg_build) {
                     Ok(h) => {
+                        // Push the current election result so a session
+                        // joining mid-life adopts the segment's DR/BDR
+                        // immediately (the v2 daemon pattern).
+                        if let Some(iface) = self
+                            .interfaces
+                            .iter()
+                            .find(|i| i.interface_id == interface_id)
+                        {
+                            if iface.network_type == OspfNetworkType::Broadcast {
+                                let _ = router.set_ospf_dr_state(h, iface.dr, iface.bdr);
+                            }
+                        }
                         self.neighbors.insert(
                             key,
                             Neighbor {
@@ -720,6 +991,9 @@ impl Ospf3Daemon {
     /// Tear sessions down after RouterDeadInterval without a packet.
     fn pump_dead_timer(&mut self, now_ms: u64) {
         let mut expired: Vec<(u32, u32)> = Vec::new();
+        // Broadcast interfaces that lost a heard neighbor: the
+        // bidirectional elector set shrank (§9.3 NeighborChange).
+        let mut election_dirty_ifaces: Vec<u32> = Vec::new();
         for iface in &mut self.interfaces {
             let dead_ms = u64::from(iface.dead_interval) * 1000;
             let gone: Vec<u32> = iface
@@ -731,6 +1005,9 @@ impl Ospf3Daemon {
             for rid in gone {
                 iface.heard.remove(&rid);
                 expired.push((iface.area, rid));
+                if iface.network_type == OspfNetworkType::Broadcast {
+                    election_dirty_ifaces.push(iface.interface_id);
+                }
             }
         }
         if expired.is_empty() {
@@ -749,6 +1026,11 @@ impl Ospf3Daemon {
             }
         }
         drop(router);
+        for iface in &mut self.interfaces {
+            if election_dirty_ifaces.contains(&iface.interface_id) {
+                iface.election_dirty = true;
+            }
+        }
         let areas: Vec<u32> = self.anchors.keys().copied().collect();
         for area in areas {
             self.schedule_reoriginate(area, now_ms);
@@ -816,11 +1098,21 @@ impl Ospf3Daemon {
                 network_mask: iface.interface_id,
                 hello_interval: iface.hello_interval,
                 options: OSPF_V3_OPTIONS_DEFAULT,
-                priority: 1,
+                priority: iface.priority,
                 dead_interval: iface.dead_interval.min(u32::from(u16::MAX)),
-                // p2p segments elect no DR (§9.4 does not apply).
-                dr: 0,
-                bdr: 0,
+                // p2p segments elect no DR (§9.4 does not apply); on
+                // broadcast segments the fields carry the elected
+                // Router IDs (§A.3.2, RFC 5340 §4.1.2).
+                dr: if iface.network_type == OspfNetworkType::Broadcast {
+                    iface.dr
+                } else {
+                    0
+                },
+                bdr: if iface.network_type == OspfNetworkType::Broadcast {
+                    iface.bdr
+                } else {
+                    0
+                },
                 neighbors,
             };
             let pkt = lr_ospf::packet::OspfPacket {
@@ -942,25 +1234,147 @@ impl Ospf3Daemon {
                 ),
             }
         }
-        // Router-LSA: one p2p link per Full adjacency.
+        // Router-LSA links + the broadcast segment LSA set (§4.4.3.2
+        // transit links, §4.4.3.3 Network-LSA, §4.4.3.5 network IAP).
         let mut links: Vec<lr_ospf::lsa::v3::V3RouterLink> = Vec::new();
-        for iface in &self.interfaces {
+        // Interfaces described as transit links: their global prefixes
+        // ride the DR's network-referenced Intra-Area-Prefix-LSA, not
+        // our router-referenced one (§4.4.3.5).
+        let mut transit_reported: BTreeMap<u32, ()> = BTreeMap::new();
+        for iface in &mut self.interfaces {
             if iface.area != area {
                 continue;
             }
-            for ((n_area, rid), n) in self.neighbors.iter() {
-                if *n_area != area || n.ifindex != iface.interface_id || !n.established {
-                    continue;
+            let established: Vec<u32> = self
+                .neighbors
+                .iter()
+                .filter(|((n_area, _rid), n)| {
+                    *n_area == area && n.ifindex == iface.interface_id && n.established
+                })
+                .map(|(&(_, rid), _)| rid)
+                .collect();
+            match iface.network_type {
+                OspfNetworkType::PointToPoint => {
+                    for rid in &established {
+                        let neighbor_interface_id =
+                            iface.heard.get(rid).map(|h| h.interface_id).unwrap_or(0);
+                        links.push(lr_ospf::lsa::v3::V3RouterLink {
+                            link_type: LINK_TYPE_POINTTOPOINT,
+                            metric: iface.cost,
+                            interface_id: iface.interface_id,
+                            neighbor_interface_id,
+                            neighbor_router_id: *rid,
+                        });
+                    }
                 }
-                let neighbor_interface_id =
-                    iface.heard.get(rid).map(|h| h.interface_id).unwrap_or(0);
-                links.push(lr_ospf::lsa::v3::V3RouterLink {
-                    link_type: LINK_TYPE_POINTTOPOINT,
-                    metric: iface.cost,
-                    interface_id: iface.interface_id,
-                    neighbor_interface_id,
-                    neighbor_router_id: *rid,
-                });
+                OspfNetworkType::Broadcast => {
+                    // FRR ospf6d `ospf6_router_lsa_originate` parity: a
+                    // broadcast interface is described only as a
+                    // transit link, and only when this router is the
+                    // DR with at least one Full adjacency, or is fully
+                    // adjacent with the elected DR. Otherwise the
+                    // interface is not transit yet and stays out of
+                    // the Router-LSA (adjacencies cannot form before a
+                    // DR exists — §10.4 gates on the elected pair).
+                    let we_are_dr =
+                        iface.if_state == IfState::Dr && iface.dr == self.router_id.as_u32();
+                    let dr_reachable = !we_are_dr
+                        && iface.dr != 0
+                        && established.contains(&iface.dr)
+                        && iface
+                            .heard
+                            .get(&iface.dr)
+                            .map(|h| h.interface_id)
+                            .is_some();
+                    let describe = (we_are_dr && !established.is_empty()) || dr_reachable;
+                    if describe {
+                        let (neighbor_interface_id, neighbor_router_id) = if we_are_dr {
+                            // The DR describes itself: the network vertex's
+                            // neighbor fields are its own (FRR keeps the
+                            // self-referential shape, §A.4.3 type 2).
+                            (iface.interface_id, self.router_id.as_u32())
+                        } else {
+                            (
+                                iface
+                                    .heard
+                                    .get(&iface.dr)
+                                    .map(|h| h.interface_id)
+                                    .unwrap_or(0),
+                                iface.dr,
+                            )
+                        };
+                        links.push(lr_ospf::lsa::v3::V3RouterLink {
+                            link_type: LINK_TYPE_TRANSIT,
+                            metric: iface.cost,
+                            interface_id: iface.interface_id,
+                            neighbor_interface_id,
+                            neighbor_router_id,
+                        });
+                        transit_reported.insert(iface.interface_id, ());
+                    }
+                    // §4.4.3.3: as the DR with at least one Full
+                    // adjacency, originate the Network-LSA listing
+                    // every fully adjacent router (ourselves included)
+                    // with the Options OR'd from the fully adjacent
+                    // neighbors' Link-LSAs. Anything else flushes the
+                    // instance we may still hold (§14.1 MaxAge).
+                    if we_are_dr && !established.is_empty() {
+                        let mut options = OSPF_V3_OPTIONS_DEFAULT;
+                        for rid in &established {
+                            let Some(h) = iface.heard.get(rid) else {
+                                continue;
+                            };
+                            if let Some(llsa) = router.ospf_area_lsa(
+                                area,
+                                LS_TYPE_LINK,
+                                h.interface_id,
+                                *rid,
+                            ) {
+                                if let Some(body) = V3LinkLsaBody::decode(&llsa.body) {
+                                    options |= body.options;
+                                }
+                            }
+                        }
+                        let mut attached = vec![self.router_id.as_u32()];
+                        attached.extend_from_slice(&established);
+                        match originate_v3_network_lsa(
+                            self.router_id.as_u32(),
+                            iface.interface_id,
+                            options,
+                            &attached,
+                            iface.net_lsa_seq,
+                        ) {
+                            Some(lsa) => {
+                                iface.net_lsa_seq = Some(lsa.header.ls_sequence_number);
+                                iface.net_lsa_active = true;
+                                lsas.push(lsa);
+                            }
+                            None => eprintln!(
+                                "daemon: ospf3 network-LSA sequence space exhausted on {}",
+                                iface.name
+                            ),
+                        }
+                    } else if iface.net_lsa_active {
+                        // A former DR flushes the Network-LSA it
+                        // originated (§14.1 MaxAge reflood, the v2
+                        // daemon pattern).
+                        if let Some(seq) = iface.net_lsa_seq {
+                            if let Some(mut lsa) = originate_v3_network_lsa(
+                                self.router_id.as_u32(),
+                                iface.interface_id,
+                                OSPF_V3_OPTIONS_DEFAULT,
+                                &[self.router_id.as_u32()],
+                                Some(seq),
+                            ) {
+                                lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                                lsa.finalize();
+                                lsas.push(lsa);
+                            }
+                        }
+                        iface.net_lsa_active = false;
+                        iface.net_lsa_seq = None;
+                    }
+                }
             }
         }
         // RFC 5340 §4.8: a router is V6-capable; E reflects the area's
@@ -984,10 +1398,15 @@ impl Ospf3Daemon {
                     .insert(area, lsa.header.ls_sequence_number);
                 // One Intra-Area-Prefix-LSA attaching every global
                 // prefix to our Router-LSA (§4.4.3.5; skip when the
-                // interfaces carry no global addresses).
+                // interfaces carry no global addresses). Interfaces
+                // reported as transit links are skipped: their
+                // prefixes ride the DR's network-referenced
+                // Intra-Area-Prefix-LSA instead (§4.4.3.5 — "prefixes
+                // that will be included in the intra-area-prefix-LSA
+                // for the link are skipped").
                 let mut prefixes: Vec<V3Prefix> = Vec::new();
                 for iface in &self.interfaces {
-                    if iface.area != area {
+                    if iface.area != area || transit_reported.contains_key(&iface.interface_id) {
                         continue;
                     }
                     for (addr, len) in &iface.prefixes {
@@ -1026,6 +1445,123 @@ impl Ospf3Daemon {
                     area_label(area)
                 );
                 return;
+            }
+        }
+        // §4.4.3.5, the DR half: on every broadcast segment where this
+        // router is the DR, originate the network-referenced
+        // Intra-Area-Prefix-LSA carrying the segment's prefixes — the
+        // union of the Link-LSA prefixes of every fully adjacent
+        // neighbor (ourselves included), NU/LA-marked prefixes and
+        // link-locals excluded, duplicates merged with their options
+        // OR'd together. A former DR flushes its instance.
+        for iface in &mut self.interfaces {
+            if iface.area != area || iface.network_type != OspfNetworkType::Broadcast {
+                continue;
+            }
+            let we_are_dr = iface.if_state == IfState::Dr && iface.dr == self.router_id.as_u32();
+            let has_full = self.neighbors.iter().any(|((n_area, _), n)| {
+                *n_area == area && n.ifindex == iface.interface_id && n.established
+            });
+            if we_are_dr && has_full {
+                // Dedup keyed (prefix length, address) → OR'd options
+                // (§4.4.3.5). BTreeMap keeps the wire order stable.
+                let mut merged: BTreeMap<(u8, [u8; 16]), u8> = BTreeMap::new();
+                let mut collect = |prefixes: &[V3Prefix]| {
+                    for p in prefixes {
+                        // §A.4.1: NU- and LA-marked prefixes are not
+                        // copied; link-locals are never advertised.
+                        if p.options & (PREFIX_OPT_NU | PREFIX_OPT_LA) != 0 {
+                            continue;
+                        }
+                        if p.addr[0] == 0xfe && (p.addr[1] & 0xc0) == 0x80 {
+                            continue;
+                        }
+                        merged
+                            .entry((p.prefix_len, p.addr))
+                            .and_modify(|o| *o |= p.options)
+                            .or_insert(p.options);
+                    }
+                };
+                let mut own: Vec<V3Prefix> = Vec::new();
+                for (addr, len) in &iface.prefixes {
+                    let mut octets = [0u8; 16];
+                    octets.copy_from_slice(&addr.octets());
+                    own.push(V3Prefix {
+                        prefix_len: *len,
+                        options: 0,
+                        metric: 0,
+                        addr: octets,
+                    });
+                }
+                collect(&own);
+                for ((n_area, rid), n) in self.neighbors.iter() {
+                    if *n_area != area || n.ifindex != iface.interface_id || !n.established {
+                        continue;
+                    }
+                    let Some(h) = iface.heard.get(rid) else {
+                        continue;
+                    };
+                    if let Some(llsa) =
+                        router.ospf_area_lsa(area, LS_TYPE_LINK, h.interface_id, *rid)
+                    {
+                        if let Some(body) = V3LinkLsaBody::decode(&llsa.body) {
+                            collect(&body.prefixes);
+                        }
+                    }
+                }
+                let prefixes: Vec<V3Prefix> = merged
+                    .into_iter()
+                    .map(|((prefix_len, addr), options)| V3Prefix {
+                        prefix_len,
+                        options,
+                        metric: 0,
+                        addr,
+                    })
+                    .collect();
+                // Network-referenced IAPs use a distinct Link State ID
+                // space from the router-referenced one (§4.4.3.5: "a
+                // router may originate several Intra-Area-Prefix-LSAs
+                // per area, disambiguated by the Link State ID"). The
+                // ifindex with a marker bit keeps per-segment instances
+                // apart from the router-referenced LS ID 1.
+                let iap_key = (area, iface.interface_id | 1 << 31);
+                let iap_seq = self.iap_lsa_seq.get(&iap_key).copied();
+                if let Some(iap) = originate_v3_intra_area_prefix_lsa(
+                    self.router_id.as_u32(),
+                    iap_key.1,
+                    LS_TYPE_NETWORK,
+                    iface.interface_id,
+                    self.router_id.as_u32(),
+                    prefixes,
+                    iap_seq,
+                ) {
+                    self.iap_lsa_seq
+                        .insert(iap_key, iap.header.ls_sequence_number);
+                    iface.net_iap_seq = Some(iap.header.ls_sequence_number);
+                    iface.net_iap_active = true;
+                    lsas.push(iap);
+                }
+            } else if iface.net_iap_active {
+                // No longer the DR (or no Full adjacency left): flush
+                // the network-referenced IAP — the new DR advertises
+                // the segment's prefixes (§4.4.3.5).
+                if let Some(seq) = iface.net_iap_seq {
+                    if let Some(mut lsa) = originate_v3_intra_area_prefix_lsa(
+                        self.router_id.as_u32(),
+                        iface.interface_id | 1 << 31,
+                        LS_TYPE_NETWORK,
+                        iface.interface_id,
+                        self.router_id.as_u32(),
+                        Vec::new(),
+                        Some(seq),
+                    ) {
+                        lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                        lsa.finalize();
+                        lsas.push(lsa);
+                    }
+                }
+                iface.net_iap_active = false;
+                iface.net_iap_seq = None;
             }
         }
         self.last_orig_ms.insert(area, now_ms);
