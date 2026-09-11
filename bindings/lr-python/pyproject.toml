@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "librouting"
-version = "0.1.0"
+version = "1.0.0-rc.1"
 description = "Python bindings for librouting (BGP, OSPF, Babel) via CFFI"
 requires-python = ">=3.8"
 dependencies = ["cffi>=1.16"]
