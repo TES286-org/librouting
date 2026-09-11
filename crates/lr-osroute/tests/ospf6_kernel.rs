@@ -56,11 +56,6 @@ fn hello(router_id: u32, interface_id: u32, src: [u8; 16], dst: [u8; 16]) -> Vec
     bytes
 }
 
-/// True when a raw socket can be opened (CAP_NET_RAW present).
-fn has_cap_net_raw() -> bool {
-    OspfV6Transport::bind("lo", true).is_ok()
-}
-
 #[test]
 fn ospf6_transport_multicast_roundtrip_on_lo() {
     // Bind with multicast loop ON so our own packet comes back to us.

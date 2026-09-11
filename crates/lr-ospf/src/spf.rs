@@ -1737,7 +1737,7 @@ mod v3_tests {
         let spf = run_spf_v3(&db, r1);
         let v2v = V3VertexId::Router(r2);
         assert_eq!(spf.vertices.get(&v2v), Some(&10), "reachable");
-        assert!(spf.next_hops.get(&v2v).is_none(), "no Link-LSA, no nh");
+        assert!(!spf.next_hops.contains_key(&v2v), "no Link-LSA, no nh");
         let route = spf
             .routes
             .iter()
@@ -1756,15 +1756,6 @@ mod v3_tests {
         a[1] = 0x80;
         a[15] = host;
         a
-    }
-
-    fn prefix_from(addr: &[u8; 16], len: u8) -> crate::lsa::v3::V3Prefix {
-        crate::lsa::v3::V3Prefix {
-            prefix_len: len,
-            options: 0,
-            metric: 0,
-            addr: *addr,
-        }
     }
 
     /// A /64 whose significant bits fit the 8 wire bytes: 2001:db8:0:hn::/64.
