@@ -434,6 +434,13 @@ pub struct V3AsExternalBody {
 }
 
 impl V3AsExternalBody {
+    /// The advertised prefix reconstructed from the wire form (the
+    /// trailing padding bytes are zero, so the result equals the
+    /// originator's network-normalized prefix).
+    pub fn prefix_addr_prefix(&self) -> Option<Prefix> {
+        Some(Prefix::new_v6(self.prefix.addr, self.prefix.prefix_len))
+    }
+
     pub fn encode(&self, out: &mut Vec<u8>) {
         let mut flags = 0u32;
         if self.e_bit {

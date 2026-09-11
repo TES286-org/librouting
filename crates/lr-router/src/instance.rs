@@ -61,7 +61,9 @@ use lr_ospf::external::{
     external_routes, flush_external_lsa, originate_external_lsa, originate_summary_asbr_lsa,
     ExternalDestination, ExternalMetricType,
 };
-use lr_ospf::lsa::v3::originate_v3_inter_area_router_lsa;
+use lr_ospf::lsa::v3::{
+    originate_v3_as_external_lsa, originate_v3_inter_area_router_lsa, V3ExternalDestination,
+};
 use lr_ospf::lsa::{prefix_len_to_mask, Lsa, LsaTypeV2};
 use lr_ospf::lsdb::Lsdb;
 use lr_ospf::neighbor::{NeighborEvent, NeighborState, OspfNeighbor};
@@ -943,6 +945,15 @@ pub struct DefaultRouter {
     /// link-state ID (the masked network). Re-originated into every
     /// attached OSPFv2 area so areas that (re)attach later catch up.
     ospf_externals: BTreeMap<u32, ExternalDestination>,
+    /// Externally redistributed IPv6 destinations on the OSPFv3 plane
+    /// (RFC 5340 §4.4.3.6), keyed by prefix. Re-originated as 0x4005
+    /// LSAs into every attached OSPFv3 area so areas that (re)attach
+    /// later catch up.
+    ospf_v3_externals: BTreeMap<Prefix, lr_ospf::lsa::v3::V3ExternalDestination>,
+    /// Stable 0x4005 LS IDs per external prefix — the LS ID carries no
+    /// addressing semantics (§4.4.3.6) and must match across the areas
+    /// the LSA is installed in (FRR reuses the previous instance's ID).
+    ospf_v3_external_lsids: BTreeMap<Prefix, u32>,
     /// Stable 0x2003 inter-area-prefix LS IDs per (area, prefix) — the
     /// v3 LS ID carries no addressing semantics (§4.4.3.4), so the ABR
     /// must keep a stable prefix → LS ID mapping across
@@ -1092,6 +1103,8 @@ impl Default for DefaultRouter {
             ospf_srv6_receive: false,
             ospf_published: BTreeMap::new(),
             ospf_externals: BTreeMap::new(),
+            ospf_v3_externals: BTreeMap::new(),
+            ospf_v3_external_lsids: BTreeMap::new(),
             ospf_v3_summary_lsids: BTreeMap::new(),
             ospf_translations: BTreeSet::new(),
             ospf_vlinks: BTreeMap::new(),
@@ -6018,20 +6031,40 @@ impl DefaultRouter {
                     )));
                 }
                 Protocol::Ospfv2 | Protocol::Ospfv3 => {
-                    if matches!(route.key.prefix.addr, IpAddr::V4(_)) {
-                        let dest = ExternalDestination {
-                            prefix: route.key.prefix,
-                            metric,
-                            metric_type: ExternalMetricType::Type1,
-                            forwarding_addr: 0,
-                            route_tag: pipe.tag,
-                            p_bit: true,
-                        };
-                        self.ospf_redistribute(dest);
-                        self.pending_events.push(RouterEvent::Log(format!(
-                            "redistribute: {} -> OSPF (metric={})",
-                            route.key.prefix, metric
-                        )));
+                    match route.key.prefix.addr {
+                        IpAddr::V4(_) if pipe.target == Protocol::Ospfv2 => {
+                            let dest = ExternalDestination {
+                                prefix: route.key.prefix,
+                                metric,
+                                metric_type: ExternalMetricType::Type1,
+                                forwarding_addr: 0,
+                                route_tag: pipe.tag,
+                                p_bit: true,
+                            };
+                            self.ospf_redistribute(dest);
+                            self.pending_events.push(RouterEvent::Log(format!(
+                                "redistribute: {} -> OSPF (metric={})",
+                                route.key.prefix, metric
+                            )));
+                        }
+                        IpAddr::V6(_) if pipe.target == Protocol::Ospfv3 => {
+                            let dest = V3ExternalDestination {
+                                prefix: route.key.prefix,
+                                metric,
+                                type2: false, // type 1, the v4 path's choice
+                                forwarding_addr: None,
+                                // 0 means "no tag" — the T bit stays clear.
+                                route_tag: (pipe.tag != 0).then_some(pipe.tag),
+                            };
+                            self.ospf_redistribute_v3(dest);
+                            self.pending_events.push(RouterEvent::Log(format!(
+                                "redistribute: {} -> OSPFv3 (metric={})",
+                                route.key.prefix, metric
+                            )));
+                        }
+                        // A v6 prefix cannot ride the v2 external plane
+                        // and a v4 prefix cannot ride the v3 one.
+                        _ => {}
                     }
                 }
                 _ => {}
@@ -6068,9 +6101,11 @@ impl DefaultRouter {
     /// The destination is remembered so areas attached later (or
     /// re-attached after their LSDB was dropped) receive it too.
     ///
-    /// Returns `false` (and records nothing) for non-IPv4 destinations.
-    /// The intent is still recorded when no OSPF session exists yet; it
-    /// is originated as soon as the first OSPFv2 area attaches.
+    /// Returns `false` (and records nothing) for non-IPv4 destinations
+    /// — IPv6 destinations belong on the OSPFv3 plane, see
+    /// [`Self::ospf_redistribute_v3`]. The intent is still recorded when
+    /// no OSPF session exists yet; it is originated as soon as the
+    /// first OSPFv2 area attaches.
     ///
     /// Overlapping prefixes whose masked networks coincide (e.g.
     /// `10.0.0.0/8` and `10.0.0.0/16`) collide on one link-state ID — the
@@ -6097,10 +6132,13 @@ impl DefaultRouter {
     /// from every area and flood the flush. Returns `false` when no
     /// matching redistribution exists.
     pub fn ospf_unredistribute(&mut self, prefix: Prefix) -> bool {
+        if matches!(prefix.addr, lr_core::addr::IpAddr::V6(_)) {
+            return self.ospf_unredistribute_v3(prefix);
+        }
+        let mask = prefix_len_to_mask(prefix.prefix_len);
         let lr_core::addr::IpAddr::V4(octets) = prefix.addr else {
             return false;
         };
-        let mask = prefix_len_to_mask(prefix.prefix_len);
         let network = u32::from_be_bytes(octets) & mask;
         if self.ospf_externals.remove(&network).is_none() {
             return false;
@@ -6149,13 +6187,208 @@ impl DefaultRouter {
     /// re-originate from [`Self::ospf_externals`]). Installs nothing when
     /// every area is already up to date. Returns whether any LSDB changed.
     fn ospf_sync_externals(&mut self) -> bool {
-        if self.ospf_externals.is_empty() {
+        let mut changed = false;
+        if !self.ospf_externals.is_empty() {
+            let networks: Vec<u32> = self.ospf_externals.keys().copied().collect();
+            for network in networks {
+                changed |= self.ospf_originate_externals(network);
+            }
+        }
+        if !self.ospf_v3_externals.is_empty() {
+            let prefixes: Vec<Prefix> = self.ospf_v3_externals.keys().copied().collect();
+            for prefix in prefixes {
+                changed |= self.ospf_originate_externals_v3(prefix);
+            }
+        }
+        changed
+    }
+
+    /// Redistribute an IPv6 external destination on the OSPFv3 plane
+    /// (RFC 5340 §4.4.3.6): originate a 0x4005 AS-external-LSA into
+    /// every attached OSPFv3 area and remember the destination so areas
+    /// that attach later catch up (see [`Self::ospf_sync_externals`]).
+    ///
+    /// The forwarding address, when set, must be a *global* IPv6
+    /// address — unspecified and link-local values are illegal
+    /// (§A.4.7) and are refused. Returns `false` (and records nothing)
+    /// for non-IPv6 destinations. The intent is still recorded when no
+    /// OSPF session exists yet; it is originated as soon as the first
+    /// OSPFv3 area attaches.
+    pub fn ospf_redistribute_v3(&mut self, dest: V3ExternalDestination) -> bool {
+        let lr_core::addr::IpAddr::V6(_) = dest.prefix.addr else {
+            return false;
+        };
+        if let Some(fa) = dest.forwarding_addr {
+            let illegal = fa == [0u8; 16] || (fa[0] == 0xfe && (fa[1] & 0xc0) == 0x80);
+            if illegal {
+                return false;
+            }
+        }
+        // Store the network-normalized form — the LS ID and the
+        // unchanged-detection compare against the wire body, which is
+        // always normalized (§A.4.1).
+        let mut dest = dest;
+        let lr_core::addr::IpAddr::V6(net) = dest.prefix.network() else {
+            return false;
+        };
+        dest.prefix = Prefix::new_v6(net, dest.prefix.prefix_len);
+        let prefix = dest.prefix;
+        self.ospf_v3_externals.insert(prefix, dest);
+        let changed = self.ospf_originate_externals_v3(prefix);
+        if changed {
+            let delta = self.ospf_on_lsdb_change();
+            self.apply_runtime_delta(delta);
+        }
+        true
+    }
+
+    /// Stop redistributing an IPv6 external destination (RFC 5340
+    /// §4.4.3.6): MaxAge-flush the self-originated 0x4005 LSA from
+    /// every attached OSPFv3 area and flood the flush. Returns `false`
+    /// when no matching redistribution exists.
+    pub fn ospf_unredistribute_v3(&mut self, prefix: Prefix) -> bool {
+        // Compare against the network-normalized key.
+        let lr_core::addr::IpAddr::V6(net) = prefix.network() else {
+            return false;
+        };
+        let prefix = Prefix::new_v6(net, prefix.prefix_len);
+        if self.ospf_v3_externals.remove(&prefix).is_none() {
             return false;
         }
+        let Some(ls_id) = self.ospf_v3_external_lsids.remove(&prefix) else {
+            return false;
+        };
+        let router_id = self.ospf_router_id.unwrap_or(0);
         let mut changed = false;
-        let networks: Vec<u32> = self.ospf_externals.keys().copied().collect();
-        for network in networks {
-            changed |= self.ospf_originate_externals(network);
+        let mut floods: Vec<(u32, Vec<Lsa>)> = Vec::new();
+        let areas: Vec<u32> = self.ospf_areas.keys().copied().collect();
+        for area_id in areas {
+            let mut flushes = Vec::new();
+            if let Some(area) = self.ospf_areas.get(&area_id) {
+                for (key, entry) in area.lsdb.iter() {
+                    if key.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                        && key.advertising_router == router_id
+                        && key.link_state_id == ls_id
+                    {
+                        if let Some(flush) = flush_external_lsa(&entry.lsa) {
+                            flushes.push(flush);
+                        }
+                    }
+                }
+            }
+            if let Some(area) = self.ospf_areas.get_mut(&area_id) {
+                for flush in flushes {
+                    if area.lsdb.install(flush.clone(), self.now_ms).changed() {
+                        floods.push((area_id, vec![flush]));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (area_id, lsas) in floods {
+            self.ospf_flood(area_id, &lsas, None);
+        }
+        if changed {
+            let delta = self.ospf_on_lsdb_change();
+            self.apply_runtime_delta(delta);
+        }
+        changed
+    }
+
+    /// Originate (or refresh) the self-originated 0x4005 for `prefix`
+    /// in every attached OSPFv3 area (RFC 5340 §4.4.3.6): the same LSA
+    /// content everywhere — the LS ID is stable per prefix so every
+    /// area's instance is the same LSA. Floods what changed. Returns
+    /// whether any LSDB changed.
+    fn ospf_originate_externals_v3(&mut self, prefix: Prefix) -> bool {
+        let Some(router_id) = self.ospf_router_id else {
+            return false; // no OSPF session yet — kept for later
+        };
+        let Some(&dest) = self.ospf_v3_externals.get(&prefix) else {
+            return false;
+        };
+        // Stable LS ID: the router's mapping first, else a previous
+        // instance advertising the same prefix in any v3 area, else the
+        // lowest ID free across all v3 areas.
+        let v3_areas: Vec<u32> = self
+            .ospf_areas
+            .iter()
+            .filter(|(_, a)| a.protocol == Protocol::Ospfv3)
+            .map(|(id, _)| *id)
+            .collect();
+        let ls_id = match self.ospf_v3_external_lsids.get(&prefix) {
+            Some(&id) => id,
+            None => {
+                let reused = v3_areas.iter().find_map(|&area| {
+                    self.ospf_areas
+                        .get(&area)?
+                        .lsdb
+                        .iter()
+                        .find(|(key, entry)| {
+                            key.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                                && key.advertising_router == router_id
+                                && lr_ospf::lsa::v3::V3AsExternalBody::decode(&entry.lsa.body)
+                                    .and_then(|b| b.prefix_addr_prefix())
+                                    .is_some_and(|p| p == prefix)
+                        })
+                        .map(|(key, _)| key.link_state_id)
+                });
+                let in_use: BTreeSet<u32> = v3_areas
+                    .iter()
+                    .filter_map(|&area| self.ospf_areas.get(&area))
+                    .flat_map(|area| {
+                        area.lsdb
+                            .iter()
+                            .filter(|(key, _)| {
+                                key.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                                    && key.advertising_router == router_id
+                            })
+                            .map(|(key, _)| key.link_state_id)
+                    })
+                    .collect();
+                let id =
+                    reused.unwrap_or_else(|| (1u32..).find(|id| !in_use.contains(id)).unwrap_or(0));
+                self.ospf_v3_external_lsids.insert(prefix, id);
+                id
+            }
+        };
+        let mut changed = false;
+        let mut floods: Vec<(u32, Vec<Lsa>)> = Vec::new();
+        for area_id in v3_areas {
+            let prev = self.ospf_areas.get(&area_id).and_then(|area| {
+                area.lsdb
+                    .iter()
+                    .find(|(key, _)| {
+                        key.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                            && key.advertising_router == router_id
+                            && key.link_state_id == ls_id
+                    })
+                    .map(|(_, entry)| entry.lsa.clone())
+            });
+            let unchanged = prev.as_ref().is_some_and(|lsa| {
+                lr_ospf::lsa::v3::V3AsExternalBody::decode(&lsa.body).is_some_and(|b| {
+                    b.e_bit == dest.type2
+                        && b.metric == dest.metric
+                        && b.prefix.prefix_len == dest.prefix.prefix_len
+                        && b.forwarding_addr == dest.forwarding_addr
+                        && b.route_tag == dest.route_tag
+                })
+            });
+            if unchanged {
+                continue;
+            }
+            let prev_seq = prev.map(|lsa| lsa.header.ls_sequence_number);
+            if let Some(lsa) = originate_v3_as_external_lsa(router_id, ls_id, &dest, prev_seq) {
+                if let Some(area) = self.ospf_areas.get_mut(&area_id) {
+                    if area.lsdb.install(lsa.clone(), self.now_ms).changed() {
+                        floods.push((area_id, vec![lsa]));
+                        changed = true;
+                    }
+                }
+            }
+        }
+        for (area_id, lsas) in floods {
+            self.ospf_flood(area_id, &lsas, None);
         }
         changed
     }
@@ -7451,6 +7684,60 @@ mod tests {
         let dst = [0xff_u8, 2, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5];
         lr_ospf::origination::finalize_v3_stream(&mut bytes, &src, &dst);
         bytes
+    }
+
+    /// An IPv6 redistribution originates a 0x4005 into every attached
+    /// v3 area (LS ID stable per prefix), refuses illegal forwarding
+    /// addresses, and `ospf_unredistribute_v3` MaxAge-flushes it.
+    #[test]
+    fn ospfv3_redistribute_originates_as_external() {
+        let mut r = DefaultRouter::new();
+        let r1 = RouterId::from_u32(0x0a00_0001);
+        let h = r
+            .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+            .expect("v3 session");
+        let _ = h;
+
+        use lr_ospf::lsa::v3::{V3AsExternalBody, V3ExternalDestination};
+        let p = Prefix::new_v6(
+            [
+                0x20, 0x01, 0x0d, 0xb8, 0xbe, 0xef, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+            ],
+            48,
+        );
+        let mut dest = V3ExternalDestination::new(p, 100, true);
+        dest.route_tag = Some(7);
+        assert!(r.ospf_redistribute_v3(dest), "v6 destination accepted");
+
+        let lsa = r
+            .ospf_area_lsa(0, lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL, 1, 0x0a00_0001)
+            .expect("0x4005 originated");
+        assert!(lsa.checksum_ok());
+        let body = V3AsExternalBody::decode(&lsa.body).unwrap();
+        assert!(body.e_bit, "type 2");
+        assert_eq!(body.metric, 100);
+        assert_eq!(body.route_tag, Some(7));
+        assert_eq!(body.prefix.prefix_len, 48);
+        assert_eq!(body.forwarding_addr, None);
+        assert_eq!(body.prefix_addr_prefix(), Some(p));
+
+        // A link-local forwarding address is illegal (§A.4.7).
+        let mut bad = V3ExternalDestination::new(p, 100, true);
+        bad.forwarding_addr = Some({
+            let mut a = [0u8; 16];
+            a[0] = 0xfe;
+            a[1] = 0x80;
+            a
+        });
+        assert!(!r.ospf_redistribute_v3(bad), "link-local FA refused");
+
+        // Withdrawal: the MaxAge flush is flooded and the LSA leaves
+        // the LSDB (RFC 2328 §14 — a purged LSA is not retained).
+        assert!(r.ospf_unredistribute_v3(p));
+        assert!(r
+            .ospf_area_lsa(0, lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL, 1, 0x0a00_0001)
+            .is_none());
+        assert!(!r.ospf_unredistribute_v3(p), "already withdrawn");
     }
 
     #[test]
