@@ -143,6 +143,54 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
 
+  # Native build + test on the three primary desktop platforms. The
+  # workspace is already target-aware: lr-osroute carries a Windows
+  # IP-Helper backend, a BSD/macOS route-socket backend, a Linux
+  # rtnetlink backend, and a compile-only stub; lr-cli::signal splits
+  # along #[cfg(unix)] / #[cfg(not(unix))]; and every Linux-only
+  # kernel-gated test uses #![cfg(target_os = "linux")] so the
+  # Windows/macOS runners skip them automatically. The BIRD/FRR interop
+  # suite is not portable — it stays on the ubuntu job above.
+  cross-platform:
+    name: Native (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-22.04
+          - macos-13   # Intel
+          - macos-14   # Apple Silicon
+          - windows-2022
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "native-${{ matrix.os }}"
+      - name: Configure Git PATH (Windows)
+        if: runner.os == 'Windows'
+        run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
+      - name: cargo fmt
+        # Formatting check is platform-independent; running it on
+        # three OSes is belt-and-braces against a toolchain drift.
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: cargo build (workspace)
+        run: cargo build --workspace --all-features
+      - name: cargo test (workspace)
+        # On Windows the lr-cli daemon tests spawn the daemon binary on
+        # loopback TCP sockets. They use std::net primitives that work
+        # cross-platform; the lr-osroute Windows backend compiles and
+        # its kernel-gated sisters (srv6_kernel, ospf6_kernel) are
+        # Linux-only at the file level, so they are excluded by the
+        # compiler, not by the test runner.
+        run: cargo test --workspace --all-features
+
   # Real-world interop: exchange BGP with BIRD and FRR (FRR's bgpd) on
   # loopback TCP sockets and verify routes propagate in both directions.
   # The scripts skip gracefully when the daemon binaries are absent, so the
