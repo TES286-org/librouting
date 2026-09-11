@@ -199,6 +199,12 @@ jobs:
         run: ./tests/interop/ospf_sr.sh
       - name: OSPF SR adjacency + mapping server interop (RFC 8665 slice 3, lr x lr)
         run: ./tests/interop/ospf_sr_adj.sh
+      - name: OSPFv3 two-daemon interop (RFC 5340, raw IPv6 sockets, user namespace)
+        run: ./tests/interop/ospf6.sh
+      - name: OSPFv3 x FRR ospf6d interop (RFC 5340, real DBD/LSR exchange)
+        run: ./tests/interop/ospf6_frr.sh
+      - name: OSPFv3 SRv6 interop (RFC 9513, lr x FRR relay x lr)
+        run: ./tests/interop/ospf6_frr_srv6.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
         run: ./tests/interop/mrt.sh
       - name: Wire-level parity harness (replay captured stream, diff Loc-RIBs)
