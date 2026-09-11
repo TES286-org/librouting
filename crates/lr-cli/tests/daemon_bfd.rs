@@ -13,8 +13,17 @@
 //!    down within seconds, proving the fast-fail path: the log shows
 //!    the BFD `Up -> Down` transition and the session ending with
 //!    reason "bfd session down" long before any hold-time expiry.
+//!
+//! Linux-only: the test relies on the loopback aliases 127.0.0.2 and
+//! 127.0.0.3, which Linux configures on `lo` by default but macOS does
+//! not (only 127.0.0.1 is on `lo0` without an `ifconfig lo0 alias`
+//! step that needs root, unavailable on CI runners). It also uses the
+//! Linux signal numbers for SIGSTOP/SIGCONT (19/18); on macOS those
+//! values are swapped (17/19). The BFD fast-fail behavior this test
+//! pins is covered end-to-end on Linux by the `tests/interop/bfd_bird.sh`
+//! interop lab as well.
 
-#![cfg(unix)]
+#![cfg(target_os = "linux")]
 
 use std::process::{Child, Command, Stdio};
 use std::thread;
