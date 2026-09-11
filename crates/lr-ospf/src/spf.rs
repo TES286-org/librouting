@@ -925,9 +925,10 @@ mod tests {
 
 use crate::lsa::srv6::locator_route_type;
 use crate::lsa::{
-    V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody, V3Prefix, V3RouterLsaBody,
-    LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL, LS_TYPE_INTRA_PREFIX,
-    LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_NU,
+    decode_v3_inter_area_prefix_body, V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody,
+    V3Prefix, V3RouterLsaBody, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL,
+    LS_TYPE_INTER_PREFIX, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER,
+    PREFIX_OPT_LA, PREFIX_OPT_NU,
 };
 
 /// One vertex in the v3 SPF tree. Unlike v2, the Network vertex needs
@@ -1363,6 +1364,81 @@ pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
     }
     result.locators = locators;
     result
+}
+
+/// RFC 5340 §4.8.3: inter-area route calculation from
+/// inter-area-prefix-LSAs (0x2003) — the v3 form of RFC 2328 §16.2.
+///
+/// Every 0x2003 LSA whose advertising border router is reachable
+/// through the intra-area v3 tree contributes a candidate route with
+/// metric `dist(border router) + summary metric`. The v3 deviations
+/// from the v2 calculation (§4.8.3):
+///
+/// - the prefix travels in the LSA body (the Link State ID has lost
+///   its addressing semantics);
+/// - prefixes carrying the NU bit in their PrefixOptions are ignored
+///   by the calculation;
+/// - the LSInfinity metric (`0x00ff_ffff`) still marks unreachable.
+///
+/// The best candidate per prefix wins — lowest metric, ties broken by
+/// the lowest border router ID for determinism. The candidate's next
+/// hop is the advertising border router's resolved link-local first
+/// hop (the only legal unicast next hop for OSPFv3, RFC 5340 §4.2.1);
+/// `None` when the border router itself has no resolved first hop.
+/// Callers must merge the result with the intra-area routes of the
+/// same area so that intra-area paths always win for an identical
+/// prefix (§16.2 (b)).
+pub fn summary_routes_v3(lsdb: &Lsdb, result: &SpfResultV3) -> Vec<SpfRoute> {
+    // LSInfinity — a summary metric that means "unreachable" (§16.2,
+    // §4.8.3 carries it over). Same constant the v2 calculation uses.
+    const LS_INFINITY: u32 = 0x00ff_ffff;
+    let mut best: BTreeMap<Prefix, (SpfRoute, u32)> = BTreeMap::new();
+    for (key, entry) in lsdb.iter() {
+        if key.ls_type != LS_TYPE_INTER_PREFIX {
+            continue;
+        }
+        // (a) The border router must be reachable via intra-area paths.
+        let Some(&dist) = result
+            .vertices
+            .get(&V3VertexId::Router(key.advertising_router))
+        else {
+            continue;
+        };
+        let Some(body) = decode_v3_inter_area_prefix_body(&entry.lsa.body) else {
+            continue;
+        };
+        if body.metric >= LS_INFINITY {
+            continue;
+        }
+        // (b) §4.8.3: NU-marked prefixes take no part in the
+        // inter-area calculation.
+        if body.prefix_options & PREFIX_OPT_NU != 0 {
+            continue;
+        }
+        let Some(prefix) = body.to_prefix() else {
+            continue;
+        };
+        let candidate = SpfRoute {
+            prefix,
+            metric: dist + u64::from(body.metric),
+            next_hop: result
+                .next_hops
+                .get(&V3VertexId::Router(key.advertising_router))
+                .map(|nh| nh.link_local),
+            border_router: Some(key.advertising_router),
+        };
+        let replace = match best.get(&prefix) {
+            None => true,
+            Some((cur, cur_border)) => {
+                candidate.metric < cur.metric
+                    || (candidate.metric == cur.metric && key.advertising_router < *cur_border)
+            }
+        };
+        if replace {
+            best.insert(prefix, (candidate, key.advertising_router));
+        }
+    }
+    best.into_values().map(|(route, _)| route).collect()
 }
 
 #[cfg(test)]
@@ -1996,5 +2072,220 @@ mod v3_tests {
         );
         let spf = run_spf_v3(&db, r1);
         assert!(spf.locators.is_empty());
+    }
+
+    /// r1 - r2 p2p backbone with both Router-LSAs, Link-LSAs and the
+    /// shared /64. Returns the LSDB and the routers' link-locals.
+    fn v3_p2p_lsdb(
+        r1: u32,
+        r2: u32,
+        ifid1: u32,
+        ifid2: u32,
+        metric: u16,
+    ) -> (Lsdb, [u8; 16], [u8; 16]) {
+        let mut db = Lsdb::new();
+        let mk = |_from: u32, from_if: u32, to_if: u32, to: u32| crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric,
+            interface_id: from_if,
+            neighbor_interface_id: to_if,
+            neighbor_router_id: to,
+        };
+        db.install(
+            originate_v3_router_lsa(r1, ROUTER_BIT_V6, 0x13, &[mk(r1, ifid1, ifid2, r2)], None)
+                .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[mk(r2, ifid2, ifid1, r1)], None)
+                .unwrap(),
+            0,
+        );
+        let ll1 = fe80(1);
+        let ll2 = fe80(2);
+        db.install(
+            originate_v3_link_lsa(r1, ifid1, 1, 0x13, ll1, vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, ifid2, 1, 0x13, ll2, vec![], None).unwrap(),
+            0,
+        );
+        (db, ll1, ll2)
+    }
+
+    /// A 0x2003 inter-area-prefix-LSA body for `prefix` at `metric`.
+    fn inter_prefix_body(prefix: Prefix, metric: u32, options: u8) -> Vec<u8> {
+        let mut body = vec![0u8];
+        body.extend_from_slice(&metric.to_be_bytes()[1..4]);
+        body.push(prefix.prefix_len);
+        body.push(options);
+        body.extend_from_slice(&0u16.to_be_bytes());
+        let n = (prefix.prefix_len as usize).div_ceil(8);
+        let padded = n.next_multiple_of(4);
+        match prefix.addr {
+            IpAddr::V6(b) => body.extend_from_slice(&b[..n.min(16)]),
+            IpAddr::V4(b) => body.extend_from_slice(&b[..n.min(4)]),
+        }
+        body.resize(body.len() + (padded - n), 0);
+        body
+    }
+
+    /// A finalized 0x2003 inter-area-prefix-LSA from `adv`.
+    fn inter_prefix_lsa(
+        ls_id: u32,
+        adv: u32,
+        prefix: Prefix,
+        metric: u32,
+        options: u8,
+    ) -> crate::lsa::Lsa {
+        let mut lsa = crate::lsa::Lsa {
+            header: crate::lsa::LsaHeader {
+                ls_age: 0,
+                options: 0,
+                ls_type: LS_TYPE_INTER_PREFIX,
+                link_state_id: ls_id,
+                advertising_router: adv,
+                ls_sequence_number: 0x8000_0001,
+                ls_checksum: 0,
+                length: 0,
+            },
+            body: inter_prefix_body(prefix, metric, options),
+        };
+        lsa.finalize();
+        lsa
+    }
+
+    /// §4.8.3: a 0x2003 from a reachable border router yields an
+    /// inter-area candidate with dist(border) + metric; LSInfinity and
+    /// NU-marked prefixes are skipped; unreachable border routers
+    /// contribute nothing.
+    #[test]
+    fn v3_inter_area_prefix_calc() {
+        let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+        let (mut db, _ll1, ll2) = v3_p2p_lsdb(r1, r2, 5, 3, 10);
+        let p_a = Prefix::new_v6(
+            {
+                let mut a = [0u8; 16];
+                a[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 1]);
+                a
+            },
+            48,
+        );
+        let p_nu = Prefix::new_v6(
+            {
+                let mut a = [0u8; 16];
+                a[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 2]);
+                a
+            },
+            48,
+        );
+        // r2's summaries: p_a at metric 7, p_nu NU-marked, and an
+        // LSInfinity default.
+        db.install(inter_prefix_lsa(1, r2, p_a, 7, 0), 0);
+        db.install(inter_prefix_lsa(2, r2, p_nu, 7, PREFIX_OPT_NU), 0);
+        db.install(
+            inter_prefix_lsa(3, r2, Prefix::new_v6([0u8; 16], 0), 0x00ff_ffff, 0),
+            0,
+        );
+        // A summary from a router with no Router-LSA: unreachable.
+        db.install(inter_prefix_lsa(4, 0x0a00_0009, p_a, 1, 0), 0);
+
+        let spf = run_spf_v3(&db, r1);
+        let inter = summary_routes_v3(&db, &spf);
+        assert_eq!(inter.len(), 1, "only p_a survives");
+        let route = &inter[0];
+        assert_eq!(route.prefix, p_a);
+        assert_eq!(route.metric, 17, "dist(r2)=10 + metric 7");
+        assert_eq!(route.border_router, Some(r2));
+        assert_eq!(route.next_hop, Some(IpAddr::V6(ll2)));
+    }
+
+    /// Candidate selection for identical prefixes: the lowest metric
+    /// wins across border routers; an exact tie falls to the lower
+    /// border router ID; duplicate LSAs from one border router keep the
+    /// lowest metric.
+    #[test]
+    fn v3_inter_area_prefix_best_candidate_wins() {
+        let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+        let mut db = Lsdb::new();
+        let p = Prefix::new_v6(
+            {
+                let mut a = [0u8; 16];
+                a[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0, 3]);
+                a
+            },
+            48,
+        );
+        // r1 p2p-connects to r2, r4 and r5 (all metric 10) so all three
+        // border routers are intra-area reachable.
+        let r4 = 0x0a00_0004;
+        let r5 = 0x0a00_0005;
+        let mk_link = |ifid: u32, nifid: u32, nrid: u32| crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+        };
+        let back = |ifid: u32, nifid: u32, nrid: u32| crate::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+        };
+        db.install(
+            originate_v3_router_lsa(
+                r1,
+                ROUTER_BIT_V6,
+                0x13,
+                &[mk_link(5, 3, r2), mk_link(6, 8, r4), mk_link(7, 9, r5)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[back(3, 5, r1)], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(r4, ROUTER_BIT_V6, 0x13, &[back(8, 6, r1)], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(r5, ROUTER_BIT_V6, 0x13, &[back(9, 7, r1)], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r1, 5, 1, 0x13, fe80(1), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r4, 8, 1, 0x13, fe80(4), vec![], None).unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r5, 9, 1, 0x13, fe80(5), vec![], None).unwrap(),
+            0,
+        );
+        // Candidates: r2 metric 5 → 15, r4 metric 1 → 11 (wins on
+        // metric), r5 metric 5 → 15 (ties with r2 but r2's ID is
+        // lower). r2's duplicate metric 9 LSA loses to its own metric 5.
+        db.install(inter_prefix_lsa(10, r2, p, 5, 0), 0);
+        db.install(inter_prefix_lsa(11, r2, p, 9, 0), 0);
+        db.install(inter_prefix_lsa(12, r4, p, 1, 0), 0);
+        db.install(inter_prefix_lsa(13, r5, p, 5, 0), 0);
+
+        let spf = run_spf_v3(&db, r1);
+        let inter = summary_routes_v3(&db, &spf);
+        assert_eq!(inter.len(), 1);
+        assert_eq!(inter[0].metric, 11, "r4's metric-1 candidate wins");
+        assert_eq!(inter[0].border_router, Some(r4));
     }
 }
