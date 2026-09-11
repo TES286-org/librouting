@@ -143,6 +143,28 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
 
+  # Intel macOS coverage now that the macos-13 (Intel) native job is
+  # retired (see cross-platform job). The macos-14 (Apple Silicon)
+  # runner ships the universal Apple clang that can target both
+  # arches; cross-compile to x86_64-apple-darwin from there. This
+  # verifies the Intel macOS code path (the lr-osroute BSD backend
+  # has no Intel/Apple-Silicon conditional — the route(4) socket
+  # ABI is the same — so a build check is sufficient coverage).
+  cross-macos-intel:
+    name: Cross-build (x86_64-apple-darwin, from macos-14)
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "cross-x86_64-apple-darwin"
+      - name: cargo build (x86_64-apple-darwin)
+        run: cargo build --workspace --target x86_64-apple-darwin --all-features
+
   # Native build + test on the three primary desktop platforms. The
   # workspace is already target-aware: lr-osroute carries a Windows
   # IP-Helper backend, a BSD/macOS route-socket backend, a Linux
@@ -151,6 +173,18 @@ jobs:
   # kernel-gated test uses #![cfg(target_os = "linux")] so the
   # Windows/macOS runners skip them automatically. The BIRD/FRR interop
   # suite is not portable — it stays on the ubuntu job above.
+  #
+  # macOS coverage is Apple Silicon only (macos-14). GitHub Actions
+  # retired the Intel macos-13 runner pool in 2025; the runner has
+  # been queued-for-hours (sometimes days) every CI run since the
+  # Phase 4 matrix landed, blocking the cross-platform signal while
+  # the same code paths ran green on macos-14. Intel macOS
+  # compilation is still covered by the cross-build matrix below
+  # (x86_64-apple-darwin target via the cross job); only the native
+  # test execution is dropped. The `lr-osroute` BSD backend is
+  # shared between Intel and Apple Silicon macOS (the route(4)
+  # socket ABI is the same), so dropping macos-13 loses no
+  # platform-conditional code path.
   cross-platform:
     name: Native (${{ matrix.os }})
     strategy:
@@ -158,8 +192,7 @@ jobs:
       matrix:
         os:
           - ubuntu-22.04
-          - macos-13   # Intel
-          - macos-14   # Apple Silicon
+          - macos-14   # Apple Silicon (Intel macOS retired by GitHub Actions)
           - windows-2022
     runs-on: ${{ matrix.os }}
     steps:
