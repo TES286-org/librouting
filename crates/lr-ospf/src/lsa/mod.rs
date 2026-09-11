@@ -42,6 +42,23 @@ pub use sr::{
     OPAQUE_TYPE_RI, SUBTLV_PREFIX_SID, TLV_EXT_PREFIX, TLV_SRGB, TLV_SR_ALGORITHM,
 };
 
+/// OSPFv3 Segment Routing over IPv6 (SRv6) extensions (RFC 9513): the
+/// SRv6 Capabilities / SR-Algorithm / Node MSD TLVs on the OSPFv3
+/// Router Information LSA (RFC 7770 §2.2), the SRv6 Locator LSA
+/// (function code 42) with the Locator TLV, the End SID sub-TLV and
+/// the SID Structure sub-TLV, plus the §6 AC prefix option and the
+/// self-origination helpers.
+pub mod srv6;
+pub use srv6::{
+    behavior_valid_for_end_sid, decode_v3_ri_tlvs, decode_v3_srv6_ri, encode_v3_srv6_ri,
+    originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorLsaBody,
+    Srv6LocatorTlv, Srv6RiBlock, Srv6SidStructure, EXT_SUBTLV_SID_STRUCTURE,
+    LOCATOR_SUBTLV_END_SID, LOCATOR_SUBTLV_IPV6_FWD_ADDR, LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR,
+    LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID, LOCATOR_SUBTLV_ROUTE_TAG, LOCATOR_SUBTLV_SID_STRUCTURE,
+    LOCATOR_TLV_SRV6_LOCATOR, LS_TYPE_SRV6_LOCATOR, LS_TYPE_V3_ROUTER_INFORMATION, PREFIX_OPT_AC,
+    RI_TLV_NODE_MSD, RI_TLV_SRV6_CAPABILITIES, RI_TLV_SR_ALGORITHM, SRV6_CAP_O_FLAG,
+};
+
 /// RFC 2328 §14: LSAs aged to MaxAge are flushed from the database.
 pub use crate::lsdb::MAX_AGE_SECS;
 
