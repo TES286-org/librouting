@@ -1,28 +1,126 @@
 name: Release
 
+# Release workflow — produces one tarball per desktop platform on every
+# `v*` tag push, then assembles them into a single GitHub Release
+# (draft, with release notes auto-generated from commits). See
+# docs/RELEASE-PLAN.md for the semver policy and the freeze criteria
+# gating the move from 0.x to 1.0.
+#
+# Artifacts per platform:
+#   - librouting-<os>-<arch>.tar.gz (or .zip on Windows)
+#       contains: the platform's liblr_ffi.{so,dll,dylib}, the static
+#       liblr_ffi.a (where the toolchain emits one), and the public
+#       headers (lr_ffi.h, librouting.hpp).
+#   - lr_ffi.h and librouting.hpp are also attached standalone so a
+#     packaging system can pull them without unpacking a tarball.
+
 on:
   push:
     tags: ["v*"]
 
 jobs:
-  publish:
-    name: Build + release
-    runs-on: ubuntu-22.04
+  build-native:
+    name: Build (${{ matrix.os }}, ${{ matrix.target }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            archive: librouting-linux-x86_64.tar.gz
+            lib: liblr_ffi.so
+          - os: macos-13
+            target: x86_64-apple-darwin
+            archive: librouting-macos-x86_64.tar.gz
+            lib: liblr_ffi.dylib
+          - os: macos-14
+            target: aarch64-apple-darwin
+            archive: librouting-macos-aarch64.tar.gz
+            lib: liblr_ffi.dylib
+          - os: windows-2022
+            target: x86_64-pc-windows-msvc
+            archive: librouting-windows-x86_64.zip
+            lib: lr_ffi.dll
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: Build release artifacts
+        with:
+          targets: ${{ matrix.target }}
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-${{ matrix.target }}"
+      - name: Build release artifact
         run: |
-          cargo build --workspace --release --all-features
-          cargo build --release -p lr-ffi
-          tar czf librouting-linux-x86_64.tar.gz -C target/release liblr_ffi.so liblr_ffi.a include
-          cp include/lr_ffi.h lr_ffi.h
-          cp include/librouting.hpp librouting.hpp
+          cargo build --workspace --release --all-features --target ${{ matrix.target }}
+          cargo build --release -p lr-ffi --target ${{ matrix.target }}
+      - name: Stage artifacts (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          set -euo pipefail
+          mkdir -p stage/include
+          cp target/${{ matrix.target }}/release/${{ matrix.lib }} stage/ || \
+            cp target/release/${{ matrix.lib }} stage/
+          # The static archive is not always emitted (e.g. Windows MSVC
+          # uses a .lib import library instead); copy when present.
+          [ -f target/${{ matrix.target }}/release/liblr_ffi.a ] && \
+            cp target/${{ matrix.target }}/release/liblr_ffi.a stage/ || true
+          cp include/lr_ffi.h include/librouting.hpp stage/include/
+          tar czf ${{ matrix.archive }} -C stage .
+      - name: Stage artifacts (Windows)
+        if: runner.os == 'Windows'
+        run: |
+          mkdir stage, stage\include
+          copy "target\${{ matrix.target }}\release\${{ matrix.lib }}" stage\ || copy "target\release\${{ matrix.lib }}" stage\
+          if (Test-Path "target\${{ matrix.target }}\release\lr_ffi.dll.lib") {
+            copy "target\${{ matrix.target }}\release\lr_ffi.dll.lib" stage\
+          }
+          copy include\lr_ffi.h stage\include\
+          copy include\librouting.hpp stage\include\
+          7z a ${{ matrix.archive }} stage
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.archive }}
+          path: ${{ matrix.archive }}
+          retention-days: 7
+
+  publish-release:
+    name: Publish GitHub Release
+    needs: build-native
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: release-assets
+          merge-multiple: false
+      - name: Flatten artifacts
+        run: |
+          set -euo pipefail
+          mkdir -p flattened
+          find release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} flattened/ \;
+          cp include/lr_ffi.h flattened/
+          cp include/librouting.hpp flattened/
+          ls -l flattened/
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            librouting-linux-x86_64.tar.gz
-            lr_ffi.h
-            librouting.hpp
+            flattened/*
           draft: true
+          generate_release_notes: true
+          body: |
+            ## librouting ${{ github.ref_name }}
+
+            Pre-built `lr-ffi` shared libraries for Linux, macOS (Intel
+            and Apple Silicon) and Windows, plus the public C and C++
+            headers (`lr_ffi.h`, `librouting.hpp`).
+
+            See `docs/RELEASE-PLAN.md` for the semver policy, the
+            API-freeze criteria, and the post-1.0 governance rules.
+            See `docs/bindings/{c,cpp,go,python}.md` for the
+            per-language embedding guides that ride on top of these
+            artifacts.
