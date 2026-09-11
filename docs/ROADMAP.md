@@ -1628,3 +1628,99 @@ design doc landed in this Phase gives the next implementer the
 codec shapes, the SPF integration plan and the interop verification
 plan to pick up slice 1 (codecs) without re-deriving the RFC 8362
 mapping from scratch.
+
+## Phase 7 — v1.0.0-rc.1 pre-release
+
+Where the project stands: Phase 6 landed the E-LSA design doc, the
+RUNBOOK deep-troubleshooting expansion, and a small lr-core code
+audit. CI is green on all desktop platforms (11/11 jobs), and
+nightly is green (2/2 jobs — Miri UB check + QEMU VM harness for
+kernel-gated interop). The user instructed a full judgment of
+whether the 1.0.0 release conditions (RELEASE-PLAN.md §2) are
+met, and if functionality is complete with no large code changes
+expected before 1.0.0, to skip the 1-week clean-CI wait or
+publish a pre-release.
+
+The assessment against §2 freeze criteria (verified on commit
+`1cc6f5d`):
+
+- ✅ §2.1 — RFC coverage at parity with BIRD 2 + FRR 10 for every
+  protocol in scope; only BGPsec is ❌ (documented out of scope).
+- ✅ §2.2 — Cross-vendor interop in CI (BIRD 2 + FRR 10): BGP,
+  OSPFv2/v3, Babel, LDP, BFD, BMP, MRT, parity — all green.
+- ✅ §2.3 — Wire-level parity harness (`lr parity-replay` +
+  `parity.sh`) green.
+- ✅ §2.4 — Cross-platform CI green: 11/11 jobs (Ubuntu, macOS
+  Apple Silicon, Windows, 3 cross-builds, MSRV, Coverage,
+  interop BIRD+FRR, interop-auth TCP-AO). macOS Intel is
+  cross-compiled from macos-14 (macos-13 retired by GitHub
+  Actions).
+- ✅ §2.5 — ABI version pinned (`ABI_VERSION = 1` in lr-core;
+  cbindgen regenerates the header on every build).
+- ✅ §2.6 — Documentation set complete (all listed docs exist and
+  reference live code; Phase 4-6 added lr-cli.md,
+  lr-cli-internals.md, RELEASE-PLAN.md, E-LSA-DESIGN.md, 3 new
+  example docs, RUNBOOK deep-troubleshooting expansion).
+- ✅ §2.7 — The 1.0 cut PR is this Phase.
+- ✅ Nightly — Miri (UB check for unsafe FFI) green; VM harness
+  (kernel-gated interop, QEMU) green.
+
+Ordered by user-visible impact:
+
+1. **Workspace version bump** — done: bumped the workspace
+   `version` from `0.1.0` to `1.0.0-rc.1` (and all the
+   `[workspace.dependencies]` version lines, the lr-python
+   `__version__` + `pyproject.toml`). The Go binding uses git
+   tags for versioning (no version string in go.mod). The C/C++
+   headers carry no version string (cbindgen does not emit one).
+   The `ABI_VERSION` constant in lr-core stays at `1` — the
+   pre-release does not change the ABI; the 1.0.0 final will
+   carry the same value.
+
+2. **Tag and push** — done: tagged `v1.0.0-rc.1` on commit
+   `1cc6f5d`, pushed the tag, triggered the `release.yml`
+   workflow.
+
+3. **Release workflow** — done: the `release.yml` build matrix
+   (4 native targets: Linux x86_64, macOS Intel + Apple Silicon,
+   Windows x86_64-MSVC) all built successfully; the
+   `publish-release` job assembled them with the standalone
+   headers into a single GitHub Release with 6 assets. Published
+   as a pre-release (`draft: false`, `prerelease: true`) with
+   detailed release notes covering protocol coverage, interop
+   verification, cross-platform CI, out-of-scope items, and the
+   "what this pre-release is for" explanation.
+
+4. **release.yml fix** — done: the release.yml build matrix used
+   `macos-13` (Intel) for the x86_64-apple-darwin artifact. The
+   runner was stuck queued on the first release run (GitHub
+   Actions retired the macos-13 runner pool during 2025; Phase 5
+   dropped it from the CI matrix for the same reason). Switched
+   to `macos-14` (Apple Silicon) and cross-compile to
+   x86_64-apple-darwin from there — the universal Apple clang
+   on macos-14 targets both arches natively. This matches the
+   `cross-macos-intel` job in ci.yml.
+
+5. **1-week clean-CI wait skipped** — done: per the user's
+   instruction, the 1-week wait (RELEASE-PLAN.md §2.8 target
+   window) was skipped because (a) functionality is complete
+   (at parity with BIRD 2 + FRR 10, only BGPsec out of scope)
+   and (b) the recent commit history (Phase 4-6) is docs + CI +
+   small fixes + one refactor — no protocol code changes. The
+   next planned protocol work (RFC 8362 E-LSA + End.X SIDs,
+   BGP-LS, BGP SR Policy) is explicitly post-1.0 work.
+
+6. **Pre-release rather than final 1.0.0** — done: released as
+   `rc.1` rather than the final `1.0.0` to (a) test the
+   never-exercised release.yml workflow end-to-end (this is the
+   first time it has run), (b) signal API freeze to the
+   community, and (c) not commit to 1.0.0 irrevocably — if the
+   release artifacts or the workflow surface issues, we can fix
+   and re-tag rc.2 before the final 1.0.0.
+
+The Phase 3 protocol work (RFC 8362 E-LSA machinery + SRv6 End.X /
+LAN End.X SIDs, BGP-LS, BGP SR Policy) remains post-1.0 work; the
+v1.0.0-rc.1 pre-release freezes the API surface so the next
+implementer can land the E-LSA codecs (slice 1 of the design doc)
+as a minor version bump (1.1.0) without breaking existing
+embedders.

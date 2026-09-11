@@ -338,3 +338,21 @@ the state, that file tracks the how and why.
    `lr-core` (the IPv6-address dotted-quad parser and the timer
    heap's `pop()`) with explicit `match` / `expect()` patterns
    that document the safety invariant for the reader.
+6. **Phase 7 — v1.0.0-rc.1 pre-release** — landed: bumped the
+   workspace version from `0.1.0` to `1.0.0-rc.1`, tagged
+   `v1.0.0-rc.1`, and triggered the `release.yml` workflow which
+   built per-OS artifacts (Linux x86_64, macOS Intel + Apple
+   Silicon, Windows x86_64-MSVC) and published them as a GitHub
+   pre-release with 6 assets (4 tarballs/zip + 2 standalone
+   headers). All §2 freeze criteria verified on the cut commit;
+   CI 11/11 green, nightly 2/2 green. The 1-week clean-CI wait
+   (RELEASE-PLAN.md §2.8) was skipped per the user's instruction:
+   functionality is complete and no large code changes are
+   expected before 1.0.0 (recent history is docs + CI + small
+   fixes). Released as `rc.1` rather than the final `1.0.0` to
+   test the never-exercised release workflow end-to-end and
+   signal API freeze to the community. The final `1.0.0` follows
+   after rc.1 artifacts are validated. Also fixed the `release.yml`
+   matrix to use `macos-14` (Apple Silicon) for the Intel macOS
+   cross-compile (the `macos-13` Intel runner was retired by
+   GitHub Actions and was stuck queued on the first release run).

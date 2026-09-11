@@ -325,9 +325,10 @@ release."
 
 ## 6. Release event log
 
-| Tag      | Date          | Notes                                                                                              |
-| -------- | ------------- | -------------------------------------------------------------------------------------------------- |
-| (pending) | (Phase 4 lands) | First release cut after macOS + Windows CI is green for a full week and the lr-cli docs are in.   |
+| Tag           | Date          | Notes                                                                                              |
+| ------------- | ------------- | -------------------------------------------------------------------------------------------------- |
+| v1.0.0-rc.1   | 2026-09-11    | API-freeze pre-release. All §2 freeze criteria verified on commit `1cc6f5d`. CI 11/11 jobs green (Ubuntu, macOS Apple Silicon, Windows, 3 cross-builds, MSRV, Coverage, interop BIRD+FRR, interop-auth TCP-AO). Nightly 2/2 green (Miri, QEMU VM harness). The 1-week clean-CI wait (§2.8) skipped per the user's instruction: functionality is complete (at parity with BIRD 2 + FRR 10, only BGPsec out of scope) and the recent commit history is docs + CI + small fixes (no protocol code changes). Released as a pre-release rather than the final 1.0.0 to test the never-exercised `release.yml` workflow end-to-end and signal API freeze to the community. 6 assets: librouting-{linux-x86_64.tar.gz, macos-x86_64.tar.gz, macos-aarch64.tar.gz, windows-x86_64.zip} + lr_ffi.h + librouting.hpp. |
+| (pending)     | (post-rc.1)   | Final 1.0.0 cut after rc.1 artifacts are validated by the community.                              |
 
 The tag history is the canonical release record; this table is the
 human-readable index.
