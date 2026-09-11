@@ -287,8 +287,22 @@ impl fmt::Display for TcpAuthError {
 
 impl std::error::Error for TcpAuthError {}
 
-/// Linux `ENOPROTOOPT` (the errno returned for unknown TCP options).
+/// `ENOPROTOOPT` — the errno a kernel returns for an unknown socket
+/// option: Linux 92, macOS and the BSDs 42, Windows `WSAENOPROTOOPT`
+/// 10042. Only the Linux value can be produced by this module's own
+/// calls (the non-Linux stubs return [`TcpAuthError::Unsupported`]);
+/// the per-platform values keep the comparison honest everywhere.
+#[cfg(target_os = "linux")]
 const ENOPROTOOPT: i32 = 92;
+#[cfg(any(target_os = "macos", target_os = "freebsd", target_os = "netbsd"))]
+const ENOPROTOOPT: i32 = 42;
+#[cfg(not(any(
+    target_os = "linux",
+    target_os = "macos",
+    target_os = "freebsd",
+    target_os = "netbsd"
+)))]
+const ENOPROTOOPT: i32 = 10042;
 
 // ---------------------------------------------------------------------------
 // Public API — Linux implementation
@@ -982,7 +996,15 @@ mod tests {
             errno: ENOPROTOOPT,
         };
         assert!(e.is_kernel_unsupported());
-        assert!(e.to_string().contains("Protocol not available"));
+        // The OS detail text is platform-specific (the Linux strerror
+        // differs from the Win32 message table), so only the context
+        // prefix and the raw-code suffix are pinned everywhere; the
+        // exact strerror text is stable on Linux alone.
+        let msg = e.to_string();
+        assert!(msg.starts_with("setsockopt(TCP_AO_ADD_KEY): "));
+        assert!(msg.contains(&format!("(os error {ENOPROTOOPT})")));
+        #[cfg(target_os = "linux")]
+        assert!(msg.contains("Protocol not available"));
         assert!(!TcpAuthError::ConnectTimeout.is_kernel_unsupported());
     }
 
