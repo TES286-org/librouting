@@ -201,8 +201,12 @@ jobs:
         run: ./tests/interop/ospf_sr_adj.sh
       - name: OSPFv3 two-daemon interop (RFC 5340, raw IPv6 sockets, user namespace)
         run: ./tests/interop/ospf6.sh
+      - name: OSPFv3 broadcast interop (RFC 5340 4.1.2 election, lr x lr)
+        run: ./tests/interop/ospf6_broadcast.sh
       - name: OSPFv3 x FRR ospf6d interop (RFC 5340, real DBD/LSR exchange)
         run: ./tests/interop/ospf6_frr.sh
+      - name: OSPFv3 broadcast x FRR ospf6d interop (RFC 5340 4.1.2, default FRR type)
+        run: ./tests/interop/ospf6_frr_broadcast.sh
       - name: OSPFv3 SRv6 interop (RFC 9513, lr x FRR relay x lr)
         run: ./tests/interop/ospf6_frr_srv6.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)

@@ -75,9 +75,7 @@ use lr_ospf::lsa::{
 use lr_ospf::origination::finalize_v3_packet;
 use lr_ospf::packet::{HelloBody, OspfBody, OspfPacketType, OSPF_V3_OPTIONS_DEFAULT};
 use lr_osroute::ospf_transport::{interface_v6_addrs, OspfV6Transport};
-use lr_router::{
-    DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
-};
+use lr_router::{DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle};
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec};
 
@@ -708,8 +706,7 @@ impl Ospf3Daemon {
             if fire {
                 iface.wait_deadline_ms = 0;
                 iface.election_dirty = false;
-                if Self::run_election(iface, &mut self.neighbors, &self.router, self_rid, now_ms)
-                {
+                if Self::run_election(iface, &mut self.neighbors, &self.router, self_rid, now_ms) {
                     // The transit-link set (§4.4.3.2) and the
                     // Network-LSA membership (§4.4.3.3) may have
                     // changed.
@@ -1281,11 +1278,7 @@ impl Ospf3Daemon {
                     let dr_reachable = !we_are_dr
                         && iface.dr != 0
                         && established.contains(&iface.dr)
-                        && iface
-                            .heard
-                            .get(&iface.dr)
-                            .map(|h| h.interface_id)
-                            .is_some();
+                        && iface.heard.get(&iface.dr).map(|h| h.interface_id).is_some();
                     let describe = (we_are_dr && !established.is_empty()) || dr_reachable;
                     if describe {
                         let (neighbor_interface_id, neighbor_router_id) = if we_are_dr {
@@ -1324,12 +1317,9 @@ impl Ospf3Daemon {
                             let Some(h) = iface.heard.get(rid) else {
                                 continue;
                             };
-                            if let Some(llsa) = router.ospf_area_lsa(
-                                area,
-                                LS_TYPE_LINK,
-                                h.interface_id,
-                                *rid,
-                            ) {
+                            if let Some(llsa) =
+                                router.ospf_area_lsa(area, LS_TYPE_LINK, h.interface_id, *rid)
+                            {
                                 if let Some(body) = V3LinkLsaBody::decode(&llsa.body) {
                                     options |= body.options;
                                 }
