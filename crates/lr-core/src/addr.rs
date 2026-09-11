@@ -231,11 +231,11 @@ fn parse_ipv6(s: &str) -> Option<[u8; 16]> {
     // A dotted quad, if present, must be the *last* group of its side and
     // counts as two hextets.
     let last = right_groups.last().or_else(|| left_groups.last());
-    let has_quad = last.map(|g| g.contains('.')).unwrap_or(false);
-    let (quad_bytes, quad_units) = if has_quad {
-        (parse_ipv4_strict(last.unwrap())?, 2)
-    } else {
-        ([0u8; 4], 0)
+    let (quad_bytes, quad_units, has_quad) = match last {
+        Some(g) if g.contains('.') => (parse_ipv4_strict(g)?, 2, true),
+        // No embedded IPv4 dotted quad: zero the quad bytes, carry no
+        // hextet units (the address is pure IPv6 textual).
+        _ => ([0u8; 4], 0, false),
     };
 
     let has_double_colon = s.contains("::");

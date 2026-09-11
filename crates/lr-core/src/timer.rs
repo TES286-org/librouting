@@ -89,7 +89,11 @@ impl TimerQueue {
         loop {
             match self.heap.peek() {
                 Some(top) if top.fire_at <= now.0 => {
-                    let mut e = self.heap.pop().unwrap();
+                    // The peek above confirmed the heap is non-empty;
+                    // pop() cannot return None here. expect() with a
+                    // message documents the invariant for the reader
+                    // and surfaces it if the invariant ever breaks.
+                    let mut e = self.heap.pop().expect("peek confirmed non-empty");
                     fired.push(e.id);
                     if e.period > 0 {
                         e.fire_at = e.fire_at.saturating_add(e.period);
