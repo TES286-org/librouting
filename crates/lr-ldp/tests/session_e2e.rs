@@ -124,12 +124,19 @@ impl Speaker {
         // Outbound UDP. A v6 logical destination other than ::1 (the
         // only host loopback address the sandbox grants) rides the
         // ::1 endpoint — the engines only ever see the logical
-        // address.
+        // address. Same for v4: Linux binds the whole 127/8 prefix on
+        // `lo` so 127.0.0.2 is loopback, but macOS only carries
+        // 127.0.0.1 on `lo0` by default (an `ifconfig lo0 alias` step
+        // needs root, unavailable on CI runners). Route any 127.0.0.X
+        // destination through 127.0.0.1 so the test runs unchanged on
+        // both — the engines still see the logical 127.0.0.2 address
+        // (RFC 5036 §2.5.2 transport comparison still holds).
         for (dest, bytes) in self.engine.drain_udp() {
             let real = match dest {
                 IpAddr::V6(o) if o != [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] => {
                     IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
                 }
+                IpAddr::V4(b) if b != [127, 0, 0, 1] => IpAddr::V4([127, 0, 0, 1]),
                 other => other,
             };
             let sock = dest_socket_addr(&real, self.peer_udp_port);
@@ -190,8 +197,26 @@ impl Speaker {
                     peer_id,
                     transport_addr,
                 } => {
-                    // The active side opens the TCP connection.
-                    let sock = format!("{}:{}", ip_display(transport_addr), self.peer_tcp_port);
+                    // The active side opens the TCP connection. The
+                    // engine tells us the logical transport address
+                    // (e.g. 127.0.0.2 for B); map any 127.0.0.X
+                    // destination to 127.0.0.1 — macOS only carries
+                    // 127.0.0.1 on lo0 by default (see the UDP note
+                    // above). The peer's TCP listener is bound to
+                    // 127.0.0.1:0, so the destination port is what
+                    // distinguishes the speakers, not the address.
+                    let real = match transport_addr {
+                        IpAddr::V4(b) if *b != [127, 0, 0, 1] => {
+                            IpAddr::V4([127, 0, 0, 1])
+                        }
+                        IpAddr::V6(o)
+                            if *o != [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1] =>
+                        {
+                            IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+                        }
+                        other => *other,
+                    };
+                    let sock = format!("{}:{}", ip_display(&real), self.peer_tcp_port);
                     if let Ok(stream) = TcpStream::connect(&sock) {
                         stream.set_nonblocking(true).unwrap();
                         let conn = self.next_conn;
