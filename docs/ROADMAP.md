@@ -867,6 +867,43 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
     re-origination), and redistribution pipes targeting `Ospfv3`
     bridge v6 routes.
 
+  - **Slice 8 — OSPFv3 broadcast segments (RFC 5340 §4.1.2, §4.4.3.2,
+    §4.4.3.3, §4.4.3.5, §A.4.3/A.4.4)** — done: the last v2-parity gap
+    in the v3 daemon's data path. `lr-ospf::interface::elect_v3` runs
+    the RFC 2328 §9.4 election core on Router-ID identity (RFC 5340
+    §4.1.2 keeps the v2 algorithm and interface FSM; §A.3.2's v3 Hello
+    carries Router IDs in its DR/BDR fields, so the segment identity
+    switches from the v2 IP interface address to the Router ID). The
+    daemon drives the §9.3 interface FSM (Waiting/BackupSeen/WaitTimer,
+    NeighborChange dirtying from received Hellos) and pushes the
+    elected pair through `set_ospf_dr_state`, whose §10.4 adjacency
+    gate and §9.4 step-7 AdjOK? handling are identity-agnostic.
+    Origination follows FRR ospf6d parity: the Router-LSA describes a
+    broadcast interface only as a transit link (§A.4.3 type 2 — the DR
+    self-referential, others pointing at the elected DR and only while
+    fully adjacent with it); the DR originates the Network-LSA
+    (§4.4.3.3 — LS ID = its Interface ID, Options OR'd from the fully
+    adjacent neighbors' Link-LSAs, attached routers = itself plus every
+    Full neighbor) and flushes it on role loss (§14.1 MaxAge reflood);
+    the §4.4.3.5 prefix split — transit-reported interfaces drop their
+    prefixes from the router-referenced Intra-Area-Prefix-LSA, the DR
+    originates the network-referenced one (the Link-LSA prefix union,
+    NU/LA and link-locals excluded, duplicate prefixes merged with
+    their options OR'd). One real wire bug the lab flushed out on the
+    router side: a peer that is already DR fires its initial DBD the
+    moment it sees us bidirectional, and absorbing it while our segment
+    was still Waiting left the exchange half-negotiated — DBDs now
+    return unprocessed below ExStart (§10.6), and the adjacency
+    re-opens through the election's set_ospf_dr_state push. Evidence:
+    `tests/interop/ospf6_broadcast.sh` (lr x lr — election convergence,
+    Network-LSA-vertex routing both ways, the non-DR carrying the
+    shared-segment prefix only via the DR's network IAP, dead-timer
+    retraction) and `tests/interop/ospf6_frr_broadcast.sh` (lr x FRR
+    10.3 ospf6d on its default broadcast type — two independent §9.4
+    implementations converge on the same DR/BDR pair, FRR parses lr's
+    transit links + Network-LSA + network IAP, lr resolves FRR's
+    loopback through the network vertex onto a link-local next hop).
+
 ### W4 — Documentation, guides, tutorials
 
 1. ~~**A book-style tutorial (`docs/tutorial.md`)**~~ — done: three
@@ -1245,3 +1282,59 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      lr's prefixes — proving FRR parses lr's Router/Link/
      Intra-Area-Prefix LSAs — and SIGKILL teardown within the dead
      interval).
+
+## Phase 3 — plan (post roadmap-v2)
+
+Where the project stands: every roadmap-v2 workstream (W1-W6) is
+complete, and the W3-extra MPLS extension has landed through SRv6
+slice 3 (data plane + RFC 9513 OSPFv3 control plane + daemon
+origination). The OSPF planes are now at feature parity with each
+other for intra-area, inter-area, external and broadcast-segment
+behavior; both daemon modes interoperate live with FRR 10.3 (ospfd,
+ospf6d, ldpd, bgpd) and BIRD 2. The honest remaining gaps are narrow
+and enumerable - the list below is the next phase.
+
+Ordered by expected user value (protocol-correctness parity first,
+control-plane extension second, policy surface third):
+
+1. **OSPFv3 graceful restart (RFC 5187)** - the only remaining
+   v2-only daemon feature. The RFC 3623 machinery (GR reason TLVs,
+   helper mode, topology-change exit, retention sets) and the
+   Grace-LSA codec already exist for v2; the slice extends the
+   driver to v3 sessions (RFC 5187 §2-§4: the v3 Grace-LSA, the
+   O-bit signaling in v3 Hellos/DBDs, the helper's per-session
+   retention and exit criteria). Acceptance: the GR e2e labs run
+   green with `[ospf] version = "v3"` (restarter and helper roles),
+   and a v3 GR restarter recovers its LSDB from a live FRR 10.3
+   ospf6d helper.
+2. **RFC 8362 extended-LSA machinery + SRv6 End.X / LAN End.X SIDs
+   (RFC 9513 §9)** - the SRv6 control plane's missing adjacency
+   segments. RFC 8362 is the prerequisite: the E-Router / E-Network /
+   E-Link / E-Intra-Area-Prefix / E-Inter-Area / E-AS-External LSA
+   set with TLV bodies and the U-bit-2 flooding rules, an E-LSA SPF
+   path, and then the E-Router-Link TLV carrying the End.X and LAN
+   End.X SID sub-TLVs (RFC 9513 §9) originated per interface on Full
+   adjacency, projected into `srv6db`, and installed as seg6local
+   routes by the kernel mirror (mirroring the v2 Adj-SID slice's
+   shape). Interop gate: lr x lr at the library level plus FRR
+   transparency (FRR ospf6d stores and re-floods the unknown E-LSAs).
+3. **BGP-LS (RFC 7752 base + RFC 9552 SRv6 extensions)** - export
+   the routing domain to an SDN controller: node/prefix/link NLRI
+   from the OSPF LSDBs, the SRv6 Node (Capabilities, MSDs), Locater
+   and End.X SID TLVs projected from `srv6db`, with the daemon as a
+   BGP-LS producer (a new address family on the existing BGP
+   sessions). Acceptance: a BGP-LS collector (FRR bfdd-style bgpd or
+   a lab consumer) receives the full SRv6 view of an lr OSPF domain.
+4. **BGP SR Policy (RFC 9256 / RFC 9430)** - the consumer side of
+   the SRv6 fabric: receive candidate/dynamic SR policies as VPN
+   routes, resolve them to `lr-srv6` segment lists, and steer
+   matching Loc-RIB entries into seg6 encap routes in the kernel
+   mirror (the BGP-LU LSP-mirror slice's shape, extended to SRv6
+   policies).
+
+Non-goals carried forward: BGPsec (documented out of scope), NBMA
+and point-to-multipoint interface types (broadcast + p2p cover the
+interoperable field surface both references implement; the two types
+differ mainly in neighbor discovery, which the daemon's dynamic
+session model already handles), and OSPFv3 virtual links (v2-only
+today - revisit if a multi-area v3 deployment asks for them).
