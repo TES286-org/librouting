@@ -85,10 +85,35 @@ fn api_ask(socket: &std::path::Path, cmd: &str) -> String {
     let mut conn = UnixStream::connect(socket).expect("connect to api socket");
     conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
     conn.flush().unwrap();
-    thread::sleep(Duration::from_millis(150));
-    let mut buf = Vec::new();
+    // Poll for the response with a 5 s deadline instead of a fixed
+    // 150 ms sleep: on macOS the listener's accept loop polls every
+    // 100 ms, so a fresh connection's first command can land during
+    // a poll gap, and the original fixed-150 ms sleep sometimes
+    // expired before the server thread had a chance to write the
+    // reply (the bogus-command round-trip reproduced exactly that
+    // on the macos-14 leg of the cross-platform CI matrix). The
+    // non-blocking read returns on the first WouldBlock with data in
+    // the buffer, so the typical latency is still a single poll.
     conn.set_nonblocking(true).unwrap();
-    let _ = conn.read_to_end(&mut buf);
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut buf = Vec::new();
+    loop {
+        let mut chunk = [0u8; 4096];
+        match conn.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => buf.extend_from_slice(&chunk[..n]),
+            Err(ref e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if !buf.is_empty() || Instant::now() >= deadline {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(_) => break,
+        }
+    }
     String::from_utf8_lossy(&buf).into_owned()
 }
 
