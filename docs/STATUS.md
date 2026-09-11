@@ -61,7 +61,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 
 | Capability | Status | Notes |
 |-----------|:------:|-------|
-| Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ 🧪 | hello, DBD, LSR, LSU, LSAck; version-dispatched DBD (v3 24-bit options, 10-byte body) and LSR (v3 16-bit LS type) layouts; v2 receive checksum validation (§8.2); LSR wire format (12-byte entries, §A.3.4) interop-verified |
+| Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ 🧪 | hello, DBD, LSR, LSU, LSAck, version-dispatched. v3: 16-byte packet header (§A.3.1, Instance ID at byte 14 — FRR `ospf6_packet_examin` parity), Hello body with FRR `ospf6_make_hello` layout (Interface ID | priority | options(3) | hello | **16-bit dead interval** | DR | BDR), DBD body 12 bytes (§A.3.3: 0\|options(3)\|MTU\|0\|flags\|seq — FRR `ospf6_make_dbdesc` parity), LSR entries 0(2)\|type(2)\|ID\|Adv (§A.3.4), IPv6 pseudo-header checksum finalization (§A.3.1); all v3 shapes FRR 10.3 interop-verified (`tests/interop/ospf6_frr.sh`). A wire audit found the earlier v3 codec self-consistent but wrong on four counts (24-byte header, Hello field order + 32-bit dead, 10-byte DBD, swapped LSR reserved word) — each was invisible to self-tests and caught only against the reference implementation |
 | Neighbor FSM | ✅ | incl. §10.9 restart-to-ExStart on sequence mismatch (Fig. 12) |
 | DBD/LSR exchange (§7.2, §10.3–§10.8) | ✅ 🧪 | `lr-ospf::exchange::DbExchange` + router wiring: master/slave election, header paging by MTU, LSR loading to Full, duplicate handling, RxmtInterval retransmit; BIRD 2 and FRR 10 interop-verified (Full adjacency + bidirectional routes + dead-timer teardown) |
 | LSDB + LSA flooding | ✅ | per-area shared LSDB; same-area sessions flood to each other (§13.3 simplified) |
@@ -76,11 +76,14 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Network-LSA (§12.4.2) + transit links (§12.4.1.2) | ✅ 🧪 | `originate_network_lsa` (LS ID = the DR's IP interface address, Advertising Router = its router-id — they differ in general), `RouterLsaLink::Transit`; the DR originates the Network-LSA only when fully adjacent to ≥ 1 other router and flushes it (MaxAge) when that stops; the SPF derives the transit network's own prefix (LS ID masked by the network mask — BIRD `spfa_process_net` parity) and secondary addresses on the interface stay stub links |
 | Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 inter-area-prefix-LSA (0x2003) origination via `originate_v3_inter_area_prefix_lsa` |
 | LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
-| Daemon transport (`--protocol ospf`) | ✅ 🧪 | `lr-osroute::ospf_transport`: raw `IPPROTO_OSPF` socket per interface, `SO_BINDTODEVICE` + `ip_mreqn` membership (224.0.0.5/6), TTL 1; `lr-ospf::origination`: Router-LSA builder + §A.1 packet checksum; two-daemon e2e over a veth pair (user namespaces, rootless); per-interface `network_type = "broadcast"` (TOML) runs the §9.4 election — Hello DR/BDR fields, §10.4 adjacency, transit links and Network-LSA end-to-end, with BIRD 2 on its default broadcast type (`tests/interop/ospf_broadcast.sh`) |
+| Daemon transport (`--protocol ospf`) | ✅ 🧪 | `lr-osroute::ospf_transport`: raw `IPPROTO_OSPF` socket per interface (v2: IPv4, `ip_mreqn` membership 224.0.0.5/6, TTL 1; v3: IPv6, ff02::5/6 membership, hop limit 1, header-less receive, kernel-gated test `tests/ospf6_kernel.rs`); `lr-ospf::origination`: Router-LSA builder + §A.1 packet checksum; two-daemon e2e over a veth pair (user namespaces, rootless); per-interface `network_type = "broadcast"` (TOML) runs the §9.4 election — Hello DR/BDR fields, §10.4 adjacency, transit links and Network-LSA end-to-end, with BIRD 2 on its default broadcast type (`tests/interop/ospf_broadcast.sh`) |
 | Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, area-scoped type-7 origination, §3.2 translation to type-5 by the elected (highest-ID/Nt) border router; OSPFv2 only |
 | Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; stub/NSSA transit refused |
 | Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer; Ko/Apad MAC per §3.3, Auth Data Len = digest), RFC 7166 v3 auth trailer (RFC 7166 layout with 16-bit SA ID + 64-bit crypto-seq; §4.5 Apad MAC embedding the IPv6 source), anti-replay; unit tests |
 | OSPFv3 inter-area-prefix-LSA (0x2003) | ✅ 🧪 | `originate_v3_inter_area_prefix_lsa` ABR origination; v3 LSA type enum; body encode/decode with IPv6 prefix support |
+| OSPFv3 LSA bodies (RFC 5340 §A.4) | ✅ 🧪 | `lr-ospf::lsa::v3`: Router-LSA (0x2001, bits\|options\|16-byte descriptors, no count field), Network-LSA (0x2002, LS ID = DR Interface ID), Link-LSA (0x0008, priority\|options\|link-local\|prefixes, §4.4.3.4 MUST), Intra-Area-Prefix-LSA (0x2009, referenced-LSA triple + prefixes) and the §A.4.1 prefix encoding (address rounded to 32-bit words); origination helpers with §12.1.2 sequence floors; FRR `ospf6_lsa.h` struct parity |
+| OSPFv3 intra-area SPF (§4.8) | ✅ 🧪 | `run_spf_v3`: Network vertices keyed (DR Router ID, DR Interface ID); next hops are (link-local, outgoing Interface ID) pairs — a direct p2p neighbor's link-local resolves from its Link-LSA (LS ID = the Neighbor Interface ID of our link), routers on a directly attached transit network resolve through the back-link transit entry, deeper vertices inherit; FRR `ospf6_lsdesc_backlink` bidirectional check; prefixes arrive via Intra-Area-Prefix-LSAs (NU/LA excluded, §A.4.1); routes publish as `Protocol::Ospfv3` in the v6-unicast family |
+| OSPFv3 daemon mode (`[ospf] version = "v3"`) | ✅ 🧪 | `daemon_ospf3`: one IPv6 raw socket per interface (no address needed — link-local sources), Interface ID = kernel ifindex (FRR convention), neighbor's Interface ID learned from Hellos; self-origination = Router-LSA (p2p links per Full adjacency, §14.1 refresh) + Link-LSA per interface (the §4.4.3.4 MUST) + Intra-Area-Prefix-LSA attaching global prefixes; pseudo-header checksum on every egress datagram; the link-local → interface mapping learned from Hello sources feeds the kernel mirror's RTA_OIF resolution; p2p segments only for slice 1 (broadcast/inter-area/external, GR and SR rejected by config). Interop: two lr daemons (`tests/interop/ospf6.sh`, adjacency + routes + kernel install + withdrawal) and FRR 10.3 ospf6d (`tests/interop/ospf6_frr.sh`, Full adjacency both ways, lr learns FRR's prefix via a link-local, FRR learns lr's prefixes, dead-timer teardown) |
 | Grace-LSA codec (RFC 3623 / RFC 5187) | ✅ 🧪 | `lr-ospf::lsa::grace` — link-local opaque type 9 with Opaque Type 3 / ID packing (RFC 5250 §3.1), TLV numbers 1=Grace Period / 2=Reason / 3=IP interface address, 4-octet TLV padding, `originate_grace_lsa_v2`; O-bit = RFC 5250 Opaque-LSA capability (DBD scope), NOT a GR signal; DD packets carry it (see the RFC 5250 row in `RFC_MAP.md`) |
 | RFC 5250 Opaque-LSA capability signalling | ✅ 🧪 | the O-bit rides the DD options byte (`lr-ospf::exchange::db_desc_packet`) — lr both originates and floods opaque LSAs, so peers learn it can receive them; BIRD 2.0.8 captures a neighbour's options from DD packets only and skips opaque flooding to non-O-bit neighbours (`lsa_is_acceptable`), FRR's `ospf_gr.c` refuses Grace-LSA origination without `OSPF_OPAQUE_CAPABLE`; Hellos stay O-bit-free per RFC 5250 §3 (audit fix: the bit previously existed only in LSA headers, so BIRD never flooded opaque LSAs toward lr) |
 | GR helper mode (RFC 3623 §3) | ✅ 🧪 | `lr-ospf::gr::HelperEntry` + daemon wiring — §3.1 checks, dead-timer retention, adjacency kept in the Router-LSA, §3.2 exits (flush/timeout/topology change via per-area topology versions), FRR `supported_grace_time` cap; default on (`--ospf-no-gr-helper`); BIRD-verified (`tests/interop/ospf_gr_bird.sh`) |
@@ -241,12 +244,18 @@ the state, that file tracks the how and why.
    data-plane codec + kernel mirror) has landed: `lr-srv6` provides
    the SID/Locator/SRH codec + the RFC 8986 behavior registry, and
    `lr-osroute::seg6_route` installs `seg6`/`seg6local` routes via
-   Linux netlink. Slice 2 (control-plane extensions) needs OSPFv3
-   daemon mode first (RFC 9352 OSPFv3 SRv6 extensions) or BGP-LS
-   / BGP SR Policy (RFC 9256 / 9430); slice 3 (daemon
-   `--srv6-locator` CLI + auto-origination) builds on slice 2.
+   Linux netlink. Slice 2 (control-plane extensions): the OSPFv3
+   daemon-mode prerequisite is now done, so RFC 9352 (OSPFv3 SRv6
+   extensions) is the natural path; the alternative is BGP-LS / BGP
+   SR Policy (RFC 9256 / 9430); slice 3 (daemon `--srv6-locator`
+   CLI + auto-origination) builds on slice 2.
    (`ROADMAP.md` W3-extra item 5 — "Next slice: SRv6".)
-2. **OSPFv3 daemon depth** — the OSPFv3 exchange/daemon mode shares
-   v2's machinery but is not yet exercised by the daemon; the v3
-   codec and LSA surfaces exist. (Tracked by the capability tables
-   above and the RFC 5187 row in `RFC_MAP.md`.)
+2. **OSPFv3 daemon depth** — slice 1 landed: the daemon runs v3 end
+   to end (adjacency, v3 LSDB exchange, v3 SPF, IPv6 route
+   publication, kernel mirror) and interoperates with FRR 10.3
+   ospf6d. Still v2-only in the daemon: broadcast segments
+   (DR election + v3 Network-LSA + network-referenced Intra-Area-Prefix
+   LSAs), inter-area summaries (0x2003/0x2004) and AS externals
+   (0x4005) in the v3 route calculation, graceful restart (RFC 5187)
+   and SR (RFC 9352). The v3 codec + LSA + SPF surfaces are in the
+   capability tables above.

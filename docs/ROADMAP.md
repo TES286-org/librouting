@@ -1031,3 +1031,96 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      fallback gate), verified locally against BIRD 2.17.5. The
      loopback e2e with the flag on demonstrates all three record
      classes (`crates/lr-cli/tests/daemon_exchange_plane.rs`).
+
+### W3 extra — OSPFv3 daemon mode (RFC 5340)
+
+5. **OSPFv3 daemon mode** — the v2 daemon ran, but the v3 codec
+   surfaces that predated it had never touched a real peer (STATUS
+   open item 2, and the named prerequisite of the RFC 9352 SRv6
+   slice). Landed as a wire audit + codec repair + a purpose-built
+   daemon module, sliced into independently verified commits:
+
+   - **Wire audit against RFC 5340 + FRR 10.3 `ospf6d` master**
+     found the v3 codec self-consistent but wrong on four counts,
+     each invisible to round-trip tests: the packet header must be
+     16 bytes (§A.3.1 — the codec emitted v2's 24-byte shape with 8
+     junk bytes before every body); the Hello body is
+     interface-ID | priority | options(3) | hello | **16-bit** dead |
+     DR | BDR (§A.3.2 — the encoder used v2's field order and a
+     32-bit dead interval, which FRR's `ospf6_packet_examin`
+     alignment check rejects outright); the DBD body is 12 bytes —
+     0 | options(3) | MTU | 0 | flags | seq (§A.3.3 — the encoder
+     used v2's MTU-first order, FRR parsed MTU 0 and stalled the
+     exchange in ExStart); the LS-Request entry's reserved word
+     *leads* the 16-bit type (§A.3.4 — the encoder put it second, so
+     FRR read type-0 requests and never answered, deadlocking
+     Loading). The first two were fixed before any daemon existed
+     (self-tests could only pin the *new* shapes); the last two were
+     flushed out by the FRR interop lab itself — the DBD fix needed
+     FRR's ExStart hang reproduced, the LSR fix needed FRR's
+     silent LSR-drop observed. Every shape is pinned against the
+     RFC diagram and the FRR struct/encoder (`ospf6_make_hello`,
+     `ospf6_make_dbdesc`, `ospf6_lsa.h`), and the exchange gained a
+     version parameter (v3 advertises the §A.2 V6|R|E option set
+     0x13, not v2's E|O).
+   - **LSA bodies (`lr-ospf::lsa::v3`)**: Router-LSA (0x2001) with
+     16-byte link descriptors running to the end of the LSA (no
+     count field — a v2 habit that does not exist on the v3 wire),
+     Network-LSA (0x2002, LS ID = the DR's Interface ID), Link-LSA
+     (0x0008 — the §4.4.3.4 MUST that carries each router's
+     link-local, the datum every v3 next hop resolves from), and
+     Intra-Area-Prefix-LSA (0x2009) with the §A.4.1 prefix encoding
+     (addresses rounded to 32-bit words, FRR
+     `OSPF6_PREFIX_SPACE` parity). Origination helpers mirror the
+     v2 shapes: sequence floors per §12.1.2, finalized LSAs.
+   - **SPF (`run_spf_v3`)**: the same Dijkstra tree over the v3
+     LSDB, with Network vertices keyed (DR Router ID, DR Interface
+     ID). Next hops are (link-local, outgoing Interface ID) pairs: a
+     direct p2p neighbor's link-local comes from its Link-LSA whose
+     Link State ID is the Neighbor Interface ID of our p2p link (the
+     v3 form of RFC 2328 §16.1.1 (5)), and routers on a directly
+     attached transit network resolve through the back-link — their
+     own Router-LSA transit entry pointing at the network carries
+     the Interface ID they use there, which indexes their Link-LSA
+     (the unambiguous pure-LSDB route where FRR consults the
+     per-link LSDB in `ospf6_nexthop_calc`). Prefixes arrive via
+     Intra-Area-Prefix-LSAs; NU- and LA-marked prefixes are excluded
+     (§A.4.1). The FRR `ospf6_lsdesc_backlink` bidirectional check
+     gates p2p edges. Routes publish as `Protocol::Ospfv3` in the
+     v6-unicast family.
+   - **Transport (`OspfV6Transport`)**: raw IPv6 protocol-89 sockets
+     per interface, ff02::5/ff02::6 membership, hop limit 1,
+     `sin6_scope_id` unicast — and no header stripping (unlike IPv4
+     raw sockets, the Linux IPv6 raw layer delivers the OSPF packet
+     bare). Kernel-gated test: bind on `lo`, multicast a real v3
+     Hello, receive it back byte-identical.
+   - **Daemon (`daemon_ospf3`)**: `[ospf] version = "v3"` (one
+     version per process, FRR's ospfd/ospf6d split). Interface ID =
+     kernel ifindex (FRR convention); the neighbor's Interface ID
+     rides its Hello into our Router-LSA's p2p descriptions.
+     Self-origination: Router-LSA per area (p2p link per Full
+     adjacency, MinLSArrival-spaced re-origination + §14.1 refresh),
+     a Link-LSA per interface (originated unconditionally — the
+     RFC MUST), and one Intra-Area-Prefix-LSA attaching the global
+     prefixes. Every egress datagram's IPv6 pseudo-header checksum
+     is finalized for the actual (link-local, ff02::5) pair. The
+     link-local → interface mapping learned from Hello sources feeds
+     a process-wide table the kernel mirror consults, so v3 routes
+     install with the RTA_OIF a link-local gateway requires (netlink
+     EINVAL without it). Slice-1 scope is p2p-only; the config
+     finalizer rejects broadcast/GR/SR combinations outright instead
+     of ignoring them. One real bug the lab flushed out on the
+     daemon side: the daemon's pumps raced the shared ticker thread
+     for `poll_events()` and could steal RouteInstalled events
+     before the kernel mirror saw them — the ticker is now the sole
+     event consumer.
+   - **Evidence**: `tests/interop/ospf6.sh` (two lr daemons over a
+     veth pair: Full adjacency, `proto=Ospfv3` routes via link-local
+     next hops both directions, kernel FIB install with `dev veth0`,
+     dead-timer withdrawal removing the API route *and* the kernel
+     route) and `tests/interop/ospf6_frr.sh` (lr × FRR 10.3
+     ospf6d, p2p network type: Full adjacency on both, lr learns
+     FRR's prefix through a link-local, FRR's route table carries
+     lr's prefixes — proving FRR parses lr's Router/Link/
+     Intra-Area-Prefix LSAs — and SIGKILL teardown within the dead
+     interval).
