@@ -792,10 +792,12 @@ impl DaemonConfig {
                 self.ospf_dead_interval
             ));
         }
-        // OSPFv3 daemon: the v2-scoped extensions (SR-MPLS, graceful
-        // restart, Adj-SIDs) are not wired — fail closed instead of
-        // silently ignoring configured features. Broadcast segments
-        // run the RFC 5340 §4.1.2 election (Router-ID identity).
+        // OSPFv3 daemon: the v2-scoped extensions (SR-MPLS, Adj-SIDs)
+        // are not wired — fail closed instead of silently ignoring
+        // configured features. Broadcast segments run the RFC 5340
+        // §4.1.2 election (Router-ID identity); graceful restart is
+        // RFC 5187 (the v3 counterpart of the v2 RFC 3623 surface —
+        // same knobs, same state-file semantics).
         if self.ospf_version == "v3" {
             for spec in &self.ospf_interfaces {
                 if spec.adj_sid.is_some() {
@@ -811,12 +813,6 @@ impl DaemonConfig {
             {
                 return Err(
                     "OSPFv3 does not support the SR-MPLS configuration (srgb/prefix_sid/mapping_server are OSPFv2 extensions)"
-                        .to_string(),
-                );
-            }
-            if self.ospf_graceful_restart {
-                return Err(
-                    "OSPFv3 does not support graceful restart yet (RFC 5187 is a later slice)"
                         .to_string(),
                 );
             }

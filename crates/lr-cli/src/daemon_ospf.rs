@@ -106,9 +106,10 @@ const REORIGINATE_DELAY_MS: u64 = 1_500;
 /// Grace-LSA retransmissions during the graceful-shutdown flood
 /// (RFC 3623 §2.1: "retransmit the grace-LSAs until they are
 /// acknowledged"; the flood path is fire-and-forget, so a bounded
-/// repeat covers the ack-less gap) and their spacing.
-const GRACE_FLOOD_REPEATS: usize = 5;
-const GRACE_FLOOD_INTERVAL_MS: u64 = 1_000;
+/// repeat covers the ack-less gap) and their spacing. Shared by the
+/// v2 and v3 daemons (RFC 5187 keeps the RFC 3623 §2.1 behaviour).
+pub(crate) const GRACE_FLOOD_REPEATS: usize = 5;
+pub(crate) const GRACE_FLOOD_INTERVAL_MS: u64 = 1_000;
 
 /// How often the graceful-shutdown flood services the protocol
 /// between rounds (see `pump_grace_quiet`): a small slice keeps the
@@ -116,7 +117,7 @@ const GRACE_FLOOD_INTERVAL_MS: u64 = 1_000;
 /// flood round, so the very next Grace-LSA instance re-runs the
 /// peer's RFC 3623 §3.1 helper checks against a drained LS
 /// retransmission list.
-const GRACE_PUMP_SLICE_MS: u64 = 50;
+pub(crate) const GRACE_PUMP_SLICE_MS: u64 = 50;
 
 /// A Grace-LSA sequence base that survives the restart: derived from
 /// the wallclock (seconds since the Unix epoch) so the flush the
@@ -128,8 +129,10 @@ const GRACE_PUMP_SLICE_MS: u64 = 50;
 /// single router's Grace-LSA lineage. (BIRD notes the same
 /// non-volatile-storage gap — "We should get end of grace period
 /// from non-volatile storage" — and uses the configured time; the
-/// clock-derived lineage needs no storage at all.)
-fn grace_sequence_base() -> u32 {
+/// clock-derived lineage needs no storage at all.) Shared with the
+/// v3 daemon (RFC 5187 keeps the RFC 3623 §2.1 sequence-lineage
+/// requirement).
+pub(crate) fn grace_sequence_base() -> u32 {
     const INITIAL: u32 = 0x8000_0001;
     let unix_ms = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -2383,21 +2386,20 @@ impl OspfDaemon {
         let mut floor = self.gr_seq_floor;
         for iface in &mut self.interfaces {
             let local = iface.addrs.first().map(|a| u32::from(a.addr)).unwrap_or(0);
-            let body = if flush {
-                // §2.3 (6): the flush carries no meaningful state.
-                GraceLsaBody {
-                    grace_period: 0,
-                    reason: GraceReason::Unknown,
-                    ipv4_address: None,
-                    ipv6_address: None,
-                }
-            } else {
-                GraceLsaBody {
-                    grace_period: period_hint,
-                    reason: GraceReason::SoftwareRestart,
-                    ipv4_address: local.to_be_bytes().into(),
-                    ipv6_address: None,
-                }
+            // The flush keeps a valid body (period ≥ 1, reason ≤ 3):
+            // FRR's grace-LSA extraction rejects a period of 0 or an
+            // unknown reason code even for the MaxAge instance
+            // (ospf_extract_grace_lsa_fields: "Wrong Grace LSA
+            // packet"), and FRR's own purge (`ospf_gr_lsa_originate`
+            // with maxage) sends the full TLV set — only the age and
+            // sequence differ from the announcement. BIRD and lr
+            // ignore the flush body, so the richer shape is safe
+            // everywhere.
+            let body = GraceLsaBody {
+                grace_period: period_hint,
+                reason: GraceReason::SoftwareRestart,
+                ipv4_address: local.to_be_bytes().into(),
+                ipv6_address: None,
             };
             let seq = grace_sequence_base().max(floor.wrapping_add(1));
             floor = seq;

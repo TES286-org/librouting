@@ -40,18 +40,31 @@
 //!   interface mapping learned from Hello sources feeds
 //!   [`crate::v6_nexthop_oifs`], so the kernel mirror can attach the
 //!   RTA_OIF a link-local gateway needs.
+//! - **Graceful restart (RFC 5187)** — the v3 counterpart of the v2
+//!   daemon's RFC 3623 machinery: helper mode (§3 via
+//!   [`lr_ospf::gr::HelperEntry`], one per neighbour session — the
+//!   restarting router's Hellos stop, so the dead timer keeps the
+//!   neighbour while helper mode is active), the graceful-shutdown
+//!   Grace-LSA flood (§2.1 — LS type 0x000b, Link State ID = the
+//!   Interface ID, state-file-persisted deadline and sequence floor)
+//!   and the restarting router's recovery (§2.2/§2.3: origination
+//!   suppressed, pre-restart adjacencies re-established from the
+//!   retained Router-LSA's p2p links, Grace-LSA flush on exit). The
+//!   Interface IDs the retained LSAs are keyed by are the kernel
+//!   ifindexes — stable across the process restart (RFC 5187 §3.2's
+//!   preservation requirement holds structurally while the interface
+//!   stays up).
 //!
 //! Scope of slice 1 was point-to-point segments only; broadcast
 //! segments (DR election, Network-LSAs, network-referenced
-//! Intra-Area-Prefix-LSAs) are the current slice. No graceful restart
-//! (RFC 5187 is a later slice). Slice 3 adds the RFC 9513 SRv6
-//! surface: with `[[ospf.srv6_locator]]` configuration the daemon
-//! originates the area-scoped Router Information LSA (the SRv6
-//! Capabilities, SR-Algorithm and Node MSD TLVs, RFC 9513 §2-§4) and
-//! the SRv6 Locator LSA (§7, with the §8 End SID and the optional §10
-//! SID Structure) alongside the topology LSAs, and `[ospf]
-//! srv6_receive` opens the §5 locator-reception gate on the router
-//! pipeline.
+//! Intra-Area-Prefix-LSAs) are the current slice. Slice 3 adds the
+//! RFC 9513 SRv6 surface: with `[[ospf.srv6_locator]]` configuration
+//! the daemon originates the area-scoped Router Information LSA (the
+//! SRv6 Capabilities, SR-Algorithm and Node MSD TLVs, RFC 9513
+//! §2-§4) and the SRv6 Locator LSA (§7, with the §8 End SID and the
+//! optional §10 SID Structure) alongside the topology LSAs, and
+//! `[ospf] srv6_receive` opens the §5 locator-reception gate on the
+//! router pipeline.
 
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
@@ -61,12 +74,14 @@ use std::time::Duration;
 
 use lr_core::addr::{IpAddr, RouterId};
 use lr_ospf::codec::OspfCodec;
+use lr_ospf::gr::{HelperCheck, HelperEntry, RestartTracker};
 use lr_ospf::interface::{elect_v3, IfState, V3Elector};
+use lr_ospf::lsa::grace::{originate_grace_lsa_v3, GraceLsaBody, GraceReason};
 use lr_ospf::lsa::srv6::{locator_route_type, msd_type, NodeMsd};
 use lr_ospf::lsa::v3::{
     originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
-    originate_v3_router_lsa, V3LinkLsaBody, V3Prefix, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT,
-    LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, ROUTER_BIT_E, ROUTER_BIT_V6,
+    originate_v3_router_lsa, V3LinkLsaBody, V3Prefix, V3RouterLsaBody, LINK_TYPE_POINTTOPOINT,
+    LINK_TYPE_TRANSIT, LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER, ROUTER_BIT_E, ROUTER_BIT_V6,
 };
 use lr_ospf::lsa::{
     originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorTlv,
@@ -75,9 +90,14 @@ use lr_ospf::lsa::{
 use lr_ospf::origination::finalize_v3_packet;
 use lr_ospf::packet::{HelloBody, OspfBody, OspfPacketType, OSPF_V3_OPTIONS_DEFAULT};
 use lr_osroute::ospf_transport::{interface_v6_addrs, OspfV6Transport};
-use lr_router::{DefaultRouter, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle};
+use lr_router::{
+    DefaultRouter, OspfGraceEvent, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
+};
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec};
+use crate::daemon_ospf::{
+    grace_sequence_base, GRACE_FLOOD_INTERVAL_MS, GRACE_FLOOD_REPEATS, GRACE_PUMP_SLICE_MS,
+};
 
 /// Loop cadence: also the dead-timer / hello-timer granularity.
 const LOOP_INTERVAL_MS: u64 = 50;
@@ -199,6 +219,10 @@ struct Neighbor {
     handle: SessionHandle,
     ifindex: u32,
     established: bool,
+    /// RFC 3623 §3 / RFC 5187 (the helper half): retains the
+    /// adjacency (dead-timer suspension in `pump_dead_timer`) while
+    /// the restarting neighbour's Hellos are silent.
+    helper: HelperEntry,
 }
 
 struct Ospf3Daemon {
@@ -227,6 +251,31 @@ struct Ospf3Daemon {
     router_id: RouterId,
     /// Snapshot for the runtime API `status` command.
     status: Arc<Mutex<Vec<String>>>,
+    // ---- Graceful restart (RFC 5187) ----
+    /// §3 helper policy (default on, `--ospf-no-gr-helper` refuses).
+    gr_helper_enabled: bool,
+    /// FRR `supported_grace_time`: the grace ceiling this router
+    /// honours as a helper (`--ospf-helper-grace-cap`, seconds).
+    gr_helper_cap: u32,
+    /// The configured grace period (seconds) — advertised in the
+    /// shutdown Grace-LSAs and persisted to the state file
+    /// (`--ospf-grace-period`).
+    gr_grace_period: u32,
+    /// Monotonic floor for this router's Grace-LSA sequence lineage
+    /// (each originated instance advances it; seeded from the state
+    /// file across restarts so the post-recovery flush is always
+    /// newer than the instances the helpers hold).
+    gr_seq_floor: u32,
+    /// Where the graceful-restart state (deadline + grace period +
+    /// sequence floor) survives the restart — `--ospf-gr-state-file`,
+    /// defaulting to `<api-socket>.gr`.
+    gr_state_file: Option<String>,
+    /// §2 recovery, per area: each tracker holds that area's
+    /// pre-restart adjacency set and latches its outcome. Non-empty
+    /// while recovery is live.
+    gr_recovery: BTreeMap<u32, RestartTracker>,
+    /// Area → last-seen LSDB topology version (the §3.2 (3) exit).
+    gr_topology: BTreeMap<u32, u64>,
 }
 
 /// The resolved RFC 9513 origination state: what `reoriginate_area`
@@ -397,6 +446,16 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         srv6: Srv6Origination::maybe_from_config(cfg),
         router_id: rid,
         status: Arc::new(Mutex::new(Vec::new())),
+        gr_helper_enabled: cfg.ospf_gr_helper,
+        gr_helper_cap: cfg.ospf_helper_grace_cap,
+        gr_grace_period: cfg.ospf_grace_period,
+        gr_seq_floor: 0,
+        gr_state_file: cfg
+            .ospf_gr_state_file
+            .clone()
+            .or_else(|| cfg.api_socket.as_ref().map(|s| format!("{s}.gr"))),
+        gr_recovery: BTreeMap::new(),
+        gr_topology: BTreeMap::new(),
     };
     if let Some(s) = &daemon.srv6 {
         println!(
@@ -409,6 +468,64 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         );
     }
     // ---- Router: one anchor session per area (v3). ----
+    // RFC 5187 §2 (inherited from RFC 3623 §2): recovery is *resumed*,
+    // not assumed — the state file written by the pre-restart process
+    // carries the grace deadline. A fresh start (no file, or a deadline
+    // already past) runs normal OSPF; a resume keeps topology-LSA
+    // origination suppressed until §2.2 exits (every pre-restart
+    // adjacency Full, an inconsistent LSA, or the grace timeout).
+    if cfg.ospf_graceful_restart {
+        let now_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0);
+        match daemon.gr_state_file.as_deref().map(std::fs::read_to_string) {
+            Some(Ok(text)) => {
+                let mut parts = text.split_whitespace();
+                let (deadline, period, floor) = (
+                    parts.next().and_then(|d| d.parse::<u64>().ok()),
+                    parts.next().and_then(|p| p.parse::<u32>().ok()),
+                    parts.next().and_then(|s| s.parse::<u32>().ok()),
+                );
+                match (deadline, period) {
+                    (Some(deadline), Some(period)) if deadline > now_unix_ms => {
+                        println!(
+                            "daemon: ospf3 graceful restart recovery started \
+                             (grace period {period}s, resuming a restart)"
+                        );
+                        // The pre-restart process's Grace-LSA sequence
+                        // floor: every instance we send from here on is
+                        // strictly newer than the ones the helpers hold.
+                        if let Some(floor) = floor {
+                            daemon.gr_seq_floor = daemon.gr_seq_floor.max(floor);
+                        }
+                        // The trackers run on the main-loop clock; the
+                        // remaining wallclock seconds translate 1:1.
+                        let remaining_secs = u32::try_from((deadline - now_unix_ms) / 1_000)
+                            .unwrap_or(1)
+                            .max(1);
+                        for area in daemon.interfaces.iter().map(|i| i.area) {
+                            daemon
+                                .gr_recovery
+                                .entry(area)
+                                .or_insert_with(|| RestartTracker::new(remaining_secs, 0));
+                        }
+                    }
+                    _ => {
+                        // Expired or malformed: remove so a later
+                        // graceful shutdown rewrites it cleanly.
+                        let _ = daemon.gr_state_file.as_deref().map(std::fs::remove_file);
+                        println!("daemon: ospf3 graceful restart state expired — fresh start");
+                    }
+                }
+            }
+            _ => {
+                println!(
+                    "daemon: ospf3 graceful restart enabled (no prior grace state — fresh start)"
+                );
+            }
+        }
+    }
     let iface_mtu = daemon.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
     {
         let router_arc = Arc::clone(&daemon.router);
@@ -477,7 +594,11 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     );
 
     // ---- Initial self-origination per area. ----
-    {
+    // RFC 5187 §2 (1) (inherited from RFC 3623): suppressed while
+    // graceful-restart recovery is live — the pre-restart instances
+    // (re-received from the helping neighbours) keep describing the
+    // topology until §2.2 exits.
+    if daemon.gr_recovery.is_empty() {
         let router_arc = Arc::clone(&daemon.router);
         let mut router = router_arc.lock().unwrap();
         let areas: Vec<u32> = daemon.anchors.keys().copied().collect();
@@ -501,6 +622,26 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         let now_ms = start.elapsed().as_millis() as u64;
         daemon.pump(&mut recv_buf, now_ms);
         std::thread::sleep(Duration::from_millis(LOOP_INTERVAL_MS));
+    }
+    // Graceful shutdown. With graceful restart enabled (RFC 5187 §2.1,
+    // inheriting RFC 3623 §2.1) the teardown is replaced: originate a
+    // Grace-LSA per interface (LS type 0x000b, Link State ID = the
+    // Interface ID, retransmitted a few times — the flood path has no
+    // acks) and exit *without* closing sessions, so no Loc-RIB
+    // withdrawals fire and the kernel FIB the forwarding plane relies
+    // on survives the restart. Between flood rounds the daemon keeps
+    // servicing the protocol (see `graceful_shutdown_flood`) so peers
+    // whose LSA refresh is still un-ACKed can drain their retransmission
+    // lists and engage helper mode on a later round. Without it: close
+    // every session so the router emits the down events, then let the
+    // ticker drain them.
+    if cfg.ospf_graceful_restart {
+        daemon.graceful_shutdown_flood(&mut recv_buf, &start);
+        let period = lr_ospf::gr::clamp_grace_period(cfg.ospf_grace_period);
+        println!(
+            "daemon: ospf3 graceful shutdown complete (neighbours asked to retain LSAs for {period}s)"
+        );
+        return ExitCode::SUCCESS;
     }
     {
         let router_arc = Arc::clone(&daemon.router);
@@ -673,6 +814,7 @@ impl Ospf3Daemon {
         self.pump_adjacency(now_ms);
         self.pump_dead_timer(now_ms);
         self.pump_reoriginate(now_ms);
+        self.pump_gr(now_ms);
         self.pump_hellos(now_ms);
         self.pump_outbound();
     }
@@ -924,6 +1066,7 @@ impl Ospf3Daemon {
                                 handle: h,
                                 ifindex: interface_id,
                                 established: false,
+                                helper: HelperEntry::default(),
                             },
                         );
                         println!(
@@ -986,7 +1129,20 @@ impl Ospf3Daemon {
     }
 
     /// Tear sessions down after RouterDeadInterval without a packet.
+    /// Neighbours in graceful-restart helper mode (RFC 5187 §3 via
+    /// RFC 3623 §3) are exempt — FRR's ospf6d resets the inactivity
+    /// timer while helping (`inactivity_timer`): their `heard`
+    /// entries and sessions are retained for the grace period; the
+    /// helper exits re-evaluate.
     fn pump_dead_timer(&mut self, now_ms: u64) {
+        // RFC 3623 §3 retention set, computed up front so the
+        // interface loop below can stay a plain mutable walk.
+        let retained: std::collections::BTreeSet<(u32, u32)> = self
+            .neighbors
+            .iter()
+            .filter(|(_, n)| n.helper.is_active())
+            .map(|((area, rid), _)| (*area, *rid))
+            .collect();
         let mut expired: Vec<(u32, u32)> = Vec::new();
         // Broadcast interfaces that lost a heard neighbor: the
         // bidirectional elector set shrank (§9.3 NeighborChange).
@@ -996,7 +1152,10 @@ impl Ospf3Daemon {
             let gone: Vec<u32> = iface
                 .heard
                 .iter()
-                .filter(|(_, h)| now_ms.saturating_sub(h.last_ms) > dead_ms)
+                .filter(|(rid, h)| {
+                    now_ms.saturating_sub(h.last_ms) > dead_ms
+                        && !retained.contains(&(iface.area, **rid))
+                })
                 .map(|(rid, _)| *rid)
                 .collect();
             for rid in gone {
@@ -1067,11 +1226,516 @@ impl Ospf3Daemon {
     }
 
     fn schedule_reoriginate(&mut self, area: u32, now_ms: u64) {
+        // No-op while graceful-restart recovery is live: RFC 5187 §2
+        // (1) (inherited from RFC 3623 §2) — the pre-restart LSAs the
+        // helpers retained keep describing the topology until §2.2
+        // exits recovery (the exit path re-origination is driven
+        // directly, not through here).
+        if self.gr_recovery.contains_key(&area) {
+            return;
+        }
         let due = now_ms + REORIGINATE_DELAY_MS;
         self.pending_reorig
             .entry(area)
             .and_modify(|t| *t = (*t).min(due))
             .or_insert(due);
+    }
+
+    /// One pump pass of the graceful-restart machines (RFC 5187,
+    /// inheriting RFC 3623): the received Grace-LSA events (§3.1
+    /// helper entry / §3.2 (1) flush exit), the §3.2 (3)
+    /// topology-change exits for helpers, the §3.2 (2) grace
+    /// timeouts, and the §2.2 recovery evaluation for the restarting
+    /// side.
+    fn pump_gr(&mut self, now_ms: u64) {
+        // The grace channel first: a flush event must be able to end
+        // helper mode before the topology/timeout machinery below
+        // re-evaluates the same neighbour.
+        {
+            let router_arc = Arc::clone(&self.router);
+            let mut router = router_arc.lock().unwrap();
+            let grace_events = router.drain_ospf_grace_events();
+            drop(router);
+            for ev in &grace_events {
+                self.on_grace_lsa_event(ev, now_ms);
+            }
+        }
+        let mut helper_exits: Vec<(u32, u32, lr_ospf::gr::HelperExit)> = Vec::new();
+        let mut gr_recovery_done: Option<lr_ospf::gr::RestartOutcome> = None;
+        {
+            let router_arc = Arc::clone(&self.router);
+            let router = router_arc.lock().unwrap();
+
+            // §3.2 (3): topology changes terminate helpers. Per area,
+            // the poll-side counterpart of FRR ospf6d's
+            // `ospf6_helper_handle_topo_chg` walk (area granularity:
+            // a p2p lab's area maps 1:1 to a segment; the
+            // flooding-allowed refinement of §3.2 (3)b is future
+            // work).
+            for area in self.anchors.keys().copied().collect::<Vec<u32>>() {
+                let version = router.ospf_area_topology_version(area).unwrap_or(0);
+                let known = self.gr_topology.get(&area).copied();
+                match known {
+                    None => {
+                        // First observation after startup — no change yet.
+                        self.gr_topology.insert(area, version);
+                    }
+                    Some(v) if v != version => {
+                        self.gr_topology.insert(area, version);
+                        for ((n_area, rid), n) in self.neighbors.iter_mut() {
+                            if *n_area == area && n.helper.is_active() {
+                                if let Some(exit) = n.helper.on_topology_change() {
+                                    helper_exits.push((*n_area, *rid, exit));
+                                }
+                            }
+                        }
+                    }
+                    Some(_) => {}
+                }
+            }
+            // §3.2 (2): grace-period deadlines.
+            for ((area, rid), n) in self.neighbors.iter_mut() {
+                if let Some(exit) = n.helper.poll(now_ms) {
+                    helper_exits.push((*area, *rid, exit));
+                }
+            }
+
+            // §2.2: the restarting side. Feed adjacency observations,
+            // verify back-links, poll the outcome.
+            if !self.gr_recovery.is_empty() {
+                let our_rid = self.router_id.as_u32();
+                let areas: Vec<u32> = self.gr_recovery.keys().copied().collect();
+                for area in areas {
+                    let Some(tracker) = self.gr_recovery.get_mut(&area) else {
+                        continue;
+                    };
+                    // Seed the pre-restart adjacency set once our old
+                    // Router-LSA (re-received from a helper through
+                    // database exchange) shows up in the LSDB — the
+                    // v3 §2.2 (1) yardstick is the p2p link set
+                    // (neighbor Router IDs, §A.4.3).
+                    if let Some(lsa) = router.ospf_area_lsa(area, LS_TYPE_ROUTER, 0, our_rid) {
+                        if let Some(body) = V3RouterLsaBody::decode(&lsa.body) {
+                            let p2p: Vec<u32> = body
+                                .links
+                                .iter()
+                                .filter(|l| l.link_type == LINK_TYPE_POINTTOPOINT)
+                                .map(|l| l.neighbor_router_id)
+                                .collect();
+                            tracker.set_pre_restart_adjacencies(p2p);
+                        }
+                    }
+                    // §2.2 (1) yardstick: every listed adjacency Full.
+                    let listed: Vec<u32> = tracker.adjacency_ids().collect();
+                    for rid in listed {
+                        let full = self.neighbors.get(&(area, rid)).map(|n| n.established);
+                        tracker.observe_adjacency(rid, full);
+                        // §2.2 (2): back-link verification — a Full
+                        // neighbour whose Router-LSA no longer links
+                        // back to us means it never helped (or
+                        // stopped). The v3 back-link is the p2p
+                        // descriptor naming our Router ID (§A.4.3), or
+                        // a transit link onto a segment we describe.
+                        if full == Some(true) {
+                            if let Some(their) = router.ospf_area_lsa(area, LS_TYPE_ROUTER, 0, rid)
+                            {
+                                let back =
+                                    V3RouterLsaBody::decode(&their.body).is_some_and(|body| {
+                                        body.links.iter().any(|l| {
+                                            l.link_type == LINK_TYPE_POINTTOPOINT
+                                                && l.neighbor_router_id == our_rid
+                                        }) || body
+                                            .links
+                                            .iter()
+                                            .any(|l| l.link_type == LINK_TYPE_TRANSIT)
+                                    });
+                                if !back {
+                                    tracker.mark_inconsistent();
+                                }
+                            }
+                        }
+                    }
+                    if let Some(outcome) = tracker.poll(now_ms) {
+                        if outcome != lr_ospf::gr::RestartOutcome::AdjacenciesRestablished {
+                            gr_recovery_done = Some(outcome);
+                        }
+                    }
+                }
+                // Global §2.2 (1): recovery succeeds when every area's
+                // tracker reports all adjacencies back.
+                if gr_recovery_done.is_none()
+                    && !self.gr_recovery.is_empty()
+                    && self.gr_recovery.values_mut().all(|t| {
+                        t.poll(now_ms).is_some_and(|o| {
+                            o == lr_ospf::gr::RestartOutcome::AdjacenciesRestablished
+                        })
+                    })
+                {
+                    gr_recovery_done = Some(lr_ospf::gr::RestartOutcome::AdjacenciesRestablished);
+                }
+            }
+        }
+        for (area, rid, exit) in helper_exits {
+            println!(
+                "daemon: ospf3 neighbor {} (area {}): helper mode exited — {}",
+                fmt_rid(rid),
+                area_label(area),
+                exit.reason()
+            );
+            self.after_helper_exit(area, rid, now_ms);
+        }
+        if let Some(outcome) = gr_recovery_done {
+            self.exit_gr_recovery(outcome, now_ms);
+        }
+        self.refresh_gr_status();
+    }
+
+    /// One received Grace-LSA (the router already decoded + deduped
+    /// it). RFC 5187 §2/§3 (via RFC 3623 §3.1): on a flush (MaxAge)
+    /// exit helper mode; on a fresh instance run the entry checks
+    /// against the neighbour session and the configured policy. The
+    /// v3 neighbour identity is the Advertising Router — RFC 5187 §1:
+    /// OSPFv3 neighbours are always Router-ID identified, no
+    /// router-address TLV indirection.
+    fn on_grace_lsa_event(&mut self, ev: &OspfGraceEvent, now_ms: u64) {
+        let area = ev.area;
+        let rid = ev.advertising_router;
+        let Some(n) = self.neighbors.get_mut(&(area, rid)) else {
+            if !ev.purged {
+                println!(
+                    "daemon: ospf3 grace-LSA from {} (area {}): no session, not helping \
+                     (RFC 3623 3.1 (1) — neighbour not Full)",
+                    fmt_rid(rid),
+                    area_label(area)
+                );
+            }
+            return;
+        };
+        if ev.purged {
+            if let Some(exit) = n.helper.on_flush() {
+                println!(
+                    "daemon: ospf3 neighbor {} (area {}): helper mode exited — {}",
+                    fmt_rid(rid),
+                    area_label(area),
+                    exit.reason()
+                );
+                self.after_helper_exit(area, rid, now_ms);
+            }
+            return;
+        }
+        let body = GraceLsaBody {
+            grace_period: ev.grace_period_secs,
+            reason: GraceReason::from_u8(ev.reason),
+            ipv4_address: ev.interface_addr_v4,
+            ipv6_address: ev.interface_addr_v6,
+        };
+        let neighbor_full = n.established;
+        let check = HelperCheck {
+            neighbor_full,
+            helper_enabled: self.gr_helper_enabled,
+            supported_grace_cap_secs: self.gr_helper_cap,
+            self_restarting: self.gr_recovery.contains_key(&area),
+            lsa: &body,
+            lsa_age_secs: ev.ls_age_secs,
+            now_ms,
+        };
+        let transition = n.helper.on_grace_lsa(check);
+        match transition {
+            lr_ospf::gr::HelperTransition::Entered { .. } => {
+                println!(
+                    "daemon: ospf3 neighbor {} (area {}): helper mode entered (grace {}s, \
+                     reason {}) — adjacency and LSAs retained",
+                    fmt_rid(rid),
+                    area_label(area),
+                    ev.grace_period_secs,
+                    match ev.reason {
+                        1 => "software restart",
+                        2 => "software reload/upgrade",
+                        3 => "redundant switchover",
+                        _ => "unknown",
+                    }
+                );
+            }
+            lr_ospf::gr::HelperTransition::Refreshed { .. } => {}
+            lr_ospf::gr::HelperTransition::Refused(why) => {
+                println!(
+                    "daemon: ospf3 neighbor {} (area {}): not helping — {}",
+                    fmt_rid(rid),
+                    area_label(area),
+                    why.reason()
+                );
+            }
+        }
+    }
+
+    /// Re-evaluate a neighbour after its helper relationship ended
+    /// (§3.2, FRR ospf6d `ospf6_gr_helper_exit`): re-run the DR
+    /// election inputs on broadcast segments, re-originate the area's
+    /// self-described LSAs (the retained adjacency drops unless the
+    /// neighbour is really back), and reap the session if it stayed
+    /// silent past the dead interval.
+    fn after_helper_exit(&mut self, area: u32, rid: u32, now_ms: u64) {
+        if let Some(ifindex) = self.neighbors.get(&(area, rid)).map(|n| n.ifindex) {
+            if let Some(iface) = self
+                .interfaces
+                .iter_mut()
+                .find(|i| i.interface_id == ifindex)
+            {
+                iface.election_dirty = true;
+            }
+        }
+        // Reap a neighbour that is still silent: without the helper
+        // retention the dead timer would have removed it already.
+        let still_quiet = self.interfaces.iter().any(|i| {
+            i.area == area
+                && i.heard.get(&rid).is_some_and(|h| {
+                    now_ms.saturating_sub(h.last_ms) > u64::from(i.dead_interval) * 1_000
+                })
+        });
+        if still_quiet {
+            if let Some(n) = self.neighbors.remove(&(area, rid)) {
+                let router_arc = Arc::clone(&self.router);
+                let mut router = router_arc.lock().unwrap();
+                router.close_session(n.handle);
+                for ev in router.poll_events() {
+                    crate::daemon_ospf::log_event(&ev);
+                }
+            }
+            for iface in self.interfaces.iter_mut() {
+                if iface.area == area {
+                    iface.heard.remove(&rid);
+                    iface.election_dirty = true;
+                }
+            }
+            println!(
+                "daemon: ospf3 neighbor {} dead (area {}) — session closed",
+                fmt_rid(rid),
+                area_label(area)
+            );
+        }
+        self.schedule_reoriginate(area, now_ms);
+    }
+
+    /// §2.3: leave graceful restart (success or failure): flush the
+    /// Grace-LSAs this router originated (helpers exit on the MaxAge
+    /// instance), re-enable origination and re-originate the area's
+    /// self-described LSAs from current state.
+    fn exit_gr_recovery(&mut self, outcome: lr_ospf::gr::RestartOutcome, now_ms: u64) {
+        let areas: Vec<u32> = self.gr_recovery.keys().copied().collect();
+        println!(
+            "daemon: ospf3 graceful restart recovery ended — {}",
+            outcome.reason()
+        );
+        self.gr_recovery.clear();
+        if let Some(state) = self.gr_state_file.as_deref() {
+            let _ = std::fs::remove_file(state);
+        }
+        // §2.3 (6): flush the Grace-LSAs — the MaxAge instances tell
+        // the helpers the restart finished (§3.2 (1)).
+        self.send_grace_lsas(true);
+        // §2.3 (1)/(2): re-originate the Router-/Link-/IAP-LSAs from
+        // current state — via the scheduled path so MinLSArrival
+        // (RFC 2328 §14) paces the instance the exchange just
+        // delivered. The sequence floors come from the retained
+        // pre-restart LSAs inside reoriginate_area.
+        for area in areas {
+            self.schedule_reoriginate(area, now_ms);
+        }
+        // A topology-observing restart exit refreshes the helper-side
+        // snapshot so our own re-origination does not read as a
+        // topology change (helpers for other routers on this box).
+        {
+            let router_arc = Arc::clone(&self.router);
+            let router = router_arc.lock().unwrap();
+            for area in self.anchors.keys() {
+                if let Some(v) = router.ospf_area_topology_version(*area) {
+                    self.gr_topology.insert(*area, v);
+                }
+            }
+        }
+    }
+
+    /// Build and (re)transmit the Grace-LSA of every interface inside
+    /// one LS-Update per interface, directly on the transport (the
+    /// restarting router speaks before any adjacency exists; §2.1).
+    /// `flush` selects the §2.3 MaxAge flush form instead of the
+    /// shutdown announcement. The v3 shapes: LS type 0x000b, Link
+    /// State ID = the Interface ID (RFC 5187 §2.2), no address TLV
+    /// (FRR's `ospf6_gr_lsa_originate` form).
+    fn send_grace_lsas(&mut self, flush: bool) {
+        let period_hint = lr_ospf::gr::clamp_grace_period(self.gr_grace_period);
+        let our_rid = self.router_id.as_u32();
+        // Sequence derivation: strictly newer than every instance this
+        // router ever sent — the wallclock base (which grows across
+        // restarts) OR the persisted floor + 1, whichever is larger.
+        // Each originated LSA advances the floor, so a flush followed
+        // by another shutdown (or a restart) can never emit an
+        // older/equal instance.
+        let mut floor = self.gr_seq_floor;
+        for iface in &mut self.interfaces {
+            // The flush keeps a valid body (period ≥ 1, reason ≤ 3):
+            // FRR ospf6d's grace-LSA extraction rejects a period of 0
+            // or an unknown reason code even for the MaxAge instance
+            // (ospf6_extract_grace_lsa_fields: "Wrong Grace LSA
+            // packet"), and FRR's own purge (`ospf6_lsa_purge`) keeps
+            // the full TLV set — only the age and sequence differ from
+            // the announcement. BIRD and lr ignore the flush body, so
+            // the richer shape is safe everywhere.
+            let body = GraceLsaBody {
+                grace_period: period_hint,
+                reason: GraceReason::SoftwareRestart,
+                ipv4_address: None,
+                ipv6_address: None,
+            };
+            let seq = grace_sequence_base().max(floor.wrapping_add(1));
+            floor = seq;
+            let Some(mut lsa) = originate_grace_lsa_v3(
+                our_rid,
+                iface.interface_id,
+                &body,
+                Some(seq.wrapping_sub(1)),
+            ) else {
+                continue;
+            };
+            if flush {
+                lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
+                lsa.finalize();
+            }
+            let packet = lr_ospf::packet::OspfPacket {
+                header: lr_ospf::packet::OspfHeader {
+                    version: lr_ospf::packet::OspfVersion::V3 as u8,
+                    kind: OspfPacketType::LinkStateUpdate as u8,
+                    length: 0,
+                    router_id: our_rid,
+                    area_id: iface.area,
+                    checksum: 0,
+                    au_type_or_instance: 0,
+                    auth_data: 0,
+                },
+                body: OspfBody::LsUpdate(lr_ospf::packet::LsUpdateBody {
+                    lsa_count: 1,
+                    lsas: vec![lsa],
+                }),
+            };
+            match OspfCodec::v3().encode_vec(&packet) {
+                Ok(mut bytes) => {
+                    finalize_v3_packet(&mut bytes, &iface.link_local.octets(), &MULTICAST_ALL_SPF);
+                    if let Err(e) = iface.transport.send_multicast(&bytes) {
+                        eprintln!("daemon: ospf3 grace-LSA send {}: {}", iface.name, e);
+                    }
+                    // RFC 2328 §13.5 direct flooding: every
+                    // bidirectional neighbour on this interface also
+                    // gets a unicast copy at its link-local — the
+                    // helper entry must not hinge on one multicast
+                    // surviving a loaded scheduler (RFC 3623 §2.1:
+                    // retransmit until received).
+                    let heard: Vec<Ipv6Addr> = iface
+                        .heard
+                        .values()
+                        .filter(|n| n.bidirectional)
+                        .map(|n| n.link_local)
+                        .collect();
+                    for dst in heard {
+                        if let Err(e) = iface.transport.send_unicast(dst, &bytes) {
+                            eprintln!("daemon: ospf3 grace-LSA unicast {dst}: {e}");
+                        }
+                    }
+                }
+                Err(e) => eprintln!("daemon: ospf3 grace-LSA encode: {e}"),
+            }
+        }
+        self.gr_seq_floor = floor;
+    }
+
+    /// The §2.1 shutdown flood: send the Grace-LSAs on every
+    /// interface, retransmitting a bounded number of times (the
+    /// flood path is fire-and-forget; FRR ospf6d performs ack-tracked
+    /// reliable flooding, we approximate with repeats). Also persists
+    /// the grace state file so the restarted process knows to enter
+    /// recovery (deadline, grace period, sequence floor) — the
+    /// non-volatile-storage note of RFC 3623 §2.1 / FRR's
+    /// `ospf6_gr_nvm_update`.
+    fn graceful_shutdown_flood(&mut self, recv_buf: &mut [u8], start: &std::time::Instant) {
+        let period = lr_ospf::gr::clamp_grace_period(self.gr_grace_period);
+        for attempt in 0..GRACE_FLOOD_REPEATS {
+            self.send_grace_lsas(false);
+            if attempt + 1 < GRACE_FLOOD_REPEATS {
+                let next_round =
+                    std::time::Instant::now() + Duration::from_millis(GRACE_FLOOD_INTERVAL_MS);
+                // Service the protocol while the flood window runs: a
+                // peer that just re-originated its Router-LSA (the
+                // post-Full refresh) has it on its LS retransmission
+                // list for us, and FRR's strict-LSA-check helper entry
+                // refuses helper mode until the ACK arrives. Pumping
+                // input between rounds sends that ACK, keeps our
+                // Hellos flowing so the peer's neighbour state stays
+                // Full (§3.1 (1)), and lets the next round's fresh
+                // Grace-LSA instance re-run the helper checks.
+                while std::time::Instant::now() < next_round {
+                    let now_ms = start.elapsed().as_millis() as u64;
+                    self.pump_grace_quiet(recv_buf, now_ms);
+                    std::thread::sleep(Duration::from_millis(GRACE_PUMP_SLICE_MS));
+                }
+            }
+        }
+        // Persist the grace state AFTER the flood so the sequence
+        // floor covers every instance just sent (the deadline runs
+        // from the shutdown moment).
+        let deadline_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as u64)
+            .unwrap_or(0)
+            + u64::from(period) * 1_000;
+        if let Some(state) = &self.gr_state_file {
+            let line = format!("{deadline_unix_ms} {period} {}\n", self.gr_seq_floor);
+            if let Err(e) = std::fs::write(state, line) {
+                eprintln!("daemon: ospf3 grace state write {state}: {e}");
+            }
+        }
+    }
+
+    /// Minimal protocol servicing during the graceful-shutdown flood
+    /// window: receive (so in-flight peer LSAs get ACKed by the
+    /// session machinery), Hellos (keep the peer's view of us Full,
+    /// §3.1 (1)), outbound. Everything that mutates the pre-restart
+    /// topology — re-origination, DR election, adjacency teardown — is
+    /// deliberately skipped: §2.1 wants the router's LSAs frozen while
+    /// the Grace-LSAs are announced and acknowledged.
+    fn pump_grace_quiet(&mut self, recv_buf: &mut [u8], now_ms: u64) {
+        self.pump_inbound(recv_buf, now_ms);
+        self.pump_hellos(now_ms);
+        self.pump_outbound();
+    }
+
+    /// Refresh the runtime-API status snapshot (cheap: a small vec).
+    fn refresh_gr_status(&self) {
+        let mut lines = Vec::new();
+        if let Some((_, tracker)) = self.gr_recovery.first_key_value() {
+            lines.push(format!(
+                "ospf3 graceful restart: recovering (grace deadline +{}ms)",
+                tracker.grace_deadline_ms()
+            ));
+        }
+        let helpers: Vec<String> = self
+            .neighbors
+            .iter()
+            .filter(|(_, n)| n.helper.is_active())
+            .map(|((area, rid), n)| {
+                format!(
+                    "  helper {} (area {}, {}s grace left)",
+                    fmt_rid(*rid),
+                    area_label(*area),
+                    n.helper.last_period_secs()
+                )
+            })
+            .collect();
+        if !helpers.is_empty() {
+            lines.push("ospf3 graceful restart helpers:".to_string());
+            lines.extend(helpers);
+        }
+        if let Ok(mut s) = self.status.lock() {
+            *s = lines;
+        }
     }
 
     /// Send one v3 Hello per interface whose interval elapsed,
