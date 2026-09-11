@@ -207,6 +207,10 @@ jobs:
         run: ./tests/interop/ospf6_frr.sh
       - name: OSPFv3 broadcast x FRR ospf6d interop (RFC 5340 4.1.2, default FRR type)
         run: ./tests/interop/ospf6_frr_broadcast.sh
+      - name: OSPFv3 graceful restart interop (RFC 5187, two daemons)
+        run: ./tests/interop/ospf6_gr.sh
+      - name: OSPFv3 graceful restart x FRR ospf6d helper (RFC 5187)
+        run: ./tests/interop/ospf6_gr_frr.sh
       - name: OSPFv3 SRv6 interop (RFC 9513, lr x FRR relay x lr)
         run: ./tests/interop/ospf6_frr_srv6.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)

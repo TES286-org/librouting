@@ -433,9 +433,14 @@ Implemented and missing features are tracked in detail in
 - OS route-table integration for **Linux (rtnetlink)**, the **BSD family
   (route(4) socket)** and **Windows (IP Helper API)**, plus a porting guide
   for other systems (`docs/OS-INTEGRATION.md`).
+- OSPFv3 (RFC 5340) runs the full daemon surface — intra/inter-area
+  and external routing, broadcast segments with DR election, SRv6
+  (RFC 9513) and graceful restart (RFC 5187, helper + restarting
+  router, interop-verified against FRR ospf6d).
 - Not yet production-ready: see the open items in `docs/ROADMAP.md`
-  (OSPFv3 daemon depth and SR-MPLS are the main remaining gaps). The C
-  ABI is **unstable** until v0.5.
+  (RFC 8362 extended LSAs / SRv6 adjacency SIDs, BGP-LS and SR
+  Policy are the next planned slices; SR-MPLS remains v2-only). The
+  C ABI is **unstable** until v0.5.
 
 ## CI/CD
 

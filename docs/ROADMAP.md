@@ -357,7 +357,7 @@ Highest-value missing/partial standards, in rough order:
      LSU ingest they never enter the area LSDB and are never
      re-flooded; each *changed instance* (RFC 2328 §13 identity:
      sequence + age + checksum + length — not sequence alone)
-     surfaces as a `RouterEvent::OspfGraceLsa` with the decoded
+     surfaces through `drain_ospf_grace_events()` with the decoded
      period/reason/address and a `purged` flag for MaxAge flushes.
      Per-area `topology_version` counters bump on content changes
      of topology LSAs (types 1-5, 7; periodic refreshes excluded)
@@ -1283,6 +1283,67 @@ the RFC 8277 BGP-LU foundation above; each item ships independently.
      Intra-Area-Prefix LSAs — and SIGKILL teardown within the dead
      interval).
 
+## Phase 3 — landings
+
+### OSPFv3 graceful restart (RFC 5187)
+
+The Phase 3 plan's item 1 — the last v2-only daemon feature —
+landed as four slices:
+
+- **The v3 Grace-LSA (`lr-ospf::lsa::grace`)**: the dedicated
+  link-scoped LS type 0x000b (LSA function code 11, S2/S1 = 0,
+  U-bit 0) with the originating **Interface ID as the Link State
+  ID** — no opaque-type packing, OSPFv3 has no RFC 5250. The TLVs
+  are RFC 3623's unchanged; RFC 5187 §1 drops the router-address
+  TLV requirement (v3 neighbours are Router-ID identified), so the
+  interoperable default body is TLV 1 + TLV 2 only — exactly FRR
+  `ospf6_gr_lsa_originate`'s shape. One correction to this file's
+  own plan text: RFC 5187 defines **no** GR capability bit in v3
+  Hellos/DBDs — the Grace-LSA itself is the signal (v2's O-bit
+  belongs to RFC 5250 opaque capability and stays v2-only).
+- **A dedicated grace-event channel (`lr-router`)**: received
+  Grace-LSAs surface through `drain_ospf_grace_events()` instead of
+  `RouterEvent::OspfGraceLsa`. The v2 daemon raced its own ticker
+  thread for grace events (whoever polled first got them; the
+  ticker drops unknown variants), and the v3 daemon cannot call
+  `poll_events()` at all — its ticker is the sole consumer by
+  design (the kernel-mirror race the slice-1 CI-red fixed). A
+  channel of its own delivers every grace instance to the
+  embedder's helper policy deterministically; the v2 daemon's
+  helper flow is otherwise unchanged (`ospf_gr.sh` re-verified).
+- **The daemon surface (`daemon_ospf3`)**: helper mode with
+  dead-timer retention (FRR ospf6d resets the neighbour's inactivity
+  timer while helping — so does the v3 `pump_dead_timer` via the
+  helper retention set), the graceful-shutdown Grace-LSA flood
+  (multicast + unicast copies to bidirectional link-locals, bounded
+  retransmission with protocol servicing between rounds, the
+  state-file deadline + sequence floor persisted after the flood),
+  recovery (origination suppressed, the pre-restart adjacency set
+  seeded from the retained v3 Router-LSA p2p descriptors, back-link
+  verification, the §2.3 flush + re-origination above the retained
+  sequence floors). RFC 5187 §3.2's Interface-ID preservation holds
+  structurally: the daemon's Interface IDs are kernel ifindexes,
+  which do not change across a process restart while the interface
+  stays up.
+- **One interop-driven fix, applied to both versions**: the MaxAge
+  flush now carries a valid body (period ≥ 1, reason ≤ 3). FRR's
+  grace-LSA extraction (`ospf6_extract_grace_lsa_fields` in ospf6d,
+  `ospf_extract_grace_lsa_fields` in ospfd) rejects a period-0
+  flush as "Wrong Grace LSA packet" and drops it — the helper then
+  exits only on grace timeout. FRR's own purge keeps the
+  announcement's TLVs; BIRD and lr ignore the flush body, so the
+  valid-body flush passes all three receivers (re-verified:
+  `ospf_gr.sh`, `ospf_gr_bird.sh`).
+
+Evidence: `tests/interop/ospf6_gr.sh` (two lr daemons — planned
+restart with retention + recovery + flush exit, then the
+grace-period timeout with teardown and withdrawal) and
+`tests/interop/ospf6_gr_frr.sh` (lr restarter × FRR 10.3 ospf6d
+with `graceful-restart helper enable` — helper entry on the 0x000b
+Grace-LSA, `activeRestarterCnt: 1` retention across the dead
+interval, `lastExitReason: "Successful graceful restart"` on the
+flush, routes never withdrawn).
+
 ## Phase 3 — plan (post roadmap-v2)
 
 Where the project stands: every roadmap-v2 workstream (W1-W6) is
@@ -1297,16 +1358,14 @@ and enumerable - the list below is the next phase.
 Ordered by expected user value (protocol-correctness parity first,
 control-plane extension second, policy surface third):
 
-1. **OSPFv3 graceful restart (RFC 5187)** - the only remaining
-   v2-only daemon feature. The RFC 3623 machinery (GR reason TLVs,
-   helper mode, topology-change exit, retention sets) and the
-   Grace-LSA codec already exist for v2; the slice extends the
-   driver to v3 sessions (RFC 5187 §2-§4: the v3 Grace-LSA, the
-   O-bit signaling in v3 Hellos/DBDs, the helper's per-session
-   retention and exit criteria). Acceptance: the GR e2e labs run
-   green with `[ospf] version = "v3"` (restarter and helper roles),
-   and a v3 GR restarter recovers its LSDB from a live FRR 10.3
-   ospf6d helper.
+1. ~~**OSPFv3 graceful restart (RFC 5187)**~~ — done (the landing
+   record lives in "Phase 3 — landings" above). The v2 daemon's last
+   exclusive feature is gone: both versions now carry the full GR
+   surface, and a v3 restarter recovers from a live FRR 10.3 ospf6d
+   helper. The plan text's "O-bit signaling in v3 Hellos/DBDs" was a
+   misreading — RFC 5187 defines no capability bit at all; the
+   Grace-LSA itself is the signal (the audit correction is recorded
+   in `RFC_MAP.md`).
 2. **RFC 8362 extended-LSA machinery + SRv6 End.X / LAN End.X SIDs
    (RFC 9513 §9)** - the SRv6 control plane's missing adjacency
    segments. RFC 8362 is the prerequisite: the E-Router / E-Network /

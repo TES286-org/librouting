@@ -330,7 +330,8 @@ permit = false
 # [ospf]
 # hello_interval = 10        # per-interface default (RFC 2328 default)
 # dead_interval = 40         # per-interface default (4x hello)
-# graceful_restart = false   # RFC 3623 restarting side: on shutdown,
+# graceful_restart = false   # RFC 3623 / RFC 5187 restarting side
+                             # (both ospf versions): on shutdown,
                              # originate Grace-LSAs and keep the kernel
                              # FIB; on restart, resume recovery until
                              # every pre-restart adjacency is Full
@@ -338,7 +339,8 @@ permit = false
 # grace_period = 120         # seconds, 1..=1800 (RFC 3623 2.1 caps at
                              # LSRefreshTime; BIRD/FRR default 120)
                              # (--ospf-grace-period)
-# graceful_restart_helper = true  # RFC 3623 helper side, default on
+# graceful_restart_helper = true  # RFC 3623 / RFC 5187 helper side
+                             # (both ospf versions), default on
                              # (BIRD "AWARE" / FRR helper default);
                              # retain a restarting neighbour's adjacency
                              # and LSAs for its grace period

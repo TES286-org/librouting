@@ -532,6 +532,35 @@ assert_eq!(lsa.header.ls_type, LsaTypeV3::InterAreaPrefixLsa.function_code());
 assert!(lsa.checksum_ok());
 ```
 
+## OSPF graceful restart (RFC 3623 / RFC 5187)
+
+The two state machines live in `lr_ospf::gr` and are embedder-driven
+(no internal timers): `HelperEntry` is the §3 helper (per
+`(area, neighbour Router ID)` — feed it `on_grace_lsa` with the §3.1
+checks, `on_flush`/`on_topology_change`/`poll` for the §3.2 exits) and
+`RestartTracker` is the §2 restarting router (suppress topology-LSA
+origination while `recovering()`, report adjacencies through
+`observe_adjacency`, poll for the §2.2 outcome).
+
+Received Grace-LSAs — v2's type-9 opaque or v3's LS type 0x000b — never
+enter the area LSDB; the router surfaces each *changed* instance through
+a channel of its own:
+
+```rust
+use lr_router::RouterInstance;
+
+for ev in r.drain_ospf_grace_events() {
+    // ev.area, ev.advertising_router, ev.grace_period_secs, ev.reason,
+    // ev.interface_addr_v4 / ev.interface_addr_v6, ev.ls_age_secs,
+    // ev.purged (true = the MaxAge flush: restart completed, §3.2 (1))
+    if ev.purged { /* helper exit path */ }
+}
+```
+
+The events deliberately do not ride `poll_events()`: an embedder that
+delegates general event consumption to a ticker/mirror thread (the
+daemon's shape) still sees every grace instance deterministically.
+
 ## OSPF Segment Routing — adjacency segments + mapping server (RFC 8665 §4/§6)
 
 Beyond the Prefix-SID shapes (RFC 7684 §2 / RFC 8665 §5), `lr-ospf::lsa::sr`
