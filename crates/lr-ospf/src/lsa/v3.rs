@@ -13,6 +13,7 @@
 
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::lsa::{Lsa, LsaHeader};
+use lr_core::addr::{IpAddr, Prefix};
 
 /// Router-LSA (0x2001) — area scope.
 pub const LS_TYPE_ROUTER: u16 = 0x2001;
@@ -356,6 +357,163 @@ impl V3IntraAreaPrefixBody {
     }
 }
 
+/// Inter-Area-Router-LSA body (RFC 5340 §A.4.6): `0 | options(3) |
+/// 0 | metric(3) | Destination Router ID`. The body describes one
+/// destination router (an ASBR) reachable in another area; the Options
+/// field mirrors the destination's own Router-LSA options (§4.4.3.5).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct V3InterAreaRouterBody {
+    /// 24-bit options of the destination router (§A.2).
+    pub options: u32,
+    /// 24-bit metric of the path to the destination.
+    pub metric: u32,
+    /// The Router ID of the router being described.
+    pub dest_router_id: u32,
+}
+
+impl V3InterAreaRouterBody {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.push(0);
+        out.extend_from_slice(&self.options.to_be_bytes()[1..4]);
+        out.push(0);
+        out.extend_from_slice(&self.metric.to_be_bytes()[1..4]);
+        out.extend_from_slice(&self.dest_router_id.to_be_bytes());
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        if b.len() < 12 {
+            return None;
+        }
+        Some(Self {
+            options: u32::from_be_bytes([0, b[1], b[2], b[3]]),
+            metric: u32::from_be_bytes([0, b[5], b[6], b[7]]),
+            dest_router_id: u32::from_be_bytes([b[8], b[9], b[10], b[11]]),
+        })
+    }
+}
+
+/// AS-External-LSA flag bits (RFC 5340 §A.4.7) — the top byte of the
+/// 32-bit flags+metric word. Distinct from the v2 layout, where the E
+/// bit is the top bit of the word (RFC 2328 §A.4.5): FRR's
+/// `ospf6_asbr.h` pins E=0x04000000 / F=0x02000000 / T=0x01000000.
+pub const AS_EXT_BIT_E: u32 = 0x0400_0000;
+/// AS-External-LSA flags: a forwarding address follows the prefix.
+pub const AS_EXT_BIT_F: u32 = 0x0200_0000;
+/// AS-External-LSA flags: an external route tag follows.
+pub const AS_EXT_BIT_T: u32 = 0x0100_0000;
+/// The 24-bit metric mask of the flags+metric word (FRR
+/// `OSPF6_EXT_PATH_METRIC_MAX`).
+pub const AS_EXT_METRIC_MASK: u32 = 0x00ff_ffff;
+
+/// AS-External-LSA body (RFC 5340 §A.4.7): `E|F|T | metric(3) |
+/// prefix` with the prefix's trailing 16-bit word carrying the
+/// Referenced LS Type (not a metric), then the optional forwarding
+/// address (16 bytes), external route tag (4 bytes) and referenced
+/// Link State ID (4 bytes) — each present if and only if its bit is
+/// set (F, T) or the referenced LS type is non-zero.
+///
+/// The forwarding address is a *global* IPv6 address: unspecified and
+/// link-local values are illegal (§A.4.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct V3AsExternalBody {
+    /// The external metric type: `true` = type 2 (E bit set).
+    pub e_bit: bool,
+    /// 24-bit metric of the external route.
+    pub metric: u32,
+    /// The advertised prefix (§A.4.1); the prefix's trailing 16-bit
+    /// word carries the Referenced LS Type — [`V3Prefix::metric`] here.
+    pub prefix: V3Prefix,
+    /// The global IPv6 forwarding address (F bit); `None` forwards to
+    /// the ASBR.
+    pub forwarding_addr: Option<[u8; 16]>,
+    /// The external route tag (T bit).
+    pub route_tag: Option<u32>,
+    /// The referenced LSA's Link State ID, present if and only if the
+    /// Referenced LS Type is non-zero (reserved — should stay 0, §4.4.3.6).
+    pub referenced_ls_id: Option<u32>,
+}
+
+impl V3AsExternalBody {
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        let mut flags = 0u32;
+        if self.e_bit {
+            flags |= AS_EXT_BIT_E;
+        }
+        if self.forwarding_addr.is_some() {
+            flags |= AS_EXT_BIT_F;
+        }
+        if self.route_tag.is_some() {
+            flags |= AS_EXT_BIT_T;
+        }
+        flags |= self.metric & AS_EXT_METRIC_MASK;
+        out.extend_from_slice(&flags.to_be_bytes());
+        self.prefix.encode(out);
+        if let Some(fa) = &self.forwarding_addr {
+            out.extend_from_slice(fa);
+        }
+        if let Some(tag) = &self.route_tag {
+            out.extend_from_slice(&tag.to_be_bytes());
+        }
+        if self.prefix.metric != 0 {
+            out.extend_from_slice(&self.referenced_ls_id.unwrap_or(0).to_be_bytes());
+        }
+    }
+
+    pub fn decode(b: &[u8]) -> Option<Self> {
+        if b.len() < 4 {
+            return None;
+        }
+        let flags = u32::from_be_bytes([b[0], b[1], b[2], b[3]]);
+        let e_bit = flags & AS_EXT_BIT_E != 0;
+        let metric = flags & AS_EXT_METRIC_MASK;
+        let (prefix, used) = V3Prefix::decode(b, 4)?;
+        let mut off = 4 + used;
+        let forwarding_addr = if flags & AS_EXT_BIT_F != 0 {
+            if off + 16 > b.len() {
+                return None;
+            }
+            let mut addr = [0u8; 16];
+            addr.copy_from_slice(&b[off..off + 16]);
+            off += 16;
+            Some(addr)
+        } else {
+            None
+        };
+        let route_tag = if flags & AS_EXT_BIT_T != 0 {
+            if off + 4 > b.len() {
+                return None;
+            }
+            let tag = u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+            off += 4;
+            Some(tag)
+        } else {
+            None
+        };
+        // The Referenced Link State ID is present if and only if the
+        // Referenced LS Type (the prefix's trailing word) is non-zero
+        // (§A.4.7); the referenced-LSA mechanism is reserved and the
+        // type should be 0, so a nonzero value is tolerated (decoded,
+        // ignored by the calculation — §4.4.3.6) but never dropped.
+        let referenced_ls_id = if prefix.metric != 0 {
+            if off + 4 > b.len() {
+                return None;
+            }
+            let id = u32::from_be_bytes([b[off], b[off + 1], b[off + 2], b[off + 3]]);
+            Some(id)
+        } else {
+            None
+        };
+        Some(Self {
+            e_bit,
+            metric,
+            prefix,
+            forwarding_addr,
+            route_tag,
+            referenced_ls_id,
+        })
+    }
+}
+
 /// Advance a sequence number one step (§12.1.2). Shared by the v3
 /// originators: `None` starts at `INITIAL_SEQUENCE_NUMBER`, an exhausted
 /// space refuses to originate.
@@ -494,6 +652,107 @@ pub fn originate_v3_intra_area_prefix_lsa(
     }
     .encode(&mut body);
     Some(v3_lsa(LS_TYPE_INTRA_PREFIX, ls_id, router_id, seq, body))
+}
+
+/// Originate an OSPFv3 inter-area-router-LSA (type 0x2004) for an AS
+/// boundary router (RFC 5340 §A.4.6). The ABR re-advertises the
+/// location of an ASBR reachable in another area, exactly like the v2
+/// type-4 summary-ASBR-LSA; `options` mirrors the destination router's
+/// own Router-LSA options (§4.4.3.5).
+///
+/// `ls_id` is the 32-bit link-state ID the ABR assigns to this LSA —
+/// unlike v2 it carries no addressing semantics (§4.4.3.5); the
+/// destination's Router ID travels in the body. Reference
+/// implementations pin it to the destination router ID, which is also
+/// this crate's convention. `None` = sequence space exhausted.
+pub fn originate_v3_inter_area_router_lsa(
+    router_id: u32,
+    ls_id: u32,
+    options: u32,
+    dest_router_id: u32,
+    metric: u32,
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    let seq = next_sequence(prev_seq)?;
+    let mut body = Vec::with_capacity(12);
+    V3InterAreaRouterBody {
+        options,
+        metric: metric.min(0x00ff_fffe),
+        dest_router_id,
+    }
+    .encode(&mut body);
+    Some(v3_lsa(LS_TYPE_INTER_ROUTER, ls_id, router_id, seq, body))
+}
+
+/// One externally redistributed destination on the OSPFv3 plane
+/// (RFC 5340 §4.4.3.6) — the v3 counterpart of the v2
+/// [`crate::external::ExternalDestination`].
+///
+/// The metric is capped just below LSInfinity (`0x00ff_ffff`). The
+/// forwarding address, when present, MUST be a global IPv6 address —
+/// unspecified and link-local values are illegal (§A.4.7); `None`
+/// forwards traffic to the ASBR itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct V3ExternalDestination {
+    /// The external IPv6 prefix.
+    pub prefix: Prefix,
+    pub metric: u32,
+    /// `true` = type 2 metric (E bit set).
+    pub type2: bool,
+    /// The global IPv6 forwarding address (F bit); `None` = the ASBR.
+    pub forwarding_addr: Option<[u8; 16]>,
+    /// The external route tag (T bit); `None` omits the field.
+    pub route_tag: Option<u32>,
+}
+
+impl V3ExternalDestination {
+    pub fn new(prefix: Prefix, metric: u32, type2: bool) -> Self {
+        Self {
+            prefix,
+            metric: metric.min(0x00ff_fffe),
+            type2,
+            forwarding_addr: None,
+            route_tag: None,
+        }
+    }
+}
+
+/// Originate an OSPFv3 AS-external-LSA (type 0x4005) for `dest`
+/// (RFC 5340 §A.4.7). `ls_id` is the 32-bit link-state ID the ASBR
+/// assigns to this LSA — it carries no addressing semantics (§4.4.3.6)
+/// and must be stable across re-origination for one prefix. The
+/// prefix's Referenced LS Type word stays 0 (the referenced-LSA
+/// mechanism is reserved, §4.4.3.6). Returns `None` for non-IPv6
+/// destinations or when the sequence space is exhausted.
+pub fn originate_v3_as_external_lsa(
+    router_id: u32,
+    ls_id: u32,
+    dest: &V3ExternalDestination,
+    prev_seq: Option<u32>,
+) -> Option<Lsa> {
+    let IpAddr::V6(octets) = dest.prefix.network() else {
+        return None; // the v3 external plane advertises IPv6 prefixes
+    };
+    let seq = next_sequence(prev_seq)?;
+    let body = {
+        let mut b = Vec::with_capacity(4 + 8 + 24);
+        V3AsExternalBody {
+            e_bit: dest.type2,
+            metric: dest.metric,
+            prefix: V3Prefix {
+                prefix_len: dest.prefix.prefix_len,
+                options: 0,
+                metric: 0, // Referenced LS Type — reserved, stays 0
+                addr: octets,
+            },
+            forwarding_addr: dest.forwarding_addr,
+            route_tag: dest.route_tag,
+            referenced_ls_id: None,
+        }
+        .encode(&mut b);
+        b
+    };
+    Some(v3_lsa(LS_TYPE_AS_EXTERNAL, ls_id, router_id, seq, body))
 }
 
 #[cfg(test)]
@@ -715,5 +974,194 @@ mod tests {
         assert_eq!(decoded.ref_ls_id, 5);
         assert_eq!(decoded.ref_adv_router, 0x0a00_0002);
         assert_eq!(decoded.prefixes, prefixes);
+    }
+
+    /// §A.4.6: the Inter-Area-Router body is 0(1) + options(3) +
+    /// 0(1) + metric(3) + destination router ID — 12 bytes total.
+    /// Shape from RFC 5340 §4.4.3.5's RT7 example: options
+    /// V6|E|R = 0x13 (v2 §A.2 bit values), metric 14, dest 0x0a00_0007.
+    #[test]
+    fn inter_area_router_body_wire_shape() {
+        let body = V3InterAreaRouterBody {
+            options: 0x13,
+            metric: 14,
+            dest_router_id: 0x0a00_0007,
+        };
+        let mut wire = Vec::new();
+        body.encode(&mut wire);
+        assert_eq!(wire.len(), 12);
+        assert_eq!(
+            &wire,
+            &[
+                0, 0, 0, 0x13, // options (24-bit)
+                0, 0, 0, 14, // metric (24-bit)
+                0x0a, 0x00, 0x00, 0x07, // destination router ID
+            ]
+        );
+        assert_eq!(V3InterAreaRouterBody::decode(&wire).unwrap(), body);
+        assert!(V3InterAreaRouterBody::decode(&wire[..11]).is_none());
+    }
+
+    /// The originated 0x2004 LSA carries the destination in the body,
+    /// the caller's LS ID and a valid checksum; the metric is capped
+    /// below LSInfinity.
+    #[test]
+    fn originate_v3_inter_area_router_lsa_shape() {
+        let lsa = originate_v3_inter_area_router_lsa(
+            0x0a00_0004,
+            0x0a00_0007,
+            0x13,
+            0x0a00_0007,
+            14,
+            None,
+        )
+        .unwrap();
+        assert_eq!(lsa.header.ls_type, LS_TYPE_INTER_ROUTER);
+        assert_eq!(lsa.header.link_state_id, 0x0a00_0007, "LS ID = destination");
+        assert_eq!(lsa.header.advertising_router, 0x0a00_0004);
+        assert_eq!(lsa.header.length, 20 + 12);
+        assert!(lsa.checksum_ok());
+        let decoded = V3InterAreaRouterBody::decode(&lsa.body).unwrap();
+        assert_eq!(decoded.dest_router_id, 0x0a00_0007);
+        assert_eq!(decoded.metric, 14);
+        assert_eq!(decoded.options, 0x13);
+        let next = originate_v3_inter_area_router_lsa(
+            0x0a00_0004,
+            0x0a00_0007,
+            0x13,
+            0x0a00_0007,
+            14,
+            Some(lsa.header.ls_sequence_number),
+        )
+        .unwrap();
+        assert_eq!(next.header.ls_sequence_number, INITIAL_SEQUENCE_NUMBER + 1);
+        // LSInfinity metrics are capped at origination.
+        let capped = originate_v3_inter_area_router_lsa(1, 2, 0, 3, 0xffff_ffff, None).unwrap();
+        assert_eq!(
+            V3InterAreaRouterBody::decode(&capped.body).unwrap().metric,
+            0x00ff_fffe
+        );
+    }
+
+    /// §A.4.7: the AS-External body is E|F|T + metric(3) + prefix (with
+    /// the trailing word = Referenced LS Type), then the optional
+    /// forwarding address / route tag / referenced LS ID. The
+    /// RFC 5340 §4.4.3.6 N12 example: type 2 (E), tag, metric 2, /40
+    /// prefix (8 wire bytes); LS ID 123 is arbitrary per §4.4.3.6.
+    #[test]
+    fn as_external_body_wire_shape() {
+        let mut addr = [0u8; 16];
+        addr[0..2].copy_from_slice(&0x2001u16.to_be_bytes());
+        addr[2] = 0x0d;
+        addr[3] = 0xb8;
+        addr[4] = 0x0a;
+        let body = V3AsExternalBody {
+            e_bit: true,
+            metric: 2,
+            prefix: V3Prefix {
+                prefix_len: 40,
+                options: 0,
+                metric: 0,
+                addr,
+            },
+            forwarding_addr: None,
+            route_tag: Some(7),
+            referenced_ls_id: None,
+        };
+        let mut wire = Vec::new();
+        body.encode(&mut wire);
+        // 4 flags/metric + 4 prefix header + 8 prefix address + 4 tag.
+        assert_eq!(wire.len(), 20);
+        assert_eq!(&wire[0..4], &[0x05, 0, 0, 2], "E|T set, metric 2");
+        assert_eq!(wire[4], 40, "prefix length");
+        assert_eq!(wire[5], 0, "prefix options");
+        assert_eq!(&wire[6..8], &[0, 0], "referenced LS type 0");
+        assert_eq!(&wire[8..16], &addr[..8], "prefix address (8 words)");
+        assert_eq!(&wire[16..20], &7u32.to_be_bytes(), "route tag");
+        assert_eq!(V3AsExternalBody::decode(&wire).unwrap(), body);
+        // Truncation never panics.
+        for cut in [0usize, 3, 7, 11, 15, 19] {
+            assert!(V3AsExternalBody::decode(&wire[..cut]).is_none());
+        }
+    }
+
+    /// F/T bit round-trip: a forwarding address rides the body if and
+    /// only if the F bit is set; the tag if and only if T is set.
+    #[test]
+    fn as_external_forwarding_address_round_trip() {
+        let mut fa = [0u8; 16];
+        fa[0] = 0x20;
+        fa[1] = 0x01;
+        let body = V3AsExternalBody {
+            e_bit: false,
+            metric: 100,
+            prefix: V3Prefix {
+                prefix_len: 64,
+                options: 0,
+                metric: 0,
+                addr: [0x20; 16],
+            },
+            forwarding_addr: Some(fa),
+            route_tag: None,
+            referenced_ls_id: None,
+        };
+        let mut wire = Vec::new();
+        body.encode(&mut wire);
+        assert_eq!(wire[0], 0x02, "F set, E clear");
+        assert_eq!(wire.len(), 4 + 12 + 16);
+        let back = V3AsExternalBody::decode(&wire).unwrap();
+        assert_eq!(back.forwarding_addr, Some(fa));
+        assert_eq!(back.route_tag, None);
+        assert!(!back.e_bit);
+        assert_eq!(back.metric, 100);
+    }
+
+    /// The originated 0x4005 LSA pins the E/F/T layout FRR uses
+    /// (E=0x04000000, distinct from the v2 top-bit form), normalizes
+    /// host bits on the prefix and refuses non-IPv6 destinations.
+    #[test]
+    fn originate_v3_as_external_lsa_shape() {
+        let dest = V3ExternalDestination::new(
+            Prefix::new_v6(
+                [
+                    0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x09, 0x99,
+                ],
+                48,
+            ),
+            150,
+            true,
+        );
+        let lsa = originate_v3_as_external_lsa(0x0a00_0007, 123, &dest, None).unwrap();
+        assert_eq!(lsa.header.ls_type, LS_TYPE_AS_EXTERNAL);
+        assert_eq!(lsa.header.link_state_id, 123);
+        assert_eq!(lsa.header.advertising_router, 0x0a00_0007);
+        assert!(lsa.checksum_ok());
+        // /48 → 8 wire bytes; the /48 host bits (0x0999 in the last two
+        // bytes) are zeroed.
+        assert_eq!(lsa.header.length, 20 + 4 + 4 + 8);
+        let decoded = V3AsExternalBody::decode(&lsa.body).unwrap();
+        assert!(decoded.e_bit);
+        assert_eq!(decoded.metric, 150);
+        assert_eq!(decoded.prefix.prefix_len, 48);
+        assert_eq!(decoded.prefix.metric, 0, "referenced LS type 0");
+        assert_eq!(&decoded.prefix.addr[..6], &[0x20, 0x01, 0x0d, 0xb8, 0, 0]);
+        assert!(decoded.forwarding_addr.is_none());
+        let next =
+            originate_v3_as_external_lsa(0x0a00_0007, 123, &dest, Some(0x8000_0005)).unwrap();
+        assert_eq!(next.header.ls_sequence_number, 0x8000_0006);
+        // Non-IPv6 destinations are refused.
+        let v4dest = V3ExternalDestination::new(Prefix::new_v4([10, 0, 0, 0], 8), 10, false);
+        assert!(originate_v3_as_external_lsa(1, 2, &v4dest, None).is_none());
+        // A global forwarding address sets the F bit and rides the body.
+        let mut with_fa = dest;
+        with_fa.forwarding_addr =
+            Some([0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let lsa = originate_v3_as_external_lsa(0x0a00_0007, 123, &with_fa, None).unwrap();
+        assert_eq!(lsa.header.length, 20 + 4 + 4 + 8 + 16);
+        let decoded = V3AsExternalBody::decode(&lsa.body).unwrap();
+        assert_eq!(
+            decoded.forwarding_addr,
+            Some([0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1])
+        );
     }
 }
