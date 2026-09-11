@@ -1557,3 +1557,74 @@ documentation surface it needs (the `ospfv3_srv6.md` example plus
 the existing `OS-INTEGRATION.md` SRv6 section + the
 `docs/research/EXCHANGE-PLANE.md` design notes) is now in place
 for the next implementer to pick up.
+
+## Phase 6 — E-LSA design doc + RUNBOOK expansion + code audit
+
+Where the project stands: Phase 5 landed the CI matrix hardening
+(dropping `macos-13`, adding `cross-macos-intel`) and three new
+example docs (LDP, BGP-LU, OSPFv3 SRv6). CI is green on all
+desktop platforms. The next protocol-correctness slice is Phase 3
+item 2 — RFC 8362 Extended-LSA machinery + SRv6 End.X SIDs (RFC
+9513 §9). That slice is large enough (seven E-LSA bodies with TLV
+framing, the U-bit-2 flooding rules, an E-LSA SPF path, and the
+End.X SID sub-TLV) that landing it requires a design doc first:
+the codec shapes, the database projection rules, the SPF
+integration and the interop verification all need to be enumerated
+before any code lands so the implementation does not drift from
+the RFC. Phase 6 lands that design doc plus a RUNBOOK expansion
+and a small code audit — the protocol implementation itself is
+the next Phase.
+
+Ordered by user-visible impact:
+
+1. **RFC 8362 E-LSA implementation design doc** — done:
+   `docs/research/E-LSA-DESIGN.md` is the implementation plan for
+   the next contributor. Covers: the seven E-LSA function codes
+   (0xA020–0xA026) and their LS Type / scope mapping; the shared
+   TLV framing (RFC 3630 convention, already used by
+   `lr-ospf::lsa::srv6`); the E-Router-LSA body + Router-Link TLV
+   shape (the carrier for the End.X SID sub-TLV); the other six
+   E-LSA bodies and their TLV type registry; the U-bit-2 flooding
+   rules (store + re-flood unchanged through non-participating
+   routers — already proven by the SRv6 interop lab); the SPF
+   integration plan (E-bit detection + E-LSA → SPF-input
+   extractors, additive to the legacy path so a deployment that
+   does not configure E-LSAs sees byte-identical output); the
+   End.X / LAN End.X SID sub-TLV design (RFC 9513 §9.1/§9.2,
+   types 31/32); the interop verification plan (lr x lr + FRR
+   transparency, same shape as the SRv6 slice); the three-slice
+   breakdown (codecs → SPF → End.X origination + dataplane);
+   risk and mitigation table.
+
+2. **RUNBOOK deep-troubleshooting expansion** — done: added a
+   "Deeper troubleshooting" section to `docs/RUNBOOK.md` covering
+   seven operational failure modes the original FAQ did not reach:
+   BGP session flapping (hold-timer / auth / collision diagnosis),
+   OSPF adjacency stuck in ExStart (MTU / Router-ID / interface
+   type), OSPF adjacency stuck in Exchange (dead-interval / area
+   mismatch), LDP label binding not propagating (Hello / session /
+   kernel MPLS), route flap damping over-aggressive (modern
+   recommendations vs RFC 2439 defaults), memory growth on
+   full-table peers (soft-reconfig / import route-map /
+   maximum-prefix), CPU spike during full-table reconvergence
+   (GR / LLGR / BFD), and MRT dump disk growth (rotation / tmpfs).
+
+3. **Code audit** — done: replaced two `unwrap()` calls in
+   `lr-core` production code with explicit patterns that document
+   the safety invariant for the reader. The IPv6-address
+   dotted-quad parser (`addr.rs`) gained a `match` that removes
+   the `last.unwrap()` after the `has_quad` check; the timer heap
+   (`timer.rs`) gained an `expect("peek confirmed non-empty")`
+   after the `peek()` → `pop()` pair. Both were provably safe by
+   construction; the change is readability + lint cleanliness, not
+   a bug fix.
+
+4. Keep `STATUS.md` / `RFC_MAP.md` / `API.md` synchronized (the
+   standing rule — applied here for the Phase 6 landings).
+
+The Phase 3 protocol work (RFC 8362 E-LSA machinery + SRv6 End.X /
+LAN End.X SIDs, BGP-LS, BGP SR Policy) remains post-1.0 work; the
+design doc landed in this Phase gives the next implementer the
+codec shapes, the SPF integration plan and the interop verification
+plan to pick up slice 1 (codecs) without re-deriving the RFC 8362
+mapping from scratch.

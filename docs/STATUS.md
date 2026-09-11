@@ -321,3 +321,20 @@ the state, that file tracks the how and why.
    RI LSA + Locator LSA origination signatures and the
    `srv6db` reception path). Indexed all three in
    `docs/README.md`.
+5. **Phase 6 — E-LSA design doc + RUNBOOK expansion + code
+   audit** — landed: `docs/research/E-LSA-DESIGN.md` is the
+   implementation plan for the RFC 8362 Extended-LSA machinery
+   (Phase 3 item 2's prerequisite), laying out the function
+   codes (0xA020–0xA026), the TLV framing, the seven E-LSA body
+   codecs, the U-bit-2 flooding rules, the SPF integration plan,
+   the End.X SID sub-TLV design (RFC 9513 §9), the interop
+   verification plan, and the three-slice breakdown (codecs →
+   SPF → End.X origination). Expanded `docs/RUNBOOK.md` with a
+   "Deeper troubleshooting" section covering BGP session flapping,
+   OSPF adjacency stuck in ExStart/Exchange, LDP label binding
+   not propagating, route flap damping tuning, memory growth on
+   full-table peers, CPU spikes during reconvergence, and MRT
+   dump disk growth. Code audit: replaced two `unwrap()` calls in
+   `lr-core` (the IPv6-address dotted-quad parser and the timer
+   heap's `pop()`) with explicit `match` / `expect()` patterns
+   that document the safety invariant for the reader.

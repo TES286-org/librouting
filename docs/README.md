@@ -49,6 +49,7 @@ the protocol crates.
 | ------------------------------------------------- | --------------------------------------------------------------------------------------------- |
 | [`research/BGP-DEFECTS.md`](research/BGP-DEFECTS.md) | BGP's protocol-inherent defects: mechanisms, primary evidence, standard mitigations, lr status |
 | [`research/EXCHANGE-PLANE.md`](research/EXCHANGE-PLANE.md) | Capability-negotiated private exchange plane design: feasibility hints, policy intent, provenance proofs |
+| [`research/E-LSA-DESIGN.md`](research/E-LSA-DESIGN.md) | RFC 8362 Extended-LSA implementation plan: function codes, TLV framing, SPF integration, End.X SID sub-TLV, three-slice breakdown |
 
 ## Standing rules
 
