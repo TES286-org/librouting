@@ -1325,6 +1325,16 @@ landed as four slices:
   structurally: the daemon's Interface IDs are kernel ifindexes,
   which do not change across a process restart while the interface
   stays up.
+- **A self-review fix — LSDB sequence floors for every
+  self-originated LSA**: only the Router-LSA consulted the area LSDB
+  for its previous sequence; the Link/IAP/Network/SRv6 shapes used
+  in-memory state alone, so after a recovery a fresh 0x80000001
+  instance would be older than every neighbour's retained copy and
+  silently ignored (RFC 2328 §12.1.2) — the LSA would never refresh
+  and age out an hour after the restart, taking the v3 Link-LSA's
+  next-hop resolution with it. `lsa_seq_floor()` generalizes the
+  floor to every v3 shape; the v2 Network-LSA gets the same
+  treatment.
 - **One interop-driven fix, applied to both versions**: the MaxAge
   flush now carries a valid body (period ≥ 1, reason ≤ 3). FRR's
   grace-LSA extraction (`ospf6_extract_grace_lsa_fields` in ospf6d,
