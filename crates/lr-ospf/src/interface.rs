@@ -532,11 +532,7 @@ mod tests {
     /// the BDR pool).
     #[test]
     fn elect_v3_priority_and_claims() {
-        let electors = vec![
-            el3(1, 1, 1, 0),
-            el3(2, 200, 0, 2),
-            el3(3, 255, 0, 0),
-        ];
+        let electors = vec![el3(1, 1, 1, 0), el3(2, 200, 0, 2), el3(3, 255, 0, 0)];
         let (dr, bdr) = elect_v3(&electors, 3);
         assert_eq!(dr, 1, "the DR claimant keeps the role");
         assert_eq!(bdr, 2, "the BDR claimant beats higher-priority router 3");
