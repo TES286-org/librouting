@@ -204,6 +204,40 @@ pub(crate) struct OspfMappingServerSpec {
     pub no_php: Option<bool>,
 }
 
+/// One `[[ospf.srv6_locator]]` table (RFC 9513 §7-§8, OSPFv3 only): a
+/// locally originated SRv6 locator, advertised in a per-area Locator
+/// LSA with its End SID. The OSPFv3 counterpart of
+/// [`OspfPrefixSidSpec`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct OspfSrv6LocatorSpec {
+    /// Locator prefix (IPv6, required) — the §7.1 Locator TLV prefix.
+    pub prefix: Option<String>,
+    /// IGP algorithm the locator is associated with (§7.1; default
+    /// 0 = SPF).
+    pub algorithm: Option<u8>,
+    /// The §7.1 locator metric (default 0).
+    pub metric: Option<u32>,
+    /// RFC 9513 §6 AC-bit: the locator is anycast (default false).
+    pub anycast: Option<bool>,
+    /// The §8 End SID value (IPv6 address). Default: the locator
+    /// prefix itself with the host bits zeroed (the RFC 8986 End
+    /// behavior on the locator prefix).
+    pub sid: Option<String>,
+    /// RFC 8986 endpoint behavior advertised with the End SID
+    /// (§8; default 1 = End).
+    pub behavior: Option<u16>,
+    /// §10 SID Structure Locator-Block length in bits. The four
+    /// lengths are all-or-none; when all are set the §10 sub-TLV rides
+    /// the End SID.
+    pub block_len: Option<u8>,
+    /// §10 Locator-Node length in bits (see `block_len`).
+    pub node_len: Option<u8>,
+    /// §10 Function length in bits (see `block_len`).
+    pub function_len: Option<u8>,
+    /// §10 Argument length in bits (see `block_len`).
+    pub argument_len: Option<u8>,
+}
+
 /// One `[[babel.key]]` table (or `--babel-key` flag): a symmetric MAC
 /// key for RFC 8967 Babel authentication.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -464,6 +498,26 @@ pub(crate) struct DaemonConfig {
     /// default — a router that never enables it stays byte-identical
     /// to a pre-SR one.
     pub ospf_sr_receive: bool,
+    /// RFC 9513 §5 reception (`[ospf] srv6_receive`, OSPFv3 only):
+    /// project learned Locator LSAs into the per-node SRv6 database
+    /// and install the §5 locator routes. Off by default (fail
+    /// closed — the `sr_receive` counterpart on the v3 plane).
+    pub ospf_srv6_receive: bool,
+    /// RFC 9513 §2 (`[ospf] srv6_o_flag`): advertise the RFC 9259
+    /// SRH O-flag in the SRv6 Capabilities TLV. Off by default.
+    pub ospf_srv6_o_flag: bool,
+    /// Node MSD limits advertised in the RI LSA's Node MSD TLV when
+    /// set (RFC 8476 §2 carrier, RFC 9352 §4 MSD types).
+    pub ospf_srv6_max_sl: Option<u8>,
+    /// See `ospf_srv6_max_sl` (SRH Max End Pop, MSD type 42).
+    pub ospf_srv6_max_end_pop: Option<u8>,
+    /// See `ospf_srv6_max_sl` (SRH Max H.Encaps, MSD type 44).
+    pub ospf_srv6_max_h_encaps: Option<u8>,
+    /// See `ospf_srv6_max_sl` (SRH Max End D, MSD type 45).
+    pub ospf_srv6_max_end_d: Option<u8>,
+    /// `[[ospf.srv6_locator]]` tables — locally originated SRv6
+    /// locators (RFC 9513 §7), OSPFv3 only.
+    pub ospf_srv6_locators: Vec<OspfSrv6LocatorSpec>,
     /// OSPF graceful restart, restarting side (RFC 3623 §2): on
     /// shutdown, originate Grace-LSAs per interface and exit without
     /// the session-close teardown (kernel routes persist); after the
@@ -628,6 +682,8 @@ impl DaemonConfig {
             ospf_dead_interval: 40,
             ospf_area: 0,
             ospf_sr_receive: false,
+            ospf_srv6_receive: false,
+            ospf_srv6_o_flag: false,
             ospf_graceful_restart: false,
             ospf_grace_period: lr_ospf::gr::DEFAULT_GRACE_PERIOD_SECS,
             ospf_gr_helper: true,
@@ -711,6 +767,13 @@ impl DaemonConfig {
             && self.ospf_prefix_sids.is_empty()
             && self.ospf_srgb_base.is_none()
             && self.ospf_srgb_range.is_none()
+            && self.ospf_srv6_locators.is_empty()
+            && !self.ospf_srv6_receive
+            && !self.ospf_srv6_o_flag
+            && self.ospf_srv6_max_sl.is_none()
+            && self.ospf_srv6_max_end_pop.is_none()
+            && self.ospf_srv6_max_h_encaps.is_none()
+            && self.ospf_srv6_max_end_d.is_none()
         {
             return Ok(());
         }
@@ -754,7 +817,7 @@ impl DaemonConfig {
                 || !self.ospf_mapping_servers.is_empty()
             {
                 return Err(
-                    "OSPFv3 does not support Segment Routing configuration                      (srgb/prefix_sid/mapping_server are OSPFv2 extensions)"
+                    "OSPFv3 does not support the SR-MPLS configuration (srgb/prefix_sid/mapping_server are OSPFv2 extensions)"
                         .to_string(),
                 );
             }
@@ -763,6 +826,78 @@ impl DaemonConfig {
                     "OSPFv3 does not support graceful restart yet (RFC 5187 is a later slice)"
                         .to_string(),
                 );
+            }
+        }
+        // SRv6 (RFC 9513) is an OSPFv3-only extension: under v2 the
+        // config is rejected outright instead of being ignored.
+        if self.ospf_version != "v3"
+            && (!self.ospf_srv6_locators.is_empty()
+                || self.ospf_srv6_receive
+                || self.ospf_srv6_o_flag
+                || self.ospf_srv6_max_sl.is_some()
+                || self.ospf_srv6_max_end_pop.is_some()
+                || self.ospf_srv6_max_h_encaps.is_some()
+                || self.ospf_srv6_max_end_d.is_some())
+        {
+            return Err(
+                "SRv6 configuration (srv6_*) is an OSPFv3 extension (RFC 9513); set [ospf] version = \"v3\""
+                    .to_string(),
+            );
+        }
+        // Per-locator validation (RFC 9513 §7.1/§8/§10): an IPv6
+        // prefix, an End-SID-valid behavior, and an all-or-none §10
+        // SID Structure whose lengths sum to ≤ 128 bits. Duplicate
+        // locator prefixes are a config bug (they would emit two
+        // indistinguishable TLVs) — fail closed.
+        let mut seen_locators = std::collections::BTreeSet::new();
+        for loc in &self.ospf_srv6_locators {
+            let Some(text) = loc.prefix.as_deref() else {
+                return Err("[[ospf.srv6_locator]] without 'prefix'".to_string());
+            };
+            let prefix: lr_core::addr::Prefix = text
+                .parse()
+                .map_err(|_| format!("srv6_locator: bad prefix '{text}'"))?;
+            if matches!(prefix.addr, lr_core::addr::IpAddr::V4(_)) {
+                return Err(format!(
+                    "srv6_locator: prefix '{text}' must be IPv6 (RFC 9513 §7.1)"
+                ));
+            }
+            if !seen_locators.insert(prefix) {
+                return Err(format!("srv6_locator: prefix '{text}' configured twice"));
+            }
+            if let Some(sid) = loc.sid.as_deref() {
+                let sid: lr_core::addr::IpAddr = sid
+                    .parse()
+                    .map_err(|_| format!("srv6_locator: bad sid '{sid}'"))?;
+                if matches!(sid, lr_core::addr::IpAddr::V4(_)) {
+                    return Err(format!("srv6_locator: sid '{sid}' must be an IPv6 address"));
+                }
+            }
+            if let Some(b) = loc.behavior {
+                if !lr_ospf::lsa::srv6::behavior_valid_for_end_sid(b) {
+                    return Err(format!(
+                        "srv6_locator: behavior {b} is not valid in an End SID sub-TLV (RFC 9513 §8)"
+                    ));
+                }
+            }
+            let lens = [
+                loc.block_len,
+                loc.node_len,
+                loc.function_len,
+                loc.argument_len,
+            ];
+            if lens.iter().any(|l| l.is_some()) && lens.iter().any(|l| l.is_none()) {
+                return Err(
+                    "srv6_locator: the §10 SID Structure needs all of block_len/node_len/function_len/argument_len (or none)"
+                        .to_string(),
+                );
+            }
+            if let [Some(b), Some(n), Some(f), Some(a)] = lens {
+                if u32::from(b) + u32::from(n) + u32::from(f) + u32::from(a) > 128 {
+                    return Err(format!(
+                        "srv6_locator: SID structure {b}+{n}+{f}+{a} exceeds 128 bits (RFC 9513 §10)"
+                    ));
+                }
             }
         }
         // Areas: id present, unique, kind valid; backbone stays normal.
@@ -1192,6 +1327,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.ospf_mapping_servers
                         .push(OspfMappingServerSpec::default());
                     section = "ospf.mapping_server".to_string();
+                }
+                "ospf.srv6_locator" => {
+                    cfg.ospf_srv6_locators.push(OspfSrv6LocatorSpec::default());
+                    section = "ospf.srv6_locator".to_string();
                 }
                 "babel.key" => {
                     cfg.babel_keys.push(BabelKeySpec::default());
@@ -1689,6 +1828,48 @@ fn apply_ospf_key(
             "sr_receive" => {
                 cfg.ospf_sr_receive = parse_bool(value);
             }
+            // RFC 9513 §5 reception (OSPFv3): project learned Locator
+            // LSAs into the per-node SRv6 database and install the §5
+            // locator routes. Off by default (fail closed — the
+            // `sr_receive` counterpart on the v3 plane).
+            "srv6_receive" => {
+                cfg.ospf_srv6_receive = parse_bool(value);
+            }
+            // RFC 9513 §2: advertise the RFC 9259 SRH O-flag in the
+            // SRv6 Capabilities TLV (OSPFv3).
+            "srv6_o_flag" => {
+                cfg.ospf_srv6_o_flag = parse_bool(value);
+            }
+            // RFC 8476 Node MSD limits (RFC 9352 §4 MSD types 41/42/
+            // 44/45), advertised in the v3 RI LSA when set.
+            "srv6_max_sl" => {
+                cfg.ospf_srv6_max_sl = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("bad srv6_max_sl '{value}'"))?,
+                );
+            }
+            "srv6_max_end_pop" => {
+                cfg.ospf_srv6_max_end_pop = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("bad srv6_max_end_pop '{value}'"))?,
+                );
+            }
+            "srv6_max_h_encaps" => {
+                cfg.ospf_srv6_max_h_encaps = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("bad srv6_max_h_encaps '{value}'"))?,
+                );
+            }
+            "srv6_max_end_d" => {
+                cfg.ospf_srv6_max_end_d = Some(
+                    value
+                        .parse()
+                        .map_err(|_| format!("bad srv6_max_end_d '{value}'"))?,
+                );
+            }
             _ => {
                 return Err(format!(
                     "unknown [ospf] key '{key}' (typo protection; OSPF config fails closed)"
@@ -1822,6 +2003,70 @@ fn apply_ospf_key(
                 _ => {
                     return Err(format!(
                         "unknown [[ospf.prefix_sid]] key '{key}' (typo protection; OSPF config fails closed)"
+                    ))
+                }
+            }
+        }
+        "ospf.srv6_locator" => {
+            let Some(loc) = cfg.ospf_srv6_locators.last_mut() else {
+                return Err("key outside a [[ospf.srv6_locator]] table".into());
+            };
+            match key {
+                "prefix" => loc.prefix = Some(value.to_string()),
+                "algorithm" => {
+                    loc.algorithm = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad algorithm '{value}'"))?,
+                    );
+                }
+                "metric" => {
+                    loc.metric = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad metric '{value}'"))?,
+                    );
+                }
+                "anycast" => loc.anycast = Some(parse_bool(value)),
+                "sid" => loc.sid = Some(value.to_string()),
+                "behavior" => {
+                    loc.behavior = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad behavior '{value}'"))?,
+                    );
+                }
+                "block_len" => {
+                    loc.block_len = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad block_len '{value}'"))?,
+                    );
+                }
+                "node_len" => {
+                    loc.node_len = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad node_len '{value}'"))?,
+                    );
+                }
+                "function_len" => {
+                    loc.function_len = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad function_len '{value}'"))?,
+                    );
+                }
+                "argument_len" => {
+                    loc.argument_len = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad argument_len '{value}'"))?,
+                    );
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown [[ospf.srv6_locator]] key '{key}' (typo protection; OSPF config fails closed)"
                     ))
                 }
             }
@@ -2408,6 +2653,25 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.ospf_gr_state_file = Some(args[i + 1].clone());
                 i += 2;
             }
+            // RFC 9513 (OSPFv3 SRv6): a repeatable --ospf-srv6-locator
+            // flag configures one locally originated locator; the
+            // remaining attributes (algorithm/metric/…) come from
+            // [[ospf.srv6_locator]] tables.
+            "--ospf-srv6-locator" if i + 1 < args.len() => {
+                cfg.ospf_srv6_locators.push(OspfSrv6LocatorSpec {
+                    prefix: Some(args[i + 1].clone()),
+                    ..Default::default()
+                });
+                i += 2;
+            }
+            "--ospf-srv6-receive" => {
+                cfg.ospf_srv6_receive = true;
+                i += 1;
+            }
+            "--ospf-srv6-o-flag" => {
+                cfg.ospf_srv6_o_flag = true;
+                i += 1;
+            }
             "--ldp-transport" if i + 1 < args.len() => {
                 cfg.ldp_transport = Some(args[i + 1].clone());
                 i += 2;
@@ -2849,6 +3113,111 @@ mod tests {
         let mut cfg = DaemonConfig::with_defaults();
         cfg.protocol = "ospf".to_string();
         assert!(parse_toml_subset("[ospf]\nhelper_grace_cap = 0\n", &mut cfg).is_err());
+    }
+
+    #[test]
+    fn ospf_srv6_locator_tables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\nversion = \"v3\"\nsrv6_receive = true\nsrv6_o_flag = true\n\
+             srv6_max_sl = 8\nsrv6_max_end_pop = 4\nsrv6_max_h_encaps = 2\n\
+             srv6_max_end_d = 6\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\nalgorithm = 0\n\
+             metric = 10\nanycast = true\nsid = \"2001:db8:a:1::1\"\nbehavior = 1\n\
+             block_len = 32\nnode_len = 16\nfunction_len = 16\nargument_len = 0\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:2::/64\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert!(cfg.ospf_srv6_receive);
+        assert!(cfg.ospf_srv6_o_flag);
+        assert_eq!(cfg.ospf_srv6_max_sl, Some(8));
+        assert_eq!(cfg.ospf_srv6_max_end_pop, Some(4));
+        assert_eq!(cfg.ospf_srv6_max_h_encaps, Some(2));
+        assert_eq!(cfg.ospf_srv6_max_end_d, Some(6));
+        assert_eq!(cfg.ospf_srv6_locators.len(), 2);
+        let first = &cfg.ospf_srv6_locators[0];
+        assert_eq!(first.prefix.as_deref(), Some("2001:db8:a:1::/48"));
+        assert_eq!(first.algorithm, Some(0));
+        assert_eq!(first.metric, Some(10));
+        assert_eq!(first.anycast, Some(true));
+        assert_eq!(first.sid.as_deref(), Some("2001:db8:a:1::1"));
+        assert_eq!(first.behavior, Some(1));
+        assert_eq!(first.block_len, Some(32));
+        assert_eq!(first.node_len, Some(16));
+        assert_eq!(first.function_len, Some(16));
+        assert_eq!(first.argument_len, Some(0));
+        // Defaults: the second locator keeps the implicit values.
+        let second = &cfg.ospf_srv6_locators[1];
+        assert_eq!(second.algorithm, None);
+        assert_eq!(second.anycast, None);
+        assert_eq!(second.behavior, None);
+        assert_eq!(second.block_len, None);
+    }
+
+    #[test]
+    fn ospf_srv6_configuration_is_rejected_under_v2() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\nversion = \"v2\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("OSPFv3"), "fail-closed error: {err}");
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[ospf]\nsrv6_receive = true\n", &mut cfg).unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("OSPFv3"), "fail-closed error: {err}");
+    }
+
+    #[test]
+    fn ospf_srv6_locator_validation_is_fail_closed() {
+        let case = |toml: &str| {
+            let mut cfg = DaemonConfig::with_defaults();
+            cfg.protocol = "ospf".to_string();
+            parse_toml_subset(toml, &mut cfg).unwrap();
+            cfg.finalize().unwrap_err()
+        };
+        // Missing prefix.
+        let err = case("[ospf]\nversion = \"v3\"\n\n[[ospf.srv6_locator]]\nanycast = true\n");
+        assert!(err.contains("prefix"), "fail-closed error: {err}");
+        // IPv4 prefix.
+        let err =
+            case("[ospf]\nversion = \"v3\"\n\n[[ospf.srv6_locator]]\nprefix = \"10.0.0.0/8\"\n");
+        assert!(err.contains("IPv6"), "fail-closed error: {err}");
+        // A behavior outside the RFC 9513 §8 End-SID set (End.X = 5 is
+        // an E-Router-Link behavior, not an End-SID one).
+        let err = case(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\nbehavior = 5\n",
+        );
+        assert!(err.contains("behavior"), "fail-closed error: {err}");
+        // Partial §10 SID Structure.
+        let err = case(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\nblock_len = 32\n",
+        );
+        assert!(err.contains("SID Structure"), "fail-closed error: {err}");
+        // §10 lengths above 128 bits.
+        let err = case(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n\
+             block_len = 32\nnode_len = 32\nfunction_len = 32\nargument_len = 40\n",
+        );
+        assert!(err.contains("128"), "fail-closed error: {err}");
+        // Duplicate locator prefix.
+        let err = case(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n",
+        );
+        assert!(err.contains("twice"), "fail-closed error: {err}");
     }
 
     #[test]
