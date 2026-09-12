@@ -302,6 +302,8 @@ jobs:
         run: ./tests/interop/bmp.sh
       - name: BGP MD5 auth interop (RFC 2385)
         run: ./tests/interop/md5.sh
+      - name: Multi-protocol interop (rc.3, lr --protocol bgp,ospf ↔ BIRD ospf+bgp)
+        run: ./tests/interop/multi_protocol.sh
       - name: BIRD interop (librouting ↔ BIRD)
         run: ./tests/interop/bird.sh
       - name: BIRD compat interop (lr-daemon runs a BIRD config natively ↔ BIRD)
