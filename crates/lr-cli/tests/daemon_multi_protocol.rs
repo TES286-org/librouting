@@ -129,7 +129,16 @@ fn api_ask(socket: &std::path::Path, cmd: &str) -> String {
 /// one runtime API socket serves both engines' sessions and the shared
 /// Loc-RIB; SIGTERM stops both engines and the supervisor joins them
 /// cleanly.
+///
+/// Linux-only, like the BFD e2e: the Babel engine binds the local
+/// address (127.0.0.2 — Linux binds the whole 127/8 without aliases,
+/// while macOS lo0 carries only 127.0.0.1), and the import safety net
+/// rejects an announced NEXT_HOP of exactly 127.0.0.1, so the
+/// babel-bindable address and the BGP-announcable next hop must be the
+/// same non-127.0.0.1 loopback address. The full data path also runs
+/// in tests/interop/multi_protocol.sh on the CI Linux leg.
 #[test]
+#[cfg(target_os = "linux")]
 fn multi_protocol_bgp_babel_share_one_process() {
     let tag = std::process::id();
     let socket = std::env::temp_dir().join(format!("lr-daemon-multi-bb-{tag}.sock", tag = tag));
@@ -346,7 +355,7 @@ fn multi_protocol_toml_array_selects_the_combination() {
         &conf,
         "protocols = [\"bgp\", \"babel\"]\n\
          [bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n\
-         ebgp_policy = \"accept-all\"\nlocal_address = \"127.0.0.2\"\n\
+         ebgp_policy = \"accept-all\"\nlocal_address = \"127.0.0.1\"\n\
          networks = [\"203.0.113.0/24\"]\n\
          [babel]\nport = 18697\n",
     )
@@ -356,7 +365,7 @@ fn multi_protocol_toml_array_selects_the_combination() {
         &d.log,
         &[
             "protocols:   bgp,babel (one shared Loc-RIB)",
-            "babel listening on 127.0.0.2:18697",
+            "babel listening on 127.0.0.1:18697",
             "daemon: 2 engine(s) running",
             "daemon: no --peer/--listen given; idling (tick loop only)",
         ],
