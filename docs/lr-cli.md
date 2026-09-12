@@ -385,10 +385,41 @@ overrides live under `[[peer]]` and inherit the global when omitted.
 | `--group NAME` | `group` | — | Privilege-drop group. |
 | `--api-socket PATH` | `api_socket` | — | Unix-socket runtime API (see RUNBOOK.md). |
 
+### Multi-protocol combinations (rc.3)
+
+`--protocol` takes a *set*: `bgp`, `ospf` and `babel` combine in one
+process through the shared-router supervisor. The flag is repeatable
+and each value may carry a comma-separated list
+(`--protocol bgp --protocol ospf` ≡ `--protocol bgp,ospf`); the TOML
+equivalents are the top-level `protocol = "bgp,ospf"` string and the
+`protocols = ["bgp", "ospf"]` array. A single name keeps the classic
+dedicated-daemon path unchanged.
+
+One process then runs one engine thread per protocol against **one
+`DefaultRouter`**: the engines share the Loc-RIB (routes learned by
+any engine are visible to all, per the FRR admin-distance order BGP
+20 < OSPF 110 < Babel 120, with withdrawal fallback between
+contributions), one running flag (SIGTERM stops everything), one
+ticker and one runtime API socket (`status`, `sessions`, `routes`,
+`reload` cover all engines; OSPF registers its status view into the
+shared registry). Cross-protocol advertisement into BGP is opt-in
+only — OSPF/Babel routes never leak into BGP advertisements without a
+redistribution pipe (see `lr-router`'s `RedistributionPipe`).
+`bmp` and `ldp` stay standalone-only: combining them fails closed at
+startup.
+
+Startup is gated: each engine binds its sockets (OSPF raw sockets, the
+BGP :179 listener, the Babel UDP pair) and reports readiness; the
+supervisor then drops privileges (`--user`), creates the API socket as
+the reduced user and releases the engines. A startup failure in any
+engine aborts the whole combination with that engine's exit code, and
+an engine dying at runtime stops the remaining engines gracefully.
+
 ### Daemon flag reference (other protocols)
 
-`--protocol PROTO` selects the protocol (`bgp` default). Each
-protocol has its own sub-flags:
+`--protocol PROTO` selects the protocol (`bgp` default, or a
+combination like `bgp,ospf` — see above). Each protocol has its own
+sub-flags:
 
 | Protocol | Flag | TOML | Default | Notes |
 | --- | --- | --- | --- | --- |

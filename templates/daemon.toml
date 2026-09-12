@@ -9,6 +9,15 @@
 # Every [bgp] global below doubles as the default each [[peer]] inherits
 # unless it sets its own value.
 
+# Multi-protocol combinations (rc.3): bgp, ospf and babel can run in one
+# process sharing one Loc-RIB. Either the string form (mirrors the CLI):
+#   protocol = "bgp,ospf"
+# or the array form:
+#   protocols = ["bgp", "ospf"]
+# Cross-protocol advertisement into BGP stays opt-in (redistribution
+# pipes); bmp and ldp cannot combine. A single name (or omitting the
+# key entirely) keeps the classic single-protocol daemon.
+
 [bgp]
 local_as = 64512
 peer_as = 64513

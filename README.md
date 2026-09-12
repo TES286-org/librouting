@@ -164,6 +164,37 @@ unshare -Urn lr-daemon --protocol ospf --router-id 1.1.1.1 \
 # → daemon: route installed 10.99.3.0/24 via (none)
 ```
 
+**Multi-protocol mode (rc.3).** `--protocol` accepts a set: BGP, OSPF
+(v2 or v3) and Babel run together in one process through the
+multi-protocol supervisor — one shared Loc-RIB, one running flag, one
+ticker, one runtime API socket, one thread per engine. The flag is
+repeatable and comma-separated (`--protocol bgp,ospf` ==
+`--protocol bgp --protocol ospf`); the TOML equivalents are
+`protocol = "bgp,ospf"` and `protocols = ["bgp", "ospf"]`. Routes
+learned by any engine are visible to all of them (and to `status` /
+`routes` / `sessions` on the API socket) with the full preference
+order — a prefix learned by both BGP and OSPF prefers BGP (admin
+distance 20 < 110), and a withdrawal from one side falls back to the
+other. Cross-protocol *advertisement* is never implicit: OSPF and
+Babel routes do not leak into BGP advertisements (FRR `redistribute` /
+BIRD `pipe` semantics — redistribution stays opt-in through the
+router's redistribution pipes). `bmp` and `ldp` cannot combine (fail
+closed). Startup is gated: every engine binds its sockets first, then
+the supervisor drops privileges and creates the API socket, then the
+engines run; a startup failure in any engine aborts the whole
+combination. Verified against BIRD 2 running ospf + bgp in one
+process: `tests/interop/multi_protocol.sh`.
+
+```bash
+unshare -Urn lr-daemon --protocol bgp,ospf --router-id 1.1.1.1 \
+                       --local-as 64512 --peer-as 64513 \
+                       --listen 10.99.1.1:179 --local-address 10.99.1.1 \
+                       --ospf-interface veth0 --network 198.51.100.0/24
+# → daemon: 2 engine(s) running
+# → daemon: ospf neighbor 2.2.2.2 Full (area 0.0.0.0)
+# → daemon: session #3 → Established
+```
+
 **LDP mode.** `--protocol ldp` runs the reference daemon as an MPLS
 LSR (RFC 5036): a UDP socket on port 646 joined to the all-routers
 group (224.0.0.2) per configured interface originates link Hellos

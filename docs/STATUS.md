@@ -356,3 +356,37 @@ the state, that file tracks the how and why.
    matrix to use `macos-14` (Apple Silicon) for the Intel macOS
    cross-compile (the `macos-13` Intel runner was retired by
    GitHub Actions and was stuck queued on the first release run).
+7. **Phase 8 — v1.0.0-rc.3 multi-protocol daemon** — landed: one
+   `lr-daemon` process now runs a combination of BGP, OSPF (v2/v3)
+   and Babel through a shared-router supervisor (`daemon_multi.rs`).
+   `--protocol` became a set (repeatable + comma-separated; TOML
+   `protocol = "a,b"` / `protocols = ["a","b"]`). The engines take an
+   `Option<EngineHost>`: standalone keeps the classic path bit-for-bit
+   (own router, ticker, API socket, privilege drop), embedded shares
+   the supervisor's plumbing (one `DefaultRouter` = one shared
+   Loc-RIB, one running flag, one ticker, one API socket, one thread
+   per engine, per-engine startup gates between the socket binds and
+   the privilege drop). Signal dispatch became supervised: the
+   supervisor is the sole signal consumer, so connector threads and
+   session pumps cannot steal SIGTERM from it. `lr-router` gained the
+   cross-protocol Loc-RIB merge the shared router exposed as missing:
+   protocol-direct contributions (OSPF/Babel runtime deltas) are
+   tracked in a `direct_rib` map, chained into `reselect` (a BGP
+   re-ranking can no longer evict them; a withdrawal falls back to
+   the surviving protocol's contribution), keys with BGP-side
+   candidates rank through the full preference order (BGP 20 < OSPF
+   110 < Babel 120), and the BGP export path filters non-BGP routes so
+   cross-protocol advertisement stays opt-in through redistribution
+   pipes (FRR `redistribute` / BIRD `pipe` semantics). Direct installs
+   also feed `redistribute_route` now, so Ospf/Babel to BGP pipes see
+   protocol-direct sources. bmp/ldp combinations fail closed; a
+   startup failure aborts the whole combination. The Babel main loop's
+   busy-spin (a full core at idle) was fixed with a 10 ms idle sleep.
+   Coverage: 5 new daemon-config unit tests, 3 new lr-router
+   merge/pipe unit tests, 4 new lr-cli e2e tests, and the
+   `tests/interop/multi_protocol.sh` lab (lr `--protocol bgp,ospf`
+   versus one BIRD 2 process running ospf + bgp: Full adjacency +
+   established BGP in both processes, the shared prefix prefers the
+   BGP path in lr's merged RIB, no OSPF route leaks into lr's BGP
+   advertisements, graceful whole-combination shutdown). Verified
+   against BIRD 2.17.5 locally.

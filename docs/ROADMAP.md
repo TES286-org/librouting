@@ -1724,3 +1724,66 @@ v1.0.0-rc.1 pre-release freezes the API surface so the next
 implementer can land the E-LSA codecs (slice 1 of the design doc)
 as a minor version bump (1.1.0) without breaking existing
 embedders.
+
+## Phase 8 — v1.0.0-rc.3 multi-protocol daemon
+
+**Goal:** one `lr-daemon` process runs a combination of BGP, OSPF
+(v2/v3) and Babel (`--protocol bgp,ospf,babel`).
+
+**Design — shared-router supervisor.** The supervisor
+(`crates/lr-cli/src/daemon_multi.rs`) owns the process-wide plumbing
+exactly once: one `DefaultRouter` (the shared Loc-RIB), one running
+flag, one ticker, one runtime API socket, one signal consumer. Each
+engine (the same `run_bgp_daemon` / `run_ospf_daemon` /
+`run_ospf3_daemon` / `run_babel_daemon` code paths) takes an
+`Option<EngineHost>`: `None` is the classic standalone daemon
+(unchanged behaviour), `Some(host)` plugs it into the supervisor —
+router, running flag and live-session counter come from the host, and
+the engine skips its own runtime, API socket, ticker and privilege
+drop. Startup is gated: every engine binds its sockets (OSPF raw
+sockets, the BGP :179 listener, the Babel UDP pair), reports `Started`
+through its channel and blocks on a `StartGate` (Mutex + Condvar, so
+a failing engine cannot wedge its siblings); the supervisor waits for
+all reports, then drops privileges and creates the management socket
+as the reduced user, then releases the gates. A startup failure in
+any engine aborts the combination with that engine's exit code; an
+engine dying at runtime stops the remaining engines gracefully (a
+combination that silently lost one protocol is not a running
+combination).
+
+**Signal ownership.** `take_pending` is a single-consumer atomic
+swap, and the BGP engine's connector threads and session pumps all
+call `dispatch_signals`. The supervisor marks dispatch supervised
+(`signal::set_supervised`); engine-side dispatch becomes a no-op, so
+no thread can steal SIGTERM/SIGHUP from the supervisor.
+
+**Cross-protocol RIB semantics** (in `lr-router`): the shared Loc-RIB
+merges contributions by the FRR admin-distance order (BGP 20 < OSPF
+110 < Babel 120) with withdrawal fallback — protocol-direct routes
+(OSPF/Babel runtime deltas, tracked in a `direct_rib` map) are chained
+into `reselect`, so a BGP re-ranking never evicts them and a
+withdrawal from either side falls back to the other's contribution.
+Cross-protocol advertisement into BGP is opt-in only: OSPF/Babel
+routes never enter BGP advertisements without a redistribution pipe
+(FRR `redistribute` / BIRD `pipe` semantics). `bmp` and `ldp` stay
+standalone-only (fail closed at dispatch).
+
+**Coverage:**
+- unit: `daemon_config` protocol-set parsing (5 tests), `lr-router`
+  cross-protocol merge / no-leak / pipe-for-direct-routes (3 tests)
+- e2e: `crates/lr-cli/tests/daemon_multi_protocol.rs` (4 tests —
+  bgp,babel combination with a real peer, startup-failure abort,
+  fail-closed combos, TOML array selection)
+- interop: `tests/interop/multi_protocol.sh` — lr `--protocol
+  bgp,ospf` versus one BIRD 2 process running ospf + bgp over a veth
+  pair (Full adjacency + established BGP in both processes, the
+  shared prefix prefers the BGP path, no OSPF route leaks into BGP
+  advertisements, graceful shutdown)
+- also fixed the pre-existing Babel main-loop busy-spin (10 ms idle
+  sleep)
+
+**Landed:** workspace version bumped to `1.0.0-rc.3`; README,
+`docs/lr-cli.md`, `docs/STATUS.md`, `templates/daemon.toml` and the
+CI interop matrix updated. Bindings (go/python/c/c++) wrap the
+library API, which is unchanged in rc.3 (all changes are daemon-layer
+or `lr-router` internals) — no binding regeneration needed.

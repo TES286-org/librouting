@@ -22,7 +22,7 @@ members = [
 ]
 
 [workspace.package]
-version = "1.0.0-rc.2"
+version = "1.0.0-rc.3"
 edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
@@ -34,22 +34,22 @@ keywords = ["bgp", "ospf", "babel", "routing", "network"]
 categories = ["network-programming", "parser-implementations", "no-std"]
 
 [workspace.dependencies]
-lr-core = { path = "crates/lr-core", version = "1.0.0-rc.2" }
-lr-bgp = { path = "crates/lr-bgp", version = "1.0.0-rc.2" }
-lr-ospf = { path = "crates/lr-ospf", version = "1.0.0-rc.2" }
-lr-babel = { path = "crates/lr-babel", version = "1.0.0-rc.2" }
-lr-rib = { path = "crates/lr-rib", version = "1.0.0-rc.2" }
-lr-policy = { path = "crates/lr-policy", version = "1.0.0-rc.2" }
-lr-router = { path = "crates/lr-router", version = "1.0.0-rc.2" }
-lr-bfd = { path = "crates/lr-bfd", version = "1.0.0-rc.2" }
-lr-bmp = { path = "crates/lr-bmp", version = "1.0.0-rc.2" }
-lr-mrt = { path = "crates/lr-mrt", version = "1.0.0-rc.2" }
-lr-damping = { path = "crates/lr-damping", version = "1.0.0-rc.2" }
-lr-osroute = { path = "crates/lr-osroute", version = "1.0.0-rc.2" }
-lr-mpls = { path = "crates/lr-mpls", version = "1.0.0-rc.2" }
-lr-srv6 = { path = "crates/lr-srv6", version = "1.0.0-rc.2" }
-lr-ldp = { path = "crates/lr-ldp", version = "1.0.0-rc.2" }
-lr-ffi = { path = "crates/lr-ffi", version = "1.0.0-rc.2" }
+lr-core = { path = "crates/lr-core", version = "1.0.0-rc.3" }
+lr-bgp = { path = "crates/lr-bgp", version = "1.0.0-rc.3" }
+lr-ospf = { path = "crates/lr-ospf", version = "1.0.0-rc.3" }
+lr-babel = { path = "crates/lr-babel", version = "1.0.0-rc.3" }
+lr-rib = { path = "crates/lr-rib", version = "1.0.0-rc.3" }
+lr-policy = { path = "crates/lr-policy", version = "1.0.0-rc.3" }
+lr-router = { path = "crates/lr-router", version = "1.0.0-rc.3" }
+lr-bfd = { path = "crates/lr-bfd", version = "1.0.0-rc.3" }
+lr-bmp = { path = "crates/lr-bmp", version = "1.0.0-rc.3" }
+lr-mrt = { path = "crates/lr-mrt", version = "1.0.0-rc.3" }
+lr-damping = { path = "crates/lr-damping", version = "1.0.0-rc.3" }
+lr-osroute = { path = "crates/lr-osroute", version = "1.0.0-rc.3" }
+lr-mpls = { path = "crates/lr-mpls", version = "1.0.0-rc.3" }
+lr-srv6 = { path = "crates/lr-srv6", version = "1.0.0-rc.3" }
+lr-ldp = { path = "crates/lr-ldp", version = "1.0.0-rc.3" }
+lr-ffi = { path = "crates/lr-ffi", version = "1.0.0-rc.3" }
 
 bytes = "1"
 socket2 = "0.5"
