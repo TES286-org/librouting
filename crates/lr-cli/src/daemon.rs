@@ -147,7 +147,10 @@ fn print_usage() {
          --bfd-min-tx-ms MS       BFD transmit interval (default 100)\n  \
          --bfd-min-rx-ms MS       BFD receive interval (default 100)\n  \
          --bfd-multiplier N       BFD detection multiplier (default 3)\n  \
-         --protocol PROTO         bgp (default) | babel | ospf | bmp | ldp\n  \
+         --protocol PROTO         One protocol or a set (repeatable, comma-\n  \
+                                  separated): bgp (default) | babel | ospf |\n  \
+                                  bmp | ldp. bgp, ospf and babel combine in\n  \
+                                  one process (--protocol bgp,ospf,babel)\n  \
          --babel-group ADDR       Babel multicast group (ff02::1:6 v6, 224.0.0.111 v4)\n  \
          --babel-port PORT        Babel UDP port (6696)\n  \
          --babel-key SECRET       RFC 8967 MAC key (repeatable; one MAC per\n  \

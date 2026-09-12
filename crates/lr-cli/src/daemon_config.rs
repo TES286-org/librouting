@@ -390,7 +390,12 @@ pub(crate) struct DaemonConfig {
     pub bfd_min_rx_ms: u32,
     /// BFD detection multiplier (packets lost before Down).
     pub bfd_multiplier: u8,
-    /// Protocol to run: "bgp" (default), "babel" or "ospf".
+    /// Protocol(s) to run, as a comma-separated list: "bgp" (the
+    /// default), "babel", "ospf", "bmp", "ldp" or a combination
+    /// like "bgp,ospf". `--protocol` is repeatable and each value may
+    /// itself carry several comma-separated names; the TOML
+    /// equivalents are `protocol = "bgp,ospf"` and
+    /// `protocols = ["bgp", "ospf"]`. See [`DaemonConfig::protocol_set`].
     pub protocol: String,
     /// Babel multicast group address (default: ff02::1:6).
     pub babel_group: Option<String>,
@@ -709,6 +714,40 @@ impl DaemonConfig {
         }
     }
 
+    /// The protocol set this daemon runs (rc.3): the comma-separated
+    /// [`Self::protocol`] string splits into an order-preserving,
+    /// duplicate-free list of names. At least one name always comes
+    /// out (an empty or all-comma value falls back to `bgp`, matching
+    /// the historical default).
+    ///
+    /// Combinations run in one process through the multi-protocol
+    /// supervisor (`bgp,ospf`, `bgp,babel`, `ospf,babel`, …); a single
+    /// name takes the classic dedicated daemon path. Name validation
+    /// is fail-closed and lives with the dispatcher so every entry
+    /// point (CLI, TOML, reload diagnostics) shares one message.
+    pub fn protocol_set(&self) -> Vec<String> {
+        let mut set: Vec<String> = Vec::new();
+        for name in self
+            .protocol
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            if !set.iter().any(|seen| seen == name) {
+                set.push(name.to_string());
+            }
+        }
+        if set.is_empty() {
+            set.push("bgp".to_string());
+        }
+        set
+    }
+
+    /// True when the protocol set includes `name`.
+    pub fn runs_protocol(&self, name: &str) -> bool {
+        self.protocol_set().iter().any(|p| p == name)
+    }
+
     /// Apply the legacy-single-peer synthesis after all inputs (CLI +
     /// TOML) are merged: with no explicit peers, the historical
     /// `--peer` / `bgp.peer_addr` (or a bare `--listen`) maps onto one
@@ -777,9 +816,9 @@ impl DaemonConfig {
         {
             return Ok(());
         }
-        if self.protocol != "ospf" {
+        if !self.runs_protocol("ospf") {
             self.warnings.push(format!(
-                "OSPF tables present but --protocol is '{}' (ignored)",
+                "OSPF tables present but the protocol set is '{}' (ignored)",
                 self.protocol
             ));
             return Ok(());
@@ -1036,13 +1075,13 @@ impl DaemonConfig {
             && self.ldp_targeted.is_empty()
             && self.ldp_binds.is_empty()
             && self.ldp_transport.is_none()
-            && self.protocol != "ldp"
+            && !self.runs_protocol("ldp")
         {
             return Ok(());
         }
-        if self.protocol != "ldp" {
+        if !self.runs_protocol("ldp") {
             self.warnings.push(format!(
-                "LDP tables present but --protocol is '{}' (ignored)",
+                "LDP tables present but the protocol set is '{}' (ignored)",
                 self.protocol
             ));
             return Ok(());
@@ -1540,6 +1579,32 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
+            // rc.3 multi-protocol selection. Top-level keys: the
+            // string form mirrors the CLI (`protocol = "bgp,ospf"`),
+            // the array form reads better in operator configs
+            // (`protocols = ["bgp", "ospf"]`). Like every other
+            // overlapping key they override the CLI value. Names are
+            // validated fail-closed by the dispatcher, not here, so
+            // the reload diagnostics name the same error.
+            "protocol" => {
+                if value.is_empty() {
+                    return Err(format!(
+                        "line {}: an empty protocol value needs at least one name",
+                        lineno + 1
+                    ));
+                }
+                cfg.protocol = value.to_string();
+            }
+            "protocols" => {
+                let list = parse_str_array(value);
+                if list.is_empty() {
+                    return Err(format!(
+                        "line {}: protocols = [...] needs at least one name",
+                        lineno + 1
+                    ));
+                }
+                cfg.protocol = list.join(",");
+            }
             "user" => cfg.user = Some(value.to_string()),
             "group" => cfg.group = Some(value.to_string()),
             "api_socket" => cfg.api_socket = Some(value.to_string()),
@@ -2309,6 +2374,13 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
     let mut cfg = DaemonConfig::with_defaults();
     let mut config_path: Option<String> = None;
     let mut config_dialect: Option<String> = None;
+    // rc.3 multi-protocol: `--protocol` is repeatable and every value
+    // may carry a comma-separated list (`--protocol bgp --protocol
+    // ospf` ≡ `--protocol bgp,ospf`). The flags accumulate here and
+    // merge into `cfg.protocol` below, before the config file load —
+    // so a TOML `protocol`/`protocols` key still overrides the CLI,
+    // exactly like every other overlapping key.
+    let mut protocol_flags: Vec<String> = Vec::new();
     let mut i = 1;
     while i < args.len() {
         let a = args[i].as_str();
@@ -2546,7 +2618,7 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 i += 2;
             }
             "--protocol" if i + 1 < args.len() => {
-                cfg.protocol = args[i + 1].clone();
+                protocol_flags.push(args[i + 1].clone());
                 i += 2;
             }
             "--babel-group" if i + 1 < args.len() => {
@@ -2776,6 +2848,9 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 return Err(ExitCode::from(2));
             }
         }
+    }
+    if !protocol_flags.is_empty() {
+        cfg.protocol = protocol_flags.join(",");
     }
     if let Some(path) = config_path {
         let text = std::fs::read_to_string(&path).map_err(|e| {
@@ -3391,7 +3466,80 @@ mod tests {
         assert!(
             cfg.warnings
                 .iter()
-                .any(|w| w.contains("OSPF tables present but --protocol")),
+                .any(|w| w.contains("OSPF tables present but the protocol set")),
+            "{:?}",
+            cfg.warnings
+        );
+    }
+
+    // ---- rc.3 multi-protocol protocol set ----
+
+    #[test]
+    fn protocol_set_splits_and_dedupes_in_order() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "bgp,ospf,bgp, babel".to_string();
+        assert_eq!(
+            cfg.protocol_set(),
+            ["bgp".to_string(), "ospf".to_string(), "babel".to_string()].as_slice()
+        );
+        assert!(cfg.runs_protocol("ospf"));
+        assert!(!cfg.runs_protocol("ldp"));
+    }
+
+    #[test]
+    fn protocol_set_empty_falls_back_to_bgp() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = " , ,".to_string();
+        assert_eq!(cfg.protocol_set(), ["bgp".to_string()].as_slice());
+        // The historical default survives untouched.
+        let plain = DaemonConfig::with_defaults();
+        assert_eq!(plain.protocol_set(), ["bgp".to_string()].as_slice());
+    }
+
+    #[test]
+    fn toml_protocol_and_protocols_keys_parse() {
+        // The string form mirrors the CLI: one comma-separated value.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "bgp".to_string();
+        parse_toml_subset("protocol = \"bgp,ospf\"\n", &mut cfg).unwrap();
+        assert_eq!(cfg.protocol, "bgp,ospf");
+        assert_eq!(cfg.protocol_set().len(), 2);
+
+        // The array form reads better in operator configs.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("protocols = [\"babel\", \"ospf\"]\n", &mut cfg).unwrap();
+        assert_eq!(cfg.protocol, "babel,ospf");
+        assert_eq!(
+            cfg.protocol_set(),
+            ["babel".to_string(), "ospf".to_string()].as_slice()
+        );
+    }
+
+    #[test]
+    fn toml_empty_protocol_keys_fail_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("protocol = \"\"\n", &mut cfg)
+            .expect_err("empty protocol value must fail");
+        assert!(err.contains("empty protocol value"), "{err}");
+
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("protocols = []\n", &mut cfg)
+            .expect_err("empty protocols list must fail");
+        assert!(err.contains("needs at least one name"), "{err}");
+    }
+
+    #[test]
+    fn ospf_tables_with_multi_protocol_set_do_not_warn() {
+        // An OSPF table is honoured (not warned about) as soon as the
+        // protocol set includes ospf — including combinations.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "bgp,ospf".to_string();
+        parse_toml_subset("[[ospf.area]]\nid = 0\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert!(
+            !cfg.warnings
+                .iter()
+                .any(|w| w.contains("OSPF tables present")),
             "{:?}",
             cfg.warnings
         );
@@ -3600,7 +3748,7 @@ mod tests {
         assert!(
             cfg.warnings
                 .iter()
-                .any(|w| w.contains("LDP tables present but --protocol")),
+                .any(|w| w.contains("LDP tables present but the protocol set")),
             "{:?}",
             cfg.warnings
         );
