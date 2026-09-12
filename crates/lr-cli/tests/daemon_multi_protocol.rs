@@ -92,7 +92,9 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
 }
 
 /// One round trip on the runtime API socket: send a command, collect
-/// the reply bytes until a short idle silence.
+/// the reply bytes until a short idle silence. (Linux-only callers —
+/// the peer-session test this serves is loopback-alias gated.)
+#[cfg(target_os = "linux")]
 fn api_ask(socket: &std::path::Path, cmd: &str) -> String {
     let mut conn = UnixStream::connect(socket).expect("connect to api socket");
     conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
