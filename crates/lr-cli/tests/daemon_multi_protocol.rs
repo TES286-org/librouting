@@ -19,7 +19,10 @@
 
 #![cfg(unix)]
 
+// Read/Write/UnixStream serve the Linux-gated api_ask helper only.
+#[cfg(target_os = "linux")]
 use std::io::{Read, Write};
+#[cfg(target_os = "linux")]
 use std::os::unix::net::UnixStream;
 use std::process::{Child, Command, Stdio};
 use std::thread;
