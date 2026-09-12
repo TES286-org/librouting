@@ -1026,6 +1026,14 @@ pub struct DefaultRouter {
     /// decision process. When the source route disappears, the copy is
     /// dropped via `unredistribute_route`.
     redistributed_bgp: BTreeMap<RouteKey, Route>,
+    /// Protocol-direct Loc-RIB contributions (OSPF/Babel runtimes, rc.3):
+    /// routes installed through `apply_runtime_delta` without passing
+    /// through the Adj-RIB-In pipeline. Keyed like
+    /// [`Self::redistributed_bgp`]; consulted by `reselect` so a BGP
+    /// re-ranking of a shared key never evicts them, and by the export
+    /// filter so they never leak into BGP advertisements (redistribution
+    /// into BGP stays opt-in through pipes).
+    direct_rib: BTreeMap<RouteKey, Route>,
     /// Optional BMP (RFC 7854) sink: when set, the router mirrors
     /// peer state changes and route events to this closure as encoded
     /// BMP messages. The embedder connects the closure to a TCP
@@ -1146,6 +1154,7 @@ impl Default for DefaultRouter {
             collision_meta: BTreeMap::new(),
             pipes: Vec::new(),
             redistributed_bgp: BTreeMap::new(),
+            direct_rib: BTreeMap::new(),
             bmp_sink: None,
             aggregates: BTreeSet::new(),
             ebgp_requires_policy: false,
@@ -2588,6 +2597,7 @@ impl DefaultRouter {
             .filter(|r| &r.key == key)
             .cloned()
             .chain(self.originated.values().filter(|r| r.key == *key).cloned())
+            .chain(self.direct_rib.values().filter(|r| r.key == *key).cloned())
             .collect();
 
         let ranked: Vec<Route> = if candidates.is_empty() {
@@ -2758,6 +2768,14 @@ impl DefaultRouter {
         let mut desired: Vec<Route> = Vec::new();
         if add_path_tx && !rfc8212_deny_export {
             for (slot, route) in ranked.iter().enumerate() {
+                if route.protocol != Protocol::Bgp {
+                    // rc.3 shared RIB: protocol-direct contributions
+                    // (OSPF, Babel) never enter BGP advertisements —
+                    // cross-protocol export stays opt-in through
+                    // redistribution pipes (FRR `redistribute` / BIRD
+                    // `pipe` semantics).
+                    continue;
+                }
                 if route.origin.peer == session {
                     continue; // split horizon, per path
                 }
@@ -2772,7 +2790,8 @@ impl DefaultRouter {
                 desired.push(candidate);
             }
         } else if let Some(best) = ranked.first() {
-            if best.origin.peer != session && !rfc8212_deny_export {
+            if best.protocol == Protocol::Bgp && best.origin.peer != session && !rfc8212_deny_export
+            {
                 let mut candidate = best.clone();
                 candidate.path_id = 0;
                 if !matches!(
@@ -4426,14 +4445,58 @@ impl DefaultRouter {
 
     /// Apply one protocol-runtime delta (installed/withdrawn routes) to
     /// Loc-RIB and emit the corresponding events.
+    ///
+    /// rc.3 shared RIB: the OSPF/Babel runtimes install *protocol-direct*
+    /// routes that never passed through the Adj-RIB-In pipeline. When the
+    /// key also carries BGP candidates (Adj-RIB-In paths or a local
+    /// origination), the change goes through the merged decision process
+    /// so the best path falls out of the full preference order (BGP 20 <
+    /// OSPF 110 < Babel 120) and a withdrawal from either side falls back
+    /// to the other's contribution. Keys with no BGP side keep the
+    /// historical direct-install behaviour (single-path `install` + event)
+    /// — exactly what a single-protocol OSPF/Babel daemon sees today.
     fn apply_runtime_delta(&mut self, delta: RuntimeDelta) {
         for route in delta.installed {
-            self.loc_rib.install(route.clone());
-            self.pending_events.push(RouterEvent::RouteInstalled(route));
+            let key = route.key.clone();
+            self.direct_rib.insert(key.clone(), route.clone());
+            let bgp_side = self.adj_rib_in.iter_all().any(|r| r.key == key)
+                || self.originated.contains_key(&key)
+                || self.redistributed_bgp.contains_key(&key);
+            if bgp_side {
+                self.reselect(&key);
+            } else {
+                self.loc_rib.install(route.clone());
+                self.pending_events
+                    .push(RouterEvent::RouteInstalled(route.clone()));
+                // Opt-in redistribution still sees the new direct best:
+                // a BGP-side candidate reaches the same call through
+                // apply_selection, and the direct path must not skip it
+                // (an OSPF/Babel-learned route with an Ospf/Babel → BGP
+                // pipe re-originates into BGP exactly like a BGP-side
+                // route would).
+                self.redistribute_route(&route);
+            }
         }
         for key in delta.withdrawn {
-            self.loc_rib.uninstall(&key);
-            self.pending_events.push(RouterEvent::RouteWithdrawn(key));
+            if let Some(withdrawn) = self.direct_rib.remove(&key) {
+                // A pipe copy this route sourced goes with it; a copy
+                // sourced from a different protocol's contribution to
+                // the same key survives (its source is still alive).
+                let sourced = self
+                    .redistributed_bgp
+                    .get(&key)
+                    .is_some_and(|copy| copy.origin.peer == withdrawn.origin.peer);
+                if sourced {
+                    self.unredistribute_route(&key);
+                }
+                // The direct contribution is gone; the merged decision
+                // process restores a surviving BGP/originated candidate
+                // (or uninstalls the key when none is left).
+                self.reselect(&key);
+            } else {
+                self.loc_rib.uninstall(&key);
+                self.pending_events.push(RouterEvent::RouteWithdrawn(key));
+            }
         }
     }
 
@@ -10701,6 +10764,210 @@ mod tests {
         assert!(
             !r.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
             "an unsupported-algorithm locator never installs"
+        );
+    }
+
+    // ===== rc.3 shared Loc-RIB: BGP + protocol-direct contributions =====
+
+    /// The mixed-protocol test bed: router `a` runs one OSPFv2 area and
+    /// one established eBGP session toward `b`, so the same prefix can
+    /// arrive from both planes into one Loc-RIB.
+    fn mixed_pair() -> (
+        DefaultRouter,
+        SessionHandle,
+        SessionHandle,
+        DefaultRouter,
+        SessionHandle,
+    ) {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let ospf = a
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(0x01010101), 0))
+            .unwrap();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0),
+            )
+            .unwrap();
+        establish(&mut a, a_session, &mut b, b_session);
+        (a, ospf, a_session, b, b_session)
+    }
+
+    /// Feed the area-0 LSDB pair that makes 10.10.10.0/24 reachable via
+    /// neighbour 2.2.2.2 (numbered p2p link with its interface address,
+    /// stub link metric 10) → one OSPF-direct route with a real next hop.
+    fn neighbour_lsa() -> Lsa {
+        router_lsa(
+            0x02020202,
+            vec![
+                (0x01010101, 0x0b0b0b01, P2P, 5),
+                (0x0a0a0a00, 0xffff_ff00, STUB, 10),
+            ],
+        )
+    }
+
+    fn feed_direct_ospf_route(a: &mut DefaultRouter, ospf: SessionHandle) {
+        let ours = router_lsa(0x01010101, vec![(0x02020202, 0x0b0b0b01, P2P, 5)]);
+        let r2 = neighbour_lsa();
+        a.feed_input(ospf, &ospf_lsu_bytes(0x02020202, 0, vec![ours, r2]))
+            .unwrap();
+    }
+
+    /// Flush 2.2.2.2's Router-LSA with a MaxAge instance → the OSPF
+    /// route withdraws.
+    fn flush_direct_ospf_route(a: &mut DefaultRouter, ospf: SessionHandle) {
+        let mut r2 = neighbour_lsa();
+        r2.header.ls_age = 3600;
+        r2.header.ls_sequence_number += 1;
+        a.feed_input(ospf, &ospf_lsu_bytes(0x02020202, 0, vec![r2]))
+            .unwrap();
+    }
+
+    #[test]
+    fn mixed_rib_bgp_beats_direct_ospf_and_withdrawals_fall_back() {
+        // The rc.3 multi-protocol RIB: the same prefix learned by OSPF
+        // (admin 110) and BGP (admin 20) must rank BGP first, and a
+        // withdrawal from either side must fall back to the other's
+        // contribution instead of dropping the route.
+        let (mut a, ospf, a_session, mut b, b_session) = mixed_pair();
+        feed_direct_ospf_route(&mut a, ospf);
+        let prefix = Prefix::new_v4([10, 10, 10, 0], 24);
+        let best = a
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("OSPF route installs");
+        assert_eq!(best.protocol, Protocol::Ospfv2);
+
+        // B advertises the same prefix over the established session.
+        let key = b.originate(prefix, Some(IpAddr::V4([192, 0, 2, 10])));
+        let advertisement = b.drain_output(b_session);
+        assert!(!advertisement.is_empty());
+        a.feed_input(a_session, &advertisement).unwrap();
+        let best = a
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("prefix still present after the BGP advertisement");
+        assert_eq!(
+            best.protocol,
+            Protocol::Bgp,
+            "BGP (admin 20) must outrank OSPF (110) for the shared prefix"
+        );
+
+        // B withdraws → the OSPF contribution must come back, not vanish.
+        b.unoriginate(&key);
+        let withdrawal = b.drain_output(b_session);
+        assert!(!withdrawal.is_empty());
+        a.feed_input(a_session, &withdrawal).unwrap();
+        let best = a
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("OSPF route must survive the BGP withdrawal");
+        assert_eq!(best.protocol, Protocol::Ospfv2);
+
+        // OSPF flushes (MaxAge) → nothing is left.
+        flush_direct_ospf_route(&mut a, ospf);
+        assert!(
+            !a.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "route must leave with its last contribution"
+        );
+    }
+
+    #[test]
+    fn direct_ospf_route_is_not_exported_to_bgp_without_a_pipe() {
+        // FRR `redistribute` / BIRD `pipe` semantics: an OSPF-learned
+        // route never leaks into BGP advertisements unless a
+        // redistribution pipe is configured — sharing the Loc-RIB is
+        // not redistribution.
+        let (mut a, ospf, a_session, mut b, b_session) = mixed_pair();
+        feed_direct_ospf_route(&mut a, ospf);
+        let prefix = Prefix::new_v4([10, 10, 10, 0], 24);
+
+        // Whatever a sends toward b (keepalives, nothing else) must not
+        // carry the OSPF route: b must not learn it.
+        let out = a.drain_output(a_session);
+        if !out.is_empty() {
+            b.feed_input(b_session, &out).unwrap();
+        }
+        assert!(
+            !b.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "OSPF route must not leak into BGP without a pipe"
+        );
+
+        // Control: a locally originated network (protocol Bgp) still
+        // exports to the established peer as before.
+        let key = a.originate(prefix, Some(IpAddr::V4([192, 0, 2, 10])));
+        let out = a.drain_output(a_session);
+        assert!(!out.is_empty(), "originated network must advertise");
+        b.feed_input(b_session, &out).unwrap();
+        assert!(
+            b.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "the originated network must reach the peer"
+        );
+        a.unoriginate(&key);
+    }
+
+    #[test]
+    fn pipe_redistributes_direct_ospf_into_bgp() {
+        // The opt-in path: with an Ospfv2 → BGP pipe, an OSPF-learned
+        // route is re-originated into BGP (the copy — admin 20 — takes
+        // the Loc-RIB slot, an UPDATE leaves toward the peer) and the
+        // copy is withdrawn when the OSPF source flushes. Whether the
+        // peer accepts the UPDATE is BGP import policy — v2 intra-area
+        // OSPF routes carry no next hop, so a strict peer may refuse —
+        // the pipe mechanics under test are A's side.
+        let (mut a, ospf, a_session, _b, _b_session) = mixed_pair();
+        a.add_redistribution_pipe(RedistributionPipe::new(Protocol::Ospfv2, Protocol::Bgp));
+        feed_direct_ospf_route(&mut a, ospf);
+        let prefix = Prefix::new_v4([10, 10, 10, 0], 24);
+
+        // The pipe fired: the redistributed copy is the Loc-RIB best.
+        let best = a
+            .rib_snapshot()
+            .into_iter()
+            .find(|rt| rt.key.prefix == prefix)
+            .expect("the redistributed copy installs");
+        assert_eq!(best.protocol, Protocol::Bgp);
+        assert_eq!(
+            best.preference,
+            lr_core::rib::Preference::new(Protocol::Bgp.default_admin_distance(), 15),
+            "the copy inherits the OSPF metric (SPF 15) under the BGP admin distance"
+        );
+        let events = a.poll_events();
+        assert!(
+            events.iter().any(|e| matches!(e, RouterEvent::Log(msg)
+                    if msg.contains("redistribute: 10.10.10.0/24 -> BGP"))),
+            "the redistribute log must fire: {:?}",
+            events
+        );
+        // An UPDATE left the BGP session toward the peer.
+        let out = a.drain_output(a_session);
+        assert!(
+            !out.is_empty(),
+            "the pipe must produce an advertisement toward the peer"
+        );
+
+        // Source flush → the copy goes with it.
+        flush_direct_ospf_route(&mut a, ospf);
+        assert!(
+            !a.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "the redistributed route must withdraw with its source"
+        );
+        let events = a.poll_events();
+        assert!(
+            events.iter().any(|e| matches!(e, RouterEvent::Log(msg)
+                    if msg.contains("redistribute: withdraw 10.10.10.0/24"))),
+            "the withdraw log must fire: {:?}",
+            events
         );
     }
 }
