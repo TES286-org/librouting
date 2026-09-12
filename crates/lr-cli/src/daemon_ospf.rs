@@ -81,6 +81,7 @@ use lr_router::{
 };
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfAreaSpec, OspfIfSpec};
+use crate::daemon_multi::{EngineHost, EngineReport};
 
 /// Default metric of the summary-default injected into stub/NSSA areas
 /// when `stub_metric` is not configured (matches the interface cost
@@ -333,7 +334,11 @@ struct SrRangeConfig {
 }
 
 /// Entry point from `daemon.rs`.
-pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
+pub(super) fn run_ospf_daemon(
+    cfg: &DaemonConfig,
+    rid: RouterId,
+    host: Option<EngineHost>,
+) -> ExitCode {
     if cfg.user.is_some() || cfg.group.is_some() {
         eprintln!(
             "daemon: --user/--group are not supported with --protocol ospf yet \
@@ -379,7 +384,10 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
     let mut daemon = OspfDaemon {
-        router: Arc::new(Mutex::new(DefaultRouter::new())),
+        router: match &host {
+            Some(h) => Arc::clone(&h.runtime.router),
+            None => Arc::new(Mutex::new(DefaultRouter::new())),
+        },
         interfaces,
         neighbors: BTreeMap::new(),
         pending_reorig: BTreeMap::new(),
@@ -601,92 +609,124 @@ pub(super) fn run_ospf_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
     // ---- Signal handling + runtime API + ticker. ----
+    // Signal installs are idempotent; the multi-protocol supervisor
+    // already did them (and owns dispatch — see signal::set_supervised).
     if let Err(sig) = crate::signal::init() {
         eprintln!("daemon: cannot install signal handlers (signal {})", sig);
         return ExitCode::from(1);
     }
-    let running = Arc::new(AtomicBool::new(true));
-    let runtime = Arc::new(crate::Runtime {
-        reload: Arc::new(|| {
-            // OSPF reload is not wired yet (interface set changes need
-            // LSA re-origination + session moves); report it loudly
-            // instead of pretending to apply.
-            vec![
-                "ospf: configuration reload is not supported yet; shutdown still works".to_string(),
-            ]
-        }),
-        router: Arc::clone(&daemon.router),
-        running: Arc::clone(&running),
-        status_lines: {
-            let snapshot = Arc::clone(&daemon.gr_status);
-            let router = Arc::clone(&daemon.router);
-            Arc::new(move || {
-                let mut lines = snapshot.lock().map(|s| s.clone()).unwrap_or_default();
-                // RFC 8665 SR view: SRGBs, adjacency segments and
-                // mapping-server ranges projected from the area LSDBs
-                // (the same data the library exposes through
-                // `DefaultRouter::ospf_sr_databases`).
-                let Ok(router) = router.lock() else {
-                    return lines;
-                };
-                for (area, db) in router.ospf_sr_databases() {
-                    for (rid, srgb) in &db.srgbs {
+    // The OSPF status view (graceful-restart snapshot + SR projection)
+    // serves through whichever runtime API socket exists: the engine's
+    // own when standalone, the supervisor's shared one when embedded.
+    let status_lines = {
+        let snapshot = Arc::clone(&daemon.gr_status);
+        let router = Arc::clone(&daemon.router);
+        Arc::new(move || {
+            let mut lines = snapshot.lock().map(|s| s.clone()).unwrap_or_default();
+            // RFC 8665 SR view: SRGBs, adjacency segments and
+            // mapping-server ranges projected from the area LSDBs
+            // (the same data the library exposes through
+            // `DefaultRouter::ospf_sr_databases`).
+            let Ok(router) = router.lock() else {
+                return lines;
+            };
+            for (area, db) in router.ospf_sr_databases() {
+                for (rid, srgb) in &db.srgbs {
+                    lines.push(format!(
+                        "ospf-sr srgb area={} router={} base={} range={}",
+                        area_label(area),
+                        fmt_rid(*rid),
+                        srgb.srgb_base,
+                        srgb.srgb_range
+                    ));
+                }
+                for segments in db.links.values() {
+                    for seg in segments {
+                        let label = db
+                            .srgbs
+                            .get(&seg.advertising_router)
+                            .and_then(|srgb| seg.sid.remote_label(srgb));
                         lines.push(format!(
-                            "ospf-sr srgb area={} router={} base={} range={}",
-                            area_label(area),
-                            fmt_rid(*rid),
-                            srgb.srgb_base,
-                            srgb.srgb_range
-                        ));
-                    }
-                    for segments in db.links.values() {
-                        for seg in segments {
-                            let label = db
-                                .srgbs
-                                .get(&seg.advertising_router)
-                                .and_then(|srgb| seg.sid.remote_label(srgb));
-                            lines.push(format!(
-                                "ospf-sr adj area={} router={} label={} type={} \
+                            "ospf-sr adj area={} router={} label={} type={} \
                                  link-id={} link-data={}{}",
-                                area_label(area),
-                                fmt_rid(seg.advertising_router),
-                                label.map(|l| l.to_string()).unwrap_or_else(|| "-".into()),
-                                if seg.sid.is_lan() { "lan" } else { "p2p" },
-                                std::net::Ipv4Addr::from(seg.link_id),
-                                std::net::Ipv4Addr::from(seg.link_data),
-                                match (seg.sid.neighbor_id, label) {
-                                    (Some(rid), _) =>
-                                        format!(" neighbor={}", std::net::Ipv4Addr::from(rid)),
-                                    (None, Some(l)) => format!(" via-label={l}"),
-                                    (None, None) => String::new(),
-                                }
-                            ));
-                        }
-                    }
-                    for range in &db.prefix_ranges {
-                        lines.push(format!(
-                            "ospf-sr ms area={} router={} range={}/{} size={} sid={} \
-                             mapping-server=yes",
                             area_label(area),
-                            fmt_rid(range.advertising_router),
-                            std::net::Ipv4Addr::from(range.range.prefix),
-                            range.range.prefix_len,
-                            range.range.range_size,
-                            range.sid.sid
+                            fmt_rid(seg.advertising_router),
+                            label.map(|l| l.to_string()).unwrap_or_else(|| "-".into()),
+                            if seg.sid.is_lan() { "lan" } else { "p2p" },
+                            std::net::Ipv4Addr::from(seg.link_id),
+                            std::net::Ipv4Addr::from(seg.link_data),
+                            match (seg.sid.neighbor_id, label) {
+                                (Some(rid), _) =>
+                                    format!(" neighbor={}", std::net::Ipv4Addr::from(rid)),
+                                (None, Some(l)) => format!(" via-label={l}"),
+                                (None, None) => String::new(),
+                            }
                         ));
                     }
                 }
-                lines
-            })
-        },
-    });
-    if let Err(e) = crate::spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
+                for range in &db.prefix_ranges {
+                    lines.push(format!(
+                        "ospf-sr ms area={} router={} range={}/{} size={} sid={} \
+                             mapping-server=yes",
+                        area_label(area),
+                        fmt_rid(range.advertising_router),
+                        std::net::Ipv4Addr::from(range.range.prefix),
+                        range.range.prefix_len,
+                        range.range.range_size,
+                        range.sid.sid
+                    ));
+                }
+            }
+            lines
+        }) as Arc<dyn Fn() -> Vec<String> + Send + Sync>
+    };
+    // Standalone: own running flag, own runtime, own API socket and
+    // ticker. Embedded: the supervisor's shared runtime, with the OSPF
+    // status view registered into its MultiStatus registry and a
+    // startup gate between the raw-socket binds above and the LSA
+    // origination + main loop below.
+    let runtime = match &host {
+        Some(h) => {
+            h.status.register(Arc::clone(&status_lines));
+            Arc::clone(&h.runtime)
+        }
+        None => Arc::new(crate::Runtime {
+            reload: Arc::new(|| {
+                // OSPF reload is not wired yet (interface set changes need
+                // LSA re-origination + session moves); report it loudly
+                // instead of pretending to apply.
+                vec![
+                    "ospf: configuration reload is not supported yet; shutdown still works"
+                        .to_string(),
+                ]
+            }),
+            router: Arc::clone(&daemon.router),
+            running: Arc::new(AtomicBool::new(true)),
+            status_lines: Arc::clone(&status_lines),
+        }),
+    };
+    let running = Arc::clone(&runtime.running);
+    match &host {
+        None => {
+            if let Err(e) = crate::spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            // The ticker drives tick() (LSA refresh + MaxAge aging) and mirrors
+            // Loc-RIB events into the kernel FIB when asked to.
+            crate::spawn_ticker(&runtime, cfg.install_kernel, Arc::new(AtomicUsize::new(0)));
+        }
+        Some(h) => {
+            // Embedded: every interface's raw socket is bound; report
+            // readiness and wait for the supervisor's release (privilege
+            // drop + API socket happen in between).
+            let _ = h.report.send(EngineReport::Started);
+            if h.gate.wait().is_err() {
+                println!("daemon: ospf engine startup aborted");
+                return ExitCode::SUCCESS;
+            }
+        }
     }
-    // The ticker drives tick() (LSA refresh + MaxAge aging) and mirrors
-    // Loc-RIB events into the kernel FIB when asked to.
-    crate::spawn_ticker(&runtime, cfg.install_kernel, Arc::new(AtomicUsize::new(0)));
 
     // ---- Initial Router-LSA per area. ----
     // RFC 3623 §2 (1): suppressed while graceful-restart recovery is

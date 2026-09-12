@@ -97,6 +97,7 @@ use lr_router::{
 };
 
 use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec};
+use crate::daemon_multi::{EngineHost, EngineReport};
 use crate::daemon_ospf::{
     grace_sequence_base, GRACE_FLOOD_INTERVAL_MS, GRACE_FLOOD_REPEATS, GRACE_PUMP_SLICE_MS,
 };
@@ -423,7 +424,7 @@ impl Srv6Origination {
 }
 
 /// `lr-daemon --protocol ospf` with `[ospf] version = "v3"`.
-pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
+pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -> ExitCode {
     if cfg.ospf_interfaces.is_empty() {
         eprintln!(
             "daemon: --protocol ospf needs at least one interface \
@@ -460,7 +461,10 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
     let mut daemon = Ospf3Daemon {
-        router: Arc::new(Mutex::new(DefaultRouter::new())),
+        router: match &host {
+            Some(h) => Arc::clone(&h.runtime.router),
+            None => Arc::new(Mutex::new(DefaultRouter::new())),
+        },
         interfaces,
         neighbors: BTreeMap::new(),
         pending_reorig: BTreeMap::new(),
@@ -580,46 +584,77 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
     // ---- Signals + runtime API + ticker. ----
+    // Signal installs are idempotent; the multi-protocol supervisor
+    // already did them (and owns dispatch — see signal::set_supervised).
     if let Err(sig) = crate::signal::init() {
         eprintln!("daemon: cannot install signal handlers (signal {})", sig);
         return ExitCode::from(1);
     }
-    let running = Arc::new(std::sync::atomic::AtomicBool::new(true));
-    let runtime = Arc::new(crate::Runtime {
-        reload: Arc::new(|| {
-            vec![
-                "ospf3: configuration reload is not supported yet; shutdown still works"
-                    .to_string(),
-            ]
-        }),
-        router: Arc::clone(&daemon.router),
-        running: Arc::clone(&running),
-        status_lines: {
-            let status = Arc::clone(&daemon.status);
-            let router = Arc::clone(&daemon.router);
-            Arc::new(move || {
-                let mut lines = status.lock().map(|s| s.clone()).unwrap_or_default();
-                if let Ok(router) = router.lock() {
-                    for s in router.session_summaries() {
-                        lines.push(format!(
-                            "ospf3 session #{} kind={} state={}",
-                            s.handle.0, s.kind, s.state
-                        ));
-                    }
+    // The OSPFv3 status view (helper snapshot + session summaries)
+    // serves through whichever runtime API socket exists: the engine's
+    // own when standalone, the supervisor's shared one when embedded.
+    let status_lines = {
+        let status = Arc::clone(&daemon.status);
+        let router = Arc::clone(&daemon.router);
+        Arc::new(move || {
+            let mut lines = status.lock().map(|s| s.clone()).unwrap_or_default();
+            if let Ok(router) = router.lock() {
+                for s in router.session_summaries() {
+                    lines.push(format!(
+                        "ospf3 session #{} kind={} state={}",
+                        s.handle.0, s.kind, s.state
+                    ));
                 }
-                lines
-            })
-        },
-    });
-    if let Err(e) = crate::spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
+            }
+            lines
+        }) as Arc<dyn Fn() -> Vec<String> + Send + Sync>
+    };
+    // Standalone: own running flag, own runtime, own API socket and
+    // ticker. Embedded: the supervisor's shared runtime, with the v3
+    // status view registered into its MultiStatus registry and a
+    // startup gate between the raw-socket binds above and the LSA
+    // origination + main loop below.
+    let runtime = match &host {
+        Some(h) => {
+            h.status.register(Arc::clone(&status_lines));
+            Arc::clone(&h.runtime)
+        }
+        None => Arc::new(crate::Runtime {
+            reload: Arc::new(|| {
+                vec![
+                    "ospf3: configuration reload is not supported yet; shutdown still works"
+                        .to_string(),
+                ]
+            }),
+            router: Arc::clone(&daemon.router),
+            running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+            status_lines: Arc::clone(&status_lines),
+        }),
+    };
+    let running = Arc::clone(&runtime.running);
+    match &host {
+        None => {
+            if let Err(e) = crate::spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            crate::spawn_ticker(
+                &runtime,
+                cfg.install_kernel,
+                Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            );
+        }
+        Some(h) => {
+            // Embedded: every interface's raw socket is bound; report
+            // readiness and wait for the supervisor's release (privilege
+            // drop + API socket happen in between).
+            let _ = h.report.send(EngineReport::Started);
+            if h.gate.wait().is_err() {
+                println!("daemon: ospf3 engine startup aborted");
+                return ExitCode::SUCCESS;
+            }
+        }
     }
-    crate::spawn_ticker(
-        &runtime,
-        cfg.install_kernel,
-        Arc::new(std::sync::atomic::AtomicUsize::new(0)),
-    );
 
     // ---- Initial self-origination per area. ----
     // RFC 5187 §2 (1) (inherited from RFC 3623): suppressed while

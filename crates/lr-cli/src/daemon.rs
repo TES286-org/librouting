@@ -43,6 +43,7 @@ use std::thread;
 use std::time::{Duration, Instant as WallClock};
 
 use core::str::FromStr;
+use daemon_multi::{EngineHost, EngineReport};
 use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
 use lr_core::nlri::NlriFamily;
 use lr_osroute::gtsm::Gtsm;
@@ -56,6 +57,7 @@ mod compat;
 mod daemon_bfd;
 mod daemon_config;
 mod daemon_ldp;
+mod daemon_multi;
 mod daemon_ospf;
 mod daemon_ospf3;
 mod daemon_policy;
@@ -217,22 +219,67 @@ fn main() -> ExitCode {
         eprintln!("error: {}", e);
         return ExitCode::from(2);
     }
-    // Fail closed on a typo'd --protocol instead of silently running BGP.
-    if !matches!(
-        cfg.protocol.as_str(),
-        "bgp" | "babel" | "ospf" | "bmp" | "ldp"
-    ) {
+    // rc.3: the protocol surface is a set. Fail closed on a typo'd or
+    // degenerate value instead of silently running BGP (an all-comma
+    // value names nothing).
+    let protocol_set = cfg.protocol_set();
+    if !cfg.protocol.split(',').any(|name| !name.trim().is_empty()) {
         eprintln!(
             "error: unknown --protocol '{}' (bgp | babel | ospf | bmp | ldp)",
             cfg.protocol
         );
         return ExitCode::from(2);
     }
+    for name in &protocol_set {
+        if !matches!(name.as_str(), "bgp" | "babel" | "ospf" | "bmp" | "ldp") {
+            eprintln!(
+                "error: unknown --protocol '{}' (bgp | babel | ospf | bmp | ldp)",
+                name
+            );
+            return ExitCode::from(2);
+        }
+    }
+    // Multi-protocol combinations (rc.3): bgp, ospf and babel run in
+    // one process through the shared-router supervisor. bmp and ldp
+    // stay standalone-only — fail closed instead of silently ignoring
+    // the combination.
+    if protocol_set.len() > 1 {
+        for name in &protocol_set {
+            if !matches!(name.as_str(), "bgp" | "ospf" | "babel") {
+                eprintln!(
+                    "error: --protocol {} cannot run in a combination \
+                     (only bgp, ospf and babel combine)",
+                    name
+                );
+                return ExitCode::from(2);
+            }
+        }
+        // Every combination includes bgp or ospf, which need the
+        // router-id (Babel alone is a single engine — classic path).
+        if cfg.router_id.is_empty() {
+            eprintln!("error: --router-id is required");
+            print_usage();
+            return ExitCode::from(2);
+        }
+        let rid = match RouterId::from_str(&cfg.router_id) {
+            Ok(r) => r,
+            Err(_) => {
+                eprintln!("error: invalid router-id: {}", cfg.router_id);
+                return ExitCode::from(2);
+            }
+        };
+        if protocol_set.iter().any(|p| p == "bgp") && cfg.local_as == 0 {
+            eprintln!("error: --local-as is required for the bgp engine");
+            print_usage();
+            return ExitCode::from(2);
+        }
+        return daemon_multi::run_multi_daemon(&cfg, rid, &protocol_set);
+    }
     // Babel mode: short-circuit the BGP session setup and run the
     // Babel UDP transport loop instead. Babel derives its router-id from
     // the local address (RFC 8966 §3.3) — --router-id is not used.
-    if cfg.protocol == "babel" {
-        return run_babel_daemon(&cfg);
+    if protocol_set.first().is_some_and(|p| p == "babel") {
+        return run_babel_daemon(&cfg, None);
     }
     if cfg.router_id.is_empty() {
         eprintln!("error: --router-id is required");
@@ -247,18 +294,18 @@ fn main() -> ExitCode {
         }
     };
     // OSPF mode: raw-socket transport, dynamic per-neighbor sessions.
-    if cfg.protocol == "ospf" {
+    if protocol_set.first().is_some_and(|p| p == "ospf") {
         if cfg.ospf_version == "v3" {
-            return daemon_ospf3::run_ospf3_daemon(&cfg, rid);
+            return daemon_ospf3::run_ospf3_daemon(&cfg, rid, None);
         }
-        return daemon_ospf::run_ospf_daemon(&cfg, rid);
+        return daemon_ospf::run_ospf_daemon(&cfg, rid, None);
     }
     // LDP mode: UDP discovery + TCP session transport around LdpEngine.
-    if cfg.protocol == "ldp" {
+    if protocol_set.first().is_some_and(|p| p == "ldp") {
         return daemon_ldp::run_ldp_daemon(&cfg, rid);
     }
     // BMP collector mode: accept monitoring sessions from routers.
-    if cfg.protocol == "bmp" {
+    if protocol_set.first().is_some_and(|p| p == "bmp") {
         return run_bmp_collector(&cfg, rid);
     }
     // BGP additionally needs the local AS.
@@ -280,7 +327,7 @@ fn main() -> ExitCode {
              kernel installs may be denied after the privilege drop"
         );
     }
-    run_bgp_daemon(&cfg, rid)
+    run_bgp_daemon(&cfg, rid, None)
 }
 
 /// One configured BGP peer: its router session(s), transport security
@@ -322,8 +369,19 @@ impl PeerEntry {
     }
 }
 
-fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
-    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+/// Run the BGP engine. `host = None` is the classic standalone
+/// daemon (own router, own running flag, own ticker, own API socket,
+/// own privilege drop); `Some(host)` plugs it into the multi-protocol
+/// supervisor (rc.3) — the supervisor supplies the shared router,
+/// running flag, ticker and API socket, and the engine waits on the
+/// startup gate between its binds and its main loop.
+fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -> ExitCode {
+    // The shared router when embedded (the supervisor created it and
+    // the other engines add their sessions to the same instance).
+    let router = match &host {
+        Some(h) => Arc::clone(&h.runtime.router),
+        None => Arc::new(Mutex::new(DefaultRouter::new())),
+    };
 
     // Optional BMP egress (RFC 7854): mirror Peer Up/Down + Route
     // Monitoring to a monitoring station. The sink is called from
@@ -563,8 +621,13 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     }
 
     // ---- Banner. ----
-    println!("librouting daemon (lr-daemon)");
-    println!("  local AS:    AS{}", cfg.local_as);
+    // The multi-protocol supervisor already printed the process banner
+    // (protocol set, router-id, install, platform); the engine banner
+    // then carries only the BGP-specific lines.
+    if host.is_none() {
+        println!("librouting daemon (lr-daemon)");
+    }
+    println!("  bgp engine: local AS AS{}", cfg.local_as);
     println!("  router-id:   {}", rid);
     println!(
         "  ebgp policy: {}",
@@ -657,8 +720,16 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
 
-    let running = Arc::new(AtomicBool::new(true));
-    let live_sessions = Arc::new(AtomicUsize::new(0));
+    let running = match &host {
+        Some(h) => Arc::clone(&h.runtime.running),
+        None => Arc::new(AtomicBool::new(true)),
+    };
+    // The supervisor's shared ticker waits on this counter at shutdown
+    // when the BGP engine is embedded; standalone owns both sides.
+    let live_sessions = match &host {
+        Some(h) => Arc::clone(&h.live_sessions),
+        None => Arc::new(AtomicUsize::new(0)),
+    };
 
     // ---- BFD fast-fail supervisor (RFC 5880/5881/5883, W1.3). ----
     // One session per `bfd = true` peer; a BFD Down tears the BGP
@@ -729,31 +800,42 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         }
     }
 
-    let runtime = Arc::new(Runtime {
-        reload: Arc::new({
-            let router = Arc::clone(&router);
-            let current_networks = Arc::clone(&current_networks);
-            let config_path = cfg.config_path.clone();
-            let config_dialect = cfg.config_dialect.clone();
-            move || {
-                reload_config(
-                    config_path.as_deref(),
-                    config_dialect.as_deref(),
-                    &router,
-                    &current_networks,
-                )
-            }
+    // ---- Runtime: standalone builds its own (reload over its own
+    // router, empty status lines); an embedded engine shares the
+    // supervisor's runtime — one running flag, one reload closure, one
+    // status registry for the whole combination.
+    let runtime = match &host {
+        Some(h) => Arc::clone(&h.runtime),
+        None => Arc::new(Runtime {
+            reload: Arc::new({
+                let router = Arc::clone(&router);
+                let current_networks = Arc::clone(&current_networks);
+                let config_path = cfg.config_path.clone();
+                let config_dialect = cfg.config_dialect.clone();
+                move || {
+                    reload_config(
+                        config_path.as_deref(),
+                        config_dialect.as_deref(),
+                        &router,
+                        &current_networks,
+                    )
+                }
+            }),
+            router,
+            running: Arc::clone(&running),
+            status_lines: Arc::new(Vec::new),
         }),
-        router,
-        running: Arc::clone(&running),
-        status_lines: Arc::new(Vec::new),
-    });
+    };
 
     // --- Ticker thread: pump the router clock every 50 ms. It is the
     // single consumer of router events — logging and (optional) kernel
     // route installation happen here, never on the I/O threads, so the
     // Loc-RIB event order cannot be shuffled across sessions. ---
-    spawn_ticker(&runtime, cfg.install_kernel, Arc::clone(&live_sessions));
+    // Embedded: the supervisor already spawned one shared ticker (and
+    // fed it our live-session counter via the host).
+    if host.is_none() {
+        spawn_ticker(&runtime, cfg.install_kernel, Arc::clone(&live_sessions));
+    }
 
     // ---- Listener (inbound), if configured. ----
     // Legacy mode (no [[peer]] tables, a single peer): the listener
@@ -816,15 +898,32 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         listener = Some(l);
     }
 
-    // Privileged work is done: drop root before touching any network
-    // input, then create the management socket as the reduced user.
-    if let Err(e) = do_privdrop(cfg) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
-    }
-    if let Err(e) = spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
+    // Privileged work is done (the listener, BFD raw sockets and any
+    // TCP-MD5/GTSM arming happened above). Standalone: drop root, then
+    // create the management socket as the reduced user. Embedded: the
+    // same two steps happen in the supervisor — report readiness and
+    // block on the startup gate so every engine binds before the drop
+    // and no connector dials before the API socket exists.
+    match host {
+        None => {
+            if let Err(e) = do_privdrop(cfg) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            if let Err(e) = spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+        }
+        Some(h) => {
+            let _ = h.report.send(EngineReport::Started);
+            if h.gate.wait().is_err() {
+                // A sibling engine failed startup; the supervisor
+                // already reported it and returns that engine's code.
+                println!("daemon: bgp engine startup aborted");
+                return ExitCode::SUCCESS;
+            }
+        }
     }
 
     // ---- Outbound connectors: one thread per remote peer. ----
@@ -1704,7 +1803,11 @@ fn pump_session(
 /// During shutdown it keeps draining until the live session threads
 /// have flushed their close NOTIFICATIONs, so withdrawal events (and
 /// their kernel route deletions) are not lost.
-fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>) {
+fn spawn_ticker(
+    rt: &Arc<Runtime>,
+    install_kernel: bool,
+    live: Arc<AtomicUsize>,
+) -> thread::JoinHandle<()> {
     let rt = Arc::clone(rt);
     thread::Builder::new()
         .name("lr-ticker".into())
@@ -1744,7 +1847,7 @@ fn spawn_ticker(rt: &Arc<Runtime>, install_kernel: bool, live: Arc<AtomicUsize>)
                 mirror.apply(&events);
             }
         })
-        .expect("spawn ticker thread");
+        .expect("spawn ticker thread")
 }
 
 /// The private `lr-bgp` attribute tag that carries an RFC 8277 label
@@ -2312,7 +2415,10 @@ fn lr_ip(addr: std::net::IpAddr) -> lr_core::addr::IpAddr {
 /// a unicast socket bound to the local address and a multicast socket bound
 /// to the group address. Challenge traffic is unicast to the peer, per
 /// RFC 8967 §4.3.1.1/§4.3.1.2.
-fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
+/// Run the Babel engine. `host = None` is the classic standalone
+/// daemon; `Some(host)` plugs it into the multi-protocol supervisor
+/// (rc.3) — see [`run_bgp_daemon`] for the split.
+fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // ---- local address (IPv6 link-local with %scope, or IPv4) ----
     let local_str = cfg.local_address.as_deref().or(cfg.listen_addr.as_deref());
     let Some(local_str) = local_str else {
@@ -2433,8 +2539,12 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
     };
     println!("daemon: babel listening on {} (group {})", uc_bind, group);
 
-    // Set up the router with a Babel session.
-    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+    // Set up the router with a Babel session. Embedded: the supervisor's
+    // shared router (every engine's sessions live in one instance).
+    let router = match &host {
+        Some(h) => Arc::clone(&h.runtime.router),
+        None => Arc::new(Mutex::new(DefaultRouter::new())),
+    };
     let babel_local = lr_ip(local);
     let sc = SessionConfig::babel(babel_local);
     let h = {
@@ -2468,45 +2578,67 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
         }
     }
 
-    // Signal handling.
+    // Signal handling (idempotent — the multi-protocol supervisor
+    // already installed the handlers; re-registering the same static
+    // handler is harmless).
     if let Err(sig) = signal::init() {
         eprintln!("daemon: cannot install signal handlers (signal {})", sig);
         return ExitCode::from(1);
     }
 
-    let running = Arc::new(AtomicBool::new(true));
-    let runtime = Arc::new(Runtime {
-        reload: Arc::new({
-            let router = Arc::clone(&router);
-            move || reload_config(None, None, &router, &Arc::new(Mutex::new(Vec::new())))
+    // Standalone: own running flag, own runtime, own API socket and
+    // ticker. Embedded: the supervisor's shared runtime (one running
+    // flag, one reload closure, one status registry, one ticker), and
+    // a startup gate between the UDP binds above and the main loop.
+    let runtime = match &host {
+        Some(h) => Arc::clone(&h.runtime),
+        None => Arc::new(Runtime {
+            reload: Arc::new({
+                let router = Arc::clone(&router);
+                move || reload_config(None, None, &router, &Arc::new(Mutex::new(Vec::new())))
+            }),
+            router: Arc::clone(&router),
+            running: Arc::new(AtomicBool::new(true)),
+            status_lines: Arc::new(Vec::new),
         }),
-        router: Arc::clone(&router),
-        running: Arc::clone(&running),
-        status_lines: Arc::new(Vec::new),
-    });
-    if let Err(e) = spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
-        return ExitCode::from(1);
-    }
-
-    // Ticker thread.
-    {
-        let router = Arc::clone(&runtime.router);
-        let running = Arc::clone(&running);
-        thread::spawn(move || {
-            let start = WallClock::now();
-            while running.load(Ordering::Relaxed) {
-                let now_ms = start.elapsed().as_millis() as u64;
-                {
-                    let mut r = router.lock().unwrap();
-                    r.tick(lr_core::time::Instant(now_ms));
-                    for ev in r.poll_events() {
-                        log_event(&ev);
-                    }
-                }
-                thread::sleep(Duration::from_millis(50));
+    };
+    let running = Arc::clone(&runtime.running);
+    match &host {
+        None => {
+            if let Err(e) = spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
             }
-        });
+
+            // Ticker thread.
+            {
+                let router = Arc::clone(&runtime.router);
+                let running = Arc::clone(&running);
+                thread::spawn(move || {
+                    let start = WallClock::now();
+                    while running.load(Ordering::Relaxed) {
+                        let now_ms = start.elapsed().as_millis() as u64;
+                        {
+                            let mut r = router.lock().unwrap();
+                            r.tick(lr_core::time::Instant(now_ms));
+                            for ev in r.poll_events() {
+                                log_event(&ev);
+                            }
+                        }
+                        thread::sleep(Duration::from_millis(50));
+                    }
+                });
+            }
+        }
+        Some(h) => {
+            // Embedded: report the binds, wait for the supervisor's
+            // release (privilege drop + API socket happen in between).
+            let _ = h.report.send(EngineReport::Started);
+            if h.gate.wait().is_err() {
+                println!("daemon: babel engine startup aborted");
+                return ExitCode::SUCCESS;
+            }
+        }
     }
 
     let mc_sock = mc.as_ref();
@@ -2529,17 +2661,25 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
     let babel_router_id = babel_router_id_for(local, boot_bytes);
     let mut babel_seqno: u16 = 0;
     let mut last_announce_ms: u64 = 0;
+    // Busyness for the idle sleep below: receiving a datagram, sending
+    // the periodic announcement or draining router output counts; an
+    // idle pass sleeps 10 ms instead of spinning the core (the loop is
+    // otherwise a non-blocking busy-spin — the only sub-second timer
+    // is the 1 s Hello interval).
+    let mut busy: bool;
 
     while running.load(Ordering::Relaxed) {
         dispatch_signals(&runtime);
         if !running.load(Ordering::Relaxed) {
             break;
         }
+        busy = false;
         let now_ms = start.elapsed().as_millis() as u64;
 
         // Periodic announcement (Hello + Router-Id + Next-Hop + Updates).
         if now_ms >= last_announce_ms + BABEL_HELLO_INTERVAL_MS {
             last_announce_ms = now_ms;
+            busy = true;
             babel_seqno = babel_seqno.wrapping_add(1);
             let announce = {
                 let r = router.lock().unwrap();
@@ -2579,6 +2719,7 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
             loop {
                 match sock.recv_from(&mut buf) {
                     Ok((n, peer)) => {
+                        busy = true;
                         if n == 0 {
                             continue;
                         }
@@ -2666,6 +2807,7 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
             r.drain_output(h)
         };
         if !out.is_empty() {
+            busy = true;
             let dest = match group {
                 std::net::IpAddr::V4(g) => std::net::SocketAddr::from((g, port)),
                 std::net::IpAddr::V6(g) => {
@@ -2691,6 +2833,11 @@ fn run_babel_daemon(cfg: &DaemonConfig) -> ExitCode {
                 None => out,
             };
             let _ = uc.send_to(&payload, dest);
+        }
+
+        // Idle pass: sleep instead of spinning (see `busy` above).
+        if !busy {
+            thread::sleep(Duration::from_millis(10));
         }
     }
     if dropped > 0 {
@@ -3148,7 +3295,22 @@ struct Runtime {
 /// (sessions are closed with a NOTIFICATION before the FIN); SIGHUP
 /// reloads the configuration file. Safe to call from any thread —
 /// exactly one caller wins the atomic take.
+///
+/// In multi-protocol mode this is a no-op on every thread except the
+/// supervisor: [`signal::set_supervised`] marks the supervisor as the
+/// sole consumer, so engine threads (connectors, session pumps, main
+/// loops) cannot steal the shutdown signal from it.
 fn dispatch_signals(rt: &Runtime) {
+    if signal::supervised() {
+        return;
+    }
+    dispatch_pending_signals(rt);
+}
+
+/// Consume and act on pending signals unconditionally — the
+/// multi-protocol supervisor's dispatch (engines go through the
+/// [`dispatch_signals`] guard above).
+fn dispatch_pending_signals(rt: &Runtime) {
     while let Some(sig) = signal::take_pending() {
         match sig {
             signal::SIGTERM | signal::SIGINT => {

@@ -26,7 +26,7 @@
 
 #[cfg(unix)]
 mod imp {
-    use std::sync::atomic::{AtomicI32, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
     pub const SIGHUP: i32 = 1;
     pub const SIGINT: i32 = 2;
@@ -34,6 +34,9 @@ mod imp {
 
     /// Last signal delivered (0 = none). Written only from the handler.
     static PENDING: AtomicI32 = AtomicI32::new(0);
+
+    /// Multi-protocol supervision flag (see [`set_supervised`]).
+    static SUPERVISED: AtomicBool = AtomicBool::new(false);
 
     extern "C" fn on_signal(sig: i32) {
         // Async-signal-safe: one relaxed store, no allocation, no locks.
@@ -69,6 +72,21 @@ mod imp {
             0 => None,
             s => Some(s),
         }
+    }
+
+    /// Set when the multi-protocol supervisor owns signal dispatch
+    /// (rc.3): `take_pending` is a single-consumer swap, so engine
+    /// threads (connector loops, session pumps, main loops) must not
+    /// consume signals — one stealing thread would hide SIGTERM from
+    /// the supervisor. `dispatch_signals` checks this flag and becomes
+    /// a no-op for everyone but the supervisor's own dispatch.
+    pub fn set_supervised(on: bool) {
+        SUPERVISED.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the multi-protocol supervisor owns signal dispatch.
+    pub fn supervised() -> bool {
+        SUPERVISED.load(Ordering::Relaxed)
     }
 
     #[cfg(test)]
@@ -115,6 +133,12 @@ mod imp {
     pub fn take_pending() -> Option<i32> {
         None
     }
+
+    pub fn set_supervised(_on: bool) {}
+
+    pub fn supervised() -> bool {
+        false
+    }
 }
 
-pub use imp::{init, take_pending, SIGHUP, SIGINT, SIGTERM};
+pub use imp::{init, set_supervised, supervised, take_pending, SIGHUP, SIGINT, SIGTERM};
