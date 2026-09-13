@@ -85,7 +85,7 @@ per-interface lookup, all `BabelInterfaceSpec` fields wired through.
 
 ---
 
-## D2 — RPKI-RTR client (RFC 8210 / RFC 8281)
+## D2 — RPKI-RTR client (RFC 8210)
 
 **Status:** landed — ~~D2.1 (PDU codec)~~, ~~D2.2 (client state
 machine)~~, ~~D2.3 (incremental ROA table)~~, ~~D2.4 (configuration
@@ -164,7 +164,12 @@ must maintain ROA data by hand — unacceptable in production.
    expiry withdrawing the cache-sourced records, and a grep-friendly
    `rpki:` status line on the runtime API `status` command. Daemon e2e
    against the mock cache: `tests/interop/rtr_lr.sh` + 3 cargo tests
-   (`crates/lr-cli/tests/daemon_rpki.rs`).
+   (`crates/lr-cli/tests/daemon_rpki.rs`). Scope note: the thread is
+   spawned by the BGP engine's `run_daemon` path — a
+   multi-protocol-supervisor deployment carries `[bgp.rpki]` through
+   the same engine config, but its shared runtime's `status` /
+   `reload` surfaces do not render the rpki line yet (the standalone
+   daemon is the reference deployment).
 5. ~~**Hot reload.**~~ **Landed.** SIGHUP / API `reload` re-applies the
    fresh config's `[[roa]]` tables through `RoaStore::replace_static`
    (malformed reload-time ROAs keep the current entries — reload

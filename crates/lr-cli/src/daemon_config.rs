@@ -1073,9 +1073,10 @@ impl DaemonConfig {
     /// The cache address must be a parseable `host:port` — hostnames
     /// are resolved by the RTR thread at connect time (the cache may
     /// come up after the daemon does), so only the syntax is checked
-    /// here. The intervals are bounded to the RFC 8210 §6 scale:
-    /// non-zero, and capped below u32::MAX seconds so the client's
-    /// millisecond clock math cannot overflow.
+    /// here. The §6 intervals must be non-zero — a zero refresh or
+    /// retry would spin the client loop, a zero expire would disable
+    /// data expiry outright. (No upper cap is needed: the client's
+    /// clock math is u64 milliseconds.)
     fn finalize_rpki(&mut self) -> Result<(), String> {
         if let Some(cache) = &self.rpki.cache {
             if cache.is_empty() {

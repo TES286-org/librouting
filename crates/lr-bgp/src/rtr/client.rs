@@ -107,7 +107,8 @@ pub struct RtrClient {
     records: HashSet<RoaEntry>,
     /// The batch accumulating since the current Cache Response.
     batch: HashSet<RoaEntry>,
-    /// Cache-provided timing (§6), resolved to defaults on v0.
+    /// Cache-provided timing (§6): v1+ End-of-Data values override;
+    /// v0 End-of-Data leaves the configured values standing.
     refresh_interval: u32,
     retry_interval: u32,
     expire_interval: u32,
@@ -221,6 +222,30 @@ impl RtrClient {
     /// the next protocol step.
     pub fn on_pdu(&mut self, version: u8, pdu: &RtrPdu, now_ms: u64) -> ClientStep {
         let mut step = ClientStep::default();
+
+        // §5.11 / §12 code 8: a PDU at a HIGHER version than the
+        // session speaks is a protocol violation — report and drop.
+        // (The §7 downgrade below only ever moves the session DOWN;
+        // a higher version cannot be honored because the client has
+        // already encoded its queries at the session version.)
+        if version > self.version && !matches!(pdu, RtrPdu::Aspa { .. }) {
+            // The SIDROPS ASPA profile pins the ASPA PDU at version 2
+            // (the codec's per-type gate); a v2 ASPA inside a v1
+            // session is legal — BIRD's parser accepts exactly that.
+            // Any other PDU above the session version is a §5.11
+            // violation: report and drop.
+            step.logs.push(format!(
+                "rtr: unexpected protocol version {version} (session speaks {}) — reporting and dropping",
+                self.version
+            ));
+            self.error_report(
+                &mut step,
+                RtrErrorCode::UnexpectedProtocolVersion,
+                "pdu version is higher than the session version",
+            );
+            step.drop = true;
+            return step;
+        }
 
         // §7: during startup (before the first completed sync) any
         // PDU at a lower *known* version downgrades the session.
@@ -363,6 +388,25 @@ impl RtrClient {
                 retry_interval,
                 expire_interval,
             } => {
+                // Phase gate (§5.8): End of Data only closes a batch a
+                // Cache Response opened. A stray or duplicate EoD —
+                // unsolicited, or while still awaiting the response —
+                // would otherwise swap the (possibly empty) batch in
+                // as authoritative and emit a spurious withdraw-all;
+                // §10 treats the exchange as corrupt instead.
+                if self.phase != Phase::ReceivingPayload {
+                    step.logs.push(format!(
+                        "rtr: end-of-data in state {} — corrupt data, dropping",
+                        self.phase_name()
+                    ));
+                    self.error_report(
+                        &mut step,
+                        RtrErrorCode::CorruptData,
+                        "end-of-data outside a payload batch",
+                    );
+                    step.drop = true;
+                    return step;
+                }
                 if Some(*session_id) != self.session_id {
                     step.logs.push(format!(
                         "rtr: end-of-data session {session_id:#06x} != {:#06x}, dropping",
@@ -383,9 +427,12 @@ impl RtrClient {
                 self.serial = Some(*serial);
                 self.phase = Phase::Synced;
                 self.last_sync_ms = Some(now_ms);
-                self.refresh_interval = refresh_interval.unwrap_or(DEFAULT_REFRESH_INTERVAL).max(1);
-                self.retry_interval = retry_interval.unwrap_or(DEFAULT_RETRY_INTERVAL).max(1);
-                self.expire_interval = expire_interval.unwrap_or(DEFAULT_EXPIRE_INTERVAL).max(1);
+                // A v1+ cache's values override (§6); a v0 cache carries
+                // no intervals, so the embedder's configured ones keep
+                // governing (they default to the RFC values when unset).
+                self.refresh_interval = refresh_interval.unwrap_or(self.refresh_interval).max(1);
+                self.retry_interval = retry_interval.unwrap_or(self.retry_interval).max(1);
+                self.expire_interval = expire_interval.unwrap_or(self.expire_interval).max(1);
                 step.synced = true;
                 step.logs.push(format!(
                     "rtr: synced (session {session_id:#06x}, serial {serial}, {} roas: +{} -{})",
@@ -504,7 +551,9 @@ fn diff_records(old: &HashSet<RoaEntry>, new: &HashSet<RoaEntry>) -> Vec<RoaDelt
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rtr::pdu::{decode, encode_vec, RtrPdu, RTR_VERSION_1, RTR_VERSION_2};
+    use crate::rtr::pdu::{
+        decode, encode_vec, RtrPdu, RTR_VERSION_0, RTR_VERSION_1, RTR_VERSION_2,
+    };
     use lr_core::addr::{Asn, Prefix};
 
     const V: u8 = RTR_VERSION_1;
@@ -976,5 +1025,115 @@ mod tests {
         // would stay quiet; this one sends its refresh Serial Query.
         let step = c.poll(NOW + 61_000);
         assert!(!step.send.is_empty());
+    }
+
+    #[test]
+    fn stray_end_of_data_is_corrupt_data_and_records_survive() {
+        // A duplicate EoD after a completed sync must NOT swap the
+        // (empty) batch in as authoritative — §10: corrupt data,
+        // Error Report + drop, records unchanged.
+        let mut c = RtrClient::new();
+        c.on_connect();
+        let a = roa([192, 0, 2, 0], 24, 24, 64512);
+        feed(&mut c, &cache_response(0x00ff), NOW);
+        feed(&mut c, &announced(&a), NOW);
+        feed(&mut c, &eod(0x00ff, 1), NOW);
+        assert_eq!(c.snapshot().len(), 1);
+
+        let step = feed(&mut c, &eod(0x00ff, 1), NOW);
+        assert!(step.drop);
+        assert!(!step.synced);
+        assert!(step.roa_deltas.is_empty());
+        assert_eq!(c.snapshot().len(), 1, "records must survive a stray EoD");
+        // The wire carried an Error Report (Corrupt Data).
+        let (ver, pdu, _) = decode(&step.send).unwrap().unwrap();
+        assert_eq!(ver, RTR_VERSION_1);
+        assert!(matches!(
+            pdu,
+            RtrPdu::ErrorReport {
+                error_code: RtrErrorCode::CorruptData,
+                ..
+            }
+        ));
+
+        // Same violation while a query is in flight.
+        let mut c = RtrClient::new();
+        c.on_connect();
+        let step = feed(&mut c, &eod(0x00ff, 1), NOW);
+        assert!(step.drop);
+        assert!(step.roa_deltas.is_empty());
+    }
+
+    #[test]
+    fn configured_intervals_survive_v0_end_of_data() {
+        // A v0 cache carries no intervals in EoD — the embedder's
+        // configured values keep governing (§6: "its configured
+        // defaults").
+        let mut c = RtrClient::new();
+        c.set_intervals(120, 45, 240);
+        c.on_connect();
+        let a = roa([192, 0, 2, 0], 24, 24, 64512);
+        feed(&mut c, &cache_response(0x00ff), NOW);
+        feed(&mut c, &announced(&a), NOW);
+        // A true v0 EoD (the feed helper speaks v1, whose encoder
+        // materializes defaults for the interval fields): encode at
+        // version 0 and decode back.
+        let wire = encode_vec(
+            &RtrPdu::EndOfData {
+                session_id: 0x00ff,
+                serial: 1,
+                refresh_interval: None,
+                retry_interval: None,
+                expire_interval: None,
+            },
+            RTR_VERSION_0,
+        );
+        let (ver, pdu, _) = decode(&wire).unwrap().unwrap();
+        assert_eq!(ver, RTR_VERSION_0);
+        assert!(matches!(
+            &pdu,
+            RtrPdu::EndOfData {
+                refresh_interval: None,
+                ..
+            }
+        ));
+        let step = c.on_pdu(ver, &pdu, NOW);
+        assert!(step.synced);
+        assert_eq!(c.intervals(), (120, 45, 240));
+    }
+
+    #[test]
+    fn higher_version_pdu_is_reported_and_dropped() {
+        // §5.11 / §12 code 8: the session never speaks a higher
+        // version than it sent — a v2 PDU against a v1 session is a
+        // violation, not a §7 upgrade.
+        let mut c = RtrClient::new();
+        c.on_connect();
+        let a = roa([192, 0, 2, 0], 24, 24, 64512);
+        feed(&mut c, &cache_response(0x00ff), NOW);
+        feed(&mut c, &announced(&a), NOW);
+        feed(&mut c, &eod(0x00ff, 1), NOW);
+        assert_eq!(c.version(), RTR_VERSION_1);
+
+        // A v2 Serial Notify after the sync: fatal, records intact.
+        let wire = encode_vec(
+            &RtrPdu::SerialNotify {
+                session_id: 0x00ff,
+                serial: 2,
+            },
+            RTR_VERSION_2,
+        );
+        let (ver, pdu, _) = decode(&wire).unwrap().unwrap();
+        assert_eq!(ver, RTR_VERSION_2);
+        let step = c.on_pdu(ver, &pdu, NOW);
+        assert!(step.drop);
+        assert!(matches!(
+            decode(&step.send).unwrap().unwrap().1,
+            RtrPdu::ErrorReport {
+                error_code: RtrErrorCode::UnexpectedProtocolVersion,
+                ..
+            }
+        ));
+        assert_eq!(c.snapshot().len(), 1);
     }
 }

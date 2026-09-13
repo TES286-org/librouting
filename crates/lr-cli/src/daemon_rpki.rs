@@ -51,8 +51,10 @@ const BACKOFF_SLICE_MS: u64 = 100;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Upper bound on back-to-back reads per loop pass: a bulk sync
-/// drains fast (64 × 8 KiB per pass) without starving the control
-/// channel for more than a few hundred milliseconds.
+/// drains fast (64 × 8 KiB per pass). Against a slow-drip cache the
+/// worst case is 64 × the read timeout before the control channel is
+/// re-checked, so the burst loop also breaks early when a control
+/// command is pending.
 const READ_BURST: usize = 64;
 
 /// One command from the daemon's control plane (the SIGHUP reload
@@ -63,7 +65,15 @@ pub(crate) enum RpkiCommand {
     /// memory is reset too (the old cache's serial is meaningless);
     /// with the same address the remembered `(session, serial)`
     /// survives and the next sync is incremental (RFC 8210 §8.1).
-    Reconnect(String),
+    /// The intervals are the freshly validated §6 timers from the
+    /// reloaded config (they pre-date the first End of Data of the
+    /// new session, so a v1+ cache still overrides them).
+    Reconnect {
+        cache: String,
+        refresh_interval: u32,
+        retry_interval: u32,
+        expire_interval: u32,
+    },
 }
 
 /// Outcome of draining the control channel.
@@ -152,9 +162,21 @@ impl RpkiHandle {
     }
 
     /// Ask the thread to drop the transport and re-sync (the reload
-    /// path). Returns the log line describing what was requested.
-    pub(crate) fn reconnect(&self, cache: String) -> String {
-        match self.control.send(RpkiCommand::Reconnect(cache)) {
+    /// path) with the freshly validated intervals. Returns the log
+    /// line describing what was requested.
+    pub(crate) fn reconnect(
+        &self,
+        cache: String,
+        refresh_interval: u32,
+        retry_interval: u32,
+        expire_interval: u32,
+    ) -> String {
+        match self.control.send(RpkiCommand::Reconnect {
+            cache,
+            refresh_interval,
+            retry_interval,
+            expire_interval,
+        }) {
             Ok(()) => "rpki: reconnect requested".to_string(),
             Err(_) => "rpki: client thread is gone (no reconnect possible)".to_string(),
         }
@@ -284,34 +306,60 @@ impl RpkiLoop {
         // One command per drain: the outer loop re-enters here every
         // few hundred milliseconds at most, so a queued reload batch
         // drains quickly without a self-recursive loop here.
-        if let Ok(RpkiCommand::Reconnect(addr)) = self.control.try_recv() {
-            let cache_changed = addr != self.cache;
-            if cache_changed {
-                println!("rpki: cache changed {} -> {}", self.cache, addr);
-                self.cache = addr;
-                // The old cache's session/serial are meaningless
-                // against a new one (§8.2): reset to a cold-start
-                // client, keep the configured intervals.
-                let (refresh, retry, expire) = self.client.intervals();
-                self.client = RtrClient::new();
-                self.client.set_intervals(refresh, retry, expire);
-                // Withdraw the old cache's records immediately:
-                // they are no longer authoritative.
-                self.store.clear_rtr();
-            } else {
-                println!("rpki: reconnecting to {} for a refresh", self.cache);
-            }
-            // Dropping the stream makes the next iteration
-            // reconnect; `on_connect()` then sends the §8.1
-            // query (a Serial Query with the remembered session
-            // when the cache did not change, a Reset Query when
-            // it did).
-            self.stream = None;
-            self.buf.clear();
-            self.refresh_status();
+        if let Ok(RpkiCommand::Reconnect {
+            cache,
+            refresh_interval,
+            retry_interval,
+            expire_interval,
+        }) = self.control.try_recv()
+        {
+            self.handle_reconnect(cache, refresh_interval, retry_interval, expire_interval);
             return Control::Interrupt;
         }
         Control::Continue
+    }
+
+    /// Apply one Reconnect command (the §8.2 cache-change / §8.1
+    /// refresh semantics shared by the loop head and the burst path).
+    fn handle_reconnect(
+        &mut self,
+        cache: String,
+        refresh_interval: u32,
+        retry_interval: u32,
+        expire_interval: u32,
+    ) {
+        let cache_changed = cache != self.cache;
+        if cache_changed {
+            println!("rpki: cache changed {} -> {}", self.cache, cache);
+            self.cache = cache;
+            // The old cache's session/serial are meaningless against a
+            // new one (§8.2): reset to a cold-start client carrying
+            // the reloaded intervals, and withdraw the old cache's
+            // records immediately — they are no longer authoritative.
+            self.client = RtrClient::new();
+            self.client
+                .set_intervals(refresh_interval, retry_interval, expire_interval);
+            self.store.clear_rtr();
+        } else {
+            println!(
+                "rpki: reconnecting to {} for a refresh (intervals {}/{}s)",
+                self.cache, refresh_interval, retry_interval
+            );
+            // Same cache: the remembered session survives, but the
+            // reloaded intervals govern until the next End of Data.
+            self.client
+                .set_intervals(refresh_interval, retry_interval, expire_interval);
+        }
+        // The last sync refers to data that either left with the old
+        // cache or is about to be re-verified — stop ageing it.
+        self.last_sync = None;
+        // Dropping the stream makes the next iteration reconnect;
+        // `on_connect()` then sends the §8.1 query (a Serial Query
+        // with the remembered session when the cache did not change,
+        // a Reset Query when it did).
+        self.stream = None;
+        self.buf.clear();
+        self.refresh_status();
     }
 
     /// Connect to the current cache. On failure logs and sleeps the
@@ -371,6 +419,20 @@ impl RpkiLoop {
     fn read_available(&mut self) -> bool {
         let mut chunk = [0u8; 8192];
         for _ in 0..READ_BURST {
+            // A reload command pending behind a trickle must not wait
+            // out the whole burst: consume it through the normal
+            // control path (drops the transport / updates intervals)
+            // and let the outer loop reconnect immediately.
+            if let Ok(RpkiCommand::Reconnect {
+                cache,
+                refresh_interval,
+                retry_interval,
+                expire_interval,
+            }) = self.control.try_recv()
+            {
+                self.handle_reconnect(cache, refresh_interval, retry_interval, expire_interval);
+                return false;
+            }
             let Some(stream) = self.stream.as_mut() else {
                 return false;
             };
@@ -395,6 +457,7 @@ impl RpkiLoop {
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
+                    self.refresh_status();
                     return true;
                 }
                 Err(e) => {
@@ -405,6 +468,7 @@ impl RpkiLoop {
                 }
             }
         }
+        self.refresh_status();
         true
     }
 
@@ -454,6 +518,11 @@ impl RpkiLoop {
                 self.client.serial().unwrap_or(0),
                 self.store.len()
             );
+            // A sync is the one event operational visibility waits for
+            // (the API status line must reflect it immediately, not
+            // after the next read timeout) — and it happens once per
+            // sync, so this is not on the per-PDU hot path.
+            self.refresh_status();
         }
         if !step.send.is_empty() && !self.send(&step.send) {
             return false;
@@ -461,11 +530,13 @@ impl RpkiLoop {
         if step.expired {
             // RFC 8210 §6: data past the expire interval MUST NOT be
             // used. Withdraw the cache-sourced records and reset the
-            // session — the next sync starts from scratch.
+            // session — the next sync starts from scratch. The last
+            // sync age now refers to withdrawn data: stop ageing it.
             println!(
                 "rpki: data expired ({}s without a sync) — withdrawing cache ROAs",
                 self.client.intervals().2
             );
+            self.last_sync = None;
             self.store.clear_rtr();
             self.reset_client();
             self.disconnect();
@@ -479,7 +550,6 @@ impl RpkiLoop {
             self.disconnect();
             return false;
         }
-        self.refresh_status();
         true
     }
 

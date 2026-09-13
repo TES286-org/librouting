@@ -11,7 +11,7 @@
 //! ```c
 //! lr_roa_store_t *s = lr_roa_store_new();
 //! lr_roa_entry_t e = { .asn = 64512, .prefix_len = 24, .max_length = 24 };
-//! memcpy(e.addr, "\xc6\x00\x71\x00", 4);      /* 198.0.113.0/24... */
+//! memcpy(e.addr, "\xc6\x33\x64\x00", 4);     /* 198.51.100.0 */
 //! lr_roa_store_replace_static(s, &e, 1);
 //! uint8_t state = 0;
 //! /* lr_roa_store_validate(...) -> LR_ROA_VALID / _NOT_FOUND / _INVALID */
@@ -329,18 +329,17 @@ fn parse_entries(entries: *const lr_roa_entry_t, len: usize) -> Result<Vec<RoaEn
     Ok(out)
 }
 
-/// Lock helper mirroring `lock_router`'s contract.
-unsafe fn lock_roa_store(
-    s: lr_roa_store_t,
-) -> Option<std::sync::MutexGuard<'static, lr_bgp::RoaStore>> {
+/// Shared-reference accessor mirroring `lock_router`'s shape. No lock:
+/// `RoaStore` is `Send + Sync` and its internal `RwLock` already
+/// serializes writers; wrapping the handle in a `Mutex` would defeat
+/// the concurrent lock-free validation reads the type advertises.
+/// Only `lr_roa_store_free` excludes concurrent calls (destroy
+/// contract, as with the router handle).
+unsafe fn lock_roa_store(s: lr_roa_store_t) -> Option<&'static lr_bgp::RoaStore> {
     if s.is_null() {
         return None;
     }
-    unsafe {
-        let m: &std::sync::Mutex<lr_bgp::RoaStore> =
-            &*(s as *const std::sync::Mutex<lr_bgp::RoaStore>);
-        m.lock().ok()
-    }
+    Some(unsafe { &*(s as *const lr_bgp::RoaStore) })
 }
 
 #[cfg(test)]

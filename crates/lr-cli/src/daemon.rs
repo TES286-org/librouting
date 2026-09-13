@@ -3786,6 +3786,15 @@ fn reload_config(
     if let Err(e) = crate::compat::load_config_text(&text, forced, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
+    // Finalize exactly like startup (ROADMAP-v3 D2.5): the reload path
+    // consumes the RPKI section, whose intervals and cache address are
+    // only validated in `finalize` — without this, a SIGHUP'd config
+    // with `retry_interval = 0` would reach the RTR thread and turn
+    // its backoff into a busy reconnect loop. A validation failure
+    // keeps the current configuration running (never half-apply).
+    if let Err(e) = fresh.finalize() {
+        return vec![format!("reload: {} (keeping current config)", e)];
+    }
     let mut lines: Vec<String> = fresh
         .warnings
         .iter()
@@ -3843,14 +3852,43 @@ fn reload_config(
     // RTR cache re-pointing (ROADMAP-v3 D2.5): an address change drops
     // the transport, resets the session memory (the old cache's
     // serial is meaningless) and withdraws the old cache's records;
-    // a same-address reload forces a fresh incremental query.
-    if let (Some(handle), Some(cache)) = (rpki, fresh.rpki.cache.as_ref()) {
-        if handle.cache() != *cache {
-            lines.push(format!("reload: rpki cache changed -> {cache}"));
-        } else {
-            lines.push(format!("reload: rpki re-sync requested from {cache}"));
+    // a same-address reload forces a fresh incremental query with the
+    // reloaded intervals. Removing the cache entirely is a restart:
+    // report it instead of silently ignoring the change.
+    if let Some(handle) = rpki {
+        match fresh.rpki.cache.as_ref() {
+            Some(cache) => {
+                if handle.cache() != *cache {
+                    lines.push(format!("reload: rpki cache changed -> {cache}"));
+                } else {
+                    lines.push(format!("reload: rpki re-sync requested from {cache}"));
+                }
+                lines.push(
+                    handle.reconnect(
+                        cache.clone(),
+                        fresh
+                            .rpki
+                            .refresh_interval
+                            .unwrap_or(lr_bgp::rtr::client::DEFAULT_REFRESH_INTERVAL),
+                        fresh
+                            .rpki
+                            .retry_interval
+                            .unwrap_or(lr_bgp::rtr::client::DEFAULT_RETRY_INTERVAL),
+                        fresh
+                            .rpki
+                            .expire_interval
+                            .unwrap_or(lr_bgp::rtr::client::DEFAULT_EXPIRE_INTERVAL),
+                    ),
+                );
+            }
+            None => {
+                lines.push(
+                    "reload: rpki cache removed — RPKI keeps running until a restart \
+                     (removing the RTR thread live is not supported)"
+                        .to_string(),
+                );
+            }
         }
-        lines.push(handle.reconnect(cache.clone()));
     }
     if lines.is_empty() {
         lines.push("reload: no network changes".into());

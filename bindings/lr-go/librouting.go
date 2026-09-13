@@ -752,7 +752,13 @@ func fillCEntry(dst *C.struct_lr_roa_entry_t, e RoaEntry) error {
 // layer. RTR-learned entries are preserved. A malformed entry fails the
 // whole call atomically (nothing is applied).
 func (s *RoaStore) ReplaceStatic(entries []RoaEntry) error {
+	// An empty slice clears the layer — the C contract is
+	// "NULL with len 0" and Go maps nil onto it directly.
 	if len(entries) == 0 {
+		rc := C.lr_roa_store_replace_static(s.ptr, nil, 0)
+		if rc != 0 {
+			return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
+		}
 		return nil
 	}
 	cEntries := make([]C.struct_lr_roa_entry_t, len(entries))

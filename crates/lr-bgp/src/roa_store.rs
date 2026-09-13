@@ -138,7 +138,7 @@ impl RoaStore {
 
     /// Number of entries in the current merged snapshot.
     pub fn len(&self) -> usize {
-        self.lock().snapshot.len()
+        self.read().snapshot.len()
     }
 
     /// True when the merged snapshot is empty.
@@ -148,12 +148,22 @@ impl RoaStore {
 
     /// Static-layer entry count (for status lines / diagnostics).
     pub fn static_len(&self) -> usize {
-        self.lock().static_entries.len()
+        self.read().static_entries.len()
     }
 
     /// RTR-layer entry count (for status lines / diagnostics).
     pub fn rtr_len(&self) -> usize {
-        self.lock().rtr_entries.len()
+        self.read().rtr_entries.len()
+    }
+
+    /// Read-lock helper with the same poison recovery as `load` —
+    /// diagnostics counters share the reader path so they never
+    /// contend with each other (the write path runs once per sync).
+    fn read(&self) -> std::sync::RwLockReadGuard<'_, RoaStoreInner> {
+        match self.inner.read() {
+            Ok(g) => g,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 
     /// Write-lock helper with poison recovery: the guarded state is

@@ -77,6 +77,11 @@ class RoaStore:
         entries are preserved. A malformed entry fails the whole call
         atomically (nothing is applied)."""
         if not entries:
+            # An empty list clears the layer — the C contract is
+            # "NULL with len 0".
+            rc = get_lib().lr_roa_store_replace_static(self._ptr, ffi.NULL, 0)
+            if rc != 0:
+                raise LrError(f"lr_roa_store_replace_static failed (rc={rc}): {last_error()}")
             return
         c_entries = ffi.new("lr_roa_entry_t[]", len(entries))
         for i, (prefix, max_length, asn) in enumerate(entries):

@@ -121,20 +121,22 @@ pub struct OpaqueRoaStore {
 
 pub type lr_roa_store_t = *mut OpaqueRoaStore;
 
-/// Helper to construct an opaque store from a `RoaStore` (behind a
-/// Mutex, mirroring the router handle's shape — the RTR thread and
-/// the validation readers share it concurrently on the Rust side).
+/// Helper to construct an opaque store from a `RoaStore`. No Mutex
+/// wrapper — `RoaStore` is already `Send + Sync` (its readers are
+/// read-locked `Arc` clones), so wrapping it in a `Mutex` would
+/// serialize the FFI validation path against the advertised lock-free
+/// reads. Concurrent `lr_roa_store_*` calls are safe; the only
+/// exclusion is `lr_roa_store_free`, exactly like the router handle's
+/// destroy contract.
 pub fn box_roa_store(s: lr_bgp::RoaStore) -> lr_roa_store_t {
-    let boxed: Box<Mutex<lr_bgp::RoaStore>> = Box::new(Mutex::new(s));
-    Box::into_raw(boxed) as lr_roa_store_t
+    Box::into_raw(Box::new(s)) as lr_roa_store_t
 }
 
-/// Helper to drop an opaque store back into its boxed Mutex.
+/// Helper to drop an opaque store back into its Box.
 ///
 /// # Safety
 /// `s` must have been produced by [`box_roa_store`] and must not be
-/// destroyed while another thread is inside a call that holds the
-/// store lock.
-pub unsafe fn unbox_roa_store(s: lr_roa_store_t) -> Box<Mutex<lr_bgp::RoaStore>> {
-    unsafe { Box::from_raw(s as *mut Mutex<lr_bgp::RoaStore>) }
+/// destroyed while another thread is inside a call on the same handle.
+pub unsafe fn unbox_roa_store(s: lr_roa_store_t) -> Box<lr_bgp::RoaStore> {
+    unsafe { Box::from_raw(s as *mut lr_bgp::RoaStore) }
 }
