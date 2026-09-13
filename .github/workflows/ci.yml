@@ -254,6 +254,8 @@ jobs:
         run: cargo build -p lr-bgp --example rtr_cache_mock
       - name: RTR codec interop (RFC 8210, lr-bgp mock cache x BIRD 2 rpki)
         run: ./tests/interop/rtr_bird.sh
+      - name: RTR daemon e2e (RFC 8210, lr-daemon [bgp.rpki] x lr-bgp mock cache)
+        run: ./tests/interop/rtr_lr.sh
       - name: Two-daemon interop (librouting ↔ librouting)
         run: ./tests/interop/two_daemon.sh
       - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)

@@ -87,8 +87,10 @@ per-interface lookup, all `BabelInterfaceSpec` fields wired through.
 
 ## D2 — RPKI-RTR client (RFC 8210 / RFC 8281)
 
-**Status:** partial — ~~D2.1 (PDU codec)~~ and ~~D2.2 (client state
-machine)~~ landed. Tracks `lr-bgp` + `lr-cli::daemon`. Note: the ASPA PDU reference in
+**Status:** landed — ~~D2.1 (PDU codec)~~, ~~D2.2 (client state
+machine)~~, ~~D2.3 (incremental ROA table)~~, ~~D2.4 (configuration
+surface + daemon RTR thread)~~ and ~~D2.5 (hot reload)~~ are all in.
+Tracks `lr-bgp` + `lr-cli::daemon`. Note: the ASPA PDU reference in
 this file originally cited RFC 8281, which is PCEP — the ASPA PDU
 (type 11, version 2) comes from the SIDROPS ASPA profile, which BIRD
 implements (`proto/rpki/packets.c` `struct pdu_aspa`). The codec
@@ -135,25 +137,43 @@ must maintain ROA data by hand — unacceptable in production.
    half-applied database and duplicates (§5.6) / unknown withdrawals
    (§12 code 6) coalesce or no-op with a log. 19 unit tests cover
    each protocol rule.
-3. **Incremental ROA table.** `RoaTable` is currently an immutable
-   `Vec<RoaEntry>`; convert it to a structure that supports add /
-   delete of individual entries while keeping validation queries
-   thread-safe. Candidates: `RwLock<RoaTable>` + COW updates, or
-   `arc-swap` for atomic whole-table replacement.
-4. **Configuration surface.** Add `[bgp.rpki]` to the daemon config:
-   ```toml
-   [bgp.rpki]
-   cache = "rpki.ris.net:8282"
-   refresh_interval = 3600
-   retry_interval = 600
-   expire_interval = 7200
-   ```
-   Spawn the RTR client thread at daemon start; periodically pull ROA
-   updates and hot-swap `RoaTable`.
-5. **Hot reload.** SIGHUP or the `reload` API command triggers an RTR
-   reconnect and full refresh. `RoaTable` swap goes through
-   `Arc<ArcSwap<RoaTable>>` (or a channel that notifies
-   `DaemonFilterContext` to refresh its reference).
+3. ~~**Incremental ROA table.**~~ **Landed** as `lr_bgp::roa_store::RoaStore`
+   — `RoaTable` stays immutable (rc API freeze) and `RoaStore` wraps
+   it with two provenance layers: static (`[[roa]]` config, FFI
+   entries) survives cache expiry and is replaced only by an explicit
+   `replace_static` (config reload); rtr entries follow the RFC 8210
+   lifecycle (`apply_rtr_deltas` per sync, `clear_rtr` on §6 data
+   expiry or cache change). Every mutation rebuilds the merged entry
+   set and swaps one `Arc<RoaTable>` under a `RwLock` — readers clone
+   the Arc under a read lock and validate lock-free, so a reader never
+   sees a half-applied sync: arc-swap semantics without the new
+   dependency. Sort + dedup keeps the table deterministic. 11 unit
+   tests including a concurrent-reader smoke test asserting snapshots
+   are never partial.
+4. ~~**Configuration surface.**~~ **Landed.** The `[bgp.rpki]` TOML
+   table parses with the fail-closed posture (unknown keys are hard
+   errors; `finalize_rpki` syntax-checks the cache address — port
+   required, bracketed v6 literals accepted, intervals non-zero) and
+   `--rpki-cache / --rpki-refresh / --rpki-retry / --rpki-expire` flag
+   the quick labs. The configured intervals are the *initial* §6
+   timers — a v1+ cache overrides them from every End-of-Data PDU.
+   The daemon spawns one RTR thread per configured cache
+   (`lr-cli::daemon_rpki`): connect/reconnect with the §6 retry
+   backoff, framing-aware decode + `on_pdu`, `poll` driving refresh
+   and expiry, atomic delta application into the shared `RoaStore`, §6
+   expiry withdrawing the cache-sourced records, and a grep-friendly
+   `rpki:` status line on the runtime API `status` command. Daemon e2e
+   against the mock cache: `tests/interop/rtr_lr.sh` + 3 cargo tests
+   (`crates/lr-cli/tests/daemon_rpki.rs`).
+5. ~~**Hot reload.**~~ **Landed.** SIGHUP / API `reload` re-applies the
+   fresh config's `[[roa]]` tables through `RoaStore::replace_static`
+   (malformed reload-time ROAs keep the current entries — reload
+   never half-applies) and re-points the RTR thread: an address change
+   drops the transport, resets the session memory (the old cache's
+   serial is meaningless, §8.2) and withdraws the old cache's records;
+   a same-address reload forces a fresh incremental query. E2E:
+   SIGHUP re-points a running daemon from cache A to cache B and grows
+   the static table (API-verified `roas=4 (static=2 rtr=2)`).
 
 **Reference implementations.** BIRD `proto/rpki/` (`rpki.c`,
 `transport.c`, `packets.c`) is a complete RTR client; FRR
@@ -794,7 +814,7 @@ refactor — needs extensive regression tests.
 | Direction | Status                | Owner | Notes                                    |
 | --------- | --------------------- | ----- | ---------------------------------------- |
 | D1        | not started           | —     | Babel multi-session + per-iface params   |
-| D2        | not started           | —     | RPKI-RTR client (RFC 8210 / 8281)        |
+| D2        | landed                | —     | RPKI-RTR client: codec + state machine + RoaStore + `[bgp.rpki]` daemon thread + hot reload |
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | partial (D4.3 landed) | —     | Daemon surface — damping wired up; redistribution + aggregate pending |
 | D5        | not started           | —     | FFI expansion                            |

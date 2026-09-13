@@ -18,6 +18,59 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- ROADMAP-v3 D2.3 — `lr_bgp::roa_store::RoaStore`, a thread-safe
+  two-layer ROA database with atomic snapshot swaps:
+  - **Static + RTR provenance layers.** Static entries
+    (`[[roa]]` config, FFI) survive cache expiry and are replaced only
+    by `replace_static` (config reload); RTR entries follow the RFC
+    8210 lifecycle (`apply_rtr_deltas` per sync, `clear_rtr` on §6
+    data expiry or cache change).
+  - **Atomic whole-table swaps.** Every mutation rebuilds the merged
+    entry set and swaps one `Arc<RoaTable>` under a `RwLock`; readers
+    clone the Arc under a read lock and validate lock-free — a reader
+    never sees a half-applied sync (arc-swap semantics without the new
+    dependency). Sort + dedup keeps the table deterministic; §5.6
+    duplicates coalesce and §12 code-6 withdrawals no-op naturally.
+  - `RoaTable::from_entries` and the `RoaEntry` `Ord` derive are new
+    (non-breaking); 11 unit tests including a concurrent-reader
+    smoke test.
+- ROADMAP-v3 D2.4 — `[bgp.rpki]` configuration + daemon RTR thread:
+  - `[bgp.rpki] cache / refresh_interval / retry_interval /
+    expire_interval` (fail-closed parsing, syntax-checked cache
+    address, non-zero intervals) plus `--rpki-cache`, `--rpki-refresh`,
+    `--rpki-retry`, `--rpki-expire` flags. The configured intervals
+    are the *initial* §6 timers — a v1+ cache overrides them from
+    every End-of-Data PDU. `RtrClient::set_intervals` (new,
+    non-breaking) injects them.
+  - `lr-cli::daemon_rpki`: one thread per configured cache —
+    connect/reconnect with the §6 retry backoff, framing-aware decode
+    + `on_pdu`, `poll` driving refresh and expiry, atomic delta
+    application into the shared `RoaStore`, §6 expiry withdrawing the
+    cache-sourced records. The filter DSL's `roa.state` and the
+    `roa_validate` import hook read the live store (cache updates
+    apply without recompilation). A grep-friendly `rpki:` line
+    (cache/state/version/phase/session/serial/roas/intervals/
+    last-sync) joins the runtime API `status` output.
+  - Daemon e2e against the mock cache:
+    `tests/interop/rtr_lr.sh` (API-verified sync + reconnect) and 3
+    cargo e2e tests (`crates/lr-cli/tests/daemon_rpki.rs`).
+- ROADMAP-v3 D2.5 — SIGHUP / API `reload` hot reload for RPKI:
+  - The fresh config's `[[roa]]` tables replace the store's static
+    layer wholesale (malformed reload-time ROAs keep the current
+    entries — reload never half-applies); an rpki cache address change
+    drops the transport, resets the session memory (§8.2) and
+    withdraws the old cache's records; a same-address reload forces a
+    fresh incremental query. E2E: SIGHUP re-points a running daemon
+    from cache A to cache B (API-verified `roas=4 (static=2 rtr=2)`).
+- FFI — `lr_roa_store_*` for C/C++/Go/Python embedders:
+  `lr_roa_store_new/free/replace_static/apply_deltas/clear_rtr/len/
+  validate` with the `LR_ROA_VALID/_NOT_FOUND/_INVALID` outcomes.
+  cbindgen header regenerated; C harness + C++ `librouting.hpp`
+  RAII (`make_roa_store`, `roa_store_replace_static/apply_deltas/
+  validate`) covered by `tests/ffi/harness.{c,cpp}`; Go `RoaStore`
+  type (`bindings/lr-go`) and Python `RoaStore` (`bindings/lr-python`,
+  new `roa.py` module) with tests.
+
 - ROADMAP-v3 D2.2 — RTR client state machine,
   `lr_bgp::rtr::client::RtrClient` (RFC 8210 §6-§8):
   - **Transport-agnostic client.** The embedder owns the socket, the

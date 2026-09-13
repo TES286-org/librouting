@@ -58,6 +58,19 @@ For every peer pair, all of the following must hold:
 5. **Clean teardown** — End-of-RIB markers are sent after the initial
    dump; no protocol error logs on either side.
 
+The RTR suite is separate (no BGP session involved):
+
+* `rtr_bird.sh` — BIRD 2's RPKI client as the transport consumer: it
+  connects to librouting's mock cache (`lr-bgp` `rtr_cache_mock`
+  example), sends its Reset Query, downgrades to the negotiated
+  version (RFC 8210 §7) and installs the two served ROAs into its
+  `roa4` / `roa6` tables (birdc-verified).
+* `rtr_lr.sh` — librouting's own daemon as the RTR client: `lr-daemon`
+  with `[bgp.rpki]` connects to the same mock cache, the runtime API
+  `status` line reports the live store (`roas=3 (static=1 rtr=2)`,
+  session/serial from the cache's End of Data), and the daemon's
+  reconnect path is exercised by killing the cache mid-run.
+
 ## Running locally
 
 ```bash
