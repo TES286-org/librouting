@@ -290,12 +290,16 @@ pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter
 
 /// A concrete [`FilterContext`] backed by `lr_policy::bgp`'s typed
 /// accessors. Used by both the import and export filter hooks.
+/// The ROA half is a shared [`lr_bgp::RoaStore`]: the RTR client
+/// thread swaps snapshots underneath as syncs land, so `roa.state`
+/// in every filter tracks the live cache data without any
+/// recompilation (ROADMAP-v3 D2.3/D2.4).
 pub(crate) struct DaemonFilterContext {
-    roa: lr_bgp::RoaTable,
+    roa: std::sync::Arc<lr_bgp::RoaStore>,
 }
 
 impl DaemonFilterContext {
-    pub(crate) fn new(roa: lr_bgp::RoaTable) -> Self {
+    pub(crate) fn new(roa: std::sync::Arc<lr_bgp::RoaStore>) -> Self {
         Self { roa }
     }
 }
@@ -332,7 +336,11 @@ impl FilterContext for DaemonFilterContext {
     fn roa_state(&self, route: &lr_core::rib::Route) -> lr_policy::filter::RoaStateLit {
         use lr_policy::filter::RoaStateLit;
         let origin = lr_policy::bgp::as_sequence(route).last().copied();
-        let state = self.roa.validate(&route.key.prefix, origin);
+        // Snapshot once per evaluation: every `roa.state` access in
+        // one filter run sees the same table version, and the load is
+        // a single `Arc` clone under a read lock.
+        let table = self.roa.load();
+        let state = table.validate(&route.key.prefix, origin);
         match state {
             lr_bgp::RoaState::Valid => RoaStateLit::Valid,
             lr_bgp::RoaState::NotFound => RoaStateLit::NotFound,

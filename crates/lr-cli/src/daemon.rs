@@ -61,6 +61,7 @@ mod daemon_multi;
 mod daemon_ospf;
 mod daemon_ospf3;
 mod daemon_policy;
+mod daemon_rpki;
 mod privdrop;
 mod signal;
 mod translate;
@@ -634,20 +635,40 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
 
     // ---- ROA / RFC 6811 prefix-origin validation ----
     // Build the table even when `roa_validate` is off so the filter
-    // DSL's `roa.state` accessor still works.
+    // DSL's `roa.state` accessor still works. The table lives in a
+    // shared `RoaStore` (ROADMAP-v3 D2.3): the static [[roa]] entries
+    // seed the store's config layer and the RTR client thread (below,
+    // D2.4) applies cache syncs on top — the filter contexts see both
+    // through one snapshot handle.
     let roa_table = match daemon_policy::build_roa_table(cfg) {
         Ok(t) => t,
         Err(e) => return daemon_policy::policy_error(e),
     };
-    if !roa_table.is_empty() {
+    let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::from_table(roa_table));
+    if !roa_store.is_empty() {
         println!(
             "  roa:         {} entries, validate={} (action: {})",
-            roa_table.len(),
+            roa_store.len(),
             cfg.roa_validate,
             cfg.roa_invalid_action
         );
     }
-    if cfg.roa_validate && !roa_table.is_empty() {
+    if let Some(cache) = &cfg.rpki.cache {
+        println!(
+            "  rpki:        cache {} (refresh {}s, retry {}s, expire {}s)",
+            cache,
+            cfg.rpki
+                .refresh_interval
+                .unwrap_or(lr_bgp::rtr::client::DEFAULT_REFRESH_INTERVAL),
+            cfg.rpki
+                .retry_interval
+                .unwrap_or(lr_bgp::rtr::client::DEFAULT_RETRY_INTERVAL),
+            cfg.rpki
+                .expire_interval
+                .unwrap_or(lr_bgp::rtr::client::DEFAULT_EXPIRE_INTERVAL)
+        );
+    }
+    if cfg.roa_validate && !roa_store.is_empty() {
         // Install a built-in import hook that drops Invalid routes
         // (or warns + accepts them) before the user-supplied chain.
         // Implemented as a tiny DSL filter so the same code path
@@ -660,8 +681,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         };
         match lr_policy::filter::compile("__roa_validate", body) {
             Ok(f) => {
-                let ctx =
-                    std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(roa_table.clone()));
+                let ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(
+                    std::sync::Arc::clone(&roa_store),
+                ));
                 let hook = daemon_policy::FilterImportHook { filter: f, ctx };
                 let mut r = router.lock().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
@@ -678,7 +700,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             Ok(f) => f,
             Err(e) => return daemon_policy::policy_error(e),
         };
-        let ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(roa_table.clone()));
+        let ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(
+            std::sync::Arc::clone(&roa_store),
+        ));
         let mut bound_import_filters = 0usize;
         let mut bound_export_filters = 0usize;
         // Index filters by name for O(1) lookup during peer binding.
@@ -1010,6 +1034,27 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // router, empty status lines); an embedded engine shares the
     // supervisor's runtime — one running flag, one reload closure, one
     // status registry for the whole combination.
+    // RPKI-RTR cache client ([bgp.rpki], RFC 8210 — ROADMAP-v3 D2.4):
+    // one thread per configured cache, syncing ROA deltas into the
+    // shared store. The handle is created before the runtime so the
+    // API `status` command can render the live state; the thread uses
+    // the same running flag as the rest of the daemon.
+    let rpki = cfg.rpki.cache.as_ref().map(|cache| {
+        daemon_rpki::spawn_rpki(
+            std::sync::Arc::clone(&roa_store),
+            cache.clone(),
+            cfg.rpki
+                .refresh_interval
+                .unwrap_or(lr_bgp::rtr::client::DEFAULT_REFRESH_INTERVAL),
+            cfg.rpki
+                .retry_interval
+                .unwrap_or(lr_bgp::rtr::client::DEFAULT_RETRY_INTERVAL),
+            cfg.rpki
+                .expire_interval
+                .unwrap_or(lr_bgp::rtr::client::DEFAULT_EXPIRE_INTERVAL),
+            Arc::clone(&running),
+        )
+    });
     let runtime = match &host {
         Some(h) => Arc::clone(&h.runtime),
         None => Arc::new(Runtime {
@@ -1029,7 +1074,13 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             }),
             router,
             running: Arc::clone(&running),
-            status_lines: Arc::new(Vec::new),
+            status_lines: Arc::new({
+                let rpki = rpki.clone();
+                move || match &rpki {
+                    Some(h) => vec![h.status_line()],
+                    None => Vec::new(),
+                }
+            }),
         }),
     };
 

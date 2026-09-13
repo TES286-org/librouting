@@ -184,6 +184,17 @@ impl RtrClient {
         )
     }
 
+    /// Override the initial §6 intervals (refresh, retry, expire —
+    /// seconds). The embedder calls this once at construction from
+    /// its configuration; a v1+ cache replaces all three from every
+    /// End-of-Data PDU (§6), so this only shapes the behaviour before
+    /// the first End of Data and for v0 caches.
+    pub fn set_intervals(&mut self, refresh: u32, retry: u32, expire: u32) {
+        self.refresh_interval = refresh;
+        self.retry_interval = retry;
+        self.expire_interval = expire;
+    }
+
     /// Bytes to transmit when the transport comes up (§8.1): a Serial
     /// Query when the client remembers an unexpired session, a Reset
     /// Query otherwise. Also (re)arms the phase tracking.
@@ -947,5 +958,23 @@ mod tests {
         let step = feed(&mut c, &eod(0x00ff, 5), NOW + 61_000);
         assert!(step.synced);
         assert!(step.roa_deltas.is_empty());
+    }
+
+    #[test]
+    fn configured_intervals_shape_the_first_refresh() {
+        // The embedder's configured intervals apply before the first
+        // End of Data: a short refresh polls sooner than the default.
+        let mut c = RtrClient::new();
+        c.set_intervals(60, 30, 120);
+        assert_eq!(c.intervals(), (60, 30, 120));
+        c.on_connect();
+        let a = roa([192, 0, 2, 0], 24, 24, 64512);
+        feed(&mut c, &cache_response(0x00ff), NOW);
+        feed(&mut c, &announced(&a), NOW);
+        feed(&mut c, &eod(0x00ff, 1), NOW);
+        // Default refresh is 3600 s — at 61 s an unconfigured client
+        // would stay quiet; this one sends its refresh Serial Query.
+        let step = c.poll(NOW + 61_000);
+        assert!(!step.send.is_empty());
     }
 }
