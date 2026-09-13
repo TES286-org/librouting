@@ -29,7 +29,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libc6-dev gcc g++ cbindgen python3 python3-pip python3-venv \
-            golang-go
+            golang-go bird2
       - name: Install Python test deps
         run: |
           python3 -m venv /tmp/venv
@@ -75,6 +75,12 @@ jobs:
       - name: Add-Path interop (RFC 7911, two-daemon)
         run: |
           ./tests/interop/addpath.sh
+      - name: Filter DSL + ROA interop (BIRD 2)
+        run: |
+          ./tests/interop/filter_dsl_bird.sh
+      - name: Babel multi-NIC pattern matching
+        run: |
+          ./tests/interop/babel_multi_nic.sh
 
   msrv:
     name: MSRV (1.88)
