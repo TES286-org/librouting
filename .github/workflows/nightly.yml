@@ -142,7 +142,7 @@ jobs:
         run: cargo +nightly fuzz run roa_validate -- -max_total_time=300 -max_len=4096
       - name: Upload crash artifacts (if any)
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: fuzz-crash-artifacts
           path: fuzz/artifacts/
@@ -179,7 +179,7 @@ jobs:
             --noplot
       - name: Upload criterion reports
         if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: criterion-reports
           path: target/criterion/
