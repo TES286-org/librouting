@@ -15,3 +15,14 @@ Cargo.lock.bak
 templates/*/target
 templates/*/Cargo.lock
 
+# cargo-fuzz build artifacts. The auto-generated corpus under
+# `fuzz/corpus/<target>/` grows in size as the fuzzer discovers new
+# coverage paths; the small hand-picked seed inputs under
+# `fuzz/seeds/<target>/` ARE committed (typically 5–10 inputs per
+# target) and serve as the starting corpus that `cargo +nightly
+# fuzz run` copies into `fuzz/corpus/` on first run.
+fuzz/target
+fuzz/artifacts
+fuzz/coverage
+fuzz/corpus
+

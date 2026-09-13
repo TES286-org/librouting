@@ -1,0 +1,51 @@
+[package]
+name = "librouting-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+authors = ["TES286-org"]
+description = "cargo-fuzz targets for librouting wire codecs and parsers (ROADMAP-v3 D6.4)"
+
+[package.metadata]
+cargo-fuzz = true
+
+# Standalone workspace — the fuzz crate must NOT be a member of the
+# librouting workspace because cargo-fuzz injects its own
+# RUSTFLAGS (`-Zsanitizer=address`, coverage instrumentation) that
+# are incompatible with the workspace's `panic = "abort"` release
+# profile. Building fuzz in isolation keeps the sanitizer build
+# graph small and the workspace build clean.
+[workspace]
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+# Path deps — fuzz against the in-tree workspace crates so a fuzz
+# regression catches bugs in the *current* code, not a published
+# snapshot.
+lr-core = { path = "../crates/lr-core" }
+lr-bgp = { path = "../crates/lr-bgp", features = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast"] }
+lr-policy = { path = "../crates/lr-policy" }
+
+# Each `[[bin]]` below is one cargo-fuzz target. cargo-fuzz runs them
+# with `cargo +nightly fuzz run <name>` — see README.md for usage.
+
+[[bin]]
+name = "bgp_decode"
+path = "fuzz_targets/bgp_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "filter_parser"
+path = "fuzz_targets/filter_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "roa_validate"
+path = "fuzz_targets/roa_validate.rs"
+test = false
+doc = false
