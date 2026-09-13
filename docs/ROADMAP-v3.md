@@ -87,7 +87,12 @@ per-interface lookup, all `BabelInterfaceSpec` fields wired through.
 
 ## D2 — RPKI-RTR client (RFC 8210 / RFC 8281)
 
-**Status:** not started. Tracks `lr-bgp` + `lr-cli::daemon`.
+**Status:** partial — ~~D2.1 (PDU codec) landed~~ (commit pending).
+Tracks `lr-bgp` + `lr-cli::daemon`. Note: the ASPA PDU reference in
+this file originally cited RFC 8281, which is PCEP — the ASPA PDU
+(type 11, version 2) comes from the SIDROPS ASPA profile, which BIRD
+implements (`proto/rpki/packets.c` `struct pdu_aspa`). The codec
+follows the BIRD shape.
 
 **Current gap.** `crates/lr-bgp/src/roa.rs` implements the RFC 6811 §2
 validation algorithm, but ROA data can only be loaded through a static
@@ -98,12 +103,21 @@ must maintain ROA data by hand — unacceptable in production.
 
 **Proposed work.**
 
-1. **RTR PDU codec.** New `crates/lr-bgp/src/rtr.rs` implementing the
-   12 PDU types from RFC 8210 §5: Serial Notify, Cache Response,
-   IPv4 Prefix, IPv6 Prefix, End-of-Data, Cache Reset, Router Key,
-   Error Report, plus the RFC 8281 ASPA PDU. Each PDU has an 8-byte
-   fixed header (version 1, type, length) + variable body. Provide
-   `rtr_pdu::encode()` / `rtr_pdu::decode()` and a 12-variant enum.
+1. ~~**RTR PDU codec.**~~ **Landed.** `crates/lr-bgp/src/rtr.rs`
+   implements the ten PDU types RFC 8210 §5 defines plus the ASPA PDU
+   v2, SIDROPS ASPA profile — the reference the item below
+   originally mislabeled as RFC 8281, which is PCEP): Serial Notify,
+   Serial Query, Reset Query, Cache Response, IPv4/IPv6 Prefix,
+   End-of-Data (both the v0 12-byte and v1 24-byte forms), Cache
+   Reset, Router Key, Error Report, ASPA. Framing-aware
+   `rtr::decode` / `rtr::encode` + the 11-variant enum, with
+   BIRD-parity validation (version gates, PDU length bounds,
+   prefix invariants, host-bit masking, reserved-flag
+   normalization). 29 unit tests pin the byte-exact RFC wire forms;
+   the `rtr_cache_mock` example plus `tests/interop/rtr_bird.sh`
+   run BIRD 2's real RPKI client against the codec — its Reset
+   Query decodes through us, our Cache Response + Prefix + EoD
+   encodings install ROAs into BIRD's roa4/roa6 tables.
 2. **RTR client state machine.** RFC 8210 §6 client logic: on connect,
    send a Serial Query carrying the last serial; receive Cache
    Response + a batch of Prefix PDUs + End-of-Data carrying the new

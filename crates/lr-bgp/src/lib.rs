@@ -43,6 +43,7 @@ pub mod path;
 pub mod peer;
 pub mod roa;
 pub mod role;
+pub mod rtr;
 
 pub use codec::BgpCodec;
 pub use error::{

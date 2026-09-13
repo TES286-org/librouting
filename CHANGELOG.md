@@ -18,6 +18,35 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- ROADMAP-v3 D2.1 — RPKI-Router (RTR) protocol PDU codec,
+  `lr_bgp::rtr` (RFC 8210 versions 0-2):
+  - **11-variant PDU enum + framing codec.** Serial Notify, Serial
+    Query, Reset Query, Cache Response, IPv4/IPv6 Prefix,
+    End-of-Data (v0 12-byte and v1 24-byte forms), Cache Reset,
+    Router Key, Error Report, and the ASPA PDU (type 11, version 2 —
+    SIDROPS ASPA profile, the shape BIRD's `proto/rpki` implements;
+    the roadmap previously mis-cited RFC 8281, which is PCEP).
+    `rtr::decode` is framing-aware (`Ok(None)` while a PDU is
+    partially buffered) and `rtr::encode` writes exact wire lengths.
+  - **BIRD-parity validation on decode.** Version-gated PDU types
+    (Router Key ≥ 1, ASPA ≥ 2), the 64 KiB PDU ceiling, per-type
+    minimum/exact lengths, prefix invariants (`prefix_len ≤ family
+    width`, `max_len ≥ prefix_len`, `max_len ≤ family width`), host
+    bit masking, reserved flag-bit normalization, and internal
+    length consistency for Error Report and ASPA bodies. The nine
+    RFC 8210 §12 error codes are a closed enum with the
+    fatal/no-data distinction.
+  - **29 unit tests** pin byte-exact wire forms from the RFC 8210 §5
+    figures, framing behavior, and the malformed-input paths.
+  - **Live interop with BIRD 2.** The new `rtr_cache_mock` example
+    (`cargo build -p lr-bgp --example rtr_cache_mock`) serves a
+    fixed two-ROA dataset through the codec, and
+    `tests/interop/rtr_bird.sh` runs BIRD's RPKI client against it:
+    BIRD's Reset Query decodes through `lr_bgp::rtr`, the §7
+    version downgrade to v1 works, and our Cache Response + Prefix
+    + End-of-Data encodings install `192.0.2.0/24-24 AS64512` and
+    `2001:db8::/48-64 AS64512` into BIRD's roa4/roa6 tables
+    (birdc-verified). Wired into the CI interop job.
 - ROADMAP-v3 D6 — fuzzing, property tests, performance benchmarks
   and RFC wire conformance vectors:
   - **`Prefix::network` IPv6 bug fix.** The previous

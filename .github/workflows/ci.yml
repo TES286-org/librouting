@@ -250,6 +250,10 @@ jobs:
           sudo apt-get install -y --no-install-recommends bird2 frr iproute2
       - name: Build lr-daemon
         run: cargo build -p lr-cli
+      - name: Build the RTR mock cache example
+        run: cargo build -p lr-bgp --example rtr_cache_mock
+      - name: RTR codec interop (RFC 8210, lr-bgp mock cache x BIRD 2 rpki)
+        run: ./tests/interop/rtr_bird.sh
       - name: Two-daemon interop (librouting ↔ librouting)
         run: ./tests/interop/two_daemon.sh
       - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)
