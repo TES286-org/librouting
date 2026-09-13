@@ -42,6 +42,7 @@ pub mod nlri;
 pub mod path;
 pub mod peer;
 pub mod roa;
+pub mod roa_store;
 pub mod role;
 pub mod rtr;
 
@@ -54,3 +55,5 @@ pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState};
 pub use message::{BgpHeader, BgpMessage, BgpMessageType};
 pub use peer::{MaxPrefixAction, PeerConfig};
 pub use roa::{RoaBuildError, RoaEntry, RoaError, RoaState, RoaTable, RoaTableBuilder};
+pub use roa_store::RoaStore;
+pub use rtr::client::{ClientStep, RoaDelta, RtrClient};

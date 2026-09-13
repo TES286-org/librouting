@@ -35,7 +35,7 @@ use lr_core::addr::{Asn, Prefix};
 
 /// One ROA entry: the authorized prefix, the longest prefix length
 /// the origin AS may announce, and the origin AS itself.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct RoaEntry {
     /// Authorized prefix (RFC 6482 §3.1).
     pub prefix: Prefix,
@@ -149,6 +149,20 @@ impl RoaTable {
     /// Empty table — every validation returns `NotFound`.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Build a table from an entry list. Entries are deduplicated and
+    /// sorted so the same set always produces the same table — the
+    /// [`crate::roa_store::RoaStore`] snapshot path uses this to make
+    /// reloads byte-deterministic. The RFC 6482 per-entry invariants
+    /// are *not* re-checked here (each entry is assumed to have been
+    /// built through [`RoaEntry::exact`] / [`RoaEntry::with_max_length`]
+    /// or the builder).
+    pub fn from_entries(entries: impl IntoIterator<Item = RoaEntry>) -> Self {
+        let mut entries: Vec<RoaEntry> = entries.into_iter().collect();
+        entries.sort_unstable();
+        entries.dedup();
+        Self { entries }
     }
 
     /// Number of ROA entries stored.
