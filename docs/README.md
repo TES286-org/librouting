@@ -59,3 +59,13 @@ the protocol crates.
    narrative lands in `ROADMAP.md` (enforced at review).
 2. `API.md` gains a section whenever a new public API surface appears.
 3. Documents are English-only; keep lines under ~80 characters.
+
+## Contributor and security docs (repo root)
+
+| Document                              | Contents                                                          |
+| ------------------------------------- | ----------------------------------------------------------------- |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | PR checklist, commit message format, test layers, RFC pinning procedure |
+| [`../SECURITY.md`](../SECURITY.md)    | Vulnerability reporting, 90-day embargo, threat model             |
+| [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Contributor Covenant 2.0                                  |
+| [`../CHANGELOG.md`](../CHANGELOG.md)  | Consumer-facing version history (Keep a Changelog format)         |
+| [`../deny.toml`](../deny.toml)        | `cargo-deny` config — advisories, licenses, bans, sources         |
