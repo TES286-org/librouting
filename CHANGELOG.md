@@ -25,6 +25,17 @@ ship, breaking changes that affect embedders, dependency bumps.
   `Other(_) -> "unknown"`. `lr-core::rib::Protocol` gained the new
   method; `lr-policy::filter::eval` uses it instead of the Rust
   `Debug` form, so `proto == "bgp"` now matches a BGP route.
+- RFC 8326 Graceful BGP Session Shutdown (sender side):
+  `Community::GRACEFUL_SHUTDOWN` (`0xFFFF:0000`) is now the
+  canonical alias for the legacy `PLANNED_SHUTDOWN` constant at
+  the same wire value; `CommunityKind::GracefulShutdown` is added
+  to the classification enum; the export hook
+  `lr_policy::hooks::GracefulShutdownExportHook` zeroes
+  `LOCAL_PREF` on any route carrying the community while preserving
+  the community itself so downstream peers see the signal. The
+  daemon installs the hook always-on for BGP. `PathAttributes`
+  gained a `set_local_pref(u32)` helper. Six regression tests
+  cover the new behaviour.
 - `docs/ROADMAP-v3.md` captures the 15 post-rc.3 maturity
   directions, grouped into four priority tiers (T1 immediate value,
   T2 high practical value, T3 engineering maturity, T4 long-term

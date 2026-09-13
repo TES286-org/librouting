@@ -22,6 +22,14 @@
 //! - **[`ExportHook`]** — invoked after the route is selected for the
 //!   Adj-RIB-Out, before encode. May modify or drop the route.
 //!
+//! Built-in hooks:
+//!
+//! - **[`GracefulShutdownExportHook`]** — RFC 8326 §3.1 sender side: when a
+//!   route carries the `GRACEFUL_SHUTDOWN` community, zero its LOCAL_PREF
+//!   on the export copy so receivers prefer alternatives before the session
+//!   actually goes down. The community itself is preserved so downstream
+//!   peers see the signal.
+//!
 //! All hooks are non-blocking and synchronous. Long-running work should be
 //! deferred to a background task and surfaced as a flag attribute on the
 //! route itself.
@@ -29,6 +37,9 @@
 use core::cmp::Ordering;
 
 use lr_core::rib::Route;
+
+#[cfg(feature = "bgp")]
+use lr_bgp::path::{Community, PathAttributes};
 
 /// Verdict returned by a hook. The route is either dropped, kept as-is, or
 /// replaced by a modified copy.
@@ -80,6 +91,68 @@ pub trait ExportHook: Send {
     fn on_export_to(&self, route: &mut Route, destination: u64) -> HookVerdict {
         let _ = destination;
         self.on_export(route)
+    }
+}
+
+/// RFC 8326 §3.1 sender-side graceful shutdown hook.
+///
+/// When a route carries the `GRACEFUL_SHUTDOWN` community
+/// (`0xFFFF:0000`, [`Community::GRACEFUL_SHUTDOWN`]), the export
+/// copy has its `LOCAL_PREF` set to zero so receiving speakers
+/// prefer alternative paths. The community itself is preserved so
+/// downstream peers see the signal (RFC 8326 §3.1: "the
+/// GRACEFUL_SHUTDOWN community ... SHOULD be retained").
+///
+/// The hook is idempotent: re-running it on a route that already
+/// has `LOCAL_PREF == 0` is a no-op.
+///
+/// The hook is destination-agnostic — RFC 8326 makes no exception
+/// for the recipient. Embedders that want to selectively disable
+/// the behaviour on a particular session should install the hook
+/// only on the relevant sessions, not globally.
+///
+/// This is the canonical implementation; the daemon installs it by
+/// default on the BGP export chain. Embedders may install their own
+/// `ExportHook` implementation if they need a different policy
+/// (e.g. to drop the route entirely rather than advertise with
+/// `LOCAL_PREF == 0`).
+///
+/// [`Community::GRACEFUL_SHUTDOWN`]: lr_bgp::path::Community::GRACEFUL_SHUTDOWN
+#[cfg(feature = "bgp")]
+#[derive(Debug, Default, Clone, Copy)]
+pub struct GracefulShutdownExportHook;
+
+#[cfg(feature = "bgp")]
+impl GracefulShutdownExportHook {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[cfg(feature = "bgp")]
+impl ExportHook for GracefulShutdownExportHook {
+    fn name(&self) -> &str {
+        "rfc8326-graceful-shutdown"
+    }
+
+    fn on_export(&self, route: &mut Route) -> HookVerdict {
+        // Take ownership of the attribute bag without cloning so we
+        // can use the high-level PathAttributes accessors mutably.
+        // The conversion is infallible (From<Attributes> for
+        // PathAttributes is total) so we always put the bag back,
+        // modified or not.
+        let mut attrs: PathAttributes = core::mem::take(&mut route.attributes).into();
+
+        if attrs.has_community(Community::GRACEFUL_SHUTDOWN) {
+            // RFC 8326 §3.1: "the BGP speaker ... SHOULD set the
+            // LOCAL_PREF value to 0 for the routes ... being
+            // advertised". We preserve the community so downstream
+            // peers can also act on it.
+            attrs.set_local_pref(0);
+        }
+
+        route.attributes = attrs.into();
+        HookVerdict::Keep
     }
 }
 
@@ -254,5 +327,140 @@ mod tests {
         let initial_metric = r.preference.metric;
         let _ = chain.run_export(&mut r);
         assert_eq!(r.preference.metric, initial_metric + 1);
+    }
+
+    /// Helper: build a route whose attribute bag carries a single
+    /// LOCAL_PREF attribute at the supplied value. Used by the
+    /// RFC 8326 hook tests below.
+    #[cfg(feature = "bgp")]
+    fn route_with_local_pref(prefix: [u8; 4], plen: u8, peer: u64, lp: u32) -> Route {
+        let mut r = route(prefix, plen, peer);
+        let mut attrs: PathAttributes = r.attributes.clone().into();
+        attrs.set_local_pref(lp);
+        r.attributes = attrs.into();
+        r
+    }
+
+    /// Helper: attach a community to a route's attribute bag.
+    #[cfg(feature = "bgp")]
+    fn attach_community(r: &mut Route, c: Community) {
+        let mut attrs: PathAttributes = r.attributes.clone().into();
+        attrs.insert_community(c);
+        r.attributes = attrs.into();
+    }
+
+    /// Helper: read LOCAL_PREF back from a route (None if absent).
+    #[cfg(feature = "bgp")]
+    fn local_pref_of(r: &Route) -> Option<u32> {
+        let attrs: PathAttributes = r.attributes.clone().into();
+        attrs.local_pref().map(|lp| lp.0)
+    }
+
+    /// Helper: check whether the route still carries a community.
+    #[cfg(feature = "bgp")]
+    fn has_community(r: &Route, c: Community) -> bool {
+        let attrs: PathAttributes = r.attributes.clone().into();
+        attrs.has_community(c)
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn graceful_shutdown_zeroes_local_pref_when_community_present() {
+        // RFC 8326 §3.1: a route carrying the GRACEFUL_SHUTDOWN
+        // community on export must have LOCAL_PREF set to zero so
+        // receivers prefer alternatives.
+        let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
+        let hook = GracefulShutdownExportHook::new();
+        let verdict = hook.on_export(&mut r);
+        assert!(
+            matches!(verdict, HookVerdict::Keep),
+            "hook must keep, not drop"
+        );
+        assert_eq!(local_pref_of(&r), Some(0), "LOCAL_PREF must be zeroed");
+        assert!(
+            has_community(&r, Community::GRACEFUL_SHUTDOWN),
+            "GRACEFUL_SHUTDOWN community must be preserved"
+        );
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn graceful_shutdown_is_noop_when_community_absent() {
+        // Routes without the community pass through unchanged — the
+        // hook is opt-in via the community marker, never global.
+        let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        let hook = GracefulShutdownExportHook::new();
+        let _ = hook.on_export(&mut r);
+        assert_eq!(local_pref_of(&r), Some(100), "LOCAL_PREF must be preserved");
+        assert!(
+            !has_community(&r, Community::GRACEFUL_SHUTDOWN),
+            "no community should have been added"
+        );
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn graceful_shutdown_inserts_local_pref_when_absent() {
+        // RFC 8326 §3.1 does not require LOCAL_PREF to pre-exist on
+        // the route. If the attribute is absent (e.g. eBGP-learned
+        // route), the hook still injects LOCAL_PREF=0 so the
+        // receiver's import path sees the explicit "least preferred"
+        // signal rather than a default-100 fallback.
+        let mut r = route([203, 0, 113, 0], 24, 1);
+        attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
+        assert!(local_pref_of(&r).is_none(), "precondition: no LOCAL_PREF");
+        let hook = GracefulShutdownExportHook::new();
+        let _ = hook.on_export(&mut r);
+        assert_eq!(
+            local_pref_of(&r),
+            Some(0),
+            "LOCAL_PREF must be inserted at zero"
+        );
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn graceful_shutdown_is_idempotent() {
+        // Running the hook twice must not produce a different
+        // result — the second pass finds LOCAL_PREF already at 0
+        // and is a no-op.
+        let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
+        let hook = GracefulShutdownExportHook::new();
+        let _ = hook.on_export(&mut r);
+        assert_eq!(local_pref_of(&r), Some(0));
+        let _ = hook.on_export(&mut r);
+        assert_eq!(local_pref_of(&r), Some(0));
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn graceful_shutdown_legacy_planned_shutdown_alias_triggers_hook() {
+        // RFC 8326 renamed PLANNED_SHUTDOWN (draft-ietf-idr-shutdown)
+        // to GRACEFUL_SHUTDOWN at the same wire value
+        // (0xFFFF:0000). Configs using the legacy alias must still
+        // trigger the hook.
+        let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut r, Community::PLANNED_SHUTDOWN);
+        let hook = GracefulShutdownExportHook::new();
+        let _ = hook.on_export(&mut r);
+        assert_eq!(local_pref_of(&r), Some(0));
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn graceful_shutdown_runs_in_hook_chain() {
+        // Verify the hook composes with the HookChain plumbing the
+        // router actually uses (HookChain::run_export).
+        let chain = HookChain {
+            import: vec![],
+            selection: vec![],
+            export: vec![Box::new(GracefulShutdownExportHook::new())],
+        };
+        let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
+        let _ = chain.run_export(&mut r);
+        assert_eq!(local_pref_of(&r), Some(0));
     }
 }

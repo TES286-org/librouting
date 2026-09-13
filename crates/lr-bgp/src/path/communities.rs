@@ -4,6 +4,13 @@
 //! Standard community: 4 bytes, hi 2 = AS, lo 2 = value.
 //! Extended: 8 bytes, type:subtype:global:local.
 //! Large: 12 bytes, global_admin:local_part1:local_part2.
+//!
+//! Well-known community aliases (RFC 8326 §4): the
+//! `GRACEFUL_SHUTDOWN` community standardised in RFC 8326 has wire
+//! value `0xFFFF:0000`. The same wire value was called
+//! `PLANNED_SHUTDOWN` in earlier drafts (draft-ietf-idr-shutdown);
+//! both names are kept as aliases so config files that use either
+//! name work without surprises.
 
 use core::fmt;
 
@@ -16,6 +23,20 @@ impl Community {
     pub const NO_ADVERTISE: Self = Self(0xffff_ff02);
     pub const NO_EXPORT_SUBCONFED: Self = Self(0xffff_ff03);
     pub const NOPEER: Self = Self(0xffff_ff04);
+    /// RFC 8326 §4 `GRACEFUL_SHUTDOWN` (`0xFFFF:0000`).
+    ///
+    /// Carried on a route to signal that the advertising speaker is
+    /// in the process of shutting down the session. Receivers SHOULD
+    /// treat the route as least-preferred (e.g. set LOCAL_PREF to
+    /// zero locally) so transit traffic shifts to alternative paths
+    /// before the session actually goes down. Senders SHOULD also set
+    /// LOCAL_PREF to zero on the export copy so the signal is visible
+    /// to downstream peers. The export hook that does this lives in
+    /// `lr_policy::hooks::GracefulShutdownExportHook`.
+    pub const GRACEFUL_SHUTDOWN: Self = Self(0xffff_0000);
+    /// Legacy alias for [`Self::GRACEFUL_SHUTDOWN`]. Pre-RFC-8326
+    /// drafts named this community `PLANNED_SHUTDOWN`; the wire value
+    /// is unchanged.
     pub const PLANNED_SHUTDOWN: Self = Self(0xffff_0000);
     /// RFC 9494 §3.2: marks a long-lived stale route (least preferred).
     pub const LLGR_STALE: Self = Self(0xffff_0006);
@@ -43,6 +64,8 @@ impl Community {
             CommunityKind::NoExportSubconfed
         } else if self.0 == Self::NOPEER.0 {
             CommunityKind::NoPeer
+        } else if self.0 == Self::GRACEFUL_SHUTDOWN.0 {
+            CommunityKind::GracefulShutdown
         } else if self.0 == Self::LLGR_STALE.0 {
             CommunityKind::LlgrStale
         } else if self.0 == Self::NO_LLGR.0 {
@@ -77,6 +100,7 @@ impl fmt::Display for Community {
             CommunityKind::NoAdvertise => f.write_str("no-advertise"),
             CommunityKind::NoExportSubconfed => f.write_str("no-export-subconfed"),
             CommunityKind::NoPeer => f.write_str("no-peer"),
+            CommunityKind::GracefulShutdown => f.write_str("graceful-shutdown"),
             CommunityKind::LlgrStale => f.write_str("llgr-stale"),
             CommunityKind::NoLlgr => f.write_str("no-llgr"),
             CommunityKind::Custom => {
@@ -94,6 +118,13 @@ pub enum CommunityKind {
     NoAdvertise,
     NoExportSubconfed,
     NoPeer,
+    /// RFC 8326 §4 `GRACEFUL_SHUTDOWN` (`0xFFFF:0000`).
+    ///
+    /// Honoured by `lr_policy::hooks::GracefulShutdownExportHook` on
+    /// the send side (set LOCAL_PREF to zero so receivers prefer
+    /// alternatives) and by the import path on the receive side
+    /// (treat as least-preferred during best-path selection).
+    GracefulShutdown,
     /// RFC 9494 §3.2 `LLGR_STALE` (0xFFFF0006).
     LlgrStale,
     /// RFC 9494 §3.3 `NO_LLGR` (0xFFFF0007).
@@ -181,5 +212,25 @@ mod tests {
         assert_eq!(Community::NO_LLGR.to_string(), "no-llgr");
         assert_eq!(Community::LLGR_STALE.kind(), CommunityKind::LlgrStale);
         assert_eq!(Community::NO_LLGR.kind(), CommunityKind::NoLlgr);
+    }
+
+    #[test]
+    fn graceful_shutdown_alias_and_classification() {
+        // RFC 8326 §4: GRACEFUL_SHUTDOWN == 0xFFFF:0000. The
+        // pre-RFC draft name `PLANNED_SHUTDOWN` is kept as an alias
+        // for the same wire value so config files using either
+        // name round-trip identically.
+        assert_eq!(Community::GRACEFUL_SHUTDOWN.0, 0xffff_0000);
+        assert_eq!(Community::PLANNED_SHUTDOWN.0, 0xffff_0000);
+        assert_eq!(Community::GRACEFUL_SHUTDOWN, Community::PLANNED_SHUTDOWN);
+        assert_eq!(
+            Community::GRACEFUL_SHUTDOWN.kind(),
+            CommunityKind::GracefulShutdown
+        );
+        // Display renders the RFC 8326 name, not the legacy alias.
+        assert_eq!(
+            Community::GRACEFUL_SHUTDOWN.to_string(),
+            "graceful-shutdown"
+        );
     }
 }

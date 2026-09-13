@@ -724,6 +724,26 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         );
     }
 
+    // ---- RFC 8326 Graceful Session Shutdown (always-on for BGP). ----
+    // The community (`GRACEFUL_SHUTDOWN` / `0xFFFF:0000`) is honoured
+    // on the *export* side: any route that carries it has its
+    // LOCAL_PREF set to zero before advertisement, so receivers prefer
+    // alternatives before the session actually goes down. RFC 8326
+    // §3.1 specifies this as a SHOULD, so the hook is installed by
+    // default whenever BGP is in the protocol set. Embedders that
+    // want a different policy can replace the hook chain.
+    //
+    // The hook is destination-agnostic and idempotent; running it
+    // twice on the same route is a no-op (the second pass finds
+    // LOCAL_PREF already at 0).
+    if cfg.runs_protocol("bgp") {
+        let mut r = router.lock().unwrap();
+        r.hooks_mut()
+            .export
+            .push(Box::new(lr_policy::hooks::GracefulShutdownExportHook::new()));
+        println!("  rfc8326:      graceful-shutdown export hook installed");
+    }
+
     // ---- Banner. ----
     // The multi-protocol supervisor already printed the process banner
     // (protocol set, router-id, install, platform); the engine banner

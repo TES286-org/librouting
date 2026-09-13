@@ -509,13 +509,27 @@ model document, no formal EBNF for the Filter DSL.
 **Current gap.** BGP core coverage is strong (25 extensions), but the
 following RFCs are unimplemented:
 
-### D10.1 — RFC 8326 (Graceful Session Shutdown)
+### D10.1 — RFC 8326 (Graceful Session Shutdown) — ~~landed~~
 
-The `GRACEFUL_SHUTDOWN` community constant exists in `communities.rs:19`
-but is not honoured on export. Need an export hook that checks whether
-a route carries the `GRACEFUL_SHUTDOWN` community; if so, set
-`LOCAL_PREF = 0` (or do not advertise) to signal the route is being
-closed. ~200 LoC. **Land early — small and self-contained.**
+The `GRACEFUL_SHUTDOWN` community constant was previously named
+`PLANNED_SHUTDOWN` (the pre-RFC-8326 draft name) and the export
+direction did not honour it. Landed: `Community::GRACEFUL_SHUTDOWN`
+is added as the canonical alias at the same wire value
+(`0xFFFF:0000`); `CommunityKind::GracefulShutdown` is added to the
+classification enum; the export hook
+`lr_policy::hooks::GracefulShutdownExportHook` zeroes LOCAL_PREF on
+any route carrying the community while preserving the community
+itself (RFC 8326 §3.1: "the GRACEFUL_SHUTDOWN community ... SHOULD
+be retained"). The hook is destination-agnostic and idempotent; the
+daemon installs it always-on for BGP sessions. Six regression tests
+in `lr-policy/src/hooks.rs` plus the community classification test
+in `lr-bgp/src/path/communities.rs` cover the new behaviour.
+
+A future follow-up will add the receive-side hook (treat routes
+carrying `GRACEFUL_SHUTDOWN` as least-preferred during best-path
+selection) and a per-peer `[bgp] graceful_shutdown = false` knob
+for embedders that want to disable the sender side. Tracked under
+D10 follow-up.
 
 ### D10.2 — RFC 5666 (Egress Peer Engineering)
 
@@ -705,7 +719,7 @@ refactor — needs extensive regression tests.
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
 | D9        | not started           | —     | Architecture + contributor docs         |
-| D10       | partial (D10.1 first) | —     | RFC 8326 first; BGP-LS / SR Policy post-1.0 |
+| D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | not started           | —     | `lrctl` + Prometheus exporter            |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |

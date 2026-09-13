@@ -318,6 +318,20 @@ impl PathAttributes {
         let a = self.get(AttrType::LocalPref)?;
         LocalPref::decode(&a.value)
     }
+    /// Insert or replace the LOCAL_PREF attribute (RFC 4271 §5.1.4).
+    ///
+    /// LOCAL_PREF is well-known discretionary (flags `0x40` —
+    /// transitive, not optional). Used by the RFC 8326 graceful
+    /// shutdown export hook to zero out LOCAL_PREF on routes that
+    /// carry `GRACEFUL_SHUTDOWN`, so receivers prefer alternatives.
+    pub fn set_local_pref(&mut self, value: u32) {
+        let lp = LocalPref(value);
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::LocalPref,
+            lp.encode().to_vec(),
+        ));
+    }
     pub fn atomic_aggregate(&self) -> Option<AtomicAggregate> {
         self.get(AttrType::AtomicAggregate).map(|_| AtomicAggregate)
     }
