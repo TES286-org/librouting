@@ -301,19 +301,34 @@ fn rpki_sync_populates_the_roa_store() {
 
     // The API status line reports the live store: two cache ROAs plus
     // one static [[roa]] entry, the session/serial from End of Data,
-    // and the connected state.
-    let status = api_ask(&socket, "status");
-    let line = status
-        .lines()
-        .find(|l| l.starts_with("rpki: cache="))
-        .expect("status carries an rpki line");
-    assert!(line.contains("state=connected"), "rpki status: {line}");
-    assert!(line.contains("session=0x00ff"), "rpki status: {line}");
-    assert!(line.contains("serial=1"), "rpki status: {line}");
-    assert!(
-        line.contains("roas=3 (static=1 rtr=2)"),
-        "rpki status: {line}"
-    );
+    // and the cache-provided refresh interval. The transport state
+    // (state=) is deliberately NOT asserted: after a sync the client
+    // may legitimately be inside a reconnect cycle, which is a
+    // transient the data assertions do not depend on. Poll until the
+    // sync's status snapshot is visible (it refreshes at sync time,
+    // but the API query may race the thread's very first update).
+    let line = {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let status = api_ask(&socket, "status");
+            let matched = status.lines().find(|l| l.starts_with("rpki: cache="));
+            if let Some(l) = matched {
+                if l.contains("session=0x00ff")
+                    && l.contains("serial=1")
+                    && l.contains("roas=3 (static=1 rtr=2)")
+                    && l.contains("refresh=60s")
+                {
+                    break l.to_string();
+                }
+            }
+            if Instant::now() >= deadline {
+                panic!("rpki status never reflected the sync: {status}");
+            }
+            thread::sleep(Duration::from_millis(100));
+        }
+    };
+    // The status line carries the cache-provided refresh interval —
+    // proof the End-of-Data values reached the live client.
     assert!(line.contains("refresh=60s"), "rpki status: {line}");
 }
 
