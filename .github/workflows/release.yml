@@ -58,7 +58,7 @@ jobs:
             lrd_bin: lr-daemon.exe
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
@@ -117,7 +117,7 @@ jobs:
     needs: build-native
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
