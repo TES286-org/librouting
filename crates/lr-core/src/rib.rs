@@ -71,6 +71,28 @@ impl Protocol {
             Self::Other(_) => 200,
         }
     }
+
+    /// BIRD-style lowercase protocol name surfaced through the Filter
+    /// DSL `proto` field and any cross-protocol comparison.
+    ///
+    /// Mirrors the names BIRD 2 uses in `filter` (`bgp`, `ospf`,
+    /// `ospf3`, `babel`, `static`, `direct`). Routes from protocols
+    /// BIRD does not model collapse to `"unknown"`.
+    ///
+    /// This is the canonical string form used by the Filter DSL
+    /// (`proto == "bgp"`); the Rust `Debug` form is for diagnostics
+    /// only and must not leak into the filter string surface.
+    pub fn bird_name(self) -> &'static str {
+        match self {
+            Self::Bgp => "bgp",
+            Self::Ospfv2 => "ospf",
+            Self::Ospfv3 => "ospf3",
+            Self::Babel => "babel",
+            Self::Static => "static",
+            Self::Connected => "direct",
+            Self::Other(_) => "unknown",
+        }
+    }
 }
 
 /// Admin preference (lower wins). Combines admin distance (left) and

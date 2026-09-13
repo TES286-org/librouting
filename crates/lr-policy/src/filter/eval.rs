@@ -489,7 +489,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     fn read_route_field(&self, field: &RouteField, route: &Route) -> Result<Value, EvalError> {
         match field.kind {
             RouteFieldKind::Net => Ok(Value::Prefix(route.key.prefix)),
-            RouteFieldKind::Proto => Ok(Value::Str(format!("{:?}", route.protocol))),
+            RouteFieldKind::Proto => Ok(Value::Str(route.protocol.bird_name().to_string())),
             RouteFieldKind::Source => Ok(Value::Int(i64::from(route.origin.proto))),
             RouteFieldKind::BgpLocalPref => Ok(Value::Int(
                 self.ctx.bgp_local_pref(route).unwrap_or(0) as i64,
@@ -1284,5 +1284,90 @@ mod tests {
         // StubCtx returns NotFound, so the equality fails and we
         // fall through to `reject;`.
         assert_eq!(run(src, &mut r), EvalResult::Reject(None));
+    }
+
+    /// Build a route with an explicit protocol kind, for `proto` field
+    /// tests. The default `route_with` helper hard-codes
+    /// `Protocol::Bgp`, which is fine for everything except the
+    /// `proto` string surface.
+    fn route_with_proto(prefix: &str, protocol: Protocol) -> Route {
+        let prefix: Prefix = prefix.parse().unwrap();
+        let mut attrs = Attributes::new();
+        attrs.insert(Attribute {
+            tag: AttrTag::raw(TAG_LOCAL_PREF),
+            flags: 0x40,
+            value: 100u32.to_be_bytes().to_vec(),
+        });
+        attrs.insert(Attribute {
+            tag: AttrTag::raw(TAG_MED),
+            flags: 0x80,
+            value: 0u32.to_be_bytes().to_vec(),
+        });
+        Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 1, peer: 0 },
+            protocol,
+            preference: Preference::new(protocol.default_admin_distance(), 100),
+            next_hop: None,
+            attributes: attrs,
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn proto_field_returns_bird_style_lowercase_name() {
+        // Regression for the Filter DSL `proto` string form: the
+        // previous implementation returned Rust Debug strings
+        // (`"Bgp"`, `"Ospfv2"`, …). BIRD and the lr docs use the
+        // lowercase form, so `proto == "bgp"` must hold for a BGP
+        // route. Mirrors the docstring on `RouteFieldKind::Proto`.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if proto == \"bgp\" then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn proto_field_does_not_match_rust_debug_form() {
+        // The buggy Debug form (`"Bgp"`) must no longer match.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if proto == \"Bgp\" then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn proto_field_matches_each_protocol_bird_name() {
+        for (proto, name) in [
+            (Protocol::Bgp, "bgp"),
+            (Protocol::Ospfv2, "ospf"),
+            (Protocol::Ospfv3, "ospf3"),
+            (Protocol::Babel, "babel"),
+            (Protocol::Static, "static"),
+            (Protocol::Connected, "direct"),
+            (Protocol::Other(99), "unknown"),
+        ] {
+            let mut r = route_with_proto("203.0.113.0/24", proto);
+            let src = format!("if proto == \"{name}\" then accept; reject;");
+            assert_eq!(
+                run(&src, &mut r),
+                EvalResult::Accept,
+                "proto {proto:?} did not match bird-name {name:?}",
+            );
+        }
+    }
+
+    #[test]
+    fn proto_field_case_statement_routes_bird_names() {
+        // Replaces the legacy `case proto { "ospfv2" => accept; … }`
+        // form: BIRD-style names are lowercase without the `v2`
+        // suffix for OSPFv2.
+        let mut r = route_with_proto("203.0.113.0/24", Protocol::Ospfv2);
+        let src = "case proto { \"ospf\" => accept; default => reject; }";
+        assert_eq!(run(src, &mut r), EvalResult::Accept);
     }
 }
