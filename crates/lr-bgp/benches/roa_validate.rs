@@ -36,11 +36,7 @@ fn build_table(n: usize) -> RoaTable {
         let lo = (i & 0xff) as u8;
         // i is the prefix; we authorise 10.{hi}.{lo}.0/24 for AS 65000.
         builder
-            .add(
-                &format!("10.{hi}.{lo}.0/24"),
-                Some(24),
-                65000 + (i % 1000),
-            )
+            .add(&format!("10.{hi}.{lo}.0/24"), Some(24), 65000 + (i % 1000))
             .expect("add ROA entry");
     }
     builder.build()
