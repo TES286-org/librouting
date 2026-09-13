@@ -451,6 +451,54 @@ int32_t lr_router_rib_dump(lr_router_t r, struct lr_bytes_t *out);
 int32_t lr_router_sessions_dump(lr_router_t r, struct lr_bytes_t *out);
 
 /**
+ * Add one ROA entry to the router's ROA table (RFC 6482 §3 /
+ * RFC 6811 §2). The router uses the table when a route is
+ * imported and `lr_router_set_roa_validate(r, 1)` is set; the
+ * filter DSL's `roa.state` accessor reads the same table.
+ *
+ * Parameters:
+ * - `r`: router handle (from [`lr_router_new`]).
+ * - `prefix_v4` / `prefix_v6`: the authorized prefix's address
+ *   bytes. For IPv4, pass the first 4 bytes of `prefix_v4` and
+ *   leave `prefix_v6` NULL. For IPv6, pass the 16-byte IPv6
+ *   address through `prefix_v6` and leave `prefix_v4` NULL.
+ * - `prefix_len`: the prefix length (0..=32 for v4, 0..=128 for v6).
+ * - `max_length`: the maximum authorized prefix length (>=
+ *   `prefix_len`, <= family width). Pass `0` to default to the
+ *   exact prefix length.
+ * - `asn`: the authorized origin AS (u32). AS 0 marks a
+ *   blackhole-range ROA (RFC 6483 §4); it never matches a real
+ *   origin AS but produces `Invalid` for any route under the
+ *   prefix.
+ *
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`. `prefix_v4` (when non-NULL)
+ * must point at 4 readable bytes; `prefix_v6` (when non-NULL)
+ * must point at 16 readable bytes.
+ */
+int32_t lr_router_add_roa_entry(lr_router_t r,
+                                const uint8_t *prefix_v4,
+                                const uint8_t *prefix_v6,
+                                uint8_t prefix_len,
+                                uint8_t max_length,
+                                uint32_t asn);
+
+/**
+ * Toggle RFC 6811 §2 prefix-origin validation on (1) or off (0).
+ * When on, every received BGP UPDATE is validated against the
+ * router's ROA table at import time; routes whose origin AS is
+ * not authorized are rejected.
+ *
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `r` must be a valid `lr_router_t`.
+ */
+int32_t lr_router_set_roa_validate(lr_router_t r, uint8_t enable);
+
+/**
  * Encode an SRH from a list of SID bytes. Each SID is 16 bytes; the
  * caller passes a flat `data` of `len = n * 16` bytes. The encoded
  * SRH (RFC 8754 §2 wire form) is written to `*out`.

@@ -164,14 +164,16 @@ pub fn prefix_mask(prefix_len: u8) -> u32 {
 mod imp;
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub use imp::{
-    ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport, OspfV6Transport,
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, InterfaceEntry,
+    OspfV2Transport, OspfV6Transport,
 };
 
 #[cfg(all(feature = "std", not(target_os = "linux")))]
 mod stub;
 #[cfg(all(feature = "std", not(target_os = "linux")))]
 pub use stub::{
-    ifindex_of, interface_v4_addrs, interface_v6_addrs, OspfV2Transport, OspfV6Transport,
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, InterfaceEntry,
+    OspfV2Transport, OspfV6Transport,
 };
 
 #[cfg(test)]

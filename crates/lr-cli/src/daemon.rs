@@ -2524,11 +2524,102 @@ fn lr_ip(addr: std::net::IpAddr) -> lr_core::addr::IpAddr {
 /// (rc.3) — see [`run_bgp_daemon`] for the split.
 fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // ---- local address (IPv6 link-local with %scope, or IPv4) ----
+    // When `[[babel.interface]]` blocks exist, resolve them against
+    // the system's interfaces first so the daemon can pick the first
+    // match's address as the bind source.
+    let mut resolved_iface_name: Option<String> = None;
+    if !cfg.babel_interfaces.is_empty() {
+        match lr_osroute::ospf_transport::list_interfaces() {
+            Ok(ifaces) => {
+                println!(
+                    "daemon: babel {} interface pattern(s) configured; enumerating {} system interface(s)",
+                    cfg.babel_interfaces.len(),
+                    ifaces.len()
+                );
+                for spec in &cfg.babel_interfaces {
+                    let pat = spec.name.as_deref().unwrap_or("");
+                    let matched: Vec<&lr_osroute::ospf_transport::InterfaceEntry> = ifaces
+                        .iter()
+                        .filter(|i| crate::daemon_config::glob_match(pat, &i.name))
+                        .collect();
+                    if matched.is_empty() {
+                        println!(
+                            "daemon: babel interface pattern '{}' matched 0 interfaces",
+                            pat
+                        );
+                    } else {
+                        println!(
+                            "daemon: babel interface pattern '{}' matched {} interface(s): {}",
+                            pat,
+                            matched.len(),
+                            matched
+                                .iter()
+                                .map(|i| i.name.as_str())
+                                .collect::<Vec<_>>()
+                                .join(", ")
+                        );
+                        if resolved_iface_name.is_none() {
+                            resolved_iface_name = Some(matched[0].name.clone());
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!(
+                    "daemon: babel interface enumeration unavailable ({}); ignoring [[babel.interface]] blocks",
+                    e
+                );
+            }
+        }
+    }
+    // Pick the bind address: explicit --local-address wins; otherwise
+    // fall back to the first matched [[babel.interface]]'s address.
     let local_str = cfg.local_address.as_deref().or(cfg.listen_addr.as_deref());
-    let Some(local_str) = local_str else {
-        eprintln!("daemon: --protocol babel requires --local-address (IPv6 link-local or IPv4)");
+    let local_str = if let Some(local_str) = local_str {
+        local_str.to_string()
+    } else if let Some(iface_name) = &resolved_iface_name {
+        match lr_osroute::ospf_transport::list_interfaces() {
+            Ok(ifaces) => {
+                let iface = ifaces.iter().find(|i| &i.name == iface_name);
+                let picked = iface.and_then(|i| {
+                    if let Some(v4) = i.v4.first() {
+                        Some(std::net::IpAddr::V4(*v4))
+                    } else {
+                        // Pick the first non-link-local IPv6, or fall
+                        // back to the first IPv6 (often link-local).
+                        i.v6.iter()
+                            .find(|v| !(v.octets()[0] == 0xfe && (v.octets()[1] & 0xc0) == 0x80))
+                            .map(|v| std::net::IpAddr::V6(*v))
+                            .or_else(|| i.v6.first().map(|v| std::net::IpAddr::V6(*v)))
+                    }
+                });
+                match picked {
+                    Some(ip) => {
+                        println!(
+                            "daemon: babel using interface {} address {} as bind source",
+                            iface_name, ip
+                        );
+                        ip.to_string()
+                    }
+                    None => {
+                        eprintln!(
+                            "daemon: babel interface {} has no usable address; specify --local-address",
+                            iface_name
+                        );
+                        return ExitCode::from(2);
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("daemon: babel interface enumeration failed: {}", e);
+                return ExitCode::from(2);
+            }
+        }
+    } else {
+        eprintln!("daemon: --protocol babel requires --local-address (IPv6 link-local or IPv4) or a [[babel.interface]] block matching a system interface");
         return ExitCode::from(2);
     };
+    let local_str = local_str.as_str();
     // Accept `fe80::1%eth0`, `[fe80::1%eth0]:6696`, and bare IPv4.
     let bare = local_str
         .trim_start_matches('[')

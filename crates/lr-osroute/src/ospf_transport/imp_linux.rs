@@ -340,6 +340,69 @@ fn mask_to_prefix_len(mask: [u8; 4]) -> Option<u8> {
     Some(len)
 }
 
+/// One interface's name + the IPv4 and IPv6 addresses `getifaddrs`
+/// returned for it. Returned by [`list_interfaces`]; used by the
+/// Babel multi-NIC config matcher to resolve `[[babel.interface]]`
+/// glob patterns (`eth*`, `eth?`) to concrete kernel interfaces
+/// and pick a bind address per match.
+#[derive(Debug, Clone)]
+pub struct InterfaceEntry {
+    pub name: String,
+    pub v4: Vec<std::net::Ipv4Addr>,
+    pub v6: Vec<std::net::Ipv6Addr>,
+}
+
+/// Enumerate every interface on the system with its IPv4 and IPv6
+/// addresses. Used by the Babel `[[babel.interface]]` matcher to
+/// resolve glob patterns to concrete interface names — the daemon
+/// then picks one address per matched interface as its bind source.
+///
+/// Link-local IPv6 addresses (`fe80::/10`) are included so the
+/// daemon can bind them with the interface's `%scope` suffix when
+/// needed (Babel commonly runs on link-local v6 only).
+pub fn list_interfaces() -> Result<Vec<InterfaceEntry>, OspfTransportError> {
+    let mut head: *mut Ifaddrs = std::ptr::null_mut();
+    // SAFETY: getifaddrs writes one fresh, self-linked list into head.
+    let rc = unsafe { getifaddrs(&mut head) };
+    if rc != 0 {
+        return Err(os_error("getifaddrs"));
+    }
+    let mut by_name: std::collections::BTreeMap<String, InterfaceEntry> =
+        std::collections::BTreeMap::new();
+    // SAFETY: the list stays valid until freeifaddrs below; we only
+    // read through the borrowed pointers.
+    unsafe {
+        let mut cur = head;
+        while !cur.is_null() {
+            let entry = &*cur;
+            if !entry.ifa_name.is_null() {
+                // SAFETY: ifa_name is a NUL-terminated C string owned
+                // by the list.
+                let name = std::ffi::CStr::from_ptr(entry.ifa_name)
+                    .to_string_lossy()
+                    .into_owned();
+                let iface = by_name.entry(name.clone()).or_insert(InterfaceEntry {
+                    name,
+                    v4: Vec::new(),
+                    v6: Vec::new(),
+                });
+                if let Some(v4) = sockaddr_ipv4(entry.ifa_addr) {
+                    iface
+                        .v4
+                        .push(std::net::Ipv4Addr::new(v4[0], v4[1], v4[2], v4[3]));
+                }
+                if let Some((v6, _, _)) = sockaddr_ipv6(entry.ifa_addr, entry.ifa_netmask) {
+                    iface.v6.push(std::net::Ipv6Addr::from(v6));
+                }
+            }
+            cur = entry.ifa_next;
+        }
+    }
+    // SAFETY: hand the borrowed list back.
+    unsafe { freeifaddrs(head) };
+    Ok(by_name.into_values().collect())
+}
+
 /// One raw OSPFv2 socket bound to a single interface.
 pub struct OspfV2Transport {
     fd: i32,

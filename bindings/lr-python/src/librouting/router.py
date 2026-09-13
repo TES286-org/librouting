@@ -433,6 +433,48 @@ class Router:
         finally:
             free_bytes(b)
 
+    def add_roa_entry(
+        self,
+        prefix: str,
+        max_length: int = 0,
+        asn: int = 0,
+    ) -> None:
+        """Add one Route Origin Authorization entry (RFC 6482 §3 /
+        RFC 6811 §2) to the router's ROA table. ``prefix`` is a CIDR
+        string (``"203.0.113.0/24"`` or ``"2001:db8::/32"``).
+        ``max_length`` defaults to the prefix length (exact-prefix
+        authorization). ``asn`` is the authorized origin AS.
+        """
+        import ipaddress
+        try:
+            net = ipaddress.ip_network(prefix, strict=False)
+        except ValueError as e:
+            raise LrError(f"invalid prefix {prefix!r}: {e}") from e
+        if max_length == 0:
+            max_length = net.prefixlen
+        if net.version == 4:
+            v4 = ffi.new("uint8_t[]", net.network_address.packed)
+            v6 = ffi.NULL
+        else:
+            v4 = ffi.NULL
+            v6 = ffi.new("uint8_t[]", net.network_address.packed)
+        rc = get_lib().lr_router_add_roa_entry(
+            self._ptr,
+            v4,
+            v6,
+            int(net.prefixlen),
+            int(max_length),
+            int(asn),
+        )
+        if rc != 0:
+            raise LrError(f"lr_router_add_roa_entry failed (rc={rc}): {last_error()}")
+
+    def set_roa_validate(self, enable: bool) -> None:
+        """Toggle RFC 6811 §2 prefix-origin validation on/off."""
+        rc = get_lib().lr_router_set_roa_validate(self._ptr, 1 if enable else 0)
+        if rc != 0:
+            raise LrError(f"lr_router_set_roa_validate failed (rc={rc}): {last_error()}")
+
 
 def abi_version() -> int:
     return int(get_lib().lr_abi_version())

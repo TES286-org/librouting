@@ -3,7 +3,7 @@
 //! embedders on other systems provide their own transport and feed
 //! bytes through the router's session API (see docs/OS-INTEGRATION.md).
 
-use super::{InterfaceV4Addr, InterfaceV6Addr, OspfTransportError};
+use super::{InterfaceEntry, InterfaceV4Addr, InterfaceV6Addr, OspfTransportError};
 
 pub fn interface_v4_addrs(_interface: &str) -> Result<Vec<InterfaceV4Addr>, OspfTransportError> {
     Err(OspfTransportError::Unsupported(
@@ -19,6 +19,15 @@ pub fn interface_v6_addrs(_interface: &str) -> Result<Vec<InterfaceV6Addr>, Ospf
 
 pub fn ifindex_of(_interface: &str) -> Option<u32> {
     None
+}
+
+/// Stub for non-Linux platforms: returns `Unsupported` since
+/// `getifaddrs` is not available. Embedders on those platforms
+/// provide their own interface enumeration.
+pub fn list_interfaces() -> Result<Vec<InterfaceEntry>, OspfTransportError> {
+    Err(OspfTransportError::Unsupported(
+        "interface enumeration exists only on Linux in librouting",
+    ))
 }
 
 pub struct OspfV2Transport {

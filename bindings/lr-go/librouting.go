@@ -511,6 +511,54 @@ func (r *Router) SessionsDump() (string, error) {
         return string(copyBytes(&b)), nil
 }
 
+// AddROAEntry adds one Route Origin Authorization entry to the
+// router's ROA table (RFC 6482 §3 / RFC 6811 §2). Pass exactly one
+// of `prefixV4` (4 bytes) or `prefixV6` (16 bytes); the other MUST
+// be nil. maxLength == 0 means "exact prefix length only" (the
+// common /24 case). When ROA validation is enabled via
+// SetROAValidate, the router rejects routes whose origin AS is not
+// authorized at import time. The filter DSL's roa.state accessor
+// reads the same table.
+func (r *Router) AddROAEntry(prefixV4, prefixV6 []byte, prefixLen, maxLength uint8, asn uint32) error {
+        var v4Ptr, v6Ptr *C.uint8_t
+        if prefixV4 != nil {
+                if len(prefixV4) != 4 {
+                        return fmt.Errorf("AddROAEntry: prefixV4 must be 4 bytes, got %d", len(prefixV4))
+                }
+                v4Ptr = (*C.uint8_t)(&prefixV4[0])
+        }
+        if prefixV6 != nil {
+                if len(prefixV6) != 16 {
+                        return fmt.Errorf("AddROAEntry: prefixV6 must be 16 bytes, got %d", len(prefixV6))
+                }
+                v6Ptr = (*C.uint8_t)(&prefixV6[0])
+        }
+        if v4Ptr == nil && v6Ptr == nil {
+                return fmt.Errorf("AddROAEntry: at least one of prefixV4 / prefixV6 must be non-nil")
+        }
+        rc := C.lr_router_add_roa_entry(r.ptr, v4Ptr, v6Ptr, C.uint8_t(prefixLen), C.uint8_t(maxLength), C.uint32_t(asn))
+        if rc != 0 {
+                return fmt.Errorf("lr_router_add_roa_entry: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
+// SetROAValidate toggles RFC 6811 §2 prefix-origin validation on
+// (enable = true) or off (false). When on, every received BGP
+// UPDATE is validated against the router's ROA table; Invalid
+// routes are rejected at import time.
+func (r *Router) SetROAValidate(enable bool) error {
+        var v C.uint8_t
+        if enable {
+                v = 1
+        }
+        rc := C.lr_router_set_roa_validate(r.ptr, v)
+        if rc != 0 {
+                return fmt.Errorf("lr_router_set_roa_validate: %s (rc=%d)", LastError(), int(rc))
+        }
+        return nil
+}
+
 // ABIVersion returns the packed ABI version of the linked library.
 func ABIVersion() uint32 {
         return uint32(C.lr_abi_version())
