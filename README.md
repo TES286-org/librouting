@@ -430,6 +430,41 @@ daemon exposes it as `[bgp] soft_reconfig_inbound` (default `false`)
 with per-peer override; CLI `--soft-reconfig-inbound` /
 `--no-soft-reconfig-inbound`.
 
+### ROA prefix-origin validation (RFC 6811)
+
+`[bgp] roa_validate = true` arms RFC 6811 §2 prefix-origin validation.
+`[[roa]]` tables load ROA entries at startup; every received BGP
+UPDATE is validated against the router-wide `RoaTable` at import
+time. `roa_invalid_action` controls the `Invalid` outcome:
+`"reject"` (default, drop), `"warn"` (accept with log), or
+`"accept"` (silent). The filter DSL's `roa.state` accessor reads the
+same table regardless of `roa_validate` — so
+`if roa.state == "invalid" then { reject; }` always works. See
+`docs/examples/filter_dsl_roa.md`.
+
+### BIRD-like filter DSL
+
+`[[filter]]` tables compile a BIRD-like filter body and attach it to
+peers via `import_filter = "name"` / `export_filter = "name"`. The
+DSL supports `if/then/else`, `let` bindings, arithmetic, comparison,
+boolean and bitwise operators, prefix-set membership
+(`net ~ [ 10.0.0.0/8{16,24} ]`), route attribute access and mutation
+(`bgp.local_pref = 200`, `bgp.communities += [ 64512:100 ]`,
+`bgp.as_path.prepend(65001)`), `accept`/`reject` (with optional
+reason), `case`/switch, and function calls (`len(bgp.as_path)`).
+See `docs/examples/filter_dsl_roa.md` for the full grammar and
+`docs/PARITY.md` §12 for the BIRD feature-comparison table.
+
+### Babel multi-NIC with glob patterns
+
+`[[babel.interface]]` blocks configure per-interface Babel parameters
+(RFC 8966 §A.2) with shell-like glob patterns (`*`, `?`, `\`). The
+daemon enumerates system interfaces via `getifaddrs(3)`, matches
+each name against the patterns in file order, and uses the first
+match's parameters for the Babel session. When `--local-address` is
+unset, the daemon picks the first matched interface's primary address
+as the bind source. See `docs/examples/babel_multi_nic.md`.
+
 ## Safety net
 
 Protocol-level invariants (RFC compliance requirements) are enforced by

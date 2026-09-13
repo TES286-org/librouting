@@ -471,3 +471,99 @@ permit = false
 # [[ldp.bind]]
 # prefix = "203.0.113.0/24"
 # label = 24000
+
+# ---------------------------------------------------------------------------
+# ROA — Route Origin Authorization (RFC 6482 / RFC 6811)
+# ---------------------------------------------------------------------------
+# Load ROA entries at startup into the router-wide RoaTable. When
+# [bgp] roa_validate = true, every received BGP UPDATE is validated
+# per RFC 6811 §2: routes whose (prefix, origin_as) is not authorized
+# are rejected at import time (before the user-supplied import hook
+# chain runs). The filter DSL's roa.state accessor reads the same
+# table regardless of roa_validate so an explicit
+# `if roa.state == "invalid" then { reject; }` always works.
+#
+# [bgp]
+# roa_validate = true           # default false (opt-in, BIRD parity)
+# roa_invalid_action = "reject" # "reject" (default) | "warn" | "accept"
+#
+# [[roa]]
+# prefix = "203.0.113.0/24"     # authorized prefix (required, CIDR)
+# asn = 64512                   # authorized origin AS (required, u32)
+# max_length = 24               # default: prefix length (exact match)
+#                               # must be >= prefix length and <= 32 (v4)
+#                               # or 128 (v6) — fail-closed on violation
+#
+# [[roa]]
+# prefix = "2001:db8::/32"
+# max_length = 48
+# asn = 64512
+
+# ---------------------------------------------------------------------------
+# BIRD-like filter DSL ([[filter]] tables)
+# ---------------------------------------------------------------------------
+# A real expression language for import/export policy — targeting a
+# subset of BIRD's filter grammar. Compile a filter body (a string
+# carrying the DSL source) and attach it to peers via
+# import_filter = "name" / export_filter = "name".
+#
+# Features: if/then/else, let bindings, arithmetic (+ - * / %),
+# comparison (== != < <= > >=), boolean (&& || !), bitwise
+# (& | ^ << >>), prefix-set membership (net ~ [ 10.0.0.0/8{16,24} ]),
+# route attribute access (net, bgp.local_pref, bgp.med, bgp.as_path,
+# bgp.communities, bgp.next_hop, proto, roa.state), assignment
+# (bgp.local_pref = 200), append (bgp.communities += [ 64512:100 ]),
+# method calls (bgp.as_path.prepend(65001)), accept/reject (with
+# optional reason), case/switch, function calls (len(), first(),
+# last()).
+#
+# [[filter]]
+# name = "customer-in"
+# body = "if net ~ [ 203.0.113.0/24, 198.51.100.0/24 ] then { bgp.local_pref = 200; accept; } reject;"
+# description = "Accept customer prefixes with bumped local-pref"
+#
+# [[filter]]
+# name = "roa-guard"
+# body = "if roa.state == \"invalid\" then { reject with \"ROA invalid\"; } accept;"
+#
+# [[peer]]
+# name = "customer-a"
+# remote = "192.0.2.2:179"
+# import_filter = "customer-in"
+# export_filter = "permit-all"
+
+# ---------------------------------------------------------------------------
+# Babel multi-NIC with glob patterns ([[babel.interface]] tables)
+# ---------------------------------------------------------------------------
+# Per-interface Babel parameters (RFC 8966 §A.2). name accepts
+# shell-like glob patterns (*, ?, \) so the same parameters can
+# apply to a fleet of similar interfaces (eth*). The daemon
+# enumerates the system interfaces (getifaddrs), matches each
+# name against the patterns in file order, and uses the first
+# match's parameters for the single Babel session. The first
+# matching pattern wins (BIRD interface directive parity).
+#
+# When [[babel.interface]] blocks exist, --local-address is
+# optional — the daemon picks the first matched interface's
+# primary address as the bind source.
+#
+# [[babel.interface]]
+# name = "eth*"               # glob pattern (required)
+# type = "wired"              # "wired" (default) | "wireless" | "tunnel"
+# rxcost = 96                 # BIRD default 96 wired, 256 wireless
+# hello_interval_ms = 4000    # BIRD default 4000 ms wired
+# # update_interval_ms = 16000 # 4x hello by default
+# # rtt_cost = 0              # RTT-based cost (off when 0)
+# # rtt_min_us = 10000        # lower RTT bound (us), BIRD default 10 ms
+# # rtt_max_us = 120000       # upper RTT bound (us), BIRD default 120 ms
+# # next_hop_ipv4 = "10.0.0.1"
+# # next_hop_ipv6 = "fe80::1"
+# # extended_next_hop = false # RFC 5549
+# # check_link = true         # withdraw on interface down
+# # port = 6696               # override [babel] port
+# # group = "224.0.0.111"     # override [babel] group
+#
+# [[babel.interface]]
+# name = "wlan0"
+# type = "wireless"
+# rxcost = 256

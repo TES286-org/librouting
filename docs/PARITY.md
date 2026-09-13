@@ -238,3 +238,53 @@ Recorded so nobody "fixes" them by accident:
    capability-list differences per peer dialect (see §4). This is a
    wire-level necessity, not a policy difference.
 
+## 11. ROA prefix-origin validation (RFC 6811)
+
+| Feature | lr | BIRD | FRR |
+|---------|-----|------|-----|
+| `[[roa]]` tables | `[[roa]] prefix, max_length, asn` | `roa table` + RPKI | `rpki` cache |
+| Validation trigger | `[bgp] roa_validate = true` | `rpki reload` | `bgp rpki on` |
+| Invalid action | `roa_invalid_action = "reject"` | `reject` | `bgp rpki invalid reject` |
+| Filter DSL access | `roa.state == "invalid"` | `roa_check()` | `extcommunity rt ...` |
+| Strictness | fail-closed on malformed ROA | strict | strict |
+
+## 12. BIRD-like filter DSL
+
+lr's `[[filter]]` tables target a subset of BIRD's filter grammar,
+compiled by `lr_policy::filter::compile()` and evaluated via a
+tree-walking interpreter with a scoped variable stack.
+
+| Feature | lr | BIRD |
+|---------|-----|------|
+| `if/then/else` | yes | yes |
+| `let` bindings | yes | yes (`int x = ...`) |
+| Arithmetic `+ - * / %` | yes | yes |
+| Comparison `== != < <= > >=` | yes | yes |
+| Boolean `&& \|\| !` | yes | yes (`and or not`) |
+| Bitwise `& \| ^ << >>` | yes | yes |
+| Prefix-set `net ~ [ p{ge,le} ]` | yes | yes |
+| `bgp.local_pref = N` | yes | yes |
+| `bgp.communities += [ asn:val ]` | yes | yes |
+| `bgp.as_path.prepend(N)` | yes | yes |
+| `accept` / `reject` | yes | yes |
+| `case` / switch | yes | yes |
+| `len(bgp.as_path)` | yes | yes |
+| `roa.state == "invalid"` | yes | `roa_check()` |
+| Bytecode compilation | no (tree-walk) | yes (`f_line`) |
+
+The tree-walking evaluator is sufficient for the typical route-per-
+second rate of import/export policy; a bytecode compiler can be
+layered on later without changing the `Filter::evaluate` API.
+
+## 13. Babel multi-NIC with glob patterns
+
+| Feature | lr | BIRD |
+|---------|-----|------|
+| Per-interface params | `[[babel.interface]]` | `interface "eth0" { ... }` |
+| Glob patterns | `name = "eth*"` (`*`, `?`, `\`) | `interface "eth*" { ... }` |
+| Wired / wireless / tunnel | `type = "wired"` | `type wired` |
+| RTT-based cost | `rtt_cost`, `rtt_min_us`, `rtt_max_us` | `rtt cost`, `rtt min`, `rtt max` |
+| Per-interface keys | `[[babel.key]]` (global) | `passwords` per iface |
+| First-match wins | yes (file order) | yes |
+
+
