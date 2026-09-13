@@ -12,6 +12,55 @@ use lr_core::addr::{IpAddr, Prefix};
 /// Body: `Source Plen(1) | Source Prefix(ceil(Plen/8))`.
 pub const SOURCE_PREFIX_SUBTLV: u8 = 128;
 
+/// The Timestamp sub-TLV (type 3, the BABEL-RTT delay-based metric
+/// extension — RFC 8966 §A.2.4 and the IANA Babel Sub-TLV registry row
+/// `[BABEL-RTT]`). Carried inside a Hello TLV (4-octet value: the
+/// sender's 32-bit microsecond clock at send time) or inside an IHU TLV
+/// (8-octet value: the echoed pair from the Hello being acknowledged —
+/// see [`Hello::timestamp`] / [`Ihu::timestamp_echo`]).
+pub const TIMESTAMP_SUBTLV: u8 = 3;
+
+/// Parse the trailing sub-TLVs of a TLV body for the Timestamp sub-TLV
+/// (type 3) and return its raw value. Unknown sub-TLVs are silently
+/// ignored (RFC 8966 §4.4); a second Timestamp sub-TLV invalidates the
+/// enclosing TLV (same policy as the RFC 9079 §7.1 duplicate rule).
+fn parse_timestamp_subtlv(tail: &[u8]) -> Option<Vec<u8>> {
+    let mut ts: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < tail.len() {
+        if tail[i] == 0 {
+            i += 1; // Pad1
+            continue;
+        }
+        if i + 2 > tail.len() {
+            return None; // truncated sub-TLV header → corrupt TLV
+        }
+        let kind = tail[i];
+        let len = tail[i + 1] as usize;
+        let end = i + 2 + len;
+        if end > tail.len() {
+            return None; // truncated sub-TLV
+        }
+        if kind == TIMESTAMP_SUBTLV {
+            if ts.is_some() {
+                return None; // duplicate → ignore the enclosing TLV
+            }
+            ts = Some(tail[i + 2..end].to_vec());
+        }
+        i = end;
+    }
+    ts
+}
+
+/// Serialize a Timestamp sub-TLV with a raw value.
+fn encode_timestamp_subtlv(value: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(2 + value.len());
+    out.push(TIMESTAMP_SUBTLV);
+    out.push(value.len() as u8);
+    out.extend_from_slice(value);
+    out
+}
+
 /// Parse the trailing sub-TLVs of a self-terminating TLV body and return
 /// the source-prefix sub-TLV's (plen, octets) if present. Unknown sub-TLVs
 /// are silently ignored (RFC 8966 §4.4); a second Source Prefix sub-TLV
@@ -58,7 +107,8 @@ fn encode_source_subtlv(plen: u8, octets: &[u8]) -> Vec<u8> {
     out
 }
 
-/// Hello TLV body (RFC 8966 §4.6.5): `Flags(2) | Seqno(2) | Interval(2)`.
+/// Hello TLV body (RFC 8966 §4.6.5): `Flags(2) | Seqno(2) | Interval(2)`,
+/// optionally followed by sub-TLVs.
 ///
 /// Only the Unicast flag (0x8000) is defined; all other flag bits MUST be
 /// sent as zero and silently ignored on reception.
@@ -67,6 +117,13 @@ pub struct Hello {
     pub flags: u16,
     pub seqno: u16,
     pub interval_cs: u16,
+    /// Timestamp sub-TLV value (BABEL-RTT): the sender's 32-bit
+    /// microsecond clock at the moment the Hello was sent. `None` when
+    /// the sender does not enable timestamps. The receiver records it
+    /// together with its own receive time so a later IHU can echo the
+    /// pair back and let the *sender* compute the round-trip time
+    /// (RFC 8966 §A.2.4).
+    pub timestamp: Option<u32>,
 }
 
 impl Hello {
@@ -77,40 +134,87 @@ impl Hello {
             flags: 0,
             seqno,
             interval_cs,
+            timestamp: None,
         }
+    }
+
+    /// Attach the BABEL-RTT timestamp sub-TLV (the sender's 32-bit
+    /// microsecond clock).
+    pub fn with_timestamp(mut self, ts_us: u32) -> Self {
+        self.timestamp = Some(ts_us);
+        self
     }
 
     pub fn decode(v: &[u8]) -> Option<Self> {
         if v.len() < 6 {
             return None;
         }
+        let flags = u16::from_be_bytes([v[0], v[1]]);
+        let seqno = u16::from_be_bytes([v[2], v[3]]);
+        let interval_cs = u16::from_be_bytes([v[4], v[5]]);
+        // Trailing bytes are sub-TLVs; only the Timestamp is defined for
+        // Hello (unknown ones are silently ignored, RFC 8966 §4.4).
+        let timestamp = match parse_timestamp_subtlv(&v[6..]) {
+            // Exactly 4 octets per the BABEL-RTT wire format; any other
+            // length corrupts the value — ignore the whole sub-TLV.
+            Some(v) if v.len() == 4 => Some(u32::from_be_bytes([v[0], v[1], v[2], v[3]])),
+            _ => None,
+        };
         Some(Self {
-            flags: u16::from_be_bytes([v[0], v[1]]),
-            seqno: u16::from_be_bytes([v[2], v[3]]),
-            interval_cs: u16::from_be_bytes([v[4], v[5]]),
+            flags,
+            seqno,
+            interval_cs,
+            timestamp,
         })
     }
 
-    pub fn encode(&self) -> [u8; 6] {
-        let mut a = [0u8; 6];
-        a[..2].copy_from_slice(&self.flags.to_be_bytes());
-        a[2..4].copy_from_slice(&self.seqno.to_be_bytes());
-        a[4..].copy_from_slice(&self.interval_cs.to_be_bytes());
+    pub fn encode(&self) -> Vec<u8> {
+        let mut a = Vec::with_capacity(6 + self.timestamp.is_some() as usize * 6);
+        a.extend_from_slice(&self.flags.to_be_bytes());
+        a.extend_from_slice(&self.seqno.to_be_bytes());
+        a.extend_from_slice(&self.interval_cs.to_be_bytes());
+        if let Some(ts) = self.timestamp {
+            a.extend_from_slice(&encode_timestamp_subtlv(&ts.to_be_bytes()));
+        }
         a
     }
 }
 
 /// IHU TLV body (RFC 8966 §4.6.6):
-/// `AE(1) | Reserved(1) | Rxcost(2) | Interval(2) | Address`.
+/// `AE(1) | Reserved(1) | Rxcost(2) | Interval(2) | Address`, optionally
+/// followed by sub-TLVs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Ihu {
     pub ae: u8,
     pub rxcost: u16,
     pub interval_cs: u16,
     pub address: Option<IpAddr>,
+    /// Timestamp sub-TLV value (BABEL-RTT): the echoed `(peer Hello send
+    /// time, our receive time of that Hello)` pair, both 32-bit
+    /// microsecond clocks — the first in the *peer's* clock (echoed
+    /// verbatim from the peer's Hello), the second in *ours*. The peer
+    /// combines them with its own records to compute the round-trip
+    /// time (RFC 8966 §A.2.4).
+    pub timestamp_echo: Option<(u32, u32)>,
 }
 
 impl Ihu {
+    pub fn new(rxcost: u16, interval_cs: u16) -> Self {
+        Self {
+            ae: 0,
+            rxcost,
+            interval_cs,
+            address: None,
+            timestamp_echo: None,
+        }
+    }
+
+    /// Attach the BABEL-RTT echo pair (see [`Ihu::timestamp_echo`]).
+    pub fn with_timestamp_echo(mut self, hello_send_us: u32, receive_us: u32) -> Self {
+        self.timestamp_echo = Some((hello_send_us, receive_us));
+        self
+    }
+
     pub fn decode(v: &[u8]) -> Option<Self> {
         if v.len() < 6 {
             return None;
@@ -118,29 +222,46 @@ impl Ihu {
         let ae = v[0];
         let rxcost = u16::from_be_bytes([v[2], v[3]]);
         let interval_cs = u16::from_be_bytes([v[4], v[5]]);
-        let address = match ae {
-            0 => None, // wildcard: no address octets
-            1 => IpAddr::from_bytes(v.get(6..10)?),
-            2 => IpAddr::from_bytes(v.get(6..22)?),
-            3 => {
-                // Link-local IPv6: 8 octets with an implied fe80::/64.
-                let b = v.get(6..14)?;
-                let mut a = [0u8; 16];
-                a[..8].copy_from_slice(b);
-                Some(IpAddr::V6(a))
-            }
+        let addr_len = match ae {
+            0 => 0, // wildcard: no address octets
+            1 => 4,
+            2 => 16,
+            3 => 8,           // link-local IPv6 with implied fe80::/64
             _ => return None, // unknown AE → silently ignored
+        };
+        let address = if addr_len == 0 {
+            None
+        } else {
+            let b = v.get(6..6 + addr_len)?;
+            match ae {
+                1 => Some(IpAddr::from_bytes(b)?),
+                2 => Some(IpAddr::from_bytes(b)?),
+                _ => {
+                    let mut a = [0u8; 16];
+                    a[..8].copy_from_slice(b);
+                    Some(IpAddr::V6(a))
+                }
+            }
+        };
+        // Trailing bytes after the address are sub-TLVs.
+        let timestamp_echo = match parse_timestamp_subtlv(&v[6 + addr_len..]) {
+            Some(v) if v.len() == 8 => Some((
+                u32::from_be_bytes([v[0], v[1], v[2], v[3]]),
+                u32::from_be_bytes([v[4], v[5], v[6], v[7]]),
+            )),
+            _ => None,
         };
         Some(Self {
             ae,
             rxcost,
             interval_cs,
             address,
+            timestamp_echo,
         })
     }
 
     pub fn encode(&self) -> Vec<u8> {
-        let mut a = Vec::with_capacity(6 + 16);
+        let mut a = Vec::with_capacity(6 + 16 + 10);
         a.push(self.ae);
         a.push(0); // Reserved
         a.extend_from_slice(&self.rxcost.to_be_bytes());
@@ -152,6 +273,12 @@ impl Ihu {
                 (3, IpAddr::V6(b)) => a.extend_from_slice(&b[..8]),
                 _ => {} // cannot encode; caller should not construct this
             }
+        }
+        if let Some((send, recv)) = self.timestamp_echo {
+            let mut pair = [0u8; 8];
+            pair[..4].copy_from_slice(&send.to_be_bytes());
+            pair[4..].copy_from_slice(&recv.to_be_bytes());
+            a.extend_from_slice(&encode_timestamp_subtlv(&pair));
         }
         a
     }
@@ -499,6 +626,7 @@ mod tests {
             flags: 0,
             seqno: 42,
             interval_cs: 1000,
+            timestamp: None,
         };
         let enc = h.encode();
         assert_eq!(enc, [0, 0, 0, 42, 0x03, 0xe8]);
@@ -512,6 +640,7 @@ mod tests {
             rxcost: 256,
             interval_cs: 400,
             address: Some(IpAddr::V4([192, 0, 2, 1])),
+            timestamp_echo: None,
         };
         let enc = ihu.encode();
         assert_eq!(enc[0], 1); // AE
@@ -526,6 +655,7 @@ mod tests {
             rxcost: 100,
             interval_cs: 200,
             address: None,
+            timestamp_echo: None,
         };
         let enc = ihu.encode();
         assert_eq!(enc.len(), 6);
@@ -670,5 +800,98 @@ mod tests {
     fn ack_roundtrip() {
         let a = Ack { opaque: 0x1234 };
         assert_eq!(Ack::decode(&a.encode()).unwrap(), a);
+    }
+
+    #[test]
+    fn hello_timestamp_roundtrip() {
+        let h = Hello::new(7, 100).with_timestamp(0x1122_3344);
+        let enc = h.encode();
+        // Fixed body, then sub-TLV: type 3, length 4, big-endian value.
+        assert_eq!(enc, [0, 0, 0, 7, 0, 100, 3, 4, 0x11, 0x22, 0x33, 0x44]);
+        assert_eq!(Hello::decode(&enc).unwrap(), h);
+    }
+
+    #[test]
+    fn hello_timestamp_wrong_length_ignored() {
+        // A 5-octet Timestamp sub-TLV value is corrupt — the sub-TLV is
+        // ignored but the Hello itself stays valid (RFC 8966 §4.4).
+        let mut enc = Hello::new(7, 100).encode();
+        enc.extend_from_slice(&[3, 5, 1, 2, 3, 4, 5]);
+        let h = Hello::decode(&enc).unwrap();
+        assert_eq!(h.timestamp, None);
+        assert_eq!(h.seqno, 7);
+    }
+
+    #[test]
+    fn hello_duplicate_timestamp_invalidates_the_subtlv_only() {
+        // A second Timestamp sub-TLV corrupts the RTT datum, but the
+        // enclosing Hello stays valid — the same graceful policy the
+        // RFC 9079 Source Prefix sub-TLV parser applies.
+        let mut enc = Hello::new(7, 100).with_timestamp(1).encode();
+        enc.extend_from_slice(&[3, 4, 0, 0, 0, 2]);
+        let h = Hello::decode(&enc).unwrap();
+        assert_eq!(h.timestamp, None);
+        assert_eq!(h.seqno, 7);
+    }
+
+    #[test]
+    fn hello_unknown_subtlv_ignored() {
+        let mut enc = Hello::new(7, 100).encode();
+        enc.extend_from_slice(&[99, 2, 0xaa, 0xbb]); // unknown sub-TLV
+        enc.extend_from_slice(&[3, 4, 0, 0, 0, 42]); // timestamp
+        let h = Hello::decode(&enc).unwrap();
+        assert_eq!(h.timestamp, Some(42));
+    }
+
+    #[test]
+    fn hello_pad1_subtlv_tolerated() {
+        let mut enc = Hello::new(7, 100).encode();
+        enc.push(0); // Pad1
+        enc.extend_from_slice(&[3, 4, 0, 0, 0, 9]);
+        assert_eq!(Hello::decode(&enc).unwrap().timestamp, Some(9));
+    }
+
+    #[test]
+    fn ihu_timestamp_echo_roundtrip() {
+        let ihu = Ihu::new(96, 300).with_timestamp_echo(0x0102_0304, 0x0506_0708);
+        let enc = ihu.encode();
+        assert_eq!(enc, [0, 0, 0, 96, 1, 44, 3, 8, 1, 2, 3, 4, 5, 6, 7, 8]);
+        assert_eq!(Ihu::decode(&enc).unwrap(), ihu);
+    }
+
+    #[test]
+    fn ihu_v4_with_timestamp_echo_roundtrip() {
+        let ihu = Ihu {
+            ae: 1,
+            rxcost: 96,
+            interval_cs: 300,
+            address: Some(IpAddr::V4([192, 0, 2, 1])),
+            timestamp_echo: Some((7, 9)),
+        };
+        let enc = ihu.encode();
+        // The sub-TLV follows the 4 address octets.
+        assert_eq!(&enc[6..10], &[192, 0, 2, 1]);
+        assert_eq!(&enc[10..], &[3, 8, 0, 0, 0, 7, 0, 0, 0, 9]);
+        assert_eq!(Ihu::decode(&enc).unwrap(), ihu);
+    }
+
+    #[test]
+    fn ihu_timestamp_wrong_length_ignored() {
+        let mut enc = Ihu::new(96, 300).encode();
+        enc.extend_from_slice(&[3, 7, 1, 2, 3, 4, 5, 6, 7]);
+        let ihu = Ihu::decode(&enc).unwrap();
+        assert_eq!(ihu.timestamp_echo, None);
+        assert_eq!(ihu.rxcost, 96);
+    }
+
+    #[test]
+    fn ihu_truncated_subtlv_drops_the_echo_only() {
+        // The sub-TLV claims 8 octets but carries 3 — the echo datum
+        // is unusable and dropped; the IHU cost fields stay valid.
+        let mut enc = Ihu::new(96, 300).encode();
+        enc.extend_from_slice(&[3, 8, 1, 2, 3]);
+        let ihu = Ihu::decode(&enc).unwrap();
+        assert_eq!(ihu.timestamp_echo, None);
+        assert_eq!(ihu.rxcost, 96);
     }
 }

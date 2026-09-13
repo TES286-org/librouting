@@ -88,6 +88,15 @@ pub trait RouterInstance {
     /// TransportOpen). Call once the transport is connected.
     fn start_session(&mut self, h: SessionHandle) -> Result<(), String>;
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String>;
+    /// Feed one received datagram together with a 32-bit microsecond
+    /// receive clock (the BABEL-RTT timestamp reference — RFC 8966
+    /// §A.2.4). Defaults to delegating to [`RouterInstance::feed_input`]
+    /// for implementors without a fine-grained clock; only the Babel
+    /// runtime consumes the extra precision.
+    fn feed_input_at(&mut self, h: SessionHandle, bytes: &[u8], now_us: u32) -> Result<(), String> {
+        let _ = now_us;
+        self.feed_input(h, bytes)
+    }
     fn drain_output(&mut self, h: SessionHandle) -> Vec<u8>;
     fn tick(&mut self, now: Instant);
     /// Request that an established peer resend its Adj-RIB-Out for `family`.
@@ -726,7 +735,13 @@ impl BabelRuntime {
     }
 
     /// Feed one decoded Babel frame; returns the Loc-RIB delta.
-    fn handle_frame(&mut self, frame: &BabelFrame, now_ms: u64) -> RuntimeDelta {
+    ///
+    /// `now_us` is the transport's 32-bit microsecond clock at frame
+    /// reception — the BABEL-RTT reference clock for timestamp bookkeeping
+    /// (RFC 8966 §A.2.4). Passing the same clock the outgoing Hello/IHU
+    /// timestamps are drawn from keeps the round-trip differences
+    /// single-clock.
+    fn handle_frame(&mut self, frame: &BabelFrame, now_ms: u64, now_us: u32) -> RuntimeDelta {
         use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
         use lr_babel::tlv::TlvType;
 
@@ -734,12 +749,32 @@ impl BabelRuntime {
             match tlv.kind {
                 TlvType::Hello => {
                     if let Some(h) = Hello::decode(&tlv.value) {
-                        self.neighbor.hello(h.seqno, h.interval_cs, now_ms);
+                        match h.timestamp {
+                            Some(ts) => {
+                                self.neighbor.hello_timestamped(
+                                    h.seqno,
+                                    h.interval_cs,
+                                    ts,
+                                    now_ms,
+                                    now_us,
+                                );
+                            }
+                            None => self.neighbor.hello(h.seqno, h.interval_cs, now_ms),
+                        }
                     }
                 }
                 TlvType::Ihu => {
                     if let Some(ihu) = Ihu::decode(&tlv.value) {
-                        self.neighbor.ihu(ihu.rxcost, ihu.interval_cs, now_ms);
+                        match ihu.timestamp_echo {
+                            Some((ts1, ts2)) => self.neighbor.ihu_echo(
+                                ihu.rxcost,
+                                ihu.interval_cs,
+                                ts1,
+                                ts2,
+                                now_ms,
+                            ),
+                            None => self.neighbor.ihu(ihu.rxcost, ihu.interval_cs, now_ms),
+                        }
                     }
                 }
                 TlvType::RouterId => {
@@ -4063,6 +4098,10 @@ impl RouterInstance for DefaultRouter {
     }
 
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String> {
+        self.feed_input_at(h, bytes, 0)
+    }
+
+    fn feed_input_at(&mut self, h: SessionHandle, bytes: &[u8], now_us: u32) -> Result<(), String> {
         // Phase 1 (borrow sessions): decode + drive the protocol FSM.
         enum Pending {
             Bgp {
@@ -4155,7 +4194,7 @@ impl RouterInstance for DefaultRouter {
                     };
                     let mut r = lr_core::buf::ReadBuf::new(&input);
                     while let Ok(Some(frame)) = runtime.codec.decode(&mut r) {
-                        let d = runtime.handle_frame(&frame, self.now_ms);
+                        let d = runtime.handle_frame(&frame, self.now_ms, now_us);
                         delta.installed.extend(d.installed);
                         delta.withdrawn.extend(d.withdrawn);
                     }
