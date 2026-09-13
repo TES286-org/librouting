@@ -38,6 +38,13 @@ pub(crate) struct PeerSpec {
     pub import: Option<String>,
     /// Export route-map name (`export = "..."`).
     pub export: Option<String>,
+    /// Import filter DSL name (`import_filter = "..."`). When set the
+    /// peer's import path runs the named `[[filter]]` body after the
+    /// route-map (if both are set). The route-map is the FRR-style
+    /// fast path; the filter DSL is the BIRD-style expressive path.
+    pub import_filter: Option<String>,
+    /// Export filter DSL name (`export_filter = "..."`).
+    pub export_filter: Option<String>,
 
     // --- per-peer overrides (None/empty = inherit the global value) ---
     pub hold_time: Option<u16>,
@@ -250,6 +257,107 @@ pub(crate) struct BabelKeySpec {
     pub algorithm: Option<String>,
 }
 
+/// One `[[babel.interface]]` table — per-interface Babel parameters
+/// (RFC 8966 §A.2). `name` accepts shell-like glob patterns (`*`, `?`,
+/// `\`) so the same parameters can apply to a fleet of similar
+/// interfaces (`eth*`). The first matching pattern wins, mirroring
+/// BIRD's `interface` directive in `proto/babel/config.Y`.
+///
+/// When no `[[babel.interface]]` block exists the daemon keeps the
+/// legacy single-socket path: one Babel session bound to the global
+/// `--local-address`. When one or more blocks exist the daemon
+/// enumerates the system interfaces, matches each name against the
+/// patterns in file order, and uses the first match's parameters
+/// for the single Babel session. A future per-interface multi-socket
+/// spawning will run one Babel session per matched interface.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct BabelInterfaceSpec {
+    /// Kernel interface name or glob pattern (`eth*`, `eth?`).
+    pub name: Option<String>,
+    /// `"wired"` (default), `"wireless"` or `"tunnel"` (RFC 8966
+    /// §A.2 link cost model selection).
+    pub kind: Option<String>,
+    /// Hello interval in milliseconds (RFC 8966 §3.1; BIRD default
+    /// 4000 ms wired, 12000 ms wireless).
+    pub hello_interval_ms: Option<u32>,
+    /// Update (multicast) interval in milliseconds (RFC 8966 §3.1).
+    pub update_interval_ms: Option<u32>,
+    /// Receive cost the interface advertises for peers it learns
+    /// (RFC 8966 §3.5.2; BIRD default 96 wired, 256 wireless).
+    pub rxcost: Option<u16>,
+    /// RTT-based cost (RFC 8966 §A.2.4): when RTT exceeds
+    /// `rtt_min`, an additional `rtt_cost` is added. Off when 0.
+    pub rtt_cost: Option<u16>,
+    /// Lower RTT bound (microseconds) below which no RTT cost is
+    /// added (RFC 8966 §A.2.4; BIRD default 10 ms).
+    pub rtt_min_us: Option<u32>,
+    /// Upper RTT bound (microseconds) above which the RTT cost is
+    /// applied in full (RFC 8966 §A.2.4; BIRD default 120 ms).
+    pub rtt_max_us: Option<u32>,
+    /// Per-interface IPv4 next-hop advertised in Babel Updates
+    /// (RFC 8966 §3.5.3; defaults to the interface's primary IPv4).
+    pub next_hop_ipv4: Option<String>,
+    /// Per-interface IPv6 next-hop advertised in Babel Updates
+    /// (RFC 8966 §3.5.3; defaults to the interface's link-local).
+    pub next_hop_ipv6: Option<String>,
+    /// RFC 5549 extended next-hop: advertise IPv4 prefixes over an
+    /// IPv6 next-hop on this interface (BIRD `extended next hop yes`).
+    pub extended_next_hop: Option<bool>,
+    /// Withdraw routes when the interface goes operationally down
+    /// (BIRD `check link yes`, default on).
+    pub check_link: Option<bool>,
+    /// Override the global `[babel] port` for this interface.
+    pub port: Option<u16>,
+    /// Override the global `[babel] group` for this interface.
+    pub group: Option<String>,
+}
+
+impl BabelInterfaceSpec {
+    /// Human-readable label for log lines.
+    pub fn label(&self) -> &str {
+        self.name.as_deref().unwrap_or("(unnamed)")
+    }
+}
+
+/// One `[[roa]]` table — a Route Origin Authorization binding
+/// (RFC 6482 §3 / RFC 6811 §2). Loaded at startup into the
+/// router-wide [`lr_bgp::RoaTable`] used by the import hook
+/// (`[bgp] roa_validate = true`) and the filter DSL's `roa.state`
+/// accessor.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RoaSpec {
+    /// Authorized prefix (`"203.0.113.0/24"`), required.
+    pub prefix: Option<String>,
+    /// Maximum authorized prefix length. Defaults to the prefix
+    /// length when unset (exact-prefix authorization). Must be ≥ the
+    /// prefix length and ≤ 32 (v4) or 128 (v6).
+    pub max_length: Option<u8>,
+    /// Authorized origin AS (RFC 6482 §3.2). AS 0 marks a ROA for
+    /// the blackhole range (RFC 6483 §4); it does not match any
+    /// real AS but still produces `Invalid` for any actual route
+    /// under the prefix.
+    pub asn: Option<u32>,
+}
+
+/// One `[[filter]]` table — a BIRD-like filter body compiled into
+/// an [`lr_policy::filter::Filter`] and attachable to peers via
+/// `import_filter` / `export_filter`. See `crates/lr-policy/src/filter/`
+/// for the DSL grammar (lexer + Pratt parser + evaluator).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct FilterSpec {
+    /// Filter name (referenced from `[[peer]] import_filter` /
+    /// `export_filter`), required and unique across the config.
+    pub name: Option<String>,
+    /// DSL body — a string carrying the filter source. TOML
+    /// `\"` escapes are processed by the daemon config parser so
+    /// the DSL's own string literals (`if proto == \"bgp\"`) reach
+    /// the lexer intact.
+    pub body: Option<String>,
+    /// Optional human-readable description shown by `lr-daemon
+    /// --config-dump` for operator sanity. Ignored at compile time.
+    pub description: Option<String>,
+}
+
 /// One `[[ldp.interface]]` table (or `--ldp-interface` flag): an
 /// interface running basic (link) discovery, RFC 5036 §3.5.2.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -414,6 +522,15 @@ pub(crate) struct DaemonConfig {
     pub babel_split_unicast_multicast: bool,
     /// RFC 9467 §3.2 window size for PC verification (OPTIONAL; 0 = off).
     pub babel_pc_window: usize,
+    /// `[[babel.interface]]` blocks — per-interface Babel parameters
+    /// with shell-like name wildcards (RFC 8966 §A.2). When empty
+    /// the daemon runs the legacy single-socket path bound to
+    /// `--local-address`. When non-empty it enumerates system
+    /// interfaces, matches them against the patterns in file order,
+    /// and uses the first match's parameters for the single Babel
+    /// session. The first matching pattern wins (BIRD `interface`
+    /// directive parity).
+    pub babel_interfaces: Vec<BabelInterfaceSpec>,
     /// BMP monitoring station to mirror Peer Up/Down + Route Monitoring
     /// to (`--bmp-target host:port` / `[bgp] bmp_target`).
     pub bmp_target: Option<String>,
@@ -469,6 +586,34 @@ pub(crate) struct DaemonConfig {
     /// decides activation, and every negotiated key id stays valid
     /// while rotating (new key id added before the old one removed).
     pub exchange_plane_keys: Vec<String>,
+
+    /// `[[roa]]` tables — Route Origin Authorizations (RFC 6482)
+    /// loaded into the router-wide [`lr_bgp::RoaTable`] at startup.
+    /// When `roa_validate` is on, every received BGP UPDATE is
+    /// validated per RFC 6811 §2; `roa_invalid_action` decides the
+    /// `Invalid` outcome. The filter DSL exposes the state via
+    /// `roa.state` regardless of `roa_validate` so an explicit
+    /// `if roa.state == "invalid" then { reject; }` always works.
+    pub roas: Vec<RoaSpec>,
+    /// RFC 6811 §2 prefix-origin validation: when on, every received
+    /// BGP UPDATE is validated against `[[roa]]` tables at import
+    /// time (before the user-supplied import hook chain runs). Off
+    /// by default — matches BIRD's opt-in `rpki reload` model.
+    pub roa_validate: bool,
+    /// Action when a received route is `Invalid` per RFC 6811 §2:
+    /// `"reject"` (default — drop the route before Adj-RIB-In),
+    /// `"warn"` (accept with a `config warning` log line; the
+    /// filter DSL still sees `roa.state == "invalid"`), or
+    /// `"accept"` (silent accept — operator who wants RFC 8212
+    /// default-accept must use this; otherwise Invalid is rejected).
+    pub roa_invalid_action: String,
+
+    /// `[[filter]]` tables — BIRD-like filter bodies attached to
+    /// peers via `import_filter` / `export_filter`. Compiled into
+    /// [`lr_policy::filter::Filter`] instances at startup and
+    /// evaluated against every route through the existing policy
+    /// hook chain.
+    pub filters: Vec<FilterSpec>,
 
     /// OSPF protocol version: `"v2"` (default) or `"v3"` (RFC 5340).
     /// One version per daemon process — the two are independent
@@ -674,6 +819,7 @@ impl DaemonConfig {
             babel_accept_unauthenticated: false,
             babel_split_unicast_multicast: true,
             babel_pc_window: 0,
+            babel_interfaces: Vec::new(),
             ebgp_policy: "rfc8212".to_string(),
             enforce_first_as: false,
             bestpath_compare_routerid: true,
@@ -682,6 +828,10 @@ impl DaemonConfig {
             soft_reconfig_inbound: false,
             exchange_plane: false,
             exchange_plane_keys: Vec::new(),
+            roas: Vec::new(),
+            roa_validate: false,
+            roa_invalid_action: "reject".to_string(),
+            filters: Vec::new(),
             ospf_version: "v2".to_string(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
@@ -791,6 +941,102 @@ impl DaemonConfig {
         }
         self.finalize_ospf()?;
         self.finalize_ldp()?;
+        self.finalize_roa()?;
+        self.finalize_filters()?;
+        self.finalize_babel_interfaces()?;
+        Ok(())
+    }
+
+    /// Validate and complete the ROA configuration (RFC 6482 invariants).
+    /// Surfaced as a separate step so the daemon can collect every
+    /// ROA error before bailing out, instead of failing on the first
+    /// malformed entry.
+    fn finalize_roa(&mut self) -> Result<(), String> {
+        let mut seen: std::collections::BTreeSet<(lr_core::addr::Prefix, u32)> =
+            std::collections::BTreeSet::new();
+        for spec in &self.roas {
+            let Some(prefix_text) = spec.prefix.as_deref() else {
+                return Err("[[roa]] without 'prefix'".to_string());
+            };
+            let prefix: lr_core::addr::Prefix = prefix_text
+                .parse()
+                .map_err(|_| format!("[[roa]] bad prefix '{prefix_text}'"))?;
+            let asn = spec
+                .asn
+                .ok_or_else(|| format!("[[roa]] {prefix_text} without 'asn' (RFC 6482 §3.2)"))?;
+            // The RoaEntry invariant: max_length >= prefix_len and ≤
+            // family width. RoaEntry::with_max_length enforces this
+            // and produces the canonical error string the daemon
+            // surfaces in its startup log.
+            let _entry = match spec.max_length {
+                Some(ml) => lr_bgp::RoaEntry::with_max_length(prefix, ml, lr_core::addr::Asn(asn))
+                    .map_err(|e| format!("[[roa]] {prefix_text}: {e}"))?,
+                None => lr_bgp::RoaEntry::exact(prefix, lr_core::addr::Asn(asn)),
+            };
+            if !seen.insert((prefix, asn)) {
+                return Err(format!(
+                    "[[roa]] {prefix_text} asn {asn} declared twice (duplicate)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and complete the filter DSL configuration. Each
+    /// `[[filter]]` table needs a non-empty `name` and a non-empty
+    /// `body`. Names are unique across the config (the peer attachment
+    /// references them). The DSL body itself is compiled by
+    /// `daemon_policy::build_policy_set` (which delegates to
+    /// `lr_policy::filter::Filter::compile`) so every per-filter
+    /// syntax error surfaces in one pass.
+    fn finalize_filters(&mut self) -> Result<(), String> {
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for spec in &self.filters {
+            let Some(name) = spec.name.as_deref() else {
+                return Err("[[filter]] without 'name'".to_string());
+            };
+            if name.is_empty() {
+                return Err("[[filter]] with empty 'name'".to_string());
+            }
+            if !seen.insert(name.to_string()) {
+                return Err(format!("[[filter]] name '{name}' declared twice"));
+            }
+            if spec.body.as_deref().map(str::is_empty).unwrap_or(true) {
+                return Err(format!("[[filter]] '{name}' without 'body'"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate the `[[babel.interface]]` blocks. Each needs a name
+    /// (the glob pattern). RTT bounds must satisfy
+    /// `rtt_min_us < rtt_max_us` when both are set (RFC 8966 §A.2.4
+    /// / BIRD's `RTT MIN must be smaller than MAX` rule). Wildcard
+    /// patterns are syntax-checked against the same shell-like
+    /// grammar BIRD uses (`*`, `?`, `\`); the actual interface
+    /// matching happens at daemon startup in `run_babel_daemon`.
+    fn finalize_babel_interfaces(&mut self) -> Result<(), String> {
+        for iface in &self.babel_interfaces {
+            let Some(name) = iface.name.as_deref() else {
+                return Err("[[babel.interface]] without 'name'".to_string());
+            };
+            if name.is_empty() {
+                return Err("[[babel.interface]] with empty 'name'".to_string());
+            }
+            // Validate the glob pattern is well-formed (no stray
+            // backslashes). BIRD's patmatch treats `\` as an escape,
+            // so a trailing `\` is a syntax error in the pattern itself.
+            if let Err(e) = glob_pattern_validate(name) {
+                return Err(format!("[[babel.interface]] bad pattern '{name}': {e}"));
+            }
+            if let (Some(min), Some(max)) = (iface.rtt_min_us, iface.rtt_max_us) {
+                if min >= max {
+                    return Err(format!(
+                        "[[babel.interface]] {name}: rtt_min ({min}us) must be < rtt_max ({max}us) (RFC 8966 §A.2.4)"
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -1226,6 +1472,8 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
     }
     opt(&mut over.import, &base.import);
     opt(&mut over.export, &base.export);
+    opt(&mut over.import_filter, &base.import_filter);
+    opt(&mut over.export_filter, &base.export_filter);
     opt(&mut over.hold_time, &base.hold_time);
     opt(&mut over.gr_restart_time, &base.gr_restart_time);
     opt(&mut over.llgr_stale_time, &base.llgr_stale_time);
@@ -1284,6 +1532,39 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
 
 fn parse_bool(value: &str) -> bool {
     matches!(value, "true" | "1" | "yes")
+}
+
+/// Process TOML `\\`, `\"`, `\n`, `\t`, `\r` escapes in a string
+/// value. Used by the filter DSL `body` field (which carries a
+/// multi-line DSL program with embedded `\"` for the DSL's own
+/// string literals, e.g. `if proto == \"bgp\"`). The caller has
+/// already stripped the outer `"` quotes via `trim_matches('"')` —
+/// this function only walks the interior, replacing escape sequences.
+fn unescape_toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    let mut chars = value.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('"') => out.push('"'),
+                Some('n') => out.push('\n'),
+                Some('t') => out.push('\t'),
+                Some('r') => out.push('\r'),
+                Some(other) => {
+                    // Unknown escape — preserve verbatim (forward
+                    // compatibility, like TOML's "unknown escapes are
+                    // an error" rule relaxed to "preserve").
+                    out.push('\\');
+                    out.push(other);
+                }
+                None => out.push('\\'),
+            }
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 fn parse_str_array(value: &str) -> Vec<String> {
@@ -1363,6 +1644,18 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 "babel.key" => {
                     cfg.babel_keys.push(BabelKeySpec::default());
                     section = "babel.key".to_string();
+                }
+                "babel.interface" => {
+                    cfg.babel_interfaces.push(BabelInterfaceSpec::default());
+                    section = "babel.interface".to_string();
+                }
+                "roa" => {
+                    cfg.roas.push(RoaSpec::default());
+                    section = "roa".to_string();
+                }
+                "filter" => {
+                    cfg.filters.push(FilterSpec::default());
+                    section = "filter".to_string();
                 }
                 "ldp.interface" => {
                     cfg.ldp_interfaces.push(LdpIfSpec::default());
@@ -1463,6 +1756,19 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         // an unknown key is a typo that could silently disable link
         // authentication or alter replay handling.
         if apply_babel_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        // ROA and filter tables: fail-closed like every other
+        // protocol surface — a typo'd prefix or filter body silently
+        // changes origin validation behaviour.
+        if apply_roa_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        if apply_filter_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -1576,6 +1882,17 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "bgp.soft_reconfig_inbound" => cfg.soft_reconfig_inbound = parse_bool(value),
             "bgp.exchange_plane" => cfg.exchange_plane = parse_bool(value),
             "bgp.exchange_plane_keys" => cfg.exchange_plane_keys = parse_str_array(value),
+            "bgp.roa_validate" | "roa_validate" => cfg.roa_validate = parse_bool(value),
+            "bgp.roa_invalid_action" | "roa_invalid_action" => {
+                if !matches!(value, "reject" | "warn" | "accept") {
+                    return Err(format!(
+                        "line {}: bad roa_invalid_action '{}' (expected \"reject\" | \"warn\" | \"accept\")",
+                        lineno + 1,
+                        value
+                    ));
+                }
+                cfg.roa_invalid_action = value.to_string();
+            }
             "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
             "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
             "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
@@ -1786,7 +2103,173 @@ fn apply_babel_key(
                 }
             }
         }
+        "babel.interface" => {
+            let Some(iface) = cfg.babel_interfaces.last_mut() else {
+                return Err("key outside a [[babel.interface]] table".into());
+            };
+            match key {
+                "name" => iface.name = Some(value.to_string()),
+                "type" | "kind" => {
+                    let v = value.trim().trim_matches('"');
+                    if !matches!(v, "wired" | "wireless" | "tunnel") {
+                        return Err(format!(
+                            "bad babel interface type '{v}' (use \"wired\" | \"wireless\" | \"tunnel\")"
+                        ));
+                    }
+                    iface.kind = Some(v.to_string());
+                }
+                "hello_interval_ms" | "hello_interval" => {
+                    iface.hello_interval_ms = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad hello_interval '{value}'"))?,
+                    );
+                }
+                "update_interval_ms" | "update_interval" => {
+                    iface.update_interval_ms = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad update_interval '{value}'"))?,
+                    );
+                }
+                "rxcost" => {
+                    iface.rxcost = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad rxcost '{value}'"))?,
+                    );
+                }
+                "rtt_cost" => {
+                    iface.rtt_cost = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad rtt_cost '{value}'"))?,
+                    );
+                }
+                "rtt_min_us" | "rtt_min" => {
+                    iface.rtt_min_us = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad rtt_min '{value}'"))?,
+                    );
+                }
+                "rtt_max_us" | "rtt_max" => {
+                    iface.rtt_max_us = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad rtt_max '{value}'"))?,
+                    );
+                }
+                "next_hop_ipv4" | "next_hop_v4" => {
+                    iface.next_hop_ipv4 = Some(value.to_string());
+                }
+                "next_hop_ipv6" | "next_hop_v6" => {
+                    iface.next_hop_ipv6 = Some(value.to_string());
+                }
+                "extended_next_hop" => {
+                    iface.extended_next_hop = Some(parse_bool(value));
+                }
+                "check_link" => {
+                    iface.check_link = Some(parse_bool(value));
+                }
+                "port" => {
+                    iface.port = Some(
+                        value
+                            .parse()
+                            .map_err(|_| format!("bad babel interface port '{value}'"))?,
+                    );
+                }
+                "group" => {
+                    iface.group = Some(value.to_string());
+                }
+                _ => {
+                    return Err(format!(
+                        "unknown [[babel.interface]] key '{key}' (typo protection; Babel config fails closed)"
+                    ))
+                }
+            }
+        }
         _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// Apply one `key = value` pair to the ROA schema: the `[[roa]]`
+/// tables. Fail-closed like every other policy surface — a typo'd
+/// prefix silently weakens origin validation, so it is a hard error.
+/// Returns `Ok(true)` when the key was consumed here, `Ok(false)`
+/// to fall through to the next section schema.
+fn apply_roa_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "roa" {
+        return Ok(false);
+    }
+    let Some(roa) = cfg.roas.last_mut() else {
+        return Err("key outside a [[roa]] table".into());
+    };
+    match key {
+        "prefix" => {
+            let v = value.trim().trim_matches('"');
+            if v.parse::<lr_core::addr::Prefix>().is_err() {
+                return Err(format!("bad roa prefix '{v}' (expected CIDR)"));
+            }
+            roa.prefix = Some(v.to_string());
+        }
+        "max_length" | "max_len" => {
+            let n: u8 = value
+                .parse()
+                .map_err(|_| format!("bad roa max_length '{value}' (0..=128)"))?;
+            roa.max_length = Some(n);
+        }
+        "asn" | "origin_as" => {
+            roa.asn = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad roa asn '{value}' (u32)"))?,
+            );
+        }
+        _ => {
+            return Err(format!(
+                "unknown [[roa]] key '{key}' (typo protection; ROA config fails closed)"
+            ))
+        }
+    }
+    Ok(true)
+}
+
+/// Apply one `key = value` pair to the filter DSL schema: the
+/// `[[filter]]` tables. Fail-closed — a typo'd key on a filter
+/// silently changes route handling. Returns `Ok(true)` when
+/// consumed, `Ok(false)` to fall through.
+fn apply_filter_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "filter" {
+        return Ok(false);
+    }
+    let Some(filter) = cfg.filters.last_mut() else {
+        return Err("key outside a [[filter]] table".into());
+    };
+    match key {
+        "name" => filter.name = Some(value.to_string()),
+        // The body is a TOML string with `\"` escapes that the DSL
+        // parser expects to see unescaped. unescape_toml_string
+        // converts `\"` back to `"` so `if proto == \"bgp\"` reaches
+        // the DSL parser as `if proto == "bgp"`.
+        "body" => filter.body = Some(unescape_toml_string(value)),
+        "description" | "desc" => filter.description = Some(value.to_string()),
+        _ => {
+            return Err(format!(
+                "unknown [[filter]] key '{key}' (typo protection; filter config fails closed)"
+            ))
+        }
     }
     Ok(true)
 }
@@ -2162,6 +2645,92 @@ pub(crate) fn parse_targeted_spec(spec: &str) -> Option<(lr_core::addr::IpAddr, 
     }
 }
 
+/// Validate a shell-like glob pattern. BIRD's `patmatch`
+/// (lib/patmatch.c) accepts `*` (any sequence), `?` (any single
+/// character) and `\` (escape next character). A pattern that ends
+/// with a dangling `\` is malformed and rejected here — every other
+/// byte is accepted.
+///
+/// This is a syntax-only check; the actual matching is [`glob_match`].
+pub(crate) fn glob_pattern_validate(pattern: &str) -> Result<(), String> {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' {
+            if i + 1 >= bytes.len() {
+                return Err("dangling '\\' at end of pattern".to_string());
+            }
+            i += 2;
+        } else {
+            i += 1;
+        }
+    }
+    Ok(())
+}
+
+/// Shell-like glob match (`*`, `?`, `\`) — same semantics as BIRD's
+/// `patmatch` (lib/patmatch.c, 1998 Martin Mares). `*` matches any
+/// (possibly empty) sequence of characters; `?` matches any single
+/// character; `\` escapes the next character to make it literal.
+///
+/// Used by the `[[babel.interface]]` matcher to apply per-interface
+/// parameters to a fleet of similar interfaces (`eth*`, `eth?`,
+/// `wlp*`, etc.). The matcher is iterative on the `*` recursion —
+/// matching `eth*` against `ethernet-extra-long` does not blow the
+/// stack.
+pub(crate) fn glob_match(pattern: &str, name: &str) -> bool {
+    let p = pattern.as_bytes();
+    let s = name.as_bytes();
+    let mut pi = 0usize;
+    let mut si = 0usize;
+    let mut star_p: Option<usize> = None;
+    let mut star_s: usize = 0;
+    while si < s.len() {
+        if pi < p.len() {
+            match p[pi] {
+                b'?' => {
+                    pi += 1;
+                    si += 1;
+                    continue;
+                }
+                b'*' => {
+                    star_p = Some(pi);
+                    star_s = si;
+                    pi += 1;
+                    continue;
+                }
+                b'\\' if pi + 1 < p.len() => {
+                    if p[pi + 1] == s[si] {
+                        pi += 2;
+                        si += 1;
+                        continue;
+                    }
+                }
+                c if c == s[si] => {
+                    pi += 1;
+                    si += 1;
+                    continue;
+                }
+                _ => {}
+            }
+        }
+        // No match — backtrack to the last `*` if we have one.
+        if let Some(sp) = star_p {
+            pi = sp + 1;
+            star_s += 1;
+            si = star_s;
+        } else {
+            return false;
+        }
+    }
+    // Skip trailing `*` in the pattern; everything else must match
+    // exactly (no leftover pattern bytes after the input ends).
+    while pi < p.len() && p[pi] == b'*' {
+        pi += 1;
+    }
+    pi == p.len()
+}
+
 /// Apply one `key = value` pair to the LDP schema: the `[ldp]`
 /// globals plus the `[[ldp.interface]]` / `[[ldp.targeted]]` /
 /// `[[ldp.bind]]` tables. Unknown keys are errors (fail closed — see
@@ -2364,6 +2933,8 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "bfd_multihop" => peer.bfd_multihop = Some(parse_bool(value)),
         "import" => peer.import = Some(value.to_string()),
         "export" => peer.export = Some(value.to_string()),
+        "import_filter" => peer.import_filter = Some(value.to_string()),
+        "export_filter" => peer.export_filter = Some(value.to_string()),
         _ => return Ok(false), // unknown key — caller warns
     }
     Ok(true)
@@ -3929,5 +4500,220 @@ mod tests {
         let mut over = PeerSpec::default();
         merge_spec(&mut over, &base);
         assert_eq!(over.exchange_plane, Some(true));
+    }
+
+    #[test]
+    fn roa_tables_parse_and_finalize() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[roa]]\nprefix = \"203.0.113.0/24\"\nasn = 64512\n\n\
+             [[roa]]\nprefix = \"198.51.100.0/24\"\nmax_length = 26\nasn = 64513\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.roas.len(), 2);
+        assert_eq!(cfg.roas[0].prefix.as_deref(), Some("203.0.113.0/24"));
+        assert_eq!(cfg.roas[0].asn, Some(64512));
+        assert_eq!(cfg.roas[0].max_length, None);
+        assert_eq!(cfg.roas[1].max_length, Some(26));
+    }
+
+    #[test]
+    fn roa_finalize_rejects_max_length_below_prefix() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[roa]]\nprefix = \"203.0.113.0/24\"\nmax_length = 23\nasn = 64512\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("max_length"), "{err}");
+    }
+
+    #[test]
+    fn roa_finalize_rejects_max_length_above_family() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[roa]]\nprefix = \"203.0.113.0/24\"\nmax_length = 33\nasn = 64512\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("family"), "{err}");
+    }
+
+    #[test]
+    fn roa_finalize_rejects_duplicates() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[roa]]\nprefix = \"203.0.113.0/24\"\nasn = 64512\n\n\
+             [[roa]]\nprefix = \"203.0.113.0/24\"\nasn = 64512\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("declared twice"), "{err}");
+    }
+
+    #[test]
+    fn roa_globals_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nroa_validate = true\nroa_invalid_action = \"warn\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(cfg.roa_validate);
+        assert_eq!(cfg.roa_invalid_action, "warn");
+    }
+
+    #[test]
+    fn roa_invalid_action_rejects_unknown() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[bgp]\nroa_invalid_action = \"quarantine\"\n", &mut cfg);
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn roa_without_prefix_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[roa]]\nasn = 64512\n", &mut cfg).unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("without 'prefix'"), "{err}");
+    }
+
+    #[test]
+    fn roa_without_asn_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[roa]]\nprefix = \"203.0.113.0/24\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("without 'asn'"), "{err}");
+    }
+
+    #[test]
+    fn filter_tables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[filter]]\nname = \"customer-in\"\nbody = \"if net ~ 203.0.113.0/24 then accept; reject;\"\n\
+             description = \"drop non-customer prefixes\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.filters.len(), 1);
+        assert_eq!(cfg.filters[0].name.as_deref(), Some("customer-in"));
+        assert!(cfg.filters[0].body.as_deref().unwrap().contains("accept"));
+    }
+
+    #[test]
+    fn filter_finalize_rejects_duplicate_names() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[filter]]\nname = \"dup\"\nbody = \"accept;\"\n\n\
+             [[filter]]\nname = \"dup\"\nbody = \"reject;\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("declared twice"), "{err}");
+    }
+
+    #[test]
+    fn filter_finalize_rejects_empty_body() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[filter]]\nname = \"empty\"\nbody = \"\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("without 'body'"), "{err}");
+    }
+
+    #[test]
+    fn peer_filter_attachment_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[peer]]\nremote = \"192.0.2.2:179\"\nimport_filter = \"in\"\nexport_filter = \"out\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.peers[0].import_filter.as_deref(), Some("in"));
+        assert_eq!(cfg.peers[0].export_filter.as_deref(), Some("out"));
+    }
+
+    #[test]
+    fn babel_interface_tables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.interface]]\nname = \"eth*\"\ntype = \"wired\"\nrxcost = 96\nhello_interval_ms = 4000\n\n\
+             [[babel.interface]]\nname = \"wlan0\"\ntype = \"wireless\"\nrxcost = 256\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.babel_interfaces.len(), 2);
+        assert_eq!(cfg.babel_interfaces[0].name.as_deref(), Some("eth*"));
+        assert_eq!(cfg.babel_interfaces[0].kind.as_deref(), Some("wired"));
+        assert_eq!(cfg.babel_interfaces[0].rxcost, Some(96));
+        assert_eq!(cfg.babel_interfaces[1].kind.as_deref(), Some("wireless"));
+    }
+
+    #[test]
+    fn babel_interface_rejects_bad_type() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[babel.interface]]\nname = \"eth0\"\ntype = \"optical\"\n",
+            &mut cfg,
+        );
+        assert!(err.is_err());
+    }
+
+    #[test]
+    fn babel_interface_rejects_bad_rtt_bounds() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.interface]]\nname = \"eth0\"\nrtt_min = 100\nrtt_max = 100\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("rtt_min"), "{err}");
+    }
+
+    #[test]
+    fn babel_interface_rejects_dangling_escape() {
+        // The validator rejects a trailing `\` (BIRD's patmatch
+        // treats `\` as an escape, so a dangling one is malformed).
+        assert!(glob_pattern_validate("eth\\").is_err());
+        assert!(glob_pattern_validate("eth").is_ok());
+        assert!(glob_pattern_validate("eth*").is_ok());
+        assert!(glob_pattern_validate("eth?").is_ok());
+        assert!(glob_pattern_validate("eth\\0").is_ok());
+    }
+
+    #[test]
+    fn glob_match_matches_bird_semantics() {
+        // Mirrors BIRD's lib/patmatch.c test cases:
+        // `*` matches any sequence (including empty),
+        // `?` matches exactly one character,
+        // `\` escapes the next character.
+        assert!(glob_match("eth*", "eth0"));
+        assert!(glob_match("eth*", "ethernet-extra-long"));
+        assert!(glob_match("eth*", "eth"));
+        assert!(!glob_match("eth*", "wlan0"));
+        assert!(glob_match("eth?", "eth0"));
+        assert!(glob_match("eth?", "eth1"));
+        assert!(!glob_match("eth?", "eth"));
+        assert!(!glob_match("eth?", "eth01"));
+        // Backslash escapes the next character.
+        assert!(glob_match("eth\\0", "eth0"));
+        assert!(!glob_match("eth\\0", "ethX"));
+        // Wildcards combined.
+        assert!(glob_match("*0", "eth0"));
+        assert!(glob_match("*0", "wlan0"));
+        assert!(!glob_match("*0", "wlan1"));
+        // Empty pattern matches empty string only.
+        assert!(glob_match("", ""));
+        assert!(!glob_match("", "eth0"));
+        assert!(glob_match("*", "anything"));
+        assert!(glob_match("*", ""));
     }
 }

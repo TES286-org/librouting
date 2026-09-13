@@ -129,15 +129,9 @@ impl RoaState {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RoaError {
     #[error("max_length {max_length} < prefix length {prefix_len} (RFC 6482 §3.3)")]
-    MaxLengthBelowPrefix {
-        prefix_len: u8,
-        max_length: u8,
-    },
+    MaxLengthBelowPrefix { prefix_len: u8, max_length: u8 },
     #[error("max_length {max_length} exceeds the family width {family_max}")]
-    MaxLengthAboveFamily {
-        max_length: u8,
-        family_max: u8,
-    },
+    MaxLengthAboveFamily { max_length: u8, family_max: u8 },
 }
 
 /// ROA database: an immutable vector of [`RoaEntry`].
@@ -246,8 +240,9 @@ impl RoaTableBuilder {
             .map_err(|e| RoaBuildError::BadPrefix(format!("bad prefix '{prefix}': {e}")))?;
         let asn = Asn(asn);
         let entry = match max_length {
-            Some(ml) => RoaEntry::with_max_length(prefix, ml, asn)
-                .map_err(RoaBuildError::Invalid)?,
+            Some(ml) => {
+                RoaEntry::with_max_length(prefix, ml, asn).map_err(RoaBuildError::Invalid)?
+            }
             None => RoaEntry::exact(prefix, asn),
         };
         self.table.push(entry);
@@ -350,7 +345,10 @@ mod tests {
         let mut b = RoaTableBuilder::new();
         b.add("203.0.113.0/24", None, 64512).unwrap();
         let t = b.build();
-        let v6 = Prefix::new_v6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64);
+        let v6 = Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            64,
+        );
         assert_eq!(t.validate(&v6, Some(Asn(64512))), RoaState::NotFound);
     }
 
