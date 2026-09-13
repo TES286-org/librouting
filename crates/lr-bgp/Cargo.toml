@@ -32,3 +32,19 @@ thiserror.workspace = true
 tracing.workspace = true
 hmac = { workspace = true, optional = true }
 sha2 = { workspace = true, optional = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+# Standalone benchmarks — `cargo bench -p lr-bgp` runs all targets
+# below. Each bench pins one codec hot path so the bench harness
+# can spot a >10% regression against the baseline committed in
+# `benches/baseline.txt` (to be added once the first nightly run
+# lands a number).
+[[bench]]
+name = "bgp_decode"
+harness = false
+
+[[bench]]
+name = "roa_validate"
+harness = false

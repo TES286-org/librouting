@@ -29,3 +29,8 @@ damping = ["std", "dep:lr-damping"]
 
 [dev-dependencies]
 proptest = { workspace = true }
+criterion = { workspace = true }
+
+[[bench]]
+name = "filter_eval"
+harness = false
