@@ -145,6 +145,22 @@ impl InterfaceV6Addr {
     }
 }
 
+/// One interface's name + the IPv4 and IPv6 addresses `getifaddrs`
+/// returned for it. Returned by [`list_interfaces`]; used by the
+/// Babel multi-NIC config matcher to resolve `[[babel.interface]]`
+/// glob patterns (`eth*`, `eth?`) to concrete kernel interfaces
+/// and pick a bind address per match.
+///
+/// Defined here (in the platform-shared `mod.rs`) so both the Linux
+/// implementation and the non-Linux stub can return it without
+/// duplicating the type.
+#[derive(Debug, Clone)]
+pub struct InterfaceEntry {
+    pub name: String,
+    pub v4: Vec<std::net::Ipv4Addr>,
+    pub v6: Vec<std::net::Ipv6Addr>,
+}
+
 /// The dotted-quad mask for a prefix length (invalid lengths saturate:
 /// >32 becomes /32; the wire encoder rejects them earlier anyway).
 pub fn prefix_mask(prefix_len: u8) -> u32 {
@@ -164,16 +180,16 @@ pub fn prefix_mask(prefix_len: u8) -> u32 {
 mod imp;
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub use imp::{
-    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, InterfaceEntry,
-    OspfV2Transport, OspfV6Transport,
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, OspfV2Transport,
+    OspfV6Transport,
 };
 
 #[cfg(all(feature = "std", not(target_os = "linux")))]
 mod stub;
 #[cfg(all(feature = "std", not(target_os = "linux")))]
 pub use stub::{
-    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, InterfaceEntry,
-    OspfV2Transport, OspfV6Transport,
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, OspfV2Transport,
+    OspfV6Transport,
 };
 
 #[cfg(test)]

@@ -6,8 +6,8 @@ use std::ffi::c_char;
 use std::net::{Ipv4Addr, Ipv6Addr};
 
 use super::{
-    InterfaceV4Addr, InterfaceV6Addr, OspfTransportError, ALL_D_ROUTERS, ALL_D_ROUTERS_V6,
-    ALL_SPF_ROUTERS, ALL_SPF_ROUTERS_V6, IPPROTO_OSPF,
+    InterfaceEntry, InterfaceV4Addr, InterfaceV6Addr, OspfTransportError, ALL_D_ROUTERS,
+    ALL_D_ROUTERS_V6, ALL_SPF_ROUTERS, ALL_SPF_ROUTERS_V6, IPPROTO_OSPF,
 };
 
 // socket(2) / fcntl(2) constants (Linux).
@@ -338,18 +338,6 @@ fn mask_to_prefix_len(mask: [u8; 4]) -> Option<u8> {
         }
     }
     Some(len)
-}
-
-/// One interface's name + the IPv4 and IPv6 addresses `getifaddrs`
-/// returned for it. Returned by [`list_interfaces`]; used by the
-/// Babel multi-NIC config matcher to resolve `[[babel.interface]]`
-/// glob patterns (`eth*`, `eth?`) to concrete kernel interfaces
-/// and pick a bind address per match.
-#[derive(Debug, Clone)]
-pub struct InterfaceEntry {
-    pub name: String,
-    pub v4: Vec<std::net::Ipv4Addr>,
-    pub v6: Vec<std::net::Ipv6Addr>,
 }
 
 /// Enumerate every interface on the system with its IPv4 and IPv6
