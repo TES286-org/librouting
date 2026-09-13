@@ -339,3 +339,73 @@ func TestRfc8212(t *testing.T) {
         }
         r.ptr = nil
 }
+
+// ---- ROA store (RFC 6482 / RFC 6811 / RFC 8210, ROADMAP-v3 D2.3) ----
+
+func TestRoaStoreLifecycle(t *testing.T) {
+	s, err := NewRoaStore()
+	if err != nil {
+		t.Fatalf("NewRoaStore: %v", err)
+	}
+	defer s.Close()
+	if s.Len() != 0 {
+		t.Fatalf("new store must be empty, got %d", s.Len())
+	}
+
+	statics := []RoaEntry{
+		{Addr: []byte{198, 51, 100, 0}, PrefixLen: 24, MaxLength: 24, ASN: 64513},
+		{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24, MaxLength: 26, ASN: 64512},
+	}
+	if err := s.ReplaceStatic(statics); err != nil {
+		t.Fatalf("ReplaceStatic: %v", err)
+	}
+	if s.Len() != 2 {
+		t.Fatalf("Len after ReplaceStatic = %d, want 2", s.Len())
+	}
+
+	state, err := s.Validate([]byte{198, 51, 100, 0}, 24, 64513, true)
+	if err != nil || state != RoaValid {
+		t.Fatalf("Validate authorized = (%d, %v), want (RoaValid, nil)", state, err)
+	}
+	state, _ = s.Validate([]byte{198, 51, 100, 0}, 24, 64512, true)
+	if state != RoaInvalid {
+		t.Fatalf("Validate wrong origin = %d, want RoaInvalid", state)
+	}
+	state, _ = s.Validate([]byte{203, 0, 113, 0}, 27, 64512, true)
+	if state != RoaInvalid {
+		t.Fatalf("Validate /27 under max 26 = %d, want RoaInvalid", state)
+	}
+	state, _ = s.Validate([]byte{203, 0, 113, 0}, 24, 0, false)
+	if state != RoaNotFound {
+		t.Fatalf("Validate without origin = %d, want RoaNotFound", state)
+	}
+
+	// One announce delta + a duplicate: RFC 8210 §5.6 coalescing.
+	deltas := []RoaDelta{
+		{Announce: true, Entry: RoaEntry{Addr: []byte{192, 0, 2, 0}, PrefixLen: 24, MaxLength: 24, ASN: 64512}},
+		{Announce: true, Entry: RoaEntry{Addr: []byte{192, 0, 2, 0}, PrefixLen: 24, MaxLength: 24, ASN: 64512}},
+	}
+	if err := s.ApplyDeltas(deltas); err != nil {
+		t.Fatalf("ApplyDeltas: %v", err)
+	}
+	if s.Len() != 3 {
+		t.Fatalf("Len after deltas = %d, want 3 (2 static + 1 rtr)", s.Len())
+	}
+
+	// Data expiry: the cache layer goes, the static layer survives.
+	if err := s.ClearRTR(); err != nil {
+		t.Fatalf("ClearRTR: %v", err)
+	}
+	if s.Len() != 2 {
+		t.Fatalf("Len after ClearRTR = %d, want 2", s.Len())
+	}
+
+	// Malformed entry fails the whole batch atomically.
+	bad := []RoaDelta{{Announce: true, Entry: RoaEntry{Addr: []byte{10, 0, 0, 0}, PrefixLen: 8, MaxLength: 4, ASN: 64512}}}
+	if err := s.ApplyDeltas(bad); err == nil {
+		t.Fatal("ApplyDeltas with max_length < prefix_len must fail")
+	}
+	if s.Len() != 2 {
+		t.Fatalf("store changed after failed batch: %d", s.Len())
+	}
+}

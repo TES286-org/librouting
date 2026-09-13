@@ -235,6 +235,85 @@ int main(void) {
     soft_n = lr_router_soft_reconfig_inbound(r, 999);
     check(soft_n == 0, "soft_reconfig_inbound no-op on unknown handle");
 
+    /* ---- ROA store (RFC 6482 / RFC 6811 / RFC 8210, ROADMAP-v3
+     * D2.3): a live, thread-safe ROA database with static + RTR
+     * layers and atomic snapshot swaps. ---- */
+    {
+        lr_roa_store_t s = lr_roa_store_new();
+        check(s != NULL, "roa_store_new");
+        check(lr_roa_store_len(s) == 0, "roa_store empty at start");
+
+        /* Static layer: 198.51.100.0/24-24 AS64513 exact and
+         * 203.0.113.0/24-26 AS64512 (max_length authorizes /25-/26). */
+        lr_roa_entry_t entries[2];
+        memset(entries, 0, sizeof(entries));
+        /* 198.51.100.0 */
+        entries[0].addr[0] = 198; entries[0].addr[1] = 51;
+        entries[0].addr[2] = 100; entries[0].addr[3] = 0;
+        entries[0].is_ipv6 = 0;
+        entries[0].prefix_len = 24; entries[0].max_length = 24;
+        entries[0].asn = 64513;
+        /* 203.0.113.0 */
+        entries[1].addr[0] = 203; entries[1].addr[1] = 0;
+        entries[1].addr[2] = 113; entries[1].addr[3] = 0;
+        entries[1].is_ipv6 = 0;
+        entries[1].prefix_len = 24; entries[1].max_length = 26;
+        entries[1].asn = 64512;
+        rc = lr_roa_store_replace_static(s, entries, 2);
+        check(rc == 0, "roa_store_replace_static");
+        check(lr_roa_store_len(s) == 2, "roa_store_len == 2 after replace");
+
+        /* RFC 6811 §2 validation outcomes. */
+        uint8_t v4a[4] = {198, 51, 100, 0};
+        uint8_t v4b[4] = {203, 0, 113, 0};
+        uint8_t state = 255;
+        rc = lr_roa_store_validate(s, v4a, NULL, 24, 64513, 1, &state);
+        check(rc == 0 && state == LR_ROA_VALID, "roa_validate valid origin");
+        rc = lr_roa_store_validate(s, v4a, NULL, 24, 64512, 1, &state);
+        check(rc == 0 && state == LR_ROA_INVALID, "roa_validate wrong origin");
+        rc = lr_roa_store_validate(s, v4b, NULL, 27, 64512, 1, &state);
+        check(rc == 0 && state == LR_ROA_INVALID,
+              "roa_validate prefix longer than max_length");
+        rc = lr_roa_store_validate(s, v4b, NULL, 26, 64512, 1, &state);
+        check(rc == 0 && state == LR_ROA_VALID,
+              "roa_validate max_length authorizes more-specific");
+        rc = lr_roa_store_validate(s, v4b, NULL, 24, 0, 0, &state);
+        check(rc == 0 && state == LR_ROA_NOT_FOUND,
+              "roa_validate without origin AS is not-found");
+
+        /* RTR layer: one announce delta (192.0.2.0/24-24 AS64512) +
+         * a duplicate that must coalesce (RFC 8210 §5.6). */
+        lr_roa_delta_t deltas[2];
+        memset(deltas, 0, sizeof(deltas));
+        deltas[0].announce = 1;
+        deltas[0].entry.addr[0] = 192; deltas[0].entry.addr[1] = 0;
+        deltas[0].entry.addr[2] = 2;   deltas[0].entry.addr[3] = 0;
+        deltas[0].entry.is_ipv6 = 0;
+        deltas[0].entry.prefix_len = 24; deltas[0].entry.max_length = 24;
+        deltas[0].entry.asn = 64512;
+        deltas[1] = deltas[0];
+        rc = lr_roa_store_apply_deltas(s, deltas, 2);
+        check(rc == 0, "roa_store_apply_deltas");
+        check(lr_roa_store_len(s) == 3, "roa_store_len == 3 (2 static + 1 rtr)");
+
+        /* Data expiry (RFC 8210 §6): the cache layer goes, the
+         * static layer survives. */
+        rc = lr_roa_store_clear_rtr(s);
+        check(rc == 0, "roa_store_clear_rtr");
+        check(lr_roa_store_len(s) == 2, "roa_store_len == 2 after clear_rtr");
+
+        /* A malformed entry fails the whole batch atomically. */
+        lr_roa_delta_t bad = deltas[0];
+        bad.entry.max_length = 4; /* < prefix_len 24 (RFC 6482 §3.3) */
+        rc = lr_roa_store_apply_deltas(s, &bad, 1);
+        check(rc != 0, "roa_store_apply_deltas rejects max_length < prefix_len");
+        check(lr_roa_store_len(s) == 2, "roa_store unchanged after failed batch");
+
+        lr_roa_store_free(s);
+        lr_roa_store_free(NULL); /* no-op */
+        check(1, "roa_store_free");
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

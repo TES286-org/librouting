@@ -666,3 +666,162 @@ func copyBytes(b *C.struct_lr_bytes_t) []byte {
         copy(out, C.GoBytes(unsafe.Pointer(ptr), C.int(n)))
         return out
 }
+
+// ---- ROA store (RFC 6482 / RFC 6811 / RFC 8210, ROADMAP-v3 D2.3) ----
+
+// ROA validation outcomes (RFC 6811 §2) returned by RoaStore.Validate.
+const (
+	RoaValid     = 0
+	RoaNotFound  = 1
+	RoaInvalid   = 2
+)
+
+// RoaEntry is one ROA record (RFC 6482 §3): the authorized prefix, the
+// longest authorized prefix length, and the origin AS. Addr is 4 bytes
+// (IPv4) or 16 bytes (IPv6). AS 0 marks the blackhole range (RFC 6483 §4).
+type RoaEntry struct {
+	Addr      []byte
+	PrefixLen uint8
+	MaxLength uint8
+	ASN       uint32
+}
+
+// RoaDelta is one record delta of a completed RTR sync (RFC 8210 §5.6/§5.7).
+type RoaDelta struct {
+	Announce bool
+	Entry    RoaEntry
+}
+
+// RoaStore is a live, thread-safe ROA database with two provenance
+// layers (static configuration + RTR cache) and atomic whole-table
+// snapshot swaps. Validation reads run lock-free against a snapshot.
+type RoaStore struct {
+	ptr C.lr_roa_store_t
+}
+
+// NewRoaStore creates an empty store. The returned *RoaStore is
+// garbage-collected via a finalizer that calls lr_roa_store_free.
+func NewRoaStore() (*RoaStore, error) {
+	s := C.lr_roa_store_new()
+	if s == nil {
+		return nil, fmt.Errorf("lr_roa_store_new returned null")
+	}
+	out := &RoaStore{ptr: s}
+	runtime.SetFinalizer(out, func(o *RoaStore) {
+		if o.ptr != nil {
+			C.lr_roa_store_free(o.ptr)
+			o.ptr = nil
+		}
+	})
+	return out, nil
+}
+
+// Close releases the store early. Idempotent; the finalizer covers
+// missing Close calls, but calling Close twice is still safe.
+func (s *RoaStore) Close() {
+	if s.ptr != nil {
+		C.lr_roa_store_free(s.ptr)
+		s.ptr = nil
+	}
+}
+
+// fillCEntry copies a Go RoaEntry into a C lr_roa_entry_t. Returns an
+// error when the address byte count is neither 4 nor 16.
+func fillCEntry(dst *C.struct_lr_roa_entry_t, e RoaEntry) error {
+	switch len(e.Addr) {
+	case 4:
+		dst.is_ipv6 = 0
+		for i := 0; i < 4; i++ {
+			dst.addr[i] = C.uint8_t(e.Addr[i])
+		}
+	case 16:
+		dst.is_ipv6 = 1
+		for i := 0; i < 16; i++ {
+			dst.addr[i] = C.uint8_t(e.Addr[i])
+		}
+	default:
+		return fmt.Errorf("RoaEntry.Addr must be 4 or 16 bytes, got %d", len(e.Addr))
+	}
+	dst.prefix_len = C.uint8_t(e.PrefixLen)
+	dst.max_length = C.uint8_t(e.MaxLength)
+	dst.asn = C.uint32_t(e.ASN)
+	return nil
+}
+
+// ReplaceStatic atomically replaces the store's static (configuration)
+// layer. RTR-learned entries are preserved. A malformed entry fails the
+// whole call atomically (nothing is applied).
+func (s *RoaStore) ReplaceStatic(entries []RoaEntry) error {
+	if len(entries) == 0 {
+		return nil
+	}
+	cEntries := make([]C.struct_lr_roa_entry_t, len(entries))
+	for i := range entries {
+		if err := fillCEntry(&cEntries[i], entries[i]); err != nil {
+			return fmt.Errorf("ReplaceStatic: %w", err)
+		}
+	}
+	rc := C.lr_roa_store_replace_static(s.ptr, &cEntries[0], C.size_t(len(cEntries)))
+	if rc != 0 {
+		return fmt.Errorf("lr_roa_store_replace_static: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// ApplyDeltas applies one completed sync's delta batch atomically.
+// Duplicates coalesce and unknown withdrawals are no-ops (the RFC 8210
+// §5.6 / §12 code-6 semantics).
+func (s *RoaStore) ApplyDeltas(deltas []RoaDelta) error {
+	if len(deltas) == 0 {
+		return nil
+	}
+	cDeltas := make([]C.struct_lr_roa_delta_t, len(deltas))
+	for i := range deltas {
+		if err := fillCEntry(&cDeltas[i].entry, deltas[i].Entry); err != nil {
+			return fmt.Errorf("ApplyDeltas: %w", err)
+		}
+		cDeltas[i].announce = toCBool(deltas[i].Announce)
+	}
+	rc := C.lr_roa_store_apply_deltas(s.ptr, &cDeltas[0], C.size_t(len(cDeltas)))
+	if rc != 0 {
+		return fmt.Errorf("lr_roa_store_apply_deltas: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// ClearRTR withdraws every RTR-learned entry — the RFC 8210 §6
+// data-expiry and cache-change response. Static entries survive.
+func (s *RoaStore) ClearRTR() error {
+	rc := C.lr_roa_store_clear_rtr(s.ptr)
+	if rc != 0 {
+		return fmt.Errorf("lr_roa_store_clear_rtr: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// Len returns the current merged entry count (static + RTR, deduplicated).
+func (s *RoaStore) Len() int {
+	return int(C.lr_roa_store_len(s.ptr))
+}
+
+// Validate runs the RFC 6811 §2 validation for (prefixAddr, prefixLen,
+// originAS). prefixAddr is 4 bytes (IPv4) or 16 bytes (IPv6). hasOrigin
+// = false (no AS_PATH) validates as RoaNotFound. Returns one of the
+// Roa* outcome constants.
+func (s *RoaStore) Validate(prefixAddr []byte, prefixLen uint8, originAS uint32, hasOrigin bool) (int, error) {
+	var state C.uint8_t
+	var v4, v6 *C.uint8_t
+	switch len(prefixAddr) {
+	case 4:
+		v4 = (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0]))
+	case 16:
+		v6 = (*C.uint8_t)(unsafe.Pointer(&prefixAddr[0]))
+	default:
+		return 0, fmt.Errorf("Validate: prefixAddr must be 4 or 16 bytes, got %d", len(prefixAddr))
+	}
+	rc := C.lr_roa_store_validate(s.ptr, v4, v6, C.uint8_t(prefixLen), C.uint32_t(originAS), toCBool(hasOrigin), &state)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_roa_store_validate: %s (rc=%d)", LastError(), int(rc))
+	}
+	return int(state), nil
+}

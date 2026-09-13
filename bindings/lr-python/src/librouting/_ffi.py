@@ -119,6 +119,40 @@ int32_t lr_ospf_decode_v2(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_babel_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_srv6_decode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
+
+typedef struct OpaqueRoaStore OpaqueRoaStore;
+typedef struct OpaqueRoaStore *lr_roa_store_t;
+
+typedef struct lr_roa_entry_t {
+    uint8_t addr[16];
+    uint8_t is_ipv6;
+    uint8_t prefix_len;
+    uint8_t max_length;
+    uint32_t asn;
+} lr_roa_entry_t;
+
+typedef struct lr_roa_delta_t {
+    uint8_t announce;
+    lr_roa_entry_t entry;
+} lr_roa_delta_t;
+
+lr_roa_store_t lr_roa_store_new(void);
+void lr_roa_store_free(lr_roa_store_t s);
+int32_t lr_roa_store_replace_static(lr_roa_store_t s,
+                                    const lr_roa_entry_t *entries,
+                                    uintptr_t len);
+int32_t lr_roa_store_apply_deltas(lr_roa_store_t s,
+                                  const lr_roa_delta_t *deltas,
+                                  uintptr_t len);
+int32_t lr_roa_store_clear_rtr(lr_roa_store_t s);
+uintptr_t lr_roa_store_len(lr_roa_store_t s);
+int32_t lr_roa_store_validate(lr_roa_store_t s,
+                              const uint8_t *addr_v4,
+                              const uint8_t *addr_v6,
+                              uint8_t prefix_len,
+                              uint32_t origin_as,
+                              uint8_t has_origin_as,
+                              uint8_t *out_state);
 """
 
 

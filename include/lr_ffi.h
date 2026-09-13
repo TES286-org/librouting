@@ -11,6 +11,15 @@
 
 
 /**
+ * Validation outcome constants (`lr_roa_store_validate` out param).
+ */
+#define LR_ROA_VALID 0
+
+#define LR_ROA_NOT_FOUND 1
+
+#define LR_ROA_INVALID 2
+
+/**
  * Rust-allocated byte slice that the embedder owns and must free.
  */
 typedef struct lr_bytes_t {
@@ -18,6 +27,61 @@ typedef struct lr_bytes_t {
   uintptr_t len;
   uintptr_t cap;
 } lr_bytes_t;
+
+/**
+ * Opaque ROA store handle. C side never touches internals.
+ */
+typedef struct OpaqueRoaStore {
+  uint8_t _private[0];
+} OpaqueRoaStore;
+
+typedef struct OpaqueRoaStore *lr_roa_store_t;
+
+/**
+ * One ROA entry for the FFI surface. IPv4 addresses go in the first
+ * four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all sixteen
+ * bytes with `is_ipv6 = 1`. `max_length` must be >= `prefix_len`
+ * (and <= 32 / 128) — malformed entries fail the whole batch with
+ * `LrError::Other` semantics (rc != 0) and never reach the store.
+ */
+typedef struct lr_roa_entry_t {
+  /**
+   * Address bytes (v4 in the low four bytes, zero-padded).
+   */
+  uint8_t addr[16];
+  /**
+   * 0 = IPv4, anything else = IPv6.
+   */
+  uint8_t is_ipv6;
+  /**
+   * Prefix length (0..=32 for v4, 0..=128 for v6).
+   */
+  uint8_t prefix_len;
+  /**
+   * Maximum authorized prefix length.
+   */
+  uint8_t max_length;
+  /**
+   * Authorized origin AS. AS 0 marks the blackhole range
+   * (RFC 6483 §4).
+   */
+  uint32_t asn;
+} lr_roa_entry_t;
+
+/**
+ * One record delta for `lr_roa_store_apply_deltas` — the wire shape
+ * of an RTR Prefix PDU (RFC 8210 §5.6/§5.7).
+ */
+typedef struct lr_roa_delta_t {
+  /**
+   * 0 = withdraw, anything else = announce.
+   */
+  uint8_t announce;
+  /**
+   * The record the delta applies to.
+   */
+  struct lr_roa_entry_t entry;
+} lr_roa_delta_t;
 
 /**
  * Opaque router handle. C side never touches internals.
@@ -77,6 +141,87 @@ const char *lr_last_error(void);
  * ABI version packed as u32. Compare to `lr_core::ABI_VERSION`.
  */
 uint32_t lr_abi_version(void);
+
+/**
+ * Create an empty ROA store. NULL on panic (last-error set).
+ */
+lr_roa_store_t lr_roa_store_new(void);
+
+/**
+ * Free a ROA store. NULL is a no-op. Must not run concurrently with
+ * any other call on the same handle.
+ *
+ * # Safety
+ * `s` must have been produced by [`lr_roa_store_new`] and must not
+ * be freed twice.
+ */
+void lr_roa_store_free(lr_roa_store_t s);
+
+/**
+ * Atomically replace the **static** layer (local configuration) with
+ * `len` entries. RTR-learned entries are preserved. Returns 0 on
+ * success; -6 (`Other`) with the last-error string set when any
+ * entry is malformed — in that case nothing is applied.
+ *
+ * # Safety
+ * `s` must be a live store handle; `entries` must point at `len`
+ * readable `lr_roa_entry_t`s (NULL with len 0 clears the layer).
+ */
+int32_t lr_roa_store_replace_static(lr_roa_store_t s,
+                                    const struct lr_roa_entry_t *entries,
+                                    uintptr_t len);
+
+/**
+ * Apply a batch of RTR deltas atomically (one completed sync).
+ * Duplicates coalesce and unknown withdrawals are no-ops — the RFC
+ * 8210 §5.6 / §12 code-6 semantics live in the set math. Returns 0
+ * on success, -6 with last-error on a malformed entry (nothing
+ * applied), -1/-4 as usual.
+ *
+ * # Safety
+ * `s` must be a live store handle; `deltas` must point at `len`
+ * readable `lr_roa_delta_t`s (NULL with len 0 is a no-op).
+ */
+int32_t lr_roa_store_apply_deltas(lr_roa_store_t s,
+                                  const struct lr_roa_delta_t *deltas,
+                                  uintptr_t len);
+
+/**
+ * Withdraw every RTR-learned entry — the RFC 8210 §6 data-expiry and
+ * cache-change response. Static entries survive.
+ *
+ * # Safety
+ * `s` must be a live store handle.
+ */
+int32_t lr_roa_store_clear_rtr(lr_roa_store_t s);
+
+/**
+ * Current merged entry count (static + RTR layers, deduplicated).
+ * 0 on NULL / panic.
+ *
+ * # Safety
+ * `s` must be NULL or a live store handle.
+ */
+uintptr_t lr_roa_store_len(lr_roa_store_t s);
+
+/**
+ * RFC 6811 §2 validation against the current snapshot. Writes
+ * `LR_ROA_VALID` / `LR_ROA_NOT_FOUND` / `LR_ROA_INVALID` to
+ * `out_state`. A NULL `origin_as` (no AS_PATH) validates as
+ * `LR_ROA_NOT_FOUND` — a route without an origin AS is not covered
+ * by any ROA.
+ *
+ * # Safety
+ * `s` must be a live store handle; `addr_v4` (4 bytes) or `addr_v6`
+ * (16 bytes) must be readable; `out_state` must be writable.
+ */
+int32_t lr_roa_store_validate(lr_roa_store_t s,
+                              const uint8_t *addr_v4,
+                              const uint8_t *addr_v6,
+                              uint8_t prefix_len,
+                              uint32_t origin_as,
+                              uint8_t has_origin_as,
+                              uint8_t *out_state);
 
 /**
  * Create a new router instance.

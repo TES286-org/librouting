@@ -110,3 +110,31 @@ pub unsafe fn lock_router(r: lr_router_t) -> Option<std::sync::MutexGuard<'stati
         m.lock().ok()
     }
 }
+
+// ---- ROA store handle (`lr_roa_store_t`, ROADMAP-v3 D2.3) ----
+
+/// Opaque ROA store handle. C side never touches internals.
+#[repr(C)]
+pub struct OpaqueRoaStore {
+    _private: [u8; 0],
+}
+
+pub type lr_roa_store_t = *mut OpaqueRoaStore;
+
+/// Helper to construct an opaque store from a `RoaStore` (behind a
+/// Mutex, mirroring the router handle's shape — the RTR thread and
+/// the validation readers share it concurrently on the Rust side).
+pub fn box_roa_store(s: lr_bgp::RoaStore) -> lr_roa_store_t {
+    let boxed: Box<Mutex<lr_bgp::RoaStore>> = Box::new(Mutex::new(s));
+    Box::into_raw(boxed) as lr_roa_store_t
+}
+
+/// Helper to drop an opaque store back into its boxed Mutex.
+///
+/// # Safety
+/// `s` must have been produced by [`box_roa_store`] and must not be
+/// destroyed while another thread is inside a call that holds the
+/// store lock.
+pub unsafe fn unbox_roa_store(s: lr_roa_store_t) -> Box<Mutex<lr_bgp::RoaStore>> {
+    unsafe { Box::from_raw(s as *mut Mutex<lr_bgp::RoaStore>) }
+}

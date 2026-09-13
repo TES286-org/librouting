@@ -43,10 +43,58 @@ struct BytesDeleter {
 using Router = std::unique_ptr<OpaqueRouter, detail::RouterDeleter>;
 using Bytes = std::unique_ptr<lr_bytes_t, detail::BytesDeleter>;
 
+/// RAII handle to a live ROA store (RFC 6482 / RFC 6811 / RFC 8210;
+/// ROADMAP-v3 D2.3) — static + RTR provenance layers with atomic
+/// snapshot swaps.
+struct RoaStoreDeleter {
+    void operator()(lr_roa_store_t s) const noexcept {
+        if (s) lr_roa_store_free(s);
+    }
+};
+using RoaStore = std::unique_ptr<OpaqueRoaStore, RoaStoreDeleter>;
+
 inline Router make_router() {
     auto r = lr_router_new();
     if (!r) throw Error("lr_router_new returned null");
     return Router(r);
+}
+
+inline RoaStore make_roa_store() {
+    auto s = lr_roa_store_new();
+    if (!s) throw Error("lr_roa_store_new returned null");
+    return RoaStore(s);
+}
+
+/// Atomically replace the store's static (configuration) layer.
+inline void roa_store_replace_static(RoaStore& s, const std::vector<lr_roa_entry_t>& entries) {
+    int rc = lr_roa_store_replace_static(s.get(), entries.data(), entries.size());
+    if (rc != 0) {
+        throw Error(std::string("lr_roa_store_replace_static: ") + lr_last_error());
+    }
+}
+
+/// Apply one completed RTR sync's delta batch atomically.
+inline void roa_store_apply_deltas(RoaStore& s, const std::vector<lr_roa_delta_t>& deltas) {
+    int rc = lr_roa_store_apply_deltas(s.get(), deltas.data(), deltas.size());
+    if (rc != 0) {
+        throw Error(std::string("lr_roa_store_apply_deltas: ") + lr_last_error());
+    }
+}
+
+/// RFC 6811 §2 validation against the current snapshot.
+inline std::uint8_t roa_store_validate(RoaStore& s,
+                                       const std::uint8_t* addr_v4,
+                                       const std::uint8_t* addr_v6,
+                                       std::uint8_t prefix_len,
+                                       std::uint32_t origin_as,
+                                       bool has_origin_as) {
+    std::uint8_t state = 0;
+    int rc = lr_roa_store_validate(s.get(), addr_v4, addr_v6, prefix_len, origin_as,
+                                   has_origin_as ? 1 : 0, &state);
+    if (rc != 0) {
+        throw Error(std::string("lr_roa_store_validate: ") + lr_last_error());
+    }
+    return state;
 }
 
 inline std::uint64_t add_bgp_session_ext(Router& r,

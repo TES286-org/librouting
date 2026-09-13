@@ -184,6 +184,42 @@ int main() {
     }
     check(err_threw, "feed_input on unknown handle throws");
 
+    // ---- ROA store RAII wrapper (RFC 6482 / RFC 6811 / RFC 8210;
+    // ROADMAP-v3 D2.3): static layer replace, RTR delta batch, the
+    // three RFC 6811 §2 outcomes. ----
+    {
+        auto store = make_roa_store();
+        check(lr_roa_store_len(store.get()) == 0, "roa store starts empty");
+
+        lr_roa_entry_t e;
+        std::memset(&e, 0, sizeof(e));
+        e.addr[0] = 203; e.addr[1] = 0; e.addr[2] = 113; e.addr[3] = 0;
+        e.is_ipv6 = 0;
+        e.prefix_len = 24; e.max_length = 26; e.asn = 64512;
+        roa_store_replace_static(store, {e});
+        check(lr_roa_store_len(store.get()) == 1, "roa replace_static applies");
+
+        std::uint8_t v4[4] = {203, 0, 113, 0};
+        check(roa_store_validate(store, v4, nullptr, 24, 64512, true) == LR_ROA_VALID,
+              "roa_validate (C++ RAII) valid origin");
+        check(roa_store_validate(store, v4, nullptr, 27, 64512, true) == LR_ROA_INVALID,
+              "roa_validate (C++ RAII) too-specific is invalid");
+        check(roa_store_validate(store, v4, nullptr, 24, 64512, false) == LR_ROA_NOT_FOUND,
+              "roa_validate (C++ RAII) no origin AS is not-found");
+
+        // Error path: a malformed entry throws and identifies the call.
+        bool threw = false;
+        try {
+            e.max_length = 4; /* < prefix_len (RFC 6482 §3.3) */
+            roa_store_replace_static(store, {e});
+        } catch (const Error& err) {
+            threw = std::string(err.what()).find("replace_static") != std::string::npos;
+        }
+        check(threw, "malformed ROA entry throws with call identity");
+
+        // RAII cleanup runs when the store leaves scope.
+    }
+
     // Router goes out of scope — RAII cleanup runs.
     if (failures == 0) {
         std::printf("ALL PASS\n");

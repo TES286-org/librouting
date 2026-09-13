@@ -268,3 +268,58 @@ def test_soft_reconfig_inbound_abi():
         n = r.soft_reconfig_inbound(9999)
         assert n == 0, f"soft_reconfig_inbound no-op on unknown handle: got {n}"
 
+
+
+def test_roa_store_lifecycle():
+    """The live ROA store (RFC 6482 / RFC 6811 / RFC 8210, ROADMAP-v3
+    D2.3): static layer replace, RTR delta batch with §5.6 duplicate
+    coalescing, §6 data-expiry clearing, and the three RFC 6811 §2
+    outcomes."""
+    s = librouting.RoaStore()
+    try:
+        assert len(s) == 0
+
+        s.replace_static([
+            ("198.51.100.0/24", 0, 64513),
+            ("203.0.113.0/24", 26, 64512),
+        ])
+        assert len(s) == 2
+
+        assert s.validate("198.51.100.0/24", 64513) == librouting.ROA_VALID
+        assert s.validate("198.51.100.0/24", 64512) == librouting.ROA_INVALID
+        # max_length 26 authorizes the /26 but not a /27.
+        assert s.validate("203.0.113.0/26", 64512) == librouting.ROA_VALID
+        assert s.validate("203.0.113.0/27", 64512) == librouting.ROA_INVALID
+        # No origin AS (no AS_PATH) → not covered by any ROA.
+        assert s.validate("198.51.100.0/24", None) == librouting.ROA_NOT_FOUND
+
+        # One announce delta + a duplicate: RFC 8210 §5.6 coalescing.
+        s.apply_deltas([
+            (True, "192.0.2.0/24", 24, 64512),
+            (True, "192.0.2.0/24", 24, 64512),
+        ])
+        assert len(s) == 3
+
+        # IPv6 static entry round-trips.
+        s.apply_deltas([(False, "192.0.2.0/24", 24, 64512)])
+        assert len(s) == 2
+        s.replace_static([
+            ("198.51.100.0/24", 0, 64513),
+            ("203.0.113.0/24", 26, 64512),
+            ("2001:db8::/32", 48, 64512),
+        ])
+        assert len(s) == 3
+        assert s.validate("2001:db8:1::/48", 64512) == librouting.ROA_VALID
+
+        # Data expiry: the cache layer goes, the static layer survives.
+        s.clear_rtr()
+        assert len(s) == 3  # all three were static in this store
+
+        # Malformed entry fails the whole batch atomically.
+        try:
+            s.replace_static([("10.0.0.0/8", 4, 64512)])
+            assert False, "max_length < prefix_len must raise"
+        except librouting.LrError:
+            pass
+    finally:
+        s.__del__()

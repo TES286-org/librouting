@@ -26,13 +26,14 @@ pub mod bytes;
 pub mod codec;
 pub mod error;
 pub mod handle;
+pub mod roa_store;
 pub mod router;
 pub mod srv6;
 
 use crate::error::set_last_error;
 
 pub use error::{lr_error_t, lr_last_error, LrError};
-pub use handle::{lr_bytes_t, lr_router_t};
+pub use handle::{lr_bytes_t, lr_roa_store_t, lr_router_t};
 
 /// Run `f` inside a `catch_unwind` barrier so a panic cannot unwind across
 /// the C ABI. Returns `None` when `f` panics (the panic is swallowed); the
