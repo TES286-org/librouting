@@ -365,6 +365,94 @@ fn poll_retransmits_pending_master_db_desc() {
 }
 
 #[test]
+fn poll_retransmits_initial_db_desc_in_exstart() {
+    // The broadcast-segment deadlock (interop `ospf_broadcast.sh`
+    // hangs): the master's initial DBD is lost — or dropped by a peer
+    // whose §10.4 DR/BDR gate has not opened yet — while the peer
+    // later enters ExStart and sends its own initial, which the master
+    // ignores by design (§10.3: only the slave reacts to the master's
+    // initial). Without an ExStart retransmission both sides wait
+    // forever while Hellos keep the neighbor alive. BIRD's
+    // `dbdes_timer_hook` resends in NEIGHBOR_EXSTART; so must `poll`.
+    let our_lsdb = lsdb_with(THEM, &[]);
+    let their_lsdb = lsdb_with(US, &[]);
+    let mut master = exchange(THEM, &our_lsdb);
+    let mut master_nbr = neighbor_at_exstart(US);
+    let mut slave = exchange(US, &their_lsdb);
+    let mut slave_nbr = neighbor_at_exstart(THEM);
+
+    // 1. The master (higher router-id) sends its initial DBD …
+    let master_init = master.initial_db_desc(9, NOW);
+    // … and it is LOST on the wire (never fed to the slave).
+
+    // 2. The slave enters ExStart later and sends its own initial …
+    let slave_init = slave.initial_db_desc(21, NOW + 500);
+    // … which the master correctly ignores (§10.3: a master waits for
+    // the slave's echo, not its initial).
+    let step = master.on_db_desc(
+        body_db_desc(&slave_init),
+        US,
+        &our_lsdb,
+        &mut master_nbr,
+        NOW + 500,
+    );
+    assert!(step.outbound.is_empty());
+    assert_eq!(master.phase(), Phase::ExStart);
+
+    // 3. Before RxmtInterval elapses: nothing repeats.
+    assert!(master.poll(NOW + 500).is_empty());
+    assert!(slave.poll(NOW + 500).is_empty());
+
+    // 4. After RxmtInterval: the master repeats its initial DBD
+    // verbatim (this is the fix — previously ExStart never repeated).
+    let retrans = master.poll(NOW + RXMT_INTERVAL_MS + 501);
+    assert_eq!(retrans.len(), 1);
+    assert_eq!(body_db_desc(&retrans[0]), body_db_desc(&master_init));
+
+    // 5. The retransmitted initial reaches the slave: negotiation
+    // proceeds, and the adjacency converges to Full.
+    let step = slave.on_db_desc(
+        body_db_desc(&retrans[0]),
+        THEM,
+        &their_lsdb,
+        &mut slave_nbr,
+        NOW + RXMT_INTERVAL_MS + 501,
+    );
+    assert!(!step.outbound.is_empty());
+    let answer = body_db_desc(&step.outbound[0]);
+    let step = master.on_db_desc(
+        answer,
+        US,
+        &our_lsdb,
+        &mut master_nbr,
+        NOW + RXMT_INTERVAL_MS + 600,
+    );
+    assert!(!step.outbound.is_empty());
+    assert_eq!(master.phase(), Phase::Exchange);
+    assert_eq!(slave.phase(), Phase::Exchange);
+    assert_eq!(master_nbr.state, NeighborState::Exchange);
+    assert_eq!(slave_nbr.state, NeighborState::Exchange);
+}
+
+#[test]
+fn slave_repeats_its_initial_db_desc_in_exstart() {
+    // The slave's initial is also repeated in ExStart (BIRD resends
+    // for both roles): a duplicate at the master is ignored, so the
+    // repetition is safe — and it keeps the conversation alive when
+    // the master has not yet consumed the slave's first answer.
+    let our_lsdb = lsdb_with(US, &[]);
+    let mut slave = exchange(US, &our_lsdb);
+
+    let slave_init = slave.initial_db_desc(31, NOW);
+    // Before RxmtInterval: nothing.
+    assert!(slave.poll(NOW + 1_000).is_empty());
+    // After: the slave repeats its pending initial verbatim.
+    let retrans = slave.poll(NOW + RXMT_INTERVAL_MS + 1);
+    assert_eq!(retrans.len(), 1);
+    assert_eq!(body_db_desc(&retrans[0]), body_db_desc(&slave_init));
+}
+
+#[test]
 fn header_paging_respects_mtu() {
     // A tiny MTU forces one LSA header per DBD page; an LSDB with
     // three LSAs therefore takes three slave pages.

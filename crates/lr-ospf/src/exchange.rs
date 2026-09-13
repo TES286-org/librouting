@@ -434,7 +434,19 @@ impl DbExchange {
                 // packets (sent from on_db_desc) but a stuck master
                 // benefits from the slave repeating too (BIRD accepts
                 // duplicates in Exchange/Loading).
-                if self.phase == Phase::Exchange {
+                //
+                // ExStart retransmits the initial DBD (I|M|MS): RFC 2328
+                // §10.3/§10.8 have the master repeat Database
+                // Descriptions at RxmtInterval until the sequence
+                // numbers are agreed, and BIRD's `dbdes_timer_hook`
+                // (proto/ospf/neighbor.c) resends in NEIGHBOR_EXSTART
+                // for both roles. Without the retry, one lost initial
+                // DBD — or one dropped by a peer whose §10.4 DR/BDR
+                // gate had not opened yet — deadlocks the adjacency:
+                // both sides wait in ExStart for the other's initial
+                // while Hellos keep the neighbor alive, and the session
+                // never reaches Full.
+                if self.phase == Phase::ExStart || self.phase == Phase::Exchange {
                     let pkt = self.db_desc_packet(*flags, *seq, headers.clone());
                     out.push(pkt);
                     self.last_dd_sent_ms = now_ms;
