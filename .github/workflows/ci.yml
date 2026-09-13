@@ -112,7 +112,7 @@ jobs:
         # suites spawn real lr-daemon pairs and under tarpaulin's
         # instrumentation the collision e2e alone can exceed 60s.
         run: cargo tarpaulin --workspace --all-features --out xml --timeout 600
-      - uses: codecov/codecov-action@v4
+      - uses: codecov/codecov-action@v7
         with:
           files: ./tarpaulin-report.xml
           fail_ci_if_error: false
