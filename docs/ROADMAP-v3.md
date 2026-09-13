@@ -1,0 +1,701 @@
+# Roadmap v3 — toward a mature routing stack
+
+Forward-looking plan that picks up where [`ROADMAP.md`](ROADMAP.md) (the v2
+landing log) leaves off. Each item below is a self-contained direction:
+the current gap, the proposed work, the reference implementation to
+mirror, and an estimated size. Items get checked off (`~~struck
+through~~`) as they land; the strike-through stays as the audit trail
+exactly like the v2 log.
+
+The *current* implemented-vs-missing snapshot still lives in
+[`STATUS.md`](STATUS.md) and is the source of truth for "what can it do
+today". This file answers "what is the next block of work and why".
+
+## Prioritisation
+
+The 15 directions are grouped by impact and risk so reviewers can
+sequence the work:
+
+* **T1 — immediate value, low risk** (do first):
+  D3.6, D7, D6, D4.3, D10.1
+* **T2 — high practical value, medium risk**:
+  D1, D2, D3 (rest), D4 (rest), D5
+* **T3 — engineering maturity, larger surface**:
+  D8, D15, D9, D14
+* **T4 — long-term protocol breadth (post-1.0)**:
+  D10 (rest), D11, D13, D12
+
+Cross-direction ordering is a judgement call, but protocol-correctness
+items (D1, D2) always beat convenience items when in doubt, and small
+verifiable commits always beat big-bang ones.
+
+---
+
+## D1 — Babel multi-session concurrency + per-interface parameters
+
+**Status:** not started. Tracks `lr-babel` + `lr-cli::daemon`.
+
+**Current gap.** The `[[babel.interface]]` block parses all RFC 8966
+§A.2 parameters (`hello_interval_ms`, `rxcost`, `rtt_cost`, `rtt_min_us`,
+`rtt_max_us`, `next_hop_ipv4`, `next_hop_ipv6`, `extended_next_hop`,
+`check_link`, `port`, `group`), but `daemon.rs:2745` only creates **one**
+Babel session. The parameters are stored but never used; the Hello
+interval is hard-coded to `BABEL_HELLO_INTERVAL_MS = 1000`
+(`daemon.rs:3050`). RFC 8967 MAC keys are global
+(`BabelKeySpec` has no `interface` field), so per-interface
+authentication is impossible.
+
+**Proposed work.**
+
+1. **Per-interface socket pair.** Replace the single `(uc, mc)` socket
+   pair in `run_babel_daemon` with `Vec<(uc, mc, BabelInterfaceSpec)>`
+   — one unicast + multicast socket pair per matched interface, bound
+   to the interface address. `glob_match` must return *all* matches
+   rather than discarding all but the first `resolved_iface_name`.
+2. **Per-interface session.** Call `r.add_session(SessionConfig::babel(
+   local))` for each matched interface. Each session carries its own
+   router-id (RFC 8966 §3.3 — router-id is unique within a routing
+   domain, but different interfaces may live in different domains).
+   The daemon main loop must move from a single `recv_from` to polling
+   `Vec<UdpSocket>` (`mio` or a simple `set_nonblocking + select`).
+3. **Per-interface authentication.** Extend `BabelKeySpec` with an
+   `interface: Option<String>` field. `build_babel_auth_interface`
+   moves from a single global value to `Vec<BabelAuthInterface>`,
+   each binding its own key set. `lr-babel/src/auth.rs::BabelAuthInterface`
+   must learn to look up keys by interface name.
+4. **Apply `BabelInterfaceSpec` parameters.** The periodic advertisement
+   loop (`daemon.rs:2875-2908`) becomes a per-session loop. Each
+   session uses its own `hello_interval_ms` and `update_interval_ms`.
+   RTT measurement (RFC 8966 §A.2.4) requires implementing timestamp
+   TLV send + receive, computing RTT and applying `rtt_cost` to link
+   cost.
+5. **Per-interface `check_link`.** When an interface goes operationally
+   down, withdraw the routes it originated. Implement by listening on
+   `netlink RTMGRP_LINK` messages or polling `getifaddrs` for interface
+   flags.
+
+**Reference implementations.** BIRD `proto/babel/babel.c`:
+`babel_if_start()` / `babel_if_stop()` / `babel_send_hello()` are
+per-interface; `babeld` `interface.c` mirrors that.
+
+**Estimated size.** Medium-large refactor: ~520 LoC of `daemon.rs`
+Babel path rewritten into a multi-session shape, `auth.rs` gains
+per-interface lookup, all `BabelInterfaceSpec` fields wired through.
+~1500–2000 new + refactored lines.
+
+---
+
+## D2 — RPKI-RTR client (RFC 8210 / RFC 8281)
+
+**Status:** not started. Tracks `lr-bgp` + `lr-cli::daemon`.
+
+**Current gap.** `crates/lr-bgp/src/roa.rs` implements the RFC 6811 §2
+validation algorithm, but ROA data can only be loaded through a static
+`[[roa]]` TOML table or the `lr_router_add_roa_entry` FFI. There is no
+RPKI cache-server connection (TCP 8282), no Serial/Reset Query PDU, no
+Cache Response / End-of-Data PDU, no incremental updates. Operators
+must maintain ROA data by hand — unacceptable in production.
+
+**Proposed work.**
+
+1. **RTR PDU codec.** New `crates/lr-bgp/src/rtr.rs` implementing the
+   12 PDU types from RFC 8210 §5: Serial Notify, Cache Response,
+   IPv4 Prefix, IPv6 Prefix, End-of-Data, Cache Reset, Router Key,
+   Error Report, plus the RFC 8281 ASPA PDU. Each PDU has an 8-byte
+   fixed header (version 1, type, length) + variable body. Provide
+   `rtr_pdu::encode()` / `rtr_pdu::decode()` and a 12-variant enum.
+2. **RTR client state machine.** RFC 8210 §6 client logic: on connect,
+   send a Serial Query carrying the last serial; receive Cache
+   Response + a batch of Prefix PDUs + End-of-Data carrying the new
+   serial and session ID. If session ID changes, send a Cache Reset
+   Query. Persist `session_id: u16` and `serial: u32`.
+3. **Incremental ROA table.** `RoaTable` is currently an immutable
+   `Vec<RoaEntry>`; convert it to a structure that supports add /
+   delete of individual entries while keeping validation queries
+   thread-safe. Candidates: `RwLock<RoaTable>` + COW updates, or
+   `arc-swap` for atomic whole-table replacement.
+4. **Configuration surface.** Add `[bgp.rpki]` to the daemon config:
+   ```toml
+   [bgp.rpki]
+   cache = "rpki.ris.net:8282"
+   refresh_interval = 3600
+   retry_interval = 600
+   expire_interval = 7200
+   ```
+   Spawn the RTR client thread at daemon start; periodically pull ROA
+   updates and hot-swap `RoaTable`.
+5. **Hot reload.** SIGHUP or the `reload` API command triggers an RTR
+   reconnect and full refresh. `RoaTable` swap goes through
+   `Arc<ArcSwap<RoaTable>>` (or a channel that notifies
+   `DaemonFilterContext` to refresh its reference).
+
+**Reference implementations.** BIRD `proto/rpki/` (`rpki.c`,
+`transport.c`, `packets.c`) is a complete RTR client; FRR
+`bgpd/bgp_rpki.c` mirrors it; `rtrtr` is a pure-Rust RTR relay whose
+PDU parser is a useful cross-check.
+
+**Estimated size.** ~2000–3000 new lines (codec ~800, state machine
+~600, config + integration ~400, tests ~400).
+
+---
+
+## D3 — Filter DSL feature expansion toward BIRD syntax parity
+
+**Status:** partial — D3.6 (proto field fix) is the smallest piece and
+should land first. Tracks `lr-policy`.
+
+**Current gap.** `crates/lr-policy/src/filter/` implements a subset of
+the BIRD filter syntax (if/then/else, let, arithmetic, comparison,
+boolean, bitwise, prefix-set membership, route-attribute read/write,
+accept/reject, case). Compared to BIRD `filter/config.Y`, the following
+are missing:
+
+### D3.1 — User-defined functions
+
+AST node `FunctionDecl { name, params, return_type, body: Vec<Stmt> }`;
+new `function` keyword; evaluator creates a new scope frame, binds
+arguments to formal parameters, executes the body until `return`.
+~400 LoC (AST + parser + evaluator + tests).
+
+### D3.2 — Large Communities (RFC 8097)
+
+`AttrType::LargeCommunities = 32` is a tag enum value only — no
+`LargeCommunity` struct, codec, accessor, setter. Need to add
+`LargeCommunity { global_admin: u32, local_data1: u32, local_data2: u32 }`
+(12 bytes) + codec to `lr-bgp/src/path/communities.rs`;
+`RouteFieldKind::BgpLargeCommunities` to `ast.rs`;
+`FilterContext::bgp_large_communities()` /
+`set_bgp_large_communities()` to the trait; DSL syntax
+`bgp.large_communities += [ 64512:100:200 ]`. ~500 LoC.
+
+### D3.3 — Extended Communities (RFC 4360)
+
+`ExtendedCommunity` already lives in `communities.rs:104-150` but is
+not exposed to the DSL. Add `RouteFieldKind::BgpExtCommunities` and
+`FilterContext::bgp_ext_communities()`; support Route Target (`rt`),
+Site of Origin (`soo`) and friends. ~400 LoC.
+
+### D3.4 — Set operations (`add`/`delete`/`filter`/`empty`/`count`)
+
+BIRD's `delete(community_set, [asn:val])`,
+`filter(community_set, [asn:val])`, `empty(community_set)`,
+`count(community_set)`. Wire them into `eval_call`. AS_PATH needs
+`delete` and `filter` too. ~300 LoC.
+
+### D3.5 — `defined()` / `exists()` checks
+
+BIRD's `defined(bgp.large_community)` checks whether an attribute is
+present. The current DSL returns a default (0/false) for missing
+attributes and cannot distinguish "absent" from "value 0". Add
+`Expr::Defined(Box<Expr>)`. ~150 LoC.
+
+### D3.6 — `proto` field string format
+
+`eval.rs:492` returns `Value::Str(format!("{:?}", route.protocol))`,
+producing the Rust Debug string (e.g. `"Bgp"`). BIRD uses lower-case
+`"bgp"`. Map to BIRD-style protocol names: `Bgp -> "bgp"`,
+`Ospfv2 -> "ospf"`, `Ospfv3 -> "ospf3"`, `Babel -> "babel"`.
+~20 LoC. **Land first — it is a one-commit fix.**
+
+### D3.7 — Bytecode compilation
+
+The current DSL is a tree-walking interpreter. BIRD compiles to
+`f_line` bytecode. For hot paths (every import/export) bytecode can
+be 2–5× faster. Compile the AST to `Vec<Instruction>` (stack VM):
+`Instruction` is `enum { Push(Value), LoadVar, LoadField, BinOp(
+BinaryOp), Jump, Accept, Reject, … }`. ~800–1200 LoC (compiler + VM
++ tests).
+
+**Total estimated size.** ~2500–3000 new lines; land in small commits.
+
+---
+
+## D4 — Daemon surface for library-level cross-protocol features
+
+**Status:** partial. Tracks `lr-cli::daemon_config` + `lr-cli::daemon`
++ `lr-ffi`.
+
+**Current gap.** Three cross-protocol features already exist in the
+library API but are unreachable from the daemon:
+
+1. **Redistribution.** `RedistributionPipe` in
+   `lr-router/src/redistribution.rs` (227 LoC) supports BGP↔OSPF,
+   BGP↔Babel, Static→BGP, Connected→BGP, with 7 in-process tests.
+   But the daemon has no `[[redistribute]]` TOML table, no
+   `--redistribute` CLI flag, no FFI entry.
+2. **Aggregation.** `RouterInstance::add_aggregate(prefix)`
+   implements RFC 4271 §9.2.2.2 (zero AS_PATH + ATOMIC_AGGREGATE +
+   AGGREGATOR; withdraw when all specifics disappear). 5 in-process
+   tests pass. But the daemon has no `[[aggregate]]` table, no CLI
+   flag, no FFI.
+3. **Damping.** `lr-damping` (283 LoC) implements the RFC 2439
+   figure-of-merit algorithm with full config + RFC 7196 warning.
+   But `grep` shows no crate depends on `lr-damping` — it is dead
+   code. `STATUS.md` incorrectly marks it ✅.
+
+**Proposed work.**
+
+1. **`[[redistribute]]` TOML table.**
+   ```toml
+   [[redistribute]]
+   source = "ospf"
+   target = "bgp"
+   metric = 100
+   tag = 65000
+   allow = ["10.0.0.0/8"]
+   ```
+   Add `RedistributeSpec` to `daemon_config.rs`; in `daemon.rs` call
+   `r.add_redistribution_pipe()`.
+2. **`[[aggregate]]` TOML table.**
+   ```toml
+   [[aggregate]]
+   prefix = "203.0.113.0/24"
+   summary_only = true
+   ```
+   Add `AggregateSpec`; call `r.add_aggregate()`.
+3. **`[damping]` TOML table + import-hook wiring.**
+   ```toml
+   [damping]
+   enabled = true
+   half_life = 15
+   reuse = 750
+   suppress = 2000
+   max_suppress = 4
+   ```
+   Build a `DampingTable` at start-up and install it as an `ImportHook`
+   so every route is checked against figure-of-merit before entering
+   Adj-RIB-In. **D4.3 should land first** — wiring up existing dead
+   code is the highest-leverage piece in this direction.
+4. **FFI surface.** `lr_router_add_redistribution_pipe()`,
+   `lr_router_add_aggregate()`, `lr_router_set_damping_config()`, etc.
+   Sync Go / Python / C++ bindings.
+5. **Interop tests.** `redistribute_bird.sh` (BIRD `pipe` protocol),
+   `aggregate_bird.sh`, `damping_bird.sh` (FRR if BIRD 2 has damping
+   disabled by default).
+
+**Estimated size.** ~800–1200 new lines (TOML ~300, daemon wiring
+~200, FFI ~200, tests ~300).
+
+---
+
+## D5 — FFI expansion across protocols and policy
+
+**Status:** not started. Tracks `lr-ffi` + bindings.
+
+**Current gap.** `crates/lr-ffi/` exposes 42 `extern "C"` functions,
+but only covers BGP session lifecycle + Layer-1 codecs + Layer-3
+router lifecycle. OSPF, Babel, LDP, BMP, MRT, BFD session management is
+unreachable; Filter DSL and policy engine are unreachable; BGP
+UPDATE/OPEN encoders are unreachable; event polling is unreachable;
+route withdraw is unreachable; IPv6 origination is unreachable.
+
+**Proposed work.**
+
+1. **OSPF / Babel / LDP session management.**
+   `lr_router_add_ospf_session()`, `lr_router_add_ospfv3_session()`,
+   `lr_router_add_babel_session()`, `lr_router_add_ldp_session()`.
+2. **Filter DSL via FFI.** `lr_filter_compile(name, body) ->
+   lr_filter_t`, `lr_filter_evaluate(filter, route) ->
+   lr_filter_result_t`, `lr_filter_free(filter)`. Requires a C-callback
+   variant of the `FilterContext` trait (`lr_filter_context_t` + a
+   function-pointer table).
+3. **Policy objects via FFI.** `lr_route_map_new() ->
+   lr_route_map_t`, `lr_route_map_add_entry(map, matches, sets,
+   verdict)`, `lr_prefix_list_new() -> lr_prefix_list_t`,
+   `lr_prefix_list_add(list, prefix, ge, le, permit)`.
+4. **BGP message encoding.** `lr_bgp_encode_open()`,
+   `lr_bgp_encode_update()`, `lr_bgp_encode_notification()`.
+5. **Event polling.** `lr_router_poll_events(router, out_events) ->
+   i32` — polls `RouterEvent::RouteInstalled` / `PeerUp` / `PeerDown`
+   and serializes them to a C struct array.
+6. **Route withdraw.** `lr_router_withdraw_v4(router, prefix,
+   prefix_len)`, `lr_router_withdraw_v6(router, prefix_v6, prefix_len)`.
+7. **IPv6 origination.** `lr_router_originate_v6(router, prefix_v6,
+   prefix_len)` (currently only `lr_router_originate_v4` and a
+   labeled variant exist).
+8. **cbindgen header + Go / Python / C++ binding sync.**
+
+**Estimated size.** ~1500–2000 new lines (FFI ~800, Go ~400, Python
+~300, C++ ~200, tests ~300).
+
+---
+
+## D6 — Fuzzing + property tests + performance benchmarks
+
+**Status:** not started. Tracks workspace + CI.
+
+**Current gap.** The project has no fuzz targets (no `fuzz/` directory,
+no `cargo-fuzz` dependency), no property tests (no `proptest` /
+`quickcheck`), no benchmarks (no `benches/`, no `criterion`). Every
+wire codec (`BgpCodec`, `OspfCodec`, `BabelCodec`, `LdpCodec`,
+`BfdPacket`, `BmpMessage`, `MrtRecord`) parses untrusted network
+bytes and is a natural fuzz target.
+
+**Proposed work.**
+
+1. **cargo-fuzz targets.**
+   ```
+   fuzz/fuzz_targets/
+   ├── bgp_decode.rs      # fuzz BgpCodec::decode_slice
+   ├── ospf_decode.rs     # fuzz OspfCodec::decode_slice
+   ├── babel_decode.rs    # fuzz BabelCodec::decode_slice
+   ├── ldp_decode.rs      # fuzz LdpCodec::decode
+   ├── bfd_decode.rs      # fuzz BfdPacket::decode
+   ├── bmp_decode.rs      # fuzz BmpMessage::decode
+   ├── mrt_decode.rs      # fuzz MrtRecord::decode
+   ├── filter_parser.rs   # fuzz lr_policy::filter::compile
+   └── roa_validate.rs    # fuzz RoaTable::validate
+   ```
+   Each target is ~20–30 LoC. Add a `cargo fuzz run` step (5 min /
+   target) to `nightly.yml`.
+2. **proptest strategies.** Prefix-set matching (random prefix +
+   prefix-set, check `prefix_set_matches` correctness), AS-path
+   filter patterns, glob patterns, TOML config fragments (parser must
+   never panic). `crates/lr-policy/tests/proptest.rs` ~200 LoC +
+   `proptest = "1"` dev-dependency.
+3. **criterion benchmarks.**
+   ```
+   benches/
+   ├── bgp_decode.rs   # BgpCodec::decode_slice throughput (MB/s)
+   ├── ospf_decode.rs  # OspfCodec::decode_slice
+   ├── roa_validate.rs # RoaTable::validate (10k / 100k / 1M entries)
+   ├── filter_eval.rs  # filter::evaluate (simple vs complex body)
+   └── rib_select.rs   # Loc-RIB best-path selection (100 / 1k / 10k routes)
+   ```
+   ~50–80 LoC per bench. Add a `cargo bench` CI step; alert on >10 %
+   regression.
+4. **RFC test-vector conformance tests.** Extract example packets from
+   RFCs (RFC 4271 Appendix A BGP messages, RFC 8966 §4.4 Babel
+   packets) and assert the decoded structure matches the RFC text.
+
+**Estimated size.** ~1000–1500 new lines (fuzz ~250, proptest ~200,
+benches ~350, RFC vectors ~200, CI ~100).
+
+---
+
+## D7 — CI/CD supply-chain hardening
+
+**Status:** not started. Tracks `.github/` + repo root.
+
+**Current gap.** CI has 11 jobs covering fmt, clippy, test, interop,
+cross-build, MSRV, coverage, Miri — the happy path is well covered.
+But supply-chain security is empty: no `cargo-audit`, no `cargo-deny`,
+no Dependabot, no SBOM, no artifact signing, no SAST (CodeQL/Semgrep).
+
+**Proposed work.**
+
+1. **`cargo-audit` job.** Install `cargo-audit`; run `cargo audit`
+   against the RustSec advisory database.
+2. **`cargo-deny` config + job.** Add `deny.toml` with advisory,
+   license, ban, source sections. Add a CI job that runs
+   `cargo deny check`.
+3. **Dependabot config.** `.github/dependabot.yml` for weekly Cargo
+   updates.
+4. **SBOM generation.** Add a CI step that runs `cyclonedx` to emit a
+   CycloneDX SBOM and uploads it as a release artifact.
+5. **Artifact signing.** Wire `sigstore/cosign-installer@v3` to sign
+   release archives.
+6. **CodeQL / Semgrep SAST.** `github/codeql-action/init@v3` with
+   `languages: rust`.
+7. **Contributor governance files.** `CONTRIBUTING.md` (PR checklist,
+   commit message format, code style), `SECURITY.md` (vulnerability
+   reporting, 90-day embargo policy), `CHANGELOG.md` (version history
+   from git log), `CODE_OF_CONDUCT.md`.
+
+**Estimated size.** ~300–500 lines of config + docs.
+
+---
+
+## D8 — Performance: RIB sharding + async I/O
+
+**Status:** not started. Tracks `lr-router` + `lr-cli::daemon`.
+
+**Current gap.** `DefaultRouter` is wrapped in
+`Arc<Mutex<DefaultRouter>>` (`daemon.rs:2332, 2380, 3204`). Every BGP
+peer thread, API socket thread, BFD thread, BMP thread and ticker
+thread contends on the same lock. No `RwLock` to separate read and
+write paths, no per-AFI RIB sharding, no async I/O (no tokio/mio) —
+the daemon uses `set_nonblocking(true) + thread::sleep(10ms)`
+polling.
+
+**Proposed work.**
+
+1. **`RwLock` instead of `Mutex`.** Loc-RIB access moves to `RwLock`:
+   reads (RIB dump, peer export) take the read lock; writes (import,
+   reselect) take the write lock. Concurrency goes from 1 to N.
+2. **Per-AFI RIB sharding.** Split Loc-RIB by AFI (IPv4 / IPv6 /
+   labeled) into independent `RwLock<LocRib>`s. Further sharding by
+   prefix first byte (16 buckets) is optional.
+3. **`mio` or `tokio` async I/O.** Replace the
+   thread-per-socket + `set_nonblocking + sleep` model with a single
+   `mio` event loop. BGP TCP, Babel UDP, OSPF raw, API socket share
+   the loop. Eliminates the 10 ms latency.
+4. **`RoaTable` radix-tree index.** `RoaTable::validate` is currently
+   O(n) linear scan (`roa.rs:21-25`). Convert to a Patricia trie for
+   O(prefix_len) lookup.
+5. **Filter DSL bytecode.** Already covered by D3.7.
+6. **Performance documentation.** Add a "Performance
+   characteristics" section to `ARCHITECTURE.md` covering the thread
+   model, lock strategy, expected throughput, scalability ceiling.
+
+**Estimated size.** Large refactor: RwLock + sharding ~1000, async
+I/O migration ~2000, radix tree ~500, benchmarks ~350. Stage it:
+radix tree + RwLock first (low risk), async I/O last (high risk).
+
+---
+
+## D9 — Documentation: architecture deep-dive + contributor guide
+
+**Status:** not started. Tracks `docs/`.
+
+**Current gap.** Existing docs target operators and embedders
+(`README.md`, `tutorial.md`, `API.md`, `lr-cli.md`, `RUNBOOK.md`,
+`PARITY.md`, `INTEROP.md`, 13 example files). Contributor-facing
+docs are thin: no `CONTRIBUTING.md`, no Filter DSL architecture
+write-up, no internal structure document for
+`lr-router/src/instance.rs` (a 11 158-LoC single file), no thread
+model document, no formal EBNF for the Filter DSL.
+
+**Proposed work.**
+
+1. **`docs/ARCHITECTURE.md` expansion.** Filter DSL chapter (AST
+   structure, Pratt parser flow, tree-walking evaluator design,
+   `FilterContext` trait intent, comparison to BIRD `f_line`).
+   `instance.rs` internal structure chapter (Loc-RIB data
+   structures, reselect path, export hook ordering, redistribution
+   tracking, `redistributed_bgp` BTreeMap design). Thread model
+   chapter (global Mutex design, thread-per-peer, lock contention
+   analysis, scalability ceiling). Performance chapter (expected
+   throughput, bottleneck analysis, optimisation directions).
+2. **`docs/filter_dsl_grammar.md`.** Formal EBNF for the Filter DSL.
+3. **`CONTRIBUTING.md`.** PR checklist (fmt / clippy / test green,
+   `-D warnings` clean, every new feature has tests + docs), commit
+   message format (`type(scope): summary`), Rust style guide,
+   testing strategy (unit + interop + RFC test vectors).
+4. **`SECURITY.md`.** Vulnerability reporting flow (email to
+   security@tes286.top), coordinated disclosure (90-day embargo),
+   affected version range, PGP public key.
+5. **`CHANGELOG.md`.** Version history from `git log`, organised by
+   version, marking breaking changes and new features.
+6. **`docs/ffi_design.md`.** FFI design: panic barrier contract
+   (`catch_unwind` so panics never cross the C ABI), `lr_bytes_t`
+   ownership model (caller frees), cbindgen pipeline (`build.rs` →
+   `include/lr_ffi.h`), why OSPF/Babel/LDP are not yet exposed.
+
+**Estimated size.** ~1500–2000 lines of docs.
+
+---
+
+## D10 — BGP extension protocol backfill
+
+**Status:** partial. Tracks `lr-bgp`.
+
+**Current gap.** BGP core coverage is strong (25 extensions), but the
+following RFCs are unimplemented:
+
+### D10.1 — RFC 8326 (Graceful Session Shutdown)
+
+The `GRACEFUL_SHUTDOWN` community constant exists in `communities.rs:19`
+but is not honoured on export. Need an export hook that checks whether
+a route carries the `GRACEFUL_SHUTDOWN` community; if so, set
+`LOCAL_PREF = 0` (or do not advertise) to signal the route is being
+closed. ~200 LoC. **Land early — small and self-contained.**
+
+### D10.2 — RFC 5666 (Egress Peer Engineering)
+
+Marked `partial (TBD)`. BGP-LU variant that uses BGP next-hop to
+steer traffic to a specific egress peer.
+
+### D10.3 — RFC 7752 + RFC 9552 (BGP-LS)
+
+ROADMAP Phase 3 item 3, post-1.0. BGP Link-State — SDN controllers use
+it to collect topology. New MP-BGP SAFI (BGP-LS = 71). TLV codecs for
+Node Descriptor, Link Descriptor, Prefix Descriptor + SRv6
+extensions. Tracked separately as D11.
+
+### D10.4 — RFC 9256 + RFC 9430 (SR Policy)
+
+ROADMAP Phase 3 item 4, post-1.0. BGP SR Policy for SR-TE. New BGP
+NLRI type and path attribute.
+
+### D10.5 — RFC 8097 (Large Communities)
+
+Already covered by D3.2.
+
+### D10.6 — RFC 8212 interop tests
+
+Currently only tested in-process (`daemon_rfc8212.rs`). Needs
+end-to-end interop scripts against BIRD / FRR.
+
+**Estimated size.** Varies: D10.1 ~200, D10.5 ~500, D10.3 ~2000,
+D10.4 ~1500. Land by priority.
+
+---
+
+## D11 — BGP-LS (RFC 7752) + SRv6 BGP-LS extensions (RFC 9552)
+
+**Status:** not started. Tracks `lr-bgp` + `lr-ospf` + `lr-router`.
+Post-1.0 per ROADMAP Phase 3.
+
+**Current gap.** ROADMAP Phase 3 item 3 explicitly post-1.0. BGP-LS
+is the standard protocol for SDN controllers to obtain IGP
+topology. lr already has an OSPF LSDB (Router-LSA / Network-LSA /
+Extended-Prefix-LSA / Extended-Link-LSA) and an SRv6 data plane
+(`lr-srv6`), but no BGP-LS export path.
+
+**Proposed work.**
+
+1. **BGP-LS NLRI codec.** Add `BgpLsNlri` to `lr-bgp/src/nlri.rs`:
+   Node NLRI, Link NLRI, Prefix NLRI. Each carries Node Descriptor
+   TLVs + Link/Prefix Descriptor TLVs.
+2. **BGP-LS Attribute codec.** Add `BgpLsAttribute` to
+   `lr-bgp/src/path/`: IGP Metric TLV, TE Metric TLV, Admin Group
+   TLV, SR Adj-SID TLV, SRv6 End.X SID TLV, etc.
+3. **OSPF → BGP-LS export.** New `lr-ospf/src/ls_to_bgp_ls.rs`:
+   convert OSPF LSDB Router-LSA / Network-LSA / Extended-Link-LSA
+   into BGP-LS Link NLRI; convert Extended-Prefix-LSA (with SR
+   Prefix-SID) into BGP-LS Prefix NLRI.
+4. **BGP-LS publication.** Add a `redistribute_ls` pipe to
+   `lr-router` that incrementally publishes OSPF LSDB changes to
+   BGP-LS peers.
+5. **Interop tests.** GoBGP or FRR (both support BGP-LS).
+
+**Estimated size.** ~2000–3000 new lines (NLRI ~600, attribute ~500,
+OSPF→BGP-LS ~500, daemon wiring ~300, tests ~400).
+
+---
+
+## D12 — Container deployment + operational tooling
+
+**Status:** not started. Tracks repo root + `lr-cli`.
+
+**Current gap.** No Dockerfile, no published container image, no Helm
+chart, no operational CLI tool (e.g. `lrctl`). Operators must build
+from source or download binaries from GitHub Releases.
+
+**Proposed work.**
+
+1. **`lrctl` operational CLI.** Standalone CLI that connects to a
+   running `lr-daemon` over the API socket and provides:
+   `lrctl status`, `lrctl sessions list`,
+   `lrctl routes show <prefix>`, `lrctl routes dump` (MRT export),
+   `lrctl reload`, `lrctl shutdown`, `lrctl roa list`,
+   `lrctl filter compile <body>`.
+2. **Prometheus metrics exporter.** Add a `/metrics` HTTP endpoint
+   to the daemon exposing session count, route count, UPDATE tx/rx
+   counters, filter-eval latency histograms.
+
+**Estimated size.** ~1000–1500 new lines (`lrctl` ~500, metrics ~400,
+Dockerfile + Helm ~100).
+
+---
+
+## D13 — OSPF backfill: E-LSA (RFC 8362) + SRv6 End.X SIDs
+
+**Status:** not started. Tracks `lr-ospf`.
+
+**Current gap.** `docs/research/E-LSA-DESIGN.md` is a design document
+only — no implementation yet. RFC 8362 is the OSPFv3 Extended LSA
+that turns fixed-length LSA types into variable TLV structures,
+allowing larger Router-ID / Link-ID spaces. SRv6 End.X SIDs
+(RFC 9513 §8) need E-LSA to carry SIDs long enough.
+
+**Proposed work.**
+
+1. **E-LSA codec.** Add to `lr-ospf/src/lsa/v3.rs`:
+   E-Router-LSA (0xC0), E-Network-LSA (0xC1),
+   E-Inter-Area-Prefix-LSA (0xC2), E-Inter-Area-Router-LSA (0xC3),
+   E-AS-External-LSA (0xC4), E-Type-7-LSA (0xC5).
+2. **E-LSA LSDB.** Extend the existing LSDB to hold both legacy and
+   Extended LSAs; SPF prefers E-LSA when the `E-bit` is set in
+   Options.
+3. **SRv6 End.X SID carriage.** Add an SRv6 End.X SID sub-TLV to
+   E-Link-LSA: 16-byte IPv6 SID + behavior + 4-byte SID Structure
+   (`block_len`/`node_len`/`function_len`/`argument_len`).
+4. **Interop tests.** FRR `ospf6d` supports E-LSA + SRv6.
+
+**Estimated size.** ~1500–2000 new lines (E-LSA codec ~600, LSDB
+changes ~300, SPF adaptation ~200, End.X SID ~200, tests ~300).
+
+---
+
+## D14 — Config compatibility: native BIRD / FRR config loading
+
+**Status:** partial. Tracks `lr-cli::compat`.
+
+**Current gap.** `crates/lr-cli/src/compat.rs` already detects and
+translates BIRD/FRR configs (`detect_dialect` + `load_config_text`),
+but coverage is limited. BIRD `filter` / `function` / `define` /
+`protocol` syntax is incomplete; FRR `route-map` / `access-list` /
+`prefix-list` syntax is incomplete.
+
+**Proposed work.**
+
+1. **BIRD filter → lr filter DSL.** Translate BIRD `filter { ... }`
+   blocks to lr `[[filter]]` body strings. BIRD and lr DSL are close
+   (both C-like), but BIRD uses `and/or/not` while lr uses
+   `&&/||/!`; `~` is identical.
+2. **BIRD `protocol babel` → `[[babel.interface]]`.**
+3. **FRR `route-map` → `[[route-map]]`.**
+   `match ip address prefix-list NAME` → `match_prefix = "NAME"`;
+   `set local-preference N` → `set_local_pref = N`.
+4. **FRR `bgp neighbor` → `[[peer]]`.**
+5. **Conversion test suite.** Maintain a set of BIRD/FRR configs +
+   expected lr TOML outputs as regression tests.
+
+**Estimated size.** ~1000–1500 new lines (translator ~600, tests
+~400, docs ~200).
+
+---
+
+## D15 — Multi-threaded RIB + lock-free event bus
+
+**Status:** not started. Tracks `lr-router` + `lr-cli::daemon`.
+
+**Current gap.** All routing operations serialise through a single
+`Arc<Mutex<DefaultRouter>>`. For a full BGP table (800k+ routes), lock
+contention is the bottleneck.
+
+**Proposed work.**
+
+1. **Per-AFI RIB sharding.** `LocRib` internally splits by AFI into
+   `IPv4Rib`, `IPv6Rib`, `LabeledV4Rib`, `LabeledV6Rib`, each holding
+   its own `RwLock`. Different AFI import / export run in parallel.
+2. **Lock-free event bus.** Replace
+   `Arc<Mutex<Vec<RouterEvent>>>` polling with a `crossbeam` channel.
+   Each session thread pushes events non-blockingly; the API socket
+   thread reads from the channel.
+3. **Sharded Adj-RIB-In.** Per-peer Adj-RIB-In uses `DashMap` instead
+   of `BTreeMap` for concurrent read/write.
+4. **Benchmarks.** At 100k / 500k / 1M routes, compare single-lock vs
+   sharded import throughput.
+
+**Estimated size.** ~2000–3000 new lines (RIB refactor ~800, event
+bus ~400, sharded RIB ~500, benchmarks ~350, tests ~300). High-risk
+refactor — needs extensive regression tests.
+
+---
+
+## Tracking
+
+| Direction | Status                | Owner | Notes                                    |
+| --------- | --------------------- | ----- | ---------------------------------------- |
+| D1        | not started           | —     | Babel multi-session + per-iface params   |
+| D2        | not started           | —     | RPKI-RTR client (RFC 8210 / 8281)        |
+| D3        | partial (D3.6 first)  | —     | Filter DSL parity — proto fix is tiny    |
+| D4        | partial (D4.3 first)  | —     | Daemon surface — wire up damping first   |
+| D5        | not started           | —     | FFI expansion                            |
+| D6        | not started           | —     | Fuzzing + proptest + criterion           |
+| D7        | not started           | —     | Supply-chain hardening                   |
+| D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
+| D9        | not started           | —     | Architecture + contributor docs         |
+| D10       | partial (D10.1 first) | —     | RFC 8326 first; BGP-LS / SR Policy post-1.0 |
+| D11       | not started (post-1.0)| —     | BGP-LS                                   |
+| D12       | not started           | —     | `lrctl` + Prometheus exporter            |
+| D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
+| D14       | partial               | —     | BIRD / FRR config loader                 |
+| D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
+
+Items flip to `~~struck through~~` here as they land, with a pointer
+to the landing commit. `STATUS.md` remains the live capability
+snapshot; this file is the forward plan.

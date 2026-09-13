@@ -13,6 +13,7 @@ the protocol crates.
 | [`ARCHITECTURE.md`](ARCHITECTURE.md) | contributors, embedders | Layering, RIB pipeline diagram, extension points, testing layout |
 | [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + roadmap state summary      |
 | [`ROADMAP.md`](ROADMAP.md)           | contributors            | Roadmap v2 workstream landing log: design decisions, evidence    |
+| [`ROADMAP-v3.md`](ROADMAP-v3.md)     | contributors            | Roadmap v3 — 15 maturity directions (Babel multi-session, RPKI-RTR, Filter DSL parity, FFI, fuzz/bench, supply-chain, perf, docs, BGP-LS, E-LSA, `lrctl`, …) |
 | [`RFC_MAP.md`](RFC_MAP.md)           | contributors            | RFC-by-RFC coverage table with crate paths                       |
 | [`RELEASE-PLAN.md`](RELEASE-PLAN.md) | maintainers, embedders  | Semver policy, 1.0 freeze criteria, release flow, post-1.0 governance |
 
