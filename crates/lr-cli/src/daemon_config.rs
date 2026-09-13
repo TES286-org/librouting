@@ -365,6 +365,34 @@ pub(crate) struct FilterSpec {
     pub description: Option<String>,
 }
 
+/// `[damping]` table — RFC 2439 route flap damping (ROADMAP-v3 D4.3).
+///
+/// Off by default. When `enabled = true`, the daemon installs an
+/// [`lr_policy::hooks::DampingImportHook`] on the import chain
+/// and spawns a background thread that periodically calls
+/// [`lr_damping::DampingTable::decay_all`] so suppressed prefixes
+/// re-emerge as the figure-of-merit decays below the reuse
+/// threshold.
+///
+/// The parameters mirror [`lr_damping::DampingConfig`] verbatim —
+/// no unit conversion is performed. RFC 2439 §4.7 documents the
+/// defaults; RFC 7196 §3 prescribes the conservative tunings that
+/// make RFD usable on Internet-facing eBGP (raise the suppress
+/// threshold, lower the decay factor). The TOML defaults match
+/// [`lr_damping::DampingConfig::default()`] so the config knob is
+/// purely opt-in (any subset of the parameters can be specified;
+/// the rest inherit the defaults).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct DampingSpec {
+    /// Master switch. `false` (default) — damping is off, the
+    /// `[damping]` table is parsed for validation only. `true` —
+    /// the hook + decay ticker are installed at daemon start.
+    pub enabled: bool,
+    /// Damping configuration. Defaults match
+    /// [`lr_damping::DampingConfig::default()`].
+    pub config: lr_damping::DampingConfig,
+}
+
 /// One `[[ldp.interface]]` table (or `--ldp-interface` flag): an
 /// interface running basic (link) discovery, RFC 5036 §3.5.2.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -622,6 +650,17 @@ pub(crate) struct DaemonConfig {
     /// hook chain.
     pub filters: Vec<FilterSpec>,
 
+    /// `[damping]` table — RFC 2439 route flap damping (ROADMAP-v3
+    /// D4.3). Off by default; when `enabled = true` the daemon
+    /// installs an `lr_policy::hooks::DampingImportHook` on the
+    /// import chain and spawns a decay ticker thread that
+    /// periodically calls `DampingTable::decay_all`. The hook
+    /// drops any route whose prefix has accumulated enough
+    /// figure-of-merit to cross the suppress threshold; the decay
+    /// ticker re-enables suppressed prefixes once FoM drops below
+    /// the reuse threshold.
+    pub damping: DampingSpec,
+
     /// OSPF protocol version: `"v2"` (default) or `"v3"` (RFC 5340).
     /// One version per daemon process — the two are independent
     /// protocols with separate LSDBs (FRR runs ospfd and ospf6d the
@@ -839,6 +878,7 @@ impl DaemonConfig {
             roa_validate: false,
             roa_invalid_action: "reject".to_string(),
             filters: Vec::new(),
+            damping: DampingSpec::default(),
             ospf_version: "v2".to_string(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
@@ -1706,6 +1746,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "ospf"
                 && section != "babel"
                 && section != "ldp"
+                && section != "damping"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -1776,6 +1817,11 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             continue;
         }
         if apply_filter_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        if apply_damping_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -2276,6 +2322,78 @@ fn apply_filter_key(
             return Err(format!(
                 "unknown [[filter]] key '{key}' (typo protection; filter config fails closed)"
             ))
+        }
+    }
+    Ok(true)
+}
+
+/// Parse one `[damping]` table key into `cfg.damping`.
+///
+/// The damping table is a single-section config (not array-of-tables),
+/// so the parser handles it directly: the `[damping]` section name
+/// is registered in the section-name allow-list and the keys are
+/// dispatched here. Unknown keys are hard errors — damping has a
+/// small, well-defined schema and a typo'd threshold would silently
+/// change flap-suppression behaviour. Mirrors the fail-closed posture
+/// of every other protocol configuration section.
+fn apply_damping_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "damping" {
+        return Ok(false);
+    }
+    let d = &mut cfg.damping;
+    match key {
+        "enabled" => {
+            // Reuse the workspace's permissive bool parser so the
+            // damping knob accepts the same forms (`true` / `1` /
+            // `yes`) as every other bool in the daemon config. A
+            // typo'd value silently disables damping — same posture
+            // as every other bool knob here.
+            d.enabled = parse_bool(value);
+        }
+        "additive_incr" => {
+            d.config.additive_incr = value
+                .parse()
+                .map_err(|_| format!("invalid u32 for damping.additive_incr: '{value}'"))?;
+        }
+        "suppress_threshold" => {
+            d.config.suppress_threshold = value
+                .parse()
+                .map_err(|_| format!("invalid u32 for damping.suppress_threshold: '{value}'"))?;
+        }
+        "reuse_threshold" => {
+            d.config.reuse_threshold = value
+                .parse()
+                .map_err(|_| format!("invalid u32 for damping.reuse_threshold: '{value}'"))?;
+        }
+        "upper_limit" => {
+            d.config.upper_limit = value
+                .parse()
+                .map_err(|_| format!("invalid u32 for damping.upper_limit: '{value}'"))?;
+        }
+        "decay_interval_s" => {
+            d.config.decay_interval_s = value
+                .parse()
+                .map_err(|_| format!("invalid u64 for damping.decay_interval_s: '{value}'"))?;
+        }
+        "decay_factor_active" => {
+            d.config.decay_factor_active = value
+                .parse()
+                .map_err(|_| format!("invalid f64 for damping.decay_factor_active: '{value}'"))?;
+        }
+        "decay_factor_withdrawn" => {
+            d.config.decay_factor_withdrawn = value.parse().map_err(|_| {
+                format!("invalid f64 for damping.decay_factor_withdrawn: '{value}'")
+            })?;
+        }
+        _ => {
+            return Err(format!(
+                "unknown [damping] key '{key}' (typo protection; damping config fails closed)"
+            ));
         }
     }
     Ok(true)
@@ -4722,5 +4840,69 @@ mod tests {
         assert!(!glob_match("", "eth0"));
         assert!(glob_match("*", "anything"));
         assert!(glob_match("*", ""));
+    }
+
+    // ==== [damping] table parsing (ROADMAP-v3 D4.3) ====
+
+    #[test]
+    fn damping_defaults_to_disabled() {
+        // Without a [damping] section the config stays at the
+        // DampingSpec::default() (enabled = false). Critical for
+        // RFC 7196 §3: damping defaults are harmful on
+        // Internet-facing eBGP, so the operator must opt in
+        // explicitly.
+        let cfg = DaemonConfig::with_defaults();
+        assert!(!cfg.damping.enabled);
+    }
+
+    #[test]
+    fn damping_enabled_flag_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[damping]\nenabled = true\n", &mut cfg).unwrap();
+        assert!(cfg.damping.enabled);
+        // The tunables inherit lr_damping::DampingConfig::default()
+        // when only `enabled` is set.
+        assert_eq!(cfg.damping.config.suppress_threshold, 2000);
+        assert_eq!(cfg.damping.config.reuse_threshold, 750);
+        assert_eq!(cfg.damping.config.decay_interval_s, 30);
+    }
+
+    #[test]
+    fn damping_tunables_parse() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[damping]\nenabled = true\nsuppress_threshold = 4000\nreuse_threshold = 1500\n\
+             decay_interval_s = 15\ndecay_factor_active = 0.95\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.damping.config.suppress_threshold, 4000);
+        assert_eq!(cfg.damping.config.reuse_threshold, 1500);
+        assert_eq!(cfg.damping.config.decay_interval_s, 15);
+        assert!((cfg.damping.config.decay_factor_active - 0.95).abs() < 1e-9);
+    }
+
+    #[test]
+    fn damping_unknown_key_fails_closed() {
+        // Typo protection: a misspelled threshold silently changes
+        // flap-suppression behaviour, so unknown keys are hard
+        // errors.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[damping]\nsuppress_treshold = 4000\n", &mut cfg).unwrap_err();
+        assert!(
+            err.contains("unknown [damping] key 'suppress_treshold'"),
+            "error should name the bad key: {err}"
+        );
+    }
+
+    #[test]
+    fn damping_bad_threshold_value_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err =
+            parse_toml_subset("[damping]\nsuppress_threshold = \"lots\"\n", &mut cfg).unwrap_err();
+        assert!(
+            err.contains("invalid u32 for damping.suppress_threshold"),
+            "error should explain the type mismatch: {err}"
+        );
     }
 }

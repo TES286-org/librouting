@@ -744,6 +744,80 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         println!("  rfc8326:      graceful-shutdown export hook installed");
     }
 
+    // ---- RFC 2439 Route Flap Damping (opt-in via [damping]). ----
+    // The damping crate shipped in rc.3 as dead code — wiring it into
+    // the daemon import chain is ROADMAP-v3 D4.3. Off by default:
+    // RFC 7196 §3 documents that RFC 2439 defaults are harmful on
+    // Internet-facing eBGP, so the operator must explicitly opt in
+    // with `[damping] enabled = true`. When enabled, the daemon
+    // installs a `DampingImportHook` on the import chain and spawns
+    // a decay ticker thread that periodically calls
+    // `DampingTable::decay_all` so suppressed prefixes re-emerge
+    // as the figure-of-merit decays below the reuse threshold.
+    if cfg.damping.enabled {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(
+            cfg.damping.config.clone(),
+        )));
+        let hook = lr_policy::hooks::DampingImportHook::new(std::sync::Arc::clone(&table));
+        {
+            let mut r = router.lock().unwrap();
+            r.hooks_mut().import.push(Box::new(hook));
+        }
+        // Spawn the decay ticker thread. The thread holds a weak-ish
+        // reference (an `Arc`) to the damping table and runs for the
+        // lifetime of the process — the daemon does not currently
+        // expose a "stop damping" knob, so a SIGHUP-driven config
+        // reload cannot unset damping mid-run (a known limitation,
+        // documented in ROADMAP-v3 D4.3 follow-up).
+        let decay_interval_s = cfg.damping.config.decay_interval_s;
+        std::thread::Builder::new()
+            .name("lr-damping-decay".into())
+            .spawn(move || {
+                // RFC 2439 §4.2: decay once per `decay_interval_s`.
+                // The first tick fires after one interval so we do
+                // not decay a freshly-started table (which would be a
+                // no-op anyway — the FoM is 0 everywhere).
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(decay_interval_s));
+                    let Ok(mut table) = table.lock() else {
+                        // Mutex poisoned — another thread panicked
+                        // while holding the lock. The damping table
+                        // is now in an unknown state; the safest thing
+                        // is to stop decaying (suppressed prefixes
+                        // will stay suppressed until the daemon is
+                        // restarted).
+                        break;
+                    };
+                    let _now_s = std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0);
+                    let reactivated = table.decay_all(_now_s);
+                    for prefix in &reactivated {
+                        // The router's import hook chain has no
+                        // "please re-import this prefix" API — the
+                        // next re-announce from the peer will
+                        // naturally flow through the import hook
+                        // (and pass, since `is_suppressed(prefix)`
+                        // is now false). Until then, the prefix
+                        // stays out of Adj-RIB-In. Log the
+                        // reactivation so the operator can correlate.
+                        eprintln!(
+                            "damping: prefix {} reactivated (FoM decayed below reuse threshold)",
+                            prefix
+                        );
+                    }
+                }
+            })
+            .expect("spawn damping decay thread");
+        println!(
+            "  rfc2439:      route flap damping enabled (suppress={}, reuse={}, decay={}s)",
+            cfg.damping.config.suppress_threshold,
+            cfg.damping.config.reuse_threshold,
+            cfg.damping.config.decay_interval_s,
+        );
+    }
+
     // ---- Banner. ----
     // The multi-protocol supervisor already printed the process banner
     // (protocol set, router-id, install, platform); the engine banner

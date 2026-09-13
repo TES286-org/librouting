@@ -36,6 +36,22 @@ ship, breaking changes that affect embedders, dependency bumps.
   daemon installs the hook always-on for BGP. `PathAttributes`
   gained a `set_local_pref(u32)` helper. Six regression tests
   cover the new behaviour.
+- RFC 2439 route flap damping wired into the daemon (D4.3). The
+  `lr-damping` crate shipped in rc.3 as dead code; the daemon now
+  exposes it via a `[damping]` TOML table with eight tunables
+  (`additive_incr`, `suppress_threshold`, `reuse_threshold`,
+  `upper_limit`, `decay_interval_s`, `decay_factor_active`,
+  `decay_factor_withdrawn`, plus `enabled`). When `enabled = true`,
+  the daemon installs `lr_policy::hooks::DampingImportHook` on the
+  import chain and spawns a `lr-damping-decay` thread that drives
+  `DampingTable::decay_all` every `decay_interval_s`. The
+  `ImportHook` trait gained an `on_withdraw` default no-op
+  notification so the damping hook can also track the
+  unreachable-transition FoM increment (router's
+  `withdraw_from_session` now notifies the chain). Off by default
+  (RFC 7196 §3: RFC 2439 defaults are harmful on Internet-facing
+  eBGP). Four unit tests + five TOML parsing tests cover the new
+  behaviour.
 - `docs/ROADMAP-v3.md` captures the 15 post-rc.3 maturity
   directions, grouped into four priority tiers (T1 immediate value,
   T2 high practical value, T3 engineering maturity, T4 long-term

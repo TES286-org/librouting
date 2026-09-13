@@ -36,10 +36,15 @@
 
 use core::cmp::Ordering;
 
-use lr_core::rib::Route;
+use lr_core::rib::{Route, RouteKey};
 
 #[cfg(feature = "bgp")]
 use lr_bgp::path::{Community, PathAttributes};
+
+#[cfg(feature = "damping")]
+use lr_damping::DampingTable;
+#[cfg(feature = "damping")]
+use std::sync::{Arc, Mutex};
 
 /// Verdict returned by a hook. The route is either dropped, kept as-is, or
 /// replaced by a modified copy.
@@ -61,6 +66,20 @@ pub trait ImportHook: Send {
     }
     /// Process the inbound route. May mutate or drop it.
     fn on_import(&self, route: &mut Route) -> HookVerdict;
+    /// Notification that a route has been withdrawn from a peer.
+    ///
+    /// Fires inside the router's withdraw path, after the route has
+    /// been removed from Adj-RIB-In. The hook is **informational** —
+    /// the return value is ignored (a withdraw cannot be "dropped";
+    /// the route is already gone). Implementations use this to
+    /// update cross-route state such as the RFC 2439 figure-of-merit
+    /// table.
+    ///
+    /// `now_s` is wall-clock seconds at the time of the withdraw,
+    /// matching the units the damping table expects.
+    fn on_withdraw(&self, _key: &RouteKey, _now_s: u64) {
+        // default no-op — most hooks do not care about withdrawals
+    }
 }
 
 /// Hook invoked during best-path selection.
@@ -156,6 +175,107 @@ impl ExportHook for GracefulShutdownExportHook {
     }
 }
 
+/// RFC 2439 route flap damping import hook (D4.3).
+///
+/// Wraps an [`Arc<Mutex<DampingTable>>`] so the same table is shared
+/// across all sessions on the router. The hook implements both sides
+/// of the damping algorithm:
+///
+/// * **`on_import`** — first decays the per-prefix figure-of-merit
+///   to "now" via [`DampingTable::on_announce`]; then, if the
+///   prefix is currently suppressed, returns [`HookVerdict::Drop`]
+///   so the route never enters Adj-RIB-In.
+/// * **`on_withdraw`** — calls [`DampingTable::on_withdraw`] to
+///   increment the figure-of-merit. A withdraw that pushes FoM
+///   past the suppress threshold marks the prefix as suppressed;
+///   subsequent imports will be dropped until the FoM decays back
+///   below the reuse threshold.
+///
+/// The hook is shared across the import path and the withdraw
+/// notification path — both must see the same table for the
+/// figure-of-merit to be accurate. The daemon installs one hook
+/// instance per router; embedders wiring damping by hand should do
+/// the same.
+///
+/// The decay itself (the exponential FoM reduction over time) is
+/// driven by the daemon's periodic ticker thread calling
+/// [`DampingTable::decay_all`]; the hook does not run a timer of
+/// its own.
+///
+/// **Note on RFC 7196.** Route flap damping with the RFC 2439
+/// defaults is documented as harmful by RFC 7196 — most operators
+/// turn RFD off on Internet-facing eBGP. The daemon ships damping
+/// disabled by default; the operator opts in via `[damping]
+/// enabled = true`.
+#[cfg(feature = "damping")]
+#[derive(Debug, Clone)]
+pub struct DampingImportHook {
+    table: Arc<Mutex<DampingTable>>,
+}
+
+#[cfg(feature = "damping")]
+impl DampingImportHook {
+    /// Wrap a damping table for installation on the import hook chain.
+    /// The `Arc<Mutex<_>>` is shared with the daemon's decay ticker
+    /// so the same table is mutated from both code paths.
+    pub fn new(table: Arc<Mutex<DampingTable>>) -> Self {
+        Self { table }
+    }
+
+    /// Borrow the underlying shared table handle. Used by the daemon
+    /// ticker thread to drive periodic `decay_all` calls without
+    /// taking ownership of the table.
+    pub fn shared_table(&self) -> Arc<Mutex<DampingTable>> {
+        Arc::clone(&self.table)
+    }
+}
+
+#[cfg(feature = "damping")]
+impl ImportHook for DampingImportHook {
+    fn name(&self) -> &str {
+        "rfc2439-damping"
+    }
+
+    fn on_import(&self, route: &mut Route) -> HookVerdict {
+        // The router sets `route.age_ms` to `now_ms` immediately
+        // before invoking import hooks (instance.rs:2304), so we
+        // can read it back to get the current wall-clock. Convert
+        // to seconds (the unit DampingTable expects).
+        let now_s = route.age_ms / 1000;
+        let mut table = match self.table.lock() {
+            Ok(g) => g,
+            // A poisoned mutex means another thread panicked while
+            // holding the lock. Drop the route rather than risk
+            // importing an unsuppressed prefix.
+            Err(_) => return HookVerdict::Drop,
+        };
+        // RFC 2439 §4.2: on the reachable transition (re-announce),
+        // decay the FoM to now and apply the re-announce increment.
+        // Cisco's variant (which we mirror, see lr_damping docs)
+        // adds `reuse * (1 - decay_factor_withdrawn)` on each
+        // re-announce.
+        let _ = table.on_announce(&route.key.prefix, now_s);
+        if table.is_suppressed(&route.key.prefix) {
+            HookVerdict::Drop
+        } else {
+            HookVerdict::Keep
+        }
+    }
+
+    fn on_withdraw(&self, key: &RouteKey, now_s: u64) {
+        let mut table = match self.table.lock() {
+            Ok(g) => g,
+            Err(_) => return,
+        };
+        // RFC 2439 §4.2: on the unreachable transition (withdraw),
+        // decay the FoM to now and add `additive_incr`. If the new
+        // FoM crosses the suppress threshold, mark the prefix as
+        // suppressed — future imports will be dropped until FoM
+        // decays back below the reuse threshold.
+        let _ = table.on_withdraw(&key.prefix, now_s);
+    }
+}
+
 /// A collection of hooks + safety net configuration. Aggregated by the
 /// router instance and invoked at the appropriate pipeline stages.
 #[derive(Default)]
@@ -186,6 +306,17 @@ impl HookChain {
             }
         }
         verdict
+    }
+
+    /// Notify all import hooks that a route was withdrawn. The return
+    /// value is intentionally `()` — a withdraw cannot be "dropped"
+    /// (the route is already gone from Adj-RIB-In). Implementations
+    /// use this notification to update cross-route state such as the
+    /// RFC 2439 damping figure-of-merit table.
+    pub fn run_import_withdraw(&self, key: &RouteKey, now_s: u64) {
+        for h in &self.import {
+            h.on_withdraw(key, now_s);
+        }
     }
 
     /// Run all selection hooks; the first that returns `Some(Ordering)`
@@ -462,5 +593,107 @@ mod tests {
         attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
         let _ = chain.run_export(&mut r);
         assert_eq!(local_pref_of(&r), Some(0));
+    }
+
+    // ==== DampingImportHook (RFC 2439) tests ====
+
+    /// Helper: build a `DampingImportHook` wrapping a fresh
+    /// `DampingTable` with the supplied config.
+    #[cfg(feature = "damping")]
+    fn damping_hook(
+        cfg: lr_damping::DampingConfig,
+    ) -> (
+        DampingImportHook,
+        std::sync::Arc<std::sync::Mutex<lr_damping::DampingTable>>,
+    ) {
+        let table = std::sync::Arc::new(std::sync::Mutex::new(lr_damping::DampingTable::new(cfg)));
+        let hook = DampingImportHook::new(std::sync::Arc::clone(&table));
+        (hook, table)
+    }
+
+    /// Helper: set a route's `age_ms` to a wall-clock-millis value so
+    /// the damping hook can derive `now_s` from it.
+    #[cfg(feature = "damping")]
+    fn route_at(prefix: [u8; 4], plen: u8, peer: u64, age_ms: u64) -> Route {
+        let mut r = route(prefix, plen, peer);
+        r.age_ms = age_ms;
+        r
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_lets_first_route_through() {
+        // A prefix with no history should not be suppressed on its
+        // first import — the FoM is 0, below the suppress threshold.
+        let (hook, _table) = damping_hook(lr_damping::DampingConfig::default());
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_drops_route_after_enough_flaps() {
+        // Three withdrawals in rapid succession push the FoM to
+        // 3000 (>= suppress threshold 2000). The next import must
+        // be dropped.
+        let (hook, table) = damping_hook(lr_damping::DampingConfig::default());
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        // Simulate three withdraws — each adds 1000 to FoM.
+        hook.on_withdraw(&key, 0);
+        hook.on_withdraw(&key, 0);
+        hook.on_withdraw(&key, 0);
+        // The third withdraw crosses the threshold — the prefix
+        // is now suppressed.
+        assert!(table.lock().unwrap().is_suppressed(&key.prefix));
+        // The next import must be dropped.
+        let mut r = route_at([203, 0, 113, 0], 24, 1, 1_000);
+        assert!(
+            matches!(hook.on_import(&mut r), HookVerdict::Drop),
+            "suppressed prefix must be dropped on import"
+        );
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_withdraw_notification_runs_through_hook_chain() {
+        // Verify the HookChain plumbing also calls on_withdraw.
+        let (hook, table) = damping_hook(lr_damping::DampingConfig::default());
+        let chain = HookChain {
+            import: vec![Box::new(hook)],
+            selection: vec![],
+            export: vec![],
+        };
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        // Three withdraws through the chain.
+        chain.run_import_withdraw(&key, 0);
+        chain.run_import_withdraw(&key, 0);
+        chain.run_import_withdraw(&key, 0);
+        assert!(table.lock().unwrap().is_suppressed(&key.prefix));
+    }
+
+    #[cfg(feature = "damping")]
+    #[test]
+    fn damping_shared_table_visible_to_hook_and_caller() {
+        // The hook's shared_table() returns the same Arc the caller
+        // built — used by the daemon decay ticker to drive
+        // decay_all on the same table the hook mutates.
+        let (hook, table) = damping_hook(lr_damping::DampingConfig::default());
+        assert!(
+            std::sync::Arc::ptr_eq(&hook.shared_table(), &table),
+            "shared_table() must return the same Arc"
+        );
+        // Mutating via the hook is visible to the caller's handle.
+        let key = lr_core::rib::RouteKey::new(
+            "203.0.113.0/24".parse().unwrap(),
+            lr_core::nlri::NlriFamily::IPV4_UNICAST,
+        );
+        hook.on_withdraw(&key, 0);
+        assert_eq!(table.lock().unwrap().entries().count(), 1);
     }
 }

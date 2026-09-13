@@ -258,7 +258,8 @@ library API but are unreachable from the daemon:
    summary_only = true
    ```
    Add `AggregateSpec`; call `r.add_aggregate()`.
-3. **`[damping]` TOML table + import-hook wiring.**
+3. **`[damping]` TOML table + import-hook wiring.** ~~Landed (commit
+   pending).~~
    ```toml
    [damping]
    enabled = true
@@ -267,10 +268,23 @@ library API but are unreachable from the daemon:
    suppress = 2000
    max_suppress = 4
    ```
-   Build a `DampingTable` at start-up and install it as an `ImportHook`
+   ~~Build a `DampingTable` at start-up and install it as an `ImportHook`
    so every route is checked against figure-of-merit before entering
    Adj-RIB-In. **D4.3 should land first** — wiring up existing dead
-   code is the highest-leverage piece in this direction.
+   code is the highest-leverage piece in this direction.~~ Landed:
+   `[damping] enabled = true` installs a
+   `lr_policy::hooks::DampingImportHook` on the import chain; the
+   hook drops routes whose prefix has crossed the suppress threshold
+   and tracks re-announcements via `DampingTable::on_announce`. A
+   separate daemon thread (`lr-damping-decay`) calls
+   `DampingTable::decay_all` every `decay_interval_s` so suppressed
+   prefixes re-emerge as FoM decays below the reuse threshold. The
+   `ImportHook` trait gained an `on_withdraw` default no-op method
+   so the damping hook can also track withdrawals (router
+   `withdraw_from_session` notifies the chain). The TOML table
+   surfaces all eight `DampingConfig` tunables verbatim — operators
+   familiar with RFC 2439 §4.7's parameter names can dial them
+   directly. Off by default (RFC 7196 §3).
 4. **FFI surface.** `lr_router_add_redistribution_pipe()`,
    `lr_router_add_aggregate()`, `lr_router_set_damping_config()`, etc.
    Sync Go / Python / C++ bindings.
@@ -713,7 +727,7 @@ refactor — needs extensive regression tests.
 | D1        | not started           | —     | Babel multi-session + per-iface params   |
 | D2        | not started           | —     | RPKI-RTR client (RFC 8210 / 8281)        |
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
-| D4        | partial (D4.3 first)  | —     | Daemon surface — wire up damping first   |
+| D4        | partial (D4.3 landed) | —     | Daemon surface — damping wired up; redistribution + aggregate pending |
 | D5        | not started           | —     | FFI expansion                            |
 | D6        | not started           | —     | Fuzzing + proptest + criterion           |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |

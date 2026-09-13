@@ -12,6 +12,7 @@ description = "Routing policy: route maps, prefix lists, AS-path filters, commun
 [dependencies]
 lr-core = { workspace = true }
 lr-bgp = { workspace = true, optional = true }
+lr-damping = { workspace = true, optional = true }
 tracing.workspace = true
 
 [features]
@@ -21,3 +22,7 @@ std = []
 # MED / prepend / add-community set actions). Requires std because
 # lr-bgp is a std crate.
 bgp = ["std", "dep:lr-bgp"]
+# RFC 2439 route flap damping import hook. Pulls in the `lr-damping`
+# crate and exposes `DampingImportHook`. Requires std because
+# `lr-damping` is a std crate.
+damping = ["std", "dep:lr-damping"]

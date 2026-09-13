@@ -2566,6 +2566,13 @@ impl DefaultRouter {
     }
 
     fn withdraw_from_session(&mut self, origin: RouteOrigin, key: &RouteKey, path_id: u32) {
+        // Notify import hooks that a route has been withdrawn. The
+        // notification fires for every withdraw, including routes
+        // that were dropped by an import hook (never made it into
+        // Adj-RIB-In) — RFC 2439 damping needs every flap event to
+        // keep its figure-of-merit accurate. The hook's return is
+        // informational only; it cannot "drop" a withdraw.
+        self.hooks.run_import_withdraw(key, self.now_ms / 1000);
         // W2.4: a withdrawal also removes the route from the pre-policy
         // RIB (it is gone from the peer either way).
         self.pre_policy_adj_rib_in.withdraw(origin, key, path_id);

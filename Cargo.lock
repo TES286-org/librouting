@@ -325,6 +325,7 @@ dependencies = [
  "lr-bgp",
  "lr-bmp",
  "lr-core",
+ "lr-damping",
  "lr-ldp",
  "lr-mpls",
  "lr-mrt",
@@ -423,6 +424,7 @@ version = "1.0.0-rc.3"
 dependencies = [
  "lr-bgp",
  "lr-core",
+ "lr-damping",
  "tracing",
 ]
 
