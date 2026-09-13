@@ -20,6 +20,7 @@ pub mod as_path_filter;
 #[cfg(feature = "bgp")]
 pub mod bgp;
 pub mod community_list;
+pub mod filter;
 pub mod hooks;
 pub mod policy;
 pub mod prefix_list;
