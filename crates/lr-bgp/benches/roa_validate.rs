@@ -39,7 +39,7 @@ fn build_table(n: usize) -> RoaTable {
             .add(
                 &format!("10.{hi}.{lo}.0/24"),
                 Some(24),
-                65000 + (i as u32 % 1000),
+                65000 + (i % 1000),
             )
             .expect("add ROA entry");
     }

@@ -443,7 +443,11 @@ impl Prefix {
                 // proptest regression in `lr-policy/tests/proptest.rs`
                 // (`prefix_network_idempotent` and
                 // `prefix_network_is_contained`).
-                let zero_start = if rem_bits > 0 { full_bytes + 1 } else { full_bytes };
+                let zero_start = if rem_bits > 0 {
+                    full_bytes + 1
+                } else {
+                    full_bytes
+                };
                 for (i, byte) in n.iter_mut().enumerate().skip(zero_start) {
                     let _ = i;
                     *byte = 0;
@@ -733,7 +737,11 @@ mod tests {
         // preserve byte 3 = 0x02 (the host bit is already 0).
         let p: Prefix = "0:2::/31".parse().unwrap();
         let n = p.network();
-        assert_eq!(n.to_string(), "0:2::", "network form dropped partial-byte network bits");
+        assert_eq!(
+            n.to_string(),
+            "0:2::",
+            "network form dropped partial-byte network bits"
+        );
 
         // Now a case where the host bit is actually set: 0:3:: has
         // byte 3 = 0x03 = 0000_0011. For /31, the LSB is the host
@@ -753,7 +761,10 @@ mod tests {
         // The original prefix must contain its own network form.
         let p: Prefix = "2001:db8:1:2::/33".parse().unwrap();
         let n = p.network();
-        assert!(p.contains(&n), "prefix {p} does not contain its own network {n}");
+        assert!(
+            p.contains(&n),
+            "prefix {p} does not contain its own network {n}"
+        );
     }
 
     /// Round-trip property of `network()`: applied twice, the result
@@ -771,12 +782,19 @@ mod tests {
             // /31 boundary: byte 3 holds 7 network bits + 1 host bit.
             ("0:2::/31", "0:2::"),
             ("0:3::/31", "0:2::"),
-            ("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/127", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe"),
+            (
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/127",
+                "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe",
+            ),
         ];
         for (src, expected) in cases {
             let p: Prefix = src.parse().unwrap();
             let n1 = p.network();
-            let n2 = Prefix { addr: n1, prefix_len: p.prefix_len }.network();
+            let n2 = Prefix {
+                addr: n1,
+                prefix_len: p.prefix_len,
+            }
+            .network();
             assert_eq!(n1.to_string(), expected, "first network() for {src}");
             assert_eq!(n2.to_string(), expected, "second network() for {src}");
         }

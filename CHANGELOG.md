@@ -18,6 +18,55 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- ROADMAP-v3 D6 — fuzzing, property tests, performance benchmarks
+  and RFC wire conformance vectors:
+  - **`Prefix::network` IPv6 bug fix.** The previous
+    implementation zeroed byte `full_bytes` *before* applying
+    the partial-byte mask when `rem_bits > 0`, so the mask
+    operated on `0x00` and the partial-byte network bits were
+    dropped. For a `/31` prefix, byte 3 holds 7 network bits +
+    1 host bit; the old code zeroed all of byte 3 and only then
+    AND-ed with `0xfe`, leaving byte 3 at `0x00` regardless of
+    the original. OSPFv3 LSA origination, BGP-LS export and
+    LDP transit-prefix installation all call `.network()` and
+    would silently install wrong addresses for any non-byte-aligned
+    IPv6 prefix. Fix: skip byte `full_bytes` in the zeroing loop
+    when `rem_bits > 0`, then mask in place — symmetric to the
+    v4 path. Two regression tests pin the fix.
+  - **proptest suite.** `crates/lr-policy/tests/proptest.rs`
+    adds 9 property tests covering prefix-lattice invariants
+    (reflexivity, antisymmetry, transitivity), `Prefix::network`
+    idempotence and containment, `PrefixList::evaluate`
+    first-match semantics, and filter-DSL parser robustness
+    (never panics, pure compilation).
+  - **RFC conformance vectors.** `crates/lr-bgp/tests/rfc_vectors.rs`
+    pins 15 byte-exact wire forms from RFC 4271 (header / OPEN /
+    UPDATE / KEEPALIVE / NOTIFICATION), RFC 4486 (Cease /
+    Administrative Shutdown), RFC 5492 (capability TLV) and
+    RFC 6793 (4-byte AS capability via AS_TRANS).
+  - **Criterion benchmarks.** Four bench harnesses under
+    `crates/{lr-bgp,lr-policy,lr-rib}/benches/` pin the codec /
+    ROA / filter / RIB hot paths. The numbers are the immutable
+    baseline the future optimisation work (D8.4 radix trie,
+    D3.7 bytecode VM, D15 sharded RIB) will be measured against.
+  - **cargo-fuzz targets.** Standalone `fuzz/` workspace with
+    three targets — `bgp_decode`, `filter_parser`, `roa_validate`
+    — asserting the security contract: never panic / abort / UB
+    on arbitrary input. Each ships with a hand-picked seed
+    corpus under `fuzz/seeds/<target>/`.
+  - **Nightly CI** gained a `fuzz` job (5 min per target,
+    non-blocking, uploads crash artifacts) and a `bench-smoke`
+    job (workspace criterion run, reduced sample size, uploads
+    reports as artifacts).
+- ROADMAP-v3 D7 — nightly `cargo deny check` CI step fixed. The
+  job had been failing on every run since cargo-deny 0.20 because
+  it invoked `cargo deny check --all-features`, but cargo-deny
+  0.20+ rejects `--all-features` (it operates on `Cargo.lock`,
+  not on the build manifest). Separately, `cbindgen v0.27.0`
+  ships under MPL-2.0 which was not on the license allow-list —
+  MPL-2.0 is OSI-approved, FSF-libre, file-level copyleft that
+  only affects `cbindgen` (a build-time-only dependency of
+  `lr-ffi`'s `build.rs`). Added to `deny.toml` with rationale.
 - `Protocol::bird_name()` returns the canonical BIRD-style
   lowercase protocol name used by the Filter DSL `proto` field.
   `Bgp -> "bgp"`, `Ospfv2 -> "ospf"`, `Ospfv3 -> "ospf3"`,

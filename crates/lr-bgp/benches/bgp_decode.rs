@@ -59,10 +59,7 @@ fn update_bytes() -> Vec<u8> {
         AttrType::NextHop,
         vec![192, 0, 2, 1],
     ));
-    u.nlri.push(Nlri::plain(Prefix::new_v4(
-        [192, 0, 2, 0],
-        24,
-    )));
+    u.nlri.push(Nlri::plain(Prefix::new_v4([192, 0, 2, 0], 24)));
     BgpCodec::new()
         .with_asn4(true)
         .encode_vec(&BgpMessage::Update(u))
@@ -78,7 +75,7 @@ fn bench_decode(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(open.len() as u64));
     group.bench_function("decode_open", |b| {
         b.iter_batched_ref(
-            || BgpCodec::new(),
+            BgpCodec::new,
             |codec| {
                 let _ = black_box(codec.decode_slice(&open).unwrap());
             },
@@ -89,7 +86,7 @@ fn bench_decode(c: &mut Criterion) {
     group.throughput(Throughput::Bytes(keepalive.len() as u64));
     group.bench_function("decode_keepalive", |b| {
         b.iter_batched_ref(
-            || BgpCodec::new(),
+            BgpCodec::new,
             |codec| {
                 let _ = black_box(codec.decode_slice(&keepalive).unwrap());
             },

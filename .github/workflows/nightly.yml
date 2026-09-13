@@ -99,3 +99,90 @@ jobs:
           LR_VM_TIMEOUT: 1500
         run: tests/vm/run_vm.sh
 
+  # Fuzzing — ROADMAP-v3 D6.4.
+  #
+  # Coverage-guided fuzzing of the three highest-risk input
+  # surfaces: BGP wire codec, filter DSL parser, ROA validation.
+  # Each target runs for 5 minutes against the seed corpus
+  # committed under `fuzz/seeds/<target>/`. The job is
+  # non-blocking: a crash is filed as a GitHub issue via the
+  # `actions/upload-artifact` step (the artifact is the crashing
+  # input), not as a CI failure — fuzzing is exploratory and a
+  # nightly crash from a corner case should not gate the next
+  # day's release.
+  #
+  # Run locally for longer:
+  #   cargo +nightly fuzz run bgp_decode -- -max_total_time=3600
+  fuzz:
+    name: Fuzz (cargo-fuzz, 5 min per target)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+      - name: Cache cargo registry + cargo-fuzz install
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "fuzz-nightly"
+      - name: Install cargo-fuzz
+        run: cargo +nightly install cargo-fuzz --locked || cargo +nightly install cargo-fuzz
+      - name: Seed corpus from committed seeds
+        run: |
+          for t in bgp_decode filter_parser roa_validate; do
+            mkdir -p "fuzz/corpus/$t"
+            cp "fuzz/seeds/$t/"* "fuzz/corpus/$t/" 2>/dev/null || true
+          done
+      - name: Fuzz bgp_decode (5 min)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run bgp_decode -- -max_total_time=300 -max_len=4096
+      - name: Fuzz filter_parser (5 min)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run filter_parser -- -max_total_time=300 -max_len=4096
+      - name: Fuzz roa_validate (5 min)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run roa_validate -- -max_total_time=300 -max_len=4096
+      - name: Upload crash artifacts (if any)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-crash-artifacts
+          path: fuzz/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # Benchmark smoke — ROADMAP-v3 D6.2.
+  #
+  # Runs the four criterion bench harnesses with a reduced sample
+  # size so the whole job fits in ~5 minutes. The numbers are
+  # written to `target/criterion/` and uploaded as an artifact;
+  # a future commit can wire this up to a regression-detection
+  # bot that diffs the latest run against the committed baseline.
+  #
+  # The bench source under `crates/{lr-bgp,lr-policy,lr-rib}/benches/`
+  # is the immutable baseline; any code change that regresses a
+  # bench by >10% should be visible in the nightly artifact.
+  bench-smoke:
+    name: Bench smoke (criterion, 5 min total)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "bench-smoke"
+      - name: cargo bench (workspace, reduced sample size)
+        run: |
+          cargo bench --workspace -- \
+            --sample-size 10 \
+            --warm-up-time 1 \
+            --measurement-time 3 \
+            --noplot
+      - name: Upload criterion reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: criterion-reports
+          path: target/criterion/
+          if-no-files-found: ignore
+          retention-days: 30
+

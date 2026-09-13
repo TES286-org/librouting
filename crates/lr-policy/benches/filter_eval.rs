@@ -36,7 +36,10 @@ const TAG_LOCAL_PREF: u8 = 5;
 const TAG_COMMUNITIES: u8 = 8;
 
 fn attr(route: &Route, tag: u8) -> Option<Vec<u8>> {
-    route.attributes.get(AttrTag::raw(tag)).map(|a| a.value.clone())
+    route
+        .attributes
+        .get(AttrTag::raw(tag))
+        .map(|a| a.value.clone())
 }
 
 impl FilterContext for BenchCtx {
@@ -147,7 +150,11 @@ fn route_with(prefix: &str, local_pref: u32, med: u32) -> Route {
 
 fn bench_eval(c: &mut Criterion) {
     let simple = compile("bench-simple", "accept;").unwrap();
-    let if_lp = compile("bench-if-lp", "if bgp.local_pref > 100 then accept; reject;").unwrap();
+    let if_lp = compile(
+        "bench-if-lp",
+        "if bgp.local_pref > 100 then accept; reject;",
+    )
+    .unwrap();
     let complex = compile(
         "bench-complex",
         "let pfx = 100; \
@@ -166,21 +173,33 @@ fn bench_eval(c: &mut Criterion) {
 
     group.bench_function("simple_accept", |b| {
         b.iter(|| {
-            let r = evaluate(black_box(&simple), black_box(&mut route), black_box(&BenchCtx));
+            let r = evaluate(
+                black_box(&simple),
+                black_box(&mut route),
+                black_box(&BenchCtx),
+            );
             let _ = black_box(r);
         });
     });
 
     group.bench_function("if_local_pref", |b| {
         b.iter(|| {
-            let r = evaluate(black_box(&if_lp), black_box(&mut route), black_box(&BenchCtx));
+            let r = evaluate(
+                black_box(&if_lp),
+                black_box(&mut route),
+                black_box(&BenchCtx),
+            );
             let _ = black_box(r);
         });
     });
 
     group.bench_function("complex_chain", |b| {
         b.iter(|| {
-            let r = evaluate(black_box(&complex), black_box(&mut route), black_box(&BenchCtx));
+            let r = evaluate(
+                black_box(&complex),
+                black_box(&mut route),
+                black_box(&BenchCtx),
+            );
             let _ = black_box(r);
         });
     });

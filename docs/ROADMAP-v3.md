@@ -341,7 +341,7 @@ route withdraw is unreachable; IPv6 origination is unreachable.
 
 ## D6 — Fuzzing + property tests + performance benchmarks
 
-**Status:** not started. Tracks workspace + CI.
+**Status:** ~~landed~~ (commit pending). Tracks workspace + CI.
 
 **Current gap.** The project has no fuzz targets (no `fuzz/` directory,
 no `cargo-fuzz` dependency), no property tests (no `proptest` /
@@ -350,7 +350,50 @@ wire codec (`BgpCodec`, `OspfCodec`, `BabelCodec`, `LdpCodec`,
 `BfdPacket`, `BmpMessage`, `MrtRecord`) parses untrusted network
 bytes and is a natural fuzz target.
 
-**Proposed work.**
+**Landed.**
+
+* **Property tests** — `crates/lr-policy/tests/proptest.rs` (9
+  properties, ~250 LoC) covering prefix-lattice invariants
+  (reflexivity / antisymmetry / transitivity of
+  `Prefix::contains_prefix`), `Prefix::network` idempotence and
+  containment, `PrefixList::evaluate` first-match semantics, and
+  two filter-DSL parser robustness properties (never panics on
+  arbitrary input, pure / reproducible compilation). The
+  property tests discovered and fixed a real bug in
+  `Prefix::network` IPv6 partial-byte handling — see the
+  `network_v6_preserves_partial_byte_bits` regression test in
+  `crates/lr-core/src/addr.rs`.
+* **RFC conformance vectors** — `crates/lr-bgp/tests/rfc_vectors.rs`
+  (15 vectors, ~440 LoC) pinning byte-exact wire forms from
+  RFC 4271 (header / OPEN / UPDATE / KEEPALIVE / NOTIFICATION),
+  RFC 4486 (Cease / Administrative Shutdown), RFC 5492
+  (capability TLV encoding) and RFC 6793 (4-byte AS capability
+  via AS_TRANS).
+* **Criterion benchmarks** — four bench harnesses pinning the
+  hot paths ROADMAP-v3 D8.4 / D3.7 / D15 will later optimise:
+  `crates/lr-bgp/benches/bgp_decode.rs` (OPEN / KEEPALIVE /
+  UPDATE decode throughput), `crates/lr-bgp/benches/roa_validate.rs`
+  (1k / 10k / 100k entries, the linear-scan target for the
+  future Patricia trie), `crates/lr-policy/benches/filter_eval.rs`
+  (simple / if-local-pref / complex chain, the target for the
+  future bytecode VM), `crates/lr-rib/benches/rib_select.rs`
+  (100 / 1k / 10k routes, the target for sharded RIB).
+* **cargo-fuzz targets** — `fuzz/` standalone workspace with
+  three targets covering the highest-risk input surfaces:
+  `bgp_decode` (BgpCodec wire path), `filter_parser` (filter DSL
+  config string), `roa_validate` (RPKI-RTR future input path).
+  Each is ~20 LoC, asserts the security contract (never panic /
+  abort / UB on arbitrary input), and ships with a hand-picked
+  seed corpus under `fuzz/seeds/<target>/` that bootstraps
+  coverage from a fresh checkout.
+* **CI integration** — the nightly workflow gained a `fuzz` job
+  (5 min per target, non-blocking, uploads crash artifacts) and
+  a `bench-smoke` job (workspace criterion run with reduced
+  sample size, uploads reports as artifacts). Property tests
+  and RFC vectors run inside the existing `cargo test` step on
+  every PR — no separate CI surface needed.
+
+**Original gap (kept as audit trail).**
 
 1. **cargo-fuzz targets.**
    ```
@@ -729,7 +772,7 @@ refactor — needs extensive regression tests.
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | partial (D4.3 landed) | —     | Daemon surface — damping wired up; redistribution + aggregate pending |
 | D5        | not started           | —     | FFI expansion                            |
-| D6        | not started           | —     | Fuzzing + proptest + criterion           |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
 | D9        | not started           | —     | Architecture + contributor docs         |

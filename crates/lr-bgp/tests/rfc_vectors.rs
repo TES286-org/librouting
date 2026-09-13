@@ -23,9 +23,9 @@
 
 #![cfg(test)]
 
-use lr_bgp::codec::BgpCodec;
 use lr_bgp::capabilities::Capability;
-use lr_bgp::error::{BgpErrorCode, BgpHeaderErrorSubcode, BgpError};
+use lr_bgp::codec::BgpCodec;
+use lr_bgp::error::{BgpError, BgpErrorCode, BgpHeaderErrorSubcode};
 use lr_bgp::message::{BgpMessage, BgpMessageType, Keepalive, Open, OpenParam};
 use lr_core::addr::{Asn, RouterId};
 
@@ -82,9 +82,9 @@ fn rfc4271_marker_must_be_all_ones() {
                 BgpHeaderErrorSubcode::ConnectionNotSynchronized as u8
             );
         }
-        other => panic!(
-            "non-0xFF marker must raise Header/Connection-Not-Synchronized, got {other:?}"
-        ),
+        other => {
+            panic!("non-0xFF marker must raise Header/Connection-Not-Synchronized, got {other:?}")
+        }
     }
 }
 
@@ -102,11 +102,12 @@ fn rfc4271_length_below_minimum_is_bad_length() {
     match err {
         Err(BgpError::Notification(n)) => {
             assert_eq!(n.error_code, BgpErrorCode::Header as u8);
-            assert_eq!(n.error_subcode, BgpHeaderErrorSubcode::BadMessageLength as u8);
+            assert_eq!(
+                n.error_subcode,
+                BgpHeaderErrorSubcode::BadMessageLength as u8
+            );
         }
-        other => panic!(
-            "length < 19 must raise Header/Bad-Message-Length, got {other:?}"
-        ),
+        other => panic!("length < 19 must raise Header/Bad-Message-Length, got {other:?}"),
     }
 }
 
@@ -121,11 +122,12 @@ fn rfc4271_length_above_maximum_is_bad_length() {
     match err {
         Err(BgpError::Notification(n)) => {
             assert_eq!(n.error_code, BgpErrorCode::Header as u8);
-            assert_eq!(n.error_subcode, BgpHeaderErrorSubcode::BadMessageLength as u8);
+            assert_eq!(
+                n.error_subcode,
+                BgpHeaderErrorSubcode::BadMessageLength as u8
+            );
         }
-        other => panic!(
-            "length > 4096 must raise Header/Bad-Message-Length, got {other:?}"
-        ),
+        other => panic!("length > 4096 must raise Header/Bad-Message-Length, got {other:?}"),
     }
 }
 
@@ -161,10 +163,7 @@ fn rfc4271_open_minimal_decodes() {
                 RouterId::from_v4([192, 0, 2, 1]),
                 "bgp_id must be 192.0.2.1"
             );
-            assert!(
-                o.params.is_empty(),
-                "no optional params in this vector"
-            );
+            assert!(o.params.is_empty(), "no optional params in this vector");
         }
         other => panic!("expected OPEN, got {other:?}"),
     }
@@ -213,8 +212,7 @@ fn rfc6793_open_with_four_byte_as_capability() {
         0xC0, 0x00, 0x02, 0x01, // bgp_id = 192.0.2.1
         0x08, // params_len = 8 (covers param header + capability body)
         // param 1: type=2 (capability), len=6
-        0x02, 0x06,
-        // capability: code=65, len=4, value=0x00011170 (70000)
+        0x02, 0x06, // capability: code=65, len=4, value=0x00011170 (70000)
         0x41, 0x04, 0x00, 0x01, 0x11, 0x70,
     ];
     let bytes = frame(&body, BgpMessageType::Open as u8);
@@ -253,11 +251,12 @@ fn rfc4271_keepalive_is_header_only() {
 // RFC 4271 §4.5 — NOTIFICATION
 // ============================================================================
 
-/// RFC 4271 §4.5: NOTIFICATION body is error_code(1) + error_subcode(1)
-/// + data(variable). RFC 4271 §6.1 specifies that the
-/// "Connection-Not-Synchronized" subcode carries the bad marker bytes
-/// as data. Pin the canonical form: code=1 (Header), subcode=1,
-/// data = the first 4 bytes of the received (bad) marker.
+/// RFC 4271 §4.5: NOTIFICATION body is `error_code(1)` then
+/// `error_subcode(1)` then `data(variable)`. RFC 4271 §6.1
+/// specifies that the "Connection-Not-Synchronized" subcode
+/// carries the bad marker bytes as data. Pin the canonical
+/// form: code=1 (Header), subcode=1, data = the first 4 bytes
+/// of the received (bad) marker.
 #[test]
 fn rfc4271_notification_header_connection_not_synchronized() {
     let body = [
@@ -409,9 +408,7 @@ fn rfc4271_open_encode_matches_rfc_bytes() {
         .expect("encode");
 
     let expected = frame(
-        &[
-            0x04, 0xFD, 0xE9, 0x00, 0xB4, 0xC0, 0x00, 0x02, 0x01, 0x00,
-        ],
+        &[0x04, 0xFD, 0xE9, 0x00, 0xB4, 0xC0, 0x00, 0x02, 0x01, 0x00],
         BgpMessageType::Open as u8,
     );
     assert_eq!(

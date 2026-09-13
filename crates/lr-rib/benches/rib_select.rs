@@ -32,7 +32,10 @@ fn make_route(i: u32) -> Route {
     let prefix = Prefix::new_v4([10, a, b, 0], 24);
     Route {
         key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
-        origin: RouteOrigin { proto: 1, peer: i as u64 },
+        origin: RouteOrigin {
+            proto: 1,
+            peer: i as u64,
+        },
         protocol: Protocol::Bgp,
         preference: Preference::new(20, 100 + i),
         next_hop: None,
