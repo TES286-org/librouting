@@ -141,8 +141,9 @@ PDU parser is a useful cross-check.
 
 ## D3 — Filter DSL feature expansion toward BIRD syntax parity
 
-**Status:** partial — D3.6 (proto field fix) is the smallest piece and
-should land first. Tracks `lr-policy`.
+**Status:** partial — ~~D3.6 (proto field fix) landed~~ (commit
+`ca8fe42`). The smallest piece is done; the rest of D3 remains
+open. Tracks `lr-policy`.
 
 **Current gap.** `crates/lr-policy/src/filter/` implements a subset of
 the BIRD filter syntax (if/then/else, let, arithmetic, comparison,
@@ -189,13 +190,17 @@ present. The current DSL returns a default (0/false) for missing
 attributes and cannot distinguish "absent" from "value 0". Add
 `Expr::Defined(Box<Expr>)`. ~150 LoC.
 
-### D3.6 — `proto` field string format
+### D3.6 — `proto` field string format — ~~landed~~
 
-`eval.rs:492` returns `Value::Str(format!("{:?}", route.protocol))`,
+`eval.rs:492` returned `Value::Str(format!("{:?}", route.protocol))`,
 producing the Rust Debug string (e.g. `"Bgp"`). BIRD uses lower-case
-`"bgp"`. Map to BIRD-style protocol names: `Bgp -> "bgp"`,
+`"bgp"`. ~~Map to BIRD-style protocol names: `Bgp -> "bgp"`,
 `Ospfv2 -> "ospf"`, `Ospfv3 -> "ospf3"`, `Babel -> "babel"`.
-~20 LoC. **Land first — it is a one-commit fix.**
+~20 LoC.~~ Landed in commit `ca8fe42` — new `Protocol::bird_name()`
+method on `lr-core::rib::Protocol` plus four regression tests
+covering the lowercase match, the negative Rust-Debug form, an
+exhaustive loop over every `Protocol` variant, and a case statement
+that routes on the OSPFv2 BIRD name.
 
 ### D3.7 — Bytecode compilation
 
@@ -375,12 +380,23 @@ benches ~350, RFC vectors ~200, CI ~100).
 
 ## D7 — CI/CD supply-chain hardening
 
-**Status:** not started. Tracks `.github/` + repo root.
+**Status:** ~~landed~~ (commit pending). Tracks `.github/` + repo root.
+The supply-chain `cargo audit` + `cargo deny` job runs nightly in
+`.github/workflows/nightly.yml`; `deny.toml` is the source of truth
+for advisories / licenses / bans / sources; `.github/dependabot.yml`
+opens weekly Cargo + GitHub Actions bumps. Contributor governance
+files (`CONTRIBUTING.md`, `SECURITY.md`, `CODE_OF_CONDUCT.md`,
+`CHANGELOG.md`) live at the repo root.
 
-**Current gap.** CI has 11 jobs covering fmt, clippy, test, interop,
-cross-build, MSRV, coverage, Miri — the happy path is well covered.
-But supply-chain security is empty: no `cargo-audit`, no `cargo-deny`,
-no Dependabot, no SBOM, no artifact signing, no SAST (CodeQL/Semgrep).
+**Landed.** SBOM generation (cyclonedx), artifact signing (cosign)
+and CodeQL/Semgrep SAST are not yet wired — these touch
+`release.yml` more invasively and will land in a follow-up.
+
+**Original gap (kept as audit trail).** CI has 11 jobs covering fmt,
+clippy, test, interop, cross-build, MSRV, coverage, Miri — the happy
+path is well covered. But supply-chain security is empty: no
+`cargo-audit`, no `cargo-deny`, no Dependabot, no SBOM, no artifact
+signing, no SAST (CodeQL/Semgrep).
 
 **Proposed work.**
 
@@ -682,11 +698,11 @@ refactor — needs extensive regression tests.
 | --------- | --------------------- | ----- | ---------------------------------------- |
 | D1        | not started           | —     | Babel multi-session + per-iface params   |
 | D2        | not started           | —     | RPKI-RTR client (RFC 8210 / 8281)        |
-| D3        | partial (D3.6 first)  | —     | Filter DSL parity — proto fix is tiny    |
+| D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | partial (D4.3 first)  | —     | Daemon surface — wire up damping first   |
 | D5        | not started           | —     | FFI expansion                            |
 | D6        | not started           | —     | Fuzzing + proptest + criterion           |
-| D7        | not started           | —     | Supply-chain hardening                   |
+| D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
 | D9        | not started           | —     | Architecture + contributor docs         |
 | D10       | partial (D10.1 first) | —     | RFC 8326 first; BGP-LS / SR Policy post-1.0 |

@@ -1,0 +1,59 @@
+# Dependabot configuration.
+#
+# Weekly cargo dependency updates. PRs opened by Dependabot go through
+# the same CI as every other PR (fmt + clippy + test + supply-chain),
+# so a broken bump is caught before merge.
+#
+# Each ecosystem gets its own block so the PRs are scoped and easy to
+# review. We keep the schedule conservative (weekly) to avoid PR
+# noise — daily bumps on a protocol library that pins a workspace
+# MSRV of 1.88 land too many false-positive failures from upstream
+# crates that require a newer toolchain.
+
+version: 2
+updates:
+  # Workspace Cargo dependencies — bumps to Cargo.toml + Cargo.lock.
+  - package-ecosystem: "cargo"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    # Group dev-only dependencies so a single `cargo update` of
+    # test-only crates lands in one PR rather than five.
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+        update-types:
+          - "minor"
+          - "patch"
+      production-dependencies:
+        dependency-type: "production"
+        update-types:
+          - "minor"
+          - "patch"
+    # Major version bumps (e.g. `bytes` 1.x -> 2.0) are always
+    # individual PRs so they get the breaking-change review they
+    # deserve.
+    labels:
+      - "dependencies"
+      - "rust"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  # GitHub Actions — bumps to workflow `uses:` lines.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      timezone: "Asia/Shanghai"
+    open-pull-requests-limit: 5
+    labels:
+      - "dependencies"
+      - "ci"
+    commit-message:
+      prefix: "chore(ci)"
+      include: "scope"

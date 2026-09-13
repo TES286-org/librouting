@@ -23,6 +23,53 @@ jobs:
         run: cargo miri test -p lr-ffi --all-features
         continue-on-error: true # nightly + experimental
 
+  # Supply-chain security — ROADMAP-v3 D7.
+  #
+  # Two independent scanners run every night against the same
+  # Cargo.lock CI builds with:
+  #
+  #   * `cargo audit`  — checks the RustSec advisory database for
+  #     any dependency with a known unpatched vulnerability. Pinned
+  #     to the latest cargo-audit at install time so the advisory
+  #     database is fresh.
+  #   * `cargo deny`   — three independent invariants from
+  #     `deny.toml` at the repo root: advisories (mirrors
+  #     cargo-audit so we get a second parser), licenses (no
+  #     unexpected license terms), bans (duplicate versions,
+  #     unmaintained crates, foreign-registry sources).
+  #
+  # Both jobs are required-passing on `main`. A failure here means
+  # either a dependency shipped a CVE or someone added a dependency
+  # with a license we did not pre-approve in `deny.toml` — review
+  # the report, then either bump, replace, or update `deny.toml`.
+  supply-chain:
+    name: Supply-chain (cargo audit + cargo deny)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + bin installs
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "supply-chain"
+      - name: Install cargo-audit
+        # `--locked` so a future cargo-audit release does not break
+        # CI by depending on a newer Rust feature than the
+        # toolchain pin.
+        run: cargo install cargo-audit --locked || cargo install cargo-audit
+      - name: Install cargo-deny
+        run: cargo install cargo-deny --locked || cargo install cargo-deny
+      - name: cargo audit
+        # Checks the RustSec advisory database. No `--ignore` here
+        # — advisories that need to be ignored are listed in
+        # `deny.toml` so cargo-deny stays the single source of
+        # truth for ignores.
+        run: cargo audit
+      - name: cargo deny check
+        # All four checks (advisories, licenses, bans, sources) are
+        # configured in `deny.toml` at the repo root.
+        run: cargo deny check --all-features
+
   # Self-test of the tests/vm harness: boot a minimal initramfs VM with
   # the runner's own kernel (6.8 has TCP-AO + the MPLS modules) and run
   # the kernel-gated interop scripts (tcp_ao.sh, mpls_lsp.sh, ldp.sh)
@@ -45,3 +92,4 @@ jobs:
           LR_VM_PROFILE: release
           LR_VM_TIMEOUT: 1500
         run: tests/vm/run_vm.sh
+

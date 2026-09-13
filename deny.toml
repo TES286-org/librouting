@@ -1,0 +1,99 @@
+# cargo-deny configuration.
+#
+# Used by the nightly `supply-chain` CI job (.github/workflows/nightly.yml)
+# to enforce three independent invariants:
+#
+#   * `advisories` — fail CI if any dependency has a known RustSec
+#     advisory with no patched version pinned.
+#   * `licenses`    — fail CI if any dependency introduces a license
+#     not on the allow-list below. The workspace is dual MIT OR
+#     Apache-2.0; we accept the OSI-approved licenses that recur in
+#     the transitive closure of `bytes`, `socket2`, `thiserror`,
+#     `tracing`, `serde`, `toml`, `clap` and friends.
+#   * `bans`        — warn (not fail) on duplicate versions and
+#     unmaintained crates so the failure mode is "noisy review
+#     surface", not "the build breaks because something pulled in
+#     windows-sys twice".
+#
+# This file is the source of truth — the CI job just runs
+# `cargo deny check` with no overrides.
+
+[graph]
+# Lint the same dependency graph CI builds: every workspace crate,
+# every feature, including dev-dependencies (test-only crates still
+# pull in advisories that ship in production builds of *other*
+# crates that share the same lockfile).
+all-features = true
+no-default-features = false
+
+[advisories]
+# The RustSec advisory database. Mirrors the URL cargo-audit uses
+# so the two tools stay in sync.
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# CI fails on any advisory that lacks an explicitly-ignored record
+# below. To ignore an advisory (e.g. a crate we cannot upgrade
+# because of MSRV), add its ID with a removal date and a
+# human-readable reason:
+#
+#   ignore = [
+#     "RUSTSEC-0000-0000",
+#   ]
+ignore = []
+# Soundness flags we DO want to fail on — these are the same fields
+# `cargo audit` honours.
+unmaintained = "workspace"
+yanked = "deny"
+
+[licenses]
+# Allow the OSI-approved licenses that appear in the dependency
+# closure. New licenses not on this list cause CI to fail; the fix
+# is either (a) the license is acceptable — add it here — or (b) the
+# license is not acceptable — the dependency must be replaced.
+allow = [
+    "MIT",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "Unicode-DFS-2016",
+    "Unicode-3.0",
+    "Zlib",
+    "CC0-1.0",
+    "0BSD",
+]
+# Confidence threshold for the license scan. cargo-deny considers
+# anything below this threshold "unknown" and fails — bumping is
+# safe, lowering is not.
+confidence-threshold = 0.8
+
+[[licenses.exceptions]]
+# `ring` ships an ISC-style license that cargo-deny cannot always
+# classify automatically; allow it explicitly when it appears.
+allow = ["ISC"]
+name = "ring"
+version = "*"
+
+[bans]
+# Duplicate versions are a *warning*, not a failure: many are
+# legitimate (e.g. `windows-sys` 0.48 vs 0.52 pulled by different
+# tooling) and the right fix is a coordinated upgrade, not a CI
+# blocker.
+multiple-versions = "warn"
+wildcards = "warn"
+# Highlight crates that ship many versions so reviewers can spot the
+# worst offenders at a glance.
+highlight = "all"
+# Don't fail on workspace-internal duplication (lr-* crates share a
+# version, that's fine).
+workspace-default-features = "allow"
+
+[sources]
+# Only crates from crates.io are allowed. Git / path / registry
+# dependencies must be reviewed case-by-case; the CI failure is the
+# review trigger.
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# The workspace itself is a path source — allowed by definition.
+allow-git = []

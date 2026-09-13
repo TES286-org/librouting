@@ -211,6 +211,9 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Cross builds: aarch64-linux-gnu, x86_64-windows-gnu (full link), freebsd/netbsd (check) | ✅ |
 | Coverage (tarpaulin) | ✅ |
 | MSRV 1.88 build | ✅ |
+| `cargo audit` (RustSec advisories, nightly) | ✅ | `.github/workflows/nightly.yml` `supply-chain` job |
+| `cargo deny` (advisories + licenses + bans + sources, nightly) | ✅ | `deny.toml` at repo root |
+| Dependabot (cargo + github-actions, weekly grouped PRs) | ✅ | `.github/dependabot.yml` |
 
 ## Roadmap v1 — complete
 
