@@ -30,7 +30,7 @@ use std::hash::{BuildHasher, Hasher};
 
 use blake2::digest::typenum::U16;
 use blake2::Blake2sMac;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use lr_core::addr::IpAddr;
 use sha2::Sha256;
 

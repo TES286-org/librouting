@@ -126,6 +126,30 @@ ship, breaking changes that affect embedders, dependency bumps.
   BIRD-style lowercase form documented in the `RouteFieldKind::Proto`
   docstring has always been the intended surface, and is now what
   the evaluator produces.
+- RustCrypto family bumped to the 2025 releases (issue #12):
+  `hmac` 0.12 → 0.13, `sha1`/`sha2`/`blake2` 0.10 → 0.11, all on
+  `digest` 0.11 / `crypto-common` 0.2. The four crates move as one
+  atomic change — bumping any of them alone splits the tree across
+  two incompatible `digest` versions and cannot compile
+  (`Hmac<Sha256>` would implement traits from both). Call-site
+  migration: MAC key setup resolves through `KeyInit` now (it moved
+  off `Mac`), so `<Hmac<Sha1> as Mac>::new_from_slice` UFCS became
+  `Hmac::<Sha1>::new_from_slice` with `KeyInit` in scope. Behavior
+  is unchanged: the RFC 5709 HMAC-SHA-1/SHA-256 vectors, the RFC
+  8967 Babel MAC vectors (HMAC-SHA256 + keyed BLAKE2s-128) and the
+  exchange-plane tag tests all pass byte-identically, and the
+  `babel_auth.sh` interop lab (challenge resync, wrong-key fail
+  closed, incremental deployment) passes against BIRD. All new
+  transitive dependencies (`hybrid-array`, `ctutils`, `cmov`,
+  `const-oid`, `cpufeatures` 0.3) are `MIT OR Apache-2.0` and
+  require Rust ≥ 1.85 — below the workspace MSRV 1.88.
+- Dependabot now groups the RustCrypto family (`hmac`, `sha1`,
+  `sha2`, `blake2`) into one PR covering major/minor/patch updates.
+  Dependabot reads 0.x minor-position bumps as major, which the
+  production-dependencies group (minor+patch only) excluded, so the
+  0.10 → 0.11 generation landed as four independent PRs (#7-#10)
+  that each broke the dependency tree on their own. The dedicated
+  group keeps the family on a single `digest` version per PR.
 
 ### Deprecated
 
@@ -137,6 +161,22 @@ Nothing yet.
 
 ### Fixed
 
+- `lr-ospf::exchange::DbExchange::poll` retransmits the pending
+  initial DBD in ExStart (issue #11). The periodic retransmission
+  only fired in Phase::Exchange, so the initial Database Description
+  (I|M|MS) sent on entering ExStart was never repeated: one lost
+  initial DBD — or one dropped by a peer whose §10.4 DR/BDR gate had
+  not opened yet (the runtime drops DBDs below ExStart until the
+  election makes `adjacency_viable()` true) — deadlocked the
+  adjacency with both sides waiting in ExStart for the other's
+  initial while Hellos kept the neighbor alive, and the
+  `ospf_broadcast.sh` interop lab hung until its 60 s timeout
+  (~10 % of CI runs). RFC 2328 §10.3/§10.8 have the master repeat
+  Database Descriptions at RxmtInterval, and BIRD's
+  `dbdes_timer_hook` resends in NEIGHBOR_EXSTART for both roles; the
+  fix mirrors that. Verified: 20/20 consecutive lab runs green after
+  the fix (1 failure in 10 before), two regression tests model the
+  deadlock conversation.
 - `lr-policy::filter::eval::read_route_field` no longer leaks the
   Rust `Debug` form of `Protocol` into the string surface of the
   Filter DSL `proto` field.

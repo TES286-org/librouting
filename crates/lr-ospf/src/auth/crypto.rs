@@ -106,17 +106,16 @@ impl CryptoAlgorithm {
     /// `hmac` crate zero-pads `Ko` to the hash block size and XORs with
     /// Ipad/Opad, which is exactly the `Ko XOR Ipad/Opad` construction.
     pub(crate) fn hmac(self, ko: &[u8], data: &[u8]) -> Vec<u8> {
-        use hmac::{Hmac, Mac};
+        use hmac::{Hmac, KeyInit, Mac};
         match self {
             Self::HmacSha1 => {
-                let mut mac =
-                    <Hmac<sha1::Sha1> as Mac>::new_from_slice(ko).expect("HMAC accepts any key");
+                let mut mac = Hmac::<sha1::Sha1>::new_from_slice(ko).expect("HMAC accepts any key");
                 mac.update(data);
                 mac.finalize().into_bytes().to_vec()
             }
             Self::HmacSha256 => {
                 let mut mac =
-                    <Hmac<sha2::Sha256> as Mac>::new_from_slice(ko).expect("HMAC accepts any key");
+                    Hmac::<sha2::Sha256>::new_from_slice(ko).expect("HMAC accepts any key");
                 mac.update(data);
                 mac.finalize().into_bytes().to_vec()
             }

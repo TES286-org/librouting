@@ -33,9 +33,29 @@ updates:
         update-types:
           - "minor"
           - "patch"
+      # The RustCrypto hash/MAC family shares the `digest` dependency:
+      # moving one crate alone (e.g. hmac 0.12 -> 0.13 while sha2 stays
+      # 0.10) splits the tree across digest 0.10/0.11 and cannot
+      # compile — `Hmac<Sha256>` ends up implementing traits from two
+      # incompatible digest versions. Dependabot reads 0.x
+      # minor-position bumps as major, so the production-dependencies
+      # group (minor+patch only) excluded them and they landed as four
+      # independent breaking PRs (#7-#10, issue #12). One atomic group
+      # keeps the family on a single digest version per PR.
+      rustcrypto-family:
+        patterns:
+          - "hmac"
+          - "sha1"
+          - "sha2"
+          - "blake2"
+        update-types:
+          - "major"
+          - "minor"
+          - "patch"
     # Major version bumps (e.g. `bytes` 1.x -> 2.0) are always
     # individual PRs so they get the breaking-change review they
-    # deserve.
+    # deserve — except for the RustCrypto family above, which must
+    # move atomically to keep one `digest` in the tree.
     labels:
       - "dependencies"
       - "rust"

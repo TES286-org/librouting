@@ -29,7 +29,7 @@
 
 #![allow(dead_code)]
 
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 
 use crate::capabilities::Capability;
