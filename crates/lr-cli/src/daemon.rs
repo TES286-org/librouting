@@ -594,6 +594,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         .peers
         .iter()
         .any(|p| p.import.is_some() || p.export.is_some());
+    let has_filter_bindings = cfg
+        .peers
+        .iter()
+        .any(|p| p.import_filter.is_some() || p.export_filter.is_some());
     if has_policy_bindings || !cfg.route_maps.is_empty() {
         let mut policy_set = match daemon_policy::build_policy_set(cfg) {
             Ok(set) => set,
@@ -617,6 +621,106 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             cfg.route_maps.len(),
             bound_imports,
             bound_exports
+        );
+    }
+
+    // ---- ROA / RFC 6811 prefix-origin validation ----
+    // Build the table even when `roa_validate` is off so the filter
+    // DSL's `roa.state` accessor still works.
+    let roa_table = match daemon_policy::build_roa_table(cfg) {
+        Ok(t) => t,
+        Err(e) => return daemon_policy::policy_error(e),
+    };
+    if !roa_table.is_empty() {
+        println!(
+            "  roa:         {} entries, validate={} (action: {})",
+            roa_table.len(),
+            cfg.roa_validate,
+            cfg.roa_invalid_action
+        );
+    }
+    if cfg.roa_validate && !roa_table.is_empty() {
+        // Install a built-in import hook that drops Invalid routes
+        // (or warns + accepts them) before the user-supplied chain.
+        // Implemented as a tiny DSL filter so the same code path
+        // runs as user-supplied filters.
+        let body = match cfg.roa_invalid_action.as_str() {
+            "reject" => "if roa.state == \"invalid\" then { reject; } accept;",
+            "warn" => "accept;",
+            "accept" => "accept;",
+            _ => "accept;",
+        };
+        match lr_policy::filter::compile("__roa_validate", body) {
+            Ok(f) => {
+                let ctx =
+                    std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(roa_table.clone()));
+                let hook = daemon_policy::FilterImportHook { filter: f, ctx };
+                let mut r = router.lock().unwrap();
+                r.hooks_mut().import.push(Box::new(hook));
+            }
+            Err(e) => {
+                eprintln!("daemon: internal ROA filter compile error: {e}");
+            }
+        }
+    }
+
+    // ---- BIRD-like filter DSL ([[filter]] tables). ----
+    if has_filter_bindings || !cfg.filters.is_empty() {
+        let filters = match daemon_policy::build_filters(cfg) {
+            Ok(f) => f,
+            Err(e) => return daemon_policy::policy_error(e),
+        };
+        let ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(roa_table.clone()));
+        let mut bound_import_filters = 0usize;
+        let mut bound_export_filters = 0usize;
+        // Index filters by name for O(1) lookup during peer binding.
+        let by_name: std::collections::BTreeMap<&str, &lr_policy::filter::Filter> =
+            filters.iter().map(|(n, f)| (n.as_str(), f)).collect();
+        for (idx, peer) in cfg.peers.iter().enumerate() {
+            let Some(session) = entries.get(idx) else {
+                continue;
+            };
+            if let Some(name) = &peer.import_filter {
+                let Some(f) = by_name.get(name.as_str()) else {
+                    return daemon_policy::policy_error(format!(
+                        "peer {}: unknown filter '{name}'",
+                        peer.label()
+                    ));
+                };
+                let hook = daemon_policy::FilterImportHook {
+                    filter: (*f).clone(),
+                    ctx: std::sync::Arc::clone(&ctx),
+                };
+                let _ = session.handle.0;
+                {
+                    let mut r = router.lock().unwrap();
+                    r.hooks_mut().import.push(Box::new(hook));
+                }
+                bound_import_filters += 1;
+            }
+            if let Some(name) = &peer.export_filter {
+                let Some(f) = by_name.get(name.as_str()) else {
+                    return daemon_policy::policy_error(format!(
+                        "peer {}: unknown filter '{name}'",
+                        peer.label()
+                    ));
+                };
+                let hook = daemon_policy::FilterExportHook {
+                    filter: (*f).clone(),
+                    ctx: std::sync::Arc::clone(&ctx),
+                };
+                {
+                    let mut r = router.lock().unwrap();
+                    r.hooks_mut().export.push(Box::new(hook));
+                }
+                bound_export_filters += 1;
+            }
+        }
+        println!(
+            "  filters:     {} compiled, {} import / {} export bindings",
+            filters.len(),
+            bound_import_filters,
+            bound_export_filters
         );
     }
 

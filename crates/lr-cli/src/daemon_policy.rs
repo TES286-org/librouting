@@ -16,6 +16,7 @@ use lr_core::addr::Prefix;
 use lr_policy::action::SetAction;
 use lr_policy::as_path_filter::AsPathFilter;
 use lr_policy::community_list::{CommunityList, CommunityListEntry};
+use lr_policy::filter::{self as dsl, EvalResult, Filter as DslFilter, FilterContext};
 use lr_policy::prefix_list::{PrefixList, PrefixListEntry};
 use lr_policy::route_map::RouteMapEntry;
 use lr_policy::{ListKind, PolicySet};
@@ -269,6 +270,156 @@ pub(crate) fn bind_peer_policies(
     Ok(())
 }
 
+/// Compile every `[[filter]]` body in the config into a [`DslFilter`]
+/// and return them keyed by name. Returns a startup error on the
+/// first filter that fails to parse or has a duplicate name.
+pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter)>, String> {
+    let mut out = Vec::with_capacity(cfg.filters.len());
+    let mut seen = std::collections::BTreeSet::new();
+    for spec in &cfg.filters {
+        let name = spec.name.as_deref().unwrap_or("");
+        if !seen.insert(name.to_string()) {
+            return Err(format!("filter '{name}' declared twice"));
+        }
+        let body = spec.body.as_deref().unwrap_or("");
+        let filter = dsl::compile(name, body).map_err(|e| format!("filter '{name}': {e}"))?;
+        out.push((name.to_string(), filter));
+    }
+    Ok(out)
+}
+
+/// A concrete [`FilterContext`] backed by `lr_policy::bgp`'s typed
+/// accessors. Used by both the import and export filter hooks.
+pub(crate) struct DaemonFilterContext {
+    roa: lr_bgp::RoaTable,
+}
+
+impl DaemonFilterContext {
+    pub(crate) fn new(roa: lr_bgp::RoaTable) -> Self {
+        Self { roa }
+    }
+}
+
+impl FilterContext for DaemonFilterContext {
+    fn bgp_local_pref(&self, route: &lr_core::rib::Route) -> Option<u32> {
+        lr_policy::bgp::local_pref(route)
+    }
+    fn bgp_med(&self, route: &lr_core::rib::Route) -> Option<u32> {
+        lr_policy::bgp::med(route)
+    }
+    fn bgp_next_hop(&self, route: &lr_core::rib::Route) -> Option<lr_core::addr::IpAddr> {
+        route.next_hop
+    }
+    fn bgp_as_path(&self, route: &lr_core::rib::Route) -> Vec<lr_core::addr::Asn> {
+        lr_policy::bgp::as_sequence(route)
+    }
+    fn bgp_communities(&self, route: &lr_core::rib::Route) -> Vec<(lr_core::addr::Asn, u16)> {
+        lr_policy::bgp::communities(route)
+            .into_iter()
+            .map(|c| {
+                let raw = c.as_u32();
+                let asn = (raw >> 16) as u32;
+                let val = (raw & 0xFFFF) as u16;
+                (lr_core::addr::Asn(asn), val)
+            })
+            .collect()
+    }
+    fn bgp_origin(&self, _route: &lr_core::rib::Route) -> Option<u8> {
+        // Origin attribute (IGP=0, EGP=1, INCOMPLETE=2) — not yet
+        // surfaced by lr-policy::bgp. Future work.
+        Some(0)
+    }
+    fn roa_state(&self, route: &lr_core::rib::Route) -> lr_policy::filter::RoaStateLit {
+        use lr_policy::filter::RoaStateLit;
+        let origin = lr_policy::bgp::as_sequence(route).last().copied();
+        let state = self.roa.validate(&route.key.prefix, origin);
+        match state {
+            lr_bgp::RoaState::Valid => RoaStateLit::Valid,
+            lr_bgp::RoaState::NotFound => RoaStateLit::NotFound,
+            lr_bgp::RoaState::Invalid => RoaStateLit::Invalid,
+        }
+    }
+    fn set_bgp_local_pref(&self, route: &mut lr_core::rib::Route, value: u32) {
+        lr_policy::bgp::set_local_pref(route, value)
+    }
+    fn set_bgp_med(&self, route: &mut lr_core::rib::Route, value: u32) {
+        lr_policy::bgp::set_med(route, value)
+    }
+    fn set_bgp_next_hop(&self, route: &mut lr_core::rib::Route, value: lr_core::addr::IpAddr) {
+        route.next_hop = Some(value);
+    }
+    fn bgp_as_path_prepend(&self, route: &mut lr_core::rib::Route, asn: lr_core::addr::Asn) {
+        lr_policy::bgp::prepend_as(route, asn)
+    }
+    fn bgp_communities_add(
+        &self,
+        route: &mut lr_core::rib::Route,
+        asn: lr_core::addr::Asn,
+        val: u16,
+    ) {
+        if asn.0 <= u16::MAX as u32 {
+            let c = lr_bgp::path::communities::Community::new(asn.0 as u16, val);
+            lr_policy::bgp::add_community(route, c);
+        }
+    }
+}
+
+/// A BGP-style import hook wrapping a compiled DSL filter. Routes
+/// matching `accept` are kept; `reject` drops them; `fallthrough`
+/// defers to the next hook in the chain.
+pub(crate) struct FilterImportHook {
+    pub filter: DslFilter,
+    pub ctx: std::sync::Arc<DaemonFilterContext>,
+}
+
+impl lr_policy::hooks::ImportHook for FilterImportHook {
+    fn name(&self) -> &str {
+        &self.filter.name
+    }
+    fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        match dsl::evaluate(&self.filter, route, self.ctx.as_ref()) {
+            EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
+            EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
+            EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
+        }
+    }
+}
+
+/// A BGP-style export hook wrapping a compiled DSL filter. Same
+/// semantics as [`FilterImportHook`] but on the outbound side.
+pub(crate) struct FilterExportHook {
+    pub filter: DslFilter,
+    pub ctx: std::sync::Arc<DaemonFilterContext>,
+}
+
+impl lr_policy::hooks::ExportHook for FilterExportHook {
+    fn name(&self) -> &str {
+        &self.filter.name
+    }
+    fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        match dsl::evaluate(&self.filter, route, self.ctx.as_ref()) {
+            EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
+            EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
+            EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
+        }
+    }
+}
+
+/// Build the router-wide ROA table from the `[[roa]]` config tables.
+pub(crate) fn build_roa_table(cfg: &DaemonConfig) -> Result<lr_bgp::RoaTable, String> {
+    let mut builder = lr_bgp::RoaTableBuilder::new();
+    for spec in &cfg.roas {
+        let prefix = spec.prefix.as_deref().unwrap_or("");
+        let asn = spec
+            .asn
+            .ok_or_else(|| format!("[[roa]] {prefix} without 'asn'"))?;
+        builder
+            .add(prefix, spec.max_length, asn)
+            .map_err(|e| format!("[[roa]] {prefix}: {e}"))?;
+    }
+    Ok(builder.build())
+}
+
 /// Convenience wrapper used by `main` to fail with exit code 2 on
 /// policy configuration errors.
 pub(crate) fn policy_error(msg: String) -> ExitCode {
@@ -337,5 +488,60 @@ mod tests {
         let map = set.route_map("m").unwrap();
         assert_eq!(map.entries.len(), 2);
         assert_eq!(map.entries[0].verdict, Some(false));
+    }
+
+    #[test]
+    fn roa_table_builds_from_config() {
+        let cfg = parse(
+            "[[roa]]\nprefix = \"203.0.113.0/24\"\nasn = 64512\n\n\
+             [[roa]]\nprefix = \"198.51.100.0/24\"\nmax_length = 26\nasn = 64513\n",
+        );
+        let t = build_roa_table(&cfg).unwrap();
+        assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn roa_table_rejects_bad_config() {
+        let cfg = parse("[[roa]]\nprefix = \"203.0.113.0/24\"\nmax_length = 23\nasn = 64512\n");
+        let err = build_roa_table(&cfg).unwrap_err();
+        assert!(err.contains("max_length"), "{err}");
+    }
+
+    #[test]
+    fn filters_compile() {
+        let cfg = parse(
+            "[[filter]]\nname = \"customer-in\"\nbody = \"if net ~ 203.0.113.0/24 then accept; reject;\"\n",
+        );
+        let filters = build_filters(&cfg).unwrap();
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].0, "customer-in");
+    }
+
+    #[test]
+    fn filter_duplicate_name_fails() {
+        let cfg = parse(
+            "[[filter]]\nname = \"dup\"\nbody = \"accept;\"\n\n\
+             [[filter]]\nname = \"dup\"\nbody = \"reject;\"\n",
+        );
+        let err = build_filters(&cfg).unwrap_err();
+        assert!(err.contains("declared twice"), "{err}");
+    }
+
+    #[test]
+    fn filter_parse_error_fails() {
+        let cfg = parse("[[filter]]\nname = \"bad\"\nbody = \"if net ~ then accept;\"\n");
+        let err = build_filters(&cfg).unwrap_err();
+        assert!(err.contains("filter 'bad'"), "{err}");
+    }
+
+    #[test]
+    fn filter_with_variables_and_arithmetic_compiles() {
+        // A non-trivial BIRD-style filter: variable bindings,
+        // arithmetic, prefix-set range, method call, append.
+        let cfg = parse(
+            "[[filter]]\nname = \"complex\"\nbody = \"let p = 100; let q = p * 2; if bgp.local_pref < q && net ~ [ 10.0.0.0/8{16,24} ] then { bgp.local_pref = q; bgp.communities += [ 64512:100 ]; accept; } reject;\"\n",
+        );
+        let filters = build_filters(&cfg).unwrap();
+        assert_eq!(filters.len(), 1);
     }
 }
