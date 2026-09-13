@@ -61,6 +61,12 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "0BSD",
+    # MPL-2.0 is OSI-approved, FSF-libre, file-level copyleft. It
+    # only appears on `cbindgen`, a *build-time* dependency of
+    # `lr-ffi` (used by `build.rs` to emit `include/lr_ffi.h`).
+    # Build-only deps do not propagate copyleft obligations to the
+    # output binary, so MPL-2.0 here is safe.
+    "MPL-2.0",
 ]
 # Confidence threshold for the license scan. cargo-deny considers
 # anything below this threshold "unknown" and fails — bumping is

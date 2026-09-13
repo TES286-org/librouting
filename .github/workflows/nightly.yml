@@ -67,8 +67,14 @@ jobs:
         run: cargo audit
       - name: cargo deny check
         # All four checks (advisories, licenses, bans, sources) are
-        # configured in `deny.toml` at the repo root.
-        run: cargo deny check --all-features
+        # configured in `deny.toml` at the repo root. `cargo deny`
+        # operates on `Cargo.lock`, so it scans every transitive
+        # dependency of every workspace member regardless of feature
+        # flags. The `--all-features` flag was rejected by cargo-deny
+        # 0.20+ — the manifest build is performed by `cargo audit`
+        # above, which is the right tool for resolving feature
+        # unification before scanning the lock file.
+        run: cargo deny check
 
   # Self-test of the tests/vm harness: boot a minimal initramfs VM with
   # the runner's own kernel (6.8 has TCP-AO + the MPLS modules) and run
