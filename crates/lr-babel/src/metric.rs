@@ -80,13 +80,16 @@ mod tests {
         // at the penalty above max.
         assert_eq!(rtt_penalty(0, 10_000, 120_000, 96), 0);
         assert_eq!(rtt_penalty(10_000, 10_000, 120_000, 96), 0);
-        assert_eq!(rtt_penalty(65_000, 10_000, 120_000, 96), 45); // 96*55/110
+        assert_eq!(rtt_penalty(65_000, 10_000, 120_000, 96), 48); // 96*55/110
         assert_eq!(rtt_penalty(120_000, 10_000, 120_000, 96), 96);
         assert_eq!(rtt_penalty(500_000, 10_000, 120_000, 96), 96);
         // Penalty 0 disables the feature entirely.
         assert_eq!(rtt_penalty(500_000, 10_000, 120_000, 0), 0);
-        // Degenerate bounds saturate rather than divide by zero.
-        assert_eq!(rtt_penalty(50_000, 50_000, 50_000, 96), 96);
+        // Degenerate bounds saturate rather than divide by zero. The
+        // `rtt <= min` branch wins at exactly the bound (babeld's
+        // ordering); one microsecond above it saturates.
+        assert_eq!(rtt_penalty(50_000, 50_000, 50_000, 96), 0);
         assert_eq!(rtt_penalty(49_999, 50_000, 50_000, 96), 0);
+        assert_eq!(rtt_penalty(50_001, 50_000, 50_000, 96), 96);
     }
 }
