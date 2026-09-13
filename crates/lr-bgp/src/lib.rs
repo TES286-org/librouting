@@ -41,6 +41,7 @@ pub mod message;
 pub mod nlri;
 pub mod path;
 pub mod peer;
+pub mod roa;
 pub mod role;
 
 pub use codec::BgpCodec;
@@ -51,3 +52,4 @@ pub use error::{
 pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState};
 pub use message::{BgpHeader, BgpMessage, BgpMessageType};
 pub use peer::{MaxPrefixAction, PeerConfig};
+pub use roa::{RoaBuildError, RoaEntry, RoaError, RoaState, RoaTable, RoaTableBuilder};
