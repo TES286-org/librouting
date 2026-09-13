@@ -123,6 +123,30 @@ pub trait RouterInstance {
     fn rib_paths_snapshot(&self) -> Vec<&Route> {
         self.rib_snapshot()
     }
+
+    /// The feasible routes learned over every Babel session except
+    /// `exclude` (per-session split horizon — the re-advertisement set
+    /// RFC 8966 §3.7.1 requires a multi-interface speaker to offer on
+    /// its other interfaces). Duplicates across sessions collapse to
+    /// the lowest metric per (destination, source, router-id) claim.
+    /// Defaults to empty for implementors without a Babel runtime.
+    fn babel_reachable(&self, _exclude: SessionHandle) -> Vec<lr_babel::BabelRoute> {
+        Vec::new()
+    }
+
+    /// Drop every route learned over the Babel session `h` and apply the
+    /// withdrawal delta to Loc-RIB — the `check link` response when an
+    /// interface goes operationally down (BIRD `check link yes`,
+    /// RFC 8966 §A.2). Defaults to a no-op for implementors without a
+    /// Babel runtime.
+    fn babel_flush_session(&mut self, _h: SessionHandle) {}
+
+    /// The smoothed RTT measured toward the peer of Babel session `h`
+    /// (BABEL-RTT, RFC 8966 §A.2.4), when a fresh sample exists.
+    /// Defaults to `None` for implementors without a Babel runtime.
+    fn babel_rtt_us(&self, _h: SessionHandle, _now_ms: u64) -> Option<u32> {
+        None
+    }
 }
 
 /// Per-session protocol runtime.
@@ -4479,6 +4503,50 @@ impl RouterInstance for DefaultRouter {
     fn session_peer_state(&self, h: SessionHandle) -> Option<&'static str> {
         match self.sessions.get(&h.0) {
             Some(SessionState::Bgp { peer, .. }) => Some(peer.state().name()),
+            _ => None,
+        }
+    }
+
+    fn babel_reachable(&self, exclude: SessionHandle) -> Vec<lr_babel::BabelRoute> {
+        // The feasible best set per foreign session, deduplicated by the
+        // full source claim (destination, source prefix, router-id) with
+        // the lowest metric winning — what one interface re-advertises on
+        // every other (RFC 8966 §3.7.1).
+        let mut best: BTreeMap<lr_babel::RouteKey, lr_babel::BabelRoute> = BTreeMap::new();
+        for (handle, state) in &self.sessions {
+            if *handle == exclude.0 {
+                continue;
+            }
+            let SessionState::Babel { runtime, .. } = state else {
+                continue;
+            };
+            for r in runtime.routes.best_routes() {
+                match best.get(&r.key) {
+                    Some(prev) if prev.metric <= r.metric => {}
+                    _ => {
+                        best.insert(r.key.clone(), r.clone());
+                    }
+                }
+            }
+        }
+        best.into_values().collect()
+    }
+
+    fn babel_flush_session(&mut self, h: SessionHandle) {
+        let Some(SessionState::Babel { runtime, .. }) = self.sessions.get_mut(&h.0) else {
+            return;
+        };
+        // Drop the learned table; the diff against `published` emits the
+        // withdrawal delta, and the session stays alive for the link's
+        // return (routes re-learn from the peer's Updates).
+        runtime.routes = lr_babel::BabelRouteTable::new();
+        let delta = runtime.diff();
+        self.apply_runtime_delta(delta);
+    }
+
+    fn babel_rtt_us(&self, h: SessionHandle, now_ms: u64) -> Option<u32> {
+        match self.sessions.get(&h.0) {
+            Some(SessionState::Babel { runtime, .. }) => runtime.neighbor.rtt_us(now_ms),
             _ => None,
         }
     }

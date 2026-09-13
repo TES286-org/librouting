@@ -211,20 +211,9 @@ impl BabelNeighbor {
     /// `rtt_max_us`, clamped at `max_penalty` above it. 0 when the RTT
     /// is invalid or `max_penalty` is 0 (feature off — babeld parity).
     pub fn rtt_cost(&self, now_ms: u64, rtt_min_us: u32, rtt_max_us: u32, max_penalty: u16) -> u16 {
-        if max_penalty == 0 || !self.rtt_valid(now_ms) {
-            return 0;
-        }
-        let rtt = self.rtt.as_ref().and_then(|r| r.rtt_us).unwrap_or(0);
-        if rtt <= rtt_min_us {
-            0
-        } else if rtt >= rtt_max_us {
-            max_penalty
-        } else {
-            u32::from(max_penalty)
-                .saturating_mul(rtt - rtt_min_us)
-                .checked_div(rtt_max_us - rtt_min_us)
-                .map(|v| v.min(u32::from(u16::MAX)) as u16)
-                .unwrap_or(max_penalty)
+        match self.rtt_us(now_ms) {
+            Some(rtt) => crate::metric::rtt_penalty(rtt, rtt_min_us, rtt_max_us, max_penalty),
+            None => 0,
         }
     }
 
