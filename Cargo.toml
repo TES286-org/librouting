@@ -64,6 +64,12 @@ blake2 = "0.10"
 sha2 = "0.10"
 siphasher = "1"
 
+# Test / dev-only workspace deps (ROADMAP-v3 D6). Per-crate opt-in
+# via `[dev-dependencies]` — these are *not* pulled into release
+# builds and never reach downstream consumers.
+proptest = "1"
+criterion = { version = "0.5", default-features = false, features = ["cargo_bench_support"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"

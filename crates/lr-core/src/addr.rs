@@ -429,7 +429,22 @@ impl Prefix {
                 let pl = self.prefix_len.min(128) as usize;
                 let full_bytes = pl / 8;
                 let rem_bits = pl % 8;
-                for (i, byte) in n.iter_mut().enumerate().skip(full_bytes) {
+                // Bytes *after* `full_bytes` are pure host bits and get
+                // zeroed unconditionally. The byte *at* `full_bytes`
+                // (when `rem_bits > 0`) is a partial-byte boundary —
+                // its high `rem_bits` bits are network bits and must
+                // be preserved; only the low `8 - rem_bits` bits are
+                // host bits. So we zero from `full_bytes + 1` when
+                // `rem_bits > 0`, then mask byte `full_bytes` in
+                // place to clear only the host bits. Zeroing
+                // `full_bytes` here (the previous implementation) and
+                // then AND-ing with the mask left the byte at 0x00,
+                // dropping the partial-byte network bits — see the
+                // proptest regression in `lr-policy/tests/proptest.rs`
+                // (`prefix_network_idempotent` and
+                // `prefix_network_is_contained`).
+                let zero_start = if rem_bits > 0 { full_bytes + 1 } else { full_bytes };
+                for (i, byte) in n.iter_mut().enumerate().skip(zero_start) {
                     let _ = i;
                     *byte = 0;
                 }
@@ -702,6 +717,69 @@ mod tests {
         let p: Prefix = "192.168.1.5/24".parse().unwrap();
         let n = p.network();
         assert_eq!(n.to_string(), "192.168.1.0");
+    }
+
+    /// Regression for a bug discovered by the `prefix_network_is_contained`
+    /// proptest in `lr-policy/tests/proptest.rs`. The IPv6 path of
+    /// `Prefix::network` zeroed byte `full_bytes` *before* applying
+    /// the partial-byte mask, so the mask operated on `0x00` and the
+    /// partial-byte network bits were dropped. For `/31`, byte 3's
+    /// low bit is the only host bit; bytes 0..3 and the high 7 bits
+    /// of byte 3 must be preserved.
+    #[test]
+    fn network_v6_preserves_partial_byte_bits() {
+        // 0:2:: = bytes [00 00 00 02 00 00 ...]. For /31, byte 3
+        // holds 7 network bits + 1 host bit. Network form must
+        // preserve byte 3 = 0x02 (the host bit is already 0).
+        let p: Prefix = "0:2::/31".parse().unwrap();
+        let n = p.network();
+        assert_eq!(n.to_string(), "0:2::", "network form dropped partial-byte network bits");
+
+        // Now a case where the host bit is actually set: 0:3:: has
+        // byte 3 = 0x03 = 0000_0011. For /31, the LSB is the host
+        // bit; mask 0xfe clears it. Result must be 0:2:: (byte 3 = 0x02).
+        let p: Prefix = "0:3::/31".parse().unwrap();
+        let n = p.network();
+        assert_eq!(n.to_string(), "0:2::");
+
+        // /33 case — byte 4 boundary. 2001:db8:1:2:: has byte 4 = 0x01.
+        // For /33, byte 4 holds 1 network bit + 7 host bits. Network
+        // form must keep bit 0 (the network bit) of byte 4 only.
+        // 0x01 & 0x80 = 0x00. So network is 2001:db8:1::.
+        let p: Prefix = "2001:db8:1:2::/33".parse().unwrap();
+        let n = p.network();
+        assert_eq!(n.to_string(), "2001:db8::");
+
+        // The original prefix must contain its own network form.
+        let p: Prefix = "2001:db8:1:2::/33".parse().unwrap();
+        let n = p.network();
+        assert!(p.contains(&n), "prefix {p} does not contain its own network {n}");
+    }
+
+    /// Round-trip property of `network()`: applied twice, the result
+    /// is identical. Catches the same family of bugs as
+    /// `network_v6_preserves_partial_byte_bits` for any prefix.
+    #[test]
+    fn network_idempotent_v6_non_byte_aligned() {
+        let cases = [
+            ("::/1", "::"),
+            // /1 network bit is the MSB of byte 0. 0x80 & 0x80 = 0x80.
+            ("8000::/1", "8000::"),
+            ("::/7", "::"),
+            // /8 is byte-aligned: byte 0 is fully network, no mask.
+            ("7f00::/8", "7f00::"),
+            // /31 boundary: byte 3 holds 7 network bits + 1 host bit.
+            ("0:2::/31", "0:2::"),
+            ("0:3::/31", "0:2::"),
+            ("ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff/127", "ffff:ffff:ffff:ffff:ffff:ffff:ffff:fffe"),
+        ];
+        for (src, expected) in cases {
+            let p: Prefix = src.parse().unwrap();
+            let n1 = p.network();
+            let n2 = Prefix { addr: n1, prefix_len: p.prefix_len }.network();
+            assert_eq!(n1.to_string(), expected, "first network() for {src}");
+            assert_eq!(n2.to_string(), expected, "second network() for {src}");
+        }
     }
 
     #[test]

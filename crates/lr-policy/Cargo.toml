@@ -26,3 +26,6 @@ bgp = ["std", "dep:lr-bgp"]
 # crate and exposes `DampingImportHook`. Requires std because
 # `lr-damping` is a std crate.
 damping = ["std", "dep:lr-damping"]
+
+[dev-dependencies]
+proptest = { workspace = true }
