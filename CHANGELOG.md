@@ -18,6 +18,30 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- ROADMAP-v3 D2.2 — RTR client state machine,
+  `lr_bgp::rtr::client::RtrClient` (RFC 8210 §6-§8):
+  - **Transport-agnostic client.** The embedder owns the socket, the
+    clock and the live `RoaTable`; `RtrClient` owns the protocol.
+    `on_connect()` emits the §8.1 query (Serial Query with the
+    remembered `(session_id, serial)`, else Reset Query), `on_pdu()`
+    consumes one decoded PDU (now carrying its wire version for §7
+    negotiation) and returns the next step, `poll()` applies the §6
+    refresh/retry/expire timing rules.
+  - **Atomic ROA deltas per sync.** Prefix PDUs accumulate in a
+    per-sync batch; the End-of-Data step carries the diff of the
+    authoritative record sets — one sync = one atomic delta batch
+    (or a `snapshot()` swap), never a half-applied database.
+    Duplicates (§5.6) coalesce and unknown withdrawals (§12 code 6)
+    no-op, both logged — BIRD's lenient channel semantics.
+  - **Full client rule coverage:** §7 version downgrade on the first
+    lower-version PDU (Serial Notifies ignored during startup),
+    §5.2 immediate Serial Query on notify, session-ID change
+    re-issuing a Reset Query, §8.3 Cache-Reset re-query, §12
+    No-Data-Available vs. fatal error reports, v0 End-of-Data
+    default intervals, and expire-window reporting.
+  - 19 unit tests, one per protocol rule. The codec module moved to
+    `rtr/pdu.rs` with `rtr/client.rs` alongside; `rtr::decode` now
+    returns the PDU's wire version (needed by the negotiation).
 - ROADMAP-v3 D2.1 — RPKI-Router (RTR) protocol PDU codec,
   `lr_bgp::rtr` (RFC 8210 versions 0-2):
   - **11-variant PDU enum + framing codec.** Serial Notify, Serial

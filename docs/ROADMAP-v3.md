@@ -87,8 +87,8 @@ per-interface lookup, all `BabelInterfaceSpec` fields wired through.
 
 ## D2 — RPKI-RTR client (RFC 8210 / RFC 8281)
 
-**Status:** partial — ~~D2.1 (PDU codec) landed~~ (commit pending).
-Tracks `lr-bgp` + `lr-cli::daemon`. Note: the ASPA PDU reference in
+**Status:** partial — ~~D2.1 (PDU codec)~~ and ~~D2.2 (client state
+machine)~~ landed. Tracks `lr-bgp` + `lr-cli::daemon`. Note: the ASPA PDU reference in
 this file originally cited RFC 8281, which is PCEP — the ASPA PDU
 (type 11, version 2) comes from the SIDROPS ASPA profile, which BIRD
 implements (`proto/rpki/packets.c` `struct pdu_aspa`). The codec
@@ -118,11 +118,23 @@ must maintain ROA data by hand — unacceptable in production.
    run BIRD 2's real RPKI client against the codec — its Reset
    Query decodes through us, our Cache Response + Prefix + EoD
    encodings install ROAs into BIRD's roa4/roa6 tables.
-2. **RTR client state machine.** RFC 8210 §6 client logic: on connect,
-   send a Serial Query carrying the last serial; receive Cache
-   Response + a batch of Prefix PDUs + End-of-Data carrying the new
-   serial and session ID. If session ID changes, send a Cache Reset
-   Query. Persist `session_id: u16` and `serial: u32`.
+2. ~~**RTR client state machine.**~~ **Landed** as
+   `lr_bgp::rtr::client::RtrClient` — transport-agnostic, embedding
+   the §6 client logic the item describes: on connect a Serial Query
+   carrying the remembered `(session_id, serial)` or a Reset Query
+   (§8.1); Cache Response + Prefix PDUs + End-of-Data sequencing with
+   the new serial and session ID; a session-ID change re-issues the
+   Reset Query; `session_id`/`serial` persist across reconnects. Also
+   the §7 version negotiation (downgrade to the first lower-version
+   PDU before the first sync; Serial Notifies ignored during
+   startup), §5.2 immediate Serial Queries on notify, §8.3
+   Cache-Reset re-query, §12 error-report handling (No Data Available
+   vs. fatal), and the §6 refresh/retry/expire timers. ROA deltas are
+   *atomic per sync*: the step at End of Data carries the diff of the
+   authoritative record sets, so the embedder never sees a
+   half-applied database and duplicates (§5.6) / unknown withdrawals
+   (§12 code 6) coalesce or no-op with a log. 19 unit tests cover
+   each protocol rule.
 3. **Incremental ROA table.** `RoaTable` is currently an immutable
    `Vec<RoaEntry>`; convert it to a structure that supports add /
    delete of individual entries while keeping validation queries

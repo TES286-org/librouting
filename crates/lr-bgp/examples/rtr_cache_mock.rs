@@ -63,7 +63,7 @@ fn recv(stream: &mut TcpStream) -> Option<RtrPdu> {
     let mut full = header.to_vec();
     full.extend_from_slice(&body);
     match rtr::decode(&full) {
-        Ok(Some((pdu, _))) => Some(pdu),
+        Ok(Some((_version, pdu, _))) => Some(pdu),
         _ => None,
     }
 }

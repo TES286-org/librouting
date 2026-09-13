@@ -524,14 +524,14 @@ fn v6_bytes(prefix: &Prefix) -> [u8; 16] {
 ///
 /// Returns `Ok(None)` while fewer bytes are buffered than the PDU
 /// header/body announce (the framing layer reads more and retries),
-/// `Ok(Some((pdu, consumed)))` on success. The protocol version of
-/// the PDU is available through the length/shape (End-of-Data) and is
-/// not re-exposed: the client state machine tracks the negotiated
-/// version and mismatching versions arrive as `ErrorReport` PDUs from
-/// a well-behaved cache (§7) — a version a full `decode` pass
-/// rejects as [`RtrDecodeError::UnsupportedVersion`] only when the
-/// PDU *type* itself cannot exist at that version.
-pub fn decode(buf: &[u8]) -> Result<Option<(RtrPdu, usize)>, RtrDecodeError> {
+/// `Ok(Some((version, pdu, consumed)))` on success. The protocol
+/// version is returned alongside the PDU — the §7 version
+/// negotiation needs the version of *every* received PDU, not just
+/// the first. A version a full `decode` pass rejects as
+/// [`RtrDecodeError::UnsupportedVersion`] is one where the PDU *type*
+/// itself cannot exist at that version; other version mismatches are
+/// the client state machine's business.
+pub fn decode(buf: &[u8]) -> Result<Option<(u8, RtrPdu, usize)>, RtrDecodeError> {
     if buf.len() < RTR_HEADER_LEN {
         return Ok(None);
     }
@@ -774,7 +774,7 @@ pub fn decode(buf: &[u8]) -> Result<Option<(RtrPdu, usize)>, RtrDecodeError> {
             }
         }
     };
-    Ok(Some((pdu, len as usize)))
+    Ok(Some((version, pdu, len as usize)))
 }
 
 /// Fixed-length check helper.
@@ -850,7 +850,7 @@ mod tests {
             serial: 5,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        let (dec, used) = decode(&expected).unwrap().unwrap();
+        let (_ver, dec, used) = decode(&expected).unwrap().unwrap();
         assert_eq!(used, 12);
         assert_eq!(dec, pdu);
     }
@@ -870,7 +870,7 @@ mod tests {
             serial: 7,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        let (dec, used) = decode(&expected).unwrap().unwrap();
+        let (_ver, dec, used) = decode(&expected).unwrap().unwrap();
         assert_eq!(used, 12);
         assert_eq!(dec, pdu);
     }
@@ -880,7 +880,7 @@ mod tests {
         // §5.4: ver=1, type=2, zero, len=8.
         let expected = [&[1u8, 2u8, 0, 0][..], &u32b(8)].concat();
         assert_eq!(encode_vec(&RtrPdu::ResetQuery, RTR_VERSION_1), expected);
-        let (dec, used) = decode(&expected).unwrap().unwrap();
+        let (_ver, dec, used) = decode(&expected).unwrap().unwrap();
         assert_eq!(used, 8);
         assert_eq!(dec, RtrPdu::ResetQuery);
     }
@@ -891,7 +891,7 @@ mod tests {
         let expected = [&[1u8, 3u8][..], &0x00ffu16.to_be_bytes(), &u32b(8)].concat();
         let pdu = RtrPdu::CacheResponse { session_id: 0x00ff };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -914,7 +914,7 @@ mod tests {
             asn: 64512,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -938,7 +938,7 @@ mod tests {
             asn: 64512,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -964,7 +964,7 @@ mod tests {
             expire_interval: Some(7200),
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -985,7 +985,7 @@ mod tests {
             expire_interval: None,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_0), expected);
-        let (dec, used) = decode(&expected).unwrap().unwrap();
+        let (_ver, dec, used) = decode(&expected).unwrap().unwrap();
         assert_eq!(used, 12);
         assert_eq!(dec, pdu);
         // The v1 defaults fill in the RFC 8210 §6 recommended values
@@ -1000,7 +1000,7 @@ mod tests {
         // §5.9: ver=1, type=8, zero, len=8.
         let expected = [&[1u8, 8u8, 0, 0][..], &u32b(8)].concat();
         assert_eq!(encode_vec(&RtrPdu::CacheReset, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, RtrPdu::CacheReset);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, RtrPdu::CacheReset);
     }
 
     #[test]
@@ -1025,7 +1025,7 @@ mod tests {
             subject_public_key_info: spki,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -1051,7 +1051,7 @@ mod tests {
             error_text: Some(String::from_utf8(text).unwrap()),
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -1074,7 +1074,7 @@ mod tests {
             error_text: Some(String::from_utf8(text).unwrap()),
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_1), expected);
-        assert_eq!(decode(&expected).unwrap().unwrap().0, pdu);
+        assert_eq!(decode(&expected).unwrap().unwrap().1, pdu);
     }
 
     #[test]
@@ -1098,7 +1098,7 @@ mod tests {
             providers,
         };
         assert_eq!(encode_vec(&pdu, RTR_VERSION_2), expected);
-        let (dec, used) = decode(&expected).unwrap().unwrap();
+        let (_ver, dec, used) = decode(&expected).unwrap().unwrap();
         assert_eq!(used, expected.len());
         assert_eq!(dec, pdu);
     }
@@ -1138,10 +1138,10 @@ mod tests {
         );
         let mut stream = a.clone();
         stream.extend_from_slice(&b);
-        let (pdu_a, used_a) = decode(&stream).unwrap().unwrap();
+        let (_va, pdu_a, used_a) = decode(&stream).unwrap().unwrap();
         assert_eq!(used_a, a.len());
         assert_eq!(pdu_a, RtrPdu::CacheResponse { session_id: 7 });
-        let (pdu_b, used_b) = decode(&stream[used_a..]).unwrap().unwrap();
+        let (_vb, pdu_b, used_b) = decode(&stream[used_a..]).unwrap().unwrap();
         assert_eq!(used_b, b.len());
         assert_eq!(
             pdu_b,
@@ -1308,7 +1308,7 @@ mod tests {
             &u32b(64512),
         ]
         .concat();
-        let (pdu, _) = decode(&wire).unwrap().unwrap();
+        let (_v, pdu, _) = decode(&wire).unwrap().unwrap();
         match pdu {
             RtrPdu::Ipv4Prefix { prefix, .. } => {
                 assert_eq!(prefix, Prefix::new_v4([192, 0, 2, 0], 24));
@@ -1329,7 +1329,7 @@ mod tests {
             &u32b(64512),
         ]
         .concat();
-        let (pdu, _) = decode(&wire).unwrap().unwrap();
+        let (_v, pdu, _) = decode(&wire).unwrap().unwrap();
         match pdu {
             RtrPdu::Ipv4Prefix { announce, .. } => assert!(announce),
             _ => panic!("expected Ipv4Prefix"),
@@ -1347,7 +1347,7 @@ mod tests {
             &u32b(64512),
         ]
         .concat();
-        let (pdu, _) = decode(&wire).unwrap().unwrap();
+        let (_v, pdu, _) = decode(&wire).unwrap().unwrap();
         match pdu {
             RtrPdu::Ipv4Prefix { announce, .. } => assert!(!announce),
             _ => panic!("expected Ipv4Prefix"),
