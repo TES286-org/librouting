@@ -255,6 +255,12 @@ pub(crate) struct BabelKeySpec {
     /// `"hmac-sha256"` (default, mandatory to implement) or `"blake2s"`
     /// (keyed BLAKE2s, 16-octet digest).
     pub algorithm: Option<String>,
+    /// Restrict this key to interfaces whose name matches the glob
+    /// pattern (`eth*`, `eth?`). `None` (the default) applies the key
+    /// to every Babel interface — the pre-multi-session behaviour.
+    /// BIRD mirrors this as per-interface `authentication` blocks in
+    /// `protocol babel`.
+    pub interface: Option<String>,
 }
 
 /// One `[[babel.interface]]` table — per-interface Babel parameters
@@ -1169,6 +1175,30 @@ impl DaemonConfig {
                         "[[babel.interface]] {name}: rtt_min ({min}us) must be < rtt_max ({max}us) (RFC 8966 §A.2.4)"
                     ));
                 }
+            }
+        }
+        // A per-key interface pattern must overlap at least one declared
+        // `[[babel.interface]]` block — a typo there would silently
+        // disable authentication on the intended interface. Overlap is
+        // checked in both directions (the key may be broader or narrower
+        // than the interface block's own pattern).
+        for key in &self.babel_keys {
+            let Some(pat) = key.interface.as_deref() else {
+                continue;
+            };
+            if self.babel_interfaces.is_empty() {
+                return Err(format!(
+                    "[[babel.key]] interface '{pat}' declared but no [[babel.interface]] blocks exist to scope it to"
+                ));
+            }
+            let overlaps = self.babel_interfaces.iter().any(|iface| {
+                let name = iface.name.as_deref().unwrap_or("");
+                glob_match(pat, name) || glob_match(name, pat)
+            });
+            if !overlaps {
+                return Err(format!(
+                    "[[babel.key]] interface pattern '{pat}' matches no [[babel.interface]] block"
+                ));
             }
         }
         Ok(())
@@ -2244,6 +2274,14 @@ fn apply_babel_key(
                         ));
                     }
                     k.algorithm = Some(value.to_string());
+                }
+                "interface" => {
+                    if let Err(e) = glob_pattern_validate(value) {
+                        return Err(format!(
+                            "bad [[babel.key]] interface pattern '{value}': {e}"
+                        ));
+                    }
+                    k.interface = Some(value.to_string());
                 }
                 _ => {
                     return Err(format!(
@@ -3474,10 +3512,12 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--babel-key" if i + 1 < args.len() => {
                 // Repeatable: every flag adds one key. The default algorithm
                 // is HMAC-SHA256 (RFC 8967 §4.1 mandatory); TOML
-                // `[[babel.key]]` tables allow per-key algorithm selection.
+                // `[[babel.key]]` tables allow per-key algorithm selection
+                // and per-interface scoping via `interface = "eth*"`.
                 cfg.babel_keys.push(BabelKeySpec {
                     secret: Some(args[i + 1].clone()),
                     algorithm: None,
+                    interface: None,
                 });
                 i += 2;
             }
@@ -4752,6 +4792,97 @@ mod tests {
         );
         assert!(err.is_err(), "{err:?}");
         assert!(err.unwrap_err().contains("unknown babel key algorithm"));
+    }
+
+    #[test]
+    fn babel_key_interface_scope_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.interface]]\nname = \"veth*\"\n\
+             [[babel.interface]]\nname = \"lan*\"\n\
+             [[babel.key]]\nsecret = \"global\"\n\
+             [[babel.key]]\nsecret = \"link\"\ninterface = \"veth*\"\n\
+             [[babel.key]]\nsecret = \"lan\"\nalgorithm = \"blake2s\"\ninterface = \"lan0\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.babel_keys.len(), 3);
+        assert_eq!(cfg.babel_keys[0].interface, None);
+        assert_eq!(cfg.babel_keys[1].interface.as_deref(), Some("veth*"));
+        // A literal interface name is a valid (wildcard-free) pattern.
+        assert_eq!(cfg.babel_keys[2].interface.as_deref(), Some("lan0"));
+    }
+
+    #[test]
+    fn babel_key_interface_scope_rejects_bad_pattern() {
+        // TOML `interface = "eth\"` decodes to a pattern with a dangling
+        // backslash — the same patmatch syntax error [[babel.interface]]
+        // rejects (the subset parser only quote-trims values, so the
+        // backslash reaches the pattern verbatim).
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[babel.interface]]\nname = \"eth*\"\n\
+             [[babel.key]]\nsecret = \"x\"\ninterface = \"eth\\\"\n",
+            &mut cfg,
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert!(err
+            .unwrap_err()
+            .contains("bad [[babel.key]] interface pattern"));
+    }
+
+    #[test]
+    fn babel_key_interface_scope_unknown_key_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[babel.key]]\nsecret = \"x\"\niface = \"eth0\"\n",
+            &mut cfg,
+        );
+        assert!(err.is_err(), "{err:?}");
+        assert!(err.unwrap_err().contains("unknown [[babel.key]] key"));
+    }
+
+    #[test]
+    fn babel_key_interface_scope_must_overlap_an_interface_block() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.interface]]\nname = \"eth*\"\n\
+             [[babel.key]]\nsecret = \"x\"\ninterface = \"wlan*\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(
+            err.contains("matches no [[babel.interface]] block"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn babel_key_interface_scope_without_interface_blocks_rejected() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.key]]\nsecret = \"x\"\ninterface = \"eth0\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("no [[babel.interface]] blocks"), "{err}");
+    }
+
+    #[test]
+    fn babel_key_literal_scope_narrower_than_block_passes() {
+        // A literal key scope (veth0) inside a broader interface block
+        // pattern (veth*) overlaps in exactly one direction — legal.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[babel.interface]]\nname = \"veth*\"\n\
+             [[babel.key]]\nsecret = \"x\"\ninterface = \"veth0\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
     }
 
     #[test]
