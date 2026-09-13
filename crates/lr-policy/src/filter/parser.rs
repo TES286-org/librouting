@@ -118,7 +118,7 @@ impl Parser {
             self.parse_stmt_list_until_eof()?
         };
         if body.stmts.is_empty() {
-            let tok = self.peek().cloned().unwrap_or_else(|| Token {
+            let tok = self.peek().cloned().unwrap_or(Token {
                 kind: TokenKind::Eof,
                 line: 1,
                 col: 1,
@@ -520,6 +520,10 @@ impl Parser {
 
     fn parse_binary(&mut self, min_prec: u8) -> Result<Expr, ParseError> {
         let mut lhs = self.parse_unary()?;
+        // The loop has multiple break paths inside the match (`_ => break`
+        // and `if prec < min_prec { break; }`), so a `while let` form
+        // would be less readable. Keep the explicit `loop`.
+        #[allow(clippy::while_let_loop)]
         loop {
             let Some(tok) = self.peek().cloned() else {
                 break;
@@ -598,6 +602,9 @@ impl Parser {
 
     fn parse_postfix(&mut self) -> Result<Expr, ParseError> {
         let mut expr = self.parse_primary()?;
+        // The loop has a `_ => break` inside the match, so a `while let`
+        // form would be less readable. Keep the explicit `loop`.
+        #[allow(clippy::while_let_loop)]
         loop {
             match self.peek_kind() {
                 Some(TokenKind::Dot) => {
@@ -796,50 +803,48 @@ impl Parser {
             });
         };
         // Community pair: `int : int`.
-        if matches!(tok.kind, TokenKind::Int(_)) {
-            if matches!(
+        if matches!(tok.kind, TokenKind::Int(_))
+            && matches!(
                 self.tokens.get(self.pos + 1).map(|t| &t.kind),
                 Some(TokenKind::Colon)
-            ) {
-                let asn_tok = self.advance().cloned().unwrap();
-                self.advance(); // colon
-                let val_tok = self.peek().cloned();
-                let Some(val_tok) = val_tok else {
+            )
+        {
+            let asn_tok = self.advance().cloned().unwrap();
+            self.advance(); // colon
+            let val_tok = self.peek().cloned();
+            let Some(val_tok) = val_tok else {
+                return Err(ParseError {
+                    line: asn_tok.line,
+                    col: asn_tok.col,
+                    kind: ParseErrorKind::InvalidCommunity("(missing value)".to_string()),
+                });
+            };
+            let val = match val_tok.kind {
+                TokenKind::Int(n) if (0..=u16::MAX as i64).contains(&n) => n as u16,
+                _ => {
+                    return Err(ParseError {
+                        line: val_tok.line,
+                        col: val_tok.col,
+                        kind: ParseErrorKind::InvalidCommunity(format!(
+                            "expected integer value, found {:?}",
+                            val_tok.kind
+                        )),
+                    });
+                }
+            };
+            self.advance();
+            if let TokenKind::Int(asn) = asn_tok.kind {
+                if asn > u32::MAX as i64 {
                     return Err(ParseError {
                         line: asn_tok.line,
                         col: asn_tok.col,
-                        kind: ParseErrorKind::InvalidCommunity("(missing value)".to_string()),
+                        kind: ParseErrorKind::InvalidCommunity(format!("ASN {asn} exceeds u32")),
                     });
-                };
-                let val = match val_tok.kind {
-                    TokenKind::Int(n) if (0..=u16::MAX as i64).contains(&n) => n as u16,
-                    _ => {
-                        return Err(ParseError {
-                            line: val_tok.line,
-                            col: val_tok.col,
-                            kind: ParseErrorKind::InvalidCommunity(format!(
-                                "expected integer value, found {:?}",
-                                val_tok.kind
-                            )),
-                        });
-                    }
-                };
-                self.advance();
-                if let TokenKind::Int(asn) = asn_tok.kind {
-                    if asn > u32::MAX as i64 {
-                        return Err(ParseError {
-                            line: asn_tok.line,
-                            col: asn_tok.col,
-                            kind: ParseErrorKind::InvalidCommunity(format!(
-                                "ASN {asn} exceeds u32"
-                            )),
-                        });
-                    }
-                    return Ok(Expr::Lit(Value::Communities(vec![(
-                        lr_core::addr::Asn(asn as u32),
-                        val,
-                    )])));
                 }
+                return Ok(Expr::Lit(Value::Communities(vec![(
+                    lr_core::addr::Asn(asn as u32),
+                    val,
+                )])));
             }
         }
         self.parse_expr()

@@ -318,7 +318,7 @@ impl FilterContext for DaemonFilterContext {
             .into_iter()
             .map(|c| {
                 let raw = c.as_u32();
-                let asn = (raw >> 16) as u32;
+                let asn = raw >> 16;
                 let val = (raw & 0xFFFF) as u16;
                 (lr_core::addr::Asn(asn), val)
             })
