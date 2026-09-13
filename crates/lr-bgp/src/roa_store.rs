@@ -56,11 +56,13 @@ struct RoaStoreInner {
 ///
 /// ```no_run
 /// use lr_bgp::RoaStore;
+/// use lr_core::addr::{Asn, Prefix};
 ///
 /// let store = RoaStore::new();
 /// // ... RTR syncs apply deltas, reloads replace the static layer ...
 /// let snapshot = store.load();          // Arc<RoaTable>, cheap
-/// let state = snapshot.validate(&route_prefix, Some(origin_as));
+/// let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+/// let state = snapshot.validate(&prefix, Some(Asn(64512)));
 /// ```
 #[derive(Debug, Default)]
 pub struct RoaStore {
