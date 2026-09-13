@@ -1063,12 +1063,16 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 let current_networks = Arc::clone(&current_networks);
                 let config_path = cfg.config_path.clone();
                 let config_dialect = cfg.config_dialect.clone();
+                let roa_store = Arc::clone(&roa_store);
+                let rpki = rpki.clone();
                 move || {
                     reload_config(
                         config_path.as_deref(),
                         config_dialect.as_deref(),
                         &router,
                         &current_networks,
+                        Some(&roa_store),
+                        rpki.as_ref(),
                     )
                 }
             }),
@@ -2943,7 +2947,16 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         None => Arc::new(Runtime {
             reload: Arc::new({
                 let router = Arc::clone(&router);
-                move || reload_config(None, None, &router, &Arc::new(Mutex::new(Vec::new())))
+                move || {
+                    reload_config(
+                        None,
+                        None,
+                        &router,
+                        &Arc::new(Mutex::new(Vec::new())),
+                        None,
+                        None,
+                    )
+                }
             }),
             router: Arc::clone(&router),
             running: Arc::new(AtomicBool::new(true)),
@@ -3740,6 +3753,8 @@ fn reload_config(
     dialect: Option<&str>,
     router: &Arc<Mutex<DefaultRouter>>,
     current_networks: &Arc<Mutex<Vec<String>>>,
+    roa_store: Option<&Arc<lr_bgp::RoaStore>>,
+    rpki: Option<&daemon_rpki::RpkiHandle>,
 ) -> Vec<String> {
     let Some(path) = path else {
         return vec!["reload: no config file in use; nothing to reload".into()];
@@ -3802,6 +3817,41 @@ fn reload_config(
         }
     }
     *current_networks.lock().unwrap() = new;
+    // Static ROA re-application (ROADMAP-v3 D2.5): the fresh config's
+    // [[roa]] tables replace the store's static layer wholesale; the
+    // RTR cache layer is untouched (the cache does not stop talking
+    // because the operator edited a local table). The validation
+    // hooks see the new table on their next evaluation — no
+    // recompilation, no route churn.
+    if let Some(store) = roa_store {
+        match daemon_policy::build_roa_table(&fresh) {
+            Ok(table) => {
+                let new_count = table.len();
+                let old_count = store.static_len();
+                store.replace_static(table.entries().iter().copied());
+                if old_count != new_count {
+                    lines.push(format!(
+                        "reload: roa table: {old_count} -> {new_count} static entries"
+                    ));
+                }
+            }
+            Err(e) => lines.push(format!(
+                "reload: roa table rejected ({e}) — keeping current entries"
+            )),
+        }
+    }
+    // RTR cache re-pointing (ROADMAP-v3 D2.5): an address change drops
+    // the transport, resets the session memory (the old cache's
+    // serial is meaningless) and withdraws the old cache's records;
+    // a same-address reload forces a fresh incremental query.
+    if let (Some(handle), Some(cache)) = (rpki, fresh.rpki.cache.as_ref()) {
+        if handle.cache() != *cache {
+            lines.push(format!("reload: rpki cache changed -> {cache}"));
+        } else {
+            lines.push(format!("reload: rpki re-sync requested from {cache}"));
+        }
+        lines.push(handle.reconnect(cache.clone()));
+    }
     if lines.is_empty() {
         lines.push("reload: no network changes".into());
     }

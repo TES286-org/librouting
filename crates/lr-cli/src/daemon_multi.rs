@@ -234,6 +234,8 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                     config_dialect.as_deref(),
                     &router,
                     &current_networks,
+                    None,
+                    None,
                 )
             }
         }),

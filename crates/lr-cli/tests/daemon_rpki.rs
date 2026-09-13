@@ -215,7 +215,18 @@ impl Daemon {
             thread::sleep(Duration::from_millis(100));
         }
     }
+
+    fn signal(&self, sig: i32) {
+        let rc = unsafe { kill(self.child.id() as i32, sig) };
+        assert_eq!(rc, 0, "kill({sig}) failed");
+    }
 }
+
+extern "C" {
+    fn kill(pid: i32, sig: i32) -> i32;
+}
+
+const SIGHUP: i32 = 1;
 
 impl Drop for Daemon {
     fn drop(&mut self) {
@@ -343,6 +354,76 @@ fn rpki_client_reconnects_and_resyncs() {
         }
         if Instant::now() >= deadline {
             panic!("no second sync within 15 s; last: {text}");
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn rpki_reload_repoints_the_cache_and_roa_table() {
+    // D2.5: SIGHUP re-applies the configuration. Cache A syncs first;
+    // the rewritten config points at cache B (different session and
+    // dataset serialization) and adds a second static [[roa]]. The
+    // reload must swap the static table and re-sync from B.
+    let cache_a = spawn_mock_cache(0x00ff, 1, dataset(), true);
+    let cache_b = spawn_mock_cache(0x00fe, 7, dataset(), true);
+
+    let socket =
+        std::env::temp_dir().join(format!("lr-daemon-rpki-reload-{}.sock", std::process::id()));
+    let config =
+        std::env::temp_dir().join(format!("lr-daemon-rpki-reload-{}.toml", std::process::id()));
+    std::fs::write(
+        &config,
+        format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
+             [bgp.rpki]\ncache = \"127.0.0.1:{}\"\nretry_interval = 1\n\n\
+             [[roa]]\nprefix = \"198.51.100.0/24\"\nasn = 64513\n",
+            cache_a.port
+        ),
+    )
+    .unwrap();
+
+    let d = Daemon::spawn(
+        &[
+            "--config",
+            config.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "reload",
+    );
+    d.wait_log("rpki: sync complete", "sync from cache A");
+
+    // Rewrite the config: new cache address + one more static ROA.
+    std::fs::write(
+        &config,
+        format!(
+            "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\n\
+             [bgp.rpki]\ncache = \"127.0.0.1:{}\"\nretry_interval = 1\n\n\
+             [[roa]]\nprefix = \"198.51.100.0/24\"\nasn = 64513\n\n\
+             [[roa]]\nprefix = \"203.0.113.0/24\"\nasn = 64512\n",
+            cache_b.port
+        ),
+    )
+    .unwrap();
+
+    d.signal(SIGHUP);
+
+    // The reload re-points the client and re-applies the static table.
+    d.wait_log("rpki: cache changed", "cache re-point");
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let status = api_ask(&socket, "status");
+        if let Some(line) = status.lines().find(|l| l.starts_with("rpki: cache=")) {
+            if line.contains(&format!("cache=127.0.0.1:{}", cache_b.port))
+                && line.contains("roas=4 (static=2 rtr=2)")
+            {
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            let text = std::fs::read_to_string(&d.log).unwrap_or_default();
+            panic!("no sync from cache B within 15 s; log: {text}");
         }
         thread::sleep(Duration::from_millis(100));
     }

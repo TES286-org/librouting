@@ -56,25 +56,20 @@ const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const READ_BURST: usize = 64;
 
 /// One command from the daemon's control plane (the SIGHUP reload
-/// path) to the RTR thread.
+/// path) to the RTR thread. Shutdown is deliberately absent — the
+/// daemon's shared `running` flag stops the thread.
 pub(crate) enum RpkiCommand {
     /// Drop the transport and re-sync. With a new address the session
     /// memory is reset too (the old cache's serial is meaningless);
     /// with the same address the remembered `(session, serial)`
     /// survives and the next sync is incremental (RFC 8210 §8.1).
-    #[expect(dead_code, reason = "wired into the SIGHUP reload path (D2.5)")]
     Reconnect(String),
-    /// Stop the thread immediately.
-    #[expect(dead_code, reason = "wired into the SIGHUP reload path (D2.5)")]
-    Shutdown,
 }
 
 /// Outcome of draining the control channel.
 enum Control {
     /// Nothing pending — keep doing what the loop was doing.
     Continue,
-    /// The thread should exit (Shutdown).
-    Exit,
     /// A Reconnect was processed — skip any backoff in progress and
     /// return to the loop head (it reconnects immediately).
     Interrupt,
@@ -146,6 +141,11 @@ pub(crate) struct RpkiHandle {
 }
 
 impl RpkiHandle {
+    /// The configured cache address last seen by the client thread.
+    pub(crate) fn cache(&self) -> String {
+        self.status.lock().unwrap().cache.clone()
+    }
+
     /// The rendered `status` line for the runtime API.
     pub(crate) fn status_line(&self) -> String {
         self.status.lock().unwrap().status_line()
@@ -153,7 +153,6 @@ impl RpkiHandle {
 
     /// Ask the thread to drop the transport and re-sync (the reload
     /// path). Returns the log line describing what was requested.
-    #[expect(dead_code, reason = "wired into the SIGHUP reload path (D2.5)")]
     pub(crate) fn reconnect(&self, cache: String) -> String {
         match self.control.send(RpkiCommand::Reconnect(cache)) {
             Ok(()) => "rpki: reconnect requested".to_string(),
@@ -251,7 +250,6 @@ impl RpkiLoop {
             }
             // Control plane first: a reload may swap the cache under us.
             match self.drain_control() {
-                Control::Exit => break,
                 Control::Interrupt => continue,
                 Control::Continue => {}
             }
@@ -286,37 +284,32 @@ impl RpkiLoop {
         // One command per drain: the outer loop re-enters here every
         // few hundred milliseconds at most, so a queued reload batch
         // drains quickly without a self-recursive loop here.
-        if let Ok(cmd) = self.control.try_recv() {
-            match cmd {
-                RpkiCommand::Shutdown => return Control::Exit,
-                RpkiCommand::Reconnect(addr) => {
-                    let cache_changed = addr != self.cache;
-                    if cache_changed {
-                        println!("rpki: cache changed {} -> {}", self.cache, addr);
-                        self.cache = addr;
-                        // The old cache's session/serial are meaningless
-                        // against a new one (§8.2): reset to a cold-start
-                        // client, keep the configured intervals.
-                        let (refresh, retry, expire) = self.client.intervals();
-                        self.client = RtrClient::new();
-                        self.client.set_intervals(refresh, retry, expire);
-                        // Withdraw the old cache's records immediately:
-                        // they are no longer authoritative.
-                        self.store.clear_rtr();
-                    } else {
-                        println!("rpki: reconnecting to {} for a refresh", self.cache);
-                    }
-                    // Dropping the stream makes the next iteration
-                    // reconnect; `on_connect()` then sends the §8.1
-                    // query (a Serial Query with the remembered session
-                    // when the cache did not change, a Reset Query when
-                    // it did).
-                    self.stream = None;
-                    self.buf.clear();
-                    self.refresh_status();
-                    return Control::Interrupt;
-                }
+        if let Ok(RpkiCommand::Reconnect(addr)) = self.control.try_recv() {
+            let cache_changed = addr != self.cache;
+            if cache_changed {
+                println!("rpki: cache changed {} -> {}", self.cache, addr);
+                self.cache = addr;
+                // The old cache's session/serial are meaningless
+                // against a new one (§8.2): reset to a cold-start
+                // client, keep the configured intervals.
+                let (refresh, retry, expire) = self.client.intervals();
+                self.client = RtrClient::new();
+                self.client.set_intervals(refresh, retry, expire);
+                // Withdraw the old cache's records immediately:
+                // they are no longer authoritative.
+                self.store.clear_rtr();
+            } else {
+                println!("rpki: reconnecting to {} for a refresh", self.cache);
             }
+            // Dropping the stream makes the next iteration
+            // reconnect; `on_connect()` then sends the §8.1
+            // query (a Serial Query with the remembered session
+            // when the cache did not change, a Reset Query when
+            // it did).
+            self.stream = None;
+            self.buf.clear();
+            self.refresh_status();
+            return Control::Interrupt;
         }
         Control::Continue
     }
@@ -539,9 +532,8 @@ impl RpkiLoop {
         let total = Duration::from_secs(u64::from(self.client.intervals().1));
         let mut remaining = total;
         while !remaining.is_zero() && self.running.load(Ordering::Relaxed) {
-            match self.drain_control() {
-                Control::Exit | Control::Interrupt => return,
-                Control::Continue => {}
+            if matches!(self.drain_control(), Control::Interrupt) {
+                return;
             }
             let chunk = remaining.min(Duration::from_millis(BACKOFF_SLICE_MS));
             thread::sleep(chunk);
