@@ -159,6 +159,14 @@ pub struct InterfaceEntry {
     pub name: String,
     pub v4: Vec<std::net::Ipv4Addr>,
     pub v6: Vec<std::net::Ipv6Addr>,
+    /// The interface is administratively up (`IFF_UP`). A down
+    /// interface is not a usable Babel transport — `check link`
+    /// (BIRD `check link yes`, RFC 8966 §A.2) withdraws its routes.
+    pub up: bool,
+    /// The interface is operationally running (`IFF_RUNNING`, carrier
+    /// present). Some administratively-up interfaces carry no carrier
+    /// (unplugged cable); routing over them is futile.
+    pub running: bool,
 }
 
 /// The dotted-quad mask for a prefix length (invalid lengths saturate:

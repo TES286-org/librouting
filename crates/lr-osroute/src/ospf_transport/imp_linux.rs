@@ -93,6 +93,11 @@ struct Ifaddrs {
     ifa_data: *mut core::ffi::c_void,
 }
 
+/// `IFF_UP` (interface administratively up).
+const IFF_UP: u32 = 0x1;
+/// `IFF_RUNNING` (carrier present / operational).
+const IFF_RUNNING: u32 = 0x40;
+
 extern "C" {
     fn socket(domain: i32, ty: i32, protocol: i32) -> i32;
     fn setsockopt(
@@ -373,6 +378,8 @@ pub fn list_interfaces() -> Result<Vec<InterfaceEntry>, OspfTransportError> {
                     name,
                     v4: Vec::new(),
                     v6: Vec::new(),
+                    up: entry.ifa_flags & IFF_UP != 0,
+                    running: entry.ifa_flags & IFF_RUNNING != 0,
                 });
                 if let Some(v4) = sockaddr_ipv4(entry.ifa_addr) {
                     iface
