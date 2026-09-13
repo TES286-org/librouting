@@ -118,6 +118,14 @@ fn print_usage() {
          --local-address ADDR     Source address for next-hop-self\n  \
          --local-address-v6 ADDR  IPv6 source for v6 NLRI / ENH egress\n  \
          --gtsm [N]               RFC 5082 TTL security (bare = 1 hop)\n  \
+         --rpki-cache ADDR:PORT   RPKI-RTR cache (RFC 8210, TCP 8282);\n  \
+         spawns the RTR client thread and syncs ROAs into the live\n  \
+         table (see also [bgp.rpki] in the TOML config)\n  \
+         --rpki-refresh SEC       Initial refresh interval (default 3600;\n  \
+         a v1+ cache overrides from End-of-Data)\n  \
+         --rpki-retry SEC         Initial retry interval (default 600)\n  \
+         --rpki-expire SEC        Initial expire interval (default 7200;\n  \
+         on expiry the RTR-sourced ROAs are withdrawn)\n  \
          --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (default 75)\n  \

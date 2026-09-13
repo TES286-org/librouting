@@ -346,6 +346,38 @@ pub(crate) struct RoaSpec {
     pub asn: Option<u32>,
 }
 
+/// The `[bgp.rpki]` table — the RPKI-RTR cache client configuration
+/// (RFC 8210; ROADMAP-v3 D2.4). When `cache` is set the daemon spawns
+/// an RTR client thread at startup: it connects to the cache, syncs
+/// the ROA database (Serial/Reset Query sequencing, §7 version
+/// negotiation) and applies every completed sync's delta batch to the
+/// router-wide [`lr_bgp::RoaStore`], alongside the static `[[roa]]`
+/// entries. The configured intervals are the *initial* §6 timers —
+/// a v1+ cache overrides them in every End-of-Data PDU (the RFC 8210
+/// §6 "SHOULD honor the cache's values" rule).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RpkiSpec {
+    /// Cache transport address, `"host:port"` (standard RTR port
+    /// 8282, e.g. `"rpki.example.net:8282"` or `"127.0.0.1:8282"`).
+    /// `None` (default) — the RTR client thread is not started and
+    /// validation runs on the static `[[roa]]` table only.
+    pub cache: Option<String>,
+    /// Initial refresh interval in seconds (RFC 8210 §6): how long
+    /// the client waits after a successful sync before polling with
+    /// a Serial Query. Default 3600 (the RFC 8210 §6 / RTR v0
+    /// convention); a v1+ cache replaces it from End-of-Data.
+    pub refresh_interval: Option<u32>,
+    /// Initial retry interval in seconds (RFC 8210 §6): how long the
+    /// client waits after a failed or rejected sync before trying
+    /// again. Default 600.
+    pub retry_interval: Option<u32>,
+    /// Initial expire interval in seconds (RFC 8210 §6): how long
+    /// client-side data remains usable without a successful sync.
+    /// Default 7200; on expiry the RTR-sourced ROAs are withdrawn
+    /// from the [`lr_bgp::RoaStore`].
+    pub expire_interval: Option<u32>,
+}
+
 /// One `[[filter]]` table — a BIRD-like filter body compiled into
 /// an [`lr_policy::filter::Filter`] and attachable to peers via
 /// `import_filter` / `export_filter`. See `crates/lr-policy/src/filter/`
@@ -661,6 +693,12 @@ pub(crate) struct DaemonConfig {
     /// the reuse threshold.
     pub damping: DampingSpec,
 
+    /// `[bgp.rpki]` table — the RPKI-RTR cache client (RFC 8210).
+    /// Off by default (`cache = None`); set `cache = "host:port"` to
+    /// spawn the RTR client thread and sync ROAs from the cache into
+    /// the router-wide [`lr_bgp::RoaStore`] (ROADMAP-v3 D2.4).
+    pub rpki: RpkiSpec,
+
     /// OSPF protocol version: `"v2"` (default) or `"v3"` (RFC 5340).
     /// One version per daemon process — the two are independent
     /// protocols with separate LSDBs (FRR runs ospfd and ospf6d the
@@ -879,6 +917,7 @@ impl DaemonConfig {
             roa_invalid_action: "reject".to_string(),
             filters: Vec::new(),
             damping: DampingSpec::default(),
+            rpki: RpkiSpec::default(),
             ospf_version: "v2".to_string(),
             ospf_hello_interval: 10,
             ospf_dead_interval: 40,
@@ -989,6 +1028,7 @@ impl DaemonConfig {
         self.finalize_ospf()?;
         self.finalize_ldp()?;
         self.finalize_roa()?;
+        self.finalize_rpki()?;
         self.finalize_filters()?;
         self.finalize_babel_interfaces()?;
         Ok(())
@@ -1024,6 +1064,52 @@ impl DaemonConfig {
                 return Err(format!(
                     "[[roa]] {prefix_text} asn {asn} declared twice (duplicate)"
                 ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and complete the `[bgp.rpki]` configuration (RFC 8210).
+    /// The cache address must be a parseable `host:port` — hostnames
+    /// are resolved by the RTR thread at connect time (the cache may
+    /// come up after the daemon does), so only the syntax is checked
+    /// here. The intervals are bounded to the RFC 8210 §6 scale:
+    /// non-zero, and capped below u32::MAX seconds so the client's
+    /// millisecond clock math cannot overflow.
+    fn finalize_rpki(&mut self) -> Result<(), String> {
+        if let Some(cache) = &self.rpki.cache {
+            if cache.is_empty() {
+                return Err("[bgp.rpki] cache is empty (expected \"host:port\")".to_string());
+            }
+            let Some((host, port)) = cache.rsplit_once(':') else {
+                return Err(format!(
+                    "[bgp.rpki] cache '{cache}' lacks a port (expected \"host:port\")"
+                ));
+            };
+            if host.is_empty() {
+                return Err(format!("[bgp.rpki] cache '{cache}' lacks a host"));
+            }
+            // A v6 literal may carry the port in `[..]:port` form —
+            // strip the brackets before the reachability-agnostic
+            // syntax check below (no DNS at parse time).
+            let host = host.trim_start_matches('[').trim_end_matches(']');
+            let port: u16 = port
+                .parse()
+                .map_err(|_| format!("[bgp.rpki] cache '{cache}' has a bad port"))?;
+            if host.parse::<std::net::IpAddr>().is_err() && host.contains(':') {
+                return Err(format!(
+                    "[bgp.rpki] cache '{cache}': unbracketed IPv6 literal (use \"[host]:{port}\")"
+                ));
+            }
+        }
+        let intervals = [
+            ("refresh_interval", self.rpki.refresh_interval),
+            ("retry_interval", self.rpki.retry_interval),
+            ("expire_interval", self.rpki.expire_interval),
+        ];
+        for (name, value) in intervals {
+            if value == Some(0) {
+                return Err(format!("[bgp.rpki] {name} must be non-zero (RFC 8210 §6)"));
             }
         }
         Ok(())
@@ -1747,6 +1833,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "babel"
                 && section != "ldp"
                 && section != "damping"
+                && section != "bgp.rpki"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -1822,6 +1909,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             continue;
         }
         if apply_damping_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        // RPKI-RTR cache client (`[bgp.rpki]`): fail-closed — a typo'd
+        // cache address or a mis-scaled interval silently changes
+        // which ROA database the origin validation runs against.
+        if apply_rpki_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -2393,6 +2488,56 @@ fn apply_damping_key(
         _ => {
             return Err(format!(
                 "unknown [damping] key '{key}' (typo protection; damping config fails closed)"
+            ));
+        }
+    }
+    Ok(true)
+}
+
+/// Parse one `[bgp.rpki]` table key into `cfg.rpki` (RFC 8210 RTR
+/// cache client, ROADMAP-v3 D2.4). Unknown keys are hard errors — a
+/// typo'd cache address or a mis-scaled interval silently changes
+/// which ROA database the origin validation runs against. Mirrors the
+/// fail-closed posture of the `[damping]` section handler above.
+fn apply_rpki_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "bgp.rpki" {
+        return Ok(false);
+    }
+    match key {
+        "cache" => {
+            if value.is_empty() {
+                return Err("[bgp.rpki] cache must be \"host:port\"".to_string());
+            }
+            cfg.rpki.cache = Some(value.to_string());
+        }
+        "refresh_interval" => {
+            cfg.rpki.refresh_interval =
+                Some(value.parse().map_err(|_| {
+                    format!("invalid u32 for bgp.rpki.refresh_interval: '{value}'")
+                })?);
+        }
+        "retry_interval" => {
+            cfg.rpki.retry_interval = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("invalid u32 for bgp.rpki.retry_interval: '{value}'"))?,
+            );
+        }
+        "expire_interval" => {
+            cfg.rpki.expire_interval = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("invalid u32 for bgp.rpki.expire_interval: '{value}'"))?,
+            );
+        }
+        _ => {
+            return Err(format!(
+                "unknown [bgp.rpki] key '{key}' (typo protection; rpki config fails closed)"
             ));
         }
     }
@@ -3428,6 +3573,42 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             "--ospf-srv6-o-flag" => {
                 cfg.ospf_srv6_o_flag = true;
                 i += 1;
+            }
+            "--rpki-cache" if i + 1 < args.len() => {
+                // RFC 8210 RTR cache transport address ("host:port").
+                // Finalized (syntax-checked) with the TOML path.
+                cfg.rpki.cache = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--rpki-refresh" if i + 1 < args.len() => {
+                match args[i + 1].parse() {
+                    Ok(v) => cfg.rpki.refresh_interval = Some(v),
+                    Err(_) => {
+                        eprintln!("bad --rpki-refresh '{}' (expected seconds)", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--rpki-retry" if i + 1 < args.len() => {
+                match args[i + 1].parse() {
+                    Ok(v) => cfg.rpki.retry_interval = Some(v),
+                    Err(_) => {
+                        eprintln!("bad --rpki-retry '{}' (expected seconds)", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--rpki-expire" if i + 1 < args.len() => {
+                match args[i + 1].parse() {
+                    Ok(v) => cfg.rpki.expire_interval = Some(v),
+                    Err(_) => {
+                        eprintln!("bad --rpki-expire '{}' (expected seconds)", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
             }
             "--ldp-transport" if i + 1 < args.len() => {
                 cfg.ldp_transport = Some(args[i + 1].clone());
@@ -4903,6 +5084,87 @@ mod tests {
         assert!(
             err.contains("invalid u32 for damping.suppress_threshold"),
             "error should explain the type mismatch: {err}"
+        );
+    }
+
+    // ==== [bgp.rpki] table parsing (ROADMAP-v3 D2.4) ====
+
+    #[test]
+    fn rpki_defaults_to_disabled() {
+        // Without a [bgp.rpki] section no RTR client thread starts —
+        // validation runs on the static [[roa]] table only.
+        let cfg = DaemonConfig::with_defaults();
+        assert_eq!(cfg.rpki.cache, None);
+        assert_eq!(cfg.rpki.refresh_interval, None);
+        assert_eq!(cfg.rpki.retry_interval, None);
+        assert_eq!(cfg.rpki.expire_interval, None);
+    }
+
+    #[test]
+    fn rpki_table_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp.rpki]\ncache = \"rpki.example.net:8282\"\nrefresh_interval = 600\n\
+             retry_interval = 120\nexpire_interval = 1440\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.rpki.cache.as_deref(), Some("rpki.example.net:8282"));
+        assert_eq!(cfg.rpki.refresh_interval, Some(600));
+        assert_eq!(cfg.rpki.retry_interval, Some(120));
+        assert_eq!(cfg.rpki.expire_interval, Some(1440));
+    }
+
+    #[test]
+    fn rpki_v6_bracketed_cache_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[bgp.rpki]\ncache = \"[2001:db8::1]:8282\"\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.rpki.cache.as_deref(), Some("[2001:db8::1]:8282"));
+    }
+
+    #[test]
+    fn rpki_cache_requires_port() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[bgp.rpki]\ncache = \"rpki.example.net\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("cache without port must fail");
+        assert!(err.contains("lacks a port"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rpki_cache_bad_port_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[bgp.rpki]\ncache = \"rpki.example.net:rtr\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("non-numeric port must fail");
+        assert!(err.contains("bad port"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn rpki_zero_interval_rejected() {
+        // RFC 8210 §6 intervals are positive — a zero would spin the
+        // client loop hot or disable expiry outright.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp.rpki]\ncache = \"1.2.3.4:8282\"\nretry_interval = 0\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("zero interval must fail");
+        assert!(
+            err.contains("retry_interval must be non-zero"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn rpki_unknown_key_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err =
+            parse_toml_subset("[bgp.rpki]\ncache_host = \"1.2.3.4\"\n", &mut cfg).unwrap_err();
+        assert!(
+            err.contains("unknown [bgp.rpki] key 'cache_host'"),
+            "error should name the bad key: {err}"
         );
     }
 }
