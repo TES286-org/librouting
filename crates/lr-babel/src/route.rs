@@ -27,6 +27,24 @@ pub struct BabelRoute {
     pub installed: bool,
 }
 
+/// Route expiry bookkeeping (RFC 8966 §3.2.5) — reception metadata the
+/// route itself does not carry: the interval the origin's Update
+/// announced and when its last re-announcement was seen. Kept on the
+/// side so [`BabelRoute`]'s equality (the Loc-RIB diff key) stays purely
+/// protocol state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct RouteTiming {
+    interval_cs: u16,
+    last_seen_ms: u64,
+}
+
+/// babeld's route hold time for an announced interval, in milliseconds:
+/// `MAX(4 × I/100 + I/50, 15)` seconds with `I` in centiseconds — six
+/// times the update interval, at least 15 s.
+fn hold_ms(interval_cs: u16) -> u64 {
+    (u64::from(interval_cs) * 60).max(15_000)
+}
+
 /// Babel route table: tracks routes per source-prefix tuple and selects
 /// feasible best routes.
 #[derive(Default)]
@@ -34,6 +52,8 @@ pub struct BabelRouteTable {
     routes: BTreeMap<RouteKey, BabelRoute>,
     /// Best-known feasible (seqno, metric) per destination+source.
     feasible: BTreeMap<(Prefix, Option<Prefix>), (u16, u32)>,
+    /// Expiry clock per route (RFC 8966 §3.2.5).
+    timing: BTreeMap<RouteKey, RouteTiming>,
 }
 
 impl BabelRouteTable {
@@ -42,6 +62,26 @@ impl BabelRouteTable {
     }
 
     pub fn insert(&mut self, route: BabelRoute) {
+        self.insert_timed(route, 0, 0);
+    }
+
+    /// Insert one route together with its reception time and the
+    /// interval its Update announced (RFC 8966 §3.2.5): an exact
+    /// re-announcement of the same claim (same source, same seqno, same
+    /// metric) is a *refresh* — it must not re-enter the feasibility
+    /// machinery, but it does push the expiry deadline out (the
+    /// re-announcement is what keeps the route alive).
+    pub fn insert_timed(&mut self, route: BabelRoute, interval_cs: u16, now_ms: u64) {
+        let timing = RouteTiming {
+            interval_cs,
+            last_seen_ms: now_ms,
+        };
+        if let Some(prev) = self.routes.get(&route.key) {
+            if prev.seqno == route.seqno && prev.metric == route.metric {
+                self.timing.insert(route.key, timing);
+                return;
+            }
+        }
         let dst = route.key.destination;
         let src = route.key.source.as_ref().map(|s| s.prefix);
         let feas = self.feasible.get(&(dst, src)).copied();
@@ -62,10 +102,30 @@ impl BabelRouteTable {
             }
         }
         self.routes.insert(r.key.clone(), r);
+        self.timing.insert(route.key, timing);
     }
 
     pub fn withdraw(&mut self, key: &RouteKey) {
         self.routes.remove(key);
+        self.timing.remove(key);
+    }
+
+    /// Expire the routes whose re-announcement hold time lapsed
+    /// (RFC 8966 §3.2.5): every Update refreshes the hold deadline of
+    /// its claim; `hold_ms` out the route goes — babeld's
+    /// `hold_time = MAX(4 × I/100 + I/50, 15)` s. Returns the withdrawn
+    /// keys so the caller can publish the retraction delta.
+    pub fn expire(&mut self, now_ms: u64) -> Vec<RouteKey> {
+        let gone: Vec<RouteKey> = self
+            .timing
+            .iter()
+            .filter(|(_, t)| now_ms.saturating_sub(t.last_seen_ms) > hold_ms(t.interval_cs))
+            .map(|(k, _)| k.clone())
+            .collect();
+        for k in &gone {
+            self.withdraw(k);
+        }
+        gone
     }
 
     pub fn get(&self, key: &RouteKey) -> Option<&BabelRoute> {
@@ -145,5 +205,39 @@ mod tests {
         // The one with seqno 4 should NOT be feasible.
         let r4 = routes.iter().find(|(_, r)| r.seqno == 4).unwrap().1;
         assert!(!r4.feasible);
+    }
+
+    /// RFC 8966 §3.2.5: a route expires when its hold time (6× the
+    /// announced interval, babeld's formula) lapses without a
+    /// re-announcement, and a refresh keeps it alive.
+    #[test]
+    fn routes_expire_without_refresh() {
+        let mut t = BabelRouteTable::new();
+        let r = make_route(1, 100, [1; 8]);
+        let key = r.key.clone();
+        // Announced interval 300 cs → hold 18 s.
+        t.insert_timed(r, 300, 1_000);
+        // Not yet: 17 999 ms of age is inside the hold.
+        assert!(t.expire(1_000 + 17_999).is_empty());
+        // A refresh at t+10 s pushes the deadline to t+10 s + 18 s.
+        t.insert_timed(make_route(1, 100, [1; 8]), 300, 11_000);
+        // One ms before the refreshed deadline: still alive.
+        assert!(t.expire(11_000 + 17_999).is_empty());
+        // Past the refreshed deadline (11 000 + 18 000 + 1): gone.
+        let gone = t.expire(11_000 + 18_001);
+        assert_eq!(gone, vec![key.clone()]);
+        assert!(t.get(&key).is_none());
+    }
+
+    /// The hold time has babeld's 15 s floor: even a zero-interval
+    /// announcement (or `insert`'s default) survives short windows.
+    #[test]
+    fn hold_time_floor_is_15s() {
+        let mut t = BabelRouteTable::new();
+        let r = make_route(1, 100, [1; 8]);
+        let key = r.key.clone();
+        t.insert_timed(r, 0, 0);
+        assert!(t.expire(14_999).is_empty());
+        assert_eq!(t.expire(15_001), vec![key]);
     }
 }
