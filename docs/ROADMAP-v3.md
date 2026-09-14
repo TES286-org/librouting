@@ -223,9 +223,9 @@ PDU parser is a useful cross-check.
 
 ## D3 — Filter DSL feature expansion toward BIRD syntax parity
 
-**Status:** partial — ~~D3.6~~, ~~D3.5~~, ~~D3.4~~, ~~D3.2~~ and
-~~D3.3~~ landed. D3.1 (user-defined functions) and D3.7 (bytecode)
-remain open. Tracks `lr-policy`.
+**Status:** partial — ~~D3.6~~, ~~D3.5~~, ~~D3.4~~, ~~D3.2~~,
+~~D3.3~~ and ~~D3.1~~ landed. D3.7 (bytecode) remains
+open. Tracks `lr-policy`.
 
 **Current gap.** `crates/lr-policy/src/filter/` implements a subset of
 the BIRD filter syntax (if/then/else, let, arithmetic, comparison,
@@ -233,12 +233,28 @@ boolean, bitwise, prefix-set membership, route-attribute read/write,
 accept/reject, case). Compared to BIRD `filter/config.Y`, the following
 are missing:
 
-### D3.1 — User-defined functions
+### D3.1 — User-defined functions — ~~landed~~
 
 AST node `FunctionDecl { name, params, return_type, body: Vec<Stmt> }`;
 new `function` keyword; evaluator creates a new scope frame, binds
 arguments to formal parameters, executes the body until `return`.
 ~400 LoC (AST + parser + evaluator + tests).
+
+~~Landed: `function name(a, b) -> ret { ... }` declarations ahead of
+the filter body (the optional `-> type` annotation is documentation
+only — the DSL is dynamically typed). The evaluator binds arguments
+positionally in a fresh scope frame and executes the body against the
+caller's route (BIRD parity: functions are the primary mutation
+tool). `return expr;` / bare `return;` produce the call value
+(default `false` when the body falls off the end); `accept` /
+`reject` inside a function terminate the whole filter (BIRD
+`f_cmd` semantics) via a latched pending verdict. Runaway recursion
+is bounded by `MAX_CALL_DEPTH = 64` (`CallDepthExceeded`), and
+compile-time call validation rejects calls that name neither a
+built-in nor a declared function (`UnknownFunctionCall`) plus
+duplicate/shadowing declarations — a typo fails at startup instead of
+silently falling through at route time. Top-level `return` in the
+filter body is Fallthrough. Ten tests.~~
 
 ### D3.2 — Large Communities (RFC 8097) — ~~landed~~
 

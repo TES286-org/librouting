@@ -12,7 +12,7 @@ use lr_core::addr::{Asn, IpAddr};
 use lr_core::rib::Route;
 
 use crate::filter::ast::{
-    BinaryOp, Expr, Filter, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
+    BinaryOp, Expr, Filter, FunctionDecl, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
 };
 
 /// The result of evaluating a filter against a route.
@@ -73,6 +73,9 @@ pub enum EvalErrorKind {
     AsnOutOfRange(i64),
     /// A community value (asn, val) where asn > u16::MAX or val > u16::MAX.
     CommunityOutOfRange { asn: i64, val: i64 },
+    /// A user-function call chain exceeded [`MAX_CALL_DEPTH`] —
+    /// runaway recursion is rejected instead of exhausting the stack.
+    CallDepthExceeded(u32),
 }
 
 impl fmt::Display for EvalError {
@@ -115,6 +118,9 @@ impl fmt::Display for EvalErrorKind {
             EvalErrorKind::AsnOutOfRange(n) => write!(f, "ASN {n} out of u32 range"),
             EvalErrorKind::CommunityOutOfRange { asn, val } => {
                 write!(f, "community {asn}:{val} has a component out of u16 range")
+            }
+            EvalErrorKind::CallDepthExceeded(d) => {
+                write!(f, "user-function call depth exceeded {d}")
             }
         }
     }
@@ -197,6 +203,9 @@ enum ControlFlow {
     Continue,
     Accept,
     Reject(Option<String>),
+    /// `return expr;` inside a user-defined function (D3.1). The
+    /// payload is the returned value; `None` is a bare `return;`.
+    Return(Option<Value>),
 }
 
 /// Variable stack entry — `let` introduces one; `Block` pushes a
@@ -213,10 +222,22 @@ impl Scope {
     }
 }
 
-/// The evaluator state — a scope stack and the route under evaluation.
+/// Maximum user-function call depth. A call chain deeper than this
+/// aborts evaluation with [`EvalErrorKind::CallDepthExceeded`] —
+/// runaway recursion must not exhaust the thread stack.
+pub const MAX_CALL_DEPTH: u32 = 64;
+
+/// The evaluator state — a scope stack, the route under evaluation
+/// and the user functions (D3.1) declared on the same filter.
 struct Evaluator<'a, C: FilterContext + ?Sized> {
     ctx: &'a C,
     scopes: Vec<Scope>,
+    functions: std::collections::BTreeMap<String, FunctionDecl>,
+    call_depth: u32,
+    /// Verdict latched by `accept` / `reject` inside a user-function
+    /// body (BIRD: terminates the whole filter). Consumed by the
+    /// top-level loop after the current statement.
+    pending_verdict: Option<ControlFlow>,
 }
 
 /// Evaluate a compiled filter against a route.
@@ -224,12 +245,33 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
     let mut ev = Evaluator {
         ctx,
         scopes: vec![Scope::new()],
+        functions: filter
+            .functions
+            .iter()
+            .map(|f| (f.name.clone(), f.clone()))
+            .collect(),
+        call_depth: 0,
+        pending_verdict: None,
     };
     for stmt in &filter.body.stmts {
+        if let Some(v) = ev.pending_verdict.take() {
+            return match v {
+                ControlFlow::Accept => EvalResult::Accept,
+                ControlFlow::Reject(reason) => EvalResult::Reject(reason),
+                _ => EvalResult::Fallthrough,
+            };
+        }
         match ev.eval_stmt(stmt, route) {
             Ok(ControlFlow::Continue) => {}
             Ok(ControlFlow::Accept) => return EvalResult::Accept,
             Ok(ControlFlow::Reject(reason)) => return EvalResult::Reject(reason),
+            Ok(ControlFlow::Return(_)) => {
+                tracing::debug!(
+                    "filter '{}': return outside a user function — no verdict",
+                    filter.name
+                );
+                return EvalResult::Fallthrough;
+            }
             Err(e) => {
                 tracing::debug!("filter '{}' eval error: {}", filter.name, e);
                 return EvalResult::Fallthrough;
@@ -280,6 +322,13 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 
     fn eval_stmt(&mut self, stmt: &Stmt, route: &mut Route) -> Result<ControlFlow, EvalError> {
         match stmt {
+            Stmt::Return(value) => {
+                let v = match value {
+                    Some(e) => Some(self.eval_expr(e, route)?),
+                    None => None,
+                };
+                Ok(ControlFlow::Return(v))
+            }
             Stmt::Accept => Ok(ControlFlow::Accept),
             Stmt::Reject(reason) => {
                 let reason_str = if let Some(r) = reason {
@@ -844,8 +893,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         &mut self,
         name: &str,
         args: &[Value],
-        _route: &Route,
+        route: &mut Route,
     ) -> Result<Value, EvalError> {
+        // D3.1: user-defined functions shadow nothing (the parser
+        // rejects shadowing a built-in), so look the name up first
+        // and fall through to the built-ins otherwise.
+        if let Some(f) = self.functions.get(name).cloned() {
+            return self.call_user_function(&f, args, route);
+        }
         match name {
             "len" => {
                 if args.len() != 1 {
@@ -925,6 +980,81 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 col: 0,
             }),
         }
+    }
+
+    /// D3.1: bind arguments to formal parameters in a fresh scope
+    /// frame and execute the body until `return` (or the end of the
+    /// body — both yield `false` when no value is produced).
+    ///
+    /// The body runs against the caller's route (BIRD parity:
+    /// functions are the primary way to structure route mutation).
+    /// `accept` / `reject` inside a function body terminate the whole
+    /// filter (BIRD `filter/config.Y` `f_cmd` semantics) — they latch
+    /// a pending verdict on the evaluator, which the top-level loop
+    /// consumes after the current statement.
+    fn call_user_function(
+        &mut self,
+        f: &FunctionDecl,
+        args: &[Value],
+        route: &mut Route,
+    ) -> Result<Value, EvalError> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(EvalError {
+                kind: EvalErrorKind::CallDepthExceeded(MAX_CALL_DEPTH),
+                line: 0,
+                col: 0,
+            });
+        }
+        if args.len() != f.params.len() {
+            return Err(EvalError {
+                kind: EvalErrorKind::BadArgCount {
+                    name: f.name.clone(),
+                    expected: f.params.len(),
+                    got: args.len(),
+                },
+                line: 0,
+                col: 0,
+            });
+        }
+        self.call_depth += 1;
+        self.push_scope();
+        for (param, arg) in f.params.iter().zip(args.iter()) {
+            self.scopes
+                .last_mut()
+                .unwrap()
+                .vars
+                .insert(param.clone(), arg.clone());
+        }
+        let mut outcome = Ok(Value::Bool(false));
+        for stmt in &f.body.stmts {
+            match self.eval_stmt(stmt, route) {
+                Ok(ControlFlow::Continue) => {}
+                Ok(ControlFlow::Return(v)) => {
+                    outcome = Ok(v.unwrap_or(Value::Bool(false)));
+                    break;
+                }
+                // BIRD: accept / reject inside a function terminate
+                // the enclosing filter, even mid-expression. Latch
+                // the verdict; the caller finishes for value purposes.
+                Ok(ControlFlow::Accept) => {
+                    self.pending_verdict = Some(ControlFlow::Accept);
+                    outcome = Ok(Value::Bool(true));
+                    break;
+                }
+                Ok(ControlFlow::Reject(reason)) => {
+                    self.pending_verdict = Some(ControlFlow::Reject(reason));
+                    outcome = Ok(Value::Bool(false));
+                    break;
+                }
+                Err(e) => {
+                    outcome = Err(e);
+                    break;
+                }
+            }
+        }
+        self.pop_scope();
+        self.call_depth -= 1;
+        outcome
     }
 
     fn eval_method(
@@ -2462,5 +2592,144 @@ mod tests {
             ),
             EvalResult::Accept,
         );
+    }
+
+    // ===== D3.1 — user-defined functions =====
+
+    #[test]
+    fn user_function_returns_value() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "function double(n) { return n * 2; } if bgp.local_pref >= double(50) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "function double(n) { return n * 2; } if bgp.local_pref >= double(51) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn user_function_multiple_params_and_scoping() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "function clamp(v, lo, hi) { if v < lo then return lo; if v > hi then return hi; return v; } bgp.local_pref = clamp(bgp.local_pref, 150, 200); if bgp.local_pref == 150 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn user_function_mutates_route_bird_parity() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        // BIRD functions are the primary structuring tool for route
+        // mutation; the body must run on the caller's route.
+        assert_eq!(
+            run(
+                "function tag_transit() { bgp.local_pref = 50; bgp.communities += [64512:100]; } tag_transit(); if bgp.local_pref == 50 && bgp.communities ~ [64512:100] then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn accept_inside_function_terminates_filter() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "function gated() { if bgp.local_pref > 50 then accept; return false; } gated(); reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        // reject inside a function likewise wins.
+        let mut r2 = route_with("203.0.113.0/24", 10, 0);
+        assert_eq!(
+            run(
+                "function gated() { if bgp.local_pref < 50 then reject; return true; } gated(); accept;",
+                &mut r2
+            ),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn bare_return_and_fallthrough_yield_false() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "function bare() { return; } if bare() == false then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "function no_return() { let x = 1; } if no_return() == false then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn runaway_recursion_is_bounded() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        // spin() calls itself forever; the depth limiter must abort
+        // evaluation (Fallthrough), not smash the stack.
+        assert_eq!(
+            run("function spin() { return spin(); } spin(); accept;", &mut r),
+            EvalResult::Fallthrough,
+        );
+    }
+
+    #[test]
+    fn top_level_return_is_fallthrough() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(run("return true;", &mut r), EvalResult::Fallthrough);
+    }
+
+    #[test]
+    fn duplicate_or_shadowing_functions_rejected() {
+        let f = compile(
+            "test",
+            "function f() { return 1; } function f() { return 2; } accept;",
+        );
+        assert!(f.is_err(), "duplicate function name must fail");
+        let f = compile("test", "function len(x) { return 1; } accept;");
+        assert!(f.is_err(), "shadowing a built-in must fail");
+    }
+
+    #[test]
+    fn unknown_call_fails_at_compile_time() {
+        let f = compile("test", "if no_such_fn(1) then accept; reject;");
+        assert!(f.is_err(), "undeclared call must fail to compile");
+        // ...including inside function bodies.
+        let f = compile("test", "function g() { return also_missing(); } accept;");
+        assert!(f.is_err(), "undeclared call in a function body must fail");
+    }
+
+    #[test]
+    fn builtin_function_list_matches_evaluator() {
+        // The parser's BUILTIN_FUNCTIONS gate and the evaluator's
+        // built-in table must agree: every listed name must compile
+        // with a plausible arity (here: via a call that survives
+        // compilation).
+        for name in crate::filter::parser::BUILTIN_FUNCTIONS {
+            let src = format!("if {name}(1) then accept; reject;");
+            let compiled = compile("test", &src);
+            // arity errors are runtime (BadArgCount), so compilation
+            // must succeed for every built-in name.
+            assert!(compiled.is_ok(), "built-in '{name}' rejected by the parser");
+        }
     }
 }

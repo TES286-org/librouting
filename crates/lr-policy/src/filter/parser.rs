@@ -10,7 +10,8 @@ use core::fmt;
 use lr_core::addr::IpAddr;
 
 use crate::filter::ast::{
-    BinaryOp, CaseArm, Expr, Filter, FilterBody, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
+    BinaryOp, CaseArm, Expr, Filter, FilterBody, FunctionDecl, RouteField, RouteFieldKind, Stmt,
+    UnaryOp, Value,
 };
 use crate::filter::lexer::{Lexer, LexerError, Token, TokenKind};
 
@@ -49,6 +50,13 @@ pub enum ParseErrorKind {
         name: String,
         got: usize,
     },
+    /// Two user functions share a name, or a user function shadows a
+    /// built-in (ROADMAP-v3 D3.1).
+    DuplicateFunction(String),
+    /// A call names neither a built-in nor a declared user function.
+    /// Caught at compile time so a typo fails at startup instead of
+    /// silently falling through at route time (D3.1).
+    UnknownFunctionCall,
 }
 
 impl fmt::Display for ParseError {
@@ -66,6 +74,18 @@ impl fmt::Display for ParseErrorKind {
         match self {
             ParseErrorKind::BadArgCount { name, got } => {
                 write!(f, "function '{name}' takes exactly one argument, got {got}")
+            }
+            ParseErrorKind::DuplicateFunction(name) => {
+                write!(
+                    f,
+                    "function '{name}' is declared twice or shadows a built-in"
+                )
+            }
+            ParseErrorKind::UnknownFunctionCall => {
+                write!(
+                    f,
+                    "call to an undeclared function (not a built-in, not user-defined)"
+                )
             }
             ParseErrorKind::Lexer(e) => write!(f, "{e}"),
             ParseErrorKind::UnexpectedToken { expected, found } => {
@@ -180,6 +200,30 @@ impl Parser {
                 });
             }
         }
+        // ROADMAP-v3 D3.1: user-defined functions come first, BIRD
+        // style (`function name(...) { ... }`), before the filter body.
+        let mut functions = Vec::new();
+        let mut fn_names = std::collections::BTreeSet::new();
+        loop {
+            if let Some(TokenKind::Ident(n)) = self.peek_kind().cloned() {
+                if n == "function" {
+                    let decl = self.parse_function_decl()?;
+                    if fn_names.contains(&decl.name)
+                        || BUILTIN_FUNCTIONS.contains(&decl.name.as_str())
+                    {
+                        return Err(ParseError {
+                            line: 1,
+                            col: 1,
+                            kind: ParseErrorKind::DuplicateFunction(decl.name.clone()),
+                        });
+                    }
+                    fn_names.insert(decl.name.clone());
+                    functions.push(decl);
+                    continue;
+                }
+            }
+            break;
+        }
         let body = if matches!(self.peek_kind(), Some(TokenKind::LBrace)) {
             self.parse_block_body()?
         } else {
@@ -208,8 +252,104 @@ impl Parser {
                 },
             });
         }
+        // Compile-time call validation: every call in the filter body
+        // and every function body must name a built-in or a declared
+        // user function — a typo must fail at startup, not silently
+        // fall through at route time.
+        validate_calls(&body, &fn_names)?;
+        for f in &functions {
+            validate_calls(&f.body, &fn_names)?;
+        }
         Ok(Filter {
             name: name.to_string(),
+            body,
+            functions,
+        })
+    }
+
+    /// Parse one `function name(a, b) -> ret { ... }` declaration.
+    fn parse_function_decl(&mut self) -> Result<FunctionDecl, ParseError> {
+        let tok = self.advance().cloned().unwrap(); // `function`
+        let name_tok = self.peek().cloned();
+        let Some(Token {
+            kind: TokenKind::Ident(name),
+            ..
+        }) = name_tok
+        else {
+            return Err(ParseError {
+                line: tok.line,
+                col: tok.col,
+                kind: ParseErrorKind::UnexpectedToken {
+                    expected: "function name",
+                    found: self
+                        .peek()
+                        .map(|t| t.kind.clone())
+                        .unwrap_or(TokenKind::Eof),
+                },
+            });
+        };
+        self.advance();
+        self.expect(TokenKind::LParen, "`(`")?;
+        let mut params = Vec::new();
+        if !matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+            loop {
+                let p = self.peek().cloned();
+                match p.map(|t| t.kind) {
+                    Some(TokenKind::Ident(pn)) => {
+                        self.advance();
+                        params.push(pn);
+                    }
+                    _ => {
+                        let t = self.peek().cloned();
+                        return Err(ParseError {
+                            line: t.as_ref().map(|t| t.line).unwrap_or(1),
+                            col: t.as_ref().map(|t| t.col).unwrap_or(1),
+                            kind: ParseErrorKind::UnexpectedToken {
+                                expected: "parameter name",
+                                found: t.map(|t| t.kind).unwrap_or(TokenKind::Eof),
+                            },
+                        });
+                    }
+                }
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                } else {
+                    break;
+                }
+            }
+        }
+        self.expect(TokenKind::RParen, "`)`")?;
+        // Optional `-> type` documentation annotation.
+        let return_type = if matches!(self.peek_kind(), Some(TokenKind::Arrow)) {
+            self.advance();
+            let t = self.peek().cloned();
+            match t.map(|t| t.kind) {
+                Some(TokenKind::Ident(ty)) => {
+                    self.advance();
+                    Some(ty)
+                }
+                _ => {
+                    return Err(ParseError {
+                        line: 1,
+                        col: 1,
+                        kind: ParseErrorKind::UnexpectedToken {
+                            expected: "return type name",
+                            found: self
+                                .peek()
+                                .map(|t| t.kind.clone())
+                                .unwrap_or(TokenKind::Eof),
+                        },
+                    });
+                }
+            }
+        } else {
+            None
+        };
+        let body = self.parse_block_body()?;
+        Ok(FunctionDecl {
+            name,
+            params,
+            return_type,
             body,
         })
     }
@@ -307,6 +447,18 @@ impl Parser {
             TokenKind::If => self.parse_if(),
             TokenKind::Case => self.parse_case(),
             TokenKind::Let | TokenKind::Var => self.parse_let(),
+            TokenKind::Ident(name) if name == "return" => {
+                // D3.1: `return expr;` / `return;` inside user
+                // functions.
+                self.advance();
+                let value = if matches!(self.peek_kind(), Some(TokenKind::Semicolon)) {
+                    None
+                } else {
+                    Some(self.parse_expr()?)
+                };
+                self.expect(TokenKind::Semicolon, "`;`")?;
+                Ok(Stmt::Return(value))
+            }
             TokenKind::Accept => {
                 self.advance();
                 self.expect(TokenKind::Semicolon, "`;`")?;
@@ -1120,6 +1272,109 @@ impl Parser {
         }
         self.parse_expr()
     }
+}
+
+/// Built-in function names the evaluator resolves in
+/// `eval_call` (ROADMAP-v3 D3.4 + earlier). User functions must not
+/// shadow these, and call validation accepts either set.
+pub(crate) const BUILTIN_FUNCTIONS: &[&str] =
+    &["len", "delete", "filter", "empty", "count", "first", "last"];
+
+/// Compile-time call validation (D3.1): walk the statement tree and
+/// reject `Call { name }` nodes that name neither a built-in nor a
+/// declared user function. The AST carries no spans, so errors point
+/// at 1:1.
+fn validate_calls(
+    body: &FilterBody,
+    user_functions: &std::collections::BTreeSet<String>,
+) -> Result<(), ParseError> {
+    const MAX_DEPTH: u32 = 512;
+    fn go_expr(e: &Expr, uf: &std::collections::BTreeSet<String>, d: u32) -> Result<(), ()> {
+        if d > MAX_DEPTH {
+            return Err(());
+        }
+        match e {
+            Expr::Call { name, args } => {
+                if !BUILTIN_FUNCTIONS.contains(&name.as_str()) && !uf.contains(name) {
+                    return Err(());
+                }
+                for a in args {
+                    go_expr(a, uf, d + 1)?;
+                }
+                Ok(())
+            }
+            Expr::Defined(inner) => go_expr(inner, uf, d + 1),
+            Expr::Method { receiver, args, .. } => {
+                go_expr(receiver, uf, d + 1)?;
+                for a in args {
+                    go_expr(a, uf, d + 1)?;
+                }
+                Ok(())
+            }
+            Expr::Binary { lhs, rhs, .. } => {
+                go_expr(lhs, uf, d + 1)?;
+                go_expr(rhs, uf, d + 1)
+            }
+            Expr::Unary { expr, .. } => go_expr(expr, uf, d + 1),
+            Expr::Set(items) => {
+                for i in items {
+                    go_expr(i, uf, d + 1)?;
+                }
+                Ok(())
+            }
+            _ => Ok(()),
+        }
+    }
+    fn go_stmt(st: &Stmt, uf: &std::collections::BTreeSet<String>, d: u32) -> Result<(), ()> {
+        if d > MAX_DEPTH {
+            return Err(());
+        }
+        match st {
+            Stmt::If { cond, then, els } => {
+                go_expr(cond, uf, d + 1).map_err(|_| ())?;
+                go_stmt(then, uf, d + 1)?;
+                if let Some(e) = els {
+                    go_stmt(e, uf, d + 1)?;
+                }
+                Ok(())
+            }
+            Stmt::Case { scrutinee, arms } => {
+                go_expr(scrutinee, uf, d + 1)?;
+                for arm in arms {
+                    for pat in &arm.patterns {
+                        go_expr(pat, uf, d + 1)?;
+                    }
+                    for s in &arm.body {
+                        go_stmt(s, uf, d + 1)?;
+                    }
+                }
+                Ok(())
+            }
+            Stmt::Let { value, .. } | Stmt::Assign { value, .. } => go_expr(value, uf, d + 1),
+            Stmt::AssignRouteField { value, .. } | Stmt::AppendRouteField { value, .. } => {
+                go_expr(value, uf, d + 1)
+            }
+            Stmt::Expr(e) => go_expr(e, uf, d + 1),
+            Stmt::Block(body) => {
+                for s in body {
+                    go_stmt(s, uf, d + 1)?;
+                }
+                Ok(())
+            }
+            Stmt::Return(Some(e)) => go_expr(e, uf, d + 1),
+            Stmt::Return(None) | Stmt::Accept | Stmt::Reject(_) => Ok(()),
+        }
+    }
+    for st in &body.stmts {
+        if go_stmt(st, user_functions, 0).is_err() {
+            return Err(ParseError {
+                line: 1,
+                col: 1,
+                kind: ParseErrorKind::UnknownFunctionCall,
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Reconstruct a `(ge, le)` pair from the tokens between `{` and `}`.

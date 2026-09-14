@@ -18,6 +18,15 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Filter DSL user-defined functions (ROADMAP-v3 D3.1): BIRD-style
+  `function name(a, b) -> ret { ... }` declarations ahead of the
+  filter body. Bodies run against the caller's route (mutations
+  stick), arguments bind positionally in a fresh scope, `return` /
+  bare-return / fall-off-the-end yield the call value (default
+  `false`), and `accept` / `reject` inside a function terminate the
+  whole filter. Runaway recursion is bounded (`MAX_CALL_DEPTH = 64`)
+  and compile-time validation rejects undeclared calls, duplicates
+  and built-in shadowing — typos fail at startup, not at route time.
 - Filter DSL large communities (ROADMAP-v3 D3.2, RFC 8097):
   `LargeCommunity` struct + 12-byte codec in `lr-bgp` (byte-exact
   wire test), typed `PathAttributes` accessors, `lr_policy::bgp`

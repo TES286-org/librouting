@@ -19,6 +19,23 @@ pub struct Filter {
     pub name: String,
     /// Body — the top-level statement list.
     pub body: FilterBody,
+    /// User-defined functions (ROADMAP-v3 D3.1) declared before the
+    /// body. BIRD-syntax `function name(params) { ... }`; callable
+    /// from anywhere in this filter.
+    pub functions: Vec<FunctionDecl>,
+}
+
+/// A user-defined function: `function name(a, b) -> ret { ... }`.
+/// The DSL is dynamically typed, so `return_type` is documentation —
+/// parsed when present, never enforced.
+#[derive(Debug, Clone)]
+pub struct FunctionDecl {
+    pub name: String,
+    /// Formal parameter names. Arguments bind positionally.
+    pub params: Vec<String>,
+    /// Optional `-> type` annotation. Documentation only.
+    pub return_type: Option<String>,
+    pub body: FilterBody,
 }
 
 /// A list of statements executed in order; the first `accept` /
@@ -54,6 +71,11 @@ pub enum Stmt {
     Expr(Expr),
     /// A nested block `{ ... }` — introduces a new scope.
     Block(Vec<Stmt>),
+    /// `return expr;` / `return;` — exit the enclosing user-defined
+    /// function with the value (bare `return;` and falling off the
+    /// end of a body yield `false`). At filter top level `return`
+    /// terminates the filter without a verdict (Fallthrough).
+    Return(Option<Expr>),
     /// `accept;` — terminate the filter with `Accept`.
     Accept,
     /// `reject;` or `reject "reason";` — terminate with `Reject(reason)`.
