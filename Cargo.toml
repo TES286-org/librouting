@@ -53,7 +53,7 @@ lr-ffi = { path = "crates/lr-ffi", version = "1.0.0-rc.3" }
 
 bytes = "1"
 socket2 = { version = "0.6", features = ["all"] }
-thiserror = "1"
+thiserror = "2"
 tracing = "0.1"
 bitflags = "2"
 serde = { version = "1", features = ["derive"] }
