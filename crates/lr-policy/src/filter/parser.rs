@@ -40,6 +40,13 @@ pub enum ParseErrorKind {
     InvalidCommunity(String),
     EmptyFilterBody,
     DuplicateArm,
+    /// A function-style construct was given the wrong number of
+    /// arguments at parse time (currently `defined` / `exists`, which
+    /// take exactly one).
+    BadArgCount {
+        name: String,
+        got: usize,
+    },
 }
 
 impl fmt::Display for ParseError {
@@ -55,6 +62,9 @@ impl fmt::Display for ParseError {
 impl fmt::Display for ParseErrorKind {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
+            ParseErrorKind::BadArgCount { name, got } => {
+                write!(f, "function '{name}' takes exactly one argument, got {got}")
+            }
             ParseErrorKind::Lexer(e) => write!(f, "{e}"),
             ParseErrorKind::UnexpectedToken { expected, found } => {
                 write!(f, "expected {expected}, found {found:?}")
@@ -844,6 +854,22 @@ impl Parser {
                         }
                     }
                     self.expect(TokenKind::RParen, "`)`")?;
+                    // `defined(x)` / `exists(x)` are structural, not
+                    // ordinary calls: the evaluator needs the argument
+                    // *expression* (unevaluated) to decide presence.
+                    if name == "defined" || name == "exists" {
+                        if args.len() != 1 {
+                            return Err(ParseError {
+                                line: tok.line,
+                                col: tok.col,
+                                kind: ParseErrorKind::BadArgCount {
+                                    name,
+                                    got: args.len(),
+                                },
+                            });
+                        }
+                        return Ok(Expr::Defined(Box::new(args.into_iter().next().unwrap())));
+                    }
                     Ok(Expr::Call { name, args })
                 } else {
                     Ok(Expr::Var(name))

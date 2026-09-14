@@ -366,6 +366,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             Expr::Lit(v) => Ok(v.clone()),
             Expr::Var(name) => self.lookup(name),
             Expr::RouteField(field) => self.read_route_field(field, route),
+            Expr::Defined(inner) => Ok(Value::Bool(self.is_defined(inner, route))),
             Expr::Call { name, args } => {
                 let mut argv: Vec<Value> = Vec::with_capacity(args.len());
                 for a in args {
@@ -482,6 +483,44 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             _ => {
                 let v = self.eval_expr(rhs, route)?;
                 Ok(value_match(lhs, &v))
+            }
+        }
+    }
+
+    /// Presence check for `defined(expr)` / `exists(expr)`.
+    ///
+    /// Never fails and never mutates the caller's route: an absent
+    /// attribute or an undefined variable is simply "not defined".
+    /// Distinguishes "absent" from "set to the default value" — the
+    /// read path collapses both to `0` / `false` / empty, which is
+    /// exactly what BIRD's `defined()` exists to avoid.
+    fn is_defined(&mut self, expr: &Expr, route: &Route) -> bool {
+        match expr {
+            Expr::RouteField(field) => match field.kind {
+                // Always carried by the route model itself.
+                RouteFieldKind::Net | RouteFieldKind::Proto | RouteFieldKind::Source => true,
+                // Computed on demand — always resolvable.
+                RouteFieldKind::RoaState => true,
+                RouteFieldKind::BgpLocalPref => self.ctx.bgp_local_pref(route).is_some(),
+                RouteFieldKind::BgpMed => self.ctx.bgp_med(route).is_some(),
+                RouteFieldKind::BgpNextHop => self.ctx.bgp_next_hop(route).is_some(),
+                RouteFieldKind::BgpOrigin => self.ctx.bgp_origin(route).is_some(),
+                // List-valued accessors lose the absent/empty
+                // distinction; BIRD parity here is "present = at least
+                // one element".
+                RouteFieldKind::BgpAsPath => !self.ctx.bgp_as_path(route).is_empty(),
+                RouteFieldKind::BgpCommunities => !self.ctx.bgp_communities(route).is_empty(),
+            },
+            Expr::Var(name) => self.scopes.iter().rev().any(|s| s.vars.contains_key(name)),
+            // A literal is always defined.
+            Expr::Lit(_) => true,
+            // Any other expression is "defined" when it evaluates
+            // without error. Evaluation runs against a route copy, so
+            // a `defined()` argument can never write through (no
+            // side effects leak from a presence probe).
+            _ => {
+                let mut probe = route.clone();
+                self.eval_expr(expr, &mut probe).is_ok()
             }
         }
     }
@@ -1369,5 +1408,101 @@ mod tests {
         let mut r = route_with_proto("203.0.113.0/24", Protocol::Ospfv2);
         let src = "case proto { \"ospf\" => accept; default => reject; }";
         assert_eq!(run(src, &mut r), EvalResult::Accept);
+    }
+
+    // ===== D3.5 — defined() / exists() =====
+
+    #[test]
+    fn defined_distinguishes_absent_from_zero_med() {
+        // `route_with` always stamps LOCAL_PREF + MED, so both are
+        // defined here; strip MED and only LOCAL_PREF stays defined.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        r.attributes.remove(AttrTag::raw(TAG_MED));
+        assert_eq!(
+            run("if defined(bgp.med) then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+        assert_eq!(
+            run("if defined(bgp.local_pref) then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn defined_zero_med_is_still_defined() {
+        // MED present with value 0 must not read as absent — the
+        // whole point of the check.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if defined(bgp.med) then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn exists_alias_behaves_like_defined() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if exists(bgp.local_pref) then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+        r.attributes.remove(AttrTag::raw(TAG_COMMUNITIES));
+        assert_eq!(
+            run("if exists(bgp.communities) then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn defined_list_fields_present_only_when_nonempty() {
+        // No AS_PATH / COMMUNITIES on a fresh route -> absent.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if defined(bgp.as_path) then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+        // Prepending an AS makes the path present.
+        assert_eq!(
+            run(
+                "bgp.as_path.prepend(65000); if defined(bgp.as_path) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn defined_never_false_for_readonly_core_fields() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "if defined(net) && defined(proto) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn defined_on_undefined_variable_is_false() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        // A variable never bound must report not-defined instead of
+        // aborting the evaluation (which would fall through).
+        assert_eq!(
+            run("if defined(no_such_var) then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+        assert_eq!(
+            run("let x = 1; if defined(x) then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn defined_requires_exactly_one_argument() {
+        let f = compile("test", "if defined(bgp.med, bgp.local_pref) then accept;");
+        assert!(f.is_err(), "two-arg defined() must fail to compile");
+        let f = compile("test", "if defined() then accept;");
+        assert!(f.is_err(), "zero-arg defined() must fail to compile");
     }
 }

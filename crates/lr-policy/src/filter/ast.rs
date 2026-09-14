@@ -80,6 +80,12 @@ pub enum Expr {
     RouteField(RouteField),
     /// A function call: `name(arg, arg, ...)`.
     Call { name: String, args: Vec<Expr> },
+    /// `defined(expr)` / `exists(expr)` — true when the inner route
+    /// attribute is present on the route or the variable exists in
+    /// scope. Unlike a plain read, `defined` never collapses an
+    /// absent attribute to its default (0 / false / empty): BIRD
+    /// policies need to distinguish "unset" from "set to zero".
+    Defined(Box<Expr>),
     /// A method call: `obj.method(arg, arg, ...)`. Used for
     /// `bgp.as_path.prepend(...)`, `bgp.communities.add(...)`.
     Method {
