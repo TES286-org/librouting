@@ -244,6 +244,7 @@ fn network_lsa_derives_transit_prefix_route() {
     // segment so the Network vertex is reachable in SPF.
     let rlsa = lr_ospf::origination::originate_router_lsa(
         u32::from_be_bytes([1, 1, 1, 1]),
+        lr_ospf::origination::RouterLsaFlags::default(),
         &[lr_ospf::origination::RouterLsaLink::Transit {
             dr_addr: 0x0a63_0102,
             local_addr: 0x0a63_0101,

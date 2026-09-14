@@ -82,7 +82,7 @@ use lr_ospf::lsa::v3::{
     originate_v3_intra_area_prefix_lsa, originate_v3_link_lsa, originate_v3_network_lsa,
     originate_v3_router_lsa, V3LinkLsaBody, V3Prefix, V3RouterLsaBody, LINK_TYPE_POINTTOPOINT,
     LINK_TYPE_TRANSIT, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER,
-    ROUTER_BIT_E, ROUTER_BIT_V6,
+    ROUTER_BIT_B, ROUTER_BIT_E, ROUTER_BIT_V6,
 };
 use lr_ospf::lsa::{
     originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorTlv,
@@ -2109,10 +2109,23 @@ impl Ospf3Daemon {
                 }
             }
         }
-        // RFC 5340 §4.8: a router is V6-capable; E reflects the area's
-        // external capability (regular areas only in slice 1 — the
-        // finalizer rejects stub/NSSA v3 areas via the v2 policy path).
-        let bits = ROUTER_BIT_E | ROUTER_BIT_V6;
+        // RFC 5340 §4.8: a router is V6-capable; E (ASBR) follows the
+        // actual redistribution state — FRR `ospf6_router_lsa_originate`
+        // sets it from IS_OSPF_ASBR, BIRD from `p->asbr`. Claiming it
+        // unconditionally makes peers track a phantom ASBR; omitting it
+        // while originating 0x4005s hides every external route (the
+        // v2 wire form of this bug was caught by
+        // tests/interop/redistribute_bird.sh). B (ABR) rides the same
+        // word: more than one attached v3 area. Regular areas only in
+        // slice 1 — the finalizer rejects stub/NSSA v3 areas via the
+        // v2 policy path.
+        let mut bits = ROUTER_BIT_V6;
+        if router.ospf_is_asbr() {
+            bits |= ROUTER_BIT_E;
+        }
+        if router.ospf_router_lsa_flags(area).border {
+            bits |= ROUTER_BIT_B;
+        }
         let seq = lsa_seq_floor(
             router,
             area,

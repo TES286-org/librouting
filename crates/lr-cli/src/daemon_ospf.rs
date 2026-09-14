@@ -235,6 +235,9 @@ struct OspfDaemon {
     /// the exchange just delivered — mirroring the calc-cycle delay
     /// BIRD/FRR naturally have.
     pending_reorig: BTreeMap<u32, u64>,
+    /// Latched ASBR state for the E-bit transition detection in
+    /// [`Self::pump_reoriginate`] — `None` until the first pass.
+    asbr_latched: Option<bool>,
     /// Area → anchor session (registers the area, accepts
     /// self-originated LSAs; output never reaches the wire).
     anchors: BTreeMap<u32, SessionHandle>,
@@ -391,6 +394,7 @@ pub(super) fn run_ospf_daemon(
         interfaces,
         neighbors: BTreeMap::new(),
         pending_reorig: BTreeMap::new(),
+        asbr_latched: None,
         anchors: BTreeMap::new(),
         lsa_seq: BTreeMap::new(),
         gr_helper_enabled: cfg.ospf_gr_helper,
@@ -1300,6 +1304,23 @@ impl OspfDaemon {
 
     /// Fire due re-originations.
     fn pump_reoriginate(&mut self, now_ms: u64) {
+        // ASBR transition (RFC 2328 A.4.2 E-bit): the first
+        // redistribution (or the last withdraw) flips the router's
+        // AS boundary status — every area's Router-LSA must
+        // re-originate so peers re-evaluate 16.4 eligibility for our
+        // type-5 LSAs instead of waiting out the 1800 s refresh.
+        {
+            let router_arc = Arc::clone(&self.router);
+            let router = router_arc.lock().unwrap();
+            let asbr = router.ospf_is_asbr();
+            if self.asbr_latched.map(|l| l != asbr).unwrap_or(false) {
+                let areas: Vec<u32> = self.anchors.keys().copied().collect();
+                for area in areas {
+                    self.schedule_reoriginate(area, now_ms);
+                }
+            }
+            self.asbr_latched = Some(asbr);
+        }
         let due: Vec<u32> = self
             .pending_reorig
             .iter()
@@ -1721,7 +1742,11 @@ impl OspfDaemon {
             (Some(a), Some(b)) => Some(a.max(b)),
             (a, b) => a.or(b),
         };
-        let Some(lsa) = originate_router_lsa(self.router_id.as_u32(), &links, prev) else {
+        // RFC 2328 §A.4.2: the V/E/B body bits follow the router's
+        // current state — the E-bit in particular, or peers (BIRD,
+        // FRR) refuse to compute §16.4 routes from our type-5 LSAs.
+        let flags = router.ospf_router_lsa_flags(area);
+        let Some(lsa) = originate_router_lsa(self.router_id.as_u32(), flags, &links, prev) else {
             eprintln!(
                 "daemon: ospf router-LSA sequence space exhausted for area {}",
                 area_label(area)

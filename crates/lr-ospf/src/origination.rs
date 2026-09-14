@@ -99,7 +99,64 @@ impl RouterLsaLink {
     }
 }
 
+/// Router-LSA body flag bits (RFC 2328 §A.4.2).
+///
+/// * `V` — the router is an endpoint of an active virtual link
+///   (advertised in the *transit* area's Router-LSA, §15).
+/// * `E` — the router is an AS boundary router: it originates
+///   AS-external (type-5) LSAs. Peers key §16.4 external-route
+///   eligibility on this bit — BIRD and FRR skip a type-5 LSA whose
+///   advertising router's Router-LSA lacks it.
+/// * `B` — the router is an area border router (attached to multiple
+///   areas, §12.4.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct RouterLsaFlags {
+    pub virtual_link: bool,
+    pub asbr: bool,
+    pub border: bool,
+}
+
+impl RouterLsaFlags {
+    pub const V_BIT: u8 = 0x04;
+    pub const E_BIT: u8 = 0x02;
+    pub const B_BIT: u8 = 0x01;
+
+    /// The 2-byte flags word that opens the Router-LSA body: the V/E/B
+    /// bits live in the FIRST byte (FRR `stream_putc(router_lsa_flags)`
+    /// then a zero byte; BIRD serializes `OPT_RT_E = 0x02 << 24` through
+    /// htonl — both leave byte 1 zero), so the bits shift up into the
+    /// high half of the word.
+    pub fn to_word(self) -> u16 {
+        let mut bits = 0u8;
+        if self.virtual_link {
+            bits |= Self::V_BIT;
+        }
+        if self.asbr {
+            bits |= Self::E_BIT;
+        }
+        if self.border {
+            bits |= Self::B_BIT;
+        }
+        (bits as u16) << 8
+    }
+
+    /// Decode the 2-byte flags word at the head of a Router-LSA body
+    /// (the mirror of [`Self::to_word`]).
+    pub fn from_word(word: u16) -> Self {
+        let bits = (word >> 8) as u8;
+        Self {
+            virtual_link: bits & Self::V_BIT != 0,
+            asbr: bits & Self::E_BIT != 0,
+            border: bits & Self::B_BIT != 0,
+        }
+    }
+}
+
 /// Originate the router's own Router-LSA for an area (RFC 2328 §12.4.1).
+///
+/// `flags` carries the V/E/B body bits (§A.4.2) — `E` (ASBR) must be
+/// set whenever this router redistributes external routes, or peers
+/// will refuse to compute §16.4 routes from its type-5 LSAs.
 ///
 /// `prev_seq` carries the sequence number of the router's current
 /// instance (if any) so re-origination advances the sequence space;
@@ -111,6 +168,7 @@ impl RouterLsaLink {
 /// (§12.1.2: the caller must flush and re-originate).
 pub fn originate_router_lsa(
     router_id: u32,
+    flags: RouterLsaFlags,
     links: &[RouterLsaLink],
     prev_seq: Option<u32>,
 ) -> Option<Lsa> {
@@ -120,7 +178,7 @@ pub fn originate_router_lsa(
         Some(p) => p + 1,
     };
     let mut body = Vec::with_capacity(4 + links.len() * 12);
-    body.extend_from_slice(&0u16.to_be_bytes()); // flags (B/E/V bits)
+    body.extend_from_slice(&flags.to_word().to_be_bytes());
     body.extend_from_slice(&(links.len() as u16).to_be_bytes());
     for link in links {
         let raw = link.clone().into_router_link();
@@ -426,6 +484,11 @@ mod tests {
     fn router_lsa_structure_and_checksum() {
         let lsa = originate_router_lsa(
             0x0a00_0001,
+            RouterLsaFlags {
+                virtual_link: false,
+                asbr: true,
+                border: false,
+            },
             &[
                 RouterLsaLink::Stub {
                     network: 0x0a0a_0a00,
@@ -449,6 +512,12 @@ mod tests {
         assert_eq!(lsa.body.len(), 4 + 24);
         assert_eq!(lsa.header.length as usize, 20 + 4 + 24);
         assert!(lsa.checksum_ok(), "LSA checksum must verify");
+        // The E-bit opens the flags word (RFC 2328 A.4.2: the V/E/B
+        // bits sit in the word's first byte — 0x0200 on the wire,
+        // matching BIRD's htonl(OPT_RT_E << 24) and FRR's
+        // stream_putc(ROUTER_LSA_EXTERNAL) + zero byte).
+        assert_eq!(&lsa.body[..2], &0x0200u16.to_be_bytes());
+        assert!(RouterLsaFlags::from_word(0x0700).asbr);
         // Link encoding: stub first.
         assert_eq!(&lsa.body[4..8], &0x0a0a_0a00u32.to_be_bytes());
         assert_eq!(&lsa.body[8..12], &0xffff_ff00u32.to_be_bytes());
@@ -460,10 +529,11 @@ mod tests {
 
     #[test]
     fn router_lsa_sequence_advances() {
-        let first = originate_router_lsa(1, &[], None).unwrap();
+        let first = originate_router_lsa(1, RouterLsaFlags::default(), &[], None).unwrap();
         let seq = first.header.ls_sequence_number;
         let second = originate_router_lsa(
             1,
+            RouterLsaFlags::default(),
             &[RouterLsaLink::Stub {
                 network: 0,
                 mask: 0,
@@ -475,7 +545,10 @@ mod tests {
         assert_eq!(second.header.ls_sequence_number, seq + 1);
         assert!(second.checksum_ok());
         // Exhausted sequence space refuses to originate.
-        assert!(originate_router_lsa(1, &[], Some(MAX_SEQUENCE_NUMBER)).is_none());
+        assert!(
+            originate_router_lsa(1, RouterLsaFlags::default(), &[], Some(MAX_SEQUENCE_NUMBER))
+                .is_none()
+        );
     }
 
     #[test]
@@ -487,7 +560,13 @@ mod tests {
             tos: 0,
             metric: 99,
         };
-        let lsa = originate_router_lsa(1, &[RouterLsaLink::Raw(raw)], None).unwrap();
+        let lsa = originate_router_lsa(
+            1,
+            RouterLsaFlags::default(),
+            &[RouterLsaLink::Raw(raw)],
+            None,
+        )
+        .unwrap();
         // metric field is the last 2 bytes of the link entry
         assert_eq!(&lsa.body[14..16], &99u16.to_be_bytes());
         assert_eq!(lsa.body[12], RouterLinkType::VirtualLink as u8);

@@ -7,7 +7,7 @@
 use super::*;
 use crate::lsdb::Lsdb;
 use crate::neighbor::{NeighborState, OspfNeighbor};
-use crate::origination::{originate_router_lsa, RouterLsaLink};
+use crate::origination::{originate_router_lsa, RouterLsaFlags, RouterLsaLink};
 
 const US: u32 = 0x0a00_0001; // 10.0.0.1
 const THEM: u32 = 0x0a00_0002; // 10.0.0.2 (higher — master by §10.3)
@@ -42,7 +42,7 @@ fn exchange(rid: u32, lsdb: &Lsdb) -> DbExchange {
 
 fn lsdb_with(router_id: u32, links: &[RouterLsaLink]) -> Lsdb {
     let mut lsdb = Lsdb::new();
-    if let Some(lsa) = originate_router_lsa(router_id, links, None) {
+    if let Some(lsa) = originate_router_lsa(router_id, RouterLsaFlags::default(), links, None) {
         lsdb.install(lsa, 0);
     }
     lsdb
@@ -460,6 +460,7 @@ fn header_paging_respects_mtu() {
     for i in 0..3u32 {
         let lsa = originate_router_lsa(
             0x0a00_0001 + i,
+            RouterLsaFlags::default(),
             &[RouterLsaLink::Stub {
                 network: i,
                 mask: 0xffff_ff00,

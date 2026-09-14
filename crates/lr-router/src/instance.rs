@@ -3209,6 +3209,19 @@ impl DefaultRouter {
                         if route.origin.peer == h {
                             continue;
                         }
+                        // rc.3 shared RIB: protocol-direct contributions
+                        // (OSPF, Babel) never enter BGP advertisements —
+                        // cross-protocol export stays opt-in through
+                        // redistribution pipes (FRR `redistribute` /
+                        // BIRD `pipe` semantics). The steady-state
+                        // `export_selection` applies the same gate; the
+                        // initial dump must agree, or every session
+                        // establishment leaks non-BGP routes onto the
+                        // wire without BGP's mandatory attributes
+                        // (BIRD: "Missing mandatory ORIGIN attribute").
+                        if route.protocol != Protocol::Bgp {
+                            continue;
+                        }
                         let mut r = route.clone();
                         r.path_id = slot as u32 + 1;
                         snapshot.push(r);
@@ -3218,7 +3231,14 @@ impl DefaultRouter {
                 snapshot.extend(
                     self.loc_rib
                         .iter_best()
-                        .filter(|route| route.key.family == family && route.origin.peer != h)
+                        .filter(|route| {
+                            // Same two gates as the Add-Path branch:
+                            // family + split horizon, and the
+                            // protocol-direct exclusion (see above).
+                            route.key.family == family
+                                && route.origin.peer != h
+                                && route.protocol == Protocol::Bgp
+                        })
                         .cloned(),
                 );
             }
@@ -7162,6 +7182,45 @@ impl DefaultRouter {
     // ------------------------------------------------------------------
     // Virtual links (RFC 2328 §15)
     // ------------------------------------------------------------------
+
+    /// The Router-LSA body flags (RFC 2328 §A.4.2 V/E/B bits) this
+    /// router should advertise for `area`, derived from its current
+    /// state:
+    ///
+    /// * `E` (ASBR) — any AS-external redistribution intent exists
+    ///   ([`Self::ospf_redistribute`] recorded one and no withdraw
+    ///   removed it since). Peers key RFC 2328 §16.4 external-route
+    ///   eligibility on this bit; without it a type-5 LSA sits in
+    ///   every neighbour's LSDB but computes to nothing (BIRD and FRR
+    ///   behaviour, caught live by `tests/interop/redistribute_bird.sh`).
+    /// * `B` (ABR) — the router is attached to more than one area
+    ///   (§12.4.1 / BIRD `oa_arearange` posture).
+    /// * `V` — the router is an endpoint of a virtual link whose
+    ///   transit area is `area` (§15: the V-bit rides the transit
+    ///   area's Router-LSA).
+    ///
+    /// The daemon re-originate path consults this on every
+    /// Router-LSA; embedders doing their own origination should too.
+    pub fn ospf_router_lsa_flags(&self, area: u32) -> lr_ospf::origination::RouterLsaFlags {
+        let v2_areas = self
+            .ospf_areas
+            .values()
+            .filter(|a| a.protocol == Protocol::Ospfv2)
+            .count();
+        lr_ospf::origination::RouterLsaFlags {
+            virtual_link: self.ospf_vlinks.keys().any(|&(ta, _)| ta == area),
+            asbr: !self.ospf_externals.is_empty(),
+            border: v2_areas > 1,
+        }
+    }
+
+    /// True while at least one AS-external redistribution intent is
+    /// recorded (the `E`-bit condition of
+    /// [`Self::ospf_router_lsa_flags`]) — lets the daemon notice the
+    /// ASBR status flip and re-originate its Router-LSAs immediately.
+    pub fn ospf_is_asbr(&self) -> bool {
+        !self.ospf_externals.is_empty() || !self.ospf_v3_externals.is_empty()
+    }
 
     /// Configure a virtual link to the area border router `endpoint`,
     /// riding through `transit_area` (RFC 2328 §15). Both endpoints must
@@ -11120,6 +11179,72 @@ mod tests {
         b.feed_input(b_session, &out).unwrap();
         assert!(
             b.rib_snapshot().iter().any(|rt| rt.key.prefix == prefix),
+            "the originated network must reach the peer"
+        );
+        a.unoriginate(&key);
+    }
+
+    #[test]
+    fn ospf_route_present_at_session_up_does_not_leak_into_bgp() {
+        // The session-up full sync is the other export path: a Loc-RIB
+        // already holding protocol-direct (OSPF) routes when the BGP
+        // session establishes must not dump them — they carry no
+        // ORIGIN/AS_PATH, and a real peer treats the UPDATE as
+        // malformed (BIRD: "Missing mandatory ORIGIN attribute",
+        // caught live by tests/interop/redistribute_bird.sh where the
+        // OSPF-internal transit net leaked into the BGP session).
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let ospf = a
+            .add_session(SessionConfig::ospfv2(RouterId::from_u32(0x01010101), 0))
+            .unwrap();
+        let a_session = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0),
+            )
+            .unwrap();
+        let b_session = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0),
+            )
+            .unwrap();
+
+        // The OSPF route lands in the Loc-RIB *before* the BGP
+        // handshake — so the initial dump is the only path it could
+        // leak through.
+        feed_direct_ospf_route(&mut a, ospf);
+        assert!(
+            a.rib_snapshot()
+                .iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)),
+            "precondition: the OSPF route is in the shared Loc-RIB"
+        );
+
+        establish(&mut a, a_session, &mut b, b_session);
+        let out = a.drain_output(a_session);
+        b.feed_input(b_session, &out).unwrap();
+        assert!(
+            !b.rib_snapshot()
+                .iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)),
+            "OSPF route must not leak into the BGP initial dump"
+        );
+
+        // Control: a locally originated network (protocol Bgp) is part
+        // of the same initial dump and must reach the peer.
+        let key = a.originate(
+            Prefix::new_v4([10, 10, 10, 0], 24),
+            Some(IpAddr::V4([192, 0, 2, 10])),
+        );
+        let out = a.drain_output(a_session);
+        assert!(!out.is_empty(), "originated network must advertise");
+        b.feed_input(b_session, &out).unwrap();
+        assert!(
+            b.rib_snapshot()
+                .iter()
+                .any(|rt| rt.key.prefix == Prefix::new_v4([10, 10, 10, 0], 24)),
             "the originated network must reach the peer"
         );
         a.unoriginate(&key);
