@@ -33,55 +33,86 @@ verifiable commits always beat big-bang ones.
 
 ## D1 — Babel multi-session concurrency + per-interface parameters
 
-**Status:** not started. Tracks `lr-babel` + `lr-cli::daemon`.
+**Status:** landed — ~~D1.1 (RTT measurement codec)~~, ~~D1.2 (interface
+state)~~, ~~D1.3 (key scoping)~~, ~~D1.4 (router re-advertisement +
+flush)~~, ~~D1.5 (daemon multi-session rewrite)~~ and ~~D1.6 (e2e)~~
+are all in. Tracks `lr-babel` + `lr-router` + `lr-cli::daemon`.
 
-**Current gap.** The `[[babel.interface]]` block parses all RFC 8966
-§A.2 parameters (`hello_interval_ms`, `rxcost`, `rtt_cost`, `rtt_min_us`,
-`rtt_max_us`, `next_hop_ipv4`, `next_hop_ipv6`, `extended_next_hop`,
-`check_link`, `port`, `group`), but `daemon.rs:2745` only creates **one**
-Babel session. The parameters are stored but never used; the Hello
-interval is hard-coded to `BABEL_HELLO_INTERVAL_MS = 1000`
-(`daemon.rs:3050`). RFC 8967 MAC keys are global
-(`BabelKeySpec` has no `interface` field), so per-interface
-authentication is impossible.
+**What landed.**
 
-**Proposed work.**
+1. ~~**Per-interface socket pair.**~~ `run_babel_daemon` resolves every
+   `[[babel.interface]]` glob against the system's interfaces (first
+   matching pattern wins, BIRD semantics) and gives each match its own
+   `BabelIface` — one or two `BabelTransport`s (the v6 link-local and
+   the v4 address, RFC 8966 §4.1), each a unicast socket bound to the
+   interface address (TTL 255, SO_BINDTODEVICE, IP_MULTICAST_IF) plus a
+   wildcard-bound multicast socket that joins the group on its own
+   interface. The wildcard listener is isolated two ways —
+   `IP_MULTICAST_ALL` is switched off (the Linux default would deliver
+   every locally-joined group's traffic to every wildcard socket) and
+   `SO_BINDTODEVICE` pins it to the segment — verified against the
+   kernel's delivery model before the rewrite landed.
+2. ~~**Per-interface session.**~~ One `SessionConfig::babel` session per
+   interface, each with its own RFC 8966 §3.3 router-id (address +
+   per-boot random) and its own announcement seqno. Routes learned on
+   one interface are re-advertised on the others with the *origin's*
+   (router-id, seqno) preserved and the interface cost added
+   (§3.7.5), split-horizoned per session through
+   `RouterInstance::babel_reachable(exclude)`; a claim that vanishes is
+   retracted on the next announcement with an infinity-metric Update
+   under the origin's Router-Id (§3.5.5) instead of leaving peers to
+   time it out. The daemon polls every socket non-blocking, as before,
+   one loop for all interfaces.
+3. ~~**Per-interface authentication.**~~ `[[babel.key]]` gained the
+   `interface` pattern (D1.3): keys without one apply everywhere, keys
+   with one only to matching interfaces; each interface builds its own
+   `BabelAuthInterface` (fresh Index, own nonce source) and its
+   challenge traffic stays unicast to the peer.
+4. ~~**Per-interface parameters.**~~ Every `[[babel.interface]]` field
+   drives its interface: `hello_interval_ms` (Hello cadence + the
+   advertised interval), `update_interval_ms` (the Update TLV's
+   interval + the re-announcement hold), `rxcost` (the IHU and the
+   base of every advertised metric), `next_hop_ipv4` /
+   `next_hop_ipv6` / `extended_next_hop` (§3.5.3, per-transport gating:
+   the v4 transport carries IPv4 destinations only), `port`, `group`.
+   The Hello seqno advances by one per Hello (§3.4.1) while the Update
+   seqno only moves when the advertised set changes (§3.7.1).
+5. ~~**RTT measurement.**~~ RFC 8966 §A.2.4 end to end: timestamped
+   Hellos, IHU echoes of the peer's `(send, receive)` pair (babeld's
+   1 s freshness window), EWMA smoothing (decay 42/256), the sanity
+   window, and the linear `rtt_penalty` between `rtt_min_us` /
+   `rtt_max_us` added to every advertised metric; `rtt_cost` gates it
+   all (tunnels default to 96, babeld parity).
+6. ~~**Per-interface `check_link`.**~~ One-second `getifaddrs` polling
+   (RFC 8966 §A.2 / BIRD `check link yes`, default on): a segment that
+   went down loses its routes — `babel_flush_session` withdraws them
+   from the Loc-RIB and the other interfaces' re-advertisements — and
+   stops announcing until the link returns.
+7. ~~**Route expiry (§3.2.5).**~~ Landed alongside the rewrite because a
+   transit speaker without it is not protocol-correct: every Update
+   refreshes its claim's hold deadline (babeld's `hold_time =
+   MAX(4·I/100 + I/50, 15)` s), `RouterInstance::babel_gc` sweeps once
+   a second, and a neighbour whose Hellos stopped loses everything it
+   taught us without waiting out each hold (babeld's
+   `retract_neighbour_routes`). `feed_input_at` now carries the
+   transport's wall-clock milliseconds beside the 32-bit BABEL-RTT
+   microsecond clock so the bookkeeping is real-time-true.
 
-1. **Per-interface socket pair.** Replace the single `(uc, mc)` socket
-   pair in `run_babel_daemon` with `Vec<(uc, mc, BabelInterfaceSpec)>`
-   — one unicast + multicast socket pair per matched interface, bound
-   to the interface address. `glob_match` must return *all* matches
-   rather than discarding all but the first `resolved_iface_name`.
-2. **Per-interface session.** Call `r.add_session(SessionConfig::babel(
-   local))` for each matched interface. Each session carries its own
-   router-id (RFC 8966 §3.3 — router-id is unique within a routing
-   domain, but different interfaces may live in different domains).
-   The daemon main loop must move from a single `recv_from` to polling
-   `Vec<UdpSocket>` (`mio` or a simple `set_nonblocking + select`).
-3. **Per-interface authentication.** Extend `BabelKeySpec` with an
-   `interface: Option<String>` field. `build_babel_auth_interface`
-   moves from a single global value to `Vec<BabelAuthInterface>`,
-   each binding its own key set. `lr-babel/src/auth.rs::BabelAuthInterface`
-   must learn to look up keys by interface name.
-4. **Apply `BabelInterfaceSpec` parameters.** The periodic advertisement
-   loop (`daemon.rs:2875-2908`) becomes a per-session loop. Each
-   session uses its own `hello_interval_ms` and `update_interval_ms`.
-   RTT measurement (RFC 8966 §A.2.4) requires implementing timestamp
-   TLV send + receive, computing RTT and applying `rtt_cost` to link
-   cost.
-5. **Per-interface `check_link`.** When an interface goes operationally
-   down, withdraw the routes it originated. Implement by listening on
-   `netlink RTMGRP_LINK` messages or polling `getifaddrs` for interface
-   flags.
+**Verification.** `tests/interop/babel_multihop.sh` — three speakers in
+three namespaces chained over veth pairs: bidirectional transit through
+the multi-session middle box, `check link` withdrawal end-to-end within
+the convergence window, and reconvergence when the link returns; in CI
+beside `babel_multi_nic.sh` (per-interface sessions + parameters).
+Router-level semantics (split horizon, dedup by claim, flush, expiry,
+neighbour-death retraction, the RTT round trip) are pinned in
+`crates/lr-router/tests/babel_multihop.rs`; the timestamp sub-TLVs and
+the RTT state machine in `lr-babel` unit tests.
 
-**Reference implementations.** BIRD `proto/babel/babel.c`:
-`babel_if_start()` / `babel_if_stop()` / `babel_send_hello()` are
-per-interface; `babeld` `interface.c` mirrors that.
-
-**Estimated size.** Medium-large refactor: ~520 LoC of `daemon.rs`
-Babel path rewritten into a multi-session shape, `auth.rs` gains
-per-interface lookup, all `BabelInterfaceSpec` fields wired through.
-~1500–2000 new + refactored lines.
+**Reference implementations.** BIRD `proto/babel/babel.c`
+(`babel_if_start()` / `babel_if_stop()` per interface) and babeld
+(`interface.c`, `neighbour.c`, `message.c`, `route.c`) were read
+first-hand for the Hello/IHU cadences, the hold-time formula, the
+retraction behaviour and the RTT constants quoted above.
 
 ---
 

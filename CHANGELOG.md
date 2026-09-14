@@ -18,6 +18,44 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- ROADMAP-v3 D1 — Babel multi-session concurrency + per-interface
+  parameters (RFC 8966 §3.3/§3.7.5/§A.2):
+  - `[[babel.interface]]` glob patterns now resolve to one Babel
+    session per matching system interface (first matching pattern wins,
+    BIRD semantics), each with its own router-id, socket pair and
+    per-interface `hello_interval_ms` / `update_interval_ms` /
+    `rxcost` / `rtt_cost` / `rtt_min_us` / `rtt_max_us` /
+    `next_hop_ipv4` / `next_hop_ipv6` / `extended_next_hop` / `port` /
+    `group` / `check_link`. Dual-stack interfaces announce on both
+    the IPv6 and IPv4 transports (§4.1).
+  - Route re-advertisement between interfaces (§3.7.5): the origin's
+    (router-id, seqno) is preserved with the interface cost added to
+    the metric, split-horizoned per session; a claim that vanishes is
+    retracted with an infinity-metric Update under the origin's
+    Router-Id (§3.5.5). `check link` (BIRD `check link yes`, default
+    on) withdraws a dead segment's routes within one second and
+    resumes when it returns.
+  - RFC 8966 §A.2.4 BABEL-RTT delay metric: Timestamp sub-TLV on
+    Hellos, Timestamp Echo sub-TLV on IHUs, EWMA-smoothed RTT
+    (babeld's decay 42/256, 1 s echo freshness, 600 s sanity, 180 s
+    validity) and the linear `rtt_penalty` added to every advertised
+    metric when `rtt_cost > 0`.
+  - RFC 8966 §3.2.5 route expiry: every Update refreshes its claim's
+    hold deadline (babeld's `hold_time = MAX(4·I/100 + I/50, 15)` s);
+    `RouterInstance::babel_gc` (new) sweeps expiry once a second and
+    retracts everything a dead neighbour taught us.
+  - `RouterInstance::babel_rtt_echo` (new) exposes the IHU echo pair;
+    `feed_input_at` now takes the transport's wall-clock milliseconds
+    beside the 32-bit BABEL-RTT microsecond clock (the method ships
+    for the first time in this release, so the signature is final
+    rather than broken).
+  - `[[babel.key]]` gained the `interface` pattern: keys apply only to
+    matching interfaces (unscoped keys apply everywhere); each
+    interface authenticates with its own RFC 8967 state.
+  - E2E: `tests/interop/babel_multihop.sh` — three speakers in three
+    namespaces chained over veth pairs (transit both ways through the
+    multi-session middle box, `check link` withdrawal end-to-end,
+    reconvergence), wired into CI.
 - ROADMAP-v3 D2.3 — `lr_bgp::roa_store::RoaStore`, a thread-safe
   two-layer ROA database with atomic snapshot swaps:
   - **Static + RTR provenance layers.** Static entries
