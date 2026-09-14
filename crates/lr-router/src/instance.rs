@@ -2192,7 +2192,16 @@ impl DefaultRouter {
                 };
                 self.loc_rib.install_set(&key, vec![route.clone()]);
                 self.originated.insert(key.clone(), route.clone());
-                self.pending_events.push(RouterEvent::RouteInstalled(route));
+                self.pending_events
+                    .push(RouterEvent::RouteInstalled(route.clone()));
+                // Flush the export pipeline for the aggregate: this
+                // origination fires from `apply_selection` (a specific
+                // just arrived) while the peer sessions are already
+                // Established — without the flush the aggregate sits in
+                // the Loc-RIB but is never queued into any Adj-RIB-Out
+                // (the session-up full sync has already run). Mirrors
+                // the `export_selection` tail of `originate_family`.
+                self.export_selection(&key, std::slice::from_ref(&route));
             } else if !has_specific && already_originated {
                 self.unoriginate(&key);
             }

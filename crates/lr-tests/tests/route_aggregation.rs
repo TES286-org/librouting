@@ -255,3 +255,55 @@ fn remove_aggregate_withdraws() {
     let has_aggregate = snap.iter().any(|r| r.key.prefix == agg_prefix);
     assert!(!has_aggregate, "aggregate must be withdrawn after removal");
 }
+
+/// Regression (ROADMAP-v3 D4.2 daemon wiring): the aggregate is
+/// originated from `apply_selection` (a specific just arrived) while
+/// the peer session is already Established — the newly originated
+/// route must still be flushed through the export pipeline and reach
+/// the peer, not merely appear in the local Loc-RIB. The daemon e2e
+/// surfaced this: the aggregating daemon's downstream peer never saw
+/// the aggregate because `recompute_aggregates` bypassed
+/// `export_selection`.
+#[test]
+fn aggregate_originated_after_session_up_reaches_the_peer() {
+    let mut a = DefaultRouter::new();
+    let mut b = DefaultRouter::new();
+    let ha = a
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), V4_A)
+                .with_local_address(IpAddr::V4([192, 0, 2, 1])),
+        )
+        .unwrap();
+    let hb = b
+        .add_session(
+            SessionConfig::bgp(Asn(64513), Asn(64512), V4_B)
+                .with_local_address(IpAddr::V4([192, 0, 2, 2])),
+        )
+        .unwrap();
+    a.start_session(ha).unwrap();
+    b.start_session(hb).unwrap();
+    pump(&mut a, ha, &mut b, hb);
+
+    let agg_prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+    a.add_aggregate(agg_prefix);
+
+    // B originates the /32 AFTER the session is up; A's aggregate
+    // originates in reaction to it.
+    b.originate(
+        Prefix::new_v4([203, 0, 113, 1], 32),
+        Some(IpAddr::V4([192, 0, 2, 2])),
+    );
+    pump(&mut a, ha, &mut b, hb);
+
+    // A originated the aggregate (Loc-RIB) AND advertised it: B's
+    // Loc-RIB must hold a copy learned over the session.
+    assert!(
+        a.rib_snapshot().iter().any(|r| r.key.prefix == agg_prefix),
+        "A must originate the aggregate into its own Loc-RIB"
+    );
+    assert!(
+        b.rib_snapshot().iter().any(|r| r.key.prefix == agg_prefix),
+        "B must learn the aggregate over the established session \
+         (the origination must reach the export pipeline)"
+    );
+}
