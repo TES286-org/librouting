@@ -408,6 +408,53 @@ redistribution pipe (see `lr-router`'s `RedistributionPipe`).
 `bmp` and `ldp` stay standalone-only: combining them fails closed at
 startup.
 
+### Cross-protocol policy — `[[redistribute]]` and `[[aggregate]]`
+
+Two TOML tables attach the router-level cross-protocol engines to the
+daemon (ROADMAP-v3 D4.1 / D4.2). Both validate fail closed: unknown
+keys, unknown protocol names, a pipe into a protocol the daemon does
+not run, and duplicate declarations are start-up errors, not
+warnings.
+
+`[[redistribute]]` installs a redistribution pipe (BIRD `pipe` / FRR
+`redistribute`): routes from `source` that enter the Loc-RIB are
+re-originated into `target`:
+
+```toml
+[[redistribute]]
+source = "ospf"                  # bgp | ospf | ospf3 | babel
+target = "bgp"                   # bgp | ospf | ospf3
+metric = 100                     # optional fixed metric override
+tag    = 65000                   # optional OSPF external route tag
+allow  = ["10.0.0.0/8"]          # optional prefix allow-list
+```
+
+Without `metric` the re-originated route inherits the source metric.
+Without `allow` every source route crosses the pipe. Sources the
+daemon cannot actually learn routes with (`static`, `connected`) are
+rejected — the daemon has no injection surface for them yet, and a
+permanently inert pipe would silently promise redistribution the
+process can never perform.
+
+`[[aggregate]]` registers a BGP route aggregate (RFC 4271 §9.2.2.2):
+while at least one more-specific route exists in the Loc-RIB, the
+aggregate is originated with a zeroed AS_PATH, ATOMIC_AGGREGATE and
+AGGREGATOR; when the last specific disappears the aggregate is
+withdrawn. This is the BIRD `aggregate` / FRR `aggregate-address`
+equivalent:
+
+```toml
+[[aggregate]]
+prefix = "203.0.113.0/24"
+```
+
+Both surfaces print one start-up banner line each
+(`redistribute: ospf -> bgp`, `aggregate: 203.0.113.0/24`) and the
+router logs every re-origination as
+`daemon: redistribute: <prefix> -> BGP (metric=N)`. Aggregation has
+no `summary_only` knob yet (the router does not implement specific
+suppression); the daemon refuses the key rather than ignoring it.
+
 Startup is gated: each engine binds its sockets (OSPF raw sockets, the
 BGP :179 listener, the Babel UDP pair) and reports readiness; the
 supervisor then drops privileges (`--user`), creates the API socket as

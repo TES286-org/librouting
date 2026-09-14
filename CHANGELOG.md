@@ -18,6 +18,52 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- ROADMAP-v3 D4.1 / D4.2 — daemon surfaces for the cross-protocol
+  engines (`[[redistribute]]` and `[[aggregate]]` TOML tables):
+  - `[[redistribute]]` (BIRD `pipe` / FRR `redistribute`): routes from
+    `source` (`bgp` | `ospf` | `ospf3` | `babel`) are re-originated
+    into `target` (`bgp` | `ospf` | `ospf3`) with an optional fixed
+    `metric`, OSPF route `tag`, and prefix `allow` list. Fail-closed
+    validation: unknown keys, unknown protocol names, unsupported
+    targets, sources without a daemon injection surface, pipes into a
+    non-running engine (protocol set + `[ospf] version` cross-check)
+    and duplicate `(source, target)` pairs are all start-up errors.
+    Installed once per process (supervisor or standalone BGP engine);
+    the banner lists every pipe and the router logs each
+    re-origination as `daemon: redistribute: <prefix> -> <TARGET>`.
+  - `[[aggregate]]` (RFC 4271 §9.2.2.2): registers a BGP aggregate
+    (zeroed AS_PATH + ATOMIC_AGGREGATE + AGGREGATOR) that is
+    originated while a more-specific exists and withdrawn when the
+    last one disappears. `summary_only` is refused on purpose — the
+    router has no specific-suppression knob yet.
+  - Router fix surfaced by the aggregate e2e: `recompute_aggregates`
+    now flushes `export_selection` at origination, so an aggregate
+    born after the session-up full sync reaches Adj-RIB-Out (with a
+    `lr-tests` regression test).
+  - E2E: `crates/lr-cli/tests/daemon_redistribute.rs` — the pipe's
+    allow-list gates exactly the covered prefix (asserted through the
+    router's own log events) and the aggregate traverses an A–B–C
+    daemon chain end to end.
+- Filter parser recursion limit (nightly fuzz fix): the recursive-
+  descent parser now bails out with
+  `ParseErrorKind::RecursionLimitExceeded` at `MAX_EXPR_DEPTH = 128`
+  nesting levels instead of overflowing the stack on inputs like
+  thousands of nested `[` set opens or `!` chains — the nightly
+  `filter_parser` cargo-fuzz target found the crash (AddressSanitizer
+  stack-overflow, 3 911-byte input). The limit also bounds the AST
+  height, keeping recursive `Drop` glue and the tree-walking
+  evaluator safe. The crashing input ships as a fuzz seed and a
+  corpus-driven regression test
+  (`crates/lr-policy/tests/filter_corpus.rs`) runs the whole committed
+  seed corpus through `filter::compile`.
+
+### Fixed
+
+- `cargo bench --workspace -- <criterion args>` no longer dies on the
+  first libtest target ("Unrecognized option: 'sample-size'"): every
+  `[lib]` target and the `lr-cli` binaries now carry `bench = false`,
+  so the bench-smoke nightly job exercises exactly the four criterion
+  harnesses.
 - ROADMAP-v3 D1 — Babel multi-session concurrency + per-interface
   parameters (RFC 8966 §3.3/§3.7.5/§A.2):
   - `[[babel.interface]]` glob patterns now resolve to one Babel

@@ -299,22 +299,26 @@ BinaryOp), Jump, Accept, Reject, … }`. ~800–1200 LoC (compiler + VM
 
 ## D4 — Daemon surface for library-level cross-protocol features
 
-**Status:** partial. Tracks `lr-cli::daemon_config` + `lr-cli::daemon`
-+ `lr-ffi`.
+**Status:** partial — ~~D4.1 (`[[redistribute]]`)~~, ~~D4.2
+(`[[aggregate]]`)~~ and ~~D4.3 (`[damping]`)~~ are in; D4.4 (FFI)
+and D4.5 (interop scripts) remain. Tracks `lr-cli::daemon_config` +
+`lr-cli::daemon` + `lr-ffi`.
 
-**Current gap.** Three cross-protocol features already exist in the
-library API but are unreachable from the daemon:
+**Current gap (what remains).** The FFI surface for the three
+daemon-wired features and the interop scripts against BIRD/FRR.
 
 1. **Redistribution.** `RedistributionPipe` in
    `lr-router/src/redistribution.rs` (227 LoC) supports BGP↔OSPF,
    BGP↔Babel, Static→BGP, Connected→BGP, with 7 in-process tests.
-   But the daemon has no `[[redistribute]]` TOML table, no
-   `--redistribute` CLI flag, no FFI entry.
+   ~~But the daemon has no `[[redistribute]]` TOML table, no
+   `--redistribute` CLI flag, no FFI entry.~~ The TOML table
+   landed (D4.1); the CLI flag and FFI entry remain open.
 2. **Aggregation.** `RouterInstance::add_aggregate(prefix)`
    implements RFC 4271 §9.2.2.2 (zero AS_PATH + ATOMIC_AGGREGATE +
    AGGREGATOR; withdraw when all specifics disappear). 5 in-process
-   tests pass. But the daemon has no `[[aggregate]]` table, no CLI
-   flag, no FFI.
+   tests pass. ~~But the daemon has no `[[aggregate]]` table, no CLI
+   flag, no FFI.~~ The TOML table landed (D4.2); the CLI flag and
+   FFI entry remain open.
 3. **Damping.** `lr-damping` (283 LoC) implements the RFC 2439
    figure-of-merit algorithm with full config + RFC 7196 warning.
    But `grep` shows no crate depends on `lr-damping` — it is dead
@@ -322,7 +326,7 @@ library API but are unreachable from the daemon:
 
 **Proposed work.**
 
-1. **`[[redistribute]]` TOML table.**
+1. **`[[redistribute]]` TOML table.** ~~Proposed.~~ Landed:
    ```toml
    [[redistribute]]
    source = "ospf"
@@ -331,15 +335,43 @@ library API but are unreachable from the daemon:
    tag = 65000
    allow = ["10.0.0.0/8"]
    ```
-   Add `RedistributeSpec` to `daemon_config.rs`; in `daemon.rs` call
-   `r.add_redistribution_pipe()`.
-2. **`[[aggregate]]` TOML table.**
+   `RedistributeSpec` in `daemon_config.rs` with the same fail-closed
+   posture as every other protocol table (unknown keys are hard
+   errors). `finalize_redistribution` validates the protocol
+   vocabulary, rejects targets the router does not implement (`bgp` |
+   `ospf` | `ospf3` only), rejects sources with no daemon injection
+   surface (`static` / `connected` — an inert pipe would silently
+   advertise capability the daemon lacks) and cross-checks both ends
+   against the configured protocol set **and** `[ospf] version`, so a
+   pipe into a non-running engine fails at start-up instead of
+   sitting dormant. Duplicate `(source, target)` pairs are rejected;
+   same-protocol pipes stay allowed where the router supports them
+   (BGP→BGP re-origination, OSPF→OSPF via `ospf_redistribute`).
+   `apply_cross_protocol_config` installs the pipes once per process
+   (supervisor after router creation, or the standalone BGP engine;
+   embedded engines skip so pipes are never double-installed) and the
+   start-up banner lists every pipe. Metric maps to
+   `MetricPolicy::Fixed`, `allow` maps to the pipe's prefix
+   allow-list. 12 config unit tests plus a daemon e2e
+   (`tests/daemon_redistribute.rs`) asserting through the router's
+   own `redistribute: <prefix> -> BGP` log events that an allow-list
+   gates exactly the covered prefix.
+2. **`[[aggregate]]` TOML table.** ~~Proposed.~~ Landed:
    ```toml
    [[aggregate]]
    prefix = "203.0.113.0/24"
-   summary_only = true
    ```
-   Add `AggregateSpec`; call `r.add_aggregate()`.
+   `AggregateSpec` + `finalize_aggregates` (prefix required, parse
+   checked, no duplicates). `summary_only` is deliberately **not**
+   accepted — the router does not implement specific suppression yet,
+   and an ignored key would lie to the operator; it becomes available
+   the moment the library grows the knob. Wiring shares the D4.1
+   install path and the banner. The e2e chain (A–B–C daemons) proves
+   the aggregate reaches a downstream peer — which exposed a real
+   router bug: `recompute_aggregates` bypassed `export_selection`, so
+   an aggregate originating after the session-up full sync never
+   reached Adj-RIB-Out. Fixed with a regression test
+   (`aggregate_originated_after_session_up_reaches_the_peer`).
 3. **`[damping]` TOML table + import-hook wiring.** ~~Landed (commit
    pending).~~
    ```toml
@@ -852,7 +884,7 @@ refactor — needs extensive regression tests.
 | D1        | not started           | —     | Babel multi-session + per-iface params   |
 | D2        | landed                | —     | RPKI-RTR client: codec + state machine + RoaStore + `[bgp.rpki]` daemon thread + hot reload |
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
-| D4        | partial (D4.3 landed) | —     | Daemon surface — damping wired up; redistribution + aggregate pending |
+| D4        | partial (D4.1–D4.3 landed) | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts pending |
 | D5        | not started           | —     | FFI expansion                            |
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
