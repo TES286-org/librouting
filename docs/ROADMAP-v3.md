@@ -223,9 +223,8 @@ PDU parser is a useful cross-check.
 
 ## D3 — Filter DSL feature expansion toward BIRD syntax parity
 
-**Status:** partial — ~~D3.6~~, ~~D3.5~~, ~~D3.4~~, ~~D3.2~~,
-~~D3.3~~ and ~~D3.1~~ landed. D3.7 (bytecode) remains
-open. Tracks `lr-policy`.
+**Status:** ~~landed~~ — ~~D3.6~~, ~~D3.5~~, ~~D3.4~~, ~~D3.2~~,
+~~D3.3~~, ~~D3.1~~ and ~~D3.7~~ are all in. Tracks `lr-policy`.
 
 **Current gap.** `crates/lr-policy/src/filter/` implements a subset of
 the BIRD filter syntax (if/then/else, let, arithmetic, comparison,
@@ -334,7 +333,7 @@ covering the lowercase match, the negative Rust-Debug form, an
 exhaustive loop over every `Protocol` variant, and a case statement
 that routes on the OSPFv2 BIRD name.
 
-### D3.7 — Bytecode compilation
+### D3.7 — Bytecode compilation — ~~landed~~
 
 The current DSL is a tree-walking interpreter. BIRD compiles to
 `f_line` bytecode. For hot paths (every import/export) bytecode can
@@ -342,6 +341,22 @@ be 2–5× faster. Compile the AST to `Vec<Instruction>` (stack VM):
 `Instruction` is `enum { Push(Value), LoadVar, LoadField, BinOp(
 BinaryOp), Jump, Accept, Reject, … }`. ~800–1200 LoC (compiler + VM
 + tests).
+
+~~Landed: `filter::bytecode` — a total AST→`Vec<Instr>` compiler
+(short-circuit `&&`/`||` compile to jumps, `case` to a scrutinee temp
+slot + chained pattern compares, `~` patterns lift their constant
+items, `defined()` compiles to presence instructions) plus a stack VM
+sharing the interpreter's scope stack, user-function machinery and
+matching helpers, so semantics are identical by construction. Dynamic
+shapes without a bytecode representation fall back to the tree walker
+on that subtree, so the engines can never diverge. `CompiledFilter`
+is built once at daemon start-up and the daemon's import/export
+filter hooks now execute bytecode per route. The D3.7 bench gained
+`vm_*` counterparts — measured parity on simple filters (23.8 ns vs
+27.9 ns bare accept) and a small win on complex chains (222 ns vs
+227 ns); the projected 2–5× needs typed stack slots and constant
+folding, recorded as future work. An equivalence test pins 27 filter
+sources × 4 routes for verdict + attribute-state equality.~~
 
 **Total estimated size.** ~2500–3000 new lines; land in small commits.
 

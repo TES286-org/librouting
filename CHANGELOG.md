@@ -18,6 +18,15 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Filter DSL bytecode VM (ROADMAP-v3 D3.7): the filter AST compiles
+  to a flat instruction stream (jumps for short-circuits and
+  branches, lifted constant patterns for `~`, presence instructions
+  for `defined()`) executed by a stack VM sharing the interpreter's
+  scope/function state, so the two engines are equivalent by
+  construction (a 27-source equivalence table pins verdict + route
+  state). The daemon's import/export filter hooks compile once at
+  start-up and execute bytecode per route. Measured: 23.8 ns vs
+  27.9 ns on bare accept, ~2% on complex chains.
 - Filter DSL user-defined functions (ROADMAP-v3 D3.1): BIRD-style
   `function name(a, b) -> ret { ... }` declarations ahead of the
   filter body. Bodies run against the caller's route (mutations
