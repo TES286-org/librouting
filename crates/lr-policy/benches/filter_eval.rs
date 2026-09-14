@@ -23,6 +23,7 @@ use lr_core::addr::{Asn, Prefix};
 use lr_core::attr::{AttrTag, Attribute, Attributes};
 use lr_core::nlri::NlriFamily;
 use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
+use lr_policy::filter::bytecode;
 use lr_policy::filter::{compile, evaluate, FilterContext, RoaStateLit};
 use std::hint::black_box;
 
@@ -208,6 +209,45 @@ fn bench_eval(c: &mut Criterion) {
         b.iter(|| {
             let r = evaluate(
                 black_box(&complex),
+                black_box(&mut route),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(r);
+        });
+    });
+
+    // D3.7 bytecode VM on the same inputs — quantifies the hot-path
+    // win the compiler + stack VM buys over the tree walk.
+    let simple_vm = bytecode::compile(&simple);
+    let if_lp_vm = bytecode::compile(&if_lp);
+    let complex_vm = bytecode::compile(&complex);
+
+    group.bench_function("vm_simple_accept", |b| {
+        b.iter(|| {
+            let r = bytecode::execute(
+                black_box(&simple_vm),
+                black_box(&mut route),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(r);
+        });
+    });
+
+    group.bench_function("vm_if_local_pref", |b| {
+        b.iter(|| {
+            let r = bytecode::execute(
+                black_box(&if_lp_vm),
+                black_box(&mut route),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(r);
+        });
+    });
+
+    group.bench_function("vm_complex_chain", |b| {
+        b.iter(|| {
+            let r = bytecode::execute(
+                black_box(&complex_vm),
                 black_box(&mut route),
                 black_box(&BenchCtx),
             );

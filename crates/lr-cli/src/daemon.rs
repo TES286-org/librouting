@@ -768,7 +768,11 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 let ctx = std::sync::Arc::new(daemon_policy::DaemonFilterContext::new(
                     std::sync::Arc::clone(&roa_store),
                 ));
-                let hook = daemon_policy::FilterImportHook { filter: f, ctx };
+                let hook = daemon_policy::FilterImportHook {
+                    compiled: lr_policy::filter::bytecode::compile(&f),
+                    filter: f,
+                    ctx,
+                };
                 let mut r = router.lock().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
             }
@@ -804,6 +808,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     ));
                 };
                 let hook = daemon_policy::FilterImportHook {
+                    compiled: lr_policy::filter::bytecode::compile(f),
                     filter: (*f).clone(),
                     ctx: std::sync::Arc::clone(&ctx),
                 };
@@ -822,6 +827,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     ));
                 };
                 let hook = daemon_policy::FilterExportHook {
+                    compiled: lr_policy::filter::bytecode::compile(f),
                     filter: (*f).clone(),
                     ctx: std::sync::Arc::clone(&ctx),
                 };

@@ -14,6 +14,7 @@ use lr_core::rib::Route;
 use crate::filter::ast::{
     BinaryOp, Expr, Filter, FunctionDecl, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
 };
+use crate::filter::bytecode::{CompiledFilter, DefinedTarget, Instr, MatchItem, MatchRhs};
 
 /// The result of evaluating a filter against a route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -556,6 +557,31 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         }
     }
 
+    /// Attribute presence for one route-field kind — the single
+    /// source both the tree-walking `defined()` and the bytecode VM
+    /// consult.
+    fn field_present(&self, kind: RouteFieldKind, route: &Route) -> bool {
+        match kind {
+            // Always carried by the route model itself.
+            RouteFieldKind::Net | RouteFieldKind::Proto | RouteFieldKind::Source => true,
+            // Computed on demand — always resolvable.
+            RouteFieldKind::RoaState => true,
+            RouteFieldKind::BgpLocalPref => self.ctx.bgp_local_pref(route).is_some(),
+            RouteFieldKind::BgpMed => self.ctx.bgp_med(route).is_some(),
+            RouteFieldKind::BgpNextHop => self.ctx.bgp_next_hop(route).is_some(),
+            RouteFieldKind::BgpOrigin => self.ctx.bgp_origin(route).is_some(),
+            // List-valued accessors lose the absent/empty
+            // distinction; BIRD parity here is "present = at least
+            // one element".
+            RouteFieldKind::BgpAsPath => !self.ctx.bgp_as_path(route).is_empty(),
+            RouteFieldKind::BgpCommunities => !self.ctx.bgp_communities(route).is_empty(),
+            RouteFieldKind::BgpLargeCommunities => {
+                !self.ctx.bgp_large_communities(route).is_empty()
+            }
+            RouteFieldKind::BgpExtCommunities => !self.ctx.bgp_ext_communities(route).is_empty(),
+        }
+    }
+
     /// Presence check for `defined(expr)` / `exists(expr)`.
     ///
     /// Never fails and never mutates the caller's route: an absent
@@ -565,27 +591,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// exactly what BIRD's `defined()` exists to avoid.
     fn is_defined(&mut self, expr: &Expr, route: &Route) -> bool {
         match expr {
-            Expr::RouteField(field) => match field.kind {
-                // Always carried by the route model itself.
-                RouteFieldKind::Net | RouteFieldKind::Proto | RouteFieldKind::Source => true,
-                // Computed on demand — always resolvable.
-                RouteFieldKind::RoaState => true,
-                RouteFieldKind::BgpLocalPref => self.ctx.bgp_local_pref(route).is_some(),
-                RouteFieldKind::BgpMed => self.ctx.bgp_med(route).is_some(),
-                RouteFieldKind::BgpNextHop => self.ctx.bgp_next_hop(route).is_some(),
-                RouteFieldKind::BgpOrigin => self.ctx.bgp_origin(route).is_some(),
-                // List-valued accessors lose the absent/empty
-                // distinction; BIRD parity here is "present = at least
-                // one element".
-                RouteFieldKind::BgpAsPath => !self.ctx.bgp_as_path(route).is_empty(),
-                RouteFieldKind::BgpCommunities => !self.ctx.bgp_communities(route).is_empty(),
-                RouteFieldKind::BgpLargeCommunities => {
-                    !self.ctx.bgp_large_communities(route).is_empty()
-                }
-                RouteFieldKind::BgpExtCommunities => {
-                    !self.ctx.bgp_ext_communities(route).is_empty()
-                }
-            },
+            Expr::RouteField(field) => self.field_present(field.kind, route),
             Expr::Var(name) => self.scopes.iter().rev().any(|s| s.vars.contains_key(name)),
             // A literal is always defined.
             Expr::Lit(_) => true,
@@ -1570,6 +1576,323 @@ fn prefix_set_matches(
     let lo = ge.unwrap_or(set.prefix_len).max(set.prefix_len);
     let hi = le.unwrap_or(family_max);
     pl >= lo && pl <= hi
+}
+
+/// Execute a compiled filter (ROADMAP-v3 D3.7). Semantically
+/// identical to [`evaluate`] — the two engines share the scope
+/// stack, user-function bookkeeping and matching helpers — but runs
+/// a flat instruction loop with pre-lifted constants instead of
+/// re-walking the AST per route.
+pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) -> EvalResult {
+    let mut ev = Evaluator {
+        ctx,
+        scopes: vec![Scope::new()],
+        functions: std::collections::BTreeMap::new(),
+        call_depth: 0,
+        pending_verdict: None,
+    };
+    match ev.run_code(&cf.code, cf, route) {
+        Ok(VmFlow::Continue) => EvalResult::Fallthrough,
+        Ok(VmFlow::Accept) => EvalResult::Accept,
+        Ok(VmFlow::Reject(reason)) => EvalResult::Reject(reason),
+        Ok(VmFlow::Return(_)) => EvalResult::Fallthrough,
+        Err(e) => {
+            tracing::debug!("filter '{}' bytecode error: {}", cf.name, e);
+            EvalResult::Fallthrough
+        }
+    }
+}
+
+/// VM control flow out of one code slice.
+enum VmFlow {
+    /// Fell off the end without a verdict.
+    Continue,
+    Accept,
+    Reject(Option<String>),
+    /// `return` inside a user-function body.
+    Return(Value),
+}
+
+impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
+    /// The stack-VM loop. Any runtime error aborts the whole filter
+    /// (the caller maps it to Fallthrough) exactly like the
+    /// tree-walking evaluator.
+    fn run_code(
+        &mut self,
+        code: &[Instr],
+        cf: &CompiledFilter,
+        route: &mut Route,
+    ) -> Result<VmFlow, EvalError> {
+        let mut ip = 0usize;
+        // No upfront capacity: trivial filters (bare accept/reject)
+        // run zero stack operations, so eager allocation would be a
+        // pure malloc on the hot path.
+        let mut stack: Vec<Value> = Vec::new();
+        let mut tmp: Option<Value> = None;
+        while ip < code.len() {
+            match &code[ip] {
+                Instr::Push(v) => stack.push(v.clone()),
+                Instr::LoadVar(name) => {
+                    let v = self.lookup(name)?;
+                    stack.push(v);
+                }
+                Instr::LoadField(field) => {
+                    let v = self.read_route_field(field, route)?;
+                    stack.push(v);
+                }
+                Instr::StoreVar(name) => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    self.scopes
+                        .last_mut()
+                        .ok_or_else(vm_stack_error)?
+                        .vars
+                        .insert(name.clone(), v);
+                }
+                Instr::AssignVar(name) => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    self.assign(name, v)?;
+                }
+                Instr::StoreTmp => {
+                    tmp = stack.pop();
+                }
+                Instr::LoadTmp => {
+                    stack.push(tmp.clone().ok_or_else(vm_stack_error)?);
+                }
+                Instr::Bin(op) => {
+                    let r = stack.pop().ok_or_else(vm_stack_error)?;
+                    let l = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = self.eval_binary(*op, l, r)?;
+                    stack.push(v);
+                }
+                Instr::Not => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    stack.push(Value::Bool(!v.truthy()));
+                }
+                Instr::Neg => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    match v {
+                        Value::Int(n) => stack.push(Value::Int(-n)),
+                        other => return Err(type_mismatch("neg", &other, "int")),
+                    }
+                }
+                Instr::JumpIfFalse(t) => {
+                    let c = stack.pop().ok_or_else(vm_stack_error)?;
+                    if !c.truthy() {
+                        ip = *t;
+                        continue;
+                    }
+                }
+                Instr::JumpIfTrue(t) => {
+                    let c = stack.pop().ok_or_else(vm_stack_error)?;
+                    if c.truthy() {
+                        ip = *t;
+                        continue;
+                    }
+                }
+                Instr::Jump(t) => {
+                    ip = *t;
+                    continue;
+                }
+                Instr::Truthy => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    stack.push(Value::Bool(v.truthy()));
+                }
+                Instr::Match { negated, rhs } => {
+                    let l = stack.pop().ok_or_else(vm_stack_error)?;
+                    let m = self.run_match(rhs, &l, route)?;
+                    stack.push(Value::Bool(if *negated { !m } else { m }));
+                }
+                Instr::Defined(target) => {
+                    let present = match target {
+                        DefinedTarget::Field(field) => self.field_present(field.kind, route),
+                        DefinedTarget::Var(name) => {
+                            self.scopes.iter().rev().any(|s| s.vars.contains_key(name))
+                        }
+                        DefinedTarget::Literal => true,
+                        DefinedTarget::Dynamic(e) => {
+                            let mut probe = route.clone();
+                            self.eval_expr(e, &mut probe).is_ok()
+                        }
+                    };
+                    stack.push(Value::Bool(present));
+                }
+                Instr::Call { name, argc } => {
+                    let args: Vec<Value> =
+                        stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    if let Some(f) = cf.functions.get(name) {
+                        let v = self.call_compiled_function(name, f, args, cf, route)?;
+                        stack.push(v);
+                    } else {
+                        let v = self.eval_call(name, &args, route)?;
+                        stack.push(v);
+                    }
+                    // accept / reject inside a function body
+                    // terminates the whole filter (BIRD f_cmd).
+                    if let Some(verdict) = self.pending_verdict.take() {
+                        return Ok(match verdict {
+                            ControlFlow::Accept => VmFlow::Accept,
+                            ControlFlow::Reject(reason) => VmFlow::Reject(reason),
+                            _ => VmFlow::Continue,
+                        });
+                    }
+                }
+                Instr::Method {
+                    field,
+                    method,
+                    argc,
+                } => {
+                    let args: Vec<Value> =
+                        stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let v = self.eval_method(field, method, &args, route)?;
+                    stack.push(v);
+                }
+                Instr::AssignField(field) => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    self.assign_route_field(field, v, route)?;
+                }
+                Instr::AppendField(field) => {
+                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    self.append_route_field(field, v, route)?;
+                }
+                Instr::Pop => {
+                    stack.pop();
+                }
+                Instr::PushScope => self.push_scope(),
+                Instr::PopScope => {
+                    self.pop_scope();
+                }
+                Instr::Accept => return Ok(VmFlow::Accept),
+                Instr::Reject { from_stack } => {
+                    let reason = if *from_stack {
+                        let v = stack.pop().ok_or_else(vm_stack_error)?;
+                        match v {
+                            Value::Str(s) => Some(s),
+                            other => Some(format!("{other}")),
+                        }
+                    } else {
+                        None
+                    };
+                    return Ok(VmFlow::Reject(reason));
+                }
+                Instr::Return => {
+                    let v = stack.pop().unwrap_or(Value::Bool(false));
+                    return Ok(VmFlow::Return(v));
+                }
+                Instr::EvalTree(e) => {
+                    let v = self.eval_expr(e, route)?;
+                    stack.push(v);
+                }
+            }
+            ip += 1;
+        }
+        Ok(VmFlow::Continue)
+    }
+
+    /// Compiled-function call: bind args in a fresh scope, run the
+    /// body code, map accept/reject to the latched pending verdict
+    /// (interpreter parity) and return the call value.
+    fn call_compiled_function(
+        &mut self,
+        name: &str,
+        f: &crate::filter::bytecode::CompiledFunction,
+        args: Vec<Value>,
+        cf: &CompiledFilter,
+        route: &mut Route,
+    ) -> Result<Value, EvalError> {
+        if self.call_depth >= MAX_CALL_DEPTH {
+            return Err(EvalError {
+                kind: EvalErrorKind::CallDepthExceeded(MAX_CALL_DEPTH),
+                line: 0,
+                col: 0,
+            });
+        }
+        if args.len() != f.params.len() {
+            return Err(EvalError {
+                kind: EvalErrorKind::BadArgCount {
+                    name: name.to_string(),
+                    expected: f.params.len(),
+                    got: args.len(),
+                },
+                line: 0,
+                col: 0,
+            });
+        }
+        self.call_depth += 1;
+        self.push_scope();
+        for (param, arg) in f.params.iter().zip(args.iter()) {
+            self.scopes
+                .last_mut()
+                .ok_or_else(vm_stack_error)?
+                .vars
+                .insert(param.clone(), arg.clone());
+        }
+        let outcome = match self.run_code(&f.code, cf, route)? {
+            VmFlow::Return(v) => v,
+            VmFlow::Accept => {
+                self.pending_verdict = Some(ControlFlow::Accept);
+                Value::Bool(true)
+            }
+            VmFlow::Reject(reason) => {
+                self.pending_verdict = Some(ControlFlow::Reject(reason));
+                Value::Bool(false)
+            }
+            VmFlow::Continue => Value::Bool(false),
+        };
+        self.pop_scope();
+        self.call_depth -= 1;
+        Ok(outcome)
+    }
+
+    /// Compiled `~` matching. Constant patterns run without touching
+    /// the tree walker; dynamic pieces fall back to it.
+    fn run_match(
+        &mut self,
+        rhs: &MatchRhs,
+        lhs: &Value,
+        route: &mut Route,
+    ) -> Result<bool, EvalError> {
+        match rhs {
+            MatchRhs::Value(v) => Ok(value_match(lhs, v)),
+            MatchRhs::Expr(e) => self.eval_match(lhs, e, route),
+            MatchRhs::Set(items) => {
+                for item in items {
+                    match item {
+                        MatchItem::Value(v) => {
+                            if value_match(lhs, v) {
+                                return Ok(true);
+                            }
+                        }
+                        MatchItem::PrefixSet { prefix, ge, le } => {
+                            if let Value::Prefix(p) = lhs {
+                                if prefix_set_matches(prefix, *ge, *le, p) {
+                                    return Ok(true);
+                                }
+                            }
+                        }
+                        MatchItem::Expr(e) => {
+                            let v = self.eval_expr(e, route)?;
+                            if value_match(lhs, &v) {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            }
+        }
+    }
+}
+
+fn vm_stack_error() -> EvalError {
+    EvalError {
+        kind: EvalErrorKind::TypeMismatch {
+            op: "vm".to_string(),
+            lhs: "empty stack".to_string(),
+            rhs: "value".to_string(),
+        },
+        line: 0,
+        col: 0,
+    }
 }
 
 #[cfg(test)]
@@ -2730,6 +3053,85 @@ mod tests {
             // arity errors are runtime (BadArgCount), so compilation
             // must succeed for every built-in name.
             assert!(compiled.is_ok(), "built-in '{name}' rejected by the parser");
+        }
+    }
+
+    // ===== D3.7 — bytecode VM equivalence =====
+
+    /// Run the same filter through the bytecode VM.
+    fn run_vm(filter_src: &str, route: &mut Route) -> EvalResult {
+        let f = compile("test", filter_src).unwrap_or_else(|e| panic!("{e}"));
+        let compiled = crate::filter::bytecode::compile(&f);
+        crate::filter::bytecode::execute(&compiled, route, &StubCtx)
+    }
+
+    /// Every source in the equivalence table must produce identical
+    /// verdicts AND identical post-evaluation route state under both
+    /// engines.
+    #[test]
+    fn vm_matches_interpreter_on_policy_table() {
+        let sources = [
+            "accept;",
+            "reject;",
+            "reject with \"too short\";",
+            "if bgp.local_pref > 100 then accept; reject;",
+            "if bgp.local_pref > 200 then accept; else reject;",
+            "case proto { \"bgp\" => accept; default => reject; }",
+            "case bgp.local_pref { 100 => accept; 200 => reject; default => accept; }",
+            "if bgp.local_pref > 50 && bgp.med < 10 then accept; reject;",
+            "if bgp.local_pref > 500 || bgp.med < 10 then accept; reject;",
+            "let x = bgp.local_pref * 2 + 1; if x == 201 then accept; reject;",
+            "let a = 6; let b = 7; if a * b == 42 then accept; reject;",
+            "bgp.local_pref = 200; bgp.med = 30; accept;",
+            "bgp.as_path.prepend(65000); bgp.as_path.prepend(65010); accept;",
+            "bgp.communities += [64512:100]; bgp.communities.delete([64512:*]); accept;",
+            "bgp.large_communities += [64512:1:2, 65000:3:4]; if bgp.large_communities ~ [64512:1:2] then accept; reject;",
+            "bgp.ext_communities += [(rt, 65000, 1)]; if bgp.ext_communities ~ [(rt, 65000, 1)] then accept; reject;",
+            "if net ~ [ 203.0.113.0/24, 198.51.100.0/24 ] then accept; reject;",
+            "if net ~ [ 203.0.0.0/8{16,24} ] then accept; reject;",
+            "if defined(bgp.med) && !defined(bgp.as_path) then accept; reject;",
+            "function double(n) { return n * 2; } if bgp.local_pref == double(50) then accept; reject;",
+            "function tag() { bgp.local_pref = 7; return true; } if tag() then accept; reject;",
+            "function gated() { if bgp.local_pref > 50 then accept; return false; } gated(); reject;",
+            "function spin() { return spin(); } spin(); accept;",
+            "return true;",
+            "let n = 65000; if bgp.as_path ~ [n] then accept; reject;",
+            "bgp.communities = delete(bgp.communities, [64512:*]); accept;",
+            "if count(bgp.communities) == 2 && !empty(bgp.as_path) then accept; reject;",
+        ];
+
+        // Route matrix: plain BGP route, one with communities and a
+        // path, one stripped of MED.
+        let routes: Vec<Route> = {
+            let r0 = route_with("203.0.113.0/24", 100, 0);
+            let mut r1 = with_communities(
+                route_with("203.0.113.0/24", 100, 5),
+                &[(64512, 100), (65000, 2)],
+            );
+            r1.attributes.insert(Attribute {
+                tag: AttrTag::raw(TAG_AS_PATH),
+                flags: 0x40,
+                value: vec![2u8, 1, 0, 0, 0xFD, 0xE8],
+            });
+            let mut r2 = route_with("198.51.100.0/24", 42, 0);
+            r2.attributes.remove(AttrTag::raw(TAG_MED));
+            let r3 = with_large(route_with("203.0.113.0/24", 100, 0), &[(64512, 1, 2)]);
+            vec![r0, r1, r2, r3]
+        };
+
+        for src in sources {
+            for (i, base) in routes.iter().enumerate() {
+                let mut a = base.clone();
+                let mut b = base.clone();
+                let va = run(src, &mut a);
+                let vb = run_vm(src, &mut b);
+                assert_eq!(va, vb, "verdict mismatch on route {i} for: {src}");
+                assert_eq!(
+                    a.attributes, b.attributes,
+                    "attribute mismatch on route {i} for: {src}"
+                );
+                assert_eq!(a.next_hop, b.next_hop);
+            }
         }
     }
 }

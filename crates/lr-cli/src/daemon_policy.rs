@@ -426,6 +426,10 @@ impl FilterContext for DaemonFilterContext {
 /// defers to the next hook in the chain.
 pub(crate) struct FilterImportHook {
     pub filter: DslFilter,
+    /// Precompiled bytecode (ROADMAP-v3 D3.7): built once at hook
+    /// construction, executed per route — the import/export hot path
+    /// no longer re-walks the AST.
+    pub compiled: lr_policy::filter::bytecode::CompiledFilter,
     pub ctx: std::sync::Arc<DaemonFilterContext>,
 }
 
@@ -434,7 +438,7 @@ impl lr_policy::hooks::ImportHook for FilterImportHook {
         &self.filter.name
     }
     fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
-        match dsl::evaluate(&self.filter, route, self.ctx.as_ref()) {
+        match lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref()) {
             EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
             EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
             EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
@@ -446,6 +450,8 @@ impl lr_policy::hooks::ImportHook for FilterImportHook {
 /// semantics as [`FilterImportHook`] but on the outbound side.
 pub(crate) struct FilterExportHook {
     pub filter: DslFilter,
+    /// See [`FilterImportHook::compiled`].
+    pub compiled: lr_policy::filter::bytecode::CompiledFilter,
     pub ctx: std::sync::Arc<DaemonFilterContext>,
 }
 
@@ -454,7 +460,7 @@ impl lr_policy::hooks::ExportHook for FilterExportHook {
         &self.filter.name
     }
     fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
-        match dsl::evaluate(&self.filter, route, self.ctx.as_ref()) {
+        match lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref()) {
             EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
             EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
             EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
