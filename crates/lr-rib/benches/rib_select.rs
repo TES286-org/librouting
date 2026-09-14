@@ -17,12 +17,13 @@
 //! per-AFI sharding lands, the same bench should show ~2× throughput
 //! on mixed v4/v6 workloads.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lr_core::addr::Prefix;
 use lr_core::attr::Attributes;
 use lr_core::nlri::NlriFamily;
 use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
 use lr_rib::LocRib;
+use std::hint::black_box;
 
 fn make_route(i: u32) -> Route {
     // Build 10.{i/256}.{i%256}.0/24 prefixes — covers 65k distinct

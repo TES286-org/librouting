@@ -17,12 +17,13 @@
 //! bench harness uses Criterion's `iter_batched_ref` so the codec's
 //! internal carryover buffer does not allocate per iteration.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lr_bgp::codec::BgpCodec;
 use lr_bgp::message::update::Nlri;
 use lr_bgp::message::{BgpMessage, Keepalive, Open, Update};
 use lr_bgp::path::{AsPath, AttrType, PathAttrFlags, PathAttribute};
 use lr_core::addr::{Asn, Prefix, RouterId};
+use std::hint::black_box;
 
 /// Minimal OPEN: AS 65001, hold 180, BGP-ID 192.0.2.1, no params.
 fn open_bytes() -> Vec<u8> {

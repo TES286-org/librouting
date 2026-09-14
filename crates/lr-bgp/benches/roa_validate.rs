@@ -19,9 +19,10 @@
 //! refactor: when that lands, the same bench should show a 10–100×
 //! speedup at 100k entries.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lr_bgp::roa::{RoaEntry, RoaState, RoaTable, RoaTableBuilder};
 use lr_core::addr::{Asn, Prefix};
+use std::hint::black_box;
 
 /// Build a ROA table of `n` entries: each entry authorizes
 /// `10.{i}.0.0/16` for AS 65000. The probe route covers

@@ -18,12 +18,13 @@
 //! BIRD's `f_line`. When the VM lands, this bench should show a
 //! commensurate speedup.
 
-use criterion::{black_box, criterion_group, criterion_main, Criterion, Throughput};
+use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lr_core::addr::{Asn, Prefix};
 use lr_core::attr::{AttrTag, Attribute, Attributes};
 use lr_core::nlri::NlriFamily;
 use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
 use lr_policy::filter::{compile, evaluate, FilterContext, RoaStateLit};
+use std::hint::black_box;
 
 /// Test context — mirrors the in-crate StubCtx, lives outside the
 /// crate so a bug in the in-crate impl cannot also live in the bench
