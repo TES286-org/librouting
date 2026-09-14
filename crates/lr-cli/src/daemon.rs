@@ -3612,12 +3612,12 @@ fn babel_transport_new(
             let _ = socket2::Socket::from(sock).set_multicast_if_v4(&v4);
         }
     }
-    // Pin both sockets to the interface when it is known: a socket
-    // bound to the group address with SO_REUSEADDR would otherwise
-    // receive every same-group datagram in the namespace — on a
+    // Pin the unicast socket to the interface when it is known: on a
     // same-host multi-segment setup (veth labs, VMs with several
-    // bridged NICs) that cross-talks unrelated segments. (SO_BINDTODEVE;
-    // not available / required on the manual path without a device.)
+    // bridged NICs) the explicit device keeps egress and unicast
+    // reception on its own segment. SO_BINDTODEVICE is Linux-only in
+    // socket2; other platforms rely on the bound address.
+    #[cfg(target_os = "linux")]
     if let Some(dev) = device {
         if let Ok(sock) = uc.try_clone() {
             if let Err(e) = socket2::Socket::from(sock).bind_device(Some(dev.as_bytes())) {
@@ -3625,12 +3625,14 @@ fn babel_transport_new(
             }
         }
     }
+    #[cfg(not(target_os = "linux"))]
+    let _ = device;
     // Multicast socket: bound to the wildcard address (a socket bound to
     // a unicast address does not receive multicast on Linux, and one
     // bound to the *group* address cannot share the port across
     // interfaces). The wildcard bind's isolation is NOT the bind — it is
-    // the per-interface membership join, and two safeguards keep it
-    // exact: a wildcard socket with IP_MULTICAST_ALL (Linux default 1)
+    // the per-interface membership join, and two Linux safeguards keep
+    // it exact: a wildcard socket with IP_MULTICAST_ALL (default 1)
     // receives every datagram for any group joined by ANY socket of the
     // namespace, so it is switched off, and SO_BINDTODEVICE pins the
     // socket to its own segment as belt-and-braces. Together: a
@@ -3654,12 +3656,14 @@ fn babel_transport_new(
                 s.try_clone()
                     .map_err(|e| format!("babel multicast socket clone on {label} failed: {e}"))?,
             );
+            // The mc_all wildcard would otherwise feed this socket
+            // every other transport's group traffic (Linux
+            // IP_MULTICAST_ALL; babeld/BIRD set 0 too).
+            #[cfg(target_os = "linux")]
             if local.is_ipv4() {
-                // The mc_all wildcard would otherwise feed this socket
-                // every other transport's group traffic (Linux
-                // IP_MULTICAST_ALL; babeld/BIRD set 0 too).
                 let _ = sock.set_multicast_all_v4(false);
             }
+            #[cfg(target_os = "linux")]
             if let Some(dev) = device {
                 if let Err(e) = sock.bind_device(Some(dev.as_bytes())) {
                     eprintln!("daemon: babel {label} cannot bind to device: {e}");
