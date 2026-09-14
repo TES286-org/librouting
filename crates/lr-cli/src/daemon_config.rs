@@ -431,6 +431,49 @@ pub(crate) struct DampingSpec {
     pub config: lr_damping::DampingConfig,
 }
 
+/// One `[[redistribute]]` table (ROADMAP-v3 D4.1): a cross-protocol
+/// redistribution pipe between two protocols the daemon runs.
+///
+/// Routes from `source` that enter the Loc-RIB are re-originated into
+/// `target` — the BIRD `pipe` / FRR `redistribute` equivalent, backed
+/// by [`lr_router::RedistributionPipe`]. Supported targets: `bgp`
+/// (re-origination into BGP, RFC 4271) and `ospf` / `ospf3`
+/// (type-5 AS-external LSA, RFC 2328 §12.4.5 / RFC 5340). Supported
+/// sources are the protocols the daemon can actually learn routes
+/// with: `bgp`, `ospf`, `ospf3`, `babel` (`static` / `connected` have
+/// no daemon injection surface yet and are rejected fail-closed).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct RedistributeSpec {
+    /// Source protocol name (`"bgp"`, `"ospf"`, `"ospf3"`,
+    /// `"babel"`). Required.
+    pub source: Option<String>,
+    /// Target protocol name (`"bgp"`, `"ospf"`, `"ospf3"`). Required.
+    pub target: Option<String>,
+    /// Fixed metric override for every re-originated route
+    /// ([`lr_router::MetricPolicy::Fixed`]). Absent = inherit the
+    /// source route's metric.
+    pub metric: Option<u32>,
+    /// Protocol tag (OSPF external route tag; informational for BGP
+    /// targets). Absent = 0 (no tag).
+    pub tag: Option<u32>,
+    /// Optional allow-list of CIDR prefixes — only routes inside one
+    /// of them are redistributed. Empty = redistribute everything.
+    pub allow: Vec<String>,
+}
+
+/// One `[[aggregate]]` table (ROADMAP-v3 D4.2): a BGP route aggregate
+/// (RFC 4271 §9.2.2.2) originated while at least one more-specific
+/// route is present in the Loc-RIB. Backed by
+/// [`lr_router::RouterInstance::add_aggregate`] — the BIRD
+/// `aggregate` / FRR `aggregate-address` equivalent.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct AggregateSpec {
+    /// Aggregate prefix (CIDR, required). The aggregate is originated
+    /// with a zeroed AS_PATH plus ATOMIC_AGGREGATE and AGGREGATOR, and
+    /// withdrawn when the last specific disappears.
+    pub prefix: Option<String>,
+}
+
 /// One `[[ldp.interface]]` table (or `--ldp-interface` flag): an
 /// interface running basic (link) discovery, RFC 5036 §3.5.2.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -699,6 +742,15 @@ pub(crate) struct DaemonConfig {
     /// the reuse threshold.
     pub damping: DampingSpec,
 
+    /// `[[redistribute]]` tables (ROADMAP-v3 D4.1) — cross-protocol
+    /// redistribution pipes installed on the shared router at startup
+    /// (`lr_router::RedistributionPipe`).
+    pub redistributes: Vec<RedistributeSpec>,
+
+    /// `[[aggregate]]` tables (ROADMAP-v3 D4.2) — BGP route aggregates
+    /// registered on the shared router at startup (RFC 4271 §9.2.2.2).
+    pub aggregates: Vec<AggregateSpec>,
+
     /// `[bgp.rpki]` table — the RPKI-RTR cache client (RFC 8210).
     /// Off by default (`cache = None`); set `cache = "host:port"` to
     /// spawn the RTR client thread and sync ROAs from the cache into
@@ -923,6 +975,8 @@ impl DaemonConfig {
             roa_invalid_action: "reject".to_string(),
             filters: Vec::new(),
             damping: DampingSpec::default(),
+            redistributes: Vec::new(),
+            aggregates: Vec::new(),
             rpki: RpkiSpec::default(),
             ospf_version: "v2".to_string(),
             ospf_hello_interval: 10,
@@ -1037,6 +1091,139 @@ impl DaemonConfig {
         self.finalize_rpki()?;
         self.finalize_filters()?;
         self.finalize_babel_interfaces()?;
+        self.finalize_redistribution()?;
+        self.finalize_aggregates()?;
+        Ok(())
+    }
+
+    /// Validate and complete the `[[redistribute]]` configuration
+    /// (ROADMAP-v3 D4.1). Cross-checked here — not just at key-parse
+    /// time — so the invariants read as one unit:
+    ///
+    /// * `source` and `target` are both present and parseable;
+    /// * the pipe actually transports: only `bgp`, `ospf`, `ospf3`
+    ///   targets are implemented by the router's redistribution
+    ///   engine (anything else would silently drop routes);
+    /// * only protocols the daemon can *learn* routes with are valid
+    ///   sources — `static` / `connected` have no daemon injection
+    ///   surface yet, so a pipe from them would be inert;
+    /// * no `(source, target)` pair is declared twice.
+    fn finalize_redistribution(&mut self) -> Result<(), String> {
+        let mut seen: std::collections::BTreeSet<(String, String)> =
+            std::collections::BTreeSet::new();
+        for spec in &self.redistributes {
+            let source = spec
+                .source
+                .as_deref()
+                .ok_or_else(|| "[[redistribute]] without 'source'".to_string())?;
+            let target = spec
+                .target
+                .as_deref()
+                .ok_or_else(|| "[[redistribute]] without 'target'".to_string())?;
+            let source_proto =
+                parse_daemon_protocol(source).map_err(|e| format!("[[redistribute]] {e}"))?;
+            let target_proto =
+                parse_daemon_protocol(target).map_err(|e| format!("[[redistribute]] {e}"))?;
+            use lr_core::rib::Protocol;
+            match target_proto {
+                Protocol::Bgp | Protocol::Ospfv2 | Protocol::Ospfv3 => {}
+                _ => {
+                    return Err(format!(
+                        "[[redistribute]] target '{target}' is not supported (expected bgp | ospf | ospf3)"
+                    ));
+                }
+            }
+            match source_proto {
+                Protocol::Bgp | Protocol::Ospfv2 | Protocol::Ospfv3 | Protocol::Babel => {}
+                _ => {
+                    return Err(format!(
+                        "[[redistribute]] source '{source}' has no daemon injection surface \
+                         (expected bgp | ospf | ospf3 | babel)"
+                    ));
+                }
+            }
+            // Same-protocol pipes are allowed (the router's
+            // redistribution table supports BGP→BGP re-origination as
+            // locally-originated and OSPF→OSPF via ospf_redistribute;
+            // its feedback guard terminates the re-selection loop).
+            // A BGP target re-originates v4/v6 unicast only; an OSPF
+            // target rides the v2 (v4) or v3 (v6) external plane — the
+            // family mismatch is handled per-route by the engine, but
+            // a babel→ospf3 pipe still needs the v3 engine running.
+            // Cross-check the pipe against the configured protocol set
+            // (and the OSPF version — the daemon runs one of v2/v3,
+            // never both) so a pipe into a protocol the daemon does
+            // not run fails at startup instead of sitting dormant.
+            let runs = |name: &str| self.runs_protocol(name);
+            let ospf_version_matches =
+                |proto: lr_core::rib::Protocol| match (proto, self.ospf_version.as_str()) {
+                    (lr_core::rib::Protocol::Ospfv2, "v2") => true,
+                    (lr_core::rib::Protocol::Ospfv3, "v3") => true,
+                    (lr_core::rib::Protocol::Ospfv2, _) | (lr_core::rib::Protocol::Ospfv3, _) => {
+                        false
+                    }
+                    _ => true,
+                };
+            let ospf_hint = |proto: lr_core::rib::Protocol| {
+                if proto == Protocol::Ospfv3 && self.ospf_version != "v3" {
+                    " and set [ospf] version = \"v3\""
+                } else {
+                    ""
+                }
+            };
+            let source_engine = match source_proto {
+                Protocol::Bgp => "bgp",
+                Protocol::Ospfv2 => "ospf",
+                Protocol::Ospfv3 => "ospf",
+                Protocol::Babel => "babel",
+                _ => unreachable!(),
+            };
+            if !runs(source_engine) || !ospf_version_matches(source_proto) {
+                return Err(format!(
+                    "[[redistribute]] source '{source}' but the daemon does not run the \
+                     {source_engine} engine (add it to --protocol{})",
+                    ospf_hint(source_proto)
+                ));
+            }
+            let target_engine = match target_proto {
+                Protocol::Bgp => "bgp",
+                Protocol::Ospfv2 | Protocol::Ospfv3 => "ospf",
+                _ => unreachable!(),
+            };
+            if !runs(target_engine) || !ospf_version_matches(target_proto) {
+                return Err(format!(
+                    "[[redistribute]] target '{target}' but the daemon does not run the \
+                     {target_engine} engine (add it to --protocol{})",
+                    ospf_hint(target_proto)
+                ));
+            }
+            if !seen.insert((source.to_string(), target.to_string())) {
+                return Err(format!(
+                    "[[redistribute]] {source} -> {target} declared twice (duplicate pipe)"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate and complete the `[[aggregate]]` configuration
+    /// (ROADMAP-v3 D4.2). Every table needs a parseable prefix; the
+    /// same prefix must not be declared twice.
+    fn finalize_aggregates(&mut self) -> Result<(), String> {
+        let mut seen: std::collections::BTreeSet<lr_core::addr::Prefix> =
+            std::collections::BTreeSet::new();
+        for spec in &self.aggregates {
+            let text = spec
+                .prefix
+                .as_deref()
+                .ok_or_else(|| "[[aggregate]] without 'prefix'".to_string())?;
+            let prefix: lr_core::addr::Prefix = text
+                .parse()
+                .map_err(|_| format!("[[aggregate]] bad prefix '{text}'"))?;
+            if !seen.insert(prefix) {
+                return Err(format!("[[aggregate]] {text} declared twice (duplicate)"));
+            }
+        }
         Ok(())
     }
 
@@ -1821,6 +2008,14 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.filters.push(FilterSpec::default());
                     section = "filter".to_string();
                 }
+                "redistribute" => {
+                    cfg.redistributes.push(RedistributeSpec::default());
+                    section = "redistribute".to_string();
+                }
+                "aggregate" => {
+                    cfg.aggregates.push(AggregateSpec::default());
+                    section = "aggregate".to_string();
+                }
                 "ldp.interface" => {
                     cfg.ldp_interfaces.push(LdpIfSpec::default());
                     section = "ldp.interface".to_string();
@@ -1940,6 +2135,19 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             continue;
         }
         if apply_damping_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        // Redistribution and aggregation tables (ROADMAP-v3 D4.1/D4.2):
+        // fail-closed — a typo'd protocol name or prefix silently
+        // changes which routes cross the pipe or get aggregated.
+        if apply_redistribute_key(cfg, &section, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            continue;
+        }
+        if apply_aggregate_key(cfg, &section, key, value)
             .map_err(|e| format!("line {}: {}", lineno + 1, e))?
         {
             continue;
@@ -2527,6 +2735,127 @@ fn apply_damping_key(
         _ => {
             return Err(format!(
                 "unknown [damping] key '{key}' (typo protection; damping config fails closed)"
+            ));
+        }
+    }
+    Ok(true)
+}
+
+/// Parse a daemon protocol name into a [`lr_core::rib::Protocol`].
+///
+/// Accepts the vocabulary the daemon itself uses (`--protocol bgp`,
+/// `ospf` with `[ospf] version = "v2"|"v3"`) plus the unambiguous
+/// aliases (`ospfv2`, `ospfv3`, the BIRD `direct` name for connected
+/// routes). This is the inverse of the *daemon* naming, not
+/// [`lr_core::rib::Protocol::bird_name`] — the daemon runs `ospf` or
+/// `ospf3` as separate engines rather than one `ospf` version.
+pub(crate) fn parse_daemon_protocol(name: &str) -> Result<lr_core::rib::Protocol, String> {
+    use lr_core::rib::Protocol;
+    match name {
+        "bgp" => Ok(Protocol::Bgp),
+        "ospf" | "ospfv2" => Ok(Protocol::Ospfv2),
+        "ospf3" | "ospfv3" => Ok(Protocol::Ospfv3),
+        "babel" => Ok(Protocol::Babel),
+        "static" => Ok(Protocol::Static),
+        "connected" | "direct" => Ok(Protocol::Connected),
+        other => Err(format!(
+            "unknown protocol name '{other}' (expected bgp | ospf | ospf3 | babel | static | connected)"
+        )),
+    }
+}
+
+/// Parse one `[[redistribute]]` table key (ROADMAP-v3 D4.1). Unknown
+/// keys are hard errors — a typo'd protocol name or a silently
+/// ignored allow entry would change which routes cross the pipe.
+fn apply_redistribute_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "redistribute" {
+        return Ok(false);
+    }
+    let Some(spec) = cfg.redistributes.last_mut() else {
+        return Err("key outside a [[redistribute]] table".into());
+    };
+    match key {
+        "source" => {
+            // Validate eagerly so the error carries the bad name, but
+            // keep the raw string — `finalize_redistribution` re-parses
+            // for the canonical cross-check.
+            let v = value.trim().trim_matches('"');
+            parse_daemon_protocol(v).map_err(|e| format!("bad redistribute source: {e}"))?;
+            spec.source = Some(v.to_string());
+        }
+        "target" => {
+            let v = value.trim().trim_matches('"');
+            parse_daemon_protocol(v).map_err(|e| format!("bad redistribute target: {e}"))?;
+            spec.target = Some(v.to_string());
+        }
+        "metric" => {
+            spec.metric = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad redistribute metric '{value}' (u32)"))?,
+            );
+        }
+        "tag" => {
+            spec.tag = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad redistribute tag '{value}' (u32)"))?,
+            );
+        }
+        "allow" => {
+            let items = parse_str_array(value);
+            if items.is_empty() {
+                return Err(format!(
+                    "bad redistribute allow '{value}' (expected [\"prefix/len\", ...])"
+                ));
+            }
+            for item in items {
+                let p: lr_core::addr::Prefix = item.parse().map_err(|_| {
+                    format!("bad redistribute allow prefix '{item}' (expected CIDR)")
+                })?;
+                spec.allow.push(p.to_string());
+            }
+        }
+        _ => {
+            return Err(format!(
+                "unknown [[redistribute]] key '{key}' (typo protection; redistribution fails closed)"
+            ));
+        }
+    }
+    Ok(true)
+}
+
+/// Parse one `[[aggregate]]` table key (ROADMAP-v3 D4.2). Unknown keys
+/// are hard errors — an ignored aggregate silently changes what BGP
+/// originates.
+fn apply_aggregate_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "aggregate" {
+        return Ok(false);
+    }
+    let Some(spec) = cfg.aggregates.last_mut() else {
+        return Err("key outside an [[aggregate]] table".into());
+    };
+    match key {
+        "prefix" => {
+            let v = value.trim().trim_matches('"');
+            let p: lr_core::addr::Prefix = v
+                .parse()
+                .map_err(|_| format!("bad aggregate prefix '{v}' (expected CIDR)"))?;
+            spec.prefix = Some(p.to_string());
+        }
+        _ => {
+            return Err(format!(
+                "unknown [[aggregate]] key '{key}' (typo protection; aggregation fails closed)"
             ));
         }
     }
@@ -5298,5 +5627,192 @@ mod tests {
             err.contains("unknown [bgp.rpki] key 'cache_host'"),
             "error should name the bad key: {err}"
         );
+    }
+
+    // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2) ----
+
+    #[test]
+    fn redistribute_table_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"ospf\"\ntarget = \"bgp\"\nmetric = 100\ntag = 65000\n\
+             allow = [\"10.0.0.0/8\", \"192.168.0.0/16\"]\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.redistributes.len(), 1);
+        let spec = &cfg.redistributes[0];
+        assert_eq!(spec.source.as_deref(), Some("ospf"));
+        assert_eq!(spec.target.as_deref(), Some("bgp"));
+        assert_eq!(spec.metric, Some(100));
+        assert_eq!(spec.tag, Some(65000));
+        assert_eq!(spec.allow, vec!["10.0.0.0/8", "192.168.0.0/16"]);
+    }
+
+    #[test]
+    fn redistribute_finalize_accepts_bgp_to_bgp_pipe() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"bgp\"\ntarget = \"bgp\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize()
+            .expect("bgp->bgp re-origination pipe is a supported shape");
+    }
+
+    #[test]
+    fn redistribute_finalize_rejects_engine_not_in_protocol_set() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"babel\"\ntarget = \"bgp\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg
+            .finalize()
+            .expect_err("babel source without the babel engine");
+        assert!(
+            err.contains("does not run the babel engine"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn redistribute_finalize_rejects_unsupported_target() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "protocol = \"bgp,babel\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"babel\"\ntarget = \"babel\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("babel is not a supported target");
+        assert!(
+            err.contains("target 'babel' is not supported"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn redistribute_finalize_rejects_static_source() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"static\"\ntarget = \"bgp\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("static has no injection surface");
+        assert!(
+            err.contains("no daemon injection surface"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn redistribute_missing_source_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[redistribute]]\ntarget = \"bgp\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("missing source");
+        assert!(err.contains("without 'source'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn redistribute_unknown_key_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[redistribute]]\nsource = \"bgp\"\ntarget = \"ospf\"\nmetrik = 5\n",
+            &mut cfg,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("unknown [[redistribute]] key 'metrik'"),
+            "error should name the bad key: {err}"
+        );
+    }
+
+    #[test]
+    fn redistribute_bad_allow_prefix_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[redistribute]]\nsource = \"bgp\"\ntarget = \"ospf\"\nallow = [\"10.0.0.0/44\"]\n",
+            &mut cfg,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("bad redistribute allow prefix"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn redistribute_duplicate_pipe_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "protocol = \"bgp\"\n[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[redistribute]]\nsource = \"bgp\"\ntarget = \"bgp\"\n\n\
+             [[redistribute]]\nsource = \"bgp\"\ntarget = \"bgp\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("duplicate pipe");
+        assert!(
+            err.contains("bgp -> bgp declared twice"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_table_parses_and_finalizes() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\nrouter_id = \"10.0.0.1\"\n\n\
+             [[aggregate]]\nprefix = \"198.51.100.0/23\"\n\n\
+             [[aggregate]]\nprefix = \"2001:db8::/32\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.aggregates.len(), 2);
+        assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("198.51.100.0/23"));
+    }
+
+    #[test]
+    fn aggregate_missing_prefix_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[aggregate]]\n", &mut cfg).unwrap();
+        let err = cfg.finalize().expect_err("missing prefix");
+        assert!(err.contains("without 'prefix'"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn aggregate_unknown_key_fails_closed() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[aggregate]]\nprefix = \"198.51.100.0/23\"\nsummary_only = true\n",
+            &mut cfg,
+        )
+        .unwrap_err();
+        assert!(
+            err.contains("unknown [[aggregate]] key 'summary_only'"),
+            "error should name the bad key: {err}"
+        );
+    }
+
+    #[test]
+    fn aggregate_duplicate_prefix_fails() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[aggregate]]\nprefix = \"198.51.100.0/23\"\n\n\
+             [[aggregate]]\nprefix = \"198.51.100.0/23\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().expect_err("duplicate aggregate");
+        assert!(err.contains("declared twice"), "unexpected error: {err}");
     }
 }

@@ -48,7 +48,10 @@ use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
 use lr_core::nlri::NlriFamily;
 use lr_osroute::gtsm::Gtsm;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
-use lr_router::{DefaultRouter, RouterEvent, RouterInstance, SessionConfig, SessionHandle};
+use lr_router::{
+    DefaultRouter, MetricPolicy, RedistributionPipe, RouterEvent, RouterInstance, SessionConfig,
+    SessionHandle,
+};
 #[cfg(target_os = "linux")]
 use std::collections::HashMap;
 
@@ -68,7 +71,7 @@ mod translate;
 mod yang;
 
 use daemon_bfd::BfdFlags;
-use daemon_config::{DaemonConfig, PeerSpec};
+use daemon_config::{parse_daemon_protocol, DaemonConfig, PeerSpec};
 
 fn print_usage() {
     println!(
@@ -378,6 +381,74 @@ impl PeerEntry {
     }
 }
 
+/// Install `[[redistribute]]` pipes and `[[aggregate]]` registrations
+/// (ROADMAP-v3 D4.1 / D4.2) on the shared router. Called once per
+/// process — from the multi-protocol supervisor right after it creates
+/// the router, or from the standalone BGP engine (`host = None`). The
+/// config validation already guaranteed the referenced engines are in
+/// the protocol set (`finalize_redistribution`), so any error here is
+/// a programming bug and surfaces as one.
+///
+/// Returns the number of pipes and aggregates installed (for the
+/// startup banner).
+fn apply_cross_protocol_config(
+    cfg: &DaemonConfig,
+    r: &mut DefaultRouter,
+) -> Result<(usize, usize), String> {
+    for spec in &cfg.redistributes {
+        let source = spec
+            .source
+            .as_deref()
+            .ok_or_else(|| "[[redistribute]] without 'source'".to_string())?;
+        let target = spec
+            .target
+            .as_deref()
+            .ok_or_else(|| "[[redistribute]] without 'target'".to_string())?;
+        let source_proto = parse_daemon_protocol(source)?;
+        let target_proto = parse_daemon_protocol(target)?;
+        let mut pipe = RedistributionPipe::new(source_proto, target_proto);
+        if let Some(metric) = spec.metric {
+            pipe = pipe.with_metric(MetricPolicy::Fixed(metric));
+        }
+        if let Some(tag) = spec.tag {
+            pipe = pipe.with_tag(tag);
+        }
+        if !spec.allow.is_empty() {
+            let mut allow = Vec::with_capacity(spec.allow.len());
+            for text in &spec.allow {
+                let p: Prefix = text
+                    .parse()
+                    .map_err(|_| format!("[[redistribute]] bad allow prefix '{text}'"))?;
+                allow.push((p.addr, p.prefix_len));
+            }
+            pipe = pipe.with_allow_prefixes(allow);
+        }
+        let metric_note = spec
+            .metric
+            .map(|m| format!(" metric={m}"))
+            .unwrap_or_default();
+        println!(
+            "  redistribute: {} -> {}{}",
+            source_proto.bird_name(),
+            target_proto.bird_name(),
+            metric_note
+        );
+        r.add_redistribution_pipe(pipe);
+    }
+    for spec in &cfg.aggregates {
+        let text = spec
+            .prefix
+            .as_deref()
+            .ok_or_else(|| "[[aggregate]] without 'prefix'".to_string())?;
+        let prefix: Prefix = text
+            .parse()
+            .map_err(|_| format!("[[aggregate]] bad prefix '{text}'"))?;
+        println!("  aggregate:    {} (rfc4271 §9.2.2.2)", prefix);
+        r.add_aggregate(prefix);
+    }
+    Ok((cfg.redistributes.len(), cfg.aggregates.len()))
+}
+
 /// Run the BGP engine. `host = None` is the classic standalone
 /// daemon (own router, own running flag, own ticker, own API socket,
 /// own privilege drop); `Some(host)` plugs it into the multi-protocol
@@ -391,6 +462,19 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         Some(h) => Arc::clone(&h.runtime.router),
         None => Arc::new(Mutex::new(DefaultRouter::new())),
     };
+
+    // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2). ----
+    // Cross-protocol pipes and BGP aggregates attach to the shared
+    // router. The supervisor applies them once on the shared router
+    // when it created it; the embedded engines must not re-apply
+    // (duplicate pipes would double-re-originate every route).
+    if host.is_none() {
+        let mut r = router.lock().unwrap();
+        if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    }
 
     // Optional BMP egress (RFC 7854): mirror Peer Up/Down + Route
     // Monitoring to a monitoring station. The sink is called from
