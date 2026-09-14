@@ -9,6 +9,14 @@ repository.workspace = true
 homepage.workspace = true
 description = "Layer-3 router instance, sessions, scheduler, event dispatch"
 
+# `cargo bench --workspace -- <criterion args>` passes the args to
+# every bench-enabled target; without this the lib unit tests
+# (libtest harness) would run in bench mode and reject the
+# criterion-only flags with "Unrecognized option". Criterion
+# benches live in the explicit [[bench]] targets below.
+[lib]
+bench = false
+
 [features]
 default = ["labeled_unicast"]
 # Forward to lr-bgp so consumers gating on lr-router's feature see the

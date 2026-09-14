@@ -10,6 +10,7 @@ homepage.workspace = true
 description = "C ABI bindings to librouting (cbindgen-generated header)"
 
 [lib]
+bench = false
 crate-type = ["cdylib", "staticlib", "rlib"]
 name = "lr_ffi"
 

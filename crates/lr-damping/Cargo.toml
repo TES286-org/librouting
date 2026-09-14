@@ -11,6 +11,14 @@ description.workspace = true
 keywords = ["routing", "damping", "flap", "bgp"]
 categories = ["network-programming", "algorithms"]
 
+# `cargo bench --workspace -- <criterion args>` passes the args to
+# every bench-enabled target; without this the lib unit tests
+# (libtest harness) would run in bench mode and reject the
+# criterion-only flags with "Unrecognized option". Criterion
+# benches live in the explicit [[bench]] targets below.
+[lib]
+bench = false
+
 [features]
 default = ["std"]
 std = ["lr-core/std"]

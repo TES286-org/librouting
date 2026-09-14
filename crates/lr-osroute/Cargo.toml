@@ -8,6 +8,14 @@ authors.workspace = true
 repository.workspace = true
 homepage.workspace = true
 description = "OS routing table reference implementation (Linux netlink, BSD route socket, Windows IPHelper)"
+
+# `cargo bench --workspace -- <criterion args>` passes the args to
+# every bench-enabled target; without this the lib unit tests
+# (libtest harness) would run in bench mode and reject the
+# criterion-only flags with "Unrecognized option". Criterion
+# benches live in the explicit [[bench]] targets below.
+[lib]
+bench = false
 keywords = ["routing", "netlink", "rtnetlink", "linux"]
 categories = ["network-programming", "os"]
 

@@ -9,6 +9,14 @@ repository.workspace = true
 homepage.workspace = true
 description = "Routing policy: route maps, prefix lists, AS-path filters, community lists"
 
+# `cargo bench --workspace -- <criterion args>` passes the args to
+# every bench-enabled target; without this the lib unit tests
+# (libtest harness) would run in bench mode and reject the
+# criterion-only flags with "Unrecognized option". Criterion
+# benches live in the explicit [[bench]] targets below.
+[lib]
+bench = false
+
 [dependencies]
 lr-core = { workspace = true }
 lr-bgp = { workspace = true, optional = true }

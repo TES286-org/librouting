@@ -9,6 +9,14 @@ repository.workspace = true
 homepage.workspace = true
 description = "Core primitives, codec traits, generic FSM and RIB traits for librouting"
 
+# `cargo bench --workspace -- <criterion args>` passes the args to
+# every bench-enabled target; without this the lib unit tests
+# (libtest harness) would run in bench mode and reject the
+# criterion-only flags with "Unrecognized option". Criterion
+# benches live in the explicit [[bench]] targets below.
+[lib]
+bench = false
+
 [features]
 default = ["std"]
 std = []

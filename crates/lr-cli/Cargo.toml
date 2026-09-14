@@ -11,13 +11,18 @@ description = "CLI tool and daemon scaffolding for librouting"
 keywords = ["bgp", "routing", "cli", "daemon"]
 categories = ["network-programming"]
 
+# `bench = false` keeps the binaries' unit tests (libtest harness)
+# out of `cargo bench --workspace` — otherwise they run in bench mode
+# and reject the criterion-only flags ("Unrecognized option").
 [[bin]]
 name = "lr"
 path = "src/main.rs"
+bench = false
 
 [[bin]]
 name = "lr-daemon"
 path = "src/daemon.rs"
+bench = false
 
 [dependencies]
 lr-core = { workspace = true }
