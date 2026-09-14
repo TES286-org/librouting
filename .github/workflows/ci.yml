@@ -81,6 +81,9 @@ jobs:
       - name: Babel multi-NIC pattern matching
         run: |
           ./tests/interop/babel_multi_nic.sh
+      - name: Babel multi-session transit + check link
+        run: |
+          ./tests/interop/babel_multihop.sh
 
   msrv:
     name: MSRV (1.88)

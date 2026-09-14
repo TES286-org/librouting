@@ -90,6 +90,27 @@ if ! grep -qE "babel interface pattern 'lo' matched 1 interface\(s\): lo" "$OUT/
     exit 1
 fi
 
-echo "PASS: Babel multi-NIC pattern matching"
+# ROADMAP-v3 D1: every matched interface gets its own Babel session with
+# the first matching pattern's parameters (BIRD first-match semantics).
+for iface in lo veth0 veth1; do
+    if ! grep -qE "babel interface $iface session [0-9]+ — " "$OUT/lr.log"; then
+        echo "FAIL: daemon did not start a per-interface session for $iface"
+        exit 1
+    fi
+done
+# veth* parameters apply to both veths (hello 4000 ms from the spec);
+# lo takes its own rxcost (256).
+for iface in veth0 veth1; do
+    if ! grep -qE "babel interface $iface session [0-9]+ — v4 hello 4000ms update 12000ms rxcost 96" "$OUT/lr.log"; then
+        echo "FAIL: $iface does not carry the veth* pattern parameters (hello 4000ms / rxcost 96)"
+        exit 1
+    fi
+done
+if ! grep -qE "babel interface lo session [0-9]+ — v6 hello 1000ms update 3000ms rxcost 256" "$OUT/lr.log"; then
+    echo "FAIL: lo does not carry its own rxcost (256)"
+    exit 1
+fi
+
+echo "PASS: Babel multi-NIC pattern matching + per-interface sessions"
 exit 0
 INNER
