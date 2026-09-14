@@ -88,13 +88,22 @@ pub trait RouterInstance {
     /// TransportOpen). Call once the transport is connected.
     fn start_session(&mut self, h: SessionHandle) -> Result<(), String>;
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String>;
-    /// Feed one received datagram together with a 32-bit microsecond
-    /// receive clock (the BABEL-RTT timestamp reference — RFC 8966
-    /// §A.2.4). Defaults to delegating to [`RouterInstance::feed_input`]
-    /// for implementors without a fine-grained clock; only the Babel
-    /// runtime consumes the extra precision.
-    fn feed_input_at(&mut self, h: SessionHandle, bytes: &[u8], now_us: u32) -> Result<(), String> {
-        let _ = now_us;
+    /// Feed one received datagram together with the transport's clocks:
+    /// `now_ms` — wall-clock milliseconds since the transport started,
+    /// the liveness/expiry reference (RFC 8966 §3.2.5) — and `now_us` —
+    /// the 32-bit microsecond BABEL-RTT timestamp reference (RFC 8966
+    /// §A.2.4). Both must be drawn from the same clock the outgoing
+    /// Hello/IHU timestamps use. Defaults to zeroing both for
+    /// implementors without fine-grained clocks; only the Babel runtime
+    /// consumes the extra precision.
+    fn feed_input_at(
+        &mut self,
+        h: SessionHandle,
+        bytes: &[u8],
+        now_ms: u64,
+        now_us: u32,
+    ) -> Result<(), String> {
+        let _ = (now_ms, now_us);
         self.feed_input(h, bytes)
     }
     fn drain_output(&mut self, h: SessionHandle) -> Vec<u8>;
@@ -147,6 +156,22 @@ pub trait RouterInstance {
     fn babel_rtt_us(&self, _h: SessionHandle, _now_ms: u64) -> Option<u32> {
         None
     }
+
+    /// The BABEL-RTT pair the next IHU toward the session's peer should
+    /// echo — `(peer Hello timestamp, our receive time)`, valid only
+    /// while the Hello is fresh (RFC 8966 §A.2.4; babeld's 1 s echo
+    /// window). Defaults to `None` for implementors without a Babel
+    /// runtime.
+    fn babel_rtt_echo(&self, _h: SessionHandle, _now_ms: u64) -> Option<(u32, u32)> {
+        None
+    }
+
+    /// One Babel expiry sweep (RFC 8966 §3.2.5): expire routes whose
+    /// re-announcement hold time lapsed and retract everything a dead
+    /// neighbour taught us, applying the Loc-RIB deltas. The transport
+    /// should call this about once a second. Default: no-op for
+    /// implementors without a Babel runtime.
+    fn babel_gc(&mut self, _now_ms: u64) {}
 }
 
 /// Per-session protocol runtime.
@@ -741,6 +766,7 @@ struct BabelRuntime {
 
 /// Result of one protocol-runtime step: routes to install into / withdraw
 /// from Loc-RIB.
+#[derive(Default)]
 struct RuntimeDelta {
     installed: Vec<Route>,
     withdrawn: Vec<RouteKey>,
@@ -813,7 +839,7 @@ impl BabelRuntime {
                 }
                 TlvType::Update => {
                     if let Some(u) = Update::decode(&tlv.value) {
-                        self.apply_update(&u);
+                        self.apply_update(&u, now_ms);
                     }
                 }
                 _ => {}
@@ -822,7 +848,7 @@ impl BabelRuntime {
         self.diff()
     }
 
-    fn apply_update(&mut self, u: &lr_babel::message::Update) {
+    fn apply_update(&mut self, u: &lr_babel::message::Update, now_ms: u64) {
         // AE 0 = wildcard; AE 1 = IPv4; AE 2 = IPv6. Both are handled.
         let prefix = match u.ae {
             1 => {
@@ -879,14 +905,38 @@ impl BabelRuntime {
             return;
         }
         let nh = self.next_hop.unwrap_or(self.neighbor.address);
-        self.routes.insert(BabelRoute {
-            key,
-            seqno: u.seqno,
-            metric: u32::from(u.metric),
-            next_hop: nh,
-            feasible: true,
-            installed: false,
-        });
+        self.routes.insert_timed(
+            BabelRoute {
+                key,
+                seqno: u.seqno,
+                metric: u32::from(u.metric),
+                next_hop: nh,
+                feasible: true,
+                installed: false,
+            },
+            u.interval_cs,
+            now_ms,
+        );
+    }
+
+    /// One expiry sweep (RFC 8966 §3.2.5 + babeld's neighbour-death
+    /// retraction): routes whose re-announcement hold time lapsed are
+    /// dropped, and a neighbour that stopped its Hellos loses every
+    /// route it taught us — in both cases the diff against `published`
+    /// becomes the Loc-RIB withdrawal delta.
+    fn gc(&mut self, now_ms: u64) -> RuntimeDelta {
+        // Neighbour death: no Hello within the advertised hold window
+        // (4× the Hello interval, the `is_alive` bound). babeld calls
+        // `retract_neighbour_routes` at that point instead of waiting
+        // out every route's own hold time.
+        if !self.neighbor.is_alive(now_ms, 0) && !self.routes.is_empty() {
+            self.routes = lr_babel::BabelRouteTable::new();
+            return self.diff();
+        }
+        if !self.routes.expire(now_ms).is_empty() {
+            return self.diff();
+        }
+        RuntimeDelta::default()
     }
 
     /// Diff the current feasible best set against the previously published
@@ -4122,10 +4172,16 @@ impl RouterInstance for DefaultRouter {
     }
 
     fn feed_input(&mut self, h: SessionHandle, bytes: &[u8]) -> Result<(), String> {
-        self.feed_input_at(h, bytes, 0)
+        self.feed_input_at(h, bytes, 0, 0)
     }
 
-    fn feed_input_at(&mut self, h: SessionHandle, bytes: &[u8], now_us: u32) -> Result<(), String> {
+    fn feed_input_at(
+        &mut self,
+        h: SessionHandle,
+        bytes: &[u8],
+        now_ms: u64,
+        now_us: u32,
+    ) -> Result<(), String> {
         // Phase 1 (borrow sessions): decode + drive the protocol FSM.
         enum Pending {
             Bgp {
@@ -4218,7 +4274,7 @@ impl RouterInstance for DefaultRouter {
                     };
                     let mut r = lr_core::buf::ReadBuf::new(&input);
                     while let Ok(Some(frame)) = runtime.codec.decode(&mut r) {
-                        let d = runtime.handle_frame(&frame, self.now_ms, now_us);
+                        let d = runtime.handle_frame(&frame, now_ms, now_us);
                         delta.installed.extend(d.installed);
                         delta.withdrawn.extend(d.withdrawn);
                     }
@@ -4548,6 +4604,27 @@ impl RouterInstance for DefaultRouter {
         match self.sessions.get(&h.0) {
             Some(SessionState::Babel { runtime, .. }) => runtime.neighbor.rtt_us(now_ms),
             _ => None,
+        }
+    }
+
+    fn babel_rtt_echo(&self, h: SessionHandle, now_ms: u64) -> Option<(u32, u32)> {
+        match self.sessions.get(&h.0) {
+            Some(SessionState::Babel { runtime, .. }) => runtime.neighbor.rtt_echo_pair(now_ms),
+            _ => None,
+        }
+    }
+
+    fn babel_gc(&mut self, now_ms: u64) {
+        // Collect first, apply after: the sessions map borrows self.
+        let mut deltas: Vec<RuntimeDelta> = Vec::new();
+        for state in self.sessions.values_mut() {
+            let SessionState::Babel { runtime, .. } = state else {
+                continue;
+            };
+            deltas.push(runtime.gc(now_ms));
+        }
+        for delta in deltas {
+            self.apply_runtime_delta(delta);
         }
     }
 }

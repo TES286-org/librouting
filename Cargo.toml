@@ -52,7 +52,7 @@ lr-ldp = { path = "crates/lr-ldp", version = "1.0.0-rc.3" }
 lr-ffi = { path = "crates/lr-ffi", version = "1.0.0-rc.3" }
 
 bytes = "1"
-socket2 = "0.6"
+socket2 = { version = "0.6", features = ["all"] }
 thiserror = "1"
 tracing = "0.1"
 bitflags = "2"

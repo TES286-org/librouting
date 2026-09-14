@@ -1,7 +1,8 @@
 //! Multi-session Babel semantics at the router level (ROADMAP-v3 D1):
 //! per-session split horizon through `babel_reachable`, link-down route
-//! flushing through `babel_flush_session`, and the BABEL-RTT round trip
-//! through `feed_input_at` (RFC 8966 §A.2.4).
+//! flushing through `babel_flush_session`, the BABEL-RTT round trip
+//! through `feed_input_at` (RFC 8966 §A.2.4) and route expiry through
+//! `babel_gc` (RFC 8966 §3.2.5).
 
 use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
 use lr_babel::tlv::{Tlv, TlvType};
@@ -168,7 +169,7 @@ fn feed_input_at_drives_the_rtt_measurement() {
         Hello::new(1, 100).with_timestamp(5_003_000).encode(),
     ));
     let wire = lr_babel::BabelCodec::new().encode_vec(&frame).unwrap();
-    r.feed_input_at(a, &wire, 104_500).unwrap();
+    r.feed_input_at(a, &wire, 104, 104_500).unwrap();
 
     // The peer's IHU echoes (our 100_000, its 5_002_000).
     let mut ihu = lr_babel::BabelFrame::empty();
@@ -179,10 +180,119 @@ fn feed_input_at_drives_the_rtt_measurement() {
             .encode(),
     ));
     let wire = lr_babel::BabelCodec::new().encode_vec(&ihu).unwrap();
-    r.feed_input_at(a, &wire, 110_000).unwrap();
+    r.feed_input_at(a, &wire, 110, 110_000).unwrap();
 
     // First sample doubles (conservative start): 2 × 3.5 ms.
     assert_eq!(r.babel_rtt_us(a, 110), Some(7_000));
     // An unknown session reports nothing.
     assert_eq!(r.babel_rtt_us(lr_router::SessionHandle(999), 110), None);
+}
+
+/// RFC 8966 §3.2.5 at the router level: routes vanish from the Loc-RIB
+/// once their re-announcement hold time lapses, and a neighbour that
+/// stops its Hellos loses everything it taught us.
+#[test]
+fn babel_gc_expires_stale_routes() {
+    let mut r = DefaultRouter::new();
+    let a = babel_session(&mut r, IpAddr::V4([127, 10, 0, 2]));
+    // Peer announces 10.99.1.0/24 with a 3 s update interval at t=1 s
+    // (hold 18 s), and Hellos with a 60 s interval — a live neighbour
+    // whose route times out, isolating §3.2.5 from the neighbour-death
+    // retraction.
+    let mut frame = lr_babel::BabelFrame::empty();
+    frame
+        .body
+        .push(Tlv::new(TlvType::Hello, Hello::new(1, 600).encode()));
+    frame.body.push(Tlv::new(
+        TlvType::RouterId,
+        RouterIdTlv {
+            id: [8, 8, 8, 8, 0, 0, 0, 1],
+        }
+        .encode()
+        .to_vec(),
+    ));
+    frame.body.push(Tlv::new(
+        TlvType::Update,
+        Update {
+            ae: 1,
+            flags: 0,
+            prefix_len: 24,
+            omitted: 0,
+            interval_cs: 300,
+            seqno: 7,
+            metric: 96,
+            prefix: vec![10, 99, 1],
+            src_prefix_len: 0,
+            src_prefix: Vec::new(),
+        }
+        .encode(),
+    ));
+    let wire = lr_babel::BabelCodec::new().encode_vec(&frame).unwrap();
+    r.feed_input_at(a, &wire, 1_000, 1_000_000).unwrap();
+    assert_eq!(
+        r.rib_snapshot()
+            .iter()
+            .filter(|rt| rt.protocol == Protocol::Babel)
+            .count(),
+        1
+    );
+
+    // Half-way through the hold: nothing expires.
+    r.babel_gc(1_000 + 9_000);
+    assert_eq!(
+        r.rib_snapshot()
+            .iter()
+            .filter(|rt| rt.protocol == Protocol::Babel)
+            .count(),
+        1
+    );
+
+    // Past the deadline (18 s + hold): the route is gone.
+    r.babel_gc(1_000 + 18_001);
+    assert_eq!(
+        r.rib_snapshot()
+            .iter()
+            .filter(|rt| rt.protocol == Protocol::Babel)
+            .count(),
+        0
+    );
+    assert!(r.babel_reachable(a).is_empty());
+}
+
+/// A neighbour that stops sending Hellos loses its routes without
+/// waiting out every route's own hold time (babeld's
+/// `retract_neighbour_routes`).
+#[test]
+fn babel_gc_retracts_dead_neighbours_routes() {
+    let mut r = DefaultRouter::new();
+    let a = babel_session(&mut r, IpAddr::V4([127, 10, 0, 2]));
+    // One announcement at t=1 s with a long update interval (60 s →
+    // hold 36 s) but a 1 s Hello interval.
+    r.feed_input(a, &peer_frame([8, 8, 8, 8, 0, 0, 0, 1], [10, 99, 1], 7, 96))
+        .unwrap();
+    let mut hello = lr_babel::BabelFrame::empty();
+    hello
+        .body
+        .push(Tlv::new(TlvType::Hello, Hello::new(1, 100).encode()));
+    let wire = lr_babel::BabelCodec::new().encode_vec(&hello).unwrap();
+    r.feed_input_at(a, &wire, 1_000, 1_000_000).unwrap();
+    assert_eq!(
+        r.rib_snapshot()
+            .iter()
+            .filter(|rt| rt.protocol == Protocol::Babel)
+            .count(),
+        1
+    );
+
+    // t = 6 s: five Hello intervals of silence — past the 4× Hello
+    // liveness bound, long before the route's own 36 s hold.
+    r.babel_gc(6_000);
+    assert_eq!(
+        r.rib_snapshot()
+            .iter()
+            .filter(|rt| rt.protocol == Protocol::Babel)
+            .count(),
+        0,
+        "the dead neighbour's routes are retracted early"
+    );
 }
