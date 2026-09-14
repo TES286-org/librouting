@@ -18,6 +18,20 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Filter DSL large communities (ROADMAP-v3 D3.2, RFC 8097):
+  `LargeCommunity` struct + 12-byte codec in `lr-bgp` (byte-exact
+  wire test), typed `PathAttributes` accessors, `lr_policy::bgp`
+  helpers and the `bgp.large_communities` filter surface — `+=`, `=`,
+  `.add/.delete/.filter`, `~` membership; 4-octet ASNs work natively
+  (`4200000000:7:9`).
+- Filter DSL extended communities (ROADMAP-v3 D3.3, RFC 4360): BIRD
+  tuple literals `(rt, <asn|ip>, <local>)` / `(ro, ...)` / `(soo,
+  ...)` mapped to the canonical transitive types (0x42 / 0x41),
+  exposed as `bgp.ext_communities` with the same read/write/method
+  surface. Note: the pre-existing `ExtendedCommunity` struct cannot
+  represent the 2-octet-AS administrator form (type 0x00); the DSL
+  steers literals to the canonical 4-octet form and wire bytes from
+  peers still pass through opaquely.
 - Filter DSL set operations (ROADMAP-v3 D3.4): BIRD `delete` /
   `filter` / `empty` / `count`, with wildcard community patterns
   (`asn:val`, `asn:*`, `*:val`, `*:*`) in set literals. Works

@@ -16,7 +16,7 @@ pub mod mp_nlri;
 pub mod well_known;
 
 pub use as_path::{AsPath, AsPathSegment, AsPathType};
-pub use communities::{Community, CommunityKind, ExtendedCommunity};
+pub use communities::{Community, CommunityKind, ExtendedCommunity, LargeCommunity};
 #[cfg(feature = "labeled_unicast")]
 pub use labeled_nlri::{
     decode_list as decode_labeled_list, decode_mp_reach as decode_labeled_mp_reach,
@@ -366,6 +366,26 @@ impl PathAttributes {
         self.get(AttrType::ExtendedCommunities)
             .map(|a| ExtendedCommunity::decode_set(&a.value))
             .unwrap_or_default()
+    }
+    /// The route's LARGE_COMMUNITIES (RFC 8097 §2); empty when absent.
+    pub fn large_communities(&self) -> Vec<LargeCommunity> {
+        self.get(AttrType::LargeCommunities)
+            .map(|a| LargeCommunity::decode_set(&a.value))
+            .unwrap_or_default()
+    }
+    /// Attach a large community (RFC 8097 §2), idempotent.
+    /// LARGE_COMMUNITIES is optional transitive.
+    pub fn insert_large_community(&mut self, c: LargeCommunity) {
+        let mut set = self.large_communities();
+        if set.contains(&c) {
+            return;
+        }
+        set.push(c);
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::LargeCommunities,
+            LargeCommunity::encode_set(&set),
+        ));
     }
     pub fn mp_reach(&self) -> Option<MpReach> {
         let a = self.get(AttrType::MpReachNlri)?;

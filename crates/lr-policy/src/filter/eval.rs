@@ -151,6 +151,13 @@ pub trait FilterContext {
     fn bgp_as_path(&self, route: &Route) -> Vec<Asn>;
     /// BGP COMMUNITIES (`bgp.communities`); empty when absent.
     fn bgp_communities(&self, route: &Route) -> Vec<(Asn, u16)>;
+    /// BGP LARGE_COMMUNITIES (`bgp.large_communities`, RFC 8097) as
+    /// `(global_admin, local_data1, local_data2)` triples; empty when
+    /// absent.
+    fn bgp_large_communities(&self, route: &Route) -> Vec<(u32, u32, u32)>;
+    /// BGP EXTENDED_COMMUNITIES (`bgp.ext_communities`, RFC 4360) as
+    /// raw `(type, subtype, global, local)` records; empty when absent.
+    fn bgp_ext_communities(&self, route: &Route) -> Vec<(u8, u8, u32, u16)>;
     /// BGP ORIGIN (`bgp.origin`): `0 = IGP`, `1 = EGP`, `2 = INCOMPLETE`.
     fn bgp_origin(&self, route: &Route) -> Option<u8>;
     /// RFC 6811 validation outcome (`roa.state`) for the route's
@@ -175,6 +182,12 @@ pub trait FilterContext {
     /// Replace the AS_PATH with a flat sequence. An empty sequence
     /// drops the attribute. Used by `bgp.as_path.delete/filter`.
     fn set_bgp_as_path(&self, route: &mut Route, seq: Vec<Asn>);
+    /// Replace the whole LARGE_COMMUNITIES attribute (RFC 8097);
+    /// an empty set drops it.
+    fn set_bgp_large_communities(&self, route: &mut Route, set: Vec<(u32, u32, u32)>);
+    /// Replace the whole EXTENDED_COMMUNITIES attribute (RFC 4360);
+    /// an empty set drops it.
+    fn set_bgp_ext_communities(&self, route: &mut Route, set: Vec<(u8, u8, u32, u16)>);
 }
 
 /// Internal control-flow signal — `Continue` keeps evaluating the
@@ -517,6 +530,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 // one element".
                 RouteFieldKind::BgpAsPath => !self.ctx.bgp_as_path(route).is_empty(),
                 RouteFieldKind::BgpCommunities => !self.ctx.bgp_communities(route).is_empty(),
+                RouteFieldKind::BgpLargeCommunities => {
+                    !self.ctx.bgp_large_communities(route).is_empty()
+                }
+                RouteFieldKind::BgpExtCommunities => {
+                    !self.ctx.bgp_ext_communities(route).is_empty()
+                }
             },
             Expr::Var(name) => self.scopes.iter().rev().any(|s| s.vars.contains_key(name)),
             // A literal is always defined.
@@ -549,6 +568,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpAsPath => Ok(Value::AsPath(self.ctx.bgp_as_path(route))),
             RouteFieldKind::BgpCommunities => {
                 Ok(Value::Communities(self.ctx.bgp_communities(route)))
+            }
+            RouteFieldKind::BgpLargeCommunities => Ok(Value::LargeCommunities(
+                self.ctx.bgp_large_communities(route),
+            )),
+            RouteFieldKind::BgpExtCommunities => {
+                Ok(Value::ExtCommunities(self.ctx.bgp_ext_communities(route)))
             }
             RouteFieldKind::BgpOrigin => Ok(Value::Int(i64::from(
                 self.ctx.bgp_origin(route).unwrap_or(0),
@@ -598,6 +623,16 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpCommunities => {
                 let cs = self.communities_from_value(&value, "=")?;
                 self.ctx.set_bgp_communities(route, cs);
+            }
+            // `bgp.large_communities = <set>` (RFC 8097).
+            RouteFieldKind::BgpLargeCommunities => {
+                let cs = self.large_communities_from_value(&value, "=")?;
+                self.ctx.set_bgp_large_communities(route, cs);
+            }
+            // `bgp.ext_communities = <set>` (RFC 4360).
+            RouteFieldKind::BgpExtCommunities => {
+                let cs = self.ext_communities_from_value(&value, "=")?;
+                self.ctx.set_bgp_ext_communities(route, cs);
             }
             // `bgp.as_path = <sequence>` — BIRD assigns `bgp_path`
             // values the same way.
@@ -650,6 +685,59 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     });
                 }
                 other => return Err(type_mismatch(op, other, "community-set")),
+            }
+            Ok(())
+        };
+        match value {
+            Value::Set(items) => {
+                for it in items {
+                    push_item(it)?;
+                }
+            }
+            other => push_item(other)?,
+        }
+        Ok(out)
+    }
+
+    /// Normalize a large-community-set RHS (RFC 8097): a bare
+    /// `LargeCommunities` value, a set literal of triples, or one
+    /// triple.
+    fn large_communities_from_value(
+        &self,
+        value: &Value,
+        op: &str,
+    ) -> Result<Vec<(u32, u32, u32)>, EvalError> {
+        let mut out = Vec::new();
+        let mut push_item = |it: &Value| -> Result<(), EvalError> {
+            match it {
+                Value::LargeCommunities(cs) => out.extend(cs.iter().copied()),
+                other => return Err(type_mismatch(op, other, "large-community-set")),
+            }
+            Ok(())
+        };
+        match value {
+            Value::Set(items) => {
+                for it in items {
+                    push_item(it)?;
+                }
+            }
+            other => push_item(other)?,
+        }
+        Ok(out)
+    }
+
+    /// Normalize an extended-community-set RHS (RFC 4360): a bare
+    /// `ExtCommunities` value, a set literal of tuples, or one tuple.
+    fn ext_communities_from_value(
+        &self,
+        value: &Value,
+        op: &str,
+    ) -> Result<Vec<(u8, u8, u32, u16)>, EvalError> {
+        let mut out = Vec::new();
+        let mut push_item = |it: &Value| -> Result<(), EvalError> {
+            match it {
+                Value::ExtCommunities(cs) => out.extend(cs.iter().copied()),
+                other => return Err(type_mismatch(op, other, "ext-community-set")),
             }
             Ok(())
         };
@@ -718,6 +806,26 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     self.ctx.bgp_communities_add(route, asn, val);
                 }
             }
+            RouteFieldKind::BgpLargeCommunities => {
+                let cs = self.large_communities_from_value(&value, "+=")?;
+                let mut cur = self.ctx.bgp_large_communities(route);
+                for c in cs {
+                    if !cur.contains(&c) {
+                        cur.push(c);
+                    }
+                }
+                self.ctx.set_bgp_large_communities(route, cur);
+            }
+            RouteFieldKind::BgpExtCommunities => {
+                let cs = self.ext_communities_from_value(&value, "+=")?;
+                let mut cur = self.ctx.bgp_ext_communities(route);
+                for c in cs {
+                    if !cur.contains(&c) {
+                        cur.push(c);
+                    }
+                }
+                self.ctx.set_bgp_ext_communities(route, cur);
+            }
             other => {
                 return Err(EvalError {
                     kind: EvalErrorKind::UnknownMethod {
@@ -746,6 +854,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 match &args[0] {
                     Value::AsPath(p) => Ok(Value::Int(p.len() as i64)),
                     Value::Communities(c) => Ok(Value::Int(c.len() as i64)),
+                    Value::LargeCommunities(c) => Ok(Value::Int(c.len() as i64)),
+                    Value::ExtCommunities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.len() as i64)),
                     other => Err(type_mismatch("len", other, "as-path|community-set|string")),
                 }
@@ -765,6 +875,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 match &args[0] {
                     Value::AsPath(p) => Ok(Value::Bool(p.is_empty())),
                     Value::Communities(c) => Ok(Value::Bool(c.is_empty())),
+                    Value::LargeCommunities(c) => Ok(Value::Bool(c.is_empty())),
+                    Value::ExtCommunities(c) => Ok(Value::Bool(c.is_empty())),
                     Value::Set(s) => Ok(Value::Bool(s.is_empty())),
                     Value::Str(s) => Ok(Value::Bool(s.is_empty())),
                     other => Err(type_mismatch("empty", other, "set-like")),
@@ -777,6 +889,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 match &args[0] {
                     Value::AsPath(p) => Ok(Value::Int(p.len() as i64)),
                     Value::Communities(c) => Ok(Value::Int(c.len() as i64)),
+                    Value::LargeCommunities(c) => Ok(Value::Int(c.len() as i64)),
+                    Value::ExtCommunities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::Set(s) => Ok(Value::Int(s.len() as i64)),
                     other => Err(type_mismatch("count", other, "set-like")),
                 }
@@ -911,6 +1025,50 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     .collect();
                 self.ctx.set_bgp_as_path(route, out.clone());
                 Ok(Value::AsPath(out))
+            }
+            (RouteFieldKind::BgpLargeCommunities, "add" | "delete" | "filter") => {
+                if args.len() != 1 {
+                    return Err(bad_arg_count("bgp.large_communities.add", 1, args.len()));
+                }
+                let items = self.large_communities_from_value(&args[0], method)?;
+                let cur = self.ctx.bgp_large_communities(route);
+                let out: Vec<(u32, u32, u32)> = match method {
+                    "add" => {
+                        let mut out = cur;
+                        for c in items {
+                            if !out.contains(&c) {
+                                out.push(c);
+                            }
+                        }
+                        out
+                    }
+                    "delete" => cur.into_iter().filter(|c| !items.contains(c)).collect(),
+                    _ => cur.into_iter().filter(|c| items.contains(c)).collect(),
+                };
+                self.ctx.set_bgp_large_communities(route, out.clone());
+                Ok(Value::LargeCommunities(out))
+            }
+            (RouteFieldKind::BgpExtCommunities, "add" | "delete" | "filter") => {
+                if args.len() != 1 {
+                    return Err(bad_arg_count("bgp.ext_communities.add", 1, args.len()));
+                }
+                let items = self.ext_communities_from_value(&args[0], method)?;
+                let cur = self.ctx.bgp_ext_communities(route);
+                let out: Vec<(u8, u8, u32, u16)> = match method {
+                    "add" => {
+                        let mut out = cur;
+                        for c in items {
+                            if !out.contains(&c) {
+                                out.push(c);
+                            }
+                        }
+                        out
+                    }
+                    "delete" => cur.into_iter().filter(|c| !items.contains(c)).collect(),
+                    _ => cur.into_iter().filter(|c| items.contains(c)).collect(),
+                };
+                self.ctx.set_bgp_ext_communities(route, out.clone());
+                Ok(Value::ExtCommunities(out))
             }
             (kind, m) => Err(EvalError {
                 kind: EvalErrorKind::UnknownMethod {
@@ -1117,6 +1275,14 @@ fn value_match(l: &Value, r: &Value) -> bool {
         (Value::Communities(route_cs), Value::CommPattern { asn, val }) => route_cs
             .iter()
             .any(|(a, v)| asn.is_none_or(|p| p == a.0) && val.is_none_or(|p| p == *v)),
+        // RFC 8097 large communities: exact triple membership.
+        (Value::LargeCommunities(route_cs), Value::LargeCommunities(set_cs)) => {
+            set_cs.iter().any(|c| route_cs.contains(c))
+        }
+        // RFC 4360 extended communities: exact record membership.
+        (Value::ExtCommunities(route_cs), Value::ExtCommunities(set_cs)) => {
+            set_cs.iter().any(|c| route_cs.contains(c))
+        }
         (Value::RoaState(s), Value::Str(t)) => s.as_str() == t.as_str(),
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Ip(a), Value::Ip(b)) => a == b,
@@ -1216,6 +1382,42 @@ fn apply_set_op(
                 .collect();
             Ok(Value::Set(out))
         }
+        Value::LargeCommunities(cs) => {
+            let out: Vec<(u32, u32, u32)> = cs
+                .iter()
+                .filter(|c| {
+                    let m = items.iter().any(|p| match p {
+                        Value::LargeCommunities(s) => s.contains(c),
+                        _ => false,
+                    });
+                    if keep_matching {
+                        m
+                    } else {
+                        !m
+                    }
+                })
+                .copied()
+                .collect();
+            Ok(Value::LargeCommunities(out))
+        }
+        Value::ExtCommunities(cs) => {
+            let out: Vec<(u8, u8, u32, u16)> = cs
+                .iter()
+                .filter(|c| {
+                    let m = items.iter().any(|p| match p {
+                        Value::ExtCommunities(s) => s.contains(c),
+                        _ => false,
+                    });
+                    if keep_matching {
+                        m
+                    } else {
+                        !m
+                    }
+                })
+                .copied()
+                .collect();
+            Ok(Value::ExtCommunities(out))
+        }
         other => Err(type_mismatch(op, other, "community-set|as-path|set")),
     }
 }
@@ -1259,6 +1461,8 @@ mod tests {
     const TAG_MED: u8 = 4;
     const TAG_LOCAL_PREF: u8 = 5;
     const TAG_COMMUNITIES: u8 = 8;
+    const TAG_EXT_COMMUNITIES: u8 = 16;
+    const TAG_LARGE_COMMUNITIES: u8 = 32;
 
     fn attr(route: &Route, tag: u8) -> Option<Vec<u8>> {
         route
@@ -1365,6 +1569,56 @@ mod tests {
         }
         fn set_bgp_communities(&self, route: &mut Route, set: Vec<(Asn, u16)>) {
             Self::put_communities(route, &set);
+        }
+        fn bgp_large_communities(&self, route: &Route) -> Vec<(u32, u32, u32)> {
+            attr(route, TAG_LARGE_COMMUNITIES)
+                .map(|b| {
+                    lr_bgp::path::communities::LargeCommunity::decode_set(&b)
+                        .into_iter()
+                        .map(|c| (c.global_admin, c.local_data1, c.local_data2))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        fn bgp_ext_communities(&self, route: &Route) -> Vec<(u8, u8, u32, u16)> {
+            attr(route, TAG_EXT_COMMUNITIES)
+                .map(|b| {
+                    lr_bgp::path::communities::ExtendedCommunity::decode_set(&b)
+                        .into_iter()
+                        .map(|c| (c.kind, c.subtype, c.global, c.local))
+                        .collect()
+                })
+                .unwrap_or_default()
+        }
+        fn set_bgp_large_communities(&self, route: &mut Route, set: Vec<(u32, u32, u32)>) {
+            let cs: Vec<lr_bgp::path::communities::LargeCommunity> = set
+                .into_iter()
+                .map(|(g, d1, d2)| lr_bgp::path::communities::LargeCommunity::new(g, d1, d2))
+                .collect();
+            if cs.is_empty() {
+                route.attributes.remove(AttrTag::raw(TAG_LARGE_COMMUNITIES));
+                return;
+            }
+            route.attributes.insert(Attribute {
+                tag: AttrTag::raw(TAG_LARGE_COMMUNITIES),
+                flags: 0xC0,
+                value: lr_bgp::path::communities::LargeCommunity::encode_set(&cs),
+            });
+        }
+        fn set_bgp_ext_communities(&self, route: &mut Route, set: Vec<(u8, u8, u32, u16)>) {
+            let cs: Vec<lr_bgp::path::communities::ExtendedCommunity> = set
+                .into_iter()
+                .map(|(k, s, g, l)| lr_bgp::path::communities::ExtendedCommunity::new(k, s, g, l))
+                .collect();
+            if cs.is_empty() {
+                route.attributes.remove(AttrTag::raw(TAG_EXT_COMMUNITIES));
+                return;
+            }
+            route.attributes.insert(Attribute {
+                tag: AttrTag::raw(TAG_EXT_COMMUNITIES),
+                flags: 0xC0,
+                value: lr_bgp::path::communities::ExtendedCommunity::encode_set(&cs),
+            });
         }
         fn set_bgp_as_path(&self, route: &mut Route, seq: Vec<Asn>) {
             if seq.is_empty() {
@@ -2007,5 +2261,206 @@ mod tests {
             EvalResult::Accept,
         );
         assert_eq!(StubCtx.bgp_communities(&r), communities_to(&[(64512, 100)]));
+    }
+
+    // ===== D3.2 — large communities (RFC 8097) =====
+
+    /// Stamp a LARGE_COMMUNITIES attribute onto a route (test helper).
+    fn with_large(mut r: Route, set: &[(u32, u32, u32)]) -> Route {
+        let cs: Vec<lr_bgp::path::communities::LargeCommunity> = set
+            .iter()
+            .map(|(g, d1, d2)| lr_bgp::path::communities::LargeCommunity::new(*g, *d1, *d2))
+            .collect();
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_LARGE_COMMUNITIES),
+            flags: 0xC0,
+            value: lr_bgp::path::communities::LargeCommunity::encode_set(&cs),
+        });
+        r
+    }
+
+    #[test]
+    fn large_communities_append_and_read_back() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("bgp.large_communities += [64512:100:200]; accept;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_large_communities(&r), vec![(64512, 100, 200)]);
+        // Wire form must be the 12-byte RFC 8097 record.
+        let raw = r
+            .attributes
+            .get(AttrTag::raw(TAG_LARGE_COMMUNITIES))
+            .unwrap();
+        assert_eq!(raw.value.len(), 12);
+        assert_eq!(raw.value[..4], [0x00, 0x00, 0xFC, 0x00]);
+    }
+
+    #[test]
+    fn large_communities_dedup_and_delete_filter() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "bgp.large_communities += [64512:100:200, 64512:100:200, 65000:1:2]; accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            StubCtx.bgp_large_communities(&r),
+            vec![(64512, 100, 200), (65000, 1, 2)],
+        );
+        assert_eq!(
+            run(
+                "bgp.large_communities.delete([64512:100:200]); accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_large_communities(&r), vec![(65000, 1, 2)]);
+        assert_eq!(
+            run(
+                "bgp.large_communities.filter([65000:1:2]); if empty(bgp.large_communities) == false then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_large_communities(&r), vec![(65000, 1, 2)]);
+    }
+
+    #[test]
+    fn large_communities_membership_and_4octet_asn() {
+        // 4-octet ASNs fit without AS_TRANS (RFC 8097 §1 motivation).
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "bgp.large_communities += [4200000000:7:9]; if bgp.large_communities ~ [4200000000:7:9] then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_large_communities(&r), vec![(4200000000, 7, 9)],);
+    }
+
+    #[test]
+    fn large_communities_assignment_idiom() {
+        let mut r = with_large(
+            route_with("203.0.113.0/24", 100, 0),
+            &[(64512, 100, 200), (65000, 1, 2)],
+        );
+        assert_eq!(
+            run(
+                "bgp.large_communities = delete(bgp.large_communities, [64512:100:200]); accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_large_communities(&r), vec![(65000, 1, 2)]);
+    }
+
+    // ===== D3.3 — extended communities (RFC 4360) =====
+
+    #[test]
+    fn ext_communities_tuple_literal_appends() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "bgp.ext_communities += [(rt, 4200000000, 100)]; accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        // Route Target: transitive (0x40) 4-octet-AS specific (0x02),
+        // subtype 0x02 — the canonical BIRD wire form.
+        assert_eq!(
+            StubCtx.bgp_ext_communities(&r),
+            vec![(0x42, 0x02, 4200000000, 100)],
+        );
+        // IPv4 administrator form.
+        assert_eq!(
+            run(
+                "bgp.ext_communities += [(rt, 192.0.2.1, 5)]; accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            StubCtx.bgp_ext_communities(&r)[1],
+            (0x41, 0x02, 0xC000_0201, 5),
+        );
+    }
+
+    #[test]
+    fn ext_communities_ro_soo_names_map_to_subtype_3() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "bgp.ext_communities += [(ro, 65000, 1), (soo, 65001, 2)]; accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        let cs = StubCtx.bgp_ext_communities(&r);
+        assert_eq!(cs[0], (0x42, 0x03, 65000, 1));
+        assert_eq!(cs[1], (0x42, 0x03, 65001, 2));
+    }
+
+    #[test]
+    fn ext_communities_delete_filter_membership() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "bgp.ext_communities += [(rt, 65000, 1), (rt, 65001, 2)]; if bgp.ext_communities ~ [(rt, 65000, 1)] then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "bgp.ext_communities.delete([(rt, 65000, 1)]); accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            StubCtx.bgp_ext_communities(&r),
+            vec![(0x42, 0x02, 65001, 2)],
+        );
+        assert_eq!(
+            run(
+                "bgp.ext_communities.filter([(rt, 65009, 9)]); if empty(bgp.ext_communities) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert!(StubCtx.bgp_ext_communities(&r).is_empty());
+    }
+
+    #[test]
+    fn ext_communities_reject_v6_admin_and_bad_local() {
+        let f = compile("test", "bgp.ext_communities += [(rt, 2001:db8::1, 1)];");
+        assert!(f.is_err(), "IPv6 administrator form must be rejected");
+        let f = compile("test", "bgp.ext_communities += [(rt, 65000, 70000)];");
+        assert!(f.is_err(), "local part above u16::MAX must be rejected");
+    }
+
+    #[test]
+    fn defined_works_for_community_attributes() {
+        // D3.5 interplay: the new list attributes report presence.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "if defined(bgp.large_communities) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Reject(None),
+        );
+        assert_eq!(
+            run(
+                "bgp.large_communities += [64512:1:2]; if defined(bgp.large_communities) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
     }
 }

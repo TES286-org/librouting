@@ -141,6 +141,69 @@ pub struct ExtendedCommunity {
     pub local: u16,
 }
 
+/// BGP Large Community (RFC 8097 §2). 12 bytes wire format:
+/// `global_admin:local_data1:local_data2`, each a 4-octet field, so
+/// 4-byte ASNs fit without AS_TRANS shenanigans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct LargeCommunity {
+    /// Global administrator — typically the 4-octet AS that defined
+    /// the community.
+    pub global_admin: u32,
+    pub local_data1: u32,
+    pub local_data2: u32,
+}
+
+impl LargeCommunity {
+    pub const fn new(global_admin: u32, local_data1: u32, local_data2: u32) -> Self {
+        Self {
+            global_admin,
+            local_data1,
+            local_data2,
+        }
+    }
+
+    /// Decode a whole LARGE_COMMUNITIES attribute value. Trailing
+    /// partial records (len % 12 != 0) are ignored, mirroring the
+    /// tolerant decode of the other community attributes.
+    pub fn decode_set(b: &[u8]) -> Vec<Self> {
+        let mut out = Vec::with_capacity(b.len() / 12);
+        for chunk in b.as_chunks::<12>().0 {
+            out.push(Self {
+                global_admin: u32::from_be_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]),
+                local_data1: u32::from_be_bytes([chunk[4], chunk[5], chunk[6], chunk[7]]),
+                local_data2: u32::from_be_bytes([chunk[8], chunk[9], chunk[10], chunk[11]]),
+            });
+        }
+        out
+    }
+
+    pub fn encode_set(set: &[Self]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(set.len() * 12);
+        for c in set {
+            out.extend_from_slice(&c.global_admin.to_be_bytes());
+            out.extend_from_slice(&c.local_data1.to_be_bytes());
+            out.extend_from_slice(&c.local_data2.to_be_bytes());
+        }
+        out
+    }
+}
+
+impl fmt::Display for LargeCommunity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}:{}:{}",
+            self.global_admin, self.local_data1, self.local_data2
+        )
+    }
+}
+
+impl fmt::Display for ExtendedCommunity {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}:{}:{}", self.kind, self.global, self.local)
+    }
+}
+
 impl ExtendedCommunity {
     pub fn new(kind: u8, subtype: u8, global: u32, local: u16) -> Self {
         Self {
@@ -190,6 +253,30 @@ mod tests {
         let enc = Community::encode_set(&set);
         let dec = Community::decode_set(&enc);
         assert_eq!(dec, set);
+    }
+
+    #[test]
+    fn large_community_roundtrip_and_wire_form() {
+        // RFC 8097 §2: 12-byte records, big-endian per component.
+        let set = vec![
+            LargeCommunity::new(64512, 100, 200),
+            LargeCommunity::new(4200000000, 1, 2),
+        ];
+        let enc = LargeCommunity::encode_set(&set);
+        assert_eq!(enc.len(), 24);
+        // First record's wire bytes: 64512:100:200 big-endian.
+        assert_eq!(
+            &enc[..12],
+            &[0x00, 0x00, 0xFC, 0x00, 0x00, 0x00, 0x00, 0x64, 0x00, 0x00, 0x00, 0xC8][..]
+        );
+        let dec = LargeCommunity::decode_set(&enc);
+        assert_eq!(dec, set);
+        // Trailing partial record is ignored (tolerant decode).
+        assert_eq!(LargeCommunity::decode_set(&enc[..14]).len(), 1);
+        assert_eq!(
+            LargeCommunity::new(64512, 100, 200).to_string(),
+            "64512:100:200"
+        );
     }
 
     #[test]

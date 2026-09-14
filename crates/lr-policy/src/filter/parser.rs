@@ -7,6 +7,8 @@
 
 use core::fmt;
 
+use lr_core::addr::IpAddr;
+
 use crate::filter::ast::{
     BinaryOp, CaseArm, Expr, Filter, FilterBody, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
 };
@@ -459,7 +461,12 @@ impl Parser {
                 }
                 Some(TokenKind::PlusEq) => {
                     self.advance();
-                    if !matches!(field.kind, RouteFieldKind::BgpCommunities) {
+                    if !matches!(
+                        field.kind,
+                        RouteFieldKind::BgpCommunities
+                            | RouteFieldKind::BgpLargeCommunities
+                            | RouteFieldKind::BgpExtCommunities
+                    ) {
                         return Err(ParseError {
                             line: tok.line,
                             col: tok.col,
@@ -539,6 +546,8 @@ impl Parser {
                         "next_hop" => RouteFieldKind::BgpNextHop,
                         "as_path" => RouteFieldKind::BgpAsPath,
                         "communities" => RouteFieldKind::BgpCommunities,
+                        "ext_communities" => RouteFieldKind::BgpExtCommunities,
+                        "large_communities" => RouteFieldKind::BgpLargeCommunities,
                         "origin" => RouteFieldKind::BgpOrigin,
                         other => {
                             return Err(ParseError {
@@ -921,6 +930,53 @@ impl Parser {
                 kind: ParseErrorKind::UnexpectedEof,
             });
         };
+        // Large community triple FIRST: `int : int : int` (RFC 8097;
+        // roadmap D3.2 syntax `bgp.large_communities += [ 64512:100:200 ]`).
+        // The pair arm below would otherwise swallow `a:b` from the
+        // triple and leave `:c` dangling.
+        if matches!(tok.kind, TokenKind::Int(_))
+            && matches!(
+                self.tokens.get(self.pos + 1).map(|t| &t.kind),
+                Some(TokenKind::Colon)
+            )
+            && matches!(
+                self.tokens.get(self.pos + 2).map(|t| &t.kind),
+                Some(TokenKind::Int(_))
+            )
+            && matches!(
+                self.tokens.get(self.pos + 3).map(|t| &t.kind),
+                Some(TokenKind::Colon)
+            )
+            && matches!(
+                self.tokens.get(self.pos + 4).map(|t| &t.kind),
+                Some(TokenKind::Int(_))
+            )
+        {
+            let comps: Vec<i64> = (0..3)
+                .map(
+                    |i| match self.tokens.get(self.pos + i * 2).map(|t| &t.kind) {
+                        Some(TokenKind::Int(n)) => *n,
+                        _ => unreachable!("shape checked above"),
+                    },
+                )
+                .collect();
+            if !comps.iter().all(|n| (0..=u32::MAX as i64).contains(n)) {
+                return Err(ParseError {
+                    line: tok.line,
+                    col: tok.col,
+                    kind: ParseErrorKind::InvalidCommunity(format!(
+                        "large community {}:{}:{} has a component out of u32 range",
+                        comps[0], comps[1], comps[2]
+                    )),
+                });
+            }
+            self.pos += 5; // 3 ints + 2 colons
+            return Ok(Expr::Lit(Value::LargeCommunities(vec![(
+                comps[0] as u32,
+                comps[1] as u32,
+                comps[2] as u32,
+            )])));
+        }
         // Community pair: `int : int`, plus the wildcard forms
         // `int : *`, `* : int`, `* : *` used by delete / filter
         // patterns (BIRD `f_pair` semantics — `None` = wildcard).
@@ -982,6 +1038,85 @@ impl Parser {
                 }
             };
             return Ok(Expr::Lit(Value::CommPattern { asn, val }));
+        }
+        // Extended community tuple (RFC 4360, BIRD syntax):
+        // `(rt, <asn|ip>, <local>)` / `(ro, ...)` / `(soo, ...)`.
+        if matches!(tok.kind, TokenKind::LParen) {
+            let save = self.pos;
+            self.advance(); // (
+            let name_tok = self.peek().cloned();
+            if let Some(TokenKind::Ident(name)) = name_tok.map(|t| t.kind) {
+                let subtype = match name.as_str() {
+                    "rt" | "target" => 0x02u8,         // Route Target
+                    "ro" | "soo" | "origin" => 0x03u8, // Route Origin / SoO
+                    _ => {
+                        self.pos = save;
+                        return self.parse_expr();
+                    }
+                };
+                self.advance(); // name
+                if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                    self.advance();
+                    // Global administrator: integer (4-octet AS) or IP.
+                    let global_tok = self.peek().cloned();
+                    let (kind, global) = match global_tok.map(|t| t.kind) {
+                        Some(TokenKind::Int(n)) if (0..=u32::MAX as i64).contains(&n) => {
+                            // 4-octet AS specific, transitive
+                            // (RFC 4360 §2 — RT/RO are transitive
+                            // types; BIRD emits 0x42/0x43).
+                            (0x02u8 | 0x40, n as u32)
+                        }
+                        Some(TokenKind::Ip(IpAddr::V4(octets))) => {
+                            // IPv4 specific, transitive
+                            (0x01u8 | 0x40, u32::from_be_bytes(octets))
+                        }
+                        Some(TokenKind::Ip(IpAddr::V6(_))) => {
+                            return Err(ParseError {
+                                line: tok.line,
+                                col: tok.col,
+                                kind: ParseErrorKind::InvalidCommunity(
+                                    "extended communities have no IPv6 administrator form"
+                                        .to_string(),
+                                ),
+                            });
+                        }
+                        _ => {
+                            self.pos = save;
+                            return self.parse_expr();
+                        }
+                    };
+                    self.advance();
+                    if matches!(self.peek_kind(), Some(TokenKind::Comma)) {
+                        self.advance();
+                        let local_tok = self.peek().cloned();
+                        let local = match local_tok.map(|t| t.kind) {
+                            Some(TokenKind::Int(n)) if (0..=u16::MAX as i64).contains(&n) => {
+                                n as u16
+                            }
+                            _ => {
+                                return Err(ParseError {
+                                    line: tok.line,
+                                    col: tok.col,
+                                    kind: ParseErrorKind::InvalidCommunity(
+                                        "extended community local part must be 0..=65535"
+                                            .to_string(),
+                                    ),
+                                });
+                            }
+                        };
+                        self.advance();
+                        if matches!(self.peek_kind(), Some(TokenKind::RParen)) {
+                            self.advance(); // )
+                            return Ok(Expr::Lit(Value::ExtCommunities(vec![(
+                                kind, subtype, global, local,
+                            )])));
+                        }
+                    }
+                }
+            }
+            // Not an extended-community tuple — rewind and parse as
+            // a grouped expression.
+            self.pos = save;
         }
         self.parse_expr()
     }

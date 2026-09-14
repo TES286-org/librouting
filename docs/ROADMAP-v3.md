@@ -223,9 +223,9 @@ PDU parser is a useful cross-check.
 
 ## D3 — Filter DSL feature expansion toward BIRD syntax parity
 
-**Status:** partial — ~~D3.6 (proto field fix) landed~~ (commit
-`ca8fe42`), ~~D3.5 (`defined()` / `exists()`) landed~~ and ~~D3.4 (set
-operations) landed~~. The rest of D3 remains open. Tracks `lr-policy`.
+**Status:** partial — ~~D3.6~~, ~~D3.5~~, ~~D3.4~~, ~~D3.2~~ and
+~~D3.3~~ landed. D3.1 (user-defined functions) and D3.7 (bytecode)
+remain open. Tracks `lr-policy`.
 
 **Current gap.** `crates/lr-policy/src/filter/` implements a subset of
 the BIRD filter syntax (if/then/else, let, arithmetic, comparison,
@@ -240,7 +240,7 @@ new `function` keyword; evaluator creates a new scope frame, binds
 arguments to formal parameters, executes the body until `return`.
 ~400 LoC (AST + parser + evaluator + tests).
 
-### D3.2 — Large Communities (RFC 8097)
+### D3.2 — Large Communities (RFC 8097) — ~~landed~~
 
 `AttrType::LargeCommunities = 32` is a tag enum value only — no
 `LargeCommunity` struct, codec, accessor, setter. Need to add
@@ -251,12 +251,31 @@ arguments to formal parameters, executes the body until `return`.
 `set_bgp_large_communities()` to the trait; DSL syntax
 `bgp.large_communities += [ 64512:100:200 ]`. ~500 LoC.
 
-### D3.3 — Extended Communities (RFC 4360)
+~~Landed: `LargeCommunity` struct + 12-byte codec (byte-exact wire
+test) in `lr-bgp`; `PathAttributes::large_communities()` /
+`insert_large_community()` typed accessors; `lr_policy::bgp`
+read/add/set helpers; DSL field `bgp.large_communities` with `+=`,
+`=`, `.add/.delete/.filter` (exact matches) and `~` membership.
+4-octet ASNs work natively (`4200000000:7:9`).~~
+
+### D3.3 — Extended Communities (RFC 4360) — ~~landed~~
 
 `ExtendedCommunity` already lives in `communities.rs:104-150` but is
 not exposed to the DSL. Add `RouteFieldKind::BgpExtCommunities` and
 `FilterContext::bgp_ext_communities()`; support Route Target (`rt`),
 Site of Origin (`soo`) and friends. ~400 LoC.
+
+~~Landed: BIRD tuple syntax in set literals — `(rt, <asn|ip>,
+<local>)` / `(ro, ...)` / `(soo, ...)` — mapped to the canonical
+transitive types (0x42 4-octet-AS specific, 0x41 IPv4 specific;
+subtype 0x02 rt / 0x03 ro). DSL field `bgp.ext_communities` with
+`+=`, `=`, `.add/.delete/.filter` (exact) and `~` membership.
+Known limitation (pre-existing struct shape): the 2-octet-AS
+administrator form (type 0x00, admin 2 bytes + assigned 4 bytes)
+cannot round-trip through the `global: u32, local: u16` struct — the
+DSL steers literals to the canonical 4-octet form instead; raw
+attribute bytes from the wire still pass through the codec
+opaquely.~~
 
 ### D3.4 — Set operations (`add`/`delete`/`filter`/`empty`/`count`) — ~~landed~~
 

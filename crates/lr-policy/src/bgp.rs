@@ -20,21 +20,26 @@
 //! width) — see `docs/ARCHITECTURE.md`, "Canonical AS_PATH".
 
 use lr_bgp::path::as_path::AsPath;
-use lr_bgp::path::communities::Community;
+use lr_bgp::path::communities::{Community, ExtendedCommunity, LargeCommunity};
 use lr_core::addr::Asn;
 use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
 
-/// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4).
+/// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4 /
+/// RFC 4360 §2 / RFC 8097 §2).
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
 const TAG_LOCAL_PREF: u8 = 5;
 const TAG_COMMUNITIES: u8 = 8;
+const TAG_EXT_COMMUNITIES: u8 = 16;
+const TAG_LARGE_COMMUNITIES: u8 = 32;
 
 const FLAGS_AS_PATH: u8 = 0x40;
 const FLAGS_MED: u8 = 0x80;
 const FLAGS_LOCAL_PREF: u8 = 0x40; // well-known discretionary
-const FLAGS_COMMUNITIES: u8 = 0xC0;
+const FLAGS_COMMUNITIES: u8 = 0xC0; // optional transitive
+const FLAGS_EXT_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 4360 §3)
+const FLAGS_LARGE_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 8097 §2)
 
 fn attr_bytes(route: &Route, tag: u8) -> Option<&[u8]> {
     route
@@ -47,6 +52,20 @@ fn attr_bytes(route: &Route, tag: u8) -> Option<&[u8]> {
 pub fn communities(route: &Route) -> Vec<Community> {
     attr_bytes(route, TAG_COMMUNITIES)
         .map(Community::decode_set)
+        .unwrap_or_default()
+}
+
+/// The route's extended communities (RFC 4360); empty when absent.
+pub fn ext_communities(route: &Route) -> Vec<ExtendedCommunity> {
+    attr_bytes(route, TAG_EXT_COMMUNITIES)
+        .map(ExtendedCommunity::decode_set)
+        .unwrap_or_default()
+}
+
+/// The route's large communities (RFC 8097); empty when absent.
+pub fn large_communities(route: &Route) -> Vec<LargeCommunity> {
+    attr_bytes(route, TAG_LARGE_COMMUNITIES)
+        .map(LargeCommunity::decode_set)
         .unwrap_or_default()
 }
 
@@ -154,6 +173,58 @@ pub fn set_as_sequence(route: &mut Route, seq: Vec<Asn>) {
     }
     let path = AsPath::from_sequence(seq);
     put(route, TAG_AS_PATH, FLAGS_AS_PATH, path.encode_4());
+}
+
+/// Append a large community (RFC 8097 §2), creating the attribute
+/// when the route has none yet. Duplicates are not added.
+pub fn add_large_community(route: &mut Route, community: LargeCommunity) {
+    let mut set = large_communities(route);
+    if set.contains(&community) {
+        return;
+    }
+    set.push(community);
+    set_large_communities(route, set);
+}
+
+/// Replace the whole LARGE_COMMUNITIES set; drops the attribute when
+/// the new set is empty.
+pub fn set_large_communities(route: &mut Route, set: Vec<LargeCommunity>) {
+    if set.is_empty() {
+        route.attributes.remove(AttrTag::raw(TAG_LARGE_COMMUNITIES));
+        return;
+    }
+    put(
+        route,
+        TAG_LARGE_COMMUNITIES,
+        FLAGS_LARGE_COMMUNITIES,
+        LargeCommunity::encode_set(&set),
+    );
+}
+
+/// Append an extended community (RFC 4360 §3), creating the
+/// attribute when the route has none yet. Duplicates are not added.
+pub fn add_ext_community(route: &mut Route, community: ExtendedCommunity) {
+    let mut set = ext_communities(route);
+    if set.contains(&community) {
+        return;
+    }
+    set.push(community);
+    set_ext_communities(route, set);
+}
+
+/// Replace the whole EXTENDED_COMMUNITIES set; drops the attribute
+/// when the new set is empty.
+pub fn set_ext_communities(route: &mut Route, set: Vec<ExtendedCommunity>) {
+    if set.is_empty() {
+        route.attributes.remove(AttrTag::raw(TAG_EXT_COMMUNITIES));
+        return;
+    }
+    put(
+        route,
+        TAG_EXT_COMMUNITIES,
+        FLAGS_EXT_COMMUNITIES,
+        ExtendedCommunity::encode_set(&set),
+    );
 }
 
 #[cfg(test)]

@@ -385,6 +385,40 @@ impl FilterContext for DaemonFilterContext {
     fn set_bgp_as_path(&self, route: &mut lr_core::rib::Route, seq: Vec<lr_core::addr::Asn>) {
         lr_policy::bgp::set_as_sequence(route, seq);
     }
+    fn bgp_large_communities(&self, route: &lr_core::rib::Route) -> Vec<(u32, u32, u32)> {
+        lr_policy::bgp::large_communities(route)
+            .into_iter()
+            .map(|c| (c.global_admin, c.local_data1, c.local_data2))
+            .collect()
+    }
+    fn bgp_ext_communities(&self, route: &lr_core::rib::Route) -> Vec<(u8, u8, u32, u16)> {
+        lr_policy::bgp::ext_communities(route)
+            .into_iter()
+            .map(|c| (c.kind, c.subtype, c.global, c.local))
+            .collect()
+    }
+    fn set_bgp_large_communities(
+        &self,
+        route: &mut lr_core::rib::Route,
+        set: Vec<(u32, u32, u32)>,
+    ) {
+        let cs: Vec<lr_bgp::path::communities::LargeCommunity> = set
+            .into_iter()
+            .map(|(g, d1, d2)| lr_bgp::path::communities::LargeCommunity::new(g, d1, d2))
+            .collect();
+        lr_policy::bgp::set_large_communities(route, cs);
+    }
+    fn set_bgp_ext_communities(
+        &self,
+        route: &mut lr_core::rib::Route,
+        set: Vec<(u8, u8, u32, u16)>,
+    ) {
+        let cs: Vec<lr_bgp::path::communities::ExtendedCommunity> = set
+            .into_iter()
+            .map(|(k, s, g, l)| lr_bgp::path::communities::ExtendedCommunity::new(k, s, g, l))
+            .collect();
+        lr_policy::bgp::set_ext_communities(route, cs);
+    }
 }
 
 /// A BGP-style import hook wrapping a compiled DSL filter. Routes

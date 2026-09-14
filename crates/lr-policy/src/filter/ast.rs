@@ -140,6 +140,12 @@ pub enum Value {
     /// `delete` / `filter`: `65000:*`, `*:100` or `*:*`. `None`
     /// component = wildcard (BIRD `filter/config.Y` `f_pair` patterns).
     CommPattern { asn: Option<u32>, val: Option<u16> },
+    /// A large-community set (RFC 8097) — `(global, data1, data2)`
+    /// triples, e.g. `bgp.large_communities += [ 64512:100:200 ]`.
+    LargeCommunities(Vec<(u32, u32, u32)>),
+    /// An extended-community set (RFC 4360) — raw
+    /// `(type, subtype, global, local)` records.
+    ExtCommunities(Vec<(u8, u8, u32, u16)>),
     /// A generic set — used for prefix sets and AS-path sets in
     /// membership tests (`net ~ [ 10.0.0.0/8, 192.0.2.0/24 ]`).
     /// Each element retains its original type (Prefix, Asn, Int).
@@ -163,6 +169,8 @@ impl Value {
             Value::AsPath(_) => "as-path",
             Value::Communities(_) => "community-set",
             Value::CommPattern { .. } => "community-pattern",
+            Value::LargeCommunities(_) => "large-community-set",
+            Value::ExtCommunities(_) => "ext-community-set",
             Value::Set(_) => "set",
             Value::Protocol(_) => "protocol",
             Value::RoaState(_) => "roa-state",
@@ -182,6 +190,8 @@ impl Value {
             Value::AsPath(v) => !v.is_empty(),
             Value::Communities(v) => !v.is_empty(),
             Value::CommPattern { .. } => true,
+            Value::LargeCommunities(v) => !v.is_empty(),
+            Value::ExtCommunities(v) => !v.is_empty(),
             Value::Set(v) => !v.is_empty(),
         }
     }
@@ -228,6 +238,26 @@ impl fmt::Display for Value {
                     show(val.map(|v| v as u64))
                 )
             }
+            Value::LargeCommunities(v) => {
+                write!(f, "[")?;
+                for (i, (g, d1, d2)) in v.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{g}:{d1}:{d2}")?;
+                }
+                write!(f, "]")
+            }
+            Value::ExtCommunities(v) => {
+                write!(f, "[")?;
+                for (i, (kind, subtype, g, l)) in v.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    ext_community_display(f, *kind, *subtype, *g, *l)?;
+                }
+                write!(f, "]")
+            }
             Value::Set(v) => {
                 write!(f, "[")?;
                 for (i, x) in v.iter().enumerate() {
@@ -241,6 +271,27 @@ impl fmt::Display for Value {
             Value::Protocol(p) => write!(f, "{:?}", p),
             Value::RoaState(s) => write!(f, "{}", s.as_str()),
         }
+    }
+}
+
+/// Render one extended community BIRD-style: named kinds first
+/// (`(rt, 64512, 100)`), raw type/subtype for private shapes.
+fn ext_community_display(
+    f: &mut fmt::Formatter<'_>,
+    kind: u8,
+    subtype: u8,
+    global: u32,
+    local: u16,
+) -> fmt::Result {
+    let name = match (kind & 0x0f, subtype) {
+        (0x00..=0x02, 0x02) => "rt",
+        (0x00..=0x02, 0x03) => "ro",
+        _ => "",
+    };
+    if name.is_empty() {
+        write!(f, "({kind:#04x}/{subtype:#04x}, {global}, {local})")
+    } else {
+        write!(f, "({name}, {global}, {local})")
     }
 }
 
@@ -360,6 +411,10 @@ pub enum RouteFieldKind {
     /// `bgp.communities` — the BGP community set. Appendable via
     /// `bgp.communities += [ asn:value ];`.
     BgpCommunities,
+    /// `bgp.ext_communities` — the RFC 4360 extended-community set.
+    BgpExtCommunities,
+    /// `bgp.large_communities` — the RFC 8097 large-community set.
+    BgpLargeCommunities,
     /// `bgp.origin` — the BGP ORIGIN attribute.
     BgpOrigin,
     /// `roa.state` — the RFC 6811 validation outcome for the
@@ -376,6 +431,8 @@ impl RouteFieldKind {
                 | RouteFieldKind::BgpMed
                 | RouteFieldKind::BgpNextHop
                 | RouteFieldKind::BgpCommunities
+                | RouteFieldKind::BgpExtCommunities
+                | RouteFieldKind::BgpLargeCommunities
         )
     }
 }
@@ -391,6 +448,8 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpNextHop => "bgp.next_hop",
             RouteFieldKind::BgpAsPath => "bgp.as_path",
             RouteFieldKind::BgpCommunities => "bgp.communities",
+            RouteFieldKind::BgpExtCommunities => "bgp.ext_communities",
+            RouteFieldKind::BgpLargeCommunities => "bgp.large_communities",
             RouteFieldKind::BgpOrigin => "bgp.origin",
             RouteFieldKind::RoaState => "roa.state",
         };
