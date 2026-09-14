@@ -29,6 +29,10 @@ pub enum ParseErrorKind {
         found: TokenKind,
     },
     UnexpectedEof,
+    /// The filter nests expressions or statements deeper than
+    /// [`MAX_EXPR_DEPTH`]. Rejected instead of overflowing the stack
+    /// (the nightly fuzz target found the unbounded-recursion crash).
+    RecursionLimitExceeded,
     UnknownRouteField(String),
     ReadOnlyField(String),
     UnknownBgpField(String),
@@ -56,6 +60,10 @@ impl fmt::Display for ParseErrorKind {
                 write!(f, "expected {expected}, found {found:?}")
             }
             ParseErrorKind::UnexpectedEof => write!(f, "unexpected end of input"),
+            ParseErrorKind::RecursionLimitExceeded => write!(
+                f,
+                "expression nests deeper than the maximum of {MAX_EXPR_DEPTH} levels"
+            ),
             ParseErrorKind::UnknownRouteField(s) => write!(f, "unknown route field '{s}'"),
             ParseErrorKind::ReadOnlyField(s) => {
                 write!(f, "field '{s}' is read-only (cannot assign)")
@@ -79,10 +87,33 @@ impl From<LexerError> for ParseError {
     }
 }
 
+/// Maximum expression / statement nesting depth the parser will
+/// descend before bailing out with
+/// [`ParseErrorKind::RecursionLimitExceeded`].
+///
+/// Every real-world BIRD-style filter nests a handful of levels deep
+/// (parens, `if` chains, set literals); 128 leaves orders of
+/// magnitude of head-room while keeping the parser's and the
+/// evaluator's recursive walk comfortably inside the thread stack in
+/// *every* build profile (debug frames are several times fatter than
+/// release ones — the limit must be safe under `cargo test` too).
+/// Without this bound an input like `[[[[[...` (thousands of set
+/// opens) or `!!!!...` overflows the stack — found by the nightly
+/// `filter_parser` fuzz target (AddressSanitizer stack-overflow on a
+/// 3 911-byte input of nested `[`). The limit bounds parse recursion,
+/// the built AST's height (so recursive `Drop` glue is safe too) and
+/// the evaluator's recursive walk, which mirrors the tree shape.
+pub const MAX_EXPR_DEPTH: usize = 128;
+
 /// The parser — a token cursor.
 pub struct Parser {
     tokens: Vec<Token>,
     pos: usize,
+    /// Current nesting depth, shared by [`Self::parse_unary`] (every
+    /// expression descent passes through it) and [`Self::parse_stmt`]
+    /// (every statement descent passes through it). Bounded by
+    /// [`MAX_EXPR_DEPTH`].
+    depth: usize,
 }
 
 impl Parser {
@@ -96,7 +127,32 @@ impl Parser {
                 col: e.col,
             }]
         });
-        Self { tokens, pos: 0 }
+        Self {
+            tokens,
+            pos: 0,
+            depth: 0,
+        }
+    }
+
+    /// Enter one level of nested parsing. Every recursive-descent
+    /// funnel (expressions via `parse_unary`, statements via
+    /// `parse_stmt`) calls this on entry and
+    /// [`Self::leave`] on the way out.
+    fn enter(&mut self, line: u32, col: u32) -> Result<(), ParseError> {
+        self.depth += 1;
+        if self.depth > MAX_EXPR_DEPTH {
+            return Err(ParseError {
+                line,
+                col,
+                kind: ParseErrorKind::RecursionLimitExceeded,
+            });
+        }
+        Ok(())
+    }
+
+    /// Leave one level of nested parsing (mirrors [`Self::enter`]).
+    fn leave(&mut self) {
+        self.depth = self.depth.saturating_sub(1);
     }
 
     /// Entry point: parse a filter body (with or without outer braces).
@@ -210,6 +266,23 @@ impl Parser {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {
+        let tok = self.peek().cloned();
+        let Some(tok) = tok else {
+            return Err(ParseError {
+                line: 1,
+                col: 1,
+                kind: ParseErrorKind::UnexpectedEof,
+            });
+        };
+        // Guard the statement-recursion funnel (`if ... then if ...`,
+        // nested `{ ... }` blocks, `case` arms). See `MAX_EXPR_DEPTH`.
+        self.enter(tok.line, tok.col)?;
+        let out = self.parse_stmt_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_stmt_inner(&mut self) -> Result<Stmt, ParseError> {
         let tok = self.peek().cloned();
         let Some(tok) = tok else {
             return Err(ParseError {
@@ -571,6 +644,26 @@ impl Parser {
     }
 
     fn parse_unary(&mut self) -> Result<Expr, ParseError> {
+        let tok = self.peek().cloned();
+        let Some(tok) = tok else {
+            return Err(ParseError {
+                line: 1,
+                col: 1,
+                kind: ParseErrorKind::UnexpectedEof,
+            });
+        };
+        // Guard the expression-recursion funnel. Every nested
+        // expression (parens, set literals, unary chains, call args)
+        // descends through `parse_binary` into `parse_unary`, so one
+        // counter here bounds the whole expression grammar. See
+        // `MAX_EXPR_DEPTH`.
+        self.enter(tok.line, tok.col)?;
+        let out = self.parse_unary_inner();
+        self.leave();
+        out
+    }
+
+    fn parse_unary_inner(&mut self) -> Result<Expr, ParseError> {
         let tok = self.peek().cloned();
         let Some(tok) = tok else {
             return Err(ParseError {
@@ -1076,5 +1169,104 @@ mod tests {
             matches!(e.kind, ParseErrorKind::UnexpectedToken { .. }),
             "{e}"
         );
+    }
+
+    // --- Recursion-limit regression tests --------------------------------
+    //
+    // The nightly `filter_parser` fuzz target found an
+    // AddressSanitizer stack-overflow on a 3 911-byte input of nested
+    // `[` set opens: the recursive-descent parser had no depth bound.
+    // These tests pin the fix at every recursive shape of the grammar.
+
+    #[test]
+    fn deeply_nested_set_literals_are_rejected() {
+        // The exact fuzz-crasher shape: thousands of `[` opens.
+        let src = "[".repeat(4_000);
+        let e = parse_err(&src);
+        assert!(
+            matches!(e.kind, ParseErrorKind::RecursionLimitExceeded),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_unary_ops_are_rejected() {
+        let src = format!("{}true", "!".repeat(4_000));
+        let e = parse_err(&src);
+        assert!(
+            matches!(e.kind, ParseErrorKind::RecursionLimitExceeded),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_negation_is_rejected() {
+        let src = format!("{}1", "-".repeat(4_000));
+        let e = parse_err(&src);
+        assert!(
+            matches!(e.kind, ParseErrorKind::RecursionLimitExceeded),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_parens_are_rejected() {
+        let src = format!("{}true{}", "(".repeat(4_000), ")".repeat(4_000));
+        let e = parse_err(&src);
+        assert!(
+            matches!(e.kind, ParseErrorKind::RecursionLimitExceeded),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn deeply_nested_ifs_are_rejected() {
+        let src = "if true then ".repeat(1_000) + "accept;";
+        let e = parse_err(&src);
+        assert!(
+            matches!(e.kind, ParseErrorKind::RecursionLimitExceeded),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn mixed_nesting_still_hits_the_limit() {
+        // Alternating set / unary / paren levels — the interleaved
+        // shape the fuzzer actually converges on (`[[[!![[[...`).
+        let mut src = String::new();
+        for _ in 0..1_000 {
+            src.push('[');
+            src.push_str("!!");
+            src.push('(');
+        }
+        let e = parse_err(&src);
+        assert!(
+            matches!(e.kind, ParseErrorKind::RecursionLimitExceeded),
+            "{e}"
+        );
+    }
+
+    #[test]
+    fn nesting_just_under_the_limit_still_parses() {
+        // 100 levels of parens sit below `MAX_EXPR_DEPTH` (128) and
+        // must parse cleanly — the limit rejects pathological input,
+        // not legitimate deep filters.
+        let depth = 100;
+        let src = format!("{}true{};", "(".repeat(depth), ")".repeat(depth));
+        let f = parse_ok(&src);
+        assert!(matches!(f.body.stmts[0], Stmt::Expr(_)));
+    }
+
+    #[test]
+    fn recursion_error_reports_location() {
+        // The error should point at the token that tripped the limit,
+        // not a generic (1, 1) position.
+        let mut src = String::new();
+        src.push_str("accept;\n");
+        src.push_str(&"[".repeat(MAX_EXPR_DEPTH + 4));
+        let e = parse_err(&src);
+        assert!(matches!(e.kind, ParseErrorKind::RecursionLimitExceeded));
+        assert_eq!(e.line, 2, "{e:?}");
+        assert!(e.col > 1, "{e:?}");
     }
 }
