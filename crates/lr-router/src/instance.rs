@@ -2133,14 +2133,19 @@ impl DefaultRouter {
         // Collect the aggregate list and local AS first to avoid
         // borrowing self while we mutate it below.
         let aggregates: Vec<lr_core::addr::Prefix> = self.aggregates.iter().copied().collect();
-        let local_as = self
+        // RFC 4271 §9.2.2.2: the AGGREGATOR carries "the AS number and
+        // BGP Identifier of the last BGP speaker that performed route
+        // aggregation" — both come from the originating session.
+        let (local_as, bgp_id) = self
             .sessions
             .values()
             .find_map(|s| match s {
-                SessionState::Bgp { peer, .. } => Some(peer.config().local_as.as_u32()),
+                SessionState::Bgp { peer, .. } => {
+                    Some((peer.config().local_as.as_u32(), peer.config().local_bgp_id))
+                }
                 _ => None,
             })
-            .unwrap_or(0);
+            .unwrap_or((0, lr_core::addr::RouterId::from_u32(0)));
         for agg in &aggregates {
             let family = match agg.addr {
                 lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
@@ -2170,9 +2175,13 @@ impl DefaultRouter {
                 ));
                 let mut agg_val = Vec::with_capacity(8);
                 agg_val.extend_from_slice(&local_as.to_be_bytes());
-                agg_val.extend_from_slice(&[0, 0, 0, 0]);
+                agg_val.extend_from_slice(&bgp_id.to_v4_bytes());
                 attrs.insert(PathAttribute::new(
-                    PathAttrFlags::new().set_transitive(true),
+                    // AGGREGATOR is optional transitive (RFC 4271 §4.3,
+                    // flags 0xC0). BIRD rejects a non-optional AGGREGATOR
+                    // with "Malformed attribute - conflicting flags" —
+                    // caught live in the aggregate_bird.sh interop.
+                    PathAttrFlags::new().set_optional(true).set_transitive(true),
                     AttrType::Aggregator,
                     agg_val,
                 ));

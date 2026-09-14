@@ -169,9 +169,29 @@ fn aggregate_has_atomic_aggregate_and_aggregator() {
         attrs.get(lr_bgp::path::AttrType::AtomicAggregate).is_some(),
         "ATOMIC_AGGREGATE must be present"
     );
+    let aggregator = attrs
+        .get(lr_bgp::path::AttrType::Aggregator)
+        .expect("AGGREGATOR must be present");
+    // RFC 4271 §4.3: AGGREGATOR is optional transitive (flags 0xC0).
+    // BIRD rejects a non-optional AGGREGATOR with "Malformed attribute -
+    // conflicting flags" (caught live by tests/interop/aggregate_bird.sh).
     assert!(
-        attrs.get(lr_bgp::path::AttrType::Aggregator).is_some(),
-        "AGGREGATOR must be present"
+        aggregator.flags.optional(),
+        "AGGREGATOR must set the optional bit (RFC 4271 §4.3)"
+    );
+    assert!(
+        aggregator.flags.transitive(),
+        "AGGREGATOR must set the transitive bit (RFC 4271 §4.3)"
+    );
+    // RFC 4271 §9.2.2.2: the AGGREGATOR value is the 4-octet AS number
+    // followed by the BGP Identifier of the aggregating speaker.
+    let decoded = lr_bgp::path::Aggregator::decode(&aggregator.value)
+        .expect("AGGREGATOR value decodes as AS + speaker");
+    assert_eq!(decoded.asn.0, 64512, "AGGREGATOR carries the local AS");
+    assert_eq!(
+        decoded.speaker,
+        [10, 0, 0, 1],
+        "AGGREGATOR carries the local BGP Identifier (V4_A)"
     );
 }
 
