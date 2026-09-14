@@ -370,6 +370,21 @@ impl FilterContext for DaemonFilterContext {
             lr_policy::bgp::add_community(route, c);
         }
     }
+    fn set_bgp_communities(
+        &self,
+        route: &mut lr_core::rib::Route,
+        set: Vec<(lr_core::addr::Asn, u16)>,
+    ) {
+        let cs: Vec<lr_bgp::path::communities::Community> = set
+            .into_iter()
+            .filter(|(asn, _)| asn.0 <= u16::MAX as u32)
+            .map(|(asn, val)| lr_bgp::path::communities::Community::new(asn.0 as u16, val))
+            .collect();
+        lr_policy::bgp::set_communities(route, cs);
+    }
+    fn set_bgp_as_path(&self, route: &mut lr_core::rib::Route, seq: Vec<lr_core::addr::Asn>) {
+        lr_policy::bgp::set_as_sequence(route, seq);
+    }
 }
 
 /// A BGP-style import hook wrapping a compiled DSL filter. Routes

@@ -168,6 +168,13 @@ pub trait FilterContext {
     fn bgp_as_path_prepend(&self, route: &mut Route, asn: Asn);
     /// Add one community (RFC 1997 §4). Duplicates are not added.
     fn bgp_communities_add(&self, route: &mut Route, asn: Asn, value: u16);
+    /// Replace the whole COMMUNITIES attribute. An empty set drops the
+    /// attribute entirely (BIRD semantics for `delete` leaving
+    /// nothing behind). Used by `bgp.communities.delete/filter`.
+    fn set_bgp_communities(&self, route: &mut Route, set: Vec<(Asn, u16)>);
+    /// Replace the AS_PATH with a flat sequence. An empty sequence
+    /// drops the attribute. Used by `bgp.as_path.delete/filter`.
+    fn set_bgp_as_path(&self, route: &mut Route, seq: Vec<Asn>);
 }
 
 /// Internal control-flow signal — `Continue` keeps evaluating the
@@ -586,6 +593,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 };
                 self.ctx.set_bgp_next_hop(route, ip);
             }
+            // `bgp.communities = <set>` — the canonical BIRD idiom
+            // (`bgp.community = delete(bgp.community, [65000:1]);`).
+            RouteFieldKind::BgpCommunities => {
+                let cs = self.communities_from_value(&value, "=")?;
+                self.ctx.set_bgp_communities(route, cs);
+            }
+            // `bgp.as_path = <sequence>` — BIRD assigns `bgp_path`
+            // values the same way.
+            RouteFieldKind::BgpAsPath => {
+                let seq = match value {
+                    Value::AsPath(p) => p,
+                    other => return Err(type_mismatch("=", &other, "as-path")),
+                };
+                self.ctx.set_bgp_as_path(route, seq);
+            }
             other => {
                 return Err(EvalError {
                     kind: EvalErrorKind::UnknownMethod {
@@ -598,6 +620,48 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
         }
         Ok(())
+    }
+
+    /// Normalize a community-set RHS: a bare `Communities` value, a
+    /// set literal (`CommPattern` items — wildcards are rejected,
+    /// nothing concrete to write) or a single pattern element.
+    fn communities_from_value(
+        &self,
+        value: &Value,
+        op: &str,
+    ) -> Result<Vec<(Asn, u16)>, EvalError> {
+        let mut out = Vec::new();
+        let mut push_item = |it: &Value| -> Result<(), EvalError> {
+            match it {
+                Value::Communities(cs) => out.extend(cs.iter().map(|(a, v)| (*a, *v))),
+                Value::CommPattern {
+                    asn: Some(a),
+                    val: Some(v),
+                } => out.push((Asn(*a), *v)),
+                Value::CommPattern { .. } => {
+                    return Err(EvalError {
+                        kind: EvalErrorKind::TypeMismatch {
+                            op: op.to_string(),
+                            lhs: "community-set".to_string(),
+                            rhs: "community-pattern wildcard".to_string(),
+                        },
+                        line: 0,
+                        col: 0,
+                    });
+                }
+                other => return Err(type_mismatch(op, other, "community-set")),
+            }
+            Ok(())
+        };
+        match value {
+            Value::Set(items) => {
+                for it in items {
+                    push_item(it)?;
+                }
+            }
+            other => push_item(other)?,
+        }
+        Ok(out)
     }
 
     fn append_route_field(
@@ -615,6 +679,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                         for it in items {
                             match it {
                                 Value::Communities(c) => out.extend(c),
+                                Value::CommPattern {
+                                    asn: Some(a),
+                                    val: Some(v),
+                                } => out.push((Asn(a), v)),
+                                Value::CommPattern { .. } => {
+                                    return Err(EvalError {
+                                        kind: EvalErrorKind::TypeMismatch {
+                                            op: "+=".to_string(),
+                                            lhs: "community-set".to_string(),
+                                            rhs: "community-pattern wildcard".to_string(),
+                                        },
+                                        line: 0,
+                                        col: 0,
+                                    });
+                                }
                                 Value::Int(n) => {
                                     if !(0..=u16::MAX as i64).contains(&n) {
                                         return Err(EvalError {
@@ -653,7 +732,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         Ok(())
     }
 
-    fn eval_call(&self, name: &str, args: &[Value], _route: &Route) -> Result<Value, EvalError> {
+    fn eval_call(
+        &mut self,
+        name: &str,
+        args: &[Value],
+        _route: &Route,
+    ) -> Result<Value, EvalError> {
         match name {
             "len" => {
                 if args.len() != 1 {
@@ -664,6 +748,37 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     Value::Communities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.len() as i64)),
                     other => Err(type_mismatch("len", other, "as-path|community-set|string")),
+                }
+            }
+            // D3.4 — BIRD set operations (filter/config.Y `f_pair`
+            // delete/filter + set introspection).
+            "delete" | "filter" => {
+                if args.len() != 2 {
+                    return Err(bad_arg_count(name, 2, args.len()));
+                }
+                apply_set_op(name, &args[0], &args[1], name == "filter")
+            }
+            "empty" => {
+                if args.len() != 1 {
+                    return Err(bad_arg_count("empty", 1, args.len()));
+                }
+                match &args[0] {
+                    Value::AsPath(p) => Ok(Value::Bool(p.is_empty())),
+                    Value::Communities(c) => Ok(Value::Bool(c.is_empty())),
+                    Value::Set(s) => Ok(Value::Bool(s.is_empty())),
+                    Value::Str(s) => Ok(Value::Bool(s.is_empty())),
+                    other => Err(type_mismatch("empty", other, "set-like")),
+                }
+            }
+            "count" => {
+                if args.len() != 1 {
+                    return Err(bad_arg_count("count", 1, args.len()));
+                }
+                match &args[0] {
+                    Value::AsPath(p) => Ok(Value::Int(p.len() as i64)),
+                    Value::Communities(c) => Ok(Value::Int(c.len() as i64)),
+                    Value::Set(s) => Ok(Value::Int(s.len() as i64)),
+                    other => Err(type_mismatch("count", other, "set-like")),
                 }
             }
             "first" => {
@@ -726,15 +841,76 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 if args.len() != 1 {
                     return Err(bad_arg_count("bgp.communities.add", 1, args.len()));
                 }
-                match &args[0] {
-                    Value::Communities(cs) => {
-                        for (asn, val) in cs {
-                            self.ctx.bgp_communities_add(route, *asn, *val);
+                // Accept both a bare community-set value and a set
+                // literal (whose items are CommPattern elements).
+                let to_add: Vec<(Asn, u16)> = pattern_items(&args[0])
+                    .into_iter()
+                    .filter_map(|item| match item {
+                        Value::Communities(cs) => {
+                            Some(cs.iter().map(|(a, v)| (*a, *v)).collect::<Vec<_>>())
                         }
-                        Ok(Value::Communities(self.ctx.bgp_communities(route)))
-                    }
-                    other => Err(type_mismatch("bgp.communities.add", other, "community-set")),
+                        Value::CommPattern {
+                            asn: Some(a),
+                            val: Some(v),
+                        } => Some(vec![(Asn(*a), *v)]),
+                        Value::CommPattern { .. } => None,
+                        _ => None,
+                    })
+                    .flatten()
+                    .collect();
+                if to_add.is_empty() && !matches!(args[0], Value::Communities(_) | Value::Set(_)) {
+                    return Err(type_mismatch(
+                        "bgp.communities.add",
+                        &args[0],
+                        "community-set",
+                    ));
                 }
+                for (asn, val) in to_add {
+                    self.ctx.bgp_communities_add(route, asn, val);
+                }
+                Ok(Value::Communities(self.ctx.bgp_communities(route)))
+            }
+            (RouteFieldKind::BgpCommunities, "delete" | "filter") => {
+                if args.len() != 1 {
+                    return Err(bad_arg_count("bgp.communities.delete", 1, args.len()));
+                }
+                let keep = method == "filter";
+                let items = pattern_items(&args[0]);
+                let cur = self.ctx.bgp_communities(route);
+                let out: Vec<(Asn, u16)> = cur
+                    .into_iter()
+                    .filter(|e| {
+                        let m = community_elem_matches(e, &items);
+                        if keep {
+                            m
+                        } else {
+                            !m
+                        }
+                    })
+                    .collect();
+                self.ctx.set_bgp_communities(route, out.clone());
+                Ok(Value::Communities(out))
+            }
+            (RouteFieldKind::BgpAsPath, "delete" | "filter") => {
+                if args.len() != 1 {
+                    return Err(bad_arg_count("bgp.as_path.delete", 1, args.len()));
+                }
+                let keep = method == "filter";
+                let items = pattern_items(&args[0]);
+                let cur = self.ctx.bgp_as_path(route);
+                let out: Vec<Asn> = cur
+                    .into_iter()
+                    .filter(|a| {
+                        let m = as_path_elem_matches(a, &items);
+                        if keep {
+                            m
+                        } else {
+                            !m
+                        }
+                    })
+                    .collect();
+                self.ctx.set_bgp_as_path(route, out.clone());
+                Ok(Value::AsPath(out))
             }
             (kind, m) => Err(EvalError {
                 kind: EvalErrorKind::UnknownMethod {
@@ -937,12 +1113,110 @@ fn value_match(l: &Value, r: &Value) -> bool {
         (Value::Communities(route_cs), Value::Communities(set_cs)) => {
             set_cs.iter().any(|c| route_cs.contains(c))
         }
+        // Wildcard-aware community pattern (D3.4): `[ 65000:*, *:1 ]`.
+        (Value::Communities(route_cs), Value::CommPattern { asn, val }) => route_cs
+            .iter()
+            .any(|(a, v)| asn.is_none_or(|p| p == a.0) && val.is_none_or(|p| p == *v)),
         (Value::RoaState(s), Value::Str(t)) => s.as_str() == t.as_str(),
         (Value::Str(a), Value::Str(b)) => a == b,
         (Value::Ip(a), Value::Ip(b)) => a == b,
         // Set membership — walk the items.
         (l, Value::Set(items)) => items.iter().any(|i| value_match(l, i)),
         _ => false,
+    }
+}
+
+/// Flatten a set-pattern value into its items — a bare item is a
+/// single-item pattern (`delete(c, 65000:1)` works like BIRD).
+fn pattern_items(pat: &Value) -> Vec<&Value> {
+    match pat {
+        Value::Set(items) => items.iter().collect(),
+        other => vec![other],
+    }
+}
+
+/// D3.4 element matching for community `delete` / `filter`: a pattern
+/// item matches when both components match-or-wildcard
+/// (`65000:*` matches every value of AS 65000; `*:100` every ASN
+/// carrying value 100; `65000:1` is the exact form).
+fn community_elem_matches(elem: &(Asn, u16), items: &[&Value]) -> bool {
+    items.iter().any(|p| match p {
+        Value::CommPattern { asn, val } => {
+            asn.is_none_or(|a| a == elem.0 .0) && val.is_none_or(|v| v == elem.1)
+        }
+        Value::Communities(cs) => cs.iter().any(|(a, v)| *a == elem.0 && *v == elem.1),
+        _ => false,
+    })
+}
+
+/// D3.4 element matching for AS-path `delete` / `filter`: pattern
+/// items are AS numbers (`[ 65001, 65002 ]`).
+fn as_path_elem_matches(asn: &Asn, items: &[&Value]) -> bool {
+    items.iter().any(|p| match p {
+        Value::Int(n) => *n == asn.0 as i64,
+        Value::Asn(a) => a == asn,
+        Value::Communities(cs) => cs.iter().any(|(a, _)| a == asn),
+        _ => false,
+    })
+}
+
+/// Value-level BIRD set operation (D3.4): remove (`delete`) or keep
+/// (`filter`) the elements of `coll` matching the pattern. Works on
+/// community sets, AS-paths and generic sets.
+fn apply_set_op(
+    op: &str,
+    coll: &Value,
+    pat: &Value,
+    keep_matching: bool,
+) -> Result<Value, EvalError> {
+    let items = pattern_items(pat);
+    match coll {
+        Value::Communities(cs) => {
+            let out: Vec<(Asn, u16)> = cs
+                .iter()
+                .filter(|e| {
+                    let m = community_elem_matches(e, &items);
+                    if keep_matching {
+                        m
+                    } else {
+                        !m
+                    }
+                })
+                .copied()
+                .collect();
+            Ok(Value::Communities(out))
+        }
+        Value::AsPath(p) => {
+            let out: Vec<Asn> = p
+                .iter()
+                .filter(|a| {
+                    let m = as_path_elem_matches(a, &items);
+                    if keep_matching {
+                        m
+                    } else {
+                        !m
+                    }
+                })
+                .copied()
+                .collect();
+            Ok(Value::AsPath(out))
+        }
+        Value::Set(s) => {
+            let out: Vec<Value> = s
+                .iter()
+                .filter(|e| {
+                    let m = items.iter().any(|p| value_eq(e, p));
+                    if keep_matching {
+                        m
+                    } else {
+                        !m
+                    }
+                })
+                .cloned()
+                .collect();
+            Ok(Value::Set(out))
+        }
+        other => Err(type_mismatch(op, other, "community-set|as-path|set")),
     }
 }
 
@@ -1087,8 +1361,38 @@ mod tests {
                 return;
             }
             set.push(new);
+            Self::put_communities(route, &set);
+        }
+        fn set_bgp_communities(&self, route: &mut Route, set: Vec<(Asn, u16)>) {
+            Self::put_communities(route, &set);
+        }
+        fn set_bgp_as_path(&self, route: &mut Route, seq: Vec<Asn>) {
+            if seq.is_empty() {
+                route.attributes.remove(AttrTag::raw(TAG_AS_PATH));
+                return;
+            }
+            let mut v = Vec::with_capacity(2 + seq.len() * 4);
+            v.push(2u8); // AS_SEQUENCE
+            v.push(seq.len() as u8);
+            for a in &seq {
+                v.extend_from_slice(&a.0.to_be_bytes());
+            }
+            route.attributes.insert(Attribute {
+                tag: AttrTag::raw(TAG_AS_PATH),
+                flags: 0x40,
+                value: v,
+            });
+        }
+    }
+
+    impl StubCtx {
+        fn put_communities(route: &mut Route, set: &[(Asn, u16)]) {
+            if set.is_empty() {
+                route.attributes.remove(AttrTag::raw(TAG_COMMUNITIES));
+                return;
+            }
             let mut v = Vec::with_capacity(set.len() * 4);
-            for (a, val) in &set {
+            for (a, val) in set {
                 v.extend_from_slice(&(a.0 as u16).to_be_bytes());
                 v.extend_from_slice(&val.to_be_bytes());
             }
@@ -1504,5 +1808,204 @@ mod tests {
         assert!(f.is_err(), "two-arg defined() must fail to compile");
         let f = compile("test", "if defined() then accept;");
         assert!(f.is_err(), "zero-arg defined() must fail to compile");
+    }
+
+    // ===== D3.4 — delete / filter / empty / count =====
+
+    fn communities_to(set: &[(u32, u16)]) -> Vec<(Asn, u16)> {
+        set.iter().map(|(a, v)| (Asn(*a), *v)).collect()
+    }
+
+    /// Stamp a COMMUNITIES attribute onto a route (test helper).
+    fn with_communities(mut r: Route, set: &[(u32, u16)]) -> Route {
+        let cs = communities_to(set);
+        let mut v = Vec::with_capacity(cs.len() * 4);
+        for (a, val) in &cs {
+            v.extend_from_slice(&(a.0 as u16).to_be_bytes());
+            v.extend_from_slice(&val.to_be_bytes());
+        }
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_COMMUNITIES),
+            flags: 0xC0,
+            value: v,
+        });
+        r
+    }
+
+    #[test]
+    fn method_delete_removes_exact_community() {
+        let mut r = with_communities(
+            route_with("203.0.113.0/24", 100, 0),
+            &[(64512, 100), (64512, 200), (65000, 1)],
+        );
+        assert_eq!(
+            run("bgp.communities.delete([64512:100]); accept;", &mut r),
+            EvalResult::Accept,
+        );
+        let cs = StubCtx.bgp_communities(&r);
+        assert_eq!(cs, communities_to(&[(64512, 200), (65000, 1)]));
+    }
+
+    #[test]
+    fn method_delete_wildcard_removes_whole_asn() {
+        let mut r = with_communities(
+            route_with("203.0.113.0/24", 100, 0),
+            &[(64512, 100), (64512, 200), (65000, 1)],
+        );
+        assert_eq!(
+            run("bgp.communities.delete([64512:*]); accept;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_communities(&r), communities_to(&[(65000, 1)]));
+    }
+
+    #[test]
+    fn method_filter_keeps_only_matches() {
+        let mut r = with_communities(
+            route_with("203.0.113.0/24", 100, 0),
+            &[(64512, 100), (64512, 200), (65000, 1)],
+        );
+        assert_eq!(
+            run("bgp.communities.filter([*:1]); accept;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_communities(&r), communities_to(&[(65000, 1)]));
+    }
+
+    #[test]
+    fn delete_last_community_drops_attribute() {
+        let mut r = with_communities(route_with("203.0.113.0/24", 100, 0), &[(64512, 100)]);
+        assert_eq!(
+            run(
+                "bgp.communities.delete([64512:*]); if empty(bgp.communities) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert!(r.attributes.get(AttrTag::raw(TAG_COMMUNITIES)).is_none());
+    }
+
+    #[test]
+    fn bird_assignment_idiom_delete_into_attribute() {
+        let mut r = with_communities(
+            route_with("203.0.113.0/24", 100, 0),
+            &[(64512, 100), (65000, 2)],
+        );
+        assert_eq!(
+            run(
+                "bgp.communities = delete(bgp.communities, [64512:*]); accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_communities(&r), communities_to(&[(65000, 2)]));
+    }
+
+    #[test]
+    fn as_path_delete_and_filter() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "bgp.as_path.prepend(65001); bgp.as_path.prepend(65002); bgp.as_path.prepend(65001); accept;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            StubCtx.bgp_as_path(&r),
+            vec![Asn(65001), Asn(65002), Asn(65001)]
+        );
+        assert_eq!(
+            run("bgp.as_path.delete([65001]); accept;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_as_path(&r), vec![Asn(65002)]);
+        assert_eq!(
+            run(
+                "bgp.as_path.filter([65003]); if empty(bgp.as_path) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert!(StubCtx.bgp_as_path(&r).is_empty());
+    }
+
+    #[test]
+    fn function_style_delete_filter_count_on_values() {
+        let mut r = with_communities(
+            route_with("203.0.113.0/24", 100, 0),
+            &[(64512, 100), (64512, 200)],
+        );
+        // Pure-value form on a local variable (BIRD: `delete(x, [..])`).
+        assert_eq!(
+            run(
+                "let cs = bgp.communities; let kept = delete(cs, [64512:100]); if count(kept) == 1 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "let cs = bgp.communities; let kept = filter(cs, [64512:*]); if count(kept) == 2 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if count(bgp.communities) == 2 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "let cs = bgp.communities; if empty(delete(cs, [64512:*])) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn wildcard_membership_now_matches() {
+        // The `~` operator gained wildcard-pattern support alongside
+        // the D3.4 pattern machinery.
+        let mut r = with_communities(route_with("203.0.113.0/24", 100, 0), &[(64512, 100)]);
+        assert_eq!(
+            run(
+                "if bgp.communities ~ [64512:*] then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if bgp.communities ~ [65000:*] then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn append_rejects_wildcard_pattern() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("bgp.communities += [64512:*]; accept;", &mut r),
+            EvalResult::Fallthrough,
+        );
+    }
+
+    #[test]
+    fn append_accepts_exact_pattern_literal() {
+        // The set-literal shape changed to CommPattern items; `+=`
+        // must keep accepting `asn:val` literals.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("bgp.communities += [64512:100]; accept;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(StubCtx.bgp_communities(&r), communities_to(&[(64512, 100)]));
     }
 }

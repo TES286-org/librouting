@@ -921,8 +921,11 @@ impl Parser {
                 kind: ParseErrorKind::UnexpectedEof,
             });
         };
-        // Community pair: `int : int`.
-        if matches!(tok.kind, TokenKind::Int(_))
+        // Community pair: `int : int`, plus the wildcard forms
+        // `int : *`, `* : int`, `* : *` used by delete / filter
+        // patterns (BIRD `f_pair` semantics — `None` = wildcard).
+        let wildcard_asn = matches!(tok.kind, TokenKind::Star);
+        if (matches!(tok.kind, TokenKind::Int(_)) || wildcard_asn)
             && matches!(
                 self.tokens.get(self.pos + 1).map(|t| &t.kind),
                 Some(TokenKind::Colon)
@@ -938,33 +941,47 @@ impl Parser {
                     kind: ParseErrorKind::InvalidCommunity("(missing value)".to_string()),
                 });
             };
-            let val = match val_tok.kind {
-                TokenKind::Int(n) if (0..=u16::MAX as i64).contains(&n) => n as u16,
+            // Value component: integer, or `*` wildcard.
+            let val: Option<u16> = match val_tok.kind {
+                TokenKind::Int(n) if (0..=u16::MAX as i64).contains(&n) => Some(n as u16),
+                TokenKind::Star => None,
                 _ => {
                     return Err(ParseError {
                         line: val_tok.line,
                         col: val_tok.col,
                         kind: ParseErrorKind::InvalidCommunity(format!(
-                            "expected integer value, found {:?}",
+                            "expected integer value or '*', found {:?}",
                             val_tok.kind
                         )),
                     });
                 }
             };
             self.advance();
-            if let TokenKind::Int(asn) = asn_tok.kind {
-                if asn > u32::MAX as i64 {
+            // ASN component: integer within u32, or the `*` wildcard
+            // that opened the pattern.
+            let asn: Option<u32> = match (asn_tok.kind, wildcard_asn) {
+                (TokenKind::Star, true) => None,
+                (TokenKind::Int(asn), false) => {
+                    if asn > u32::MAX as i64 {
+                        return Err(ParseError {
+                            line: asn_tok.line,
+                            col: asn_tok.col,
+                            kind: ParseErrorKind::InvalidCommunity(format!(
+                                "ASN {asn} exceeds u32"
+                            )),
+                        });
+                    }
+                    Some(asn as u32)
+                }
+                _ => {
                     return Err(ParseError {
                         line: asn_tok.line,
                         col: asn_tok.col,
-                        kind: ParseErrorKind::InvalidCommunity(format!("ASN {asn} exceeds u32")),
+                        kind: ParseErrorKind::InvalidCommunity("(mixed wildcard)".to_string()),
                     });
                 }
-                return Ok(Expr::Lit(Value::Communities(vec![(
-                    lr_core::addr::Asn(asn as u32),
-                    val,
-                )])));
-            }
+            };
+            return Ok(Expr::Lit(Value::CommPattern { asn, val }));
         }
         self.parse_expr()
     }

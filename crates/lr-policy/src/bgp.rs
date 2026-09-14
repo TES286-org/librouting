@@ -127,16 +127,33 @@ pub fn add_community(route: &mut Route, community: Community) {
 pub fn remove_community(route: &mut Route, community: Community) {
     let mut set = communities(route);
     set.retain(|c| *c != community);
+    set_communities(route, set);
+}
+
+/// Replace the whole COMMUNITIES set; drops the attribute when the
+/// new set is empty (the D3.4 `delete`/`filter` write-back path).
+pub fn set_communities(route: &mut Route, set: Vec<Community>) {
     if set.is_empty() {
         route.attributes.remove(AttrTag::raw(TAG_COMMUNITIES));
-    } else {
-        put(
-            route,
-            TAG_COMMUNITIES,
-            FLAGS_COMMUNITIES,
-            Community::encode_set(&set),
-        );
+        return;
     }
+    put(
+        route,
+        TAG_COMMUNITIES,
+        FLAGS_COMMUNITIES,
+        Community::encode_set(&set),
+    );
+}
+
+/// Replace the AS_PATH with a flat AS_SEQUENCE; drops the attribute
+/// when the sequence is empty (the D3.4 path write-back).
+pub fn set_as_sequence(route: &mut Route, seq: Vec<Asn>) {
+    if seq.is_empty() {
+        route.attributes.remove(AttrTag::raw(TAG_AS_PATH));
+        return;
+    }
+    let path = AsPath::from_sequence(seq);
+    put(route, TAG_AS_PATH, FLAGS_AS_PATH, path.encode_4());
 }
 
 #[cfg(test)]

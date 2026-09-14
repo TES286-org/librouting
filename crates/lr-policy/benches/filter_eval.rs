@@ -121,6 +121,8 @@ impl FilterContext for BenchCtx {
         });
     }
     fn bgp_communities_add(&self, _route: &mut Route, _asn: Asn, _val: u16) {}
+    fn set_bgp_communities(&self, _route: &mut Route, _set: Vec<(Asn, u16)>) {}
+    fn set_bgp_as_path(&self, _route: &mut Route, _seq: Vec<Asn>) {}
 }
 
 fn route_with(prefix: &str, local_pref: u32, med: u32) -> Route {

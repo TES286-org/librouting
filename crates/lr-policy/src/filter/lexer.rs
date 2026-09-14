@@ -299,6 +299,11 @@ impl<'a> Lexer<'a> {
                     // decimal digits terminated by a non-hex /
                     // non-address char (`,`, `]`, `;`, ...), treat
                     // this as a community pair — stop here.
+                    // `64512:*` (D3.4 wildcard pattern) is a pair
+                    // too — the value component is the `*`.
+                    if self.src.get(self.pos + 1) == Some(&b'*') {
+                        break;
+                    }
                     let mut p = self.pos + 1;
                     let mut all_decimal = true;
                     let mut any_digit = false;

@@ -18,6 +18,29 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Filter DSL set operations (ROADMAP-v3 D3.4): BIRD `delete` /
+  `filter` / `empty` / `count`, with wildcard community patterns
+  (`asn:val`, `asn:*`, `*:val`, `*:*`) in set literals. Works
+  value-level (`delete(cs, [64512:*])` on a local) and directly on
+  route attributes (`bgp.communities.delete([...])`,
+  `bgp.as_path.delete([...])`, `bgp.communities.filter([...])`).
+  Assignment accepts the canonical BIRD idiom
+  `bgp.communities = delete(bgp.communities, [64512:*]);` and
+  `bgp.as_path = <sequence>`; `~` matches wildcard patterns. Two new
+  `FilterContext` mutators (`set_bgp_communities`, `set_bgp_as_path`)
+  — empty results drop the attribute.
+- Filter DSL `defined()` / `exists()` (ROADMAP-v3 D3.5): presence
+  checks for route attributes and scope variables, parsed structurally
+  (`Expr::Defined`) so the argument is never evaluated and an absent
+  attribute stays distinguishable from "set to the default". Optional
+  attributes (`bgp.local_pref`, `bgp.med`, `bgp.next_hop`,
+  `bgp.origin`) report presence from the typed accessors; list-valued
+  attributes (`bgp.as_path`, `bgp.communities`) report presence as
+  non-empty; `net` / `proto` / `source` / `roa.state` and literals are
+  always defined. Any other expression probes against a route copy, so
+  `defined()` can never write through. Seven regression tests cover
+  the absent-vs-zero-MED distinction, the `exists` alias, list fields,
+  variables and the one-argument arity error.
 - ROADMAP-v3 D4.1 / D4.2 — daemon surfaces for the cross-protocol
   engines (`[[redistribute]]` and `[[aggregate]]` TOML tables):
   - `[[redistribute]]` (BIRD `pipe` / FRR `redistribute`): routes from

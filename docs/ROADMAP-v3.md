@@ -224,8 +224,8 @@ PDU parser is a useful cross-check.
 ## D3 — Filter DSL feature expansion toward BIRD syntax parity
 
 **Status:** partial — ~~D3.6 (proto field fix) landed~~ (commit
-`ca8fe42`). The smallest piece is done; the rest of D3 remains
-open. Tracks `lr-policy`.
+`ca8fe42`), ~~D3.5 (`defined()` / `exists()`) landed~~ and ~~D3.4 (set
+operations) landed~~. The rest of D3 remains open. Tracks `lr-policy`.
 
 **Current gap.** `crates/lr-policy/src/filter/` implements a subset of
 the BIRD filter syntax (if/then/else, let, arithmetic, comparison,
@@ -258,12 +258,27 @@ not exposed to the DSL. Add `RouteFieldKind::BgpExtCommunities` and
 `FilterContext::bgp_ext_communities()`; support Route Target (`rt`),
 Site of Origin (`soo`) and friends. ~400 LoC.
 
-### D3.4 — Set operations (`add`/`delete`/`filter`/`empty`/`count`)
+### D3.4 — Set operations (`add`/`delete`/`filter`/`empty`/`count`) — ~~landed~~
 
 BIRD's `delete(community_set, [asn:val])`,
 `filter(community_set, [asn:val])`, `empty(community_set)`,
 `count(community_set)`. Wire them into `eval_call`. AS_PATH needs
 `delete` and `filter` too. ~300 LoC.
+
+~~Landed with BIRD wildcard patterns on top: set literals accept
+`asn:val`, `asn:*`, `*:val` and `*:*` community patterns (new
+`Value::CommPattern`, the lexer breaks the number scan before `:*`);
+`delete` / `filter` / `empty` / `count` work value-level (locals) via
+`eval_call`, and `bgp.communities.delete/filter`,
+`bgp.as_path.delete/filter` mutate the route through two new
+`FilterContext` mutators (`set_bgp_communities`, `set_bgp_as_path` —
+empty results drop the attribute, BIRD semantics). Assignment now
+accepts `bgp.communities = delete(bgp.communities, [64512:*])` (the
+canonical BIRD idiom) and `bgp.as_path = <sequence>`;
+`bgp.communities += [asn:val]` keeps working (wildcards rejected) and
+`~` matches wildcard patterns. Ten tests cover exact/wildcard delete,
+filter, attribute drop, the assignment idiom, AS-path ops,
+value-level ops and append rejections.~~
 
 ### D3.5 — `defined()` / `exists()` checks
 

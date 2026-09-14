@@ -136,6 +136,10 @@ pub enum Value {
     AsPath(Vec<Asn>),
     /// A community set — list of `(asn, value)` pairs.
     Communities(Vec<(Asn, u16)>),
+    /// One community *pattern* element from a set literal used by
+    /// `delete` / `filter`: `65000:*`, `*:100` or `*:*`. `None`
+    /// component = wildcard (BIRD `filter/config.Y` `f_pair` patterns).
+    CommPattern { asn: Option<u32>, val: Option<u16> },
     /// A generic set — used for prefix sets and AS-path sets in
     /// membership tests (`net ~ [ 10.0.0.0/8, 192.0.2.0/24 ]`).
     /// Each element retains its original type (Prefix, Asn, Int).
@@ -158,6 +162,7 @@ impl Value {
             Value::Asn(_) => "asn",
             Value::AsPath(_) => "as-path",
             Value::Communities(_) => "community-set",
+            Value::CommPattern { .. } => "community-pattern",
             Value::Set(_) => "set",
             Value::Protocol(_) => "protocol",
             Value::RoaState(_) => "roa-state",
@@ -176,6 +181,7 @@ impl Value {
             Value::RoaState(_) => true,
             Value::AsPath(v) => !v.is_empty(),
             Value::Communities(v) => !v.is_empty(),
+            Value::CommPattern { .. } => true,
             Value::Set(v) => !v.is_empty(),
         }
     }
@@ -209,6 +215,18 @@ impl fmt::Display for Value {
                     write!(f, "{}:{}", asn.0, val)?;
                 }
                 write!(f, "]")
+            }
+            Value::CommPattern { asn, val } => {
+                let show = |o: Option<u64>| match o {
+                    Some(n) => n.to_string(),
+                    None => "*".to_string(),
+                };
+                write!(
+                    f,
+                    "{}:{}",
+                    show(asn.map(|a| a as u64)),
+                    show(val.map(|v| v as u64))
+                )
             }
             Value::Set(v) => {
                 write!(f, "[")?;
