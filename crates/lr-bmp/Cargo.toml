@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 description = "BGP Monitoring Protocol (RFC 7854) — BMP message codec and collector sink"
 
+keywords = ["bmp", "bgp", "monitoring", "rfc7854"]
+categories = ["network-programming", "parser-implementations"]
+
 # `cargo bench --workspace -- <criterion args>` passes the args to
 # every bench-enabled target; without this the lib unit tests
 # (libtest harness) would run in bench mode and reject the
@@ -16,8 +19,6 @@ description = "BGP Monitoring Protocol (RFC 7854) — BMP message codec and coll
 # benches live in the explicit [[bench]] targets below.
 [lib]
 bench = false
-keywords = ["bmp", "bgp", "monitoring", "rfc7854"]
-categories = ["network-programming", "parser-implementations"]
 
 [features]
 default = ["std"]

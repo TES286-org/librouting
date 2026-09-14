@@ -9,6 +9,9 @@ repository.workspace = true
 homepage.workspace = true
 description = "LDP - Label Distribution Protocol (RFC 5036) codec and session state machines for librouting"
 
+keywords = ["ldp", "mpls", "label-distribution", "routing"]
+categories = ["network-programming", "parser-implementations"]
+
 # `cargo bench --workspace -- <criterion args>` passes the args to
 # every bench-enabled target; without this the lib unit tests
 # (libtest harness) would run in bench mode and reject the
@@ -16,8 +19,6 @@ description = "LDP - Label Distribution Protocol (RFC 5036) codec and session st
 # benches live in the explicit [[bench]] targets below.
 [lib]
 bench = false
-keywords = ["ldp", "mpls", "label-distribution", "routing"]
-categories = ["network-programming", "parser-implementations"]
 
 [features]
 default = ["std"]
