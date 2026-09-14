@@ -28,7 +28,8 @@ lr-bgp = { workspace = true }
 lr-ospf = { workspace = true }
 lr-babel = { workspace = true }
 lr-rib = { workspace = true }
-lr-policy = { workspace = true }
+lr-policy = { workspace = true, features = ["damping"] }
+lr-damping = { workspace = true }
 lr-router = { workspace = true }
 lr-mpls = { workspace = true }
 lr-srv6 = { workspace = true }

@@ -6,7 +6,23 @@ overridden via the `LIBROUTING_LIB` environment variable; otherwise we look
 in the workspace's `target/release` directory.
 """
 
-from .router import LrError, Router, abi_version, last_error, mpls_platform_labels
+from .router import (
+    METRIC_ADD,
+    METRIC_FIXED,
+    METRIC_INHERIT,
+    PROTO_BABEL,
+    PROTO_BGP,
+    PROTO_CONNECTED,
+    PROTO_OSPF,
+    PROTO_OSPF3,
+    PROTO_STATIC,
+    Damping,
+    LrError,
+    Router,
+    abi_version,
+    last_error,
+    mpls_platform_labels,
+)
 from .roa import ROA_INVALID, ROA_NOT_FOUND, ROA_VALID, RoaStore
 from .codec import (
     encode_keepalive,
@@ -19,6 +35,16 @@ from .codec import (
 
 __all__ = [
     "Router",
+    "Damping",
+    "PROTO_BGP",
+    "PROTO_OSPF",
+    "PROTO_OSPF3",
+    "PROTO_BABEL",
+    "PROTO_STATIC",
+    "PROTO_CONNECTED",
+    "METRIC_INHERIT",
+    "METRIC_FIXED",
+    "METRIC_ADD",
     "RoaStore",
     "ROA_VALID",
     "ROA_NOT_FOUND",
@@ -35,4 +61,4 @@ __all__ = [
     "LrError",
 ]
 
-__version__ = "1.0.0-rc.2"
+__version__ = "1.0.0-rc.3"

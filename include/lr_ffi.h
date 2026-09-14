@@ -8,6 +8,20 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/* Wire protocol ids for lr_router_add_redistribution_pipe (LrProtocol). */
+#define LR_PROTO_BGP 0
+#define LR_PROTO_OSPF 1
+#define LR_PROTO_OSPF3 2
+#define LR_PROTO_BABEL 3
+#define LR_PROTO_STATIC 4
+#define LR_PROTO_CONNECTED 5
+
+/* Metric policy ids for lr_router_add_redistribution_pipe (LrMetricPolicy). */
+#define LR_METRIC_INHERIT 0
+#define LR_METRIC_FIXED 1
+#define LR_METRIC_ADD 2
+
+
 
 
 /**
@@ -27,6 +41,51 @@ typedef struct lr_bytes_t {
   uintptr_t len;
   uintptr_t cap;
 } lr_bytes_t;
+
+/**
+ * Opaque router handle. C side never touches internals.
+ */
+typedef struct OpaqueRouter {
+  uint8_t _private[0];
+} OpaqueRouter;
+
+typedef struct OpaqueRouter *lr_router_t;
+
+/**
+ * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
+ * first four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all
+ * sixteen bytes with `is_ipv6 = 1` — the same convention as
+ * `lr_roa_entry_t`.
+ */
+typedef struct lr_prefix_t {
+  uint8_t addr[16];
+  uint8_t is_ipv6;
+  uint8_t prefix_len;
+} lr_prefix_t;
+
+/**
+ * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
+ * shared with the hook installed on the router.
+ */
+typedef struct OpaqueDamping {
+  uint8_t _private[0];
+} OpaqueDamping;
+
+typedef struct OpaqueDamping *lr_damping_t;
+
+/**
+ * RFC 2439 §4.7 damping tunables. Mirrors
+ * `lr_damping::DampingConfig` field-for-field.
+ */
+typedef struct lr_damping_config_t {
+  uint32_t additive_incr;
+  uint32_t suppress_threshold;
+  uint32_t reuse_threshold;
+  uint32_t upper_limit;
+  uint64_t decay_interval_s;
+  double decay_factor_active;
+  double decay_factor_withdrawn;
+} lr_damping_config_t;
 
 /**
  * Opaque ROA store handle. C side never touches internals.
@@ -84,15 +143,6 @@ typedef struct lr_roa_delta_t {
 } lr_roa_delta_t;
 
 /**
- * Opaque router handle. C side never touches internals.
- */
-typedef struct OpaqueRouter {
-  uint8_t _private[0];
-} OpaqueRouter;
-
-typedef struct OpaqueRouter *lr_router_t;
-
-/**
  * Free an `lr_bytes_t` previously returned from any `lr_*` function. Safe to
  * call with a NULL pointer.
  *
@@ -141,6 +191,92 @@ const char *lr_last_error(void);
  * ABI version packed as u32. Compare to `lr_core::ABI_VERSION`.
  */
 uint32_t lr_abi_version(void);
+
+/**
+ * Install one redistribution pipe on the router.
+ *
+ * `source` / `target` are [`LrProtocol`] values, `metric_policy` a
+ * [`LrMetricPolicy`]. `has_tag` gates `tag` (any non-zero installs
+ * the tag). `allow` / `allow_count` carry an optional allow-list of
+ * prefixes (NULL / 0 = redistribute everything). Returns 0 on
+ * success, -1 on a null argument, -2 on an invalid router handle,
+ * -3 on a malformed argument (unknown protocol id, bad prefix
+ * length), and [`LR_ERR_PANIC`] if the body panics.
+ *
+ * # Safety
+ * `r` must be a live router handle. `allow` (when non-null) must
+ * point to `allow_count` readable `lr_prefix_t` values.
+ */
+int32_t lr_router_add_redistribution_pipe(lr_router_t r,
+                                          int32_t source,
+                                          int32_t target,
+                                          int32_t metric_policy,
+                                          uint32_t metric,
+                                          int32_t has_tag,
+                                          uint32_t tag,
+                                          const struct lr_prefix_t *allow,
+                                          uintptr_t allow_count);
+
+/**
+ * Register an RFC 4271 §9.2.2.2 aggregate. The aggregate is
+ * originated while a more-specific exists and withdrawn when the
+ * last one disappears. Returns 0 on success, -1 / -2 / -3 on
+ * null / invalid-handle / malformed-prefix.
+ *
+ * # Safety
+ * `r` must be a live router handle; `prefix` must be a readable
+ * `lr_prefix_t`.
+ */
+int32_t lr_router_add_aggregate(lr_router_t r, const struct lr_prefix_t *prefix);
+
+/**
+ * Withdraw a previously registered aggregate. Removing an unknown
+ * prefix is a no-op that still returns 0 (the router treats it the
+ * same way).
+ *
+ * # Safety
+ * See [`lr_router_add_aggregate`].
+ */
+int32_t lr_router_remove_aggregate(lr_router_t r, const struct lr_prefix_t *prefix);
+
+/**
+ * Install the RFC 2439 damping import hook with the supplied
+ * tunables and return a shared [`lr_damping_t`] handle. The embedder
+ * drives decay with [`lr_damping_decay`] (the in-process analogue of
+ * the daemon's `lr-damping-decay` thread) and frees the handle with
+ * [`lr_damping_destroy`]. Installing damping twice replaces nothing —
+ * the second hook simply chains after the first; call this once per
+ * router.
+ *
+ * Returns NULL on null/invalid arguments (the last-error string says
+ * which) and the handle otherwise.
+ *
+ * # Safety
+ * `r` must be a live router handle; `cfg` must be a readable
+ * `lr_damping_config_t`.
+ */
+lr_damping_t lr_router_set_damping(lr_router_t r, const struct lr_damping_config_t *cfg);
+
+/**
+ * Drive one damping decay pass at wall-clock `now_s` (seconds).
+ * Returns the number of prefixes that re-emerged from suppression
+ * (>= 0), or negative error codes on null / invalid handles.
+ *
+ * # Safety
+ * `d` must be a live damping handle from [`lr_router_set_damping`].
+ */
+int32_t lr_damping_decay(struct OpaqueDamping *d, uint64_t now_s);
+
+/**
+ * Free a damping handle. The hook installed on the router keeps its
+ * own `Arc`, so damping continues until the router is destroyed;
+ * destroying the handle only releases the embedder's decay access.
+ *
+ * # Safety
+ * `d` must be null or a handle returned by [`lr_router_set_damping`]
+ * that has not been destroyed yet, and must not be used afterwards.
+ */
+void lr_damping_destroy(struct OpaqueDamping *d);
 
 /**
  * Create an empty ROA store. NULL on panic (last-error set).

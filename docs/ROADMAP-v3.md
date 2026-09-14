@@ -369,8 +369,9 @@ sources × 4 routes for verdict + attribute-state equality.~~
 and D4.5 (interop scripts) remain. Tracks `lr-cli::daemon_config` +
 `lr-cli::daemon` + `lr-ffi`.
 
-**Current gap (what remains).** The FFI surface for the three
-daemon-wired features and the interop scripts against BIRD/FRR.
+**Current gap (what remains).** ~~The FFI surface for the three
+daemon-wired features~~ (D4.4) ~~and~~ the interop scripts against
+BIRD/FRR (D4.5) remain.
 
 1. **Redistribution.** `RedistributionPipe` in
    `lr-router/src/redistribution.rs` (227 LoC) supports BGP↔OSPF,
@@ -464,9 +465,23 @@ daemon-wired features and the interop scripts against BIRD/FRR.
    surfaces all eight `DampingConfig` tunables verbatim — operators
    familiar with RFC 2439 §4.7's parameter names can dial them
    directly. Off by default (RFC 7196 §3).
-4. **FFI surface.** `lr_router_add_redistribution_pipe()`,
+4. **FFI surface.** ~~`lr_router_add_redistribution_pipe()`,
    `lr_router_add_aggregate()`, `lr_router_set_damping_config()`, etc.
-   Sync Go / Python / C++ bindings.
+   Sync Go / Python / C++ bindings.~~ Landed as `crates/lr-ffi/src/policy.rs`:
+   `lr_router_add_redistribution_pipe` (source/target as `LR_PROTO_*`
+   ids, metric policy as `LR_METRIC_*`, optional tag + allow-list),
+   `lr_router_add_aggregate` / `lr_router_remove_aggregate`,
+   `lr_router_set_damping` (installs the RFC 2439 import hook and
+   returns a shared `lr_damping_t` handle) plus `lr_damping_decay` /
+   `lr_damping_destroy`. C constants ship in the cbindgen header
+   (`after_includes` preamble); the C++ RAII wrapper gains
+   `add_redistribution_pipe` / `add_aggregate` / `remove_aggregate` /
+   `set_damping` + a `Damping` unique_ptr; Go gains `AddRedistributionPipe`
+   / `AddAggregate` / `RemoveAggregate` / `SetDamping` / `(*Damping).Decay`
+   with finalizers; Python gains the same surface with protocol/metric
+   constants re-exported. The C, C++, Go and Python harnesses/test
+   suites exercise the new entries in CI. FFI tests (5) pin round
+   trips + the argument-validation matrix.
 5. **Interop tests.** `redistribute_bird.sh` (BIRD `pipe` protocol),
    `aggregate_bird.sh`, `damping_bird.sh` (FRR if BIRD 2 has damping
    disabled by default).

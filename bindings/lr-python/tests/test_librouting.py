@@ -323,3 +323,33 @@ def test_roa_store_lifecycle():
             pass
     finally:
         s.__del__()
+
+
+# ===== D4.4 — redistribution / aggregation / damping =====
+
+def test_add_redistribution_pipe_and_aggregates():
+    with librouting.Router() as r:
+        # Pipe with tag + allow-list: fail-closed parse of the allow
+        # prefixes happens Python-side (ipaddress) and C-side (lengths).
+        r.add_redistribution_pipe(librouting.PROTO_OSPF, librouting.PROTO_BGP,
+                                  metric_policy=librouting.METRIC_FIXED,
+                                  metric=100, tag=65000,
+                                  allow=["10.0.0.0/8", "2001:db8::/32"])
+        r.add_redistribution_pipe(librouting.PROTO_STATIC, librouting.PROTO_BGP)
+
+        # Aggregates round-trip; unknown removals are a no-op.
+        r.add_aggregate("203.0.113.0/24")
+        r.remove_aggregate("203.0.113.0/24")
+        r.remove_aggregate("198.51.100.0/24")
+
+
+def test_damping_install_decay_destroy():
+    with librouting.Router() as r:
+        d = r.set_damping()
+        try:
+            # Idle table: a decay pass re-emerges nothing.
+            assert d.decay(1000) == 0
+        finally:
+            d.destroy()
+        # Double destroy is safe.
+        d.destroy()

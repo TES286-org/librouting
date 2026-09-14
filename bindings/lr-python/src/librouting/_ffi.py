@@ -153,6 +153,40 @@ int32_t lr_roa_store_validate(lr_roa_store_t s,
                               uint32_t origin_as,
                               uint8_t has_origin_as,
                               uint8_t *out_state);
+
+typedef struct lr_prefix_t {
+    uint8_t addr[16];
+    uint8_t is_ipv6;
+    uint8_t prefix_len;
+} lr_prefix_t;
+
+typedef struct lr_damping_config_t {
+    uint32_t additive_incr;
+    uint32_t suppress_threshold;
+    uint32_t reuse_threshold;
+    uint32_t upper_limit;
+    uint64_t decay_interval_s;
+    double decay_factor_active;
+    double decay_factor_withdrawn;
+} lr_damping_config_t;
+
+typedef struct OpaqueDamping OpaqueDamping;
+typedef struct OpaqueDamping *lr_damping_t;
+
+int32_t lr_router_add_redistribution_pipe(lr_router_t r,
+                                          int32_t source,
+                                          int32_t target,
+                                          int32_t metric_policy,
+                                          uint32_t metric,
+                                          int32_t has_tag,
+                                          uint32_t tag,
+                                          const lr_prefix_t *allow,
+                                          uintptr_t allow_count);
+int32_t lr_router_add_aggregate(lr_router_t r, const lr_prefix_t *prefix);
+int32_t lr_router_remove_aggregate(lr_router_t r, const lr_prefix_t *prefix);
+lr_damping_t lr_router_set_damping(lr_router_t r, const lr_damping_config_t *cfg);
+int32_t lr_damping_decay(lr_damping_t d, uint64_t now_s);
+void lr_damping_destroy(lr_damping_t d);
 """
 
 

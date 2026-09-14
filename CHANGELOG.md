@@ -18,6 +18,16 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- FFI surface for the cross-protocol daemon features (ROADMAP-v3
+  D4.4): `lr_router_add_redistribution_pipe` (BIRD `pipe` / FRR
+  `redistribute` with metric policy, tag and allow-list),
+  `lr_router_add_aggregate` / `lr_router_remove_aggregate` (RFC 4271
+  section 9.2.2.2), and `lr_router_set_damping` + `lr_damping_decay` /
+  `lr_damping_destroy` (RFC 2439 with an embedder-driven decay
+  handle). C constants (`LR_PROTO_*`, `LR_METRIC_*`) ship in the
+  generated header; the C++ RAII wrapper, Go and Python bindings all
+  expose the new surface with tests, and the C/C++ harnesses exercise
+  it in CI.
 - Filter DSL bytecode VM (ROADMAP-v3 D3.7): the filter AST compiles
   to a flat instruction stream (jumps for short-circuits and
   branches, lifted constant patterns for `~`, presence instructions

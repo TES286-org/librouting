@@ -314,6 +314,60 @@ int main(void) {
         check(1, "roa_store_free");
     }
 
+    /* ===== D4.4 — redistribution / aggregation / damping ===== */
+    {
+        /* Redistribution pipe: OSPF -> BGP, fixed metric, tag, and
+         * an allow-list covering 10.0.0.0/8. */
+        lr_prefix_t allow;
+        memset(&allow, 0, sizeof(allow));
+        allow.addr[0] = 10;
+        allow.is_ipv6 = 0;
+        allow.prefix_len = 8;
+        rc = lr_router_add_redistribution_pipe(
+            r, LR_PROTO_OSPF, LR_PROTO_BGP, LR_METRIC_FIXED, 100, 1, 65000, &allow, 1);
+        check(rc == 0, "add_redistribution_pipe ospf->bgp");
+        rc = lr_router_add_redistribution_pipe(
+            r, 99, LR_PROTO_BGP, LR_METRIC_INHERIT, 0, 0, 0, NULL, 0);
+        check(rc == -3, "add_redistribution_pipe rejects unknown protocol id");
+
+        /* Aggregates: add, remove, malformed length rejected. */
+        lr_prefix_t agg;
+        memset(&agg, 0, sizeof(agg));
+        agg.addr[0] = 203; agg.addr[1] = 0; agg.addr[2] = 113;
+        agg.prefix_len = 24;
+        rc = lr_router_add_aggregate(r, &agg);
+        check(rc == 0, "add_aggregate");
+        rc = lr_router_remove_aggregate(r, &agg);
+        check(rc == 0, "remove_aggregate");
+        lr_prefix_t badp;
+        memset(&badp, 0, sizeof(badp));
+        badp.prefix_len = 33;
+        rc = lr_router_add_aggregate(r, &badp);
+        check(rc == -3, "add_aggregate rejects prefix_len > 32");
+        rc = lr_router_add_aggregate(r, NULL);
+        check(rc == -1, "add_aggregate rejects NULL");
+    }
+    {
+        /* Damping: install with RFC 2439 defaults, decay an idle
+         * table, then destroy the handle. */
+        lr_damping_config_t cfg;
+        memset(&cfg, 0, sizeof(cfg));
+        cfg.additive_incr = 1000;
+        cfg.suppress_threshold = 2000;
+        cfg.reuse_threshold = 750;
+        cfg.upper_limit = 60000;
+        cfg.decay_interval_s = 30;
+        cfg.decay_factor_active = 0.97;
+        cfg.decay_factor_withdrawn = 0.5;
+        lr_damping_t d = lr_router_set_damping(r, &cfg);
+        check(d != NULL, "set_damping returns handle");
+        int32_t reemerged = lr_damping_decay(d, 1000);
+        check(reemerged == 0, "damping decay on idle table");
+        lr_damping_destroy(d);
+        lr_damping_destroy(NULL); /* no-op */
+        check(1, "damping_destroy");
+    }
+
     lr_router_destroy(r);
     if (failures == 0) {
         printf("ALL PASS\n");

@@ -556,6 +556,7 @@ dependencies = [
  "lr-babel",
  "lr-bgp",
  "lr-core",
+ "lr-damping",
  "lr-mpls",
  "lr-ospf",
  "lr-policy",

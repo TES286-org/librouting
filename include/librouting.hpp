@@ -9,6 +9,8 @@ extern "C" {
 #include "lr_ffi.h"
 }
 
+#include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <memory>
@@ -52,6 +54,16 @@ struct RoaStoreDeleter {
     }
 };
 using RoaStore = std::unique_ptr<OpaqueRoaStore, RoaStoreDeleter>;
+
+/// RAII handle to a shared RFC 2439 damping table (ROADMAP-v3 D4.4).
+/// The router's import hook holds its own reference, so destroying
+/// this handle releases only the embedder's decay access.
+struct DampingDeleter {
+    void operator()(lr_damping_t d) const noexcept {
+        if (d) lr_damping_destroy(d);
+    }
+};
+using Damping = std::unique_ptr<OpaqueDamping, DampingDeleter>;
 
 inline Router make_router() {
     auto r = lr_router_new();
@@ -268,6 +280,101 @@ inline void set_local_address(Router& r, std::uint64_t session,
         throw Error("lr_router_set_local_address failed: " +
                     std::string(err ? err : "unknown"));
     }
+}
+
+// ===== D4.4 — redistribution / aggregation / damping =====
+
+/// Wire protocol identifiers for redistribution pipes. Mirrors
+/// `LrProtocol` in lr_ffi.h.
+enum class Protocol : std::int32_t {
+    Bgp = 0,
+    Ospf = 1,
+    Ospf3 = 2,
+    Babel = 3,
+    Static = 4,
+    Connected = 5,
+};
+
+/// Metric transformation for a redistribution pipe.
+enum class MetricPolicy : std::int32_t {
+    Inherit = 0,
+    Fixed = 1,
+    Add = 2,
+};
+
+/// One IPv4/IPv6 prefix. IPv4 goes in the first four bytes of `addr`.
+inline lr_prefix_t make_prefix(const std::vector<std::uint8_t>& addr, std::uint8_t prefix_len) {
+    if (addr.size() != 4 && addr.size() != 16) {
+        throw Error("make_prefix: bad address length (want 4 or 16)");
+    }
+    lr_prefix_t p{};
+    std::copy(addr.begin(), addr.end(), p.addr);
+    p.is_ipv6 = addr.size() == 16 ? 1 : 0;
+    p.prefix_len = prefix_len;
+    return p;
+}
+
+/// Install a redistribution pipe (BIRD `pipe` / FRR `redistribute`):
+/// routes from `source` are re-originated into `target` with the
+/// configured metric policy, optional tag and optional allow-list.
+inline void add_redistribution_pipe(Router& r,
+                                    Protocol source,
+                                    Protocol target,
+                                    MetricPolicy metric_policy,
+                                    std::uint32_t metric,
+                                    bool has_tag,
+                                    std::uint32_t tag,
+                                    const std::vector<lr_prefix_t>& allow = {}) {
+    int rc = lr_router_add_redistribution_pipe(
+        r.get(), static_cast<std::int32_t>(source), static_cast<std::int32_t>(target),
+        static_cast<std::int32_t>(metric_policy), metric, has_tag ? 1 : 0, tag,
+        allow.empty() ? nullptr : allow.data(), allow.size());
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_add_redistribution_pipe failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Register an RFC 4271 §9.2.2.2 aggregate (zeroed AS_PATH +
+/// ATOMIC_AGGREGATE + AGGREGATOR while a more-specific exists).
+inline void add_aggregate(Router& r, const lr_prefix_t& prefix) {
+    int rc = lr_router_add_aggregate(r.get(), &prefix);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_add_aggregate failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Withdraw a previously registered aggregate (unknown prefixes are
+/// a no-op).
+inline void remove_aggregate(Router& r, const lr_prefix_t& prefix) {
+    int rc = lr_router_remove_aggregate(r.get(), &prefix);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_remove_aggregate failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// RFC 2439 damping tunables (mirrors `lr_damping_config_t`).
+inline Damping set_damping(Router& r, const lr_damping_config_t& cfg) {
+    lr_damping_t d = lr_router_set_damping(r.get(), &cfg);
+    if (!d) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_set_damping failed: " + std::string(err ? err : "unknown"));
+    }
+    return Damping(d);
+}
+
+/// Drive one damping decay pass; returns the number of prefixes that
+/// re-emerged from suppression.
+inline std::int32_t damping_decay(Damping& d, std::uint64_t now_s) {
+    std::int32_t rc = lr_damping_decay(d.get(), now_s);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_damping_decay failed: " + std::string(err ? err : "unknown"));
+    }
+    return rc;
 }
 
 inline std::vector<std::uint8_t> to_vec(const Bytes& b) {

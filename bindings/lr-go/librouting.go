@@ -831,3 +831,185 @@ func (s *RoaStore) Validate(prefixAddr []byte, prefixLen uint8, originAS uint32,
 	}
 	return int(state), nil
 }
+
+// ===== D4.4 — redistribution / aggregation / damping =====
+
+// Wire protocol identifiers for AddRedistributionPipe. Mirrors
+// LrProtocol in lr_ffi.h.
+type Protocol int
+
+const (
+	ProtoBgp       Protocol = 0
+	ProtoOspf      Protocol = 1
+	ProtoOspf3     Protocol = 2
+	ProtoBabel     Protocol = 3
+	ProtoStatic    Protocol = 4
+	ProtoConnected Protocol = 5
+)
+
+// Metric transformation for a redistribution pipe.
+type MetricPolicy int
+
+const (
+	MetricInherit MetricPolicy = 0
+	MetricFixed   MetricPolicy = 1
+	MetricAdd     MetricPolicy = 2
+)
+
+// PrefixSpec is one IPv4/IPv6 prefix. Addr is 4 bytes (IPv4) or
+// 16 bytes (IPv6) — the same convention as the ROA entry API.
+type PrefixSpec struct {
+	Addr      []byte
+	IsIPv6    bool
+	PrefixLen uint8
+}
+
+func (p PrefixSpec) toC() (C.lr_prefix_t, error) {
+	var out C.lr_prefix_t
+	if p.IsIPv6 {
+		if len(p.Addr) != 16 {
+			return out, fmt.Errorf("IPv6 prefix Addr must be 16 bytes, got %d", len(p.Addr))
+		}
+		for i := 0; i < 16; i++ {
+			out.addr[i] = C.uint8_t(p.Addr[i])
+		}
+		out.is_ipv6 = 1
+	} else {
+		if len(p.Addr) != 4 {
+			return out, fmt.Errorf("IPv4 prefix Addr must be 4 bytes, got %d", len(p.Addr))
+		}
+		for i := 0; i < 4; i++ {
+			out.addr[i] = C.uint8_t(p.Addr[i])
+		}
+		out.is_ipv6 = 0
+	}
+	out.prefix_len = C.uint8_t(p.PrefixLen)
+	return out, nil
+}
+
+// AddRedistributionPipe installs a redistribution pipe (BIRD `pipe` /
+// FRR `redistribute`): routes from source are re-originated into
+// target with the configured metric policy, optional tag and optional
+// allow-list. allow == nil redistributes everything.
+func (r *Router) AddRedistributionPipe(source, target Protocol, metricPolicy MetricPolicy,
+	metric uint32, hasTag bool, tag uint32, allow []PrefixSpec) error {
+	var allowPtr *C.lr_prefix_t
+	var cAllow []C.lr_prefix_t
+	if len(allow) > 0 {
+		for _, a := range allow {
+			cp, err := a.toC()
+			if err != nil {
+				return fmt.Errorf("AddRedistributionPipe: %v", err)
+			}
+			cAllow = append(cAllow, cp)
+		}
+		allowPtr = &cAllow[0]
+	}
+	var ht C.int
+	if hasTag {
+		ht = 1
+	}
+	rc := C.lr_router_add_redistribution_pipe(r.ptr, C.int(source), C.int(target),
+		C.int(metricPolicy), C.uint32_t(metric), ht, C.uint32_t(tag), allowPtr,
+		C.size_t(len(cAllow)))
+	if rc != 0 {
+		return fmt.Errorf("lr_router_add_redistribution_pipe: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// AddAggregate registers an RFC 4271 §9.2.2.2 aggregate: originated
+// with a zeroed AS_PATH + ATOMIC_AGGREGATE + AGGREGATOR while a
+// more-specific exists, withdrawn when the last one disappears.
+func (r *Router) AddAggregate(prefix PrefixSpec) error {
+	cp, err := prefix.toC()
+	if err != nil {
+		return fmt.Errorf("AddAggregate: %v", err)
+	}
+	rc := C.lr_router_add_aggregate(r.ptr, &cp)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_add_aggregate: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// RemoveAggregate withdraws a previously registered aggregate.
+// Unknown prefixes are a no-op.
+func (r *Router) RemoveAggregate(prefix PrefixSpec) error {
+	cp, err := prefix.toC()
+	if err != nil {
+		return fmt.Errorf("RemoveAggregate: %v", err)
+	}
+	rc := C.lr_router_remove_aggregate(r.ptr, &cp)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_remove_aggregate: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// DampingConfig carries the RFC 2439 §4.7 tunables (mirrors
+// lr_damping_config_t).
+type DampingConfig struct {
+	AdditiveIncr         uint32
+	SuppressThreshold    uint32
+	ReuseThreshold       uint32
+	UpperLimit           uint32
+	DecayIntervalS       uint64
+	DecayFactorActive    float64
+	DecayFactorWithdrawn float64
+}
+
+// Damping is an owned handle to a shared damping table. The router's
+// import hook keeps its own reference; Destroy releases the
+// embedder's decay access. A runtime finalizer also destroys it.
+type Damping struct {
+	ptr C.lr_damping_t
+}
+
+// SetDamping installs the RFC 2439 damping import hook on the router
+// and returns the shared table handle. Drive periodic decay with
+// (*Damping).Decay — the in-process analogue of the daemon's
+// lr-damping-decay thread.
+func (r *Router) SetDamping(cfg DampingConfig) (*Damping, error) {
+	d := C.lr_router_set_damping(r.ptr, &C.lr_damping_config_t{
+		additive_incr:         C.uint32_t(cfg.AdditiveIncr),
+		suppress_threshold:    C.uint32_t(cfg.SuppressThreshold),
+		reuse_threshold:       C.uint32_t(cfg.ReuseThreshold),
+		upper_limit:           C.uint32_t(cfg.UpperLimit),
+		decay_interval_s:      C.uint64_t(cfg.DecayIntervalS),
+		decay_factor_active:   C.double(cfg.DecayFactorActive),
+		decay_factor_withdrawn: C.double(cfg.DecayFactorWithdrawn),
+	})
+	if d == nil {
+		return nil, fmt.Errorf("lr_router_set_damping: %s", LastError())
+	}
+	out := &Damping{ptr: d}
+	runtime.SetFinalizer(out, func(o *Damping) {
+		if o.ptr != nil {
+			C.lr_damping_destroy(o.ptr)
+			o.ptr = nil
+		}
+	})
+	return out, nil
+}
+
+// Decay drives one damping decay pass at wall-clock nowS (seconds)
+// and returns the number of prefixes that re-emerged.
+func (d *Damping) Decay(nowS uint64) (int, error) {
+	if d.ptr == nil {
+		return 0, fmt.Errorf("Decay: damping handle destroyed")
+	}
+	rc := C.lr_damping_decay(d.ptr, C.uint64_t(nowS))
+	if rc < 0 {
+		return 0, fmt.Errorf("lr_damping_decay: %s (rc=%d)", LastError(), int(rc))
+	}
+	return int(rc), nil
+}
+
+// Destroy releases the damping handle (idempotent).
+func (d *Damping) Destroy() {
+	if d.ptr != nil {
+		C.lr_damping_destroy(d.ptr)
+		d.ptr = nil
+	}
+}

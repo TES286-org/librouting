@@ -26,6 +26,7 @@ pub mod bytes;
 pub mod codec;
 pub mod error;
 pub mod handle;
+pub mod policy;
 pub mod roa_store;
 pub mod router;
 pub mod srv6;

@@ -4,6 +4,19 @@ from __future__ import annotations
 
 from ._ffi import ffi, get_lib, alloc_bytes, free_bytes, copy_bytes
 
+# Wire protocol identifiers (mirrors LrProtocol in lr_ffi.h).
+PROTO_BGP = 0
+PROTO_OSPF = 1
+PROTO_OSPF3 = 2
+PROTO_BABEL = 3
+PROTO_STATIC = 4
+PROTO_CONNECTED = 5
+
+# Metric transformation for redistribution pipes.
+METRIC_INHERIT = 0
+METRIC_FIXED = 1
+METRIC_ADD = 2
+
 
 class LrError(Exception):
     pass
@@ -475,9 +488,111 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_set_roa_validate failed (rc={rc}): {last_error()}")
 
+    # ===== D4.4 — redistribution / aggregation / damping =====
+
+    def add_redistribution_pipe(self, source: int, target: int,
+                                metric_policy: int = METRIC_INHERIT,
+                                metric: int = 0, tag: int | None = None,
+                                allow: list[str] | None = None) -> None:
+        """Install a redistribution pipe (BIRD ``pipe`` / FRR
+        ``redistribute``). Routes from ``source`` are re-originated
+        into ``target`` with the configured metric policy, optional
+        ``tag`` and optional ``allow`` prefix-list; ``allow is None``
+        redistributes everything."""
+        allow_ptr = ffi.NULL
+        allow_count = 0
+        if allow:
+            arr = ffi.new("lr_prefix_t[]", len(allow))
+            for i, pfx in enumerate(allow):
+                arr[i] = _make_prefix(pfx)[0]
+            allow_ptr = arr
+            allow_count = len(allow)
+        rc = get_lib().lr_router_add_redistribution_pipe(
+            self._ptr, int(source), int(target), int(metric_policy), int(metric),
+            1 if tag is not None else 0, int(tag or 0), allow_ptr, allow_count)
+        if rc != 0:
+            raise LrError(f"lr_router_add_redistribution_pipe failed (rc={rc}): {last_error()}")
+
+    def add_aggregate(self, prefix: str) -> None:
+        """Register an RFC 4271 section 9.2.2.2 aggregate (originated
+        while a more-specific exists, withdrawn when the last one
+        disappears)."""
+        p = _make_prefix(prefix)
+        rc = get_lib().lr_router_add_aggregate(self._ptr, p)
+        if rc != 0:
+            raise LrError(f"lr_router_add_aggregate failed (rc={rc}): {last_error()}")
+
+    def remove_aggregate(self, prefix: str) -> None:
+        """Withdraw a previously registered aggregate (unknown
+        prefixes are a no-op)."""
+        p = _make_prefix(prefix)
+        rc = get_lib().lr_router_remove_aggregate(self._ptr, p)
+        if rc != 0:
+            raise LrError(f"lr_router_remove_aggregate failed (rc={rc}): {last_error()}")
+
+    def set_damping(self, additive_incr: int = 1000, suppress_threshold: int = 2000,
+                    reuse_threshold: int = 750, upper_limit: int = 60000,
+                    decay_interval_s: int = 30, decay_factor_active: float = 0.97,
+                    decay_factor_withdrawn: float = 0.5) -> "Damping":
+        """Install the RFC 2439 damping import hook and return a
+        Damping handle the caller drives with decay()."""
+        cfg = ffi.new("lr_damping_config_t*", {
+            "additive_incr": additive_incr,
+            "suppress_threshold": suppress_threshold,
+            "reuse_threshold": reuse_threshold,
+            "upper_limit": upper_limit,
+            "decay_interval_s": decay_interval_s,
+            "decay_factor_active": decay_factor_active,
+            "decay_factor_withdrawn": decay_factor_withdrawn,
+        })
+        d = get_lib().lr_router_set_damping(self._ptr, cfg)
+        if not d:
+            raise LrError(f"lr_router_set_damping failed: {last_error()}")
+        return Damping(d)
+
+
+class Damping:
+    """Owned handle to a shared RFC 2439 damping table. The router's
+    import hook keeps its own reference; destroy() releases only the
+    embedder's decay access."""
+
+    def __init__(self, ptr):
+        self._d = ptr
+
+    def decay(self, now_s: int) -> int:
+        """Drive one decay pass; returns the number of prefixes that
+        re-emerged from suppression."""
+        rc = get_lib().lr_damping_decay(self._d, int(now_s))
+        if rc < 0:
+            raise LrError(f"lr_damping_decay failed (rc={rc}): {last_error()}")
+        return rc
+
+    def destroy(self) -> None:
+        if self._d:
+            get_lib().lr_damping_destroy(self._d)
+            self._d = None
+
+    def __del__(self):
+        try:
+            self.destroy()
+        except Exception:
+            pass
 
 def abi_version() -> int:
     return int(get_lib().lr_abi_version())
+
+
+def _make_prefix(prefix: str):
+    """Build an lr_prefix_t from an 'a.b.c.d/len' or 'v6::/len' string."""
+    import ipaddress
+    net = ipaddress.ip_network(prefix, strict=False)
+    p = ffi.new("lr_prefix_t*")
+    packed = net.network_address.packed
+    for i, octet in enumerate(packed):
+        p.addr[i] = octet
+    p.is_ipv6 = 1 if net.version == 6 else 0
+    p.prefix_len = net.prefixlen
+    return p
 
 
 def last_error() -> str:
@@ -541,4 +656,3 @@ def _parse_v6_next_hop(next_hop: str | None):
     if addr.version != 6:
         raise LrError(f"not an IPv6 next-hop: {next_hop}")
     return ffi.new("uint8_t[]", addr.packed)
-

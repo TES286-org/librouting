@@ -409,3 +409,55 @@ func TestRoaStoreLifecycle(t *testing.T) {
 		t.Fatalf("store changed after failed batch: %d", s.Len())
 	}
 }
+
+func TestRedistributionAndAggregate(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	err = r.AddRedistributionPipe(ProtoOspf, ProtoBgp, MetricFixed, 100, true, 65000,
+		[]PrefixSpec{{Addr: []byte{10, 0, 0, 0}, PrefixLen: 8}})
+	if err != nil {
+		t.Fatalf("AddRedistributionPipe: %v", err)
+	}
+	err = r.AddRedistributionPipe(Protocol(99), ProtoBgp, MetricInherit, 0, false, 0, nil)
+	if err == nil {
+		t.Fatal("unknown protocol id must fail")
+	}
+
+	prefix := PrefixSpec{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24}
+	if err := r.AddAggregate(prefix); err != nil {
+		t.Fatalf("AddAggregate: %v", err)
+	}
+	if err := r.RemoveAggregate(prefix); err != nil {
+		t.Fatalf("RemoveAggregate: %v", err)
+	}
+}
+
+func TestDamping(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	d, err := r.SetDamping(DampingConfig{
+		AdditiveIncr:         1000,
+		SuppressThreshold:    2000,
+		ReuseThreshold:       750,
+		UpperLimit:           60000,
+		DecayIntervalS:       30,
+		DecayFactorActive:    0.97,
+		DecayFactorWithdrawn: 0.5,
+	})
+	if err != nil {
+		t.Fatalf("SetDamping: %v", err)
+	}
+	defer d.Destroy()
+	n, err := d.Decay(1000)
+	if err != nil || n != 0 {
+		t.Fatalf("Decay on idle table: got (%d, %v), want (0, nil)", n, err)
+	}
+}
