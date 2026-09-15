@@ -18,6 +18,25 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- `lrctl` operational CLI (ROADMAP-v3 D12.1): a third `lr-cli` binary
+  alongside `lr` and `lr-daemon`. Connects to a running `lr-daemon`
+  over its Unix API socket and proxies the line-oriented command
+  protocol: `lrctl status`, `lrctl sessions [list]`,
+  `lrctl routes show [prefix]` (client-side prefix filter),
+  `lrctl routes dump <path>` (MRT export via the daemon's `mrt PATH`
+  command), `lrctl reload`, `lrctl shutdown`. Adds a client-side
+  `lrctl filter compile <body>` that reuses
+  `lr-policy::filter::compile` directly so operators can validate a
+  filter body before deploying — the same parser path the daemon
+  runs at startup. Default socket path `/run/lr-daemon.api` (matches
+  `templates/daemon.toml`); `--socket PATH` overrides on any
+  subcommand. Non-Unix targets refuse with a clear error. The
+  release workflow stages `lrctl` in every platform archive. 10 e2e
+  tests in `crates/lr-cli/tests/lrctl.rs`. Documented in
+  `docs/lr-cli.md` (new `lrctl` section) and `docs/RUNBOOK.md`.
+  `roa list` is deferred — exposing it requires threading the
+  `RoaStore` through the daemon's `Runtime` struct (a follow-up
+  commit).
 - Filter DSL formal grammar reference (ROADMAP-v3 D9.2): the new
   `docs/filter_dsl_grammar.md` is the canonical EBNF reference for
   the BIRD-like filter DSL, derived directly from the lexer + Pratt

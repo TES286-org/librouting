@@ -440,3 +440,34 @@ the state, that file tracks the how and why.
    parsed by the lexer but does not yet carry meaning inside `~`
    patterns). Both are documented as current behaviour with
    follow-up pointers in ROADMAP-v3 D9.
+9. **Phase 10 — D12.1 `lrctl` operational CLI** — landed: a third
+   `lr-cli` binary (`crates/lr-cli/src/lrctl.rs`) connects to a
+   running `lr-daemon` over its Unix API socket and proxies the
+   line-oriented command protocol. Mirrors the existing `lr` /
+   `lr-daemon` style (hand-rolled `env::args()` parsing, no clap
+   dependency, `ExitCode` returns). Daemon-proxy surface:
+   `lrctl status`, `lrctl sessions [list]`,
+   `lrctl routes show [prefix]` (client-side prefix filter — exact
+   match on the leading token so `203.0.113.0/24` does not also
+   match `203.0.113.0/25`), `lrctl routes dump <path>` (writes an
+   MRT dump via the daemon's `mrt PATH` command),
+   `lrctl reload`, `lrctl shutdown`. Client-side surface:
+   `lrctl filter compile <body>` reuses `lr-policy::filter::compile`
+   directly so operators can validate a filter body before deploying
+   — the same parser path the daemon runs at startup. Default
+   socket path `/run/lr-daemon.api` matches `templates/daemon.toml`;
+   `--socket PATH` overrides on any subcommand. Non-Unix targets
+   refuse with a clear error (the runtime API requires Unix domain
+   sockets). Exit codes: 0 success (or a `routes show <prefix>` with
+   no match — FRR parity), 1 transport failure / daemon `error:`
+   reply / filter parse error, 2 argument error. The release
+   workflow stages `lrctl` alongside `lr` and `lr-daemon` in every
+   platform archive (Linux x86_64, macOS Intel + Apple Silicon,
+   Windows x86_64-MSVC). 10 e2e tests in
+   `crates/lr-cli/tests/lrctl.rs` pin every subcommand including
+   transport-failure and argument-error paths. `lrctl` is documented
+   in `docs/lr-cli.md` (new `lrctl` section) and `docs/RUNBOOK.md`
+   (cross-reference from the Runtime API section). `roa list` deferred
+   — the daemon's `Runtime` struct does not carry a `RoaStore`
+   reference today, so exposing it requires threading the store
+   through `spawn_api` (a follow-up commit).

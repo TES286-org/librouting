@@ -970,26 +970,54 @@ OSPF→BGP-LS ~500, daemon wiring ~300, tests ~400).
 
 ## D12 — Container deployment + operational tooling
 
-**Status:** not started. Tracks repo root + `lr-cli`.
+**Status:** partial — ~~D12.1 (`lrctl` operational CLI)~~ landed;
+D12.2 (Prometheus `/metrics` endpoint) and the container/Helm tooling
+still open. Tracks repo root + `lr-cli`.
 
 **Current gap.** No Dockerfile, no published container image, no Helm
-chart, no operational CLI tool (e.g. `lrctl`). Operators must build
-from source or download binaries from GitHub Releases.
+chart, no operational CLI tool (e.g. `lrctl`). ~~Operators must build
+from source or download binaries from GitHub Releases.~~ D12.1 closed
+the operational CLI gap.
 
 **Proposed work.**
 
-1. **`lrctl` operational CLI.** Standalone CLI that connects to a
+1. ~~**`lrctl` operational CLI.** Standalone CLI that connects to a
    running `lr-daemon` over the API socket and provides:
    `lrctl status`, `lrctl sessions list`,
    `lrctl routes show <prefix>`, `lrctl routes dump` (MRT export),
    `lrctl reload`, `lrctl shutdown`, `lrctl roa list`,
-   `lrctl filter compile <body>`.
+   `lrctl filter compile <body>`.~~
+   Landed as `crates/lr-cli/src/lrctl.rs` — a third `lr-cli` binary
+   alongside `lr` and `lr-daemon`. Mirrors their hand-rolled
+   `env::args()` style (no clap dependency). The daemon-proxy surface
+   (`status` / `sessions [list]` / `routes show [prefix]` /
+   `routes dump <path>` / `reload` / `shutdown`) covers the runtime
+   API verbatim; `routes show <prefix>` does client-side prefix
+   filtering (exact match on the leading token) since the daemon API
+   has no parameterised `routes <prefix>` command today. The
+   client-side surface (`filter compile <body>`) reuses
+   `lr-policy::filter::compile` directly so operators can validate a
+   filter body before deploying — the same parser path the daemon
+   runs at startup. The default socket path matches
+   `templates/daemon.toml` (`/run/lr-daemon.api`); `--socket PATH`
+   overrides on any subcommand. Non-Unix targets refuse with a clear
+   error (the runtime API requires Unix domain sockets). The release
+   workflow stages `lrctl` alongside `lr` and `lr-daemon` in every
+   platform archive. 10 e2e tests in `crates/lr-cli/tests/lrctl.rs`
+   pin every subcommand including transport-failure and
+   argument-error paths. `roa list` deferred — the daemon's
+   `Runtime` struct does not carry a `RoaStore` reference today, so
+   exposing it requires threading the store through `spawn_api` (a
+   follow-up commit).
 2. **Prometheus metrics exporter.** Add a `/metrics` HTTP endpoint
    to the daemon exposing session count, route count, UPDATE tx/rx
    counters, filter-eval latency histograms.
+3. **Container deployment.** Dockerfile + published container image
+   + Helm chart.
 
 **Estimated size.** ~1000–1500 new lines (`lrctl` ~500, metrics ~400,
-Dockerfile + Helm ~100).
+Dockerfile + Helm ~100). D12.1 landed ~870 lines (lrctl.rs ~370,
+lrctl.rs tests ~330, docs + release.yml + audit trail ~170).
 
 ---
 
@@ -1162,7 +1190,7 @@ refactor — needs extensive regression tests.
 | D9        | partial (D9.2 landed) | —     | Filter DSL formal EBNF grammar + corpus test landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh and `ffi_design.md` still open |
 | D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
-| D12       | not started           | —     | `lrctl` + Prometheus exporter            |
+| D12       | partial (D12.1 landed) | —     | `lrctl` operational CLI + 10 e2e tests + release.yml wiring landed; Prometheus `/metrics` endpoint (D12.2) and container/Helm tooling open |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
