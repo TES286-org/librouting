@@ -59,7 +59,7 @@ pub enum HookVerdict {
 }
 
 /// Hook invoked on inbound, after decode, before Adj-RIB-In insertion.
-pub trait ImportHook: Send {
+pub trait ImportHook: Send + Sync {
     /// Optional human-readable name (for diagnostics).
     fn name(&self) -> &str {
         "import-hook"
@@ -83,7 +83,7 @@ pub trait ImportHook: Send {
 }
 
 /// Hook invoked during best-path selection.
-pub trait SelectionHook: Send {
+pub trait SelectionHook: Send + Sync {
     fn name(&self) -> &str {
         "selection-hook"
     }
@@ -96,7 +96,7 @@ pub trait SelectionHook: Send {
 }
 
 /// Hook invoked on outbound, after Loc-RIB, before Adj-RIB-Out encode.
-pub trait ExportHook: Send {
+pub trait ExportHook: Send + Sync {
     fn name(&self) -> &str {
         "export-hook"
     }
