@@ -18,6 +18,23 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- FFI expansion, third wave — D5 direction complete (ROADMAP-v3
+  D5.1–D5.3): OSPFv2/OSPFv3/Babel session management
+  (`lr_router_add_ospf_session` / `lr_router_add_ospfv3_session` /
+  `lr_router_add_ospf_session_ext` with stub/NSSA area kinds, network
+  type and the RFC 2328 §10.4 segment identities;
+  `lr_router_add_babel_session` per RFC 8966 §4.2.1 — LDP sessions
+  stay daemon-side by design); policy objects (`lr_route_new_v4/_v6`
+  boxing a real `Route` with typed attribute setters/getters,
+  `lr_prefix_list_*` with FRR ge/le semantics, `lr_route_map_*` +
+  `lr_resolver_*` running the FRR route-map flow with fail-closed
+  NULL-resolver semantics); and the Filter DSL over the C ABI
+  (`lr_filter_compile` to the D3.7 stack VM, `lr_filter_evaluate`,
+  `lr_filter_context_t` — the C callback variant of `FilterContext`
+  where every NULL field keeps the built-in route-backed behaviour).
+  C/C++/Go/Python bindings synced with tests; the C++ wrapper gains
+  RAII `Route` / `PrefixListHandle` / `RouteMapHandle` /
+  `ResolverHandle` / `Filter` types.
 - FFI expansion, second wave (ROADMAP-v3 D5.4–D5.7): BGP message
   encoders (`lr_bgp_encode_open` with the RFC 6793 four-octet-AS
   capability, `lr_bgp_encode_notification`,

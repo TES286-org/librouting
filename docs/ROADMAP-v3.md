@@ -502,33 +502,83 @@ BIRD/FRR~~ (D4.5) ~~remain~~ both landed.
 
 ## D5 — FFI expansion across protocols and policy
 
-**Status:** partial — ~~D5.4 (BGP message encoders)~~, ~~D5.5
-(event polling)~~, ~~D5.6 (route withdraw)~~ and ~~D5.7 (IPv6
-origination)~~ are in; D5.1 (OSPF/Babel/LDP session management), D5.2
-(Filter DSL via FFI) and D5.3 (policy objects via FFI) remain. Tracks
-`lr-ffi` + bindings.
+**Status:** landed — ~~D5.4 (BGP message encoders)~~, ~~D5.5
+(event polling)~~, ~~D5.6 (route withdraw)~~, ~~D5.7 (IPv6
+origination)~~, ~~D5.1 (OSPF/OSPFv3/Babel session management)~~,
+~~D5.3 (policy objects via FFI)~~ and ~~D5.2 (Filter DSL via FFI)~~
+are all in. Tracks `lr-ffi` + bindings.
 
-**Current gap.** `crates/lr-ffi/` exposes 60+ `extern "C"` functions
-covering BGP session lifecycle + Layer-1 codecs + Layer-3 router
-lifecycle + the D5.4–D5.7 slices. Still unreachable: OSPF, Babel,
-LDP, BMP, MRT, BFD session management; Filter DSL and policy engine.
-BGP UPDATE/OPEN/NOTIFICATION encoders, event polling, route
-withdraw and IPv6 origination ~~are~~ are in.
+**Current gap.** None — direction closed. The FFI surface now spans
+router + session lifecycle (BGP, OSPFv2, OSPFv3, Babel), Layer-1
+codecs, policy objects (route handles, prefix-lists, route-maps,
+resolver), the compiled Filter DSL with a C-callback context, ROA
+stores, damping and redistribution. LDP session management stays
+daemon-side (see the D5.1 audit trail); BMP/MRT/BFD remain
+codec/polling level by design.
 
 **Proposed work.**
 
-1. **OSPF / Babel / LDP session management.**
+1. ~~**OSPF / Babel / LDP session management.**~~
    `lr_router_add_ospf_session()`, `lr_router_add_ospfv3_session()`,
    `lr_router_add_babel_session()`, `lr_router_add_ldp_session()`.
-2. **Filter DSL via FFI.** `lr_filter_compile(name, body) ->
+   Landed (commit `5500ae7`): `lr_router_add_ospf_session` /
+   `lr_router_add_ospfv3_session` (BIRD/FRR `type ptp` defaults: MTU
+   1500, point-to-point, Normal area), `lr_router_add_ospf_session_ext`
+   (area kind incl. RFC 2328 §3.6 stub / RFC 3101 NSSA and their
+   totally- variants with the injected-default metric, MTU §10.6,
+   network type §9.1, the §10.4 segment identities) and
+   `lr_router_add_babel_session` (one interface session keyed by the
+   local address, RFC 8966 §4.2.1; v4 in the first four bytes).
+   Unknown version/area-kind/network-type ids fail closed; the
+   router's own rejections (router-id mismatch, area kind conflict,
+   backbone stub) surface through last-error with rc -3. 6 Rust
+   tests + the C/C++/Go/Python harness sections. **LDP deliberately
+   absent:** `lr-router` has no LDP session kind — the `LdpEngine`
+   is daemon-driven (UDP/TCP 646 discovery + transport), so an
+   `lr_router_add_ldp_session` would advertise a capability the
+   library does not have. If the engine ever grows a router-level
+   LDP session model, the entry lands then.
+2. ~~**Filter DSL via FFI.**~~ `lr_filter_compile(name, body) ->
    lr_filter_t`, `lr_filter_evaluate(filter, route) ->
    lr_filter_result_t`, `lr_filter_free(filter)`. Requires a C-callback
    variant of the `FilterContext` trait (`lr_filter_context_t` + a
    function-pointer table).
-3. **Policy objects via FFI.** `lr_route_map_new() ->
+   Landed (commit `3929549`): `lr_filter_compile` parses a BIRD-like
+   body and compiles it to the D3.7 stack VM (the daemon's hot path;
+   parse errors carry the 1-indexed line/column diagnostic through
+   last-error), `lr_filter_evaluate` runs it against an `lr_route_t`
+   (D5.3) reporting ACCEPT / REJECT / FALLTHROUGH with the optional
+   `reject with` reason as an owned NUL-terminated `lr_bytes_t`, and
+   runtime evaluation errors surface as Fallthrough exactly like the
+   daemon. `lr_filter_context_t` is the C callback variant of
+   `FilterContext`: 19 optional function pointers + `user_data`
+   where every NULL field keeps the built-in route-backed context
+   (the same `lr_policy::bgp` accessors the daemon uses — mutations
+   land in the route handle's real path attributes) and a non-NULL
+   field overrides exactly that aspect (canonical example:
+   `roa.state` from a live RFC 6811 store, the built-in default being
+   not-found). 7 Rust tests; the C harness exercises the C callback
+   override, the C++ RAII `Filter` throws on parse errors with the
+   filter name, and Go/Python get Compile/evaluate with the built-in
+   context.
+3. ~~**Policy objects via FFI.**~~ `lr_route_map_new() ->
    lr_route_map_t`, `lr_route_map_add_entry(map, matches, sets,
    verdict)`, `lr_prefix_list_new() -> lr_prefix_list_t`,
    `lr_prefix_list_add(list, prefix, ge, le, permit)`.
+   Landed (commit `78c227c`): `lr_route_new_v4`/`_v6` + `lr_route_free`
+   box a real `lr_core::rib::Route`; `lr_route_set/get` cover next
+   hop, LOCAL_PREF, MED, ORIGIN, the canonical 4-byte AS_PATH,
+   standard/large/extended communities, metric and tag (probe-then-
+   read array getters, a short buffer is -3). `lr_prefix_list_*`
+   mirror FRR ge/le first-match semantics. `lr_route_map_*` run the
+   FRR flow over tagged `lr_match_t`/`lr_set_t` arrays with
+   CONTINUE/PERMIT/DENY verdicts; matches resolve through
+   `lr_resolver_*` — a `PolicySet`-backed registry of prefix-lists,
+   FRR-dialect AS-path access-lists and RFC 1997 community lists
+   (each with its own id namespace). A NULL resolver fails every
+   list-backed match (fail-closed). `lr-policy::PrefixList` gained
+   `Clone` (non-breaking) for registration. 6 Rust tests + harness
+   sections in all four binding languages.
 4. **BGP message encoding.** ~~`lr_bgp_encode_open()`,
    `lr_bgp_encode_update()`, `lr_bgp_encode_notification()`.~~
    Landed as `lr_bgp_encode_open` (version 4 + the RFC 6793
@@ -998,7 +1048,7 @@ refactor — needs extensive regression tests.
 | D2        | landed                | —     | RPKI-RTR client: codec + state machine + RoaStore + `[bgp.rpki]` daemon thread + hot reload |
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
-| D5        | partial (D5.4–D5.7 landed) | —     | FFI expansion — encoders + event polling + withdraw + v6 originate in; OSPF/Babel/LDP sessions, filter DSL, policy objects pending |
+| D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
