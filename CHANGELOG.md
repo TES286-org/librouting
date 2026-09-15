@@ -18,6 +18,31 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Prometheus `/metrics` HTTP endpoint (ROADMAP-v3 D12.2): the daemon
+  gains an opt-in HTTP endpoint that serves the Prometheus text
+  exposition format on `GET /metrics` (`crates/lr-cli/src/metrics.rs`).
+  Hand-rolled HTTP/1.0 responder — no `hyper` / `tokio` dependency,
+  matching the project's stance on `api.rs`. Configuration:
+  `--metrics-addr ADDR` CLI flag / `[bgp] metrics_addr = "…"` TOML
+  key (default off, like `api_socket`); a bind failure is fatal
+  (same stance as `spawn_api`). The exposition covers `lr_info`
+  (gauge=1 with `version` / `local_as` / `router_id` labels, for join
+  queries), `lr_uptime_seconds`, `lr_sessions_total{kind,state}`,
+  `lr_established_sessions{kind}` (with explicit-zero for kinds that
+  have sessions but none established), `lr_adj_rib_in_entries{kind}`,
+  `lr_rib_entries`, and `lr_roa_entries` (omitted entirely when no
+  ROA store is configured). `GET /` returns a one-line pointer to
+  `/metrics`, `GET /nonexistent` returns `404`, non-GET methods
+  return `404`. The `Runtime` struct gained an optional
+  `roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>` field so
+  the BGP daemon can expose the live ROA count without holding a
+  lock; OSPF/Babel/LDP/BMP/multi pass `None`. Wired into every
+  daemon entry point via `spawn_metrics()`. 7 e2e tests in
+  `crates/lr-cli/tests/daemon_metrics.rs`. Documented in
+  `docs/RUNBOOK.md`, `docs/lr-cli.md` and `templates/daemon.toml`.
+  Filter-eval latency histograms and UPDATE tx/rx counters remain
+  open — they require per-session counters the daemon does not track
+  today.
 - `lrctl` operational CLI (ROADMAP-v3 D12.1): a third `lr-cli` binary
   alongside `lr` and `lr-daemon`. Connects to a running `lr-daemon`
   over its Unix API socket and proxies the line-oriented command

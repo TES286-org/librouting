@@ -970,14 +970,14 @@ OSPF→BGP-LS ~500, daemon wiring ~300, tests ~400).
 
 ## D12 — Container deployment + operational tooling
 
-**Status:** partial — ~~D12.1 (`lrctl` operational CLI)~~ landed;
-D12.2 (Prometheus `/metrics` endpoint) and the container/Helm tooling
-still open. Tracks repo root + `lr-cli`.
+**Status:** partial — ~~D12.1 (`lrctl` operational CLI)~~ and
+~~D12.2 (Prometheus `/metrics` endpoint)~~ landed; the container/Helm
+tooling still open. Tracks repo root + `lr-cli`.
 
 **Current gap.** No Dockerfile, no published container image, no Helm
-chart, no operational CLI tool (e.g. `lrctl`). ~~Operators must build
-from source or download binaries from GitHub Releases.~~ D12.1 closed
-the operational CLI gap.
+chart. ~~No operational CLI tool (e.g. `lrctl`).~~ D12.1 closed the
+operational CLI gap. ~~No metrics endpoint.~~ D12.2 closed the
+Prometheus gap.
 
 **Proposed work.**
 
@@ -1009,15 +1009,47 @@ the operational CLI gap.
    `Runtime` struct does not carry a `RoaStore` reference today, so
    exposing it requires threading the store through `spawn_api` (a
    follow-up commit).
-2. **Prometheus metrics exporter.** Add a `/metrics` HTTP endpoint
+2. ~~**Prometheus metrics exporter.** Add a `/metrics` HTTP endpoint
    to the daemon exposing session count, route count, UPDATE tx/rx
-   counters, filter-eval latency histograms.
+   counters, filter-eval latency histograms.~~
+   Landed as `crates/lr-cli/src/metrics.rs` — a hand-rolled HTTP/1.0
+   responder (no `hyper` / `tokio` dependency) bound to a TCP
+   address. Opt-in via `--metrics-addr ADDR` /
+   `[bgp] metrics_addr = "…"` (default off, like `api_socket`); a
+   bind failure is fatal (same stance as `spawn_api`). The thread
+   model mirrors `api.rs`: one thread polls a
+   `set_nonblocking(true)` `TcpListener` with a 100 ms sleep, each
+   accepted connection served on its own short-lived thread so a
+   slow client cannot hold the endpoint hostage. The router lock is
+   held only for the duration of a single `session_summaries()` +
+   `rib_len()` read, never for the network write. The exposition
+   covers `lr_info` (gauge=1 with `version`/`local_as`/`router_id`
+   labels, for join queries), `lr_uptime_seconds`,
+   `lr_sessions_total{kind,state}`, `lr_established_sessions{kind}`
+   (with explicit-zero for kinds that have sessions but none
+   established, so an alert joining on `kind` does not see a missing
+   series), `lr_adj_rib_in_entries{kind}`, `lr_rib_entries`, and
+   `lr_roa_entries` (omitted entirely when no ROA store is
+   configured — a missing metric is more honest than a misleading
+   zero). `GET /` returns a one-line pointer to `/metrics`,
+   `GET /nonexistent` returns `404`, non-GET methods return `404`.
+   The `Runtime` struct gained an optional
+   `roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>` field so
+   the BGP daemon (which always builds a `RoaStore`) can expose the
+   live count without holding a lock; OSPF/Babel/LDP/BMP/multi pass
+   `None`. 7 e2e tests in `crates/lr-cli/tests/daemon_metrics.rs`
+   pin the exposition shape, the opt-in default, the 404 paths,
+   non-GET rejection, scrape stability and bind-failure fatality.
+   Filter-eval latency histograms and UPDATE tx/rx counters remain
+   open — they require per-session counters the daemon does not
+   track today (a follow-up commit under D12).
 3. **Container deployment.** Dockerfile + published container image
    + Helm chart.
 
 **Estimated size.** ~1000–1500 new lines (`lrctl` ~500, metrics ~400,
-Dockerfile + Helm ~100). D12.1 landed ~870 lines (lrctl.rs ~370,
-lrctl.rs tests ~330, docs + release.yml + audit trail ~170).
+Dockerfile + Helm ~100). D12.1 landed ~870 lines; D12.2 landed ~880
+lines (metrics.rs ~340, daemon_metrics.rs tests ~470, daemon +
+daemon_config + templates + docs ~70).
 
 ---
 
@@ -1190,7 +1222,7 @@ refactor — needs extensive regression tests.
 | D9        | partial (D9.2 landed) | —     | Filter DSL formal EBNF grammar + corpus test landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh and `ffi_design.md` still open |
 | D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
-| D12       | partial (D12.1 landed) | —     | `lrctl` operational CLI + 10 e2e tests + release.yml wiring landed; Prometheus `/metrics` endpoint (D12.2) and container/Helm tooling open |
+| D12       | partial (D12.1 + D12.2 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint + 17 e2e tests landed; container/Helm tooling and per-session UPDATE counters / filter-eval histograms open |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |

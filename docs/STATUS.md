@@ -471,3 +471,47 @@ the state, that file tracks the how and why.
    — the daemon's `Runtime` struct does not carry a `RoaStore`
    reference today, so exposing it requires threading the store
    through `spawn_api` (a follow-up commit).
+10. **Phase 11 — D12.2 Prometheus `/metrics` endpoint** — landed:
+    the daemon gained an opt-in HTTP endpoint that serves the
+    Prometheus text exposition format on `GET /metrics`
+    (`crates/lr-cli/src/metrics.rs`). Hand-rolled HTTP/1.0
+    responder — no `hyper` / `tokio` dependency, matching the
+    project's stance on `api.rs`. Configuration: `--metrics-addr ADDR`
+    CLI flag / `[bgp] metrics_addr = "…"` TOML key (default off,
+    like `api_socket`); a bind failure is fatal (same stance as
+    `spawn_api`). The thread model mirrors `api.rs`: one thread
+    polls a `set_nonblocking(true)` `TcpListener` with a 100 ms
+    sleep, each accepted connection served on its own short-lived
+    thread so a slow client cannot hold the endpoint hostage. The
+    router lock is held only for the duration of a single
+    `session_summaries()` + `rib_len()` read, never for the
+    network write. The exposition covers: `lr_info` (gauge=1 with
+    `version` / `local_as` / `router_id` labels, for join
+    queries); `lr_uptime_seconds`; `lr_sessions_total{kind,state}`;
+    `lr_established_sessions{kind}` (with explicit-zero for kinds
+    that have sessions but none established, so an alert joining
+    on `kind` does not see a missing series);
+    `lr_adj_rib_in_entries{kind}`; `lr_rib_entries`; and
+    `lr_roa_entries` (omitted entirely when no ROA store is
+    configured — a missing metric is more honest than a misleading
+    zero). `GET /` returns a one-line pointer to `/metrics`,
+    `GET /nonexistent` returns `404`, non-GET methods return
+    `404`. The `Runtime` struct gained an optional
+    `roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>` field
+    so the BGP daemon (which always builds a `RoaStore`) can
+    expose the live count without holding a lock; OSPF/Babel/LDP/
+    BMP/multi pass `None`. Wired into every daemon entry point
+    (BGP, OSPFv2, OSPFv3, Babel, LDP, BMP, multi-protocol
+    supervisor) via `spawn_metrics()`, paralleling `spawn_api()`.
+    7 e2e tests in `crates/lr-cli/tests/daemon_metrics.rs` pin
+    the exposition shape, the opt-in default, the 404 paths,
+    non-GET rejection, scrape stability across two scrapes, and
+    bind-failure fatality. Documented in `docs/RUNBOOK.md` (new
+    "Prometheus `/metrics` endpoint" section with the metric
+    table and a live scrape example), `docs/lr-cli.md`
+    (`--metrics-addr` row in the daemon flag reference) and
+    `templates/daemon.toml` (commented-out `metrics_addr` with
+    the metric list). Filter-eval latency histograms and UPDATE
+    tx/rx counters remain open — they require per-session
+    counters the daemon does not track today (a follow-up
+    commit under D12).
