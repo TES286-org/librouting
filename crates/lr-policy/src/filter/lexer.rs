@@ -60,16 +60,17 @@ pub enum TokenKind {
     Underscore, // _ (BIRD AS-path wildcard)
 
     // Multi-char
-    EqEq,   // ==
-    NotEq,  // !=
-    LtEq,   // <=
-    GtEq,   // >=
-    AndAnd, // &&
-    OrOr,   // ||
-    Shl,    // <<
-    Shr,    // >>
-    PlusEq, // +=
-    Arrow,  // =>
+    EqEq,      // ==
+    NotEq,     // !=
+    LtEq,      // <=
+    GtEq,      // >=
+    AndAnd,    // &&
+    OrOr,      // ||
+    Shl,       // <<
+    Shr,       // >>
+    PlusEq,    // +=
+    Arrow,     // =>
+    BangTilde, // !~ (BIRD/RFC-style non-match operator)
 
     // --- Keywords ---
     If,
@@ -442,6 +443,10 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     TokenKind::NotEq
                 }
+                Some(b'~') => {
+                    self.advance();
+                    TokenKind::BangTilde
+                }
                 _ => TokenKind::Bang,
             },
             b'~' => TokenKind::Tilde,
@@ -542,7 +547,7 @@ mod tests {
     #[test]
     fn operators_two_char() {
         assert_eq!(
-            kinds("== != <= >= && || << >> += =>"),
+            kinds("== != <= >= && || << >> += => !~"),
             vec![
                 TokenKind::EqEq,
                 TokenKind::NotEq,
@@ -554,6 +559,24 @@ mod tests {
                 TokenKind::Shr,
                 TokenKind::PlusEq,
                 TokenKind::Arrow,
+                TokenKind::BangTilde,
+                TokenKind::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn bang_tilde_distinguished_from_bang() {
+        // `! ~` (with whitespace) is two tokens; `!~` is one. BIRD
+        // spells both forms and the lexer must mirror it so the
+        // parser can build a `NotMatch` node only when the user
+        // actually meant non-match.
+        assert_eq!(
+            kinds("!~ ! ~"),
+            vec![
+                TokenKind::BangTilde,
+                TokenKind::Bang,
+                TokenKind::Tilde,
                 TokenKind::Eof,
             ]
         );

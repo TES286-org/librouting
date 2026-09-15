@@ -2256,6 +2256,26 @@ mod tests {
     }
 
     #[test]
+    fn not_match_negates_prefix_match() {
+        // `!~` is the negation of `~`: a route inside the excluded
+        // prefix is rejected, a route outside is accepted.
+        let mut inside = route_with("203.0.113.0/24", 100, 0);
+        let mut outside = route_with("198.51.100.0/24", 100, 0);
+        let src = "if net !~ 203.0.113.0/24 then accept; reject;";
+        assert_eq!(run(src, &mut inside), EvalResult::Reject(None));
+        assert_eq!(run(src, &mut outside), EvalResult::Accept);
+    }
+
+    #[test]
+    fn not_match_against_set() {
+        let mut in_set = route_with("203.0.113.0/24", 100, 0);
+        let mut out_set = route_with("192.0.2.0/24", 100, 0);
+        let src = "if net !~ [ 203.0.113.0/24, 198.51.100.0/24 ] then accept; reject;";
+        assert_eq!(run(src, &mut in_set), EvalResult::Reject(None));
+        assert_eq!(run(src, &mut out_set), EvalResult::Accept);
+    }
+
+    #[test]
     fn method_prepend_adds_to_as_path() {
         let mut r = route_with("203.0.113.0/24", 100, 0);
         let src = "bgp.as_path.prepend(65001); accept;";
@@ -3098,6 +3118,9 @@ mod tests {
             "let n = 65000; if bgp.as_path ~ [n] then accept; reject;",
             "bgp.communities = delete(bgp.communities, [64512:*]); accept;",
             "if count(bgp.communities) == 2 && !empty(bgp.as_path) then accept; reject;",
+            "if net !~ 203.0.113.0/24 then accept; reject;",
+            "if net !~ [ 198.51.100.0/24, 203.0.113.0/24 ] then accept; reject;",
+            "if net ~ 10.0.0.0/8 && net !~ 203.0.113.0/24 then accept; reject;",
         ];
 
         // Route matrix: plain BGP route, one with communities and a

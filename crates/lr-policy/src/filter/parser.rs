@@ -792,6 +792,7 @@ impl Parser {
                 TokenKind::Shl => BinaryOp::Shl,
                 TokenKind::Shr => BinaryOp::Shr,
                 TokenKind::Tilde => BinaryOp::Match,
+                TokenKind::BangTilde => BinaryOp::NotMatch,
                 _ => break,
             };
             let prec = op.precedence();
@@ -1513,6 +1514,48 @@ mod tests {
     fn case_statement_parses() {
         let f = parse_ok("case proto { \"bgp\" => accept; default => reject; }");
         assert!(matches!(f.body.stmts[0], Stmt::Case { .. }));
+    }
+
+    #[test]
+    fn not_match_operator_parses() {
+        // `!~` is the negation of `~` (BIRD/RFC spelling). Both
+        // sides share Match precedence (4) so a sequence like
+        // `a ~ b && c !~ d` parses left-to-right at the AND level.
+        let f = parse_ok("if net !~ 10.0.0.0/8 then accept; reject;");
+        if let Stmt::If { cond, .. } = &f.body.stmts[0] {
+            assert!(
+                matches!(
+                    cond,
+                    Expr::Binary {
+                        op: BinaryOp::NotMatch,
+                        ..
+                    }
+                ),
+                "{cond:?}"
+            );
+        } else {
+            panic!("expected If");
+        }
+    }
+
+    #[test]
+    fn not_match_and_match_share_precedence() {
+        // `a ~ b && c !~ d` should parse as `(a ~ b) && (c !~ d)`.
+        let f = parse_ok("let r = net ~ 10.0.0.0/8 && bgp.as_path !~ [ 65000 ]; accept;");
+        if let Stmt::Let { value, .. } = &f.body.stmts[0] {
+            assert!(
+                matches!(
+                    value,
+                    Expr::Binary {
+                        op: BinaryOp::And,
+                        ..
+                    }
+                ),
+                "{value:?}"
+            );
+        } else {
+            panic!("expected Let");
+        }
     }
 
     #[test]
