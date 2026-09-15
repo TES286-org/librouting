@@ -173,6 +173,71 @@ Multipath (`multipath()`) collects all routes that tie on steps 1–11 (the
 final peer-id tiebreaker is by definition different for different peers).
 `multipath_relax=true` allows mixing neighbors.
 
+## Performance characteristics
+
+### ROA validation (RFC 6811)
+
+`lr-bgp::roa::RoaTable::validate` walks a path-compressed (Patricia)
+prefix trie (ROADMAP-v3 D8.4). The covering ROAs of a route are exactly
+the trie nodes on the root-to-route bit path, so a query costs
+`O(prefix_len)` (bounded by 32 / 128 bit visits) whatever the table
+size. Entries stay in a canonical sorted `Vec<RoaEntry>` (dumps,
+equality, snapshot determinism) with the trie as a pure lookup index
+built once at construction.
+
+Criterion (`crates/lr-bgp/benches/roa_validate.rs`, sample-size 20,
+x86_64 Linux):
+
+| Probe                  | 1k entries | 10k entries | 100k entries |
+| ---------------------- | ---------- | ----------- | ------------ |
+| uncovered (`NotFound`) | ~5.1 ns    | ~5.1 ns     | ~5.8 ns      |
+| covered (`Valid`)      | ~75 ns     | ~119 ns     | ~182 ns      |
+
+Both shapes are flat across the sizes operators actually deploy (1k
+single-AS, 10k IXP route-server, 100k regional cache). The replaced
+linear scan visited every entry per query and grew linearly with the
+table — the trie removes that ceiling entirely.
+
+### Filter DSL evaluation
+
+Policy filters run the D3.7 stack-machine bytecode: filters compile
+once at configuration time and each route evaluation is a flat opcode
+loop with no AST re-walking and no per-route allocation on the match
+path (`crates/lr-policy/src/filter/bytecode.rs`).
+
+### Daemon thread model and lock strategy
+
+The `lr` daemon runs one thread per BGP peer session, one API-socket
+thread, BFD / BMP / RTR threads, per-protocol OSPF/Babel loops and a
+periodic ticker. All of them share the routing state through
+`Arc<RwLock<DefaultRouter>>` (ROADMAP-v3 D8.1):
+
+* **Read lock** — API dumps and status (`rib_paths_snapshot`,
+  `session_summaries`, `rib_len`), Babel RTT probes, OSPF/LSDB status
+  views. Readers run concurrently: a `show routes` no longer blocks
+  behind (or blocks) a peer import.
+* **Write lock** — session setup, `feed_input`, event polling,
+  best-path reselection, redistribution, Babel GC, config reload.
+
+`DefaultRouter` contains no interior mutability, so `&self` methods
+are genuinely read-only and the borrow checker polices the
+read/write classification of every call site. Hook traits carry
+`Send + Sync` for the same reason (`lr-policy::hooks`).
+
+The daemon event plane is still thread-per-socket with non-blocking
+poll loops — see ROADMAP-v3 D8.3 for the planned `mio` event-loop
+migration.
+
+### Scalability ceiling and next steps
+
+With one `RwLock` there is still at most one writer at a time; a full
+BGP table (800k+ routes) arriving over several peers serializes on
+import. The planned next stages (ROADMAP-v3 D8.2 / D15) are per-AFI
+Loc-RIB sharding (independent `RwLock<LocRib>` per family so v4 and
+v6 imports run in parallel), a lock-free event bus, sharded
+Adj-RIB-In, and import-throughput benchmarks at 100k / 500k / 1M
+routes.
+
 ## OS routing table reference
 
 `lr-osroute` provides:
@@ -268,8 +333,8 @@ embedders. Notable toggles:
 - Interop scripts against the BIRD and FRR reference routers live in
   `tests/interop/` (run in CI on ubuntu runners with the reference
   daemons installed via apt; they skip gracefully when absent).
-- Total: 971 unit + integration tests across 61 test binaries (16 crates
-  + doc-tests + interop scripts).
+- Total: 1,631 unit + integration tests across 75 test binaries (18
+  workspace crates + doc-tests + interop scripts).
 
 ## CI/CD
 

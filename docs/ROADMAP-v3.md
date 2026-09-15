@@ -314,12 +314,12 @@ canonical BIRD idiom) and `bgp.as_path = <sequence>`;
 filter, attribute drop, the assignment idiom, AS-path ops,
 value-level ops and append rejections.~~
 
-### D3.5 — `defined()` / `exists()` checks
+### D3.5 — `defined()` / `exists()` checks — ~~landed~~
 
 BIRD's `defined(bgp.large_community)` checks whether an attribute is
 present. The current DSL returns a default (0/false) for missing
 attributes and cannot distinguish "absent" from "value 0". Add
-`Expr::Defined(Box<Expr>)`. ~150 LoC.
+`Expr::Defined(Box<Expr>)`. ~150 LoC. Landed in commit `f0fb91b`.
 
 ### D3.6 — `proto` field string format — ~~landed~~
 
@@ -758,21 +758,33 @@ signing, no SAST (CodeQL/Semgrep).
 
 ## D8 — Performance: RIB sharding + async I/O
 
-**Status:** not started. Tracks `lr-router` + `lr-cli::daemon`.
+**Status:** partial — ~~D8.1 (RwLock read/write split)~~,
+~~D8.4 (RoaTable Patricia trie)~~, ~~D8.6 (performance docs)~~.
+Tracks `lr-router` + `lr-cli::daemon`.
 
-**Current gap.** `DefaultRouter` is wrapped in
+**Current gap.** ~~`DefaultRouter` is wrapped in
 `Arc<Mutex<DefaultRouter>>` (`daemon.rs:2332, 2380, 3204`). Every BGP
 peer thread, API socket thread, BFD thread, BMP thread and ticker
-thread contends on the same lock. No `RwLock` to separate read and
-write paths, no per-AFI RIB sharding, no async I/O (no tokio/mio) —
-the daemon uses `set_nonblocking(true) + thread::sleep(10ms)`
-polling.
+thread contends on the same lock.~~ D8.1 landed: the shared handle is
+`Arc<RwLock<DefaultRouter>>` — read-only call sites (API dumps,
+status, session summaries, Babel RTT probes) take the read lock and
+run concurrently while writes (import, reselect, reload) take the
+write lock; the borrow checker polices the split because
+`DefaultRouter` has no interior mutability (commit `e5102d5`, plus
+`f236b1c` which adds the `Sync` supertraits the read path requires on
+`lr-policy` hooks). Still open: per-AFI RIB sharding and async I/O —
+the daemon remains `set_nonblocking(true) + thread::sleep(10ms)`
+polling (D8.3).
 
 **Proposed work.**
 
 1. **`RwLock` instead of `Mutex`.** Loc-RIB access moves to `RwLock`:
    reads (RIB dump, peer export) take the read lock; writes (import,
    reselect) take the write lock. Concurrency goes from 1 to N.
+   ~~Landed in commit `e5102d5` — `Arc<RwLock<DefaultRouter>>` with
+   81 call sites classified (16 read / 65 write), the borrow checker
+   enforcing the read-only set; hooks gained `Sync` supertraits in
+   `f236b1c`.~~
 2. **Per-AFI RIB sharding.** Split Loc-RIB by AFI (IPv4 / IPv6 /
    labeled) into independent `RwLock<LocRib>`s. Further sharding by
    prefix first byte (16 buckets) is optional.
@@ -780,13 +792,21 @@ polling.
    thread-per-socket + `set_nonblocking + sleep` model with a single
    `mio` event loop. BGP TCP, Babel UDP, OSPF raw, API socket share
    the loop. Eliminates the 10 ms latency.
-4. **`RoaTable` radix-tree index.** `RoaTable::validate` is currently
-   O(n) linear scan (`roa.rs:21-25`). Convert to a Patricia trie for
-   O(prefix_len) lookup.
+4. **`RoaTable` radix-tree index.** ~~`RoaTable::validate` is
+   currently O(n) linear scan (`roa.rs:21-25`). Convert to a Patricia
+   trie for O(prefix_len) lookup.~~ Landed in commit `296fb38` —
+   path-compressed trie over high-aligned u128 keys, one root per
+   family; entries keep their canonical sorted Vec and equality;
+   criterion shows the query cost flat across 1k/10k/100k tables
+   (~5 ns uncovered, 75–182 ns covered) with differential proptests
+   against the reference scan.
 5. **Filter DSL bytecode.** Already covered by D3.7.
 6. **Performance documentation.** Add a "Performance
    characteristics" section to `ARCHITECTURE.md` covering the thread
    model, lock strategy, expected throughput, scalability ceiling.
+   ~~Landed: `docs/ARCHITECTURE.md` documents ROA lookup costs, the
+   filter bytecode hot path, the daemon thread model, the RwLock
+   read/write split and the scalability ceiling.~~
 
 **Estimated size.** Large refactor: RwLock + sharding ~1000, async
 I/O migration ~2000, radix tree ~500, benchmarks ~350. Stage it:
@@ -1051,7 +1071,7 @@ refactor — needs extensive regression tests.
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
-| D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
+| D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | not started           | —     | Architecture + contributor docs         |
 | D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |

@@ -162,6 +162,38 @@ ship, breaking changes that affect embedders, dependency bumps.
   (`crates/lr-policy/tests/filter_corpus.rs`) runs the whole committed
   seed corpus through `filter::compile`.
 
+### Changed
+
+- **BREAKING** `lr-policy::hooks`: `ImportHook`, `SelectionHook` and
+  `ExportHook` now require `Send + Sync` (previously `Send` only).
+  Hooks are invoked on whichever thread owns the router guard, so
+  shared-reference access is the real contract; the `Sync` bound lets
+  read guards share `DefaultRouter` across threads (ROADMAP-v3 D8.1).
+  Embedders with non-`Sync` hook state must wrap it in `Arc`/`Mutex` —
+  a compile-time change, not a behavioural one.
+- **BREAKING** `lr-cli` daemon surface: the shared router handle is
+  `Arc<RwLock<DefaultRouter>>` (was `Arc<Mutex<...>>`). Read-only
+  paths (API `routes`/`status`/`sessions` dumps, session summaries,
+  Babel RTT probes, OSPF/LSDB status views) take the read lock and run
+  concurrently with each other; mutating paths (session setup,
+  `feed_input`, event polling, reselection, redistribution, Babel GC,
+  config reload) take the write lock. All 81 call sites are classified
+  and the classification is enforced by the borrow checker
+  (`DefaultRouter` has no interior mutability) (ROADMAP-v3 D8.1).
+- `lr-bgp::roa`: `RoaTable::validate` now walks a path-compressed
+  (Patricia) prefix trie — `O(prefix_len)` per query instead of the
+  `O(n)` entry scan. Entries keep their canonical sorted `Vec`
+  (dumps, equality, snapshot determinism unchanged); the trie is a
+  pure lookup index built once at construction.
+  `RoaTableBuilder::build` now sorts and deduplicates like
+  `from_entries`, so every construction path is byte-deterministic
+  (ROADMAP-v3 D8.4). Criterion: ~5 ns uncovered / 75-182 ns covered
+  across 1k/10k/100k tables.
+- Performance documented in the new "Performance characteristics"
+  section of `docs/ARCHITECTURE.md` — ROA lookup costs, the filter
+  bytecode hot path, the daemon thread model, the RwLock read/write
+  split and the scalability ceiling (ROADMAP-v3 D8.6).
+
 ### Fixed
 
 - Route flap damping decay used the UNIX epoch as its time base while
