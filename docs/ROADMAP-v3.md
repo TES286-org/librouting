@@ -1006,7 +1006,8 @@ changes ~300, SPF adaptation ~200, End.X SID ~200, tests ~300).
 ## D14 — Config compatibility: native BIRD / FRR config loading
 
 **Status:** partial — ~~D14.1 (BIRD filters)~~, ~~D14.2 (BIRD
-babel)~~, ~~D14.3 (FRR route-maps)~~, ~~D14.4 (FRR neighbors)~~.
+babel)~~, ~~D14.3 (FRR route-maps)~~, ~~D14.4 (FRR neighbors)~~,
+~~D14.5 (`!~` operator)~~, ~~D14.6 (`case` statements)~~.
 Tracks `lr-cli::compat`.
 
 **Current gap.** ~~`crates/lr-cli/src/compat.rs` already detects and
@@ -1024,10 +1025,21 @@ and BIRD writes equality `=` / assignment `:=` where lr writes `==`
 to peers, inline channel bodies now split into statements, and `roa
 table` entries carry over as `[[roa]]` (commits `f1fc747` and
 `2456f45`, including `protocol babel` → `[[babel.interface]]` with
-the RFC 8966 §A.2 parameter mapping). Still open: BIRD `case`
-statements, `!~`, per-protocol route attributes, and a maintained
-external conversion corpus (the in-tree regression suite covers the
-mapping table).
+the RFC 8966 §A.2 parameter mapping). ~~D14.5 + D14.6 landed: BIRD
+`!~` (not-match) and `case` statements now translate faithfully
+(commits `1b09aa7` + `6f39f15`). The `!~` operator gained a
+`TokenKind::BangTilde` in the lr DSL lexer and a `BinaryOp::NotMatch`
+mapping in the parser — the AST, evaluator and bytecode VM already
+lowered it to `Match { negated: true }`, so the language-level
+addition was the missing piece. The `case` translation is a
+structural pre-pass (`rewrite_cases`) that walks the token stream
+before the regular token-rewriting pass and converts BIRD's `:`
+arm separator to lr's `=>`, `else:` to `default =>`, and wraps
+non-block arm bodies in `{ … }` (lr DSL case arm bodies parse a
+single statement). Range arms (`a .. b:`) remain unfaithful — lr
+case arms match exact values only.~~ Still open: per-protocol route
+attributes, and a maintained external conversion corpus (the in-tree
+regression suite covers the mapping table).
 
 **Proposed work.**
 
@@ -1055,10 +1067,32 @@ mapping table).
    converter surface, W5.1.)
 4. **FRR `bgp neighbor` → `[[peer]]`.** (Pre-existing converter
    surface, W5.1.)
-5. **Conversion test suite.** Maintain a set of BIRD/FRR configs +
+5. **BIRD `!~` (not-match) → lr `!~`.** Landed in commits `1b09aa7`
+   (lexer + parser) + `6f39f15` (translator). The lr DSL AST has
+   carried `BinaryOp::NotMatch` since the parser was first written —
+   the evaluator and bytecode VM already lowered it to
+   `Match { negated: true }` — but the lexer never produced a `!~`
+   token, so no source program could exercise the path. The fix adds
+   `TokenKind::BangTilde` to the lexer's multi-char set (alongside
+   `!=` / `==` / …) and maps it to `BinaryOp::NotMatch` in the
+   parser. The translator's `!~` branch — which pushed an
+   unfaithful note — is removed; the operator now passes through
+   verbatim because BIRD and lr spell it identically.
+6. **BIRD `case` → lr `case`.** Landed in commit `6f39f15`. A new
+   structural pre-pass `rewrite_cases` walks the token stream before
+   the regular token-rewriting pass and rewrites every BIRD
+   `case … { … }` block into lr DSL syntax. The mapping was verified
+   against BIRD's `filter/config.Y` §`switch_body` and `conf/cf-lex.l`
+   (the `else:` ELSECOL token): arm separator `:` (at depth 1) →
+   `=>`; `else :` → `default =>`; non-block arm bodies are wrapped
+   in `{ … }` (lr DSL case arm bodies parse a single statement,
+   which may be a `Block`); block arm bodies are left as-is; range
+   arms (`a .. b:`) remain unfaithful. Nested cases are handled
+   recursively. `case` is removed from `UNMAPPABLE_WORDS`.
+7. **Conversion test suite.** Maintain a set of BIRD/FRR configs +
    expected lr TOML outputs as regression tests. Partially covered:
-   the D14.1/D14.2 round-trip tests load every generated TOML
-   through the real daemon config parser and finalize (compiling
+   the D14.1/D14.2/D14.5/D14.6 round-trip tests load every generated
+   TOML through the real daemon config parser and finalize (compiling
    the filters); a larger external corpus remains open.
 
 **Estimated size.** ~1000–1500 new lines (translator ~600, tests
@@ -1111,7 +1145,7 @@ refactor — needs extensive regression tests.
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | not started           | —     | `lrctl` + Prometheus exporter            |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
-| D14       | partial (D14.1–D14.4 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces; FRR route-map/neighbor pre-existing; external corpus open |
+| D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
 
 Items flip to `~~struck through~~` here as they land, with a pointer

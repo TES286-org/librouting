@@ -18,6 +18,28 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- BIRD `!~` (not-match) operator in the filter DSL (ROADMAP-v3 D14.5):
+  the lr DSL AST has carried `BinaryOp::NotMatch` since the parser was
+  first written — the evaluator and bytecode VM already lowered it to
+  `Match { negated: true }` — but the lexer never produced a `!~`
+  token, so no source program could exercise the path. The fix adds
+  `TokenKind::BangTilde` to the lexer's multi-char set (alongside
+  `!=` / `==` / …) and maps it to `BinaryOp::NotMatch` in the parser.
+  The BIRD filter compat translator (D14.1) now passes `!~` through
+  verbatim instead of fail-closing on it; BIRD and lr spell the
+  operator identically.
+- BIRD `case` statement translation (ROADMAP-v3 D14.6): a new
+  structural pre-pass `rewrite_cases` in the BIRD filter compat
+  translator walks the token stream and rewrites every BIRD
+  `case … { … }` block into lr DSL syntax. The mapping was verified
+  against BIRD's `filter/config.Y` §`switch_body` and `conf/cf-lex.l`
+  (the `else:` ELSECOL token): arm separator `:` (at depth 1) → `=>`;
+  `else :` → `default =>`; non-block arm bodies are wrapped in
+  `{ … }` (lr DSL case arm bodies parse a single statement, which
+  may be a `Block`); block arm bodies are left as-is; nested cases
+  are handled recursively. Range arms (`a .. b:`) remain
+  unfaithful — lr case arms match exact values only. `case` is
+  removed from the translator's `UNMAPPABLE_WORDS` list.
 - FFI expansion, third wave — D5 direction complete (ROADMAP-v3
   D5.1–D5.3): OSPFv2/OSPFv3/Babel session management
   (`lr_router_add_ospf_session` / `lr_router_add_ospfv3_session` /
