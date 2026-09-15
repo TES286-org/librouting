@@ -696,3 +696,112 @@ func TestPollEvents(t *testing.T) {
 		t.Fatal("PollEvents(0) must fail")
 	}
 }
+
+func TestPolicyObjects(t *testing.T) {
+	// Route handle: attribute round trip.
+	rt, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer rt.Free()
+	if err := rt.SetLocalPref(250); err != nil {
+		t.Fatalf("SetLocalPref: %v", err)
+	}
+	if lp, ok, err := rt.LocalPref(); err != nil || !ok || lp != 250 {
+		t.Fatalf("LocalPref: got (%d, %v, %v), want (250, true, nil)", lp, ok, err)
+	}
+	if err := rt.SetOrigin(0); err != nil {
+		t.Fatalf("SetOrigin: %v", err)
+	}
+	if err := rt.SetOrigin(7); err == nil {
+		t.Fatal("ORIGIN 7 must be rejected")
+	}
+	path := []uint32{64513, 65010, 64512}
+	if err := rt.SetAsPath(path); err != nil {
+		t.Fatalf("SetAsPath: %v", err)
+	}
+	got, err := rt.AsPath()
+	if err != nil || len(got) != 3 || got[1] != 65010 {
+		t.Fatalf("AsPath: got %v, %v", got, err)
+	}
+	if err := rt.SetCommunities([]uint64{(64512 << 16) | 100}); err != nil {
+		t.Fatalf("SetCommunities: %v", err)
+	}
+	if err := rt.AddCommunity(4294967295, 1); err == nil {
+		t.Fatal("a 4-byte ASN must be rejected for a standard community")
+	}
+	comms, err := rt.Communities()
+	if err != nil || len(comms) != 1 || comms[0] != (64512<<16)|100 {
+		t.Fatalf("Communities: got %v, %v", comms, err)
+	}
+	if err := rt.AddLargeCommunity(4200000000, 7, 9); err != nil {
+		t.Fatalf("AddLargeCommunity: %v", err)
+	}
+	lc, err := rt.LargeCommunities()
+	if err != nil || len(lc) != 3 {
+		t.Fatalf("LargeCommunities: got %v, %v", lc, err)
+	}
+	if err := rt.AddExtCommunity(0x42, 0x02, 64512, 5); err != nil {
+		t.Fatalf("AddExtCommunity: %v", err)
+	}
+	ec, err := rt.ExtCommunities()
+	if err != nil || len(ec) != 1 || ec[0].Kind != 0x42 {
+		t.Fatalf("ExtCommunities: got %v, %v", ec, err)
+	}
+
+	// Prefix-list: 10.0.0.0/8 ge 16 le 24.
+	pl, err := NewPrefixList()
+	if err != nil {
+		t.Fatalf("NewPrefixList: %v", err)
+	}
+	defer pl.Free()
+	if err := pl.Add(PrefixSpec{Addr: []byte{10, 0, 0, 0}, PrefixLen: 8}, 16, 24, true); err != nil {
+		t.Fatalf("PrefixList.Add: %v", err)
+	}
+	if ok, err := pl.Match(PrefixSpec{Addr: []byte{10, 1, 1, 0}, PrefixLen: 24}); err != nil || !ok {
+		t.Fatalf("Match in-range: got (%v, %v), want (true, nil)", ok, err)
+	}
+	if ok, err := pl.Match(PrefixSpec{Addr: []byte{10, 0, 0, 0}, PrefixLen: 8}); err != nil || ok {
+		t.Fatalf("Match ge gate: got (%v, %v), want (false, nil)", ok, err)
+	}
+
+	// Resolver + route-map: the FRR flow.
+	res, err := NewResolver()
+	if err != nil {
+		t.Fatalf("NewResolver: %v", err)
+	}
+	defer res.Free()
+	any4, err := NewPrefixList()
+	if err != nil {
+		t.Fatalf("NewPrefixList any: %v", err)
+	}
+	defer any4.Free()
+	if err := any4.Add(PrefixSpec{Addr: []byte{10, 0, 0, 0}, PrefixLen: 0}, 0, 32, true); err != nil {
+		t.Fatalf("PrefixList.Add any: %v", err)
+	}
+	id, err := res.AddPrefixList("all-v4", any4)
+	if err != nil || id != 0 {
+		t.Fatalf("AddPrefixList: got (%d, %v), want (0, nil)", id, err)
+	}
+
+	rm, err := NewRouteMap()
+	if err != nil {
+		t.Fatalf("NewRouteMap: %v", err)
+	}
+	defer rm.Free()
+	if err := rm.AddEntry([]Match{{Kind: MatchPrefixIn, ListID: 0}},
+		[]Set{{Kind: SetLocalPref, Value: 300}}, VerdictPermit); err != nil {
+		t.Fatalf("AddEntry: %v", err)
+	}
+	verdict, err := rm.Evaluate(rt, res)
+	if err != nil || verdict != EvalPermit {
+		t.Fatalf("Evaluate: got (%d, %v), want (%d, nil)", verdict, err, EvalPermit)
+	}
+	if lp, _, _ := rt.LocalPref(); lp != 300 {
+		t.Fatalf("set not applied: local_pref = %d, want 300", lp)
+	}
+	if verdict, err := rm.Evaluate(rt, nil); err != nil || verdict != EvalFallthrough {
+		t.Fatalf("NULL resolver must fail the match: got (%d, %v), want (%d, nil)",
+			verdict, err, EvalFallthrough)
+	}
+}

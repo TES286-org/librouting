@@ -335,6 +335,82 @@ int main() {
         check(bh4 != 0, "add_babel_session (RAII) v4");
     }
 
+    // ---- Policy objects RAII wrapper (ROADMAP-v3 D5.3): route
+    // handle, prefix-list, resolver + route-map — the FRR flow. ----
+    {
+        auto rt = make_route_v4({203, 0, 113, 0}, 24, Protocol::Bgp);
+        check(rt != nullptr, "make_route_v4 (RAII)");
+
+        set_local_pref(rt, 250);
+        check(local_pref(rt) == std::optional<std::uint32_t>(250),
+              "local_pref (RAII) round trip");
+        set_origin(rt, 0);
+        check(origin(rt) == std::optional<std::uint8_t>(0), "origin (RAII)");
+        set_as_path(rt, {64513, 65010, 64512});
+        check(as_path(rt).size() == 3 && as_path(rt)[1] == 65010, "as_path (RAII)");
+        set_communities(rt, {(64512ull << 16) | 100});
+        check(communities(rt).size() == 1, "communities (RAII)");
+        add_large_community(rt, 4200000000u, 7, 9);
+        check(large_communities(rt).size() == 3, "large_communities (RAII)");
+        add_ext_community(rt, 0x42, 0x02, 64512, 5);
+        check(ext_communities(rt).size() == 1 && ext_communities(rt)[0].kind == 0x42,
+              "ext_communities (RAII)");
+        set_metric(rt, 42);
+        check(metric(rt) == 42, "metric (RAII)");
+        set_tag(rt, std::nullopt);
+        check(!tag(rt).has_value(), "tag cleared (RAII)");
+
+        auto pl = make_prefix_list();
+        auto p8 = make_prefix({10, 0, 0, 0}, 8);
+        prefix_list_add(pl, p8, 16, 24, true);
+        auto inside = make_prefix({10, 1, 1, 0}, 24);
+        check(prefix_list_match(pl, inside), "prefix_list_match (RAII) in-range");
+        auto shorter = make_prefix({10, 0, 0, 0}, 8);
+        check(!prefix_list_match(pl, shorter), "prefix_list_match (RAII) ge gate");
+
+        auto res = make_resolver();
+        // A 0.0.0.0/0 ge-0 le-32 permit list: matches everything.
+        auto any4 = make_prefix_list();
+        prefix_list_add(any4, make_prefix({10, 0, 0, 0}, 0), 0, 32, true);
+        check(resolver_add_prefix_list(res, "all-v4", any4) == 0,
+              "resolver_add_prefix_list (RAII)");
+
+        auto map = make_route_map();
+        route_map_add_entry(map,
+                            {{LR_MATCH_PREFIX_IN, 0, 0}},
+                            {{LR_SET_LOCAL_PREF, 0, {}, 300, 0}},
+                            MapVerdict::Permit);
+        auto verdict = route_map_evaluate(map, rt, &res);
+        check(verdict == EvalVerdict::Permit, "route_map_evaluate (RAII) permits");
+        check(local_pref(rt) == std::optional<std::uint32_t>(300),
+              "route_map set applied (RAII)");
+
+        auto empty = make_route_map();
+        check(route_map_evaluate(empty, rt, &res) == EvalVerdict::Fallthrough,
+              "empty map falls through (RAII)");
+
+        // A NULL resolver fails the list-backed match (fail closed):
+        // the permit-only entry falls through.
+        auto nomatch = make_route_map();
+        route_map_add_entry(nomatch, {{LR_MATCH_PREFIX_IN, 0, 0}}, {}, MapVerdict::Permit);
+        check(route_map_evaluate(nomatch, rt, nullptr) == EvalVerdict::Fallthrough,
+              "NULL resolver: match fails, falls through (RAII)");
+
+        // An explicit deny entry with a matching list really denies.
+        auto deny = make_route_map();
+        route_map_add_entry(deny, {{LR_MATCH_PREFIX_IN, 0, 0}}, {}, MapVerdict::Deny);
+        check(route_map_evaluate(deny, rt, &res) == EvalVerdict::Deny,
+              "explicit deny via resolver (RAII)");
+
+        bool threw = false;
+        try {
+            route_map_add_entry(map, {{99, 0, 0}}, {}, MapVerdict::Permit);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "unknown match kind throws (RAII)");
+    }
+
     // ---- ROA store RAII wrapper (RFC 6482 / RFC 6811 / RFC 8210;
     // ROADMAP-v3 D2.3): static layer replace, RTR delta batch, the
     // three RFC 6811 §2 outcomes. ----

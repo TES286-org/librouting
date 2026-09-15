@@ -37,7 +37,7 @@ impl PrefixListEntry {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PrefixList {
     entries: Vec<PrefixListEntry>,
 }

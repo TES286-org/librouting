@@ -14,6 +14,7 @@ extern "C" {
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -25,6 +26,15 @@ class Error : public std::runtime_error {
 public:
     explicit Error(std::string msg) : std::runtime_error(msg) {}
 };
+
+/// Throw `Error(what + ": " + last_error)` when `rc != 0` — the
+/// throwing one-liner behind the D5.3 policy-object wrappers.
+inline void check_rc(std::int32_t rc, const char* what) {
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error(std::string(what) + " failed: " + std::string(err ? err : "unknown"));
+    }
+}
 
 namespace detail {
 
@@ -670,6 +680,311 @@ inline std::vector<std::uint8_t> to_vec(const Bytes& b) {
     auto len = lr_bytes_len(b.get());
     auto* ptr = lr_bytes_ptr(b.get());
     return std::vector<std::uint8_t>(ptr, ptr + len);
+}
+
+// ===== D5.3 — policy objects: route handle, prefix-list, route-map,
+// resolver =====
+
+/// Verdict encoding for route-map entries.
+enum class MapVerdict : std::int32_t { Continue = 0, Permit = 1, Deny = 2 };
+
+/// `lr_route_map_evaluate` outcomes.
+enum class EvalVerdict : std::int32_t {
+    Fallthrough = -1,
+    Deny = 0,
+    Permit = 1,
+};
+
+struct RouteDeleter {
+    void operator()(lr_route_t r) const noexcept { lr_route_free(r); }
+};
+/// An owned route handle (a boxed `lr_core::rib::Route`).
+using Route = std::unique_ptr<OpaqueRoute, RouteDeleter>;
+
+struct PrefixListDeleter {
+    void operator()(lr_prefix_list_t l) const noexcept { lr_prefix_list_free(l); }
+};
+using PrefixListHandle = std::unique_ptr<OpaquePrefixList, PrefixListDeleter>;
+
+struct RouteMapDeleter {
+    void operator()(lr_route_map_t m) const noexcept { lr_route_map_free(m); }
+};
+using RouteMapHandle = std::unique_ptr<OpaqueRouteMap, RouteMapDeleter>;
+
+struct ResolverDeleter {
+    void operator()(lr_resolver_t r) const noexcept { lr_resolver_free(r); }
+};
+using ResolverHandle = std::unique_ptr<OpaqueResolver, ResolverDeleter>;
+
+inline Route make_route_v4(const std::array<std::uint8_t, 4>& octets, std::uint8_t prefix_len,
+                           Protocol proto) {
+    auto r = lr_route_new_v4(octets.data(), prefix_len, static_cast<std::int32_t>(proto));
+    if (!r) {
+        const char* err = lr_last_error();
+        throw Error("lr_route_new_v4 failed: " + std::string(err ? err : "unknown"));
+    }
+    return Route(r);
+}
+
+inline Route make_route_v6(const std::array<std::uint8_t, 16>& octets, std::uint8_t prefix_len,
+                           Protocol proto) {
+    auto r = lr_route_new_v6(octets.data(), prefix_len, static_cast<std::int32_t>(proto));
+    if (!r) {
+        const char* err = lr_last_error();
+        throw Error("lr_route_new_v6 failed: " + std::string(err ? err : "unknown"));
+    }
+    return Route(r);
+}
+
+inline void set_next_hop(Route& r, const std::vector<std::uint8_t>& addr) {
+    if (addr.size() != 4 && addr.size() != 16) {
+        throw Error("set_next_hop: bad address length (want 4 or 16)");
+    }
+    check_rc(lr_route_set_next_hop(r.get(), addr.data(), addr.size() == 16 ? 1 : 0),
+             "lr_route_set_next_hop");
+}
+
+/// Reads the next hop; `false` when absent. IPv4 comes back in the
+/// first four bytes.
+inline bool next_hop(Route& r, std::vector<std::uint8_t>& out, bool& is_ipv6) {
+    std::uint8_t buf[16];
+    std::int32_t v6 = 0;
+    std::int32_t rc = lr_route_next_hop(r.get(), buf, &v6);
+    if (rc == 1) return false;
+    if (rc != 0) {
+        throw Error("lr_route_next_hop failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    out.assign(buf, buf + (v6 ? 16 : 4));
+    is_ipv6 = v6 != 0;
+    return true;
+}
+
+inline void set_local_pref(Route& r, std::uint32_t value) {
+    check_rc(lr_route_set_local_pref(r.get(), value), "lr_route_set_local_pref");
+}
+
+inline std::optional<std::uint32_t> local_pref(Route& r) {
+    std::uint32_t v = 0;
+    std::int32_t rc = lr_route_local_pref(r.get(), &v);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0) {
+        throw Error("lr_route_local_pref failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return v;
+}
+
+inline void set_med(Route& r, std::uint32_t value) {
+    check_rc(lr_route_set_med(r.get(), value), "lr_route_set_med");
+}
+
+inline std::optional<std::uint32_t> med(Route& r) {
+    std::uint32_t v = 0;
+    std::int32_t rc = lr_route_med(r.get(), &v);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0) {
+        throw Error("lr_route_med failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return v;
+}
+
+/// ORIGIN values (RFC 4271 §5.1.1).
+inline void set_origin(Route& r, std::uint8_t origin) {
+    check_rc(lr_route_set_origin(r.get(), origin), "lr_route_set_origin");
+}
+
+inline std::optional<std::uint8_t> origin(Route& r) {
+    std::uint8_t v = 0;
+    std::int32_t rc = lr_route_origin(r.get(), &v);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0) {
+        throw Error("lr_route_origin failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return v;
+}
+
+/// Replace the AS_PATH with a flat sequence (empty drops the attribute).
+inline void set_as_path(Route& r, const std::vector<std::uint32_t>& asns) {
+    check_rc(lr_route_set_as_path(r.get(), asns.empty() ? nullptr : asns.data(), asns.size()),
+             "lr_route_set_as_path");
+}
+
+inline std::vector<std::uint32_t> as_path(Route& r) {
+    // These getters return the element count (>= 0) on success, so
+    // only a negative rc is an error.
+    std::int64_t n = lr_route_as_path(r.get(), nullptr, 0);
+    if (n < 0) return {};
+    std::vector<std::uint32_t> out(static_cast<std::size_t>(n));
+    if (n > 0 && lr_route_as_path(r.get(), out.data(), out.size()) < 0) {
+        throw Error("lr_route_as_path failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return out;
+}
+
+inline void add_community(Route& r, std::uint32_t asn, std::uint16_t value) {
+    check_rc(lr_route_add_community(r.get(), asn, value), "lr_route_add_community");
+}
+
+/// Replace the standard communities from packed `asn << 16 | value`.
+inline void set_communities(Route& r, const std::vector<std::uint64_t>& packed) {
+    check_rc(lr_route_set_communities(r.get(), packed.empty() ? nullptr : packed.data(), packed.size()),
+             "lr_route_set_communities");
+}
+
+inline std::vector<std::uint64_t> communities(Route& r) {
+    std::int64_t n = lr_route_communities(r.get(), nullptr, 0);
+    if (n < 0) return {};
+    std::vector<std::uint64_t> out(static_cast<std::size_t>(n));
+    if (n > 0 && lr_route_communities(r.get(), out.data(), out.size()) < 0) {
+        throw Error("lr_route_communities failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return out;
+}
+
+inline void add_large_community(Route& r, std::uint32_t g, std::uint32_t d1, std::uint32_t d2) {
+    check_rc(lr_route_add_large_community(r.get(), g, d1, d2), "lr_route_add_large_community");
+}
+
+/// Replace the large communities from flat triples.
+inline void set_large_communities(Route& r, const std::vector<std::uint32_t>& triples) {
+    if (triples.size() % 3 != 0) {
+        throw Error("set_large_communities: triples must come in groups of three");
+    }
+    check_rc(lr_route_set_large_communities(r.get(), triples.empty() ? nullptr : triples.data(),
+                                            triples.size() / 3),
+             "lr_route_set_large_communities");
+}
+
+inline std::vector<std::uint32_t> large_communities(Route& r) {
+    std::int64_t n = lr_route_large_communities(r.get(), nullptr, 0);
+    if (n < 0) return {};
+    std::vector<std::uint32_t> out(static_cast<std::size_t>(n));
+    if (n > 0 && lr_route_large_communities(r.get(), out.data(), out.size()) < 0) {
+        throw Error("lr_route_large_communities failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return out;
+}
+
+inline void add_ext_community(Route& r, std::uint8_t kind, std::uint8_t subtype,
+                              std::uint32_t global, std::uint16_t local) {
+    check_rc(lr_route_add_ext_community(r.get(), kind, subtype, global, local),
+             "lr_route_add_ext_community");
+}
+
+inline std::vector<lr_ext_comm_t> ext_communities(Route& r) {
+    std::int64_t n = lr_route_ext_communities(r.get(), nullptr, 0);
+    if (n < 0) return {};
+    std::vector<lr_ext_comm_t> out(static_cast<std::size_t>(n));
+    if (n > 0 && lr_route_ext_communities(r.get(), out.data(), out.size()) < 0) {
+        throw Error("lr_route_ext_communities failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return out;
+}
+
+inline void set_metric(Route& r, std::uint32_t value) {
+    check_rc(lr_route_set_metric(r.get(), value), "lr_route_set_metric");
+}
+
+inline std::uint32_t metric(Route& r) {
+    std::uint32_t v = 0;
+    check_rc(lr_route_metric(r.get(), &v), "lr_route_metric");
+    return v;
+}
+
+/// `std::nullopt` clears the tag.
+inline void set_tag(Route& r, std::optional<std::uint32_t> tag) {
+    check_rc(lr_route_set_tag(r.get(), tag ? 1 : 0, tag.value_or(0)), "lr_route_set_tag");
+}
+
+inline std::optional<std::uint32_t> tag(Route& r) {
+    std::uint32_t v = 0;
+    std::int32_t rc = lr_route_tag(r.get(), &v);
+    if (rc == 1) return std::nullopt;
+    if (rc != 0) {
+        throw Error("lr_route_tag failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return v;
+}
+
+inline PrefixListHandle make_prefix_list() {
+    auto l = lr_prefix_list_new();
+    if (!l) throw Error("lr_prefix_list_new returned null");
+    return PrefixListHandle(l);
+}
+
+inline void prefix_list_add(PrefixListHandle& l, const lr_prefix_t& prefix, std::uint8_t ge,
+                            std::uint8_t le, bool permit) {
+    check_rc(lr_prefix_list_add(l.get(), &prefix, ge, le, permit ? 1 : 0), "lr_prefix_list_add");
+}
+
+/// First-match evaluation; `false` covers deny + implicit deny.
+inline bool prefix_list_match(PrefixListHandle& l, const lr_prefix_t& prefix) {
+    std::int32_t rc = lr_prefix_list_match(l.get(), &prefix);
+    if (rc < 0) {
+        throw Error("lr_prefix_list_match failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return rc == 1;
+}
+
+inline RouteMapHandle make_route_map() {
+    auto m = lr_route_map_new();
+    if (!m) throw Error("lr_route_map_new returned null");
+    return RouteMapHandle(m);
+}
+
+inline void route_map_add_entry(RouteMapHandle& m, const std::vector<lr_match_t>& matches,
+                                const std::vector<lr_set_t>& sets, MapVerdict verdict) {
+    check_rc(lr_route_map_add_entry(m.get(),
+                                    matches.empty() ? nullptr : matches.data(), matches.size(),
+                                    sets.empty() ? nullptr : sets.data(), sets.size(),
+                                    static_cast<std::int32_t>(verdict)),
+             "lr_route_map_add_entry");
+}
+
+inline EvalVerdict route_map_evaluate(RouteMapHandle& m, Route& r, ResolverHandle* resolver) {
+    std::int32_t verdict = 0;
+    lr_resolver_t res = resolver ? resolver->get() : nullptr;
+    check_rc(lr_route_map_evaluate(m.get(), r.get(), res, &verdict), "lr_route_map_evaluate");
+    return static_cast<EvalVerdict>(verdict);
+}
+
+inline ResolverHandle make_resolver() {
+    auto r = lr_resolver_new();
+    if (!r) throw Error("lr_resolver_new returned null");
+    return ResolverHandle(r);
+}
+
+/// Register a prefix-list under `name`; the list is copied in. Returns
+/// the numeric list id for `lr_match_t::list_id`.
+inline std::int32_t resolver_add_prefix_list(ResolverHandle& res, const char* name,
+                                             PrefixListHandle& list) {
+    std::int32_t id = lr_resolver_add_prefix_list(res.get(), name, list.get());
+    if (id < 0) {
+        throw Error("lr_resolver_add_prefix_list failed: " +
+                    std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return id;
+}
+
+inline std::int32_t resolver_add_as_path_list(ResolverHandle& res, const char* name,
+                                              const std::vector<lr_as_path_filter_t>& filters) {
+    std::int32_t id = lr_resolver_add_as_path_list(
+        res.get(), name, filters.empty() ? nullptr : filters.data(), filters.size());
+    if (id < 0) {
+        throw Error("lr_resolver_add_as_path_list failed: " +
+                    std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return id;
+}
+
+inline std::int32_t resolver_add_community_list(ResolverHandle& res, const char* name,
+                                                const std::vector<lr_community_entry_t>& entries) {
+    std::int32_t id = lr_resolver_add_community_list(
+        res.get(), name, entries.empty() ? nullptr : entries.data(), entries.size());
+    if (id < 0) {
+        throw Error("lr_resolver_add_community_list failed: " +
+                    std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    return id;
 }
 
 } // namespace librouting

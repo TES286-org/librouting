@@ -132,6 +132,44 @@ pub struct OpaqueRoaStore {
 
 pub type lr_roa_store_t = *mut OpaqueRoaStore;
 
+// ---- Policy object handles (ROADMAP-v3 D5.3) ----
+
+/// Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
+/// and route-map evaluation run against the same data model the
+/// library uses internally.
+#[repr(C)]
+pub struct OpaqueRoute {
+    _private: [u8; 0],
+}
+
+pub type lr_route_t = *mut OpaqueRoute;
+
+/// Opaque prefix-list handle (`lr_policy::PrefixList`).
+#[repr(C)]
+pub struct OpaquePrefixList {
+    _private: [u8; 0],
+}
+
+pub type lr_prefix_list_t = *mut OpaquePrefixList;
+
+/// Opaque route-map handle (`lr_policy::RouteMap`).
+#[repr(C)]
+pub struct OpaqueRouteMap {
+    _private: [u8; 0],
+}
+
+pub type lr_route_map_t = *mut OpaqueRouteMap;
+
+/// Opaque policy resolver handle (`lr_policy::PolicySet`): the named
+/// registry of prefix-lists / AS-path filters / community lists that
+/// route-map match conditions resolve against.
+#[repr(C)]
+pub struct OpaqueResolver {
+    _private: [u8; 0],
+}
+
+pub type lr_resolver_t = *mut OpaqueResolver;
+
 /// Helper to construct an opaque store from a `RoaStore`. No Mutex
 /// wrapper — `RoaStore` is already `Send + Sync` (its readers are
 /// read-locked `Arc` clones), so wrapping it in a `Mutex` would

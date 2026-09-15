@@ -28,6 +28,7 @@ pub mod error;
 pub mod events;
 pub mod handle;
 pub mod policy;
+pub mod policy_objects;
 pub mod roa_store;
 pub mod router;
 pub mod sessions;

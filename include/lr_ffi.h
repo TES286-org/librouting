@@ -51,6 +51,63 @@
 #define LR_EVENT_TEXT_MAX 128
 
 /**
+ * ORIGIN values (RFC 4271 §5.1.1).
+ */
+#define LR_ORIGIN_IGP 0
+
+#define LR_ORIGIN_EGP 1
+
+#define LR_ORIGIN_INCOMPLETE 2
+
+/**
+ * Route-map match condition kinds (`lr_match_t::kind`).
+ */
+#define LR_MATCH_PREFIX_IN 0
+
+#define LR_MATCH_AS_PATH_IN 1
+
+#define LR_MATCH_COMMUNITY_IN 2
+
+#define LR_MATCH_PROTOCOL_IS 3
+
+#define LR_MATCH_NEXT_HOP_IN 4
+
+/**
+ * Route-map set action kinds (`lr_set_t::kind`).
+ */
+#define LR_SET_LOCAL_PREF 0
+
+#define LR_SET_MED 1
+
+#define LR_SET_NEXT_HOP 2
+
+#define LR_SET_PREPEND_AS 3
+
+#define LR_SET_ADD_COMMUNITY 4
+
+#define LR_SET_METRIC 5
+
+#define LR_SET_TAG 6
+
+/**
+ * Route-map entry verdict (`lr_route_map_add_entry`).
+ */
+#define LR_VERDICT_CONTINUE 0
+
+#define LR_VERDICT_PERMIT 1
+
+#define LR_VERDICT_DENY 2
+
+/**
+ * `lr_route_map_evaluate` verdict output.
+ */
+#define LR_EVAL_DENY 0
+
+#define LR_EVAL_PERMIT 1
+
+#define LR_EVAL_FALLTHROUGH -1
+
+/**
  * Validation outcome constants (`lr_roa_store_validate` out param).
  */
 #define LR_ROA_VALID 0
@@ -199,6 +256,133 @@ typedef struct lr_damping_config_t {
   double decay_factor_active;
   double decay_factor_withdrawn;
 } lr_damping_config_t;
+
+/**
+ * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
+ * and route-map evaluation run against the same data model the
+ * library uses internally.
+ */
+typedef struct OpaqueRoute {
+  uint8_t _private[0];
+} OpaqueRoute;
+
+typedef struct OpaqueRoute *lr_route_t;
+
+/**
+ * One RFC 4360 extended community, embedder-side.
+ */
+typedef struct lr_ext_comm_t {
+  uint8_t kind;
+  uint8_t subtype;
+  uint32_t global;
+  uint16_t local;
+} lr_ext_comm_t;
+
+/**
+ * Opaque prefix-list handle (`lr_policy::PrefixList`).
+ */
+typedef struct OpaquePrefixList {
+  uint8_t _private[0];
+} OpaquePrefixList;
+
+typedef struct OpaquePrefixList *lr_prefix_list_t;
+
+/**
+ * Opaque route-map handle (`lr_policy::RouteMap`).
+ */
+typedef struct OpaqueRouteMap {
+  uint8_t _private[0];
+} OpaqueRouteMap;
+
+typedef struct OpaqueRouteMap *lr_route_map_t;
+
+/**
+ * One route-map match condition.
+ */
+typedef struct lr_match_t {
+  /**
+   * [`LR_MATCH_*`](LR_MATCH_PREFIX_IN) kind.
+   */
+  uint8_t kind;
+  /**
+   * List id for the `*_IN` kinds (as returned by the
+   * `lr_resolver_add_*` registrations).
+   */
+  uint32_t list_id;
+  /**
+   * [`LrProtocol`] id for [`LR_MATCH_PROTOCOL_IS`].
+   */
+  uint8_t protocol;
+} lr_match_t;
+
+/**
+ * One route-map set action.
+ */
+typedef struct lr_set_t {
+  /**
+   * [`LR_SET_*`](LR_SET_LOCAL_PREF) kind.
+   */
+  uint8_t kind;
+  /**
+   * IPv6 flag for [`LR_SET_NEXT_HOP`].
+   */
+  uint8_t is_ipv6;
+  /**
+   * Address for [`LR_SET_NEXT_HOP`] (first 4 bytes for IPv4).
+   */
+  uint8_t addr[16];
+  /**
+   * Payload: LOCAL_PREF / MED / the AS for PREPEND_AS / the ASN for
+   * ADD_COMMUNITY / METRIC / TAG.
+   */
+  uint32_t value;
+  /**
+   * Community value for [`LR_SET_ADD_COMMUNITY`].
+   */
+  uint16_t value2;
+} lr_set_t;
+
+/**
+ * Opaque policy resolver handle (`lr_policy::PolicySet`): the named
+ * registry of prefix-lists / AS-path filters / community lists that
+ * route-map match conditions resolve against.
+ */
+typedef struct OpaqueResolver {
+  uint8_t _private[0];
+} OpaqueResolver;
+
+typedef struct OpaqueResolver *lr_resolver_t;
+
+/**
+ * One FRR-dialect AS-path access-list filter.
+ */
+typedef struct lr_as_path_filter_t {
+  /**
+   * NUL-terminated pattern (`_65001_`, `^65001$`, ...). Borrowed for
+   * the duration of the `lr_resolver_add_as_path_list` call only.
+   */
+  const char *pattern;
+  /**
+   * Non-zero: permit, zero: deny.
+   */
+  uint8_t permit;
+} lr_as_path_filter_t;
+
+/**
+ * One community-list entry (RFC 1997 standard list).
+ */
+typedef struct lr_community_entry_t {
+  /**
+   * Packed `asn << 16 | value` communities. Borrowed for the
+   * duration of the `lr_resolver_add_community_list` call only.
+   */
+  const uint64_t *communities;
+  uintptr_t count;
+  /**
+   * Non-zero: permit, zero: deny.
+   */
+  uint8_t permit;
+} lr_community_entry_t;
 
 /**
  * Opaque ROA store handle. C side never touches internals.
@@ -483,6 +667,386 @@ int32_t lr_damping_decay(struct OpaqueDamping *d, uint64_t now_s);
  * that has not been destroyed yet, and must not be used afterwards.
  */
 void lr_damping_destroy(struct OpaqueDamping *d);
+
+/**
+ * Create a route handle for an IPv4 prefix. `protocol` is an
+ * [`LrProtocol`] id. Returns NULL on a malformed prefix length or
+ * unknown protocol id (the last-error string says which).
+ *
+ * # Safety
+ * `octets` must point to 4 readable bytes.
+ */
+lr_route_t lr_route_new_v4(const uint8_t *octets, uint8_t prefix_len, int32_t protocol);
+
+/**
+ * Create a route handle for an IPv6 prefix. See
+ * [`lr_route_new_v4`] for the contract.
+ *
+ * # Safety
+ * `octets` must point to 16 readable bytes.
+ */
+lr_route_t lr_route_new_v6(const uint8_t *octets, uint8_t prefix_len, int32_t protocol);
+
+/**
+ * Free a route handle. NULL is a no-op.
+ *
+ * # Safety
+ * `route` must be null or a handle returned by `lr_route_new_*` that
+ * has not been freed yet, and must not be used afterwards.
+ */
+void lr_route_free(lr_route_t route);
+
+/**
+ * Set the route's next hop (RFC 4271 §5.1.3). `addr` carries the
+ * IPv4 octets in the first four bytes when `is_ipv6` is 0. Returns
+ * 0, -1 on a null argument.
+ *
+ * # Safety
+ * `addr` must point to 4 (v4) / 16 (v6) readable bytes.
+ */
+int32_t lr_route_set_next_hop(lr_route_t route, const uint8_t *addr, int32_t is_ipv6);
+
+/**
+ * Read the route's next hop into `out` (16 bytes, IPv4 in the first
+ * four) and its family into `out_is_ipv6`. Returns 0 when present,
+ * 1 when absent, -1 on a null argument.
+ *
+ * # Safety
+ * `out` must be writable for 16 bytes; `out_is_ipv6` writable for one
+ * `i32`.
+ */
+int32_t lr_route_next_hop(lr_route_t route, uint8_t *out, int32_t *out_is_ipv6);
+
+/**
+ * Set the BGP LOCAL_PREF (RFC 4271 §5.1.5). Returns 0 / -1.
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_set_local_pref(lr_route_t route, uint32_t value);
+
+/**
+ * Read LOCAL_PREF into `out`. Returns 0 present, 1 absent, -1 null.
+ *
+ * # Safety
+ * `out` must be writable.
+ */
+int32_t lr_route_local_pref(lr_route_t route, uint32_t *out);
+
+/**
+ * Set the BGP MULTI_EXIT_DISC (RFC 4271 §4.2.4). 0 / -1.
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_set_med(lr_route_t route, uint32_t value);
+
+/**
+ * Read MULTI_EXIT_DISC. 0 present, 1 absent, -1 null.
+ *
+ * # Safety
+ * `out` must be writable.
+ */
+int32_t lr_route_med(lr_route_t route, uint32_t *out);
+
+/**
+ * Set the BGP ORIGIN (RFC 4271 §5.1.1): [`LR_ORIGIN_IGP`],
+ * [`LR_ORIGIN_EGP`] or [`LR_ORIGIN_INCOMPLETE`]. Returns 0, -1 null,
+ * -3 unknown origin value.
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_set_origin(lr_route_t route, uint8_t origin);
+
+/**
+ * Read ORIGIN into `out`. 0 present, 1 absent, -1 null.
+ *
+ * # Safety
+ * `out` must be writable.
+ */
+int32_t lr_route_origin(lr_route_t route, uint8_t *out);
+
+/**
+ * Replace the AS_PATH with a flat sequence (RFC 4271 §4.3). An empty
+ * sequence drops the attribute. 0 ok, -1 null.
+ *
+ * # Safety
+ * `asns` must point to `count` readable `u32`s when non-null.
+ */
+int32_t lr_route_set_as_path(lr_route_t route, const uint32_t *asns, uintptr_t count);
+
+/**
+ * Read the AS_PATH's flat sequence. Call with `out = NULL` to get the
+ * required length; with a buffer, returns the number of ASes written.
+ * Negative on null handle / buffer smaller than needed.
+ *
+ * # Safety
+ * `out` (when non-null) must be writable for `cap` `u32`s.
+ */
+int64_t lr_route_as_path(lr_route_t route, uint32_t *out, uintptr_t cap);
+
+/**
+ * Append one standard community (RFC 1997 §4). The ASN must fit 16
+ * bits — 4-octet-AS communities ride LARGE_COMMUNITIES (RFC 8097).
+ * 0 ok, -1 null, -3 ASN > 0xFFFF.
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_add_community(lr_route_t route, uint32_t asn, uint16_t value);
+
+/**
+ * Replace the whole standard COMMUNITIES attribute from packed
+ * `asn << 16 | value` items. An empty set drops the attribute.
+ *
+ * # Safety
+ * `items` must point to `count` readable `u64`s when non-null.
+ */
+int32_t lr_route_set_communities(lr_route_t route, const uint64_t *items, uintptr_t count);
+
+/**
+ * Read the standard communities as packed `asn << 16 | value`.
+ * `out = NULL` → required length; otherwise the count written.
+ *
+ * # Safety
+ * `out` (when non-null) must be writable for `cap` `u64`s.
+ */
+int64_t lr_route_communities(lr_route_t route, uint64_t *out, uintptr_t cap);
+
+/**
+ * Append one large community (RFC 8097).
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_add_large_community(lr_route_t route,
+                                     uint32_t global_admin,
+                                     uint32_t local_data1,
+                                     uint32_t local_data2);
+
+/**
+ * Replace the whole LARGE_COMMUNITIES attribute from flat triples.
+ *
+ * # Safety
+ * `triples` must point to `count * 3` readable `u32`s when non-null.
+ */
+int32_t lr_route_set_large_communities(lr_route_t route, const uint32_t *triples, uintptr_t count);
+
+/**
+ * Read the large communities as flat triples. `out = NULL` →
+ * required `u32` count (3 * entries); otherwise the count written.
+ *
+ * # Safety
+ * `out` (when non-null) must be writable for `cap` `u32`s.
+ */
+int64_t lr_route_large_communities(lr_route_t route, uint32_t *out, uintptr_t cap);
+
+/**
+ * Append one extended community (RFC 4360).
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_add_ext_community(lr_route_t route,
+                                   uint8_t kind,
+                                   uint8_t subtype,
+                                   uint32_t global,
+                                   uint16_t local);
+
+/**
+ * Replace the whole EXTENDED_COMMUNITIES attribute.
+ *
+ * # Safety
+ * `items` must point to `count` readable `lr_ext_comm_t`s when
+ * non-null.
+ */
+int32_t lr_route_set_ext_communities(lr_route_t route,
+                                     const struct lr_ext_comm_t *items,
+                                     uintptr_t count);
+
+/**
+ * Read the extended communities. `out = NULL` → required length,
+ * otherwise the count written.
+ *
+ * # Safety
+ * `out` (when non-null) must be writable for `cap` `lr_ext_comm_t`s.
+ */
+int64_t lr_route_ext_communities(lr_route_t route, struct lr_ext_comm_t *out, uintptr_t cap);
+
+/**
+ * Set the route's metric (the cross-protocol preference metric).
+ * 0 / -1.
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_set_metric(lr_route_t route, uint32_t value);
+
+/**
+ * Read the route's metric. 0 / -1.
+ *
+ * # Safety
+ * `out` must be writable.
+ */
+int32_t lr_route_metric(lr_route_t route, uint32_t *out);
+
+/**
+ * Set the operator route tag (`None` when `has_tag` is 0). 0 / -1.
+ *
+ * # Safety
+ * `route` must be a live handle.
+ */
+int32_t lr_route_set_tag(lr_route_t route, int32_t has_tag, uint32_t tag);
+
+/**
+ * Read the route tag. 0 present, 1 absent, -1 null.
+ *
+ * # Safety
+ * `out` must be writable.
+ */
+int32_t lr_route_tag(lr_route_t route, uint32_t *out);
+
+/**
+ * Create an empty prefix-list. NULL on panic.
+ */
+lr_prefix_list_t lr_prefix_list_new(void);
+
+/**
+ * Free a prefix-list. NULL is a no-op.
+ *
+ * # Safety
+ * `list` must be null or a handle from `lr_prefix_list_new` that has
+ * not been freed or consumed by `lr_resolver_add_prefix_list`.
+ */
+void lr_prefix_list_free(lr_prefix_list_t list);
+
+/**
+ * Append one entry: `prefix` with the ge/le length window (FRR
+ * `ge`/`le`; `le = 255` means no upper bound) and `permit` (non-zero
+ * = permit). First matching entry decides; no match denies.
+ * 0 ok, -1 null, -3 malformed prefix.
+ *
+ * # Safety
+ * `list` must be a live handle; `prefix` a readable `lr_prefix_t`.
+ */
+int32_t lr_prefix_list_add(lr_prefix_list_t list,
+                           const struct lr_prefix_t *prefix,
+                           uint8_t ge,
+                           uint8_t le,
+                           int32_t permit);
+
+/**
+ * Evaluate the list against `prefix`: 1 = permit, 0 = deny (implicit
+ * deny included), -1 null.
+ *
+ * # Safety
+ * `list` must be a live handle; `prefix` a readable `lr_prefix_t`.
+ */
+int32_t lr_prefix_list_match(lr_prefix_list_t list, const struct lr_prefix_t *prefix);
+
+/**
+ * Create an empty route-map. NULL on panic.
+ */
+lr_route_map_t lr_route_map_new(void);
+
+/**
+ * Free a route-map. NULL is a no-op.
+ *
+ * # Safety
+ * `map` must be null or a handle from `lr_route_map_new` that has not
+ * been freed.
+ */
+void lr_route_map_free(lr_route_map_t map);
+
+/**
+ * Append one entry: all `matches` must hold, then all `sets` apply
+ * and `verdict` decides ([`LR_VERDICT_CONTINUE`] falls through to the
+ * next entry). Entries are tried in insertion order. 0 ok, -1 null,
+ * -3 malformed match/set or prefix length.
+ *
+ * # Safety
+ * `map` must be a live handle; the arrays readable for `n_matches` /
+ * `n_sets` items when non-null.
+ */
+int32_t lr_route_map_add_entry(lr_route_map_t map,
+                               const struct lr_match_t *matches,
+                               uintptr_t n_matches,
+                               const struct lr_set_t *sets,
+                               uintptr_t n_sets,
+                               int32_t verdict);
+
+/**
+ * FRR route-map evaluation over a live route handle: the first
+ * matching entry applies its sets and its verdict lands in `out`
+ * ([`LR_EVAL_PERMIT`] / [`LR_EVAL_DENY`] / [`LR_EVAL_FALLTHROUGH`]).
+ * Mutations are visible to subsequent `lr_route_*` reads.
+ * 0 ok, -1 null, -2 invalid handle.
+ *
+ * `resolver` may be NULL: then every list-backed match fails
+ * (fail-closed, FRR unknown-list semantics).
+ *
+ * # Safety
+ * `map` / `route` must be live handles; `resolver` null or live.
+ */
+int32_t lr_route_map_evaluate(lr_route_map_t map,
+                              lr_route_t route,
+                              lr_resolver_t resolver,
+                              int32_t *out);
+
+/**
+ * Create an empty policy resolver. NULL on panic.
+ */
+lr_resolver_t lr_resolver_new(void);
+
+/**
+ * Free a resolver. Registered policy objects go with it.
+ *
+ * # Safety
+ * `resolver` must be null or a handle from `lr_resolver_new` that has
+ * not been freed.
+ */
+void lr_resolver_free(lr_resolver_t resolver);
+
+/**
+ * Register the prefix-list under `name` (NUL-terminated). The list is
+ * COPIED into the resolver; the caller keeps ownership of the handle.
+ * Returns the numeric list id for `lr_match_t.list_id` (>= 0), or
+ * -1/-3 on null/malformed.
+ *
+ * # Safety
+ * `resolver` must be live; `name` a readable NUL-terminated string;
+ * `list` a live handle.
+ */
+int32_t lr_resolver_add_prefix_list(lr_resolver_t resolver,
+                                    const char *name,
+                                    lr_prefix_list_t list);
+
+/**
+ * Register an AS-path access-list (FRR dialect) under `name`. Returns
+ * the list id, or -1/-3.
+ *
+ * # Safety
+ * `resolver` must be live; `filters` readable for `count` items, each
+ * `pattern` a readable NUL-terminated string.
+ */
+int32_t lr_resolver_add_as_path_list(lr_resolver_t resolver,
+                                     const char *name,
+                                     const struct lr_as_path_filter_t *filters,
+                                     uintptr_t count);
+
+/**
+ * Register a standard community list (RFC 1997) under `name`. Returns
+ * the list id, or -1/-3.
+ *
+ * # Safety
+ * `resolver` must be live; `entries` readable for `count` items, each
+ * `communities` array readable for its `count`.
+ */
+int32_t lr_resolver_add_community_list(lr_resolver_t resolver,
+                                       const char *name,
+                                       const struct lr_community_entry_t *entries,
+                                       uintptr_t count);
 
 /**
  * Create an empty ROA store. NULL on panic (last-error set).

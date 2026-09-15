@@ -501,3 +501,66 @@ def test_ospf_and_babel_sessions():
         # The sessions surface in the dump.
         dump = r.sessions_dump()
         assert "ospf" in dump and "babel" in dump
+
+
+def test_policy_objects():
+    # Route handle: attribute round trip.
+    rt = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    rt.set_local_pref(250)
+    assert rt.local_pref() == 250
+    rt.set_origin(0)
+    try:
+        rt.set_origin(7)
+        raise AssertionError("ORIGIN 7 must be rejected")
+    except librouting.LrError:
+        pass
+    rt.set_as_path([64513, 65010, 64512])
+    assert rt.as_path() == [64513, 65010, 64512]
+    rt.set_communities([(64512 << 16) | 100])
+    try:
+        rt.add_community(4294967295, 1)
+        raise AssertionError("a 4-byte ASN must be rejected")
+    except librouting.LrError:
+        pass
+    assert rt.communities() == [(64512 << 16) | 100]
+    rt.add_large_community(4200000000, 7, 9)
+    assert rt.large_communities() == [4200000000, 7, 9]
+    rt.add_ext_community(0x42, 0x02, 64512, 5)
+    rt.set_metric(42)
+    assert rt.metric() == 42
+    rt.set_tag(None)
+
+    # Prefix-list: 10.0.0.0/8 ge 16 le 24.
+    pl = librouting.PrefixList()
+    pl.add(([10, 0, 0, 0], 8), ge=16, le=24, permit=True)
+    assert pl.match(([10, 1, 1, 0], 24))
+    assert not pl.match(([10, 0, 0, 0], 8))
+
+    # Resolver + route-map: the FRR flow.
+    res = librouting.Resolver()
+    any4 = librouting.PrefixList()
+    any4.add(([10, 0, 0, 0], 0), ge=0, le=32, permit=True)
+    assert res.add_prefix_list("all-v4", any4) == 0
+
+    rm = librouting.RouteMap()
+    rm.add_entry(
+        [librouting.Match(librouting.MATCH_PREFIX_IN, list_id=0)],
+        [librouting.Set(librouting.SET_LOCAL_PREF, value=300)],
+        librouting.VERDICT_PERMIT,
+    )
+    assert rm.evaluate(rt, res) == librouting.EVAL_PERMIT
+    assert rt.local_pref() == 300
+
+    # NULL resolver: the list-backed match fails -> fallthrough.
+    assert rm.evaluate(rt, None) == librouting.EVAL_FALLTHROUGH
+
+    # An explicit deny entry with a matching list really denies.
+    deny = librouting.RouteMap()
+    deny.add_entry([librouting.Match(librouting.MATCH_PREFIX_IN, list_id=0)], [],
+                   librouting.VERDICT_DENY)
+    assert deny.evaluate(rt, res) == librouting.EVAL_DENY
+
+    # AS-path list registration via the resolver (its own id namespace).
+    pid = res.add_as_path_list("paths", [librouting.AsPathFilter("^65001$", permit=False),
+                                         librouting.AsPathFilter("_65002_", permit=True)])
+    assert pid == 0

@@ -1357,3 +1357,561 @@ func (d *Damping) Destroy() {
 		d.ptr = nil
 	}
 }
+
+// ===== D5.3 — policy objects: route handle, prefix-list, route-map,
+// resolver =====
+
+// Route-map match condition kinds (LR_MATCH_*).
+const (
+	MatchPrefixIn    = C.LR_MATCH_PREFIX_IN
+	MatchAsPathIn    = C.LR_MATCH_AS_PATH_IN
+	MatchCommunityIn = C.LR_MATCH_COMMUNITY_IN
+	MatchProtocolIs  = C.LR_MATCH_PROTOCOL_IS
+	MatchNextHopIn   = C.LR_MATCH_NEXT_HOP_IN
+)
+
+// Route-map set action kinds (LR_SET_*).
+const (
+	SetLocalPref    = C.LR_SET_LOCAL_PREF
+	SetMed          = C.LR_SET_MED
+	SetNextHopKind  = C.LR_SET_NEXT_HOP
+	SetPrependAs    = C.LR_SET_PREPEND_AS
+	SetAddCommunity = C.LR_SET_ADD_COMMUNITY
+	SetMetric       = C.LR_SET_METRIC
+	SetTag          = C.LR_SET_TAG
+)
+
+// Route-map entry verdicts (LR_VERDICT_*).
+const (
+	VerdictContinue = C.LR_VERDICT_CONTINUE
+	VerdictPermit   = C.LR_VERDICT_PERMIT
+	VerdictDeny     = C.LR_VERDICT_DENY
+)
+
+// lr_route_map_evaluate outcomes (LR_EVAL_*).
+const (
+	EvalFallthrough = C.LR_EVAL_FALLTHROUGH
+	EvalDeny        = C.LR_EVAL_DENY
+	EvalPermit      = C.LR_EVAL_PERMIT
+)
+
+// Route is an owned policy route handle (a boxed lr_core::rib::Route):
+// the exact data model filter and route-map evaluation run against.
+type Route struct {
+	ptr C.lr_route_t
+}
+
+// NewRouteV4 creates a route handle for an IPv4 prefix. proto is one of
+// the Proto* constants.
+func NewRouteV4(octets [4]byte, prefixLen uint8, proto Protocol) (*Route, error) {
+	var p [16]byte
+	copy(p[:4], octets[:])
+	ptr := C.lr_route_new_v4((*C.uint8_t)(unsafe.Pointer(&p[0])), C.uint8_t(prefixLen), C.int32_t(proto))
+	if ptr == nil {
+		return nil, fmt.Errorf("lr_route_new_v4: %s", LastError())
+	}
+	r := &Route{ptr: ptr}
+	runtime.SetFinalizer(r, (*Route).destroy)
+	return r, nil
+}
+
+// NewRouteV6 creates a route handle for an IPv6 prefix.
+func NewRouteV6(octets [16]byte, prefixLen uint8, proto Protocol) (*Route, error) {
+	var p [16]byte
+	copy(p[:], octets[:])
+	ptr := C.lr_route_new_v6((*C.uint8_t)(unsafe.Pointer(&p[0])), C.uint8_t(prefixLen), C.int32_t(proto))
+	if ptr == nil {
+		return nil, fmt.Errorf("lr_route_new_v6: %s", LastError())
+	}
+	r := &Route{ptr: ptr}
+	runtime.SetFinalizer(r, (*Route).destroy)
+	return r, nil
+}
+
+func (r *Route) destroy() {
+	if r.ptr != nil {
+		C.lr_route_free(r.ptr)
+		r.ptr = nil
+	}
+}
+
+// Free releases the route handle (optional; a finalizer also runs).
+func (r *Route) Free() {
+	runtime.SetFinalizer(r, nil)
+	r.destroy()
+}
+
+// SetNextHop sets the route's next hop (4- or 16-byte address).
+func (r *Route) SetNextHop(addr []byte) error {
+	if len(addr) != 4 && len(addr) != 16 {
+		return fmt.Errorf("SetNextHop: bad address length (want 4 or 16)")
+	}
+	rc := C.lr_route_set_next_hop(r.ptr, (*C.uint8_t)(unsafe.Pointer(&addr[0])),
+		cIntBool(len(addr) == 16))
+	if rc != 0 {
+		return fmt.Errorf("lr_route_set_next_hop: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// SetLocalPref sets the BGP LOCAL_PREF (RFC 4271 §5.1.5).
+func (r *Route) SetLocalPref(value uint32) error {
+	if rc := C.lr_route_set_local_pref(r.ptr, C.uint32_t(value)); rc != 0 {
+		return fmt.Errorf("lr_route_set_local_pref: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// LocalPref reads LOCAL_PREF; false when absent.
+func (r *Route) LocalPref() (uint32, bool, error) {
+	var v C.uint32_t
+	rc := C.lr_route_local_pref(r.ptr, &v)
+	if rc == 1 {
+		return 0, false, nil
+	}
+	if rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_local_pref: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(v), true, nil
+}
+
+// SetMed sets the BGP MULTI_EXIT_DISC (RFC 4271 §4.2.4).
+func (r *Route) SetMed(value uint32) error {
+	if rc := C.lr_route_set_med(r.ptr, C.uint32_t(value)); rc != 0 {
+		return fmt.Errorf("lr_route_set_med: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// Med reads MULTI_EXIT_DISC; false when absent.
+func (r *Route) Med() (uint32, bool, error) {
+	var v C.uint32_t
+	rc := C.lr_route_med(r.ptr, &v)
+	if rc == 1 {
+		return 0, false, nil
+	}
+	if rc != 0 {
+		return 0, false, fmt.Errorf("lr_route_med: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint32(v), true, nil
+}
+
+// SetOrigin sets the BGP ORIGIN (0 IGP / 1 EGP / 2 INCOMPLETE).
+func (r *Route) SetOrigin(origin byte) error {
+	if rc := C.lr_route_set_origin(r.ptr, C.uint8_t(origin)); rc != 0 {
+		return fmt.Errorf("lr_route_set_origin: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// SetAsPath replaces the AS_PATH with a flat sequence (empty drops it).
+func (r *Route) SetAsPath(asns []uint32) error {
+	var p *C.uint32_t
+	if len(asns) > 0 {
+		p = (*C.uint32_t)(unsafe.Pointer(&asns[0]))
+	}
+	if rc := C.lr_route_set_as_path(r.ptr, p, C.size_t(len(asns))); rc != 0 {
+		return fmt.Errorf("lr_route_set_as_path: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// AsPath reads the AS_PATH's flat AS_SEQUENCE.
+func (r *Route) AsPath() ([]uint32, error) {
+	n := C.lr_route_as_path(r.ptr, nil, 0)
+	if n < 0 {
+		return nil, fmt.Errorf("lr_route_as_path: %s (rc=%d)", LastError(), int(n))
+	}
+	out := make([]uint32, n)
+	if n > 0 {
+		if rc := C.lr_route_as_path(r.ptr, (*C.uint32_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
+			return nil, fmt.Errorf("lr_route_as_path: %s (rc=%d)", LastError(), int(rc))
+		}
+	}
+	return out, nil
+}
+
+// AddCommunity appends one standard community (2-byte ASN).
+func (r *Route) AddCommunity(asn uint32, value uint16) error {
+	if rc := C.lr_route_add_community(r.ptr, C.uint32_t(asn), C.uint16_t(value)); rc != 0 {
+		return fmt.Errorf("lr_route_add_community: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// SetCommunities replaces the standard communities from packed
+// asn<<16|value items (empty drops the attribute).
+func (r *Route) SetCommunities(packed []uint64) error {
+	var p *C.uint64_t
+	if len(packed) > 0 {
+		p = (*C.uint64_t)(unsafe.Pointer(&packed[0]))
+	}
+	if rc := C.lr_route_set_communities(r.ptr, p, C.size_t(len(packed))); rc != 0 {
+		return fmt.Errorf("lr_route_set_communities: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// Communities reads the standard communities as packed asn<<16|value.
+func (r *Route) Communities() ([]uint64, error) {
+	n := C.lr_route_communities(r.ptr, nil, 0)
+	if n < 0 {
+		return nil, fmt.Errorf("lr_route_communities: %s (rc=%d)", LastError(), int(n))
+	}
+	out := make([]uint64, n)
+	if n > 0 {
+		if rc := C.lr_route_communities(r.ptr, (*C.uint64_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
+			return nil, fmt.Errorf("lr_route_communities: %s (rc=%d)", LastError(), int(rc))
+		}
+	}
+	return out, nil
+}
+
+// AddLargeCommunity appends one RFC 8097 large community.
+func (r *Route) AddLargeCommunity(globalAdmin, localData1, localData2 uint32) error {
+	if rc := C.lr_route_add_large_community(r.ptr, C.uint32_t(globalAdmin),
+		C.uint32_t(localData1), C.uint32_t(localData2)); rc != 0 {
+		return fmt.Errorf("lr_route_add_large_community: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// LargeCommunities reads the large communities as flat triples.
+func (r *Route) LargeCommunities() ([]uint32, error) {
+	n := C.lr_route_large_communities(r.ptr, nil, 0)
+	if n < 0 {
+		return nil, fmt.Errorf("lr_route_large_communities: %s (rc=%d)", LastError(), int(n))
+	}
+	out := make([]uint32, n)
+	if n > 0 {
+		if rc := C.lr_route_large_communities(r.ptr, (*C.uint32_t)(unsafe.Pointer(&out[0])), C.size_t(n)); rc < 0 {
+			return nil, fmt.Errorf("lr_route_large_communities: %s (rc=%d)", LastError(), int(rc))
+		}
+	}
+	return out, nil
+}
+
+// AddExtCommunity appends one RFC 4360 extended community.
+func (r *Route) AddExtCommunity(kind, subtype byte, global uint32, local uint16) error {
+	if rc := C.lr_route_add_ext_community(r.ptr, C.uint8_t(kind), C.uint8_t(subtype),
+		C.uint32_t(global), C.uint16_t(local)); rc != 0 {
+		return fmt.Errorf("lr_route_add_ext_community: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// ExtCommunities reads the extended communities.
+func (r *Route) ExtCommunities() ([]ExtCommunity, error) {
+	n := C.lr_route_ext_communities(r.ptr, nil, 0)
+	if n < 0 {
+		return nil, fmt.Errorf("lr_route_ext_communities: %s (rc=%d)", LastError(), int(n))
+	}
+	raw := make([]C.struct_lr_ext_comm_t, n)
+	if n > 0 {
+		if rc := C.lr_route_ext_communities(r.ptr, &raw[0], C.size_t(n)); rc < 0 {
+			return nil, fmt.Errorf("lr_route_ext_communities: %s (rc=%d)", LastError(), int(rc))
+		}
+	}
+	out := make([]ExtCommunity, 0, len(raw))
+	for _, e := range raw {
+		out = append(out, ExtCommunity{Kind: byte(e.kind), Subtype: byte(e.subtype),
+			Global: uint32(e.global), Local: uint16(e.local)})
+	}
+	return out, nil
+}
+
+// ExtCommunity mirrors lr_ext_comm_t (RFC 4360).
+type ExtCommunity struct {
+	Kind    byte
+	Subtype byte
+	Global  uint32
+	Local   uint16
+}
+
+// SetMetric sets the route's cross-protocol metric.
+func (r *Route) SetMetric(value uint32) error {
+	if rc := C.lr_route_set_metric(r.ptr, C.uint32_t(value)); rc != 0 {
+		return fmt.Errorf("lr_route_set_metric: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// SetTag sets (or, with ok=false, clears) the route tag.
+func (r *Route) SetTag(tag uint32, ok bool) error {
+	if rc := C.lr_route_set_tag(r.ptr, cIntBool(ok), C.uint32_t(tag)); rc != 0 {
+		return fmt.Errorf("lr_route_set_tag: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// PrefixList is an owned prefix-list handle (FRR ge/le semantics,
+// first-match evaluation, implicit deny).
+type PrefixList struct {
+	ptr C.lr_prefix_list_t
+}
+
+// NewPrefixList creates an empty prefix-list.
+func NewPrefixList() (*PrefixList, error) {
+	ptr := C.lr_prefix_list_new()
+	if ptr == nil {
+		return nil, fmt.Errorf("lr_prefix_list_new returned null")
+	}
+	l := &PrefixList{ptr: ptr}
+	runtime.SetFinalizer(l, (*PrefixList).destroy)
+	return l, nil
+}
+
+func (l *PrefixList) destroy() {
+	if l.ptr != nil {
+		C.lr_prefix_list_free(l.ptr)
+		l.ptr = nil
+	}
+}
+
+// Free releases the handle (optional; a finalizer also runs).
+func (l *PrefixList) Free() {
+	runtime.SetFinalizer(l, nil)
+	l.destroy()
+}
+
+// Add appends one entry (le = 255 means no upper bound).
+func (l *PrefixList) Add(spec PrefixSpec, ge, le uint8, permit bool) error {
+	if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
+		return fmt.Errorf("PrefixList.Add: bad address length (want 4 or 16)")
+	}
+	var p C.struct_lr_prefix_t
+	for i := 0; i < len(spec.Addr); i++ {
+		p.addr[i] = C.uint8_t(spec.Addr[i])
+	}
+	p.is_ipv6 = toCBool(len(spec.Addr) == 16)
+	p.prefix_len = C.uint8_t(spec.PrefixLen)
+	if rc := C.lr_prefix_list_add(l.ptr, &p, C.uint8_t(ge), C.uint8_t(le), cIntBool(permit)); rc != 0 {
+		return fmt.Errorf("lr_prefix_list_add: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// Match evaluates the list: true = permit (false covers deny +
+// implicit deny).
+func (l *PrefixList) Match(spec PrefixSpec) (bool, error) {
+	if len(spec.Addr) != 4 && len(spec.Addr) != 16 {
+		return false, fmt.Errorf("PrefixList.Match: bad address length (want 4 or 16)")
+	}
+	var p C.struct_lr_prefix_t
+	for i := 0; i < len(spec.Addr); i++ {
+		p.addr[i] = C.uint8_t(spec.Addr[i])
+	}
+	p.is_ipv6 = toCBool(len(spec.Addr) == 16)
+	p.prefix_len = C.uint8_t(spec.PrefixLen)
+	rc := C.lr_prefix_list_match(l.ptr, &p)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_prefix_list_match: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 1, nil
+}
+
+// RouteMap is an owned route-map handle: ordered entries, first match
+// wins (FRR route-map semantics).
+type RouteMap struct {
+	ptr C.lr_route_map_t
+}
+
+// NewRouteMap creates an empty route-map.
+func NewRouteMap() (*RouteMap, error) {
+	ptr := C.lr_route_map_new()
+	if ptr == nil {
+		return nil, fmt.Errorf("lr_route_map_new returned null")
+	}
+	m := &RouteMap{ptr: ptr}
+	runtime.SetFinalizer(m, (*RouteMap).destroy)
+	return m, nil
+}
+
+func (m *RouteMap) destroy() {
+	if m.ptr != nil {
+		C.lr_route_map_free(m.ptr)
+		m.ptr = nil
+	}
+}
+
+// Free releases the handle (optional; a finalizer also runs).
+func (m *RouteMap) Free() {
+	runtime.SetFinalizer(m, nil)
+	m.destroy()
+}
+
+// Match is one route-map match condition.
+type Match struct {
+	Kind   uint8  // Match* constant
+	ListID uint32 // resolved list id for the *_IN kinds
+	Proto  Protocol
+}
+
+// Set is one route-map set action.
+type Set struct {
+	Kind   uint8 // Set* constant
+	IsIPv6 bool
+	Addr   []byte // next-hop address (4 or 16 bytes) for SetNextHopKind
+	Value  uint32 // local-pref / med / AS / metric / tag / community ASN
+	Value2 uint16 // community value for SetAddCommunity
+}
+
+// AddEntry appends one entry. verdict is one of the Verdict* constants.
+func (m *RouteMap) AddEntry(matches []Match, sets []Set, verdict int32) error {
+	cm := make([]C.struct_lr_match_t, len(matches))
+	for i, x := range matches {
+		cm[i].kind = C.uint8_t(x.Kind)
+		cm[i].list_id = C.uint32_t(x.ListID)
+		cm[i].protocol = C.uint8_t(x.Proto)
+	}
+	cs := make([]C.struct_lr_set_t, len(sets))
+	for i, x := range sets {
+		cs[i].kind = C.uint8_t(x.Kind)
+		cs[i].is_ipv6 = toCBool(x.IsIPv6)
+		for j := 0; j < len(x.Addr) && j < 16; j++ {
+			cs[i].addr[j] = C.uint8_t(x.Addr[j])
+		}
+		cs[i].value = C.uint32_t(x.Value)
+		cs[i].value2 = C.uint16_t(x.Value2)
+	}
+	var mp *C.struct_lr_match_t
+	var sp *C.struct_lr_set_t
+	if len(cm) > 0 {
+		mp = &cm[0]
+	}
+	if len(cs) > 0 {
+		sp = &cs[0]
+	}
+	if rc := C.lr_route_map_add_entry(m.ptr, mp, C.size_t(len(cm)), sp,
+		C.size_t(len(cs)), C.int32_t(verdict)); rc != 0 {
+		return fmt.Errorf("lr_route_map_add_entry: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// Evaluate runs the map against the route (sets mutate it). resolver
+// may be nil: list-backed matches then fail (fail-closed). Returns one
+// of the Eval* constants.
+func (m *RouteMap) Evaluate(route *Route, resolver *Resolver) (int32, error) {
+	var rp C.lr_resolver_t
+	if resolver != nil {
+		rp = resolver.ptr
+	}
+	var verdict C.int32_t
+	if rc := C.lr_route_map_evaluate(m.ptr, route.ptr, rp, &verdict); rc != 0 {
+		return 0, fmt.Errorf("lr_route_map_evaluate: %s (rc=%d)", LastError(), int(rc))
+	}
+	return int32(verdict), nil
+}
+
+// Resolver is an owned policy resolver (a lr_policy::PolicySet): the
+// named registry of prefix-lists / AS-path filters / community lists
+// that route-map match conditions resolve against.
+type Resolver struct {
+	ptr C.lr_resolver_t
+}
+
+// NewResolver creates an empty resolver.
+func NewResolver() (*Resolver, error) {
+	ptr := C.lr_resolver_new()
+	if ptr == nil {
+		return nil, fmt.Errorf("lr_resolver_new returned null")
+	}
+	r := &Resolver{ptr: ptr}
+	runtime.SetFinalizer(r, (*Resolver).destroy)
+	return r, nil
+}
+
+func (r *Resolver) destroy() {
+	if r.ptr != nil {
+		C.lr_resolver_free(r.ptr)
+		r.ptr = nil
+	}
+}
+
+// Free releases the handle (optional; a finalizer also runs).
+func (r *Resolver) Free() {
+	runtime.SetFinalizer(r, nil)
+	r.destroy()
+}
+
+// AddPrefixList registers the list under name (copied in) and returns
+// its numeric list id.
+func (r *Resolver) AddPrefixList(name string, list *PrefixList) (int32, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	id := C.lr_resolver_add_prefix_list(r.ptr, (*C.int8_t)(unsafe.Pointer(cname)), list.ptr)
+	if id < 0 {
+		return 0, fmt.Errorf("lr_resolver_add_prefix_list: %s (rc=%d)", LastError(), int(id))
+	}
+	return int32(id), nil
+}
+
+// AsPathFilter is one FRR-dialect AS-path access-list line.
+type AsPathFilter struct {
+	Pattern string
+	Permit  bool
+}
+
+// AddAsPathList registers an AS-path access-list under name and
+// returns its numeric list id.
+func (r *Resolver) AddAsPathList(name string, filters []AsPathFilter) (int32, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	cf := make([]C.struct_lr_as_path_filter_t, len(filters))
+	ptrs := make([](*C.char), 0, len(filters))
+	for i, f := range filters {
+		p := C.CString(f.Pattern)
+		ptrs = append(ptrs, p)
+		cf[i].pattern = (*C.int8_t)(unsafe.Pointer(p))
+		if f.Permit {
+			cf[i].permit = 1
+		}
+	}
+	defer func() {
+		for _, p := range ptrs {
+			C.free(unsafe.Pointer(p))
+		}
+	}()
+	var fp *C.struct_lr_as_path_filter_t
+	if len(cf) > 0 {
+		fp = &cf[0]
+	}
+	id := C.lr_resolver_add_as_path_list(r.ptr, (*C.int8_t)(unsafe.Pointer(cname)), fp, C.size_t(len(cf)))
+	if id < 0 {
+		return 0, fmt.Errorf("lr_resolver_add_as_path_list: %s (rc=%d)", LastError(), int(id))
+	}
+	return int32(id), nil
+}
+
+// CommunityEntry is one standard community-list line.
+type CommunityEntry struct {
+	Communities []uint64 // packed asn<<16|value
+	Permit      bool
+}
+
+// AddCommunityList registers a community list under name and returns
+// its numeric list id.
+func (r *Resolver) AddCommunityList(name string, entries []CommunityEntry) (int32, error) {
+	cname := C.CString(name)
+	defer C.free(unsafe.Pointer(cname))
+	ce := make([]C.struct_lr_community_entry_t, len(entries))
+	for i, e := range entries {
+		if len(e.Communities) > 0 {
+			ce[i].communities = (*C.uint64_t)(unsafe.Pointer(&e.Communities[0]))
+		}
+		ce[i].count = C.size_t(len(e.Communities))
+		if e.Permit {
+			ce[i].permit = 1
+		}
+	}
+	var ep *C.struct_lr_community_entry_t
+	if len(ce) > 0 {
+		ep = &ce[0]
+	}
+	id := C.lr_resolver_add_community_list(r.ptr, (*C.int8_t)(unsafe.Pointer(cname)), ep, C.size_t(len(ce)))
+	if id < 0 {
+		return 0, fmt.Errorf("lr_resolver_add_community_list: %s (rc=%d)", LastError(), int(id))
+	}
+	return int32(id), nil
+}

@@ -243,6 +243,108 @@ typedef struct lr_damping_config_t {
 typedef struct OpaqueDamping OpaqueDamping;
 typedef struct OpaqueDamping *lr_damping_t;
 
+typedef struct lr_ext_comm_t {
+    uint8_t kind;
+    uint8_t subtype;
+    uint32_t global;
+    uint16_t local;
+} lr_ext_comm_t;
+
+typedef struct lr_match_t {
+    uint8_t kind;
+    uint32_t list_id;
+    uint8_t protocol;
+} lr_match_t;
+
+typedef struct lr_set_t {
+    uint8_t kind;
+    uint8_t is_ipv6;
+    uint8_t addr[16];
+    uint32_t value;
+    uint16_t value2;
+} lr_set_t;
+
+typedef struct lr_as_path_filter_t {
+    const char *pattern;
+    uint8_t permit;
+} lr_as_path_filter_t;
+
+typedef struct lr_community_entry_t {
+    const uint64_t *communities;
+    uintptr_t count;
+    uint8_t permit;
+} lr_community_entry_t;
+
+typedef struct OpaqueRoute OpaqueRoute;
+typedef struct OpaqueRoute *lr_route_t;
+typedef struct OpaquePrefixList OpaquePrefixList;
+typedef struct OpaquePrefixList *lr_prefix_list_t;
+typedef struct OpaqueRouteMap OpaqueRouteMap;
+typedef struct OpaqueRouteMap *lr_route_map_t;
+typedef struct OpaqueResolver OpaqueResolver;
+typedef struct OpaqueResolver *lr_resolver_t;
+
+lr_route_t lr_route_new_v4(const uint8_t *octets,
+                           uint8_t prefix_len,
+                           int32_t protocol);
+lr_route_t lr_route_new_v6(const uint8_t *octets,
+                           uint8_t prefix_len,
+                           int32_t protocol);
+void lr_route_free(lr_route_t route);
+int32_t lr_route_set_next_hop(lr_route_t route, const uint8_t *addr, int32_t is_ipv6);
+int32_t lr_route_next_hop(lr_route_t route, uint8_t *out, int32_t *out_is_ipv6);
+int32_t lr_route_set_local_pref(lr_route_t route, uint32_t value);
+int32_t lr_route_local_pref(lr_route_t route, uint32_t *out);
+int32_t lr_route_set_med(lr_route_t route, uint32_t value);
+int32_t lr_route_med(lr_route_t route, uint32_t *out);
+int32_t lr_route_set_origin(lr_route_t route, uint8_t origin);
+int32_t lr_route_origin(lr_route_t route, uint8_t *out);
+int32_t lr_route_set_as_path(lr_route_t route, const uint32_t *asns, uintptr_t count);
+int64_t lr_route_as_path(lr_route_t route, uint32_t *out, uintptr_t cap);
+int32_t lr_route_add_community(lr_route_t route, uint32_t asn, uint16_t value);
+int32_t lr_route_set_communities(lr_route_t route, const uint64_t *items, uintptr_t count);
+int64_t lr_route_communities(lr_route_t route, uint64_t *out, uintptr_t cap);
+int32_t lr_route_add_large_community(lr_route_t route, uint32_t global_admin,
+                                     uint32_t local_data1, uint32_t local_data2);
+int32_t lr_route_set_large_communities(lr_route_t route, const uint32_t *triples,
+                                       uintptr_t count);
+int64_t lr_route_large_communities(lr_route_t route, uint32_t *out, uintptr_t cap);
+int32_t lr_route_add_ext_community(lr_route_t route, uint8_t kind, uint8_t subtype,
+                                   uint32_t global, uint16_t local);
+int32_t lr_route_set_ext_communities(lr_route_t route, const struct lr_ext_comm_t *items,
+                                     uintptr_t count);
+int64_t lr_route_ext_communities(lr_route_t route, struct lr_ext_comm_t *out, uintptr_t cap);
+int32_t lr_route_set_metric(lr_route_t route, uint32_t value);
+int32_t lr_route_metric(lr_route_t route, uint32_t *out);
+int32_t lr_route_set_tag(lr_route_t route, int32_t has_tag, uint32_t tag);
+int32_t lr_route_tag(lr_route_t route, uint32_t *out);
+
+lr_prefix_list_t lr_prefix_list_new(void);
+void lr_prefix_list_free(lr_prefix_list_t list);
+int32_t lr_prefix_list_add(lr_prefix_list_t list, const struct lr_prefix_t *prefix,
+                           uint8_t ge, uint8_t le, int32_t permit);
+int32_t lr_prefix_list_match(lr_prefix_list_t list, const struct lr_prefix_t *prefix);
+
+lr_route_map_t lr_route_map_new(void);
+void lr_route_map_free(lr_route_map_t map);
+int32_t lr_route_map_add_entry(lr_route_map_t map,
+                               const struct lr_match_t *matches, uintptr_t n_matches,
+                               const struct lr_set_t *sets, uintptr_t n_sets,
+                               int32_t verdict);
+int32_t lr_route_map_evaluate(lr_route_map_t map, lr_route_t route,
+                              lr_resolver_t resolver, int32_t *out);
+
+lr_resolver_t lr_resolver_new(void);
+void lr_resolver_free(lr_resolver_t resolver);
+int32_t lr_resolver_add_prefix_list(lr_resolver_t resolver, const char *name,
+                                    lr_prefix_list_t list);
+int32_t lr_resolver_add_as_path_list(lr_resolver_t resolver, const char *name,
+                                     const struct lr_as_path_filter_t *filters,
+                                     uintptr_t count);
+int32_t lr_resolver_add_community_list(lr_resolver_t resolver, const char *name,
+                                       const struct lr_community_entry_t *entries,
+                                       uintptr_t count);
+
 int32_t lr_router_add_redistribution_pipe(lr_router_t r,
                                           int32_t source,
                                           int32_t target,

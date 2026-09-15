@@ -46,7 +46,7 @@ pub enum LrProtocol {
 }
 
 impl LrProtocol {
-    fn from_i32(v: i32) -> Option<Self> {
+    pub(crate) fn from_i32(v: i32) -> Option<Self> {
         match v {
             0 => Some(Self::Bgp),
             1 => Some(Self::Ospf),

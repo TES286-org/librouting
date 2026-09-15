@@ -563,6 +563,132 @@ int main(void) {
               "session dump lists ospf + babel");
         lr_bytes_free(&dump);
     }
+    {
+        /* Policy objects (ROADMAP-v3 D5.3): route handle round trip,
+         * prefix-list first-match semantics, the FRR route-map flow
+         * (resolver + match + set + verdict) and the rejection
+         * matrix. */
+        const unsigned char p4[4] = {203, 0, 113, 0};
+        lr_route_t rt = lr_route_new_v4(p4, 24, LR_PROTO_BGP);
+        check(rt != NULL, "route_new_v4");
+
+        /* Attribute round trip. */
+        unsigned char nh[16] = {0};
+        nh[0] = 192; nh[1] = 0; nh[2] = 2; nh[3] = 1;
+        check(lr_route_set_next_hop(rt, nh, 0) == 0, "route_set_next_hop v4");
+        unsigned char got[16] = {0};
+        int32_t is_v6 = -1;
+        check(lr_route_next_hop(rt, got, &is_v6) == 0 && is_v6 == 0,
+              "route_next_hop reads back");
+        check(lr_route_set_local_pref(rt, 250) == 0, "route_set_local_pref");
+        uint32_t lp = 0;
+        check(lr_route_local_pref(rt, &lp) == 0 && lp == 250, "local_pref round trip");
+        check(lr_route_set_origin(rt, LR_ORIGIN_IGP) == 0, "route_set_origin");
+        check(lr_route_set_origin(rt, 7) == -3, "route_set_origin rejects 7");
+
+        /* AS_PATH: probe-then-read. */
+        const uint32_t path[3] = {64513, 65010, 64512};
+        check(lr_route_set_as_path(rt, path, 3) == 0, "route_set_as_path");
+        check(lr_route_as_path(rt, NULL, 0) == 3, "as_path length probe");
+        uint32_t gp[3] = {0};
+        check(lr_route_as_path(rt, gp, 2) == -3, "as_path rejects a short buffer");
+        check(lr_route_as_path(rt, gp, 3) == 3 && gp[1] == 65010, "as_path round trip");
+
+        /* Standard communities, packed asn<<16|val. */
+        const uint64_t comms[2] = {(64512ull << 16) | 100, (65000ull << 16) | 7};
+        check(lr_route_set_communities(rt, comms, 2) == 0, "route_set_communities");
+        check(lr_route_add_community(rt, 4294967295u, 1) == -3,
+              "add_community rejects a 4-byte ASN");
+        check(lr_route_communities(rt, NULL, 0) == 2, "communities length probe");
+
+        /* Prefix-list: 10.0.0.0/8 ge 16 le 24 permit. */
+        lr_prefix_list_t pl = lr_prefix_list_new();
+        check(pl != NULL, "prefix_list_new");
+        lr_prefix_t p8;
+        memset(&p8, 0, sizeof(p8));
+        p8.addr[0] = 10;
+        p8.prefix_len = 8;
+        check(lr_prefix_list_add(pl, &p8, 16, 24, 1) == 0, "prefix_list_add");
+        lr_prefix_t inside;
+        memset(&inside, 0, sizeof(inside));
+        inside.addr[0] = 10; inside.addr[1] = 1; inside.prefix_len = 24;
+        lr_prefix_t shorter = inside; shorter.prefix_len = 8;
+        lr_prefix_t longer = inside; longer.prefix_len = 25;
+        check(lr_prefix_list_match(pl, &inside) == 1, "prefix_list permits in-range");
+        check(lr_prefix_list_match(pl, &shorter) == 0, "prefix_list ge gate");
+        check(lr_prefix_list_match(pl, &longer) == 0, "prefix_list le gate");
+        lr_prefix_list_free(pl);
+
+        /* Resolver: "all-v4" prefix-list (id 0). */
+        lr_resolver_t res = lr_resolver_new();
+        check(res != NULL, "resolver_new");
+        lr_prefix_list_t all4 = lr_prefix_list_new();
+        lr_prefix_t any;
+        memset(&any, 0, sizeof(any));
+        any.addr[0] = 10;
+        any.prefix_len = 0;
+        check(lr_prefix_list_add(all4, &any, 0, 32, 1) == 0, "prefix_list_add any");
+        int32_t list_id = lr_resolver_add_prefix_list(
+            res, "all-v4", all4);
+        check(list_id == 0, "resolver_add_prefix_list returns id 0");
+        lr_prefix_list_free(all4); /* copied into the resolver */
+
+        /* Route-map: match prefix-list 0 -> set local-pref 300, permit. */
+        lr_route_map_t map = lr_route_map_new();
+        check(map != NULL, "route_map_new");
+        const lr_match_t m = {LR_MATCH_PREFIX_IN, 0, 0};
+        const lr_set_t s = {LR_SET_LOCAL_PREF, 0, {0}, 300, 0};
+        check(lr_route_map_add_entry(map, &m, 1, &s, 1, LR_VERDICT_PERMIT) == 0,
+              "route_map_add_entry");
+        int32_t verdict = 9;
+        check(lr_route_map_evaluate(map, rt, res, &verdict) == 0,
+              "route_map_evaluate");
+        check(verdict == LR_EVAL_PERMIT, "route_map permits");
+        check(lr_route_local_pref(rt, &lp) == 0 && lp == 300,
+              "route_map set applied to the route");
+
+        /* Fallthrough on an empty map. */
+        lr_route_map_t empty = lr_route_map_new();
+        check(lr_route_map_evaluate(empty, rt, res, &verdict) == 0 &&
+                  verdict == LR_EVAL_FALLTHROUGH,
+              "empty route-map falls through");
+        lr_route_map_free(empty);
+
+        /* A NULL resolver fails the list-backed match (fail closed):
+         * the permit-only entry therefore falls through instead of
+         * admitting the route. */
+        lr_route_map_t nomatch = lr_route_map_new();
+        check(lr_route_map_add_entry(nomatch, &m, 1, NULL, 0, LR_VERDICT_PERMIT) == 0,
+              "route_map_add_entry no-set");
+        check(lr_route_map_evaluate(nomatch, rt, NULL, &verdict) == 0 &&
+                  verdict == LR_EVAL_FALLTHROUGH,
+              "NULL resolver: list match fails, entry falls through");
+        lr_route_map_free(nomatch);
+
+        /* An explicit deny entry with a matching list really denies. */
+        lr_route_map_t deny = lr_route_map_new();
+        check(lr_route_map_add_entry(deny, &m, 1, NULL, 0, LR_VERDICT_DENY) == 0,
+              "route_map_add_entry deny");
+        check(lr_route_map_evaluate(deny, rt, res, &verdict) == 0 &&
+                  verdict == LR_EVAL_DENY,
+              "explicit deny entry denies via resolver");
+        lr_route_map_free(deny);
+
+        /* Rejection matrix. */
+        const lr_match_t badm = {99, 0, 0};
+        check(lr_route_map_add_entry(map, &badm, 1, NULL, 0, LR_VERDICT_PERMIT) == -3,
+              "unknown match kind rejected");
+        const lr_set_t bads = {99, 0, {0}, 0, 0};
+        check(lr_route_map_add_entry(map, NULL, 0, &bads, 1, LR_VERDICT_PERMIT) == -3,
+              "unknown set kind rejected");
+        check(lr_route_map_add_entry(map, NULL, 0, NULL, 0, 5) == -3,
+              "unknown verdict rejected");
+
+        lr_route_map_free(map);
+        lr_resolver_free(res);
+        lr_route_free(rt);
+        lr_route_free(NULL);
+    }
 
     lr_router_destroy(r);
     if (failures == 0) {
