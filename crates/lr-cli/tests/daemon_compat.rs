@@ -295,6 +295,18 @@ fn non_bgp_stanzas_warn_but_do_not_block() {
         ],
         "mixed-peer",
     );
+    // Wait for the peer's listener before expecting Established: the
+    // mixed daemon is the outbound connector and starts trying to
+    // connect as soon as config parse finishes. Without this gate the
+    // first connect attempt hits a port that is not yet open, the
+    // connector's exponential backoff (1 s → 2 s → 4 s → 8 s → 16 s)
+    // eats the 30 s `wait_log_all` budget on a loaded macOS runner
+    // before the retry can land. The other two compat tests
+    // (`bird_dialect_config_runs_end_to_end`,
+    // `frr_dialect_config_runs_end_to_end`) already wait for
+    // `"listening on"` on the peer's log before waiting for
+    // Established — this test was the outlier.
+    wait_log_all(&peer.log, &["listening on"]);
     wait_log_all(&mixed.log, &["session #1 → Established"]);
     let _ = peer;
 }
