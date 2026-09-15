@@ -249,7 +249,8 @@ const TYPE_WORDS: &[&str] = &[
 /// any occurrence marks the filter unfaithful. `proto` is listed for
 /// a different reason: BIRD's `proto` is the protocol *instance*
 /// name while lr's `proto` is the protocol *type*, so a comparison
-/// would silently change meaning.
+/// would silently change meaning. `case` is NOT listed here — it has
+/// a structural translation handled by `rewrite_cases` below.
 const UNMAPPABLE_WORDS: &[&str] = &[
     "from",
     "gw",
@@ -263,7 +264,6 @@ const UNMAPPABLE_WORDS: &[&str] = &[
     "print",
     "printn",
     "putn",
-    "case",
     "eval",
     "bt_assert",
     "bt_test_suite",
@@ -376,7 +376,7 @@ fn tokenize(text: &str) -> Vec<Token> {
                 let start = i;
                 let two = &text[i..(i + 2).min(text.len())];
                 let len = match two {
-                    "&&" | "||" | "!=" | "!~" | "==" | "<=" | ">=" | "->" | "++" | ":=" => 2,
+                    "&&" | "||" | "!=" | "!~" | "==" | "<=" | ">=" | "->" | "++" | ":=" | ".." => 2,
                     _ => 1,
                 };
                 i += len;
@@ -516,12 +516,317 @@ fn translate_function(text: &str, ctx: &Ctx) -> Result<String, Vec<String>> {
     Ok(format!("{} {body_lr}{tail}", header_lr.trim_end()))
 }
 
+// ---------------------------------------------------------------------------
+// Case-statement structural rewrite
+// ---------------------------------------------------------------------------
+
+/// The current replacement text for token `idx` (or its original
+/// source slice when no replacement is set). Used by the case-rewrite
+/// pass to prepend/append bracket characters to a token's replacement.
+fn token_text(body: &str, toks: &[Token], rewritten: &[Option<String>], idx: usize) -> String {
+    match &rewritten[idx] {
+        Some(s) => s.clone(),
+        None => body[toks[idx].start..toks[idx].end].to_string(),
+    }
+}
+
+/// Ensure `replacement` begins with a space when the source gap
+/// before token `idx` is empty. BIRD writes `pat:body` (no space
+/// before `:`); lr's `=>` needs a separator so it does not glue to
+/// the preceding pattern. When the gap already contains whitespace
+/// the `emit` pass preserves it, so we return `replacement` as-is.
+fn with_leading_space(body: &str, toks: &[Token], idx: usize, replacement: &str) -> String {
+    let prev_char = toks[idx]
+        .start
+        .checked_sub(1)
+        .and_then(|p| body.as_bytes().get(p).copied());
+    match prev_char {
+        Some(c) if c.is_ascii_whitespace() => replacement.to_string(),
+        _ => format!(" {replacement}"),
+    }
+}
+
+/// Pre-pass: rewrite every BIRD `case … { … }` block in the token
+/// stream into lr DSL syntax. BIRD (verified against `filter/config.Y`
+/// §`switch_body`) spells an arm as `switch_items ':' cmds_scoped`
+/// and the default arm as `ELSECOL cmds_scoped` (where `ELSECOL` is
+/// the lexer's `else:` token); lr DSL spells them `pat => stmt` and
+/// `default => stmt` (commit `f1fc747`'s D14.1 audit trail). The
+/// shape diverges in three places the regular token-rewriting pass
+/// cannot handle:
+///
+/// 1. The arm separator `:` (at the top of the case body, depth 1)
+///    becomes `=>`. A `:` inside `()` / `[]` / `{}` is a pair or
+///    set literal and is left alone — depth tracking distinguishes
+///    the two.
+/// 2. `else :` (two tokens in lr's tokenizer; BIRD's lexer collapses
+///    them to `ELSECOL`) becomes `default =>`.
+/// 3. lr DSL case arm bodies are a single statement (which may be a
+///    `Block`); BIRD arm bodies are a `cmds_scoped` list. A bare
+///    `pat: cmd1; cmd2;` in BIRD (multi-statement, no braces) would
+///    parse wrongly in lr (the second `cmd2;` would be read as the
+///    start of a new arm). The rewrite wraps every non-block arm
+///    body in `{ … }` so the body always parses as one `Block`.
+///
+/// Range arms (`a .. b:`) have no lr equivalent — lr case arms match
+/// exact values only — and are reported as unfaithful. Nested cases
+/// are handled recursively.
+fn rewrite_cases(
+    body: &str,
+    toks: &[Token],
+    rewritten: &mut [Option<String>],
+    notes: &mut Vec<String>,
+) {
+    let mut i = 0;
+    while i < toks.len() {
+        if let Tok::Word(w) = &toks[i].tok {
+            if w == "case" {
+                i = rewrite_one_case(body, toks, rewritten, notes, i);
+                continue;
+            }
+        }
+        i += 1;
+    }
+}
+
+/// Rewrite one `case` block starting at `start` (pointing at the
+/// `case` keyword). Returns the index after the closing `}` of the
+/// case body.
+fn rewrite_one_case(
+    body: &str,
+    toks: &[Token],
+    rewritten: &mut [Option<String>],
+    notes: &mut Vec<String>,
+    start: usize,
+) -> usize {
+    // Find the opening `{` of the case body, skipping the scrutinee
+    // expression. Track `()` / `[]` so a `{` inside a parenthesised
+    // scrutinee is not mistaken for the case body open.
+    let mut j = start + 1;
+    let mut paren_depth: i32 = 0;
+    while j < toks.len() {
+        match &toks[j].tok {
+            Tok::Sym(s) if s == "{" && paren_depth == 0 => break,
+            Tok::Sym(s) if s == "(" || s == "[" => paren_depth += 1,
+            Tok::Sym(s) if s == ")" || s == "]" => paren_depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    if j >= toks.len() {
+        return start + 1; // Malformed — let the regular pass report.
+    }
+    // `j` is the `{` opening the case body. Step inside.
+    let mut depth: i32 = 1;
+    j += 1;
+
+    #[derive(PartialEq)]
+    enum State {
+        Pattern,
+        Body,
+    }
+    let mut state = State::Pattern;
+    // True when the current arm body is a `{ cmds }` block (BIRD
+    // already braces it) — we do not inject an extra `{`.
+    let mut arm_body_is_block = false;
+    // True when we injected a `{` to wrap a non-block arm body.
+    let mut arm_body_open = false;
+
+    while j < toks.len() {
+        let tok = &toks[j].tok;
+        match (tok, &state) {
+            // --- Pattern state: scanning arm patterns ---------------
+            (Tok::Word(w), State::Pattern) if w == "else" && depth == 1 => {
+                // `else :` → `default =>`. The `:` is the next token.
+                if let Some(arm) = start_arm_body(body, toks, rewritten, j, false) {
+                    arm_body_open = arm.open;
+                    arm_body_is_block = arm.is_block;
+                    state = State::Body;
+                    j = arm.next;
+                    continue;
+                }
+                // Malformed `else` without `:` — leave as-is.
+            }
+            (Tok::Word(w), State::Pattern) if w == "case" => {
+                // Nested case inside the scrutinee or pattern (rare).
+                j = rewrite_one_case(body, toks, rewritten, notes, j);
+                continue;
+            }
+            (Tok::Sym(s), State::Pattern) if s == ":" && depth == 1 => {
+                // Arm separator `:` → `=>`. Wrap the arm body if it
+                // is not already a `{ cmds }` block. Use
+                // `with_leading_space` so `100:` (no space before
+                // `:`) becomes `100 =>` not `100=>`.
+                rewritten[j] = Some(with_leading_space(body, toks, j, "=>"));
+                if let Some(arm) = start_arm_body(body, toks, rewritten, j + 1, false) {
+                    arm_body_open = arm.open;
+                    arm_body_is_block = arm.is_block;
+                    state = State::Body;
+                    j = arm.next;
+                    continue;
+                }
+                state = State::Body;
+            }
+            (Tok::Sym(s), State::Pattern) if s == ".." && depth == 1 => {
+                notes.push(
+                    "case arm range (`a .. b`) has no lr equivalent — \
+                     lr case arms match exact values only"
+                        .to_string(),
+                );
+            }
+            (Tok::Sym(s), State::Pattern) if s == "{" => depth += 1,
+            (Tok::Sym(s), State::Pattern) if s == "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    return j + 1;
+                }
+            }
+            (Tok::Sym(s), State::Pattern) if s == "(" || s == "[" => depth += 1,
+            (Tok::Sym(s), State::Pattern) if s == ")" || s == "]" => depth -= 1,
+
+            // --- Body state: scanning an arm body --------------------
+            (Tok::Word(w), State::Body) if w == "case" => {
+                // Nested case as a cmd in the arm body.
+                j = rewrite_one_case(body, toks, rewritten, notes, j);
+                continue;
+            }
+            (Tok::Word(w), State::Body) if w == "else" && depth == 1 => {
+                // The arm body ends without a `;` (e.g. it was a
+                // nested case). Close the injected `{` first, then
+                // process `else :` as `default =>`.
+                if let Some(arm) = start_arm_body(body, toks, rewritten, j, arm_body_open) {
+                    arm_body_open = arm.open;
+                    arm_body_is_block = arm.is_block;
+                    state = State::Body;
+                    j = arm.next;
+                    continue;
+                }
+            }
+            (Tok::Sym(s), State::Body) if s == ";" && depth == 1 => {
+                if arm_body_open {
+                    let t = token_text(body, toks, rewritten, j);
+                    rewritten[j] = Some(format!("{t} }}"));
+                    arm_body_open = false;
+                }
+                state = State::Pattern;
+            }
+            (Tok::Sym(s), State::Body) if s == "{" => depth += 1,
+            (Tok::Sym(s), State::Body) if s == "}" => {
+                depth -= 1;
+                if depth == 0 {
+                    // End of case body. Close any open arm body.
+                    if arm_body_open {
+                        let t = token_text(body, toks, rewritten, j);
+                        rewritten[j] = Some(format!("}} {t}"));
+                    }
+                    return j + 1;
+                }
+                if depth == 1 && arm_body_is_block {
+                    // This `}` closes the `{ cmds }` block that was
+                    // the arm body. Back to Pattern state.
+                    arm_body_is_block = false;
+                    state = State::Pattern;
+                }
+            }
+            (Tok::Sym(s), State::Body) if s == "(" || s == "[" => depth += 1,
+            (Tok::Sym(s), State::Body) if s == ")" || s == "]" => depth -= 1,
+            _ => {}
+        }
+        j += 1;
+    }
+    j
+}
+
+/// Result of [`start_arm_body`]: how the arm body was opened and
+/// where to resume scanning.
+struct ArmBody {
+    /// `true` when we injected a `{` to wrap a non-block arm body.
+    open: bool,
+    /// `true` when the arm body is a `{ cmds }` block (BIRD already
+    /// braces it) and we did not inject an extra `{`.
+    is_block: bool,
+    /// Token index to resume at (just past the `=>` / injected `{`).
+    next: usize,
+}
+
+/// Common logic for opening an arm body after rewriting the separator
+/// to `=>`. Handles two shapes:
+///
+/// * `pat : { cmds }` — the arm body is already a block. We leave it
+///   alone (`is_block = true`, `open = false`).
+/// * `pat : cmd;` — the arm body is a bare command. We inject a `{`
+///   before the command token (`open = true`); the matching `}` is
+///   appended by the Body-state scan when it hits `;` or `}`.
+///
+/// `at` points at the token that will become `default` (for the
+/// `else` shape) or the token after `:` (for the `:` shape). When
+/// `close_prev_arm` is true, a `} ` prefix is prepended to close a
+/// still-open injected `{` from the previous arm (the arm body ended
+/// without a `;`, e.g. a nested case).
+fn start_arm_body(
+    body: &str,
+    toks: &[Token],
+    rewritten: &mut [Option<String>],
+    at: usize,
+    close_prev_arm: bool,
+) -> Option<ArmBody> {
+    let prefix = if close_prev_arm { "} " } else { "" };
+
+    // Peek the next significant token to decide the body shape.
+    // `at` is either the `else` keyword (followed by `:`) or the
+    // token after `:`. Detect which by looking at `toks[at]`.
+    let (name_idx, colon_idx, body_idx) = match &toks.get(at)?.tok {
+        Tok::Word(w) if w == "else" => {
+            // `else : <body>` — the `:` is at `at + 1`.
+            let colon = at + 1;
+            if !matches!(&toks.get(colon)?.tok, Tok::Sym(s) if s == ":") {
+                return None;
+            }
+            (at, colon, colon + 1)
+        }
+        _ => {
+            // Already past the `:`; `at` is the first body token.
+            (at, at, at)
+        }
+    };
+
+    // Rewrite `else` → `default` (with prefix) and `:` → `=>`.
+    if name_idx != colon_idx {
+        let name_repl = format!("{prefix}default");
+        rewritten[name_idx] = Some(with_leading_space(body, toks, name_idx, &name_repl));
+        rewritten[colon_idx] = Some(with_leading_space(body, toks, colon_idx, "=>"));
+    }
+
+    let after = toks.get(body_idx)?;
+    let is_block = matches!(&after.tok, Tok::Sym(s) if s == "{");
+    if is_block {
+        Some(ArmBody {
+            open: false,
+            is_block: true,
+            next: body_idx,
+        })
+    } else {
+        let t = token_text(body, toks, rewritten, body_idx);
+        rewritten[body_idx] = Some(format!("{{ {t}"));
+        Some(ArmBody {
+            open: true,
+            is_block: false,
+            next: body_idx,
+        })
+    }
+}
+
 /// Core token-stream rewrite. Errors carry the unfaithful-construct
 /// notes; the result is only meaningful when they are empty.
 fn translate_body_inner(body: &str, ctx: &Ctx) -> (String, Vec<String>) {
     let toks = tokenize(body);
     let mut rewritten: Vec<Option<String>> = vec![None; toks.len()];
     let mut notes: Vec<String> = Vec::new();
+
+    // Structural pre-pass: rewrite BIRD `case … { … }` blocks into
+    // lr DSL syntax (`:` → `=>`, `else:` → `default =>`, multi-stmt
+    // arm bodies wrapped in `{ … }`). See `rewrite_cases`.
+    rewrite_cases(body, &toks, &mut rewritten, &mut notes);
 
     let mut prev_significant: Option<&Tok> = None;
     let mut i = 0;
@@ -530,15 +835,12 @@ fn translate_body_inner(body: &str, ctx: &Ctx) -> (String, Vec<String>) {
         match tok {
             Tok::Str(_) => {}
             Tok::Sym(s) => {
-                // `!~` has no lr spelling (lr lacks a not-match token);
-                // rewriting it needs expression-level re-parenthesising.
-                if s == "!~" {
-                    notes.push(
-                        "`!~` (not-match) operator: no lr equivalent — \
-                                rewrite as `!(a ~ b)` by hand"
-                            .to_string(),
-                    );
-                }
+                // `!~` now passes through verbatim: lr's filter DSL
+                // gained `!~` (BinaryOp::NotMatch) as a peer of `~`
+                // in commit 1b09aa7, sharing Match precedence (4)
+                // with BIRD's `filter/config.Y` rule layering. No
+                // re-parenthesisation needed — BIRD spells both
+                // forms identically.
                 // Operator spelling: BIRD writes equality `=` and
                 // assignment `:=`; lr writes equality `==` and
                 // assignment `=`. Every BIRD `=` inside a body is an
@@ -979,21 +1281,30 @@ mod tests {
     }
 
     #[test]
-    fn print_and_case_are_unfaithful() {
+    fn print_remains_unfaithful_but_case_translates() {
+        // `print` is still unfaithful — lr has no side-effecting
+        // print statement. `case` now translates (the structural
+        // rewrite pass converts `:` → `=>` and `else:` →
+        // `default =>`), so it must NOT appear in the unfaithful
+        // set anymore.
         let c = ctx(&[], 0);
         assert!(body_fails("print \"x\";", &c)
             .iter()
             .any(|n| n.contains("`print`")));
-        assert!(body_fails("case net { else: accept; }", &c)
-            .iter()
-            .any(|n| n.contains("`case`")));
+        let out = body_ok("case net { 10.0.0.0/8: accept; else: reject; }", &c);
+        assert!(out.contains("case net {"));
+        assert!(out.contains("=>"));
+        assert!(out.contains("default"));
     }
 
     #[test]
-    fn not_match_is_unfaithful() {
+    fn not_match_passes_through() {
+        // `!~` now passes through verbatim — lr's filter DSL gained
+        // `!~` (BinaryOp::NotMatch) as a peer of `~` in commit
+        // 1b09aa7. BIRD and lr spell it identically.
         let c = ctx(&[], 0);
-        let notes = body_fails("if net !~ 10.0.0.0/8 then accept;", &c);
-        assert!(notes.iter().any(|n| n.contains("`!~`")));
+        let out = body_ok("if net !~ 10.0.0.0/8 then accept;", &c);
+        assert!(out.contains("!~"), "expected `!~` in output, got: {out}");
     }
 
     #[test]
@@ -1110,5 +1421,124 @@ mod tests {
         let (out, _) = translate(&src);
         assert!(out.ok.is_empty());
         assert!(out.failed.iter().any(|(n, _)| n == "f" || n == "debug"));
+    }
+
+    // --- D14.5/D14.6: case + !~ translation ------------------------
+    //
+    // BIRD's `case` syntax (`pat: body; else: body;`) and `!~`
+    // operator now translate faithfully. These tests pin the
+    // mapping verified against BIRD's `filter/config.Y` §`switch_body`
+    // and `conf/cf-lex.l` (the `else:` ELSECOL token).
+
+    #[test]
+    fn case_with_single_stmt_arms_translates() {
+        let c = ctx(&[], 0);
+        let out = body_ok(
+            "case bgp_local_pref { 100: accept; 200: reject; else: accept; }",
+            &c,
+        );
+        // Every arm separator became `=>`; the default arm became
+        // `default =>`. The bare-stmt arm bodies are wrapped in `{ … }`
+        // because lr DSL case arm bodies parse a single statement.
+        assert!(out.contains("100 => { accept; }"));
+        assert!(out.contains("200 => { reject; }"));
+        assert!(out.contains("default => { accept; }"));
+    }
+
+    #[test]
+    fn case_with_block_arms_translates() {
+        let c = ctx(&[], 0);
+        let out = body_ok(
+            "case bgp_local_pref {\
+             \n  100: { bgp_local_pref := 200; accept; }\
+             \n  else: { reject; }\
+             \n}",
+            &c,
+        );
+        // Block arm bodies are left as `{ … }` (no double-wrapping).
+        // `bgp_local_pref := 200` becomes `bgp.local_pref = 200`.
+        assert!(out.contains("100 => { bgp.local_pref = 200; accept; }"));
+        assert!(out.contains("default => { reject; }"));
+    }
+
+    #[test]
+    fn case_with_parenthesised_pattern_translates() {
+        // BIRD's `filter/test.conf` uses `(2+2):` as a pattern —
+        // parenthesised expressions are valid arm patterns.
+        let c = ctx(&[], 0);
+        let out = body_ok("case bgp_local_pref { (2+2): accept; else: reject; }", &c);
+        assert!(out.contains("(2+2) => { accept; }"));
+        assert!(out.contains("default => { reject; }"));
+    }
+
+    #[test]
+    fn case_with_multiple_patterns_translates() {
+        // `1, 2, 3: body;` — comma-separated patterns share one arm.
+        let c = ctx(&[], 0);
+        let out = body_ok("case bgp_local_pref { 1, 2, 3: accept; else: reject; }", &c);
+        assert!(out.contains("1, 2, 3 => { accept; }"));
+    }
+
+    #[test]
+    fn case_range_arm_is_unfaithful() {
+        // `1 .. 5:` — lr DSL case arms match exact values only;
+        // there is no range-arm equivalent.
+        let c = ctx(&[], 0);
+        let notes = body_fails("case bgp_local_pref { 1 .. 5: accept; else: reject; }", &c);
+        assert!(
+            notes.iter().any(|n| n.contains("case arm range")),
+            "expected range-arm note, got: {notes:?}"
+        );
+    }
+
+    #[test]
+    fn not_match_in_complex_expression_translates() {
+        let c = ctx(&[], 0);
+        let out = body_ok(
+            "if net ~ 10.0.0.0/8 && net !~ 10.1.0.0/16 then accept; reject;",
+            &c,
+        );
+        assert!(out.contains("net ~ 10.0.0.0/8"));
+        assert!(out.contains("net !~ 10.1.0.0/16"));
+    }
+
+    #[test]
+    fn not_match_against_set_translates() {
+        let c = ctx(&[], 0);
+        let out = body_ok(
+            "if net !~ [ 10.0.0.0/8, 192.168.0.0/16 ] then accept; reject;",
+            &c,
+        );
+        assert!(out.contains("net !~ [ 10.0.0.0/8, 192.168.0.0/16 ]"));
+    }
+
+    #[test]
+    fn case_and_not_match_together_compile() {
+        // End-to-end: a filter mixing `case` and `!~` must compile
+        // in the lr DSL (the `translate` backstop runs `compile`).
+        let src = BirdFilterSource {
+            defines: vec![],
+            functions: vec![],
+            filters: vec![(
+                "classify".into(),
+                vec![
+                    "case bgp_local_pref {".to_string(),
+                    "  100: accept;".to_string(),
+                    "  200: { bgp_med := 50; accept; }".to_string(),
+                    "  else: reject;".to_string(),
+                    "}".to_string(),
+                    "if net !~ 10.0.0.0/8 then reject;".to_string(),
+                    "accept;".to_string(),
+                ],
+            )],
+            roa_tables: vec![],
+        };
+        let (out, _) = translate(&src);
+        assert_eq!(out.ok.len(), 1, "failed: {:?}", out.failed);
+        let f = &out.ok[0];
+        assert!(f.body.contains("case bgp.local_pref {"));
+        assert!(f.body.contains("=> { accept; }"));
+        assert!(f.body.contains("default => { reject; }"));
+        assert!(f.body.contains("net !~ 10.0.0.0/8"));
     }
 }
