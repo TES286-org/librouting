@@ -1005,27 +1005,61 @@ changes ~300, SPF adaptation ~200, End.X SID ~200, tests ~300).
 
 ## D14 — Config compatibility: native BIRD / FRR config loading
 
-**Status:** partial. Tracks `lr-cli::compat`.
+**Status:** partial — ~~D14.1 (BIRD filters)~~, ~~D14.2 (BIRD
+babel)~~, ~~D14.3 (FRR route-maps)~~, ~~D14.4 (FRR neighbors)~~.
+Tracks `lr-cli::compat`.
 
-**Current gap.** `crates/lr-cli/src/compat.rs` already detects and
+**Current gap.** ~~`crates/lr-cli/src/compat.rs` already detects and
 translates BIRD/FRR configs (`detect_dialect` + `load_config_text`),
 but coverage is limited. BIRD `filter` / `function` / `define` /
 `protocol` syntax is incomplete; FRR `route-map` / `access-list` /
-`prefix-list` syntax is incomplete.
+`prefix-list` syntax is incomplete.~~ D14.1 landed: BIRD 2
+`filter`/`function`/`define`/`roa table` blocks translate into the
+lr filter DSL (fail-closed per filter — constructs without a
+faithful mapping leave the filter unemitted and reported; the
+operator mapping was verified against BIRD's own grammar/lexer,
+correcting the assumption below: BIRD 2 has no `and/or/not` keywords,
+and BIRD writes equality `=` / assignment `:=` where lr writes `==`
+/ `=`); `import|export filter NAME` / `where EXPR` wire the filters
+to peers, inline channel bodies now split into statements, and `roa
+table` entries carry over as `[[roa]]` (commits `f1fc747` and
+`2456f45`, including `protocol babel` → `[[babel.interface]]` with
+the RFC 8966 §A.2 parameter mapping). Still open: BIRD `case`
+statements, `!~`, per-protocol route attributes, and a maintained
+external conversion corpus (the in-tree regression suite covers the
+mapping table).
 
 **Proposed work.**
 
 1. **BIRD filter → lr filter DSL.** Translate BIRD `filter { ... }`
-   blocks to lr `[[filter]]` body strings. BIRD and lr DSL are close
-   (both C-like), but BIRD uses `and/or/not` while lr uses
-   `&&/||/!`; `~` is identical.
-2. **BIRD `protocol babel` → `[[babel.interface]]`.**
+   blocks to lr `[[filter]]` body strings. ~~BIRD and lr DSL are
+   close (both C-like), but BIRD uses `and/or/not` while lr uses
+   `&&/||/!`; `~` is identical.~~ Landed in commit `f1fc747` — the
+   corrected mapping (verified against BIRD's `filter/config.Y` +
+   `conf/cf-lex.l`): booleans are symbolic in both dialects; BIRD `=`
+   becomes `==` and BIRD `:=` becomes `=`; attribute renames
+   (`bgp_path` → `bgp.as_path`, …); `define` constants substitute
+   textually; user functions embed with parameter types stripped;
+   `roa_check` on a single table becomes `roa.state` comparisons;
+   every emitted body must compile and reference only introduced
+   variables (compile + AST-walk backstops).
+2. **BIRD `protocol babel` → `[[babel.interface]]`.** Landed in
+   commit `2456f45` — interface blocks and bare interface lines map
+   the RFC 8966 §A.2 parameters (type/kind, rxcost, rtt
+   cost/min/max with BIRD's time grammar, check link, extended next
+   hop, port); protocol-level next hops backfill; the rest stays
+   visible per statement.
 3. **FRR `route-map` → `[[route-map]]`.**
    `match ip address prefix-list NAME` → `match_prefix = "NAME"`;
-   `set local-preference N` → `set_local_pref = N`.
-4. **FRR `bgp neighbor` → `[[peer]]`.**
+   `set local-preference N` → `set_local_pref = N`. (Pre-existing
+   converter surface, W5.1.)
+4. **FRR `bgp neighbor` → `[[peer]]`.** (Pre-existing converter
+   surface, W5.1.)
 5. **Conversion test suite.** Maintain a set of BIRD/FRR configs +
-   expected lr TOML outputs as regression tests.
+   expected lr TOML outputs as regression tests. Partially covered:
+   the D14.1/D14.2 round-trip tests load every generated TOML
+   through the real daemon config parser and finalize (compiling
+   the filters); a larger external corpus remains open.
 
 **Estimated size.** ~1000–1500 new lines (translator ~600, tests
 ~400, docs ~200).
@@ -1077,7 +1111,7 @@ refactor — needs extensive regression tests.
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | not started           | —     | `lrctl` + Prometheus exporter            |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
-| D14       | partial               | —     | BIRD / FRR config loader                 |
+| D14       | partial (D14.1–D14.4 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces; FRR route-map/neighbor pre-existing; external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
 
 Items flip to `~~struck through~~` here as they land, with a pointer

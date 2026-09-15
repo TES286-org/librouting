@@ -162,6 +162,26 @@ ship, breaking changes that affect embedders, dependency bumps.
   (`crates/lr-policy/tests/filter_corpus.rs`) runs the whole committed
   seed corpus through `filter::compile`.
 
+
+- BIRD 2 filter translation into the lr filter DSL (ROADMAP-v3 D14.1):
+  `filter`/`function`/`define`/`roa table` blocks become `[[filter]]`
+  bodies; `import|export filter NAME` and `import where EXPR` wire the
+  filters to peers. Fail-closed per filter — constructs without a
+  faithful lr mapping (BIRD-only route attributes, `case`, `print`,
+  `!~`, `proto` comparisons, multi-table `roa_check`, …) leave the
+  filter unemitted and reported. Operator mapping verified against
+  BIRD's grammar and lexer: no `and`/`or`/`not` keywords exist in
+  BIRD 2; BIRD equality `=` becomes `==` and assignment `:=` becomes
+  `=`. Every emitted body must compile and reference only introduced
+  variables. Inline channel bodies (`ipv4 { import all; };`) now
+  split into statements instead of one UNMAPPED line, and `roa table`
+  entries carry over as `[[roa]]` rows.
+- BIRD `protocol babel` translation (ROADMAP-v3 D14.2): interface
+  blocks map the RFC 8966 §A.2 parameters onto `[[babel.interface]]`
+  tables (type/kind, rxcost, rtt cost/min/max with BIRD's time
+  grammar, check link, extended next hop, port); protocol-level
+  `next hop` statements backfill interfaces that lack their own.
+
 ### Changed
 
 - **BREAKING** `lr-policy::hooks`: `ImportHook`, `SelectionHook` and
