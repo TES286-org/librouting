@@ -1,23 +1,28 @@
 //! `cargo bench -p lr-bgp --bench roa_validate` — measure ROA
 //! validation throughput (ROADMAP-v3 D6.2, D8.4).
 //!
-//! RFC 6811 §2 mandates a linear scan over the ROA table per
-//! validation query. The current implementation is `O(n)` over
-//! a `Vec<RoaEntry>`; the bench exercises the three table sizes
-//! the operations community actually deploys:
+//! Since D8.4, `RoaTable::validate` walks a path-compressed prefix
+//! trie: the covering ROAs of a route are exactly the trie nodes on
+//! the root-to-route path, so a query costs `O(prefix_len)` node
+//! visits instead of an `O(n)` scan over the entry list. The bench
+//! exercises the two query shapes and the three table sizes the
+//! operations community actually deploys:
 //!
 //! * 1k entries  — a single AS with a few delegated prefixes.
 //! * 10k entries — a small ISP / IXP route-server.
 //! * 100k entries — a regional RPKI cache snapshot.
 //!
-//! Each iteration validates a route whose prefix is covered by
-//! at least one ROA — the worst case for the linear scan since
-//! every entry must be visited before a `Valid` decision can be
-//! returned.
+//! * `uncovered` validates a route whose prefix no ROA covers — for
+//!   the pre-trie linear scan this was the worst case (every entry
+//!   visited before the `NotFound` decision); for the trie it is a
+//!   shallow walk that terminates at the root.
+//! * `covered` validates a route that IS authorized by an exact ROA —
+//!   the trie's worst case, walking the full prefix depth to the
+//!   matching node.
 //!
-//! The bench output is the basis for the ROADMAP-v3 D8.4 radix-trie
-//! refactor: when that lands, the same bench should show a 10–100×
-//! speedup at 100k entries.
+//! Both query shapes should be flat (roughly constant) across table
+//! sizes; if a size shows growth, the trie's path compression has
+//! regressed.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lr_bgp::roa::{RoaEntry, RoaState, RoaTable, RoaTableBuilder};
@@ -44,22 +49,29 @@ fn build_table(n: usize) -> RoaTable {
 }
 
 fn bench_roa_validate(c: &mut Criterion) {
-    let probe = Prefix::new_v4([10, 0, 0, 0], 8);
+    let uncovered = Prefix::new_v4([10, 0, 0, 0], 8);
+    // An exact /24 from the table: covered and authorized — the
+    // deepest possible walk for this shape.
+    let covered = Prefix::new_v4([10, 0, 0, 0], 24);
     let origin = Asn(65000);
 
     let mut group = c.benchmark_group("roa_validate");
     for size in [1_000, 10_000, 100_000] {
         let table = build_table(size);
-        // Each validation does O(n) work proportional to table size.
         group.throughput(Throughput::Elements(1));
-        group.bench_function(size.to_string(), |b| {
+        group.bench_function(format!("uncovered-{size}"), |b| {
             b.iter(|| {
-                let state = black_box(table.validate(black_box(&probe), Some(origin)));
-                // For an empty catch-all prefix probe, the answer
-                // is `NotFound` (none of our /24 ROAs cover a /8
-                // probe — the prefix_len > max_length check excludes
-                // them, but they're still scanned).
+                let state = black_box(table.validate(black_box(&uncovered), Some(origin)));
+                // No /24 ROA covers a /8 probe: covered stays false.
                 debug_assert_eq!(state, RoaState::NotFound);
+            });
+        });
+        group.bench_function(format!("covered-{size}"), |b| {
+            b.iter(|| {
+                let state = black_box(table.validate(black_box(&covered), Some(origin)));
+                // 10.0.0.0/24 with origin AS 65000 + (0 % 1000): the
+                // first entry's origin, authorized by max_length 24.
+                debug_assert_eq!(state, RoaState::Valid);
             });
         });
     }

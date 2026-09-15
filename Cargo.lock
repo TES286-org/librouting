@@ -501,6 +501,7 @@ dependencies = [
  "hmac",
  "lr-core",
  "lr-mpls",
+ "proptest",
  "sha2",
  "thiserror",
  "tracing",

@@ -43,6 +43,7 @@ pub mod path;
 pub mod peer;
 pub mod roa;
 pub mod roa_store;
+mod roa_trie;
 pub mod role;
 pub mod rtr;
 

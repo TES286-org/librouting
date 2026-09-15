@@ -18,19 +18,25 @@
 //! 4. Otherwise the route is `Invalid` (origin AS not authorized, or
 //!    the prefix length exceeds the authorized max length).
 //!
-//! The database is a flat `Vec<RoaEntry>` — lookup is `O(n)` but the
-//! access pattern is cache-friendly and the typical operator-side ROA
-//! count is in the low thousands, well under a millisecond per check
-//! on commodity hardware. A radix-trie index is future work; the
-//! `validate` API stays the same when one is added.
+//! # Lookup structure
+//!
+//! The entries live in a flat, sorted `Vec<RoaEntry>` — the canonical
+//! store used by dumps, equality and determinism — while a
+//! path-compressed prefix trie ([`roa_trie::RoaTrie`], ROADMAP-v3
+//! D8.4) indexes them by normalized prefix. `validate` walks the trie
+//! from the root following the route's bits: every trie node on that
+//! path holds exactly the ROAs covering the route, so the lookup
+//! costs `O(prefix_len)` (bounded by 32 / 128) instead of the
+//! previous `O(n)` scan over the whole table.
 //!
 //! # Thread safety
 //!
-//! `RoaTable` is `Send + Sync` — `RoaEntry` is `Copy` and the
-//! backing `Vec` is read-only after construction.
+//! `RoaTable` is `Send + Sync` — `RoaEntry` is `Copy` and both the
+//! backing `Vec` and the trie index are read-only after construction.
 
 use core::str::FromStr;
 
+use crate::roa_trie;
 use lr_core::addr::{Asn, Prefix};
 
 /// One ROA entry: the authorized prefix, the longest prefix length
@@ -134,16 +140,28 @@ pub enum RoaError {
     MaxLengthAboveFamily { max_length: u8, family_max: u8 },
 }
 
-/// ROA database: an immutable vector of [`RoaEntry`].
+/// ROA database: a sorted entry list plus a prefix-trie lookup index.
 ///
 /// Constructed via [`RoaTableBuilder`] (which enforces the RFC 6482
 /// invariants per entry) and queried via [`validate`]. Lookups are
-/// `O(n)` — a future radix-trie index can drop them to `O(log n)`
-/// without touching the public API.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+/// `O(prefix_len)` via the trie index; the sorted entry list stays
+/// the canonical store so dumps and equality remain deterministic.
+#[derive(Debug, Clone, Default)]
 pub struct RoaTable {
     entries: Vec<RoaEntry>,
+    trie: roa_trie::RoaTrie,
 }
+
+impl PartialEq for RoaTable {
+    /// Two tables are equal when their canonical entry lists match.
+    /// The trie index is a pure function of the entries and is not
+    /// consulted (it exists only to accelerate `validate`).
+    fn eq(&self, other: &Self) -> bool {
+        self.entries == other.entries
+    }
+}
+
+impl Eq for RoaTable {}
 
 impl RoaTable {
     /// Empty table — every validation returns `NotFound`.
@@ -162,7 +180,8 @@ impl RoaTable {
         let mut entries: Vec<RoaEntry> = entries.into_iter().collect();
         entries.sort_unstable();
         entries.dedup();
-        Self { entries }
+        let trie = roa_trie::RoaTrie::build(&entries);
+        Self { entries, trie }
     }
 
     /// Number of ROA entries stored.
@@ -181,45 +200,28 @@ impl RoaTable {
         &self.entries
     }
 
-    /// Append one entry. Mutating access is package-private to the
-    /// `lr-bgp` crate; embedders go through [`RoaTableBuilder`] which
-    /// enforces the RFC 6482 invariants at insert time.
-    pub(crate) fn push(&mut self, entry: RoaEntry) {
-        self.entries.push(entry);
-    }
-
     /// Validate `(prefix, origin_as)` per RFC 6811 §2. A `None`
     /// `origin_as` (no AS_PATH, e.g. locally originated routes)
     /// returns `NotFound` — a route without an origin AS is not
     /// covered by any ROA.
+    ///
+    /// The trie walk visits every covering ROA (those whose prefix
+    /// contains the route's prefix); `Valid` needs one of them to
+    /// authorize the origin within `max_length`, `Invalid` means the
+    /// route is covered but not authorized, `NotFound` means no ROA
+    /// covers it at all.
     pub fn validate(&self, prefix: &Prefix, origin_as: Option<Asn>) -> RoaState {
         let Some(origin_as) = origin_as else {
             return RoaState::NotFound;
         };
-        let mut any_covered = false;
-        for entry in &self.entries {
-            // Same address family and entry.prefix covers the route.
-            if entry.prefix.addr.is_ipv4() != prefix.addr.is_ipv4() {
-                continue;
-            }
-            if !entry.prefix.contains_prefix(prefix) {
-                continue;
-            }
-            // The route's prefix length must be ≤ entry.max_length.
-            if prefix.prefix_len > entry.max_length {
-                // Covered by a more specific ROA but too long — still
-                // counts as "covered" for the Invalid/NotFound
-                // decision: another ROA might authorize this exact
-                // (prefix, asn) pair.
-                any_covered = true;
-                continue;
-            }
-            any_covered = true;
-            if entry.asn == origin_as {
-                return RoaState::Valid;
-            }
-        }
-        if any_covered {
+        let (any_covered, authorized) =
+            self.trie
+                .walk_covering(&self.entries, prefix, &mut |entry: &RoaEntry| {
+                    prefix.prefix_len <= entry.max_length && entry.asn == origin_as
+                });
+        if authorized {
+            RoaState::Valid
+        } else if any_covered {
             RoaState::Invalid
         } else {
             RoaState::NotFound
@@ -233,7 +235,7 @@ impl RoaTable {
 /// the daemon can fail-closed at startup.
 #[derive(Debug, Default)]
 pub struct RoaTableBuilder {
-    table: RoaTable,
+    entries: Vec<RoaEntry>,
 }
 
 impl RoaTableBuilder {
@@ -259,19 +261,21 @@ impl RoaTableBuilder {
             }
             None => RoaEntry::exact(prefix, asn),
         };
-        self.table.push(entry);
+        self.entries.push(entry);
         Ok(entry)
     }
 
     /// Add one already-constructed entry (used by the FFI layer when
     /// the caller passes parsed values).
     pub fn add_entry(&mut self, entry: RoaEntry) {
-        self.table.push(entry);
+        self.entries.push(entry);
     }
 
-    /// Finalize into an immutable [`RoaTable`].
+    /// Finalize into an immutable [`RoaTable`]. Entries are
+    /// deduplicated and sorted (the same set always produces the same
+    /// table) and the trie index is built once, up front.
     pub fn build(self) -> RoaTable {
-        self.table
+        RoaTable::from_entries(self.entries)
     }
 }
 
