@@ -387,6 +387,7 @@ overrides live under `[[peer]]` and inherit the global when omitted.
 | `--user NAME` | `user` | — | Drop privileges after binding sockets. |
 | `--group NAME` | `group` | — | Privilege-drop group. |
 | `--api-socket PATH` | `api_socket` | — | Unix-socket runtime API (see RUNBOOK.md). |
+| `--metrics-addr ADDR` | `metrics_addr` | — | Prometheus `/metrics` HTTP endpoint (ROADMAP-v3 D12.2). Bind to a loopback address; basic-auth/mTLS is out of scope. |
 
 ### Multi-protocol combinations (rc.3)
 

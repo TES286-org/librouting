@@ -65,6 +65,7 @@ mod daemon_ospf;
 mod daemon_ospf3;
 mod daemon_policy;
 mod daemon_rpki;
+mod metrics;
 mod privdrop;
 mod signal;
 mod translate;
@@ -198,6 +199,7 @@ fn print_usage() {
          --user NAME              Drop privileges after binding\n  \
          --group NAME             Privilege-drop group\n  \
          --api-socket PATH        Unix-socket runtime API\n  \
+         --metrics-addr ADDR      Prometheus /metrics HTTP endpoint (e.g. 127.0.0.1:9119)\n  \
          Multi-peer configuration uses [[peer]] tables in the TOML config\n  \
          (see templates/daemon.toml): per-peer remote/address, peer_as,\n  \
          auth, GTSM, maximum-prefix, Add-Path and family settings,\n  \
@@ -1186,6 +1188,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     None => Vec::new(),
                 }
             }),
+            roa_len: Some(Arc::new({
+                let roa_store = Arc::clone(&roa_store);
+                move || roa_store.len()
+            })),
         }),
     };
 
@@ -1273,6 +1279,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 return ExitCode::from(1);
             }
             if let Err(e) = spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            if let Err(e) = spawn_metrics(cfg, &runtime) {
                 eprintln!("daemon: {}", e);
                 return ExitCode::from(1);
             }
@@ -2515,8 +2525,13 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         router: Arc::clone(&router),
         running: Arc::clone(&running),
         status_lines: Arc::new(Vec::new),
+        roa_len: None,
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+    if let Err(e) = spawn_metrics(cfg, &runtime) {
         eprintln!("daemon: {}", e);
         return ExitCode::from(1);
     }
@@ -2879,12 +2894,17 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             router: Arc::clone(&router),
             running: Arc::new(AtomicBool::new(true)),
             status_lines: Arc::new(Vec::new),
+            roa_len: None,
         }),
     };
     let running = Arc::clone(&runtime.running);
     match &host {
         None => {
             if let Err(e) = spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            if let Err(e) = spawn_metrics(cfg, &runtime) {
                 eprintln!("daemon: {}", e);
                 return ExitCode::from(1);
             }
@@ -4547,6 +4567,14 @@ struct Runtime {
     /// Protocol-specific extra `status` lines for the runtime API
     /// (e.g. LDP counters). Empty for the BGP/Babel/OSPF/BMP modes.
     status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Optional ROA store length reader (ROADMAP-v3 D12.2 metrics).
+    /// `None` when the daemon is not running BGP ROA validation
+    /// (e.g. OSPF-only, Babel-only, or a BGP daemon with
+    /// `roa_validate = false` and no static `[[roa]]` table). When
+    /// present the metrics endpoint emits `lr_roa_entries`; when
+    /// absent the metric is omitted (rather than emitting a
+    /// misleading zero).
+    roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
 }
 
 /// Act on every pending signal. SIGTERM/SIGINT trigger a graceful stop
@@ -4637,6 +4665,33 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
     api::spawn(path, ctx)
         .map(|p| println!("daemon: runtime API on {}", p))
         .map_err(|e| format!("runtime API: {e}"))
+}
+
+/// Start the Prometheus `/metrics` HTTP endpoint when
+/// `--metrics-addr` is configured (ROADMAP-v3 D12.2). Creation
+/// failure is fatal — the operator asked for a metrics endpoint;
+/// running without it silently is not an option (same stance as
+/// [`spawn_api`]).
+fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
+    let Some(addr) = &cfg.metrics_addr else {
+        return Ok(());
+    };
+    let ctx = metrics::MetricsContext {
+        info: metrics::MetricsInfo {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            local_as: cfg.local_as,
+            router_id: cfg.router_id.clone(),
+        },
+        router: Arc::clone(&rt.router),
+        running: Arc::clone(&rt.running),
+        roa_len: rt.roa_len.as_ref().map(|f| {
+            let f = Arc::clone(f);
+            Box::new(move || f()) as Box<dyn Fn() -> usize + Send + Sync>
+        }),
+    };
+    metrics::spawn(addr, ctx)
+        .map(|a| println!("daemon: metrics endpoint on http://{a}/metrics"))
+        .map_err(|e| format!("metrics endpoint: {e}"))
 }
 
 /// Re-apply the configuration file: diff the `networks` list against the

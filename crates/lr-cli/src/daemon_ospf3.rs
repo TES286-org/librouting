@@ -629,12 +629,17 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             router: Arc::clone(&daemon.router),
             running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             status_lines: Arc::clone(&status_lines),
+            roa_len: None,
         }),
     };
     let running = Arc::clone(&runtime.running);
     match &host {
         None => {
             if let Err(e) = crate::spawn_api(cfg, &runtime) {
+                eprintln!("daemon: {}", e);
+                return ExitCode::from(1);
+            }
+            if let Err(e) = crate::spawn_metrics(cfg, &runtime) {
                 eprintln!("daemon: {}", e);
                 return ExitCode::from(1);
             }

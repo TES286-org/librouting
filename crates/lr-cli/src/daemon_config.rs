@@ -577,6 +577,12 @@ pub(crate) struct DaemonConfig {
     pub group: Option<String>,
     /// Runtime API socket path (Unix domain socket, 0600).
     pub api_socket: Option<String>,
+    /// Prometheus `/metrics` HTTP endpoint address (TCP, opt-in).
+    /// `None` → the metrics exporter is disabled (the default). When
+    /// set, the daemon binds a TCP listener on the address and serves
+    /// the Prometheus text exposition format on `GET /metrics`
+    /// (ROADMAP-v3 D12.2).
+    pub metrics_addr: Option<String>,
     /// Configuration file the daemon was started with (reload source).
     pub config_path: Option<String>,
     /// Dialect of the config file: `"toml"` (native), `"bird"` or
@@ -2312,6 +2318,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "user" => cfg.user = Some(value.to_string()),
             "group" => cfg.group = Some(value.to_string()),
             "api_socket" => cfg.api_socket = Some(value.to_string()),
+            "metrics_addr" => cfg.metrics_addr = Some(value.to_string()),
             "networks" | "bgp.networks" => cfg.networks = parse_str_array(value),
             "labeled_networks" | "bgp.labeled_networks" => {
                 cfg.labeled_networks = parse_str_array(value)
@@ -4085,6 +4092,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--api-socket" if i + 1 < args.len() => {
                 cfg.api_socket = Some(args[i + 1].clone());
+                i += 2;
+            }
+            "--metrics-addr" if i + 1 < args.len() => {
+                cfg.metrics_addr = Some(args[i + 1].clone());
                 i += 2;
             }
             "-h" | "--help" => {

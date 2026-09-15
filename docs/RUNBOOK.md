@@ -89,6 +89,69 @@ Command reference:
 | `help`     | command list                                                    |
 | `quit`     | close this connection                                           |
 
+## Prometheus `/metrics` endpoint
+
+`--metrics-addr ADDR` (or `[bgp] metrics_addr = "…"`) starts an
+opt-in HTTP endpoint that serves the Prometheus text exposition
+format on `GET /metrics` (ROADMAP-v3 D12.2). The endpoint is a
+hand-rolled HTTP/1.0 responder (no `hyper` / `tokio` dependency)
+bound to a TCP address; bind it to a loopback address for scrape
+security — Prometheus basic-auth / mTLS is out of scope (use a
+reverse proxy for that).
+
+```sh
+./target/release/lr-daemon \
+    --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+    --listen 127.0.0.1:1179 --network 203.0.113.0/24 \
+    --metrics-addr 127.0.0.1:9119
+```
+
+Scrape with any HTTP client:
+
+```sh
+$ curl -s http://127.0.0.1:9119/metrics
+# HELP lr_info librouting daemon identity (always 1).
+# TYPE lr_info gauge
+lr_info{version="1.0.0-rc.3",local_as="64512",router_id="10.0.0.1"} 1
+# HELP lr_uptime_seconds Daemon uptime in seconds.
+# TYPE lr_uptime_seconds gauge
+lr_uptime_seconds 42
+# HELP lr_sessions_total Number of configured sessions, by protocol kind and state.
+# TYPE lr_sessions_total gauge
+lr_sessions_total{kind="bgp",state="Idle"} 1
+# HELP lr_established_sessions Number of sessions in the established / Full / Up state, by protocol kind.
+# TYPE lr_established_sessions gauge
+lr_established_sessions{kind="bgp"} 0
+# HELP lr_adj_rib_in_entries Total routes held in Adj-RIB-In across all sessions of each protocol kind.
+# TYPE lr_adj_rib_in_entries gauge
+lr_adj_rib_in_entries{kind="bgp"} 0
+# HELP lr_rib_entries Number of routes in the Loc-RIB (best-path selection output).
+# TYPE lr_rib_entries gauge
+lr_rib_entries 1
+# HELP lr_roa_entries Number of ROA entries in the live ROA store (static + RTR cache).
+# TYPE lr_roa_entries gauge
+lr_roa_entries 0
+```
+
+The exposed metrics:
+
+| Metric                       | Type    | Labels                          | Source                                   |
+| ---------------------------- | ------- | ------------------------------- | ---------------------------------------- |
+| `lr_info`                    | gauge=1 | `version`, `local_as`, `router_id` | daemon identity (for join queries)  |
+| `lr_uptime_seconds`          | gauge   | —                               | `Instant::elapsed()` since metrics spawn |
+| `lr_sessions_total`          | gauge   | `kind`, `state`                 | `session_summaries()` count per (kind, state) |
+| `lr_established_sessions`    | gauge   | `kind`                          | `session_summaries().established` count |
+| `lr_rib_entries`             | gauge   | —                               | `rib_len()`                              |
+| `lr_adj_rib_in_entries`      | gauge   | `kind`                          | sum of `adj_rib_in_len` per kind         |
+| `lr_roa_entries`             | gauge   | —                               | `RoaStore::len()` (omitted when no store) |
+
+The `lr_roa_entries` metric is omitted entirely when the daemon does
+not carry a ROA store (e.g. OSPF-only, Babel-only, or a BGP daemon
+without `roa_validate` and no static `[[roa]]` table) — a missing
+metric is more honest than a misleading zero. The endpoint also
+serves `GET /` (a one-line pointer to `/metrics`) and `404 Not Found`
+for every other path.
+
 ## Troubleshooting FAQ
 
 **Session establishes but no routes flow in either direction.**

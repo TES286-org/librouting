@@ -253,6 +253,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             let status = Arc::clone(&status);
             move || status.lines()
         }),
+        roa_len: None,
     });
 
     println!("librouting daemon (lr-daemon)");
@@ -389,6 +390,11 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         return ExitCode::from(1);
     }
     if let Err(e) = crate::spawn_api(cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        abort_all(&runtime, engines, ticker);
+        return ExitCode::from(1);
+    }
+    if let Err(e) = crate::spawn_metrics(cfg, &runtime) {
         eprintln!("daemon: {}", e);
         abort_all(&runtime, engines, ticker);
         return ExitCode::from(1);

@@ -499,12 +499,17 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 ]
             }
         }),
+        roa_len: None,
     });
     if let Err(sig) = crate::signal::init() {
         eprintln!("daemon: cannot install signal handlers (signal {})", sig);
         return ExitCode::from(1);
     }
     if let Err(e) = crate::spawn_api(cfg, &runtime) {
+        eprintln!("daemon: {}", e);
+        return ExitCode::from(1);
+    }
+    if let Err(e) = crate::spawn_metrics(cfg, &runtime) {
         eprintln!("daemon: {}", e);
         return ExitCode::from(1);
     }
