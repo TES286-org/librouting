@@ -18,6 +18,17 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- FFI expansion, second wave (ROADMAP-v3 D5.4–D5.7): BGP message
+  encoders (`lr_bgp_encode_open` with the RFC 6793 four-octet-AS
+  capability, `lr_bgp_encode_notification`,
+  `lr_bgp_encode_update_withdraw_v4` / `..._announce_v4`), event
+  polling (`lr_router_poll_events` serializing `lr_event_t` batches
+  with lossless requeue of the overflow), and the local route
+  lifecycle (`lr_router_originate_v6`, `lr_router_withdraw_v4` /
+  `_v6` — FRR `no network` semantics, idempotent on absent
+  statements). `RouterInstance::unoriginate` now reports whether a
+  route was actually removed (bool, non-breaking). The C/C++/Go/
+  Python surfaces are all synced with tests.
 - Cross-protocol interop labs (ROADMAP-v3 D4.5) closing the D4
   direction: `tests/interop/redistribute_bird.sh` (BIRD 2 speaks both
   ends of a BGP↔OSPF pipe over a veth pair — flushed out the

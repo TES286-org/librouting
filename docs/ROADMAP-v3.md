@@ -502,14 +502,18 @@ BIRD/FRR~~ (D4.5) ~~remain~~ both landed.
 
 ## D5 — FFI expansion across protocols and policy
 
-**Status:** not started. Tracks `lr-ffi` + bindings.
+**Status:** partial — ~~D5.4 (BGP message encoders)~~, ~~D5.5
+(event polling)~~, ~~D5.6 (route withdraw)~~ and ~~D5.7 (IPv6
+origination)~~ are in; D5.1 (OSPF/Babel/LDP session management), D5.2
+(Filter DSL via FFI) and D5.3 (policy objects via FFI) remain. Tracks
+`lr-ffi` + bindings.
 
-**Current gap.** `crates/lr-ffi/` exposes 42 `extern "C"` functions,
-but only covers BGP session lifecycle + Layer-1 codecs + Layer-3
-router lifecycle. OSPF, Babel, LDP, BMP, MRT, BFD session management is
-unreachable; Filter DSL and policy engine are unreachable; BGP
-UPDATE/OPEN encoders are unreachable; event polling is unreachable;
-route withdraw is unreachable; IPv6 origination is unreachable.
+**Current gap.** `crates/lr-ffi/` exposes 60+ `extern "C"` functions
+covering BGP session lifecycle + Layer-1 codecs + Layer-3 router
+lifecycle + the D5.4–D5.7 slices. Still unreachable: OSPF, Babel,
+LDP, BMP, MRT, BFD session management; Filter DSL and policy engine.
+BGP UPDATE/OPEN/NOTIFICATION encoders, event polling, route
+withdraw and IPv6 origination ~~are~~ are in.
 
 **Proposed work.**
 
@@ -525,16 +529,36 @@ route withdraw is unreachable; IPv6 origination is unreachable.
    lr_route_map_t`, `lr_route_map_add_entry(map, matches, sets,
    verdict)`, `lr_prefix_list_new() -> lr_prefix_list_t`,
    `lr_prefix_list_add(list, prefix, ge, le, permit)`.
-4. **BGP message encoding.** `lr_bgp_encode_open()`,
-   `lr_bgp_encode_update()`, `lr_bgp_encode_notification()`.
-5. **Event polling.** `lr_router_poll_events(router, out_events) ->
+4. **BGP message encoding.** ~~`lr_bgp_encode_open()`,
+   `lr_bgp_encode_update()`, `lr_bgp_encode_notification()`.~~
+   Landed as `lr_bgp_encode_open` (version 4 + the RFC 6793
+   four-octet-AS capability, AS_TRANS above 16 bits; rejects illegal
+   hold times and unrepresentable AS/wire-width combinations),
+   `lr_bgp_encode_notification` (code + subcode + optional data) and
+   `lr_bgp_encode_update_withdraw_v4` /
+   `lr_bgp_encode_update_announce_v4` (ORIGIN + AS_PATH + NEXT_HOP
+   + the legacy IPv4 NLRI; AS_SEQUENCE in wire order, 2- or 4-octet
+   path encoding). 8 Rust tests pin the wire forms and the
+   rejection matrix; the C/C++/Go/Python harnesses exercise the
+   same surface.
+5. **Event polling.** ~~`lr_router_poll_events(router, out_events) ->
    i32` — polls `RouterEvent::RouteInstalled` / `PeerUp` / `PeerDown`
-   and serializes them to a C struct array.
-6. **Route withdraw.** `lr_router_withdraw_v4(router, prefix,
-   prefix_len)`, `lr_router_withdraw_v6(router, prefix_v6, prefix_len)`.
-7. **IPv6 origination.** `lr_router_originate_v6(router, prefix_v6,
+   and serializes them to a C struct array.~~ Landed: `lr_event_t`
+   (kind/session/prefix/path-id/count/limit/pct/action + 128-byte
+   NUL-terminated text) with `lr_router_poll_events`; the
+   `RouterInstance::requeue_events` trait hook pushes events back to
+   the front of the queue so a bounded poll never loses an event;
+   `SendBytes` (drain-output data plane) and `TimerFired` (internal)
+   are consumed silently.
+6. **Route withdraw.** ~~`lr_router_withdraw_v4(router, prefix,
+   prefix_len)`, `lr_router_withdraw_v6(router, prefix_v6, prefix_len)`.~~
+   Landed — both, backed by the `unoriginate` return-value widening
+   (bool: was a locally originated route removed). 0 = withdrawn,
+   1 = not locally originated (idempotent no-op, FRR/BIRD `no
+   network` semantics), negative = error.
+7. **IPv6 origination.** ~~`lr_router_originate_v6(router, prefix_v6,
    prefix_len)` (currently only `lr_router_originate_v4` and a
-   labeled variant exist).
+   labeled variant exist).~~ Landed.
 8. **cbindgen header + Go / Python / C++ binding sync.**
 
 **Estimated size.** ~1500–2000 new lines (FFI ~800, Go ~400, Python
@@ -974,7 +998,7 @@ refactor — needs extensive regression tests.
 | D2        | landed                | —     | RPKI-RTR client: codec + state machine + RoaStore + `[bgp.rpki]` daemon thread + hot reload |
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
-| D5        | not started           | —     | FFI expansion                            |
+| D5        | partial (D5.4–D5.7 landed) | —     | FFI expansion — encoders + event polling + withdraw + v6 originate in; OSPF/Babel/LDP sessions, filter DSL, policy objects pending |
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | not started           | —     | RwLock + per-AFI sharding + async I/O    |
