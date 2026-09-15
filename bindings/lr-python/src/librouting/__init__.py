@@ -26,6 +26,10 @@ from .router import (
 from .roa import ROA_INVALID, ROA_NOT_FOUND, ROA_VALID, RoaStore
 from .codec import (
     encode_keepalive,
+    encode_open,
+    encode_notification,
+    encode_update_withdraw_v4,
+    encode_update_announce_v4,
     decode_bgp,
     decode_ospf_v2,
     decode_babel,
@@ -50,6 +54,10 @@ __all__ = [
     "ROA_NOT_FOUND",
     "ROA_INVALID",
     "encode_keepalive",
+    "encode_open",
+    "encode_notification",
+    "encode_update_withdraw_v4",
+    "encode_update_announce_v4",
     "decode_bgp",
     "decode_ospf_v2",
     "decode_babel",

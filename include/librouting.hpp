@@ -424,6 +424,82 @@ inline std::int32_t damping_decay(Damping& d, std::uint64_t now_s) {
     return rc;
 }
 
+// ===== D5.4 — BGP message encoders =====
+
+/// Encode a KEEPALIVE message (RFC 4271 §4.4).
+inline Bytes encode_keepalive() {
+    auto b = std::make_unique<lr_bytes_t>();
+    if (lr_bgp_encode_keepalive(b.get()) != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bgp_encode_keepalive failed: " + std::string(err ? err : "unknown"));
+    }
+    return Bytes(b.release());
+}
+
+/// Encode an OPEN message (RFC 4271 §4.2). With as4 the RFC 6793
+/// four-octet-AS capability (code 65) is appended; an AS above 65535
+/// then travels as AS_TRANS (23456) in the 16-bit field.
+inline Bytes encode_open(std::uint32_t my_as, std::uint16_t hold_time,
+                         const std::array<std::uint8_t, 4>& bgp_id, bool as4) {
+    auto b = std::make_unique<lr_bytes_t>();
+    if (lr_bgp_encode_open(my_as, hold_time, bgp_id.data(), as4 ? 1 : 0, b.get()) != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bgp_encode_open failed: " + std::string(err ? err : "unknown"));
+    }
+    return Bytes(b.release());
+}
+
+/// Encode a NOTIFICATION message (RFC 4271 §4.5): code + subcode and
+/// an optional data payload.
+inline Bytes encode_notification(std::uint8_t code, std::uint8_t subcode,
+                                 const std::vector<std::uint8_t>& data = {}) {
+    auto b = std::make_unique<lr_bytes_t>();
+    if (lr_bgp_encode_notification(code, subcode, data.empty() ? nullptr : data.data(),
+                                    data.size(), b.get()) != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bgp_encode_notification failed: " + std::string(err ? err : "unknown"));
+    }
+    return Bytes(b.release());
+}
+
+/// Encode a withdraw-only UPDATE (RFC 4271 §4.3): every listed IPv4
+/// prefix goes into the withdrawn-routes section. IPv6 entries are
+/// rejected (the legacy NLRI section carries IPv4 only).
+inline Bytes encode_update_withdraw_v4(const std::vector<lr_prefix_t>& prefixes) {
+    auto b = std::make_unique<lr_bytes_t>();
+    if (lr_bgp_encode_update_withdraw_v4(prefixes.empty() ? nullptr : prefixes.data(),
+                                          prefixes.size(), b.get()) != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bgp_encode_update_withdraw_v4 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return Bytes(b.release());
+}
+
+/// Encode an announcement UPDATE (RFC 4271 §4.3): ORIGIN + AS_PATH +
+/// NEXT_HOP attributes and the IPv4 NLRI. origin selects the ORIGIN
+/// value (0=IGP, 1=EGP, 2=INCOMPLETE); as_path is an AS_SEQUENCE in
+/// wire order (the origin AS first; empty for a locally originated
+/// route); with as4 the segments use the RFC 6793 four-octet encoding.
+inline Bytes encode_update_announce_v4(const std::vector<lr_prefix_t>& prefixes,
+                                       const std::array<std::uint8_t, 4>& next_hop,
+                                       const std::vector<std::uint32_t>& as_path = {},
+                                       std::uint8_t origin = 0, bool as4 = true) {
+    if (origin > 2) {
+        throw Error("encode_update_announce_v4: origin must be 0 (IGP), 1 (EGP) or 2 (INCOMPLETE)");
+    }
+    auto b = std::make_unique<lr_bytes_t>();
+    if (lr_bgp_encode_update_announce_v4(
+            prefixes.empty() ? nullptr : prefixes.data(), prefixes.size(), next_hop.data(),
+            as_path.empty() ? nullptr : as_path.data(), as_path.size(), origin, as4 ? 1 : 0,
+            b.get()) != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_bgp_encode_update_announce_v4 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return Bytes(b.release());
+}
+
 inline std::vector<std::uint8_t> to_vec(const Bytes& b) {
     if (!b) return {};
     auto len = lr_bytes_len(b.get());

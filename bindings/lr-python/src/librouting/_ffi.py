@@ -125,6 +125,27 @@ int32_t lr_router_sessions_dump(lr_router_t r, lr_bytes_t *out);
 
 int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_bgp_encode_keepalive(lr_bytes_t *out);
+int32_t lr_bgp_encode_open(uint32_t my_as,
+                           uint16_t hold_time,
+                           const uint8_t *bgp_id,
+                           uint8_t as4,
+                           lr_bytes_t *out);
+int32_t lr_bgp_encode_notification(uint8_t error_code,
+                                   uint8_t error_subcode,
+                                   const uint8_t *data,
+                                   uintptr_t data_len,
+                                   lr_bytes_t *out);
+int32_t lr_bgp_encode_update_withdraw_v4(const struct lr_prefix_t *prefixes,
+                                         uintptr_t n_prefixes,
+                                         lr_bytes_t *out);
+int32_t lr_bgp_encode_update_announce_v4(const struct lr_prefix_t *prefixes,
+                                         uintptr_t n_prefixes,
+                                         const uint8_t *next_hop,
+                                         const uint32_t *as_path,
+                                         uintptr_t as_path_len,
+                                         uint8_t origin,
+                                         uint8_t as4,
+                                         lr_bytes_t *out);
 int32_t lr_ospf_decode_v2(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_babel_decode(const uint8_t *data, uintptr_t len, lr_bytes_t *out);
 int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, lr_bytes_t *out);

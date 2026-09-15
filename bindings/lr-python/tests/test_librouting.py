@@ -382,3 +382,43 @@ def test_originate_and_withdraw_lifecycle():
                 raise AssertionError(f"{bad} must be rejected")
             except librouting.LrError:
                 pass
+
+def test_bgp_message_encoders():
+    # OPEN with the ASN4 capability.
+    open_msg = librouting.encode_open(64512, 90, "10.0.0.1")
+    assert open_msg[18] == 1 and len(open_msg) >= 30
+    for bad in (lambda: librouting.encode_open(4200000000, 90, "10.0.0.1", as4=False),
+                lambda: librouting.encode_open(64512, 1, "10.0.0.1")):
+        try:
+            bad()
+            raise AssertionError("must be rejected")
+        except librouting.LrError:
+            pass
+
+    # NOTIFICATION with and without data.
+    n = librouting.encode_notification(6, 3)
+    assert n[18] == 3 and len(n) == 21
+    n = librouting.encode_notification(2, 4, b"\x01\x02")
+    assert len(n) == 23
+
+    # Withdraw-only UPDATE.
+    w = librouting.encode_update_withdraw_v4(["203.0.113.0/24", "198.51.100.0/24"])
+    assert w[18] == 2 and len(w) == 31
+    try:
+        librouting.encode_update_withdraw_v4(["2001:db8::/32"])
+        raise AssertionError("IPv6 must be rejected")
+    except librouting.LrError:
+        pass
+
+    # Announcement UPDATE.
+    a = librouting.encode_update_announce_v4(
+        ["203.0.113.0/24"], "192.0.2.1", [64513, 64512], origin=0, as4=False
+    )
+    assert a[18] == 2 and len(a) > 23
+    try:
+        librouting.encode_update_announce_v4(
+            ["203.0.113.0/24"], "192.0.2.1", None, origin=3
+        )
+        raise AssertionError("ORIGIN 3 must be rejected")
+    except librouting.LrError:
+        pass

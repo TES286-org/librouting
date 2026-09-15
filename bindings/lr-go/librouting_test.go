@@ -522,3 +522,56 @@ func TestOriginateAndWithdrawLifecycle(t *testing.T) {
 		t.Fatal("WithdrawV6 with plen 129 must fail")
 	}
 }
+
+func TestBGPMessageEncoders(t *testing.T) {
+	// OPEN with the ASN4 capability.
+	open, err := EncodeOpen(64512, 90, [4]byte{10, 0, 0, 1}, true)
+	if err != nil {
+		t.Fatalf("EncodeOpen: %v", err)
+	}
+	if len(open) < 30 || open[18] != 1 {
+		t.Fatalf("OPEN wire form: type=%d len=%d", open[18], len(open))
+	}
+	if _, err := EncodeOpen(4200000000, 90, [4]byte{10, 0, 0, 1}, false); err == nil {
+		t.Fatal("4-byte AS with as4 off must fail")
+	}
+	if _, err := EncodeOpen(64512, 1, [4]byte{10, 0, 0, 1}, false); err == nil {
+		t.Fatal("hold time 1 must fail")
+	}
+
+	// NOTIFICATION with and without data.
+	n, err := EncodeNotification(6, 3, nil)
+	if err != nil || len(n) != 21 || n[18] != 3 {
+		t.Fatalf("EncodeNotification: got (%d bytes, err=%v)", len(n), err)
+	}
+	n, err = EncodeNotification(2, 4, []byte{1, 2})
+	if err != nil || len(n) != 23 {
+		t.Fatalf("EncodeNotification with data: got (%d bytes, err=%v)", len(n), err)
+	}
+
+	// Withdraw-only UPDATE.
+	pfx := []PrefixSpec{{Addr: []byte{203, 0, 113, 0}, PrefixLen: 24}}
+	w, err := EncodeUpdateWithdrawV4(pfx)
+	if err != nil {
+		t.Fatalf("EncodeUpdateWithdrawV4: %v", err)
+	}
+	if w[18] != 2 {
+		t.Fatalf("UPDATE type = %d", w[18])
+	}
+	if _, err := EncodeUpdateWithdrawV4(
+		[]PrefixSpec{{Addr: make([]byte, 16), IsIPv6: true, PrefixLen: 32}}); err == nil {
+		t.Fatal("IPv6 prefix in the legacy NLRI section must fail")
+	}
+
+	// Announcement UPDATE (ORIGIN=IGP, AS_PATH 64513 64512).
+	a, err := EncodeUpdateAnnounceV4(pfx, [4]byte{192, 0, 2, 1}, []uint32{64513, 64512}, 0, false)
+	if err != nil {
+		t.Fatalf("EncodeUpdateAnnounceV4: %v", err)
+	}
+	if a[18] != 2 || len(a) <= 23 {
+		t.Fatalf("announce UPDATE wire form: type=%d len=%d", a[18], len(a))
+	}
+	if _, err := EncodeUpdateAnnounceV4(pfx, [4]byte{192, 0, 2, 1}, nil, 3, false); err == nil {
+		t.Fatal("ORIGIN 3 must fail")
+	}
+}

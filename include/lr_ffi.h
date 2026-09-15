@@ -43,15 +43,6 @@ typedef struct lr_bytes_t {
 } lr_bytes_t;
 
 /**
- * Opaque router handle. C side never touches internals.
- */
-typedef struct OpaqueRouter {
-  uint8_t _private[0];
-} OpaqueRouter;
-
-typedef struct OpaqueRouter *lr_router_t;
-
-/**
  * One IPv4/IPv6 prefix (embedder-side). IPv4 addresses go in the
  * first four bytes of `addr` with `is_ipv6 = 0`; IPv6 uses all
  * sixteen bytes with `is_ipv6 = 1` — the same convention as
@@ -62,6 +53,15 @@ typedef struct lr_prefix_t {
   uint8_t is_ipv6;
   uint8_t prefix_len;
 } lr_prefix_t;
+
+/**
+ * Opaque router handle. C side never touches internals.
+ */
+typedef struct OpaqueRouter {
+  uint8_t _private[0];
+} OpaqueRouter;
+
+typedef struct OpaqueRouter *lr_router_t;
 
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
@@ -169,11 +169,86 @@ const uint8_t *lr_bytes_ptr(const struct lr_bytes_t *b);
 int32_t lr_bgp_decode(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 
 /**
- * Encode a BGP message given the body bytes. The first byte of `data` is the
- * message type (1=OPEN, 2=UPDATE, 3=NOTIF, 4=KEEPALIVE, 5=ROUTE-REFRESH).
- * Currently only KEEPALIVE is supported for round-trip FFI testing.
+ * Encode a KEEPALIVE message (RFC 4271 §4.4). Part of the D5.4
+ * encoder surface: see also [`lr_bgp_encode_open`],
+ * [`lr_bgp_encode_notification`], [`lr_bgp_encode_update_withdraw_v4`]
+ * and [`lr_bgp_encode_update_announce_v4`].
  */
 int32_t lr_bgp_encode_keepalive(struct lr_bytes_t *out);
+
+/**
+ * Encode an OPEN message (RFC 4271 §4.2, ROADMAP-v3 D5.4): version 4,
+ * the given AS, hold time and BGP identifier. When `as4` is non-zero
+ * the RFC 6793 four-octet-AS capability (code 65) is appended with the
+ * full 32-bit AS — an AS above 65535 then travels as AS_TRANS (23456)
+ * in the 16-bit field per RFC 4893 §7. An AS above 65535 with `as4`
+ * unset is rejected (it cannot be represented on the wire).
+ *
+ * Hold time 0 (use the negotiated default) or >= 3 per RFC 4271 §4.2;
+ * the illegal 1-2 second values are rejected up front.
+ *
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `bgp_id` must point to 4 readable bytes.
+ */
+int32_t lr_bgp_encode_open(uint32_t my_as,
+                           uint16_t hold_time,
+                           const uint8_t *bgp_id,
+                           uint8_t as4,
+                           struct lr_bytes_t *out);
+
+/**
+ * Encode a NOTIFICATION message (RFC 4271 §4.5): the error code, the
+ * subcode and the optional data payload (NULL when `data_len` is 0).
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `data` must point to `data_len` readable bytes (NULL only when
+ * `data_len` is 0).
+ */
+int32_t lr_bgp_encode_notification(uint8_t error_code,
+                                   uint8_t error_subcode,
+                                   const uint8_t *data,
+                                   uintptr_t data_len,
+                                   struct lr_bytes_t *out);
+
+/**
+ * Encode a withdraw-only UPDATE (RFC 4271 §4.3): every listed IPv4
+ * prefix goes into the withdrawn-routes section; no path attributes,
+ * no NLRI. Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `prefixes` must point to `n_prefixes` readable `lr_prefix_t` values.
+ */
+int32_t lr_bgp_encode_update_withdraw_v4(const struct lr_prefix_t *prefixes,
+                                         uintptr_t n_prefixes,
+                                         struct lr_bytes_t *out);
+
+/**
+ * Encode an announcement UPDATE (RFC 4271 §4.3): ORIGIN + AS_PATH +
+ * NEXT_HOP attributes and the IPv4 prefixes in the NLRI section.
+ *
+ * `origin` selects the ORIGIN value (0 = IGP, 1 = EGP, 2 = INCOMPLETE;
+ * anything else is rejected). `as_path` is an AS_SEQUENCE in wire order
+ * (the origin AS first); with `as4` set the segments use the RFC 6793
+ * four-octet encoding. An empty AS_PATH (locally originated) is legal.
+ *
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `prefixes` must point to `n_prefixes` readable `lr_prefix_t` values,
+ * `next_hop` to 4 readable bytes and `as_path` to `as_path_len` readable
+ * `uint32_t` values.
+ */
+int32_t lr_bgp_encode_update_announce_v4(const struct lr_prefix_t *prefixes,
+                                         uintptr_t n_prefixes,
+                                         const uint8_t *next_hop,
+                                         const uint32_t *as_path,
+                                         uintptr_t as_path_len,
+                                         uint8_t origin,
+                                         uint8_t as4,
+                                         struct lr_bytes_t *out);
 
 int32_t lr_ospf_decode_v2(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 

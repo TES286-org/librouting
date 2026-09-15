@@ -103,6 +103,66 @@ int main(void) {
     check(p[18] == 4, "keepalive type=4");
     lr_bytes_free(&b);
 
+    /* D5.4 encoder surface: OPEN / NOTIFICATION / UPDATE. */
+    lr_bytes_t enc = {0};
+    const uint8_t rid[4] = {10, 0, 0, 1};
+    rc = lr_bgp_encode_open(64512, 90, rid, 1, &enc);
+    check(rc == 0, "encode_open");
+    check(lr_bytes_ptr(&enc)[18] == 1, "open type=1");
+    check(lr_bytes_len(&enc) > 29, "open carries optional parameters");
+    lr_bytes_free(&enc);
+    rc = lr_bgp_encode_open(4200000000u, 90, rid, 0, &enc);
+    check(rc == -3, "encode_open rejects a 4-byte AS with as4 off");
+    rc = lr_bgp_encode_open(64512, 1, rid, 0, &enc);
+    check(rc == -3, "encode_open rejects hold time 1");
+
+    rc = lr_bgp_encode_notification(6, 3, NULL, 0, &enc);
+    check(rc == 0, "encode_notification");
+    check(lr_bytes_ptr(&enc)[18] == 3, "notification type=3");
+    check(lr_bytes_len(&enc) == 21, "notification without data is 21 bytes");
+    lr_bytes_free(&enc);
+    const uint8_t notif_data[2] = {1, 2};
+    rc = lr_bgp_encode_notification(2, 4, notif_data, 2, &enc);
+    check(rc == 0, "encode_notification with data");
+    check(lr_bytes_len(&enc) == 23, "notification data rides the body");
+    lr_bytes_free(&enc);
+
+    struct lr_prefix_t w[2];
+    memset(w, 0, sizeof(w));
+    w[0].addr[0] = 203; w[0].addr[1] = 0; w[0].addr[2] = 113; w[0].addr[3] = 0;
+    w[0].prefix_len = 24;
+    w[1].addr[0] = 198; w[1].addr[1] = 51; w[1].addr[2] = 100; w[1].addr[3] = 0;
+    w[1].prefix_len = 24;
+    rc = lr_bgp_encode_update_withdraw_v4(w, 2, &enc);
+    check(rc == 0, "encode_update_withdraw_v4");
+    check(lr_bytes_ptr(&enc)[18] == 2, "update type=2");
+    check(lr_bytes_len(&enc) == 31, "withdraw update: 2 prefixes, no attrs");
+    lr_bytes_free(&enc);
+    rc = lr_bgp_encode_update_withdraw_v4(NULL, 0, &enc);
+    check(rc == 0, "encode_update_withdraw_v4 with zero prefixes");
+    lr_bytes_free(&enc);
+
+    struct lr_prefix_t ann[1];
+    memset(ann, 0, sizeof(ann));
+    ann[0].addr[0] = 203; ann[0].addr[1] = 0; ann[0].addr[2] = 113; ann[0].addr[3] = 0;
+    ann[0].prefix_len = 24;
+    const uint8_t enc_nh[4] = {192, 0, 2, 1};
+    const uint32_t ases[2] = {64513, 64512};
+    rc = lr_bgp_encode_update_announce_v4(ann, 1, enc_nh, ases, 2, 0, 0, &enc);
+    check(rc == 0, "encode_update_announce_v4");
+    check(lr_bytes_ptr(&enc)[18] == 2, "announce update type=2");
+    check(lr_bytes_len(&enc) > 31, "announce update carries attributes + NLRI");
+    lr_bytes_free(&enc);
+    rc = lr_bgp_encode_update_announce_v4(ann, 1, enc_nh, NULL, 0, 3, 0, &enc);
+    check(rc == -3, "announce rejects ORIGIN 3");
+    struct lr_prefix_t v6p;
+    memset(&v6p, 0, sizeof(v6p));
+    v6p.addr[0] = 0x20; v6p.addr[1] = 0x01; v6p.addr[2] = 0x0d; v6p.addr[3] = 0xb8;
+    v6p.is_ipv6 = 1;
+    v6p.prefix_len = 32;
+    rc = lr_bgp_encode_update_withdraw_v4(&v6p, 1, &enc);
+    check(rc == -3, "withdraw rejects IPv6 in the legacy NLRI section");
+
     /* Drain output — should be empty since we didn't feed input */
     lr_bytes_t out = {0};
     rc = lr_router_drain_output(r, h, &out);

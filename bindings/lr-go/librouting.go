@@ -637,6 +637,131 @@ func EncodeKeepalive() ([]byte, error) {
 	return copyBytes(&b), nil
 }
 
+// EncodeOpen returns the bytes of a BGP OPEN message (RFC 4271 §4.2).
+// With as4 set, the RFC 6793 four-octet-AS capability (code 65) is
+// appended; an AS above 65535 then travels as AS_TRANS (23456) in the
+// 16-bit field. Hold time must be 0 or >= 3.
+func EncodeOpen(myAs uint32, holdTime uint16, bgpId [4]byte, as4 bool) ([]byte, error) {
+	var b C.struct_lr_bytes_t
+	rc := C.lr_bgp_encode_open(
+		C.uint32_t(myAs),
+		C.uint16_t(holdTime),
+		(*C.uint8_t)(unsafe.Pointer(&bgpId[0])),
+		boolToU8(as4),
+		&b,
+	)
+	if rc != 0 {
+		return nil, fmt.Errorf("lr_bgp_encode_open: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&b)
+	return copyBytes(&b), nil
+}
+
+// EncodeNotification returns the bytes of a BGP NOTIFICATION message
+// (RFC 4271 §4.5): the error code, the subcode and an optional data
+// payload (nil for none).
+func EncodeNotification(code, subcode uint8, data []byte) ([]byte, error) {
+	var b C.struct_lr_bytes_t
+	var dataPtr *C.uint8_t
+	if len(data) > 0 {
+		dataPtr = (*C.uint8_t)(unsafe.Pointer(&data[0]))
+	}
+	rc := C.lr_bgp_encode_notification(
+		C.uint8_t(code),
+		C.uint8_t(subcode),
+		dataPtr,
+		C.size_t(len(data)),
+		&b,
+	)
+	if rc != 0 {
+		return nil, fmt.Errorf("lr_bgp_encode_notification: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&b)
+	return copyBytes(&b), nil
+}
+
+// EncodeUpdateWithdrawV4 returns the bytes of a withdraw-only UPDATE
+// (RFC 4271 §4.3): every listed IPv4 prefix goes into the
+// withdrawn-routes section. IPv6 entries are rejected (the legacy
+// NLRI section carries IPv4 only).
+func EncodeUpdateWithdrawV4(prefixes []PrefixSpec) ([]byte, error) {
+	cPrefixes, err := prefixSpecsToC(prefixes)
+	if err != nil {
+		return nil, fmt.Errorf("EncodeUpdateWithdrawV4: %v", err)
+	}
+	var b C.struct_lr_bytes_t
+	rc := C.lr_bgp_encode_update_withdraw_v4(cPrefixes.ptr(), C.size_t(len(prefixes)), &b)
+	if rc != 0 {
+		return nil, fmt.Errorf("lr_bgp_encode_update_withdraw_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&b)
+	return copyBytes(&b), nil
+}
+
+// EncodeUpdateAnnounceV4 returns the bytes of an announcement UPDATE
+// (RFC 4271 §4.3): ORIGIN + AS_PATH + NEXT_HOP and the IPv4 NLRI.
+// origin selects the ORIGIN value (0=IGP, 1=EGP, 2=INCOMPLETE);
+// asPath is an AS_SEQUENCE in wire order (the origin AS first; nil for
+// a locally originated route); with as4 set the segments use the
+// RFC 6793 four-octet encoding.
+func EncodeUpdateAnnounceV4(prefixes []PrefixSpec, nextHop [4]byte, asPath []uint32,
+	origin uint8, as4 bool) ([]byte, error) {
+	cPrefixes, err := prefixSpecsToC(prefixes)
+	if err != nil {
+		return nil, fmt.Errorf("EncodeUpdateAnnounceV4: %v", err)
+	}
+	var asPathPtr *C.uint32_t
+	if len(asPath) > 0 {
+		asPathPtr = (*C.uint32_t)(unsafe.Pointer(&asPath[0]))
+	}
+	var b C.struct_lr_bytes_t
+	rc := C.lr_bgp_encode_update_announce_v4(
+		cPrefixes.ptr(),
+		C.size_t(len(prefixes)),
+		(*C.uint8_t)(unsafe.Pointer(&nextHop[0])),
+		asPathPtr,
+		C.size_t(len(asPath)),
+		C.uint8_t(origin),
+		boolToU8(as4),
+		&b,
+	)
+	if rc != 0 {
+		return nil, fmt.Errorf("lr_bgp_encode_update_announce_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	defer C.lr_bytes_free(&b)
+	return copyBytes(&b), nil
+}
+
+// cPrefixArray is a scratch []C.lr_prefix_t kept alive until the FFI
+// call returns.
+type cPrefixArray []C.lr_prefix_t
+
+func (c cPrefixArray) ptr() *C.lr_prefix_t {
+	if len(c) == 0 {
+		return nil
+	}
+	return (*C.lr_prefix_t)(unsafe.Pointer(&c[0]))
+}
+
+func prefixSpecsToC(prefixes []PrefixSpec) (cPrefixArray, error) {
+	out := make(cPrefixArray, 0, len(prefixes))
+	for _, p := range prefixes {
+		cp, err := p.toC()
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, cp)
+	}
+	return out, nil
+}
+
+func boolToU8(v bool) C.uint8_t {
+	if v {
+		return 1
+	}
+	return 0
+}
+
 // DecodeBGP decodes a single BGP message from `data`. Returns the canonical
 // re-encoded bytes of the message on success.
 func DecodeBGP(data []byte) ([]byte, error) {

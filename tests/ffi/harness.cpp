@@ -33,6 +33,55 @@ int main() {
     std::uint32_t v = lr_abi_version();
     check(v != 0, "abi_version > 0");
 
+    // D5.4 encoder surface (stateless — before the router lifecycle).
+    {
+        auto ka = encode_keepalive();
+        check(lr_bytes_len(ka.get()) == 19, "encode_keepalive is 19 bytes");
+
+        auto open = encode_open(64512, 90, {10, 0, 0, 1}, true);
+        check(lr_bytes_ptr(open.get())[18] == 1, "encode_open type=1");
+        check(lr_bytes_len(open.get()) > 29, "encode_open carries parameters");
+        bool threw = false;
+        try {
+            encode_open(4200000000u, 90, {10, 0, 0, 1}, false);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "encode_open rejects a 4-byte AS with as4 off");
+
+        auto n = encode_notification(6, 3);
+        check(lr_bytes_len(n.get()) == 21, "encode_notification without data");
+        auto nd = encode_notification(2, 4, {1, 2});
+        check(lr_bytes_len(nd.get()) == 23, "encode_notification with data");
+
+        auto w = encode_update_withdraw_v4(
+            {make_prefix({203, 0, 113, 0}, 24), make_prefix({198, 51, 100, 0}, 24)});
+        check(lr_bytes_len(w.get()) == 31, "encode_update_withdraw_v4 (2 prefixes)");
+        threw = false;
+        try {
+            lr_prefix_t bad{};
+            bad.is_ipv6 = 1;
+            bad.prefix_len = 32;
+            encode_update_withdraw_v4({bad});
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "withdraw rejects IPv6 in the legacy NLRI section");
+
+        auto a = encode_update_announce_v4({make_prefix({203, 0, 113, 0}, 24)},
+                                           {192, 0, 2, 1}, {64513, 64512}, 0, false);
+        check(lr_bytes_ptr(a.get())[18] == 2, "encode_update_announce_v4 type=2");
+        check(lr_bytes_len(a.get()) > 23, "announce carries attributes + NLRI");
+        threw = false;
+        try {
+            encode_update_announce_v4({make_prefix({203, 0, 113, 0}, 24)},
+                                      {192, 0, 2, 1}, {}, 3, false);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "announce rejects ORIGIN 3");
+    }
+
     // RAII lifecycle: the Router unique_ptr must free the handle on scope
     // exit. We wrap the block so the destructor runs before the final
     // report.
