@@ -364,14 +364,14 @@ sources × 4 routes for verdict + attribute-state equality.~~
 
 ## D4 — Daemon surface for library-level cross-protocol features
 
-**Status:** partial — ~~D4.1 (`[[redistribute]]`)~~, ~~D4.2
-(`[[aggregate]]`)~~ and ~~D4.3 (`[damping]`)~~ are in; D4.4 (FFI)
-and D4.5 (interop scripts) remain. Tracks `lr-cli::daemon_config` +
+**Status:** landed — ~~D4.1 (`[[redistribute]]`)~~, ~~D4.2
+(`[[aggregate]]`)~~, ~~D4.3 (`[damping]`)~~, ~~D4.4 (FFI)~~ and
+~~D4.5 (interop scripts)~~ are all in. Tracks `lr-cli::daemon_config` +
 `lr-cli::daemon` + `lr-ffi`.
 
-**Current gap (what remains).** ~~The FFI surface for the three
-daemon-wired features~~ (D4.4) ~~and~~ the interop scripts against
-BIRD/FRR (D4.5) remain.
+**Current gap.** None — direction closed. ~~The FFI surface for the three
+daemon-wired features~~ (D4.4) ~~and the interop scripts against
+BIRD/FRR~~ (D4.5) ~~remain~~ both landed.
 
 1. **Redistribution.** `RedistributionPipe` in
    `lr-router/src/redistribution.rs` (227 LoC) supports BGP↔OSPF,
@@ -482,9 +482,18 @@ BIRD/FRR (D4.5) remain.
    constants re-exported. The C, C++, Go and Python harnesses/test
    suites exercise the new entries in CI. FFI tests (5) pin round
    trips + the argument-validation matrix.
-5. **Interop tests.** `redistribute_bird.sh` (BIRD `pipe` protocol),
-   `aggregate_bird.sh`, `damping_bird.sh` (FRR if BIRD 2 has damping
-   disabled by default).
+5. **Interop tests.** Landed: `redistribute_bird.sh` (BIRD 2 speaks
+   both ends of a BGP↔OSPF pipe over a veth pair — the lab that
+   flushed out the Router-LSA V/E/B bit and the protocol-direct
+   ORIGIN/AS_PATH export bugs), `aggregate_bird.sh` (BIRD originates
+   two covering specifics, lr aggregates, BIRD verifies
+   ATOMIC_AGGREGATE + AGGREGATOR + AS_PATH on the wire and the
+   retraction after a SIGHUP route swap — the lab that caught the
+   AGGREGATOR flags bug) and `damping_frr.sh` (FRR bgpd drives
+   withdraw flaps into lr's `[damping]` table — three flaps
+   suppress, the decay ticker reactivates below reuse, a post-reuse
+   flap re-installs — the lab that caught the epoch-vs-monotonic
+   decay time base). All three run in the CI interop job.
 
 **Estimated size.** ~800–1200 new lines (TOML ~300, daemon wiring
 ~200, FFI ~200, tests ~300).
@@ -964,7 +973,7 @@ refactor — needs extensive regression tests.
 | D1        | not started           | —     | Babel multi-session + per-iface params   |
 | D2        | landed                | —     | RPKI-RTR client: codec + state machine + RoaStore + `[bgp.rpki]` daemon thread + hot reload |
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
-| D4        | partial (D4.1–D4.3 landed) | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts pending |
+| D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | not started           | —     | FFI expansion                            |
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |

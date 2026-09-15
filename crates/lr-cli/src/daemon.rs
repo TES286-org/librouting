@@ -895,6 +895,19 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         std::thread::Builder::new()
             .name("lr-damping-decay".into())
             .spawn(move || {
+                // TIME BASE: the damping hook derives `now_s` from
+                // `route.age_ms` — the router's monotonic
+                // milliseconds-since-daemon-start (`start.elapsed()`),
+                // NOT the UNIX epoch. The decay ticker must share
+                // that base: with epoch seconds every tick would see
+                // an astronomically large `elapsed` in
+                // `decay_to_now`, zero the figure-of-merit and
+                // instantly "reactivate" every suppressed prefix —
+                // damping could never hold (caught live by
+                // tests/interop/damping_frr.sh). The per-thread
+                // start skew is milliseconds — noise against decay
+                // intervals measured in seconds.
+                let base = WallClock::now();
                 // RFC 2439 §4.2: decay once per `decay_interval_s`.
                 // The first tick fires after one interval so we do
                 // not decay a freshly-started table (which would be a
@@ -910,11 +923,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         // restarted).
                         break;
                     };
-                    let _now_s = std::time::SystemTime::now()
-                        .duration_since(std::time::UNIX_EPOCH)
-                        .map(|d| d.as_secs())
-                        .unwrap_or(0);
-                    let reactivated = table.decay_all(_now_s);
+                    let now_s = base.elapsed().as_secs();
+                    let reactivated = table.decay_all(now_s);
                     for prefix in &reactivated {
                         // The router's import hook chain has no
                         // "please re-import this prefix" API — the

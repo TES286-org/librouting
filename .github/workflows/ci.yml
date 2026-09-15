@@ -343,6 +343,12 @@ jobs:
         run: ./tests/interop/ldp_frr_v6.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
         run: ./tests/interop/frr.sh
+      - name: Redistribution interop (BGP↔OSPF pipes ↔ BIRD 2, ROADMAP-v3 D4.5)
+        run: ./tests/interop/redistribute_bird.sh
+      - name: Aggregation interop (RFC 4271 9.2.2.2 ↔ BIRD 2, ROADMAP-v3 D4.5)
+        run: ./tests/interop/aggregate_bird.sh
+      - name: Route flap damping interop (RFC 2439 ↔ FRR bgpd, ROADMAP-v3 D4.5)
+        run: ./tests/interop/damping_frr.sh
       - name: YANG surface gate (RFC 9647 + RFC 8177, libyang when present)
         run: ./tests/interop/yang.sh
       # W6.3 exchange-plane exit criteria (docs/research/EXCHANGE-PLANE.md

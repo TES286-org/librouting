@@ -18,6 +18,18 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Cross-protocol interop labs (ROADMAP-v3 D4.5) closing the D4
+  direction: `tests/interop/redistribute_bird.sh` (BIRD 2 speaks both
+  ends of a BGP↔OSPF pipe over a veth pair — flushed out the
+  Router-LSA V/E/B body-bits bug and the protocol-direct export
+  missing ORIGIN/AS_PATH), `tests/interop/aggregate_bird.sh` (BIRD
+  originates covering specifics, lr aggregates, BIRD verifies
+  ATOMIC_AGGREGATE + AGGREGATOR + AS_PATH on the wire and the
+  retraction after a SIGHUP route swap) and
+  `tests/interop/damping_frr.sh` (FRR bgpd drives withdraw flaps
+  into the `[damping]` table — three flaps suppress, the decay ticker
+  reactivates below reuse, a post-reuse flap re-installs). All three
+  wired into the CI interop job.
 - FFI surface for the cross-protocol daemon features (ROADMAP-v3
   D4.4): `lr_router_add_redistribution_pipe` (BIRD `pipe` / FRR
   `redistribute` with metric policy, tag and allow-list),
@@ -124,6 +136,14 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed
 
+- Route flap damping decay used the UNIX epoch as its time base while
+  the import hook derives `now` from the router's monotonic
+  milliseconds-since-daemon-start — every decay tick saw an
+  astronomically large elapsed time, zeroed the figure-of-merit and
+  instantly "reactivated" every suppressed prefix, so damping could
+  never hold. The `lr-damping-decay` thread now ticks on the same
+  monotonic base the router stamps `route.age_ms` with (caught live by
+  the new `tests/interop/damping_frr.sh` FRR lab).
 - `cargo bench --workspace -- <criterion args>` no longer dies on the
   first libtest target ("Unrecognized option: 'sample-size'"): every
   `[lib]` target and the `lr-cli` binaries now carry `bench = false`,
