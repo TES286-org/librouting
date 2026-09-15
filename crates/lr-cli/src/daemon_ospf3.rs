@@ -69,7 +69,7 @@
 use std::collections::BTreeMap;
 use std::net::Ipv6Addr;
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use lr_core::addr::{IpAddr, RouterId};
@@ -255,7 +255,7 @@ struct Neighbor {
 }
 
 struct Ospf3Daemon {
-    router: Arc<Mutex<DefaultRouter>>,
+    router: Arc<RwLock<DefaultRouter>>,
     interfaces: Vec<Ospf3Interface>,
     neighbors: BTreeMap<(u32, u32), Neighbor>,
     /// Router-LSA re-origination due times (area → ms), MinLSArrival
@@ -463,7 +463,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     let mut daemon = Ospf3Daemon {
         router: match &host {
             Some(h) => Arc::clone(&h.runtime.router),
-            None => Arc::new(Mutex::new(DefaultRouter::new())),
+            None => Arc::new(RwLock::new(DefaultRouter::new())),
         },
         interfaces,
         neighbors: BTreeMap::new(),
@@ -561,7 +561,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     let iface_mtu = daemon.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
     {
         let router_arc = Arc::clone(&daemon.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         if cfg.ospf_srv6_receive {
             // RFC 9513 §5 reception: project learned Locator LSAs into
             // the per-node SRv6 database and install the §5 locator
@@ -598,7 +598,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         let router = Arc::clone(&daemon.router);
         Arc::new(move || {
             let mut lines = status.lock().map(|s| s.clone()).unwrap_or_default();
-            if let Ok(router) = router.lock() {
+            if let Ok(router) = router.read() {
                 for s in router.session_summaries() {
                     lines.push(format!(
                         "ospf3 session #{} kind={} state={}",
@@ -663,7 +663,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     // topology until §2.2 exits.
     if daemon.gr_recovery.is_empty() {
         let router_arc = Arc::clone(&daemon.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         let areas: Vec<u32> = daemon.anchors.keys().copied().collect();
         for area in areas {
             daemon.reoriginate_area(&mut router, area, 0);
@@ -708,7 +708,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
     }
     {
         let router_arc = Arc::clone(&daemon.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for n in daemon.neighbors.values() {
             router.close_session(n.handle);
         }
@@ -938,7 +938,7 @@ impl Ospf3Daemon {
     fn run_election(
         iface: &mut Ospf3Interface,
         neighbors: &mut BTreeMap<(u32, u32), Neighbor>,
-        router: &Mutex<DefaultRouter>,
+        router: &RwLock<DefaultRouter>,
         self_rid: u32,
         now_ms: u64,
     ) -> bool {
@@ -979,7 +979,7 @@ impl Ospf3Daemon {
         // §9.4 step 7: the AdjOK? event on every neighbor — pushed via
         // set_ospf_dr_state, which re-runs the §10.4 decision per
         // session (advance to ExStart or demote to 2-Way).
-        let mut router = router.lock().unwrap();
+        let mut router = router.write().unwrap();
         for ((area, _rid), n) in neighbors.iter_mut() {
             if *area != iface.area || n.ifindex != iface.interface_id {
                 continue;
@@ -1084,7 +1084,7 @@ impl Ospf3Daemon {
             return;
         }
         let router_arc = Arc::clone(&self.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for (interface_id, area, rid, idx, mtu) in accepted {
             let key = (area, rid);
             if !self.neighbors.contains_key(&key) {
@@ -1166,7 +1166,7 @@ impl Ospf3Daemon {
         let mut changed_areas: Vec<u32> = Vec::new();
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
             let summaries = router.session_summaries();
             for ((area, rid), n) in self.neighbors.iter_mut() {
                 let est = summaries
@@ -1233,7 +1233,7 @@ impl Ospf3Daemon {
             return;
         }
         let router_arc = Arc::clone(&self.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for (area, rid) in expired {
             if let Some(n) = self.neighbors.remove(&(area, rid)) {
                 router.close_session(n.handle);
@@ -1281,7 +1281,7 @@ impl Ospf3Daemon {
         due.sort_by_key(|(_, t)| *t);
         let areas: Vec<u32> = due.into_iter().map(|(a, _)| a).collect();
         let router_arc = Arc::clone(&self.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for area in areas {
             self.pending_reorig.remove(&area);
             self.reoriginate_area(&mut router, area, now_ms);
@@ -1316,7 +1316,7 @@ impl Ospf3Daemon {
         // re-evaluates the same neighbour.
         {
             let router_arc = Arc::clone(&self.router);
-            let mut router = router_arc.lock().unwrap();
+            let mut router = router_arc.write().unwrap();
             let grace_events = router.drain_ospf_grace_events();
             drop(router);
             for ev in &grace_events {
@@ -1327,7 +1327,7 @@ impl Ospf3Daemon {
         let mut gr_recovery_done: Option<lr_ospf::gr::RestartOutcome> = None;
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
 
             // §3.2 (3): topology changes terminate helpers. Per area,
             // the poll-side counterpart of FRR ospf6d's
@@ -1558,7 +1558,7 @@ impl Ospf3Daemon {
         if still_quiet {
             if let Some(n) = self.neighbors.remove(&(area, rid)) {
                 let router_arc = Arc::clone(&self.router);
-                let mut router = router_arc.lock().unwrap();
+                let mut router = router_arc.write().unwrap();
                 router.close_session(n.handle);
                 for ev in router.poll_events() {
                     crate::daemon_ospf::log_event(&ev);
@@ -1609,7 +1609,7 @@ impl Ospf3Daemon {
         // topology change (helpers for other routers on this box).
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
             for area in self.anchors.keys() {
                 if let Some(v) = router.ospf_area_topology_version(*area) {
                     self.gr_topology.insert(*area, v);
@@ -1875,7 +1875,7 @@ impl Ospf3Daemon {
         let mut outbound: Vec<(u32, Vec<u8>)> = Vec::new();
         {
             let router_arc = Arc::clone(&self.router);
-            let mut router = router_arc.lock().unwrap();
+            let mut router = router_arc.write().unwrap();
             for n in self.neighbors.values() {
                 let stream = router.drain_output(n.handle);
                 if stream.is_empty() {

@@ -54,7 +54,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -460,7 +460,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     }
 
     // ---- Runtime API + signals. ----
-    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+    let router = Arc::new(RwLock::new(DefaultRouter::new()));
     let counters = Arc::new(LdpCounters::new());
     let running = Arc::new(AtomicBool::new(true));
     let runtime = Arc::new(crate::Runtime {

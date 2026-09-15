@@ -49,7 +49,7 @@
 use std::collections::BTreeMap;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use lr_core::addr::RouterId;
@@ -225,7 +225,7 @@ struct Neighbor {
 
 /// Daemon-wide state (the router is shared with the ticker/API threads).
 struct OspfDaemon {
-    router: Arc<Mutex<DefaultRouter>>,
+    router: Arc<RwLock<DefaultRouter>>,
     interfaces: Vec<OspfInterface>,
     neighbors: BTreeMap<(u32, u32), Neighbor>,
     /// Router-LSA re-originations scheduled for the future (area → due
@@ -389,7 +389,7 @@ pub(super) fn run_ospf_daemon(
     let mut daemon = OspfDaemon {
         router: match &host {
             Some(h) => Arc::clone(&h.runtime.router),
-            None => Arc::new(Mutex::new(DefaultRouter::new())),
+            None => Arc::new(RwLock::new(DefaultRouter::new())),
         },
         interfaces,
         neighbors: BTreeMap::new(),
@@ -535,7 +535,7 @@ pub(super) fn run_ospf_daemon(
     let daemon_iface_mtu = daemon.interfaces.first().map(|i| i.mtu).unwrap_or(1500);
     {
         let router_arc = Arc::clone(&daemon.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for area in daemon.interfaces.iter().map(|i| i.area) {
             if daemon.anchors.contains_key(&area) {
                 continue;
@@ -631,7 +631,7 @@ pub(super) fn run_ospf_daemon(
             // mapping-server ranges projected from the area LSDBs
             // (the same data the library exposes through
             // `DefaultRouter::ospf_sr_databases`).
-            let Ok(router) = router.lock() else {
+            let Ok(router) = router.read() else {
                 return lines;
             };
             for (area, db) in router.ospf_sr_databases() {
@@ -738,7 +738,7 @@ pub(super) fn run_ospf_daemon(
     // neighbours) keep describing the topology until §2.2 exits.
     if daemon.gr_recovery.is_empty() {
         let router_arc = Arc::clone(&daemon.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         let areas: Vec<u32> = daemon.anchors.keys().copied().collect();
         for area in areas {
             daemon.reoriginate_area(&mut router, area);
@@ -785,7 +785,7 @@ pub(super) fn run_ospf_daemon(
     }
     {
         let router_arc = Arc::clone(&daemon.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for n in daemon.neighbors.values() {
             router.close_session(n.handle);
         }
@@ -1058,7 +1058,7 @@ impl OspfDaemon {
         let mut new_neighbors: Vec<(u32, u32, u32)> = Vec::new(); // (ifindex, area, rid)
         {
             let router_arc = Arc::clone(&self.router);
-            let mut router = router_arc.lock().unwrap();
+            let mut router = router_arc.write().unwrap();
             for (ifindex, area, rid, idx, mtu) in accepted {
                 let key = (area, rid);
                 if !self.neighbors.contains_key(&key) {
@@ -1185,7 +1185,7 @@ impl OspfDaemon {
     fn run_election(
         iface: &mut OspfInterface,
         neighbors: &mut BTreeMap<(u32, u32), Neighbor>,
-        router: &Mutex<DefaultRouter>,
+        router: &RwLock<DefaultRouter>,
         now_ms: u64,
     ) -> bool {
         let self_ip = iface.addrs.first().map(|a| u32::from(a.addr)).unwrap_or(0);
@@ -1228,7 +1228,7 @@ impl OspfDaemon {
         // §9.4 step 7: the AdjOK? event on every neighbor — pushed via
         // set_ospf_dr_state, which re-runs the §10.4 decision per
         // session (advance to ExStart or demote to 2-Way).
-        let mut router = router.lock().unwrap();
+        let mut router = router.write().unwrap();
         for ((area, _rid), n) in neighbors.iter_mut() {
             if *area != iface.area || n.ifindex != iface.transport.ifindex() {
                 continue;
@@ -1256,7 +1256,7 @@ impl OspfDaemon {
         let mut newly_full: Vec<(u32, u32)> = Vec::new(); // (area, rid)
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
             let summaries = router.session_summaries();
             let mut changed_areas: Vec<u32> = Vec::new();
             for ((area, rid), n) in self.neighbors.iter_mut() {
@@ -1311,7 +1311,7 @@ impl OspfDaemon {
         // type-5 LSAs instead of waiting out the 1800 s refresh.
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
             let asbr = router.ospf_is_asbr();
             if self.asbr_latched.map(|l| l != asbr).unwrap_or(false) {
                 let areas: Vec<u32> = self.anchors.keys().copied().collect();
@@ -1331,7 +1331,7 @@ impl OspfDaemon {
             return;
         }
         let router_arc = Arc::clone(&self.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for area in due {
             self.pending_reorig.remove(&area);
             self.reoriginate_area(&mut router, area);
@@ -1381,7 +1381,7 @@ impl OspfDaemon {
             return;
         }
         let router_arc = Arc::clone(&self.router);
-        let mut router = router_arc.lock().unwrap();
+        let mut router = router_arc.write().unwrap();
         for (area, rid) in expired {
             // The bidirectional elector set shrank (§9.3 NeighborChange)
             // and the dead router leaves the Hello list.
@@ -1508,7 +1508,7 @@ impl OspfDaemon {
         let mut outbound: Vec<(u32, Vec<u8>)> = Vec::new(); // (ifindex, datagram)
         {
             let router_arc = Arc::clone(&self.router);
-            let mut router = router_arc.lock().unwrap();
+            let mut router = router_arc.write().unwrap();
             for n in self.neighbors.values() {
                 let stream = router.drain_output(n.handle);
                 if stream.is_empty() {
@@ -2261,7 +2261,7 @@ impl OspfDaemon {
         if still_quiet {
             if let Some(n) = self.neighbors.remove(&(area, rid)) {
                 let router_arc = Arc::clone(&self.router);
-                let mut router = router_arc.lock().unwrap();
+                let mut router = router_arc.write().unwrap();
                 router.close_session(n.handle);
                 println!(
                     "daemon: ospf neighbor {} dead (area {}) — session closed",
@@ -2295,7 +2295,7 @@ impl OspfDaemon {
         // re-evaluates the same neighbour.
         {
             let router_arc = Arc::clone(&self.router);
-            let mut router = router_arc.lock().unwrap();
+            let mut router = router_arc.write().unwrap();
             let grace_events = router.drain_ospf_grace_events();
             drop(router);
             for ev in &grace_events {
@@ -2306,7 +2306,7 @@ impl OspfDaemon {
         let mut gr_recovery_done: Option<lr_ospf::gr::RestartOutcome> = None;
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
 
             // §3.2 (3): topology changes terminate helpers. Per area,
             // the poll-side counterpart of BIRD's LSDB-change walk
@@ -2448,7 +2448,7 @@ impl OspfDaemon {
         // topology change (helpers for other routers on this box).
         {
             let router_arc = Arc::clone(&self.router);
-            let router = router_arc.lock().unwrap();
+            let router = router_arc.read().unwrap();
             for area in self.anchors.keys() {
                 if let Some(v) = router.ospf_area_topology_version(*area) {
                     self.gr_topology.insert(*area, v);

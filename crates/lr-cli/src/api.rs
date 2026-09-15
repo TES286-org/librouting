@@ -31,7 +31,7 @@
 //! clear refusal at startup instead of a pretend API.
 
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 use lr_router::DefaultRouter;
 
@@ -54,7 +54,7 @@ pub struct DaemonInfo {
 #[cfg_attr(not(unix), expect(dead_code))]
 pub struct ApiContext {
     pub info: DaemonInfo,
-    pub router: Arc<Mutex<DefaultRouter>>,
+    pub router: Arc<RwLock<DefaultRouter>>,
     pub running: Arc<AtomicBool>,
     /// Re-apply configuration (SIGHUP equivalent); returns the log
     /// lines describing what was (not) applied.
@@ -69,7 +69,7 @@ mod imp {
     use std::io::{BufRead, BufReader, BufWriter, Write};
     use std::os::unix::net::{UnixListener, UnixStream};
     use std::sync::atomic::{AtomicBool, Ordering};
-    use std::sync::{Arc, Mutex};
+    use std::sync::{Arc, RwLock};
     use std::thread;
     use std::time::Duration;
 
@@ -183,7 +183,7 @@ mod imp {
     /// grow (`status_lines`, …).
     struct ConnDeps<'a> {
         info: &'a DaemonInfo,
-        router: &'a Arc<Mutex<DefaultRouter>>,
+        router: &'a Arc<RwLock<DefaultRouter>>,
         running: &'a Arc<AtomicBool>,
         reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
@@ -277,7 +277,7 @@ mod imp {
                     // hung filesystem must not stall the router (BGP hold
                     // timers expire).
                     let (routes, summaries) = {
-                        let r = deps.router.lock().unwrap();
+                        let r = deps.router.read().unwrap();
                         (
                             r.rib_paths_snapshot()
                                 .into_iter()
@@ -319,7 +319,7 @@ mod imp {
                 }
                 "status" => {
                     let (sessions, rib) = {
-                        let r = deps.router.lock().unwrap();
+                        let r = deps.router.read().unwrap();
                         (r.session_summaries().len(), r.rib_len())
                     };
                     let _ = writeln!(out, "version {}", deps.info.version);
@@ -339,7 +339,7 @@ mod imp {
                     }
                 }
                 "sessions" => {
-                    let summaries = deps.router.lock().unwrap().session_summaries();
+                    let summaries = deps.router.read().unwrap().session_summaries();
                     for s in summaries {
                         let _ = writeln!(
                             out,
@@ -367,7 +367,7 @@ mod imp {
                         // output stays unchanged.
                         #[cfg(feature = "exchange-plane")]
                         {
-                            let r = deps.router.lock().unwrap();
+                            let r = deps.router.read().unwrap();
                             let h = s.handle;
                             let records = r.exchange_plane_records(h).len();
                             let partial = r.exchange_plane_partial_transit(h);
@@ -390,7 +390,7 @@ mod imp {
                     // prefix-SIDs) append `label=<top>` — the MPLS
                     // label the kernel mirror installs, what `show
                     // mpls table` on FRR would print.
-                    let r = deps.router.lock().unwrap();
+                    let r = deps.router.read().unwrap();
                     for route in r.rib_paths_snapshot() {
                         let _ = writeln!(
                             out,
@@ -438,7 +438,7 @@ mod imp {
     mod tests {
         use super::*;
 
-        fn test_ctx(router: Arc<Mutex<DefaultRouter>>, running: Arc<AtomicBool>) -> ApiContext {
+        fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> ApiContext {
             ApiContext {
                 info: DaemonInfo {
                     version: "test".into(),
@@ -461,9 +461,9 @@ mod imp {
             let path = dir.join("daemon.api");
             let path_str = path.to_str().unwrap().to_string();
 
-            let router = Arc::new(Mutex::new(DefaultRouter::new()));
+            let router = Arc::new(RwLock::new(DefaultRouter::new()));
             {
-                let mut r = router.lock().unwrap();
+                let mut r = router.write().unwrap();
                 r.add_session(lr_router::SessionConfig::bgp(
                     lr_core::addr::Asn(64512),
                     lr_core::addr::Asn(64513),

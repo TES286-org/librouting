@@ -54,7 +54,7 @@
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
-use std::sync::{Arc, Condvar, Mutex};
+use std::sync::{Arc, Condvar, Mutex, RwLock};
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
@@ -217,12 +217,12 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     crate::signal::set_supervised(true);
 
     // Shared plumbing.
-    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+    let router = Arc::new(RwLock::new(DefaultRouter::new()));
     // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2). ----
     // Applied once, here, before any engine spawns: pipes scan the
     // (still empty) Loc-RIB and fire on every later selection; the
     // embedded engines must not re-apply on the shared router.
-    if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.lock().unwrap()) {
+    if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
         eprintln!("error: {}", e);
         return ExitCode::from(2);
     }

@@ -38,7 +38,7 @@ use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
 use std::time::{Duration, Instant as WallClock};
 
@@ -460,7 +460,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // the other engines add their sessions to the same instance).
     let router = match &host {
         Some(h) => Arc::clone(&h.runtime.router),
-        None => Arc::new(Mutex::new(DefaultRouter::new())),
+        None => Arc::new(RwLock::new(DefaultRouter::new())),
     };
 
     // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2). ----
@@ -469,7 +469,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // when it created it; the embedded engines must not re-apply
     // (duplicate pipes would double-re-originate every route).
     if host.is_none() {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
             eprintln!("error: {}", e);
             return ExitCode::from(2);
@@ -493,7 +493,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // ---- Build one router session per configured peer. ----
     let mut entries: Vec<PeerEntry> = Vec::new();
     {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         // RFC 7911 Add-Path: cap how many paths per prefix survive the
         // decision process (and reach Add-Path peers). Router-global.
         r.set_add_path_max_paths(cfg.add_path_max_paths.max(1) as usize);
@@ -705,7 +705,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         let bound_imports = cfg.peers.iter().filter(|p| p.import.is_some()).count();
         let bound_exports = cfg.peers.iter().filter(|p| p.export.is_some()).count();
         {
-            let mut r = router.lock().unwrap();
+            let mut r = router.write().unwrap();
             r.hooks_mut().import.push(Box::new(hooks.clone()));
             r.hooks_mut().export.push(Box::new(hooks));
         }
@@ -773,7 +773,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     filter: f,
                     ctx,
                 };
-                let mut r = router.lock().unwrap();
+                let mut r = router.write().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
             }
             Err(e) => {
@@ -814,7 +814,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 };
                 let _ = session.handle.0;
                 {
-                    let mut r = router.lock().unwrap();
+                    let mut r = router.write().unwrap();
                     r.hooks_mut().import.push(Box::new(hook));
                 }
                 bound_import_filters += 1;
@@ -832,7 +832,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     ctx: std::sync::Arc::clone(&ctx),
                 };
                 {
-                    let mut r = router.lock().unwrap();
+                    let mut r = router.write().unwrap();
                     r.hooks_mut().export.push(Box::new(hook));
                 }
                 bound_export_filters += 1;
@@ -859,7 +859,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // twice on the same route is a no-op (the second pass finds
     // LOCAL_PREF already at 0).
     if cfg.runs_protocol("bgp") {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         r.hooks_mut()
             .export
             .push(Box::new(lr_policy::hooks::GracefulShutdownExportHook::new()));
@@ -882,7 +882,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         )));
         let hook = lr_policy::hooks::DampingImportHook::new(std::sync::Arc::clone(&table));
         {
-            let mut r = router.lock().unwrap();
+            let mut r = router.write().unwrap();
             r.hooks_mut().import.push(Box::new(hook));
         }
         // Spawn the decay ticker thread. The thread holds a weak-ish
@@ -1017,7 +1017,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // reloads can diff old vs new (SIGHUP / runtime API `reload`).
     let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
     {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         for net in &cfg.networks {
             match Prefix::from_str(net) {
                 Ok(p) => {
@@ -1998,7 +1998,7 @@ fn spawn_connector(
                     let hold_off = lost_once.load(Ordering::Relaxed)
                         && rt
                             .router
-                            .lock()
+                            .read()
                             .unwrap()
                             .session_peer_state(hin)
                             .map(|s| s == "Established")
@@ -2064,7 +2064,7 @@ fn run_peer_session(
 ) -> Result<(), String> {
     let _ = stream.set_read_timeout(Some(Duration::from_millis(200)));
     {
-        let mut r = rt.router.lock().unwrap();
+        let mut r = rt.router.write().unwrap();
         r.start_session(session)
             .map_err(|e| format!("start_session: {}", e))?;
     }
@@ -2073,7 +2073,7 @@ fn run_peer_session(
     // this session contributed (RFC 4271 §8.2.2). Event consumers (the
     // ticker thread) observe the resulting events.
     {
-        let mut r = rt.router.lock().unwrap();
+        let mut r = rt.router.write().unwrap();
         r.close_session(session);
         // RFC 4271 §6.4: close a live session with a NOTIFICATION
         // (CEASE) rather than a bare FIN — close_session queues it, so
@@ -2123,7 +2123,7 @@ fn pump_session(
         match stream.read(&mut buf) {
             Ok(0) => return Err("peer closed connection".into()),
             Ok(n) => {
-                let mut r = router.lock().unwrap();
+                let mut r = router.write().unwrap();
                 r.feed_input(session, &buf[..n])
                     .map_err(|e| format!("feed_input: {}", e))?;
             }
@@ -2135,7 +2135,7 @@ fn pump_session(
 
         // 2. Drain router output → write to peer.
         let (out, closed_by_router) = {
-            let mut r = router.lock().unwrap();
+            let mut r = router.write().unwrap();
             let out = r.drain_output(session);
             // RFC 4271 §6.8: the router may have just closed this
             // session while the TCP connection is still alive — this
@@ -2182,7 +2182,7 @@ fn spawn_ticker(
                 }
                 let now_ms = start.elapsed().as_millis() as u64;
                 {
-                    let mut r = rt.router.lock().unwrap();
+                    let mut r = rt.router.write().unwrap();
                     r.tick(lr_core::time::Instant(now_ms));
                     let events = r.poll_events();
                     for ev in &events {
@@ -2200,7 +2200,7 @@ fn spawn_ticker(
             }
             // Final drain: the last events queued by closing sessions.
             {
-                let mut r = rt.router.lock().unwrap();
+                let mut r = rt.router.write().unwrap();
                 let events = r.poll_events();
                 for ev in &events {
                     log_event(ev);
@@ -2510,7 +2510,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         return ExitCode::from(1);
     }
     let running = Arc::new(AtomicBool::new(true));
-    let router = Arc::new(Mutex::new(DefaultRouter::new()));
+    let router = Arc::new(RwLock::new(DefaultRouter::new()));
     let runtime = Arc::new(Runtime {
         reload: Arc::new(|| vec!["bmp: configuration reload is not supported".to_string()]),
         router: Arc::clone(&router),
@@ -2535,7 +2535,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     }
                     let now_ms = start.elapsed().as_millis() as u64;
                     {
-                        let mut r = rt.router.lock().unwrap();
+                        let mut r = rt.router.write().unwrap();
                         r.tick(lr_core::time::Instant(now_ms));
                         for ev in r.poll_events() {
                             log_event(&ev);
@@ -2586,7 +2586,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
 /// shared router; Peer Up/Down are logged.
 fn serve_bmp_station(
     mut stream: std::net::TcpStream,
-    router: &Arc<Mutex<DefaultRouter>>,
+    router: &Arc<RwLock<DefaultRouter>>,
     running: &Arc<AtomicBool>,
 ) {
     use lr_bmp::BmpCodec;
@@ -2634,7 +2634,7 @@ fn serve_bmp_station(
 fn handle_bmp_message(
     message: &lr_bmp::BmpMessage,
     bgp: &mut lr_bgp::BgpCodec,
-    router: &Arc<Mutex<DefaultRouter>>,
+    router: &Arc<RwLock<DefaultRouter>>,
     installed: &mut std::collections::BTreeMap<lr_core::addr::Prefix, lr_core::rib::RouteKey>,
 ) {
     use lr_bmp::BmpMsgType;
@@ -2662,7 +2662,7 @@ fn handle_bmp_message(
                     return;
                 }
             };
-            let mut r = router.lock().unwrap();
+            let mut r = router.write().unwrap();
             for w in &update.withdrawn {
                 if let Some(key) = installed.remove(&w.prefix) {
                     r.unoriginate(&key);
@@ -2788,13 +2788,13 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // (every engine's sessions live in one instance).
     let router = match &host {
         Some(h) => Arc::clone(&h.runtime.router),
-        None => Arc::new(Mutex::new(DefaultRouter::new())),
+        None => Arc::new(RwLock::new(DefaultRouter::new())),
     };
     let mut ifaces = ifaces;
     for iface in &mut ifaces {
         let sc = SessionConfig::babel(lr_ip(iface.transports[0].local));
         let h = {
-            let mut r = router.lock().unwrap();
+            let mut r = router.write().unwrap();
             match r.add_session(sc) {
                 Ok(h) => {
                     r.start_session(h).unwrap();
@@ -2834,7 +2834,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     // Locally originated networks enter the Loc-RIB and are announced as
     // Babel Updates (RFC 8966 §3.7) on the periodic announcement tick.
     {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         for net in &cfg.networks {
             match Prefix::from_str(net) {
                 Ok(p) => {
@@ -2899,7 +2899,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     while running.load(Ordering::Relaxed) {
                         let now_ms = start.elapsed().as_millis() as u64;
                         {
-                            let mut r = router.lock().unwrap();
+                            let mut r = router.write().unwrap();
                             r.tick(lr_core::time::Instant(now_ms));
                             for ev in r.poll_events() {
                                 log_event(&ev);
@@ -2988,7 +2988,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                 "daemon: babel interface {} link down — withdrawing its routes (check link)",
                                 iface.name
                             );
-                            let mut r = router.lock().unwrap();
+                            let mut r = router.write().unwrap();
                             r.babel_flush_session(iface.session);
                         }
                     }
@@ -3002,7 +3002,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         // the other interfaces' re-advertisements).
         if now_ms >= last_babel_gc_ms + 1_000 {
             last_babel_gc_ms = now_ms;
-            router.lock().unwrap().babel_gc(now_ms);
+            router.write().unwrap().babel_gc(now_ms);
         }
 
         // ---- periodic announcements (one per interface × family) ----
@@ -3026,7 +3026,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             iface.hello_seqno = iface.hello_seqno.wrapping_add(1);
             busy = true;
             let rtt_echo = if iface.rtt_cost > 0 {
-                router.lock().unwrap().babel_rtt_echo(iface.session, now_ms)
+                router.read().unwrap().babel_rtt_echo(iface.session, now_ms)
             } else {
                 None
             };
@@ -3034,7 +3034,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // not the refresh cadence — bump it only when the advertised
             // set moved since the last announcement.
             {
-                let r = router.lock().unwrap();
+                let r = router.read().unwrap();
                 let sig = babel_announcement_signature(&r, iface);
                 if sig != iface.last_sig {
                     iface.seqno = iface.seqno.wrapping_add(1);
@@ -3044,7 +3044,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             for ti in 0..iface.transports.len() {
                 let transport_local = iface.transports[ti].local;
                 let announce = {
-                    let r = router.lock().unwrap();
+                    let r = router.read().unwrap();
                     build_babel_announcement(&r, iface, transport_local, now_ms, now_us, rtt_echo)
                 };
                 let transport = &mut iface.transports[ti];
@@ -3111,7 +3111,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                     destination: lr_ip(dest),
                                     destination_port: iface.port,
                                 };
-                                let mut r = router.lock().unwrap();
+                                let mut r = router.write().unwrap();
                                 match &mut iface.auth {
                                     Some(auth) => {
                                         let out = auth.verify(&buf[..n], ph, now_ms);
@@ -3194,7 +3194,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         // ---- drain outbound ----
         for iface in &mut ifaces {
             let out = {
-                let mut r = router.lock().unwrap();
+                let mut r = router.write().unwrap();
                 r.drain_output(iface.session)
             };
             if out.is_empty() {
@@ -4247,12 +4247,12 @@ fn build_challenge_packet(
 /// forwards every BMP message the router emits. Reconnects with
 /// backoff; messages produced while disconnected are dropped (BMP is
 /// best-effort monitoring).
-fn spawn_bmp_sender(target: &str, router: &Arc<Mutex<DefaultRouter>>) -> Result<(), String> {
+fn spawn_bmp_sender(target: &str, router: &Arc<RwLock<DefaultRouter>>) -> Result<(), String> {
     use std::sync::mpsc;
     let addr = resolve(target).ok_or_else(|| format!("invalid address: {target}"))?;
     let (tx, rx) = mpsc::channel::<Vec<u8>>();
     {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         r.set_bmp_sink(move |bytes| {
             // Channel send is non-blocking enough for the router lock;
             // unbounded queueing under a stuck collector is bounded by
@@ -4523,7 +4523,7 @@ fn originate_next_hop(cfg: &DaemonConfig, family: NlriFamily) -> Option<IpAddr> 
 
 /// Shared daemon state threaded through the I/O loops.
 struct Runtime {
-    router: Arc<Mutex<DefaultRouter>>,
+    router: Arc<RwLock<DefaultRouter>>,
     running: Arc<AtomicBool>,
     /// Re-apply the configuration file (SIGHUP / API `reload`).
     reload: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
@@ -4631,7 +4631,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
 fn reload_config(
     path: Option<&str>,
     dialect: Option<&str>,
-    router: &Arc<Mutex<DefaultRouter>>,
+    router: &Arc<RwLock<DefaultRouter>>,
     current_networks: &Arc<Mutex<Vec<String>>>,
     roa_store: Option<&Arc<lr_bgp::RoaStore>>,
     rpki: Option<&daemon_rpki::RpkiHandle>,
@@ -4684,7 +4684,7 @@ fn reload_config(
     let old = current_networks.lock().unwrap().clone();
     let new = fresh.networks.clone();
     {
-        let mut r = router.lock().unwrap();
+        let mut r = router.write().unwrap();
         for net in new.iter().filter(|n| !old.contains(n)) {
             match Prefix::from_str(net) {
                 Ok(p) => {
