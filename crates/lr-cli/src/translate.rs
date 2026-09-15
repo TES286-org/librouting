@@ -81,6 +81,7 @@
 
 use std::process::ExitCode;
 
+use crate::daemon_config::BabelInterfaceSpec;
 use crate::translate_bird_filter::{self, BirdFilterSource, FilterRow, RoaRow};
 
 /// One lr-specific `lr:` comment directive: `key` (normalised to
@@ -228,6 +229,9 @@ pub(super) struct ConfigOut {
     /// BIRD filters that could not be translated faithfully:
     /// `(bird name, notes)` — rendered as UNMAPPED.
     failed_filters: Vec<(String, Vec<String>)>,
+    /// BIRD `protocol babel` interface blocks (D14.2): the spec plus
+    /// the per-interface unmapped notes.
+    babel_ifaces: Vec<(BabelInterfaceSpec, Vec<String>)>,
     /// Whole-peer notes rendered near the header (peers dropped
     /// because they can never start, e.g. FRR stubs without a
     /// `remote-as`).
@@ -346,6 +350,33 @@ fn translate_bird(text: &str) -> ConfigOut {
                     }
                     BirdCaptureKind::Function(name) => functions.push((name, cap.text)),
                     BirdCaptureKind::RoaTable => roa_tables.push(cap.rows),
+                    BirdCaptureKind::Babel(mut proto) => {
+                        let proto = &mut *proto;
+                        finish_babel_iface(proto);
+                        // Protocol-level `next hop` statements may
+                        // appear after the interface blocks — backfill
+                        // every interface still lacking one.
+                        for (spec, _) in &mut proto.ifaces {
+                            if spec.next_hop_ipv4.is_none() {
+                                spec.next_hop_ipv4 = proto.next_hop_v4.clone();
+                            }
+                            if spec.next_hop_ipv6.is_none() {
+                                spec.next_hop_ipv6 = proto.next_hop_v6.clone();
+                            }
+                        }
+                        // lr runs one protocol per daemon instance: the
+                        // Babel interface parameters carry over, and the
+                        // operator picks the protocol with the top-level
+                        // `protocol = "babel"` key.
+                        out.unmapped_global.push(
+                            "protocol babel: lr runs one protocol per daemon instance —                              set the top-level `protocol = \"babel\"` key to activate Babel                              (the BGP peers above need their own instance)"
+                                .to_string(),
+                        );
+                        for note in proto.iface_notes.drain(..) {
+                            out.unmapped_global.push(format!("protocol babel: {note}"));
+                        }
+                        out.babel_ifaces.append(&mut proto.ifaces);
+                    }
                 }
             }
             continue;
@@ -413,6 +444,17 @@ fn translate_bird(text: &str) -> ConfigOut {
                     }
                     continue;
                 }
+                "protocol" if tokens.len() >= 3 && tokens[1] == "babel" => {
+                    // D14.2: `protocol babel NAME { interface …; }` —
+                    // per-interface parameter capture (RFC 8966 §A.2).
+                    capture = Some(BirdCapture::new(
+                        BirdCaptureKind::Babel(Box::default()),
+                        line,
+                        opens,
+                        closes,
+                    ));
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -441,9 +483,11 @@ fn translate_bird(text: &str) -> ConfigOut {
             }
             // Non-BGP routing protocols are reported as ignored instead
             // of vanishing silently — the converter covers the BGP
-            // control plane. `protocol device` is BIRD housekeeping
-            // with no routing meaning: skipped without a note.
-            "protocol" if tokens.len() >= 3 && tokens[1] != "static" => {
+            // control plane (Babel's interface parameters are the one
+            // exception, handled by its own capture below). `protocol
+            // device` is BIRD housekeeping with no routing meaning:
+            // skipped without a note.
+            "protocol" if tokens.len() >= 3 && tokens[1] != "static" && tokens[1] != "babel" => {
                 if tokens[1] != "device" {
                     out.ignored_protocols.push(format!(
                         "protocol {} {}",
@@ -795,6 +839,24 @@ enum BirdCaptureKind {
     Filter(String),
     Function(String),
     RoaTable,
+    /// `protocol babel NAME` — interface-block parsing state plus
+    /// protocol-level next hops. Boxed: by far the largest variant.
+    Babel(Box<BabelProtoCapture>),
+}
+
+/// State accumulated while scanning a `protocol babel` stanza.
+#[derive(Default)]
+struct BabelProtoCapture {
+    /// Name of the `interface "…" { … }` block being captured
+    /// (`None` while at protocol level).
+    iface: Option<BabelInterfaceSpec>,
+    iface_notes: Vec<String>,
+    /// Protocol-level `next hop ipv4|ipv6` defaults applied to every
+    /// interface at close time.
+    next_hop_v4: Option<String>,
+    next_hop_v6: Option<String>,
+    /// Per-interface rows finished so far.
+    ifaces: Vec<(BabelInterfaceSpec, Vec<String>)>,
 }
 
 impl BirdCapture {
@@ -819,10 +881,14 @@ impl BirdCapture {
         if self.text.contains('{') {
             self.seen_brace = true;
         }
-        if matches!(self.kind, BirdCaptureKind::RoaTable) {
-            if let Some(row) = parse_roa_line(line) {
-                self.rows.push(row);
+        match &mut self.kind {
+            BirdCaptureKind::RoaTable => {
+                if let Some(row) = parse_roa_line(line) {
+                    self.rows.push(row);
+                }
             }
+            BirdCaptureKind::Babel(proto) => absorb_babel_line(proto, line),
+            _ => {}
         }
     }
 
@@ -831,6 +897,182 @@ impl BirdCapture {
         self.absorb(line, opens, closes);
         self.seen_brace && self.depth <= 0
     }
+}
+
+/// One line inside a `protocol babel` stanza: interface-block
+/// bookkeeping plus the parameter statements that map onto
+/// [`BabelInterfaceSpec`] (D14.2, RFC 8966 §A.2).
+fn absorb_babel_line(proto: &mut BabelProtoCapture, line: &str) {
+    let trimmed = line.trim();
+    let mut tokens = trimmed.split_whitespace();
+    let t0 = tokens.next().unwrap_or("");
+    // Interface block lifecycle: `interface "eth0" {` opens a block
+    // (closed by the matching `};` line), a bare `interface "wg*";`
+    // is complete immediately, and the stanza-level `}` that closes
+    // the protocol itself arrives at depth 0 (handled by the caller).
+    if t0 == "interface" && !trimmed.starts_with('}') {
+        // Close any open interface block first.
+        finish_babel_iface(proto);
+        let raw_name = trimmed.split('"').nth(1).unwrap_or_default().to_string();
+        let spec = BabelInterfaceSpec {
+            name: Some(raw_name),
+            ..BabelInterfaceSpec::default()
+        };
+        if trimmed.ends_with(';') {
+            // Bare form: no parameter block, complete as-is.
+            let mut spec = spec;
+            if spec.next_hop_ipv4.is_none() {
+                spec.next_hop_ipv4 = proto.next_hop_v4.clone();
+            }
+            if spec.next_hop_ipv6.is_none() {
+                spec.next_hop_ipv6 = proto.next_hop_v6.clone();
+            }
+            proto.ifaces.push((spec, Vec::new()));
+            return;
+        }
+        proto.iface = Some(spec);
+        proto.iface_notes = Vec::new();
+        return;
+    }
+    // A pure close line ends the open interface block.
+    if proto.iface.is_some() && is_brace_noise(trimmed) {
+        finish_babel_iface(proto);
+        return;
+    }
+    if proto.iface.is_none() {
+        // Protocol-level statements.
+        match t0 {
+            "next" if trimmed.contains("hop ipv4 ") => {
+                proto.next_hop_v4 = Some(
+                    trimmed
+                        .split("hop ipv4 ")
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string(),
+                );
+            }
+            "next" if trimmed.contains("hop ipv6 ") => {
+                proto.next_hop_v6 = Some(
+                    trimmed
+                        .split("hop ipv6 ")
+                        .nth(1)
+                        .unwrap_or("")
+                        .trim_end_matches(';')
+                        .trim()
+                        .to_string(),
+                );
+            }
+            // Protocol-level keys/other statements: keep visible.
+            t if !t.is_empty() && !is_brace_noise(trimmed) => {
+                proto.iface_notes.push(format!(
+                    "protocol-level babel statement `{t}` — lr carries it per [[babel.interface]]"
+                ));
+            }
+            _ => {}
+        }
+        return;
+    }
+    // Inside an interface block: map the parameter statements.
+    let Some(spec) = proto.iface.as_mut() else {
+        return;
+    };
+    let mut words = trimmed.split_whitespace();
+    let t0 = words.next().unwrap_or("");
+    match t0 {
+        "type" => {
+            let kind = words.next().unwrap_or("").trim_end_matches(';');
+            spec.kind = Some(kind.to_string());
+        }
+        "rxcost" => {
+            spec.rxcost = words
+                .next()
+                .and_then(|v| v.trim_end_matches(';').parse().ok());
+        }
+        "rtt" => match words.next() {
+            Some("cost") => {
+                spec.rtt_cost = words
+                    .next()
+                    .and_then(|v| v.trim_end_matches(';').parse().ok());
+            }
+            // `rtt min 10 ms;` / `rtt max 120 ms;` — value and unit
+            // are separate words (bare numbers are seconds in BIRD).
+            Some("min") => {
+                let v = words.next().unwrap_or("");
+                let unit = words.next().unwrap_or("s");
+                spec.rtt_min_us = parse_time_ms(&format!("{v} {}", unit.trim_end_matches(';')))
+                    .map(|ms| ms * 1000);
+            }
+            Some("max") => {
+                let v = words.next().unwrap_or("");
+                let unit = words.next().unwrap_or("s");
+                spec.rtt_max_us = parse_time_ms(&format!("{v} {}", unit.trim_end_matches(';')))
+                    .map(|ms| ms * 1000);
+            }
+            _ => {}
+        },
+        "hello" if trimmed.contains("interval") => {
+            // `hello interval 4 s;` / `hello interval 4000 ms;`
+            let after = trimmed.split("interval").nth(1).unwrap_or("");
+            let mut it = after.split_whitespace();
+            let value = it.next().unwrap_or("");
+            let unit = it.next().unwrap_or("s");
+            spec.hello_interval_ms =
+                parse_time_ms(&format!("{value} {}", unit.trim_end_matches(';')));
+        }
+        "update" if trimmed.contains("interval") => {
+            let after = trimmed.split("interval").nth(1).unwrap_or("");
+            let mut it = after.split_whitespace();
+            let value = it.next().unwrap_or("");
+            let unit = it.next().unwrap_or("s");
+            spec.update_interval_ms =
+                parse_time_ms(&format!("{value} {}", unit.trim_end_matches(';')));
+        }
+        "check" if trimmed.contains("link") => {
+            spec.check_link = Some(trimmed.contains("yes"));
+        }
+        "extended" if trimmed.contains("next hop") => {
+            spec.extended_next_hop = Some(trimmed.contains("yes"));
+        }
+        "port" => {
+            spec.port = words
+                .next()
+                .and_then(|v| v.trim_end_matches(';').parse().ok());
+        }
+        t if !t.is_empty() && !is_brace_noise(trimmed) => {
+            proto.iface_notes.push(format!(
+                "babel interface parameter `{t}` — no lr equivalent"
+            ));
+        }
+        _ => {}
+    }
+}
+
+/// Close the open interface block (if any), applying the protocol
+/// level next-hop defaults.
+fn finish_babel_iface(proto: &mut BabelProtoCapture) {
+    if let Some(mut spec) = proto.iface.take() {
+        let notes = std::mem::take(&mut proto.iface_notes);
+        if spec.next_hop_ipv4.is_none() {
+            spec.next_hop_ipv4 = proto.next_hop_v4.clone();
+        }
+        if spec.next_hop_ipv6.is_none() {
+            spec.next_hop_ipv6 = proto.next_hop_v6.clone();
+        }
+        proto.ifaces.push((spec, notes));
+    }
+}
+
+/// Parse a BIRD babel time value (`4`, `4 s`, `4000 ms`) into
+/// milliseconds. Bare numbers are seconds (BIRD's babel time default).
+fn parse_time_ms(text: &str) -> Option<u32> {
+    let text = text.trim().trim_end_matches(';');
+    if let Some(ms) = text.strip_suffix("ms") {
+        return ms.trim().parse().ok();
+    }
+    let secs: f64 = text.trim_end_matches('s').trim().parse().ok()?;
+    Some((secs * 1000.0).round() as u32)
 }
 
 /// The text between the first `{` and the matching final `}` — the
@@ -1570,6 +1812,53 @@ fn render(out: ConfigOut) -> String {
             s.push_str(&format!("max_length = {ml}\n"));
         }
         s.push_str(&format!("asn = {}\n\n", row.asn));
+    }
+    // BIRD `protocol babel` interface parameters (D14.2).
+    for (spec, notes) in &out.babel_ifaces {
+        s.push_str("[[babel.interface]]\n");
+        if let Some(n) = &spec.name {
+            s.push_str(&format!("name = {}\n", toml_str(n)));
+        }
+        if let Some(k) = &spec.kind {
+            s.push_str(&format!("kind = {}\n", toml_str(k)));
+        }
+        if let Some(v) = spec.hello_interval_ms {
+            s.push_str(&format!("hello_interval_ms = {v}\n"));
+        }
+        if let Some(v) = spec.update_interval_ms {
+            s.push_str(&format!("update_interval_ms = {v}\n"));
+        }
+        if let Some(v) = spec.rxcost {
+            s.push_str(&format!("rxcost = {v}\n"));
+        }
+        if let Some(v) = spec.rtt_cost {
+            s.push_str(&format!("rtt_cost = {v}\n"));
+        }
+        if let Some(v) = spec.rtt_min_us {
+            s.push_str(&format!("rtt_min_us = {v}\n"));
+        }
+        if let Some(v) = spec.rtt_max_us {
+            s.push_str(&format!("rtt_max_us = {v}\n"));
+        }
+        if let Some(v) = &spec.next_hop_ipv4 {
+            s.push_str(&format!("next_hop_ipv4 = {}\n", toml_str(v)));
+        }
+        if let Some(v) = &spec.next_hop_ipv6 {
+            s.push_str(&format!("next_hop_ipv6 = {}\n", toml_str(v)));
+        }
+        if let Some(v) = spec.extended_next_hop {
+            s.push_str(&format!("extended_next_hop = {v}\n"));
+        }
+        if let Some(v) = spec.check_link {
+            s.push_str(&format!("check_link = {v}\n"));
+        }
+        if let Some(v) = spec.port {
+            s.push_str(&format!("port = {v}\n"));
+        }
+        for n in notes {
+            s.push_str(&format!("# UNMAPPED: {n}\n"));
+        }
+        s.push('\n');
     }
     // Translated BIRD filters. The lr DSL is whitespace-insensitive,
     // so the multi-line body collapses onto one TOML string line.
@@ -2453,6 +2742,60 @@ protocol bgp uplink {
             .as_deref()
             .unwrap_or("")
             .contains("bgp.local_pref = p;"));
+    }
+
+    #[test]
+    fn bird_babel_protocol_maps_interfaces() {
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+protocol babel babel_core {
+    interface "eth0" {
+        type wired;
+        rxcost 8;
+        hello interval 4 s;
+        update interval 30 s;
+        rtt cost 42;
+        rtt min 10 ms;
+        rtt max 120 ms;
+        check link yes;
+    };
+    interface "wg*";
+    next hop ipv4 192.0.2.1;
+    next hop ipv6 2001:db8::1;
+}
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        // The BGP peer still converts; the Babel interfaces carry over
+        // as [[babel.interface]] tables.
+        assert_eq!(cfg.peers.len(), 1);
+        assert_eq!(cfg.babel_interfaces.len(), 2);
+        let eth0 = &cfg.babel_interfaces[0];
+        assert_eq!(eth0.name.as_deref(), Some("eth0"));
+        assert_eq!(eth0.kind.as_deref(), Some("wired"));
+        assert_eq!(eth0.rxcost, Some(8));
+        assert_eq!(eth0.hello_interval_ms, Some(4000));
+        assert_eq!(eth0.update_interval_ms, Some(30000));
+        assert_eq!(eth0.rtt_cost, Some(42));
+        assert_eq!(eth0.rtt_min_us, Some(10_000));
+        assert_eq!(eth0.rtt_max_us, Some(120_000));
+        assert_eq!(eth0.check_link, Some(true));
+        // Protocol-level next hops apply to interfaces without their own.
+        assert_eq!(eth0.next_hop_ipv4.as_deref(), Some("192.0.2.1"));
+        assert_eq!(eth0.next_hop_ipv6.as_deref(), Some("2001:db8::1"));
+        // The bare interface inherits the protocol-level next hops only.
+        let wg = &cfg.babel_interfaces[1];
+        assert_eq!(wg.name.as_deref(), Some("wg*"));
+        assert_eq!(wg.kind, None);
+        assert_eq!(wg.next_hop_ipv4.as_deref(), Some("192.0.2.1"));
+        // lr runs one protocol per daemon instance — the converter
+        // says so instead of silently switching the protocol key.
+        assert!(toml.contains("lr runs one protocol per daemon instance"));
     }
 
     #[test]
