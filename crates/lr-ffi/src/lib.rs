@@ -25,6 +25,7 @@
 pub mod bytes;
 pub mod codec;
 pub mod error;
+pub mod events;
 pub mod handle;
 pub mod policy;
 pub mod roa_store;

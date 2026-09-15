@@ -454,6 +454,43 @@ class Router:
                 f"lr_router_originate_labeled_v6 failed (rc={rc}): {last_error()}"
             )
 
+    def poll_events(self, capacity: int = 32) -> list[dict]:
+        """Poll up to ``capacity`` pending router events (ROADMAP-v3 D5.5).
+
+        Returns a list of dicts with the fields ``kind`` (int),
+        ``session``, ``prefix`` (bytes), ``prefix_len``, ``is_ipv6``,
+        ``path_id``, ``count``, ``limit``, ``pct``, ``action`` and
+        ``text``. Events beyond the buffer are requeued, so polling
+        with a small buffer loses nothing. Transport-plane events
+        (outgoing bytes, timers) never surface here.
+        """
+        if capacity <= 0:
+            raise LrError(f"poll_events: capacity must be positive, got {capacity}")
+        arr = ffi.new("lr_event_t[]", capacity)
+        n = get_lib().lr_router_poll_events(self._ptr, arr, capacity)
+        if n < 0:
+            raise LrError(f"lr_router_poll_events failed (rc={n}): {last_error()}")
+        out = []
+        for i in range(n):
+            e = arr[i]
+            text_end = 0
+            while text_end < len(e.text) and e.text[text_end] != 0:
+                text_end += 1
+            out.append({
+                "kind": e.kind,
+                "session": e.session,
+                "prefix": bytes(e.prefix),
+                "prefix_len": e.prefix_len,
+                "is_ipv6": e.is_ipv6 != 0,
+                "path_id": e.path_id,
+                "count": e.count,
+                "limit": e.limit,
+                "pct": e.pct,
+                "action": e.action,
+                "text": ffi.unpack(e.text, text_end).decode("utf-8", "replace"),
+            })
+        return out
+
     def rib_len(self) -> int:
         n = get_lib().lr_router_rib_len(self._ptr)
         if n < 0:

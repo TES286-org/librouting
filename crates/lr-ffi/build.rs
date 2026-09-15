@@ -43,6 +43,24 @@ fn main() {
 #define LR_METRIC_INHERIT 0
 #define LR_METRIC_FIXED 1
 #define LR_METRIC_ADD 2
+
+/* Event kind ids for lr_router_poll_events (lr_event_kind_t) - the
+ * enum itself is exported, the defines exist for pre-C23 consumers
+ * that cannot name enum values in preprocessor tests. */
+#define LR_EVENT_PEER_STATE 1
+#define LR_EVENT_ROUTE_INSTALLED 2
+#define LR_EVENT_ROUTE_WITHDRAWN 3
+#define LR_EVENT_LOG 4
+#define LR_EVENT_PREFIX_ADVERTISED 5
+#define LR_EVENT_PREFIX_RETRACTED 6
+#define LR_EVENT_PROTOCOL_ERROR 7
+#define LR_EVENT_MAX_PREFIX_EXCEEDED 8
+#define LR_EVENT_MAX_PREFIX_THRESHOLD 9
+
+/* MaxPrefixExceeded action ids (lr_event_t::action). */
+#define LR_MAX_PREFIX_WARN 0
+#define LR_MAX_PREFIX_TEARDOWN 1
+#define LR_MAX_PREFIX_RESTART 2
 "#.to_string(),
         ),
         ..Default::default()
@@ -67,4 +85,5 @@ fn main() {
     println!("cargo:rerun-if-changed=src/router.rs");
     println!("cargo:rerun-if-changed=src/policy.rs");
     println!("cargo:rerun-if-changed=src/codec.rs");
+    println!("cargo:rerun-if-changed=src/events.rs");
 }

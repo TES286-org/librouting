@@ -114,6 +114,12 @@ pub trait RouterInstance {
     /// Set the per-prefix RFC 4271 MRAI interval for a BGP session.
     fn set_mrai(&mut self, h: SessionHandle, interval_ms: u64) -> Result<(), String>;
     fn poll_events(&mut self) -> Vec<RouterEvent>;
+    /// Push events back to the *front* of the pending queue, keeping
+    /// their relative order. Used by embedders whose poll buffer fills
+    /// mid-batch (the FFI event-poll shape): poll + serialize + requeue
+    /// is one logical drain, so no event is lost. The default no-op
+    /// keeps mock implementations source-compatible.
+    fn requeue_events(&mut self, _events: Vec<RouterEvent>) {}
     fn rib_snapshot(&self) -> Vec<&Route>;
 
     /// Current BGP FSM state name of a session ("Idle", "Connect", …,
@@ -4593,6 +4599,18 @@ impl RouterInstance for DefaultRouter {
 
     fn poll_events(&mut self) -> Vec<RouterEvent> {
         core::mem::take(&mut self.pending_events)
+    }
+
+    /// Push events back to the *front* of the pending queue, keeping
+    /// their relative order. The FFI embedder shape: a caller whose
+    /// poll buffer filled mid-batch requeues the remainder so no event
+    /// is lost (poll + serialize + requeue is one logical drain).
+    fn requeue_events(&mut self, mut events: Vec<RouterEvent>) {
+        if events.is_empty() {
+            return;
+        }
+        events.append(&mut self.pending_events);
+        self.pending_events = events;
     }
 
     fn rib_snapshot(&self) -> Vec<&Route> {

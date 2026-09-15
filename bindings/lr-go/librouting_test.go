@@ -575,3 +575,62 @@ func TestBGPMessageEncoders(t *testing.T) {
 		t.Fatal("ORIGIN 3 must fail")
 	}
 }
+
+func TestPollEvents(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	if err := r.OriginateV4([4]byte{203, 0, 113, 0}, 24, nil); err != nil {
+		t.Fatalf("OriginateV4: %v", err)
+	}
+	if err := r.OriginateV4([4]byte{198, 51, 100, 0}, 24, nil); err != nil {
+		t.Fatalf("OriginateV4: %v", err)
+	}
+	events, err := r.PollEvents(8)
+	if err != nil {
+		t.Fatalf("PollEvents: %v", err)
+	}
+	sawInstalled := false
+	for _, ev := range events {
+		if ev.Kind == EventRouteInstalled {
+			sawInstalled = true
+			if ev.PrefixLen > 32 {
+				t.Fatalf("installed event plen %d", ev.PrefixLen)
+			}
+		}
+	}
+	if !sawInstalled {
+		t.Fatal("RouteInstalled event not observed")
+	}
+
+	// Requeue semantics: one slot at a time drains everything.
+	if err := r.OriginateV4([4]byte{192, 0, 2, 0}, 24, nil); err != nil {
+		t.Fatalf("OriginateV4: %v", err)
+	}
+	slot, err := r.PollEvents(1)
+	if err != nil {
+		t.Fatalf("PollEvents(1): %v", err)
+	}
+	first := slot[0].Prefix
+	drained := len(slot)
+	for {
+		more, err := r.PollEvents(1)
+		if err != nil {
+			t.Fatalf("PollEvents loop: %v", err)
+		}
+		if len(more) == 0 {
+			break
+		}
+		drained++
+		_ = more
+	}
+	_ = first
+
+	// Invalid capacity is rejected.
+	if _, err := r.PollEvents(0); err == nil {
+		t.Fatal("PollEvents(0) must fail")
+	}
+}

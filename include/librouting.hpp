@@ -424,6 +424,73 @@ inline std::int32_t damping_decay(Damping& d, std::uint64_t now_s) {
     return rc;
 }
 
+// ===== D5.5 — event polling =====
+
+/// Event kind constants (mirror lr_event_kind_t / LR_EVENT_*).
+enum class EventKind : std::int32_t {
+    PeerState = 1,
+    RouteInstalled = 2,
+    RouteWithdrawn = 3,
+    Log = 4,
+    PrefixAdvertised = 5,
+    PrefixRetracted = 6,
+    ProtocolError = 7,
+    MaxPrefixExceeded = 8,
+    MaxPrefixThreshold = 9,
+};
+
+/// One serialized router event. Only the fields meaningful for `kind`
+/// are populated (see lr_event_t in lr_ffi.h).
+struct Event {
+    EventKind kind;
+    std::uint64_t session = 0;
+    std::vector<std::uint8_t> prefix; // 4 bytes (IPv4) or 16 (IPv6)
+    std::uint8_t prefix_len = 0;
+    bool is_ipv6 = false;
+    std::uint32_t path_id = 0;
+    std::uint32_t count = 0;
+    std::uint32_t limit = 0;
+    std::uint32_t pct = 0;
+    std::int32_t action = 0;
+    std::string text;
+};
+
+/// Poll up to `capacity` pending router events. Events beyond the
+/// buffer are requeued (nothing is lost); transport-plane events never
+/// surface — outgoing bytes ride the drain-output data plane.
+inline std::vector<Event> poll_events(Router& r, std::size_t capacity = 32) {
+    if (capacity == 0) {
+        throw Error("poll_events: capacity must be positive");
+    }
+    std::vector<lr_event_t> raw(capacity);
+    std::int32_t n = lr_router_poll_events(r.get(), raw.data(),
+                                           static_cast<std::int32_t>(capacity));
+    if (n < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_poll_events failed: " + std::string(err ? err : "unknown"));
+    }
+    std::vector<Event> out;
+    out.reserve(static_cast<std::size_t>(n));
+    for (std::int32_t i = 0; i < n; ++i) {
+        const auto& e = raw[static_cast<std::size_t>(i)];
+        Event ev;
+        ev.kind = static_cast<EventKind>(e.kind);
+        ev.session = e.session;
+        ev.is_ipv6 = e.is_ipv6 != 0;
+        const std::size_t plen = e.is_ipv6 ? 16 : 4;
+        ev.prefix.assign(e.prefix, e.prefix + plen);
+        ev.prefix_len = e.prefix_len;
+        ev.path_id = e.path_id;
+        ev.count = e.count;
+        ev.limit = e.limit;
+        ev.pct = e.pct;
+        ev.action = e.action;
+        ev.text.assign(reinterpret_cast<const char*>(e.text), strnlen(reinterpret_cast<const char*>(e.text), sizeof(e.text)));
+        out.push_back(std::move(ev));
+    }
+    return out;
+}
+
 // ===== D5.4 — BGP message encoders =====
 
 /// Encode a KEEPALIVE message (RFC 4271 §4.4).

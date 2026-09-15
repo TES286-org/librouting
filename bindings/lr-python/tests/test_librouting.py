@@ -422,3 +422,33 @@ def test_bgp_message_encoders():
         raise AssertionError("ORIGIN 3 must be rejected")
     except librouting.LrError:
         pass
+
+
+def test_poll_events():
+    with librouting.Router() as r:
+        r.originate_v4("203.0.113.0/24")
+        r.originate_v4("198.51.100.0/24")
+        events = r.poll_events(8)
+        kinds = [e["kind"] for e in events]
+        assert 2 in kinds, "RouteInstalled (2) observed"
+        installed = [e for e in events if e["kind"] == 2]
+        assert all(e["prefix_len"] <= 32 for e in installed)
+        assert any(e["prefix"][:4] == bytes([203, 0, 113, 0]) for e in installed)
+
+        # Requeue semantics: one slot at a time.
+        r.originate_v4("192.0.2.0/24")
+        r.originate_v4("198.18.0.0/15")
+        slot = r.poll_events(1)
+        assert len(slot) == 1
+        assert r.poll_events(1), "the requeued remainder arrives next"
+        while r.poll_events(1):
+            pass
+        assert r.poll_events(8) == []
+
+        # Invalid capacity is rejected.
+        for bad in (0, -3):
+            try:
+                r.poll_events(bad)
+                raise AssertionError("must be rejected")
+            except librouting.LrError:
+                pass

@@ -119,6 +119,20 @@ int32_t lr_router_originate_labeled_v6(lr_router_t r,
                                        uintptr_t n_labels,
                                        const uint8_t *next_hop);
 uint32_t lr_mpls_platform_labels(void);
+typedef struct lr_event_t {
+    int32_t kind;
+    uint64_t session;
+    uint8_t prefix[16];
+    uint8_t prefix_len;
+    uint8_t is_ipv6;
+    uint32_t path_id;
+    uint32_t count;
+    uint32_t limit;
+    uint32_t pct;
+    int32_t action;
+    char text[128];
+} lr_event_t;
+int32_t lr_router_poll_events(lr_router_t r, struct lr_event_t *out, int32_t cap);
 int64_t lr_router_rib_len(lr_router_t r);
 int32_t lr_router_rib_dump(lr_router_t r, lr_bytes_t *out);
 int32_t lr_router_sessions_dump(lr_router_t r, lr_bytes_t *out);

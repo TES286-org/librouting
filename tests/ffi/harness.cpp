@@ -200,6 +200,48 @@ int main() {
     }
     check(threw, "set_local_address rejects 3-byte address");
 
+    // D5.5 event polling through the RAII surface.
+    {
+        originate_v4(r, {203, 0, 113, 0}, 24);
+        originate_v4(r, {198, 51, 100, 0}, 24);
+        auto events = poll_events(r, 8);
+        bool saw_installed = false;
+        for (const auto& ev : events) {
+            if (ev.kind == EventKind::RouteInstalled) {
+                saw_installed = true;
+                check(ev.prefix_len <= 32, "installed event prefix length sane");
+                check(ev.prefix.size() == 4, "installed event carries a v4 prefix");
+            }
+        }
+        check(saw_installed, "poll_events observed RouteInstalled");
+        // Drain to empty.
+        while (!poll_events(r, 8).empty()) {
+        }
+        // Requeue semantics: one slot at a time drains everything.
+        originate_v4(r, {192, 0, 2, 0}, 24);
+        originate_v4(r, {198, 18, 0, 0}, 15);
+        auto slot = poll_events(r, 1);
+        check(slot.size() == 1, "one slot takes one event");
+        check(!poll_events(r, 1).empty(), "the requeued remainder arrives next");
+        while (!poll_events(r, 1).empty()) {
+        }
+        bool threw = false;
+        try {
+            poll_events(r, 0);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "poll_events rejects zero capacity");
+        // Leave the router clean for the sections that follow: retract
+        // everything this block originated and drain the tail events.
+        check(withdraw_v4(r, {203, 0, 113, 0}, 24), "cleanup withdraw 1");
+        check(withdraw_v4(r, {198, 51, 100, 0}, 24), "cleanup withdraw 2");
+        check(withdraw_v4(r, {192, 0, 2, 0}, 24), "cleanup withdraw 3");
+        check(withdraw_v4(r, {198, 18, 0, 0}, 15), "cleanup withdraw 4");
+        while (!poll_events(r, 8).empty()) {
+        }
+    }
+
     // Originate a route: 203.0.113.0/24 via 192.0.2.1
     {
         const std::uint8_t prefix[4] = {203, 0, 113, 0};

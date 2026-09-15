@@ -532,6 +532,77 @@ func MplsPlatformLabels() uint32 {
 	return uint32(C.lr_mpls_platform_labels())
 }
 
+// Event is one serialized router event (ROADMAP-v3 D5.5): a peer-state
+// change, a route install/withdrawal, an advertisement or retraction,
+// a log line, a protocol error or one of the maximum-prefix signals.
+type Event struct {
+	Kind      int32
+	Session   uint64
+	Prefix    [16]byte
+	PrefixLen uint8
+	IsIPv6    bool
+	PathID    uint32
+	Count     uint32
+	Limit     uint32
+	Pct       uint32
+	Action    int32
+	Text      string
+}
+
+// Event kind constants (mirror lr_event_kind_t / LR_EVENT_*).
+const (
+	EventPeerState          = 1
+	EventRouteInstalled     = 2
+	EventRouteWithdrawn     = 3
+	EventLog                = 4
+	EventPrefixAdvertised   = 5
+	EventPrefixRetracted    = 6
+	EventProtocolError      = 7
+	EventMaxPrefixExceeded  = 8
+	EventMaxPrefixThreshold = 9
+)
+
+// PollEvents returns up to cap pending router events. Events beyond
+// the buffer are requeued, so polling with a small buffer loses
+// nothing. Transport-plane events (outgoing bytes, timers) never
+// surface here — bytes ride DrainOutput.
+func (r *Router) PollEvents(capacity int) ([]Event, error) {
+	if capacity <= 0 {
+		return nil, fmt.Errorf("PollEvents: capacity must be positive")
+	}
+	cArr := (*C.lr_event_t)(C.malloc(C.sizeof_lr_event_t * C.size_t(capacity)))
+	if cArr == nil {
+		return nil, fmt.Errorf("PollEvents: out of memory")
+	}
+	defer C.free(unsafe.Pointer(cArr))
+	n := C.lr_router_poll_events(r.ptr, cArr, C.int32_t(capacity))
+	if n < 0 {
+		return nil, fmt.Errorf("lr_router_poll_events: %s (rc=%d)", LastError(), int(n))
+	}
+	slice := (*[1 << 20]C.lr_event_t)(unsafe.Pointer(cArr))[:n:n]
+	out := make([]Event, 0, n)
+	for _, e := range slice {
+		var ev Event
+		ev.Kind = int32(e.kind)
+		ev.Session = uint64(e.session)
+		copy(ev.Prefix[:], (*[16]byte)(unsafe.Pointer(&e.prefix[0]))[:])
+		ev.PrefixLen = uint8(e.prefix_len)
+		ev.IsIPv6 = e.is_ipv6 != 0
+		ev.PathID = uint32(e.path_id)
+		ev.Count = uint32(e.count)
+		ev.Limit = uint32(e.limit)
+		ev.Pct = uint32(e.pct)
+		ev.Action = int32(e.action)
+		end := 0
+		for end < len(e.text) && e.text[end] != 0 {
+			end++
+		}
+		ev.Text = string(unsafe.Slice((*byte)(unsafe.Pointer(&e.text[0])), end))
+		out = append(out, ev)
+	}
+	return out, nil
+}
+
 // RibLen returns the number of routes currently in Loc-RIB.
 func (r *Router) RibLen() (int64, error) {
 	n := C.lr_router_rib_len(r.ptr)

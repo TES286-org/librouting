@@ -21,8 +21,34 @@
 #define LR_METRIC_FIXED 1
 #define LR_METRIC_ADD 2
 
+/* Event kind ids for lr_router_poll_events (lr_event_kind_t) - the
+ * enum itself is exported, the defines exist for pre-C23 consumers
+ * that cannot name enum values in preprocessor tests. */
+#define LR_EVENT_PEER_STATE 1
+#define LR_EVENT_ROUTE_INSTALLED 2
+#define LR_EVENT_ROUTE_WITHDRAWN 3
+#define LR_EVENT_LOG 4
+#define LR_EVENT_PREFIX_ADVERTISED 5
+#define LR_EVENT_PREFIX_RETRACTED 6
+#define LR_EVENT_PROTOCOL_ERROR 7
+#define LR_EVENT_MAX_PREFIX_EXCEEDED 8
+#define LR_EVENT_MAX_PREFIX_THRESHOLD 9
+
+/* MaxPrefixExceeded action ids (lr_event_t::action). */
+#define LR_MAX_PREFIX_WARN 0
+#define LR_MAX_PREFIX_TEARDOWN 1
+#define LR_MAX_PREFIX_RESTART 2
 
 
+
+
+/**
+ * Maximum text length carried in one event (peer-state names, log
+ * lines, protocol-error messages). Longer strings are truncated to
+ * `LR_EVENT_TEXT_MAX - 1` bytes plus the NUL terminator; the full
+ * text stays available through the Rust API.
+ */
+#define LR_EVENT_TEXT_MAX 128
 
 /**
  * Validation outcome constants (`lr_roa_store_validate` out param).
@@ -62,6 +88,61 @@ typedef struct OpaqueRouter {
 } OpaqueRouter;
 
 typedef struct OpaqueRouter *lr_router_t;
+
+/**
+ * One serialized router event. Only the fields meaningful for `kind`
+ * are populated; the rest are zero. `prefix` carries IPv4 in its
+ * first four bytes with `is_ipv6 == 0`, IPv6 in all sixteen with
+ * `is_ipv6 == 1`. `text` is NUL-terminated.
+ */
+typedef struct lr_event_t {
+  /**
+   * Which event this is ([`lr_event_kind_t`], also published as the
+   * `LR_EVENT_*` defines in the header).
+   */
+  int32_t kind;
+  /**
+   * The session the event relates to (0 when none).
+   */
+  uint64_t session;
+  /**
+   * The prefix (RouteInstalled / RouteWithdrawn / Prefix* events).
+   */
+  uint8_t prefix[16];
+  /**
+   * Prefix length in bits.
+   */
+  uint8_t prefix_len;
+  /**
+   * 1 when `prefix` carries an IPv6 address.
+   */
+  uint8_t is_ipv6;
+  /**
+   * The Add-Path identifier of the installed/withdrawn path.
+   */
+  uint32_t path_id;
+  /**
+   * MaxPrefix events: the current Adj-RIB-In size.
+   */
+  uint32_t count;
+  /**
+   * MaxPrefix events: the configured ceiling.
+   */
+  uint32_t limit;
+  /**
+   * MaxPrefixThreshold: the crossing percentage.
+   */
+  uint32_t pct;
+  /**
+   * MaxPrefixExceeded: 0 = warn, 1 = teardown, 2 = restart.
+   */
+  int32_t action;
+  /**
+   * Peer state, log line or error message, NUL-terminated
+   * (truncated at [`LR_EVENT_TEXT_MAX`] bytes).
+   */
+  uint8_t text[LR_EVENT_TEXT_MAX];
+} lr_event_t;
 
 /**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
@@ -266,6 +347,24 @@ const char *lr_last_error(void);
  * ABI version packed as u32. Compare to `lr_core::ABI_VERSION`.
  */
 uint32_t lr_abi_version(void);
+
+/**
+ * Poll up to `cap` router events into `out` (ROADMAP-v3 D5.5):
+ * peer-state changes, route installs/withdrawals, advertisements and
+ * retractions, logs, protocol errors and the maximum-prefix signals.
+ * Returns the number of events written; 0 means the queue is empty
+ * for now. Events beyond the buffer are requeued — nothing is lost,
+ * the next call delivers them first. Negative on error.
+ *
+ * Transport-plane events (`SendBytes`, `TimerFired`) are consumed
+ * and dropped by the poll: outgoing bytes ride
+ * [`crate::handle`]`::drain_output`, timers are internal.
+ *
+ * # Safety
+ * `out` must point to `cap` writable `lr_event_t` values when `cap`
+ * is positive.
+ */
+int32_t lr_router_poll_events(lr_router_t r, struct lr_event_t *out, int32_t cap);
 
 /**
  * Install one redistribution pipe on the router.

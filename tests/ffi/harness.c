@@ -236,6 +236,53 @@ int main(void) {
     int64_t n = lr_router_rib_len(r);
     check(n == 2, "rib_len == 2 after the withdraw lifecycle");
 
+    /* D5.5 event polling: the whole originate/withdraw lifecycle
+     * surfaces as events. Drain in batches of 8 — the queue is longer
+     * than one batch (4 installs + 2 withdraws + advertisements), which
+     * exercises the requeue path implicitly. */
+    {
+        lr_event_t ev[8];
+        int saw_installed = 0, saw_withdrawn = 0, sane_plen = 1;
+        int total = 0, nev;
+        while ((nev = lr_router_poll_events(r, ev, 8)) > 0) {
+            for (int i = 0; i < nev; i++) {
+                total++;
+                if (ev[i].kind == LR_EVENT_ROUTE_INSTALLED) {
+                    saw_installed = 1;
+                    if (ev[i].prefix_len > 32) sane_plen = 0;
+                }
+                if (ev[i].kind == LR_EVENT_ROUTE_WITHDRAWN) saw_withdrawn = 1;
+            }
+        }
+        check(total >= 6, "the lifecycle produced >= 6 events");
+        check(saw_installed, "RouteInstalled event observed");
+        check(saw_withdrawn, "RouteWithdrawn event observed");
+        check(sane_plen, "installed events carry sane prefix lengths");
+        /* The queue is now empty. */
+        check(lr_router_poll_events(r, ev, 8) == 0, "poll_events empty after drain");
+        /* cap 0 with NULL is a legal no-op poll. */
+        check(lr_router_poll_events(r, NULL, 0) == 0, "poll_events cap=0 is a no-op");
+        /* Negative capacity / NULL buffer are rejected. */
+        check(lr_router_poll_events(r, NULL, -1) == -3, "poll_events rejects negative cap");
+        check(lr_router_poll_events(r, NULL, 4) == -1, "poll_events rejects NULL buffer");
+        /* Requeue semantics: generate two events, poll one at a time. */
+        const uint8_t more1[4] = {198, 51, 100, 0};
+        const uint8_t more2[4] = {203, 0, 113, 0};
+        rc = lr_router_originate_v4(r, more1, 24, NULL);
+        check(rc == 0, "originate for requeue test 1");
+        rc = lr_router_originate_v4(r, more2, 24, NULL);
+        check(rc == 0, "originate for requeue test 2");
+        lr_event_t slot[1];
+        check(lr_router_poll_events(r, slot, 1) == 1, "one slot takes one event");
+        uint8_t first_prefix[4] = {slot[0].prefix[0], slot[0].prefix[1],
+                                    slot[0].prefix[2], slot[0].prefix[3]};
+        int drained = 1;
+        while (lr_router_poll_events(r, slot, 1) > 0) drained++;
+        check(drained >= 2, "the requeued remainder arrives on later polls");
+        check(first_prefix[0] != 0 || first_prefix[1] != 0,
+              "the first polled event carried a prefix");
+    }
+
     /* RIB dump renders the route */
     lr_bytes_t dump = {0};
     rc = lr_router_rib_dump(r, &dump);
