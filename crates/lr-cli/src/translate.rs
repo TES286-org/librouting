@@ -33,6 +33,18 @@
 //! - `network PREFIX` (FRR) / `route PREFIX` inside `protocol static`
 //!   (BIRD) → `networks`
 //! - `ip prefix-list … seq … permit|deny` → `[[prefix-list]]` entries
+//! - BIRD `filter NAME { … }` / `function NAME(…) { … }` → `[[filter]]`
+//!   bodies in the lr filter DSL (ROADMAP-v3 D14.1, fail-closed: a
+//!   filter with any unfaithfully-translatable construct is not
+//!   emitted and the offending constructs are reported; see
+//!   `translate_bird_filter.rs` for the verified operator/attribute
+//!   mapping)
+//! - BIRD `import|export filter NAME` / `import where EXPR` →
+//!   `import_filter` / `export_filter` peer wiring (`where` becomes a
+//!   generated `bird-<dir>-<peer>` filter)
+//! - BIRD `roa table NAME { roa …; }` → `[[roa]]` entries; the
+//!   single-table `roa_check(t) = ROA_*` idiom → `roa.state` string
+//!   comparisons
 //! - BIRD `ipv4 { … }` / `ipv6 { … }` channels → `mp_families` (+
 //!   `default_ipv4_unicast = false` for an ipv6-only peer)
 //! - FRR `address-family ipv6 unicast` + `neighbor … activate` →
@@ -69,6 +81,8 @@
 
 use std::process::ExitCode;
 
+use crate::translate_bird_filter::{self, BirdFilterSource, FilterRow, RoaRow};
+
 /// One lr-specific `lr:` comment directive: `key` (normalised to
 /// snake_case) plus its optional value (the whitespace-joined
 /// remainder, quotes stripped). Resolved against the TOML schema at
@@ -94,9 +108,13 @@ struct PeerOut {
     hold_time: Option<u32>,
     bfd: Option<bool>,
     default_ipv4_unicast: Option<bool>,
-    /// Policy attachment: `import = "name"`.
+    /// Policy attachment: `import = "name"` (route-map).
     import: Option<String>,
     export: Option<String>,
+    /// Filter DSL attachments (BIRD `import filter NAME`):
+    /// `import_filter = "name"`.
+    import_filter: Option<String>,
+    export_filter: Option<String>,
     /// MP-BGP families beyond the daemon's implicit ipv4-unicast
     /// (BIRD channels / FRR `address-family … activate`). Rendered as
     /// the peer's `mp_families` list when non-empty.
@@ -117,6 +135,22 @@ struct PeerOut {
 
 /// One `[[prefix-list]]` table: (name, seq, permit, prefix, ge, le).
 type PrefixListRow = (String, u32, bool, String, Option<u8>, Option<u8>);
+
+/// A pending BIRD `import|export filter NAME` / `… where EXPR`
+/// attachment, resolved after the whole file is scanned (BIRD lets
+/// filters be defined after the protocol that uses them).
+struct PendingFilter {
+    peer: String,
+    dir: &'static str,
+    target: PendingTarget,
+}
+
+enum PendingTarget {
+    /// `filter NAME` — a named top-level filter.
+    Named(String),
+    /// `where EXPR` — an inline expression.
+    Where(String),
+}
 
 /// One `[[route-map]]` entry: FRR's `route-map` block plus its
 /// `match`/`set` clauses (lr's schema mirrors the FRR shapes closely
@@ -187,6 +221,13 @@ pub(super) struct ConfigOut {
     as_path_lists: Vec<AsPathListRow>,
     community_lists: Vec<CommunityListRow>,
     route_maps: Vec<RouteMapRow>,
+    /// BIRD filters translated into lr filter DSL bodies (D14.1).
+    filters: Vec<FilterRow>,
+    /// ROA entries captured from BIRD `roa table` blocks.
+    roas: Vec<RoaRow>,
+    /// BIRD filters that could not be translated faithfully:
+    /// `(bird name, notes)` — rendered as UNMAPPED.
+    failed_filters: Vec<(String, Vec<String>)>,
     /// Whole-peer notes rendered near the header (peers dropped
     /// because they can never start, e.g. FRR stubs without a
     /// `remote-as`).
@@ -277,24 +318,104 @@ fn translate_bird(text: &str) -> ConfigOut {
     // same role in the converted config, so they carry over.
     let mut in_static = false;
     let mut static_depth = 0usize;
+    // D14.1 captures: BIRD top-level `filter` / `function` /
+    // `roa table` blocks and `define` constants. Filter attachment is
+    // deferred — BIRD lets a filter be defined after the protocol
+    // that uses it.
+    let mut capture: Option<BirdCapture> = None;
+    let mut defines: Vec<(String, String)> = Vec::new();
+    let mut functions: Vec<(String, String)> = Vec::new();
+    let mut filters: Vec<(String, Vec<String>)> = Vec::new();
+    let mut roa_tables: Vec<Vec<RoaRow>> = Vec::new();
+    let mut pending: Vec<PendingFilter> = Vec::new();
 
     for raw in text.lines() {
+        let line = strip_comments(raw);
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        let opens = line.matches('{').count();
+        let closes = line.matches('}').count();
+
+        // An active capture swallows its body lines whole — they
+        // belong to the filter text, not to the peer scan below.
+        if let Some(cap) = capture.as_mut() {
+            if cap.feed(line, opens, closes) {
+                let cap = capture.take().expect("checked above");
+                match cap.kind {
+                    BirdCaptureKind::Filter(name) => {
+                        filters.push((name, extract_block_body(&cap.text)));
+                    }
+                    BirdCaptureKind::Function(name) => functions.push((name, cap.text)),
+                    BirdCaptureKind::RoaTable => roa_tables.push(cap.rows),
+                }
+            }
+            continue;
+        }
+
         // `lr:` directives live in comments that strip_comments would
-        // eat — scan the raw line first. Inside `protocol bgp` a
-        // directive scopes to that peer, outside it is global.
+        // eat — scan the raw line first, but never inside captured
+        // bodies (a directive there is BIRD filter text, not lr
+        // config). Inside `protocol bgp` a directive scopes to that
+        // peer, outside it is global.
         if let Some(d) = extract_lr_directive(raw, "#") {
             match current.as_mut() {
                 Some(peer) => attach_peer_directive(peer, d),
                 None => out.ext_global.push(d),
             }
         }
-        let line = strip_comments(raw);
-        let tokens: Vec<&str> = line.split_whitespace().collect();
         if tokens.is_empty() {
             continue;
         }
-        let opens = line.matches('{').count();
-        let closes = line.matches('}').count();
+        // Capture starts (top level only — BIRD has no filters inside
+        // protocol stanzas).
+        if current.is_none() {
+            match tokens[0] {
+                "filter" if tokens.len() >= 2 && line.contains('{') => {
+                    let name = tokens[1].trim_end_matches('{').to_string();
+                    capture = Some(BirdCapture::new(
+                        BirdCaptureKind::Filter(name),
+                        line,
+                        opens,
+                        closes,
+                    ));
+                    continue;
+                }
+                "function" if tokens.len() >= 2 => {
+                    let name = tokens[1].split('(').next().unwrap_or("").to_string();
+                    capture = Some(BirdCapture::new(
+                        BirdCaptureKind::Function(name),
+                        line,
+                        opens,
+                        closes,
+                    ));
+                    continue;
+                }
+                "roa" if tokens.len() >= 3 && tokens[1] == "table" => {
+                    if line.contains('{') {
+                        capture = Some(BirdCapture::new(
+                            BirdCaptureKind::RoaTable,
+                            line,
+                            opens,
+                            closes,
+                        ));
+                    } else {
+                        // `roa table t4;` — an empty table (populated
+                        // via RTR in BIRD; lr's [[roa]] stays empty and
+                        // the roa_check mapping still knows it exists).
+                        roa_tables.push(Vec::new());
+                    }
+                    continue;
+                }
+                "define" if tokens.len() >= 4 && tokens[2] == "=" => {
+                    // `define NAME = value;` — parsed from the line so
+                    // quoted values keep their inner spaces.
+                    if let Some((name, value)) = parse_bird_define(line) {
+                        defines.push((name, value));
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+        }
         if tokens.len() >= 2 && tokens[0] == "protocol" && tokens[1] == "static" {
             in_static = true;
             static_depth = 0;
@@ -417,8 +538,9 @@ fn translate_bird(text: &str) -> ConfigOut {
             }
             // Channel openings: `ipv4 { … }` / `ipv6 { … }`. A peer's
             // channel set decides its MP-BGP families (mapped after
-            // the loop). An inline body (`ipv4 { import all; };`)
-            // cannot be parsed line-wise — kept visible as UNMAPPED.
+            // the loop). Inline bodies (`ipv4 { import all; };`) split
+            // on `;` and run the same statement mapping; the shapes
+            // that still do not map stay visible per statement.
             "ipv4" | "ipv6" if current.is_some() => {
                 let peer = current.as_mut().unwrap();
                 if tokens[0] == "ipv4" {
@@ -426,11 +548,35 @@ fn translate_bird(text: &str) -> ConfigOut {
                 } else {
                     peer.channel_v6 = true;
                 }
-                if tokens[1..]
+                let has_content = tokens[1..]
                     .iter()
-                    .any(|t| !t.trim_matches(|c| c == '{' || c == '}').is_empty())
-                {
-                    peer.unmapped.push(line.trim().to_string());
+                    .any(|t| !t.trim_matches(|c| c == '{' || c == '}').is_empty());
+                if has_content {
+                    let start = line.find('{').map(|i| i + 1).unwrap_or(0);
+                    let end = line.rfind('}').unwrap_or(line.len());
+                    let peer_name = peer.name.clone().unwrap_or_else(|| "peer".to_string());
+                    for stmt in line[start..end].split(';') {
+                        let stmt = stmt.trim();
+                        if stmt.is_empty() {
+                            continue;
+                        }
+                        if stmt.starts_with("import") || stmt.starts_with("export") {
+                            let dir: &'static str = if stmt.starts_with("import") {
+                                "import"
+                            } else {
+                                "export"
+                            };
+                            let value = stmt
+                                .split_whitespace()
+                                .skip(1)
+                                .map(clean)
+                                .collect::<Vec<_>>()
+                                .join(" ");
+                            apply_bird_import_export(&peer_name, peer, dir, &value, &mut pending);
+                        } else {
+                            peer.unmapped.push(stmt.to_string());
+                        }
+                    }
                 }
             }
             "hold" if tokens.len() >= 3 && tokens[1] == "time" => {
@@ -444,7 +590,11 @@ fn translate_bird(text: &str) -> ConfigOut {
                 }
             }
             "import" | "export" if current.is_some() => {
-                let dir = tokens[0];
+                let dir: &'static str = if tokens[0] == "import" {
+                    "import"
+                } else {
+                    "export"
+                };
                 // Keep the whole filter expression visible in notes
                 // (`export filter export_to_lr`, `import where …`).
                 let value = tokens[1..]
@@ -452,7 +602,19 @@ fn translate_bird(text: &str) -> ConfigOut {
                     .map(|t| clean(t))
                     .collect::<Vec<_>>()
                     .join(" ");
-                apply_bird_policy(current.as_mut().unwrap(), dir, &value);
+                let peer_name = current
+                    .as_ref()
+                    .expect("arm guard")
+                    .name
+                    .clone()
+                    .unwrap_or_else(|| "peer".to_string());
+                apply_bird_import_export(
+                    &peer_name,
+                    current.as_mut().unwrap(),
+                    dir,
+                    &value,
+                    &mut pending,
+                );
             }
             "rr" if tokens.len() >= 2 && tokens[1] == "client" => {
                 if let Some(peer) = current.as_mut() {
@@ -533,7 +695,206 @@ fn translate_bird(text: &str) -> ConfigOut {
             _ => {}
         }
     }
+    // D14.1: translate the captured filter set, then resolve the
+    // deferred `import|export filter NAME` / `where EXPR` attachments.
+    let src = BirdFilterSource {
+        defines,
+        functions,
+        filters,
+        roa_tables,
+    };
+    let (translated, roa_rows) = translate_bird_filter::translate(&src);
+    out.filters = translated.ok;
+    out.failed_filters = translated.failed;
+    out.roas = roa_rows;
+    for p in pending {
+        let peer = match out
+            .peers
+            .iter_mut()
+            .find(|peer| peer.name.as_deref() == Some(&p.peer))
+        {
+            Some(peer) => peer,
+            None => continue,
+        };
+        let filter_slot = if p.dir == "import" {
+            &mut peer.import_filter
+        } else {
+            &mut peer.export_filter
+        };
+        match &p.target {
+            PendingTarget::Named(name) => {
+                if out.filters.iter().any(|f| &f.name == name) {
+                    *filter_slot = Some(name.clone());
+                } else {
+                    let notes = out
+                        .failed_filters
+                        .iter()
+                        .filter(|(n, _)| n == name)
+                        .flat_map(|(_, notes)| notes.iter())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("; ");
+                    let reason = if notes.is_empty() {
+                        "filter is not defined in the source config".to_string()
+                    } else {
+                        notes
+                    };
+                    peer.unmapped.push(format!(
+                        "{} filter {name}: filter NOT attached — {reason}",
+                        p.dir
+                    ));
+                }
+            }
+            PendingTarget::Where(expr) => {
+                match translate_bird_filter::translate_where(expr, &src) {
+                    Ok(body) => {
+                        let name = format!("bird-{}-{}", p.dir, p.peer);
+                        let name = unique_filter_name(&out.filters, &name);
+                        out.filters.push(FilterRow {
+                            name: name.clone(),
+                            body,
+                        });
+                        *filter_slot = Some(name);
+                    }
+                    Err(notes) => {
+                        peer.unmapped.push(format!(
+                            "{} where {expr}: filter NOT attached — {}",
+                            p.dir,
+                            notes.join("; ")
+                        ));
+                    }
+                }
+            }
+        }
+    }
     out
+}
+
+/// Ensure generated `where` filter names stay unique across peers.
+fn unique_filter_name(existing: &[FilterRow], base: &str) -> String {
+    let mut candidate = base.to_string();
+    let mut n = 1;
+    while existing.iter().any(|f| f.name == candidate) {
+        n += 1;
+        candidate = format!("{base}-{n}");
+    }
+    candidate
+}
+
+/// One top-level BIRD block capture (`filter`, `function`,
+/// `roa table`): brace-counted text accumulation.
+struct BirdCapture {
+    kind: BirdCaptureKind,
+    text: String,
+    depth: isize,
+    seen_brace: bool,
+    rows: Vec<RoaRow>,
+}
+
+enum BirdCaptureKind {
+    Filter(String),
+    Function(String),
+    RoaTable,
+}
+
+impl BirdCapture {
+    /// Start a capture from the header line (its braces count too —
+    /// a single-line stanza closes immediately).
+    fn new(kind: BirdCaptureKind, header: &str, opens: usize, closes: usize) -> Self {
+        let mut cap = Self {
+            kind,
+            text: String::new(),
+            depth: 0,
+            seen_brace: false,
+            rows: Vec::new(),
+        };
+        cap.absorb(header, opens, closes);
+        cap
+    }
+
+    fn absorb(&mut self, line: &str, opens: usize, closes: usize) {
+        self.text.push_str(line);
+        self.text.push('\n');
+        self.depth += opens as isize - closes as isize;
+        if self.text.contains('{') {
+            self.seen_brace = true;
+        }
+        if matches!(self.kind, BirdCaptureKind::RoaTable) {
+            if let Some(row) = parse_roa_line(line) {
+                self.rows.push(row);
+            }
+        }
+    }
+
+    /// Absorb one body line; true when the block just closed.
+    fn feed(&mut self, line: &str, opens: usize, closes: usize) -> bool {
+        self.absorb(line, opens, closes);
+        self.seen_brace && self.depth <= 0
+    }
+}
+
+/// The text between the first `{` and the matching final `}` — the
+/// filter body the translator works on, trimmed per line.
+fn extract_block_body(text: &str) -> Vec<String> {
+    let start = text.find('{').map(|i| i + 1).unwrap_or(0);
+    let end = text.rfind('}').unwrap_or(text.len());
+    text[start..end]
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(String::from)
+        .collect()
+}
+
+/// `define NAME = value;` — name plus the verbatim value text
+/// (quotes preserved, trailing `;` stripped).
+fn parse_bird_define(line: &str) -> Option<(String, String)> {
+    let rest = line.strip_prefix("define")?.trim_start();
+    let eq = rest.find('=')?;
+    let name = rest[..eq].trim();
+    if name.is_empty() || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+        return None;
+    }
+    let value = rest[eq + 1..].trim();
+    let value = value.strip_suffix(';').unwrap_or(value).trim();
+    Some((name.to_string(), value.to_string()))
+}
+
+/// One `roa <prefix> [max <n>] as <asn>;` entry inside a
+/// `roa table { … }` block.
+fn parse_roa_line(line: &str) -> Option<RoaRow> {
+    let rest = line.trim().strip_prefix("roa")?.trim_start();
+    if rest.starts_with("table") {
+        return None;
+    }
+    let tokens: Vec<&str> = rest.split_whitespace().collect();
+    if tokens.is_empty() {
+        return None;
+    }
+    let prefix = tokens[0].to_string();
+    let mut max_length = None;
+    let mut asn = None;
+    let mut i = 1;
+    while i < tokens.len() {
+        match tokens[i] {
+            "max" => {
+                max_length = tokens.get(i + 1).and_then(|v| v.parse().ok());
+                i += 2;
+            }
+            "as" => {
+                asn = tokens
+                    .get(i + 1)
+                    .and_then(|v| v.trim_end_matches(';').parse().ok());
+                i += 2;
+            }
+            _ => i += 1,
+        }
+    }
+    asn.map(|asn| RoaRow {
+        prefix,
+        max_length,
+        asn,
+    })
 }
 
 /// A line made purely of block punctuation (`{`, `};`, `}};`, …) —
@@ -555,6 +916,43 @@ fn apply_bird_local_as(out: &mut ConfigOut, peer: &mut PeerOut, asn_text: &str) 
         }
         Err(_) => peer.unmapped.push(format!("local as {asn_text}")),
     }
+}
+
+/// One BIRD `import|export VALUE` statement — from a channel block
+/// line or an inline channel body. `all` / `none` map immediately
+/// (see [`apply_bird_policy`]); `filter NAME` / `where EXPR` defer to
+/// the post-scan resolution (BIRD lets filters be defined after the
+/// protocol that uses them).
+fn apply_bird_import_export(
+    peer_name: &str,
+    peer: &mut PeerOut,
+    dir: &'static str,
+    value: &str,
+    pending: &mut Vec<PendingFilter>,
+) {
+    if let Some(rest) = value.strip_prefix("filter ") {
+        if rest.trim().starts_with('{') {
+            peer.unmapped.push(format!(
+                "{dir} filter {{ … }} (inline filter block) — use a named top-level filter"
+            ));
+        } else {
+            pending.push(PendingFilter {
+                peer: peer_name.to_string(),
+                dir,
+                target: PendingTarget::Named(rest.trim().to_string()),
+            });
+        }
+        return;
+    }
+    if let Some(rest) = value.strip_prefix("where ") {
+        pending.push(PendingFilter {
+            peer: peer_name.to_string(),
+            dir,
+            target: PendingTarget::Where(rest.trim().to_string()),
+        });
+        return;
+    }
+    apply_bird_policy(peer, dir, value);
 }
 
 /// One BIRD `import|export <value>` line. `none` gets a deny-all
@@ -1162,6 +1560,33 @@ fn render(out: ConfigOut) -> String {
         s.push_str("entry = 10\n");
         s.push_str(&format!("permit = {}\n\n", tag.ends_with("permit")));
     }
+    // BIRD `roa table` entries carry over as `[[roa]]` rows — the
+    // translated filters' `roa.state` checks and the daemon's
+    // `roa_validate` both read the same store.
+    for row in &out.roas {
+        s.push_str("[[roa]]\n");
+        s.push_str(&format!("prefix = {}\n", toml_str(&row.prefix)));
+        if let Some(ml) = row.max_length {
+            s.push_str(&format!("max_length = {ml}\n"));
+        }
+        s.push_str(&format!("asn = {}\n\n", row.asn));
+    }
+    // Translated BIRD filters. The lr DSL is whitespace-insensitive,
+    // so the multi-line body collapses onto one TOML string line.
+    for f in &out.filters {
+        s.push_str("[[filter]]\n");
+        s.push_str(&format!("name = {}\n", toml_str(&f.name)));
+        let one_line = f.body.replace('\n', " ");
+        s.push_str(&format!("body = {}\n\n", toml_str(&one_line)));
+    }
+    // Filters that could not be translated faithfully stay visible —
+    // silently re-filtering a route policy is worse than a gap.
+    for (name, notes) in &out.failed_filters {
+        s.push_str(&format!(
+            "# UNMAPPED: filter {name} not translated — {}\n",
+            notes.join("; ")
+        ));
+    }
 
     for peer in &out.peers {
         s.push_str("[[peer]]\n");
@@ -1224,6 +1649,12 @@ fn render(out: ConfigOut) -> String {
         }
         if let Some(e) = &peer.export {
             s.push_str(&format!("export = \"{e}\"\n"));
+        }
+        if let Some(i) = &peer.import_filter {
+            s.push_str(&format!("import_filter = {}\n", toml_str(i)));
+        }
+        if let Some(e) = &peer.export_filter {
+            s.push_str(&format!("export_filter = {}\n", toml_str(e)));
         }
         for u in &peer.unmapped {
             s.push_str(&format!("# UNMAPPED: {u}\n"));
@@ -1775,6 +2206,255 @@ protocol bgp p1 {
         assert!(toml.contains("ebgp_policy = \"accept-all\""));
     }
 
+    // ---- D14.1: BIRD filter translation through the public path ----
+
+    #[test]
+    fn bird_named_filter_translates_and_attaches() {
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+
+filter export_only_cust {
+    if net ~ [ 10.0.0.0/8{16,24}, 192.0.2.0/24 ] then {
+        bgp_local_pref := 200;
+        bgp_path.prepend(64512);
+        accept;
+    }
+    reject;
+}
+
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 {
+        import all;
+        export filter export_only_cust;
+    };
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        // The filter body landed as a [[filter]] table and compiled
+        // at finalize time (roundtrip would have failed otherwise).
+        assert_eq!(cfg.filters.len(), 1);
+        assert_eq!(cfg.filters[0].name.as_deref(), Some("export_only_cust"));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("bgp.local_pref = 200"));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("bgp.as_path.prepend(64512)"));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("10.0.0.0/8{16,24}"));
+        assert!(!cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("bgp_path"));
+        // The peer references it.
+        assert_eq!(cfg.peers.len(), 1);
+        assert_eq!(
+            cfg.peers[0].export_filter.as_deref(),
+            Some("export_only_cust")
+        );
+    }
+
+    #[test]
+    fn bird_where_expression_becomes_generated_filter() {
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 { import where net ~ 10.0.0.0/8; export all; };
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        assert_eq!(cfg.filters.len(), 1);
+        assert_eq!(cfg.filters[0].name.as_deref(), Some("bird-import-uplink"));
+        // `import where EXPR` = accept iff EXPR.
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("if net ~ 10.0.0.0/8 then accept; reject;"));
+        assert_eq!(
+            cfg.peers[0].import_filter.as_deref(),
+            Some("bird-import-uplink")
+        );
+    }
+
+    #[test]
+    fn bird_unfaithful_filter_is_not_attached() {
+        // `proto` compares the BIRD instance name — no faithful lr
+        // translation exists, so the filter must NOT attach.
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+filter from_customer {
+    if proto = "cust_bgp" then accept;
+    reject;
+}
+protocol bgp cust {
+    local as 64512;
+    neighbor 192.0.2.9 as 64513;
+    ipv4 { import filter from_customer; export all; };
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        assert!(cfg.filters.is_empty(), "unfaithful filter must not emit");
+        assert!(toml.contains(
+            "filter from_customer: filter NOT attached — BIRD route attribute or statement `proto`"
+        ));
+        assert_eq!(cfg.peers[0].import_filter, None);
+    }
+
+    #[test]
+    fn bird_roa_table_and_roa_check_translate() {
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+roa table roa_v4 {
+    roa 198.51.100.0/24 max 24 as 64513;
+    roa 203.0.113.0/24 as 65000;
+}
+filter roa_guard {
+    if roa_check(roa_v4) = ROA_INVALID then reject;
+    if roa_check(roa_v4) = ROA_UNKNOWN then accept;
+    reject;
+}
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 { import filter roa_guard; export all; };
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        assert_eq!(cfg.roas.len(), 2);
+        assert_eq!(cfg.roas[0].prefix.as_deref(), Some("198.51.100.0/24"));
+        assert_eq!(cfg.roas[0].max_length, Some(24));
+        assert_eq!(cfg.roas[0].asn, Some(64513));
+        assert_eq!(cfg.roas[1].max_length, None);
+        assert_eq!(cfg.roas[1].asn, Some(65000));
+        assert_eq!(cfg.filters.len(), 1);
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("roa.state == \"invalid\""));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("roa.state == \"not-found\""));
+        assert!(!cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("roa_check"));
+        assert_eq!(cfg.peers[0].import_filter.as_deref(), Some("roa_guard"));
+    }
+
+    #[test]
+    fn bird_defines_substitute_into_filters() {
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+define MY_AS = 64512;
+define CUST_NETS = [ 10.0.0.0/8, 192.0.2.0/24 ];
+filter tag_cust {
+    if net ~ CUST_NETS then {
+        bgp_path.prepend(MY_AS);
+        accept;
+    }
+    reject;
+}
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 { export filter tag_cust; import all; };
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        assert_eq!(cfg.filters.len(), 1);
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("bgp.as_path.prepend(64512)"));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("[ 10.0.0.0/8, 192.0.2.0/24 ]"));
+        assert!(!cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("CUST_NETS"));
+        assert!(!cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("MY_AS"));
+    }
+
+    #[test]
+    fn bird_function_used_by_filter_is_embedded() {
+        let toml = render(translate_bird(
+            r#"
+router id 10.0.0.1;
+function set_pref(int p) {
+    bgp_local_pref := p;
+    return true;
+}
+filter export_up {
+    if net ~ 10.0.0.0/8 then {
+        set_pref(200);
+        accept;
+    }
+    reject;
+}
+protocol bgp uplink {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 { export filter export_up; import all; };
+}
+"#,
+        ));
+        let cfg = roundtrip(&toml);
+        assert_eq!(cfg.filters.len(), 1);
+        // The function declaration precedes the body and survives
+        // compilation (roundtrip finalizes the filter).
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .starts_with("function set_pref(p)"));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("set_pref(200);"));
+        assert!(cfg.filters[0]
+            .body
+            .as_deref()
+            .unwrap_or("")
+            .contains("bgp.local_pref = p;"));
+    }
+
     #[test]
     fn bird_neighbor_and_local_with_ports() {
         // The shape the interop lab actually deploys: non-default
@@ -1804,7 +2484,11 @@ protocol bgp lr {
         assert_eq!(peer.peer_as, 64512);
         assert!(toml
             .contains("# UNMAPPED: local port 17992 (lr listens on the daemon's global listener)"));
-        assert!(toml.contains("# UNMAPPED: export filter export_to_lr"));
+        // The filter is referenced but never defined in the source —
+        // reported, and nothing attaches.
+        assert!(toml.contains(
+            "# UNMAPPED: export filter export_to_lr: filter NOT attached — filter is not defined"
+        ));
     }
 
     #[test]

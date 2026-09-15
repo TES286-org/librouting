@@ -68,6 +68,7 @@ mod daemon_rpki;
 mod privdrop;
 mod signal;
 mod translate;
+mod translate_bird_filter;
 mod yang;
 
 use daemon_bfd::BfdFlags;
