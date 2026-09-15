@@ -1,26 +1,29 @@
 # lr-cli — User Guide
 
-`lr-cli` is the librouting command-line package. It ships **two
-binaries**, both built from the same crate (`crates/lr-cli`):
+`lr-cli` is the librouting command-line package. It ships **three
+binaries**, all built from the same crate (`crates/lr-cli`):
 
 | Binary        | Purpose                                                       |
 | ------------- | ------------------------------------------------------------- |
 | `lr`          | The protocol-inspection CLI — decode wire bytes, parse MRT dumps, replay captured streams. |
 | `lr-daemon`   | The reference daemon — runs a real BGP / OSPF / Babel / LDP / BMP router with a config file or CLI flags. |
+| `lrctl`       | The operational CLI — connects to a running `lr-daemon` over its Unix API socket (status / sessions / routes / reload / shutdown) and validates filter DSL bodies client-side. |
 
 ```sh
 cargo build --release -p lr-cli
 # → target/release/lr
 # → target/release/lr-daemon
+# → target/release/lrctl
 ```
 
-Both binaries are intentionally dependency-light: `lr` has no
+All three binaries are intentionally dependency-light: `lr` has no
 argument-parsing library at all, `lr-daemon` parses its own argv in
 `daemon_config::parse_args` so a stripped container can still run the
-daemon. Operators looking for a full production BGP daemon should use
-BIRD / FRR / OpenBGPD; `lr-cli` is the librouting reference
-implementation — every feature in the library ends up on the daemon's
-flag surface so it can be tested end-to-end.
+daemon, and `lrctl` mirrors the same hand-rolled style. Operators
+looking for a full production BGP daemon should use BIRD / FRR /
+OpenBGPD; `lr-cli` is the librouting reference implementation — every
+feature in the library ends up on the daemon's flag surface so it can
+be tested end-to-end.
 
 This guide is the user-facing reference. For the architecture, module
 layout and extension points see
@@ -566,3 +569,93 @@ sid = "fc00:dead:beef::"
 For the full set of worked examples — route reflector, confederation,
 route server, BFD integration, OS integration, Babel source-specific,
 OSPF ABR/NSSA — see the [`examples/`](examples/) directory.
+
+---
+
+## `lrctl` — the operational CLI (ROADMAP-v3 D12)
+
+`lrctl` is the operator-facing companion to `lr-daemon`. It connects to
+a running daemon over its Unix API socket (the same line-oriented
+protocol `socat - UNIX-CONNECT:…` speaks) and proxies the command,
+returning the daemon's reply verbatim to stdout. A small set of
+subcommands (`filter compile`) run client-side and never touch the
+daemon — they reuse the `lr-policy` library directly so the operator
+can validate a filter body before deploying it.
+
+### Quick start
+
+```sh
+# Start a daemon with the API socket enabled.
+./target/release/lr-daemon \
+    --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+    --listen 127.0.0.1:1179 --network 203.0.113.0/24 \
+    --api-socket /run/lr-daemon.api &
+
+# Query it.
+./target/release/lrctl status
+./target/release/lrctl sessions
+./target/release/lrctl routes show
+./target/release/lrctl routes show 203.0.113.0/24
+
+# Validate a filter body client-side (no daemon needed).
+./target/release/lrctl filter compile 'if net ~ 10.0.0.0/8 then accept; reject;'
+
+# Reload or shut the daemon down.
+./target/release/lrctl reload
+./target/release/lrctl shutdown
+```
+
+The default socket path is `/run/lr-daemon.api` (matches
+`templates/daemon.toml`); override with `--socket PATH` on any
+subcommand. On non-Unix targets `lrctl` refuses with a clear error —
+the runtime API requires Unix domain sockets.
+
+### Daemon commands (proxy the runtime API)
+
+| Command                         | Daemon API  | Effect                                                |
+| ------------------------------- | ----------- | ----------------------------------------------------- |
+| `lrctl status`                  | `status`    | Daemon summary (version, identity, uptime, counters)  |
+| `lrctl sessions [list]`         | `sessions`  | One line per configured session                       |
+| `lrctl routes show [prefix]`    | `routes`    | Loc-RIB dump, optionally filtered to one prefix        |
+| `lrctl routes dump <path>`      | `mrt PATH`  | Write the Loc-RIB as an MRT dump (RFC 6396)           |
+| `lrctl reload`                  | `reload`    | Re-apply configuration (SIGHUP equivalent)           |
+| `lrctl shutdown`                | `shutdown`  | Graceful shutdown                                      |
+
+`routes show <prefix>` is the operator-facing verb for the FRR
+`show ip route <prefix>` lineage; the daemon API has no
+parameterised `routes <prefix>` command today, so `lrctl` does the
+filtering client-side (exact match on the leading token so
+`203.0.113.0/24` does not also match `203.0.113.0/25`). A non-zero
+exit code signals a transport failure or a daemon `error:` reply; a
+missing prefix on `routes show <prefix>` is exit 0 with an empty
+stdout and a `no route for …` note on stderr (FRR parity).
+
+### Client-side commands (no daemon required)
+
+| Command                         | Effect                                                |
+| ------------------------------- | ----------------------------------------------------- |
+| `lrctl filter compile <body>`   | Validate a filter DSL body via `lr-policy::filter::compile` |
+
+`filter compile` runs the same parser path the daemon runs at startup,
+so an `ok` here means the body will compile when the daemon reloads.
+The body is a single shell-quoted argument; multiple args after
+`compile` are joined with spaces so `lrctl filter compile if net ~
+10/8 then accept; reject;` works without extra quoting. On success the
+exit code is 0 and the body is `ok (<n> statement(s)…)`; on a parse
+error the exit code is 1 and the stderr carries the 1-indexed
+line/column diagnostic.
+
+### Other commands
+
+| Command        | Effect                              |
+| -------------- | ----------------------------------- |
+| `lrctl version` | Print `lrctl <version>`             |
+| `lrctl help`    | Show the usage banner               |
+
+### Exit codes
+
+| Code | Meaning                                                        |
+| ---- | -------------------------------------------------------------- |
+| 0    | Success (or a `routes show <prefix>` with no match)            |
+| 1    | Transport failure, daemon `error:` reply, or filter parse error |
+| 2    | `lrctl` argument error (unknown subcommand, missing arg)       |

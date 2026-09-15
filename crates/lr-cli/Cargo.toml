@@ -24,6 +24,16 @@ name = "lr-daemon"
 path = "src/daemon.rs"
 bench = false
 
+# `lrctl` — the operational CLI (ROADMAP-v3 D12). Connects to a running
+# `lr-daemon` over its Unix API socket and proxies the line-oriented
+# command protocol, plus a small set of client-side tools that do not
+# need the daemon (e.g. `filter compile` validates a filter body via
+# `lr-policy::filter::compile`).
+[[bin]]
+name = "lrctl"
+path = "src/lrctl.rs"
+bench = false
+
 [dependencies]
 lr-core = { workspace = true }
 lr-babel = { workspace = true }

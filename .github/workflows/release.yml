@@ -10,8 +10,8 @@ name: Release
 #   - librouting-<os>-<arch>.tar.gz (or .zip on Windows)
 #       contains: the platform's liblr_ffi.{so,dll,dylib}, the static
 #       liblr_ffi.a (where the toolchain emits one), the public
-#       headers (lr_ffi.h, librouting.hpp), and the `lr` + `lr-daemon`
-#       CLI binaries.
+#       headers (lr_ffi.h, librouting.hpp), and the `lr`, `lr-daemon`
+#       and `lrctl` CLI binaries.
 #   - lr_ffi.h and librouting.hpp are also attached standalone so a
 #     packaging system can pull them without unpacking an archive.
 
@@ -32,6 +32,7 @@ jobs:
             lib: liblr_ffi.so
             lr_bin: lr
             lrd_bin: lr-daemon
+            lrctl_bin: lrctl
           # macOS Intel: cross-compile from macos-14 (Apple Silicon).
           # GitHub Actions retired the macos-13 (Intel) runner pool
           # during 2025; the universal Apple clang on macos-14 targets
@@ -44,18 +45,21 @@ jobs:
             lib: liblr_ffi.dylib
             lr_bin: lr
             lrd_bin: lr-daemon
+            lrctl_bin: lrctl
           - os: macos-14
             target: aarch64-apple-darwin
             archive: librouting-macos-aarch64.tar.gz
             lib: liblr_ffi.dylib
             lr_bin: lr
             lrd_bin: lr-daemon
+            lrctl_bin: lrctl
           - os: windows-2022
             target: x86_64-pc-windows-msvc
             archive: librouting-windows-x86_64.zip
             lib: lr_ffi.dll
             lr_bin: lr.exe
             lrd_bin: lr-daemon.exe
+            lrctl_bin: lrctl.exe
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -68,9 +72,9 @@ jobs:
           shared-key: "release-${{ matrix.target }}"
       - name: Build release artifacts
         # The first line builds the whole workspace (lr-ffi shared
-        # library + lr-cli's `lr` and `lr-daemon` binaries). The
-        # second line is belt-and-braces: ensures lr-ffi is fresh even
-        # if a cache hit skipped the workspace build.
+        # library + lr-cli's `lr`, `lr-daemon` and `lrctl` binaries).
+        # The second line is belt-and-braces: ensures lr-ffi is fresh
+        # even if a cache hit skipped the workspace build.
         run: |
           cargo build --workspace --release --all-features --target ${{ matrix.target }}
           cargo build --release -p lr-ffi --target ${{ matrix.target }}
@@ -86,10 +90,13 @@ jobs:
           [ -f target/${{ matrix.target }}/release/liblr_ffi.a ] && \
             cp target/${{ matrix.target }}/release/liblr_ffi.a stage/ || true
           # CLI binaries: `lr` (the inspection CLI — decode, routes,
-          # mrt, parity-replay) and `lr-daemon` (the reference daemon).
-          # See docs/lr-cli.md for the full flag reference.
+          # mrt, parity-replay), `lr-daemon` (the reference daemon)
+          # and `lrctl` (the operational CLI — status / sessions /
+          # routes / reload / shutdown, plus client-side `filter
+          # compile`). See docs/lr-cli.md for the full flag reference.
           cp target/${{ matrix.target }}/release/${{ matrix.lr_bin }} stage/
           cp target/${{ matrix.target }}/release/${{ matrix.lrd_bin }} stage/
+          cp target/${{ matrix.target }}/release/${{ matrix.lrctl_bin }} stage/
           cp include/lr_ffi.h include/librouting.hpp stage/include/
           tar czf ${{ matrix.archive }} -C stage .
       - name: Stage artifacts (Windows)
@@ -102,6 +109,7 @@ jobs:
           }
           copy "target\${{ matrix.target }}\release\${{ matrix.lr_bin }}" stage\
           copy "target\${{ matrix.target }}\release\${{ matrix.lrd_bin }}" stage\
+          copy "target\${{ matrix.target }}\release\${{ matrix.lrctl_bin }}" stage\
           copy include\lr_ffi.h stage\include\
           copy include\librouting.hpp stage\include\
           7z a ${{ matrix.archive }} stage
@@ -143,13 +151,13 @@ jobs:
 
             Pre-built `lr-ffi` shared libraries for Linux, macOS (Intel
             and Apple Silicon) and Windows, the public C and C++ headers
-            (`lr_ffi.h`, `librouting.hpp`), and the `lr` + `lr-daemon`
-            CLI binaries.
+            (`lr_ffi.h`, `librouting.hpp`), and the `lr`, `lr-daemon` and
+            `lrctl` CLI binaries.
 
             Each platform archive contains:
             - `liblr_ffi.{so,dylib,dll}` — the C ABI shared library
             - `liblr_ffi.a` (where emitted) — the static archive
-            - `lr` / `lr-daemon` (or `.exe` on Windows) — the CLI tools
+            - `lr` / `lr-daemon` / `lrctl` (or `.exe` on Windows) — the CLI tools
             - `include/lr_ffi.h` + `include/librouting.hpp` — the headers
 
             See `docs/RELEASE-PLAN.md` for the semver policy, the

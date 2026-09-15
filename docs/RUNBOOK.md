@@ -67,6 +67,15 @@ reload: note: AS, router-id, peer and auth changes require a restart
 shutting down
 ```
 
+The `lrctl` binary (ROADMAP-v3 D12) is the supported client: it
+proxies the same commands with `lrctl status`, `lrctl sessions`,
+`lrctl routes show [prefix]`, `lrctl routes dump <path>`,
+`lrctl reload`, `lrctl shutdown` and adds a client-side
+`lrctl filter compile <body>` that validates a filter DSL body
+without touching the daemon. See
+[`lr-cli.md`](lr-cli.md#lrctl--the-operational-cli-roadmap-v3-d12)
+for the full `lrctl` reference.
+
 Command reference:
 
 | Command    | Effect                                                          |
