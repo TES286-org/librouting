@@ -26,6 +26,7 @@ pub mod bytes;
 pub mod codec;
 pub mod error;
 pub mod events;
+pub mod filters;
 pub mod handle;
 pub mod policy;
 pub mod policy_objects;

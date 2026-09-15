@@ -418,3 +418,70 @@ class Resolver:
         if rc < 0:
             raise LrError(f"lr_resolver_add_community_list failed (rc={rc}): {last_error()}")
         return int(rc)
+
+
+# ===== D5.2 — Filter DSL: compile / evaluate / free =====
+
+FILTER_ACCEPT = 0
+FILTER_REJECT = 1
+FILTER_FALLTHROUGH = 2
+
+__all__ += ["CompiledFilter", "compile_filter", "FILTER_ACCEPT", "FILTER_REJECT", "FILTER_FALLTHROUGH"]
+
+
+class CompiledFilter:
+    """An owned compiled filter (the D3.7 stack VM — the same hot
+    path the daemon executes per route)."""
+
+    def __init__(self, name: str, body: str):
+        ptr = get_lib().lr_filter_compile(name.encode(), body.encode())
+        if ptr == ffi.NULL:
+            raise LrError(f"lr_filter_compile failed: {last_error()}")
+        self._ptr = ptr
+
+    def __del__(self):
+        if getattr(self, "_ptr", None) is not None:
+            get_lib().lr_filter_free(self._ptr)
+            self._ptr = None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_):
+        self.__del__()
+
+    def name(self) -> str:
+        need = get_lib().lr_filter_name(self._ptr, ffi.NULL, 0)
+        if need < 0:
+            raise LrError(f"lr_filter_name failed (rc={need}): {last_error()}")
+        buf = ffi.new("uint8_t[]", need)
+        rc = get_lib().lr_filter_name(self._ptr, buf, need)
+        if rc < 0:
+            raise LrError(f"lr_filter_name failed (rc={rc}): {last_error()}")
+        return bytes(buf[0:need - 1]).decode()
+
+    def evaluate(self, route: Route) -> tuple[int, str]:
+        """Run the filter against ``route`` with the built-in
+        route-backed context (attribute reads/writes hit the route;
+        ``roa.state`` is not-found). Returns ``(verdict, reason)``
+        where ``verdict`` is ``FILTER_ACCEPT`` / ``FILTER_REJECT`` /
+        ``FILTER_FALLTHROUGH`` and ``reason`` is the optional
+        ``reject with`` payload."""
+        verdict = ffi.new("int32_t*")
+        reason = ffi.new("lr_bytes_t*")
+        rc = get_lib().lr_filter_evaluate(self._ptr, route._ptr, ffi.NULL, verdict, reason)
+        if rc != 0:
+            raise LrError(f"lr_filter_evaluate failed (rc={rc}): {last_error()}")
+        out = ""
+        if reason.ptr:
+            n = int(get_lib().lr_bytes_len(reason))
+            raw = bytes(ffi.buffer(get_lib().lr_bytes_ptr(reason), n))
+            get_lib().lr_bytes_free(reason)
+            out = raw.rstrip(b"\x00").decode()
+        return int(verdict[0]), out
+
+
+def compile_filter(name: str, body: str) -> CompiledFilter:
+    """Compile a BIRD-like filter body. Raises :class:`LrError` with
+    the 1-indexed line/column diagnostic on a parse error."""
+    return CompiledFilter(name, body)

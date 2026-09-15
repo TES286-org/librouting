@@ -564,3 +564,30 @@ def test_policy_objects():
     pid = res.add_as_path_list("paths", [librouting.AsPathFilter("^65001$", permit=False),
                                          librouting.AsPathFilter("_65002_", permit=True)])
     assert pid == 0
+
+
+def test_filter_dsl():
+    f = librouting.compile_filter("py-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"low\"; }")
+    assert f.name() == "py-f"
+    rt = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    rt.set_local_pref(250)
+    assert f.evaluate(rt) == (librouting.FILTER_ACCEPT, "")
+    rt.set_local_pref(100)
+    verdict, reason = f.evaluate(rt)
+    assert (verdict, reason) == (librouting.FILTER_REJECT, "low")
+
+    # Mutations persist on the route handle.
+    mut = librouting.compile_filter("py-mut", "bgp.local_pref = 42;")
+    mut.evaluate(rt)
+    assert rt.local_pref() == 42
+
+    # Parse errors raise with the diagnostic.
+    try:
+        librouting.compile_filter("py-bad", "if bgp.local_pref = ")
+        raise AssertionError("parse error must raise")
+    except librouting.LrError as e:
+        assert "py-bad" in str(e)
+
+    # ROA state defaults to not-found in the built-in context.
+    roa = librouting.compile_filter("py-roa", "if roa.state == \"not-found\" then { accept; } reject;")
+    assert roa.evaluate(rt)[0] == librouting.FILTER_ACCEPT

@@ -17,6 +17,8 @@ typedef struct lr_bytes_t {
 
 typedef struct OpaqueRouter OpaqueRouter;
 typedef struct OpaqueRouter *lr_router_t;
+typedef struct OpaqueFilter OpaqueFilter;
+typedef struct OpaqueFilter *lr_filter_t;
 
 const char *lr_last_error(void);
 uint32_t lr_abi_version(void);
@@ -275,6 +277,14 @@ typedef struct lr_community_entry_t {
     uint8_t permit;
 } lr_community_entry_t;
 
+typedef struct lr_filter_context_t {
+    void *user_data;
+    /* Every field may be NULL (built-in route-backed behaviour). The
+     * Python binding uses the built-in context; the raw table is
+     * available for advanced embedders. */
+    void *unused_padding[19];
+} lr_filter_context_t;
+
 typedef struct OpaqueRoute OpaqueRoute;
 typedef struct OpaqueRoute *lr_route_t;
 typedef struct OpaquePrefixList OpaquePrefixList;
@@ -359,6 +369,15 @@ int32_t lr_router_remove_aggregate(lr_router_t r, const lr_prefix_t *prefix);
 lr_damping_t lr_router_set_damping(lr_router_t r, const lr_damping_config_t *cfg);
 int32_t lr_damping_decay(lr_damping_t d, uint64_t now_s);
 void lr_damping_destroy(lr_damping_t d);
+
+lr_filter_t lr_filter_compile(const char *name, const char *body);
+void lr_filter_free(lr_filter_t filter);
+int64_t lr_filter_name(lr_filter_t filter, uint8_t *out, uintptr_t cap);
+int32_t lr_filter_evaluate(lr_filter_t filter,
+                           lr_route_t route,
+                           const struct lr_filter_context_t *ctx,
+                           int32_t *out_verdict,
+                           lr_bytes_t *out_reason);
 """
 
 

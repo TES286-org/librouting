@@ -987,4 +987,61 @@ inline std::int32_t resolver_add_community_list(ResolverHandle& res, const char*
     return id;
 }
 
+// ===== D5.2 — Filter DSL: compile / evaluate / free =====
+
+/// `lr_filter_evaluate` verdicts.
+enum class FilterVerdict : std::int32_t { Accept = 0, Reject = 1, Fallthrough = 2 };
+
+struct FilterDeleter {
+    void operator()(lr_filter_t f) const noexcept { lr_filter_free(f); }
+};
+/// An owned compiled filter (the D3.7 stack VM).
+using Filter = std::unique_ptr<OpaqueFilter, FilterDeleter>;
+
+inline Filter make_filter(const std::string& name, const std::string& body) {
+    auto f = lr_filter_compile(name.c_str(), body.c_str());
+    if (!f) {
+        const char* err = lr_last_error();
+        throw Error("lr_filter_compile failed: " + std::string(err ? err : "unknown"));
+    }
+    return Filter(f);
+}
+
+inline std::string filter_name(const Filter& f) {
+    std::int64_t need = lr_filter_name(f.get(), nullptr, 0);
+    if (need < 0) {
+        throw Error("lr_filter_name failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    std::string out(static_cast<std::size_t>(need), '\0');
+    if (lr_filter_name(f.get(), reinterpret_cast<std::uint8_t*>(out.data()),
+                       static_cast<std::size_t>(need)) < 0) {
+        throw Error("lr_filter_name failed: " + std::string(lr_last_error() ? lr_last_error() : "unknown"));
+    }
+    out.resize(static_cast<std::size_t>(need) - 1);
+    return out;
+}
+
+/// Run the filter against the route. `ctx` may be nullptr (built-in
+/// route-backed context). `reason` (optional) receives the
+/// `reject with` payload.
+inline FilterVerdict filter_evaluate(const Filter& f, Route& r,
+                                     const lr_filter_context_t* ctx = nullptr,
+                                     std::string* reason = nullptr) {
+    std::int32_t verdict = 0;
+    auto buf = std::make_unique<lr_bytes_t>();
+    std::int32_t rc = lr_filter_evaluate(f.get(), r.get(), ctx, &verdict,
+                                         reason ? buf.get() : nullptr);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_filter_evaluate failed: " + std::string(err ? err : "unknown"));
+    }
+    if (reason && buf->ptr) {
+        *reason = std::string(reinterpret_cast<const char*>(lr_bytes_ptr(buf.get())),
+                              lr_bytes_len(buf.get()));
+        // The FFI hands back a NUL-terminated buffer; strip the NUL.
+        while (!reason->empty() && reason->back() == '\0') reason->pop_back();
+    }
+    return static_cast<FilterVerdict>(verdict);
+}
+
 } // namespace librouting

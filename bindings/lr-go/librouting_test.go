@@ -805,3 +805,59 @@ func TestPolicyObjects(t *testing.T) {
 			verdict, err, EvalFallthrough)
 	}
 }
+
+func TestFilterDSL(t *testing.T) {
+	f, err := Compile("go-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"low\"; }")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	defer f.Free()
+	name, err := f.Name()
+	if err != nil || name != "go-f" {
+		t.Fatalf("Name: got (%q, %v), want (go-f, nil)", name, err)
+	}
+
+	rt, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer rt.Free()
+
+	if err := rt.SetLocalPref(250); err != nil {
+		t.Fatalf("SetLocalPref: %v", err)
+	}
+	verdict, reason, err := f.Evaluate(rt)
+	if err != nil || verdict != FilterAccept || reason != "" {
+		t.Fatalf("Evaluate high: got (%d, %q, %v), want (%d, \"\", nil)",
+			verdict, reason, err, FilterAccept)
+	}
+	if err := rt.SetLocalPref(100); err != nil {
+		t.Fatalf("SetLocalPref low: %v", err)
+	}
+	verdict, reason, err = f.Evaluate(rt)
+	if err != nil || verdict != FilterReject || reason != "low" {
+		t.Fatalf("Evaluate low: got (%d, %q, %v), want (%d, \"low\", nil)",
+			verdict, reason, err, FilterReject)
+	}
+
+	// Mutations persist: the filter rewrote LOCAL_PREF.
+	if err := rt.SetLocalPref(300); err != nil {
+		t.Fatalf("SetLocalPref reset: %v", err)
+	}
+	mut, err := Compile("go-mut", "bgp.local_pref = 42;")
+	if err != nil {
+		t.Fatalf("Compile mut: %v", err)
+	}
+	defer mut.Free()
+	if _, _, err := mut.Evaluate(rt); err != nil {
+		t.Fatalf("Evaluate mut: %v", err)
+	}
+	if lp, _, _ := rt.LocalPref(); lp != 42 {
+		t.Fatalf("mutation not applied: local_pref = %d, want 42", lp)
+	}
+
+	// Parse errors surface with the diagnostic.
+	if _, err := Compile("go-bad", "if bgp.local_pref = "); err == nil {
+		t.Fatal("parse error must fail")
+	}
+}

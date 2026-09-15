@@ -411,6 +411,46 @@ int main() {
         check(threw, "unknown match kind throws (RAII)");
     }
 
+    // ---- Filter DSL RAII wrapper (ROADMAP-v3 D5.2): compile,
+    // accept/reject + reason, ROA override through the callback
+    // table, parse-error throwing. ----
+    {
+        auto f = make_filter("cpp-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"low\"; }");
+        check(filter_name(f) == "cpp-f", "filter_name (RAII)");
+
+        auto rt = make_route_v4({203, 0, 113, 0}, 24, Protocol::Bgp);
+        set_local_pref(rt, 250);
+        check(filter_evaluate(f, rt) == FilterVerdict::Accept,
+              "filter accepts (RAII)");
+        set_local_pref(rt, 100);
+        std::string reason;
+        check(filter_evaluate(f, rt, nullptr, &reason) == FilterVerdict::Reject &&
+                  reason == "low",
+              "filter rejects with reason (RAII)");
+
+        // Parse errors throw.
+        bool threw = false;
+        try {
+            make_filter("cpp-bad", "if bgp.local_pref = ");
+        } catch (const Error& err) {
+            threw = std::string(err.what()).find("cpp-bad") != std::string::npos;
+        }
+        check(threw, "filter parse error throws with name (RAII)");
+
+        // ROA override via a C callback table.
+        auto rf = make_filter("cpp-roa", "if roa.state == \"invalid\" then { reject; } accept;");
+        check(filter_evaluate(rf, rt) == FilterVerdict::Accept,
+              "built-in roa not-found accepts (RAII)");
+        struct Ud { uint8_t state; } ud{LR_ROA_INVALID};
+        lr_filter_context_t table{};
+        table.user_data = &ud;
+        table.roa_state = [](void* p, lr_route_t) -> uint8_t {
+            return static_cast<Ud*>(p)->state;
+        };
+        check(filter_evaluate(rf, rt, &table) == FilterVerdict::Reject,
+              "callback table overrides roa.state (RAII)");
+    }
+
     // ---- ROA store RAII wrapper (RFC 6482 / RFC 6811 / RFC 8210;
     // ROADMAP-v3 D2.3): static layer replace, RTR delta batch, the
     // three RFC 6811 §2 outcomes. ----

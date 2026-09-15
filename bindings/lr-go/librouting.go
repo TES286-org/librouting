@@ -17,6 +17,7 @@ import "C"
 import (
 	"fmt"
 	"runtime"
+	"strings"
 	"unsafe"
 )
 
@@ -1840,7 +1841,7 @@ func (r *Resolver) Free() {
 func (r *Resolver) AddPrefixList(name string, list *PrefixList) (int32, error) {
 	cname := C.CString(name)
 	defer C.free(unsafe.Pointer(cname))
-	id := C.lr_resolver_add_prefix_list(r.ptr, (*C.int8_t)(unsafe.Pointer(cname)), list.ptr)
+	id := C.lr_resolver_add_prefix_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), list.ptr)
 	if id < 0 {
 		return 0, fmt.Errorf("lr_resolver_add_prefix_list: %s (rc=%d)", LastError(), int(id))
 	}
@@ -1863,7 +1864,7 @@ func (r *Resolver) AddAsPathList(name string, filters []AsPathFilter) (int32, er
 	for i, f := range filters {
 		p := C.CString(f.Pattern)
 		ptrs = append(ptrs, p)
-		cf[i].pattern = (*C.int8_t)(unsafe.Pointer(p))
+		cf[i].pattern = (*C.char)(unsafe.Pointer(p))
 		if f.Permit {
 			cf[i].permit = 1
 		}
@@ -1877,7 +1878,7 @@ func (r *Resolver) AddAsPathList(name string, filters []AsPathFilter) (int32, er
 	if len(cf) > 0 {
 		fp = &cf[0]
 	}
-	id := C.lr_resolver_add_as_path_list(r.ptr, (*C.int8_t)(unsafe.Pointer(cname)), fp, C.size_t(len(cf)))
+	id := C.lr_resolver_add_as_path_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), fp, C.size_t(len(cf)))
 	if id < 0 {
 		return 0, fmt.Errorf("lr_resolver_add_as_path_list: %s (rc=%d)", LastError(), int(id))
 	}
@@ -1909,9 +1910,91 @@ func (r *Resolver) AddCommunityList(name string, entries []CommunityEntry) (int3
 	if len(ce) > 0 {
 		ep = &ce[0]
 	}
-	id := C.lr_resolver_add_community_list(r.ptr, (*C.int8_t)(unsafe.Pointer(cname)), ep, C.size_t(len(ce)))
+	id := C.lr_resolver_add_community_list(r.ptr, (*C.char)(unsafe.Pointer(cname)), ep, C.size_t(len(ce)))
 	if id < 0 {
 		return 0, fmt.Errorf("lr_resolver_add_community_list: %s (rc=%d)", LastError(), int(id))
 	}
 	return int32(id), nil
+}
+
+// ===== D5.2 — Filter DSL: compile / evaluate / free =====
+
+// lr_filter_evaluate verdicts (LR_FILTER_*).
+const (
+	FilterAccept      = C.LR_FILTER_ACCEPT
+	FilterReject      = C.LR_FILTER_REJECT
+	FilterFallthrough = C.LR_FILTER_FALLTHROUGH
+)
+
+// Compile parses and compiles a BIRD-like filter body to the D3.7
+// stack VM (the daemon's hot path). Returns an error on a parse
+// failure; LastError carries the line/column diagnostic.
+func Compile(name, body string) (*CompiledFilter, error) {
+	cn := C.CString(name)
+	defer C.free(unsafe.Pointer(cn))
+	cb := C.CString(body)
+	defer C.free(unsafe.Pointer(cb))
+	ptr := C.lr_filter_compile((*C.char)(unsafe.Pointer(cn)), (*C.char)(unsafe.Pointer(cb)))
+	if ptr == nil {
+		return nil, fmt.Errorf("lr_filter_compile: %s", LastError())
+	}
+	f := &CompiledFilter{ptr: ptr}
+	runtime.SetFinalizer(f, (*CompiledFilter).destroy)
+	return f, nil
+}
+
+// CompiledFilter is an owned compiled-filter handle.
+type CompiledFilter struct {
+	ptr C.lr_filter_t
+}
+
+func (f *CompiledFilter) destroy() {
+	if f.ptr != nil {
+		C.lr_filter_free(f.ptr)
+		f.ptr = nil
+	}
+}
+
+// Free releases the handle (optional; a finalizer also runs).
+func (f *CompiledFilter) Free() {
+	runtime.SetFinalizer(f, nil)
+	f.destroy()
+}
+
+// Name reads the compiled filter's name.
+func (f *CompiledFilter) Name() (string, error) {
+	need := C.lr_filter_name(f.ptr, nil, 0)
+	if need < 0 {
+		return "", fmt.Errorf("lr_filter_name: %s (rc=%d)", LastError(), int(need))
+	}
+	buf := make([]byte, need)
+	if rc := C.lr_filter_name(f.ptr, (*C.uint8_t)(unsafe.Pointer(&buf[0])), C.size_t(need)); rc < 0 {
+		return "", fmt.Errorf("lr_filter_name: %s (rc=%d)", LastError(), int(rc))
+	}
+	return string(buf[:need-1]), nil
+}
+
+// Evaluate runs the filter against the route (mutations persist) with
+// the built-in route-backed context: attribute reads and writes
+// operate on the route handle itself and `roa.state` is not-found
+// (the route carries no RPKI data). Full context control — including
+// the RFC 6811 ROA override — lives in the C ABI's
+// lr_filter_context_t callback table. Returns one of the Filter*
+// verdict constants; for FilterReject, reason carries the
+// `reject with` payload when present.
+func (f *CompiledFilter) Evaluate(route *Route) (int32, string, error) {
+	var verdict C.int32_t
+	var reason C.struct_lr_bytes_t
+	rc := C.lr_filter_evaluate(f.ptr, route.ptr, nil, &verdict, &reason)
+	if rc != 0 {
+		return 0, "", fmt.Errorf("lr_filter_evaluate: %s (rc=%d)", LastError(), int(rc))
+	}
+	out := ""
+	if reason.ptr != nil {
+		n := C.lr_bytes_len(&reason)
+		raw := C.GoBytes(unsafe.Pointer(C.lr_bytes_ptr(&reason)), C.int(n))
+		C.lr_bytes_free(&reason)
+		out = strings.TrimRight(string(raw), "\x00")
+	}
+	return int32(verdict), out, nil
 }

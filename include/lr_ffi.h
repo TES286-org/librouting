@@ -51,6 +51,15 @@
 #define LR_EVENT_TEXT_MAX 128
 
 /**
+ * Verdict codes (`lr_filter_evaluate` out parameter).
+ */
+#define LR_FILTER_ACCEPT 0
+
+#define LR_FILTER_REJECT 1
+
+#define LR_FILTER_FALLTHROUGH 2
+
+/**
  * ORIGIN values (RFC 4271 §5.1.1).
  */
 #define LR_ORIGIN_IGP 0
@@ -234,6 +243,117 @@ typedef struct lr_event_t {
 } lr_event_t;
 
 /**
+ * Opaque compiled-filter handle (`lr_policy::filter::bytecode::
+ * CompiledFilter` — the D3.7 stack VM, the same hot path the daemon
+ * executes per route).
+ */
+typedef struct OpaqueFilter {
+  uint8_t _private[0];
+} OpaqueFilter;
+
+typedef struct OpaqueFilter *lr_filter_t;
+
+/**
+ * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
+ * and route-map evaluation run against the same data model the
+ * library uses internally.
+ */
+typedef struct OpaqueRoute {
+  uint8_t _private[0];
+} OpaqueRoute;
+
+typedef struct OpaqueRoute *lr_route_t;
+
+/**
+ * One RFC 4360 extended community, embedder-side.
+ */
+typedef struct lr_ext_comm_t {
+  uint8_t kind;
+  uint8_t subtype;
+  uint32_t global;
+  uint16_t local;
+} lr_ext_comm_t;
+
+/**
+ * The C callback table backing a [`FilterContext`]. Every field may
+ * be NULL to keep the built-in route-backed behaviour.
+ *
+ * Accessor conventions: `out = NULL` / `out_cap = 0` asks for the
+ * required element count; with a buffer the return value is the
+ * number of elements written; a negative return means "absent" for
+ * the accessor (evaluation continues with the attribute missing).
+ *
+ * # Safety
+ *
+ * Each function pointer, when non-NULL, is invoked synchronously
+ * from `lr_filter_evaluate` with the `user_data` pointer and the
+ * route handle being evaluated. Implementations must not destroy the
+ * route handle or call back into the same filter.
+ */
+typedef struct lr_filter_context_t {
+  void *user_data;
+  /**
+   * LOCAL_PREF: return 1 with `out` written when present, 0 when
+   * absent.
+   */
+  int32_t (*bgp_local_pref)(void *user_data, lr_route_t route, uint32_t *out);
+  /**
+   * MULTI_EXIT_DISC: 1 present / 0 absent.
+   */
+  int32_t (*bgp_med)(void *user_data, lr_route_t route, uint32_t *out);
+  /**
+   * NEXT_HOP: 1 present (out_is_v6 + 16-byte out written) / 0 absent.
+   */
+  int32_t (*bgp_next_hop)(void *user_data, lr_route_t route, int32_t *out_is_v6, uint8_t *out);
+  /**
+   * AS_PATH sequence.
+   */
+  int64_t (*bgp_as_path)(void *user_data, lr_route_t route, uint32_t *out, uintptr_t cap);
+  /**
+   * Standard communities as packed `asn << 16 | value`.
+   */
+  int64_t (*bgp_communities)(void *user_data, lr_route_t route, uint64_t *out, uintptr_t cap);
+  /**
+   * Large communities as flat triples.
+   */
+  int64_t (*bgp_large_communities)(void *user_data, lr_route_t route, uint32_t *out, uintptr_t cap);
+  /**
+   * Extended communities.
+   */
+  int64_t (*bgp_ext_communities)(void *user_data,
+                                 lr_route_t route,
+                                 struct lr_ext_comm_t *out,
+                                 uintptr_t cap);
+  /**
+   * ORIGIN: 1 present / 0 absent.
+   */
+  int32_t (*bgp_origin)(void *user_data, lr_route_t route, uint8_t *out);
+  /**
+   * RFC 6811 validation state: [`LR_ROA_VALID`],
+   * [`LR_ROA_NOT_FOUND`] or [`LR_ROA_INVALID`].
+   */
+  uint8_t (*roa_state)(void *user_data, lr_route_t route);
+  void (*set_bgp_local_pref)(void *user_data, lr_route_t route, uint32_t value);
+  void (*set_bgp_med)(void *user_data, lr_route_t route, uint32_t value);
+  void (*set_bgp_next_hop)(void *user_data, lr_route_t route, int32_t is_v6, const uint8_t *addr);
+  void (*bgp_as_path_prepend)(void *user_data, lr_route_t route, uint32_t asn);
+  void (*bgp_communities_add)(void *user_data, lr_route_t route, uint32_t asn, uint16_t value);
+  void (*set_bgp_communities)(void *user_data,
+                              lr_route_t route,
+                              const uint64_t *items,
+                              uintptr_t count);
+  void (*set_bgp_as_path)(void *user_data, lr_route_t route, const uint32_t *seq, uintptr_t count);
+  void (*set_bgp_large_communities)(void *user_data,
+                                    lr_route_t route,
+                                    const uint32_t *triples,
+                                    uintptr_t count);
+  void (*set_bgp_ext_communities)(void *user_data,
+                                  lr_route_t route,
+                                  const struct lr_ext_comm_t *items,
+                                  uintptr_t count);
+} lr_filter_context_t;
+
+/**
  * Opaque damping handle. Wraps a boxed `Arc<Mutex<DampingTable>>`
  * shared with the hook installed on the router.
  */
@@ -256,27 +376,6 @@ typedef struct lr_damping_config_t {
   double decay_factor_active;
   double decay_factor_withdrawn;
 } lr_damping_config_t;
-
-/**
- * Opaque route handle. Boxes a real `lr_core::rib::Route` so filter
- * and route-map evaluation run against the same data model the
- * library uses internally.
- */
-typedef struct OpaqueRoute {
-  uint8_t _private[0];
-} OpaqueRoute;
-
-typedef struct OpaqueRoute *lr_route_t;
-
-/**
- * One RFC 4360 extended community, embedder-side.
- */
-typedef struct lr_ext_comm_t {
-  uint8_t kind;
-  uint8_t subtype;
-  uint32_t global;
-  uint16_t local;
-} lr_ext_comm_t;
 
 /**
  * Opaque prefix-list handle (`lr_policy::PrefixList`).
@@ -581,6 +680,55 @@ uint32_t lr_abi_version(void);
  * is positive.
  */
 int32_t lr_router_poll_events(lr_router_t r, struct lr_event_t *out, int32_t cap);
+
+/**
+ * Compile `body` under `name` to the D3.7 stack VM. Returns NULL on
+ * a parse error (the last-error string carries the 1-indexed
+ * line/column diagnostic) or null arguments.
+ *
+ * # Safety
+ * `name` / `body` must be readable NUL-terminated strings.
+ */
+lr_filter_t lr_filter_compile(const char *name, const char *body);
+
+/**
+ * Free a compiled filter. NULL is a no-op.
+ *
+ * # Safety
+ * `filter` must be null or a handle from `lr_filter_compile` that has
+ * not been freed yet, and must not be used afterwards.
+ */
+void lr_filter_free(lr_filter_t filter);
+
+/**
+ * The compiled filter's name (NUL-terminated, probe-then-read:
+ * `out = NULL` returns the required buffer size including the NUL).
+ * Negative on null handle / short buffer.
+ *
+ * # Safety
+ * `out` (when non-null) must be writable for `cap` bytes.
+ */
+int64_t lr_filter_name(lr_filter_t filter, uint8_t *out, uintptr_t cap);
+
+/**
+ * Run the compiled filter against the route handle. `ctx` may be NULL
+ * (built-in route-backed context). On [`LR_FILTER_REJECT`] the
+ * optional `reject with "reason"` payload is written to `out_reason`
+ * as a NUL-terminated byte buffer the caller frees with
+ * `lr_bytes_free`; pass NULL to ignore it.
+ *
+ * Returns 0 on a completed evaluation, -1 on null arguments, -2 on
+ * invalid handles.
+ *
+ * # Safety
+ * `filter` / `route` must be live handles. The callbacks in `ctx`
+ * must be valid for the duration of the call.
+ */
+int32_t lr_filter_evaluate(lr_filter_t filter,
+                           lr_route_t route,
+                           const struct lr_filter_context_t *ctx,
+                           int32_t *out_verdict,
+                           struct lr_bytes_t *out_reason);
 
 /**
  * Install one redistribution pipe on the router.

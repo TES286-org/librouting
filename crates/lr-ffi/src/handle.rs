@@ -189,3 +189,13 @@ pub fn box_roa_store(s: lr_bgp::RoaStore) -> lr_roa_store_t {
 pub unsafe fn unbox_roa_store(s: lr_roa_store_t) -> Box<lr_bgp::RoaStore> {
     unsafe { Box::from_raw(s as *mut lr_bgp::RoaStore) }
 }
+
+/// Opaque compiled-filter handle (`lr_policy::filter::bytecode::
+/// CompiledFilter` — the D3.7 stack VM, the same hot path the daemon
+/// executes per route).
+#[repr(C)]
+pub struct OpaqueFilter {
+    _private: [u8; 0],
+}
+
+pub type lr_filter_t = *mut OpaqueFilter;

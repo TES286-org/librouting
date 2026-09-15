@@ -12,6 +12,17 @@
 #include "lr_ffi.h"
 
 static int failures = 0;
+
+/* ROA-state override used by the filter-context callback table
+ * (D5.2): pretend every route is RFC 6811 invalid. */
+static uint8_t roa_always_invalid(void *ud, lr_route_t r) {
+    (void)ud; (void)r;
+    return LR_ROA_INVALID;
+}
+static lr_filter_context_t roa_invalid_ctx = {
+    .user_data = NULL,
+    .roa_state = roa_always_invalid,
+};
 static void check(int cond, const char *what) {
     if (!cond) {
         fprintf(stderr, "FAIL: %s\n", what);
@@ -688,6 +699,60 @@ int main(void) {
         lr_resolver_free(res);
         lr_route_free(rt);
         lr_route_free(NULL);
+    }
+    {
+        /* Filter DSL (ROADMAP-v3 D5.2): compile, accept/reject with
+         * the built-in context, ROA override through the callback
+         * table, and the reject reason buffer. */
+        lr_filter_t f = lr_filter_compile("c-f", "if bgp.local_pref >= 200 then { accept; } else { reject with \"too low\"; }");
+        check(f != NULL, "filter_compile");
+        lr_filter_t bad = lr_filter_compile("c-bad", "if bgp.local_pref = ");
+        check(bad == NULL, "filter_compile rejects a parse error");
+
+        const unsigned char p4[4] = {203, 0, 113, 0};
+        lr_route_t rt = lr_route_new_v4(p4, 24, LR_PROTO_BGP);
+        check(lr_route_set_local_pref(rt, 250) == 0, "route_set_local_pref for filter");
+
+        int32_t verdict = -9;
+        check(lr_filter_evaluate(f, rt, NULL, &verdict, NULL) == 0, "filter_evaluate");
+        check(verdict == LR_FILTER_ACCEPT, "filter accepts local_pref 250");
+
+        check(lr_route_set_local_pref(rt, 100) == 0, "route_set_local_pref low");
+        check(lr_filter_evaluate(f, rt, NULL, &verdict, NULL) == 0, "filter_evaluate low");
+        check(verdict == LR_FILTER_REJECT, "filter rejects local_pref 100");
+
+        /* Reject reason comes back as an owned NUL-terminated buffer. */
+        lr_bytes_t reason = {0};
+        check(lr_filter_evaluate(f, rt, NULL, &verdict, &reason) == 0,
+              "filter_evaluate with reason out");
+        check(verdict == LR_FILTER_REJECT && reason.ptr != NULL &&
+                  strcmp((const char *)lr_bytes_ptr(&reason), "too low") == 0,
+              "reject reason carried");
+        lr_bytes_free(&reason);
+
+        /* ROA override: the built-in context has no RPKI data, the
+         * table's roa_state callback injects invalid. */
+        lr_filter_t rf = lr_filter_compile("c-roa", "if roa.state == \"invalid\" then { reject; } accept;");
+        check(rf != NULL, "filter_compile roa");
+        check(lr_filter_evaluate(rf, rt, NULL, &verdict, NULL) == 0 &&
+                  verdict == LR_FILTER_ACCEPT,
+              "built-in context: roa not-found accepts");
+        int32_t rc2 = lr_filter_evaluate(rf, rt, &roa_invalid_ctx, &verdict, NULL);
+        check(rc2 == 0 && verdict == LR_FILTER_REJECT,
+              "callback table overrides roa.state");
+
+        /* Name probe-then-read. */
+        int64_t need = lr_filter_name(rf, NULL, 0);
+        check(need == 6, "filter_name length probe");
+        char nb[8] = {0};
+        check(lr_filter_name(rf, (uint8_t *)nb, sizeof(nb)) == need &&
+                  strcmp(nb, "c-roa") == 0,
+              "filter_name reads back");
+
+        lr_filter_free(f);
+        lr_filter_free(rf);
+        lr_filter_free(NULL);
+        lr_route_free(rt);
     }
 
     lr_router_destroy(r);

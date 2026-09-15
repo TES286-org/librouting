@@ -52,6 +52,13 @@ from .policy import (
     RouteMap,
     Set,
 )
+from .policy import (
+    FILTER_ACCEPT,
+    FILTER_FALLTHROUGH,
+    FILTER_REJECT,
+    CompiledFilter,
+    compile_filter,
+)
 from .codec import (
     encode_keepalive,
     encode_open,
@@ -122,6 +129,12 @@ __all__ = [
     "EVAL_FALLTHROUGH",
     "EVAL_DENY",
     "EVAL_PERMIT",
+    # D5.2 filter DSL
+    "CompiledFilter",
+    "compile_filter",
+    "FILTER_ACCEPT",
+    "FILTER_REJECT",
+    "FILTER_FALLTHROUGH",
 ]
 
 __version__ = "1.0.0-rc.3"
