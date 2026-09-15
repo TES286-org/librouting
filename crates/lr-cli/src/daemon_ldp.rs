@@ -300,6 +300,9 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         match Socket::new(Domain::IPV6, Type::STREAM, Some(Protocol::TCP)) {
             Ok(s) => {
                 set_v6_session_hops(&s);
+                // Restart-friendly: rebind while old connections sit in
+                // TIME_WAIT (macOS rejects that without the flag).
+                let _ = s.set_reuse_address(true);
                 match s.bind(
                     &std::net::SocketAddr::from((std::net::Ipv6Addr::UNSPECIFIED, port)).into(),
                 ) {
@@ -322,7 +325,10 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             }
         }
     } else {
-        match TcpListener::bind(("0.0.0.0", port)) {
+        match super::bind_tcp_reuse(std::net::SocketAddr::from((
+            std::net::Ipv4Addr::UNSPECIFIED,
+            port,
+        ))) {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("daemon: ldp TCP bind :{} failed: {}", port, e);

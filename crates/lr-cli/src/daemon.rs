@@ -1213,7 +1213,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 return ExitCode::from(1);
             }
         };
-        let l = match std::net::TcpListener::bind(sockaddr) {
+        let l = match bind_tcp_reuse(sockaddr) {
             Ok(l) => l,
             Err(e) => {
                 eprintln!("daemon: bind {} failed: {}", listen_addr, e);
@@ -2484,8 +2484,6 @@ impl KernelMirror {
 /// is an operational view, not a full Adj-RIB-In replay (W5.3's
 /// wire-parity harness will build that).
 fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
-    use std::net::TcpListener;
-
     let Some(listen) = cfg.listen_addr.as_deref() else {
         eprintln!("daemon: --protocol bmp requires --listen ADDR:PORT");
         return ExitCode::from(2);
@@ -2497,7 +2495,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let listener = match TcpListener::bind(addr) {
+    let listener = match bind_tcp_reuse(addr) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("daemon: bmp bind {} failed: {}", addr, e);
@@ -4399,6 +4397,24 @@ fn to_std_ip(ip: IpAddr) -> std::net::IpAddr {
         IpAddr::V4(o) => std::net::IpAddr::V4(std::net::Ipv4Addr::from(o)),
         IpAddr::V6(o) => std::net::IpAddr::V6(std::net::Ipv6Addr::from(o)),
     }
+}
+
+/// Bind a TCP listener with `SO_REUSEADDR` set (socket2, pre-bind).
+///
+/// Daemons restart frequently (test suites, SIGHUP-driven
+/// supervisors, crash loops) and rebind the same port while the old
+/// daemon's connections linger in TIME_WAIT. Linux tolerates that
+/// only with the flag set; macOS rejects the rebind outright without
+/// it ("Address already in use", os error 48). The Babel and LDP
+/// sockets already set the flag for exactly this reason — the BGP
+/// and BMP TCP listeners get the same treatment.
+pub(crate) fn bind_tcp_reuse(addr: std::net::SocketAddr) -> std::io::Result<std::net::TcpListener> {
+    use socket2::{Domain, Protocol, Socket, Type};
+    let sock = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))?;
+    sock.set_reuse_address(true)?;
+    sock.bind(&addr.into())?;
+    sock.listen(128)?;
+    Ok(sock.into())
 }
 
 fn resolve(addr: &str) -> Option<std::net::SocketAddr> {
