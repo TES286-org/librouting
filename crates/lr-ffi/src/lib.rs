@@ -30,6 +30,7 @@ pub mod handle;
 pub mod policy;
 pub mod roa_store;
 pub mod router;
+pub mod sessions;
 pub mod srv6;
 
 use crate::error::set_last_error;

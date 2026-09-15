@@ -494,6 +494,75 @@ int main(void) {
         lr_damping_destroy(NULL); /* no-op */
         check(1, "damping_destroy");
     }
+    {
+        /* OSPFv2/OSPFv3/Babel session management (ROADMAP-v3 D5.1):
+         * defaults, the full ext knob set, the enum rejection matrix
+         * and a Babel interface in both address families. */
+        uint64_t oh = 0;
+        rc = lr_router_add_ospf_session(r, 0x0a000001u, 0, &oh);
+        check(rc == 0, "add_ospf_session defaults");
+        check(oh != 0, "ospf session handle assigned");
+
+        uint64_t oh3 = 0;
+        rc = lr_router_add_ospfv3_session(r, 0x0a000001u, 3, &oh3);
+        check(rc == 0, "add_ospfv3_session defaults (area 3: areas are version-exclusive)");
+
+        /* A second OSPF router-id is rejected by the router. */
+        uint64_t ohbad = 0;
+        rc = lr_router_add_ospf_session(r, 0x0a000002u, 5, &ohbad);
+        check(rc == -3, "add_ospf_session rejects router-id mismatch");
+
+        /* Full knobs: totally-NSSA area 1 with the segment identities,
+         * broadcast network type. */
+        uint64_t ohx = 0;
+        rc = lr_router_add_ospf_session_ext(r, LR_OSPF_V2, 0x0a000001u, 1,
+                                            LR_AREA_NSSA_NO_SUMMARY, 1000, 1500,
+                                            LR_NET_BROADCAST, 1, 0x0a000101u,
+                                            1, 0x0a000102u, &ohx);
+        check(rc == 0, "add_ospf_session_ext totally-NSSA + broadcast");
+
+        /* RFC 2328 §3.6: the backbone can never be a stub. */
+        rc = lr_router_add_ospf_session_ext(r, LR_OSPF_V2, 0x0a000001u, 0,
+                                            LR_AREA_STUB, 1000, 1500, LR_NET_PTP,
+                                            0, 0, 0, 0, &ohbad);
+        check(rc == -3, "add_ospf_session_ext rejects backbone stub");
+
+        /* Unknown enums fail closed. */
+        rc = lr_router_add_ospf_session_ext(r, 4, 1, 0, LR_AREA_NORMAL, 0, 1500,
+                                            LR_NET_PTP, 0, 0, 0, 0, &ohbad);
+        check(rc == -3, "add_ospf_session_ext rejects version 4");
+        rc = lr_router_add_ospf_session_ext(r, LR_OSPF_V3, 1, 3, 9, 0, 1500,
+                                            LR_NET_PTP, 0, 0, 0, 0, &ohbad);
+        check(rc == -3, "add_ospf_session_ext rejects area kind 9");
+        rc = lr_router_add_ospf_session_ext(r, LR_OSPF_V3, 1, 3, LR_AREA_NORMAL, 0,
+                                            1500, 7, 0, 0, 0, 0, &ohbad);
+        check(rc == -3, "add_ospf_session_ext rejects network type 7");
+        rc = lr_router_add_ospf_session_ext(r, LR_OSPF_V3, 1, 3, LR_AREA_NORMAL, 0,
+                                            1500, LR_NET_PTP, 0, 0, 0, 0, NULL);
+        check(rc == -1, "add_ospf_session_ext rejects NULL out_handle");
+
+        /* Babel: one IPv6 link-local interface and one IPv4 interface
+         * (v4 in the first four bytes, is_ipv6 = 0). */
+        uint64_t bh = 0;
+        const unsigned char ll6[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                                       0,    0,    0, 0, 0, 0, 0, 1};
+        rc = lr_router_add_babel_session(r, ll6, 1, &bh);
+        check(rc == 0, "add_babel_session v6");
+        const unsigned char v4[4] = {192, 0, 2, 1};
+        rc = lr_router_add_babel_session(r, v4, 0, &bh);
+        check(rc == 0, "add_babel_session v4");
+        rc = lr_router_add_babel_session(r, ll6, 1, NULL);
+        check(rc == -1, "add_babel_session rejects NULL out_handle");
+
+        /* The new sessions surface in the session dump. */
+        lr_bytes_t dump = {0};
+        rc = lr_router_sessions_dump(r, &dump);
+        check(rc == 0, "sessions_dump");
+        const char *text = (const char *)lr_bytes_ptr(&dump);
+        check(strstr(text, "ospf") != NULL && strstr(text, "babel") != NULL,
+              "session dump lists ospf + babel");
+        lr_bytes_free(&dump);
+    }
 
     lr_router_destroy(r);
     if (failures == 0) {

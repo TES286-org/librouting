@@ -462,6 +462,68 @@ func TestDamping(t *testing.T) {
 	}
 }
 
+func TestOSPFAndBabelSessions(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	// OSPFv2 + OSPFv3 on the same 32-bit router-id share the id domain.
+	h, err := r.AddOSPFSession(0x0a000001, 0)
+	if err != nil {
+		t.Fatalf("AddOSPFSession: %v", err)
+	}
+	if h == 0 {
+		t.Fatal("OSPF session handle must be non-zero")
+	}
+	h3, err := r.AddOSPFv3Session(0x0a000001, 3)
+	if err != nil {
+		t.Fatalf("AddOSPFv3Session: %v", err)
+	}
+	if h3 == h {
+		t.Fatal("session handles must be distinct")
+	}
+	// A second router-id is rejected by the router.
+	if _, err := r.AddOSPFSession(0x0a000002, 5); err == nil {
+		t.Fatal("router-id mismatch must fail")
+	}
+	// The backbone (area 0) can never be a stub (RFC 2328 §3.6).
+	if _, err := r.AddOSPFSessionExt(OspfV2, 0x0a000001, 0, AreaStub, 1000, 1500,
+		NetPtp, false, 0, false, 0); err == nil {
+		t.Fatal("backbone stub must fail")
+	}
+	// Unknown enums fail closed.
+	if _, err := r.AddOSPFSessionExt(4, 0x0a000001, 3, AreaNormal, 0, 1500,
+		NetPtp, false, 0, false, 0); err == nil {
+		t.Fatal("version 4 must fail")
+	}
+	// A totally-NSSA area with the segment identities attaches.
+	hx, err := r.AddOSPFSessionExt(OspfV2, 0x0a000001, 1, AreaNssaNoSummary, 1000, 1500,
+		NetBroadcast, true, 0x0a000101, true, 0x0a000102)
+	if err != nil {
+		t.Fatalf("AddOSPFSessionExt: %v", err)
+	}
+	if hx == 0 {
+		t.Fatal("ext OSPF session handle must be non-zero")
+	}
+
+	// Babel: one IPv6 link-local interface, one IPv4 interface.
+	hb, err := r.AddBabelSession([]byte{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1})
+	if err != nil {
+		t.Fatalf("AddBabelSession v6: %v", err)
+	}
+	if hb == 0 {
+		t.Fatal("Babel session handle must be non-zero")
+	}
+	if _, err := r.AddBabelSession([]byte{192, 0, 2, 1}); err != nil {
+		t.Fatalf("AddBabelSession v4: %v", err)
+	}
+	if _, err := r.AddBabelSession([]byte{1, 2, 3}); err == nil {
+		t.Fatal("a 3-byte address must fail")
+	}
+}
+
 func TestOriginateAndWithdrawLifecycle(t *testing.T) {
 	r, err := NewRouter()
 	if err != nil {

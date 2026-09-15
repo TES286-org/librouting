@@ -71,6 +71,82 @@ class Router:
             raise LrError(f"lr_router_add_bgp_session failed (rc={rc}): {last_error()}")
         return int(h[0])
 
+    # OSPF area kinds (LR_AREA_*).
+    AREA_NORMAL = 0
+    AREA_STUB = 1
+    AREA_STUB_NO_SUMMARY = 2
+    AREA_NSSA = 3
+    AREA_NSSA_NO_SUMMARY = 4
+
+    # OSPF interface network types (LR_NET_*).
+    NET_PTP = 0
+    NET_BROADCAST = 1
+
+    # OSPF protocol versions (LR_OSPF_*).
+    OSPF_V2 = 2
+    OSPF_V3 = 3
+
+    def add_ospf_session(self, router_id: int, area_id: int) -> int:
+        """Add an OSPFv2 session with the library defaults (MTU 1500,
+        point-to-point network, Normal area) and return its handle."""
+        h = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_add_ospf_session(self._ptr, int(router_id), int(area_id), h)
+        if rc != 0:
+            raise LrError(f"lr_router_add_ospf_session failed (rc={rc}): {last_error()}")
+        return int(h[0])
+
+    def add_ospfv3_session(self, router_id: int, area_id: int) -> int:
+        """Add an OSPFv3 session (RFC 5340) with the library defaults and
+        return its handle. Router IDs stay 32-bit and are shared with
+        OSPFv2 within one router; areas are version-exclusive."""
+        h = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_add_ospfv3_session(self._ptr, int(router_id), int(area_id), h)
+        if rc != 0:
+            raise LrError(f"lr_router_add_ospfv3_session failed (rc={rc}): {last_error()}")
+        return int(h[0])
+
+    def add_ospf_session_ext(self, version: int, router_id: int, area_id: int,
+                             area_kind: int = 0, default_metric: int = 0,
+                             mtu: int = 1500, network_type: int = 0,
+                             interface_ip: int | None = None,
+                             neighbor_ip: int | None = None) -> int:
+        """Add an OSPF session with the full knob set and return its handle.
+
+        ``version`` is ``OSPF_V2`` or ``OSPF_V3``; ``area_kind`` one of the
+        ``AREA_*`` constants (the stub/NSSA kinds inject a default route
+        with ``default_metric``); ``network_type`` is ``NET_PTP`` or
+        ``NET_BROADCAST`` (RFC 2328 §9.1). ``interface_ip`` /
+        ``neighbor_ip`` are the §10.4 segment identities as 32-bit IPv4
+        integers (the v2 interface address / the v3 Router ID); ``None``
+        leaves them unset.
+        """
+        h = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_add_ospf_session_ext(
+            self._ptr,
+            int(version), int(router_id), int(area_id),
+            int(area_kind), int(default_metric), int(mtu), int(network_type),
+            0 if interface_ip is None else 1, int(interface_ip or 0),
+            0 if neighbor_ip is None else 1, int(neighbor_ip or 0),
+            h,
+        )
+        if rc != 0:
+            raise LrError(f"lr_router_add_ospf_session_ext failed (rc={rc}): {last_error()}")
+        return int(h[0])
+
+    def add_babel_session(self, addr: bytes) -> int:
+        """Add one Babel interface session (RFC 8966 §4.2.1) and return
+        its handle. ``addr`` is the 4-byte IPv4 or 16-byte IPv6 local
+        address announced in Hellos."""
+        if len(addr) not in (4, 16):
+            raise LrError("add_babel_session: bad address length (want 4 or 16)")
+        h = ffi.new("uint64_t*")
+        rc = get_lib().lr_router_add_babel_session(
+            self._ptr, addr, 1 if len(addr) == 16 else 0, h,
+        )
+        if rc != 0:
+            raise LrError(f"lr_router_add_babel_session failed (rc={rc}): {last_error()}")
+        return int(h[0])
+
     def feed_input(self, session: int, data: bytes) -> None:
         if not data:
             return

@@ -168,6 +168,104 @@ inline std::uint64_t add_bgp_session_ext(Router& r,
     return h;
 }
 
+// ===== D5.1 — OSPF / OSPFv3 / Babel session management =====
+
+/// OSPF protocol version selector (LR_OSPF_V2 / LR_OSPF_V3).
+enum class OspfVersion : std::int32_t { V2 = 2, V3 = 3 };
+
+/// OSPF area kind (LR_AREA_*): Normal, RFC 2328 §3.6 stub and the
+/// "totally stubby" variant, RFC 3101 NSSA and the "totally NSSA"
+/// variant. The stub/NSSA kinds inject a default route with the
+/// configured metric on the area border router.
+enum class OspfAreaKind : std::int32_t {
+    Normal = 0,
+    Stub = 1,
+    StubNoSummary = 2,
+    Nssa = 3,
+    NssaNoSummary = 4,
+};
+
+/// OSPF interface network type (RFC 2328 §9.1): point-to-point always
+/// becomes adjacent; broadcast elects a DR/BDR (§9.4, §10.4).
+enum class OspfNetType : std::int32_t { Ptp = 0, Broadcast = 1 };
+
+/// Add an OSPFv2 session with the library defaults (MTU 1500,
+/// point-to-point, Normal area). Returns the session handle.
+inline std::uint64_t add_ospf_session(Router& r,
+                                      std::uint32_t router_id,
+                                      std::uint32_t area_id) {
+    std::uint64_t h = 0;
+    int rc = lr_router_add_ospf_session(r.get(), router_id, area_id, &h);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_add_ospf_session failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return h;
+}
+
+/// Add an OSPFv3 session (RFC 5340) with the library defaults.
+inline std::uint64_t add_ospfv3_session(Router& r,
+                                        std::uint32_t router_id,
+                                        std::uint32_t area_id) {
+    std::uint64_t h = 0;
+    int rc = lr_router_add_ospfv3_session(r.get(), router_id, area_id, &h);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_add_ospfv3_session failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return h;
+}
+
+/// Add an OSPF session with the full knob set: area kind + default
+/// metric, MTU (§10.6), network type (§9.1) and the §10.4 segment
+/// identities (`has_interface_ip` / `has_neighbor_ip` gate the
+/// addresses; v2 uses the IPv4 interface address, v3 the Router ID).
+inline std::uint64_t add_ospf_session_ext(Router& r,
+                                          OspfVersion version,
+                                          std::uint32_t router_id,
+                                          std::uint32_t area_id,
+                                          OspfAreaKind area_kind,
+                                          std::uint32_t default_metric,
+                                          std::uint16_t mtu,
+                                          OspfNetType network_type,
+                                          bool has_interface_ip,
+                                          std::uint32_t interface_ip,
+                                          bool has_neighbor_ip,
+                                          std::uint32_t neighbor_ip) {
+    std::uint64_t h = 0;
+    int rc = lr_router_add_ospf_session_ext(
+        r.get(), static_cast<std::int32_t>(version), router_id, area_id,
+        static_cast<std::int32_t>(area_kind), default_metric, mtu,
+        static_cast<std::int32_t>(network_type), has_interface_ip ? 1 : 0,
+        interface_ip, has_neighbor_ip ? 1 : 0, neighbor_ip, &h);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_add_ospf_session_ext failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return h;
+}
+
+/// Add one Babel interface session (RFC 8966 §4.2.1). `addr` is the
+/// 4-byte IPv4 or 16-byte IPv6 local address announced in Hellos.
+inline std::uint64_t add_babel_session(Router& r,
+                                       const std::vector<std::uint8_t>& addr) {
+    if (addr.size() != 4 && addr.size() != 16) {
+        throw Error("add_babel_session: bad address length (want 4 or 16)");
+    }
+    std::uint64_t h = 0;
+    int rc = lr_router_add_babel_session(r.get(), addr.data(),
+                                         addr.size() == 16 ? 1 : 0, &h);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_add_babel_session failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return h;
+}
+
 inline void feed_input(Router& r, std::uint64_t session, const std::uint8_t* data, std::size_t len) {
     int rc = lr_router_feed_input(r.get(), session, data, len);
     if (rc != 0) {

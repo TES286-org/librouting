@@ -452,3 +452,52 @@ def test_poll_events():
                 raise AssertionError("must be rejected")
             except librouting.LrError:
                 pass
+
+
+def test_ospf_and_babel_sessions():
+    with librouting.Router() as r:
+        # OSPFv2 + OSPFv3 share the 32-bit router-id domain but not areas.
+        h = r.add_ospf_session(0x0A000001, 0)
+        assert h != 0
+        h3 = r.add_ospfv3_session(0x0A000001, 3)
+        assert h3 != 0 and h3 != h
+
+        # A second router-id is rejected by the router.
+        try:
+            r.add_ospf_session(0x0A000002, 5)
+            raise AssertionError("router-id mismatch must fail")
+        except librouting.LrError:
+            pass
+
+        # RFC 2328 §3.6: the backbone can never be a stub area.
+        try:
+            r.add_ospf_session_ext(
+                r.OSPF_V2, 0x0A000001, 0, area_kind=r.AREA_STUB, default_metric=1000
+            )
+            raise AssertionError("backbone stub must fail")
+        except librouting.LrError:
+            pass
+
+        # A totally-NSSA area with the segment identities attaches.
+        hx = r.add_ospf_session_ext(
+            r.OSPF_V2, 0x0A000001, 1,
+            area_kind=r.AREA_NSSA_NO_SUMMARY, default_metric=1000,
+            network_type=r.NET_BROADCAST, interface_ip=0x0A000101,
+            neighbor_ip=0x0A000102,
+        )
+        assert hx != 0
+
+        # Babel: one IPv6 link-local interface, one IPv4 interface.
+        hb = r.add_babel_session(bytes([0xFE, 0x80] + [0] * 13 + [1]))
+        assert hb != 0
+        hb4 = r.add_babel_session(bytes([192, 0, 2, 1]))
+        assert hb4 != 0
+        try:
+            r.add_babel_session(bytes([1, 2, 3]))
+            raise AssertionError("a 3-byte address must fail")
+        except librouting.LrError:
+            pass
+
+        # The sessions surface in the dump.
+        dump = r.sessions_dump()
+        assert "ospf" in dump and "babel" in dump

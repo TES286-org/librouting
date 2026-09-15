@@ -60,6 +60,38 @@
 #define LR_ROA_INVALID 2
 
 /**
+ * Area kind ids shared by `lr_router_add_ospf_session_ext`. The stub
+ * and NSSA kinds carry a `default_metric` (the border-router-injected
+ * default route, RFC 2328 §3.6 / RFC 3101 §2.7); the `*_NO_SUMMARY`
+ * variants suppress inter-area summaries ("totally stubby / totally
+ * NSSA").
+ */
+#define LR_AREA_NORMAL 0
+
+#define LR_AREA_STUB 1
+
+#define LR_AREA_STUB_NO_SUMMARY 2
+
+#define LR_AREA_NSSA 3
+
+#define LR_AREA_NSSA_NO_SUMMARY 4
+
+/**
+ * Interface network-type ids (RFC 2328 §9.1), shared by
+ * `lr_router_add_ospf_session_ext`.
+ */
+#define LR_NET_PTP 0
+
+#define LR_NET_BROADCAST 1
+
+/**
+ * OSPF protocol version selector for `lr_router_add_ospf_session_ext`.
+ */
+#define LR_OSPF_V2 2
+
+#define LR_OSPF_V3 3
+
+/**
  * Rust-allocated byte slice that the embedder owns and must free.
  */
 typedef struct lr_bytes_t {
@@ -994,6 +1026,94 @@ int32_t lr_router_add_roa_entry(lr_router_t r,
  * `r` must be a valid `lr_router_t`.
  */
 int32_t lr_router_set_roa_validate(lr_router_t r, uint8_t enable);
+
+/**
+ * Add an OSPFv2 session with the library defaults: MTU 1500,
+ * point-to-point network type, Normal (non-stub) area. Returns 0 with
+ * the handle written to `out_handle`, `-1` on a null out pointer,
+ * `-2` on an invalid router handle, `-3` when the router rejects the
+ * configuration (mismatched router-id, area kind conflict, backbone
+ * stub — the last-error string says which).
+ *
+ * # Safety
+ * `out_handle` must be a writable `u64` when non-null.
+ */
+int32_t lr_router_add_ospf_session(lr_router_t r,
+                                   uint32_t router_id,
+                                   uint32_t area_id,
+                                   uint64_t *out_handle);
+
+/**
+ * Add an OSPFv3 session (RFC 5340) with the library defaults. Router
+ * IDs stay 32-bit and shared with OSPFv2 within one router; areas are
+ * version-exclusive. Return/error codes as
+ * [`lr_router_add_ospf_session`].
+ *
+ * # Safety
+ * `out_handle` must be a writable `u64` when non-null.
+ */
+int32_t lr_router_add_ospfv3_session(lr_router_t r,
+                                     uint32_t router_id,
+                                     uint32_t area_id,
+                                     uint64_t *out_handle);
+
+/**
+ * Add an OSPF session with the full knob set.
+ *
+ * * `version` — [`LR_OSPF_V2`] or [`LR_OSPF_V3`].
+ * * `area_kind` — [`LR_AREA_NORMAL`], [`LR_AREA_STUB`],
+ *   [`LR_AREA_STUB_NO_SUMMARY`], [`LR_AREA_NSSA`],
+ *   [`LR_AREA_NSSA_NO_SUMMARY`]. The stub/NSSA kinds use
+ *   `default_metric` for the border-router-injected default route.
+ * * `mtu` — interface MTU announced in DBD packets (§10.6); 0 falls
+ *   back to the 1500 default.
+ * * `network_type` — [`LR_NET_PTP`] or [`LR_NET_BROADCAST`] (§9.4;
+ *   broadcast gates adjacency on the elected DR/BDR, §10.4).
+ * * `has_interface_ip` / `interface_ip` — our identity on the segment:
+ *   the IPv4 interface address on v2 (§10.4, §12.4.1.2) or the Router
+ *   ID on v3 (RFC 5340 §4.1.2). Ignored when `has_interface_ip` is 0.
+ * * `has_neighbor_ip` / `neighbor_ip` — the neighbor's identity on
+ *   the segment (v2 interface address / v3 Router ID), what the
+ *   elected DR/BDR is compared against. Ignored when 0.
+ *
+ * Return codes: 0 ok, -1 null out pointer, -2 invalid handle, -3
+ * malformed argument (unknown version/area kind/network type) or
+ * rejected by the router, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `out_handle` must be a writable `u64` when non-null.
+ */
+int32_t lr_router_add_ospf_session_ext(lr_router_t r,
+                                       int32_t version,
+                                       uint32_t router_id,
+                                       uint32_t area_id,
+                                       int32_t area_kind,
+                                       uint32_t default_metric,
+                                       uint16_t mtu,
+                                       int32_t network_type,
+                                       int32_t has_interface_ip,
+                                       uint32_t interface_ip,
+                                       int32_t has_neighbor_ip,
+                                       uint32_t neighbor_ip,
+                                       uint64_t *out_handle);
+
+/**
+ * Add one Babel interface session (RFC 8966). `local_addr` is the
+ * 16-byte IPv6 address the interface announces in Hellos (§4.2.1) —
+ * for IPv4 operation the embedder passes the v4-mapped form
+ * (`::ffff:a.b.c.d`, `is_ipv6 = 0` selects the first four bytes).
+ *
+ * Return codes: 0 ok with the handle in `out_handle`, -1 null out
+ * pointer, -2 invalid handle, [`LR_ERR_PANIC`] on panic.
+ *
+ * # Safety
+ * `local_addr` must be a readable 16-byte array when non-null;
+ * `out_handle` must be a writable `u64` when non-null.
+ */
+int32_t lr_router_add_babel_session(lr_router_t r,
+                                    const uint8_t *local_addr,
+                                    int32_t is_ipv6,
+                                    uint64_t *out_handle);
 
 /**
  * Encode an SRH from a list of SID bytes. Each SID is 16 bytes; the

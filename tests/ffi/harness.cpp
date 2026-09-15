@@ -288,6 +288,53 @@ int main() {
     }
     check(err_threw, "feed_input on unknown handle throws");
 
+    // ---- OSPF/OSPFv3/Babel session RAII wrappers (ROADMAP-v3 D5.1):
+    // defaults, the ext knob set, the rejection matrix via exceptions. ----
+    {
+        auto oh = add_ospf_session(r, 0x0a000001u, 0);
+        check(oh != 0, "add_ospf_session (RAII) defaults");
+        auto oh3 = add_ospfv3_session(r, 0x0a000001u, 3);
+        check(oh3 != 0, "add_ospfv3_session (RAII) defaults");
+
+        auto ohx = add_ospf_session_ext(r, OspfVersion::V2, 0x0a000001u, 1,
+                                        OspfAreaKind::NssaNoSummary, 1000, 1500,
+                                        OspfNetType::Broadcast, true, 0x0a000101u,
+                                        true, 0x0a000102u);
+        check(ohx != 0, "add_ospf_session_ext (RAII) totally-NSSA + broadcast");
+
+        bool threw = false;
+        try {
+            add_ospf_session(r, 0x0a000002u, 5);
+        } catch (const Error& err) {
+            threw = std::string(err.what()).find("add_ospf_session") != std::string::npos;
+        }
+        check(threw, "router-id mismatch throws");
+
+        threw = false;
+        try {
+            add_ospf_session_ext(r, OspfVersion::V2, 0x0a000001u, 0,
+                                 OspfAreaKind::Stub, 1000, 1500, OspfNetType::Ptp,
+                                 false, 0, false, 0);
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "backbone stub throws (RFC 2328 3.6)");
+
+        threw = false;
+        try {
+            add_babel_session(r, {1, 2, 3});
+        } catch (const Error&) {
+            threw = true;
+        }
+        check(threw, "babel rejects a 3-byte address");
+
+        auto bh = add_babel_session(r, {0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                                             0, 0, 0, 0, 0, 0, 0, 1});
+        check(bh != 0, "add_babel_session (RAII) v6");
+        auto bh4 = add_babel_session(r, {192, 0, 2, 1});
+        check(bh4 != 0, "add_babel_session (RAII) v4");
+    }
+
     // ---- ROA store RAII wrapper (RFC 6482 / RFC 6811 / RFC 8210;
     // ROADMAP-v3 D2.3): static layer replace, RTR delta batch, the
     // three RFC 6811 §2 outcomes. ----

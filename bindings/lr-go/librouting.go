@@ -81,6 +81,93 @@ func (r *Router) AddBGPSessionExt(localAS, peerAS, localBGPID uint32, holdTime, 
 	return uint64(h), nil
 }
 
+// OSPF area kind ids for AddOSPFSessionExt (LR_AREA_*).
+const (
+	AreaNormal        = C.LR_AREA_NORMAL
+	AreaStub          = C.LR_AREA_STUB
+	AreaStubNoSummary = C.LR_AREA_STUB_NO_SUMMARY
+	AreaNssa          = C.LR_AREA_NSSA
+	AreaNssaNoSummary = C.LR_AREA_NSSA_NO_SUMMARY
+)
+
+// OSPF interface network-type ids for AddOSPFSessionExt (LR_NET_*).
+const (
+	NetPtp       = C.LR_NET_PTP
+	NetBroadcast = C.LR_NET_BROADCAST
+)
+
+// OSPF protocol version selectors for AddOSPFSessionExt (LR_OSPF_*).
+const (
+	OspfV2 = C.LR_OSPF_V2
+	OspfV3 = C.LR_OSPF_V3
+)
+
+// AddOSPFSession adds an OSPFv2 session with the library defaults
+// (MTU 1500, point-to-point network, Normal area). Returns the session handle.
+func (r *Router) AddOSPFSession(routerID, areaID uint32) (uint64, error) {
+	return r.AddOSPFSessionExt(OspfV2, routerID, areaID, AreaNormal, 0, 1500, NetPtp,
+		false, 0, false, 0)
+}
+
+// AddOSPFv3Session adds an OSPFv3 session (RFC 5340) with the library
+// defaults. Router IDs stay 32-bit and are shared with OSPFv2 within one
+// router; areas are version-exclusive. Returns the session handle.
+func (r *Router) AddOSPFv3Session(routerID, areaID uint32) (uint64, error) {
+	return r.AddOSPFSessionExt(OspfV3, routerID, areaID, AreaNormal, 0, 1500, NetPtp,
+		false, 0, false, 0)
+}
+
+// AddOSPFSessionExt adds an OSPF session with the full knob set:
+// version (OspfV2 / OspfV3), area kind (Area*; the stub/NSSA kinds use
+// defaultMetric for the border-router-injected default), MTU (0 falls back
+// to 1500), network type (Net*), and the segment identities
+// (hasInterfaceIP / hasNeighborIP gate the addresses; v2 uses the IPv4
+// interface address, v3 the Router ID). Returns the session handle.
+func (r *Router) AddOSPFSessionExt(version, routerID, areaID uint32,
+	areaKind uint32, defaultMetric uint32, mtu uint16, networkType uint32,
+	hasInterfaceIP bool, interfaceIP uint32, hasNeighborIP bool, neighborIP uint32) (uint64, error) {
+	var h C.uint64_t
+	rc := C.lr_router_add_ospf_session_ext(
+		r.ptr,
+		C.int32_t(version),
+		C.uint32_t(routerID),
+		C.uint32_t(areaID),
+		C.int32_t(areaKind),
+		C.uint32_t(defaultMetric),
+		C.uint16_t(mtu),
+		C.int32_t(networkType),
+		cIntBool(hasInterfaceIP),
+		C.uint32_t(interfaceIP),
+		cIntBool(hasNeighborIP),
+		C.uint32_t(neighborIP),
+		&h,
+	)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_router_add_ospf_session_ext: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint64(h), nil
+}
+
+// AddBabelSession adds one Babel interface session (RFC 8966 §4.2.1).
+// addr is the 4-byte IPv4 or 16-byte IPv6 local address announced in
+// Hellos. Returns the session handle.
+func (r *Router) AddBabelSession(addr []byte) (uint64, error) {
+	if len(addr) != 4 && len(addr) != 16 {
+		return 0, fmt.Errorf("AddBabelSession: bad address length (want 4 or 16)")
+	}
+	var h C.uint64_t
+	rc := C.lr_router_add_babel_session(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&addr[0])),
+		cIntBool(len(addr) == 16),
+		&h,
+	)
+	if rc != 0 {
+		return 0, fmt.Errorf("lr_router_add_babel_session: %s (rc=%d)", LastError(), int(rc))
+	}
+	return uint64(h), nil
+}
+
 // FeedInput pushes bytes from the peer transport into a session.
 func (r *Router) FeedInput(session uint64, data []byte) error {
 	if len(data) == 0 {
@@ -897,6 +984,14 @@ func DecodeSRv6SRH(data []byte) ([]byte, error) {
 }
 
 // toCBool converts a Go bool to a C.uint8_t (0 or 1).
+// cIntBool maps a Go bool onto the C int32_t flag convention (0 / 1).
+func cIntBool(b bool) C.int32_t {
+	if b {
+		return 1
+	}
+	return 0
+}
+
 func toCBool(b bool) C.uint8_t {
 	if b {
 		return 1
