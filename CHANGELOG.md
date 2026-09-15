@@ -18,6 +18,24 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Filter DSL formal grammar reference (ROADMAP-v3 D9.2): the new
+  `docs/filter_dsl_grammar.md` is the canonical EBNF reference for
+  the BIRD-like filter DSL, derived directly from the lexer + Pratt
+  parser source in `crates/lr-policy/src/filter/`. Covers the
+  lexical structure, the full statement + expression grammar, the
+  operator precedence table (mirroring `BinaryOp::precedence`), the
+  route field reference, the `MAX_EXPR_DEPTH` / `MAX_CALL_DEPTH`
+  limits, a worked-examples section and a BIRD-comparison table.
+  The companion `crates/lr-policy/tests/grammar_corpus.rs` pins
+  every example through `lr_policy::filter::compile` — 30 tests
+  across positive, negative and boundary cases. The grammar
+  captured two real divergences from the older in-tree BIRD
+  example doc: the function return-type annotation uses `=>`
+  (the same `TokenKind::Arrow` as `case` arms), not BIRD's `->`;
+  and AS-path `~` is currently flat set-membership, not BIRD regex
+  (the `_` wildcard token is parsed but does not yet carry
+  meaning inside `~` patterns). Both are now documented as
+  current behaviour with a follow-up pointer.
 - BIRD `!~` (not-match) operator in the filter DSL (ROADMAP-v3 D14.5):
   the lr DSL AST has carried `BinaryOp::NotMatch` since the parser was
   first written — the evaluator and bytecode VM already lowered it to

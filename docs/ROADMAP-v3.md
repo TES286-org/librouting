@@ -816,15 +816,16 @@ radix tree + RwLock first (low risk), async I/O last (high risk).
 
 ## D9 — Documentation: architecture deep-dive + contributor guide
 
-**Status:** not started. Tracks `docs/`.
+**Status:** partial — ~~D9.2 (filter DSL EBNF grammar)~~ landed;
+D9.1, D9.3–D9.6 still open. Tracks `docs/`.
 
 **Current gap.** Existing docs target operators and embedders
 (`README.md`, `tutorial.md`, `API.md`, `lr-cli.md`, `RUNBOOK.md`,
 `PARITY.md`, `INTEROP.md`, 13 example files). Contributor-facing
-docs are thin: no `CONTRIBUTING.md`, no Filter DSL architecture
-write-up, no internal structure document for
-`lr-router/src/instance.rs` (a 11 158-LoC single file), no thread
-model document, no formal EBNF for the Filter DSL.
+docs are thin: no Filter DSL architecture write-up, no internal
+structure document for `lr-router/src/instance.rs` (a 11 158-LoC
+single file), no thread model document. ~~No formal EBNF for the
+Filter DSL.~~ D9.2 closed that gap.
 
 **Proposed work.**
 
@@ -837,7 +838,24 @@ model document, no formal EBNF for the Filter DSL.
    chapter (global Mutex design, thread-per-peer, lock contention
    analysis, scalability ceiling). Performance chapter (expected
    throughput, bottleneck analysis, optimisation directions).
-2. **`docs/filter_dsl_grammar.md`.** Formal EBNF for the Filter DSL.
+2. ~~**`docs/filter_dsl_grammar.md`.** Formal EBNF for the Filter DSL.~~
+   Landed. ISO/IEC 14977 EBNF derived directly from the lexer +
+   Pratt parser source: lexical structure (identifiers, keywords,
+   literals, operators), the full statement + expression grammar
+   (every production traced to its parser function), the operator
+   precedence table (mirrors `BinaryOp::precedence`), the route
+   field reference (settable vs `+=`-only vs read-only), the
+   `MAX_EXPR_DEPTH` / `MAX_CALL_DEPTH` limits, a worked-examples
+   section, and a BIRD-comparison table. The companion
+   `crates/lr-policy/tests/grammar_corpus.rs` pins every example
+   (positive + negative) — a doc/source drift fails CI rather than
+   shipping. The grammar captured two real divergences from the
+  in-tree BIRD example doc (`docs/examples/filter_dsl_roa.md`):
+   the function return-type annotation uses `=>` (not BIRD's `->`),
+   and AS-path `~` is flat set-membership, not BIRD regex (the `_`
+   wildcard token is parsed but does not yet carry meaning inside
+   `~` patterns). Both are now documented as current behaviour
+   with a follow-up pointer.
 3. **`CONTRIBUTING.md`.** PR checklist (fmt / clippy / test green,
    `-D warnings` clean, every new feature has tests + docs), commit
    message format (`type(scope): summary`), Rust style guide,
@@ -852,7 +870,8 @@ model document, no formal EBNF for the Filter DSL.
    ownership model (caller frees), cbindgen pipeline (`build.rs` →
    `include/lr_ffi.h`), why OSPF/Babel/LDP are not yet exposed.
 
-**Estimated size.** ~1500–2000 lines of docs.
+**Estimated size.** ~1500–2000 lines of docs (D9.2 lands ~680 of
+those; the rest is split across D9.1 + D9.3–D9.6).
 
 ---
 
@@ -1140,7 +1159,7 @@ refactor — needs extensive regression tests.
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
-| D9        | not started           | —     | Architecture + contributor docs         |
+| D9        | partial (D9.2 landed) | —     | Filter DSL formal EBNF grammar + corpus test landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh and `ffi_design.md` still open |
 | D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | not started           | —     | `lrctl` + Prometheus exporter            |

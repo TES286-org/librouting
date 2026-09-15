@@ -411,3 +411,32 @@ the state, that file tracks the how and why.
    BGP path in lr's merged RIB, no OSPF route leaks into lr's BGP
    advertisements, graceful whole-combination shutdown). Verified
    against BIRD 2.17.5 locally.
+8. **Phase 9 — D9.2 Filter DSL formal grammar** — landed: the
+   `docs/filter_dsl_grammar.md` reference document derives an
+   ISO/IEC 14977 EBNF grammar directly from the lexer + Pratt
+   parser source (`crates/lr-policy/src/filter/`). It covers the
+   lexical structure (identifiers, reserved words, integer /
+   string / IP / prefix literals, the full operator table with
+   longest-match rules), the full statement + expression grammar
+   (every production traced to its parser function), the operator
+   precedence table mirroring `BinaryOp::precedence`, the route
+   field reference (settable vs `+=`-only vs read-only), the
+   `MAX_EXPR_DEPTH = 128` / `MAX_CALL_DEPTH = 64` limits, a
+   worked-examples section covering accept-on-prefix, prefix-range
+   membership, ROA gating, `case`, user-defined functions,
+   community-set mutation, AS-path membership, extended- and
+   large-community tuples, and a BIRD-comparison table. The
+   companion `crates/lr-policy/tests/grammar_corpus.rs` test
+   suite pins every example — positive cases compile through
+   `lr_policy::filter::compile`, negative cases fail with the
+   documented `ParseErrorKind` — so a doc/source drift fails CI
+   rather than shipping. 30 tests across positive, negative and
+   boundary cases. The grammar captured two real divergences
+   from the older in-tree BIRD example doc
+   (`docs/examples/filter_dsl_roa.md`): the function return-type
+   annotation uses `=>` (the same `TokenKind::Arrow` as `case`
+   arms), not BIRD's `->`; and AS-path `~` is currently flat
+   set-membership, not BIRD regex (the `_` wildcard token is
+   parsed by the lexer but does not yet carry meaning inside `~`
+   patterns). Both are documented as current behaviour with
+   follow-up pointers in ROADMAP-v3 D9.
