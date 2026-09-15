@@ -2076,7 +2076,8 @@ impl DefaultRouter {
         key
     }
 
-    /// Remove a locally originated route and withdraw it everywhere.
+    /// Remove a locally originated route and withdraw it everywhere
+    /// (FRR `no network ...`, BIRD removing the protocol's static route).
     ///
     /// The decision process re-runs for the prefix (RFC 4271 §9.1.2): a
     /// peer path that was ranked below the originated route is restored,
@@ -2084,7 +2085,12 @@ impl DefaultRouter {
     /// (via `apply_selection`). Any redistribution-sourced copy of the
     /// route is flushed first — its source (this originated route) is
     /// gone.
-    pub fn unoriginate(&mut self, key: &RouteKey) {
+    ///
+    /// Returns `true` when a locally originated route was removed and
+    /// `false` when the key was not locally originated (never
+    /// `originate`d, or already unoriginated) — nothing changes in that
+    /// case, matching FRR/BIRD `no network` on an absent statement.
+    pub fn unoriginate(&mut self, key: &RouteKey) -> bool {
         if self.originated.remove(key).is_some() {
             // Flush the redistributed BGP copy whose source was this
             // originated route.
@@ -2092,6 +2098,9 @@ impl DefaultRouter {
             // Re-run selection: a beaten peer path comes back, or the
             // empty ranking withdraws the prefix everywhere.
             self.reselect(key);
+            true
+        } else {
+            false
         }
     }
 

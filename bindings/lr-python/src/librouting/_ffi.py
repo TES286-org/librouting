@@ -96,6 +96,16 @@ int32_t lr_router_originate_v4(lr_router_t r,
                                const uint8_t *prefix_addr,
                                uint8_t prefix_len,
                                const uint8_t *next_hop);
+int32_t lr_router_originate_v6(lr_router_t r,
+                               const uint8_t *prefix_addr,
+                               uint8_t prefix_len,
+                               const uint8_t *next_hop);
+int32_t lr_router_withdraw_v4(lr_router_t r,
+                               const uint8_t *prefix_addr,
+                               uint8_t prefix_len);
+int32_t lr_router_withdraw_v6(lr_router_t r,
+                               const uint8_t *prefix_addr,
+                               uint8_t prefix_len);
 int32_t lr_router_originate_labeled_v4(lr_router_t r,
                                        const uint8_t *prefix_addr,
                                        uint8_t prefix_len,

@@ -147,14 +147,34 @@ int main(void) {
     rc = lr_router_originate_labeled_v4(r, lu_prefix, 24, bad_labels, 1, nh);
     check(rc == -3, "originate_labeled_v4 rejects label > 20 bits");
 
+    /* IPv6 origination (AFI=2, SAFI=1) + the withdraw lifecycle
+     * (ROADMAP-v3 D5.6/D5.7). */
+    const uint8_t v6_prefix[16] = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                   0, 0, 0, 0, 0, 0, 0, 0};
+    const uint8_t v6_nh[16] = {0xfe, 0x80, 0, 0, 0, 0, 0, 0,
+                               0, 0, 0, 0, 0, 0, 0, 0x01};
+    rc = lr_router_withdraw_v6(r, v6_prefix, 32);
+    check(rc == 1, "withdraw_v6 on a non-originated prefix is a no-op (rc=1)");
+    rc = lr_router_originate_v6(r, v6_prefix, 32, v6_nh);
+    check(rc == 0, "originate_v6 (2001:db8::/32)");
+    rc = lr_router_withdraw_v4(r, prefix, 24);
+    check(rc == 0, "withdraw_v4 of the plain origination");
+    rc = lr_router_withdraw_v4(r, prefix, 24);
+    check(rc == 1, "repeat withdraw_v4 is a no-op (rc=1)");
+    rc = lr_router_withdraw_v6(r, v6_prefix, 32);
+    check(rc == 0, "withdraw_v6 of the v6 origination");
+    rc = lr_router_withdraw_v6(r, v6_prefix, 129);
+    check(rc == -3, "withdraw_v6 rejects prefix length 129");
+
     /* MPLS platform-labels query (Linux: 0 in CI; lab: 16/20). */
     uint32_t mpls = lr_mpls_platform_labels();
     check(mpls == 0 || mpls == 16 || mpls == 20,
           "lr_mpls_platform_labels returns a known value");
 
-    /* Loc-RIB must now hold exactly three routes (1 plain + 2 labelled). */
+    /* Loc-RIB must now hold exactly the two labelled routes (the plain
+     * v4 and v6 origins were withdrawn above). */
     int64_t n = lr_router_rib_len(r);
-    check(n == 3, "rib_len == 3 after originate + 2 labelled");
+    check(n == 2, "rib_len == 2 after the withdraw lifecycle");
 
     /* RIB dump renders the route */
     lr_bytes_t dump = {0};

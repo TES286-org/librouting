@@ -159,16 +159,29 @@ int main() {
         check(rc == 0, "originate_v4");
     }
 
-    // Loc-RIB must now hold exactly one route.
-    int64_t n = lr_router_rib_len(r.get());
-    check(n == 1, "rib_len == 1 after originate");
+    // IPv6 origination + the withdraw lifecycle (ROADMAP-v3 D5.6/D5.7),
+    // through the RAII helper surface.
+    {
+        const std::array<std::uint8_t, 16> v6 = {0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0,
+                                                 0, 0, 0, 0, 0, 0, 0, 0};
+        const std::array<std::uint8_t, 4> v4 = {203, 0, 113, 0};
+        check(!withdraw_v6(r, v6, 32), "withdraw_v6 on non-originated prefix is a no-op");
+        originate_v6(r, v6, 32);
+        check(withdraw_v4(r, v4, 24), "withdraw_v4 removes the origination");
+        check(!withdraw_v4(r, v4, 24), "repeat withdraw_v4 is a no-op");
+        check(withdraw_v6(r, v6, 32), "withdraw_v6 removes the v6 origination");
+    }
 
-    // RIB dump renders the route.
+    // Loc-RIB is empty again (both origins withdrawn above).
+    int64_t n = lr_router_rib_len(r.get());
+    check(n == 0, "rib_len == 0 after the withdraw lifecycle");
+
+    // RIB dump of the now-empty Loc-RIB still succeeds (empty output).
     {
         auto out = std::make_unique<lr_bytes_t>();
         int rc = lr_router_rib_dump(r.get(), out.get());
         check(rc == 0, "rib_dump");
-        check(lr_bytes_len(out.get()) > 0, "rib_dump non-empty");
+        check(lr_bytes_len(out.get()) == 0, "rib_dump empty after withdrawals");
         lr_bytes_free(out.get());
     }
 

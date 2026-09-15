@@ -383,6 +383,42 @@ class Router:
         if rc != 0:
             raise LrError(f"lr_router_originate_v4 failed (rc={rc}): {last_error()}")
 
+    def originate_v6(self, prefix: str, next_hop: str | None = None) -> None:
+        """Originate a local IPv6 unicast route, e.g. originate_v6("2001:db8::/32").
+
+        The route is advertised to established MP-BGP peers via
+        MP_REACH_NLRI.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        nh_buf = _parse_v6_next_hop(next_hop)
+        rc = get_lib().lr_router_originate_v6(self._ptr, addr, plen, nh_buf)
+        if rc != 0:
+            raise LrError(f"lr_router_originate_v6 failed (rc={rc}): {last_error()}")
+
+    def withdraw_v4(self, prefix: str) -> bool:
+        """Withdraw a locally originated IPv4 route (FRR ``no network``).
+
+        Returns ``True`` when a route was withdrawn; ``False`` when the
+        prefix was not locally originated (an idempotent no-op, matching
+        FRR/BIRD ``no network`` on an absent statement).
+        """
+        addr, plen = _parse_v4_prefix(prefix)
+        rc = get_lib().lr_router_withdraw_v4(self._ptr, addr, plen)
+        if rc < 0:
+            raise LrError(f"lr_router_withdraw_v4 failed (rc={rc}): {last_error()}")
+        return rc == 0
+
+    def withdraw_v6(self, prefix: str) -> bool:
+        """Withdraw a locally originated IPv6 unicast route.
+
+        See ``withdraw_v4`` for the semantics and the return value.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        rc = get_lib().lr_router_withdraw_v6(self._ptr, addr, plen)
+        if rc < 0:
+            raise LrError(f"lr_router_withdraw_v6 failed (rc={rc}): {last_error()}")
+        return rc == 0
+
     def originate_labeled_v4(self, prefix: str, labels: list[int],
                               next_hop: str | None = None) -> None:
         """Originate an RFC 8277 labelled IPv4 BGP route (AFI=1, SAFI=4).

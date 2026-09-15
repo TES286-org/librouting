@@ -461,3 +461,64 @@ func TestDamping(t *testing.T) {
 		t.Fatalf("Decay on idle table: got (%d, %v), want (0, nil)", n, err)
 	}
 }
+
+func TestOriginateAndWithdrawLifecycle(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	v4 := [4]byte{203, 0, 113, 0}
+	v6 := [16]byte{0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+
+	// Withdrawing a prefix that was never originated is an idempotent
+	// no-op (FRR "no network" on an absent statement).
+	if w, err := r.WithdrawV4(v4, 24); err != nil || w {
+		t.Fatalf("WithdrawV4 on empty router: got (%v, %v), want (false, nil)", w, err)
+	}
+
+	if err := r.OriginateV4(v4, 24, nil); err != nil {
+		t.Fatalf("OriginateV4: %v", err)
+	}
+	if err := r.OriginateV6(v6, 32, nil); err != nil {
+		t.Fatalf("OriginateV6: %v", err)
+	}
+	n, err := r.RibLen()
+	if err != nil || n != 2 {
+		t.Fatalf("RibLen after originates: got (%d, %v), want (2, nil)", n, err)
+	}
+
+	if w, err := r.WithdrawV4(v4, 24); err != nil || !w {
+		t.Fatalf("WithdrawV4: got (%v, %v), want (true, nil)", w, err)
+	}
+	if w, err := r.WithdrawV6(v6, 32); err != nil || !w {
+		t.Fatalf("WithdrawV6: got (%v, %v), want (true, nil)", w, err)
+	}
+	n, err = r.RibLen()
+	if err != nil || n != 0 {
+		t.Fatalf("RibLen after withdraws: got (%d, %v), want (0, nil)", n, err)
+	}
+
+	// Second withdraw of the same prefixes is a no-op again.
+	if w, err := r.WithdrawV4(v4, 24); err != nil || w {
+		t.Fatalf("repeat WithdrawV4: got (%v, %v), want (false, nil)", w, err)
+	}
+	if w, err := r.WithdrawV6(v6, 32); err != nil || w {
+		t.Fatalf("repeat WithdrawV6: got (%v, %v), want (false, nil)", w, err)
+	}
+
+	// Out-of-range prefix lengths are rejected up front.
+	if err := r.OriginateV4(v4, 33, nil); err == nil {
+		t.Fatal("OriginateV4 with plen 33 must fail")
+	}
+	if err := r.OriginateV6(v6, 129, nil); err == nil {
+		t.Fatal("OriginateV6 with plen 129 must fail")
+	}
+	if _, err := r.WithdrawV4(v4, 33); err == nil {
+		t.Fatal("WithdrawV4 with plen 33 must fail")
+	}
+	if _, err := r.WithdrawV6(v6, 129); err == nil {
+		t.Fatal("WithdrawV6 with plen 129 must fail")
+	}
+}

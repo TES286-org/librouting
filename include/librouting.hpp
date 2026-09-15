@@ -282,6 +282,53 @@ inline void set_local_address(Router& r, std::uint64_t session,
     }
 }
 
+// ===== Local route lifecycle =====
+
+/// Originate a local IPv4 route into Loc-RIB and advertise it (FRR
+/// `network ...`).
+inline void originate_v4(Router& r, const std::array<std::uint8_t, 4>& prefix,
+                         std::uint8_t prefix_len, const std::uint8_t* next_hop = nullptr) {
+    int rc = lr_router_originate_v4(r.get(), prefix.data(), prefix_len, next_hop);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_originate_v4 failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Originate a local IPv6 route (AFI=2, SAFI=1; MP_REACH_NLRI on egress).
+inline void originate_v6(Router& r, const std::array<std::uint8_t, 16>& prefix,
+                         std::uint8_t prefix_len, const std::uint8_t* next_hop = nullptr) {
+    int rc = lr_router_originate_v6(r.get(), prefix.data(), prefix_len, next_hop);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_originate_v6 failed: " + std::string(err ? err : "unknown"));
+    }
+}
+
+/// Withdraw a locally originated IPv4 route (FRR `no network ...`).
+/// Returns true when a route was withdrawn; false when the prefix was
+/// not locally originated (idempotent no-op).
+inline bool withdraw_v4(Router& r, const std::array<std::uint8_t, 4>& prefix,
+                        std::uint8_t prefix_len) {
+    int rc = lr_router_withdraw_v4(r.get(), prefix.data(), prefix_len);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_withdraw_v4 failed: " + std::string(err ? err : "unknown"));
+    }
+    return rc == 0;
+}
+
+/// Withdraw a locally originated IPv6 route (FRR `no network ...`).
+inline bool withdraw_v6(Router& r, const std::array<std::uint8_t, 16>& prefix,
+                       std::uint8_t prefix_len) {
+    int rc = lr_router_withdraw_v6(r.get(), prefix.data(), prefix_len);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_withdraw_v6 failed: " + std::string(err ? err : "unknown"));
+    }
+    return rc == 0;
+}
+
 // ===== D4.4 — redistribution / aggregation / damping =====
 
 /// Wire protocol identifiers for redistribution pipes. Mirrors

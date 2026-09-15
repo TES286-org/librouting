@@ -699,6 +699,48 @@ int32_t lr_router_originate_labeled_v6(lr_router_t r,
                                        const uint8_t *next_hop);
 
 /**
+ * Originate a local IPv6 unicast route (AFI=2, SAFI=1): injects it into
+ * Loc-RIB (ORIGIN=IGP, empty AS_PATH) and advertises it to established
+ * MP-BGP peers. The v6 counterpart of [`lr_router_originate_v4`]; the
+ * next-hop is carried by MP_REACH_NLRI on egress.
+ *
+ * Returns 0 on success, negative on error.
+ *
+ * # Safety
+ * `prefix_addr` and `next_hop` (when non-NULL) must point to 16 readable
+ * bytes.
+ */
+int32_t lr_router_originate_v6(lr_router_t r,
+                               const uint8_t *prefix_addr,
+                               uint8_t prefix_len,
+                               const uint8_t *next_hop);
+
+/**
+ * Withdraw a locally originated IPv4 route (FRR `no network ...`): the
+ * prefix leaves the originated set, the decision process re-runs (a
+ * beaten peer path is restored; an empty set withdraws the prefix from
+ * every session) and any redistribution-sourced copy is flushed.
+ * Returns 0 when the route was withdrawn, **1 when the prefix was not
+ * locally originated** (idempotent no-op, matching FRR/BIRD `no
+ * network` on an absent statement — nothing changes), negative on
+ * error.
+ *
+ * # Safety
+ * `prefix_addr` must point to 4 readable bytes.
+ */
+int32_t lr_router_withdraw_v4(lr_router_t r, const uint8_t *prefix_addr, uint8_t prefix_len);
+
+/**
+ * Withdraw a locally originated IPv6 unicast route. See
+ * [`lr_router_withdraw_v4`] for the semantics and return codes (0 =
+ * withdrawn, 1 = not locally originated, negative = error).
+ *
+ * # Safety
+ * `prefix_addr` must point to 16 readable bytes.
+ */
+int32_t lr_router_withdraw_v6(lr_router_t r, const uint8_t *prefix_addr, uint8_t prefix_len);
+
+/**
  * Query the kernel's MPLS platform-labels capability (Linux only).
  * Returns the value of `/proc/sys/net/mpls/platform_labels` (0 when
  * MPLS routing is not enabled, 16 or 20 when it is). On non-Linux

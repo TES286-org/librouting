@@ -9,6 +9,8 @@ use lr_router::{
     SessionKind,
 };
 
+use lr_core::rib::RouteKey;
+
 use crate::error::{set_last_error, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::{box_router, lock_router, lr_bytes_t, lr_router_t, unbox_router};
@@ -960,6 +962,141 @@ pub unsafe extern "C" fn lr_router_originate_labeled_v6(
     )
 }
 
+/// Originate a local IPv6 unicast route (AFI=2, SAFI=1): injects it into
+/// Loc-RIB (ORIGIN=IGP, empty AS_PATH) and advertises it to established
+/// MP-BGP peers. The v6 counterpart of [`lr_router_originate_v4`]; the
+/// next-hop is carried by MP_REACH_NLRI on egress.
+///
+/// Returns 0 on success, negative on error.
+///
+/// # Safety
+/// `prefix_addr` and `next_hop` (when non-NULL) must point to 16 readable
+/// bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_originate_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    next_hop: *const u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 128 {
+                set_last_error(format!(
+                    "invalid IPv6 prefix length {prefix_len}: must be <= 128"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 16];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+            let nh = if next_hop.is_null() {
+                None
+            } else {
+                let mut n = [0u8; 16];
+                unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 16)) };
+                Some(lr_core::addr::IpAddr::V6(n))
+            };
+            router.originate_family(
+                lr_core::addr::Prefix::new_v6(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+                nh,
+            );
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw a locally originated IPv4 route (FRR `no network ...`): the
+/// prefix leaves the originated set, the decision process re-runs (a
+/// beaten peer path is restored; an empty set withdraws the prefix from
+/// every session) and any redistribution-sourced copy is flushed.
+/// Returns 0 when the route was withdrawn, **1 when the prefix was not
+/// locally originated** (idempotent no-op, matching FRR/BIRD `no
+/// network` on an absent statement — nothing changes), negative on
+/// error.
+///
+/// # Safety
+/// `prefix_addr` must point to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_withdraw_v4(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 32 {
+                set_last_error(format!(
+                    "invalid IPv4 prefix length {prefix_len}: must be <= 32"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 4];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 4)) };
+            let key = RouteKey::new(
+                lr_core::addr::Prefix::new_v4(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            );
+            i32::from(!router.unoriginate(&key))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw a locally originated IPv6 unicast route. See
+/// [`lr_router_withdraw_v4`] for the semantics and return codes (0 =
+/// withdrawn, 1 = not locally originated, negative = error).
+///
+/// # Safety
+/// `prefix_addr` must point to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_withdraw_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 128 {
+                set_last_error(format!(
+                    "invalid IPv6 prefix length {prefix_len}: must be <= 128"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 16];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+            let key = RouteKey::new(
+                lr_core::addr::Prefix::new_v6(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            );
+            i32::from(!router.unoriginate(&key))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 /// Build a `LabelStack` from a flat C array of 20-bit label values.
 /// Returns `None` (after recording the last error) when any value exceeds
 /// `Label::MAX_VALUE` or when `n_labels` exceeds [`MAX_LABEL_STACK_DEPTH`] —
@@ -1277,6 +1414,60 @@ mod tests {
             unsafe { lr_router_originate_v4(r, addr.as_ptr(), 32, std::ptr::null()) },
             0
         );
+        unsafe { unbox_router(r) };
+    }
+
+    #[test]
+    fn originate_v6_round_trip() {
+        let r = lr_router_new();
+        let v6 = [0x20u8, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(
+            unsafe { lr_router_originate_v6(r, v6.as_ptr(), 32, std::ptr::null()) },
+            0
+        );
+        assert_eq!(lr_router_rib_len(r), 1);
+        // 129 > 128 must be rejected up front.
+        assert_eq!(
+            unsafe { lr_router_originate_v6(r, v6.as_ptr(), 129, std::ptr::null()) },
+            -3
+        );
+        assert!(last_error().contains("prefix length"), "{}", last_error());
+        unsafe { unbox_router(r) };
+    }
+
+    #[test]
+    fn withdraw_v4_lifecycle() {
+        let r = lr_router_new();
+        let addr = [203u8, 0, 113, 0];
+        // Not originated yet: idempotent no-op (FRR `no network` on an
+        // absent statement).
+        assert_eq!(unsafe { lr_router_withdraw_v4(r, addr.as_ptr(), 24) }, 1);
+        assert_eq!(
+            unsafe { lr_router_originate_v4(r, addr.as_ptr(), 24, std::ptr::null()) },
+            0
+        );
+        assert_eq!(lr_router_rib_len(r), 1);
+        assert_eq!(unsafe { lr_router_withdraw_v4(r, addr.as_ptr(), 24) }, 0);
+        assert_eq!(lr_router_rib_len(r), 0);
+        // A second withdraw of the same prefix is a no-op again.
+        assert_eq!(unsafe { lr_router_withdraw_v4(r, addr.as_ptr(), 24) }, 1);
+        // Prefix-length validation mirrors originate.
+        assert_eq!(unsafe { lr_router_withdraw_v4(r, addr.as_ptr(), 33) }, -3);
+        unsafe { unbox_router(r) };
+    }
+
+    #[test]
+    fn withdraw_v6_lifecycle() {
+        let r = lr_router_new();
+        let v6 = [0x20u8, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert_eq!(unsafe { lr_router_withdraw_v6(r, v6.as_ptr(), 32) }, 1);
+        assert_eq!(
+            unsafe { lr_router_originate_v6(r, v6.as_ptr(), 32, std::ptr::null()) },
+            0
+        );
+        assert_eq!(unsafe { lr_router_withdraw_v6(r, v6.as_ptr(), 32) }, 0);
+        assert_eq!(lr_router_rib_len(r), 0);
+        assert_eq!(unsafe { lr_router_withdraw_v6(r, v6.as_ptr(), 129) }, -3);
         unsafe { unbox_router(r) };
     }
 

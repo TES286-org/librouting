@@ -419,6 +419,59 @@ func (r *Router) OriginateV4(prefix [4]byte, prefixLen uint8, nextHop *[4]byte) 
 	return nil
 }
 
+// OriginateV6 injects a local IPv6 unicast route (AFI=2, SAFI=1) into
+// Loc-RIB and advertises it to established MP-BGP peers via
+// MP_REACH_NLRI. The v6 counterpart of OriginateV4.
+func (r *Router) OriginateV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte) error {
+	var nhPtr *C.uint8_t
+	if nextHop != nil {
+		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+	}
+	rc := C.lr_router_originate_v6(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+		nhPtr,
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_originate_v6: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// WithdrawV4 removes a locally originated IPv4 route (FRR "no network"):
+// the prefix leaves the originated set, the decision process re-runs (a
+// beaten peer path is restored; an empty set withdraws the prefix from
+// every session) and peers see the withdrawal. Returns nil and
+// withdrawn=false when the prefix was not locally originated — an
+// idempotent no-op, matching FRR/BIRD "no network" on an absent
+// statement.
+func (r *Router) WithdrawV4(prefix [4]byte, prefixLen uint8) (withdrawn bool, err error) {
+	rc := C.lr_router_withdraw_v4(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+	)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_withdraw_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 0, nil
+}
+
+// WithdrawV6 removes a locally originated IPv6 unicast route. See
+// WithdrawV4 for the semantics.
+func (r *Router) WithdrawV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, err error) {
+	rc := C.lr_router_withdraw_v6(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+	)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_withdraw_v6: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 0, nil
+}
+
 // OriginateLabeledV4 injects an RFC 8277 labelled IPv4 BGP route
 // (AFI=1, SAFI=4) into Loc-RIB. The label stack is supplied as a slice
 // of 20-bit label values; the bottom-of-stack bit is set automatically.

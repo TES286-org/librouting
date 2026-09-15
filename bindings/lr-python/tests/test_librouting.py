@@ -353,3 +353,32 @@ def test_damping_install_decay_destroy():
             d.destroy()
         # Double destroy is safe.
         d.destroy()
+
+
+def test_originate_and_withdraw_lifecycle():
+    with librouting.Router() as r:
+        # Withdrawing a prefix that was never originated is an idempotent
+        # no-op (FRR "no network" on an absent statement).
+        assert r.withdraw_v4("203.0.113.0/24") is False
+        assert r.withdraw_v6("2001:db8::/32") is False
+
+        r.originate_v4("203.0.113.0/24")
+        r.originate_v6("2001:db8::/32")
+        assert r.rib_len() == 2
+
+        assert r.withdraw_v4("203.0.113.0/24") is True
+        assert r.withdraw_v6("2001:db8::/32") is True
+        assert r.rib_len() == 0
+
+        # Second withdraw of the same prefixes is a no-op again.
+        assert r.withdraw_v4("203.0.113.0/24") is False
+        assert r.withdraw_v6("2001:db8::/32") is False
+
+        # Out-of-range prefix lengths are rejected up front.
+        for bad, fn in (("203.0.113.0/33", r.originate_v4),
+                        ("203.0.113.0/33", r.withdraw_v4)):
+            try:
+                fn(bad)
+                raise AssertionError(f"{bad} must be rejected")
+            except librouting.LrError:
+                pass
