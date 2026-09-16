@@ -50,6 +50,11 @@ use lr_router::DefaultRouter;
 /// a `RoaStore` reference for every engine — when `None`, the
 /// `lr_roa_entries` metric is omitted (rather than emitting a
 /// misleading zero).
+///
+/// The fields are only read by the Unix server below; on other
+/// targets the type exists so callers compile unchanged (`spawn`
+/// refuses there).
+#[cfg_attr(not(unix), expect(dead_code))]
 pub struct MetricsContext {
     pub info: MetricsInfo,
     pub router: Arc<RwLock<DefaultRouter>>,
@@ -62,6 +67,10 @@ pub struct MetricsContext {
 }
 
 /// Static daemon facts served by `lr_info`.
+///
+/// See [`MetricsContext`] for why some fields are unread on non-Unix
+/// targets.
+#[cfg_attr(not(unix), expect(dead_code))]
 pub struct MetricsInfo {
     pub version: String,
     pub local_as: u32,
