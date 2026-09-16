@@ -59,8 +59,278 @@ pub enum MatchRhs {
     Value(Value),
     /// A set literal (the common BIRD shape: `[ 10.0.0.0/8, ... ]`).
     Set(Vec<MatchItem>),
+    /// A set literal optimised with a prefix trie (#19 P4). The trie
+    /// indexes every [`MatchItem::PrefixSet`] entry for O(prefix_len)
+    /// containment lookup instead of the O(n) linear scan in
+    /// [`MatchRhs::Set`]; non-prefix items (values, dynamic exprs)
+    /// stay in `others` for a linear scan. The trie borrows its
+    /// structure from `lr-bgp::roa_trie` (D8.4) — a path-compressed
+    /// Patricia trie with a flat node arena, two family roots, and a
+    /// covering walk that stops at the first divergence. The trie
+    /// is only built when the set contains at least one prefix
+    /// pattern; pure value / dynamic sets keep the linear scan.
+    PrefixSet {
+        trie: PrefixSetTrie,
+        others: Vec<MatchItem>,
+    },
     /// Fully dynamic fallback — the tree-walking `eval_match`.
     Expr(Expr),
+}
+
+/// Path-compressed (Patricia) prefix trie indexing the prefix patterns
+/// of a `~` set literal (#19 P4). Turns the O(n) linear scan over
+/// `MatchItem::PrefixSet` entries into an O(prefix_len) covering walk.
+///
+/// Each node owns a path-compressed segment of key bits and the
+/// `(ge, le)` constraints of every pattern whose prefix terminates
+/// exactly at that node. The walk follows the query prefix's bits
+/// root-to-leaf, consulting each node whose prefix is a bit-prefix of
+/// the query, and stops at the first divergence. The structure
+/// mirrors `lr-bgp::roa_trie::RoaTrie` (D8.4) — the same high-aligned
+/// `u128` key encoding, the same flat node arena with `u32` indices,
+/// the same two-family root layout — but stores `(ge, le)` pairs
+/// instead of ROA entry indices.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PrefixSetTrie {
+    /// Node arena. Node 0 of each family is that family's root.
+    nodes: Vec<TrieNode>,
+    /// Per-family root node index: `[None; 2]` while empty (family 0
+    /// = IPv4, family 1 = IPv6).
+    roots: [Option<u32>; 2],
+}
+
+/// One trie node: a path-compressed segment plus the `(ge, le)`
+/// constraints of every pattern terminating at this node.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct TrieNode {
+    /// Segment key bits, high-aligned (bit 0 = MSB).
+    segment: u128,
+    /// Segment length in bits (0 for a family root).
+    skip: u8,
+    /// Patterns whose prefix terminates at this node. Each entry is
+    /// `(ge, le)` — the range constraint from the source `~` pattern.
+    patterns: Vec<(Option<u8>, Option<u8>)>,
+    /// Children keyed by the next key bit after this node's prefix.
+    children: [Option<u32>; 2],
+}
+
+/// Mask with the top `bits` bits set (`bits <= 128`).
+fn high_bits_mask(bits: u8) -> u128 {
+    if bits == 0 {
+        0
+    } else {
+        u128::MAX << (128 - bits as u32)
+    }
+}
+
+/// Bit `i` (0-based from the MSB) of a high-aligned key.
+fn bit_at(key: u128, i: u8) -> usize {
+    ((key << i) >> 127) as usize
+}
+
+/// Encode a prefix as a high-aligned `u128` key, clamping the length
+/// to the family width. Returns `(key, length, family)` where family
+/// is 0 for IPv4 and 1 for IPv6. Mirrors `roa_trie::encode_prefix`.
+fn encode_prefix(prefix: &Prefix) -> (u128, u8, usize) {
+    match prefix.network() {
+        lr_core::addr::IpAddr::V4(b) => (
+            (u32::from_be_bytes(b) as u128) << 96,
+            prefix.prefix_len.min(32),
+            0,
+        ),
+        lr_core::addr::IpAddr::V6(b) => (u128::from_be_bytes(b), prefix.prefix_len.min(128), 1),
+    }
+}
+
+impl PrefixSetTrie {
+    /// Build a trie indexing every `MatchItem::PrefixSet` entry in
+    /// `items` (by position). Non-prefix items are ignored — the
+    /// caller keeps them in a separate linear-scan list.
+    pub fn build(items: &[MatchItem]) -> Self {
+        let mut trie = Self::new();
+        for item in items {
+            if let MatchItem::PrefixSet { prefix, ge, le } = item {
+                let (key, len, family) = encode_prefix(prefix);
+                trie.insert(key, len, family, *ge, *le);
+            }
+        }
+        trie
+    }
+
+    /// Empty trie — no roots, no nodes.
+    fn new() -> Self {
+        Self::default()
+    }
+
+    /// Insert one `(ge, le)` pattern under the node for `(key, len)`.
+    /// Mirrors `RoaTrie::insert` — the structure is identical; only
+    /// the payload type differs (`(ge, le)` vs `RoaEntry` index).
+    fn insert(&mut self, key: u128, len: u8, family: usize, ge: Option<u8>, le: Option<u8>) {
+        let Some(root) = self.roots[family] else {
+            let idx = self.nodes.len() as u32;
+            self.nodes.push(TrieNode {
+                segment: if len == 0 { 0 } else { key },
+                skip: len,
+                patterns: Vec::from([(ge, le)]),
+                children: [None, None],
+            });
+            self.roots[family] = Some(idx);
+            return;
+        };
+
+        enum Attach {
+            Root(usize),
+            Child(u32, usize),
+        }
+
+        let mut cur = root;
+        let mut pos: u8 = 0;
+        let mut attach = Attach::Root(family);
+        loop {
+            let (seg, skip) = {
+                let node = &self.nodes[cur as usize];
+                (node.segment, node.skip)
+            };
+            let remaining = len - pos;
+            let cmp = skip.min(remaining);
+            let xor = (seg ^ (key << pos)) & high_bits_mask(cmp);
+            if xor != 0 {
+                // Divergence inside the segment: factor the shared
+                // prefix into a new branch node.
+                let j = xor.leading_zeros() as u8;
+                let branch_idx = self.nodes.len() as u32;
+                let leaf_idx = branch_idx + 1;
+                self.nodes.push(TrieNode {
+                    segment: seg & high_bits_mask(j),
+                    skip: j,
+                    patterns: Vec::new(),
+                    children: [None, None],
+                });
+                self.nodes.push(TrieNode {
+                    segment: key << (pos + j),
+                    skip: remaining - j,
+                    patterns: Vec::from([(ge, le)]),
+                    children: [None, None],
+                });
+                let old_bit = bit_at(seg, j);
+                let old = &mut self.nodes[cur as usize];
+                old.segment = seg << j;
+                old.skip = skip - j;
+                self.nodes[branch_idx as usize].children[old_bit] = Some(cur);
+                self.nodes[branch_idx as usize].children[1 - old_bit] = Some(leaf_idx);
+                match attach {
+                    Attach::Root(f) => self.roots[f] = Some(branch_idx),
+                    Attach::Child(parent, slot) => {
+                        self.nodes[parent as usize].children[slot] = Some(branch_idx)
+                    }
+                }
+                return;
+            }
+            if remaining < skip {
+                // The key is a strict ancestor of this node: splice a
+                // new node for it above.
+                let new_idx = self.nodes.len() as u32;
+                let old_bit = bit_at(seg, remaining);
+                self.nodes.push(TrieNode {
+                    segment: if remaining == 0 { 0 } else { key << pos },
+                    skip: remaining,
+                    patterns: Vec::from([(ge, le)]),
+                    children: [None, None],
+                });
+                let old = &mut self.nodes[cur as usize];
+                old.segment = seg << remaining;
+                old.skip = skip - remaining;
+                self.nodes[new_idx as usize].children[old_bit] = Some(cur);
+                match attach {
+                    Attach::Root(f) => self.roots[f] = Some(new_idx),
+                    Attach::Child(parent, slot) => {
+                        self.nodes[parent as usize].children[slot] = Some(new_idx)
+                    }
+                }
+                return;
+            }
+            if remaining == skip {
+                // The key terminates exactly at this node.
+                self.nodes[cur as usize].patterns.push((ge, le));
+                return;
+            }
+            // Full segment match with key bits to spare: descend.
+            let slot = bit_at(key, pos + skip);
+            match self.nodes[cur as usize].children[slot] {
+                Some(child) => {
+                    pos += skip;
+                    attach = Attach::Child(cur, slot);
+                    cur = child;
+                }
+                None => {
+                    let idx = self.nodes.len() as u32;
+                    self.nodes.push(TrieNode {
+                        segment: key << (pos + skip),
+                        skip: remaining - skip,
+                        patterns: Vec::from([(ge, le)]),
+                        children: [None, None],
+                    });
+                    self.nodes[cur as usize].children[slot] = Some(idx);
+                    return;
+                }
+            }
+        }
+    }
+
+    /// Walk the covering path for `prefix` and return `true` when any
+    /// pattern in the trie matches. A pattern matches when its prefix
+    /// is a bit-prefix of `prefix` (the trie structure guarantees
+    /// this) AND `prefix.prefix_len` is within the pattern's
+    /// `[lo, hi]` range (the `ge`/`le` constraint checked here).
+    ///
+    /// The walk is O(prefix_len) — at most 32 hops for IPv4, 128 for
+    /// IPv6 — versus the O(n) linear scan over every pattern in the
+    /// set. This is the win the #19 P4 plan targets: a 100-entry
+    /// prefix set goes from ~100 comparisons per route to ~32.
+    pub fn matches(&self, prefix: &Prefix) -> bool {
+        let (key, len, family) = encode_prefix(prefix);
+        let Some(mut cur) = self.roots[family] else {
+            return false;
+        };
+        let mut pos: u8 = 0;
+        let family_max = if family == 0 { 32 } else { 128 };
+        loop {
+            let (seg, skip, patterns) = {
+                let node = &self.nodes[cur as usize];
+                (node.segment, node.skip, &node.patterns)
+            };
+            let remaining = len - pos;
+            let cmp = skip.min(remaining);
+            let xor = (seg ^ (key << pos)) & high_bits_mask(cmp);
+            if xor != 0 || remaining < skip {
+                break;
+            }
+            // This node's prefix (length `pos + skip`) is a bit-prefix
+            // of the query. Check every pattern terminating here.
+            let set_len = pos + skip;
+            if !patterns.is_empty() {
+                for &(ge, le) in patterns {
+                    let lo = ge.unwrap_or(set_len).max(set_len);
+                    let hi = le.unwrap_or(family_max);
+                    if len >= lo && len <= hi {
+                        return true;
+                    }
+                }
+            }
+            if remaining == skip {
+                break;
+            }
+            let slot = bit_at(key, pos + skip);
+            match self.nodes[cur as usize].children[slot] {
+                Some(child) => {
+                    pos += skip;
+                    cur = child;
+                }
+                None => break,
+            }
+        }
+        false
+    }
 }
 
 /// `defined()` targets. `defined()` must observe *presence*, not the
@@ -406,8 +676,15 @@ impl Compiler {
 
     fn compile_match_rhs(&self, rhs: &Expr) -> MatchRhs {
         match rhs {
-            Expr::Set(items) => MatchRhs::Set(
-                items
+            Expr::Set(items) => {
+                // Compile each AST item into a `MatchItem`, then
+                // check whether any are prefix patterns. When at
+                // least one is, build a `PrefixSetTrie` over the
+                // prefix items and keep the non-prefix items in
+                // `others` for a linear scan. The trie turns the
+                // O(n) prefix-containment scan into O(prefix_len) —
+                // the #19 P4 win.
+                let compiled: Vec<MatchItem> = items
                     .iter()
                     .map(|i| match i {
                         Expr::PrefixSet { prefix, ge, le } => MatchItem::PrefixSet {
@@ -418,13 +695,33 @@ impl Compiler {
                         Expr::Lit(v) => MatchItem::Value(v.clone()),
                         other => MatchItem::Expr(other.clone()),
                     })
-                    .collect(),
-            ),
-            Expr::PrefixSet { prefix, ge, le } => MatchRhs::Set(vec![MatchItem::PrefixSet {
-                prefix: *prefix,
-                ge: *ge,
-                le: *le,
-            }]),
+                    .collect();
+                let has_prefix = compiled
+                    .iter()
+                    .any(|i| matches!(i, MatchItem::PrefixSet { .. }));
+                if has_prefix {
+                    let trie = PrefixSetTrie::build(&compiled);
+                    let others: Vec<MatchItem> = compiled
+                        .into_iter()
+                        .filter(|i| !matches!(i, MatchItem::PrefixSet { .. }))
+                        .collect();
+                    MatchRhs::PrefixSet { trie, others }
+                } else {
+                    MatchRhs::Set(compiled)
+                }
+            }
+            Expr::PrefixSet { prefix, ge, le } => {
+                // Single prefix pattern — build a one-entry trie.
+                let trie = PrefixSetTrie::build(&[MatchItem::PrefixSet {
+                    prefix: *prefix,
+                    ge: *ge,
+                    le: *le,
+                }]);
+                MatchRhs::PrefixSet {
+                    trie,
+                    others: Vec::new(),
+                }
+            }
             Expr::Lit(v) => MatchRhs::Value(v.clone()),
             other => MatchRhs::Expr(other.clone()),
         }

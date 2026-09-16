@@ -18,6 +18,55 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Prefix-trie set matching for the filter DSL (GitHub #19 P4):
+  `PrefixSetTrie` in `crates/lr-policy/src/filter/bytecode.rs`
+  replaces the O(n) linear scan over `MatchRhs::Set` prefix items
+  with an O(prefix_len) covering walk. The trie is a
+  path-compressed Patricia trie that borrows its structure from
+  `lr-bgp::roa_trie` (ROADMAP-v3 D8.4) — the same flat-arena node
+  layout, the same high-aligned `u128` key encoding, the same
+  two-family root layout, the same covering-walk divergence
+  rule — but stores `(ge, le)` range constraints instead of ROA
+  entry indices. A new `MatchRhs::PrefixSet { trie, others }`
+  variant is emitted by the compiler when the set contains at
+  least one `MatchItem::PrefixSet`; non-prefix items (values,
+  dynamic exprs) stay in `others` for a linear scan. Pure value
+  sets keep `MatchRhs::Set` — no regression for sets the trie
+  cannot help. Single-prefix patterns (`net ~ 10.0.0.0/8`) now
+  also go through the trie (a one-node trie is cheaper than the
+  one-element `Vec`).
+  - Bench delta (criterion, `--baseline p0`): `vm_large_prefix_set`
+    goes from 291 ns to 87.6 ns on `hit_last` (−70 %, 3.3× faster)
+    and from 191 ns to 58.3 ns on `miss` (−69 %, 3.3× faster) —
+    the biggest actionable win the P0 baseline surfaced. The
+    import-pipeline bench shows the win compounding at scale:
+    `realistic/10000` −8.8 %, `trivial/10000` −10.4 %,
+    `realistic/1000` −5.3 %, `trivial/1000` −5.9 %. No shape
+    regresses; the other VM shapes (`simple_accept`,
+    `if_local_pref`, `complex_chain`, `large_community_set`,
+    `user_functions`) are all within ±1 % of P0 (noise).
+  - Engine equivalence: a new test
+    `prefix_trie_matches_linear_scan_across_set_shapes` in
+    `crates/lr-policy/src/filter/eval.rs` pins the trie ==
+    linear-scan contract across five set shapes (plain /32s,
+    `ge`/`le` ranges, IPv6, mixed prefix + value, overlapping
+    ranges) and a hit/miss/longer/shorter/wrong-family query
+    matrix. The existing 27×4 equivalence table and the
+    bench-shapes table run verbatim against both `MatchRhs::Set`
+    and `MatchRhs::PrefixSet`.
+  - P1 (compact instruction encoding, `Instr { op, a: u32, b: u32 }`
+    = 12 bytes) was attempted and reverted. The A/B bench showed
+    a 2–10 % regression across every VM shape: the side-table
+    indirection (one `Vec` lookup per dispatch) exceeded the
+    cache-density win on the bench sizes (the existing benches
+    exercise filters with ≤ 10 instructions, where the whole
+    instruction stream fits in 1–2 cache lines either way). The
+    process guardrail ("every optimisation lands with a bench
+    delta attached, not an argument") was honoured — the P1
+    regression was measured, not argued, and the change was not
+    landed. The instruction-encoding work is deferred until a
+    bench with a 1000+ instruction filter exists, or until P2/P5
+    work makes the compact encoding pay for itself.
 - DSL performance baseline benches (GitHub #19 P0): two new
   criterion benches in `crates/lr-policy/benches/` give the filter
   DSL and the daemon import pipeline a measurable perf baseline

@@ -1879,6 +1879,42 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 }
                 Ok(false)
             }
+            MatchRhs::PrefixSet { trie, others } => {
+                // #19 P4: prefix patterns are indexed in the trie;
+                // one O(prefix_len) walk replaces the O(n) linear
+                // scan over every `MatchItem::PrefixSet` entry.
+                if let Value::Prefix(p) = lhs {
+                    if trie.matches(p) {
+                        return Ok(true);
+                    }
+                }
+                // Non-prefix items (values, dynamic exprs) stay in
+                // a linear scan — the trie cannot index them.
+                for item in others {
+                    match item {
+                        MatchItem::Value(v) => {
+                            if value_match(lhs, v) {
+                                return Ok(true);
+                            }
+                        }
+                        MatchItem::PrefixSet { .. } => {
+                            // Already covered by the trie above; skip.
+                            // (The trie built from `PrefixSetTrie::build`
+                            // indexed every prefix item in the original
+                            // set, so this arm is unreachable in
+                            // practice — `others` filters them out at
+                            // compile time. Kept for exhaustiveness.)
+                        }
+                        MatchItem::Expr(e) => {
+                            let v = self.eval_expr(e, route)?;
+                            if value_match(lhs, &v) {
+                                return Ok(true);
+                            }
+                        }
+                    }
+                }
+                Ok(false)
+            }
         }
     }
 }
@@ -3233,6 +3269,106 @@ mod tests {
                     "attribute mismatch on route {i} for: {src}"
                 );
                 assert_eq!(a.next_hop, b.next_hop);
+            }
+        }
+    }
+
+    /// #19 P4 — the prefix-trie path (`MatchRhs::PrefixSet`) must
+    /// produce the same verdicts as the linear-scan path
+    /// (`MatchRhs::Set`) across a matrix of set shapes (plain
+    /// /32s, `ge`/`le` ranges, IPv6, mixed prefix + value sets)
+    /// and query prefixes (hit, miss, longer, shorter, wrong
+    /// family). This is the differential test the #19 process
+    /// guardrail calls for: the trie is a performance
+    /// optimisation, not a semantic change.
+    #[test]
+    fn prefix_trie_matches_linear_scan_across_set_shapes() {
+        // Each entry is (filter_source, query_prefixes_that_accept,
+        // query_prefixes_that_reject).
+        let cases: &[(&str, &[&str], &[&str])] = &[
+            // 1. Plain /32 set — exact match only.
+            (
+                "if net ~ [ 10.0.0.1/32, 10.0.0.2/32, 10.0.0.100/32 ] then accept; reject;",
+                &["10.0.0.1/32", "10.0.0.2/32", "10.0.0.100/32"],
+                &["10.0.0.3/32", "10.0.0.0/32", "10.0.0.1/31"],
+            ),
+            // 2. `ge`/`le` range: 10.0.0.0/8{16,24} — accepts /16
+            // through /24 inside 10/8.
+            (
+                "if net ~ [ 10.0.0.0/8{16,24} ] then accept; reject;",
+                &[
+                    "10.0.0.0/16",
+                    "10.0.0.0/24",
+                    "10.1.2.0/24",
+                    "10.255.255.0/24",
+                ],
+                &["10.0.0.0/8", "10.0.0.0/25", "10.0.0.0/15", "192.0.2.0/24"],
+            ),
+            // 3. IPv6 set with range.
+            (
+                "if net ~ [ 2001:db8::/32{48,64} ] then accept; reject;",
+                &[
+                    "2001:db8::/48",
+                    "2001:db8::/64",
+                    "2001:db8:1::/64",
+                    "2001:db8:ffff::/64",
+                ],
+                &[
+                    "2001:db8::/32",
+                    "2001:db8::/65",
+                    "2001:db9::/48",
+                    "2001:dead::/48",
+                ],
+            ),
+            // 4. Mixed prefix + value set: the trie handles the prefix
+            // items; the value items stay in the linear scan.
+            (
+                "if net ~ [ 10.0.0.0/8, 192.0.2.0/24, 64512 ] then accept; reject;",
+                &[
+                    "10.0.0.0/8",
+                    "10.1.2.3/32",
+                    "192.0.2.0/24",
+                    "192.0.2.128/25",
+                ],
+                &["172.16.0.0/12", "203.0.113.0/24"],
+            ),
+            // 5. Multiple overlapping ranges — the trie must check
+            // every covering node, not just the first.
+            (
+                "if net ~ [ 10.0.0.0/8, 10.0.0.0/24{25,32} ] then accept; reject;",
+                &[
+                    "10.0.0.0/8",
+                    "10.0.0.0/24",
+                    "10.0.0.128/25",
+                    "10.0.0.1/32",
+                    "10.1.0.0/25",
+                ],
+                &["172.16.0.0/12", "192.0.2.0/24"],
+            ),
+        ];
+
+        for (src, accept_prefixes, reject_prefixes) in cases {
+            for pfx in *accept_prefixes {
+                let mut r = route_with(pfx, 150, 30);
+                let va = run(src, &mut r);
+                let mut r2 = route_with(pfx, 150, 30);
+                let vb = run_vm(src, &mut r2);
+                assert_eq!(va, vb, "verdict mismatch on accept prefix {pfx} for: {src}");
+                assert!(
+                    matches!(va, EvalResult::Accept),
+                    "expected accept for {pfx} in: {src}, got {va:?}"
+                );
+            }
+            for pfx in *reject_prefixes {
+                let mut r = route_with(pfx, 150, 30);
+                let va = run(src, &mut r);
+                let mut r2 = route_with(pfx, 150, 30);
+                let vb = run_vm(src, &mut r2);
+                assert_eq!(va, vb, "verdict mismatch on reject prefix {pfx} for: {src}");
+                assert!(
+                    matches!(va, EvalResult::Reject(_)),
+                    "expected reject for {pfx} in: {src}, got {va:?}"
+                );
             }
         }
     }

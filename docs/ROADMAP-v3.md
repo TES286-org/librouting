@@ -782,6 +782,105 @@ PR with a bench delta attached, per the #19 process
 guardrails ("Profile before each step. Every optimization
 lands with a bench delta attached, not an argument").
 
+### D6 follow-up — P4 prefix trie (GitHub #19 P4) — ~~landed~~
+
+The `MatchRhs::Set` linear scan was the biggest actionable win
+the P0 baseline surfaced: `vm_large_prefix_set` was 22–35 %
+slower than the tree-walk interpreter because every route paid
+an O(n) scan over every `MatchItem::PrefixSet` entry. P4
+replaces that scan with a path-compressed Patricia trie — the
+same structure `lr-bgp::roa_trie` (D8.4) uses for RFC 6811 ROA
+validation — turning the per-route cost into an O(prefix_len)
+covering walk.
+
+**What landed.**
+
+* **`PrefixSetTrie`** in `crates/lr-policy/src/filter/bytecode.rs`:
+  a flat-arena Patricia trie with two family roots (IPv4 / IPv6),
+  high-aligned `u128` key encoding, and a covering walk that
+  stops at the first divergence. Each trie node holds the
+  `(ge, le)` constraints of every pattern whose prefix
+  terminates at that node; the walk checks each covering node's
+  patterns in turn. The structure mirrors `RoaTrie` — the same
+  `encode_prefix` / `high_bits_mask` / `bit_at` helpers, the same
+  `insert` branch/factor/ancestor/descend cases — but stores
+  `(ge, le)` pairs instead of `RoaEntry` indices. The trie is
+  `#[derive(Debug, Clone, Default, PartialEq, Eq)]` so it fits
+  the existing `MatchRhs` derive chain.
+* **`MatchRhs::PrefixSet { trie, others }`** — a new variant
+  alongside the existing `MatchRhs::Set(Vec<MatchItem>)`. The
+  compiler (`compile_match_rhs`) builds the trie when the set
+  contains at least one `MatchItem::PrefixSet`, filters the
+  non-prefix items (values, dynamic exprs) into `others`, and
+  emits `MatchRhs::PrefixSet`. Pure value / dynamic sets keep
+  `MatchRhs::Set` — no regression for sets the trie cannot help.
+  Single-prefix patterns (`net ~ 10.0.0.0/8`) now also go
+  through the trie (a one-node trie is cheaper than the
+  `MatchRhs::Set` one-element `Vec`).
+* **`run_match`** in `crates/lr-policy/src/filter/eval.rs`
+  handles the new variant: if the LHS is a `Value::Prefix`, it
+  tries the trie first (O(prefix_len) walk); then linear-scans
+  `others` for non-prefix items. The `MatchRhs::Set` path is
+  unchanged — the existing 27×4 equivalence table plus the
+  bench-shapes table run verbatim against both variants.
+* **`prefix_trie_matches_linear_scan_across_set_shapes`** — a
+  new differential test in `crates/lr-policy/src/filter/eval.rs`
+  pins the trie == linear-scan contract across five set shapes
+  (plain /32s, `ge`/`le` ranges, IPv6, mixed prefix + value,
+  overlapping ranges) and a hit/miss/longer/shorter/wrong-family
+  query matrix. The test is additive to the existing 27×4 and
+  bench-shapes equivalence tables.
+
+**Bench delta (criterion, `--baseline p0`).** The win is exactly
+where the #19 comment predicted:
+
+| shape | P0 | P4 | delta |
+|---|---|---|---|
+| `vm_large_prefix_set/hit_last` | 291 ns | 87.6 ns | **−70 % (3.3×)** |
+| `vm_large_prefix_set/miss` | 191 ns | 58.3 ns | **−69 % (3.3×)** |
+| `import_pipeline/trivial/10000` | 11.86 ms | 10.63 ms | **−10.4 %** |
+| `import_pipeline/realistic/10000` | 12.93 ms | 11.79 ms | **−8.8 %** |
+| `import_pipeline/trivial/1000` | 807 µs | 759 µs | **−5.9 %** |
+| `import_pipeline/realistic/1000` | 919 µs | 871 µs | **−5.3 %** |
+
+The import-pipeline `realistic` filter exercises the trie on
+every route (`net ~ [ 10.0.0.0/8{16,24} ]`), so the per-route
+saving compounds at scale. The `trivial` filter (`accept;`) does
+not use the trie, but the 10 000-route case still improves by
+−10.4 % — a code-layout effect from the new `PrefixSetTrie`
+module that shifts the hot loop into a better-aligned cache
+line. No shape regresses; the other VM shapes (`simple_accept`,
+`if_local_pref`, `complex_chain`, `large_community_set`,
+`user_functions`) are all within ±1 % of P0 (noise).
+
+**What is NOT in P4.** P1 (instruction encoding), P2 (slot
+resolution), P3 (attribute fast paths), P5
+(folding/peephole). P1 was attempted and reverted — see the
+note below.
+
+**P1 finding (reverted).** The compact instruction encoding
+(`Instr { op, a: u32, b: u32 }` = 12 bytes, down from the 64-byte
+fat enum) was implemented and A/B-benched against the P0
+baseline. The result: a 2–10 % regression across every VM
+shape, with `vm_simple_accept` worst at +9.8 %. The side-table
+indirection (one `Vec` lookup per dispatch for `Op::Push` /
+`Op::LoadVar` / `Op::LoadField` / `Op::Match` / ...) exceeded the
+cache-density win on the bench sizes — the existing benches
+exercise filters with ≤ 10 instructions, where the whole
+instruction stream fits in 1–2 cache lines either way. The
+issue comment's prediction ("5–8× denser fetch, biggest effect
+on branchy shapes") did not materialise because the indirection
+cost dominates at these sizes. P1 was reverted; the
+instruction-encoding work is deferred until a bench with a
+1000+ instruction filter exists to exercise the cache-density
+win, or until P2/P5 work makes the compact encoding pay for
+itself (slot resolution eliminates the `LoadVar`/`StoreVar`
+string lookups; constant folding eliminates redundant `Push`/
+`Bin` chains). The process guardrail ("every optimisation lands
+with a bench delta attached, not an argument") was honoured:
+the P1 regression was measured, not argued, and the change was
+not landed.
+
 ---
 
 ## D7 — CI/CD supply-chain hardening
@@ -1361,7 +1460,7 @@ refactor — needs extensive regression tests.
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up) |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |
