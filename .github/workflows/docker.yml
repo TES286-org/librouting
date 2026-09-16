@@ -105,21 +105,35 @@ jobs:
         # 0 (the daemon's `print_usage` returns SUCCESS for
         # `--help`); a non-zero exit means the binary is missing or
         # the image layout is wrong.
+        #
+        # The output is captured into a shell variable before grepping
+        # — piping `docker run ... | grep -q` makes `grep` close the
+        # pipe after the first match, which sends SIGPIPE to the
+        # daemon's stdout writer. Under `set -euo pipefail` that
+        # surfaces as `write /dev/stdout: broken pipe` and fails the
+        # step even though the binary works. Capturing first avoids
+        # the broken pipe entirely.
         run: |
           set -euo pipefail
-          docker run --rm librouting:ci --help | grep -q "librouting"
+          out=$(docker run --rm librouting:ci --help)
+          echo "$out" | grep -q "librouting"
           # lrctl and lr are in the same image; verify they run too.
-          docker run --rm --entrypoint lrctl librouting:ci version | grep -q "lrctl"
-          docker run --rm --entrypoint lr librouting:ci version | grep -q "librouting"
+          out=$(docker run --rm --entrypoint lrctl librouting:ci version)
+          echo "$out" | grep -q "lrctl"
+          out=$(docker run --rm --entrypoint lr librouting:ci version)
+          echo "$out" | grep -q "librouting"
 
       - name: Verify the shared library is present and loadable
         # `ldconfig -p` lists every library the dynamic linker knows
         # about; `liblr_ffi.so` should be there because the
         # Dockerfile runs `ldconfig` after copying it.
+        #
+        # Same capture-then-grep pattern as the binary smoke test —
+        # avoids the `grep -q` broken-pipe failure mode.
         run: |
           set -euo pipefail
-          docker run --rm --entrypoint /bin/sh librouting:ci -c \
-            'ldconfig -p | grep -q liblr_ffi.so'
+          out=$(docker run --rm --entrypoint /bin/sh librouting:ci -c 'ldconfig -p')
+          echo "$out" | grep -q liblr_ffi.so
 
       - name: Report image size
         # Log the image size so a regression (e.g. a dep add that
