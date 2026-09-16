@@ -18,6 +18,53 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- User-function call index resolution for the filter DSL bytecode
+  (GitHub #19 P2): `Expr::Call { name, .. }` resolves to a new
+  `Instr::CallFn { idx, argc }` instruction at compile time when
+  `name` is a user-defined function, eliminating the `BTreeMap`
+  lookup per call that `Instr::Call { name, .. }` previously paid.
+  Built-in calls (`len`, `count`, `delete`, `filter`, `empty`,
+  `first`, `last`) keep `Instr::Call { name, argc }` — the parser's
+  `validate_calls` pass already guarantees every call name is a user
+  function or a built-in, so the resolution is total.
+  - **`CompiledFilter`** — `functions` changed from
+    `BTreeMap<String, CompiledFunction>` to `Vec<CompiledFunction>`
+    (indexed by `CallFn`), plus a new `function_index:
+    BTreeMap<String, usize>` map (name → index). The VM's `CallFn`
+    handler does `cf.functions[idx]` — a direct `Vec` index, no
+    hash + string comparison. **BREAKING CHANGE** for embedders that
+    access `CompiledFilter.functions` directly (the field type
+    changed from a map to a vec); use `function_index` for name-based
+    lookup. No FFI/binding updates needed — `CompiledFilter` is
+    opaque across the FFI boundary.
+  - **Bench delta** (criterion, `--baseline p5`, `--quick`):
+    `vm_user_functions` improved **−1.25 %** (437 → 430 ns,
+    p = 0.05). The `user_functions` bench calls 2 user functions
+    per eval; the win is the 2 BTreeMap lookups eliminated. No
+    other bench regresses — all existing shapes are within ±1 % of
+    P5 (noise). The `import_pipeline` bench is also unchanged.
+  - **Equivalence preserved** — the 27×4 policy table, the
+    bench-shapes table, and the prefix-trie differential table in
+    `crates/lr-policy/src/filter/eval.rs` all pass unchanged. 2 new
+    tests pin the P2 contract: `p2_user_function_calls_resolve_to_callfn`
+    (verifies `CallFn` is emitted for user functions, `Call` for
+    built-ins) and `p2_callfn_matches_interpreter_on_user_functions`
+    (verifies `CallFn` produces identical verdicts + route state
+    vs the tree-walking interpreter across 4 filter sources × 3
+    routes).
+  - **What is NOT in P2.** Variable slot resolution (`LoadSlot`/
+    `StoreSlot`/`AssignSlot` + frame-based scope management) was
+    prototyped and benchmarked but not landed — the frame/scope
+    double-write and the `Evaluator` allocation overhead regressed
+    `vm_simple_accept` by +10 % and `vm_const_fold` by +29 %. The
+    slot-resolution work is deferred until a bench with a hot
+    variable-intensive filter (100+ `let`/`LoadVar` per eval) exists
+    to amortise the fixed overhead, or until P3 (attribute fast
+    paths) makes the frame pay for itself by eliminating the
+    `Value` clone on attribute reads. P3 remains the highest-
+    leverage remaining lever — it would eliminate the `Value` clone
+    the `if_local_pref` bench (81.5 ns) pays on every attribute
+    read.
 - Peephole optimisation pass for the filter DSL bytecode (GitHub
   #19 P5): a new `crates/lr-policy/src/filter/peephole.rs` module
   runs three passes inside `bytecode::compile` after the

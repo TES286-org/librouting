@@ -243,6 +243,7 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
             | Instr::PushScope
             | Instr::PopScope
             | Instr::Call { .. }
+            | Instr::CallFn { .. }
             | Instr::Method { .. }
             | Instr::EvalTree(_)
             | Instr::AssignField(_)

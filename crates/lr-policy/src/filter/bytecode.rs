@@ -384,8 +384,19 @@ pub enum Instr {
     Match { negated: bool, rhs: MatchRhs },
     /// `defined(x)` / `exists(x)`.
     Defined(DefinedTarget),
-    /// Call a built-in or user function with `argc` stack arguments.
+    /// Call a built-in function with `argc` stack arguments. The VM
+    /// dispatches by name through the built-in table (`eval_call`).
+    /// User-function calls are resolved to [`Instr::CallFn`] at
+    /// compile time (GitHub #19 P2).
     Call { name: String, argc: usize },
+    /// Call a user-defined function by index (GitHub #19 P2). The
+    /// VM indexes directly into `CompiledFilter.functions[idx]` —
+    /// no BTreeMap lookup per call. The compiler resolves
+    /// `Expr::Call { name, .. }` to `CallFn { idx, argc }` when
+    /// `name` is a user function (the parser's `validate_calls`
+    /// pass guarantees every call name is a user function or a
+    /// built-in).
+    CallFn { idx: usize, argc: usize },
     /// Method call on a route field (`bgp.as_path.prepend`, ...).
     Method {
         field: RouteField,
@@ -414,11 +425,21 @@ pub enum Instr {
 }
 
 /// A compiled filter: flat code plus compiled user functions.
+///
+/// `functions` is a `Vec` indexed by the `CallFn { idx, argc }`
+/// instruction (GitHub #19 P2) — the VM indexes directly into this
+/// vector per call, no BTreeMap lookup. `function_index` maps a
+/// function name to its `Vec` index; the compiler builds this first so
+/// it can resolve `Expr::Call { name, .. }` to `CallFn { idx, argc }`
+/// at compile time.
 #[derive(Debug, Clone)]
 pub struct CompiledFilter {
     pub name: String,
     pub code: Vec<Instr>,
-    pub functions: BTreeMap<String, CompiledFunction>,
+    pub functions: Vec<CompiledFunction>,
+    /// Name → index map for `functions` (GitHub #19 P2). Built so the
+    /// compiler can resolve call names to indices at compile time.
+    pub function_index: BTreeMap<String, usize>,
 }
 
 /// Compile a parsed filter to bytecode. Infallible: every AST shape
@@ -428,36 +449,55 @@ pub struct CompiledFilter {
 /// threading — see `crate::filter::peephole`); the passes are
 /// transparent (preserve verdict + route state for every route, as
 /// pinned by the equivalence tables in `eval.rs`).
+///
+/// GitHub #19 P2: the compiler builds a name → index map for user
+/// functions *first*, then compiles the body and function bodies with
+/// that map in scope. `Expr::Call { name, .. }` resolves to
+/// `CallFn { idx, argc }` when `name` is a user function, and to
+/// `Call { name, argc }` (built-in) otherwise. The parser's
+/// `validate_calls` pass already guarantees every call name is one or
+/// the other, so the resolution is total.
 pub fn compile(filter: &Filter) -> CompiledFilter {
-    let c = Compiler;
+    // Build the function table first so body compilation can resolve
+    // calls to indices.
+    let mut function_index: BTreeMap<String, usize> = BTreeMap::new();
+    for (i, f) in filter.functions.iter().enumerate() {
+        function_index.insert(f.name.clone(), i);
+    }
+
+    let c = Compiler {
+        function_index: &function_index,
+    };
     let mut code = Vec::new();
     c.compile_stmts(&filter.body.stmts, &mut code);
     let code = crate::filter::peephole::optimize(code);
-    let mut functions = BTreeMap::new();
+    let mut functions = Vec::with_capacity(filter.functions.len());
     for f in &filter.functions {
         let mut code = Vec::new();
         c.compile_stmts(&f.body.stmts, &mut code);
         code.push(Instr::Return);
         let code = crate::filter::peephole::optimize(code);
-        functions.insert(
-            f.name.clone(),
-            CompiledFunction {
-                params: f.params.clone(),
-                code,
-            },
-        );
+        functions.push(CompiledFunction {
+            params: f.params.clone(),
+            code,
+        });
     }
     CompiledFilter {
         name: filter.name.clone(),
         code,
         functions,
+        function_index,
     }
 }
 
-#[derive(Default)]
-struct Compiler;
+/// The bytecode compiler. Carries a reference to the function table
+/// (GitHub #19 P2) so `Expr::Call { name, .. }` can resolve to
+/// `CallFn { idx, argc }` at compile time.
+struct Compiler<'a> {
+    function_index: &'a BTreeMap<String, usize>,
+}
 
-impl Compiler {
+impl<'a> Compiler<'a> {
     fn compile_stmts(&self, stmts: &[Stmt], out: &mut Vec<Instr>) {
         for s in stmts {
             self.compile_stmt(s, out);
@@ -577,10 +617,21 @@ impl Compiler {
                 for a in args {
                     self.compile_expr(a, out);
                 }
-                out.push(Instr::Call {
-                    name: name.clone(),
-                    argc: args.len(),
-                });
+                // P2: resolve user-function calls to `CallFn { idx, argc }`
+                // for direct Vec index access at run time. Built-in calls
+                // keep `Call { name, argc }`. The parser's `validate_calls`
+                // pass guarantees every name is one or the other.
+                if let Some(&idx) = self.function_index.get(name) {
+                    out.push(Instr::CallFn {
+                        idx,
+                        argc: args.len(),
+                    });
+                } else {
+                    out.push(Instr::Call {
+                        name: name.clone(),
+                        argc: args.len(),
+                    });
+                }
             }
             Expr::Method {
                 receiver,

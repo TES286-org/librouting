@@ -980,6 +980,69 @@ eliminate the `LoadVar`/`StoreVar` string hashing that the
 `Value` clone the `if_local_pref` bench (81.6 ns) pays on
 every attribute read.
 
+### D6 follow-up — P2 call index resolution (GitHub #19 P2) — ~~landed~~
+
+The issue comment's P2 ("compile-time resolution") has two halves:
+variable slot resolution and user-function call index resolution.
+This PR lands the call index resolution half — the simpler,
+contained change that eliminates the `BTreeMap` lookup the VM
+paid per user-function call.
+
+**What landed.**
+
+* **`Instr::CallFn { idx, argc }`** — a new instruction alongside
+  `Instr::Call { name, argc }`. The VM's `CallFn` handler does
+  `cf.functions[idx]` — a direct `Vec` index, no BTreeMap lookup.
+  The `Call` handler now only dispatches built-in functions (it no
+  longer falls back to `cf.functions.get(name)` — the compiler
+  already resolved user functions to `CallFn`).
+* **`CompiledFilter`** — `functions` changed from
+  `BTreeMap<String, CompiledFunction>` to `Vec<CompiledFunction>`,
+  plus a new `function_index: BTreeMap<String, usize>` map
+  (name → index). The compiler builds the index first, then
+  compiles the body and function bodies with the index in scope.
+  **BREAKING CHANGE** for embedders accessing `functions` directly;
+  use `function_index` for name-based lookup. No FFI/binding
+  impact (`CompiledFilter` is opaque across the FFI boundary).
+* **Compiler** — `Compiler` is now stateful: it carries a
+  `&BTreeMap<String, usize>` function table. `Expr::Call { name,
+  .. }` checks the table; if `name` is a user function, it emits
+  `CallFn { idx, argc }`; otherwise `Call { name, argc }` (built-in).
+  The parser's `validate_calls` pass already guarantees every
+  call name is one or the other, so the resolution is total.
+* **Bench delta** (criterion, `--baseline p5`, `--quick`):
+  `vm_user_functions` improved **−1.25 %** (437 → 430 ns,
+  p = 0.05, statistically significant). The bench calls 2 user
+  functions per eval; the win is the 2 BTreeMap lookups eliminated.
+  No other bench regresses — all existing shapes are within ±1 %
+  of P5 (noise). The `import_pipeline` bench is also unchanged.
+* **Equivalence preserved** — the 27×4 policy table, the
+  bench-shapes table, and the prefix-trie differential table in
+  `crates/lr-policy/src/filter/eval.rs` all pass unchanged. 2 new
+  tests pin the P2 contract:
+  `p2_user_function_calls_resolve_to_callfn` (verifies `CallFn`
+  is emitted for user functions, `Call` for built-ins) and
+  `p2_callfn_matches_interpreter_on_user_functions` (verifies
+  `CallFn` produces identical verdicts + route state vs the
+  tree-walking interpreter across 4 filter sources × 3 routes).
+
+**What is NOT in P2.** Variable slot resolution (`LoadSlot`/
+`StoreSlot`/`AssignSlot` + frame-based scope management) was
+prototyped and benchmarked but not landed. The frame/scope
+double-write (the VM maintains both a `Vec<Value>` frame for
+fast slot access AND a `BTreeMap<String, u32>` scope map for
+tree-walker fallback) and the `Evaluator` allocation overhead
+(`frame: Vec::new()` + `scope_marks: vec![0]` per `execute`
+call) regressed `vm_simple_accept` by +10 % and `vm_const_fold`
+by +29 %. The slot-resolution work is deferred until a bench
+with a hot variable-intensive filter (100+ `let`/`LoadVar` per
+eval) exists to amortise the fixed overhead, or until P3
+(attribute fast paths) makes the frame pay for itself by
+eliminating the `Value` clone on attribute reads. P3 remains the
+highest-leverage remaining lever — it would eliminate the
+`Value` clone the `if_local_pref` bench (81.5 ns) pays on every
+attribute read.
+
 ---
 
 ## D7 — CI/CD supply-chain hardening
@@ -1559,7 +1622,7 @@ refactor — needs extensive regression tests.
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive) |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); P3 (attribute fast paths) remains the highest-leverage lever |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |

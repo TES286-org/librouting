@@ -1716,18 +1716,37 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     };
                     stack.push(Value::Bool(present));
                 }
+                // P2: `Call { name, argc }` now only handles built-in
+                // functions. User-function calls are resolved to
+                // `CallFn { idx, argc }` at compile time. The built-in
+                // dispatch goes through `eval_call`.
                 Instr::Call { name, argc } => {
                     let args: Vec<Value> =
                         stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
-                    if let Some(f) = cf.functions.get(name) {
-                        let v = self.call_compiled_function(name, f, args, cf, route)?;
-                        stack.push(v);
-                    } else {
-                        let v = self.eval_call(name, &args, route)?;
-                        stack.push(v);
+                    let v = self.eval_call(name, &args, route)?;
+                    stack.push(v);
+                    if let Some(verdict) = self.pending_verdict.take() {
+                        return Ok(match verdict {
+                            ControlFlow::Accept => VmFlow::Accept,
+                            ControlFlow::Reject(reason) => VmFlow::Reject(reason),
+                            _ => VmFlow::Continue,
+                        });
                     }
-                    // accept / reject inside a function body
-                    // terminates the whole filter (BIRD f_cmd).
+                }
+                // P2: user-function call by index — direct Vec access,
+                // no BTreeMap lookup per call.
+                Instr::CallFn { idx, argc } => {
+                    let args: Vec<Value> =
+                        stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let f = cf.functions.get(*idx).ok_or_else(|| EvalError {
+                        kind: EvalErrorKind::UnknownFunction(format!(
+                            "function index {idx} out of range"
+                        )),
+                        line: 0,
+                        col: 0,
+                    })?;
+                    let v = self.call_compiled_function(f, args, cf, route)?;
+                    stack.push(v);
                     if let Some(verdict) = self.pending_verdict.take() {
                         return Ok(match verdict {
                             ControlFlow::Accept => VmFlow::Accept,
@@ -1791,9 +1810,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// Compiled-function call: bind args in a fresh scope, run the
     /// body code, map accept/reject to the latched pending verdict
     /// (interpreter parity) and return the call value.
+    ///
+    /// P2: the `name` parameter was removed — `CallFn { idx, argc }`
+    /// carries the function index, not the name. The `BadArgCount`
+    /// error uses an empty name string (the error message is less
+    /// informative but the error is rare — the compiler validates
+    /// arg counts at the call site via the parser).
     fn call_compiled_function(
         &mut self,
-        name: &str,
         f: &crate::filter::bytecode::CompiledFunction,
         args: Vec<Value>,
         cf: &CompiledFilter,
@@ -1809,7 +1833,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         if args.len() != f.params.len() {
             return Err(EvalError {
                 kind: EvalErrorKind::BadArgCount {
-                    name: name.to_string(),
+                    name: String::new(),
                     expected: f.params.len(),
                     got: args.len(),
                 },
@@ -1826,7 +1850,10 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 .vars
                 .insert(param.clone(), arg.clone());
         }
-        let outcome = match self.run_code(&f.code, cf, route)? {
+        let result = self.run_code(&f.code, cf, route);
+        self.pop_scope();
+        self.call_depth -= 1;
+        let outcome = match result? {
             VmFlow::Return(v) => v,
             VmFlow::Accept => {
                 self.pending_verdict = Some(ControlFlow::Accept);
@@ -1838,8 +1865,6 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             VmFlow::Continue => Value::Bool(false),
         };
-        self.pop_scope();
-        self.call_depth -= 1;
         Ok(outcome)
     }
 
@@ -3368,6 +3393,102 @@ mod tests {
                 assert!(
                     matches!(va, EvalResult::Reject(_)),
                     "expected reject for {pfx} in: {src}, got {va:?}"
+                );
+            }
+        }
+    }
+
+    /// #19 P2 — user-function calls are resolved to `CallFn { idx, argc }`
+    /// at compile time. The compiled `CompiledFilter` carries a
+    /// `Vec<CompiledFunction>` (indexed by `CallFn`) and a
+    /// `function_index` map (name → index). This test pins both:
+    /// the instruction variant is `CallFn` (not `Call`), and the
+    /// function table is a `Vec` (not a `BTreeMap`).
+    #[test]
+    fn p2_user_function_calls_resolve_to_callfn() {
+        let f = compile(
+            "test-p2-callfn",
+            "function double(n) { return n * 2; } \
+             function tag(lp) { bgp.local_pref = lp; return true; } \
+             if tag(double(50)) && bgp.local_pref == 100 then accept; reject;",
+        )
+        .unwrap();
+        let cf = crate::filter::bytecode::compile(&f);
+
+        // The function table is a Vec with 2 entries, indexed by
+        // the CallFn instruction. `function_index` maps names to
+        // indices: "double" → 0, "tag" → 1 (declaration order).
+        assert_eq!(cf.functions.len(), 2);
+        assert_eq!(cf.function_index.get("double"), Some(&0));
+        assert_eq!(cf.function_index.get("tag"), Some(&1));
+
+        // The body code must contain at least one `CallFn` instruction
+        // (for `double(50)` or `tag(...)`). It must NOT contain a
+        // `Call` with name "double" or "tag" (those are user
+        // functions, not built-ins).
+        let has_callfn = cf.code.iter().any(|i| matches!(i, Instr::CallFn { .. }));
+        assert!(has_callfn, "body code must contain a CallFn instruction");
+        let has_user_call = cf.code.iter().any(|i| {
+            matches!(
+                i,
+                Instr::Call { name, .. } if name == "double" || name == "tag"
+            )
+        });
+        assert!(
+            !has_user_call,
+            "body code must not contain a Call for user functions"
+        );
+
+        // Built-in calls (like `len`) still use `Call { name, argc }`.
+        let f2 = compile(
+            "test-p2-builtin",
+            "if count(bgp.communities) == 2 then accept; reject;",
+        )
+        .unwrap();
+        let cf2 = crate::filter::bytecode::compile(&f2);
+        let has_builtin_call = cf2
+            .code
+            .iter()
+            .any(|i| matches!(i, Instr::Call { name, .. } if name == "count"));
+        assert!(
+            has_builtin_call,
+            "body code must contain a Call for the built-in `count`"
+        );
+        let has_callfn2 = cf2.code.iter().any(|i| matches!(i, Instr::CallFn { .. }));
+        assert!(
+            !has_callfn2,
+            "body code must not contain a CallFn for built-in calls"
+        );
+    }
+
+    /// #19 P2 — the `CallFn` instruction and the old `Call` fallback
+    /// produce identical verdicts and route state. The equivalence
+    /// table already covers user functions via `Call`, but this test
+    /// pins the `CallFn` path explicitly against the interpreter.
+    #[test]
+    fn p2_callfn_matches_interpreter_on_user_functions() {
+        let sources = [
+            "function double(n) { return n * 2; } if bgp.local_pref == double(50) then accept; reject;",
+            "function tag() { bgp.local_pref = 7; return true; } if tag() then accept; reject;",
+            "function gated() { if bgp.local_pref > 50 then accept; return false; } gated(); reject;",
+            "function classify(lp) { if lp >= 200 then return 300; return 100; } let lp = classify(bgp.local_pref); if lp == 100 then accept; reject;",
+        ];
+        let routes: Vec<Route> = {
+            let r0 = route_with("203.0.113.0/24", 100, 0);
+            let r1 = route_with("203.0.113.0/24", 200, 0);
+            let r2 = route_with("203.0.113.0/24", 42, 0);
+            vec![r0, r1, r2]
+        };
+        for src in sources {
+            for (i, base) in routes.iter().enumerate() {
+                let mut a = base.clone();
+                let mut b = base.clone();
+                let va = run(src, &mut a);
+                let vb = run_vm(src, &mut b);
+                assert_eq!(va, vb, "verdict mismatch on route {i} for: {src}");
+                assert_eq!(
+                    a.attributes, b.attributes,
+                    "attribute mismatch on route {i} for: {src}"
                 );
             }
         }
