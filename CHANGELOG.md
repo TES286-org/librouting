@@ -18,6 +18,30 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Container image (ROADMAP-v3 D12.3): a multi-stage `Dockerfile` at
+  the repo root builds the whole workspace in release mode with all
+  features and ships the three CLI binaries (`lr`, `lr-daemon`,
+  `lrctl`), `liblr_ffi.so` and the C / C++ headers into a
+  `debian:bookworm-slim` runtime image. The builder stage pins
+  `rust:1.88-slim-bookworm` (the workspace MSRV) and uses BuildKit
+  mount caches on the cargo registry + target dir so a no-op rebuild
+  is seconds. The runtime stage creates a non-root `lr` user,
+  `EXPOSE`s `179/tcp` (BGP) + `9119/tcp` (metrics), declares
+  `VOLUME /etc/lr-daemon` + `VOLUME /run/lr-daemon` (for config
+  mount + `lrctl` sidecar pattern), and uses
+  `ENTRYPOINT ["lr-daemon"]` with `CMD ["--help"]`. The image does
+  NOT ship a default config and does NOT push to a registry from CI.
+  The `.dockerignore` keeps the build context lean. The
+  `docker/README.md` deployment guide covers quick start, production
+  config-file mount, sidecar `lrctl`, image layout, exposed ports,
+  volumes, the ~100 MB size target, and what the image does NOT
+  include. The `.github/workflows/docker.yml` CI workflow builds the
+  image on every push / PR / nightly, runs the three CLI binaries,
+  verifies `liblr_ffi.so` is loadable via `ldconfig -p`, and reports
+  the image size. Helm chart deferred — a Helm chart conventionally
+  lives in its own repository so it can version independently of the
+  image; the Dockerfile here is the foundation a chart would
+  reference.
 - Prometheus `/metrics` HTTP endpoint (ROADMAP-v3 D12.2): the daemon
   gains an opt-in HTTP endpoint that serves the Prometheus text
   exposition format on `GET /metrics` (`crates/lr-cli/src/metrics.rs`).

@@ -970,14 +970,21 @@ OSPF→BGP-LS ~500, daemon wiring ~300, tests ~400).
 
 ## D12 — Container deployment + operational tooling
 
-**Status:** partial — ~~D12.1 (`lrctl` operational CLI)~~ and
-~~D12.2 (Prometheus `/metrics` endpoint)~~ landed; the container/Helm
-tooling still open. Tracks repo root + `lr-cli`.
+**Status:** partial — ~~D12.1 (`lrctl` operational CLI)~~,
+~~D12.2 (Prometheus `/metrics` endpoint)~~ and
+~~D12.3 (container deployment)~~ landed; per-session UPDATE
+counters / filter-eval latency histograms still open. Tracks repo
+root + `lr-cli`.
 
-**Current gap.** No Dockerfile, no published container image, no Helm
-chart. ~~No operational CLI tool (e.g. `lrctl`).~~ D12.1 closed the
-operational CLI gap. ~~No metrics endpoint.~~ D12.2 closed the
-Prometheus gap.
+**Current gap.** ~~No Dockerfile, no published container image, no
+Helm chart, no operational CLI tool (e.g. `lrctl`).~~ D12.1 closed
+the operational CLI gap. ~~No metrics endpoint.~~ D12.2 closed
+the Prometheus gap. ~~No container image.~~ D12.3 closed the
+container gap (a Helm chart remains open — it conventionally lives
+in its own repository so it can version independently of the image).
+Per-session UPDATE tx/rx counters and filter-eval latency
+histograms remain open — they require per-session counters the
+daemon does not track today (a follow-up commit under D12).
 
 **Proposed work.**
 
@@ -1043,13 +1050,42 @@ Prometheus gap.
    Filter-eval latency histograms and UPDATE tx/rx counters remain
    open — they require per-session counters the daemon does not
    track today (a follow-up commit under D12).
-3. **Container deployment.** Dockerfile + published container image
-   + Helm chart.
+3. ~~**Container deployment.** Dockerfile + published container image
+   + Helm chart.~~
+   Landed as `Dockerfile` (multi-stage: `rust:1.88-slim-bookworm`
+   builder + `debian:bookworm-slim` runtime) + `.dockerignore` +
+   `docker/README.md` (deployment guide: quick start, production
+   config-file mount, sidecar `lrctl`, image layout table, exposed
+   ports, volumes, size target ~100 MB, what the image does NOT
+   include) + `.github/workflows/docker.yml` (CI verification that
+   builds the image on every push / PR / nightly, runs the three
+   CLI binaries with `--help` / `version`, verifies
+   `liblr_ffi.so` is loadable via `ldconfig -p`, reports image size).
+   BuildKit mount caches (`--mount=type=cache`) on the cargo
+   registry + target dir keep no-op rebuilds fast. The runtime
+   stage ships the three CLI binaries (`lr`, `lr-daemon`, `lrctl`),
+   `liblr_ffi.so`, the C / C++ headers, a non-root `lr` user,
+   `EXPOSE 179/tcp` (BGP) + `9119/tcp` (metrics — matches the
+   example address in `docs/RUNBOOK.md` and `templates/daemon.toml`),
+   `VOLUME /etc/lr-daemon` (config mount) + `/run/lr-daemon` (API
+   socket mount for the `lrctl` sidecar pattern), `ENTRYPOINT
+   ["lr-daemon"]` with `CMD ["--help"]`. The image does NOT ship a
+   default config (operators mount one or pass CLI flags) and does
+   NOT push to a registry from CI (that is a release-event concern
+   — the existing `release.yml` handles `v*` tag pushes and produces
+   the GitHub Release archives; a future container-registry push
+   would ride the same tag event). Helm chart deferred — a Helm
+   chart conventionally lives in its own repository so it can
+   version independently of the image; the Dockerfile here is the
+   foundation a chart would reference.
 
 **Estimated size.** ~1000–1500 new lines (`lrctl` ~500, metrics ~400,
 Dockerfile + Helm ~100). D12.1 landed ~870 lines; D12.2 landed ~880
 lines (metrics.rs ~340, daemon_metrics.rs tests ~470, daemon +
-daemon_config + templates + docs ~70).
+daemon_config + templates + docs ~70); D12.3 landed ~390 lines
+(Dockerfile ~180, .dockerignore ~70, docker/README.md ~140,
+.github/workflows/docker.yml ~110 — the workflow counts against
+the D12.3 total even though it is CI not image).
 
 ---
 
@@ -1222,7 +1258,7 @@ refactor — needs extensive regression tests.
 | D9        | partial (D9.2 landed) | —     | Filter DSL formal EBNF grammar + corpus test landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh and `ffi_design.md` still open |
 | D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
-| D12       | partial (D12.1 + D12.2 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint + 17 e2e tests landed; container/Helm tooling and per-session UPDATE counters / filter-eval histograms open |
+| D12       | partial (D12.1 + D12.2 + D12.3 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) and per-session UPDATE counters / filter-eval histograms open |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |

@@ -515,3 +515,39 @@ the state, that file tracks the how and why.
     tx/rx counters remain open — they require per-session
     counters the daemon does not track today (a follow-up
     commit under D12).
+11. **Phase 12 — D12.3 container deployment** — landed: a
+    multi-stage `Dockerfile` at the repo root builds the whole
+    workspace in release mode with all features and ships the
+    three CLI binaries (`lr`, `lr-daemon`, `lrctl`), `liblr_ffi.so`
+    and the C / C++ headers into a `debian:bookworm-slim` runtime
+    image. The builder stage pins `rust:1.88-slim-bookworm` (the
+    workspace MSRV) and uses BuildKit mount caches on the cargo
+    registry + target dir so a no-op rebuild is seconds, not
+    minutes. The runtime stage is `debian:bookworm-slim` — the
+    glibc baseline matches the builder so the dynamically linked
+    `liblr_ffi.so` and CLI binaries load without a compatibility
+    shim. The image creates a non-root `lr` user, `EXPOSE`s
+    `179/tcp` (BGP) and `9119/tcp` (Prometheus metrics — matches
+    the example address in `docs/RUNBOOK.md` and
+    `templates/daemon.toml`), declares `VOLUME /etc/lr-daemon`
+    (config mount) and `VOLUME /run/lr-daemon` (API socket mount
+    for the `lrctl` sidecar pattern), and uses
+    `ENTRYPOINT ["lr-daemon"]` with `CMD ["--help"]` so a bare
+    `docker run` prints the usage banner instead of crashing. The
+    image does NOT ship a default config (operators mount one or
+    pass CLI flags) and does NOT push to a registry from CI (that
+    is a release-event concern). The `.dockerignore` keeps the
+    build context lean (excludes `target/`, editor state, Python /
+    Go binding build artifacts, fuzz corpus, `.git/`, etc.). The
+    `docker/README.md` deployment guide covers quick start,
+    production config-file mount, sidecar `lrctl`, image layout,
+    exposed ports, volumes, the ~100 MB size target, and what the
+    image does NOT include (no default config, no Helm chart, no
+    BIRD/FRR, no process supervisor). The
+    `.github/workflows/docker.yml` CI workflow builds the image on
+    every push / PR / nightly, runs the three CLI binaries with
+    `--help` / `version`, verifies `liblr_ffi.so` is loadable via
+    `ldconfig -p`, and reports the image size. Helm chart deferred
+    — a Helm chart conventionally lives in its own repository so
+    it can version independently of the image; the Dockerfile here
+    is the foundation a chart would reference.
