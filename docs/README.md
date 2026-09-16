@@ -23,6 +23,7 @@ the protocol crates.
 | ------------------------------------------------ | -------------------------------------------------------------------------------------------- |
 | [`API.md`](API.md)                               | Public API tour, layer by layer, with code snippets                                          |
 | [`filter_dsl_grammar.md`](filter_dsl_grammar.md) | Formal EBNF grammar for the BIRD-like filter DSL — every example pinned by `crates/lr-policy/tests/grammar_corpus.rs` |
+| [`ffi_design.md`](ffi_design.md)               | FFI design: panic barrier contract, `lr_bytes_t` ownership model, cbindgen pipeline, opaque-handle pattern, why OSPF/Babel/LDP are not yet exposed |
 | [`bindings/`](bindings/)                         | Per-language guides with complete, verified programs (Go / Python / C / C++)                  |
 | [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/` (analyzer, RR, BFD, OS integration)            |
 | [`examples/`](examples/)                         | Per-scenario walkthroughs: route reflector, confederation, route server, BFD, OS integration, LDP, BGP-LU, OSPFv3 SRv6 |
