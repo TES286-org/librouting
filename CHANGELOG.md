@@ -18,6 +18,32 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- RFC 8212 interop tests (ROADMAP-v3 D10.6): two end-to-end
+  interop scripts verify lr-daemon's default RFC 8212 eBGP policy
+  against real BIRD 2 and FRR bgpd. `tests/interop/rfc8212_bird.sh`
+  and `tests/interop/rfc8212_frr.sh` each run two phases: Phase 1
+  (default mode, no explicit policy) asserts the session reaches
+  Established but BIRD/FRR does NOT learn lr-daemon's route and
+  lr-daemon does NOT install BIRD/FRR's route — the RFC 8212
+  import-deny and export-deny are both exercised; Phase 2 (explicit
+  permit-all route-maps) asserts the route flows both directions,
+  confirming the RFC-intended escape hatch. The startup warnings
+  (`no export route-map; announcing nothing (RFC 8212)` and `no
+  import route-map; discarding received routes (RFC 8212)`) are
+  pinned as Phase 1 assertions. Both scripts are wired into the CI
+  interop job. The scripts gracefully SKIP when `bird`/`birdc` or
+  `bgpd` are not on `$PATH` (same pattern as every other interop
+  script). The in-process `daemon_rfc8212.rs` tests remain — the
+  interop scripts are additive, not replacement.
+- FFI design document (ROADMAP-v3 D9.6): `docs/ffi_design.md` is
+  the canonical reference for the librouting C ABI design — the
+  panic-barrier contract, the `lr_bytes_t` ownership model, the
+  cbindgen pipeline, the opaque-handle pattern, the non-reentrant
+  lock hazard, what is NOT exposed and why (OSPF/Babel engines are
+  daemon-driven, LDP has no router session model, BMP/MRT/BFD are
+  codec-only), the error model, and the three-level testing
+  strategy. Cross-references every section to the source file that
+  implements it.
 - Container image (ROADMAP-v3 D12.3): a multi-stage `Dockerfile` at
   the repo root builds the whole workspace in release mode with all
   features and ships the three CLI binaries (`lr`, `lr-daemon`,

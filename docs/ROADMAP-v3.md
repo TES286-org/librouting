@@ -816,8 +816,9 @@ radix tree + RwLock first (low risk), async I/O last (high risk).
 
 ## D9 — Documentation: architecture deep-dive + contributor guide
 
-**Status:** partial — ~~D9.2 (filter DSL EBNF grammar)~~ landed;
-D9.1, D9.3–D9.6 still open. Tracks `docs/`.
+**Status:** partial — ~~D9.2 (filter DSL EBNF grammar)~~ and
+~~D9.6 (`docs/ffi_design.md`)~~ landed; D9.1, D9.3–D9.5 still open.
+Tracks `docs/`.
 
 **Current gap.** Existing docs target operators and embedders
 (`README.md`, `tutorial.md`, `API.md`, `lr-cli.md`, `RUNBOOK.md`,
@@ -825,7 +826,8 @@ D9.1, D9.3–D9.6 still open. Tracks `docs/`.
 docs are thin: no Filter DSL architecture write-up, no internal
 structure document for `lr-router/src/instance.rs` (a 11 158-LoC
 single file), no thread model document. ~~No formal EBNF for the
-Filter DSL.~~ D9.2 closed that gap.
+Filter DSL.~~ D9.2 closed that gap. ~~No FFI design document.~~
+D9.6 closed that gap.
 
 **Proposed work.**
 
@@ -865,13 +867,32 @@ Filter DSL.~~ D9.2 closed that gap.
    affected version range, PGP public key.
 5. **`CHANGELOG.md`.** Version history from `git log`, organised by
    version, marking breaking changes and new features.
-6. **`docs/ffi_design.md`.** FFI design: panic barrier contract
+6. ~~**`docs/ffi_design.md`.** FFI design: panic barrier contract
    (`catch_unwind` so panics never cross the C ABI), `lr_bytes_t`
    ownership model (caller frees), cbindgen pipeline (`build.rs` →
-   `include/lr_ffi.h`), why OSPF/Babel/LDP are not yet exposed.
+   `include/lr_ffi.h`), why OSPF/Babel/LDP are not yet exposed.~~
+   Landed. The document covers: the panic-barrier contract (every
+   `extern "C"` entry point wrapped in `guarded` / `catch_unwind`;
+   the release-profile `panic = "abort"` caveat that makes the
+   barrier a dev-build-only safety net); the `lr_bytes_t` ownership
+   model (`from_vec` / `reclaim_into_vec` / `lr_bytes_free`; the
+   four embedder rules); the cbindgen pipeline (`build.rs` config,
+   the `LrError` exclusion for pre-C23 portability, the `#define`
+   constants in `after_includes`); the opaque-handle pattern
+   (`#[repr(C)]` + `_private: [u8; 0]`; the handle zoo table; the
+   destroy contract); the non-reentrant lock hazard (every
+   `lr_router_*` holds the `Mutex` for the whole call; hooks must
+   not re-enter); what is NOT exposed and why (OSPF/Babel engines
+   are daemon-driven, LDP has no router session model, BMP/MRT/BFD
+   are codec-only, the exchange-plane prototype is daemon-only);
+   the error model (the `LR_ERR_*` code table, the thread-local
+   last-error string, the `lr_abi_version()` check); and the
+   three-level testing strategy (Rust unit tests, C / C++ harness,
+   Go / Python bindings). Cross-references every section to the
+   source file that implements it.
 
 **Estimated size.** ~1500–2000 lines of docs (D9.2 lands ~680 of
-those; the rest is split across D9.1 + D9.3–D9.6).
+those; D9.6 lands ~310; the rest is split across D9.1 + D9.3–D9.5).
 
 ---
 
@@ -925,10 +946,26 @@ NLRI type and path attribute.
 
 Already covered by D3.2.
 
-### D10.6 — RFC 8212 interop tests
+### D10.6 — RFC 8212 interop tests — ~~landed~~
 
-Currently only tested in-process (`daemon_rfc8212.rs`). Needs
-end-to-end interop scripts against BIRD / FRR.
+~~Currently only tested in-process (`daemon_rfc8212.rs`). Needs
+end-to-end interop scripts against BIRD / FRR.~~ Landed:
+`tests/interop/rfc8212_bird.sh` and `tests/interop/rfc8212_frr.sh`
+verify lr-daemon's default RFC 8212 eBGP policy against real BIRD 2
+and FRR bgpd. Each script runs two phases: Phase 1 (default mode,
+no explicit policy) asserts the session reaches Established but
+BIRD/FRR does NOT learn lr-daemon's route and lr-daemon does NOT
+install BIRD/FRR's route — the RFC 8212 import-deny and export-deny
+are both exercised; Phase 2 (explicit permit-all route-maps)
+asserts the route flows both directions, confirming the
+RFC-intended escape hatch. The startup warnings (`no export
+route-map; announcing nothing (RFC 8212)` and `no import
+route-map; discarding received routes (RFC 8212)`) are pinned as
+Phase 1 assertions. Both scripts are wired into the CI interop job.
+The scripts gracefully SKIP when `bird`/`birdc` or `bgpd` are not
+on `$PATH` (same pattern as every other interop script), so they
+run in CI (where `bird2` + `frr` are installed) and skip locally
+without a reference daemon.
 
 **Estimated size.** Varies: D10.1 ~200, D10.5 ~500, D10.3 ~2000,
 D10.4 ~1500. Land by priority.
@@ -1255,8 +1292,8 @@ refactor — needs extensive regression tests.
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
-| D9        | partial (D9.2 landed) | —     | Filter DSL formal EBNF grammar + corpus test landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh and `ffi_design.md` still open |
-| D10       | partial (D10.1 landed) | —     | RFC 8326 sender-side hook landed; BGP-LS / SR Policy post-1.0 |
+| D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |
+| D10       | partial (D10.1 + D10.6 landed) | —     | RFC 8326 sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | partial (D12.1 + D12.2 + D12.3 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) and per-session UPDATE counters / filter-eval histograms open |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |

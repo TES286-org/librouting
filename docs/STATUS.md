@@ -205,7 +205,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪 | `tests/interop/bmp.sh` |
 | Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪 | `crates/lr-cli/tests/daemon_multi_peer.rs` |
 | Policy-in-config E2E (export filter, import filter, set-actions keep-route, unknown-reference fail-closed startup) | ✅ 🧪 | `crates/lr-cli/tests/daemon_policy.rs` |
-| RFC 8212 E2E (default deny-in/deny-out, permit-all route-maps restoring flow, accept-all deviation, iBGP exemption, unknown mode fails closed) | ✅ 🧪 | `crates/lr-cli/tests/daemon_rfc8212.rs` |
+| RFC 8212 E2E (default deny-in/deny-out, permit-all route-maps restoring flow, accept-all deviation, iBGP exemption, unknown mode fails closed) | ✅ 🧪 | `crates/lr-cli/tests/daemon_rfc8212.rs` (in-process) + `tests/interop/rfc8212_bird.sh` + `tests/interop/rfc8212_frr.sh` (D10.6 — real BIRD 2 + FRR bgpd, two-phase: default deny + explicit policy restores flow) |
 | MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
 | TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
 | Kernel-gated tests in a QEMU VM (tests/vm: tcp_ao + MPLS dataplane phases without host kernel/root support) | ✅ 🧪 |
@@ -551,3 +551,44 @@ the state, that file tracks the how and why.
     — a Helm chart conventionally lives in its own repository so
     it can version independently of the image; the Dockerfile here
     is the foundation a chart would reference.
+12. **Phase 13 — D10.6 RFC 8212 interop + D9.6 FFI design doc**
+    — landed: two interop scripts verify lr-daemon's default
+    RFC 8212 eBGP policy against real BIRD 2 and FRR bgpd.
+    `tests/interop/rfc8212_bird.sh` and
+    `tests/interop/rfc8212_frr.sh` each run two phases: Phase 1
+    (default mode, no explicit policy) asserts the session reaches
+    Established but BIRD/FRR does NOT learn lr-daemon's route and
+    lr-daemon does NOT install BIRD/FRR's route — the RFC 8212
+    import-deny and export-deny are both exercised; Phase 2
+    (explicit permit-all route-maps) asserts the route flows both
+    directions, confirming the RFC-intended escape hatch. The
+    startup warnings (`no export route-map; announcing nothing
+    (RFC 8212)` and `no import route-map; discarding received
+    routes (RFC 8212)`) are pinned as Phase 1 assertions. Both
+    scripts are wired into the CI interop job. The scripts
+    gracefully SKIP when `bird`/`birdc` or `bgpd` are not on
+    `$PATH` (same pattern as every other interop script). The
+    in-process `daemon_rfc8212.rs` tests (the original D10.6
+    coverage) remain — the interop scripts are additive, not
+    replacement.
+    `docs/ffi_design.md` (~310 lines) is the canonical FFI design
+    reference: the panic-barrier contract (every `extern "C"`
+    entry point wrapped in `guarded` / `catch_unwind`; the
+    release-profile `panic = "abort"` caveat); the `lr_bytes_t`
+    ownership model (`from_vec` / `reclaim_into_vec` /
+    `lr_bytes_free`; the four embedder rules); the cbindgen
+    pipeline (`build.rs` config, the `LrError` exclusion for
+    pre-C23 portability, the `#define` constants in
+    `after_includes`); the opaque-handle pattern (`#[repr(C)]` +
+    `_private: [u8; 0]`; the handle zoo table; the destroy
+    contract); the non-reentrant lock hazard (every `lr_router_*`
+    holds the `Mutex` for the whole call; hooks must not
+    re-enter); what is NOT exposed and why (OSPF/Babel engines
+    are daemon-driven, LDP has no router session model, BMP/MRT/BFD
+    are codec-only, the exchange-plane prototype is daemon-only);
+    the error model (the `LR_ERR_*` code table, the thread-local
+    last-error string, the `lr_abi_version()` check); and the
+    three-level testing strategy (Rust unit tests, C / C++ harness,
+    Go / Python bindings). Cross-references every section to the
+    source file that implements it. The doc is indexed in
+    `docs/README.md` under "Embedding the library".
