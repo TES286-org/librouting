@@ -38,7 +38,19 @@ damping = ["std", "dep:lr-damping"]
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+lr-rib = { workspace = true }
 
 [[bench]]
 name = "filter_eval"
+harness = false
+
+# #19 P0 — daemon-level import-pipeline bench. Measures the per-route
+# cost of the import path the daemon actually runs (DSL eval → Adj-RIB-In
+# install → Loc-RIB install + best-path select), not just the DSL in
+# isolation. Lives in `lr-policy` (not `lr-rib`) because the DSL eval is
+# the dominant component and the bench drives the pipeline from the
+# filter side; the bench pulls `lr-rib` as a dev-dependency (no cycle —
+# `lr-rib` does not depend on `lr-policy`).
+[[bench]]
+name = "import_pipeline"
 harness = false

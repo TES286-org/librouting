@@ -18,6 +18,56 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- DSL performance baseline benches (GitHub #19 P0): two new
+  criterion benches in `crates/lr-policy/benches/` give the filter
+  DSL and the daemon import pipeline a measurable perf baseline
+  before the P1–P5 optimisation work begins.
+  - `filter_eval.rs` grows from three shapes to six: the original
+    `simple_accept` / `if_local_pref` / `complex_chain` are
+    preserved verbatim (historical regression baselines keep
+    working), and three new shapes exercise the realistic-load
+    surface the issue comment calls out — `large_prefix_set`
+    (100-entry `net ~ [...]`, measured on `hit_last` and `miss`
+    positions), `large_community_set` (10-entry
+    `bgp.communities ~ [...]`, same two positions) and
+    `user_functions` (a two-call chain — classify + tag — that
+    exercises the VM's call-dispatch overhead). Every shape runs
+    under both engines: the tree-walking interpreter (`evaluate`)
+    stays the semantic oracle; the bytecode VM
+    (`bytecode::execute`) is the hot path the daemon runs per
+    route after `daemon_policy::build_filters` precompiles every
+    `[[filter]]` at startup.
+  - `import_pipeline.rs` is the new daemon-level bench. For each
+    route it runs the import path the daemon actually runs —
+    bytecode eval → Adj-RIB-In install → Loc-RIB install — at
+    three scales (100 / 1 000 / 10 000 routes) and under two
+    filter shapes (`trivial` and `realistic`). The bench lives in
+    `lr-policy` (DSL eval is the dominant component) and pulls
+    `lr-rib` as a dev-dependency (no cycle — `lr-rib` does not
+    depend on `lr-policy`). The bench is shaped to outlive the
+    #18 config-format migration: the filter body is a string
+    literal, not a config fragment, so the bench can be reused
+    unchanged after the TOML→DSL migration lands.
+  - Baseline numbers (criterion, `--quick`): the VM is at parity
+    with the interpreter on the original three shapes — `if_local_pref`
+    is where the VM still loses (+19 %), confirming the P1
+    instruction-encoding hypothesis. The new shapes expose where
+    the VM wins and loses today: `large_prefix_set` VM is 22–35 %
+    *slower* than the tree walk (the linear `MatchRhs::Set` scan
+    that P4 prefix-trie targets), `large_community_set` VM is
+    43–45 % faster, `user_functions` VM is 64 % faster (the P2
+    slot-resolution lever — call dispatch is the tree walker's
+    worst case). The import-pipeline bench shows the per-route
+    cost the daemon pays: ~570 ns / route at 100 routes,
+    ~1.18 µs / route at 10 000 routes (BTreeMap log factor). These
+    numbers are the P1–P5 deltas will be measured against.
+  - Engine equivalence is load-bearing: a new test
+    `vm_matches_interpreter_on_bench_shapes` in
+    `crates/lr-policy/src/filter/eval.rs` pins the VM ==
+    interpreter contract on the bench-sized shapes (100-entry
+    prefix set, 10-entry community set, two-call user-function
+    chain) across a six-route matrix. The 27×4 equivalence
+    table is preserved unchanged; the new test is additive.
 - RFC 8212 interop tests (ROADMAP-v3 D10.6): two end-to-end
   interop scripts verify lr-daemon's default RFC 8212 eBGP policy
   against real BIRD 2 and FRR bgpd. `tests/interop/rfc8212_bird.sh`

@@ -710,6 +710,78 @@ bytes and is a natural fuzz target.
 **Estimated size.** ~1000–1500 new lines (fuzz ~250, proptest ~200,
 benches ~350, RFC vectors ~200, CI ~100).
 
+### D6 follow-up — DSL performance baseline (GitHub #19 P0) — ~~landed~~
+
+The DSL perf optimisation plan in GitHub #19 phasing has its P0
+landed. The original three bench shapes (`simple_accept`,
+`if_local_pref`, `complex_chain`) were too small to justify the
+later P4 prefix-trie work, so P0 grows the bench set first — the
+precondition every later phase measures its win against.
+
+**What landed.**
+
+* **`crates/lr-policy/benches/filter_eval.rs` grew from three
+  shapes to six.** The original three are preserved verbatim so
+  historical regression baselines keep working; three new shapes
+  exercise the realistic-load surface the #19 process guardrails
+  call out:
+  * `large_prefix_set` — `if net ~ [ 100 entries ] then accept;
+    reject;`. 100 host routes (`10.x.y.1/32`) so the linear
+    `MatchRhs::Set` scan cannot short-circuit on a longest-prefix
+    optimisation; measured on `hit_last` (route matches the last
+    entry — full scan accept) and `miss` (route matches no entry —
+    full scan reject).
+  * `large_community_set` — `if bgp.communities ~ [ 10 entries ]
+    then accept; reject;`. 10 entries is the upper bound of a
+    typical tagging taxonomy; same `hit_last` / `miss` positions.
+  * `user_functions` — a two-call chain (`classify` + `tag_customer`)
+    that exercises the VM's call-dispatch overhead, the #19 P2
+    slot-resolution lever.
+  Every shape runs under both engines (tree-walk interpreter
+  stays the semantic oracle; bytecode VM is the hot path the
+  daemon runs per route after `daemon_policy::build_filters`
+  precompiles every `[[filter]]` at startup).
+* **`crates/lr-policy/benches/import_pipeline.rs` is the new
+  daemon-level bench.** For each route it runs the import path
+  the daemon actually runs — bytecode eval → Adj-RIB-In install
+  → Loc-RIB install — at three scales (100 / 1 000 / 10 000
+  routes) under two filter shapes (`trivial` and `realistic`).
+  Lives in `lr-policy` (DSL eval is the dominant component) and
+  pulls `lr-rib` as a dev-dependency (no cycle — `lr-rib` does
+  not depend on `lr-policy`). The bench is shaped to outlive the
+  #18 config-format migration: the filter body is a string
+  literal, not a config fragment, so the bench can be reused
+  unchanged after the TOML→DSL migration lands.
+* **Baseline numbers** (criterion, `--quick`, this machine):
+  * The VM is at parity with the interpreter on the original
+    three shapes — `if_local_pref` is where the VM still loses
+    (+19 %), confirming the P1 instruction-encoding hypothesis.
+  * `large_prefix_set` VM is 22–35 % *slower* than the tree walk
+    — the linear `MatchRhs::Set` scan that P4 prefix-trie targets.
+  * `large_community_set` VM is 43–45 % faster than the tree walk.
+  * `user_functions` VM is 64 % faster than the tree walk — the
+    P2 slot-resolution lever; call dispatch is the tree walker's
+    worst case.
+  * Import-pipeline: ~570 ns / route at 100 routes, ~1.18 µs /
+    route at 10 000 routes (BTreeMap log factor) under the
+    realistic filter.
+  These numbers are the P1–P5 deltas will be measured against.
+* **Engine equivalence is load-bearing.** A new test
+  `vm_matches_interpreter_on_bench_shapes` in
+  `crates/lr-policy/src/filter/eval.rs` pins the VM ==
+  interpreter contract on the bench-sized shapes (100-entry
+  prefix set, 10-entry community set, two-call user-function
+  chain) across a six-route matrix. The 27×4 equivalence table
+  is preserved unchanged; the new test is additive.
+
+**What is NOT in P0.** Every later phase of #19 — P1
+(instruction encoding), P2 (slot resolution), P3 (attribute
+fast paths), P4 (prefix trie), P5 (folding/peephole) — is
+explicitly out of scope for this PR; each will land as its own
+PR with a bench delta attached, per the #19 process
+guardrails ("Profile before each step. Every optimization
+lands with a bench delta attached, not an argument").
+
 ---
 
 ## D7 — CI/CD supply-chain hardening
@@ -1289,7 +1361,7 @@ refactor — needs extensive regression tests.
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |

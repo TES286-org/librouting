@@ -1,7 +1,8 @@
 //! `cargo bench -p lr-policy --bench filter_eval` — measure the
-//! filter DSL evaluator throughput (ROADMAP-v3 D6.2, D3.7).
+//! filter DSL evaluator throughput (ROADMAP-v3 D6.2, D3.7, #19 P0).
 //!
-//! Three filters cover the policy complexity spectrum:
+//! Six filter families cover the policy complexity spectrum, sized
+//! to expose the costs that real-world policies actually pay:
 //!
 //! * `simple_accept` — `accept;` — minimum overhead, measures the
 //!   fixed cost of the evaluator setup + first-statement dispatch.
@@ -12,11 +13,35 @@
 //!   membership. The bench measures the worst-case per-route cost
 //!   of a policy that exercises every evaluator subsystem (scope,
 //!   attribute lookup, arithmetic, prefix-set, branch).
+//! * `large_prefix_set` — `if net ~ [ 100 prefixes ] then accept;
+//!   reject;`. The bench measures the linear `MatchRhs::Set` scan
+//!   that the bytecode VM currently inherits from the tree-walker
+//!   — the realistic-load lever for the P4 prefix-trie work. Two
+//!   positions are measured: `hit_last` (route matches the last
+//!   entry, full scan on the accept path) and `miss` (route matches
+//!   no entry, full scan on the reject path). The set is sized to
+//!   100 entries — the lower bound of a real ISP import policy.
+//! * `large_community_set` — `if bgp.communities ~ [ 10 entries ]
+//!   then accept; reject;`. The bench measures the community
+//!   membership scan (10 entries — the upper bound of a typical
+//!   tagging taxonomy) for both `hit_last` and `miss` positions.
+//! * `user_functions` — a filter that calls two user functions
+//!   (one recursive call, one route-mutating helper). The bench
+//!   measures the call-dispatch overhead the VM pays per call —
+//!   the P2 slot-resolution lever.
 //!
-//! The bench is the basis for the D3.7 bytecode-VM refactor: the
-//! current tree-walking interpreter has a ~2–5× regression risk vs
-//! BIRD's `f_line`. When the VM lands, this bench should show a
-//! commensurate speedup.
+//! Each shape runs under both engines:
+//! * tree walk (`evaluate`) — the semantic oracle.
+//! * bytecode VM (`bytecode::execute`) — the hot path the daemon
+//!   runs per route after `daemon_policy::build_filters` precompiles
+//!   every `[[filter]]`.
+//!
+//! The bench is the basis for the #19 P0 perf baseline: the current
+//! three shapes are too small to justify the P4 prefix-trie work, so
+//! the larger shapes here are the precondition for any further DSL
+//! optimisation. Each new shape must keep VM == interpreter verdict
+//! and route state — pinned in `vm_matches_interpreter_on_policy_table`
+//! in `crates/lr-policy/src/filter/eval.rs`.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
 use lr_core::addr::{Asn, Prefix};
@@ -160,6 +185,84 @@ fn route_with(prefix: &str, local_pref: u32, med: u32) -> Route {
     }
 }
 
+/// Stamp a COMMUNITIES attribute onto a route (mirrors `with_communities`
+/// in the in-crate test helpers — kept local so the bench is independent
+/// of the crate's test surface).
+fn with_communities(mut r: Route, set: &[(u32, u16)]) -> Route {
+    let mut v = Vec::with_capacity(set.len() * 4);
+    for (asn, val) in set {
+        v.extend_from_slice(&(*asn as u16).to_be_bytes());
+        v.extend_from_slice(&val.to_be_bytes());
+    }
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_COMMUNITIES),
+        flags: 0xC0,
+        value: v,
+    });
+    r
+}
+
+// ----- #19 P0: large-set bench shapes --------------------------------------
+
+/// Number of prefix entries in the `large_prefix_set` filter. 100 is
+/// the lower bound of a real ISP import list — BIRD configs in the
+/// wild routinely carry 200–2000 entries, but 100 already moves the
+/// linear scan past the L1 cache-line boundary that the trivial
+/// 1–3-entry sets in `complex_chain` never cross.
+const PREFIX_SET_SIZE: usize = 100;
+
+/// Number of community entries in the `large_community_set` filter.
+/// 10 is the upper bound of a typical tagging taxonomy (transit,
+/// peer, customer, downstream, blackhole, no-export, ...); a
+/// larger set is a configuration smell, not a hot path.
+const COMMUNITY_SET_SIZE: usize = 10;
+
+/// Build a prefix-set literal body: `[ 10.0.0.1/32, 10.0.0.2/32, ... ]`.
+/// Each entry is a host route so the `~` scan cannot short-circuit on
+/// a longest-prefix-match optimization the tree-walker performs for
+/// overlapping ranges — every entry is a distinct comparison.
+fn prefix_set_literal(n: usize) -> String {
+    let mut s = String::from("net ~ [ ");
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        // 10.{i/256}.{i%256}.1/32 — host routes inside 10/8.
+        let a = (i / 256) as u8;
+        let b = (i % 256) as u8;
+        s.push_str(&format!("10.{a}.{b}.1/32"));
+    }
+    s.push_str(" ]");
+    s
+}
+
+/// Build a community-set literal body: `[ 64512:1, 64512:2, ... ]`.
+/// Uses a single ASN so the linear scan cannot short-circuit on the
+/// ASN-side hash bucket — every entry is a distinct (asn, value) pair.
+fn community_set_literal(n: usize) -> String {
+    let mut s = String::from("bgp.communities ~ [ ");
+    for i in 0..n {
+        if i > 0 {
+            s.push_str(", ");
+        }
+        s.push_str(&format!("64512:{}", i + 1));
+    }
+    s.push_str(" ]");
+    s
+}
+
+/// A filter that exercises two user functions (one pure, one
+/// route-mutating), so the bench measures the call-dispatch overhead
+/// the VM pays per call. The function bodies are intentionally small
+/// — the call overhead, not the body, is what we want to measure.
+fn user_function_filter() -> String {
+    "function tag_customer(lp) { bgp.local_pref = lp; return true; } \
+     function classify(lp) { if lp >= 200 then return 300; return 100; } \
+     let lp = classify(bgp.local_pref); \
+     if tag_customer(lp) && bgp.local_pref == 300 then accept; reject;"
+        .to_string()
+}
+
 fn bench_eval(c: &mut Criterion) {
     let simple = compile("bench-simple", "accept;").unwrap();
     let if_lp = compile(
@@ -178,16 +281,64 @@ fn bench_eval(c: &mut Criterion) {
     )
     .unwrap();
 
-    let mut route = route_with("203.0.113.0/24", 150, 30);
+    // #19 P0 — large-set shapes. Compiled once per bench; the
+    // compiled `Filter` / `CompiledFilter` are reused across
+    // iterations exactly the way the daemon reuses them.
+    let large_prefix_src = format!(
+        "if {} then accept; reject;",
+        prefix_set_literal(PREFIX_SET_SIZE)
+    );
+    let large_prefix = compile("bench-large-prefix-set", &large_prefix_src)
+        .expect("large prefix set filter must compile");
+    let large_comm_src = format!(
+        "if {} then accept; reject;",
+        community_set_literal(COMMUNITY_SET_SIZE)
+    );
+    let large_comm = compile("bench-large-community-set", &large_comm_src)
+        .expect("large community set filter must compile");
+    let user_fn = compile("bench-user-functions", &user_function_filter())
+        .expect("user-function filter must compile");
+
+    // Route inputs.
+    let mut route_plain = route_with("203.0.113.0/24", 150, 30);
+    // `large_prefix_set` hit_last: the route matches the last entry
+    // in the set — the worst-case accept path (full scan).
+    let route_pfx_hit = route_with(
+        &format!(
+            "10.{}.{}.1/32",
+            (PREFIX_SET_SIZE - 1) / 256,
+            (PREFIX_SET_SIZE - 1) % 256
+        ),
+        150,
+        30,
+    );
+    // `large_prefix_set` miss: the route matches no entry — the
+    // worst-case reject path (full scan, no early exit).
+    let route_pfx_miss = route_with("203.0.113.0/24", 150, 30);
+    // `large_community_set` hit_last: the route carries the last
+    // community in the set.
+    let route_comm_hit = with_communities(
+        route_with("203.0.113.0/24", 150, 30),
+        &[(64512, COMMUNITY_SET_SIZE as u16)],
+    );
+    // `large_community_set` miss: the route carries a community
+    // that is not in the set.
+    let route_comm_miss = with_communities(route_with("203.0.113.0/24", 150, 30), &[(64512, 9999)]);
+    // `user_functions`: the route has local_pref=200 so the
+    // classifier returns 300, the tag function sets local_pref=300,
+    // and the if-condition matches.
+    let route_user_fn = route_with("203.0.113.0/24", 200, 30);
 
     let mut group = c.benchmark_group("filter_eval");
     group.throughput(Throughput::Elements(1));
 
+    // Original three shapes — preserved verbatim so historical
+    // regression baselines keep working.
     group.bench_function("simple_accept", |b| {
         b.iter(|| {
             let r = evaluate(
                 black_box(&simple),
-                black_box(&mut route),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(r);
@@ -198,7 +349,7 @@ fn bench_eval(c: &mut Criterion) {
         b.iter(|| {
             let r = evaluate(
                 black_box(&if_lp),
-                black_box(&mut route),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(r);
@@ -209,10 +360,67 @@ fn bench_eval(c: &mut Criterion) {
         b.iter(|| {
             let r = evaluate(
                 black_box(&complex),
-                black_box(&mut route),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(r);
+        });
+    });
+
+    // #19 P0 — large prefix set (linear scan, 100 entries).
+    group.bench_function("large_prefix_set/hit_last", |b| {
+        let mut r = route_pfx_hit.clone();
+        b.iter(|| {
+            let v = evaluate(
+                black_box(&large_prefix),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+    group.bench_function("large_prefix_set/miss", |b| {
+        let mut r = route_pfx_miss.clone();
+        b.iter(|| {
+            let v = evaluate(
+                black_box(&large_prefix),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+
+    // #19 P0 — large community set (linear scan, 10 entries).
+    group.bench_function("large_community_set/hit_last", |b| {
+        let mut r = route_comm_hit.clone();
+        b.iter(|| {
+            let v = evaluate(
+                black_box(&large_comm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+    group.bench_function("large_community_set/miss", |b| {
+        let mut r = route_comm_miss.clone();
+        b.iter(|| {
+            let v = evaluate(
+                black_box(&large_comm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+
+    // #19 P0 — user functions (call dispatch overhead).
+    group.bench_function("user_functions", |b| {
+        let mut r = route_user_fn.clone();
+        b.iter(|| {
+            let v = evaluate(black_box(&user_fn), black_box(&mut r), black_box(&BenchCtx));
+            let _ = black_box(v);
         });
     });
 
@@ -221,12 +429,15 @@ fn bench_eval(c: &mut Criterion) {
     let simple_vm = bytecode::compile(&simple);
     let if_lp_vm = bytecode::compile(&if_lp);
     let complex_vm = bytecode::compile(&complex);
+    let large_prefix_vm = bytecode::compile(&large_prefix);
+    let large_comm_vm = bytecode::compile(&large_comm);
+    let user_fn_vm = bytecode::compile(&user_fn);
 
     group.bench_function("vm_simple_accept", |b| {
         b.iter(|| {
             let r = bytecode::execute(
                 black_box(&simple_vm),
-                black_box(&mut route),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(r);
@@ -237,7 +448,7 @@ fn bench_eval(c: &mut Criterion) {
         b.iter(|| {
             let r = bytecode::execute(
                 black_box(&if_lp_vm),
-                black_box(&mut route),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(r);
@@ -248,10 +459,68 @@ fn bench_eval(c: &mut Criterion) {
         b.iter(|| {
             let r = bytecode::execute(
                 black_box(&complex_vm),
-                black_box(&mut route),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(r);
+        });
+    });
+
+    group.bench_function("vm_large_prefix_set/hit_last", |b| {
+        let mut r = route_pfx_hit.clone();
+        b.iter(|| {
+            let v = bytecode::execute(
+                black_box(&large_prefix_vm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+    group.bench_function("vm_large_prefix_set/miss", |b| {
+        let mut r = route_pfx_miss.clone();
+        b.iter(|| {
+            let v = bytecode::execute(
+                black_box(&large_prefix_vm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+
+    group.bench_function("vm_large_community_set/hit_last", |b| {
+        let mut r = route_comm_hit.clone();
+        b.iter(|| {
+            let v = bytecode::execute(
+                black_box(&large_comm_vm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+    group.bench_function("vm_large_community_set/miss", |b| {
+        let mut r = route_comm_miss.clone();
+        b.iter(|| {
+            let v = bytecode::execute(
+                black_box(&large_comm_vm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+
+    group.bench_function("vm_user_functions", |b| {
+        let mut r = route_user_fn.clone();
+        b.iter(|| {
+            let v = bytecode::execute(
+                black_box(&user_fn_vm),
+                black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
         });
     });
 

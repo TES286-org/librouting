@@ -3157,4 +3157,83 @@ mod tests {
             }
         }
     }
+
+    /// #19 P0 — extend the equivalence table with the bench-sized
+    /// shapes (`filter_eval`/`import_pipeline`). The 27×4 table above
+    /// uses tiny sets; the benches use a 100-entry prefix set, a
+    /// 10-entry community set, and a two-function user-function chain.
+    /// Those shapes must keep VM == interpreter verdict + route state
+    /// exactly the same as the small ones, otherwise the bench
+    /// numbers cannot be trusted to reflect the production hot path.
+    #[test]
+    fn vm_matches_interpreter_on_bench_shapes() {
+        // 100-entry prefix set: `net ~ [ 10.0.0.1/32, ..., 10.0.63.100/32 ]`.
+        // Host routes so the linear scan cannot short-circuit on
+        // longest-prefix-match optimization.
+        let mut pfx_set = String::from("net ~ [ ");
+        for i in 0..100u32 {
+            if i > 0 {
+                pfx_set.push_str(", ");
+            }
+            let a = (i / 256) as u8;
+            let b = (i % 256) as u8;
+            pfx_set.push_str(&format!("10.{a}.{b}.1/32"));
+        }
+        pfx_set.push_str(" ]");
+        let large_prefix_src = format!("if {pfx_set} then accept; reject;");
+
+        // 10-entry community set: `bgp.communities ~ [ 64512:1, ..., 64512:10 ]`.
+        let mut comm_set = String::from("bgp.communities ~ [ ");
+        for i in 1..=10u32 {
+            if i > 1 {
+                comm_set.push_str(", ");
+            }
+            comm_set.push_str(&format!("64512:{i}"));
+        }
+        comm_set.push_str(" ]");
+        let large_comm_src = format!("if {comm_set} then accept; reject;");
+
+        // User functions: two-call chain (classify + tag).
+        let user_fn_src = "function tag_customer(lp) { bgp.local_pref = lp; return true; } \
+             function classify(lp) { if lp >= 200 then return 300; return 100; } \
+             let lp = classify(bgp.local_pref); \
+             if tag_customer(lp) && bgp.local_pref == 300 then accept; reject;";
+
+        let bench_sources = [large_prefix_src, large_comm_src, user_fn_src.to_string()];
+
+        // Route matrix covers the hit/miss positions the bench
+        // measures plus the plain route that exercises the user-fn
+        // classifier's `lp < 200` branch (returns 100, tag fails).
+        let routes: Vec<Route> = {
+            // large_prefix_set hit_last: 10.0.63.100/32 matches the
+            // 100th entry.
+            let r0 = route_with("10.0.63.100/32", 150, 30);
+            // large_prefix_set miss: 203.0.113.0/24 matches nothing.
+            let r1 = route_with("203.0.113.0/24", 150, 30);
+            // large_community_set hit_last: carries 64512:10.
+            let r2 = with_communities(route_with("203.0.113.0/24", 150, 30), &[(64512, 10)]);
+            // large_community_set miss: carries 64512:9999.
+            let r3 = with_communities(route_with("203.0.113.0/24", 150, 30), &[(64512, 9999)]);
+            // user_functions hit: local_pref=200 → classify→300, tag→300, match.
+            let r4 = route_with("203.0.113.0/24", 200, 30);
+            // user_functions miss: local_pref=100 → classify→100, tag→100, no match.
+            let r5 = route_with("203.0.113.0/24", 100, 30);
+            vec![r0, r1, r2, r3, r4, r5]
+        };
+
+        for src in bench_sources {
+            for (i, base) in routes.iter().enumerate() {
+                let mut a = base.clone();
+                let mut b = base.clone();
+                let va = run(&src, &mut a);
+                let vb = run_vm(&src, &mut b);
+                assert_eq!(va, vb, "verdict mismatch on route {i} for: {src}");
+                assert_eq!(
+                    a.attributes, b.attributes,
+                    "attribute mismatch on route {i} for: {src}"
+                );
+                assert_eq!(a.next_hop, b.next_hop);
+            }
+        }
+    }
 }
