@@ -92,7 +92,7 @@ pub struct CaseArm {
 }
 
 /// An expression — the functional side of the DSL.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Expr {
     /// A literal value: integer, string, IP, prefix, boolean, ASN.
     Lit(Value),
@@ -138,7 +138,7 @@ pub enum Expr {
 
 /// A literal value — what every expression reduces to at evaluation
 /// time.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Value {
     /// 64-bit signed integer — covers BGP local-pref, MED, prefix
     /// lengths, AS numbers (the DSL treats AS as integers; the

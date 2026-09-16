@@ -1,7 +1,7 @@
 //! `cargo bench -p lr-policy --bench filter_eval` — measure the
-//! filter DSL evaluator throughput (ROADMAP-v3 D6.2, D3.7, #19 P0).
+//! filter DSL evaluator throughput (ROADMAP-v3 D6.2, D3.7, #19 P0, #19 P5).
 //!
-//! Six filter families cover the policy complexity spectrum, sized
+//! Seven filter families cover the policy complexity spectrum, sized
 //! to expose the costs that real-world policies actually pay:
 //!
 //! * `simple_accept` — `accept;` — minimum overhead, measures the
@@ -263,6 +263,24 @@ fn user_function_filter() -> String {
         .to_string()
 }
 
+/// A filter that exercises the peephole constant-propagation +
+/// literal-folding pass (GitHub #19 P5). `let a = 6; let b = 7; if
+/// a * b == 42 then accept; reject;` compiles to 12 instructions
+/// unoptimised (`Push; StoreVar` × 2, `LoadVar; LoadVar; Bin(Mul);
+/// Push; Bin(Eq); JumpIfFalse; Accept; Reject`). The peephole pass
+/// propagates `a` and `b` through the `let` bindings, folds
+/// `Push(6); Push(7); Bin(Mul)` → `Push(42)`, then folds
+/// `Push(42); Push(42); Bin(Eq)` → `Push(Bool(true))`, and the
+/// dead-branch pass drops the `Push(Bool(true)); JumpIfFalse`,
+/// leaving the `Accept` to fall through. The dead `Push; StoreVar`
+/// pairs remain (dead-store elimination is a later phase); the VM
+/// executes them but they have no route side effects. The bench
+/// measures the cost the peephole pass saves — the unoptimised
+/// 12-instruction stream vs the optimised 6-instruction stream.
+fn const_fold_filter() -> &'static str {
+    "let a = 6; let b = 7; if a * b == 42 then accept; reject;"
+}
+
 fn bench_eval(c: &mut Criterion) {
     let simple = compile("bench-simple", "accept;").unwrap();
     let if_lp = compile(
@@ -298,6 +316,12 @@ fn bench_eval(c: &mut Criterion) {
         .expect("large community set filter must compile");
     let user_fn = compile("bench-user-functions", &user_function_filter())
         .expect("user-function filter must compile");
+    // #19 P5 — const-fold shape: 12 unoptimised instrs collapse to
+    // 6 after the peephole pass. Compiled once; the route is
+    // irrelevant (the verdict is constant) — the bench measures
+    // the per-eval cost the pass saves.
+    let const_fold =
+        compile("bench-const-fold", const_fold_filter()).expect("const-fold filter must compile");
 
     // Route inputs.
     let mut route_plain = route_with("203.0.113.0/24", 150, 30);
@@ -424,6 +448,22 @@ fn bench_eval(c: &mut Criterion) {
         });
     });
 
+    // #19 P5 — const-fold shape (tree-walk interpreter). The
+    // interpreter does not run the peephole pass, so this bench
+    // measures the unoptimised 12-instruction cost. The VM bench
+    // below (`vm_const_fold`) measures the optimised 6-instruction
+    // cost — the delta is the P5 win.
+    group.bench_function("const_fold", |b| {
+        b.iter(|| {
+            let v = evaluate(
+                black_box(&const_fold),
+                black_box(&mut route_plain),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+
     // D3.7 bytecode VM on the same inputs — quantifies the hot-path
     // win the compiler + stack VM buys over the tree walk.
     let simple_vm = bytecode::compile(&simple);
@@ -432,6 +472,7 @@ fn bench_eval(c: &mut Criterion) {
     let large_prefix_vm = bytecode::compile(&large_prefix);
     let large_comm_vm = bytecode::compile(&large_comm);
     let user_fn_vm = bytecode::compile(&user_fn);
+    let const_fold_vm = bytecode::compile(&const_fold);
 
     group.bench_function("vm_simple_accept", |b| {
         b.iter(|| {
@@ -518,6 +559,21 @@ fn bench_eval(c: &mut Criterion) {
             let v = bytecode::execute(
                 black_box(&user_fn_vm),
                 black_box(&mut r),
+                black_box(&BenchCtx),
+            );
+            let _ = black_box(v);
+        });
+    });
+
+    // #19 P5 — const-fold shape (bytecode VM). The peephole pass
+    // runs inside `bytecode::compile`, so this bench measures the
+    // optimised 6-instruction cost. Compare against `const_fold`
+    // (tree walk, 12 instructions unoptimised) for the P5 delta.
+    group.bench_function("vm_const_fold", |b| {
+        b.iter(|| {
+            let v = bytecode::execute(
+                black_box(&const_fold_vm),
+                black_box(&mut route_plain),
                 black_box(&BenchCtx),
             );
             let _ = black_box(v);

@@ -28,6 +28,7 @@ pub mod bytecode;
 pub mod eval;
 pub mod lexer;
 pub mod parser;
+pub mod peephole;
 
 pub use ast::{
     BinaryOp, Expr, Filter, FilterBody, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,

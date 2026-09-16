@@ -18,6 +18,75 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Peephole optimisation pass for the filter DSL bytecode (GitHub
+  #19 P5): a new `crates/lr-policy/src/filter/peephole.rs` module
+  runs three passes inside `bytecode::compile` after the
+  AST-to-bytecode compiler emits the instruction stream.
+  - **Constant propagation + literal folding** — a forward pass
+    tracks `let`-bound constants in a `HashMap<String, Value>` and
+    rewrites `LoadVar(name)` to `Push(v)` when `name` is a known
+    constant. `Push(L1); Push(L2); Bin(Op)` triples fold to a
+    single `Push(folded)` when both are literals and the fold
+    cannot error (the pass refuses to fold division by zero,
+    arithmetic overflow, and bad shift amounts — those errors must
+    surface at runtime exactly as the unoptimised code surfaces
+    them). `Push(Bool(b)); Not` and `Push(Int(n)); Neg` fold the
+    same way. The constant map is invalidated at every control-flow
+    join (`Jump`, `JumpIfFalse`, `JumpIfTrue`, `PushScope`,
+    `PopScope`) and every side-effecting instruction (`Call`,
+    `Method`, `EvalTree`, `AssignField`, `AppendField`, `Defined`,
+    `AssignVar`) so the analysis is a single forward walk, not a
+    full data-flow fixpoint.
+  - **Dead-branch elimination** — after folding produces
+    `Push(Bool(c)); JumpIfFalse(X)` or `Push(Bool(c));
+    JumpIfTrue(X)`, the branch direction is known at compile time.
+    `Push(Bool(true)); JumpIfFalse(X)` always falls through (drop
+    both); `Push(Bool(false)); JumpIfFalse(X)` always jumps
+    (replace with `Jump(X)`). The pass is only applied when the
+    `JumpIfFalse`/`JumpIfTrue` is NOT a jump target from elsewhere
+    — the `&&`/`||` short-circuit compilation emits `Jump(Le)`
+    that targets the `JumpIfFalse` directly, so eliminating the
+    branch in that case would change the stack state seen by the
+    jump.
+  - **Jump threading** — `Jump(X)` where `code[X]` is `Jump(Y)`
+    is rewritten to `Jump(Y)`; same for `JumpIfFalse(X)` and
+    `JumpIfTrue(X)` when `code[X]` is an unconditional `Jump`.
+    Conditional-jump-to-conditional-jump is NOT threaded (the
+    target conditional pops a stack value). Threads through chains
+    of unconditional jumps until a fixed point per instruction.
+  - **Jump-target safety** — both the fold and dead-branch passes
+    compute the set of jump targets upfront and skip any
+    optimisation that would consume an instruction that is a jump
+    target. This is the key correctness invariant: collapsing a
+    jump target would change the stack state seen by the jump
+    source.
+  - The passes iterate to a fixed point (constant propagation can
+    expose new fold patterns), then run dead-branch elimination
+    once, then jump threading once. The order is intentional:
+    folding exposes dead branches, dead-branch elimination exposes
+    new jump chains (a `Jump(X)` replacing a `JumpIfFalse(X)` may
+    now target another `Jump`).
+  - **Bench delta** (criterion, `--quick`): the new `const_fold`
+    bench shape (`let a = 6; let b = 7; if a * b == 42 then accept;
+    reject;`) measures the win — the tree-walk interpreter runs
+    the unoptimised 12-instruction stream at 160 ns, the bytecode
+    VM runs the peephole-optimised 6-instruction stream at
+    119.5 ns, a **-25 % (1.34×)** speedup. The existing six bench
+    shapes are all within ±2 % of P4 (noise) — the pass is a
+    no-op on filters without foldable constants.
+  - **Equivalence preserved** — the 27×4 policy table, the
+    bench-shapes table, and the prefix-trie differential table in
+    `crates/lr-policy/src/filter/eval.rs` all pass unchanged. 14
+    new unit tests in `peephole.rs` pin the pass's golden output
+    (folds, no-fold error cases, jump threading, self-loop safety,
+    jump-target invalidation, no-op on dynamic filters).
+  - **API additions** — `Instr`, `MatchItem`, `MatchRhs`,
+    `DefinedTarget`, `Expr` derive `PartialEq, Eq` (the fold tests
+    compare instruction streams for equality; the derives are
+    additive and do not affect existing code). `Value` gains `Eq`
+    (it was already `PartialEq`; all variants are integer/bool
+    based). No public function signatures change; no FFI/binding
+    updates needed.
 - Prefix-trie set matching for the filter DSL (GitHub #19 P4):
   `PrefixSetTrie` in `crates/lr-policy/src/filter/bytecode.rs`
   replaces the O(n) linear scan over `MatchRhs::Set` prefix items

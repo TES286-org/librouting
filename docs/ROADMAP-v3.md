@@ -881,6 +881,105 @@ with a bench delta attached, not an argument") was honoured:
 the P1 regression was measured, not argued, and the change was
 not landed.
 
+### D6 follow-up — P5 peephole pass (GitHub #19 P5) — ~~landed~~
+
+The issue comment's P5 ("compiler polish — constant folding,
+peephole, dead-branch elimination, pre-sized stack") is the
+cheapest, safest lever in the #19 phasing. P5 lands three of
+the four sub-items (pre-sized stack is deferred — the existing
+trivial-filter bench at 23 ns would regress on an eager
+allocation, and the win on non-trivial filters is dominated by
+the BTreeMap log factor in the Adj-RIB-In install path).
+
+**What landed.**
+
+* **`crates/lr-policy/src/filter/peephole.rs`** — a new module
+  with three passes that run inside `bytecode::compile` after
+  the AST-to-bytecode compiler emits the instruction stream.
+  * **Constant propagation + literal folding** — a forward pass
+    tracks `let`-bound constants in a `HashMap<String, Value>`
+    and rewrites `LoadVar(name)` to `Push(v)` when `name` is a
+    known constant. `Push(L1); Push(L2); Bin(Op)` triples fold
+    to a single `Push(folded)` when both are literals and the
+    fold cannot error (refuses to fold division by zero,
+    arithmetic overflow, bad shift — those errors must surface
+    at runtime). `Push(Bool(b)); Not` and `Push(Int(n)); Neg`
+    fold the same way. The constant map is invalidated at every
+    control-flow join (`Jump`, `JumpIfFalse`, `JumpIfTrue`,
+    `PushScope`, `PopScope`) and every side-effecting
+    instruction (`Call`, `Method`, `EvalTree`, `AssignField`,
+    `AppendField`, `Defined`, `AssignVar`) so the analysis is
+    a single forward walk, not a full data-flow fixpoint.
+  * **Dead-branch elimination** — after folding produces
+    `Push(Bool(c)); JumpIfFalse(X)` (or `JumpIfTrue(X)`), the
+    branch direction is known. `Push(Bool(true)); JumpIfFalse(X)`
+    always falls through (drop both); `Push(Bool(false));
+    JumpIfFalse(X)` always jumps (replace with `Jump(X)`).
+    Symmetric for `JumpIfTrue`. The pass is only applied when
+    the `JumpIfFalse`/`JumpIfTrue` is NOT a jump target from
+    elsewhere — the `&&`/`||` short-circuit compilation emits
+    `Jump(Le)` that targets the `JumpIfFalse` directly, so
+    eliminating the branch in that case would change the stack
+    state seen by the jump.
+  * **Jump threading** — `Jump(X)` where `code[X]` is `Jump(Y)`
+    is rewritten to `Jump(Y)`; same for `JumpIfFalse` and
+    `JumpIfTrue` when `code[X]` is an unconditional `Jump`.
+    Conditional-jump-to-conditional-jump is NOT threaded (the
+    target conditional pops a stack value). Threads through
+    chains of unconditional jumps until a fixed point per
+    instruction.
+* **Jump-target safety** — both the fold and dead-branch passes
+  compute the set of jump targets upfront (`collect_jump_targets`)
+  and skip any optimisation that would consume an instruction
+  that is a jump target. This is the key correctness invariant:
+  collapsing a jump target would change the stack state seen by
+  the jump source. The `&&`/`||` short-circuit compilation is
+  the canonical case — `Jump(Le)` targets the `JumpIfFalse`
+  directly (skipping the `Push(Bool(false))`), so the
+  `JumpIfFalse` sees a different stack value depending on the
+  path.
+* The passes iterate to a fixed point (constant propagation can
+  expose new fold patterns), then run dead-branch elimination
+  once, then jump threading once. The order is intentional:
+  folding exposes dead branches, dead-branch elimination
+  exposes new jump chains.
+* **Bench delta** (criterion, `--quick`): a new `const_fold`
+  bench shape (`let a = 6; let b = 7; if a * b == 42 then
+  accept; reject;`) measures the win. The tree-walk interpreter
+  runs the unoptimised 12-instruction stream at 160 ns; the
+  bytecode VM runs the peephole-optimised 6-instruction stream
+  at 119.5 ns — a **-25 % (1.34×)** speedup. The existing six
+  bench shapes are all within ±2 % of P4 (noise) — the pass is
+  a no-op on filters without foldable constants. The
+  import-pipeline bench shows no change (the `trivial` and
+  `realistic` filters have no foldable constants).
+* **Equivalence preserved** — the 27×4 policy table, the
+  bench-shapes table, and the prefix-trie differential table in
+  `crates/lr-policy/src/filter/eval.rs` all pass unchanged. 14
+  new unit tests in `peephole.rs` pin the pass's golden output
+  (folds, no-fold error cases, jump threading, self-loop safety,
+  jump-target invalidation, no-op on dynamic filters).
+* **API additions** — `Instr`, `MatchItem`, `MatchRhs`,
+  `DefinedTarget`, `Expr` derive `PartialEq, Eq` (the fold tests
+  compare instruction streams for equality; the derives are
+  additive). `Value` gains `Eq` (it was already `PartialEq`;
+  all variants are integer/bool based). No public function
+  signatures change; no FFI/binding updates needed.
+
+**What is NOT in P5.** Pre-sized stack (the issue comment's
+4th sub-item) — the trivial-filter bench at 23 ns would
+regress on an eager `Vec::with_capacity` allocation, and the
+win on non-trivial filters is dominated by the BTreeMap log
+factor in the Adj-RIB-In install path. Deferred until a bench
+with a hot filter that allocates a deep stack exists. P1
+(compact instruction encoding) remains deferred per the P4
+finding. P2 (slot resolution) and P3 (attribute fast paths)
+remain the highest-leverage remaining levers — P2 would
+eliminate the `LoadVar`/`StoreVar` string hashing that the
+`user_functions` bench (439 ns) pays, P3 would eliminate the
+`Value` clone the `if_local_pref` bench (81.6 ns) pays on
+every attribute read.
+
 ---
 
 ## D7 — CI/CD supply-chain hardening
@@ -1460,7 +1559,7 @@ refactor — needs extensive regression tests.
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up) |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive) |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |

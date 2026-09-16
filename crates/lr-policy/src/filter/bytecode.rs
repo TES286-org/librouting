@@ -37,7 +37,7 @@ pub struct CompiledFunction {
 }
 
 /// One match-pattern item — the right-hand side of `~`.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchItem {
     /// A constant item (community literal, AS number, ...).
     Value(Value),
@@ -53,7 +53,7 @@ pub enum MatchItem {
 }
 
 /// The compiled right-hand side of a `~` / `!~` test.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MatchRhs {
     /// A single constant pattern.
     Value(Value),
@@ -336,7 +336,7 @@ impl PrefixSetTrie {
 /// `defined()` targets. `defined()` must observe *presence*, not the
 /// (default-collapsed) value, so its argument is never evaluated in
 /// the ordinary sense.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DefinedTarget {
     /// A route attribute — presence via the typed accessors.
     Field(RouteField),
@@ -350,7 +350,7 @@ pub enum DefinedTarget {
 }
 
 /// One VM instruction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Instr {
     /// Push a constant.
     Push(Value),
@@ -422,16 +422,23 @@ pub struct CompiledFilter {
 }
 
 /// Compile a parsed filter to bytecode. Infallible: every AST shape
-/// has a bytecode representation or a tree-walking fallback.
+/// has a bytecode representation or a tree-walking fallback. The
+/// compiled code is then run through the peephole passes (constant
+/// propagation + literal folding + dead-branch elimination + jump
+/// threading — see `crate::filter::peephole`); the passes are
+/// transparent (preserve verdict + route state for every route, as
+/// pinned by the equivalence tables in `eval.rs`).
 pub fn compile(filter: &Filter) -> CompiledFilter {
     let c = Compiler;
     let mut code = Vec::new();
     c.compile_stmts(&filter.body.stmts, &mut code);
+    let code = crate::filter::peephole::optimize(code);
     let mut functions = BTreeMap::new();
     for f in &filter.functions {
         let mut code = Vec::new();
         c.compile_stmts(&f.body.stmts, &mut code);
         code.push(Instr::Return);
+        let code = crate::filter::peephole::optimize(code);
         functions.insert(
             f.name.clone(),
             CompiledFunction {
