@@ -1,0 +1,76 @@
+# Docker build context exclusions (ROADMAP-v3 D12.3).
+#
+# Keep the build context small so `docker build` does not upload
+# the local `target/` dir (which can be several GB on a dev
+# machine) or any of the editor / OS cruft. The Dockerfile's
+# `COPY` lines only reference source dirs that are NOT excluded
+# here; everything below is dropped at context-creation time.
+
+# Build artifacts — the container builds from source, so the host's
+# `target/` dir (debug + release binaries, incremental compilation
+# cache, dependency build artifacts) is irrelevant. Template
+# scaffolding projects have their own target dirs under
+# `templates/*/target`.
+target/
+**/target/
+templates/*/target/
+
+# Editor / IDE state. Not strictly necessary (the COPY lines do
+# not reference these), but excluding them keeps the context small
+# and avoids leaking local editor config into the image layer
+# history.
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS cruft.
+.DS_Store
+Thumbs.db
+
+# Python bindings build artifacts — the container does not build
+# the Python bindings (they ship as a separate wheel). Excluding
+# the local build dir keeps the context lean.
+bindings/lr-python/build/
+bindings/lr-python/dist/
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+
+# Go bindings shared library — same rationale as the Python build
+# dir. The container ships `liblr_ffi.so` from the Rust build; the
+# Go bindings' local cgo artifact is a host-only build.
+bindings/lr-go/liblr_ffi.*
+
+# Fuzz corpus + artifacts. The fuzz seed corpus under
+# `fuzz/seeds/` IS included (the Dockerfile does not reference it
+# today, but keeping it in the context is cheap and matches the
+# repo's "seeds are committed" stance). The grown corpus and the
+# crash artifacts are host-only.
+fuzz/target/
+fuzz/artifacts/
+fuzz/coverage/
+fuzz/corpus/
+
+# Git metadata — the container builds from the working tree, not
+# from a git checkout, so `.git/` is dead weight in the context.
+.git/
+.gitignore
+
+# GitHub Actions workflow files — the container does not run CI.
+.github/
+
+# Backup files.
+*.bak
+Cargo.lock.bak
+
+# Local environment files.
+.env
+.env.local
+
+# Download / upload / scratch dirs that the host agent may have
+# created alongside the repo.
+download/
+upload/
+skills/

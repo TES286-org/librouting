@@ -1,0 +1,129 @@
+name: Docker
+
+# Docker image build verification (ROADMAP-v3 D12.3).
+#
+# Builds the multi-stage Dockerfile on every push and pull request to
+# `main`, plus a nightly run on schedule. The job does NOT push to a
+# registry — that is a release-event concern (the `release.yml`
+# workflow handles `v*` tag pushes and produces the GitHub Release
+# archives; a future container-registry push would ride the same tag
+# event).
+#
+# The job's purpose is to catch Dockerfile drift early:
+#   - a source change that breaks the build,
+#   - a dependency add that needs a new system package,
+#   - a `COPY` line that references a path that no longer exists,
+#   - a `rust:1.88-slim-bookworm` image that was retired (the
+#     `rust:1.88-slim-bookworm` tag is maintained by Docker Official
+#     Images and stays available even after newer Rust releases land;
+#     if it ever disappears, this job fails first).
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker/**"
+      # The build depends on every Rust source file, so a change to
+      # any crate should re-trigger the build. List the high-level
+      # paths rather than every `crates/*/src/**` glob to keep the
+      # trigger legible.
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "include/**"
+      - "templates/**"
+      - "tests/**"
+      - "fuzz/**"
+      - "yang/**"
+      - "bindings/**"
+  pull_request:
+    branches: [main]
+    paths:
+      - "Dockerfile"
+      - ".dockerignore"
+      - "docker/**"
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "rust-toolchain.toml"
+      - "crates/**"
+      - "include/**"
+      - "templates/**"
+      - "tests/**"
+      - "fuzz/**"
+      - "yang/**"
+      - "bindings/**"
+  schedule:
+    # Nightly at 04:17 UTC — off-peak for GitHub Actions runners and
+    # off-set from the existing `nightly.yml` (03:00 UTC) so the two
+    # nightly workloads do not compete for runner capacity.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+env:
+  # BuildKit is required for the Dockerfile's `--mount=type=cache`
+  # lines. Docker 23.0+ enables it by default; the explicit env var
+  # keeps the job correct on older runners (though GitHub Actions
+  # runners are always current).
+  DOCKER_BUILDKIT: "1"
+
+jobs:
+  build:
+    name: docker build
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        # Buildx is the BuildKit-native builder. It is pre-installed
+        # on GitHub Actions runners; this step enables it for the
+        # job and is idempotent.
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build the image
+        # `--load` makes the built image available to `docker images`
+        # so the next step can inspect it. Without `--load` Buildx
+        # would build the image but not register it with the local
+        # Docker daemon (it would be in the BuildKit cache only).
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          load: true
+          tags: librouting:ci
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # Do not push — this is a CI verification, not a release.
+          push: false
+
+      - name: Verify the binaries are present
+        # Smoke test: run the daemon with `--help` and assert the
+        # three CLI binaries are on PATH. The `--help` exit code is
+        # 0 (the daemon's `print_usage` returns SUCCESS for
+        # `--help`); a non-zero exit means the binary is missing or
+        # the image layout is wrong.
+        run: |
+          set -euo pipefail
+          docker run --rm librouting:ci --help | grep -q "librouting"
+          # lrctl and lr are in the same image; verify they run too.
+          docker run --rm --entrypoint lrctl librouting:ci version | grep -q "lrctl"
+          docker run --rm --entrypoint lr librouting:ci version | grep -q "librouting"
+
+      - name: Verify the shared library is present and loadable
+        # `ldconfig -p` lists every library the dynamic linker knows
+        # about; `liblr_ffi.so` should be there because the
+        # Dockerfile runs `ldconfig` after copying it.
+        run: |
+          set -euo pipefail
+          docker run --rm --entrypoint /bin/sh librouting:ci -c \
+            'ldconfig -p | grep -q liblr_ffi.so'
+
+      - name: Report image size
+        # Log the image size so a regression (e.g. a dep add that
+        # bloats the runtime layer) is visible in the CI log. The
+        # expected size is ~100 MB (see `docker/README.md`).
+        run: |
+          docker images librouting:ci --format "{{.Repository}}:{{.Tag}} {{.Size}}" | head -1

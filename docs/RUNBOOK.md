@@ -152,6 +152,49 @@ metric is more honest than a misleading zero. The endpoint also
 serves `GET /` (a one-line pointer to `/metrics`) and `404 Not Found`
 for every other path.
 
+## Container deployment
+
+A multi-stage `Dockerfile` at the repo root builds the daemon, the
+inspection CLI (`lr`), the operational CLI (`lrctl`), and the C ABI
+shared library (`liblr_ffi.so`) into a `debian:bookworm-slim` runtime
+image (ROADMAP-v3 D12.3). See [`docker/README.md`](docker/README.md)
+for the full deployment guide — quick start, production config-file
+mount, sidecar `lrctl`, image layout, exposed ports, volumes, the
+~100 MB size target, and what the image does NOT include.
+
+```sh
+# Build.
+docker build -t librouting:rc.3 .
+
+# Quick start — single-peer BGP on loopback.
+docker run --rm --network host \
+    librouting:rc.3 \
+    --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+    --listen 127.0.0.1:1179 --network 203.0.113.0/24 \
+    --api-socket /run/lr-daemon/api.sock \
+    --metrics-addr 127.0.0.1:9119
+
+# Production — config file mount.
+docker run --rm -d \
+    --name lr-daemon \
+    -p 179:179 -p 9119:9119 \
+    -v /etc/lr-daemon/daemon.toml:/etc/lr-daemon/daemon.toml:ro \
+    -v lr-daemon-run:/run/lr-daemon \
+    librouting:rc.3 \
+    --config /etc/lr-daemon/daemon.toml
+
+# Sidecar lrctl — same image, override the entrypoint.
+docker run --rm --volumes-from lr-daemon \
+    librouting:rc.3 \
+    lrctl --socket /run/lr-daemon/api.sock status
+```
+
+The image does NOT ship a default config (operators mount one or pass
+CLI flags) and does NOT push to a registry from CI (that is a
+release-event concern). A Helm chart is deferred — it conventionally
+lives in its own repository so it can version independently of the
+image; the Dockerfile here is the foundation a chart would reference.
+
 ## Troubleshooting FAQ
 
 **Session establishes but no routes flow in either direction.**
