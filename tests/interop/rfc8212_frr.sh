@@ -104,6 +104,32 @@ line vty
 !
 EOF
 
+# ---- Phase 1: default (RFC 8212) — no explicit policy on lr-daemon. ------
+# Start lr-daemon FIRST so FRR's first connect attempt succeeds. FRR's
+# default BGP connect-retry is 120 s; if FRR starts before the listener
+# it hits ECONNREFUSED and backs off, and the 30 s test window is not
+# enough for the retry to land. The existing frr.sh test avoids this by
+# using `--ebgp-policy accept-all` which makes the daemon listen
+# eagerly; here the default (rfc8212) mode has the same listen
+# behaviour, but starting lr-daemon first is the robust fix.
+echo "== Phase 1: lr-daemon default (RFC 8212) — no explicit policy =="
+"$BIN" --local-as 64512 --peer-as 64514 --router-id 10.0.0.1 \
+    --listen "127.0.0.1:$PORT" --local-address 192.0.2.1 \
+    --network 203.0.113.0/24 \
+    >"$OUT/lr-phase1.log" 2>&1 &
+LR_PID=$!
+
+# Wait for lr-daemon to start listening before starting FRR, so FRR's
+# first connect attempt succeeds (avoids the 120 s connect-retry
+# backoff that would blow the 30 s test window).
+for i in $(seq 1 40); do
+    sleep 0.25
+    if grep -qF "listening on" "$OUT/lr-phase1.log" 2>/dev/null; then
+        break
+    fi
+done
+
+# Start FRR bgpd now that the listener is up.
 echo "== starting FRR bgpd (AS64514, connects to lr-daemon :$PORT) =="
 "$BGPD" -f "$OUT/bgpd.conf" -i "$OUT/bgpd.pid" \
     -Z -n -S \
@@ -185,14 +211,6 @@ if [ $vty_ok -ne 0 ]; then
     exit 1
 fi
 
-# ---- Phase 1: default (RFC 8212) — no explicit policy on lr-daemon. ------
-echo "== Phase 1: lr-daemon default (RFC 8212) — no explicit policy =="
-"$BIN" --local-as 64512 --peer-as 64514 --router-id 10.0.0.1 \
-    --listen "127.0.0.1:$PORT" --local-address 192.0.2.1 \
-    --network 203.0.113.0/24 \
-    >"$OUT/lr-phase1.log" 2>&1 &
-LR_PID=$!
-
 # Wait for the session to come up and for the policy-less warnings.
 ok_session=1
 ok_warn_export=1
@@ -267,6 +285,16 @@ EOF
 
 "$BIN" --config "$OUT/lr-phase2.toml" >"$OUT/lr-phase2.log" 2>&1 &
 LR_PID=$!
+
+# Wait for lr-daemon to start listening before expecting FRR to
+# reconnect (FRR detects the TCP drop and retries; the listen gate
+# avoids racing the first retry).
+for i in $(seq 1 40); do
+    sleep 0.25
+    if grep -qF "listening on" "$OUT/lr-phase2.log" 2>/dev/null; then
+        break
+    fi
+done
 
 # Wait for the route to propagate both directions (up to 45 s).
 ok_frr=1
