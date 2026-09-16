@@ -33,12 +33,8 @@
 //! The exporter is **opt-in** (default off, like `api_socket`):
 //! `--metrics-addr 127.0.0.1:9119` / `[bgp] metrics_addr = "…"`.
 
-use std::io::{BufRead, BufReader, Write};
-use std::net::TcpListener;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::sync::{Arc, RwLock};
-use std::thread;
-use std::time::Duration;
 
 use lr_router::DefaultRouter;
 
@@ -81,6 +77,11 @@ pub struct MetricsInfo {
 mod imp {
     use super::*;
     use std::fmt::Write as _;
+    use std::io::{BufRead, BufReader, Write};
+    use std::net::TcpListener;
+    use std::sync::atomic::Ordering;
+    use std::thread;
+    use std::time::Duration;
 
     /// Bind the metrics TCP listener and spawn the serving thread.
     ///
