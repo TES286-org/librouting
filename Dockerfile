@@ -81,16 +81,23 @@ COPY bindings/ bindings/
 # tests; omitting it here would produce a different binary (e.g.
 # without the exchange-plane prototype) and surprise an operator.
 #
-# BuildKit mount caches: the cargo registry and the target dir are
-# cached across builds so a no-op rebuild (only source files
-# changed) is fast. The `--mount=type=cache` syntax requires
-# `DOCKER_BUILDKIT=1` (default on Docker 23.0+ and on every
+# BuildKit mount caches: the cargo registry + git checkouts and the
+# target dir are cached across builds so a no-op rebuild (only
+# source files changed) is fast. The `--mount=type=cache` syntax
+# requires `DOCKER_BUILDKIT=1` (default on Docker 23.0+ and on every
 # GitHub Actions runner).
+#
+# IMPORTANT: the cache mount targets `/usr/local/cargo/registry` and
+# `/usr/local/cargo/git` — NOT `/usr/local/cargo` itself. The rust
+# image installs `cargo` at `/usr/local/cargo/bin/cargo`; a cache
+# mount on the parent dir would shadow the toolchain binaries and
+# `cargo` would vanish (`/bin/sh: 1: cargo: not found`).
 #
 # After the build, copy the artifacts to `/out` (a stable location
 # outside the cache mount) so the runtime stage can `COPY --from`
 # them. The cache mount itself is not visible to the next stage.
-RUN --mount=type=cache,target=/usr/local/cargo,sharing=locked \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked \
     --mount=type=cache,target=/build/target,sharing=locked \
     cargo build --release --all-features --workspace \
     && mkdir -p /out/include \
