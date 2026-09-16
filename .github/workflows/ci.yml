@@ -349,6 +349,10 @@ jobs:
         run: ./tests/interop/aggregate_bird.sh
       - name: Route flap damping interop (RFC 2439 ↔ FRR bgpd, ROADMAP-v3 D4.5)
         run: ./tests/interop/damping_frr.sh
+      - name: RFC 8212 interop (default eBGP policy ↔ BIRD 2, ROADMAP-v3 D10.6)
+        run: ./tests/interop/rfc8212_bird.sh
+      - name: RFC 8212 interop (default eBGP policy ↔ FRR bgpd, ROADMAP-v3 D10.6)
+        run: ./tests/interop/rfc8212_frr.sh
       - name: YANG surface gate (RFC 9647 + RFC 8177, libyang when present)
         run: ./tests/interop/yang.sh
       # W6.3 exchange-plane exit criteria (docs/research/EXCHANGE-PLANE.md
