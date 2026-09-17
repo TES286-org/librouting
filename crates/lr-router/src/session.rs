@@ -550,6 +550,14 @@ pub struct SessionSummary {
     pub negotiated_hold_time: u16,
     /// Routes currently held in this session's Adj-RIB-In.
     pub adj_rib_in_len: usize,
+    /// UPDATE messages received from the peer (BGP only; 0 for
+    /// OSPF/Babel, whose update mechanisms are not BGP UPDATEs).
+    /// Monotonic across session re-establishment — see
+    /// [`lr_bgp::PeerMessageStats`].
+    pub updates_received: u64,
+    /// UPDATE messages sent to the peer (BGP only; 0 for OSPF/Babel).
+    /// Monotonic across session re-establishment.
+    pub updates_sent: u64,
 }
 
 /// One session.

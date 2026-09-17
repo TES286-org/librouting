@@ -2251,17 +2251,22 @@ impl DefaultRouter {
                 match state {
                     SessionState::Bgp {
                         peer, established, ..
-                    } => SessionSummary {
-                        handle: SessionHandle(*id),
-                        kind: "bgp",
-                        local_as: peer.config().local_as,
-                        peer_as: peer.config().peer_as,
-                        state: peer.state().name(),
-                        established: *established,
-                        peer_bgp_id: peer.peer_bgp_id(),
-                        negotiated_hold_time: peer.negotiated_hold_time(),
-                        adj_rib_in_len,
-                    },
+                    } => {
+                        let stats = peer.message_stats();
+                        SessionSummary {
+                            handle: SessionHandle(*id),
+                            kind: "bgp",
+                            local_as: peer.config().local_as,
+                            peer_as: peer.config().peer_as,
+                            state: peer.state().name(),
+                            established: *established,
+                            peer_bgp_id: peer.peer_bgp_id(),
+                            negotiated_hold_time: peer.negotiated_hold_time(),
+                            adj_rib_in_len,
+                            updates_received: stats.update_received,
+                            updates_sent: stats.update_sent,
+                        }
+                    }
                     SessionState::Ospf { runtime, .. } => SessionSummary {
                         handle: SessionHandle(*id),
                         kind: "ospf",
@@ -2272,6 +2277,8 @@ impl DefaultRouter {
                         peer_bgp_id: None,
                         negotiated_hold_time: 0,
                         adj_rib_in_len,
+                        updates_received: 0,
+                        updates_sent: 0,
                     },
                     SessionState::Babel { runtime, .. } => {
                         let heard = !runtime.neighbor.hello_history.is_empty();
@@ -2285,6 +2292,8 @@ impl DefaultRouter {
                             peer_bgp_id: None,
                             negotiated_hold_time: 0,
                             adj_rib_in_len,
+                            updates_received: 0,
+                            updates_sent: 0,
                         }
                     }
                 }
@@ -8864,6 +8873,64 @@ mod tests {
         assert_eq!(s[0].state, "Idle");
         assert!(!s[0].established);
         assert_eq!(s[0].adj_rib_in_len, 0);
+    }
+
+    /// The UPDATE counters on [`SessionSummary`] follow the wire: the
+    /// initial table dump's EoR marker counts as one UPDATE, each
+    /// pumped advertisement adds one more per direction, and the
+    /// counters survive a session flap (FRR per-neighbor semantics).
+    #[test]
+    fn session_summaries_count_updates() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let a_session = a
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 1]),
+            ))
+            .unwrap();
+        let b_session = b
+            .add_session(SessionConfig::bgp(
+                Asn(64513),
+                Asn(64512),
+                RouterId::from_v4([10, 0, 0, 2]),
+            ))
+            .unwrap();
+
+        // Pre-start: no UPDATEs booked in either direction.
+        let s = &a.session_summaries()[0];
+        assert_eq!((s.updates_received, s.updates_sent), (0, 0));
+
+        establish(&mut a, a_session, &mut b, b_session);
+        // Pump the post-establishment output both ways: each side's
+        // initial dump ends in an EoR marker (one UPDATE PDU) that is
+        // still sitting in the peer's connection buffer.
+        let a_out = a.drain_output(a_session);
+        let b_out = b.drain_output(b_session);
+        a.feed_input(a_session, &b_out).unwrap();
+        b.feed_input(b_session, &a_out).unwrap();
+        let s = &a.session_summaries()[0];
+        assert_eq!(s.updates_received, 1, "B's EoR marker arrives");
+        assert_eq!(s.updates_sent, 1, "A's own EoR marker");
+        let s = &b.session_summaries()[0];
+        assert_eq!(s.updates_received, 1);
+        assert_eq!(s.updates_sent, 1);
+
+        // One advertisement: +1 on both sides of the wire.
+        b_advertise_to_a(&mut a, a_session, &mut b, b_session);
+        let s = &a.session_summaries()[0];
+        assert_eq!(s.updates_received, 2, "EoR + the real advertisement");
+        let s = &b.session_summaries()[0];
+        assert_eq!(s.updates_sent, 2);
+
+        // A session flap (close + re-establish) must not zero the
+        // counters — they are per-neighbor, not per-connection.
+        a.close_session(a_session);
+        a.tick(Instant(0));
+        let s = &a.session_summaries()[0];
+        assert_eq!(s.updates_received, 2, "counters survive the flap");
+        assert_eq!(s.state, "Idle");
     }
 
     #[test]

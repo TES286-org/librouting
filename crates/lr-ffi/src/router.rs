@@ -1227,7 +1227,7 @@ pub unsafe extern "C" fn lr_router_sessions_dump(r: lr_router_t, out: *mut lr_by
                 let _ = writeln!(
                     text,
                     "#{} kind={} local-as={} peer-as={} state={} established={} peer-id={} \
-                     hold-time={} adj-rib-in={}",
+                     hold-time={} adj-rib-in={} updates-rx={} updates-tx={}",
                     s.handle.0,
                     s.kind,
                     s.local_as.0,
@@ -1238,7 +1238,9 @@ pub unsafe extern "C" fn lr_router_sessions_dump(r: lr_router_t, out: *mut lr_by
                         .map(|i| i.to_string())
                         .unwrap_or_else(|| "-".to_string()),
                     s.negotiated_hold_time,
-                    s.adj_rib_in_len
+                    s.adj_rib_in_len,
+                    s.updates_received,
+                    s.updates_sent
                 );
             }
             unsafe { *out = lr_bytes_t::from_vec(text.into_bytes()) }

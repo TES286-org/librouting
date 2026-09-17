@@ -345,7 +345,8 @@ mod imp {
                             out,
                             "#{handle} kind={kind} local-as={la} peer-as={pa} \
                              state={state} established={est} peer-id={id} \
-                             hold-time={hold} adj-rib-in={ar}",
+                             hold-time={hold} adj-rib-in={ar} \
+                             updates-rx={urx} updates-tx={utx}",
                             handle = s.handle.0,
                             kind = s.kind,
                             la = s.local_as.0,
@@ -358,6 +359,8 @@ mod imp {
                                 .unwrap_or_else(|| "-".into()),
                             hold = s.negotiated_hold_time,
                             ar = s.adj_rib_in_len,
+                            urx = s.updates_received,
+                            utx = s.updates_sent,
                         );
                         // W6.3 exchange-plane (feature `exchange-plane`):
                         // per-session record stats — how many prefixes
