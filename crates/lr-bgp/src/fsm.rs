@@ -113,11 +113,11 @@ pub enum BgpAction {
 /// from zero.
 ///
 /// Counting is at the wire boundary, not the FSM boundary: every
-/// message that is encoded onto the outbound buffer counts as sent
-/// (even one the FSM later refuses to transmit), and every message
-/// decoded from fed input counts as received (even one the FSM
-/// discards as a state violation) — the same accounting FRR's
-/// `bgp_..->open_in`/`update_in` counters use.
+/// message encoded onto the outbound buffer counts as sent (whether
+/// or not the embedder drains and transmits those bytes), and every
+/// message decoded from fed input counts as received (even one the
+/// FSM discards as a state violation) — the same accounting FRR's
+/// per-neighbor counters use.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct PeerMessageStats {
     /// OPEN messages sent / received.
