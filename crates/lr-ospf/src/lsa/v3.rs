@@ -524,7 +524,7 @@ impl V3AsExternalBody {
 /// Advance a sequence number one step (§12.1.2). Shared by the v3
 /// originators: `None` starts at `INITIAL_SEQUENCE_NUMBER`, an exhausted
 /// space refuses to originate.
-fn next_sequence(prev: Option<u32>) -> Option<u32> {
+pub(crate) fn next_sequence(prev: Option<u32>) -> Option<u32> {
     match prev {
         None => Some(INITIAL_SEQUENCE_NUMBER),
         Some(MAX_SEQUENCE_NUMBER) => None,
@@ -532,7 +532,13 @@ fn next_sequence(prev: Option<u32>) -> Option<u32> {
     }
 }
 
-fn v3_lsa(ls_type: u16, link_state_id: u32, adv_router: u32, seq: u32, body: Vec<u8>) -> Lsa {
+pub(crate) fn v3_lsa(
+    ls_type: u16,
+    link_state_id: u32,
+    adv_router: u32,
+    seq: u32,
+    body: Vec<u8>,
+) -> Lsa {
     let mut lsa = Lsa {
         header: LsaHeader {
             ls_age: 0,
