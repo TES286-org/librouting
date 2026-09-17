@@ -423,7 +423,8 @@ pub(crate) fn longest_covering(table: &[(Prefix, u64)], prefix: Prefix) -> Optio
 // ---------------------------------------------------------------------------
 
 use crate::lsa::v3::{V3AsExternalBody, LS_TYPE_AS_EXTERNAL, LS_TYPE_INTER_ROUTER, PREFIX_OPT_NU};
-use crate::spf::{summary_routes_v3, SpfResultV3, V3VertexId};
+use crate::lsa::{LS_TYPE_E_AS_EXTERNAL, LS_TYPE_E_INTER_ROUTER};
+use crate::spf::{SpfResultV3, V3VertexId};
 
 /// One external route candidate produced by the v3 §4.8.5 calculation.
 /// The v3 mirror of [`ExternalRoute`]: the forwarding address is a full
@@ -484,6 +485,18 @@ struct AsbrLegV3 {
     border_router: Option<u32>,
 }
 
+/// The calculation-relevant projection of one external LSA body — the
+/// legacy 0x4005 shape (RFC 5340 §A.4.7) and the E-AS-External
+/// External-Prefix TLV (RFC 8362 §3.6) decode into this common form.
+struct ExternalBodyV3 {
+    /// 24-bit external metric (already masked).
+    metric: u32,
+    e_bit: bool,
+    prefix: crate::lsa::v3::V3Prefix,
+    /// The global IPv6 forwarding address (F bit / sub-TLV 1).
+    forwarding_addr: Option<[u8; 16]>,
+}
+
 /// RFC 5340 §4.8.5: compute the external route candidates for one area
 /// — the v3 form of RFC 2328 §16.4.
 ///
@@ -506,11 +519,33 @@ struct AsbrLegV3 {
 /// ID has lost its addressing semantics (§4.4.3.5), so the ASBR legs
 /// are keyed by the body field.
 pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<ExternalRouteV3> {
-    // Fast path: areas without any 0x4005/0x2004 LSAs skip the covering
-    // table construction entirely (summary routes are not needed).
-    let has_externals = lsdb
-        .iter()
-        .any(|(key, _)| key.ls_type == LS_TYPE_AS_EXTERNAL || key.ls_type == LS_TYPE_INTER_ROUTER);
+    external_routes_v3_mode(lsdb, spf_result, false)
+}
+
+/// The full Extended-LSA mode of [`external_routes_v3`] (RFC 8362
+/// §6.1): E-AS-External-LSAs (0xC025) contribute external prefixes
+/// alongside the legacy 0x4005s, E-Inter-Area-Router-LSAs (0xA024)
+/// inter-area ASBR legs alongside the 0x2004s, and the
+/// forwarding-address covering table admits E-Inter-Area-Prefix
+/// summaries (0xA023).
+pub fn external_routes_v3_extended(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<ExternalRouteV3> {
+    external_routes_v3_mode(lsdb, spf_result, true)
+}
+
+fn external_routes_v3_mode(
+    lsdb: &Lsdb,
+    spf_result: &SpfResultV3,
+    extended: bool,
+) -> Vec<ExternalRouteV3> {
+    // Fast path: areas without any external/ASBR-leg LSA skip the
+    // covering table construction entirely (summary routes are not
+    // needed).
+    let has_externals = lsdb.iter().any(|(key, _)| {
+        key.ls_type == LS_TYPE_AS_EXTERNAL
+            || key.ls_type == LS_TYPE_INTER_ROUTER
+            || (extended
+                && (key.ls_type == LS_TYPE_E_AS_EXTERNAL || key.ls_type == LS_TYPE_E_INTER_ROUTER))
+    });
     if !has_externals {
         return Vec::new();
     }
@@ -520,7 +555,8 @@ pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<External
     // body. The best (lowest-cost) leg per ASBR wins.
     let mut asbr_legs: BTreeMap<u32, AsbrLegV3> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LS_TYPE_INTER_ROUTER {
+        let e_iar = key.ls_type == LS_TYPE_E_INTER_ROUTER;
+        if key.ls_type != LS_TYPE_INTER_ROUTER && !(extended && e_iar) {
             continue;
         }
         let Some(&dist) = spf_result
@@ -529,22 +565,31 @@ pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<External
         else {
             continue; // border router itself unreachable
         };
-        let Some(body) = crate::lsa::v3::V3InterAreaRouterBody::decode(&entry.lsa.body) else {
-            continue;
+        let leg = if e_iar {
+            match crate::lsa::EInterAreaRouterLsaBody::decode(&entry.lsa.body) {
+                Some(b) => (b.0.options, b.0.metric, b.0.dest_router_id),
+                None => continue,
+            }
+        } else {
+            match crate::lsa::v3::V3InterAreaRouterBody::decode(&entry.lsa.body) {
+                Some(b) => (b.options, b.metric, b.dest_router_id),
+                None => continue,
+            }
         };
-        if body.metric >= LS_INFINITY {
+        let (_, metric, dest_router_id) = leg;
+        if metric >= LS_INFINITY {
             continue;
         }
         let candidate = AsbrLegV3 {
-            cost: dist + u64::from(body.metric),
+            cost: dist + u64::from(metric),
             border_router: Some(key.advertising_router),
         };
         let not_better = matches!(
-            asbr_legs.get(&body.dest_router_id),
+            asbr_legs.get(&dest_router_id),
             Some(prev) if prev.cost <= candidate.cost
         );
         if !not_better {
-            asbr_legs.insert(body.dest_router_id, candidate);
+            asbr_legs.insert(dest_router_id, candidate);
         }
     }
 
@@ -556,17 +601,36 @@ pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<External
         .iter()
         .map(|r| (r.prefix, r.metric))
         .collect();
-    for r in summary_routes_v3(lsdb, spf_result) {
+    for r in crate::spf::summary_routes_v3_mode(lsdb, spf_result, extended) {
         covering.push((r.prefix, r.metric));
     }
 
     let mut best: BTreeMap<Prefix, ExternalRouteV3> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LS_TYPE_AS_EXTERNAL {
+        let e_ext = key.ls_type == LS_TYPE_E_AS_EXTERNAL;
+        if key.ls_type != LS_TYPE_AS_EXTERNAL && !(extended && e_ext) {
             continue;
         }
-        let Some(body) = V3AsExternalBody::decode(&entry.lsa.body) else {
-            continue;
+        let body = if e_ext {
+            match crate::lsa::EAsExternalLsaBody::decode(&entry.lsa.body) {
+                Some(b) => ExternalBodyV3 {
+                    metric: b.0.metric,
+                    e_bit: b.0.e_bit,
+                    prefix: b.0.prefix,
+                    forwarding_addr: b.0.ipv6_fwd_addr,
+                },
+                None => continue,
+            }
+        } else {
+            match V3AsExternalBody::decode(&entry.lsa.body) {
+                Some(b) => ExternalBodyV3 {
+                    metric: b.metric & crate::lsa::v3::AS_EXT_METRIC_MASK,
+                    e_bit: b.e_bit,
+                    prefix: b.prefix,
+                    forwarding_addr: b.forwarding_addr,
+                },
+                None => continue,
+            }
         };
         if body.metric >= LS_INFINITY {
             continue; // §16.4 (1)
@@ -577,7 +641,7 @@ pub fn external_routes_v3(lsdb: &Lsdb, spf_result: &SpfResultV3) -> Vec<External
             continue;
         }
         let metric_type = ExternalMetricType::from_e_bit(body.e_bit);
-        let external_metric = u64::from(body.metric & crate::lsa::v3::AS_EXT_METRIC_MASK);
+        let external_metric = u64::from(body.metric);
 
         // (2) Locate the ASBR (or the forwarding address) and its cost.
         let (internal_cost, border_router, asbr) = if let Some(fa) = body.forwarding_addr {
@@ -1333,5 +1397,44 @@ mod v3_tests {
         assert_eq!(routes[0].metric, 20);
         assert_eq!(routes[0].metric_type, ExternalMetricType::Type1);
         assert_eq!(routes[0].internal_cost, 10);
+    }
+
+    /// RFC 8362 §4.5: an E-AS-External-LSA (0xC025) installs the
+    /// external route in extended mode (with the forwarding address as
+    /// a sub-TLV); legacy mode ignores it.
+    #[test]
+    fn v3_e_as_external_installs_in_extended_mode() {
+        let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+        let mut db = v3_p2p_lsdb(r1, r2);
+        let p = ext_prefix([0x20, 0x01, 0x0d, 0xb8, 0xca, 0xfe], 48);
+        let dest = V3ExternalDestination::new(p, 100, true);
+        db.install(
+            crate::lsa::originate_v3_e_as_external_lsa(
+                crate::lsa::LS_TYPE_E_AS_EXTERNAL,
+                r2,
+                7,
+                &dest,
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+
+        // Legacy mode: the 0xC025 is invisible.
+        let spf = run_spf_v3(&db, r1);
+        assert!(external_routes_v3(&db, &spf).is_empty());
+
+        // Extended mode: type 2, metric 100, internal leg = SPF
+        // distance 10, next hop = r2's link-local.
+        let spf = crate::spf::run_spf_v3_extended(&db, r1);
+        let routes = external_routes_v3_extended(&db, &spf);
+        assert_eq!(routes.len(), 1);
+        let r = &routes[0];
+        assert_eq!(r.prefix, p);
+        assert_eq!(r.metric, 100);
+        assert_eq!(r.metric_type, ExternalMetricType::Type2);
+        assert_eq!(r.internal_cost, 10);
+        assert_eq!(r.asbr, r2);
+        assert_eq!(r.next_hop, Some(lr_core::addr::IpAddr::V6(fe80(2))));
     }
 }

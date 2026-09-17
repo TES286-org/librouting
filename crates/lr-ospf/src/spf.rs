@@ -52,7 +52,7 @@ pub struct SpfResult {
     pub transit_routes: Vec<SpfRoute>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpfRoute {
     pub prefix: Prefix,
     pub metric: u64,
@@ -925,10 +925,12 @@ mod tests {
 
 use crate::lsa::srv6::locator_route_type;
 use crate::lsa::{
-    decode_v3_inter_area_prefix_body, V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody,
-    V3Prefix, V3RouterLsaBody, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL,
-    LS_TYPE_INTER_PREFIX, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK, LS_TYPE_NETWORK, LS_TYPE_ROUTER,
-    PREFIX_OPT_LA, PREFIX_OPT_NU,
+    decode_v3_inter_area_prefix_body, EIntraAreaPrefixLsaBody, ELinkLsaBody, ENetworkLsaBody,
+    ERouterLsaBody, V3IntraAreaPrefixBody, V3LinkLsaBody, V3NetworkLsaBody, V3Prefix,
+    V3RouterLsaBody, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL,
+    LS_TYPE_E_INTER_PREFIX, LS_TYPE_E_INTRA_PREFIX, LS_TYPE_E_LINK, LS_TYPE_E_NETWORK,
+    LS_TYPE_E_ROUTER, LS_TYPE_INTER_PREFIX, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK, LS_TYPE_NETWORK,
+    LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_NU,
 };
 
 /// One vertex in the v3 SPF tree. Unlike v2, the Network vertex needs
@@ -1020,7 +1022,14 @@ struct V3Topology {
 }
 
 impl V3Topology {
-    fn from_lsdb(lsdb: &Lsdb) -> Self {
+    /// Scan the area LSDB into the per-type maps. `extended` selects
+    /// the RFC 8362 reception mode: in full Extended-LSA mode a
+    /// speaker's E-Router/E-Network/E-Link/E-Intra-Area-Prefix LSA
+    /// overrides its legacy counterpart (§6.1 — the topology rides the
+    /// E-LSAs); a legacy-mode receiver ignores the E-LSAs for the
+    /// calculation entirely (§6.2 — it still stores and re-floods
+    /// them, and the SRv6 database still projects from them).
+    fn from_lsdb(lsdb: &Lsdb, extended: bool) -> Self {
         let mut t = Self {
             router_lsas: BTreeMap::new(),
             router_options: BTreeMap::new(),
@@ -1028,6 +1037,120 @@ impl V3Topology {
             link_locals: BTreeMap::new(),
             intra_prefixes: Vec::new(),
         };
+        if extended {
+            // E-LSA pre-pass: the BTreeMap key order visits the legacy
+            // types (0x2001…) before the Extended ones (0xA021…), so
+            // the Extended shapes are collected first and the legacy
+            // pass below defers to them.
+            let mut e_routers: BTreeSet<u32> = BTreeSet::new();
+            for (key, entry) in lsdb.iter() {
+                match key.ls_type {
+                    x if x == LS_TYPE_E_ROUTER => {
+                        let Some(body) = ERouterLsaBody::decode(&entry.lsa.body) else {
+                            continue;
+                        };
+                        // First E-Router-LSA per router wins (fragmented
+                        // E-Router-LSAs concatenate, RFC 5340 §A.4.3
+                        // semantics carried over by RFC 8362 §4.1 — the
+                        // same first-instance rule the legacy scan uses).
+                        if e_routers.insert(key.advertising_router) {
+                            t.router_options
+                                .insert(key.advertising_router, body.options);
+                            t.router_lsas.insert(
+                                key.advertising_router,
+                                V3RouterLsaBody {
+                                    bits: body.bits,
+                                    options: body.options,
+                                    links: body
+                                        .links
+                                        .iter()
+                                        .map(|l| crate::lsa::v3::V3RouterLink {
+                                            link_type: l.link_type,
+                                            metric: l.metric,
+                                            interface_id: l.interface_id,
+                                            neighbor_interface_id: l.neighbor_interface_id,
+                                            neighbor_router_id: l.neighbor_router_id,
+                                        })
+                                        .collect(),
+                                },
+                            );
+                        }
+                    }
+                    x if x == LS_TYPE_E_NETWORK => {
+                        if let Some(body) = ENetworkLsaBody::decode(&entry.lsa.body) {
+                            t.network_lsas
+                                .entry((key.advertising_router, key.link_state_id))
+                                .or_insert(V3NetworkLsaBody {
+                                    options: body.options,
+                                    routers: body.routers,
+                                });
+                        }
+                    }
+                    x if x == LS_TYPE_E_LINK => {
+                        if let Some(body) = ELinkLsaBody::decode(&entry.lsa.body) {
+                            t.link_locals
+                                .entry((key.advertising_router, key.link_state_id))
+                                .or_insert(body.link_local);
+                        }
+                    }
+                    x if x == LS_TYPE_E_INTRA_PREFIX => {
+                        if let Some(body) = EIntraAreaPrefixLsaBody::decode(&entry.lsa.body) {
+                            t.intra_prefixes.push((
+                                body.ref_type,
+                                body.ref_ls_id,
+                                body.ref_adv_router,
+                                body.prefixes.iter().map(|p| p.prefix.clone()).collect(),
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            // Legacy pass with Extended preference: a speaker that
+            // also (or only) originated legacy LSAs keeps them when it
+            // has no Extended counterpart.
+            for (key, entry) in lsdb.iter() {
+                match key.ls_type {
+                    x if x == LS_TYPE_ROUTER => {
+                        if e_routers.contains(&key.advertising_router) {
+                            continue;
+                        }
+                        if let Some(body) = V3RouterLsaBody::decode(&entry.lsa.body) {
+                            t.router_options
+                                .entry(key.advertising_router)
+                                .or_insert(body.options);
+                            t.router_lsas.entry(key.advertising_router).or_insert(body);
+                        }
+                    }
+                    x if x == LS_TYPE_NETWORK => {
+                        if let Some(body) = V3NetworkLsaBody::decode(&entry.lsa.body) {
+                            t.network_lsas
+                                .entry((key.advertising_router, key.link_state_id))
+                                .or_insert(body);
+                        }
+                    }
+                    x if x == LS_TYPE_LINK => {
+                        if let Some(body) = V3LinkLsaBody::decode(&entry.lsa.body) {
+                            t.link_locals
+                                .entry((key.advertising_router, key.link_state_id))
+                                .or_insert(body.link_local);
+                        }
+                    }
+                    x if x == LS_TYPE_INTRA_PREFIX => {
+                        if let Some(body) = V3IntraAreaPrefixBody::decode(&entry.lsa.body) {
+                            t.intra_prefixes.push((
+                                body.ref_type,
+                                body.ref_ls_id,
+                                body.ref_adv_router,
+                                body.prefixes,
+                            ));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            return t;
+        }
         for (key, entry) in lsdb.iter() {
             match key.ls_type {
                 x if x == LS_TYPE_ROUTER => {
@@ -1108,7 +1231,10 @@ impl V3Topology {
 }
 
 /// Run the OSPFv3 intra-area shortest-path calculation (RFC 5340 §4.8)
-/// starting at the Router vertex `root`.
+/// starting at the Router vertex `root` — legacy-LSA reception mode
+/// (RFC 8362 §6.2: Extended LSAs in the database are stored and
+/// re-flooded but take no part in the calculation). See
+/// [`run_spf_v3_extended`] for the full Extended-LSA mode.
 ///
 /// The tree is built from Router-LSAs (0x2001) and Network-LSAs (0x2002)
 /// exactly as in v2; the differences are the next-hop model and the
@@ -1131,7 +1257,22 @@ impl V3Topology {
 /// the tree but leave the route without a gateway — the embedder
 /// decides whether to keep it.
 pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
-    let topo = V3Topology::from_lsdb(lsdb);
+    run_spf_v3_mode(lsdb, root, false)
+}
+
+/// The full Extended-LSA reception mode of [`run_spf_v3`] (RFC 8362
+/// §6.1): a speaker's E-Router-LSA (0xA021) supplies its vertex links,
+/// E-Network-LSAs (0xA022) the transit vertices, E-Link-LSAs (0x8028)
+/// the link-local resolution and E-Intra-Area-Prefix-LSAs (0xA029) the
+/// prefixes — each overriding the same speaker's legacy LSA when both
+/// exist, so an area migrates router by router. Speakers without
+/// Extended LSAs keep their legacy topology.
+pub fn run_spf_v3_extended(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
+    run_spf_v3_mode(lsdb, root, true)
+}
+
+fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
+    let topo = V3Topology::from_lsdb(lsdb, extended);
     let mut result = SpfResultV3 {
         router_options: topo.router_options.clone(),
         ..SpfResultV3::default()
@@ -1310,8 +1451,10 @@ pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
     let mut best: BTreeMap<Prefix, (SpfRoute, u32)> = BTreeMap::new();
     for (ref_type, ref_ls_id, ref_adv, prefixes) in &topo.intra_prefixes {
         let vertex = match *ref_type {
-            x if x == LS_TYPE_ROUTER => V3VertexId::Router(*ref_adv),
-            x if x == LS_TYPE_NETWORK => V3VertexId::Network(*ref_adv, *ref_ls_id),
+            x if x == LS_TYPE_ROUTER || x == LS_TYPE_E_ROUTER => V3VertexId::Router(*ref_adv),
+            x if x == LS_TYPE_NETWORK || x == LS_TYPE_E_NETWORK => {
+                V3VertexId::Network(*ref_adv, *ref_ls_id)
+            }
             _ => continue,
         };
         let Some(&d) = dist.get(&vertex) else {
@@ -1381,7 +1524,9 @@ pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
 }
 
 /// RFC 5340 §4.8.3: inter-area route calculation from
-/// inter-area-prefix-LSAs (0x2003) — the v3 form of RFC 2328 §16.2.
+/// inter-area-prefix-LSAs (0x2003) — the v3 form of RFC 2328 §16.2 —
+/// in legacy-LSA reception mode (RFC 8362 §6.2). See
+/// [`summary_routes_v3_extended`].
 ///
 /// Every 0x2003 LSA whose advertising border router is reachable
 /// through the intra-area v3 tree contributes a candidate route with
@@ -1403,12 +1548,30 @@ pub fn run_spf_v3(lsdb: &Lsdb, root: u32) -> SpfResultV3 {
 /// same area so that intra-area paths always win for an identical
 /// prefix (§16.2 (b)).
 pub fn summary_routes_v3(lsdb: &Lsdb, result: &SpfResultV3) -> Vec<SpfRoute> {
+    summary_routes_v3_mode(lsdb, result, false)
+}
+
+/// The full Extended-LSA mode of [`summary_routes_v3`] (RFC 8362 §6.1):
+/// E-Inter-Area-Prefix-LSAs (0xA023) contribute alongside the legacy
+/// 0x2003 summaries under the same best-per-prefix rule (a border
+/// router advertises each prefix in exactly one form; a same-prefix
+/// dual advertisement yields an identical route).
+pub fn summary_routes_v3_extended(lsdb: &Lsdb, result: &SpfResultV3) -> Vec<SpfRoute> {
+    summary_routes_v3_mode(lsdb, result, true)
+}
+
+pub(crate) fn summary_routes_v3_mode(
+    lsdb: &Lsdb,
+    result: &SpfResultV3,
+    extended: bool,
+) -> Vec<SpfRoute> {
     // LSInfinity — a summary metric that means "unreachable" (§16.2,
     // §4.8.3 carries it over). Same constant the v2 calculation uses.
     const LS_INFINITY: u32 = 0x00ff_ffff;
     let mut best: BTreeMap<Prefix, (SpfRoute, u32)> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
-        if key.ls_type != LS_TYPE_INTER_PREFIX {
+        let e_type = key.ls_type == LS_TYPE_E_INTER_PREFIX;
+        if key.ls_type != LS_TYPE_INTER_PREFIX && !(extended && e_type) {
             continue;
         }
         // (a) The border router must be reachable via intra-area paths.
@@ -1418,23 +1581,40 @@ pub fn summary_routes_v3(lsdb: &Lsdb, result: &SpfResultV3) -> Vec<SpfRoute> {
         else {
             continue;
         };
-        let Some(body) = decode_v3_inter_area_prefix_body(&entry.lsa.body) else {
-            continue;
+        let body = if e_type {
+            match crate::lsa::EInterAreaPrefixLsaBody::decode(&entry.lsa.body) {
+                Some(b) => (
+                    b.0.metric,
+                    b.0.prefix.prefix_len,
+                    b.0.prefix.options,
+                    b.0.prefix.addr,
+                ),
+                None => continue,
+            }
+        } else {
+            match decode_v3_inter_area_prefix_body(&entry.lsa.body) {
+                Some(b) => (b.metric, b.prefix_len, b.prefix_options, {
+                    let mut addr = [0u8; 16];
+                    let n = b.prefix_bytes.len().min(16);
+                    addr[..n].copy_from_slice(&b.prefix_bytes[..n]);
+                    addr
+                }),
+                None => continue,
+            }
         };
-        if body.metric >= LS_INFINITY {
+        let (metric, prefix_len, prefix_options, addr) = body;
+        if metric >= LS_INFINITY {
             continue;
         }
         // (b) §4.8.3: NU-marked prefixes take no part in the
         // inter-area calculation.
-        if body.prefix_options & PREFIX_OPT_NU != 0 {
+        if prefix_options & PREFIX_OPT_NU != 0 {
             continue;
         }
-        let Some(prefix) = body.to_prefix() else {
-            continue;
-        };
+        let prefix = Prefix::new_v6(addr, prefix_len);
         let candidate = SpfRoute {
             prefix,
-            metric: dist + u64::from(body.metric),
+            metric: dist + u64::from(metric),
             next_hop: result
                 .next_hops
                 .get(&V3VertexId::Router(key.advertising_router))
@@ -2301,5 +2481,348 @@ mod v3_tests {
         assert_eq!(inter.len(), 1);
         assert_eq!(inter[0].metric, 11, "r4's metric-1 candidate wins");
         assert_eq!(inter[0].border_router, Some(r4));
+    }
+
+    // ------------------------------------------------------------------
+    // RFC 8362 Extended-LSA reception
+    // ------------------------------------------------------------------
+
+    /// Helper: the p2p link descriptor for the E-Router-LSA.
+    fn e_link(metric: u16, ifid: u32, nifid: u32, nrid: u32) -> crate::lsa::ERouterLinkTlv {
+        crate::lsa::ERouterLinkTlv {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric,
+            interface_id: ifid,
+            neighbor_interface_id: nifid,
+            neighbor_router_id: nrid,
+            sub_tlvs: Vec::new(),
+        }
+    }
+
+    /// Helper: an Intra-Area-Prefix TLV around one prefix.
+    fn e_prefix_tlv(p: &crate::lsa::v3::V3Prefix) -> crate::lsa::EPrefixTlv {
+        crate::lsa::EPrefixTlv {
+            metric: 0,
+            prefix: p.clone(),
+            sub_tlvs: Vec::new(),
+        }
+    }
+
+    /// RFC 8362 §6.1: the same two-router p2p topology expressed
+    /// entirely in Extended LSAs (E-Router, E-Link, E-IAP referencing
+    /// the E-Router-LSA) computes the same vertices, next hops and
+    /// routes as the legacy encoding — the acceptance shape for the
+    /// E-LSA reception path.
+    #[test]
+    fn v3_e_lsa_topology_matches_legacy() {
+        let r1 = 0x0a00_0001;
+        let r2 = 0x0a00_0002;
+        let ll1 = fe80(1);
+        let ll2 = fe80(2);
+        let p1 = net64(1);
+        let p2 = net64(2);
+        let mut legacy = Lsdb::new();
+        legacy.install(
+            originate_v3_router_lsa(
+                r1,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 3,
+                    neighbor_router_id: r2,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        legacy.install(
+            originate_v3_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 10,
+                    interface_id: 3,
+                    neighbor_interface_id: 5,
+                    neighbor_router_id: r1,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        legacy.install(
+            originate_v3_link_lsa(r1, 5, 1, 0x13, ll1, vec![], None).unwrap(),
+            0,
+        );
+        legacy.install(
+            originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap(),
+            0,
+        );
+        legacy.install(
+            originate_v3_intra_area_prefix_lsa(
+                r1,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                r1,
+                vec![p1.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        legacy.install(
+            originate_v3_intra_area_prefix_lsa(
+                r2,
+                1,
+                LS_TYPE_ROUTER,
+                0,
+                r2,
+                vec![p2.clone()],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        let expect = run_spf_v3(&legacy, r1);
+
+        let mut ext = Lsdb::new();
+        ext.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                r1,
+                ROUTER_BIT_V6,
+                0x13,
+                vec![e_link(10, 5, 3, r2)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        ext.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                vec![e_link(10, 3, 5, r1)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        ext.install(
+            crate::lsa::originate_v3_e_link_lsa(r1, 5, 1, 0x13, ll1, vec![], None).unwrap(),
+            0,
+        );
+        ext.install(
+            crate::lsa::originate_v3_e_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap(),
+            0,
+        );
+        // The E-IAP references the E-Router-LSA type (RFC 8362 §4.8).
+        ext.install(
+            crate::lsa::originate_v3_e_intra_area_prefix_lsa(
+                r1,
+                1,
+                crate::lsa::LS_TYPE_E_ROUTER,
+                0,
+                r1,
+                vec![e_prefix_tlv(&p1)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        ext.install(
+            crate::lsa::originate_v3_e_intra_area_prefix_lsa(
+                r2,
+                1,
+                crate::lsa::LS_TYPE_E_ROUTER,
+                0,
+                r2,
+                vec![e_prefix_tlv(&p2)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+
+        let spf = run_spf_v3_extended(&ext, r1);
+        assert_eq!(spf.vertices, expect.vertices);
+        assert_eq!(spf.next_hops, expect.next_hops);
+        assert_eq!(spf.adjacent_routers, expect.adjacent_routers);
+        assert_eq!(spf.routes, expect.routes);
+        // And the concrete acceptance: r2 at cost 10 through its
+        // link-local, both prefixes present.
+        assert_eq!(spf.vertices.get(&V3VertexId::Router(r2)), Some(&10));
+        assert_eq!(
+            spf.next_hops
+                .get(&V3VertexId::Router(r2))
+                .unwrap()
+                .link_local,
+            IpAddr::V6(ll2)
+        );
+        assert_eq!(spf.routes.len(), 2);
+    }
+
+    /// RFC 8362 §6.1/§6.2: in extended mode a speaker's E-Router-LSA
+    /// overrides its legacy Router-LSA; in legacy mode the E-LSAs take
+    /// no part in the calculation at all.
+    #[test]
+    fn v3_e_lsa_preference_and_legacy_ignoring() {
+        let r1 = 0x0a00_0001;
+        let r2 = 0x0a00_0002;
+        let mut db = Lsdb::new();
+        // r1 legacy only (root).
+        db.install(
+            originate_v3_router_lsa(
+                r1,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 3,
+                    neighbor_router_id: r2,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        // r2 BOTH forms: legacy says metric 10, E says metric 42.
+        db.install(
+            originate_v3_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 10,
+                    interface_id: 3,
+                    neighbor_interface_id: 5,
+                    neighbor_router_id: r1,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                vec![e_link(42, 3, 5, r1)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
+            0,
+        );
+
+        // Extended mode: r2's E-Router-LSA wins — its back-link carries
+        // metric 42, so r2's vertex distance stays 10 (r1's own link
+        // metric) but the E form is what provided the back-link.
+        let ext = run_spf_v3_extended(&db, r1);
+        assert_eq!(ext.vertices.get(&V3VertexId::Router(r2)), Some(&10));
+        assert!(ext.next_hops.contains_key(&V3VertexId::Router(r2)));
+
+        // Legacy mode: the E-LSA is invisible — r2 still at 10 (the
+        // legacy back-link provides bidirectionality).
+        let legacy = run_spf_v3(&db, r1);
+        assert_eq!(legacy.vertices.get(&V3VertexId::Router(r2)), Some(&10));
+
+        // E-only topology under legacy mode: nothing but the root —
+        // §6.2's "stored, re-flooded, not used for the SPF".
+        let mut e_only = Lsdb::new();
+        e_only.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                vec![e_link(10, 3, 5, r1)],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        let none = run_spf_v3(&e_only, r1);
+        assert!(
+            none.vertices.is_empty(),
+            "no vertex relaxes from an E-only topology in legacy mode"
+        );
+        assert!(none.routes.is_empty());
+    }
+
+    /// RFC 8362 §4.3: an E-Inter-Area-Prefix-LSA from a reachable
+    /// border router contributes the inter-area route in extended mode
+    /// and is ignored in legacy mode.
+    #[test]
+    fn summary_routes_v3_e_inter_area_prefix() {
+        let r1 = 0x0a00_0001;
+        let r2 = 0x0a00_0002;
+        let p = Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 9, 0, 0, 0, 0, 0, 0, 0, 0],
+            64,
+        );
+        let mut db = Lsdb::new();
+        db.install(
+            originate_v3_router_lsa(
+                r1,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 5,
+                    interface_id: 1,
+                    neighbor_interface_id: 1,
+                    neighbor_router_id: r2,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            originate_v3_router_lsa(
+                r2,
+                ROUTER_BIT_V6,
+                0x13,
+                &[crate::lsa::v3::V3RouterLink {
+                    link_type: LINK_TYPE_POINTTOPOINT,
+                    metric: 5,
+                    interface_id: 1,
+                    neighbor_interface_id: 1,
+                    neighbor_router_id: r1,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        db.install(
+            crate::lsa::originate_v3_e_inter_area_prefix_lsa(r2, 1, 30, &p, None).unwrap(),
+            0,
+        );
+
+        let spf = run_spf_v3_extended(&db, r1);
+        let inter = summary_routes_v3_extended(&db, &spf);
+        assert_eq!(inter.len(), 1);
+        assert_eq!(inter[0].prefix, p);
+        assert_eq!(inter[0].metric, 35, "dist(r2)=5 + summary metric 30");
+        assert_eq!(inter[0].border_router, Some(r2));
+
+        // Legacy mode ignores the 0xA023.
+        let spf_legacy = run_spf_v3(&db, r1);
+        assert!(summary_routes_v3(&db, &spf_legacy).is_empty());
     }
 }

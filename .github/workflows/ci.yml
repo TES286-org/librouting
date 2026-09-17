@@ -297,6 +297,8 @@ jobs:
         run: ./tests/interop/ospf_sr_adj.sh
       - name: OSPFv3 two-daemon interop (RFC 5340, raw IPv6 sockets, user namespace)
         run: ./tests/interop/ospf6.sh
+      - name: OSPFv3 Extended-LSA interop (RFC 8362, two daemons)
+        run: ./tests/interop/ospf6_e_lsa.sh
       - name: OSPFv3 broadcast interop (RFC 5340 4.1.2 election, lr x lr)
         run: ./tests/interop/ospf6_broadcast.sh
       - name: OSPFv3 x FRR ospf6d interop (RFC 5340, real DBD/LSR exchange)

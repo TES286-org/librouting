@@ -332,30 +332,44 @@ struct OspfAreaState {
 /// default; type-7 LSAs only exist inside NSSAs. The OSPFv3 shapes of
 /// the same classes (0x4005 AS-external, 0x2004 inter-area-router,
 /// 0x2003 inter-area-prefix — RFC 5340 §A.4.5/§A.4.6/§A.4.7) are
-/// filtered identically; v2 and v3 types are distinct 16-bit values so
-/// one match covers both.
+/// filtered identically, and so are their RFC 8362 Extended forms
+/// (0xC025 E-AS-external, 0xA024 E-inter-area-router, 0xA023
+/// E-inter-area-prefix, 0xA027 E-Type-7); v2 and v3 types are
+/// distinct 16-bit values so one match covers both.
 fn ospf_area_accepts(kind: &OspfAreaType, lsa: &Lsa) -> bool {
     match lsa.header.ls_type {
         t if t == LsaTypeV2::AsExternalLsa as u16
             || t == LsaTypeV2::SummaryAsbrLsa as u16
             || t == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
-            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER =>
+            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
+            || t == lr_ospf::lsa::LS_TYPE_E_AS_EXTERNAL
+            || t == lr_ospf::lsa::LS_TYPE_E_INTER_ROUTER =>
         {
             !kind.is_stubby()
         }
-        t if t == LsaTypeV2::NssaExternalLsa as u16 => kind.is_nssa(),
-        t if t == LsaTypeV2::SummaryIpLsa as u16 || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX => {
+        t if t == LsaTypeV2::NssaExternalLsa as u16 || t == lr_ospf::lsa::LS_TYPE_E_TYPE_7 => {
+            kind.is_nssa()
+        }
+        t if t == LsaTypeV2::SummaryIpLsa as u16
+            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX
+            || t == lr_ospf::lsa::LS_TYPE_E_INTER_PREFIX =>
+        {
             if !kind.no_summary() {
                 true
             } else if t == LsaTypeV2::SummaryIpLsa as u16 {
                 // v2: the default summary's LS ID is 0.0.0.0.
                 lsa.header.link_state_id == 0
-            } else {
+            } else if t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX {
                 // v3 (RFC 5340 §4.4.3.4): the LS ID has no addressing
                 // semantics — the default is a zero-length prefix in
                 // the body.
                 lr_ospf::lsa::decode_v3_inter_area_prefix_body(&lsa.body)
                     .is_some_and(|b| b.prefix_len == 0)
+            } else {
+                // The E-Inter-Area-Prefix form (RFC 8362 §4.3): the
+                // default is the zero-length prefix in the TLV.
+                lr_ospf::lsa::EInterAreaPrefixLsaBody::decode(&lsa.body)
+                    .is_some_and(|b| b.0.prefix.prefix_len == 0)
             }
         }
         _ => true,
@@ -400,6 +414,12 @@ fn lsa_topology_changed(
             || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
             || t == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
             || t == lr_ospf::lsa::v3::LS_TYPE_INTRA_PREFIX
+            || t == lr_ospf::lsa::LS_TYPE_E_ROUTER
+            || t == lr_ospf::lsa::LS_TYPE_E_NETWORK
+            || t == lr_ospf::lsa::LS_TYPE_E_INTER_PREFIX
+            || t == lr_ospf::lsa::LS_TYPE_E_INTER_ROUTER
+            || t == lr_ospf::lsa::LS_TYPE_E_AS_EXTERNAL
+            || t == lr_ospf::lsa::LS_TYPE_E_INTRA_PREFIX
     );
     if !is_topology {
         return false;
@@ -1082,6 +1102,14 @@ pub struct DefaultRouter {
     /// embedders). Off by default — fail-closed like every behavioural
     /// flag.
     ospf_srv6_receive: bool,
+    /// RFC 8362 Extended-LSA mode for OSPFv3 (the `ExtendedLSASupport`
+    /// knob of Appendix A): the v3 calculations prefer a speaker's
+    /// E-Router/E-Network/E-Link/E-Intra-Area-Prefix LSAs over its
+    /// legacy shapes and admit the E inter-area/external forms; E-LSAs
+    /// still store and re-flood in legacy mode (§6.2). Off by default
+    /// — a router that never enables it stays byte-identical to a
+    /// pre-E-LSA one.
+    ospf_v3_extended_lsas: bool,
     /// OSPF route table currently published to Loc-RIB: the merged view
     /// across all areas, diffed on every recompute.
     ospf_published: BTreeMap<RouteKey, Route>,
@@ -1255,6 +1283,7 @@ impl Default for DefaultRouter {
             ospf_router_id: None,
             ospf_sr_receive: false,
             ospf_srv6_receive: false,
+            ospf_v3_extended_lsas: false,
             ospf_published: BTreeMap::new(),
             ospf_externals: BTreeMap::new(),
             ospf_v3_externals: BTreeMap::new(),
@@ -4444,6 +4473,7 @@ impl RouterInstance for DefaultRouter {
                             }
                             if lsa.header.ls_type == LsaTypeV2::AsExternalLsa as u16
                                 || lsa.header.ls_type == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
+                                || lsa.header.ls_type == lr_ospf::lsa::LS_TYPE_E_AS_EXTERNAL
                             {
                                 as_scope.push(lsa.clone());
                             }
@@ -4936,7 +4966,11 @@ impl DefaultRouter {
                 // with `ospf_srv6_receive` on, the RFC 9513 §5 SRv6
                 // locators; then the inter-area summaries (§4.8.3,
                 // 0x2003) and AS externals (§4.8.5, 0x4005).
-                let spf3 = spf::run_spf_v3(&area.lsdb, router_id);
+                let spf3 = if self.ospf_v3_extended_lsas {
+                    spf::run_spf_v3_extended(&area.lsdb, router_id)
+                } else {
+                    spf::run_spf_v3(&area.lsdb, router_id)
+                };
                 let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
                     table
@@ -4963,7 +4997,11 @@ impl DefaultRouter {
                 // intra-area paths win per prefix (§16.2 (b)), and
                 // `no_summary` areas derive only the default (the same
                 // rule the v2 area table applies).
-                for r in spf::summary_routes_v3(&area.lsdb, &spf3) {
+                for r in if self.ospf_v3_extended_lsas {
+                    spf::summary_routes_v3_extended(&area.lsdb, &spf3)
+                } else {
+                    spf::summary_routes_v3(&area.lsdb, &spf3)
+                } {
                     if area.kind.no_summary() && r.prefix.prefix_len != 0 {
                         continue;
                     }
@@ -4981,7 +5019,11 @@ impl DefaultRouter {
                 // resolves the §16.4 (6) preference among candidates, and
                 // the entry only fills prefixes without an internal or
                 // inter-area route (§11 path preference).
-                for r in lr_ospf::external::external_routes_v3(&area.lsdb, &spf3) {
+                for r in if self.ospf_v3_extended_lsas {
+                    lr_ospf::external::external_routes_v3_extended(&area.lsdb, &spf3)
+                } else {
+                    lr_ospf::external::external_routes_v3(&area.lsdb, &spf3)
+                } {
                     table.entry(r.prefix).or_insert_with(|| OspfTableEntry {
                         metric: r.metric,
                         kind: OspfKind::External {
@@ -5419,7 +5461,16 @@ impl DefaultRouter {
             .ospf_areas
             .iter()
             .filter(|(_, area)| area.protocol == Protocol::Ospfv3)
-            .map(|(id, area)| (*id, spf::run_spf_v3(&area.lsdb, router_id)))
+            .map(|(id, area)| {
+                (
+                    *id,
+                    if self.ospf_v3_extended_lsas {
+                        spf::run_spf_v3_extended(&area.lsdb, router_id)
+                    } else {
+                        spf::run_spf_v3(&area.lsdb, router_id)
+                    },
+                )
+            })
             .collect();
         let tables: BTreeMap<u32, BTreeMap<Prefix, OspfTableEntry>> = self
             .ospf_areas
@@ -5432,7 +5483,11 @@ impl DefaultRouter {
                     t.entry(r.prefix)
                         .or_insert_with(|| OspfTableEntry::intra_v3(r.metric, r.next_hop));
                 }
-                for r in spf::summary_routes_v3(&area.lsdb, spf3) {
+                for r in if self.ospf_v3_extended_lsas {
+                    spf::summary_routes_v3_extended(&area.lsdb, spf3)
+                } else {
+                    spf::summary_routes_v3(&area.lsdb, spf3)
+                } {
                     if area.kind.no_summary() && r.prefix.prefix_len != 0 {
                         continue;
                     }
@@ -6924,6 +6979,24 @@ impl DefaultRouter {
     /// [`Self::set_ospf_srv6_receive`]).
     pub fn ospf_srv6_receive(&self) -> bool {
         self.ospf_srv6_receive
+    }
+
+    /// Enable the RFC 8362 Extended-LSA mode for the OSPFv3
+    /// calculations (`ExtendedLSASupport`, Appendix A): the v3 SPF,
+    /// inter-area and external calculations prefer a speaker's
+    /// Extended LSAs and admit the E inter-area/external forms. Set
+    /// once at startup, before sessions feed the router — the flag is
+    /// read at every recompute, but origination switches belong to the
+    /// embedder (the daemon pairs this with its own E-LSA
+    /// origination).
+    pub fn set_ospf_v3_extended_lsas(&mut self, on: bool) {
+        self.ospf_v3_extended_lsas = on;
+    }
+
+    /// Whether the RFC 8362 Extended-LSA mode is enabled (see
+    /// [`Self::set_ospf_v3_extended_lsas`]).
+    pub fn ospf_v3_extended_lsas(&self) -> bool {
+        self.ospf_v3_extended_lsas
     }
 
     /// The IGP algorithms this router supports for SRv6 locator

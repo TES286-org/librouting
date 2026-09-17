@@ -804,6 +804,12 @@ pub(crate) struct DaemonConfig {
     /// RFC 9513 §2 (`[ospf] srv6_o_flag`): advertise the RFC 9259
     /// SRH O-flag in the SRv6 Capabilities TLV. Off by default.
     pub ospf_srv6_o_flag: bool,
+    /// RFC 8362 Extended-LSA mode (`[ospf] extended_lsas`, OSPFv3
+    /// only): originate the Extended LSAs and use them for the SPF
+    /// computation — the `ExtendedLSASupport` knob of Appendix A. Off
+    /// by default (fail closed; a router that never enables it stays
+    /// byte-identical to a pre-E-LSA one).
+    pub ospf_extended_lsas: bool,
     /// Node MSD limits advertised in the RI LSA's Node MSD TLV when
     /// set (RFC 8476 §2 carrier, RFC 9352 §4 MSD types).
     pub ospf_srv6_max_sl: Option<u8>,
@@ -991,6 +997,7 @@ impl DaemonConfig {
             ospf_sr_receive: false,
             ospf_srv6_receive: false,
             ospf_srv6_o_flag: false,
+            ospf_extended_lsas: false,
             ospf_graceful_restart: false,
             ospf_grace_period: lr_ospf::gr::DEFAULT_GRACE_PERIOD_SECS,
             ospf_gr_helper: true,
@@ -1412,6 +1419,7 @@ impl DaemonConfig {
             && self.ospf_srv6_locators.is_empty()
             && !self.ospf_srv6_receive
             && !self.ospf_srv6_o_flag
+            && !self.ospf_extended_lsas
             && self.ospf_srv6_max_sl.is_none()
             && self.ospf_srv6_max_end_pop.is_none()
             && self.ospf_srv6_max_h_encaps.is_none()
@@ -1465,13 +1473,14 @@ impl DaemonConfig {
             && (!self.ospf_srv6_locators.is_empty()
                 || self.ospf_srv6_receive
                 || self.ospf_srv6_o_flag
+                || self.ospf_extended_lsas
                 || self.ospf_srv6_max_sl.is_some()
                 || self.ospf_srv6_max_end_pop.is_some()
                 || self.ospf_srv6_max_h_encaps.is_some()
                 || self.ospf_srv6_max_end_d.is_some())
         {
             return Err(
-                "SRv6 configuration (srv6_*) is an OSPFv3 extension (RFC 9513); set [ospf] version = \"v3\""
+                "SRv6/Extended-LSA configuration (srv6_*, extended_lsas) is OSPFv3-only (RFC 9513/8362); set [ospf] version = \"v3\""
                     .to_string(),
             );
         }
@@ -3022,6 +3031,12 @@ fn apply_ospf_key(
             "srv6_o_flag" => {
                 cfg.ospf_srv6_o_flag = parse_bool(value);
             }
+            // RFC 8362 Extended-LSA mode (OSPFv3): originate the
+            // Extended LSAs and use them for the SPF computation —
+            // the `ExtendedLSASupport` knob of Appendix A.
+            "extended_lsas" => {
+                cfg.ospf_extended_lsas = parse_bool(value);
+            }
             // RFC 8476 Node MSD limits (RFC 9352 §4 MSD types 41/42/
             // 44/45), advertised in the v3 RI LSA when set.
             "srv6_max_sl" => {
@@ -3951,6 +3966,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.ospf_srv6_o_flag = true;
                 i += 1;
             }
+            "--ospf-extended-lsas" => {
+                cfg.ospf_extended_lsas = true;
+                i += 1;
+            }
             "--rpki-cache" if i + 1 < args.len() => {
                 // RFC 8210 RTR cache transport address ("host:port").
                 // Finalized (syntax-checked) with the TOML path.
@@ -4496,6 +4515,27 @@ mod tests {
         parse_toml_subset("[ospf]\nsrv6_receive = true\n", &mut cfg).unwrap();
         let err = cfg.finalize().unwrap_err();
         assert!(err.contains("OSPFv3"), "fail-closed error: {err}");
+        // The RFC 8362 Extended-LSA knob is OSPFv3-only too.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[ospf]\nextended_lsas = true\n", &mut cfg).unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("OSPFv3"), "fail-closed error: {err}");
+    }
+
+    #[test]
+    fn ospf_extended_lsas_parses_under_v3() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[ospf]\nversion = \"v3\"\nextended_lsas = true\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert!(cfg.ospf_extended_lsas);
+        // Default off — a v3 config without the knob stays legacy.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset("[ospf]\nversion = \"v3\"\n", &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+        assert!(!cfg.ospf_extended_lsas);
     }
 
     #[test]

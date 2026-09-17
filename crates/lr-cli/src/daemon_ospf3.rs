@@ -86,6 +86,11 @@ use lr_ospf::lsa::v3::{
     ROUTER_BIT_B, ROUTER_BIT_E, ROUTER_BIT_V6,
 };
 use lr_ospf::lsa::{
+    originate_v3_e_intra_area_prefix_lsa, originate_v3_e_link_lsa, originate_v3_e_network_lsa,
+    originate_v3_e_router_lsa, EPrefixTlv, ERouterLinkTlv, LS_TYPE_E_INTRA_PREFIX, LS_TYPE_E_LINK,
+    LS_TYPE_E_NETWORK, LS_TYPE_E_ROUTER,
+};
+use lr_ospf::lsa::{
     originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorTlv,
     Srv6SidStructure, PREFIX_OPT_AC, PREFIX_OPT_LA, PREFIX_OPT_NU, SRV6_CAP_O_FLAG,
 };
@@ -139,6 +144,34 @@ fn lsa_seq_floor(
         (Some(a), Some(b)) => Some(a.max(b)),
         (a, b) => a.or(b),
     }
+}
+
+/// The Router-Link TLV form of a legacy link descriptor (RFC 8362
+/// §3.2) — the E-Router-LSA origination switch.
+fn e_router_links(links: &[lr_ospf::lsa::v3::V3RouterLink]) -> Vec<ERouterLinkTlv> {
+    links
+        .iter()
+        .map(|l| ERouterLinkTlv {
+            link_type: l.link_type,
+            metric: l.metric,
+            interface_id: l.interface_id,
+            neighbor_interface_id: l.neighbor_interface_id,
+            neighbor_router_id: l.neighbor_router_id,
+            sub_tlvs: Vec::new(),
+        })
+        .collect()
+}
+
+/// The Intra-Area-Prefix TLV form of legacy prefixes (RFC 8362 §3.7).
+fn e_prefix_tlvs(prefixes: Vec<V3Prefix>) -> Vec<EPrefixTlv> {
+    prefixes
+        .into_iter()
+        .map(|p| EPrefixTlv {
+            metric: 0,
+            prefix: p,
+            sub_tlvs: Vec::new(),
+        })
+        .collect()
 }
 
 /// The v3-extended Debug wire trace (`LR_OSPF_DEBUG`): walk a packet
@@ -278,6 +311,11 @@ struct Ospf3Daemon {
     /// RFC 9513 origination state (`None` = SRv6 off — the daemon stays
     /// byte-identical to a pre-SRv6 one).
     srv6: Option<Srv6Origination>,
+    /// RFC 8362 Extended-LSA mode (`[ospf] extended_lsas`): originate
+    /// the E-Router/E-Network/E-Link/E-Intra-Area-Prefix LSAs instead
+    /// of the legacy shapes (`ExtendedLSASupport`, Appendix A). Off by
+    /// default — byte-identical to a pre-E-LSA daemon.
+    extended_lsas: bool,
     router_id: RouterId,
     /// Snapshot for the runtime API `status` command.
     status: Arc<Mutex<Vec<String>>>,
@@ -477,6 +515,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         srv6_lsa_seq: BTreeMap::new(),
         last_orig_ms: BTreeMap::new(),
         srv6: Srv6Origination::maybe_from_config(cfg),
+        extended_lsas: cfg.ospf_extended_lsas,
         router_id: rid,
         status: Arc::new(Mutex::new(Vec::new())),
         gr_helper_enabled: cfg.ospf_gr_helper,
@@ -568,6 +607,13 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             // the per-node SRv6 database and install the §5 locator
             // routes (fail-closed off by default, like `sr_receive`).
             router.set_ospf_srv6_receive(true);
+        }
+        if cfg.ospf_extended_lsas {
+            // RFC 8362 Extended-LSA mode (Appendix A
+            // `ExtendedLSASupport`): the v3 calculations prefer a
+            // speaker's Extended LSAs; the origination switch lives in
+            // this module's self-origination walk.
+            router.set_ospf_v3_extended_lsas(true);
         }
         for area in daemon.interfaces.iter().map(|i| i.area) {
             if daemon.anchors.contains_key(&area) {
@@ -1946,23 +1992,41 @@ impl Ospf3Daemon {
                 })
                 .collect();
             let key = (area, iface.interface_id);
+            let link_lsa_type = if self.extended_lsas {
+                LS_TYPE_E_LINK
+            } else {
+                LS_TYPE_LINK
+            };
             let seq = lsa_seq_floor(
                 router,
                 area,
-                LS_TYPE_LINK,
+                link_lsa_type,
                 iface.interface_id,
                 self.router_id.as_u32(),
                 self.link_lsa_seq.get(&key).copied(),
             );
-            match originate_v3_link_lsa(
-                self.router_id.as_u32(),
-                iface.interface_id,
-                1,
-                OSPF_V3_OPTIONS_DEFAULT,
-                iface.link_local.octets(),
-                prefixes,
-                seq,
-            ) {
+            let originated = if self.extended_lsas {
+                originate_v3_e_link_lsa(
+                    self.router_id.as_u32(),
+                    iface.interface_id,
+                    1,
+                    OSPF_V3_OPTIONS_DEFAULT,
+                    iface.link_local.octets(),
+                    e_prefix_tlvs(prefixes),
+                    seq,
+                )
+            } else {
+                originate_v3_link_lsa(
+                    self.router_id.as_u32(),
+                    iface.interface_id,
+                    1,
+                    OSPF_V3_OPTIONS_DEFAULT,
+                    iface.link_local.octets(),
+                    prefixes,
+                    seq,
+                )
+            };
+            match originated {
                 Some(lsa) => {
                     self.link_lsa_seq.insert(key, lsa.header.ls_sequence_number);
                     lsas.push(lsa);
@@ -2069,21 +2133,37 @@ impl Ospf3Daemon {
                         }
                         let mut attached = vec![self.router_id.as_u32()];
                         attached.extend_from_slice(&established);
+                        let net_lsa_type = if self.extended_lsas {
+                            LS_TYPE_E_NETWORK
+                        } else {
+                            LS_TYPE_NETWORK
+                        };
                         let net_seq = lsa_seq_floor(
                             router,
                             area,
-                            LS_TYPE_NETWORK,
+                            net_lsa_type,
                             iface.interface_id,
                             self.router_id.as_u32(),
                             iface.net_lsa_seq,
                         );
-                        match originate_v3_network_lsa(
-                            self.router_id.as_u32(),
-                            iface.interface_id,
-                            options,
-                            &attached,
-                            net_seq,
-                        ) {
+                        let net_originated = if self.extended_lsas {
+                            originate_v3_e_network_lsa(
+                                self.router_id.as_u32(),
+                                iface.interface_id,
+                                options,
+                                &attached,
+                                net_seq,
+                            )
+                        } else {
+                            originate_v3_network_lsa(
+                                self.router_id.as_u32(),
+                                iface.interface_id,
+                                options,
+                                &attached,
+                                net_seq,
+                            )
+                        };
+                        match net_originated {
                             Some(lsa) => {
                                 iface.net_lsa_seq = Some(lsa.header.ls_sequence_number);
                                 iface.net_lsa_active = true;
@@ -2099,13 +2179,24 @@ impl Ospf3Daemon {
                         // originated (§14.1 MaxAge reflood, the v2
                         // daemon pattern).
                         if let Some(seq) = iface.net_lsa_seq {
-                            if let Some(mut lsa) = originate_v3_network_lsa(
-                                self.router_id.as_u32(),
-                                iface.interface_id,
-                                OSPF_V3_OPTIONS_DEFAULT,
-                                &[self.router_id.as_u32()],
-                                Some(seq),
-                            ) {
+                            let flushed = if self.extended_lsas {
+                                originate_v3_e_network_lsa(
+                                    self.router_id.as_u32(),
+                                    iface.interface_id,
+                                    OSPF_V3_OPTIONS_DEFAULT,
+                                    &[self.router_id.as_u32()],
+                                    Some(seq),
+                                )
+                            } else {
+                                originate_v3_network_lsa(
+                                    self.router_id.as_u32(),
+                                    iface.interface_id,
+                                    OSPF_V3_OPTIONS_DEFAULT,
+                                    &[self.router_id.as_u32()],
+                                    Some(seq),
+                                )
+                            };
+                            if let Some(mut lsa) = flushed {
                                 lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
                                 lsa.finalize();
                                 lsas.push(lsa);
@@ -2134,21 +2225,37 @@ impl Ospf3Daemon {
         if router.ospf_router_lsa_flags(area).border {
             bits |= ROUTER_BIT_B;
         }
+        let router_lsa_type = if self.extended_lsas {
+            LS_TYPE_E_ROUTER
+        } else {
+            LS_TYPE_ROUTER
+        };
         let seq = lsa_seq_floor(
             router,
             area,
-            LS_TYPE_ROUTER,
+            router_lsa_type,
             0,
             self.router_id.as_u32(),
             self.router_lsa_seq.get(&area).copied(),
         );
-        match originate_v3_router_lsa(
-            self.router_id.as_u32(),
-            bits,
-            OSPF_V3_OPTIONS_DEFAULT,
-            &links,
-            seq,
-        ) {
+        let router_originated = if self.extended_lsas {
+            originate_v3_e_router_lsa(
+                self.router_id.as_u32(),
+                bits,
+                OSPF_V3_OPTIONS_DEFAULT,
+                e_router_links(&links),
+                seq,
+            )
+        } else {
+            originate_v3_router_lsa(
+                self.router_id.as_u32(),
+                bits,
+                OSPF_V3_OPTIONS_DEFAULT,
+                &links,
+                seq,
+            )
+        };
+        match router_originated {
             Some(lsa) => {
                 self.router_lsa_seq
                     .insert(area, lsa.header.ls_sequence_number);
@@ -2178,23 +2285,41 @@ impl Ospf3Daemon {
                 }
                 if !prefixes.is_empty() {
                     let iap_key = (area, 1u32);
+                    let iap_lsa_type = if self.extended_lsas {
+                        LS_TYPE_E_INTRA_PREFIX
+                    } else {
+                        LS_TYPE_INTRA_PREFIX
+                    };
                     let iap_seq = lsa_seq_floor(
                         router,
                         area,
-                        LS_TYPE_INTRA_PREFIX,
+                        iap_lsa_type,
                         1,
                         self.router_id.as_u32(),
                         self.iap_lsa_seq.get(&iap_key).copied(),
                     );
-                    if let Some(iap) = originate_v3_intra_area_prefix_lsa(
-                        self.router_id.as_u32(),
-                        1,
-                        LS_TYPE_ROUTER,
-                        0,
-                        self.router_id.as_u32(),
-                        prefixes,
-                        iap_seq,
-                    ) {
+                    let iap_originated = if self.extended_lsas {
+                        originate_v3_e_intra_area_prefix_lsa(
+                            self.router_id.as_u32(),
+                            1,
+                            LS_TYPE_E_ROUTER,
+                            0,
+                            self.router_id.as_u32(),
+                            e_prefix_tlvs(prefixes),
+                            iap_seq,
+                        )
+                    } else {
+                        originate_v3_intra_area_prefix_lsa(
+                            self.router_id.as_u32(),
+                            1,
+                            LS_TYPE_ROUTER,
+                            0,
+                            self.router_id.as_u32(),
+                            prefixes,
+                            iap_seq,
+                        )
+                    };
+                    if let Some(iap) = iap_originated {
                         self.iap_lsa_seq
                             .insert(iap_key, iap.header.ls_sequence_number);
                         lsas.push(iap);
@@ -2288,23 +2413,41 @@ impl Ospf3Daemon {
                 // ifindex with a marker bit keeps per-segment instances
                 // apart from the router-referenced LS ID 1.
                 let iap_key = (area, iface.interface_id | 1 << 31);
+                let iap_lsa_type = if self.extended_lsas {
+                    LS_TYPE_E_INTRA_PREFIX
+                } else {
+                    LS_TYPE_INTRA_PREFIX
+                };
                 let iap_seq = lsa_seq_floor(
                     router,
                     area,
-                    LS_TYPE_INTRA_PREFIX,
+                    iap_lsa_type,
                     iap_key.1,
                     self.router_id.as_u32(),
                     self.iap_lsa_seq.get(&iap_key).copied(),
                 );
-                if let Some(iap) = originate_v3_intra_area_prefix_lsa(
-                    self.router_id.as_u32(),
-                    iap_key.1,
-                    LS_TYPE_NETWORK,
-                    iface.interface_id,
-                    self.router_id.as_u32(),
-                    prefixes,
-                    iap_seq,
-                ) {
+                let iap_originated = if self.extended_lsas {
+                    originate_v3_e_intra_area_prefix_lsa(
+                        self.router_id.as_u32(),
+                        iap_key.1,
+                        LS_TYPE_E_NETWORK,
+                        iface.interface_id,
+                        self.router_id.as_u32(),
+                        e_prefix_tlvs(prefixes),
+                        iap_seq,
+                    )
+                } else {
+                    originate_v3_intra_area_prefix_lsa(
+                        self.router_id.as_u32(),
+                        iap_key.1,
+                        LS_TYPE_NETWORK,
+                        iface.interface_id,
+                        self.router_id.as_u32(),
+                        prefixes,
+                        iap_seq,
+                    )
+                };
+                if let Some(iap) = iap_originated {
                     self.iap_lsa_seq
                         .insert(iap_key, iap.header.ls_sequence_number);
                     iface.net_iap_seq = Some(iap.header.ls_sequence_number);
@@ -2316,15 +2459,28 @@ impl Ospf3Daemon {
                 // the network-referenced IAP — the new DR advertises
                 // the segment's prefixes (§4.4.3.5).
                 if let Some(seq) = iface.net_iap_seq {
-                    if let Some(mut lsa) = originate_v3_intra_area_prefix_lsa(
-                        self.router_id.as_u32(),
-                        iface.interface_id | 1 << 31,
-                        LS_TYPE_NETWORK,
-                        iface.interface_id,
-                        self.router_id.as_u32(),
-                        Vec::new(),
-                        Some(seq),
-                    ) {
+                    let flushed = if self.extended_lsas {
+                        originate_v3_e_intra_area_prefix_lsa(
+                            self.router_id.as_u32(),
+                            iface.interface_id | 1 << 31,
+                            LS_TYPE_E_NETWORK,
+                            iface.interface_id,
+                            self.router_id.as_u32(),
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    } else {
+                        originate_v3_intra_area_prefix_lsa(
+                            self.router_id.as_u32(),
+                            iface.interface_id | 1 << 31,
+                            LS_TYPE_NETWORK,
+                            iface.interface_id,
+                            self.router_id.as_u32(),
+                            Vec::new(),
+                            Some(seq),
+                        )
+                    };
+                    if let Some(mut lsa) = flushed {
                         lsa.header.ls_age = lr_ospf::lsdb::MAX_AGE_SECS;
                         lsa.finalize();
                         lsas.push(lsa);
