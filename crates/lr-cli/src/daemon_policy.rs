@@ -432,6 +432,11 @@ pub(crate) struct FilterImportHook {
     /// no longer re-walks the AST.
     pub compiled: lr_policy::filter::bytecode::CompiledFilter,
     pub ctx: std::sync::Arc<DaemonFilterContext>,
+    /// Latency histogram (ROADMAP-v3 D12.4). `None` unless the
+    /// metrics endpoint is configured — the per-route timing (two
+    /// `Instant::now()` calls) is opt-in so the hot path stays free
+    /// of observability cost when nobody is scraping.
+    pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
 }
 
 impl lr_policy::hooks::ImportHook for FilterImportHook {
@@ -439,11 +444,31 @@ impl lr_policy::hooks::ImportHook for FilterImportHook {
         &self.filter.name
     }
     fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
-        match lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref()) {
-            EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
-            EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
-            EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
+        match &self.stats {
+            Some(hist) => {
+                let t0 = std::time::Instant::now();
+                let verdict =
+                    lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref());
+                hist.record(t0.elapsed().as_nanos() as u64);
+                map_verdict(verdict)
+            }
+            None => map_verdict(lr_policy::filter::bytecode::execute(
+                &self.compiled,
+                route,
+                self.ctx.as_ref(),
+            )),
         }
+    }
+}
+
+/// Map an [`EvalResult`] onto the hook verdict shared by both
+/// directions: `accept`/`fallthrough` keep the route, `reject` drops
+/// it.
+fn map_verdict(result: EvalResult) -> lr_policy::hooks::HookVerdict {
+    match result {
+        EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
+        EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
+        EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
     }
 }
 
@@ -454,6 +479,8 @@ pub(crate) struct FilterExportHook {
     /// See [`FilterImportHook::compiled`].
     pub compiled: lr_policy::filter::bytecode::CompiledFilter,
     pub ctx: std::sync::Arc<DaemonFilterContext>,
+    /// See [`FilterImportHook::stats`].
+    pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
 }
 
 impl lr_policy::hooks::ExportHook for FilterExportHook {
@@ -461,10 +488,19 @@ impl lr_policy::hooks::ExportHook for FilterExportHook {
         &self.filter.name
     }
     fn on_export(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
-        match lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref()) {
-            EvalResult::Accept => lr_policy::hooks::HookVerdict::Keep,
-            EvalResult::Reject(_) => lr_policy::hooks::HookVerdict::Drop,
-            EvalResult::Fallthrough => lr_policy::hooks::HookVerdict::Keep,
+        match &self.stats {
+            Some(hist) => {
+                let t0 = std::time::Instant::now();
+                let verdict =
+                    lr_policy::filter::bytecode::execute(&self.compiled, route, self.ctx.as_ref());
+                hist.record(t0.elapsed().as_nanos() as u64);
+                map_verdict(verdict)
+            }
+            None => map_verdict(lr_policy::filter::bytecode::execute(
+                &self.compiled,
+                route,
+                self.ctx.as_ref(),
+            )),
         }
     }
 }
@@ -607,5 +643,48 @@ mod tests {
         );
         let filters = build_filters(&cfg).unwrap();
         assert_eq!(filters.len(), 1);
+    }
+
+    /// The D12.4 hook timing: a hook built with a histogram records
+    /// one observation per evaluation (count and sum both move), and
+    /// the verdict is unchanged by the timing wrapper.
+    #[test]
+    fn filter_hook_records_latency() {
+        use lr_core::rib::Route;
+        use lr_policy::hooks::{HookVerdict, ImportHook};
+
+        let f = dsl::compile("timed", "if net ~ [ 192.0.2.0/24 ] then accept; reject;").unwrap();
+        let ctx = std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::new(
+            lr_bgp::RoaStore::new(),
+        )));
+        let hist = std::sync::Arc::new(crate::metrics::DurationHistogram::new());
+        let hook = FilterImportHook {
+            compiled: lr_policy::filter::bytecode::compile(&f),
+            filter: f,
+            ctx,
+            stats: Some(std::sync::Arc::clone(&hist)),
+        };
+
+        let mut route = Route {
+            key: lr_core::rib::RouteKey::new(
+                lr_core::addr::Prefix::new_v4([192, 0, 2, 0], 24),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            ),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        assert!(matches!(hook.on_import(&mut route), HookVerdict::Keep));
+        assert_eq!(hist.count(), 1, "one evaluation recorded");
+
+        let mut other = route.clone();
+        other.key.prefix = lr_core::addr::Prefix::new_v4([198, 51, 100, 0], 24);
+        assert!(matches!(hook.on_import(&mut other), HookVerdict::Drop));
+        assert_eq!(hist.count(), 2, "second evaluation recorded");
     }
 }

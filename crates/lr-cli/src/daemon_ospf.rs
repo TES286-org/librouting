@@ -47,9 +47,10 @@
 //! remains the default so existing labs are unaffected.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use lr_core::addr::RouterId;
@@ -708,6 +709,8 @@ pub(super) fn run_ospf_daemon(
             running: Arc::new(AtomicBool::new(true)),
             status_lines: Arc::clone(&status_lines),
             roa_len: None,
+            filter_metrics: Mutex::new(None),
+            session_labels: Arc::new(Mutex::new(HashMap::new())),
         }),
     };
     let running = Arc::clone(&runtime.running);

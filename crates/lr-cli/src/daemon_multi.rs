@@ -51,6 +51,7 @@
 //! running flag and returns the failing engine's exit code) — a
 //! half-configured daemon never serves traffic.
 
+use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{sync_channel, Receiver, SyncSender};
@@ -254,6 +255,8 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             move || status.lines()
         }),
         roa_len: None,
+        filter_metrics: Mutex::new(None),
+        session_labels: Arc::new(Mutex::new(HashMap::new())),
     });
 
     println!("librouting daemon (lr-daemon)");

@@ -67,6 +67,7 @@
 //! router pipeline.
 
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::net::Ipv6Addr;
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex, RwLock};
@@ -630,6 +631,8 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             status_lines: Arc::clone(&status_lines),
             roa_len: None,
+            filter_metrics: Mutex::new(None),
+            session_labels: Arc::new(Mutex::new(HashMap::new())),
         }),
     };
     let running = Arc::clone(&runtime.running);

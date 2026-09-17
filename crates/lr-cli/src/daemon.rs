@@ -683,6 +683,29 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         }
     }
 
+    // ---- D12.4 observability: filter histograms + session labels. ----
+    // The registry exists only when the metrics endpoint is
+    // configured — the filter hooks then record per-route evaluation
+    // latency into it; without `--metrics-addr` the hooks carry no
+    // histogram and the hot path stays free of timing cost.
+    let mut filter_registry = cfg
+        .metrics_addr
+        .as_ref()
+        .map(|_| metrics::FilterMetricsRegistry::new());
+    // Handle → configured peer label (name / remote / address,
+    // whichever the operator wrote). Bidirectional peers carry two
+    // sessions per neighbor (RFC 4271 §6.8 collision resolution);
+    // the inbound challenger gets an explicit "(inbound)" suffix so
+    // the metrics `peer=` label stays readable while the `session=`
+    // label keeps the series unique.
+    let mut session_label_map: HashMap<u64, String> = HashMap::new();
+    for e in &entries {
+        session_label_map.insert(e.handle.0, e.spec.label().to_string());
+        if let Some(h2) = e.handle_in {
+            session_label_map.insert(h2.0, format!("{} (inbound)", e.spec.label()));
+        }
+    }
+
     // ---- Policy (route-maps / lists from the TOML config). ----
     // Registered before any session comes up so the initial table
     // dump already flows through per-peer import/export policy.
@@ -775,6 +798,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     compiled: lr_policy::filter::bytecode::compile(&f),
                     filter: f,
                     ctx,
+                    stats: filter_registry
+                        .as_mut()
+                        .map(|r| r.register(metrics::FilterDirection::Import, "__roa_validate")),
                 };
                 let mut r = router.write().unwrap();
                 r.hooks_mut().import.push(Box::new(hook));
@@ -814,6 +840,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     compiled: lr_policy::filter::bytecode::compile(f),
                     filter: (*f).clone(),
                     ctx: std::sync::Arc::clone(&ctx),
+                    stats: filter_registry
+                        .as_mut()
+                        .map(|r| r.register(metrics::FilterDirection::Import, name)),
                 };
                 let _ = session.handle.0;
                 {
@@ -833,6 +862,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     compiled: lr_policy::filter::bytecode::compile(f),
                     filter: (*f).clone(),
                     ctx: std::sync::Arc::clone(&ctx),
+                    stats: filter_registry
+                        .as_mut()
+                        .map(|r| r.register(metrics::FilterDirection::Export, name)),
                 };
                 {
                     let mut r = router.write().unwrap();
@@ -1159,7 +1191,16 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         )
     });
     let runtime = match &host {
-        Some(h) => Arc::clone(&h.runtime),
+        Some(h) => {
+            // Embedded (multi-protocol supervisor): hand the D12.4
+            // observability state to the supervisor's runtime before
+            // reporting Started — it spawns the metrics endpoint only
+            // after every engine is up, so the registry and labels are
+            // in place by the first scrape.
+            *h.runtime.filter_metrics.lock().unwrap() = filter_registry.map(Arc::new);
+            *h.runtime.session_labels.lock().unwrap() = session_label_map;
+            Arc::clone(&h.runtime)
+        }
         None => Arc::new(Runtime {
             reload: Arc::new({
                 let router = Arc::clone(&router);
@@ -1192,6 +1233,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 let roa_store = Arc::clone(&roa_store);
                 move || roa_store.len()
             })),
+            filter_metrics: Mutex::new(filter_registry.map(Arc::new)),
+            session_labels: Arc::new(Mutex::new(session_label_map)),
         }),
     };
 
@@ -2526,6 +2569,8 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         running: Arc::clone(&running),
         status_lines: Arc::new(Vec::new),
         roa_len: None,
+        filter_metrics: Mutex::new(None),
+        session_labels: Arc::new(Mutex::new(HashMap::new())),
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
         eprintln!("daemon: {}", e);
@@ -2895,6 +2940,8 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             running: Arc::new(AtomicBool::new(true)),
             status_lines: Arc::new(Vec::new),
             roa_len: None,
+            filter_metrics: Mutex::new(None),
+            session_labels: Arc::new(Mutex::new(HashMap::new())),
         }),
     };
     let running = Arc::clone(&runtime.running);
@@ -4575,6 +4622,21 @@ struct Runtime {
     /// absent the metric is omitted (rather than emitting a
     /// misleading zero).
     roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
+    /// Filter-eval latency histograms (ROADMAP-v3 D12.4), shared
+    /// between the import/export filter hooks (which record into
+    /// them per route) and the metrics endpoint (which renders
+    /// them per scrape). `None` for daemon modes without filter
+    /// hooks, or when no metrics endpoint is configured. Wrapped in
+    /// a `Mutex` because the embedded BGP engine (multi-protocol
+    /// supervisor) populates the *supervisor's* registry after its
+    /// hooks are built, before the supervisor spawns metrics — a
+    /// single write at start-up, a single read per scrape.
+    filter_metrics: Mutex<Option<Arc<metrics::FilterMetricsRegistry>>>,
+    /// Session handle → configured peer label, the `peer` label of
+    /// `lr_bgp_updates_total`. Filled once by the BGP engine
+    /// (standalone or embedded) after its sessions exist; other
+    /// engines leave it empty (they emit no BGP series).
+    session_labels: Arc<Mutex<HashMap<u64, String>>>,
 }
 
 /// Act on every pending signal. SIGTERM/SIGINT trigger a graceful stop
@@ -4687,6 +4749,18 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
         roa_len: rt.roa_len.as_ref().map(|f| {
             let f = Arc::clone(f);
             Box::new(move || f()) as Box<dyn Fn() -> usize + Send + Sync>
+        }),
+        filter_metrics: rt.filter_metrics.lock().unwrap().clone(),
+        session_label: Box::new({
+            let labels = Arc::clone(&rt.session_labels);
+            move |h| {
+                labels
+                    .lock()
+                    .unwrap()
+                    .get(&h)
+                    .cloned()
+                    .unwrap_or_else(|| "?".to_string())
+            }
         }),
     };
     metrics::spawn(addr, ctx)

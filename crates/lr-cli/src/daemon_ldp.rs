@@ -54,7 +54,7 @@ use std::net::{TcpListener, TcpStream, UdpSocket};
 use std::process::ExitCode;
 use std::str::FromStr;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
 use socket2::{Domain, Protocol, Socket, Type};
@@ -500,6 +500,8 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             }
         }),
         roa_len: None,
+        filter_metrics: Mutex::new(None),
+        session_labels: Arc::new(Mutex::new(HashMap::new())),
     });
     if let Err(sig) = crate::signal::init() {
         eprintln!("daemon: cannot install signal handlers (signal {})", sig);
