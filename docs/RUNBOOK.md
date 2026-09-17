@@ -55,7 +55,7 @@ version 0.1.0
 local-as 64512
 ...
 > sessions
-#1 64513 Established (hold 90s)
+#1 kind=bgp local-as=64512 peer-as=64513 state=Established established=true peer-id=10.0.0.2 hold-time=90 adj-rib-in=1 updates-rx=2 updates-tx=2
 > routes
 203.0.113.0/24 via 192.0.2.1 proto=Bgp metric=0 path-id=0
 > mrt /tmp/rib.mrt
@@ -91,9 +91,10 @@ Command reference:
 
 ## Prometheus `/metrics` endpoint
 
-`--metrics-addr ADDR` (or `[bgp] metrics_addr = "…"`) starts an
-opt-in HTTP endpoint that serves the Prometheus text exposition
-format on `GET /metrics` (ROADMAP-v3 D12.2). The endpoint is a
+`--metrics-addr ADDR` (or a top-level `metrics_addr = "…"` in the
+TOML config) starts an opt-in HTTP endpoint that serves the
+Prometheus text exposition format on `GET /metrics`
+(ROADMAP-v3 D12.2 + D12.4). The endpoint is a
 hand-rolled HTTP/1.0 responder (no `hyper` / `tokio` dependency)
 bound to a TCP address; bind it to a loopback address for scrape
 security — Prometheus basic-auth / mTLS is out of scope (use a
@@ -131,6 +132,17 @@ lr_rib_entries 1
 # HELP lr_roa_entries Number of ROA entries in the live ROA store (static + RTR cache).
 # TYPE lr_roa_entries gauge
 lr_roa_entries 0
+# HELP lr_bgp_updates_total BGP UPDATE messages exchanged per session, by direction. Monotonic across session re-establishment.
+# TYPE lr_bgp_updates_total counter
+lr_bgp_updates_total{session="1",peer="192.0.2.2",direction="received"} 7
+lr_bgp_updates_total{session="1",peer="192.0.2.2",direction="sent"} 5
+# HELP lr_filter_eval_duration_seconds Filter DSL evaluation latency, by direction and filter name.
+# TYPE lr_filter_eval_duration_seconds histogram
+lr_filter_eval_duration_seconds_bucket{direction="import",filter="in",le="0.000000100"} 2
+…
+lr_filter_eval_duration_seconds_bucket{direction="import",filter="in",le="0.010000000"} 7
+lr_filter_eval_duration_seconds_sum{direction="import",filter="in"} 0.000003540
+lr_filter_eval_duration_seconds_count{direction="import",filter="in"} 7
 ```
 
 The exposed metrics:
@@ -143,12 +155,22 @@ The exposed metrics:
 | `lr_established_sessions`    | gauge   | `kind`                          | `session_summaries().established` count |
 | `lr_rib_entries`             | gauge   | —                               | `rib_len()`                              |
 | `lr_adj_rib_in_entries`      | gauge   | `kind`                          | sum of `adj_rib_in_len` per kind         |
+| `lr_bgp_updates_total`       | counter | `session`, `peer`, `direction`  | per-peer BGP UPDATE counters (FRR "Message statistics" parity; survive session flaps) |
 | `lr_roa_entries`             | gauge   | —                               | `RoaStore::len()` (omitted when no store) |
+| `lr_filter_eval_duration_seconds` | histogram | `direction`, `filter`      | import/export filter evaluation latency (recorded only while the endpoint is configured) |
 
 The `lr_roa_entries` metric is omitted entirely when the daemon does
 not carry a ROA store (e.g. OSPF-only, Babel-only, or a BGP daemon
 without `roa_validate` and no static `[[roa]]` table) — a missing
-metric is more honest than a misleading zero. The endpoint also
+metric is more honest than a misleading zero. The histogram block
+is likewise omitted when no filter hooks registered (no
+`--metrics-addr` at start-up, or a daemon mode without filter
+bindings). The `peer` label of `lr_bgp_updates_total` carries the
+configured peer name / remote / address (bidirectional peers get
+an `(inbound)` suffix on the collision-challenger session); the
+`session` label keeps series unique. Filter-eval recording is gated
+on the endpoint being configured, so the per-route hot path pays
+the timing cost only while metrics are enabled. The endpoint also
 serves `GET /` (a one-line pointer to `/metrics`) and `404 Not Found`
 for every other path.
 

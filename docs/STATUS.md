@@ -516,10 +516,10 @@ the state, that file tracks the how and why.
     table and a live scrape example), `docs/lr-cli.md`
     (`--metrics-addr` row in the daemon flag reference) and
     `templates/daemon.toml` (commented-out `metrics_addr` with
-    the metric list). Filter-eval latency histograms and UPDATE
+    the metric list). ~~Filter-eval latency histograms and UPDATE
     tx/rx counters remain open — they require per-session
     counters the daemon does not track today (a follow-up
-    commit under D12).
+    commit under D12).~~ Closed by Phase 14 (D12.4) below.
 11. **Phase 12 — D12.3 container deployment** — landed: a
     multi-stage `Dockerfile` at the repo root builds the whole
     workspace in release mode with all features and ships the
@@ -597,3 +597,49 @@ the state, that file tracks the how and why.
     Go / Python bindings). Cross-references every section to the
     source file that implements it. The doc is indexed in
     `docs/README.md` under "Embedding the library".
+
+13. **Phase 14 — D12.4 per-session UPDATE counters + filter-eval
+    latency histograms** — landed: two new metric families on the
+    Prometheus endpoint, backed by counters that live where the
+    traffic flows. `lr-bgp::PeerMessageStats` (FRR `show bgp
+    neighbor` "Message statistics" parity) counts OPEN / UPDATE /
+    NOTIFICATION / KEEPALIVE / ROUTE-REFRESH per direction at the
+    wire boundary — the ten inline encode sites in
+    `fsm.rs`/`advertise.rs` folded into one `send_msg()` choke
+    point, `feed_bytes` counts every decoded message, and the
+    counters are monotonic across session re-establishment
+    (`reset()` leaves them untouched; structurally invalid PDUs
+    never decode and do not count). `SessionSummary` grew
+    `updates_received`/`updates_sent` (0 for OSPF/Babel), surfaced
+    on the runtime API `sessions` command (`updates-rx=`/
+    `updates-tx=`) and the FFI `lr_router_sessions_dump` text —
+    additive key=value fields. The metrics endpoint renders
+    `lr_bgp_updates_total{session,peer,direction}` (the `peer`
+    label carries the configured name/address; bidirectional peers
+    get an `(inbound)` suffix on the RFC 4271 §6.8 challenger) and
+    `lr_filter_eval_duration_seconds{direction,filter}` histograms
+    — fixed 16-bucket atomic `DurationHistogram`s (100 ns … 10 ms,
+    bounds around the GitHub #19 measured VM hot path of
+    60–430 ns) recorded by the import/export filter hooks with
+    relaxed atomics, no locks on the per-route path. Recording is
+    opt-in: hooks carry `Option<Arc<DurationHistogram>>` that is
+    `Some` only when `--metrics-addr` is configured, so the hot
+    path pays the two `Instant::now()` calls only while metrics
+    are enabled; the internal `__roa_validate` filter registers
+    like any user filter so ROA-validation cost is separable from
+    user policy. Daemon wiring covers the standalone BGP daemon
+    and the multi-protocol supervisor (the embedded engine pushes
+    its registry + session labels into the supervisor's `Runtime`
+    before reporting Started). Along the way a real RFC 8212 bug
+    was fixed: `set_session_policy` only counted route-map
+    bindings, so a peer configured with `import_filter`/
+    `export_filter` but no route-map was treated as policy-less
+    and its imports silently discarded under the default
+    `rfc8212` enforcement — DSL filter bindings now count as
+    explicit policy. Coverage: 4 `lr-bgp` unit tests, 1
+    `lr-router` test (EoR + advertisement + flap survival), 6
+    `lr-cli` unit tests (bucket cumulativity, exact seconds
+    formatting, registry rendering, empty omission, concurrent
+    recording, hook latency) and the two-daemon e2e
+    `metrics_updates_and_filter_histograms` (the first cargo e2e
+    exercising `import_filter`/`export_filter` bindings).

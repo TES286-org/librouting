@@ -1421,20 +1421,20 @@ OSPF→BGP-LS ~500, daemon wiring ~300, tests ~400).
 ## D12 — Container deployment + operational tooling
 
 **Status:** partial — ~~D12.1 (`lrctl` operational CLI)~~,
-~~D12.2 (Prometheus `/metrics` endpoint)~~ and
-~~D12.3 (container deployment)~~ landed; per-session UPDATE
-counters / filter-eval latency histograms still open. Tracks repo
-root + `lr-cli`.
+~~D12.2 (Prometheus `/metrics` endpoint)~~, ~~D12.3 (container
+deployment)~~ and ~~D12.4 (per-session UPDATE counters +
+filter-eval latency histograms)~~ landed; a Helm chart remains
+(separate repository). Tracks repo root + `lr-cli`.
 
 **Current gap.** ~~No Dockerfile, no published container image, no
 Helm chart, no operational CLI tool (e.g. `lrctl`).~~ D12.1 closed
 the operational CLI gap. ~~No metrics endpoint.~~ D12.2 closed
 the Prometheus gap. ~~No container image.~~ D12.3 closed the
-container gap (a Helm chart remains open — it conventionally lives
-in its own repository so it can version independently of the image).
-Per-session UPDATE tx/rx counters and filter-eval latency
-histograms remain open — they require per-session counters the
-daemon does not track today (a follow-up commit under D12).
+current gap. ~~No per-session UPDATE tx/rx counters, no filter-eval
+latency histograms.~~ D12.4 closed both — `PeerMessageStats` on the
+BGP FSM feeds `lr_bgp_updates_total` through `SessionSummary`, and
+the filter hooks time `bytecode::execute` into atomic fixed-bucket
+histograms exposed as `lr_filter_eval_duration_seconds`.
 
 **Proposed work.**
 
@@ -1497,9 +1497,10 @@ daemon does not track today (a follow-up commit under D12).
    `None`. 7 e2e tests in `crates/lr-cli/tests/daemon_metrics.rs`
    pin the exposition shape, the opt-in default, the 404 paths,
    non-GET rejection, scrape stability and bind-failure fatality.
-   Filter-eval latency histograms and UPDATE tx/rx counters remain
+   ~~Filter-eval latency histograms and UPDATE tx/rx counters remain
    open — they require per-session counters the daemon does not
-   track today (a follow-up commit under D12).
+   track today (a follow-up commit under D12).~~ Closed by D12.4
+   below.
 3. ~~**Container deployment.** Dockerfile + published container image
    + Helm chart.~~
    Landed as `Dockerfile` (multi-stage: `rust:1.88-slim-bookworm`
@@ -1528,6 +1529,64 @@ daemon does not track today (a follow-up commit under D12).
    chart conventionally lives in its own repository so it can
    version independently of the image; the Dockerfile here is the
    foundation a chart would reference.
+4. ~~**Per-session UPDATE counters + filter-eval latency histograms.**
+   Expose UPDATE tx/rx counters per BGP session and the import/export
+   filter evaluation latency as Prometheus metrics.~~
+   Landed across four layers. **`lr-bgp`**: `PeerMessageStats` on
+   `BgpPeer` (FRR `show bgp neighbor` "Message statistics" parity —
+   OPEN / UPDATE / NOTIFICATION / KEEPALIVE / ROUTE-REFRESH, each
+   direction) counts at the wire boundary: every message encoded
+   onto the outbound buffer books as sent (the ten inline encode
+   sites in `fsm.rs`/`advertise.rs` folded into one
+   `send_msg()` choke point), every message decoded from fed input
+   books as received (`feed_bytes`), and a well-formed peer
+   NOTIFICATION surfacing as `Err(BgpError::Notification)` books
+   `notification_received`. Counters are monotonic across
+   re-establishment — `reset()` leaves them untouched (FRR
+   per-neighbor semantics); structurally invalid PDUs never decode
+   and do not count. **`lr-router`**:
+   `SessionSummary.updates_received`/`updates_sent` filled from
+   `peer.message_stats()` (0 for OSPF/Babel), surfaced on the
+   runtime API `sessions` command (`updates-rx=`/`updates-tx=`) and
+   the FFI `lr_router_sessions_dump` text — additive `key=value`
+   fields, so existing parsers keep working. **`lr-cli`**: the
+   histogram infrastructure — `DurationHistogram`, a fixed-bucket
+   (100 ns … 10 ms, 16 bounds chosen around the GitHub #19 measured
+   VM hot path of 60–430 ns) atomic histogram recorded with relaxed
+   ordering (no locks on the per-route path), plus
+   `FilterMetricsRegistry` mapping (direction, filter name) →
+   histogram, populated once at start-up; `FilterImportHook` /
+   `FilterExportHook` carry `Option<Arc<DurationHistogram>>` and
+   time `bytecode::execute` only when the metrics endpoint is
+   configured — the hot path pays two `Instant::now()` calls only
+   when someone is scraping. The internal `__roa_validate` filter
+   registers like any user filter so ROA-validation cost is
+   separable from user policy. **Metrics rendering**:
+   `lr_bgp_updates_total{session,peer,direction}` counter (the
+   `peer` label carries the configured name/address — bidirectional
+   peers get an `(inbound)` suffix on the RFC 4271 §6.8 challenger
+   session; the `session` label keeps series unique) and
+   `lr_filter_eval_duration_seconds{direction,filter}` histogram
+   with cumulative buckets, `_sum` and `_count`. Daemon wiring
+   covers the standalone BGP daemon and the multi-protocol
+   supervisor (the embedded engine pushes its registry + session
+   labels into the supervisor's `Runtime` before reporting Started).
+   Along the way: a real RFC 8212 bug surfaced —
+   `set_session_policy` only counted route-map bindings, so a peer
+   configured with `import_filter`/`export_filter` but no route-map
+   was treated as policy-less and its imports silently discarded
+   under the default `rfc8212` enforcement; DSL filter bindings now
+   count as explicit policy (§3 speaks of "policy" broadly; FRR
+   counts distribute-lists and route-maps alike). 4 `lr-bgp` unit
+   tests (wire-exchange, reset-survival, parse-error accounting,
+   UPDATE-egress round-trip), 1 `lr-router` test (EoR +
+   advertisement + flap-survival counters), 6 `lr-cli` unit tests
+   (cumulative buckets, exact seconds formatting, registry
+   rendering, empty-registry omission, concurrent recording, hook
+   latency recording) and 1 two-daemon e2e
+   (`metrics_updates_and_filter_histograms` — the first cargo e2e
+   exercising `import_filter`/`export_filter` bindings) pin the
+   behaviour.
 
 **Estimated size.** ~1000–1500 new lines (`lrctl` ~500, metrics ~400,
 Dockerfile + Helm ~100). D12.1 landed ~870 lines; D12.2 landed ~880
@@ -1535,7 +1594,12 @@ lines (metrics.rs ~340, daemon_metrics.rs tests ~470, daemon +
 daemon_config + templates + docs ~70); D12.3 landed ~390 lines
 (Dockerfile ~180, .dockerignore ~70, docker/README.md ~140,
 .github/workflows/docker.yml ~110 — the workflow counts against
-the D12.3 total even though it is CI not image).
+the D12.3 total even though it is CI not image); D12.4 landed ~960
+lines (metrics.rs histogram + rendering ~470, fsm.rs + advertise.rs
+counters ~270, daemon/daemon_policy wiring ~120, session.rs +
+instance.rs summary ~100, tests: 4 lr-bgp + 1 lr-router + 6 lr-cli
+unit + 1 e2e ~230 — plus the RFC 8212 filter-binding fix in
+`daemon.rs`).
 
 ---
 
@@ -1697,9 +1761,9 @@ refactor — needs extensive regression tests.
 
 | Direction | Status                | Owner | Notes                                    |
 | --------- | --------------------- | ----- | ---------------------------------------- |
-| D1        | not started           | —     | Babel multi-session + per-iface params   |
+| D1        | landed                | —     | Babel multi-session + per-iface params — D1.1–D1.6 all in (commit `e7f50d5`): per-interface socket pairs + sessions, per-interface auth/key scoping and parameters, RFC 8966 §A.2.4 RTT measurement, route expiry §3.2.5, re-advertisement/flush, `babel_multihop.sh` + `babel_multi_nic.sh` interop |
 | D2        | landed                | —     | RPKI-RTR client: codec + state machine + RoaStore + `[bgp.rpki]` daemon thread + hot reload |
-| D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
+| D3        | landed                | —     | Filter DSL parity — D3.1–D3.7 all in: user functions, large/extended communities, set ops, `defined()`/`exists()`, `proto` format, bytecode VM + equivalence table |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; #19 phasing complete (P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓) |
@@ -1708,7 +1772,7 @@ refactor — needs extensive regression tests.
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |
 | D10       | partial (D10.1 + D10.6 landed) | —     | RFC 8326 sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
-| D12       | partial (D12.1 + D12.2 + D12.3 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) and per-session UPDATE counters / filter-eval histograms open |
+| D12       | partial (D12.1 + D12.2 + D12.3 + D12.4 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint (now with per-session UPDATE counters `lr_bgp_updates_total` and filter-eval latency histograms `lr_filter_eval_duration_seconds` — D12.4, incl. the RFC 8212 filter-bindings-count-as-policy fix) + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) open |
 | D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |

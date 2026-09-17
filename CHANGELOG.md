@@ -18,6 +18,40 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Per-session BGP UPDATE counters + filter-eval latency histograms
+  on the Prometheus `/metrics` endpoint (ROADMAP-v3 D12.4).
+  - **`lr_bgp::PeerMessageStats`** — FRR `show bgp neighbor`
+    "Message statistics" parity on `BgpPeer`: OPEN / UPDATE /
+    NOTIFICATION / KEEPALIVE / ROUTE-REFRESH counters per
+    direction, counted at the wire boundary (every encoded
+    outbound message books as sent through the new single
+    `send_msg()` choke point; every decoded inbound message books
+    as received in `feed_bytes`). Monotonic across session
+    re-establishment — `reset()` leaves the counters untouched
+    (per-neighbor semantics, surviving flaps like FRR). Exposed
+    via `BgpPeer::message_stats()`.
+  - **`SessionSummary::updates_received` / `updates_sent`** —
+    the UPDATE counters surfaced through
+    `DefaultRouter::session_summaries()` (0 for OSPF/Babel), the
+    daemon runtime API `sessions` command (new `updates-rx=` /
+    `updates-tx=` fields) and the FFI
+    `lr_router_sessions_dump` text — additive `key=value` fields,
+    existing parsers keep working.
+  - **`lr_bgp_updates_total{session,peer,direction}`** — new
+    Prometheus counter: per-session UPDATE counters labelled with
+    the configured peer name/address (bidirectional peers get an
+    `(inbound)` suffix on the RFC 4271 §6.8 collision challenger).
+  - **`lr_filter_eval_duration_seconds{direction,filter}`** — new
+    Prometheus histogram: import/export filter DSL evaluation
+    latency, one series per (direction, filter name) including the
+    internal `__roa_validate` filter (ROA-validation cost is
+    separable from user policy). Fixed 16 buckets (100 ns … 10 ms
+    + implicit `+Inf`), recorded through relaxed atomics — no
+    locks on the per-route path. Recording and rendering are gated
+    on the metrics endpoint being configured, so the filter hot
+    path pays the two `Instant::now()` calls only while someone
+    can scrape.
+
 - Attribute fast paths for the filter DSL hot path (GitHub #19 P3):
   two new `Attributes` methods (`get_u32_be`, `get_u8`) read
   fixed-width integer attributes in place — no `Vec<u8>` clone, no
@@ -611,6 +645,16 @@ ship, breaking changes that affect embedders, dependency bumps.
   split and the scalability ceiling (ROADMAP-v3 D8.6).
 
 ### Fixed
+
+- RFC 8212: DSL filter bindings now count as explicit policy. A
+  peer configured with `import_filter`/`export_filter` but no
+  route-map was treated as policy-less under the default
+  `rfc8212` enforcement — its received routes were silently
+  discarded even though the operator wrote an explicit filter.
+  `set_session_policy` now considers both binding kinds (RFC 8212
+  §3 speaks of "policy" broadly; FRR counts distribute-lists and
+  route-maps alike). The startup warning text says "route-map or
+  filter" accordingly.
 
 - Route flap damping decay used the UNIX epoch as its time base while
   the import hook derives `now` from the router's monotonic
