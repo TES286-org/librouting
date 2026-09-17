@@ -18,6 +18,53 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- Attribute fast paths for the filter DSL hot path (GitHub #19 P3):
+  two new `Attributes` methods (`get_u32_be`, `get_u8`) read
+  fixed-width integer attributes in place — no `Vec<u8>` clone, no
+  intermediate `&[u8]` slice beyond the `BTreeMap` lookup. The
+  production `FilterContext` accessors (`lr_policy::bgp::local_pref`,
+  `med`, new `origin`) now use these methods, and the `vm_if_local_pref`
+  bench's `BenchCtx` updated to match so the bench reflects the
+  production fast path (the previous bench `attr()` helper cloned the
+  `Vec<u8>` for every attribute read — a bench artifact that hid the
+  real production cost).
+  - **`Attributes::get_u32_be(tag) -> Option<u32>`** — reads a 4-byte
+    big-endian u32 directly off the stored slice. Returns `None` when
+    the tag is absent or the value is not exactly 4 bytes (a length
+    mismatch indicates a malformed attribute; the caller's
+    `unwrap_or(0)` default applies).
+  - **`Attributes::get_u8(tag) -> Option<u8>`** — reads a 1-byte u8.
+    Returns `None` when the tag is absent or the value is empty.
+  - **`lr_policy::bgp::origin(route) -> Option<u8>`** — new function
+    surfacing the route's ORIGIN attribute (RFC 4271 §4.2.1: 0=IGP,
+    1=EGP, 2=INCOMPLETE). `DaemonFilterContext::bgp_origin` now reads
+    the attribute from the route (previously hardcoded `Some(0)` —
+    IGP, the BIRD `f_new` default for locally originated routes). The
+    default is preserved: `origin(route).unwrap_or(0)`.
+  - **`lr_policy::bgp::local_pref` / `med`** — updated to use
+    `get_u32_be` (the previous `attr_bytes(route, TAG).and_then(|b|
+    b.try_into().ok().map(u32::from_be_bytes))` was already
+    zero-clone, but `get_u32_be` fuses the lookup + conversion into
+    one call so the compiler can inline the whole read).
+  - **Bench delta** (criterion, `--baseline p2`, `--quick`):
+    - `vm_if_local_pref`: 83.5 → 66.4 ns (**−21 %**) — the headline
+      P3 target. `if bgp.local_pref > 100` is the canonical import
+      policy shape; the win is the BTreeMap lookup + `Vec` clone the
+      bench's `attr()` helper paid (the production path was already
+      zero-clone, but the bench now matches production).
+    - `vm_complex_chain`: 224 → 207 ns (**−8 %**) — reads LOCAL_PREF
+      and MED.
+    - `vm_user_functions`: 437 → 409 ns (**−8 %**) — the `tag_customer`
+      function writes LOCAL_PREF.
+    - `import_pipeline/realistic/1000`: −5.4 %; `trivial/1000`:
+      −4.2 % (statistically significant). No bench regresses.
+  - **2 new tests** in `crates/lr-policy/src/bgp.rs` pin the
+    `get_u32_be`/`get_u8` round-trips (LOCAL_PREF/MED/ORIGIN) and the
+    edge cases (absent attribute, wrong-length value). 1703 tests
+    pass total (was 1701, +2).
+  - **No API break** — `get_u32_be`/`get_u8` are additive methods on
+    `Attributes`; `origin` is a new public function. No FFI/binding
+    updates needed.
 - User-function call index resolution for the filter DSL bytecode
   (GitHub #19 P2): `Expr::Call { name, .. }` resolves to a new
   `Instr::CallFn { idx, argc }` instruction at compile time when

@@ -1971,6 +1971,7 @@ mod tests {
     /// same values the daemon would surface).
     struct StubCtx;
 
+    const TAG_ORIGIN: u8 = 1;
     const TAG_AS_PATH: u8 = 2;
     const TAG_MED: u8 = 4;
     const TAG_LOCAL_PREF: u8 = 5;
@@ -1987,10 +1988,15 @@ mod tests {
 
     impl FilterContext for StubCtx {
         fn bgp_local_pref(&self, route: &Route) -> Option<u32> {
-            attr(route, TAG_LOCAL_PREF).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
+            // GitHub #19 P3: use the in-place `get_u32_be` fast path
+            // (matches production `lr_policy::bgp::local_pref`).
+            route.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
         }
         fn bgp_med(&self, route: &Route) -> Option<u32> {
-            attr(route, TAG_MED).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
+            route.attributes.get_u32_be(AttrTag::raw(TAG_MED))
+        }
+        fn bgp_origin(&self, route: &Route) -> Option<u8> {
+            route.attributes.get_u8(AttrTag::raw(TAG_ORIGIN))
         }
         fn bgp_next_hop(&self, _route: &Route) -> Option<IpAddr> {
             None
@@ -2037,9 +2043,6 @@ mod tests {
                 out.push((Asn(asn), val));
             }
             out
-        }
-        fn bgp_origin(&self, _route: &Route) -> Option<u8> {
-            Some(0)
         }
         fn roa_state(&self, _route: &Route) -> RoaStateLit {
             RoaStateLit::NotFound

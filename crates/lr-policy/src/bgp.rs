@@ -27,6 +27,7 @@ use lr_core::rib::Route;
 
 /// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4 /
 /// RFC 4360 §2 / RFC 8097 §2).
+const TAG_ORIGIN: u8 = 1;
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
 const TAG_LOCAL_PREF: u8 = 5;
@@ -76,8 +77,16 @@ pub fn as_path(route: &Route) -> Option<AsPath> {
 }
 
 /// The route's MULTI_EXIT_DISC; `None` when absent.
+///
+/// GitHub #19 P3: reads the 4-byte big-endian value in place via
+/// `Attributes::get_u32_be` — no `Vec<u8>` clone, no intermediate
+/// `&[u8]` slice beyond the BTreeMap lookup. The previous path
+/// (`attr_bytes(route, TAG_MED).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))`)
+/// was already zero-clone (the slice was read off the stored `Vec`),
+/// but `get_u32_be` fuses the lookup + conversion into one call so
+/// the compiler can inline the whole read.
 pub fn med(route: &Route) -> Option<u32> {
-    attr_bytes(route, TAG_MED).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
+    route.attributes.get_u32_be(AttrTag::raw(TAG_MED))
 }
 
 /// Flat AS sequence of the route's AS_PATH (sets flattened in order).
@@ -113,8 +122,23 @@ pub fn set_local_pref(route: &mut Route, value: u32) {
 }
 
 /// The route's LOCAL_PREF; `None` when absent (defaults to 100 on eBGP).
+///
+/// GitHub #19 P3: reads the 4-byte big-endian value in place via
+/// `Attributes::get_u32_be` — see `med` for the rationale.
 pub fn local_pref(route: &Route) -> Option<u32> {
-    attr_bytes(route, TAG_LOCAL_PREF).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
+    route.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
+}
+
+/// The route's ORIGIN (RFC 4271 §4.2.1): `0 = IGP`, `1 = EGP`,
+/// `2 = INCOMPLETE`. `None` when the attribute is absent — the
+/// `FilterContext::bgp_origin` accessor defaults to `Some(0)` (IGP)
+/// for routes that never carried an ORIGIN (e.g. locally originated),
+/// matching BIRD's `f_new` default.
+///
+/// GitHub #19 P3: reads the 1-byte value in place via
+/// `Attributes::get_u8` — no `Vec<u8>` clone.
+pub fn origin(route: &Route) -> Option<u8> {
+    route.attributes.get_u8(AttrTag::raw(TAG_ORIGIN))
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -317,5 +341,60 @@ mod tests {
         set_med(&mut r, 7);
         let typed: lr_bgp::path::PathAttributes = r.attributes.clone().into();
         assert_eq!(typed.med().map(|m| m.0), Some(7));
+    }
+
+    /// GitHub #19 P3 — `get_u32_be` reads the 4-byte big-endian value
+    /// in place, no `Vec<u8>` clone. Pin the round-trip for LOCAL_PREF
+    /// and MED (the two u32 attributes the filter DSL reads on the hot
+    /// path), plus the edge cases (absent attribute, wrong-length
+    /// value).
+    #[test]
+    fn p3_get_u32_be_reads_local_pref_and_med_in_place() {
+        let mut r = route_with(vec![]);
+        set_local_pref(&mut r, 100);
+        set_med(&mut r, 42);
+        // Round-trip via the fast path.
+        assert_eq!(
+            r.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)),
+            Some(100)
+        );
+        assert_eq!(r.attributes.get_u32_be(AttrTag::raw(TAG_MED)), Some(42));
+        // Absent attribute.
+        let r2 = route_with(vec![]);
+        assert_eq!(r2.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)), None);
+        // Wrong-length value — treated as "absent" (the caller's
+        // `unwrap_or(0)` default applies).
+        let mut r3 = route_with(vec![]);
+        r3.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_LOCAL_PREF),
+            flags: 0x40,
+            value: vec![1, 2, 3], // 3 bytes, not 4
+        });
+        assert_eq!(r3.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF)), None);
+    }
+
+    /// GitHub #19 P3 — `get_u8` reads the 1-byte ORIGIN attribute in
+    /// place. Pin the round-trip and the edge cases.
+    #[test]
+    fn p3_get_u8_reads_origin_in_place() {
+        let mut r = route_with(vec![]);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_ORIGIN),
+            flags: 0x40,
+            value: vec![2], // INCOMPLETE
+        });
+        assert_eq!(origin(&r), Some(2));
+        assert_eq!(r.attributes.get_u8(AttrTag::raw(TAG_ORIGIN)), Some(2));
+        // Absent attribute.
+        let r2 = route_with(vec![]);
+        assert_eq!(origin(&r2), None);
+        // Empty value — `get_u8` returns None (no first byte).
+        let mut r3 = route_with(vec![]);
+        r3.attributes.insert(Attribute {
+            tag: AttrTag::raw(TAG_ORIGIN),
+            flags: 0x40,
+            value: vec![],
+        });
+        assert_eq!(r3.attributes.get_u8(AttrTag::raw(TAG_ORIGIN)), None);
     }
 }

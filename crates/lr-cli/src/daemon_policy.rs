@@ -328,10 +328,11 @@ impl FilterContext for DaemonFilterContext {
             })
             .collect()
     }
-    fn bgp_origin(&self, _route: &lr_core::rib::Route) -> Option<u8> {
-        // Origin attribute (IGP=0, EGP=1, INCOMPLETE=2) — not yet
-        // surfaced by lr-policy::bgp. Future work.
-        Some(0)
+    fn bgp_origin(&self, route: &lr_core::rib::Route) -> Option<u8> {
+        // GitHub #19 P3: read ORIGIN from the route's attribute set
+        // in place (no Vec clone). Defaults to IGP (0) when absent —
+        // BIRD's `f_new` default for locally originated routes.
+        Some(lr_policy::bgp::origin(route).unwrap_or(0))
     }
     fn roa_state(&self, route: &lr_core::rib::Route) -> lr_policy::filter::RoaStateLit {
         use lr_policy::filter::RoaStateLit;

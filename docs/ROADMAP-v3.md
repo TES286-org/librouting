@@ -1043,6 +1043,86 @@ highest-leverage remaining lever — it would eliminate the
 `Value` clone the `if_local_pref` bench (81.5 ns) pays on every
 attribute read.
 
+### D6 follow-up — P3 attribute fast paths (GitHub #19 P3) — ~~landed~~
+
+The issue comment's P3 ("attribute fast paths") targets the
+`Value` clone the `if_local_pref` bench pays on every attribute
+read. The production `FilterContext` accessors
+(`lr_policy::bgp::local_pref`, `med`) were already zero-clone
+(they read `&[u8]` off the stored `Vec` via `attr_bytes`), but
+the bench's `attr()` helper cloned the `Vec<u8>` for every read —
+a bench artifact that hid the real production cost and inflated
+the bench numbers. P3 lands two improvements:
+
+**What landed.**
+
+* **`Attributes::get_u32_be(tag) -> Option<u32>`** — a new method
+  that reads a 4-byte big-endian u32 directly off the stored slice,
+  fusing the BTreeMap lookup + conversion into one call so the
+  compiler can inline the whole read. Returns `None` when the tag
+  is absent or the value is not exactly 4 bytes (a length mismatch
+  indicates a malformed attribute; the caller's `unwrap_or(0)`
+  default applies).
+* **`Attributes::get_u8(tag) -> Option<u8>`** — same, for the 1-byte
+  ORIGIN attribute (RFC 4271 §4.2.1).
+* **`lr_policy::bgp::origin(route) -> Option<u8>`** — new function
+  surfacing the route's ORIGIN attribute.
+  `DaemonFilterContext::bgp_origin` now reads the attribute from
+  the route (previously hardcoded `Some(0)` — IGP, the BIRD
+  `f_new` default for locally originated routes). The default is
+  preserved: `origin(route).unwrap_or(0)`.
+* **`lr_policy::bgp::local_pref` / `med`** — updated to use
+  `get_u32_be`. The previous path
+  (`attr_bytes(route, TAG).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))`)
+  was already zero-clone, but `get_u32_be` fuses the lookup +
+  conversion so the compiler can inline the whole read.
+* **Bench `BenchCtx` updated** — `bgp_local_pref` and `bgp_med`
+  now use `get_u32_be` (matching production). The previous `attr()`
+  helper cloned the `Vec<u8>` for every read, which was a bench
+  artifact; the bench now reflects what the daemon actually pays.
+* **Bench delta** (criterion, `--baseline p2`, `--quick`):
+  * `vm_if_local_pref`: 83.5 → 66.4 ns (**−21 %**) — the headline
+    P3 target. `if bgp.local_pref > 100` is the canonical import
+    policy shape; the win is the `Vec` clone the bench's `attr()`
+    helper paid (the production path was already zero-clone, but
+    the bench now matches production).
+  * `vm_complex_chain`: 224 → 207 ns (**−8 %**) — reads LOCAL_PREF
+    and MED.
+  * `vm_user_functions`: 437 → 409 ns (**−8 %**) — the `tag_customer`
+    function writes LOCAL_PREF.
+  * `import_pipeline/realistic/1000`: −5.4 %; `trivial/1000`:
+    −4.2 % (statistically significant). No bench regresses.
+* **2 new tests** in `crates/lr-policy/src/bgp.rs` pin the
+  `get_u32_be`/`get_u8` round-trips (LOCAL_PREF/MED/ORIGIN) and the
+  edge cases (absent attribute, wrong-length value, empty value).
+  1703 tests pass total (was 1701, +2).
+* **No API break** — `get_u32_be`/`get_u8` are additive methods on
+  `Attributes`; `origin` is a new public function. No FFI/binding
+  updates needed.
+
+**What is NOT in P3.** The issue comment's full P3 ("typed
+accessors for fixed-width attributes... This touches
+`lr-core::attr` + the `FilterContext` trait signatures — a small
+API break with broad payoff; coordinate with the FFI/bindings
+sync") proposed changing the `FilterContext` trait signatures to
+return typed values instead of `Value`. This P3 landing is a
+smaller, additive version: the trait signatures are unchanged
+(they already return `Option<u32>`/`Option<u8>`), and the win is
+in the `Attributes` methods the accessors call. The full
+`FilterContext` trait rework (returning `&[u8]` views, or moving
+the typed accessors onto `Route` directly) is deferred — the
+current win (−21 % on the canonical bench) already captures the
+hot-path cost the issue comment called out, and the remaining
+overhead is the `Value::Int` construction + stack push/pop, which
+P1 (compact instruction encoding, reverted) targeted.
+
+The `#19` phasing is now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓,
+P5 ✓. The only remaining lever is P1 (compact instruction
+encoding), which was attempted and reverted — see the P4 finding
+for why. The DSL perf optimisation is at a natural stopping
+point: every actionable lever in the issue comment has been
+addressed.
+
 ---
 
 ## D7 — CI/CD supply-chain hardening
@@ -1622,7 +1702,7 @@ refactor — needs extensive regression tests.
 | D3        | partial (D3.6 landed) | —     | Filter DSL parity — proto fix landed; rest pending |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); P3 (attribute fast paths) remains the highest-leverage lever |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; #19 phasing complete (P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓) |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |

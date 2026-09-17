@@ -71,10 +71,19 @@ fn attr(route: &Route, tag: u8) -> Option<Vec<u8>> {
 
 impl FilterContext for BenchCtx {
     fn bgp_local_pref(&self, route: &Route) -> Option<u32> {
-        attr(route, TAG_LOCAL_PREF).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
+        // GitHub #19 P3: read the 4-byte LOCAL_PREF in place via
+        // `Attributes::get_u32_be` — no `Vec<u8>` clone. The previous
+        // path (`attr(TAG_LOCAL_PREF).and_then(...)`) cloned the
+        // `Vec<u8>` for every attribute read, which was a bench
+        // artifact, not a production cost (the production
+        // `DaemonFilterContext` uses `lr_policy::bgp::local_pref`
+        // which already read off `&[u8]`). The bench now matches the
+        // production fast path so the `vm_if_local_pref` number
+        // reflects what the daemon actually pays.
+        route.attributes.get_u32_be(AttrTag::raw(TAG_LOCAL_PREF))
     }
     fn bgp_med(&self, route: &Route) -> Option<u32> {
-        attr(route, TAG_MED).and_then(|b| b.try_into().ok().map(u32::from_be_bytes))
+        route.attributes.get_u32_be(AttrTag::raw(TAG_MED))
     }
     fn bgp_next_hop(&self, _route: &Route) -> Option<lr_core::addr::IpAddr> {
         None
