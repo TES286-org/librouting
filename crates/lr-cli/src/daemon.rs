@@ -52,7 +52,9 @@ use lr_router::{
     DefaultRouter, MetricPolicy, RedistributionPipe, RouterEvent, RouterInstance, SessionConfig,
     SessionHandle,
 };
-#[cfg(target_os = "linux")]
+// Ungated: HashMap serves both the kernel-routing-table helpers
+// (Linux-only code) and the D12.4 session-label map, which every
+// platform's daemon constructs (the metrics Runtime field).
 use std::collections::HashMap;
 
 mod api;
