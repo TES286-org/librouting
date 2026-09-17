@@ -101,6 +101,12 @@ impl DurationHistogram {
     }
 
     /// Total observations recorded.
+    ///
+    /// Unix-only in production (the exporter's render path); the
+    /// non-Unix daemon has no metrics endpoint, so the method is
+    /// allowed dead there rather than fighting `--all-targets`
+    /// clippy (the unit tests use it on every platform).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn count(&self) -> u64 {
         self.count.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -109,6 +115,7 @@ impl DurationHistogram {
     /// count) under one label set. `labels` is a pre-rendered
     /// `{k="v",…}` fragment (possibly empty); the `le` label is
     /// appended per bucket line.
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn render(&self, out: &mut String, metric: &str, labels: &str) {
         use std::fmt::Write as _;
         // The label-set shape differs between "no labels" (`{le=…}`)
@@ -147,6 +154,7 @@ impl Default for DurationHistogram {
 /// precision (9 decimals). All histogram bounds are multiples of
 /// 50 ns, so the 9-decimal form is exact for them; the running sum
 /// is likewise exact to the nanosecond.
+#[cfg_attr(not(unix), allow(dead_code))]
 fn format_secs(ns: u64) -> String {
     format!("{:.9}", ns as f64 / 1e9)
 }
@@ -160,6 +168,7 @@ pub enum FilterDirection {
 }
 
 impl FilterDirection {
+    #[cfg_attr(not(unix), allow(dead_code))]
     fn label(self) -> &'static str {
         match self {
             Self::Import => "import",
@@ -201,6 +210,7 @@ impl FilterMetricsRegistry {
 
     /// True when no series registered (the metric block is omitted
     /// from the exposition).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -208,6 +218,7 @@ impl FilterMetricsRegistry {
     /// Render the full histogram block: HELP/TYPE headers plus the
     /// per-series bucket/sum/count lines, series in registration
     /// order (deterministic across scrapes).
+    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn render(&self, out: &mut String) {
         use std::fmt::Write as _;
         if self.is_empty() {
