@@ -197,12 +197,16 @@ networks = ["203.0.113.0/24"]
 # a NOTIFICATION); SIGHUP is equivalent to `reload`.
 # api_socket = "/run/lr-daemon.api"
 
-# Prometheus /metrics HTTP endpoint (ROADMAP-v3 D12.2). Opt-in: when
-# set, the daemon binds a TCP listener and serves the Prometheus text
-# exposition format on `GET /metrics`. The body carries:
+# Prometheus /metrics HTTP endpoint (ROADMAP-v3 D12.2/D12.4). Opt-in:
+# when set, the daemon binds a TCP listener and serves the Prometheus
+# text exposition format on `GET /metrics`. The body carries:
 #   lr_info, lr_uptime_seconds, lr_sessions_total{kind,state},
 #   lr_established_sessions{kind}, lr_adj_rib_in_entries{kind},
-#   lr_rib_entries, lr_roa_entries (when a ROA store is configured).
+#   lr_rib_entries, lr_roa_entries (when a ROA store is configured),
+#   lr_bgp_updates_total{session,peer,direction} (per-peer UPDATE
+#   counters) and lr_filter_eval_duration_seconds{direction,filter}
+#   (import/export filter latency histograms — recorded only while
+#   this endpoint is configured).
 # Bind to a loopback address for scrape security — Prometheus basic
 # auth / mTLS is out of scope (use a reverse proxy for that).
 # metrics_addr = "127.0.0.1:9119"

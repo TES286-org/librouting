@@ -33,7 +33,7 @@
 //! | `lr_filter_eval_duration_seconds` | histogram | `direction`, `filter`      | `FilterMetricsRegistry` (when present)  |
 //!
 //! The exporter is **opt-in** (default off, like `api_socket`):
-//! `--metrics-addr 127.0.0.1:9119` / `[bgp] metrics_addr = "…"`.
+//! `--metrics-addr 127.0.0.1:9119` / top-level `metrics_addr = "…"`.
 //!
 //! The histogram series is emitted only when a registry was wired in
 //! (BGP daemon with `--metrics-addr`); recording is likewise gated on

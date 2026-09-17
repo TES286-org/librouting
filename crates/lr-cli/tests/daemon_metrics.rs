@@ -461,3 +461,147 @@ fn _bufread_used(reader: &mut BufReader<&[u8]>) -> String {
     reader.read_line(&mut line).ok();
     line
 }
+
+/// Two daemons exchange real UPDATEs over TCP with DSL filter bindings
+/// on the subject daemon; a scrape then shows the D12.4 observability:
+/// per-session UPDATE counters that moved in both directions and
+/// filter-eval histograms that recorded the import/export evaluations
+/// (ROADMAP-v3 D12.4).
+#[test]
+fn metrics_updates_and_filter_histograms() {
+    let port = free_port();
+    let metrics_addr = format!("127.0.0.1:{port}");
+    let dir = std::env::temp_dir().join(format!("lr-metrics-d124-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let bgp_port = 18410u16;
+
+    // A: AS64512, listens for B, originates 203.0.113.0/24, runs an
+    // import + export DSL filter on the B peer, exports metrics.
+    // The filter bindings double as the peer's RFC 8212 explicit
+    // policy (both directions bound — no default-deny warning).
+    let conf = dir.join("a.toml");
+    std::fs::write(
+        &conf,
+        format!(
+            "metrics_addr = \"{metrics_addr}\"\n\n\
+             [bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+             listen_addr = \"127.0.0.1:{bgp_port}\"\nlocal_address = \"192.0.2.1\"\n\
+             networks = [\"203.0.113.0/24\"]\n\n\
+             [[filter]]\nname = \"from-b\"\nbody = \"accept;\"\n\n\
+             [[filter]]\nname = \"to-b\"\nbody = \"accept;\"\n\n\
+             [[peer]]\nname = \"b\"\naddress = \"127.0.0.1\"\n\
+             import_filter = \"from-b\"\nexport_filter = \"to-b\"\n"
+        ),
+    )
+    .unwrap();
+    let a = Daemon::spawn(&["--config", conf.to_str().unwrap()], "d124-a");
+    a.wait_log("metrics endpoint on", "metrics endpoint up");
+    a.wait_log("listening on", "BGP listener up");
+
+    // B: AS64513, dials A, originates 198.51.100.0/24. Plain peer
+    // (the accept-all deviation) — A's filters are the subject.
+    let b = Daemon::spawn(
+        &[
+            "--local-as",
+            "64513",
+            "--peer-as",
+            "64512",
+            "--router-id",
+            "10.0.0.2",
+            "--peer",
+            &format!("127.0.0.1:{bgp_port}"),
+            "--local-address",
+            "192.0.2.2",
+            "--network",
+            "198.51.100.0/24",
+            "--ebgp-policy",
+            "accept-all",
+        ],
+        "d124-b",
+    );
+
+    // Both directions carry a real prefix.
+    a.wait_log("route installed 198.51.100.0/24", "A learned B's prefix");
+    b.wait_log("route installed 203.0.113.0/24", "B learned A's prefix");
+
+    let resp = http_get(&metrics_addr, "/metrics");
+    let (status, _headers, body) = split_response(&resp);
+    assert!(status.starts_with("HTTP/1.0 200"), "status: {status}");
+
+    // Per-session UPDATE counters: the series exists with A's peer
+    // label and both directions have moved (each side's initial dump
+    // EoR + the real advertisement ⇒ ≥ 2 in each direction).
+    assert!(
+        body.contains("# TYPE lr_bgp_updates_total counter"),
+        "UPDATE counter TYPE line missing; body:\n{body}"
+    );
+    let rx = body
+        .lines()
+        .find(|l| l.starts_with("lr_bgp_updates_total{") && l.contains("direction=\"received\""))
+        .unwrap_or_else(|| panic!("no received-direction series; body:\n{body}"));
+    let tx = body
+        .lines()
+        .find(|l| l.starts_with("lr_bgp_updates_total{") && l.contains("direction=\"sent\""))
+        .unwrap_or_else(|| panic!("no sent-direction series; body:\n{body}"));
+    assert!(
+        rx.contains("peer=\"b\""),
+        "series should carry the configured peer label; line: {rx}"
+    );
+    let rx_n: u64 = rx.rsplit(' ').next().unwrap().parse().unwrap();
+    let tx_n: u64 = tx.rsplit(' ').next().unwrap().parse().unwrap();
+    assert!(rx_n >= 2, "received UPDATEs (EoR + advertisement): {rx_n}");
+    assert!(tx_n >= 2, "sent UPDATEs (EoR + advertisement): {tx_n}");
+
+    // Filter histograms: both bound filters recorded evaluations.
+    assert!(
+        body.contains("# TYPE lr_filter_eval_duration_seconds histogram"),
+        "histogram TYPE line missing; body:\n{body}"
+    );
+    let import_count = body
+        .lines()
+        .find(|l| {
+            l.starts_with("lr_filter_eval_duration_seconds_count{")
+                && l.contains("direction=\"import\"")
+                && l.contains("filter=\"from-b\"")
+        })
+        .unwrap_or_else(|| panic!("no import filter series; body:\n{body}"));
+    let export_count = body
+        .lines()
+        .find(|l| {
+            l.starts_with("lr_filter_eval_duration_seconds_count{")
+                && l.contains("direction=\"export\"")
+                && l.contains("filter=\"to-b\"")
+        })
+        .unwrap_or_else(|| panic!("no export filter series; body:\n{body}"));
+    let in_n: u64 = import_count.rsplit(' ').next().unwrap().parse().unwrap();
+    let out_n: u64 = export_count.rsplit(' ').next().unwrap().parse().unwrap();
+    assert!(in_n >= 1, "import filter evaluated at least once: {in_n}");
+    assert!(out_n >= 1, "export filter evaluated at least once: {out_n}");
+    // Bucket lines are present and cumulative (the +Inf bucket equals
+    // the count — checked via the largest le bucket line).
+    let import_inf = body
+        .lines()
+        .find(|l| {
+            l.starts_with("lr_filter_eval_duration_seconds_bucket{")
+                && l.contains("direction=\"import\"")
+                && l.contains("le=\"0.010000000\"")
+        })
+        .unwrap_or_else(|| panic!("no top-bucket line; body:\n{body}"));
+    let inf_n: u64 = import_inf.rsplit(' ').next().unwrap().parse().unwrap();
+    assert_eq!(inf_n, in_n, "top bucket must equal the series count");
+
+    // Counters move between scrapes: trigger another UPDATE (B flaps
+    // nothing — just re-scrape after the periodic MRAI-less steady
+    // state; instead verify monotonicity by scraping again: the same
+    // or higher values, never lower).
+    let resp2 = http_get(&metrics_addr, "/metrics");
+    let (_, _, body2) = split_response(&resp2);
+    let rx2_n: u64 = body2
+        .lines()
+        .find(|l| l.starts_with("lr_bgp_updates_total{") && l.contains("direction=\"received\""))
+        .map(|l| l.rsplit(' ').next().unwrap().parse().unwrap())
+        .unwrap_or(rx_n);
+    assert!(rx2_n >= rx_n, "counters are monotonic: {rx2_n} >= {rx_n}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
