@@ -599,16 +599,20 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         None => None,
                     };
                     let handles = core::iter::once(h).chain(handle_in);
+                    // RFC 8212 §3: declare the policy presence of this
+                    // peer so the router knows which directions carry
+                    // an explicit policy. Both route-maps and DSL
+                    // filter bindings count — §3 speaks of "policy"
+                    // broadly, and FRR treats a distribute-list /
+                    // route-map alike for the neighbor's policy
+                    // state. External peers missing a direction get
+                    // the default deny (with an Appendix-A-style
+                    // warning so the incomplete configuration is
+                    // visible at startup).
+                    let has_import = spec.import.is_some() || spec.import_filter.is_some();
+                    let has_export = spec.export.is_some() || spec.export_filter.is_some();
                     for hh in handles {
-                        // RFC 8212 §3: declare the policy presence of this
-                        // peer so the router knows which directions carry
-                        // an explicit route-map. External peers missing a
-                        // direction get the default deny (with an
-                        // Appendix-A-style warning so the incomplete
-                        // configuration is visible at startup).
-                        if let Err(e) =
-                            r.set_session_policy(hh, spec.import.is_some(), spec.export.is_some())
-                        {
+                        if let Err(e) = r.set_session_policy(hh, has_import, has_export) {
                             eprintln!("daemon: peer {}: {}", spec.label(), e);
                             return ExitCode::from(1);
                         }
@@ -639,17 +643,17 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         }
                     }
                     if rfc8212 && cfg.effective_peer_as(spec) != cfg.local_as {
-                        if spec.import.is_none() {
+                        if !has_import {
                             eprintln!(
-                                "daemon: peer {}: warning: no import route-map; discarding \
-                                 received routes (RFC 8212)",
+                                "daemon: peer {}: warning: no import route-map or filter; \
+                                 discarding received routes (RFC 8212)",
                                 spec.label()
                             );
                         }
-                        if spec.export.is_none() {
+                        if !has_export {
                             eprintln!(
-                                "daemon: peer {}: warning: no export route-map; announcing \
-                                 nothing (RFC 8212)",
+                                "daemon: peer {}: warning: no export route-map or filter; \
+                                 announcing nothing (RFC 8212)",
                                 spec.label()
                             );
                         }

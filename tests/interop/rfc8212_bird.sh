@@ -124,10 +124,10 @@ for i in $(seq 1 120); do
     if [ $ok_session -ne 0 ] && grep -qF "session #1 → Established" "$OUT/lr-phase1.log" 2>/dev/null; then
         ok_session=0
     fi
-    if [ $ok_warn_export -ne 0 ] && grep -qF "no export route-map; announcing nothing (RFC 8212)" "$OUT/lr-phase1.log" 2>/dev/null; then
+    if [ $ok_warn_export -ne 0 ] && grep -qF "no export route-map or filter; announcing nothing (RFC 8212)" "$OUT/lr-phase1.log" 2>/dev/null; then
         ok_warn_export=0
     fi
-    if [ $ok_warn_import -ne 0 ] && grep -qF "no import route-map; discarding received routes (RFC 8212)" "$OUT/lr-phase1.log" 2>/dev/null; then
+    if [ $ok_warn_import -ne 0 ] && grep -qF "no import route-map or filter; discarding received routes (RFC 8212)" "$OUT/lr-phase1.log" 2>/dev/null; then
         ok_warn_import=0
     fi
     if [ $ok_session -eq 0 ] && [ $ok_warn_export -eq 0 ] && [ $ok_warn_import -eq 0 ]; then
@@ -228,11 +228,11 @@ if [ $ok_session -ne 0 ]; then
 fi
 # Phase 1 — startup warnings must have fired.
 if [ $ok_warn_export -ne 0 ]; then
-    echo "FAIL: Phase 1 — lr-daemon did not log 'no export route-map; announcing nothing (RFC 8212)'"
+    echo "FAIL: Phase 1 — lr-daemon did not log 'no export route-map or filter; announcing nothing (RFC 8212)'"
     fail=1
 fi
 if [ $ok_warn_import -ne 0 ]; then
-    echo "FAIL: Phase 1 — lr-daemon did not log 'no import route-map; discarding received routes (RFC 8212)'"
+    echo "FAIL: Phase 1 — lr-daemon did not log 'no import route-map or filter; discarding received routes (RFC 8212)'"
     fail=1
 fi
 # Phase 1 — BIRD must NOT have learned the route.

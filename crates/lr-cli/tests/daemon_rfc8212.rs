@@ -149,11 +149,11 @@ fn default_mode_denies_both_directions() {
     // Startup warnings name the incomplete configuration on each side.
     wait_log_all(
         &a.log,
-        &["no export route-map; announcing nothing (RFC 8212)"],
+        &["no export route-map or filter; announcing nothing (RFC 8212)"],
     );
     wait_log_all(
         &b.log,
-        &["no import route-map; discarding received routes (RFC 8212)"],
+        &["no import route-map or filter; discarding received routes (RFC 8212)"],
     );
 
     // Convergence without the prefix: deny-out on A + deny-in on B.
@@ -227,7 +227,7 @@ import = "import-all"
     // No policy-less warnings: every direction carries explicit policy.
     let b_text = std::fs::read_to_string(&b.log).unwrap_or_default();
     assert!(
-        !b_text.contains("no import route-map"),
+        !b_text.contains("no import route-map"), // prefix of either warning form
         "B has an import route-map; log: {b_text}"
     );
     std::fs::remove_file(&cfg_a).ok();
@@ -329,7 +329,7 @@ fn ibgp_sessions_are_exempt() {
     // And no policy-less warnings fire for the iBGP peer.
     let b_text = std::fs::read_to_string(&b.log).unwrap_or_default();
     assert!(
-        !b_text.contains("no import route-map"),
+        !b_text.contains("no import route-map"), // prefix of either warning form
         "iBGP is exempt from RFC 8212; log: {b_text}"
     );
 }
