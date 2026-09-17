@@ -93,11 +93,26 @@ fn wait_quiet(path: &std::path::Path) -> String {
 }
 
 fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
+    // A fixed range *below* the OS ephemeral allocations (Linux
+    // 32768+, macOS 49152+) closes the classic bind(:0)-then-drop
+    // TOCTOU: the kernel never hands these ports to a sibling probe
+    // or an outbound connection, so the only contenders are sibling
+    // tests in this binary — and the per-process counter makes the
+    // pick unique per call (observed live as "Address already in
+    // use" on a macOS CI runner with the :0 probe).
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    loop {
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let seed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0);
+        let port = 20000u32 + (seed.wrapping_add(n.wrapping_mul(7919)) % 12_000);
+        if std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
+            return port as u16;
+        }
+    }
 }
 
 /// Default mode: the session establishes, but without import/export
