@@ -45,8 +45,9 @@
 //!
 //! Slice scope note: the End.X / LAN End.X SID sub-TLVs (RFC 9513 §9.1/
 //! §9.2, types 31/32 of the "OSPFv3 Extended-LSA Sub-TLVs" registry)
-//! ride the RFC 8362 E-Router-Link TLV, which is a later slice — the
-//! locator + End SID surface here is the reachability core.
+//! ride the RFC 8362 E-Router-Link TLV's sub-TLV region —
+//! [`Srv6EndXSidSubTlv`] / [`Srv6LanEndXSidSubTlv`] and the walkers
+//! below; the locator + End SID surface is the reachability core.
 
 use crate::abr::{INITIAL_SEQUENCE_NUMBER, MAX_SEQUENCE_NUMBER};
 use crate::lsa::v3::V3Prefix;
@@ -286,6 +287,19 @@ impl Srv6SidStructure {
         out.push(self.arg_len);
     }
 
+    /// Encode with an explicit sub-TLV type — the §10 registry value
+    /// differs by carrier (10 in the Locator LSA registry, 30 in the
+    /// "OSPFv3 Extended-LSA Sub-TLVs" registry, RFC 9513 §13.7 — the
+    /// End.X / LAN End.X nesting).
+    pub fn encode_as(&self, out: &mut Vec<u8>, sub_tlv_type: u16) {
+        out.extend_from_slice(&sub_tlv_type.to_be_bytes());
+        out.extend_from_slice(&4u16.to_be_bytes());
+        out.push(self.lb_len);
+        out.push(self.ln_len);
+        out.push(self.func_len);
+        out.push(self.arg_len);
+    }
+
     /// Decode the 4-octet value (the caller passes the TLV value, not
     /// the header). `None` on any §10 violation — wrong length, sum
     /// above 128 — signalling "ignore the parent sub-TLV".
@@ -398,6 +412,286 @@ impl Srv6EndSidSubTlv {
             consumed,
         ))
     }
+}
+
+/// SRv6 End.X SID sub-TLV (RFC 9513 §9.1): one adjacency-steering SRv6
+/// SID, advertised as a sub-TLV of the **Router-Link TLV** of the
+/// E-Router-LSA (RFC 8362 §3.2) — "an instruction to forward to a
+/// specific neighbor on a specific link". Unlike the End SID sub-TLV,
+/// the behavior word leads and the algorithm/weight travel explicitly
+/// (the SID may share the locator of any algorithm).
+///
+/// Wire shape (§9.1, figure 7):
+/// `Type(2)=31 | Length(2) | Endpoint Behavior(2) | Flags(1) |
+/// Reserved1(1) | Algorithm(1) | Weight(1) | Reserved2(2) | SID(16) |
+/// sub-TLVs` — the optional SID Structure sub-TLV rides as type 30 of
+/// the "OSPFv3 Extended-LSA Sub-TLVs" registry (§13.7).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Srv6EndXSidSubTlv {
+    /// B/S/P flags (§9.1): [`END_X_FLAG_B`] backup, [`END_X_FLAG_S`]
+    /// set-of-adjacencies, [`END_X_FLAG_P`] persistent.
+    pub flags: u8,
+    /// RFC 8986 endpoint behavior code point (the End.X family — 5 for
+    /// plain End.X; PSP/USP/USD flavors 6-7, 24-25, 33-34).
+    pub behavior: u16,
+    /// The algorithm of the locator the SID is allocated from.
+    pub algorithm: u8,
+    /// The load-balancing weight of the End.X SID (§9.1).
+    pub weight: u8,
+    /// The 128-bit SID.
+    pub sid: [u8; 16],
+    /// The §10 SID Structure sub-TLV (registry type 30) when present.
+    pub structure: Option<Srv6SidStructure>,
+}
+
+/// End.X B-flag (§9.1): the SID refers to a path eligible for
+/// protection.
+pub const END_X_FLAG_B: u8 = 0x80;
+/// End.X S-flag (§9.1): the SID refers to a set of adjacencies.
+pub const END_X_FLAG_S: u8 = 0x40;
+/// End.X P-flag (§9.1): the SID is persistently allocated.
+pub const END_X_FLAG_P: u8 = 0x20;
+
+/// "OSPFv3 Extended-LSA Sub-TLVs" registry (RFC 9513 §13.7): the
+/// SRv6 End.X SID sub-TLV.
+pub const EXT_SUBTLV_END_X_SID: u16 = 31;
+/// "OSPFv3 Extended-LSA Sub-TLVs" registry: the SRv6 LAN End.X SID
+/// sub-TLV.
+pub const EXT_SUBTLV_LAN_END_X_SID: u16 = 32;
+
+impl Srv6EndXSidSubTlv {
+    /// The fixed value: Behavior(2) + Flags(1) + Reserved1(1) +
+    /// Algorithm(1) + Weight(1) + Reserved2(2) + SID(16) = 24 octets.
+    pub const FIXED_LEN: usize = 24;
+
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&EXT_SUBTLV_END_X_SID.to_be_bytes());
+        let struct_len: usize = if self.structure.is_some() { 8 } else { 0 };
+        let len: u16 = (Self::FIXED_LEN + struct_len) as u16;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&self.behavior.to_be_bytes());
+        out.push(self.flags);
+        out.push(0); // Reserved1
+        out.push(self.algorithm);
+        out.push(self.weight);
+        out.extend_from_slice(&0u16.to_be_bytes()); // Reserved2
+        out.extend_from_slice(&self.sid);
+        if let Some(s) = &self.structure {
+            s.encode_as(out, EXT_SUBTLV_SID_STRUCTURE);
+        }
+    }
+
+    /// Decode one End.X sub-TLV at `off` (inside a Router-Link TLV's
+    /// sub-TLV region). Returns the sub-TLV and the bytes consumed.
+    /// `None` on a truncated §9.1 shape or a §10 contract violation —
+    /// the caller ignores that sub-TLV instance.
+    pub fn decode(b: &[u8], off: usize) -> Option<(Self, usize)> {
+        if off + 4 > b.len() {
+            return None;
+        }
+        let t = u16::from_be_bytes([b[off], b[off + 1]]);
+        if t != EXT_SUBTLV_END_X_SID {
+            return None;
+        }
+        let len = u16::from_be_bytes([b[off + 2], b[off + 3]]) as usize;
+        let value_end = off + 4 + len;
+        if value_end > b.len() || len < Self::FIXED_LEN {
+            return None;
+        }
+        Self::decode_value(&b[off + 4..value_end]).map(|s| {
+            let consumed = off + 4 + len.div_ceil(4) * 4;
+            (s, consumed)
+        })
+    }
+
+    /// Decode from the sub-TLV value (past the header). The nested
+    /// sub-TLVs may only carry the §10 SID Structure (type 30, at most
+    /// once).
+    pub fn decode_value(value: &[u8]) -> Option<Self> {
+        if value.len() < Self::FIXED_LEN {
+            return None;
+        }
+        let behavior = u16::from_be_bytes([value[0], value[1]]);
+        let flags = value[2];
+        // value[3] Reserved1
+        let algorithm = value[4];
+        let weight = value[5];
+        // value[6..8] Reserved2
+        let mut sid = [0u8; 16];
+        sid.copy_from_slice(&value[8..24]);
+        let mut structure = None;
+        let mut sub = Self::FIXED_LEN;
+        while sub + 4 <= value.len() {
+            let st = u16::from_be_bytes([value[sub], value[sub + 1]]);
+            let slen = u16::from_be_bytes([value[sub + 2], value[sub + 3]]) as usize;
+            if sub + 4 + slen > value.len() {
+                return None;
+            }
+            if st == EXT_SUBTLV_SID_STRUCTURE {
+                // §10: MUST NOT appear more than once in the parent.
+                if structure.is_some() {
+                    return None;
+                }
+                structure = Some(Srv6SidStructure::decode_value(
+                    &value[sub + 4..sub + 4 + slen],
+                )?);
+            }
+            sub += 4 + slen.div_ceil(4) * 4;
+        }
+        Some(Self {
+            flags,
+            behavior,
+            algorithm,
+            weight,
+            sid,
+            structure,
+        })
+    }
+}
+
+/// SRv6 LAN End.X SID sub-TLV (RFC 9513 §9.2): the broadcast/NBMA
+/// sibling — one instance per DR/DR-Other neighbor, distinguished by
+/// the OSPFv3 Router-ID field, all riding the same link's Router-Link
+/// TLV. Same shape as the End.X sub-TLV with the 4-octet neighbor
+/// Router-ID inserted before the SID.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Srv6LanEndXSidSubTlv {
+    pub flags: u8,
+    pub behavior: u16,
+    pub algorithm: u8,
+    pub weight: u8,
+    /// The OSPFv3 Router-ID of the neighbor the SID steers to (§9.2).
+    pub neighbor_router_id: u32,
+    pub sid: [u8; 16],
+    pub structure: Option<Srv6SidStructure>,
+}
+
+impl Srv6LanEndXSidSubTlv {
+    /// The fixed value: the End.X fields + the 4-octet neighbor
+    /// Router-ID = 28 octets.
+    pub const FIXED_LEN: usize = 28;
+
+    pub fn encode(&self, out: &mut Vec<u8>) {
+        out.extend_from_slice(&EXT_SUBTLV_LAN_END_X_SID.to_be_bytes());
+        let struct_len: usize = if self.structure.is_some() { 8 } else { 0 };
+        let len: u16 = (Self::FIXED_LEN + struct_len) as u16;
+        out.extend_from_slice(&len.to_be_bytes());
+        out.extend_from_slice(&self.behavior.to_be_bytes());
+        out.push(self.flags);
+        out.push(0); // Reserved1
+        out.push(self.algorithm);
+        out.push(self.weight);
+        out.extend_from_slice(&0u16.to_be_bytes()); // Reserved2
+        out.extend_from_slice(&self.neighbor_router_id.to_be_bytes());
+        out.extend_from_slice(&self.sid);
+        if let Some(s) = &self.structure {
+            s.encode_as(out, EXT_SUBTLV_SID_STRUCTURE);
+        }
+    }
+
+    /// Decode one LAN End.X sub-TLV at `off`. Same contract as
+    /// [`Srv6EndXSidSubTlv::decode`].
+    pub fn decode(b: &[u8], off: usize) -> Option<(Self, usize)> {
+        if off + 4 > b.len() {
+            return None;
+        }
+        let t = u16::from_be_bytes([b[off], b[off + 1]]);
+        if t != EXT_SUBTLV_LAN_END_X_SID {
+            return None;
+        }
+        let len = u16::from_be_bytes([b[off + 2], b[off + 3]]) as usize;
+        let value_end = off + 4 + len;
+        if value_end > b.len() || len < Self::FIXED_LEN {
+            return None;
+        }
+        let value = &b[off + 4..value_end];
+        let behavior = u16::from_be_bytes([value[0], value[1]]);
+        let flags = value[2];
+        let algorithm = value[4];
+        let weight = value[5];
+        let neighbor_router_id = u32::from_be_bytes([value[8], value[9], value[10], value[11]]);
+        let mut sid = [0u8; 16];
+        sid.copy_from_slice(&value[12..28]);
+        let mut structure = None;
+        let mut sub = Self::FIXED_LEN;
+        while sub + 4 <= value.len() {
+            let st = u16::from_be_bytes([value[sub], value[sub + 1]]);
+            let slen = u16::from_be_bytes([value[sub + 2], value[sub + 3]]) as usize;
+            if sub + 4 + slen > value.len() {
+                return None;
+            }
+            if st == EXT_SUBTLV_SID_STRUCTURE {
+                if structure.is_some() {
+                    return None;
+                }
+                structure = Some(Srv6SidStructure::decode_value(
+                    &value[sub + 4..sub + 4 + slen],
+                )?);
+            }
+            sub += 4 + slen.div_ceil(4) * 4;
+        }
+        let consumed = off + 4 + len.div_ceil(4) * 4;
+        Some((
+            Self {
+                flags,
+                behavior,
+                algorithm,
+                weight,
+                neighbor_router_id,
+                sid,
+                structure,
+            },
+            consumed,
+        ))
+    }
+}
+
+/// Walk a Router-Link TLV's sub-TLV region and yield every End.X
+/// (§9.1) instance, in wire order. Malformed instances are skipped
+/// (the §9.1 decode contract); other sub-TLV types pass through.
+pub fn walk_end_x_sub_tlvs(sub_tlvs: &[u8]) -> Vec<Srv6EndXSidSubTlv> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off + 4 <= sub_tlvs.len() {
+        let t = u16::from_be_bytes([sub_tlvs[off], sub_tlvs[off + 1]]);
+        let len = u16::from_be_bytes([sub_tlvs[off + 2], sub_tlvs[off + 3]]) as usize;
+        if off + 4 + len > sub_tlvs.len() {
+            break; // malformed tail — stop walking
+        }
+        if t == EXT_SUBTLV_END_X_SID {
+            if let Some((sid, consumed)) = Srv6EndXSidSubTlv::decode(sub_tlvs, off) {
+                out.push(sid);
+                off = consumed;
+                continue;
+            }
+        }
+        off += 4 + len.div_ceil(4) * 4;
+    }
+    out
+}
+
+/// Walk a Router-Link TLV's sub-TLV region and yield every LAN End.X
+/// (§9.2) instance, in wire order. Same contract as
+/// [`walk_end_x_sub_tlvs`].
+pub fn walk_lan_end_x_sub_tlvs(sub_tlvs: &[u8]) -> Vec<Srv6LanEndXSidSubTlv> {
+    let mut out = Vec::new();
+    let mut off = 0usize;
+    while off + 4 <= sub_tlvs.len() {
+        let t = u16::from_be_bytes([sub_tlvs[off], sub_tlvs[off + 1]]);
+        let len = u16::from_be_bytes([sub_tlvs[off + 2], sub_tlvs[off + 3]]) as usize;
+        if off + 4 + len > sub_tlvs.len() {
+            break;
+        }
+        if t == EXT_SUBTLV_LAN_END_X_SID {
+            if let Some((sid, consumed)) = Srv6LanEndXSidSubTlv::decode(sub_tlvs, off) {
+                out.push(sid);
+                off = consumed;
+                continue;
+            }
+        }
+        off += 4 + len.div_ceil(4) * 4;
+    }
+    out
 }
 
 /// SRv6 Locator TLV (RFC 9513 §7.1): one locator of the advertising
@@ -1080,5 +1374,116 @@ mod tests {
         assert!(Srv6LocatorLsaBody::decode(&ri_body).is_none());
         let bad = vec![0x00, 0x01, 0xff, 0xff, 0x01];
         assert!(Srv6LocatorLsaBody::decode(&bad).is_none());
+    }
+
+    /// RFC 9513 §9.1 figure 7, byte-pinned: Type 31, Behavior(2),
+    /// Flags(1), Reserved1(1), Algorithm(1), Weight(1), Reserved2(2),
+    /// SID(16) — note the field order differs from the End SID sub-TLV
+    /// (§8), where Flags leads and no algorithm/weight travel.
+    #[test]
+    fn end_x_sid_sub_tlv_wire_and_round_trip() {
+        let sid: [u8; 16] = [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x64,
+        ];
+        let tlv = Srv6EndXSidSubTlv {
+            flags: END_X_FLAG_B | END_X_FLAG_P,
+            behavior: 5, // End.X (RFC 8986)
+            algorithm: 0,
+            weight: 3,
+            sid,
+            structure: Some(Srv6SidStructure {
+                lb_len: 32,
+                ln_len: 16,
+                func_len: 16,
+                arg_len: 0,
+            }),
+        };
+        let mut buf = Vec::new();
+        tlv.encode(&mut buf);
+        // Header (4) + 24 fixed + 8 SID Structure = 36, already
+        // 4-octet aligned.
+        assert_eq!(buf.len(), 36);
+        assert_eq!(
+            &buf[..8],
+            &[
+                0x00,
+                0x1F, // type 31
+                0x00,
+                0x20, // length 32
+                0x00,
+                0x05, // Endpoint Behavior = End.X
+                END_X_FLAG_B | END_X_FLAG_P,
+                0, // Reserved1
+            ]
+        );
+        assert_eq!(&buf[8..12], &[0, 3, 0, 0]); // algorithm 0, weight 3, Reserved2
+        assert_eq!(&buf[12..28], &sid);
+        // The nested SID Structure rides as registry type 30.
+        assert_eq!(&buf[28..32], &[0x00, 0x1E, 0x00, 0x04]);
+        assert_eq!(&buf[32..36], &[32, 16, 16, 0]);
+        let (decoded, consumed) = Srv6EndXSidSubTlv::decode(&buf, 0).unwrap();
+        assert_eq!(decoded, tlv);
+        assert_eq!(consumed, 36);
+
+        // A preceding foreign sub-TLV and a trailing one — the walker
+        // picks only the End.X instance.
+        let mut region = Vec::new();
+        region.extend_from_slice(&[0x00, 0x63, 0x00, 0x04, 1, 2, 3, 4]); // unknown type 99
+        region.extend_from_slice(&buf);
+        region.extend_from_slice(&[0x00, 0x1E, 0x00, 0x04, 1, 1, 1, 1]); // stray structure
+        assert_eq!(walk_end_x_sub_tlvs(&region), vec![tlv]);
+        // Truncation and duplicate nested structures are ignored.
+        assert!(Srv6EndXSidSubTlv::decode(&buf[..20], 0).is_none());
+        let mut dup = buf.clone();
+        dup.extend_from_slice(&[0x00, 0x1E, 0x00, 0x04, 1, 1, 1, 1]);
+        // length still says 32 — the second structure sits outside the
+        // sub-TLV, so the walker treats it as a separate (unknown
+        // here) sub-TLV; extend the parent length to make it a true
+        // duplicate violation instead.
+        dup[2..4].copy_from_slice(&40u16.to_be_bytes());
+        assert!(Srv6EndXSidSubTlv::decode(&dup, 0).is_none());
+    }
+
+    /// RFC 9513 §9.2 figure 8, byte-pinned: the LAN form inserts the
+    /// 4-octet Neighbor Router-ID between Reserved2 and the SID.
+    #[test]
+    fn lan_end_x_sid_sub_tlv_wire_and_round_trip() {
+        let sid: [u8; 16] = [
+            0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xC8,
+        ];
+        let tlv = Srv6LanEndXSidSubTlv {
+            flags: END_X_FLAG_S,
+            behavior: 5,
+            algorithm: 0,
+            weight: 0,
+            neighbor_router_id: 0x0a00_0002,
+            sid,
+            structure: None,
+        };
+        let mut buf = Vec::new();
+        tlv.encode(&mut buf);
+        assert_eq!(buf.len(), 32); // 4 header + 28 fixed
+        assert_eq!(&buf[..4], &[0x00, 0x20, 0x00, 0x1C]); // type 32, length 28
+        assert_eq!(&buf[4..6], &[0x00, 0x05]);
+        assert_eq!(buf[6], END_X_FLAG_S);
+        assert_eq!(&buf[12..16], &[0x0A, 0x00, 0x00, 0x02]); // neighbor router id
+        assert_eq!(&buf[16..32], &sid);
+        let (decoded, consumed) = Srv6LanEndXSidSubTlv::decode(&buf, 0).unwrap();
+        assert_eq!(decoded, tlv);
+        assert_eq!(consumed, 32);
+        // Mixed region: both forms walk out with their own types.
+        let mut region = Vec::new();
+        let p2p = Srv6EndXSidSubTlv {
+            flags: 0,
+            behavior: 5,
+            algorithm: 0,
+            weight: 0,
+            sid,
+            structure: None,
+        };
+        p2p.encode(&mut region);
+        tlv.encode(&mut region);
+        assert_eq!(walk_end_x_sub_tlvs(&region), vec![p2p]);
+        assert_eq!(walk_lan_end_x_sub_tlvs(&region), vec![tlv]);
     }
 }

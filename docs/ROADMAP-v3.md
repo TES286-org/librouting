@@ -1605,30 +1605,61 @@ unit + 1 e2e ~230 — plus the RFC 8212 filter-binding fix in
 
 ## D13 — OSPF backfill: E-LSA (RFC 8362) + SRv6 End.X SIDs
 
-**Status:** not started. Tracks `lr-ospf`.
+**Status:** landed. Tracks `lr-ospf` (+ `lr-router`, `lr-cli`). The
+research doc `docs/research/E-LSA-DESIGN.md` predated the
+implementation and carried a wrong LS-type/TLV table plus a
+fabricated E-bit capability story — the landed shapes come from the
+RFC 8362/9513 texts directly (see the wire-audit note atop the doc).
 
-**Current gap.** `docs/research/E-LSA-DESIGN.md` is a design document
-only — no implementation yet. RFC 8362 is the OSPFv3 Extended LSA
-that turns fixed-length LSA types into variable TLV structures,
-allowing larger Router-ID / Link-ID spaces. SRv6 End.X SIDs
-(RFC 9513 §8) need E-LSA to carry SIDs long enough.
+**Landed in three slices.**
 
-**Proposed work.**
+1. **Codecs** (`crates/lr-ospf/src/lsa/e_v3.rs`): the eight
+   TLV-bodied E-LSA types — E-Router 0xA021 (fc 33), E-Network
+   0xA022 (34), E-Inter-Area-Prefix 0xA023 (35), E-Inter-Area-Router
+   0xA024 (36), E-AS-External 0xC025 (37, AS scope), E-Type-7 0xA027
+   (39), E-Link 0x8028 (40, link scope), E-Intra-Area-Prefix 0xA029
+   (41); fc 38 stays unallocated — with the RFC 3630 TLV framing and
+   the §5/§6.3 malformed/skip rules. 13 unit tests pin the wire
+   shapes against the RFC figures. Origination helpers for all
+   eight shapes (sequence machinery shared with the legacy v3
+   originators).
+2. **Reception + origination** (spf.rs / external.rs / instance.rs /
+   daemon_ospf3.rs): the receiver decides — `run_spf_v3_extended` /
+   `summary_routes_v3_extended` / `external_routes_v3_extended`
+   prefer a speaker's E-LSAs (per-speaker, first E-instance wins) and
+   admit the E inter-area/external forms, while the legacy paths
+   stay byte-identical (§6.2: E-LSAs stored + re-flooded, never used
+   for the calc); `ospf_area_accepts` classifies the E forms, 0xC025
+   re-floods at AS scope, the RFC 3623 topology bookkeeping counts
+   them. The daemon knob `[ospf] extended_lsas` (OSPFv3-only,
+   fail-closed) switches origination to the E-Router/E-Network/
+   E-Link/E-IAP forms (ABR/ASBR origination stays legacy — §6.1
+   migrates areas individually). The two-daemon lab
+   `tests/interop/ospf6_e_lsa.sh` makes legacy origination impossible,
+   so convergence proves the E-LSA path end to end; the
+   `ospf6.sh`/`ospf6_broadcast.sh` regressions pin the default.
+3. **SRv6 End.X** (`lsa/srv6.rs` / `srv6db.rs` / daemon): the §9.1
+   End.X (registry type 31) and §9.2 LAN End.X (32) sub-TLV codecs
+   ride the E-Router-Link TLV's sub-TLV region (§10 SID Structure
+   as type 30); the srv6db projects `Srv6EndXSid`s gated on §9
+   locator containment + algorithm match (multiple instances kept —
+   load-balancing); the daemon originates the p2p form per
+   `[[ospf.interface]] srv6_end_x` (fail-closed inside a configured
+   locator, p2p-only) — riding the topology E-Router-LSA under
+   `extended_lsas`, or a complete sparse-mode companion E-Router-LSA
+   (§6.2) under legacy mode; the projections surface on the runtime
+   API `status` (`srv6-endx` lines). The lab
+   `tests/interop/ospf6_e_lsa_endx.sh` pins adjacency + legacy-route
+   neutrality + both projections. LAN End.X origination (per
+   DR/DR-Other neighbor on broadcast segments) is the remaining
+   follow-up, along with a BGP-LS projection of the E-LSA topology
+   (D11's consumer).
 
-1. **E-LSA codec.** Add to `lr-ospf/src/lsa/v3.rs`:
-   E-Router-LSA (0xC0), E-Network-LSA (0xC1),
-   E-Inter-Area-Prefix-LSA (0xC2), E-Inter-Area-Router-LSA (0xC3),
-   E-AS-External-LSA (0xC4), E-Type-7-LSA (0xC5).
-2. **E-LSA LSDB.** Extend the existing LSDB to hold both legacy and
-   Extended LSAs; SPF prefers E-LSA when the `E-bit` is set in
-   Options.
-3. **SRv6 End.X SID carriage.** Add an SRv6 End.X SID sub-TLV to
-   E-Link-LSA: 16-byte IPv6 SID + behavior + 4-byte SID Structure
-   (`block_len`/`node_len`/`function_len`/`argument_len`).
-4. **Interop tests.** FRR `ospf6d` supports E-LSA + SRv6.
-
-**Estimated size.** ~1500–2000 new lines (E-LSA codec ~600, LSDB
-changes ~300, SPF adaptation ~200, End.X SID ~200, tests ~300).
+**Original gap (kept as audit trail).** `docs/research/E-LSA-DESIGN.md`
+is a design document only — no implementation yet. RFC 8362 is the
+OSPFv3 Extended LSA that turns fixed-length LSA types into variable
+TLV structures, allowing larger Router-ID / Link-ID spaces. SRv6
+End.X SIDs (RFC 9513 §8) need E-LSA to carry SIDs long enough.
 
 ---
 
@@ -1773,7 +1804,7 @@ refactor — needs extensive regression tests.
 | D10       | partial (D10.1 + D10.6 landed) | —     | RFC 8326 sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | partial (D12.1 + D12.2 + D12.3 + D12.4 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint (now with per-session UPDATE counters `lr_bgp_updates_total` and filter-eval latency histograms `lr_filter_eval_duration_seconds` — D12.4, incl. the RFC 8212 filter-bindings-count-as-policy fix) + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) open |
-| D13       | not started           | —     | OSPF E-LSA + SRv6 End.X                  |
+| D13       | landed                | —     | OSPFv3 E-LSA + SRv6 End.X — codecs (`lsa::e_v3`, the eight RFC 8362 types byte-pinned), reception (per-speaker E-preference in `run_spf_v3_extended`/`summary_routes_v3_extended`/`external_routes_v3_extended`, receiver-decided per §6.1/§6.2 — no wire negotiation exists), origination (`[ospf] extended_lsas` switches the daemon's E-Router/E-Network/E-Link/E-IAP forms; ABR/ASBR stays legacy), End.X/LAN End.X codecs (RFC 9513 §9.1/§9.2, types 31/32) + srv6db projection (§9 containment/algorithm gates) + `srv6_end_x` origination (sparse-mode companion E-Router-LSA under legacy mode); labs `ospf6_e_lsa.sh` + `ospf6_e_lsa_endx.sh`. Follow-ups: LAN End.X origination, BGP-LS projection (D11) |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
 

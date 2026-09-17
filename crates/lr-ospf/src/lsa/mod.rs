@@ -51,8 +51,10 @@ pub use sr::{
 pub mod srv6;
 pub use srv6::{
     behavior_valid_for_end_sid, decode_v3_ri_tlvs, decode_v3_srv6_ri, encode_v3_srv6_ri,
-    originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv, Srv6LocatorLsaBody,
-    Srv6LocatorTlv, Srv6RiBlock, Srv6SidStructure, EXT_SUBTLV_SID_STRUCTURE,
+    originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, walk_end_x_sub_tlvs,
+    walk_lan_end_x_sub_tlvs, Srv6EndSidSubTlv, Srv6EndXSidSubTlv, Srv6LanEndXSidSubTlv,
+    Srv6LocatorLsaBody, Srv6LocatorTlv, Srv6RiBlock, Srv6SidStructure, END_X_FLAG_B, END_X_FLAG_P,
+    END_X_FLAG_S, EXT_SUBTLV_END_X_SID, EXT_SUBTLV_LAN_END_X_SID, EXT_SUBTLV_SID_STRUCTURE,
     LOCATOR_SUBTLV_END_SID, LOCATOR_SUBTLV_IPV6_FWD_ADDR, LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR,
     LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ID, LOCATOR_SUBTLV_ROUTE_TAG, LOCATOR_SUBTLV_SID_STRUCTURE,
     LOCATOR_TLV_SRV6_LOCATOR, LS_TYPE_SRV6_LOCATOR, LS_TYPE_V3_ROUTER_INFORMATION, PREFIX_OPT_AC,

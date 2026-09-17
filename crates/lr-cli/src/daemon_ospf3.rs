@@ -147,17 +147,38 @@ fn lsa_seq_floor(
 }
 
 /// The Router-Link TLV form of a legacy link descriptor (RFC 8362
-/// §3.2) — the E-Router-LSA origination switch.
-fn e_router_links(links: &[lr_ospf::lsa::v3::V3RouterLink]) -> Vec<ERouterLinkTlv> {
+/// §3.2) — the E-Router-LSA origination switch. p2p links on an
+/// interface with a configured End.X SID (`[[ospf.interface]]
+/// srv6_end_x`, RFC 9513 §9.1) carry it in the sub-TLV region.
+fn e_router_links(
+    links: &[lr_ospf::lsa::v3::V3RouterLink],
+    end_x_by_if: &BTreeMap<u32, ([u8; 16], u8)>,
+) -> Vec<ERouterLinkTlv> {
     links
         .iter()
-        .map(|l| ERouterLinkTlv {
-            link_type: l.link_type,
-            metric: l.metric,
-            interface_id: l.interface_id,
-            neighbor_interface_id: l.neighbor_interface_id,
-            neighbor_router_id: l.neighbor_router_id,
-            sub_tlvs: Vec::new(),
+        .map(|l| {
+            let mut sub_tlvs = Vec::new();
+            if l.link_type == LINK_TYPE_POINTTOPOINT {
+                if let Some((sid, algorithm)) = end_x_by_if.get(&l.interface_id) {
+                    lr_ospf::lsa::Srv6EndXSidSubTlv {
+                        flags: 0,
+                        behavior: 5, // End.X (RFC 8986)
+                        algorithm: *algorithm,
+                        weight: 0,
+                        sid: *sid,
+                        structure: None,
+                    }
+                    .encode(&mut sub_tlvs);
+                }
+            }
+            ERouterLinkTlv {
+                link_type: l.link_type,
+                metric: l.metric,
+                interface_id: l.interface_id,
+                neighbor_interface_id: l.neighbor_interface_id,
+                neighbor_router_id: l.neighbor_router_id,
+                sub_tlvs,
+            }
         })
         .collect()
 }
@@ -228,6 +249,11 @@ struct Ospf3Interface {
     /// broadcast segments run the §9.4 DR/BDR election (RFC 5340
     /// §4.1.2 keeps the v2 election on Router-ID identity).
     network_type: OspfNetworkType,
+    /// RFC 9513 §9.1: the local End.X SID
+    /// (`[[ospf.interface]] srv6_end_x`) with the algorithm of the
+    /// locator it is allocated from — rides the E-Router-LSA's p2p
+    /// Router-Link TLV sub-TLV region once the adjacency is Full.
+    end_x_sid: Option<([u8; 16], u8)>,
     /// Router Priority advertised in Hellos (§A.3.2; 0 = never DR/BDR).
     priority: u8,
     /// Interface FSM state (§9.1): Waiting until the WaitTimer or
@@ -302,6 +328,9 @@ struct Ospf3Daemon {
     /// Link-LSA, (area, ls_id) → Intra-Area-Prefix-LSA, area →
     /// SRv6 Router-Information-LSA, area → SRv6 Locator-LSA.
     router_lsa_seq: BTreeMap<u32, u32>,
+    /// Area → E-Router-LSA (the RFC 8362 carrier — shared by the
+    /// extended mode and the RFC 9513 §9 sparse-mode companion).
+    e_router_lsa_seq: BTreeMap<u32, u32>,
     link_lsa_seq: BTreeMap<(u32, u32), u32>,
     iap_lsa_seq: BTreeMap<(u32, u32), u32>,
     ri_lsa_seq: BTreeMap<u32, u32>,
@@ -509,6 +538,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         pending_reorig: BTreeMap::new(),
         anchors: BTreeMap::new(),
         router_lsa_seq: BTreeMap::new(),
+        e_router_lsa_seq: BTreeMap::new(),
         link_lsa_seq: BTreeMap::new(),
         iap_lsa_seq: BTreeMap::new(),
         ri_lsa_seq: BTreeMap::new(),
@@ -651,6 +681,26 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                         "ospf3 session #{} kind={} state={}",
                         s.handle.0, s.kind, s.state
                     ));
+                }
+                // RFC 9513 §9: the projected adjacency End.X SIDs, one
+                // line per (node, SID) — grep-friendly for the interop
+                // labs (`status | grep srv6-endx`).
+                for (area, db) in router.ospf_srv6_databases() {
+                    for (rid, node) in &db.nodes {
+                        for x in &node.end_x_sids {
+                            lines.push(format!(
+                                "srv6-endx {} area={} router={:08x} behavior={} alg={} neighbor={:08x}{}",
+                                Ipv6Addr::from(x.sid),
+                                area_label(area),
+                                rid,
+                                x.behavior,
+                                x.algorithm,
+                                x.lan_neighbor_router_id
+                                    .unwrap_or(x.neighbor_router_id),
+                                if x.lan_neighbor_router_id.is_some() { " lan" } else { "" },
+                            ));
+                        }
+                    }
                 }
             }
             lines
@@ -828,6 +878,34 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
     };
     let priority = spec.priority.unwrap_or(1);
     let interface_id = transport.ifindex();
+    // RFC 9513 §9.1: resolve the configured End.X SID with its
+    // locator's algorithm (the finalize pass already fail-closed on
+    // containment; here we only need the covering locator's
+    // algorithm — 0 when the locator leaves it default).
+    let end_x_sid = spec.srv6_end_x.as_deref().and_then(|text| {
+        let sid: Ipv6Addr = text.parse().ok()?;
+        let algorithm = cfg
+            .ospf_srv6_locators
+            .iter()
+            .find_map(|loc| {
+                let p: lr_core::addr::Prefix = loc.prefix.as_deref()?.parse().ok()?;
+                let lr_core::addr::IpAddr::V6(pb) = p.addr else {
+                    return None;
+                };
+                let len = (p.prefix_len as usize).min(128);
+                let full = len / 8;
+                let rem = len % 8;
+                let bytes = sid.octets();
+                let covered = bytes[..full] == pb[..full]
+                    && (rem == 0 || {
+                        let mask = !0u8 << (8 - rem);
+                        bytes[full] & mask == pb[full] & mask
+                    });
+                covered.then_some(loc.algorithm.unwrap_or(0))
+            })
+            .unwrap_or(0);
+        Some((sid.octets(), algorithm))
+    });
     Ok(Ospf3Interface {
         name,
         area: spec.area.unwrap_or(cfg.ospf_area),
@@ -842,6 +920,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
         last_hello_ms: 0,
         heard: BTreeMap::new(),
         network_type,
+        end_x_sid,
         priority,
         // §9.3: broadcast interfaces come up in Waiting and wait
         // RouterDeadInterval before electing (p2p has no election;
@@ -2225,6 +2304,17 @@ impl Ospf3Daemon {
         if router.ospf_router_lsa_flags(area).border {
             bits |= ROUTER_BIT_B;
         }
+        // RFC 9513 §9: the interface End.X SIDs ride the E-Router-LSA's
+        // p2p Router-Link TLV sub-TLVs. In extended mode the E-Router-LSA
+        // is the topology carrier; in legacy mode (RFC 8362 §6.2
+        // sparse-mode) a complete E-Router-LSA companion carries them
+        // alongside the legacy topology — receivers ignore it for the
+        // SPF but the SRv6 database still projects the SIDs.
+        let end_x_by_if: BTreeMap<u32, ([u8; 16], u8)> = self
+            .interfaces
+            .iter()
+            .filter_map(|i| i.end_x_sid.map(|sid| (i.interface_id, sid)))
+            .collect();
         let router_lsa_type = if self.extended_lsas {
             LS_TYPE_E_ROUTER
         } else {
@@ -2243,7 +2333,7 @@ impl Ospf3Daemon {
                 self.router_id.as_u32(),
                 bits,
                 OSPF_V3_OPTIONS_DEFAULT,
-                e_router_links(&links),
+                e_router_links(&links, &end_x_by_if),
                 seq,
             )
         } else {
@@ -2333,6 +2423,38 @@ impl Ospf3Daemon {
                     area_label(area)
                 );
                 return;
+            }
+        }
+        // RFC 9513 §9 sparse-mode companion: with End.X SIDs configured
+        // but extended mode off, the complete E-Router-LSA rides the
+        // same LSU as the legacy topology — legacy receivers store and
+        // re-flood it (U-bit) without using it for the SPF, and the
+        // SRv6 database projects the adjacency SIDs from it.
+        if !self.extended_lsas && !end_x_by_if.is_empty() {
+            let e_seq = lsa_seq_floor(
+                router,
+                area,
+                LS_TYPE_E_ROUTER,
+                0,
+                self.router_id.as_u32(),
+                self.e_router_lsa_seq.get(&area).copied(),
+            );
+            match originate_v3_e_router_lsa(
+                self.router_id.as_u32(),
+                bits,
+                OSPF_V3_OPTIONS_DEFAULT,
+                e_router_links(&links, &end_x_by_if),
+                e_seq,
+            ) {
+                Some(lsa) => {
+                    self.e_router_lsa_seq
+                        .insert(area, lsa.header.ls_sequence_number);
+                    lsas.push(lsa);
+                }
+                None => eprintln!(
+                    "daemon: ospf3 E-Router-LSA sequence space exhausted for area {}",
+                    area_label(area)
+                ),
             }
         }
         // §4.4.3.5, the DR half: on every broadcast segment where this

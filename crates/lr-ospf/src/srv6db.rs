@@ -126,9 +126,38 @@ fn contains_prefix(addr: &[u8; 16], prefix: &Prefix) -> bool {
     addr[full] & mask == p[full] & mask
 }
 
-/// The SRv6 view of one advertising router (RFC 9513 §2-§8): its
+/// One adjacency-steering SRv6 End.X SID of a node (RFC 9513 §9),
+/// projected from an E-Router-LSA Router-Link TLV: the §9.1 p2p form
+/// or the §9.2 LAN form (which carries its neighbor Router-ID
+/// explicitly).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Srv6EndXSid {
+    /// RFC 8986 endpoint behavior code point (the End.X family).
+    pub behavior: u16,
+    /// B/S/P flags (§9.1/§9.2).
+    pub flags: u8,
+    /// The algorithm of the locator the SID is allocated from.
+    pub algorithm: u8,
+    /// The load-balancing weight.
+    pub weight: u8,
+    /// The 128-bit SID, network byte order.
+    pub sid: [u8; 16],
+    /// The §10 SID Structure when advertised.
+    pub structure: Option<Srv6SidStructure>,
+    /// The parent Router-Link TLV's neighbor — the adjacency the SID
+    /// steers to (§9: "forward to a specific neighbor on a specific
+    /// link").
+    pub neighbor_interface_id: u32,
+    pub neighbor_router_id: u32,
+    /// The LAN End.X neighbor Router-ID (§9.2); `None` for the p2p
+    /// form (§9.1), where the parent link's neighbor is the target.
+    pub lan_neighbor_router_id: Option<u32>,
+}
+
+/// The SRv6 view of one advertising router (RFC 9513 §2-§9): its
 /// capabilities, algorithms and MSDs from the Router Information LSA,
-/// plus the locators and End SIDs from the Locator LSAs.
+/// the locators and End SIDs from the Locator LSAs, and the adjacency
+/// End.X SIDs from the E-Router-LSA's Router-Link TLVs (§9).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Srv6Node {
     /// The §2 SRv6 Capabilities TLV flags. `None` when the node's
@@ -146,6 +175,13 @@ pub struct Srv6Node {
     /// The locators (§7), deduplicated per prefix by the §7.1
     /// preference, in (preference, wire) order.
     pub locators: Vec<Srv6Locator>,
+    /// The adjacency End.X / LAN End.X SIDs (§9), projected from the
+    /// E-Router-LSA's Router-Link TLV sub-TLVs and gated on §9
+    /// locator containment (the SID must fall inside a locator this
+    /// same router advertised, with the matching algorithm). Multiple
+    /// instances survive — the same SID may serve several links and a
+    /// link may carry several SIDs (load-balancing, §9).
+    pub end_x_sids: Vec<Srv6EndXSid>,
 }
 
 impl Srv6Node {
@@ -174,7 +210,7 @@ pub struct Srv6Database {
 
 impl Srv6Database {
     /// Project the area LSDB. Pure: reads the database, applies the
-    /// §2/§7.1 preference rules and the §5/§8/§11 gates.
+    /// §2/§7.1 preference rules and the §5/§8/§9/§11 gates.
     pub fn from_lsdb(lsdb: &Lsdb) -> Self {
         // Collect the raw advertisements per router, ordered so the
         // preference rules become first-wins: area scope before link
@@ -182,6 +218,10 @@ impl Srv6Database {
         // (type, ls_id, router) — group and re-sort per router.)
         let mut ri_blocks: BTreeMap<u32, Vec<(u8, u32, Srv6RiBlock)>> = BTreeMap::new();
         let mut locator_tlvs: BTreeMap<u32, Vec<(u8, u32, Vec<Srv6LocatorTlv>)>> = BTreeMap::new();
+        // RFC 9513 §9: the adjacency End.X SIDs ride the E-Router-LSA's
+        // Router-Link TLV sub-TLVs — first E-Router-LSA per router wins
+        // (the same first-instance rule the SPF pre-scan applies).
+        let mut e_router_lsas: BTreeMap<u32, crate::lsa::ERouterLsaBody> = BTreeMap::new();
         for (key, entry) in lsdb.iter() {
             match key.ls_type & 0x1FFF {
                 RI_FUNC_CODE => {
@@ -201,6 +241,11 @@ impl Srv6Database {
                             .push((scope_rank(key.ls_type), key.link_state_id, body.locators));
                     }
                 }
+                _ if key.ls_type == crate::lsa::LS_TYPE_E_ROUTER => {
+                    if let Some(body) = crate::lsa::ERouterLsaBody::decode(&entry.lsa.body) {
+                        e_router_lsas.entry(key.advertising_router).or_insert(body);
+                    }
+                }
                 _ => {}
             }
         }
@@ -208,6 +253,11 @@ impl Srv6Database {
         let mut nodes = BTreeMap::new();
         let mut router_ids: Vec<u32> = ri_blocks.keys().copied().collect();
         for rid in locator_tlvs.keys().copied() {
+            if !router_ids.contains(&rid) {
+                router_ids.push(rid);
+            }
+        }
+        for rid in e_router_lsas.keys().copied() {
             if !router_ids.contains(&rid) {
                 router_ids.push(rid);
             }
@@ -252,7 +302,51 @@ impl Srv6Database {
                 }
             }
 
-            if node.capabilities.is_some() || !node.locators.is_empty() {
+            // §9: project the adjacency End.X / LAN End.X SIDs from the
+            // E-Router-LSA. Every SID must be subsumed by the subnet of
+            // a locator this same router advertised with the matching
+            // algorithm — otherwise it is ignored.
+            if let Some(e_router) = e_router_lsas.get(&rid) {
+                for link in &e_router.links {
+                    for x in crate::lsa::srv6::walk_end_x_sub_tlvs(&link.sub_tlvs) {
+                        if !locator_covers(&node, &x.sid, x.algorithm) {
+                            continue;
+                        }
+                        node.end_x_sids.push(Srv6EndXSid {
+                            behavior: x.behavior,
+                            flags: x.flags,
+                            algorithm: x.algorithm,
+                            weight: x.weight,
+                            sid: x.sid,
+                            structure: x.structure,
+                            neighbor_interface_id: link.neighbor_interface_id,
+                            neighbor_router_id: link.neighbor_router_id,
+                            lan_neighbor_router_id: None,
+                        });
+                    }
+                    for lan in crate::lsa::srv6::walk_lan_end_x_sub_tlvs(&link.sub_tlvs) {
+                        if !locator_covers(&node, &lan.sid, lan.algorithm) {
+                            continue;
+                        }
+                        node.end_x_sids.push(Srv6EndXSid {
+                            behavior: lan.behavior,
+                            flags: lan.flags,
+                            algorithm: lan.algorithm,
+                            weight: lan.weight,
+                            sid: lan.sid,
+                            structure: lan.structure,
+                            neighbor_interface_id: link.neighbor_interface_id,
+                            neighbor_router_id: link.neighbor_router_id,
+                            lan_neighbor_router_id: Some(lan.neighbor_router_id),
+                        });
+                    }
+                }
+            }
+
+            if node.capabilities.is_some()
+                || !node.locators.is_empty()
+                || !node.end_x_sids.is_empty()
+            {
                 nodes.insert(rid, node);
             }
         }
@@ -281,6 +375,16 @@ fn mask_prefix(addr: &[u8; 16], prefix_len: u8) -> Prefix {
         out[full] &= mask;
     }
     Prefix::new_v6(out, prefix_len)
+}
+
+/// RFC 9513 §9: whether `sid` is subsumed by the subnet of a locator
+/// `node` advertised with the matching algorithm — the End.X
+/// containment gate ("End.X SIDs that do not meet this requirement
+/// MUST be ignored").
+fn locator_covers(node: &Srv6Node, sid: &[u8; 16], algorithm: u8) -> bool {
+    node.locators
+        .iter()
+        .any(|l| l.algorithm == algorithm && l.contains(sid))
 }
 
 /// Project one Locator TLV into a [`Srv6Locator`]: gate the End SIDs
@@ -658,5 +762,183 @@ mod tests {
         assert_eq!(loc.prefix.prefix_len, 48);
         assert!(loc.contains(&in_sid));
         assert_eq!(loc.end_sids.len(), 1);
+    }
+
+    /// RFC 9513 §9: End.X SIDs project from the E-Router-LSA's
+    /// Router-Link TLVs, gated on locator containment — the same
+    /// router's locator, with the matching algorithm.
+    #[test]
+    fn end_x_sids_project_from_e_router_lsa() {
+        let rid = 0x0a00_0001;
+        let mut db = Lsdb::new();
+        // The locator LSA (algorithm 0, 2001:db8:1::/48).
+        db.install(
+            originate_v3_srv6_locator_lsa(rid, 1, &[locator_tlv(&[], 1)], None).unwrap(),
+            0,
+        );
+        // The E-Router-LSA: one p2p link with one End.X sub-TLV inside
+        // the locator and one outside (dropped by §9), plus a LAN
+        // End.X sub-TLV for a DR-Other neighbor.
+        let mut sub_tlvs = Vec::new();
+        crate::lsa::srv6::Srv6EndXSidSubTlv {
+            flags: 0,
+            behavior: 5,
+            algorithm: 0,
+            weight: 0,
+            sid: sid_in_locator(),
+            structure: None,
+        }
+        .encode(&mut sub_tlvs);
+        crate::lsa::srv6::Srv6EndXSidSubTlv {
+            flags: 0,
+            behavior: 5,
+            algorithm: 0,
+            weight: 0,
+            // 2001:db8:dead:: — outside the locator.
+            sid: [
+                0x20, 0x01, 0x0d, 0xb8, 0xde, 0xad, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+            ],
+            structure: None,
+        }
+        .encode(&mut sub_tlvs);
+        crate::lsa::srv6::Srv6LanEndXSidSubTlv {
+            flags: 0,
+            behavior: 5,
+            algorithm: 0,
+            weight: 0,
+            neighbor_router_id: 0x0a00_0003,
+            sid: sid_in_locator(),
+            structure: None,
+        }
+        .encode(&mut sub_tlvs);
+        db.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                rid,
+                0x04,
+                0x13,
+                vec![crate::lsa::ERouterLinkTlv {
+                    link_type: 1, // p2p
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 3,
+                    neighbor_router_id: 0x0a00_0002,
+                    sub_tlvs,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+
+        let srv6 = Srv6Database::from_lsdb(&db);
+        let node = srv6.node(rid).expect("node projects");
+        // The out-of-locator SID is gone; the p2p and LAN forms survive.
+        assert_eq!(node.end_x_sids.len(), 2);
+        assert!(node.end_x_sids.iter().all(|x| x.sid == sid_in_locator()));
+        let p2p = node
+            .end_x_sids
+            .iter()
+            .find(|x| x.lan_neighbor_router_id.is_none())
+            .unwrap();
+        assert_eq!(p2p.neighbor_router_id, 0x0a00_0002);
+        assert_eq!(p2p.neighbor_interface_id, 3);
+        assert_eq!(p2p.behavior, 5);
+        let lan = node
+            .end_x_sids
+            .iter()
+            .find(|x| x.lan_neighbor_router_id.is_some())
+            .unwrap();
+        assert_eq!(lan.lan_neighbor_router_id, Some(0x0a00_0003));
+    }
+
+    /// §9: an End.X SID whose algorithm matches no locator of the same
+    /// router is ignored (the locator must be advertised "with the
+    /// algorithm that will be used for computing paths destined to the
+    /// SID").
+    #[test]
+    fn end_x_sids_gate_on_algorithm_match() {
+        let rid = 0x0a00_0001;
+        let mut db = Lsdb::new();
+        // Locator with algorithm 0 only.
+        db.install(
+            originate_v3_srv6_locator_lsa(rid, 1, &[locator_tlv(&[], 1)], None).unwrap(),
+            0,
+        );
+        let mut sub_tlvs = Vec::new();
+        crate::lsa::srv6::Srv6EndXSidSubTlv {
+            flags: 0,
+            behavior: 5,
+            algorithm: 1, // flexible algorithm — no matching locator
+            weight: 0,
+            sid: sid_in_locator(),
+            structure: None,
+        }
+        .encode(&mut sub_tlvs);
+        db.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                rid,
+                0x04,
+                0x13,
+                vec![crate::lsa::ERouterLinkTlv {
+                    link_type: 1,
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 3,
+                    neighbor_router_id: 0x0a00_0002,
+                    sub_tlvs,
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        let srv6 = Srv6Database::from_lsdb(&db);
+        let node = srv6.node(rid).expect("locator still projects");
+        assert!(
+            node.end_x_sids.is_empty(),
+            "algorithm mismatch drops the SID"
+        );
+
+        // Without any locator at all, an E-Router-LSA with End.X SIDs
+        // projects no node: §9 needs a locator to admit the SIDs, and
+        // the node has no other SRv6 signal (no RI block, no
+        // locators) — a plain E-Router-LSA never pollutes the
+        // database with empty nodes.
+        let mut db2 = Lsdb::new();
+        db2.install(
+            crate::lsa::originate_v3_e_router_lsa(
+                rid,
+                0x04,
+                0x13,
+                vec![crate::lsa::ERouterLinkTlv {
+                    link_type: 1,
+                    metric: 10,
+                    interface_id: 5,
+                    neighbor_interface_id: 3,
+                    neighbor_router_id: 0x0a00_0002,
+                    sub_tlvs: {
+                        let mut s = Vec::new();
+                        crate::lsa::srv6::Srv6EndXSidSubTlv {
+                            flags: 0,
+                            behavior: 5,
+                            algorithm: 0,
+                            weight: 0,
+                            sid: sid_in_locator(),
+                            structure: None,
+                        }
+                        .encode(&mut s);
+                        s
+                    },
+                }],
+                None,
+            )
+            .unwrap(),
+            0,
+        );
+        let srv6 = Srv6Database::from_lsdb(&db2);
+        assert!(
+            srv6.node(rid).is_none(),
+            "no locator — no node, the SIDs were gated"
+        );
     }
 }

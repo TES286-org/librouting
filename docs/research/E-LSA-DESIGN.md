@@ -1,5 +1,29 @@
 # RFC 8362 E-LSA implementation design
 
+> **Wire-audit correction (post-implementation).** The tables and the
+> E-bit capability story in this pre-implementation doc turned out to
+> be wrong where they were checked against the published RFC texts:
+> the real LSA function codes are 33-37, 39-41 (not 32-38) — E-Router
+> is 0xA021, E-AS-External 0xC025 (AS scope), E-Link 0x8028 (link
+> scope), with E-Type-7 0xA027 and function code 38 unallocated; the
+> top-level TLV set is 1=Router-Link, 2=Attached-Routers,
+> 3=Inter-Area-Prefix, 4=Inter-Area-Router, 5=External-Prefix,
+> 6=Intra-Area-Prefix, 7=IPv6 Link-Local Address, 8=IPv4 Link-Local
+> Address (not the numbering in §5 below); and RFC 8362 defines **no**
+> E-bit capability negotiation at all — migration runs through the
+> `ExtendedLSASupport` / `AreaExtendedLSASupport` configuration knobs
+> (Appendices A/B), and the receiver's own mode decides whether
+> E-LSAs join the SPF (§6.1/§6.2). FRR 10.3 and BIRD 2.17 contain no
+> E-LSA implementation (verified in both sources), so this doc's
+> "FRR as the field-proven reference" premise was also wrong — the
+> landed acceptance posture is RFC-figure-pinned unit tests plus the
+> U-bit transparency property. The implemented shapes live in
+> `crates/lr-ospf/src/lsa/e_v3.rs` (codecs), `spf.rs` / `external.rs`
+> (reception), `daemon_ospf3.rs` (origination) and `lsa/srv6.rs` /
+> `srv6db.rs` (the §9 End.X carriage); the landing narrative is in
+> `ROADMAP-v3.md` D13. The body of this document is kept unmodified
+> as the original plan of record.
+
 This document is the implementation plan for the OSPFv3 Extended-LSA
 machinery (RFC 8362) in `librouting`. It exists because the
 `STATUS.md` "next planned work" list puts E-LSA + SRv6 End.X SIDs as

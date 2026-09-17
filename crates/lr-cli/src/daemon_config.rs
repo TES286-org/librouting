@@ -182,6 +182,12 @@ pub(crate) struct OspfIfSpec {
     /// it. Optional; absent = the interface originates no Extended
     /// Link LSA.
     pub adj_sid: Option<u32>,
+    /// RFC 9513 §9.1 (OSPFv3): the local End.X SID this interface
+    /// advertises on the E-Router-LSA's Router-Link TLV once its p2p
+    /// adjacency is Full — an IPv6 SID that MUST fall inside one of
+    /// the `[[ospf.srv6_locator]]` prefixes (fail-closed at finalize).
+    /// Optional; absent = no End.X sub-TLV.
+    pub srv6_end_x: Option<String>,
 }
 
 impl OspfIfSpec {
@@ -1477,7 +1483,8 @@ impl DaemonConfig {
                 || self.ospf_srv6_max_sl.is_some()
                 || self.ospf_srv6_max_end_pop.is_some()
                 || self.ospf_srv6_max_h_encaps.is_some()
-                || self.ospf_srv6_max_end_d.is_some())
+                || self.ospf_srv6_max_end_d.is_some()
+                || self.ospf_interfaces.iter().any(|i| i.srv6_end_x.is_some()))
         {
             return Err(
                 "SRv6/Extended-LSA configuration (srv6_*, extended_lsas) is OSPFv3-only (RFC 9513/8362); set [ospf] version = \"v3\""
@@ -1536,6 +1543,68 @@ impl DaemonConfig {
                 if u32::from(b) + u32::from(n) + u32::from(f) + u32::from(a) > 128 {
                     return Err(format!(
                         "srv6_locator: SID structure {b}+{n}+{f}+{a} exceeds 128 bits (RFC 9513 §10)"
+                    ));
+                }
+            }
+        }
+        // RFC 9513 §9: every configured End.X SID must be subsumed by
+        // the subnet of one of the router's own locators ("End.X SIDs
+        // that do not meet this requirement MUST be ignored" — the
+        // daemon refuses to originate what receivers would drop), and
+        // the p2p End.X form only rides point-to-point segments (the
+        // LAN form is a later slice).
+        if self.ospf_version == "v3" {
+            for spec in &self.ospf_interfaces {
+                let Some(text) = spec.srv6_end_x.as_deref() else {
+                    continue;
+                };
+                let sid: lr_core::addr::IpAddr = text.parse().map_err(|_| {
+                    format!("ospf interface {}: bad srv6_end_x '{text}'", spec.label())
+                })?;
+                let lr_core::addr::IpAddr::V6(sid) = sid else {
+                    return Err(format!(
+                        "ospf interface {}: srv6_end_x '{text}' must be an IPv6 address",
+                        spec.label()
+                    ));
+                };
+                let inside = self.ospf_srv6_locators.iter().any(|loc| {
+                    loc.prefix
+                        .as_deref()
+                        .and_then(|t| t.parse::<lr_core::addr::Prefix>().ok())
+                        .is_some_and(|p| {
+                            let len = (p.prefix_len as usize).min(128);
+                            let full = len / 8;
+                            let rem = len % 8;
+                            let bytes = sid;
+                            let pb = match p.addr {
+                                lr_core::addr::IpAddr::V6(b) => b,
+                                _ => return false,
+                            };
+                            if bytes[..full] != pb[..full] {
+                                return false;
+                            }
+                            if rem != 0 {
+                                let mask = !0u8 << (8 - rem);
+                                bytes[full] & mask == pb[full] & mask
+                            } else {
+                                true
+                            }
+                        })
+                });
+                if !inside {
+                    return Err(format!(
+                        "ospf interface {}: srv6_end_x '{text}' falls outside every [[ospf.srv6_locator]] prefix (RFC 9513 §9)",
+                        spec.label()
+                    ));
+                }
+                let is_p2p = spec
+                    .network_type
+                    .as_deref()
+                    .is_none_or(|t| matches!(t, "p2p" | "point-to-point"));
+                if !is_p2p {
+                    return Err(format!(
+                        "ospf interface {}: srv6_end_x needs network_type \"p2p\" (the LAN End.X form is a later slice)",
+                        spec.label()
                     ));
                 }
             }
@@ -3151,6 +3220,16 @@ fn apply_ospf_key(
                             .map_err(|_| format!("bad adj_sid '{value}'"))?,
                     );
                 }
+                // RFC 9513 §9.1: the local End.X SID (OSPFv3 only —
+                // validated against the configured locators at
+                // finalize).
+                "srv6_end_x" => {
+                    let v = value.trim().trim_matches('"');
+                    if v.parse::<std::net::Ipv6Addr>().is_err() {
+                        return Err(format!("bad srv6_end_x '{v}' (IPv6 address)"));
+                    }
+                    iface.srv6_end_x = Some(v.to_string());
+                }
                 _ => {
                     return Err(format!(
                         "unknown [[ospf.interface]] key '{key}' (typo protection; OSPF config fails closed)"
@@ -4536,6 +4615,57 @@ mod tests {
         parse_toml_subset("[ospf]\nversion = \"v3\"\n", &mut cfg).unwrap();
         cfg.finalize().unwrap();
         assert!(!cfg.ospf_extended_lsas);
+    }
+
+    #[test]
+    fn ospf_srv6_end_x_validation_is_fail_closed() {
+        let case = |toml: &str| {
+            let mut cfg = DaemonConfig::with_defaults();
+            cfg.protocol = "ospf".to_string();
+            parse_toml_subset(toml, &mut cfg).unwrap();
+            cfg.finalize().unwrap_err()
+        };
+        // §9 containment: a SID outside every locator is refused.
+        let err = case(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n\n\
+             [[ospf.interface]]\nname = \"eth0\"\nsrv6_end_x = \"2001:db8:dead::1\"\n",
+        );
+        assert!(err.contains("outside"), "fail-closed error: {err}");
+        // The p2p form does not ride broadcast segments.
+        let err = case(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n\n\
+             [[ospf.interface]]\nname = \"eth0\"\nnetwork_type = \"broadcast\"\n\
+             srv6_end_x = \"2001:db8:a:1::100\"\n",
+        );
+        assert!(err.contains("p2p"), "fail-closed error: {err}");
+        // A non-IPv6 SID is refused at the parse site.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        let err = parse_toml_subset(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n\n\
+             [[ospf.interface]]\nname = \"eth0\"\nsrv6_end_x = \"10.0.0.1\"\n",
+            &mut cfg,
+        )
+        .unwrap_err();
+        assert!(err.contains("bad srv6_end_x"), "fail-closed error: {err}");
+        // A SID inside the locator passes.
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\nversion = \"v3\"\n\n\
+             [[ospf.srv6_locator]]\nprefix = \"2001:db8:a:1::/48\"\n\n\
+             [[ospf.interface]]\nname = \"lo\"\nsrv6_end_x = \"2001:db8:a:1::100\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(
+            cfg.ospf_interfaces[0].srv6_end_x.as_deref(),
+            Some("2001:db8:a:1::100")
+        );
     }
 
     #[test]

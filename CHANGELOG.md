@@ -18,6 +18,66 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- OSPFv3 Extended LSAs — RFC 8362 (ROADMAP-v3 D13 slices 1-2).
+  - **`lr_ospf::lsa::e_v3`** — the eight TLV-bodied E-LSA codecs:
+    E-Router 0xA021 (function code 33), E-Network 0xA022,
+    E-Inter-Area-Prefix 0xA023, E-Inter-Area-Router 0xA024,
+    E-AS-External 0xC025 (AS flooding scope), E-Type-7 0xA027,
+    E-Link 0x8028 (link scope) and E-Intra-Area-Prefix 0xA029
+    (function code 38 stays unallocated). RFC 3630 TLV framing
+    (4-octet padded, padding not counted in Length), the §3 top-level
+    TLV set (Router-Link, Attached-Routers, the prefix TLVs, the
+    link-local address TLVs) and the External-Prefix sub-TLVs; the §5
+    malformed rules decode to `None` (refused install/ack/flood);
+    unknown TLV types skipped; duplicate single-instance TLVs keep the
+    first. Origination helpers for all eight shapes.
+  - **Extended-LSA reception** — `run_spf_v3_extended`,
+    `summary_routes_v3_extended` and `external_routes_v3_extended`:
+    a speaker's E-Router/E-Network/E-Link/E-Intra-Area-Prefix LSA
+    overrides its legacy counterpart (first E-instance per router
+    wins), and the E inter-area/external forms contribute alongside
+    the legacy ones. The receiver decides the mode (RFC 8362 §6.1/§6.2
+    — no wire capability negotiation exists): the legacy
+    `run_spf_v3` path is byte-identical and never uses E-LSAs for the
+    calculation, though they are still stored and re-flooded.
+  - **`DefaultRouter::set_ospf_v3_extended_lsas`** — the
+    `ExtendedLSASupport` knob (RFC 8362 Appendix A) driving the
+    extended calculators; daemon surface `[ospf] extended_lsas` /
+    `--ospf-extended-lsas`, OSPFv3-only and fail-closed under v2.
+  - **Daemon origination** — with the knob on, the v3 daemon
+    originates the E-Router/E-Network/E-Link/E-IAP forms instead of
+    the legacy shapes (per-LSA sequence floors preserved, MaxAge flush
+    paths switched symmetrically). ABR/ASBR origination stays legacy
+    (RFC 8362 §6.1 migrates areas individually — every receiver
+    interops).
+  - No reference implementation originates E-LSAs (verified: FRR
+    10.3+ and BIRD 2.17 have none), so acceptance is RFC-figure-pinned
+    unit tests plus `tests/interop/ospf6_e_lsa.sh` — the two-daemon
+    lab where `extended_lsas = true` makes legacy origination
+    impossible, so adjacency + route convergence + link-local next
+    hops + MaxAge withdrawal prove the E-LSA path end to end.
+
+- SRv6 adjacency SIDs — RFC 9513 §9 over RFC 8362 (ROADMAP-v3 D13
+  slice 3).
+  - **`lr_ospf::lsa::srv6`** — the End.X SID sub-TLV (§9.1, registry
+    type 31) and LAN End.X SID sub-TLV (§9.2, type 32) codecs riding
+    the E-Router-Link TLV's sub-TLV region, with the §10 SID Structure
+    as registry type 30 (at most once per parent, lengths summing to
+    ≤ 128 bits); `walk_end_x_sub_tlvs` / `walk_lan_end_x_sub_tlvs`.
+  - **`lr_ospf::srv6db::Srv6EndXSid`** — the projection from
+    E-Router-LSA links, gated on §9 locator containment + algorithm
+    match of the same router; multiple instances preserved (the same
+    SID may serve several links; a link may carry several SIDs).
+  - **`[[ospf.interface]] srv6_end_x`** — per-interface End.X SID
+    origination (IPv6, fail-closed inside a configured
+    `[[ospf.srv6_locator]]` prefix, p2p-only): under `extended_lsas`
+    the sub-TLV rides the topology E-Router-LSA; under legacy mode a
+    complete sparse-mode companion E-Router-LSA (RFC 8362 §6.2)
+    carries it alongside the legacy topology. The projections surface
+    on the daemon runtime API `status` as `srv6-endx` lines.
+    `tests/interop/ospf6_e_lsa_endx.sh` pins adjacency + legacy-route
+    neutrality + both projections.
+
 - Per-session BGP UPDATE counters + filter-eval latency histograms
   on the Prometheus `/metrics` endpoint (ROADMAP-v3 D12.4).
   - **`lr_bgp::PeerMessageStats`** — FRR `show bgp neighbor`
