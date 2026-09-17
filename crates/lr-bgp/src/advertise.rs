@@ -273,9 +273,7 @@ impl BgpPeer {
                 ),
             ));
             update.attributes = attrs;
-            if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
-                self.out_buf.extend_from_slice(&bytes);
-            }
+            self.send_msg(&BgpMessage::Update(update));
             return true;
         }
 
@@ -329,9 +327,7 @@ impl BgpPeer {
             }
         }
         update.attributes = attrs;
-        if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
-            self.out_buf.extend_from_slice(&bytes);
-        }
+        self.send_msg(&BgpMessage::Update(update));
         true
     }
 
@@ -387,9 +383,7 @@ impl BgpPeer {
                 AttrType::MpUnreachNlri,
                 mp,
             ));
-            if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
-                self.out_buf.extend_from_slice(&bytes);
-            }
+            self.send_msg(&BgpMessage::Update(update));
             return;
         }
 
@@ -412,9 +406,7 @@ impl BgpPeer {
                 ));
             }
         }
-        if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
-            self.out_buf.extend_from_slice(&bytes);
-        }
+        self.send_msg(&BgpMessage::Update(update));
     }
 
     /// Send the End-of-RIB (EoR) marker: an UPDATE carrying no withdrawn
@@ -435,9 +427,7 @@ impl BgpPeer {
             return;
         }
         let update = Update::new();
-        if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Update(update)) {
-            self.out_buf.extend_from_slice(&bytes);
-        }
+        self.send_msg(&BgpMessage::Update(update));
     }
 
     fn next_hop_attr(ip: lr_core::addr::IpAddr) -> PathAttribute {
@@ -527,6 +517,57 @@ mod tests {
             path_id: 0,
             tag: None,
         }
+    }
+
+    /// UPDATE egress books one `update_sent` per PDU: advertisement,
+    /// withdrawal and the End-of-RIB marker each count once, and the
+    /// receiver's `update_received` follows when the bytes are fed.
+    #[test]
+    fn message_stats_count_update_egress() {
+        let cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        let mut peer = established_peer(cfg.clone());
+        assert_eq!(peer.message_stats().update_sent, 0);
+
+        let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
+        assert!(peer.advertise(&route));
+        assert_eq!(peer.message_stats().update_sent, 1);
+
+        peer.withdraw(
+            &[Prefix::new_v4([203, 0, 113, 0], 24)],
+            NlriFamily::IPV4_UNICAST,
+        );
+        assert_eq!(peer.message_stats().update_sent, 2, "withdrawal counts");
+
+        peer.send_end_of_rib();
+        assert_eq!(peer.message_stats().update_sent, 3, "EoR marker counts");
+
+        // Feed the drained bytes into a live partner: the receiving
+        // side counts the same PDUs.
+        let mut partner = {
+            let mut p = BgpPeer::new(PeerConfig::new(
+                cfg.peer_as,
+                cfg.local_as,
+                RouterId::from_v4([10, 9, 9, 9]),
+            ));
+            let mut dummy = BgpPeer::new(cfg.clone());
+            p.step(BgpEvent::ManualStart);
+            p.step(BgpEvent::TransportOpen);
+            dummy.step(BgpEvent::ManualStart);
+            dummy.step(BgpEvent::TransportOpen);
+            let _ = p.feed_bytes(&dummy.drain_outgoing()).unwrap();
+            let _ = dummy.feed_bytes(&p.drain_outgoing()).unwrap();
+            let _ = p.feed_bytes(&dummy.drain_outgoing()).unwrap();
+            let _ = dummy.feed_bytes(&p.drain_outgoing()).unwrap();
+            assert!(p.is_established());
+            p
+        };
+        let wire = peer.drain_outgoing();
+        let _ = partner.feed_bytes(&wire).unwrap();
+        assert_eq!(
+            partner.message_stats().update_received,
+            3,
+            "receiver counts all three UPDATEs"
+        );
     }
 
     /// eBGP egress: AS prepended, LOCAL_PREF stripped.

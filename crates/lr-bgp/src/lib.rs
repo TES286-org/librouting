@@ -52,7 +52,7 @@ pub use error::{
     BgpCeaseSubcode, BgpErrorCode, BgpHeaderErrorSubcode, BgpNotification, BgpOpenErrorSubcode,
     BgpUpdateErrorSubcode,
 };
-pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState};
+pub use fsm::{BgpAction, BgpEvent, BgpPeer, BgpState, PeerMessageStats};
 pub use message::{BgpHeader, BgpMessage, BgpMessageType};
 pub use peer::{MaxPrefixAction, PeerConfig};
 pub use roa::{RoaBuildError, RoaEntry, RoaError, RoaState, RoaTable, RoaTableBuilder};

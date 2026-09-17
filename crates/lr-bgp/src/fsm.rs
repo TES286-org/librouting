@@ -102,6 +102,67 @@ pub enum BgpAction {
     None,
 }
 
+/// Per-peer BGP message counters (FRR `show bgp neighbor` "Message
+/// statistics" parity): OPEN / UPDATE / NOTIFICATION / KEEPALIVE /
+/// ROUTE-REFRESH, each direction separately.
+///
+/// The counters are **monotonic for the lifetime of the
+/// [`BgpPeer`]** — a session re-establishment (`reset()` + fresh
+/// OPEN handshake) does not zero them, matching FRR's per-neighbor
+/// counters that survive flaps. Only constructing a new peer starts
+/// from zero.
+///
+/// Counting is at the wire boundary, not the FSM boundary: every
+/// message that is encoded onto the outbound buffer counts as sent
+/// (even one the FSM later refuses to transmit), and every message
+/// decoded from fed input counts as received (even one the FSM
+/// discards as a state violation) — the same accounting FRR's
+/// `bgp_..->open_in`/`update_in` counters use.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct PeerMessageStats {
+    /// OPEN messages sent / received.
+    pub open_sent: u64,
+    pub open_received: u64,
+    /// UPDATE messages sent / received (advertisements, withdrawals
+    /// and End-of-RIB markers alike — each is one UPDATE PDU).
+    pub update_sent: u64,
+    pub update_received: u64,
+    /// NOTIFICATION messages sent / received.
+    pub notification_sent: u64,
+    pub notification_received: u64,
+    /// KEEPALIVE messages sent / received.
+    pub keepalive_sent: u64,
+    pub keepalive_received: u64,
+    /// ROUTE-REFRESH messages sent / received (RFC 2918 / RFC 7313,
+    /// including the BoRR/EoRR demarcation PDUs).
+    pub route_refresh_sent: u64,
+    pub route_refresh_received: u64,
+}
+
+impl PeerMessageStats {
+    /// Account one decoded inbound message.
+    fn count_received(&mut self, msg: &BgpMessage) {
+        match msg {
+            BgpMessage::Open(_) => self.open_received += 1,
+            BgpMessage::Update(_) => self.update_received += 1,
+            BgpMessage::Notification(_) => self.notification_received += 1,
+            BgpMessage::Keepalive(_) => self.keepalive_received += 1,
+            BgpMessage::RouteRefresh(_) => self.route_refresh_received += 1,
+        }
+    }
+
+    /// Account one encoded outbound message.
+    fn count_sent(&mut self, msg: &BgpMessage) {
+        match msg {
+            BgpMessage::Open(_) => self.open_sent += 1,
+            BgpMessage::Update(_) => self.update_sent += 1,
+            BgpMessage::Notification(_) => self.notification_sent += 1,
+            BgpMessage::Keepalive(_) => self.keepalive_sent += 1,
+            BgpMessage::RouteRefresh(_) => self.route_refresh_sent += 1,
+        }
+    }
+}
+
 /// BGP peer FSM. Owns codec, peer state, and timers.
 pub struct BgpPeer {
     pub(crate) cfg: PeerConfig,
@@ -154,6 +215,10 @@ pub struct BgpPeer {
     #[cfg(feature = "exchange-plane")]
     exchange_plane_open_count: u32,
     pub(crate) out_buf: Vec<u8>,
+    /// Per-type message counters (FRR "Message statistics" parity).
+    /// Lives beside the FSM state so `reset()` (a re-establishment)
+    /// leaves it untouched — see [`PeerMessageStats`].
+    msg_stats: PeerMessageStats,
     hold_remaining: u64,
     keepalive_remaining: u64,
     established: bool,
@@ -195,10 +260,18 @@ impl BgpPeer {
             #[cfg(feature = "exchange-plane")]
             exchange_plane_open_count: 0,
             out_buf: Vec::new(),
+            msg_stats: PeerMessageStats::default(),
             hold_remaining: 0,
             keepalive_remaining: 0,
             established: false,
         }
+    }
+
+    /// Per-type message counters for this peer (FRR `show bgp neighbor`
+    /// "Message statistics" parity). Monotonic across re-establishment;
+    /// see [`PeerMessageStats`].
+    pub fn message_stats(&self) -> &PeerMessageStats {
+        &self.msg_stats
     }
 
     pub fn state(&self) -> BgpState {
@@ -388,13 +461,7 @@ impl BgpPeer {
         if !self.is_established() || !self.route_refresh_negotiated() {
             return false;
         }
-        match self.codec.encode_vec(&BgpMessage::RouteRefresh(refresh)) {
-            Ok(bytes) => {
-                self.out_buf.extend_from_slice(&bytes);
-                true
-            }
-            Err(_) => false,
-        }
+        self.send_msg(&BgpMessage::RouteRefresh(refresh))
     }
 
     /// Start an RFC 7313 enhanced-refresh response for an address family.
@@ -422,9 +489,18 @@ impl BgpPeer {
             match self.codec.decode_bgp(&mut r) {
                 Ok(None) => break,
                 Ok(Some(msg)) => {
+                    // Wire-boundary accounting (FRR parity): count
+                    // every decoded message, even one the FSM's
+                    // current state then refuses.
+                    self.msg_stats.count_received(&msg);
                     actions.extend(self.step(BgpEvent::Message(msg)));
                 }
                 Err(BgpError::Notification(n)) => {
+                    // A well-formed NOTIFICATION from the peer: it
+                    // decoded (and counts at the wire boundary) even
+                    // though the FSM surfaces it as a parse-level
+                    // fatal event.
+                    self.msg_stats.notification_received += 1;
                     actions.extend(self.step(BgpEvent::ParseError(n)));
                     break;
                 }
@@ -447,6 +523,22 @@ impl BgpPeer {
 
     pub fn drain_outgoing(&mut self) -> Vec<u8> {
         core::mem::take(&mut self.out_buf)
+    }
+
+    /// Encode one message onto the outbound buffer and account it in
+    /// [`PeerMessageStats`]. Every egress message goes through this
+    /// single choke point so the counters stay exact — including the
+    /// End-of-RIB marker (an empty UPDATE) and the NOTIFICATION a
+    /// parse error produces. Returns whether the encode succeeded.
+    pub(crate) fn send_msg(&mut self, msg: &BgpMessage) -> bool {
+        match self.codec.encode_vec(msg) {
+            Ok(bytes) => {
+                self.out_buf.extend_from_slice(&bytes);
+                self.msg_stats.count_sent(msg);
+                true
+            }
+            Err(_) => false,
+        }
     }
 
     fn enqueue_open(&mut self) {
@@ -521,12 +613,14 @@ impl BgpPeer {
         });
         if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Open(open)) {
             self.out_buf.extend_from_slice(&bytes);
+            self.msg_stats.open_sent += 1;
         }
     }
 
     fn enqueue_keepalive(&mut self) {
         if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Keepalive(Keepalive)) {
             self.out_buf.extend_from_slice(&bytes);
+            self.msg_stats.keepalive_sent += 1;
         }
     }
 
@@ -733,9 +827,7 @@ impl BgpPeer {
 
     pub fn enqueue_notification(&mut self, code: BgpErrorCode, subcode: u8) {
         let n = BgpNotification::new(code as u8, subcode, vec![]);
-        if let Ok(bytes) = self.codec.encode_vec(&BgpMessage::Notification(n)) {
-            self.out_buf.extend_from_slice(&bytes);
-        }
+        self.send_msg(&BgpMessage::Notification(n));
     }
 
     fn handle_open_in_opensent(&mut self, open: &Open) -> (BgpState, Vec<BgpAction>) {
@@ -977,9 +1069,7 @@ impl BgpPeer {
             }
             (_, BgpEvent::ParseError(n)) => {
                 let n = n.clone();
-                if let Ok(b) = self.codec.encode_vec(&BgpMessage::Notification(n)) {
-                    self.out_buf.extend_from_slice(&b);
-                }
+                self.send_msg(&BgpMessage::Notification(n));
                 self.established = false;
                 my_actions.push(BgpAction::Close);
                 BgpState::Idle
@@ -1525,6 +1615,115 @@ mod tests {
         assert_eq!(out[18], 3, "message type = NOTIFICATION");
         assert_eq!(out[19], 3, "error code = UPDATE Message Error");
         assert_eq!(out[20], 1, "subcode = Malformed Attribute List");
+    }
+
+    /// `PeerMessageStats` counts every message at the wire boundary:
+    /// the establishment handshake books one OPEN + one KEEPALIVE per
+    /// direction, and a received NOTIFICATION books on the receiving
+    /// side even though it tears the session down.
+    #[test]
+    fn message_stats_count_wire_exchange() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        let _ = a.feed_bytes(&b_open).unwrap();
+        let _ = b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        let _ = a.feed_bytes(&b_ka).unwrap();
+        let _ = b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established());
+
+        for p in [&a, &b] {
+            let s = p.message_stats();
+            assert_eq!(s.open_sent, 1, "one OPEN sent");
+            assert_eq!(s.open_received, 1, "one OPEN received");
+            assert_eq!(s.keepalive_sent, 1, "one KEEPALIVE sent");
+            assert_eq!(s.keepalive_received, 1, "one KEEPALIVE received");
+            assert_eq!(s.update_sent, 0);
+            assert_eq!(s.update_received, 0);
+            assert_eq!(s.notification_sent, 0);
+            assert_eq!(s.notification_received, 0);
+            assert_eq!(s.route_refresh_sent, 0);
+            assert_eq!(s.route_refresh_received, 0);
+        }
+
+        // A wire NOTIFICATION from the peer counts on the receiver;
+        // sending it as real bytes (marker + len + type 3 + code/sub)
+        // exercises the decode path the daemon uses.
+        let mut frame = vec![0xffu8; 16];
+        frame.extend_from_slice(&21u16.to_be_bytes()); // 19 header + code + sub
+        frame.push(3); // NOTIFICATION
+        frame.push(4); // Hold Timer Expired
+        frame.push(0); // subcode
+        let _ = a.feed_bytes(&frame).unwrap();
+        assert_eq!(a.message_stats().notification_received, 1);
+        assert_eq!(a.message_stats().notification_sent, 0);
+    }
+
+    /// `reset()` (a session re-establishment) must NOT zero the
+    /// message counters — FRR's per-neighbor statistics survive flaps.
+    #[test]
+    fn message_stats_survive_reset() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let _ = a.feed_bytes(&b.drain_outgoing()).unwrap();
+        let _ = b.feed_bytes(&a.drain_outgoing()).unwrap();
+        let _ = a.feed_bytes(&b.drain_outgoing()).unwrap();
+        let _ = b.feed_bytes(&a.drain_outgoing()).unwrap();
+        assert!(a.is_established());
+        assert_eq!(a.message_stats().open_sent, 1);
+
+        a.reset();
+        assert_eq!(a.state(), BgpState::Idle);
+        assert_eq!(a.message_stats().open_sent, 1, "counters survive reset");
+        assert_eq!(a.message_stats().open_received, 1);
+        assert_eq!(a.message_stats().keepalive_received, 1);
+    }
+
+    /// A parse error produces the NOTIFICATION on the outbound side:
+    /// the required NOTIFICATION counts as sent. The malformed UPDATE
+    /// itself never decodes (codec-level error), so it does not book
+    /// `update_received` — counting is post-decode, and a PDU that
+    /// fails structural validation never becomes a message.
+    #[test]
+    fn message_stats_count_parse_error_exchange() {
+        let (mut a, mut b) = make_peer_pair();
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let _ = a.feed_bytes(&b.drain_outgoing()).unwrap();
+        let _ = b.feed_bytes(&a.drain_outgoing()).unwrap();
+        let _ = a.feed_bytes(&b.drain_outgoing()).unwrap();
+        let _ = b.feed_bytes(&a.drain_outgoing()).unwrap();
+        assert!(a.is_established());
+
+        // Malformed UPDATE (duplicate ORIGIN — RFC 4271 §6.3).
+        let mut frame = vec![0xffu8; 16];
+        frame.extend_from_slice(&(19 + 12u16).to_be_bytes());
+        frame.push(2); // UPDATE
+        frame.extend_from_slice(&0u16.to_be_bytes()); // withdrawn len
+        frame.extend_from_slice(&8u16.to_be_bytes()); // attrs len
+        frame.extend_from_slice(&[0x40, 1, 1, 0]); // ORIGIN
+        frame.extend_from_slice(&[0x40, 1, 1, 0]); // duplicate ORIGIN
+        let _ = a.feed_bytes(&frame).unwrap();
+        assert_eq!(a.state(), BgpState::Idle);
+        let _ = a.drain_outgoing();
+
+        let s = a.message_stats();
+        assert_eq!(
+            s.update_received, 0,
+            "a structurally invalid PDU is not a message"
+        );
+        assert_eq!(s.notification_sent, 1, "the required NOTIFICATION was sent");
     }
 
     #[test]
