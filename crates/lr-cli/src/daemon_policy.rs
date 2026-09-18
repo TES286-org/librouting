@@ -282,7 +282,16 @@ pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter
             return Err(format!("filter '{name}' declared twice"));
         }
         let body = spec.body.as_deref().unwrap_or("");
-        let filter = dsl::compile(name, body).map_err(|e| format!("filter '{name}': {e}"))?;
+        let filter = dsl::compile(name, body).map_err(|e| {
+            // Issue #18 Phase 0: render the positioned diagnostic with
+            // a source snippet — the body IS the source, so spans are
+            // directly displayable to the operator.
+            format!(
+                "filter '{name}': {}\n{}",
+                e,
+                dsl::render_snippet(body, e.span, &e.kind.to_string())
+            )
+        })?;
         out.push((name.to_string(), filter));
     }
     Ok(out)

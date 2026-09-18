@@ -402,6 +402,17 @@ fn lrctl_filter_compile_validates_body() {
         stderr.contains("parse error"),
         "stderr should mention parse error: {stderr}"
     );
+    // Issue #18 Phase 0: the diagnostic is rendered with a caret
+    // snippet under the offending source line.
+    assert!(
+        stderr.contains("1 | if typo_function(net) then accept; reject;"),
+        "stderr should show the source line: {stderr}"
+    );
+    assert!(stderr.contains('^'), "stderr should show a caret: {stderr}");
+    assert!(
+        stderr.contains("parse error at 1:4:"),
+        "stderr should carry the 1-indexed position: {stderr}"
+    );
 
     // Negative: empty body.
     let (ok, _stdout, stderr) = lrctl(&["filter", "compile", "{}"]);

@@ -249,7 +249,16 @@ fn filter(rest: &[String]) -> ExitCode {
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
-                    eprintln!("parse error: {e}");
+                    // Issue #18 Phase 0: positioned diagnostic with a
+                    // caret snippet under the offending source line.
+                    eprintln!(
+                        "{}",
+                        lr_policy::filter::render_snippet(
+                            &body,
+                            e.span,
+                            &format!("parse error at {}:{}: {}", e.line, e.col, e.kind),
+                        )
+                    );
                     ExitCode::from(1)
                 }
             }
