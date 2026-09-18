@@ -18,6 +18,46 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- **RFC 8326 Graceful Session Shutdown — receive side and knobs**
+  (ROADMAP-v3 D10.1 follow-up). The `GRACEFUL_SHUTDOWN` community
+  (`0xFFFF:0000`) is now honoured on all three surfaces, gated by the
+  global `[bgp] graceful_shutdown` knob (default on):
+  - **§4 best-path step** —
+    `BestPathConfig::graceful_shutdown_least_preferred` (default
+    true) adds a step
+    right after the RFC 9494 LLGR_STALE check in `BestPath::compare`
+    and `compare_multipath`: a route carrying the community loses to
+    any untagged candidate; between two tagged candidates the normal
+    tiebreakers apply. The step sits ahead of LOCAL_PREF because the
+    comparator pins eBGP LOCAL_PREF at 100, so the §4.1
+    low-LOCAL_PREF policy alone could not de-preference an eBGP path
+    against another eBGP path — FRR closes the same gap by forcing
+    LOCAL_PREF to 0 on GS-tagged eBGP routes and comparing
+    LOCAL_PREF unconditionally (`BGP_GSHUT_LOCAL_PREF`).
+  - **§4.1 receiver hook** —
+    `lr_policy::hooks::GracefulShutdownImportHook` is the RFC's
+    inbound policy as an
+    `ImportHook`: an imported route carrying the community has its
+    LOCAL_PREF lowered to the RECOMMENDED 0 (configurable via
+    `with_low_local_pref`, default mirrors FRR's
+    `BGP_GSHUT_LOCAL_PREF`), the community retained, so the
+    de-preference also propagates to downstream iBGP speakers that
+    do not implement §4.
+  - **Per-peer sender-side override** — `[[peer]] graceful_shutdown
+    = false` exempts that neighbor's sessions from the §3.1 export
+    rewrite (`GracefulShutdownExportHook::with_exempt_sessions`).
+    The receive-side honouring stays unconditional, mirroring FRR.
+    `[bgp] graceful_shutdown = false` opts out of all three
+    surfaces — the plain RFC 4271 decision process, with the
+    community inert for selection.
+  - The daemon's startup banner reports which hooks are installed
+    (and the exempt session count when the per-peer override fires)
+    or the explicit opt-out. Four e2e tests
+    (`crates/lr-cli/tests/daemon_graceful_shutdown.rs`) cover the
+    receiver step, the knob-off restore and both per-peer override
+    variants on the real daemon; unit tests pin the comparator
+    step, both hooks and the config keys.
+
 - **Filter DSL instruction fusion** (GitHub #19 P6, ROADMAP-v3 D6
   follow-up). The peephole compiler gained a new pass
   `pass_fuse_branches` that collapses the four-instruction pattern

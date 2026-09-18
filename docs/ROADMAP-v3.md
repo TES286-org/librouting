@@ -1438,11 +1438,46 @@ daemon installs it always-on for BGP sessions. Six regression tests
 in `lr-policy/src/hooks.rs` plus the community classification test
 in `lr-bgp/src/path/communities.rs` cover the new behaviour.
 
-A future follow-up will add the receive-side hook (treat routes
+~~A future follow-up will add the receive-side hook (treat routes
 carrying `GRACEFUL_SHUTDOWN` as least-preferred during best-path
 selection) and a per-peer `[bgp] graceful_shutdown = false` knob
-for embedders that want to disable the sender side. Tracked under
-D10 follow-up.
+for embedders that want to disable the sender side.~~ Follow-up
+landed. The receive side now honours the community on all three
+surfaces, gated by the global `[bgp] graceful_shutdown` knob
+(default on):
+
+1. **§4 best-path step.** `BestPathConfig::graceful_shutdown_least_preferred`
+   (default true) adds a step
+   right after the RFC 9494 LLGR_STALE check in `BestPath::compare`
+   and `compare_multipath`: a route carrying the community loses to
+   any untagged candidate; between two tagged candidates the normal
+   tiebreakers apply. The step sits ahead of LOCAL_PREF because the
+   comparator pins eBGP LOCAL_PREF at 100, so the §4.1
+   low-LOCAL_PREF policy alone could not de-preference an eBGP path
+   against another eBGP path — FRR closes the same gap by forcing
+   LOCAL_PREF to 0 on GS-tagged eBGP routes and comparing
+   LOCAL_PREF unconditionally (`BGP_GSHUT_LOCAL_PREF`).
+2. **§4.1 receiver hook.** `lr_policy::hooks::GracefulShutdownImportHook`
+   is the RFC's inbound policy as an
+   `ImportHook`: an imported route carrying the community has its
+   LOCAL_PREF lowered to the RECOMMENDED 0 (configurable via
+   `with_low_local_pref`), the community retained, so the
+   de-preference also propagates to downstream iBGP speakers that
+   do not implement §4.
+3. **Per-peer sender-side override.** `[[peer]] graceful_shutdown =
+   false` exempts that neighbor's sessions from the §3.1 export
+   rewrite (`GracefulShutdownExportHook::with_exempt_sessions`);
+   the receive-side honouring stays unconditional, mirroring FRR,
+   which de-preferences GS-tagged eBGP routes regardless of
+   configuration. `[bgp] graceful_shutdown = false` opts out of all
+   three surfaces (the plain RFC 4271 process, community inert for
+   selection).
+
+Tests: unit tests for the comparator step (lr-bgp), the import hook
++ exempt-session export hook (lr-policy), the config keys
+(lr-cli), and four e2e tests on the real daemon
+(`daemon_graceful_shutdown.rs`) covering the receiver step, the
+knob-off restore and both per-peer override variants.
 
 ### D10.2 — RFC 5666 (Egress Peer Engineering)
 
@@ -1926,7 +1961,7 @@ refactor — needs extensive regression tests.
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |
-| D10       | partial (D10.1 + D10.6 landed) | —     | RFC 8326 sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
+| D10       | partial (D10.1 + follow-up + D10.6 landed) | —     | RFC 8326 receive side (§4 best-path step + §4.1 import hook + `[bgp]`/`[[peer]]` graceful_shutdown knobs) + sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | partial (D12.1 + D12.2 + D12.3 + D12.4 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint (now with per-session UPDATE counters `lr_bgp_updates_total` and filter-eval latency histograms `lr_filter_eval_duration_seconds` — D12.4, incl. the RFC 8212 filter-bindings-count-as-policy fix) + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) open |
 | D13       | landed                | —     | OSPFv3 E-LSA + SRv6 End.X — codecs (`lsa::e_v3`, the eight RFC 8362 types byte-pinned), reception (per-speaker E-preference in `run_spf_v3_extended`/`summary_routes_v3_extended`/`external_routes_v3_extended`, receiver-decided per §6.1/§6.2 — no wire negotiation exists), origination (`[ospf] extended_lsas` switches the daemon's E-Router/E-Network/E-Link/E-IAP forms; ABR/ASBR stays legacy), End.X/LAN End.X codecs (RFC 9513 §9.1/§9.2, types 31/32) + srv6db projection (§9 containment/algorithm gates) + `srv6_end_x` origination (sparse-mode companion E-Router-LSA under legacy mode) + **LAN End.X origination** (`srv6_end_x_lan` base derives per-neighbor §9.2 SIDs as `base | Router-ID` on broadcast segments, `srv6_end_x` covering the §9.1 DR adjacency); labs `ospf6_e_lsa.sh` + `ospf6_e_lsa_endx.sh` + `ospf6_e_lsa_endx_lan.sh` (the three-router bridge lab also pinned the multicast-DD fix: RFC 2328 §8.1 per-adjacency DD/LSR now unicast in both v2 and v3 daemons, and Full→2-Way demotions re-originate immediately). Follow-ups: BGP-LS projection (D11) |
