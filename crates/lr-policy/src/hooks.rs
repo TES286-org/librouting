@@ -131,36 +131,57 @@ pub trait ExportHook: Send + Sync {
 /// The hook is idempotent: re-running it on a route that already
 /// has `LOCAL_PREF == 0` is a no-op.
 ///
-/// The hook is destination-agnostic — RFC 8326 makes no exception
-/// for the recipient. Embedders that want to selectively disable
-/// the behaviour on a particular session should install the hook
-/// only on the relevant sessions, not globally.
-///
-/// This is the canonical implementation; the daemon installs it by
-/// default on the BGP export chain. Embedders may install their own
-/// `ExportHook` implementation if they need a different policy
+/// By default the hook is destination-agnostic — RFC 8326 makes no
+/// exception for the recipient. [`Self::with_exempt_sessions`]
+/// scopes the rewrite: routes exported to an exempt session keep
+/// their LOCAL_PREF (the daemon fills it from the per-peer
+/// `graceful_shutdown = false` override). Embedders that want a
+/// different policy can install their own `ExportHook` instead
 /// (e.g. to drop the route entirely rather than advertise with
 /// `LOCAL_PREF == 0`).
 ///
+/// This is the canonical implementation; the daemon installs it by
+/// default on the BGP export chain.
+///
 /// [`Community::GRACEFUL_SHUTDOWN`]: lr_bgp::path::Community::GRACEFUL_SHUTDOWN
 #[cfg(feature = "bgp")]
-#[derive(Debug, Default, Clone, Copy)]
-pub struct GracefulShutdownExportHook;
+#[derive(Debug, Default, Clone)]
+pub struct GracefulShutdownExportHook {
+    /// Session ids exempt from the §3.1 LOCAL_PREF zeroing.
+    /// `None` (the [`Default`] / [`Self::new`] shape) means no
+    /// exemptions and skips the per-destination lookup entirely —
+    /// the rc.3 destination-agnostic behaviour with zero added
+    /// cost on the export hot path.
+    exempt: Option<std::collections::BTreeSet<u64>>,
+}
 
 #[cfg(feature = "bgp")]
 impl GracefulShutdownExportHook {
     pub fn new() -> Self {
-        Self
-    }
-}
-
-#[cfg(feature = "bgp")]
-impl ExportHook for GracefulShutdownExportHook {
-    fn name(&self) -> &str {
-        "rfc8326-graceful-shutdown"
+        Self { exempt: None }
     }
 
-    fn on_export(&self, route: &mut Route) -> HookVerdict {
+    /// Destination-scoped variant: routes exported to any of
+    /// `sessions` are left untouched by the §3.1 rewrite. An empty
+    /// set degrades to [`Self::new`].
+    pub fn with_exempt_sessions(sessions: std::collections::BTreeSet<u64>) -> Self {
+        Self {
+            exempt: if sessions.is_empty() {
+                None
+            } else {
+                Some(sessions)
+            },
+        }
+    }
+
+    /// The exempt session ids, if any.
+    pub fn exempt_sessions(&self) -> Option<&std::collections::BTreeSet<u64>> {
+        self.exempt.as_ref()
+    }
+
+    /// The §3.1 rewrite itself, shared by `on_export` and
+    /// `on_export_to`.
+    fn apply(&self, route: &mut Route) -> HookVerdict {
         // Take ownership of the attribute bag without cloning so we
         // can use the high-level PathAttributes accessors mutably.
         // The conversion is infallible (From<Attributes> for
@@ -178,6 +199,31 @@ impl ExportHook for GracefulShutdownExportHook {
 
         route.attributes = attrs.into();
         HookVerdict::Keep
+    }
+}
+
+#[cfg(feature = "bgp")]
+impl ExportHook for GracefulShutdownExportHook {
+    fn name(&self) -> &str {
+        "rfc8326-graceful-shutdown"
+    }
+
+    fn on_export(&self, route: &mut Route) -> HookVerdict {
+        self.apply(route)
+    }
+
+    fn on_export_to(&self, route: &mut Route, destination: u64) -> HookVerdict {
+        // Per-destination opt-out: an exempt session receives the
+        // route with its LOCAL_PREF intact. The common case (no
+        // exemptions configured) is a single `None` check.
+        if self
+            .exempt
+            .as_ref()
+            .is_some_and(|s| s.contains(&destination))
+        {
+            return HookVerdict::Keep;
+        }
+        self.apply(route)
     }
 }
 
@@ -771,6 +817,60 @@ mod tests {
         let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
         attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
         let _ = chain.run_import(&mut r);
+        assert_eq!(local_pref_of(&r), Some(0));
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn gs_export_hook_exempt_sessions_skip_the_rewrite() {
+        // The per-peer `graceful_shutdown = false` override materialises
+        // as an exempt-session set on the export hook: the exempt
+        // destination receives the route untouched, every other
+        // destination still sees the §3.1 zeroing.
+        let hook = GracefulShutdownExportHook::with_exempt_sessions([7].into_iter().collect());
+        assert_eq!(
+            hook.exempt_sessions().map(|s| s.len()),
+            Some(1),
+            "the exempt set is retained for introspection"
+        );
+
+        let mut exempted = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut exempted, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export_to(&mut exempted, 7);
+        assert_eq!(
+            local_pref_of(&exempted),
+            Some(100),
+            "exempt destination keeps LOCAL_PREF"
+        );
+
+        let mut scoped = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut scoped, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export_to(&mut scoped, 8);
+        assert_eq!(
+            local_pref_of(&scoped),
+            Some(0),
+            "non-exempt destination is still zeroed"
+        );
+
+        // The destination-agnostic path (`run_export`) is unaffected by
+        // an exempt set — it has no destination to check.
+        let mut plain = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut plain, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export(&mut plain);
+        assert_eq!(local_pref_of(&plain), Some(0));
+    }
+
+    #[cfg(feature = "bgp")]
+    #[test]
+    fn gs_export_hook_empty_exempt_set_degrades_to_agnostic() {
+        let hook = GracefulShutdownExportHook::with_exempt_sessions(Default::default());
+        assert!(
+            hook.exempt_sessions().is_none(),
+            "an empty set must collapse to None so the hot path stays lookup-free"
+        );
+        let mut r = route_with_local_pref([203, 0, 113, 0], 24, 1, 100);
+        attach_community(&mut r, Community::GRACEFUL_SHUTDOWN);
+        let _ = hook.on_export_to(&mut r, 42);
         assert_eq!(local_pref_of(&r), Some(0));
     }
 

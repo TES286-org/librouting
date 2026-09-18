@@ -497,6 +497,11 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
 
     // ---- Build one router session per configured peer. ----
     let mut entries: Vec<PeerEntry> = Vec::new();
+    // RFC 8326 per-peer override: sessions of neighbors configured with
+    // `graceful_shutdown = false` are exempt from the §3.1 sender-side
+    // LOCAL_PREF zeroing. Collected while the handles exist (the
+    // installation below consumes the set).
+    let mut gs_exempt_sessions: std::collections::BTreeSet<u64> = std::collections::BTreeSet::new();
     {
         let mut r = router.write().unwrap();
         // RFC 7911 Add-Path: cap how many paths per prefix survive the
@@ -516,6 +521,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // tiebreaker is the lowest BGP IDENTIFIER (RFC 5004
         // deterministic) when on, or oldest-route-wins when off.
         r.best_path_config_mut().deterministic_router_id = cfg.bestpath_compare_routerid;
+        // RFC 8326 §4: routes carrying the GRACEFUL_SHUTDOWN community
+        // are the least preferred for their prefix. Gated by the global
+        // knob together with the §3.1/§4.1 hooks installed below (the
+        // library default is already true; setting it explicitly makes
+        // the off switch take effect).
+        r.best_path_config_mut().graceful_shutdown_least_preferred = cfg.graceful_shutdown;
         for spec in &cfg.peers {
             if cfg.explicit_peers && !spec.is_outbound() && !spec.is_inbound() {
                 eprintln!(
@@ -601,6 +612,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         None => None,
                     };
                     let handles = core::iter::once(h).chain(handle_in);
+                    // RFC 8326 per-peer override: this neighbor opted out
+                    // of the §3.1 sender-side rewrite, so exports to its
+                    // sessions keep their LOCAL_PREF.
+                    if spec.graceful_shutdown == Some(false) {
+                        gs_exempt_sessions.insert(h.0);
+                        if let Some(h2) = handle_in {
+                            gs_exempt_sessions.insert(h2.0);
+                        }
+                    }
                     // RFC 8212 §3: declare the policy presence of this
                     // peer so the router knows which directions carry
                     // an explicit policy. Both route-maps and DSL
@@ -887,24 +907,56 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         );
     }
 
-    // ---- RFC 8326 Graceful Session Shutdown (always-on for BGP). ----
-    // The community (`GRACEFUL_SHUTDOWN` / `0xFFFF:0000`) is honoured
-    // on the *export* side: any route that carries it has its
-    // LOCAL_PREF set to zero before advertisement, so receivers prefer
-    // alternatives before the session actually goes down. RFC 8326
-    // §3.1 specifies this as a SHOULD, so the hook is installed by
-    // default whenever BGP is in the protocol set. Embedders that
-    // want a different policy can replace the hook chain.
+    // ---- RFC 8326 Graceful Session Shutdown (default-on for BGP). ----
+    // The community (`GRACEFUL_SHUTDOWN` / `0xFFFF:0000`) is honoured on
+    // three surfaces, all gated by the global `[bgp] graceful_shutdown`
+    // knob (default on — RFC 8326 §4 frames the receiver procedure as a
+    // SHOULD and FRR ships `bgp graceful-shutdown` opt-in; we follow the
+    // same split between "honour the signal" (on by default) and
+    // "enter maintenance mode" (an operator action, out of scope here)):
     //
-    // The hook is destination-agnostic and idempotent; running it
-    // twice on the same route is a no-op (the second pass finds
-    // LOCAL_PREF already at 0).
+    //   §3.1 sender side (export hook) — any route that carries the
+    //     community has its LOCAL_PREF set to zero before advertisement,
+    //     so receivers prefer alternatives before the session actually
+    //     goes down. Per-peer `graceful_shutdown = false` exempts that
+    //     neighbor's sessions from the rewrite.
+    //   §4.1 receiver side (import hook) — an imported route carrying
+    //     the community has its LOCAL_PREF lowered to the RECOMMENDED 0,
+    //     which also propagates to downstream iBGP speakers.
+    //   §4 best path — a tagged route is the least preferred for its
+    //     prefix (set alongside the other global knobs above).
+    //
+    // All three are idempotent and free for routes without the
+    // community. `[bgp] graceful_shutdown = false` skips the hooks and
+    // turns the best-path step off — the plain RFC 4271 decision
+    // process, with the community inert for selection. Embedders that
+    // want a different policy can replace the hook chain.
     if cfg.runs_protocol("bgp") {
-        let mut r = router.write().unwrap();
-        r.hooks_mut()
-            .export
-            .push(Box::new(lr_policy::hooks::GracefulShutdownExportHook::new()));
-        println!("  rfc8326:      graceful-shutdown export hook installed");
+        if cfg.graceful_shutdown {
+            let exempt_count = gs_exempt_sessions.len();
+            let mut r = router.write().unwrap();
+            r.hooks_mut().export.push(Box::new(
+                lr_policy::hooks::GracefulShutdownExportHook::with_exempt_sessions(
+                    gs_exempt_sessions,
+                ),
+            ));
+            r.hooks_mut()
+                .import
+                .push(Box::new(lr_policy::hooks::GracefulShutdownImportHook::new()));
+            drop(r);
+            if exempt_count > 0 {
+                println!(
+                    "  rfc8326:      graceful-shutdown hooks installed (export + import; \
+                     {exempt_count} exempt session(s))"
+                );
+            } else {
+                println!("  rfc8326:      graceful-shutdown hooks installed (export + import)");
+            }
+        } else {
+            println!(
+                "  rfc8326:      graceful-shutdown disabled ([bgp] graceful_shutdown = false)"
+            );
+        }
     }
 
     // ---- RFC 2439 Route Flap Damping (opt-in via [damping]). ----
