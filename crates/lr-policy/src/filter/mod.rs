@@ -29,6 +29,7 @@ pub mod eval;
 pub mod lexer;
 pub mod parser;
 pub mod peephole;
+pub mod span;
 
 pub use ast::{
     BinaryOp, Expr, Filter, FilterBody, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
@@ -36,6 +37,7 @@ pub use ast::{
 pub use eval::{EvalError, EvalResult, FilterContext, RoaStateLit};
 pub use lexer::{Lexer, LexerError, Token, TokenKind};
 pub use parser::{ParseError, Parser};
+pub use span::{render_snippet, LineIndex, Span};
 
 /// Compile a filter source string into an executable [`Filter`].
 ///

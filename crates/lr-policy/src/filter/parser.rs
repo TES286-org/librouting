@@ -14,6 +14,7 @@ use crate::filter::ast::{
     UnaryOp, Value,
 };
 use crate::filter::lexer::{Lexer, LexerError, Token, TokenKind};
+use crate::filter::span::Span;
 
 /// Parse error — always fatal. Carries the source location of the
 /// offending token for diagnostics.
@@ -155,6 +156,7 @@ impl Parser {
             // parser produces a clear ParseError on the first call.
             vec![Token {
                 kind: TokenKind::Eof,
+                span: e.span,
                 line: e.line,
                 col: e.col,
             }]
@@ -232,6 +234,7 @@ impl Parser {
         if body.stmts.is_empty() {
             let tok = self.peek().cloned().unwrap_or(Token {
                 kind: TokenKind::Eof,
+                span: Span::default(),
                 line: 1,
                 col: 1,
             });

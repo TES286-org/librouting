@@ -11,14 +11,19 @@ use core::str::FromStr;
 
 use lr_core::addr::{IpAddr, Prefix};
 
-/// A lexed token: kind + byte offset in the source (1-indexed line
-/// and column for diagnostics).
+use super::span::Span;
+
+/// A lexed token: kind + source position (byte span, plus the
+/// 1-indexed line and column of its first byte for diagnostics).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Token {
     pub kind: TokenKind,
-    /// 1-indexed line in the source.
+    /// Byte span of the token in the source (`[start, end)`). The
+    /// span of the `Eof` token is the point at the end of input.
+    pub span: Span,
+    /// 1-indexed line of the token's first byte.
     pub line: u32,
-    /// 1-indexed column in the source.
+    /// 1-indexed (byte) column of the token's first byte.
     pub col: u32,
 }
 
@@ -97,7 +102,12 @@ pub enum TokenKind {
 /// Lexer error: always fatal — the parser does not try to recover.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LexerError {
+    /// Byte span of the offending lexeme (point spans for
+    /// end-of-input errors).
+    pub span: Span,
+    /// 1-indexed line of the error position.
     pub line: u32,
+    /// 1-indexed byte column of the error position.
     pub col: u32,
     pub kind: LexerErrorKind,
 }
@@ -169,6 +179,11 @@ impl<'a> Lexer<'a> {
         self.src.get(self.pos).copied()
     }
 
+    /// Byte span from `start` to the current cursor.
+    fn span_since(&self, start: usize) -> Span {
+        Span::new(start, self.pos)
+    }
+
     fn advance(&mut self) -> Option<u8> {
         let b = self.src.get(self.pos).copied()?;
         self.pos += 1;
@@ -203,15 +218,16 @@ impl<'a> Lexer<'a> {
 
     fn next_token(&mut self) -> Result<Token, LexerError> {
         self.skip_whitespace_and_comments();
+        let start = self.pos;
         let line = self.line;
         let col = self.col;
         let Some(b) = self.peek() else {
-            return Ok(self.token(TokenKind::Eof, line, col));
+            return Ok(self.token(TokenKind::Eof, self.span_since(start), line, col));
         };
 
         // Identifiers / keywords (start with letter or underscore).
         if b == b'_' || b.is_ascii_alphabetic() {
-            return self.lex_ident(line, col);
+            return self.lex_ident(start, line, col);
         }
 
         // Numbers — integers, possibly followed by an address / prefix
@@ -220,24 +236,28 @@ impl<'a> Lexer<'a> {
         // hex digits / `/` so the parser gets one token; the value
         // decides whether it's an Int, Ip, Prefix, or Asn literal.
         if b.is_ascii_digit() {
-            return self.lex_numeric_or_address(line, col);
+            return self.lex_numeric_or_address(start, line, col);
         }
 
         // String literals.
         if b == b'"' {
-            return self.lex_string(line, col);
+            return self.lex_string(start, line, col);
         }
 
         // Multi-char operators and single-char punctuation.
-        self.lex_punctuation(line, col)
+        self.lex_punctuation(start, line, col)
     }
 
-    fn token(&self, kind: TokenKind, line: u32, col: u32) -> Token {
-        Token { kind, line, col }
+    fn token(&self, kind: TokenKind, span: Span, line: u32, col: u32) -> Token {
+        Token {
+            kind,
+            span,
+            line,
+            col,
+        }
     }
 
-    fn lex_ident(&mut self, line: u32, col: u32) -> Result<Token, LexerError> {
-        let start = self.pos;
+    fn lex_ident(&mut self, start: usize, line: u32, col: u32) -> Result<Token, LexerError> {
         while let Some(b) = self.peek() {
             if b == b'_' || b.is_ascii_alphanumeric() {
                 self.advance();
@@ -246,6 +266,7 @@ impl<'a> Lexer<'a> {
             }
         }
         let text = std::str::from_utf8(&self.src[start..self.pos]).map_err(|_| LexerError {
+            span: self.span_since(start),
             line,
             col,
             kind: LexerErrorKind::UnexpectedChar('\0'),
@@ -271,17 +292,21 @@ impl<'a> Lexer<'a> {
             "_" => TokenKind::Underscore,
             other => TokenKind::Ident(other.to_string()),
         };
-        Ok(self.token(kind, line, col))
+        Ok(self.token(kind, self.span_since(start), line, col))
     }
 
-    fn lex_numeric_or_address(&mut self, line: u32, col: u32) -> Result<Token, LexerError> {
+    fn lex_numeric_or_address(
+        &mut self,
+        start: usize,
+        line: u32,
+        col: u32,
+    ) -> Result<Token, LexerError> {
         // Collect the run that could be a number, an IPv4 address,
         // an IPv6 address (with `:`), or a prefix (`/`).
         // The run stops at the FIRST `:` when no `.` has been seen
         // yet AND the segment after the `:` is purely decimal — that
         // distinguishes a community pair `64512:100` from an IPv6
         // address `2001:db8::1`.
-        let start = self.pos;
         let mut saw_dot = false;
         let mut saw_colon = false;
         while let Some(b) = self.peek() {
@@ -332,6 +357,7 @@ impl<'a> Lexer<'a> {
             break;
         }
         let raw = std::str::from_utf8(&self.src[start..self.pos]).map_err(|_| LexerError {
+            span: self.span_since(start),
             line,
             col,
             kind: LexerErrorKind::UnexpectedChar('\0'),
@@ -339,25 +365,26 @@ impl<'a> Lexer<'a> {
 
         // Try as prefix (`a.b.c.d/n` or `2001:db8::/n`).
         if let Ok(prefix) = Prefix::from_str(raw) {
-            return Ok(self.token(TokenKind::Prefix(prefix), line, col));
+            return Ok(self.token(TokenKind::Prefix(prefix), self.span_since(start), line, col));
         }
         // Try as bare IP address (no `/`).
         if let Ok(ip) = IpAddr::from_str(raw) {
-            return Ok(self.token(TokenKind::Ip(ip), line, col));
+            return Ok(self.token(TokenKind::Ip(ip), self.span_since(start), line, col));
         }
         // The DSL accepts bare integers as AS numbers in context;
         // the evaluator coerces to `Asn` when needed.
         if let Ok(n) = raw.parse::<i64>() {
-            return Ok(self.token(TokenKind::Int(n), line, col));
+            return Ok(self.token(TokenKind::Int(n), self.span_since(start), line, col));
         }
         Err(LexerError {
+            span: self.span_since(start),
             line,
             col,
             kind: LexerErrorKind::InvalidNumber(raw.to_string()),
         })
     }
 
-    fn lex_string(&mut self, line: u32, col: u32) -> Result<Token, LexerError> {
+    fn lex_string(&mut self, start: usize, line: u32, col: u32) -> Result<Token, LexerError> {
         // Opening `"` already at self.pos.
         self.advance(); // consume `"`
         let mut buf = String::new();
@@ -365,6 +392,7 @@ impl<'a> Lexer<'a> {
             match self.peek() {
                 None => {
                     return Err(LexerError {
+                        span: self.span_since(start),
                         line,
                         col,
                         kind: LexerErrorKind::UnterminatedString,
@@ -378,6 +406,7 @@ impl<'a> Lexer<'a> {
                     self.advance();
                     let Some(esc) = self.peek() else {
                         return Err(LexerError {
+                            span: self.span_since(start),
                             line,
                             col,
                             kind: LexerErrorKind::UnterminatedString,
@@ -393,6 +422,7 @@ impl<'a> Lexer<'a> {
                         b'0' => buf.push('\0'),
                         other => {
                             return Err(LexerError {
+                                span: Span::point(self.pos - 1),
                                 line,
                                 col,
                                 kind: LexerErrorKind::UnknownEscape(other as char),
@@ -411,10 +441,10 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        Ok(self.token(TokenKind::Str(buf), line, col))
+        Ok(self.token(TokenKind::Str(buf), self.span_since(start), line, col))
     }
 
-    fn lex_punctuation(&mut self, line: u32, col: u32) -> Result<Token, LexerError> {
+    fn lex_punctuation(&mut self, start: usize, line: u32, col: u32) -> Result<Token, LexerError> {
         let b = self.advance().unwrap();
         let kind = match b {
             b'(' => TokenKind::LParen,
@@ -501,13 +531,14 @@ impl<'a> Lexer<'a> {
             b'?' => TokenKind::Underscore, // unused — keep for completeness
             other => {
                 return Err(LexerError {
+                    span: Span::point(self.pos - 1),
                     line,
                     col,
                     kind: LexerErrorKind::UnexpectedChar(other as char),
                 });
             }
         };
-        Ok(self.token(kind, line, col))
+        Ok(self.token(kind, self.span_since(start), line, col))
     }
 }
 
@@ -755,5 +786,60 @@ mod tests {
         // parser can build AS-path patterns.
         let toks = kinds("_");
         assert_eq!(toks, vec![TokenKind::Underscore, TokenKind::Eof]);
+    }
+
+    #[test]
+    fn token_spans_cover_lexemes() {
+        let src = "let x = 10.0.0.0/8; accept";
+        let toks = Lexer::new(src).tokenize().unwrap();
+        // (text, line, col) for the interesting tokens.
+        let span_of = |i: usize| toks[i].span.slice(src);
+        assert_eq!(span_of(0), Some("let"));
+        assert_eq!((toks[0].line, toks[0].col), (1, 1));
+        assert_eq!(span_of(1), Some("x"));
+        assert_eq!((toks[1].line, toks[1].col), (1, 5));
+        assert_eq!(span_of(3), Some("10.0.0.0/8"));
+        assert_eq!(span_of(5), Some("accept"));
+        // EOF is a point span at the end of input.
+        let eof = toks.last().unwrap();
+        assert_eq!(eof.kind, TokenKind::Eof);
+        assert!(eof.span.is_empty());
+        assert_eq!(eof.span.start as usize, src.len());
+    }
+
+    #[test]
+    fn token_spans_across_lines_and_comments() {
+        let src = "# comment line\nif net {\n  accept; # trailing\n}";
+        let toks = Lexer::new(src).tokenize().unwrap();
+        assert_eq!(toks[0].kind, TokenKind::If);
+        assert_eq!((toks[0].line, toks[0].col), (2, 1));
+        assert_eq!(toks[0].span.slice(src), Some("if"));
+        // `accept` on line 3, indented two bytes.
+        let acc = &toks[3];
+        assert_eq!(acc.kind, TokenKind::Accept);
+        assert_eq!((acc.line, acc.col), (3, 3));
+        // `}` on line 4.
+        let rbrace = &toks[5];
+        assert_eq!(rbrace.kind, TokenKind::RBrace);
+        assert_eq!((rbrace.line, rbrace.col), (4, 1));
+    }
+
+    #[test]
+    fn string_token_span_covers_quotes() {
+        let src = "\"a b\"";
+        let toks = Lexer::new(src).tokenize().unwrap();
+        assert_eq!(toks[0].span.slice(src), Some("\"a b\""));
+    }
+
+    #[test]
+    fn lexer_error_carries_span() {
+        // Unknown escape: point span at the escape character (`x` at
+        // byte offset 3 of "a\xb").
+        let err = Lexer::new("\"a\\xb\"").tokenize().unwrap_err();
+        assert_eq!((err.span.start, err.span.end), (3, 4));
+        // Unterminated string: span from the opening quote to EOF.
+        let err = Lexer::new("ab \"oops").tokenize().unwrap_err();
+        assert_eq!((err.span.start, err.span.end), (3, 8));
+        assert_eq!((err.line, err.col), (1, 4));
     }
 }
