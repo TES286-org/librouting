@@ -1,4 +1,5 @@
-//! Best-path selection (RFC 4271 §9.1.2 + RFC 5004 / RFC 7911 / multipath).
+//! Best-path selection (RFC 4271 §9.1.2 + RFC 5004 / RFC 7911 / multipath
+//! + RFC 8326 graceful shutdown).
 //!
 //! The BGP decision process is a deterministic 14-step comparison. The
 //! implementation here mirrors the canonical order used by FRRouting, BIRD
@@ -47,6 +48,16 @@ pub struct BestPathConfig {
     /// Whether multipath may include paths from different neighboring ASes.
     /// Default false (RFC 4784 §2).
     pub multipath_relax: bool,
+    /// RFC 8326 §4: a route carrying the `GRACEFUL_SHUTDOWN` community
+    /// (`0xFFFF:0000`) is the least preferred amongst all other routes
+    /// for the same prefix. Default true — the community's whole purpose
+    /// is to signal "de-preference me before the session goes away", so
+    /// an untagged path always beats a tagged one while two tagged paths
+    /// fall back to the normal tiebreakers. Disabling this restores the
+    /// plain RFC 4271 decision process (the community is then inert for
+    /// selection, and the operator is expected to implement RFC 8326
+    /// §4.1 as an explicit inbound policy instead).
+    pub graceful_shutdown_least_preferred: bool,
 }
 
 impl Default for BestPathConfig {
@@ -59,6 +70,7 @@ impl Default for BestPathConfig {
             count_confed_in_path_len: false,
             multipath: 1,
             multipath_relax: false,
+            graceful_shutdown_least_preferred: true,
         }
     }
 }
@@ -125,6 +137,20 @@ impl BestPath {
             } else {
                 Ordering::Less
             };
+        }
+
+        // RFC 8326 §4: the same least-preferred treatment for paths
+        // carrying the GRACEFUL_SHUTDOWN community.
+        if cfg.graceful_shutdown_least_preferred {
+            let gshut_a = Self::is_graceful_shutdown(&attrs_a);
+            let gshut_b = Self::is_graceful_shutdown(&attrs_b);
+            if gshut_a != gshut_b {
+                return if gshut_a {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                };
+            }
         }
 
         let internal_a = a.protocol == lr_core::rib::Protocol::Bgp && a.origin.proto == 1;
@@ -232,6 +258,28 @@ impl BestPath {
             } else {
                 Ordering::Less
             };
+        }
+
+        // 0b. RFC 8326 §4: a route carrying the GRACEFUL_SHUTDOWN
+        //     community is likewise the least preferred — the sender
+        //     attached it precisely so receivers move traffic onto
+        //     alternatives before the session goes away. The step sits
+        //     ahead of LOCAL_PREF because the comparator pins eBGP
+        //     LOCAL_PREF at 100, so the RFC §4.1 low-LOCAL_PREF inbound
+        //     policy alone could not de-preference an eBGP path against
+        //     another eBGP path (FRR closes the same gap by forcing
+        //     LOCAL_PREF to 0 on GS-tagged eBGP routes and comparing
+        //     LOCAL_PREF unconditionally).
+        if cfg.graceful_shutdown_least_preferred {
+            let gshut_a = Self::is_graceful_shutdown(&attrs_a);
+            let gshut_b = Self::is_graceful_shutdown(&attrs_b);
+            if gshut_a != gshut_b {
+                return if gshut_a {
+                    Ordering::Greater
+                } else {
+                    Ordering::Less
+                };
+            }
         }
 
         // 1. Weight (vendor-specific; treated as 0; embedder injects via policy).
@@ -366,6 +414,13 @@ impl BestPath {
     /// "least preferred".
     fn is_llgr_stale(attrs: &PathAttributes) -> bool {
         attrs.has_community(Community::LLGR_STALE)
+    }
+
+    /// RFC 8326 §4: a route carrying the GRACEFUL_SHUTDOWN community is
+    /// "least preferred" (when
+    /// [`BestPathConfig::graceful_shutdown_least_preferred`] is set).
+    fn is_graceful_shutdown(attrs: &PathAttributes) -> bool {
+        attrs.has_community(Community::GRACEFUL_SHUTDOWN)
     }
 
     fn same_neighbor(a: &Route, b: &Route) -> bool {
@@ -578,5 +633,83 @@ mod tests {
         let stale_set = [stale_long, stale_short];
         let best = BestPath::select(&stale_set, &cfg).unwrap();
         assert_eq!(best.origin.peer, 3);
+    }
+
+    /// RFC 8326 §4: a route carrying GRACEFUL_SHUTDOWN is the least
+    /// preferred — it loses to any untagged candidate regardless of the
+    /// other attributes, and only survives selection when every
+    /// candidate carries the community (the normal tiebreakers then
+    /// decide between them).
+    #[test]
+    fn graceful_shutdown_route_is_least_preferred() {
+        let gshut = Community::GRACEFUL_SHUTDOWN.0.to_be_bytes().to_vec();
+        let path_2as = vec![2, 2, 0, 0, 0, 100, 0, 0, 0, 200]; // sequence: AS100, AS200
+        let path_1as = vec![2, 1, 0, 0, 0, 100]; // sequence: AS100
+
+        // The shutdown route has a *shorter* AS path; without the §4
+        // step it would win. The fresh route must be selected.
+        let fresh = route_with_attrs_many(&[(2, path_2as.clone())], 1);
+        let shutdown = route_with_attrs_many(&[(2, path_1as.clone()), (8, gshut.clone())], 2);
+        let cfg = BestPathConfig::default();
+        let fresh_set = [fresh, shutdown];
+        let best = BestPath::select(&fresh_set, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 1,
+            "fresh route must beat the shutdown one"
+        );
+
+        // Only shutdown candidates remain: the normal tiebreakers
+        // (shorter AS path) decide between them.
+        let shutdown_long = route_with_attrs_many(
+            &[
+                (2, path_2as),
+                (8, Community::GRACEFUL_SHUTDOWN.0.to_be_bytes().to_vec()),
+            ],
+            2,
+        );
+        let shutdown_short = route_with_attrs_many(&[(2, path_1as), (8, gshut)], 3);
+        let shutdown_set = [shutdown_long, shutdown_short];
+        let best = BestPath::select(&shutdown_set, &cfg).unwrap();
+        assert_eq!(best.origin.peer, 3);
+    }
+
+    /// RFC 8326 §4 de-preference is a SHOULD: `BestPathConfig` lets an
+    /// embedder opt out, restoring the plain RFC 4271 decision process
+    /// where the community is inert for selection.
+    #[test]
+    fn graceful_shutdown_de_preference_can_be_disabled() {
+        let gshut = Community::GRACEFUL_SHUTDOWN.0.to_be_bytes().to_vec();
+        let fresh = route_with_attr(2, vec![2, 2, 0, 0, 0, 100, 0, 0, 0, 200], 1); // 2 AS
+        let shutdown = route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 0, 100]), (8, gshut)], 2); // 1 AS
+        let cfg = BestPathConfig {
+            graceful_shutdown_least_preferred: false,
+            ..Default::default()
+        };
+        let routes = [fresh, shutdown];
+        let best = BestPath::select(&routes, &cfg).unwrap();
+        assert_eq!(
+            best.origin.peer, 2,
+            "with the step disabled the shorter AS path wins even though it carries GS"
+        );
+    }
+
+    /// RFC 8326 §4 in the multipath comparator: a GS-tagged path never
+    /// joins an equal-cost set alongside a fresh path (it only ties with
+    /// another GS-tagged path when `multipath_relax` bridges the neighbor
+    /// check).
+    #[test]
+    fn graceful_shutdown_excluded_from_multipath() {
+        let gshut = Community::GRACEFUL_SHUTDOWN.0.to_be_bytes().to_vec();
+        let a = route_with_attr(2, vec![2, 1, 0, 0, 100], 1);
+        let b = route_with_attrs_many(&[(2, vec![2, 1, 0, 0, 100]), (8, gshut)], 2);
+        let cfg = BestPathConfig {
+            multipath: 8,
+            multipath_relax: true,
+            ..Default::default()
+        };
+        let routes = [a, b];
+        let mp = BestPath::multipath(&routes, &cfg).unwrap();
+        assert_eq!(mp.len(), 1, "the GS-tagged path must stay out of the set");
+        assert_eq!(mp[0].origin.peer, 1);
     }
 }
