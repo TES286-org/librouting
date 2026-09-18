@@ -437,7 +437,7 @@ the state, that file tracks the how and why.
    (every production traced to its parser function), the operator
    precedence table mirroring `BinaryOp::precedence`, the route
    field reference (settable vs `+=`-only vs read-only), the
-   `MAX_EXPR_DEPTH = 128` / `MAX_CALL_DEPTH = 64` limits, a
+   `MAX_EXPR_DEPTH = 108` / `MAX_CALL_DEPTH = 64` limits, a
    worked-examples section covering accept-on-prefix, prefix-range
    membership, ROA gating, `case`, user-defined functions,
    community-set mutation, AS-path membership, extended- and

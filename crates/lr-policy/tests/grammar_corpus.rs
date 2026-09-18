@@ -428,26 +428,26 @@ fn s1_5_bang_tilde_is_one_token() {
     assert_eq!(f.body.stmts.len(), 2);
 }
 
-/// §6 — `MAX_EXPR_DEPTH = 128`. The parser's `enter()` increments
+/// §6 — `MAX_EXPR_DEPTH = 108`. The parser's `enter()` increments
 /// depth on every statement descent (`parse_stmt`) and every
 /// expression descent (`parse_unary`); the bound is checked with
-/// `> MAX_EXPR_DEPTH` (so depth exactly 128 is allowed, 129 errors).
+/// `> MAX_EXPR_DEPTH` (so depth exactly 108 is allowed, 109 errors).
 ///
 /// For a body like `let x = ((...1...));` with `N` parenthesized
 /// groups, the depth sequence is: 1 (the `let` stmt) + 1 (the outer
-/// `parse_unary`) + N (each nested paren). So `N = 126` lands at
-/// depth exactly 128 (allowed) and `N = 127` lands at 129 (rejected).
+/// `parse_unary`) + N (each nested paren). So `N = 106` lands at
+/// depth exactly 108 (allowed) and `N = 107` lands at 109 (rejected).
 #[test]
 fn s6_max_expr_depth_boundary() {
-    // 126 nested parens around `1` inside a `let` statement → depth = 128 (allowed).
-    let body = format!("let x = {}1{}; accept;", "(".repeat(126), ")".repeat(126));
+    // 106 nested parens around `1` inside a `let` statement → depth = 108 (allowed).
+    let body = format!("let x = {}1{}; accept;", "(".repeat(106), ")".repeat(106));
     compile("s6_boundary", &body).expect("depth == MAX_EXPR_DEPTH must compile");
 }
 
-/// §6 — `MAX_EXPR_DEPTH = 128`. A 127-deep nesting must fail.
+/// §6 — `MAX_EXPR_DEPTH = 108`. A 107-deep nesting must fail.
 #[test]
 fn s6_max_expr_depth_exceeded() {
-    let body = format!("let x = {}1{}; accept;", "(".repeat(127), ")".repeat(127));
+    let body = format!("let x = {}1{}; accept;", "(".repeat(107), ")".repeat(107));
     let err = compile("s6_exceeded", &body).unwrap_err();
     assert!(
         matches!(err.kind, ParseErrorKind::RecursionLimitExceeded),

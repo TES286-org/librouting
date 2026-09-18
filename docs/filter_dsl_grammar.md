@@ -500,7 +500,7 @@ Two compile-time limits bound the parser and evaluator:
 
 | Limit              | Value | Where defined                          | Effect when exceeded               |
 | ------------------ | ----- | -------------------------------------- | --------------------------------- |
-| `MAX_EXPR_DEPTH`   | 128   | `crates/lr-policy/src/filter/parser.rs`| Parse error `RecursionLimitExceeded` |
+| `MAX_EXPR_DEPTH`   | 108   | `crates/lr-policy/src/filter/parser.rs`| Parse error `RecursionLimitExceeded` |
 | `MAX_CALL_DEPTH`   | 64    | `crates/lr-policy/src/filter/eval.rs`   | Runtime error `CallDepthExceeded` |
 
 The depth bound exists because the parser is recursive-descent and a
@@ -657,7 +657,7 @@ Parses as `Err(ParseError { kind: ReadOnlyField("bgp.local_pref"), … })`.
 
 A literal of 200 unclosed `[` characters parses as
 `Err(ParseError { kind: RecursionLimitExceeded, … })` because the
-nesting exceeds `MAX_EXPR_DEPTH = 128`. (The exact 3 911-byte crasher
+nesting exceeds `MAX_EXPR_DEPTH = 108`. (The exact 3 911-byte crasher
 from the nightly fuzzer is pinned by
 `crates/lr-policy/tests/filter_corpus.rs::nightly_nested_set_crasher_is_now_rejected_not_fatal`.)
 

@@ -10,6 +10,7 @@ use lr_core::addr::{Asn, IpAddr, Prefix};
 use lr_core::rib::Protocol;
 
 use crate::filter::eval::RoaStateLit;
+use crate::filter::span::{LineIndex, Span};
 
 /// A compiled filter: its name (referenced by `[[peer]] import_filter`
 /// / `export_filter`) and the body AST.
@@ -23,6 +24,11 @@ pub struct Filter {
     /// body. BIRD-syntax `function name(params) { ... }`; callable
     /// from anywhere in this filter.
     pub functions: Vec<FunctionDecl>,
+    /// Byte-offset → (line, col) translation table for the source
+    /// this filter was parsed from. Carried so evaluation-time errors
+    /// (which only have spans) can render `line:col` without keeping
+    /// the source text alive.
+    pub line_index: LineIndex,
 }
 
 /// A user-defined function: `function name(a, b) -> ret { ... }`.
@@ -47,6 +53,11 @@ pub struct FilterBody {
 }
 
 /// A statement — the imperative side of the DSL.
+///
+/// Every variant carries the byte [`Span`] of the source it was
+/// parsed from (first token through last token). Spans feed
+/// evaluation-time diagnostics and are ignored by the AST's
+/// structural equality.
 #[derive(Debug, Clone)]
 pub enum Stmt {
     /// `if cond { ... }` or `if cond { ... } else { ... }`.
@@ -54,32 +65,72 @@ pub enum Stmt {
         cond: Expr,
         then: Box<Stmt>,
         els: Option<Box<Stmt>>,
+        span: Span,
     },
     /// `case expr { pat => stmt; ... default => stmt; }`.
-    Case { scrutinee: Expr, arms: Vec<CaseArm> },
+    Case {
+        scrutinee: Expr,
+        arms: Vec<CaseArm>,
+        span: Span,
+    },
     /// `let name = expr;` — introduce a new variable in scope.
-    Let { name: String, value: Expr },
+    Let {
+        name: String,
+        value: Expr,
+        span: Span,
+    },
     /// `name = expr;` — reassign a variable introduced by `let`.
-    Assign { name: String, value: Expr },
+    Assign {
+        name: String,
+        value: Expr,
+        span: Span,
+    },
     /// `route.attr = expr;` — write a settable route attribute.
-    AssignRouteField { field: RouteField, value: Expr },
+    AssignRouteField {
+        field: RouteField,
+        value: Expr,
+        span: Span,
+    },
     /// `route.attr += expr;` — append to a settable list-like
     /// attribute (currently only `bgp.communities`).
-    AppendRouteField { field: RouteField, value: Expr },
+    AppendRouteField {
+        field: RouteField,
+        value: Expr,
+        span: Span,
+    },
     /// `expr;` — evaluate the expression for side effects (e.g. a
     /// method call like `bgp.as_path.prepend(65001)`).
-    Expr(Expr),
+    Expr(Expr, Span),
     /// A nested block `{ ... }` — introduces a new scope.
-    Block(Vec<Stmt>),
+    Block(Vec<Stmt>, Span),
     /// `return expr;` / `return;` — exit the enclosing user-defined
     /// function with the value (bare `return;` and falling off the
     /// end of a body yield `false`). At filter top level `return`
     /// terminates the filter without a verdict (Fallthrough).
-    Return(Option<Expr>),
+    Return(Option<Expr>, Span),
     /// `accept;` — terminate the filter with `Accept`.
-    Accept,
+    Accept(Span),
     /// `reject;` or `reject "reason";` — terminate with `Reject(reason)`.
-    Reject(Option<Expr>),
+    Reject(Option<Expr>, Span),
+}
+
+impl Stmt {
+    /// The source span of this statement.
+    pub fn span(&self) -> Span {
+        match self {
+            Stmt::If { span, .. }
+            | Stmt::Case { span, .. }
+            | Stmt::Let { span, .. }
+            | Stmt::Assign { span, .. }
+            | Stmt::AssignRouteField { span, .. }
+            | Stmt::AppendRouteField { span, .. }
+            | Stmt::Expr(_, span)
+            | Stmt::Block(_, span)
+            | Stmt::Return(_, span)
+            | Stmt::Accept(span)
+            | Stmt::Reject(_, span) => *span,
+        }
+    }
 }
 
 /// One arm of a `case` statement: the pattern(s) and the body.
@@ -92,40 +143,55 @@ pub struct CaseArm {
 }
 
 /// An expression — the functional side of the DSL.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Every variant carries the byte [`Span`] of the source it was
+/// parsed from. Spans feed evaluation-time diagnostics; the
+/// hand-written `PartialEq`/`Eq` impls ignore them so structural
+/// equality (proptests, peephole goldens) stays span-blind.
+#[derive(Debug, Clone)]
 pub enum Expr {
     /// A literal value: integer, string, IP, prefix, boolean, ASN.
-    Lit(Value),
+    Lit(Value, Span),
     /// A variable reference — looked up in the current scope.
-    Var(String),
+    Var(String, Span),
     /// A route field access: `net`, `bgp.local_pref`, `proto`, etc.
-    RouteField(RouteField),
+    RouteField(RouteField, Span),
     /// A function call: `name(arg, arg, ...)`.
-    Call { name: String, args: Vec<Expr> },
+    Call {
+        name: String,
+        args: Vec<Expr>,
+        span: Span,
+    },
     /// `defined(expr)` / `exists(expr)` — true when the inner route
     /// attribute is present on the route or the variable exists in
     /// scope. Unlike a plain read, `defined` never collapses an
     /// absent attribute to its default (0 / false / empty): BIRD
     /// policies need to distinguish "unset" from "set to zero".
-    Defined(Box<Expr>),
+    Defined(Box<Expr>, Span),
     /// A method call: `obj.method(arg, arg, ...)`. Used for
     /// `bgp.as_path.prepend(...)`, `bgp.communities.add(...)`.
     Method {
         receiver: Box<Expr>,
         method: String,
         args: Vec<Expr>,
+        span: Span,
     },
     /// Binary operator application: `a + b`, `a == b`, `a && b`, etc.
     Binary {
         op: BinaryOp,
         lhs: Box<Expr>,
         rhs: Box<Expr>,
+        span: Span,
     },
     /// Unary operator application: `!x`, `-x`.
-    Unary { op: UnaryOp, expr: Box<Expr> },
+    Unary {
+        op: UnaryOp,
+        expr: Box<Expr>,
+        span: Span,
+    },
     /// A set literal: `[ 10.0.0.0/8, 192.0.2.0/24 ]`. Used with
     /// `~` for prefix / AS-path / community membership.
-    Set(Vec<Expr>),
+    Set(Vec<Expr>, Span),
     /// A prefix with optional range: `10.0.0.0/8{16,24}`. The
     /// range is `[ge, le]` — BIRD's `{minlen, maxlen}` syntax. When
     /// `None` the prefix length is exact.
@@ -133,8 +199,105 @@ pub enum Expr {
         prefix: Prefix,
         ge: Option<u8>,
         le: Option<u8>,
+        span: Span,
     },
 }
+
+impl Expr {
+    /// The source span of this expression.
+    pub fn span(&self) -> Span {
+        match self {
+            Expr::Lit(_, span)
+            | Expr::Var(_, span)
+            | Expr::RouteField(_, span)
+            | Expr::Defined(_, span)
+            | Expr::Set(_, span) => *span,
+            Expr::Call { span, .. }
+            | Expr::Method { span, .. }
+            | Expr::Binary { span, .. }
+            | Expr::Unary { span, .. }
+            | Expr::PrefixSet { span, .. } => *span,
+        }
+    }
+}
+
+/// Structural equality for [`Expr`]: spans are position metadata,
+/// not semantics, so two expressions are equal iff their content
+/// (kinds, literals, children) matches. This keeps the peephole
+/// golden tables and the proptest oracles span-blind.
+impl PartialEq for Expr {
+    fn eq(&self, other: &Self) -> bool {
+        use Expr as E;
+        match (self, other) {
+            (E::Lit(a, _), E::Lit(b, _)) => a == b,
+            (E::Var(a, _), E::Var(b, _)) => a == b,
+            (E::RouteField(a, _), E::RouteField(b, _)) => a == b,
+            (
+                E::Call {
+                    name: na, args: aa, ..
+                },
+                E::Call {
+                    name: nb, args: ab, ..
+                },
+            ) => na == nb && aa == ab,
+            (E::Defined(a, _), E::Defined(b, _)) => a == b,
+            (
+                E::Method {
+                    receiver: ra,
+                    method: ma,
+                    args: aa,
+                    ..
+                },
+                E::Method {
+                    receiver: rb,
+                    method: mb,
+                    args: ab,
+                    ..
+                },
+            ) => ra == rb && ma == mb && aa == ab,
+            (
+                E::Binary {
+                    op: oa,
+                    lhs: la,
+                    rhs: ra,
+                    ..
+                },
+                E::Binary {
+                    op: ob,
+                    lhs: lb,
+                    rhs: rb,
+                    ..
+                },
+            ) => oa == ob && la == lb && ra == rb,
+            (
+                E::Unary {
+                    op: oa, expr: ea, ..
+                },
+                E::Unary {
+                    op: ob, expr: eb, ..
+                },
+            ) => oa == ob && ea == eb,
+            (E::Set(a, _), E::Set(b, _)) => a == b,
+            (
+                E::PrefixSet {
+                    prefix: pa,
+                    ge: ga,
+                    le: la,
+                    ..
+                },
+                E::PrefixSet {
+                    prefix: pb,
+                    ge: gb,
+                    le: lb,
+                    ..
+                },
+            ) => pa == pb && ga == gb && la == lb,
+            _ => false,
+        }
+    }
+}
+
+impl Eq for Expr {}
 
 /// A literal value — what every expression reduces to at evaluation
 /// time.

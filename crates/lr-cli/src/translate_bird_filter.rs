@@ -1064,8 +1064,8 @@ fn verify_vars(filter: &Filter) -> Vec<String> {
 
 fn walk_expr(e: &Expr, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
     match e {
-        Expr::Lit(_) => {}
-        Expr::Var(name) => {
+        Expr::Lit(..) => {}
+        Expr::Var(name, _) => {
             if !scope.iter().any(|s| s == name) {
                 unknown.push(format!(
                     "variable or constant `{name}` is never introduced — a BIRD \
@@ -1073,13 +1073,13 @@ fn walk_expr(e: &Expr, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
                 ));
             }
         }
-        Expr::RouteField(_) => {}
+        Expr::RouteField(..) => {}
         Expr::Call { args, .. } => {
             for a in args {
                 walk_expr(a, scope, unknown);
             }
         }
-        Expr::Defined(inner) => walk_expr(inner, scope, unknown),
+        Expr::Defined(inner, _) => walk_expr(inner, scope, unknown),
         Expr::Method { receiver, args, .. } => {
             walk_expr(receiver, scope, unknown);
             for a in args {
@@ -1091,7 +1091,7 @@ fn walk_expr(e: &Expr, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
             walk_expr(rhs, scope, unknown);
         }
         Expr::Unary { expr, .. } => walk_expr(expr, scope, unknown),
-        Expr::Set(items) => {
+        Expr::Set(items, _) => {
             for it in items {
                 walk_expr(it, scope, unknown);
             }
@@ -1102,14 +1102,18 @@ fn walk_expr(e: &Expr, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
 
 fn walk_stmt(stmt: &Stmt, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
     match stmt {
-        Stmt::If { cond, then, els } => {
+        Stmt::If {
+            cond, then, els, ..
+        } => {
             walk_expr(cond, scope, unknown);
             walk_stmt(then, scope, unknown);
             if let Some(e) = els {
                 walk_stmt(e, scope, unknown);
             }
         }
-        Stmt::Case { scrutinee, arms } => {
+        Stmt::Case {
+            scrutinee, arms, ..
+        } => {
             walk_expr(scrutinee, scope, unknown);
             for arm in arms {
                 for pat in &arm.patterns {
@@ -1120,11 +1124,11 @@ fn walk_stmt(stmt: &Stmt, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
                 }
             }
         }
-        Stmt::Let { name, value } => {
+        Stmt::Let { name, value, .. } => {
             walk_expr(value, scope, unknown);
             scope.push(name.clone());
         }
-        Stmt::Assign { name, value } => {
+        Stmt::Assign { name, value, .. } => {
             walk_expr(value, scope, unknown);
             if !scope.iter().any(|s| s == name) {
                 unknown.push(format!(
@@ -1136,17 +1140,17 @@ fn walk_stmt(stmt: &Stmt, scope: &mut Vec<String>, unknown: &mut Vec<String>) {
         Stmt::AssignRouteField { value, .. } | Stmt::AppendRouteField { value, .. } => {
             walk_expr(value, scope, unknown);
         }
-        Stmt::Expr(e) => walk_expr(e, scope, unknown),
-        Stmt::Block(stmts) => {
+        Stmt::Expr(e, _) => walk_expr(e, scope, unknown),
+        Stmt::Block(stmts, _) => {
             let base = scope.len();
             for s in stmts {
                 walk_stmt(s, scope, unknown);
             }
             scope.truncate(base);
         }
-        Stmt::Return(Some(e)) => walk_expr(e, scope, unknown),
-        Stmt::Return(None) | Stmt::Accept | Stmt::Reject(None) => {}
-        Stmt::Reject(Some(e)) => walk_expr(e, scope, unknown),
+        Stmt::Return(Some(e), _) => walk_expr(e, scope, unknown),
+        Stmt::Return(None, _) | Stmt::Accept(_) | Stmt::Reject(None, _) => {}
+        Stmt::Reject(Some(e), _) => walk_expr(e, scope, unknown),
     }
 }
 

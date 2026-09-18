@@ -323,15 +323,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 
     fn eval_stmt(&mut self, stmt: &Stmt, route: &mut Route) -> Result<ControlFlow, EvalError> {
         match stmt {
-            Stmt::Return(value) => {
+            Stmt::Return(value, _) => {
                 let v = match value {
                     Some(e) => Some(self.eval_expr(e, route)?),
                     None => None,
                 };
                 Ok(ControlFlow::Return(v))
             }
-            Stmt::Accept => Ok(ControlFlow::Accept),
-            Stmt::Reject(reason) => {
+            Stmt::Accept(_) => Ok(ControlFlow::Accept),
+            Stmt::Reject(reason, _) => {
                 let reason_str = if let Some(r) = reason {
                     match self.eval_expr(r, route)? {
                         Value::Str(s) => Some(s),
@@ -342,7 +342,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 };
                 Ok(ControlFlow::Reject(reason_str))
             }
-            Stmt::If { cond, then, els } => {
+            Stmt::If {
+                cond, then, els, ..
+            } => {
                 let c = self.eval_expr(cond, route)?;
                 if c.truthy() {
                     self.eval_stmt(then, route)
@@ -352,7 +354,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     Ok(ControlFlow::Continue)
                 }
             }
-            Stmt::Case { scrutinee, arms } => {
+            Stmt::Case {
+                scrutinee, arms, ..
+            } => {
                 let v = self.eval_expr(scrutinee, route)?;
                 for arm in arms {
                     if arm.patterns.is_empty() {
@@ -390,31 +394,31 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 }
                 Ok(ControlFlow::Continue)
             }
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, value, .. } => {
                 let v = self.eval_expr(value, route)?;
                 self.scopes.last_mut().unwrap().vars.insert(name.clone(), v);
                 Ok(ControlFlow::Continue)
             }
-            Stmt::Assign { name, value } => {
+            Stmt::Assign { name, value, .. } => {
                 let v = self.eval_expr(value, route)?;
                 self.assign(name, v)?;
                 Ok(ControlFlow::Continue)
             }
-            Stmt::AssignRouteField { field, value } => {
+            Stmt::AssignRouteField { field, value, .. } => {
                 let v = self.eval_expr(value, route)?;
                 self.assign_route_field(field, v, route)?;
                 Ok(ControlFlow::Continue)
             }
-            Stmt::AppendRouteField { field, value } => {
+            Stmt::AppendRouteField { field, value, .. } => {
                 let v = self.eval_expr(value, route)?;
                 self.append_route_field(field, v, route)?;
                 Ok(ControlFlow::Continue)
             }
-            Stmt::Expr(e) => {
+            Stmt::Expr(e, _) => {
                 let _ = self.eval_expr(e, route)?;
                 Ok(ControlFlow::Continue)
             }
-            Stmt::Block(body) => {
+            Stmt::Block(body, _) => {
                 self.push_scope();
                 for s in body {
                     match self.eval_stmt(s, route)? {
@@ -433,11 +437,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 
     fn eval_expr(&mut self, expr: &Expr, route: &mut Route) -> Result<Value, EvalError> {
         match expr {
-            Expr::Lit(v) => Ok(v.clone()),
-            Expr::Var(name) => self.lookup(name),
-            Expr::RouteField(field) => self.read_route_field(field, route),
-            Expr::Defined(inner) => Ok(Value::Bool(self.is_defined(inner, route))),
-            Expr::Call { name, args } => {
+            Expr::Lit(v, _) => Ok(v.clone()),
+            Expr::Var(name, _) => self.lookup(name),
+            Expr::RouteField(field, _) => self.read_route_field(field, route),
+            Expr::Defined(inner, _) => Ok(Value::Bool(self.is_defined(inner, route))),
+            Expr::Call { name, args, .. } => {
                 let mut argv: Vec<Value> = Vec::with_capacity(args.len());
                 for a in args {
                     argv.push(self.eval_expr(a, route)?);
@@ -448,8 +452,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 receiver,
                 method,
                 args,
+                ..
             } => {
-                if let Expr::RouteField(field) = receiver.as_ref() {
+                if let Expr::RouteField(field, _) = receiver.as_ref() {
                     let mut argv: Vec<Value> = Vec::with_capacity(args.len());
                     for a in args {
                         argv.push(self.eval_expr(a, route)?);
@@ -465,7 +470,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     col: 0,
                 })
             }
-            Expr::Binary { op, lhs, rhs } => {
+            Expr::Binary { op, lhs, rhs, .. } => {
                 // Short-circuit for && and ||.
                 if *op == BinaryOp::And {
                     let l = self.eval_expr(lhs, route)?;
@@ -495,7 +500,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 let r = self.eval_expr(rhs, route)?;
                 self.eval_binary(*op, l, r)
             }
-            Expr::Unary { op, expr } => {
+            Expr::Unary { op, expr, .. } => {
                 let v = self.eval_expr(expr, route)?;
                 match op {
                     UnaryOp::Not => Ok(Value::Bool(!v.truthy())),
@@ -505,14 +510,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     },
                 }
             }
-            Expr::Set(items) => {
+            Expr::Set(items, _) => {
                 let mut v = Vec::with_capacity(items.len());
                 for it in items {
                     v.push(self.eval_expr(it, route)?);
                 }
                 Ok(Value::Set(v))
             }
-            Expr::PrefixSet { prefix, ge, le } => {
+            Expr::PrefixSet { prefix, ge, le, .. } => {
                 let _ = (ge, le);
                 Ok(Value::Prefix(*prefix))
             }
@@ -526,9 +531,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         route: &mut Route,
     ) -> Result<bool, EvalError> {
         match rhs {
-            Expr::Set(items) => {
+            Expr::Set(items, _) => {
                 for it in items {
-                    if let Expr::PrefixSet { prefix, ge, le } = it {
+                    if let Expr::PrefixSet { prefix, ge, le, .. } = it {
                         if let Value::Prefix(p) = lhs {
                             if prefix_set_matches(prefix, *ge, *le, p) {
                                 return Ok(true);
@@ -543,7 +548,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 }
                 Ok(false)
             }
-            Expr::PrefixSet { prefix, ge, le } => {
+            Expr::PrefixSet { prefix, ge, le, .. } => {
                 if let Value::Prefix(p) = lhs {
                     Ok(prefix_set_matches(prefix, *ge, *le, p))
                 } else {
@@ -591,10 +596,10 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// exactly what BIRD's `defined()` exists to avoid.
     fn is_defined(&mut self, expr: &Expr, route: &Route) -> bool {
         match expr {
-            Expr::RouteField(field) => self.field_present(field.kind, route),
-            Expr::Var(name) => self.scopes.iter().rev().any(|s| s.vars.contains_key(name)),
+            Expr::RouteField(field, _) => self.field_present(field.kind, route),
+            Expr::Var(name, _) => self.scopes.iter().rev().any(|s| s.vars.contains_key(name)),
             // A literal is always defined.
-            Expr::Lit(_) => true,
+            Expr::Lit(..) => true,
             // Any other expression is "defined" when it evaluates
             // without error. Evaluation runs against a route copy, so
             // a `defined()` argument can never write through (no

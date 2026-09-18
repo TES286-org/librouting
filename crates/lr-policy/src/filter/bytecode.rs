@@ -527,7 +527,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_stmt(&self, stmt: &Stmt, out: &mut Vec<Instr>) {
         match stmt {
-            Stmt::Return(value) => match value {
+            Stmt::Return(value, _) => match value {
                 Some(e) => {
                     self.compile_expr(e, out);
                     out.push(Instr::Return);
@@ -537,15 +537,17 @@ impl<'a> Compiler<'a> {
                     out.push(Instr::Return);
                 }
             },
-            Stmt::Accept => out.push(Instr::Accept),
-            Stmt::Reject(reason) => match reason {
+            Stmt::Accept(_) => out.push(Instr::Accept),
+            Stmt::Reject(reason, _) => match reason {
                 Some(e) => {
                     self.compile_expr(e, out);
                     out.push(Instr::Reject { from_stack: true });
                 }
                 None => out.push(Instr::Reject { from_stack: false }),
             },
-            Stmt::If { cond, then, els } => {
+            Stmt::If {
+                cond, then, els, ..
+            } => {
                 self.compile_expr(cond, out);
                 if let Some(e) = els {
                     // cond? then : else
@@ -564,7 +566,9 @@ impl<'a> Compiler<'a> {
                     out[jf] = Instr::JumpIfFalse(out.len());
                 }
             }
-            Stmt::Case { scrutinee, arms } => {
+            Stmt::Case {
+                scrutinee, arms, ..
+            } => {
                 self.compile_expr(scrutinee, out);
                 out.push(Instr::StoreTmp);
                 let mut arm_jumps = Vec::new();
@@ -601,27 +605,27 @@ impl<'a> Compiler<'a> {
                     out[j] = Instr::Jump(end);
                 }
             }
-            Stmt::Let { name, value } => {
+            Stmt::Let { name, value, .. } => {
                 self.compile_expr(value, out);
                 out.push(Instr::StoreVar(name.clone()));
             }
-            Stmt::Assign { name, value } => {
+            Stmt::Assign { name, value, .. } => {
                 self.compile_expr(value, out);
                 out.push(Instr::AssignVar(name.clone()));
             }
-            Stmt::AssignRouteField { field, value } => {
+            Stmt::AssignRouteField { field, value, .. } => {
                 self.compile_expr(value, out);
                 out.push(Instr::AssignField(*field));
             }
-            Stmt::AppendRouteField { field, value } => {
+            Stmt::AppendRouteField { field, value, .. } => {
                 self.compile_expr(value, out);
                 out.push(Instr::AppendField(*field));
             }
-            Stmt::Expr(e) => {
+            Stmt::Expr(e, _) => {
                 self.compile_expr(e, out);
                 out.push(Instr::Pop);
             }
-            Stmt::Block(body) => {
+            Stmt::Block(body, _) => {
                 out.push(Instr::PushScope);
                 self.compile_stmts(body, out);
                 out.push(Instr::PopScope);
@@ -631,10 +635,10 @@ impl<'a> Compiler<'a> {
 
     fn compile_expr(&self, expr: &Expr, out: &mut Vec<Instr>) {
         match expr {
-            Expr::Lit(v) => out.push(Instr::Push(v.clone())),
-            Expr::Var(name) => out.push(Instr::LoadVar(name.clone())),
-            Expr::RouteField(f) => out.push(Instr::LoadField(*f)),
-            Expr::Call { name, args } => {
+            Expr::Lit(v, _) => out.push(Instr::Push(v.clone())),
+            Expr::Var(name, _) => out.push(Instr::LoadVar(name.clone())),
+            Expr::RouteField(f, _) => out.push(Instr::LoadField(*f)),
+            Expr::Call { name, args, .. } => {
                 for a in args {
                     self.compile_expr(a, out);
                 }
@@ -658,8 +662,9 @@ impl<'a> Compiler<'a> {
                 receiver,
                 method,
                 args,
+                ..
             } => {
-                if let Expr::RouteField(field) = receiver.as_ref() {
+                if let Expr::RouteField(field, _) = receiver.as_ref() {
                     for a in args {
                         self.compile_expr(a, out);
                     }
@@ -674,16 +679,16 @@ impl<'a> Compiler<'a> {
                     out.push(Instr::EvalTree(expr.clone()));
                 }
             }
-            Expr::Defined(inner) => {
+            Expr::Defined(inner, _) => {
                 let target = match inner.as_ref() {
-                    Expr::RouteField(f) => DefinedTarget::Field(*f),
-                    Expr::Var(n) => DefinedTarget::Var(n.clone()),
-                    Expr::Lit(_) => DefinedTarget::Literal,
+                    Expr::RouteField(f, _) => DefinedTarget::Field(*f),
+                    Expr::Var(n, _) => DefinedTarget::Var(n.clone()),
+                    Expr::Lit(..) => DefinedTarget::Literal,
                     other => DefinedTarget::Dynamic(other.clone()),
                 };
                 out.push(Instr::Defined(target));
             }
-            Expr::Binary { op, lhs, rhs } => match op {
+            Expr::Binary { op, lhs, rhs, .. } => match op {
                 // Short-circuit operators compile to jumps; everything
                 // else is a plain three-address stack op.
                 BinaryOp::And => {
@@ -730,14 +735,14 @@ impl<'a> Compiler<'a> {
                     out.push(Instr::Bin(*other));
                 }
             },
-            Expr::Unary { op, expr } => {
+            Expr::Unary { op, expr, .. } => {
                 self.compile_expr(expr, out);
                 match op {
                     UnaryOp::Not => out.push(Instr::Not),
                     UnaryOp::Neg => out.push(Instr::Neg),
                 }
             }
-            Expr::Set(_) => {
+            Expr::Set(..) => {
                 // Non-constant sets are only consumed by `~` in
                 // practice; as a plain value they compile to the
                 // tree walk so `Value::Set` construction semantics
@@ -755,7 +760,7 @@ impl<'a> Compiler<'a> {
 
     fn compile_match_rhs(&self, rhs: &Expr) -> MatchRhs {
         match rhs {
-            Expr::Set(items) => {
+            Expr::Set(items, _) => {
                 // Compile each AST item into a `MatchItem`, then
                 // check whether any are prefix patterns. When at
                 // least one is, build a `PrefixSetTrie` over the
@@ -766,12 +771,12 @@ impl<'a> Compiler<'a> {
                 let compiled: Vec<MatchItem> = items
                     .iter()
                     .map(|i| match i {
-                        Expr::PrefixSet { prefix, ge, le } => MatchItem::PrefixSet {
+                        Expr::PrefixSet { prefix, ge, le, .. } => MatchItem::PrefixSet {
                             prefix: *prefix,
                             ge: *ge,
                             le: *le,
                         },
-                        Expr::Lit(v) => MatchItem::Value(v.clone()),
+                        Expr::Lit(v, _) => MatchItem::Value(v.clone()),
                         other => MatchItem::Expr(other.clone()),
                     })
                     .collect();
@@ -789,7 +794,7 @@ impl<'a> Compiler<'a> {
                     MatchRhs::Set(compiled)
                 }
             }
-            Expr::PrefixSet { prefix, ge, le } => {
+            Expr::PrefixSet { prefix, ge, le, .. } => {
                 // Single prefix pattern — build a one-entry trie.
                 let trie = PrefixSetTrie::build(&[MatchItem::PrefixSet {
                     prefix: *prefix,
@@ -801,7 +806,7 @@ impl<'a> Compiler<'a> {
                     others: Vec::new(),
                 }
             }
-            Expr::Lit(v) => MatchRhs::Value(v.clone()),
+            Expr::Lit(v, _) => MatchRhs::Value(v.clone()),
             other => MatchRhs::Expr(other.clone()),
         }
     }
