@@ -101,6 +101,13 @@ pub(crate) struct PeerSpec {
     /// override of the router-wide default. `None` inherits the global.
     /// Requires a binary built with the `exchange-plane` feature.
     pub exchange_plane: Option<bool>,
+    /// RFC 8326 per-peer override (`graceful_shutdown = false`): exempt
+    /// this neighbor's sessions from the §3.1 sender-side LOCAL_PREF
+    /// zeroing on GRACEFUL_SHUTDOWN-tagged exports. `None` inherits the
+    /// global `[bgp] graceful_shutdown`. The §4.1 receive-side honouring
+    /// is not scoped per peer (mirroring FRR, which de-preferences
+    /// GS-tagged eBGP routes regardless of configuration).
+    pub graceful_shutdown: Option<bool>,
 }
 
 impl PeerSpec {
@@ -745,6 +752,21 @@ pub(crate) struct DaemonConfig {
     /// while rotating (new key id added before the old one removed).
     pub exchange_plane_keys: Vec<String>,
 
+    /// RFC 8326 Graceful Session Shutdown (``[bgp] graceful_shutdown``,
+    /// default on). When on, the daemon honours the ``GRACEFUL_SHUTDOWN``
+    /// community (``0xFFFF:0000``) on all three surfaces: the §3.1 sender
+    /// side (export hook zeroes LOCAL_PREF on tagged routes), the §4.1
+    /// receiver side (import hook lowers LOCAL_PREF on tagged routes to
+    /// the RECOMMENDED 0) and the §4 best-path step (a tagged route is
+    /// the least preferred for its prefix). Setting it to ``false`` opts
+    /// out of all three — the plain RFC 4271 decision process, with the
+    /// community inert for selection. Per-peer ``[[peer]]
+    /// graceful_shutdown = false`` exempts one neighbor's sessions from
+    /// the §3.1 sender-side rewrite only (the receive-side honouring is
+    /// unconditional, mirroring FRR, which de-preferences GS-tagged eBGP
+    /// routes regardless of configuration).
+    pub graceful_shutdown: bool,
+
     /// `[[roa]]` tables — Route Origin Authorizations (RFC 6482)
     /// loaded into the router-wide [`lr_bgp::RoaTable`] at startup.
     /// When `roa_validate` is on, every received BGP UPDATE is
@@ -1018,6 +1040,7 @@ impl DaemonConfig {
             soft_reconfig_inbound: false,
             exchange_plane: false,
             exchange_plane_keys: Vec::new(),
+            graceful_shutdown: true,
             roas: Vec::new(),
             roa_validate: false,
             roa_invalid_action: "reject".to_string(),
@@ -2385,6 +2408,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
             "bgp.bestpath_compare_routerid" => {
                 cfg.bestpath_compare_routerid = parse_bool(value);
             }
+            "bgp.graceful_shutdown" => cfg.graceful_shutdown = parse_bool(value),
             "bgp.default_ipv4_unicast" => cfg.default_ipv4_unicast = parse_bool(value),
             "bgp.allow_local_as" => {
                 // Accept "any" / "allowas-any" as the u32::MAX sentinel,
@@ -3723,6 +3747,7 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         }
         "soft_reconfig_inbound" => peer.soft_reconfig_inbound = Some(parse_bool(value)),
         "exchange_plane" => peer.exchange_plane = Some(parse_bool(value)),
+        "graceful_shutdown" => peer.graceful_shutdown = Some(parse_bool(value)),
         "extended_next_hop" => peer.extended_next_hop = Some(parse_bool(value)),
         "gtsm" => peer.gtsm_hops = parse_gtsm(value),
         "max_prefixes" => {
@@ -5376,6 +5401,41 @@ mod tests {
         )
         .unwrap();
         assert!(!cfg.default_ipv4_unicast);
+    }
+
+    #[test]
+    fn graceful_shutdown_default_on_and_parses() {
+        // RFC 8326 honouring is a SHOULD on the receive side, so the
+        // daemon ships it enabled; `[bgp] graceful_shutdown = false`
+        // opts out of all three surfaces (sender hook, receiver hook,
+        // best-path step).
+        assert!(DaemonConfig::with_defaults().graceful_shutdown);
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\
+             graceful_shutdown = false\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(!cfg.graceful_shutdown);
+    }
+
+    #[test]
+    fn graceful_shutdown_per_peer_override_parses_and_inherits() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\npeer_as = 65001\nrouter_id = \"10.0.0.1\"\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\ngraceful_shutdown = false\n\n\
+             [[peer]]\nremote = \"192.0.2.3:179\"\ngraceful_shutdown = true\n\n\
+             [[peer]]\nremote = \"192.0.2.4:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.peers[0].graceful_shutdown, Some(false));
+        assert_eq!(cfg.peers[1].graceful_shutdown, Some(true));
+        // Inheritance: the third peer carries no override (None).
+        assert_eq!(cfg.peers[2].graceful_shutdown, None);
     }
 
     #[test]
