@@ -577,7 +577,14 @@ pub(crate) fn v6_prefix_contains(p: &lr_core::addr::Prefix, addr: &[u8; 16]) -> 
 /// Daemon configuration (TOML or CLI flags). The historical fields are
 /// the globals every `PeerSpec` inherits from; `peers` carries the
 /// explicit per-peer entries.
-#[derive(Debug, Clone, Default)]
+///
+/// This struct doubles as the typed configuration IR (issue #18
+/// Phase 1): every frontend — the TOML subset parser today, the native
+/// DSL once Phase 2 lands — must resolve into exactly one
+/// `DaemonConfig` value, and two configs are semantically equivalent
+/// iff their IRs compare equal (`PartialEq`). That equality is the
+/// golden property the DSL migration is validated against.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct DaemonConfig {
     pub local_as: u32,
     pub peer_as: u32,
