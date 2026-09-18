@@ -26,6 +26,7 @@ use std::collections::BTreeMap;
 use lr_core::addr::Prefix;
 
 use crate::filter::ast::{BinaryOp, Expr, Filter, RouteField, Stmt, UnaryOp, Value};
+use crate::filter::span::Span;
 
 pub use crate::filter::eval::execute;
 
@@ -34,6 +35,10 @@ pub use crate::filter::eval::execute;
 pub struct CompiledFunction {
     pub params: Vec<String>,
     pub code: Vec<Instr>,
+    /// Byte span per instruction, parallel to `code` (issue #18
+    /// Phase 0). Populated by the compiler, preserved by the peephole
+    /// passes; read on the cold error path only.
+    pub spans: Vec<Span>,
 }
 
 /// One match-pattern item — the right-hand side of `~`.
@@ -457,10 +462,25 @@ pub enum Instr {
 pub struct CompiledFilter {
     pub name: String,
     pub code: Vec<Instr>,
+    /// Source span per instruction, parallel to `code` (issue #18
+    /// Phase 0): the VM reads it on the cold error path to position
+    /// runtime errors. Zero cost on the hot fetch loop.
+    pub spans: Vec<Span>,
+    /// Offset → (line, col) table for the filter source, so VM errors
+    /// can fill `EvalError::line` / `EvalError::col` without the text.
+    pub line_index: crate::filter::span::LineIndex,
     pub functions: Vec<CompiledFunction>,
     /// Name → index map for `functions` (GitHub #19 P2). Built so the
     /// compiler can resolve call names to indices at compile time.
     pub function_index: BTreeMap<String, usize>,
+}
+
+impl CompiledFilter {
+    /// The span of the instruction at `ip` (default span when out of
+    /// range — defensive; `ip` always comes from the fetch loop).
+    pub fn span_at(&self, ip: usize) -> Span {
+        self.spans.get(ip).copied().unwrap_or_default()
+    }
 }
 
 /// Compile a parsed filter to bytecode. Infallible: every AST shape
@@ -490,22 +510,28 @@ pub fn compile(filter: &Filter) -> CompiledFilter {
         function_index: &function_index,
     };
     let mut code = Vec::new();
-    c.compile_stmts(&filter.body.stmts, &mut code);
-    let code = crate::filter::peephole::optimize(code);
+    let mut spans = Vec::new();
+    c.compile_stmts(&filter.body.stmts, &mut code, &mut spans);
+    let (code, spans) = crate::filter::peephole::optimize_with_spans(code, spans);
     let mut functions = Vec::with_capacity(filter.functions.len());
     for f in &filter.functions {
-        let mut code = Vec::new();
-        c.compile_stmts(&f.body.stmts, &mut code);
-        code.push(Instr::Return);
-        let code = crate::filter::peephole::optimize(code);
+        let mut fcode = Vec::new();
+        let mut fspans = Vec::new();
+        c.compile_stmts(&f.body.stmts, &mut fcode, &mut fspans);
+        fcode.push(Instr::Return);
+        fspans.push(Span::default());
+        let (fcode, fspans) = crate::filter::peephole::optimize_with_spans(fcode, fspans);
         functions.push(CompiledFunction {
             params: f.params.clone(),
-            code,
+            code: fcode,
+            spans: fspans,
         });
     }
     CompiledFilter {
         name: filter.name.clone(),
         code,
+        spans,
+        line_index: filter.line_index.clone(),
         functions,
         function_index,
     }
@@ -519,83 +545,95 @@ struct Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    fn compile_stmts(&self, stmts: &[Stmt], out: &mut Vec<Instr>) {
+    fn compile_stmts(&self, stmts: &[Stmt], out: &mut Vec<Instr>, spans: &mut Vec<Span>) {
         for s in stmts {
-            self.compile_stmt(s, out);
+            self.compile_stmt(s, out, spans);
         }
     }
 
-    fn compile_stmt(&self, stmt: &Stmt, out: &mut Vec<Instr>) {
+    fn compile_stmt(&self, stmt: &Stmt, out: &mut Vec<Instr>, spans: &mut Vec<Span>) {
+        // Every emission records the span of the AST node it came
+        // from, so VM runtime errors can point at the source. The
+        // side table is parallel to `out` by construction.
+        macro_rules! emit {
+            ($instr:expr, $span:expr) => {{
+                out.push($instr);
+                spans.push($span);
+            }};
+        }
         match stmt {
-            Stmt::Return(value, _) => match value {
+            Stmt::Return(value, span) => match value {
                 Some(e) => {
-                    self.compile_expr(e, out);
-                    out.push(Instr::Return);
+                    self.compile_expr(e, out, spans);
+                    emit!(Instr::Return, *span);
                 }
                 None => {
-                    out.push(Instr::Push(Value::Bool(false)));
-                    out.push(Instr::Return);
+                    emit!(Instr::Push(Value::Bool(false)), *span);
+                    emit!(Instr::Return, *span);
                 }
             },
-            Stmt::Accept(_) => out.push(Instr::Accept),
-            Stmt::Reject(reason, _) => match reason {
+            Stmt::Accept(span) => emit!(Instr::Accept, *span),
+            Stmt::Reject(reason, span) => match reason {
                 Some(e) => {
-                    self.compile_expr(e, out);
-                    out.push(Instr::Reject { from_stack: true });
+                    self.compile_expr(e, out, spans);
+                    emit!(Instr::Reject { from_stack: true }, *span);
                 }
-                None => out.push(Instr::Reject { from_stack: false }),
+                None => emit!(Instr::Reject { from_stack: false }, *span),
             },
             Stmt::If {
-                cond, then, els, ..
+                cond,
+                then,
+                els,
+                span,
             } => {
-                self.compile_expr(cond, out);
+                self.compile_expr(cond, out, spans);
                 if let Some(e) = els {
                     // cond? then : else
                     let jf = out.len();
-                    out.push(Instr::JumpIfFalse(usize::MAX)); // patched
-                    self.compile_stmt(then, out);
+                    emit!(Instr::JumpIfFalse(usize::MAX), *span); // patched
+                    self.compile_stmt(then, out, spans);
                     let j = out.len();
-                    out.push(Instr::Jump(usize::MAX));
+                    emit!(Instr::Jump(usize::MAX), *span);
                     out[jf] = Instr::JumpIfFalse(out.len());
-                    self.compile_stmt(e, out);
+                    self.compile_stmt(e, out, spans);
                     out[j] = Instr::Jump(out.len());
                 } else {
                     let jf = out.len();
-                    out.push(Instr::JumpIfFalse(usize::MAX));
-                    self.compile_stmt(then, out);
+                    emit!(Instr::JumpIfFalse(usize::MAX), *span);
+                    self.compile_stmt(then, out, spans);
                     out[jf] = Instr::JumpIfFalse(out.len());
                 }
             }
             Stmt::Case {
-                scrutinee, arms, ..
+                scrutinee,
+                arms,
+                span,
             } => {
-                self.compile_expr(scrutinee, out);
-                out.push(Instr::StoreTmp);
+                self.compile_expr(scrutinee, out, spans);
+                emit!(Instr::StoreTmp, *span);
                 let mut arm_jumps = Vec::new();
                 for arm in arms {
                     if arm.patterns.is_empty() {
                         // default arm
-                        self.compile_stmts(&arm.body, out);
+                        self.compile_stmts(&arm.body, out, spans);
                         arm_jumps.push(out.len());
-                        out.push(Instr::Jump(usize::MAX));
+                        emit!(Instr::Jump(usize::MAX), *span);
                         continue;
                     }
                     let mut pattern_jumps = Vec::new();
-                    for (i, p) in arm.patterns.iter().enumerate() {
-                        if i > 0 {
-                            // Only jump into pattern i when the previous
-                            // ones did not match — chained by fall-through.
-                        }
-                        out.push(Instr::LoadTmp);
-                        self.compile_expr(p, out);
-                        out.push(Instr::Bin(BinaryOp::Eq));
+                    for p in &arm.patterns {
+                        // Only jump into pattern i when the previous
+                        // ones did not match — chained by fall-through.
+                        emit!(Instr::LoadTmp, *span);
+                        self.compile_expr(p, out, spans);
+                        emit!(Instr::Bin(BinaryOp::Eq), *span);
                         let jf = out.len();
-                        out.push(Instr::JumpIfFalse(usize::MAX));
+                        emit!(Instr::JumpIfFalse(usize::MAX), *span);
                         pattern_jumps.push(jf);
                     }
-                    self.compile_stmts(&arm.body, out);
+                    self.compile_stmts(&arm.body, out, spans);
                     arm_jumps.push(out.len());
-                    out.push(Instr::Jump(usize::MAX));
+                    emit!(Instr::Jump(usize::MAX), *span);
                     for j in pattern_jumps {
                         out[j] = Instr::JumpIfFalse(out.len());
                     }
@@ -605,141 +643,159 @@ impl<'a> Compiler<'a> {
                     out[j] = Instr::Jump(end);
                 }
             }
-            Stmt::Let { name, value, .. } => {
-                self.compile_expr(value, out);
-                out.push(Instr::StoreVar(name.clone()));
+            Stmt::Let { name, value, span } => {
+                self.compile_expr(value, out, spans);
+                emit!(Instr::StoreVar(name.clone()), *span);
             }
-            Stmt::Assign { name, value, .. } => {
-                self.compile_expr(value, out);
-                out.push(Instr::AssignVar(name.clone()));
+            Stmt::Assign { name, value, span } => {
+                self.compile_expr(value, out, spans);
+                emit!(Instr::AssignVar(name.clone()), *span);
             }
-            Stmt::AssignRouteField { field, value, .. } => {
-                self.compile_expr(value, out);
-                out.push(Instr::AssignField(*field));
+            Stmt::AssignRouteField { field, value, span } => {
+                self.compile_expr(value, out, spans);
+                emit!(Instr::AssignField(*field), *span);
             }
-            Stmt::AppendRouteField { field, value, .. } => {
-                self.compile_expr(value, out);
-                out.push(Instr::AppendField(*field));
+            Stmt::AppendRouteField { field, value, span } => {
+                self.compile_expr(value, out, spans);
+                emit!(Instr::AppendField(*field), *span);
             }
-            Stmt::Expr(e, _) => {
-                self.compile_expr(e, out);
-                out.push(Instr::Pop);
+            Stmt::Expr(e, span) => {
+                self.compile_expr(e, out, spans);
+                emit!(Instr::Pop, *span);
             }
-            Stmt::Block(body, _) => {
-                out.push(Instr::PushScope);
-                self.compile_stmts(body, out);
-                out.push(Instr::PopScope);
+            Stmt::Block(body, span) => {
+                emit!(Instr::PushScope, *span);
+                self.compile_stmts(body, out, spans);
+                emit!(Instr::PopScope, *span);
             }
         }
     }
 
-    fn compile_expr(&self, expr: &Expr, out: &mut Vec<Instr>) {
+    fn compile_expr(&self, expr: &Expr, out: &mut Vec<Instr>, spans: &mut Vec<Span>) {
+        macro_rules! emit {
+            ($instr:expr, $span:expr) => {{
+                out.push($instr);
+                spans.push($span);
+            }};
+        }
         match expr {
-            Expr::Lit(v, _) => out.push(Instr::Push(v.clone())),
-            Expr::Var(name, _) => out.push(Instr::LoadVar(name.clone())),
-            Expr::RouteField(f, _) => out.push(Instr::LoadField(*f)),
-            Expr::Call { name, args, .. } => {
+            Expr::Lit(v, span) => emit!(Instr::Push(v.clone()), *span),
+            Expr::Var(name, span) => emit!(Instr::LoadVar(name.clone()), *span),
+            Expr::RouteField(f, span) => emit!(Instr::LoadField(*f), *span),
+            Expr::Call { name, args, span } => {
                 for a in args {
-                    self.compile_expr(a, out);
+                    self.compile_expr(a, out, spans);
                 }
                 // P2: resolve user-function calls to `CallFn { idx, argc }`
                 // for direct Vec index access at run time. Built-in calls
                 // keep `Call { name, argc }`. The parser's `validate_calls`
                 // pass guarantees every name is one or the other.
-                if let Some(&idx) = self.function_index.get(name) {
-                    out.push(Instr::CallFn {
-                        idx,
-                        argc: args.len(),
-                    });
+                if let Some(&idx) = self.function_index.get(name.as_str()) {
+                    emit!(
+                        Instr::CallFn {
+                            idx,
+                            argc: args.len(),
+                        },
+                        *span
+                    );
                 } else {
-                    out.push(Instr::Call {
-                        name: name.clone(),
-                        argc: args.len(),
-                    });
+                    emit!(
+                        Instr::Call {
+                            name: name.clone(),
+                            argc: args.len(),
+                        },
+                        *span
+                    );
                 }
             }
             Expr::Method {
                 receiver,
                 method,
                 args,
-                ..
+                span,
             } => {
                 if let Expr::RouteField(field, _) = receiver.as_ref() {
                     for a in args {
-                        self.compile_expr(a, out);
+                        self.compile_expr(a, out, spans);
                     }
-                    out.push(Instr::Method {
-                        field: *field,
-                        method: method.clone(),
-                        argc: args.len(),
-                    });
+                    emit!(
+                        Instr::Method {
+                            field: *field,
+                            method: method.clone(),
+                            argc: args.len(),
+                        },
+                        *span
+                    );
                 } else {
                     // The interpreter errors on this shape; keep the
                     // same behaviour by routing through the tree walk.
-                    out.push(Instr::EvalTree(expr.clone()));
+                    emit!(Instr::EvalTree(expr.clone()), *span);
                 }
             }
-            Expr::Defined(inner, _) => {
+            Expr::Defined(inner, span) => {
                 let target = match inner.as_ref() {
                     Expr::RouteField(f, _) => DefinedTarget::Field(*f),
                     Expr::Var(n, _) => DefinedTarget::Var(n.clone()),
                     Expr::Lit(..) => DefinedTarget::Literal,
                     other => DefinedTarget::Dynamic(other.clone()),
                 };
-                out.push(Instr::Defined(target));
+                emit!(Instr::Defined(target), *span);
             }
-            Expr::Binary { op, lhs, rhs, .. } => match op {
+            Expr::Binary { op, lhs, rhs, span } => match op {
                 // Short-circuit operators compile to jumps; everything
                 // else is a plain three-address stack op.
                 BinaryOp::And => {
                     // <a>; JumpIfFalse(Lf); <b>; Truthy; Jump(Le);
                     // Lf: Push(false); Le:
-                    self.compile_expr(lhs, out);
+                    self.compile_expr(lhs, out, spans);
                     let jf = out.len();
-                    out.push(Instr::JumpIfFalse(usize::MAX));
-                    self.compile_expr(rhs, out);
-                    out.push(Instr::Truthy);
+                    emit!(Instr::JumpIfFalse(usize::MAX), *span);
+                    self.compile_expr(rhs, out, spans);
+                    emit!(Instr::Truthy, *span);
                     let j = out.len();
-                    out.push(Instr::Jump(usize::MAX));
+                    emit!(Instr::Jump(usize::MAX), *span);
                     let lf = out.len();
-                    out.push(Instr::Push(Value::Bool(false)));
+                    emit!(Instr::Push(Value::Bool(false)), *span);
                     out[jf] = Instr::JumpIfFalse(lf);
                     out[j] = Instr::Jump(out.len());
                 }
                 BinaryOp::Or => {
                     // <a>; JumpIfTrue(Lt); <b>; Truthy; Jump(Le);
                     // Lt: Push(true); Le:
-                    self.compile_expr(lhs, out);
+                    self.compile_expr(lhs, out, spans);
                     let jt = out.len();
-                    out.push(Instr::JumpIfTrue(usize::MAX));
-                    self.compile_expr(rhs, out);
-                    out.push(Instr::Truthy);
+                    emit!(Instr::JumpIfTrue(usize::MAX), *span);
+                    self.compile_expr(rhs, out, spans);
+                    emit!(Instr::Truthy, *span);
                     let j = out.len();
-                    out.push(Instr::Jump(usize::MAX));
+                    emit!(Instr::Jump(usize::MAX), *span);
                     let lt = out.len();
-                    out.push(Instr::Push(Value::Bool(true)));
+                    emit!(Instr::Push(Value::Bool(true)), *span);
                     out[jt] = Instr::JumpIfTrue(lt);
                     out[j] = Instr::Jump(out.len());
                 }
                 BinaryOp::Match | BinaryOp::NotMatch => {
-                    self.compile_expr(lhs, out);
+                    self.compile_expr(lhs, out, spans);
                     let rhs_c = self.compile_match_rhs(rhs);
-                    out.push(Instr::Match {
-                        negated: matches!(op, BinaryOp::NotMatch),
-                        rhs: rhs_c,
-                    });
+                    emit!(
+                        Instr::Match {
+                            negated: matches!(op, BinaryOp::NotMatch),
+                            rhs: rhs_c,
+                        },
+                        *span
+                    );
                 }
                 other => {
-                    self.compile_expr(lhs, out);
-                    self.compile_expr(rhs, out);
-                    out.push(Instr::Bin(*other));
+                    self.compile_expr(lhs, out, spans);
+                    self.compile_expr(rhs, out, spans);
+                    emit!(Instr::Bin(*other), *span);
                 }
             },
-            Expr::Unary { op, expr, .. } => {
-                self.compile_expr(expr, out);
+            Expr::Unary { op, expr, span } => {
+                self.compile_expr(expr, out, spans);
                 match op {
-                    UnaryOp::Not => out.push(Instr::Not),
-                    UnaryOp::Neg => out.push(Instr::Neg),
+                    UnaryOp::Not => emit!(Instr::Not, *span),
+                    UnaryOp::Neg => emit!(Instr::Neg, *span),
                 }
             }
             Expr::Set(..) => {
@@ -747,13 +803,13 @@ impl<'a> Compiler<'a> {
                 // practice; as a plain value they compile to the
                 // tree walk so `Value::Set` construction semantics
                 // stay identical.
-                out.push(Instr::EvalTree(expr.clone()));
+                emit!(Instr::EvalTree(expr.clone()), expr.span());
             }
             Expr::PrefixSet { prefix, .. } => {
                 // As a bare value a prefix range evaluates to the
                 // prefix itself (interpreter parity); the range only
                 // matters inside a `~` pattern, handled there.
-                out.push(Instr::Push(Value::Prefix(*prefix)));
+                emit!(Instr::Push(Value::Prefix(*prefix)), expr.span());
             }
         }
     }

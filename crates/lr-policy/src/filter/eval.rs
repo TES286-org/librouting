@@ -15,6 +15,7 @@ use crate::filter::ast::{
     BinaryOp, Expr, Filter, FunctionDecl, RouteField, RouteFieldKind, Stmt, UnaryOp, Value,
 };
 use crate::filter::bytecode::{CompiledFilter, DefinedTarget, Instr, MatchItem, MatchRhs};
+use crate::filter::span::{LineIndex, Span};
 
 /// The result of evaluating a filter against a route.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,10 +34,19 @@ pub enum EvalResult {
 /// Evaluation error — always fatal for this route (the daemon logs
 /// and falls back to the configured `roa_invalid_action` / the
 /// route-map's verdict). Never panics.
+///
+/// Errors carry the byte [`Span`] of the offending AST node plus its
+/// 1-indexed start line/column (derived from the filter's
+/// [`LineIndex`] at construction), so log lines read "line 3 col 12"
+/// instead of the pre-Phase-0 "line 0 col 0".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvalError {
     pub kind: EvalErrorKind,
+    /// Byte span of the offending node in the filter source.
+    pub span: Span,
+    /// 1-indexed line of the error position.
     pub line: u32,
+    /// 1-indexed byte column of the error position.
     pub col: u32,
 }
 
@@ -239,6 +249,22 @@ struct Evaluator<'a, C: FilterContext + ?Sized> {
     /// body (BIRD: terminates the whole filter). Consumed by the
     /// top-level loop after the current statement.
     pending_verdict: Option<ControlFlow>,
+    /// Offset → (line, col) table for the filter source — eval errors
+    /// are built with real positions instead of `line 0 col 0`.
+    line_index: &'a LineIndex,
+}
+
+impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
+    /// Build an [`EvalError`] with the position derived from `span`.
+    fn err(&self, span: Span, kind: EvalErrorKind) -> EvalError {
+        let (line, col) = self.line_index.line_col(span.start);
+        EvalError {
+            kind,
+            span,
+            line,
+            col,
+        }
+    }
 }
 
 /// Evaluate a compiled filter against a route.
@@ -253,6 +279,7 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
             .collect(),
         call_depth: 0,
         pending_verdict: None,
+        line_index: &filter.line_index,
     };
     for stmt in &filter.body.stmts {
         if let Some(v) = ev.pending_verdict.take() {
@@ -283,7 +310,7 @@ pub fn evaluate(filter: &Filter, route: &mut Route, ctx: &dyn FilterContext) -> 
 }
 
 impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
-    fn lookup(&self, name: &str) -> Result<Value, EvalError> {
+    fn lookup(&self, name: &str, span: Span) -> Result<Value, EvalError> {
         for scope in self.scopes.iter().rev() {
             if let Some(v) = scope.vars.get(name) {
                 return Ok(v.clone());
@@ -292,25 +319,17 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         if name == "_" {
             return Ok(Value::Bool(true));
         }
-        Err(EvalError {
-            kind: EvalErrorKind::UndefinedVar(name.to_string()),
-            line: 0,
-            col: 0,
-        })
+        Err(self.err(span, EvalErrorKind::UndefinedVar(name.to_string())))
     }
 
-    fn assign(&mut self, name: &str, value: Value) -> Result<(), EvalError> {
+    fn assign(&mut self, name: &str, value: Value, span: Span) -> Result<(), EvalError> {
         for scope in self.scopes.iter_mut().rev() {
             if scope.vars.contains_key(name) {
                 scope.vars.insert(name.to_string(), value);
                 return Ok(());
             }
         }
-        Err(EvalError {
-            kind: EvalErrorKind::AssignToUndefined(name.to_string()),
-            line: 0,
-            col: 0,
-        })
+        Err(self.err(span, EvalErrorKind::AssignToUndefined(name.to_string())))
     }
 
     fn push_scope(&mut self) {
@@ -399,19 +418,19 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 self.scopes.last_mut().unwrap().vars.insert(name.clone(), v);
                 Ok(ControlFlow::Continue)
             }
-            Stmt::Assign { name, value, .. } => {
+            Stmt::Assign { name, value, span } => {
                 let v = self.eval_expr(value, route)?;
-                self.assign(name, v)?;
+                self.assign(name, v, *span)?;
                 Ok(ControlFlow::Continue)
             }
-            Stmt::AssignRouteField { field, value, .. } => {
+            Stmt::AssignRouteField { field, value, span } => {
                 let v = self.eval_expr(value, route)?;
-                self.assign_route_field(field, v, route)?;
+                self.assign_route_field(field, v, route, *span)?;
                 Ok(ControlFlow::Continue)
             }
-            Stmt::AppendRouteField { field, value, .. } => {
+            Stmt::AppendRouteField { field, value, span } => {
                 let v = self.eval_expr(value, route)?;
-                self.append_route_field(field, v, route)?;
+                self.append_route_field(field, v, route, *span)?;
                 Ok(ControlFlow::Continue)
             }
             Stmt::Expr(e, _) => {
@@ -438,39 +457,38 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     fn eval_expr(&mut self, expr: &Expr, route: &mut Route) -> Result<Value, EvalError> {
         match expr {
             Expr::Lit(v, _) => Ok(v.clone()),
-            Expr::Var(name, _) => self.lookup(name),
+            Expr::Var(name, span) => self.lookup(name, *span),
             Expr::RouteField(field, _) => self.read_route_field(field, route),
             Expr::Defined(inner, _) => Ok(Value::Bool(self.is_defined(inner, route))),
-            Expr::Call { name, args, .. } => {
+            Expr::Call { name, args, span } => {
                 let mut argv: Vec<Value> = Vec::with_capacity(args.len());
                 for a in args {
                     argv.push(self.eval_expr(a, route)?);
                 }
-                self.eval_call(name, &argv, route)
+                self.eval_call(name, &argv, route, *span)
             }
             Expr::Method {
                 receiver,
                 method,
                 args,
-                ..
+                span,
             } => {
                 if let Expr::RouteField(field, _) = receiver.as_ref() {
                     let mut argv: Vec<Value> = Vec::with_capacity(args.len());
                     for a in args {
                         argv.push(self.eval_expr(a, route)?);
                     }
-                    return self.eval_method(field, method, &argv, route);
+                    return self.eval_method(field, method, &argv, route, *span);
                 }
-                Err(EvalError {
-                    kind: EvalErrorKind::UnknownMethod {
+                Err(self.err(
+                    *span,
+                    EvalErrorKind::UnknownMethod {
                         field: "<expr>".to_string(),
                         method: method.clone(),
                     },
-                    line: 0,
-                    col: 0,
-                })
+                ))
             }
-            Expr::Binary { op, lhs, rhs, .. } => {
+            Expr::Binary { op, lhs, rhs, span } => {
                 // Short-circuit for && and ||.
                 if *op == BinaryOp::And {
                     let l = self.eval_expr(lhs, route)?;
@@ -498,15 +516,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 }
                 let l = self.eval_expr(lhs, route)?;
                 let r = self.eval_expr(rhs, route)?;
-                self.eval_binary(*op, l, r)
+                self.eval_binary(*op, l, r, *span)
             }
-            Expr::Unary { op, expr, .. } => {
+            Expr::Unary { op, expr, span } => {
                 let v = self.eval_expr(expr, route)?;
                 match op {
                     UnaryOp::Not => Ok(Value::Bool(!v.truthy())),
                     UnaryOp::Neg => match v {
                         Value::Int(n) => Ok(Value::Int(-n)),
-                        other => Err(type_mismatch("neg", &other, "int")),
+                        other => Err(type_mismatch("neg", &other, "int", *span, self.line_index)),
                     },
                 }
             }
@@ -674,51 +692,46 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         field: &RouteField,
         value: Value,
         route: &mut Route,
+        span: Span,
     ) -> Result<(), EvalError> {
         match field.kind {
             RouteFieldKind::BgpLocalPref => {
-                let n = as_int(&value).ok_or_else(|| type_mismatch("=", &value, "int"))?;
+                let n = as_int(&value)
+                    .ok_or_else(|| type_mismatch("=", &value, "int", span, self.line_index))?;
                 if !(0..=u32::MAX as i64).contains(&n) {
-                    return Err(EvalError {
-                        kind: EvalErrorKind::AsnOutOfRange(n),
-                        line: 0,
-                        col: 0,
-                    });
+                    return Err(self.err(span, EvalErrorKind::AsnOutOfRange(n)));
                 }
                 self.ctx.set_bgp_local_pref(route, n as u32);
             }
             RouteFieldKind::BgpMed => {
-                let n = as_int(&value).ok_or_else(|| type_mismatch("=", &value, "int"))?;
+                let n = as_int(&value)
+                    .ok_or_else(|| type_mismatch("=", &value, "int", span, self.line_index))?;
                 if !(0..=u32::MAX as i64).contains(&n) {
-                    return Err(EvalError {
-                        kind: EvalErrorKind::AsnOutOfRange(n),
-                        line: 0,
-                        col: 0,
-                    });
+                    return Err(self.err(span, EvalErrorKind::AsnOutOfRange(n)));
                 }
                 self.ctx.set_bgp_med(route, n as u32);
             }
             RouteFieldKind::BgpNextHop => {
                 let ip = match value {
                     Value::Ip(ip) => ip,
-                    other => return Err(type_mismatch("=", &other, "ip")),
+                    other => return Err(type_mismatch("=", &other, "ip", span, self.line_index)),
                 };
                 self.ctx.set_bgp_next_hop(route, ip);
             }
             // `bgp.communities = <set>` — the canonical BIRD idiom
             // (`bgp.community = delete(bgp.community, [65000:1]);`).
             RouteFieldKind::BgpCommunities => {
-                let cs = self.communities_from_value(&value, "=")?;
+                let cs = self.communities_from_value(&value, "=", span)?;
                 self.ctx.set_bgp_communities(route, cs);
             }
             // `bgp.large_communities = <set>` (RFC 8097).
             RouteFieldKind::BgpLargeCommunities => {
-                let cs = self.large_communities_from_value(&value, "=")?;
+                let cs = self.large_communities_from_value(&value, "=", span)?;
                 self.ctx.set_bgp_large_communities(route, cs);
             }
             // `bgp.ext_communities = <set>` (RFC 4360).
             RouteFieldKind::BgpExtCommunities => {
-                let cs = self.ext_communities_from_value(&value, "=")?;
+                let cs = self.ext_communities_from_value(&value, "=", span)?;
                 self.ctx.set_bgp_ext_communities(route, cs);
             }
             // `bgp.as_path = <sequence>` — BIRD assigns `bgp_path`
@@ -726,19 +739,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpAsPath => {
                 let seq = match value {
                     Value::AsPath(p) => p,
-                    other => return Err(type_mismatch("=", &other, "as-path")),
+                    other => {
+                        return Err(type_mismatch("=", &other, "as-path", span, self.line_index))
+                    }
                 };
                 self.ctx.set_bgp_as_path(route, seq);
             }
             other => {
-                return Err(EvalError {
-                    kind: EvalErrorKind::UnknownMethod {
+                return Err(self.err(
+                    span,
+                    EvalErrorKind::UnknownMethod {
                         field: other.to_string(),
                         method: "=".to_string(),
                     },
-                    line: 0,
-                    col: 0,
-                });
+                ));
             }
         }
         Ok(())
@@ -751,6 +765,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         &self,
         value: &Value,
         op: &str,
+        span: Span,
     ) -> Result<Vec<(Asn, u16)>, EvalError> {
         let mut out = Vec::new();
         let mut push_item = |it: &Value| -> Result<(), EvalError> {
@@ -761,17 +776,24 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     val: Some(v),
                 } => out.push((Asn(*a), *v)),
                 Value::CommPattern { .. } => {
-                    return Err(EvalError {
-                        kind: EvalErrorKind::TypeMismatch {
+                    return Err(self.err(
+                        span,
+                        EvalErrorKind::TypeMismatch {
                             op: op.to_string(),
                             lhs: "community-set".to_string(),
                             rhs: "community-pattern wildcard".to_string(),
                         },
-                        line: 0,
-                        col: 0,
-                    });
+                    ));
                 }
-                other => return Err(type_mismatch(op, other, "community-set")),
+                other => {
+                    return Err(type_mismatch(
+                        op,
+                        other,
+                        "community-set",
+                        span,
+                        self.line_index,
+                    ))
+                }
             }
             Ok(())
         };
@@ -793,12 +815,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         &self,
         value: &Value,
         op: &str,
+        span: Span,
     ) -> Result<Vec<(u32, u32, u32)>, EvalError> {
         let mut out = Vec::new();
         let mut push_item = |it: &Value| -> Result<(), EvalError> {
             match it {
                 Value::LargeCommunities(cs) => out.extend(cs.iter().copied()),
-                other => return Err(type_mismatch(op, other, "large-community-set")),
+                other => {
+                    return Err(type_mismatch(
+                        op,
+                        other,
+                        "large-community-set",
+                        span,
+                        self.line_index,
+                    ))
+                }
             }
             Ok(())
         };
@@ -819,12 +850,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         &self,
         value: &Value,
         op: &str,
+        span: Span,
     ) -> Result<Vec<(u8, u8, u32, u16)>, EvalError> {
         let mut out = Vec::new();
         let mut push_item = |it: &Value| -> Result<(), EvalError> {
             match it {
                 Value::ExtCommunities(cs) => out.extend(cs.iter().copied()),
-                other => return Err(type_mismatch(op, other, "ext-community-set")),
+                other => {
+                    return Err(type_mismatch(
+                        op,
+                        other,
+                        "ext-community-set",
+                        span,
+                        self.line_index,
+                    ))
+                }
             }
             Ok(())
         };
@@ -844,6 +884,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         field: &RouteField,
         value: Value,
         route: &mut Route,
+        span: Span,
     ) -> Result<(), EvalError> {
         match field.kind {
             RouteFieldKind::BgpCommunities => {
@@ -859,42 +900,53 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                                     val: Some(v),
                                 } => out.push((Asn(a), v)),
                                 Value::CommPattern { .. } => {
-                                    return Err(EvalError {
-                                        kind: EvalErrorKind::TypeMismatch {
+                                    return Err(self.err(
+                                        span,
+                                        EvalErrorKind::TypeMismatch {
                                             op: "+=".to_string(),
                                             lhs: "community-set".to_string(),
                                             rhs: "community-pattern wildcard".to_string(),
                                         },
-                                        line: 0,
-                                        col: 0,
-                                    });
+                                    ));
                                 }
                                 Value::Int(n) => {
                                     if !(0..=u16::MAX as i64).contains(&n) {
-                                        return Err(EvalError {
-                                            kind: EvalErrorKind::CommunityOutOfRange {
-                                                asn: n,
-                                                val: 0,
-                                            },
-                                            line: 0,
-                                            col: 0,
-                                        });
+                                        return Err(self.err(
+                                            span,
+                                            EvalErrorKind::CommunityOutOfRange { asn: n, val: 0 },
+                                        ));
                                     }
                                     out.push((Asn(n as u32), 0));
                                 }
-                                other => return Err(type_mismatch("+=", &other, "community-set")),
+                                other => {
+                                    return Err(type_mismatch(
+                                        "+=",
+                                        &other,
+                                        "community-set",
+                                        span,
+                                        self.line_index,
+                                    ))
+                                }
                             }
                         }
                         out
                     }
-                    other => return Err(type_mismatch("+=", &other, "community-set")),
+                    other => {
+                        return Err(type_mismatch(
+                            "+=",
+                            &other,
+                            "community-set",
+                            span,
+                            self.line_index,
+                        ))
+                    }
                 };
                 for (asn, val) in cs {
                     self.ctx.bgp_communities_add(route, asn, val);
                 }
             }
             RouteFieldKind::BgpLargeCommunities => {
-                let cs = self.large_communities_from_value(&value, "+=")?;
+                let cs = self.large_communities_from_value(&value, "+=", span)?;
                 let mut cur = self.ctx.bgp_large_communities(route);
                 for c in cs {
                     if !cur.contains(&c) {
@@ -904,7 +956,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 self.ctx.set_bgp_large_communities(route, cur);
             }
             RouteFieldKind::BgpExtCommunities => {
-                let cs = self.ext_communities_from_value(&value, "+=")?;
+                let cs = self.ext_communities_from_value(&value, "+=", span)?;
                 let mut cur = self.ctx.bgp_ext_communities(route);
                 for c in cs {
                     if !cur.contains(&c) {
@@ -914,14 +966,13 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 self.ctx.set_bgp_ext_communities(route, cur);
             }
             other => {
-                return Err(EvalError {
-                    kind: EvalErrorKind::UnknownMethod {
+                return Err(self.err(
+                    span,
+                    EvalErrorKind::UnknownMethod {
                         field: other.to_string(),
                         method: "+=".to_string(),
                     },
-                    line: 0,
-                    col: 0,
-                });
+                ));
             }
         }
         Ok(())
@@ -932,17 +983,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         name: &str,
         args: &[Value],
         route: &mut Route,
+        span: Span,
     ) -> Result<Value, EvalError> {
         // D3.1: user-defined functions shadow nothing (the parser
         // rejects shadowing a built-in), so look the name up first
         // and fall through to the built-ins otherwise.
         if let Some(f) = self.functions.get(name).cloned() {
-            return self.call_user_function(&f, args, route);
+            return self.call_user_function(&f, args, route, span);
         }
         match name {
             "len" => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("len", 1, args.len()));
+                    return Err(bad_arg_count("len", 1, args.len(), span, self.line_index));
                 }
                 match &args[0] {
                     Value::AsPath(p) => Ok(Value::Int(p.len() as i64)),
@@ -950,20 +1002,33 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     Value::LargeCommunities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::ExtCommunities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::Str(s) => Ok(Value::Int(s.len() as i64)),
-                    other => Err(type_mismatch("len", other, "as-path|community-set|string")),
+                    other => Err(type_mismatch(
+                        "len",
+                        other,
+                        "as-path|community-set|string",
+                        span,
+                        self.line_index,
+                    )),
                 }
             }
             // D3.4 — BIRD set operations (filter/config.Y `f_pair`
             // delete/filter + set introspection).
             "delete" | "filter" => {
                 if args.len() != 2 {
-                    return Err(bad_arg_count(name, 2, args.len()));
+                    return Err(bad_arg_count(name, 2, args.len(), span, self.line_index));
                 }
-                apply_set_op(name, &args[0], &args[1], name == "filter")
+                apply_set_op(
+                    name,
+                    &args[0],
+                    &args[1],
+                    name == "filter",
+                    span,
+                    self.line_index,
+                )
             }
             "empty" => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("empty", 1, args.len()));
+                    return Err(bad_arg_count("empty", 1, args.len(), span, self.line_index));
                 }
                 match &args[0] {
                     Value::AsPath(p) => Ok(Value::Bool(p.is_empty())),
@@ -972,12 +1037,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     Value::ExtCommunities(c) => Ok(Value::Bool(c.is_empty())),
                     Value::Set(s) => Ok(Value::Bool(s.is_empty())),
                     Value::Str(s) => Ok(Value::Bool(s.is_empty())),
-                    other => Err(type_mismatch("empty", other, "set-like")),
+                    other => Err(type_mismatch(
+                        "empty",
+                        other,
+                        "set-like",
+                        span,
+                        self.line_index,
+                    )),
                 }
             }
             "count" => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("count", 1, args.len()));
+                    return Err(bad_arg_count("count", 1, args.len(), span, self.line_index));
                 }
                 match &args[0] {
                     Value::AsPath(p) => Ok(Value::Int(p.len() as i64)),
@@ -985,38 +1056,52 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     Value::LargeCommunities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::ExtCommunities(c) => Ok(Value::Int(c.len() as i64)),
                     Value::Set(s) => Ok(Value::Int(s.len() as i64)),
-                    other => Err(type_mismatch("count", other, "set-like")),
+                    other => Err(type_mismatch(
+                        "count",
+                        other,
+                        "set-like",
+                        span,
+                        self.line_index,
+                    )),
                 }
             }
             "first" => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("first", 1, args.len()));
+                    return Err(bad_arg_count("first", 1, args.len(), span, self.line_index));
                 }
                 match &args[0] {
                     Value::AsPath(p) => Ok(p
                         .first()
                         .map(|a| Value::Asn(*a))
                         .unwrap_or(Value::Bool(false))),
-                    other => Err(type_mismatch("first", other, "as-path")),
+                    other => Err(type_mismatch(
+                        "first",
+                        other,
+                        "as-path",
+                        span,
+                        self.line_index,
+                    )),
                 }
             }
             "last" => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("last", 1, args.len()));
+                    return Err(bad_arg_count("last", 1, args.len(), span, self.line_index));
                 }
                 match &args[0] {
                     Value::AsPath(p) => Ok(p
                         .last()
                         .map(|a| Value::Asn(*a))
                         .unwrap_or(Value::Bool(false))),
-                    other => Err(type_mismatch("last", other, "as-path")),
+                    other => Err(type_mismatch(
+                        "last",
+                        other,
+                        "as-path",
+                        span,
+                        self.line_index,
+                    )),
                 }
             }
-            other => Err(EvalError {
-                kind: EvalErrorKind::UnknownFunction(other.to_string()),
-                line: 0,
-                col: 0,
-            }),
+            other => Err(self.err(span, EvalErrorKind::UnknownFunction(other.to_string()))),
         }
     }
 
@@ -1035,24 +1120,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         f: &FunctionDecl,
         args: &[Value],
         route: &mut Route,
+        span: Span,
     ) -> Result<Value, EvalError> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(EvalError {
-                kind: EvalErrorKind::CallDepthExceeded(MAX_CALL_DEPTH),
-                line: 0,
-                col: 0,
-            });
+            return Err(self.err(span, EvalErrorKind::CallDepthExceeded(MAX_CALL_DEPTH)));
         }
         if args.len() != f.params.len() {
-            return Err(EvalError {
-                kind: EvalErrorKind::BadArgCount {
+            return Err(self.err(
+                span,
+                EvalErrorKind::BadArgCount {
                     name: f.name.clone(),
                     expected: f.params.len(),
                     got: args.len(),
                 },
-                line: 0,
-                col: 0,
-            });
+            ));
         }
         self.call_depth += 1;
         self.push_scope();
@@ -1101,27 +1182,37 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         method: &str,
         args: &[Value],
         route: &mut Route,
+        span: Span,
     ) -> Result<Value, EvalError> {
         match (field.kind, method) {
             (RouteFieldKind::BgpAsPath, "prepend") => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("bgp.as_path.prepend", 1, args.len()));
+                    return Err(bad_arg_count(
+                        "bgp.as_path.prepend",
+                        1,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
                 }
-                let n =
-                    as_int(&args[0]).ok_or_else(|| type_mismatch("prepend", &args[0], "int"))?;
+                let n = as_int(&args[0]).ok_or_else(|| {
+                    type_mismatch("prepend", &args[0], "int", span, self.line_index)
+                })?;
                 if !(0..=u32::MAX as i64).contains(&n) {
-                    return Err(EvalError {
-                        kind: EvalErrorKind::AsnOutOfRange(n),
-                        line: 0,
-                        col: 0,
-                    });
+                    return Err(self.err(span, EvalErrorKind::AsnOutOfRange(n)));
                 }
                 self.ctx.bgp_as_path_prepend(route, Asn(n as u32));
                 Ok(Value::AsPath(self.ctx.bgp_as_path(route)))
             }
             (RouteFieldKind::BgpCommunities, "add") => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("bgp.communities.add", 1, args.len()));
+                    return Err(bad_arg_count(
+                        "bgp.communities.add",
+                        1,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
                 }
                 // Accept both a bare community-set value and a set
                 // literal (whose items are CommPattern elements).
@@ -1145,6 +1236,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                         "bgp.communities.add",
                         &args[0],
                         "community-set",
+                        span,
+                        self.line_index,
                     ));
                 }
                 for (asn, val) in to_add {
@@ -1154,7 +1247,13 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             (RouteFieldKind::BgpCommunities, "delete" | "filter") => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("bgp.communities.delete", 1, args.len()));
+                    return Err(bad_arg_count(
+                        "bgp.communities.delete",
+                        1,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
                 }
                 let keep = method == "filter";
                 let items = pattern_items(&args[0]);
@@ -1175,7 +1274,13 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             (RouteFieldKind::BgpAsPath, "delete" | "filter") => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("bgp.as_path.delete", 1, args.len()));
+                    return Err(bad_arg_count(
+                        "bgp.as_path.delete",
+                        1,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
                 }
                 let keep = method == "filter";
                 let items = pattern_items(&args[0]);
@@ -1196,9 +1301,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             (RouteFieldKind::BgpLargeCommunities, "add" | "delete" | "filter") => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("bgp.large_communities.add", 1, args.len()));
+                    return Err(bad_arg_count(
+                        "bgp.large_communities.add",
+                        1,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
                 }
-                let items = self.large_communities_from_value(&args[0], method)?;
+                let items = self.large_communities_from_value(&args[0], method, span)?;
                 let cur = self.ctx.bgp_large_communities(route);
                 let out: Vec<(u32, u32, u32)> = match method {
                     "add" => {
@@ -1218,9 +1329,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             }
             (RouteFieldKind::BgpExtCommunities, "add" | "delete" | "filter") => {
                 if args.len() != 1 {
-                    return Err(bad_arg_count("bgp.ext_communities.add", 1, args.len()));
+                    return Err(bad_arg_count(
+                        "bgp.ext_communities.add",
+                        1,
+                        args.len(),
+                        span,
+                        self.line_index,
+                    ));
                 }
-                let items = self.ext_communities_from_value(&args[0], method)?;
+                let items = self.ext_communities_from_value(&args[0], method, span)?;
                 let cur = self.ctx.bgp_ext_communities(route);
                 let out: Vec<(u8, u8, u32, u16)> = match method {
                     "add" => {
@@ -1238,24 +1355,31 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 self.ctx.set_bgp_ext_communities(route, out.clone());
                 Ok(Value::ExtCommunities(out))
             }
-            (kind, m) => Err(EvalError {
-                kind: EvalErrorKind::UnknownMethod {
+            (kind, m) => Err(self.err(
+                span,
+                EvalErrorKind::UnknownMethod {
                     field: kind.to_string(),
                     method: m.to_string(),
                 },
-                line: 0,
-                col: 0,
-            }),
+            )),
         }
     }
 
-    fn eval_binary(&self, op: BinaryOp, l: Value, r: Value) -> Result<Value, EvalError> {
+    fn eval_binary(
+        &self,
+        op: BinaryOp,
+        l: Value,
+        r: Value,
+        span: Span,
+    ) -> Result<Value, EvalError> {
         match op {
             BinaryOp::Eq => Ok(Value::Bool(value_eq(&l, &r))),
             BinaryOp::Ne => Ok(Value::Bool(!value_eq(&l, &r))),
             BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge => {
-                let li = as_int(&l).ok_or_else(|| type_mismatch(op_name(op), &l, "int"))?;
-                let ri = as_int(&r).ok_or_else(|| type_mismatch(op_name(op), &r, "int"))?;
+                let li = as_int(&l)
+                    .ok_or_else(|| type_mismatch(op_name(op), &l, "int", span, self.line_index))?;
+                let ri = as_int(&r)
+                    .ok_or_else(|| type_mismatch(op_name(op), &r, "int", span, self.line_index))?;
                 let b = match op {
                     BinaryOp::Lt => li < ri,
                     BinaryOp::Le => li <= ri,
@@ -1266,43 +1390,36 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Ok(Value::Bool(b))
             }
             BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul | BinaryOp::Div | BinaryOp::Mod => {
-                let li = as_int(&l).ok_or_else(|| type_mismatch(op_name(op), &l, "int"))?;
-                let ri = as_int(&r).ok_or_else(|| type_mismatch(op_name(op), &r, "int"))?;
+                let li = as_int(&l)
+                    .ok_or_else(|| type_mismatch(op_name(op), &l, "int", span, self.line_index))?;
+                let ri = as_int(&r)
+                    .ok_or_else(|| type_mismatch(op_name(op), &r, "int", span, self.line_index))?;
                 let v = match op {
                     BinaryOp::Add => li.checked_add(ri),
                     BinaryOp::Sub => li.checked_sub(ri),
                     BinaryOp::Mul => li.checked_mul(ri),
                     BinaryOp::Div => {
                         if ri == 0 {
-                            return Err(EvalError {
-                                kind: EvalErrorKind::DivByZero,
-                                line: 0,
-                                col: 0,
-                            });
+                            return Err(self.err(span, EvalErrorKind::DivByZero));
                         }
                         li.checked_div(ri)
                     }
                     BinaryOp::Mod => {
                         if ri == 0 {
-                            return Err(EvalError {
-                                kind: EvalErrorKind::DivByZero,
-                                line: 0,
-                                col: 0,
-                            });
+                            return Err(self.err(span, EvalErrorKind::DivByZero));
                         }
                         Some(li.checked_rem(ri).unwrap_or(0))
                     }
                     _ => unreachable!(),
                 };
-                v.map(Value::Int).ok_or(EvalError {
-                    kind: EvalErrorKind::Overflow,
-                    line: 0,
-                    col: 0,
-                })
+                v.map(Value::Int)
+                    .ok_or_else(|| self.err(span, EvalErrorKind::Overflow))
             }
             BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor => {
-                let li = as_int(&l).ok_or_else(|| type_mismatch(op_name(op), &l, "int"))?;
-                let ri = as_int(&r).ok_or_else(|| type_mismatch(op_name(op), &r, "int"))?;
+                let li = as_int(&l)
+                    .ok_or_else(|| type_mismatch(op_name(op), &l, "int", span, self.line_index))?;
+                let ri = as_int(&r)
+                    .ok_or_else(|| type_mismatch(op_name(op), &r, "int", span, self.line_index))?;
                 let v = match op {
                     BinaryOp::BitAnd => li & ri,
                     BinaryOp::BitOr => li | ri,
@@ -1312,14 +1429,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Ok(Value::Int(v))
             }
             BinaryOp::Shl | BinaryOp::Shr => {
-                let li = as_int(&l).ok_or_else(|| type_mismatch(op_name(op), &l, "int"))?;
-                let ri = as_int(&r).ok_or_else(|| type_mismatch(op_name(op), &r, "int"))?;
+                let li = as_int(&l)
+                    .ok_or_else(|| type_mismatch(op_name(op), &l, "int", span, self.line_index))?;
+                let ri = as_int(&r)
+                    .ok_or_else(|| type_mismatch(op_name(op), &r, "int", span, self.line_index))?;
                 if !(0..=63).contains(&ri) {
-                    return Err(EvalError {
-                        kind: EvalErrorKind::BadShift(ri),
-                        line: 0,
-                        col: 0,
-                    });
+                    return Err(self.err(span, EvalErrorKind::BadShift(ri)));
                 }
                 let v = match op {
                     BinaryOp::Shl => li << ri,
@@ -1375,27 +1490,37 @@ fn op_name(op: BinaryOp) -> &'static str {
     }
 }
 
-fn type_mismatch(op: &str, v: &Value, expected: &str) -> EvalError {
+fn type_mismatch(op: &str, v: &Value, expected: &str, span: Span, index: &LineIndex) -> EvalError {
+    let (line, col) = index.line_col(span.start);
     EvalError {
         kind: EvalErrorKind::TypeMismatch {
             op: op.to_string(),
             lhs: v.type_name().to_string(),
             rhs: expected.to_string(),
         },
-        line: 0,
-        col: 0,
+        span,
+        line,
+        col,
     }
 }
 
-fn bad_arg_count(name: &str, expected: usize, got: usize) -> EvalError {
+fn bad_arg_count(
+    name: &str,
+    expected: usize,
+    got: usize,
+    span: Span,
+    index: &LineIndex,
+) -> EvalError {
+    let (line, col) = index.line_col(span.start);
     EvalError {
         kind: EvalErrorKind::BadArgCount {
             name: name.to_string(),
             expected,
             got,
         },
-        line: 0,
-        col: 0,
+        span,
+        line,
+        col,
     }
 }
 
@@ -1502,6 +1627,8 @@ fn apply_set_op(
     coll: &Value,
     pat: &Value,
     keep_matching: bool,
+    span: Span,
+    index: &LineIndex,
 ) -> Result<Value, EvalError> {
     let items = pattern_items(pat);
     match coll {
@@ -1586,7 +1713,13 @@ fn apply_set_op(
                 .collect();
             Ok(Value::ExtCommunities(out))
         }
-        other => Err(type_mismatch(op, other, "community-set|as-path|set")),
+        other => Err(type_mismatch(
+            op,
+            other,
+            "community-set|as-path|set",
+            span,
+            index,
+        )),
     }
 }
 
@@ -1622,6 +1755,7 @@ pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) 
         functions: std::collections::BTreeMap::new(),
         call_depth: 0,
         pending_verdict: None,
+        line_index: &cf.line_index,
     };
     match ev.run_code(&cf.code, cf, route) {
         Ok(VmFlow::Continue) => EvalResult::Fallthrough,
@@ -1636,6 +1770,7 @@ pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) 
 }
 
 /// VM control flow out of one code slice.
+#[derive(Debug)]
 enum VmFlow {
     /// Fell off the end without a verdict.
     Continue,
@@ -1662,10 +1797,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         let mut stack: Vec<Value> = Vec::new();
         let mut tmp: Option<Value> = None;
         while ip < code.len() {
+            // The source span of the current instruction — read once
+            // per dispatch and threaded into every fallible operation,
+            // so VM errors carry the same positions as the
+            // interpreter's (issue #18 Phase 0). Cold cost only.
+            let span = cf.span_at(ip);
             match &code[ip] {
                 Instr::Push(v) => stack.push(v.clone()),
                 Instr::LoadVar(name) => {
-                    let v = self.lookup(name)?;
+                    let v = self.lookup(name, span)?;
                     stack.push(v);
                 }
                 Instr::LoadField(field) => {
@@ -1682,7 +1822,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 }
                 Instr::AssignVar(name) => {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
-                    self.assign(name, v)?;
+                    self.assign(name, v, span)?;
                 }
                 Instr::StoreTmp => {
                     tmp = stack.pop();
@@ -1693,7 +1833,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Instr::Bin(op) => {
                     let r = stack.pop().ok_or_else(vm_stack_error)?;
                     let l = stack.pop().ok_or_else(vm_stack_error)?;
-                    let v = self.eval_binary(*op, l, r)?;
+                    let v = self.eval_binary(*op, l, r, span)?;
                     stack.push(v);
                 }
                 Instr::Not => {
@@ -1704,7 +1844,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
                     match v {
                         Value::Int(n) => stack.push(Value::Int(-n)),
-                        other => return Err(type_mismatch("neg", &other, "int")),
+                        other => {
+                            return Err(type_mismatch("neg", &other, "int", span, self.line_index))
+                        }
                     }
                 }
                 Instr::JumpIfFalse(t) => {
@@ -1787,7 +1929,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Instr::Call { name, argc } => {
                     let args: Vec<Value> =
                         stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
-                    let v = self.eval_call(name, &args, route)?;
+                    let v = self.eval_call(name, &args, route, span)?;
                     stack.push(v);
                     if let Some(verdict) = self.pending_verdict.take() {
                         return Ok(match verdict {
@@ -1806,10 +1948,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                         kind: EvalErrorKind::UnknownFunction(format!(
                             "function index {idx} out of range"
                         )),
+                        span,
                         line: 0,
                         col: 0,
                     })?;
-                    let v = self.call_compiled_function(f, args, cf, route)?;
+                    let v = self.call_compiled_function(f, args, cf, route, span)?;
                     stack.push(v);
                     if let Some(verdict) = self.pending_verdict.take() {
                         return Ok(match verdict {
@@ -1826,16 +1969,16 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 } => {
                     let args: Vec<Value> =
                         stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
-                    let v = self.eval_method(field, method, &args, route)?;
+                    let v = self.eval_method(field, method, &args, route, span)?;
                     stack.push(v);
                 }
                 Instr::AssignField(field) => {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
-                    self.assign_route_field(field, v, route)?;
+                    self.assign_route_field(field, v, route, span)?;
                 }
                 Instr::AppendField(field) => {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
-                    self.append_route_field(field, v, route)?;
+                    self.append_route_field(field, v, route, span)?;
                 }
                 Instr::Pop => {
                     stack.pop();
@@ -1886,24 +2029,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         args: Vec<Value>,
         cf: &CompiledFilter,
         route: &mut Route,
+        span: Span,
     ) -> Result<Value, EvalError> {
         if self.call_depth >= MAX_CALL_DEPTH {
-            return Err(EvalError {
-                kind: EvalErrorKind::CallDepthExceeded(MAX_CALL_DEPTH),
-                line: 0,
-                col: 0,
-            });
+            return Err(self.err(span, EvalErrorKind::CallDepthExceeded(MAX_CALL_DEPTH)));
         }
         if args.len() != f.params.len() {
-            return Err(EvalError {
-                kind: EvalErrorKind::BadArgCount {
+            return Err(self.err(
+                span,
+                EvalErrorKind::BadArgCount {
                     name: String::new(),
                     expected: f.params.len(),
                     got: args.len(),
                 },
-                line: 0,
-                col: 0,
-            });
+            ));
         }
         self.call_depth += 1;
         self.push_scope();
@@ -2008,6 +2147,10 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     }
 }
 
+/// VM invariant violation: the stack was empty where a value was
+/// required. Not attributable to user source (well-formed bytecode
+/// from the total compiler never underflows), so the error carries
+/// the default span / zero position.
 fn vm_stack_error() -> EvalError {
     EvalError {
         kind: EvalErrorKind::TypeMismatch {
@@ -2015,6 +2158,7 @@ fn vm_stack_error() -> EvalError {
             lhs: "empty stack".to_string(),
             rhs: "value".to_string(),
         },
+        span: Span::default(),
         line: 0,
         col: 0,
     }
@@ -3559,5 +3703,121 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ----- #18 Phase 0: evaluation errors carry real positions -----
+
+    /// Drive the tree-walking evaluator directly and surface the
+    /// error (evaluate() itself logs + falls through).
+    fn run_err(filter_src: &str) -> EvalError {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        let f = compile("test", filter_src).unwrap_or_else(|e| panic!("{e}"));
+        let mut ev = Evaluator {
+            ctx: &StubCtx,
+            scopes: vec![Scope::new()],
+            functions: f
+                .functions
+                .iter()
+                .map(|f| (f.name.clone(), f.clone()))
+                .collect(),
+            call_depth: 0,
+            pending_verdict: None,
+            line_index: &f.line_index,
+        };
+        for stmt in &f.body.stmts {
+            if let Err(e) = ev.eval_stmt(stmt, &mut r) {
+                return e;
+            }
+        }
+        panic!("filter evaluated without error: {filter_src}");
+    }
+
+    /// Same through the bytecode VM (run_code returns the raw error).
+    fn run_vm_err(filter_src: &str) -> EvalError {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        let f = compile("test", filter_src).unwrap_or_else(|e| panic!("{e}"));
+        let compiled = crate::filter::bytecode::compile(&f);
+        let mut ev = Evaluator {
+            ctx: &StubCtx,
+            scopes: vec![Scope::new()],
+            functions: std::collections::BTreeMap::new(),
+            call_depth: 0,
+            pending_verdict: None,
+            line_index: &compiled.line_index,
+        };
+        match ev.run_code(&compiled.code, &compiled, &mut r) {
+            Err(e) => e,
+            other => panic!("VM did not error: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn eval_error_assign_undefined_carries_span() {
+        let src = "accept;\nzz = 1;";
+        let e = run_err(src);
+        assert!(
+            matches!(e.kind, EvalErrorKind::AssignToUndefined(_)),
+            "{e:?}"
+        );
+        assert_eq!(e.span.slice(src), Some("zz = 1;"), "{e:?}");
+        assert_eq!((e.line, e.col), (2, 1));
+    }
+
+    #[test]
+    fn eval_error_undefined_var_carries_span() {
+        let src = "let ok = 1;\nnope;";
+        let e = run_err(src);
+        assert!(
+            matches!(&e.kind, EvalErrorKind::UndefinedVar(v) if v == "nope"),
+            "{e:?}"
+        );
+        assert_eq!(e.span.slice(src), Some("nope"), "{e:?}");
+        assert_eq!((e.line, e.col), (2, 1));
+    }
+
+    #[test]
+    fn eval_error_type_mismatch_points_at_expression() {
+        let src = "if 1 + \"x\" == 2 then accept; accept;";
+        let e = run_err(src);
+        assert!(
+            matches!(e.kind, EvalErrorKind::TypeMismatch { .. }),
+            "{e:?}"
+        );
+        assert_eq!(e.span.slice(src), Some("1 + \"x\""), "{e:?}");
+        assert_eq!((e.line, e.col), (1, 4));
+    }
+
+    #[test]
+    fn vm_errors_match_interpreter_spans() {
+        // The erroring construct must run before any `accept;` — the
+        // VM (like the interpreter) terminates at the first verdict.
+        let sources = [
+            "zz = 1;",
+            "let ok = 1;\nnope;",
+            "if 1 + \"x\" == 2 then accept; accept;",
+            "let a = 1;\nlet b = a + \"s\";",
+        ];
+        for src in sources {
+            let a = run_err(src);
+            let b = run_vm_err(src);
+            assert_eq!(a.kind, b.kind, "{src}");
+            assert_eq!(a.span, b.span, "{src}");
+            assert_eq!((a.line, a.col), (b.line, b.col), "{src}");
+        }
+    }
+
+    #[test]
+    fn vm_error_spans_survive_peephole_optimisation() {
+        // The `1 + 2` folds to `Push(Int(3))`; the peephole passes
+        // must keep the span table aligned so the later UndefinedVar
+        // still points at `missing` on line 2.
+        let src = "let n = 1 + 2;\nmissing;";
+        let e = run_vm_err(src);
+        assert!(
+            matches!(&e.kind, EvalErrorKind::UndefinedVar(v) if v == "missing"),
+            "{e:?}"
+        );
+        assert_eq!(e.span.slice(src), Some("missing"), "{e:?}");
+        assert_eq!((e.line, e.col), (2, 1));
     }
 }

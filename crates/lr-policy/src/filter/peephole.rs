@@ -71,6 +71,7 @@ use std::collections::HashMap;
 
 use crate::filter::ast::{BinaryOp, RouteFieldKind, Value};
 use crate::filter::bytecode::Instr;
+use crate::filter::span::Span;
 
 /// Run all peephole passes on a compiled instruction stream. The
 /// input is the verbatim output of `Compiler::compile_stmts`; the
@@ -83,20 +84,39 @@ use crate::filter::bytecode::Instr;
 /// folding can produce the `Push(Int(c))` operand a fuse candidate
 /// needs (rare in practice, but the loop makes it correct).
 pub fn optimize(code: Vec<Instr>) -> Vec<Instr> {
+    let spans = vec![Span::default(); code.len()];
+    optimize_with_spans(code, spans).0
+}
+
+/// Run all peephole passes on a compiled instruction stream *and* its
+/// parallel span table (issue #18 Phase 0). The spans ride along:
+/// every instruction the passes keep, fold, fuse or rewrite carries
+/// the span of the AST node it came from, so runtime errors after
+/// optimisation still point at the source. Returns the optimised code
+/// and the (equally optimised) span table.
+pub fn optimize_with_spans(code: Vec<Instr>, spans: Vec<Span>) -> (Vec<Instr>, Vec<Span>) {
+    debug_assert_eq!(code.len(), spans.len());
     let mut current = code;
+    let mut current_spans = spans;
     loop {
-        let (next, c1) = pass_propagate_and_fold(&current);
+        let (next, next_spans, c1) = pass_propagate_and_fold(&current, &current_spans);
         current = next;
-        let (next, c2) = pass_fuse_branches(&current);
+        current_spans = next_spans;
+        let (next, next_spans, c2) = pass_fuse_branches(&current, &current_spans);
         current = next;
+        current_spans = next_spans;
         if !c1 && !c2 {
             break;
         }
     }
-    let (next, _) = pass_dead_branch(&current);
+    let (next, next_spans, _) = pass_dead_branch(&current, &current_spans);
     current = next;
+    current_spans = next_spans;
+    // Jump threading rewrites targets in place — index order (and
+    // therefore the span table) is unchanged.
     pass_thread_jumps(&mut current);
-    current
+    debug_assert_eq!(current.len(), current_spans.len());
+    (current, current_spans)
 }
 
 // ----- helpers ----------------------------------------------------------
@@ -130,7 +150,7 @@ fn collect_jump_targets(code: &[Instr]) -> Vec<bool> {
 /// One iteration of constant propagation + literal folding. Returns
 /// the rewritten code and a flag indicating whether any change was
 /// made (so the caller can iterate to a fixed point).
-fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
+fn pass_propagate_and_fold(code: &[Instr], spans: &[Span]) -> (Vec<Instr>, Vec<Span>, bool) {
     // Compute the set of indices that are jump targets — these
     // cannot be consumed by the fold (a jump into the middle of
     // `Push; Push; Bin` would land on a different stack state
@@ -138,6 +158,8 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
     let jump_targets = collect_jump_targets(code);
 
     let mut out: Vec<Instr> = Vec::with_capacity(code.len());
+    // The span table mirrors `out` instruction-for-instruction.
+    let mut out_spans: Vec<Span> = Vec::with_capacity(code.len());
     // Map from each old instruction index to its index in `out`.
     // Consumed instructions (the `Push` and `Bin` of a folded
     // `Push; Push; Bin` triple) map to the same `out` index as the
@@ -199,6 +221,7 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
                     if let Some(Value::Bool(b)) = last_push_value.as_ref() {
                         let folded = Value::Bool(!*b);
                         out.pop();
+                        out_spans.pop();
                         changed = true;
                         (Instr::Push(folded), 1)
                     } else {
@@ -215,6 +238,7 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
                     if let Some(Value::Int(n)) = last_push_value.as_ref() {
                         if let Some(neg) = n.checked_neg() {
                             out.pop();
+                            out_spans.pop();
                             changed = true;
                             (Instr::Push(Value::Int(neg)), 1)
                         } else {
@@ -283,6 +307,7 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
             _ => (code[i].clone(), 1),
         };
         out.push(new_instr);
+        out_spans.push(spans[i]);
         i += advance;
     }
 
@@ -314,7 +339,7 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
         }
     }
 
-    (out, changed)
+    (out, out_spans, changed)
 }
 
 // ----- pass 2: instruction fusion (P6) -----------------------------------
@@ -358,10 +383,11 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
 ///   remapping at the end of the pass rewrites it through the
 ///   old-to-new index map exactly like `Jump`/`JumpIfFalse`/
 ///   `JumpIfTrue` targets are rewritten.
-fn pass_fuse_branches(code: &[Instr]) -> (Vec<Instr>, bool) {
+fn pass_fuse_branches(code: &[Instr], spans: &[Span]) -> (Vec<Instr>, Vec<Span>, bool) {
     let jump_targets = collect_jump_targets(code);
 
     let mut out: Vec<Instr> = Vec::with_capacity(code.len());
+    let mut out_spans: Vec<Span> = Vec::with_capacity(code.len());
     let mut old_to_new: Vec<usize> = vec![usize::MAX; code.len()];
     let mut changed = false;
 
@@ -413,6 +439,10 @@ fn pass_fuse_branches(code: &[Instr]) -> (Vec<Instr>, bool) {
                         target,
                         jump_if_true,
                     });
+                    // The fused instruction stands in for the whole
+                    // four-instruction pattern — it carries the span
+                    // of the pattern's head (the `LoadField`).
+                    out_spans.push(spans[i]);
                     i += 4;
                     continue;
                 }
@@ -420,6 +450,7 @@ fn pass_fuse_branches(code: &[Instr]) -> (Vec<Instr>, bool) {
         }
         // Fallback: emit verbatim.
         out.push(code[i].clone());
+        out_spans.push(spans[i]);
         i += 1;
     }
 
@@ -448,7 +479,7 @@ fn pass_fuse_branches(code: &[Instr]) -> (Vec<Instr>, bool) {
         }
     }
 
-    (out, changed)
+    (out, out_spans, changed)
 }
 
 /// `read_route_field` returns `Value::Int(_)` for these field kinds
@@ -496,10 +527,11 @@ fn is_int_cmp_op(op: &BinaryOp) -> bool {
 ///
 /// Like the fold pass, this builds a new `out` array and tracks an
 /// old-to-new index mapping so jump targets stay valid.
-fn pass_dead_branch(code: &[Instr]) -> (Vec<Instr>, bool) {
+fn pass_dead_branch(code: &[Instr], spans: &[Span]) -> (Vec<Instr>, Vec<Span>, bool) {
     let jump_targets = collect_jump_targets(code);
 
     let mut out: Vec<Instr> = Vec::with_capacity(code.len());
+    let mut out_spans: Vec<Span> = Vec::with_capacity(code.len());
     let mut old_to_new: Vec<usize> = vec![usize::MAX; code.len()];
     let mut changed = false;
 
@@ -545,6 +577,10 @@ fn pass_dead_branch(code: &[Instr]) -> (Vec<Instr>, bool) {
         };
         if let Some(instr) = emit {
             out.push(instr);
+            // Eliminated branches cannot raise evaluation errors
+            // (constant Push + conditional jumps); attributing the
+            // replacement to the pair's head span is exact enough.
+            out_spans.push(spans[i]);
         }
         i += advance;
     }
@@ -571,7 +607,7 @@ fn pass_dead_branch(code: &[Instr]) -> (Vec<Instr>, bool) {
         }
     }
 
-    (out, changed)
+    (out, out_spans, changed)
 }
 
 // ----- pass 4: jump threading --------------------------------------------
