@@ -4423,6 +4423,130 @@ mod tests {
         assert_eq!(cfg.route_maps[0].permit, Some(false));
     }
 
+    // --------------------------------------------------------------
+    // Issue #18 Phase 1 — the IR-equality golden tests. A TOML config
+    // and its future DSL translation are semantically equivalent iff
+    // they parse to equal `DaemonConfig`s; these tests pin the
+    // equality contract the DSL migration (Phase 2+) is validated
+    // against, plus the shipped template as the standing golden file.
+    // --------------------------------------------------------------
+
+    /// Parsing is a pure function of the text: the same file produces
+    /// the same IR on every parse, so a golden IR comparison is stable
+    /// across runs and processes.
+    #[test]
+    fn ir_parse_is_deterministic() {
+        let text = include_str!("../../../templates/daemon.toml");
+        let mut first = DaemonConfig::default();
+        let mut second = DaemonConfig::default();
+        parse_toml_subset(text, &mut first).unwrap();
+        parse_toml_subset(text, &mut second).unwrap();
+        first.finalize().unwrap();
+        second.finalize().unwrap();
+        assert_eq!(first, second);
+    }
+
+    /// Frontend freedom does not change the IR: the two spellings the
+    /// TOML subset defines for the top-level protocol set key
+    /// (`protocol = "a,b"` mirroring the CLI, `protocols = ["a", "b"]`
+    /// as the native list) and key order inside a table (TOML tables
+    /// are unordered mappings) resolve to equal IRs.
+    #[test]
+    fn ir_semantically_equal_variants_are_equal() {
+        let mut string_form = DaemonConfig::with_defaults();
+        parse_toml_subset("protocol = \"bgp,ospf\"\n", &mut string_form).unwrap();
+        assert!(
+            string_form.warnings.is_empty(),
+            "warnings: {:?}",
+            string_form.warnings
+        );
+        let mut list_form = DaemonConfig::with_defaults();
+        parse_toml_subset("protocols = [\"bgp\", \"ospf\"]\n", &mut list_form).unwrap();
+        assert_eq!(string_form, list_form);
+
+        let mut forward = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\npeer_as = 65001\nrouter_id = \"10.0.0.1\"\n",
+            &mut forward,
+        )
+        .unwrap();
+        let mut reversed = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nrouter_id = \"10.0.0.1\"\npeer_as = 65001\nlocal_as = 65000\n",
+            &mut reversed,
+        )
+        .unwrap();
+        assert_eq!(forward, reversed);
+    }
+
+    /// Equality is content, not shape: one differing field makes the
+    /// IRs unequal (guards against a PartialEq that accidentally
+    /// compares equal), while the order of `[[peer]]` entries is
+    /// semantic — peers are matched and listed by index, so a
+    /// reordering is a different configuration.
+    #[test]
+    fn ir_distinguishes_different_configs() {
+        let mut a = DaemonConfig::with_defaults();
+        parse_toml_subset("[bgp]\nlocal_as = 65000\n", &mut a).unwrap();
+        let mut b = DaemonConfig::with_defaults();
+        parse_toml_subset("[bgp]\nlocal_as = 65001\n", &mut b).unwrap();
+        assert_ne!(a, b);
+
+        let mut first = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 10\n\n\
+             [[peer]]\nremote = \"192.0.2.3:179\"\npeer_as = 11\n",
+            &mut first,
+        )
+        .unwrap();
+        let mut swapped = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 1\npeer_as = 2\nrouter_id = \"10.0.0.1\"\n\n\
+             [[peer]]\nremote = \"192.0.2.3:179\"\npeer_as = 11\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\npeer_as = 10\n",
+            &mut swapped,
+        )
+        .unwrap();
+        assert_ne!(first, swapped);
+    }
+
+    /// The shipped template is the standing golden file: a structured
+    /// walk of the IR it must resolve to. Doubles as the fast
+    /// unit-level guard for the schema the template documents.
+    #[test]
+    fn shipped_template_resolves_to_expected_ir() {
+        let text = include_str!("../../../templates/daemon.toml");
+        let mut cfg = DaemonConfig::default();
+        parse_toml_subset(text, &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+
+        assert_eq!(cfg.local_as, 64512);
+        assert_eq!(cfg.peer_as, 64513);
+        assert_eq!(cfg.router_id, "10.0.0.1");
+        assert_eq!(cfg.hold_time, 90);
+        assert_eq!(cfg.gr_restart_time, 120);
+        assert_eq!(cfg.local_address.as_deref(), Some("192.0.2.1"));
+        assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
+        // The legacy single-peer shape: no [[peer]] tables, so the
+        // peer_addr key synthesises one peer at finalize.
+        assert!(!cfg.explicit_peers);
+        assert_eq!(cfg.peers.len(), 1);
+        assert_eq!(cfg.peers[0].remote.as_deref(), Some("192.0.2.2:179"));
+        // The policy bank: one prefix-list feeding two route-map
+        // entries of the same map name.
+        assert_eq!(cfg.prefix_lists.len(), 1);
+        assert_eq!(cfg.prefix_lists[0].name, "customer-space");
+        assert_eq!(cfg.route_maps.len(), 2);
+        assert!(cfg.route_maps.iter().all(|rm| rm.name == "to-customer"));
+        assert_eq!(cfg.route_maps[0].entry, 10);
+        assert_eq!(cfg.route_maps[0].permit, Some(true));
+        assert_eq!(cfg.route_maps[1].entry, 20);
+        assert_eq!(cfg.route_maps[1].permit, Some(false));
+        // Nothing in the shipped template triggers a warning.
+        assert!(cfg.warnings.is_empty(), "warnings: {:?}", cfg.warnings);
+    }
+
     #[test]
     fn legacy_single_peer_is_synthesised() {
         let mut cfg = DaemonConfig::with_defaults();
