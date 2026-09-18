@@ -59,6 +59,7 @@ use std::collections::HashMap;
 
 mod api;
 mod compat;
+mod config_check;
 mod daemon_bfd;
 mod daemon_config;
 mod daemon_ldp;
@@ -222,6 +223,12 @@ fn main() -> ExitCode {
     // schema into RFC 9647 / RFC 8177 XML instance data.
     if argv.len() >= 2 && argv[1] == "yang" {
         return yang::cmd_yang(&argv[2..]);
+    }
+    // `lr-daemon config check <file>` — the D16 Phase 1 validator
+    // rides the daemon binary like translate/yang: it runs the real
+    // loader + finalize against a file without starting the daemon.
+    if argv.len() >= 2 && argv[1] == "config" {
+        return config_check::config_check(&argv[2..]);
     }
     let mut cfg = match daemon_config::parse_args() {
         Ok(c) => c,
