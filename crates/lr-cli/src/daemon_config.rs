@@ -2101,13 +2101,41 @@ fn parse_gtsm(value: &str) -> Option<u8> {
     }
 }
 
+/// Strip an inline `#` comment from a config line, honouring quoted
+/// strings: a `#` inside `"…"` is data, not a comment, and a `\"`
+/// escape does not close the string. TOML §"Comments" allows a comment
+/// after any value; the subset parser previously accepted whole-line
+/// comments only, which made `templates/daemon.toml` itself (e.g.
+/// `entry = 20      # everything else stays internal`) unparseable.
+fn strip_inline_comment(line: &str) -> &str {
+    let mut in_string = false;
+    let mut escaped = false;
+    for (idx, ch) in line.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_string => escaped = true,
+            '"' => in_string = !in_string,
+            '#' if !in_string => return &line[..idx],
+            _ => {}
+        }
+    }
+    line
+}
+
 /// Minimal TOML subset parser: `key = value` lines, `[section]` headers,
 /// `[[peer]]` array-of-table sections, `#` comments, and quoted strings.
 /// Sufficient for the daemon's config schema (see templates/daemon.toml).
 pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<(), String> {
     let mut section = String::new();
     for (lineno, raw) in text.lines().enumerate() {
-        let line = raw.trim();
+        // Inline comments are stripped before anything else, quoted
+        // strings excepted — `md5_key = "a#b"` keeps its hash while
+        // `entry = 20 # comment` loses the comment (both shapes appear
+        // in templates/daemon.toml).
+        let line = strip_inline_comment(raw.trim()).trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
@@ -4365,6 +4393,35 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inline_comments_strip_outside_strings_only() {
+        assert_eq!(strip_inline_comment("entry = 20 # trailing"), "entry = 20 ");
+        assert_eq!(strip_inline_comment("[bgp] # header comment"), "[bgp] ");
+        assert_eq!(
+            strip_inline_comment("md5_key = \"a#b\""),
+            "md5_key = \"a#b\""
+        );
+        // An escaped quote keeps the string open, so the hash stays data.
+        assert_eq!(
+            strip_inline_comment("name = \"a\\\"#b\" # real comment"),
+            "name = \"a\\\"#b\" "
+        );
+        assert_eq!(strip_inline_comment("no comment here"), "no comment here");
+    }
+
+    #[test]
+    fn inline_comment_on_value_line_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[route-map]]\nname = \"rm\" \nentry = 20      # everything else stays internal\npermit = false\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert_eq!(cfg.route_maps.len(), 1);
+        assert_eq!(cfg.route_maps[0].entry, 20);
+        assert_eq!(cfg.route_maps[0].permit, Some(false));
+    }
 
     #[test]
     fn legacy_single_peer_is_synthesised() {
