@@ -18,6 +18,39 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- **Filter DSL source spans + positioned diagnostics (issue #18
+  Phase 0)** — the foundation for the TOML→DSL configuration
+  migration. Every token, AST node and error produced by the filter
+  front end now carries a byte `Span` into the filter source, and the
+  evaluator, bytecode VM, daemon and `lrctl` all surface it:
+  - `lr_policy::filter::span` — `Span` (half-open byte range),
+    `LineIndex` (offset → 1-indexed line/col) and `render_snippet`
+    (rustc-style caret diagnostic renderer).
+  - Parse errors point at the exact offending token, including
+    `UnknownFunctionCall`, which now names the unknown call's position
+    instead of a generic `1:1`.
+  - Evaluation errors (`UndefinedVar`, `AssignToUndefined`,
+    `TypeMismatch`, ...) carry real positions in **both** engines —
+    the tree-walking interpreter and the bytecode VM report identical
+    kind + span + line/col, pinned by an engine-parity test. The VM
+    reads a span side table parallel to the instruction stream; the
+    peephole passes (fold / fuse / dead-branch / jump-thread) preserve
+    the table's alignment, so positions survive optimisation.
+  - The daemon (`[[filter]]` startup compilation) and `lrctl filter
+    compile` render positioned errors with a caret snippet under the
+    offending source line.
+  - `MAX_EXPR_DEPTH` tightened from 128 to 108: the AST's span fields
+    grow debug-build stack frames, and the recursion guard's margin
+    was recalibrated against the worst-case per-level frame chain
+    (nested set literals). Real filters nest a handful of levels; the
+    positive corpus boundary test pins depth 100 still parsing.
+  - `BREAKING CHANGE:` `Token`, `LexerError`, `ParseError` and
+    `EvalError` gained fields (`span`); `Stmt` and `Expr` variants
+    carry a `span` field (tuple variants grew a second element);
+    `Filter` gained `line_index`; `CompiledFilter` / `CompiledFunction`
+    gained `spans` (+ `CompiledFilter::line_index`). Code that
+    constructs or exhaustively matches these types must add the new
+    fields/patterns; `Expr` equality is now span-blind.
 - **RFC 8326 Graceful Session Shutdown — receive side and knobs**
   (ROADMAP-v3 D10.1 follow-up). The `GRACEFUL_SHUTDOWN` community
   (`0xFFFF:0000`) is now honoured on all three surfaces, gated by the
