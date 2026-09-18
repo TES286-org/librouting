@@ -1513,15 +1513,33 @@ impl OspfDaemon {
     /// how every implementation parses the protocol, and trailing
     /// bytes of a concatenated send are silently ignored by BIRD/FRR.
     fn pump_outbound(&mut self) {
-        let mut outbound: Vec<(u32, Vec<u8>)> = Vec::new(); // (ifindex, datagram)
+        // (ifindex, destination, datagram). RFC 2328 §8.1: on
+        // broadcast networks only Hello, LSU and LSAck ride multicast
+        // (AllSPFRouters) — the per-adjacency conversation packets
+        // (DD, LSR) are unicast at the neighbor's interface address.
+        // Multicasting those breaks segments with three or more
+        // speakers: every router dispatches by header Router-ID, so
+        // the DR's two independent sequence-numbered conversations
+        // interleave in each DR-Other's single session with it and the
+        // negotiation deadlocks (v3 twin caught by
+        // tests/interop/ospf6_e_lsa_endx_lan.sh).
+        let mut outbound: Vec<(u32, Option<u32>, Vec<u8>)> = Vec::new(); // (ifindex, unicast dst, datagram)
         {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.write().unwrap();
-            for n in self.neighbors.values() {
+            for ((_area, rid), n) in &self.neighbors {
                 let stream = router.drain_output(n.handle);
                 if stream.is_empty() {
                     continue;
                 }
+                // The neighbor's interface address (Hello source).
+                // Unknown — fall back to multicast rather than drop.
+                let peer_ip = self
+                    .interfaces
+                    .iter()
+                    .find(|i| i.transport.ifindex() == n.ifindex)
+                    .and_then(|i| i.heard.get(rid))
+                    .map(|h| h.ip);
                 // The router finalizes the RFC 2328 §A.1 checksum on every
                 // OSPFv2 packet it emits (feed_input, tick exchange, flood).
                 // Finalizing again would zero the checksum — the second pass
@@ -1532,7 +1550,14 @@ impl OspfDaemon {
                     if len < lr_ospf::packet::OspfHeader::LEN || off + len > stream.len() {
                         break; // malformed tail
                     }
-                    outbound.push((n.ifindex, stream[off..off + len].to_vec()));
+                    let kind = stream[off + 1];
+                    let conversational = matches!(
+                        kind,
+                        k if k == lr_ospf::packet::OspfPacketType::DatabaseDescription as u8
+                            || k == lr_ospf::packet::OspfPacketType::LinkStateRequest as u8
+                    );
+                    let dst = if conversational { peer_ip } else { None };
+                    outbound.push((n.ifindex, dst, stream[off..off + len].to_vec()));
                     off += len;
                 }
             }
@@ -1540,15 +1565,27 @@ impl OspfDaemon {
                 let _ = router.drain_output(*anchor); // discard
             }
         }
-        for (ifindex, bytes) in outbound {
+        for (ifindex, dst, bytes) in outbound {
             if let Some(iface) = self
                 .interfaces
                 .iter()
                 .find(|i| i.transport.ifindex() == ifindex)
             {
                 Self::dbg_send_trace(&bytes);
-                if let Err(e) = iface.transport.send_multicast(&bytes) {
-                    eprintln!("daemon: ospf send {}: {}", iface.name, e);
+                match dst {
+                    Some(ip) => {
+                        if let Err(e) = iface
+                            .transport
+                            .send_unicast(std::net::Ipv4Addr::from(ip), &bytes)
+                        {
+                            eprintln!("daemon: ospf send {} unicast: {}", iface.name, e);
+                        }
+                    }
+                    None => {
+                        if let Err(e) = iface.transport.send_multicast(&bytes) {
+                            eprintln!("daemon: ospf send {}: {}", iface.name, e);
+                        }
+                    }
                 }
             }
         }

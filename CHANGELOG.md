@@ -16,6 +16,23 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ## [Unreleased]
 
+### Fixed
+
+- OSPF DD/LSR packets are now unicast at the peer's address on
+  broadcast segments (RFC 2328 §8.1 via RFC 5340 §4.2), in both the
+  v2 and v3 daemons. Previously every session packet was multicast to
+  AllSPFRouters, which deadlocked the DBD exchange
+  nondeterministically on segments with three or more speakers: the
+  DR's two independent sequence-numbered conversations interleaved
+  inside each DR-Other's single session with it. Two-router segments
+  were unaffected (all prior labs are two-router). The v3 OSPFv3
+  pseudo-header checksum is finalized for the actual unicast
+  destination.
+- An OSPF adjacency demoted Full → 2-Way (the §10.4 gate closing on
+  an election change) now schedules Router-LSA re-origination
+  immediately; previously the stale link lingered until the §14.1
+  refresh (30 minutes).
+
 ### Added
 
 - OSPFv3 Extended LSAs — RFC 8362 (ROADMAP-v3 D13 slices 1-2).

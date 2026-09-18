@@ -1294,8 +1294,13 @@ impl Ospf3Daemon {
 
     /// Track Full transitions via session summaries (the v2 pattern)
     /// and schedule Router-LSA re-origination for the affected areas.
+    /// Both directions matter: a newly Full adjacency adds a link to
+    /// the Router-LSA, and a Full → 2-Way demotion (the §10.4 gate
+    /// closing on an election change) removes it — without the
+    /// downward edge the stale link lingers until the §14.1 refresh.
     fn pump_adjacency(&mut self, now_ms: u64) {
         let mut newly_full: Vec<(u32, u32)> = Vec::new();
+        let mut dropped_full: Vec<(u32, u32)> = Vec::new();
         let mut changed_areas: Vec<u32> = Vec::new();
         {
             let router_arc = Arc::clone(&self.router);
@@ -1309,6 +1314,10 @@ impl Ospf3Daemon {
                     n.established = true;
                     changed_areas.push(*area);
                     newly_full.push((*area, *rid));
+                } else if !est && n.established {
+                    n.established = false;
+                    changed_areas.push(*area);
+                    dropped_full.push((*area, *rid));
                 }
             }
         }
@@ -1318,6 +1327,13 @@ impl Ospf3Daemon {
         for (area, rid) in newly_full {
             println!(
                 "daemon: ospf3 neighbor {} Full (area {})",
+                fmt_rid(rid),
+                area_label(area)
+            );
+        }
+        for (area, rid) in dropped_full {
+            println!(
+                "daemon: ospf3 neighbor {} left Full (area {}) — adjacency demoted",
                 fmt_rid(rid),
                 area_label(area)
             );
@@ -2003,24 +2019,58 @@ impl Ospf3Daemon {
     /// Drain neighbor sessions and send every packet as its own
     /// datagram, checksum finalized for the pseudo-header this
     /// interface actually uses (source link-local, destination
-    /// ff02::5). Anchor output is discarded (no wire neighbor).
+    /// ff02::5 for the multicast shapes, the peer's link-local for
+    /// the conversational ones). Anchor output is discarded (no wire
+    /// neighbor).
     fn pump_outbound(&mut self) {
-        let mut outbound: Vec<(u32, Vec<u8>)> = Vec::new();
+        // (ifindex, destination, datagram). RFC 2328 §8.1 (inherited by
+        // RFC 5340 §4.2: "the IPv6 destination address is chosen from
+        // among the addresses AllSPFRouters, AllDRouters, and the
+        // Neighbor IP address associated with the other end of the
+        // adjacency"): on broadcast networks only Hello, LSU and LSAck
+        // ride multicast — the per-adjacency conversation packets (DD,
+        // LSR) are unicast at the peer's link-local. Multicasting those
+        // breaks segments with three or more speakers: every router
+        // dispatches by header Router-ID, so the two independent
+        // sequence-numbered conversations of one DR interleave in each
+        // DR-Other's single session with it and the negotiation
+        // deadlocks (caught by tests/interop/ospf6_e_lsa_endx_lan.sh).
+        let mut outbound: Vec<(u32, [u8; 16], Vec<u8>)> = Vec::new();
         {
             let router_arc = Arc::clone(&self.router);
             let mut router = router_arc.write().unwrap();
-            for n in self.neighbors.values() {
+            for ((_area, rid), n) in &self.neighbors {
                 let stream = router.drain_output(n.handle);
                 if stream.is_empty() {
                     continue;
                 }
+                // The peer's link-local (Hello source). Unknown peer —
+                // fall back to multicast rather than dropping: the
+                // conversation is dead either way, but a multicast DD
+                // still reaches it if it lives.
+                let peer_ll = self
+                    .interfaces
+                    .iter()
+                    .find(|i| i.interface_id == n.ifindex)
+                    .and_then(|i| i.heard.get(rid))
+                    .map(|h| h.link_local.octets());
                 let mut off = 0usize;
                 while off + lr_ospf::packet::OspfHeader::LEN_V3 <= stream.len() {
                     let len = u16::from_be_bytes([stream[off + 2], stream[off + 3]]) as usize;
                     if len < lr_ospf::packet::OspfHeader::LEN_V3 || off + len > stream.len() {
                         break;
                     }
-                    outbound.push((n.ifindex, stream[off..off + len].to_vec()));
+                    let kind = stream[off + 1];
+                    let conversational = matches!(
+                        kind,
+                        k if k == OspfPacketType::DatabaseDescription as u8
+                            || k == OspfPacketType::LinkStateRequest as u8
+                    );
+                    let dst = match (conversational, peer_ll) {
+                        (true, Some(ll)) => ll,
+                        _ => MULTICAST_ALL_SPF,
+                    };
+                    outbound.push((n.ifindex, dst, stream[off..off + len].to_vec()));
                     off += len;
                 }
             }
@@ -2028,7 +2078,7 @@ impl Ospf3Daemon {
                 let _ = router.drain_output(*anchor);
             }
         }
-        for (interface_id, mut bytes) in outbound {
+        for (interface_id, dst, mut bytes) in outbound {
             let Some(iface) = self
                 .interfaces
                 .iter_mut()
@@ -2036,10 +2086,19 @@ impl Ospf3Daemon {
             else {
                 continue;
             };
-            finalize_v3_packet(&mut bytes, &iface.link_local.octets(), &MULTICAST_ALL_SPF);
+            finalize_v3_packet(&mut bytes, &iface.link_local.octets(), &dst);
             dbg_send_trace(&bytes);
-            if let Err(e) = iface.transport.send_multicast(&bytes) {
-                eprintln!("daemon: ospf3 send {}: {}", iface.name, e);
+            if dst == MULTICAST_ALL_SPF {
+                if let Err(e) = iface.transport.send_multicast(&bytes) {
+                    eprintln!("daemon: ospf3 send {}: {}", iface.name, e);
+                }
+            } else if let Err(e) = iface.transport.send_unicast(Ipv6Addr::from(dst), &bytes) {
+                eprintln!(
+                    "daemon: ospf3 send {} unicast {}: {}",
+                    iface.name,
+                    Ipv6Addr::from(dst),
+                    e
+                );
             }
         }
     }
