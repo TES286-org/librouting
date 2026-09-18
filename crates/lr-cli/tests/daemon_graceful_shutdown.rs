@@ -87,8 +87,7 @@ fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
 /// or None when the prefix was never installed.
 fn last_installed_hop(text: &str, prefix: &str) -> Option<String> {
     text.lines()
-        .filter(|l| l.contains("route installed") && l.contains(prefix))
-        .last()
+        .rfind(|l| l.contains("route installed") && l.contains(prefix))
         .and_then(|l| l.rsplit(" via ").next().map(|s| s.trim().to_string()))
 }
 
