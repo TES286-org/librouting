@@ -16,25 +16,29 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ## [Unreleased]
 
-### Fixed
-
-- OSPF DD/LSR packets are now unicast at the peer's address on
-  broadcast segments (RFC 2328 §8.1 via RFC 5340 §4.2), in both the
-  v2 and v3 daemons. Previously every session packet was multicast to
-  AllSPFRouters, which deadlocked the DBD exchange
-  nondeterministically on segments with three or more speakers: the
-  DR's two independent sequence-numbered conversations interleaved
-  inside each DR-Other's single session with it. Two-router segments
-  were unaffected (all prior labs are two-router). The v3 OSPFv3
-  pseudo-header checksum is finalized for the actual unicast
-  destination.
-- An OSPF adjacency demoted Full → 2-Way (the §10.4 gate closing on
-  an election change) now schedules Router-LSA re-origination
-  immediately; previously the stale link lingered until the §14.1
-  refresh (30 minutes).
-
 ### Added
 
+- **Filter DSL instruction fusion** (GitHub #19 P6, ROADMAP-v3 D6
+  follow-up). The peephole compiler gained a new pass
+  `pass_fuse_branches` that collapses the four-instruction pattern
+  `LoadField(int); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into a single
+  `Instr::BranchFieldIntCmp { .. }`. The fused instruction reads the
+  integer route field directly, compares against the constant, and
+  branches with zero stack traffic — one cache-line fetch and zero
+  `Vec::push`/`pop` instead of the unfused four-fetch/three-push/
+  two-pop sequence. The pattern is the canonical import-policy shape
+  (`if bgp.local_pref > 100 then accept; reject;`) and the
+  `#19`-documented VM hotspot: `vm_if_local_pref` drops from ~66 ns
+  to ~28 ns (−57 %, 2.3×) on the bench machine; the
+  `import_pipeline/realistic/10000` end-to-end pipeline drops from
+  ~12.27 ms to ~11.47 ms (−6.5 %). The fusion pass is conservative
+  — it only fires for the four integer-typed fields
+  (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`), only for the six
+  comparison ops (`Eq`/`Ne`/`Lt`/`Le`/`Gt`/`Ge`), and refuses to
+  fuse when any external jump lands inside the four-instruction
+  pattern. The existing equivalence tables in
+  `crates/lr-policy/src/filter/eval.rs` pin verdict + route-state
+  equality between the fused and unfused VM dispatch.
 - OSPFv3 SRv6 LAN End.X SID origination — RFC 9513 §9.2 over RFC 8362
   (ROADMAP-v3 D13 slice 4).
   - **`[[ospf.interface]] srv6_end_x_lan`** — the broadcast form: an

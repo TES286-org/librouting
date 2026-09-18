@@ -637,6 +637,33 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         }
     }
 
+    /// Read an integer-typed route field directly as an `i64`,
+    /// skipping the `Value::Int` construction. Used by the fused
+    /// `Instr::BranchFieldIntCmp` (GitHub #19 P6) to avoid the
+    /// 32-byte `Value` allocation + `Vec::push` the unfused
+    /// `LoadField; Push; Bin; JumpIf*` sequence pays. Only the
+    /// four integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
+    /// `BgpOrigin`) reach this path — the peephole pass's
+    /// `is_int_field` gate guarantees it. The `unwrap_or(0)`
+    /// semantics for absent attributes mirror `read_route_field`
+    /// exactly so the fused and unfused paths agree for every
+    /// route.
+    fn read_int_route_field(&self, field: &RouteField, route: &Route) -> Result<i64, EvalError> {
+        Ok(match field.kind {
+            RouteFieldKind::Source => i64::from(route.origin.proto),
+            RouteFieldKind::BgpLocalPref => self.ctx.bgp_local_pref(route).unwrap_or(0) as i64,
+            RouteFieldKind::BgpMed => self.ctx.bgp_med(route).unwrap_or(0) as i64,
+            RouteFieldKind::BgpOrigin => i64::from(self.ctx.bgp_origin(route).unwrap_or(0)),
+            // The peephole pass's `is_int_field` gate guarantees
+            // one of the four arms above; the unreachable arms
+            // are listed so the match is exhaustive over
+            // `RouteFieldKind` and stays compilable if a new
+            // field kind is added later (the gate would still
+            // refuse to fuse it).
+            _ => unreachable!("peephole is_int_field gates this"),
+        })
+    }
+
     fn assign_route_field(
         &self,
         field: &RouteField,
@@ -1701,6 +1728,38 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     let l = stack.pop().ok_or_else(vm_stack_error)?;
                     let m = self.run_match(rhs, &l, route)?;
                     stack.push(Value::Bool(if *negated { !m } else { m }));
+                }
+                // P6: fused `LoadField(int); Push(Int); Bin(Cmp);
+                // JumpIf*(t)`. Reads the integer field directly,
+                // compares against the constant, branches — zero
+                // stack traffic. The peephole pass only emits this
+                // for the four int-typed fields
+                // (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`)
+                // and the six comparison ops, so the `match op`
+                // body's `unreachable!` arms are genuinely
+                // unreachable.
+                Instr::BranchFieldIntCmp {
+                    field,
+                    op,
+                    val,
+                    target,
+                    jump_if_true,
+                } => {
+                    let n = self.read_int_route_field(field, route)?;
+                    let r = match op {
+                        BinaryOp::Eq => n == *val,
+                        BinaryOp::Ne => n != *val,
+                        BinaryOp::Lt => n < *val,
+                        BinaryOp::Le => n <= *val,
+                        BinaryOp::Gt => n > *val,
+                        BinaryOp::Ge => n >= *val,
+                        _ => unreachable!("peephole is_int_cmp_op gates this"),
+                    };
+                    let take = if *jump_if_true { r } else { !r };
+                    if take {
+                        ip = *target;
+                        continue;
+                    }
                 }
                 Instr::Defined(target) => {
                     let present = match target {

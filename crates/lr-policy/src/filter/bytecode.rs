@@ -382,6 +382,27 @@ pub enum Instr {
     Truthy,
     /// `~` / `!~` — membership test against a compiled pattern.
     Match { negated: bool, rhs: MatchRhs },
+    /// Fused `LoadField(field); Push(Int(c)); Bin(op); JumpIf*(t)` —
+    /// reads an integer-typed route field directly, compares against
+    /// the constant, and branches without touching the stack. Only
+    /// emitted by `pass_fuse_branches` for fields whose
+    /// `read_route_field` returns `Value::Int(_)` (LocalPref / Med /
+    /// Origin / Source) and comparison ops in
+    /// `{Eq, Ne, Lt, Le, Gt, Ge}`. The fused instruction preserves
+    /// the `unwrap_or(0)` semantics of the int-typed field read — an
+    /// absent attribute reads as 0, exactly like the unfused path.
+    /// Stack traffic: zero push, zero pop (vs three pushes + two
+    /// pops in the unfused four-instruction sequence). GitHub #19 P6.
+    BranchFieldIntCmp {
+        field: RouteField,
+        op: BinaryOp,
+        val: i64,
+        target: usize,
+        /// `true` = jump when the comparison is true (`JumpIfTrue`).
+        /// `false` = jump when the comparison is false
+        /// (`JumpIfFalse`).
+        jump_if_true: bool,
+    },
     /// `defined(x)` / `exists(x)`.
     Defined(DefinedTarget),
     /// Call a built-in function with `argc` stack arguments. The VM

@@ -1112,16 +1112,122 @@ in the `Attributes` methods the accessors call. The full
 `FilterContext` trait rework (returning `&[u8]` views, or moving
 the typed accessors onto `Route` directly) is deferred — the
 current win (−21 % on the canonical bench) already captures the
-hot-path cost the issue comment called out, and the remaining
-overhead is the `Value::Int` construction + stack push/pop, which
-P1 (compact instruction encoding, reverted) targeted.
+hot-path cost the issue comment called out. The remaining
+overhead on `if_local_pref` after P3 is the `Value::Int`
+construction + `Push`/`Bin`/`JumpIfFalse` stack traffic, which
+P6 (instruction fusion) targets.
 
-The `#19` phasing is now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓,
-P5 ✓. The only remaining lever is P1 (compact instruction
-encoding), which was attempted and reverted — see the P4 finding
-for why. The DSL perf optimisation is at a natural stopping
-point: every actionable lever in the issue comment has been
-addressed.
+The `#19` phasing was: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓,
+P5 ✓. The P6 instruction-fusion follow-up (below) reopens the
+`if_local_pref` lever — the only remaining hot shape where the
+VM was still losing ground to the tree walker.
+
+---
+
+### D6 follow-up — P6 instruction fusion (GitHub #19 P6) — ~~landed~~
+
+P3 closed the attribute-read cost on `if_local_pref`, but the
+VM still paid four cache-line fetches + three stack writes + two
+stack pops per route on the canonical import-policy shape. The
+pre-P6 bench showed `vm_if_local_pref` at ~66 ns vs the
+tree-walker's ~58 ns — the VM was 14 % *slower* than the
+interpreter on the most common import policy shape, because the
+unfused four-instruction `LoadField; Push(Int); Bin(Cmp);
+JumpIf*` sequence paid four 64 B instruction-fetches (one cache
+line each) for work that conceptually is a single comparison.
+
+**What landed.**
+
+* **New `Instr::BranchFieldIntCmp { field, op, val, target,
+  jump_if_true }`** variant — a single instruction that reads an
+  integer-typed route field, compares against a constant, and
+  branches with zero stack traffic (no `Push`, no `Bin`, no
+  `JumpIf*` stack pops). The variant sits inside the existing
+  `Instr` enum (no enum-size growth — the variant payload is
+  ~24 B, well under the 64 B envelope dominated by `EvalTree`).
+* **New `pass_fuse_branches` peephole pass** in
+  `crates/lr-policy/src/filter/peephole.rs` — recognises the
+  four-instruction pattern `LoadField(int); Push(Int(c));
+  Bin(Cmp); JumpIf*(t)` and collapses it into one
+  `BranchFieldIntCmp { .. }`. The pass runs inside the existing
+  `optimize()` fixpoint loop alongside `pass_propagate_and_fold`
+  so folding-exposed `Push(Int(c))` operands are also fusible.
+* **Safety gates** — the pass only fires when:
+  (1) `LoadField`'s kind is one of the four integer-typed fields
+  (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`) —
+  `read_route_field` returns `Value::Int(_)` for these with
+  `unwrap_or(0)` semantics, and the fused instruction's
+  `read_int_route_field` helper preserves them;
+  (2) `Bin`'s operator is in `{Eq, Ne, Lt, Le, Gt, Ge}` — these
+  are the only ops the fused `match op { .. }` body implements;
+  (3) no external jump targets any of the four instructions in
+  the pattern — collapsing the middle of the pattern would land
+  a jump on a different stack state than the unfused sequence
+  would have at that label. The `collect_jump_targets` table
+  covers `BranchFieldIntCmp`'s own `target`, so fusing is only
+  blocked when an *external* jump lands inside the pattern.
+* **`Evaluator::read_int_route_field`** — a new private helper
+  on `Evaluator` that returns the integer route field directly
+  as an `i64`, skipping the `Value::Int` construction. The
+  `unwrap_or(0)` semantics for absent attributes mirror
+  `read_route_field` exactly so the fused and unfused paths
+  agree for every route (verified by the existing
+  `vm_matches_interpreter_on_policy_table` equivalence table,
+  which includes `if bgp.local_pref > 100 then accept; reject;`).
+* **Pass plumbing** — `collect_jump_targets` and the
+  jump-target remap loops in `pass_propagate_and_fold`,
+  `pass_dead_branch` and `pass_thread_jumps` now also handle
+  `BranchFieldIntCmp`'s `target` field. The
+  `pass_propagate_and_fold`'s constant-map invalidation set
+  adds `BranchFieldIntCmp` (it is a control-flow instruction).
+* **Bench delta** (criterion, `--warm-up-time 1
+  --measurement-time 3 --sample-size 30`):
+  * `vm_if_local_pref`: 65.8 → 28.5 ns (**−57 %, 2.3×**) — the
+    headline P6 target. The four-instruction unfused sequence
+    becomes one instruction with zero stack traffic.
+  * `import_pipeline/realistic/10000`: 12.27 → 11.47 ms
+    (**−6.5 %**) — the realistic-shape end-to-end pipeline
+    exercises `if bgp.local_pref > 100` on 10 000 routes.
+  * `import_pipeline/trivial/10000`: 11.05 → 10.53 ms
+    (−4.7 %) — the trivial-shape pipeline (the `trivial`
+    filter still contains a `bgp.local_pref` comparison, so P6
+    still fires).
+  * Other bench shapes (`simple_accept`, `complex_chain`,
+    `large_prefix_set`, `large_community_set`, `user_functions`,
+    `const_fold`) — within ±2 % of P5 (noise), no regression.
+* **5 new unit tests** in
+  `crates/lr-policy/src/filter/peephole.rs` pin the rewrite:
+  `fuses_local_pref_branch_pattern`,
+  `fuses_jump_if_true_direction`,
+  `does_not_fuse_non_int_field_branch`,
+  `does_not_fuse_non_comparison_op`,
+  `does_not_fuse_when_jump_lands_in_pattern`. The existing
+  `vm_matches_interpreter_on_policy_table` equivalence table
+  already covers the dispatch (its `if bgp.local_pref > 100`
+  source now compiles to `BranchFieldIntCmp` and the verdict +
+  route state stay bit-identical between the VM and the
+  tree-walker). 189 tests pass in `lr-policy` lib (was 184, +5).
+
+**Why P6 was not in the original P0–P5 plan.** The issue
+comment's first-cut analysis identified P1 (compact instruction
+encoding) as the highest-expected win, attempted it, and
+reverted because the side-table indirection regressed every
+shape. P6 takes a different angle: instead of slimming the
+*whole* instruction encoding (which requires side-tables for
+the big variants), it adds one *fused* instruction that
+collapses a single hot pattern. The pattern is targeted (only
+int-typed field comparisons against a constant followed by a
+conditional jump), the rewrite is total (no fall-through cases
+that change semantics), and the dispatch is one new arm in the
+VM loop. The bench confirms the prediction.
+
+The `#19` phasing is now: P0 ✓, P1 reverted, P2 ✓, P3 ✓,
+P4 ✓, P5 ✓, P6 ✓. The DSL perf optimisation is at a natural
+stopping point again — the only remaining hot shape where the
+VM might still lose to the tree walker is `complex_chain`
+(~225 ns in both engines), which is already dominated by
+prefix-set membership and user-function call dispatch (P4/P2
+respectively) rather than per-instruction overhead.
 
 ---
 
@@ -1816,7 +1922,7 @@ refactor — needs extensive regression tests.
 | D3        | landed                | —     | Filter DSL parity — D3.1–D3.7 all in: user functions, large/extended communities, set ops, `defined()`/`exists()`, `proto` format, bytecode VM + equivalence table |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; #19 phasing complete (P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓) |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; **GitHub #19 P6 landed** — new `Instr::BranchFieldIntCmp` variant + `pass_fuse_branches` peephole pass collapse the four-instruction pattern `LoadField(int); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into one instruction with zero stack traffic; only the four int-typed fields (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`) and six comparison ops fuse, and only when no external jump lands inside the pattern; `vm_if_local_pref` ~66 → ~28 ns (−57 %, 2.3×), `import_pipeline/realistic/10000` ~12.27 → ~11.47 ms (−6.5 %); 5 new unit tests pin the rewrite (positive shapes + non-int-field + non-cmp-op + jump-into-pattern refusals); existing equivalence tables already cover the dispatch (`if bgp.local_pref > 100 then accept; reject;` is in `vm_matches_interpreter_on_policy_table`); #19 phasing now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓, P6 ✓ |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |

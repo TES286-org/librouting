@@ -1,9 +1,9 @@
 //! Peephole optimisation passes for the compiled bytecode
-//! (ROADMAP-v3 D6 follow-up, GitHub #19 P5).
+//! (ROADMAP-v3 D6 follow-up, GitHub #19 P5 + P6).
 //!
 //! The bytecode VM runs a flat instruction stream per route; cutting
 //! the instruction count is the cheapest lever for filters that
-//! contain constants the compiler can pre-compute. Three passes run
+//! contain constants the compiler can pre-compute. Four passes run
 //! in sequence after the AST-to-bytecode compiler emits the code:
 //!
 //! * **Constant propagation + literal folding** — a forward pass
@@ -16,8 +16,17 @@
 //!   control-flow join (`Jump`, `JumpIfFalse`, `JumpIfTrue`,
 //!   `PushScope`, `PopScope`) and every side-effecting instruction
 //!   (`Call`, `Method`, `EvalTree`, `AssignField`, `AppendField`,
-//!   `Defined`, `AssignVar`) so the analysis is a single forward
-//!   walk, not a full data-flow fixpoint.
+//!   `Defined`, `AssignVar`, `BranchFieldIntCmp`) so the analysis is
+//!   a single forward walk, not a full data-flow fixpoint.
+//! * **Instruction fusion** (P6) — collapses the four-instruction
+//!   pattern `LoadField(int_field); Push(Int(c)); Bin(Cmp);
+//!   JumpIf*(t)` into a single `BranchFieldIntCmp { .. }` that reads
+//!   the field, compares against the constant, and branches without
+//!   touching the stack. The pattern is the documented `#19` hotspot
+//!   (`if_local_pref` is the canonical import-policy shape and the
+//!   one where the VM lost 17 % to the tree walker pre-P6); the
+//!   fused instruction makes the four-instruction sequence cost one
+//!   cache-line fetch + zero stack traffic.
 //! * **Dead-branch elimination** — after folding produces
 //!   `Push(Bool(c)); JumpIfFalse(X)` or `Push(Bool(c));
 //!   JumpIfTrue(X)`, the branch direction is known at compile time.
@@ -29,13 +38,15 @@
 //!   reachability analysis left for a later phase.
 //! * **Jump threading** — `Jump(X)` where `code[X]` is `Jump(Y)`
 //!   can be rewritten to `Jump(Y)`. Same for `JumpIfFalse(X)` and
-//!   `JumpIfTrue(X)` when `code[X]` is an unconditional `Jump`.
-//!   Conditional-jump-to-conditional-jump is NOT threaded: the
-//!   target conditional pops a stack value, so redirecting would
-//!   skip the pop and corrupt the stack. Threads through chains
-//!   of unconditional jumps until a fixed point per instruction.
+//!   `JumpIfTrue(X)` when `code[X]` is an unconditional `Jump`, and
+//!   for `BranchFieldIntCmp` (its target is also an unconditional
+//!   jump candidate). Conditional-jump-to-conditional-jump is NOT
+//!   threaded: the target conditional pops a stack value, so
+//!   redirecting would skip the pop and corrupt the stack. Threads
+//!   through chains of unconditional jumps until a fixed point per
+//!   instruction.
 //!
-//! All three passes preserve the VM's contract: the verdict (Accept
+//! All four passes preserve the VM's contract: the verdict (Accept
 //! / Reject / Fallthrough) and the post-evaluation route state must
 //! be bit-identical to the unoptimised code for every route. The
 //! existing `vm_matches_interpreter_on_policy_table`,
@@ -45,16 +56,20 @@
 //! peephole pass runs transparently inside `bytecode::compile`, so
 //! every existing test exercises the optimised code path.
 //!
-//! The pass is conservative on purpose: every fold checks the
+//! The passes are conservative on purpose: every fold checks the
 //! interpreter's `eval_binary` semantics (overflow, division by
 //! zero, shift range) and refuses to fold when the runtime would
 //! error — the error must surface at runtime exactly as the
 //! unoptimised code surfaces it, otherwise the Fallthrough-on-error
-//! contract diverges. See `safe_fold` for the exact rules.
+//! contract diverges. See `safe_fold` for the exact rules. The
+//! fusion pass is conservative in the same way: it only fires when
+//! every instruction in the pattern is in canonical order and no
+//! jump targets the middle of the sequence — see
+//! `pass_fuse_branches` for the safety predicates.
 
 use std::collections::HashMap;
 
-use crate::filter::ast::{BinaryOp, Value};
+use crate::filter::ast::{BinaryOp, RouteFieldKind, Value};
 use crate::filter::bytecode::Instr;
 
 /// Run all peephole passes on a compiled instruction stream. The
@@ -64,13 +79,17 @@ use crate::filter::bytecode::Instr;
 /// The passes iterate to a fixed point: constant propagation can
 /// expose new fold patterns, and folding can expose new
 /// dead-branches, so the outer loop runs until no pass reports a
-/// change.
+/// change. Instruction fusion (P6) runs in the same fixpoint loop —
+/// folding can produce the `Push(Int(c))` operand a fuse candidate
+/// needs (rare in practice, but the loop makes it correct).
 pub fn optimize(code: Vec<Instr>) -> Vec<Instr> {
     let mut current = code;
     loop {
-        let (next, changed) = pass_propagate_and_fold(&current);
+        let (next, c1) = pass_propagate_and_fold(&current);
         current = next;
-        if !changed {
+        let (next, c2) = pass_fuse_branches(&current);
+        current = next;
+        if !c1 && !c2 {
             break;
         }
     }
@@ -83,15 +102,21 @@ pub fn optimize(code: Vec<Instr>) -> Vec<Instr> {
 // ----- helpers ----------------------------------------------------------
 
 /// Compute the set of indices that are targets of any jump
-/// instruction (`Jump`, `JumpIfFalse`, `JumpIfTrue`). The peephole
-/// passes use this to skip optimizations that would consume an
-/// instruction that is a jump target — collapsing such an
-/// instruction would change the stack state seen by the jump.
+/// instruction (`Jump`, `JumpIfFalse`, `JumpIfTrue`,
+/// `BranchFieldIntCmp`). The peephole passes use this to skip
+/// optimizations that would consume an instruction that is a jump
+/// target — collapsing such an instruction would change the stack
+/// state seen by the jump.
 fn collect_jump_targets(code: &[Instr]) -> Vec<bool> {
     let mut targets = vec![false; code.len()];
     for instr in code {
         match instr {
-            Instr::Jump(t) | Instr::JumpIfFalse(t) | Instr::JumpIfTrue(t) if *t < targets.len() => {
+            Instr::Jump(t)
+            | Instr::JumpIfFalse(t)
+            | Instr::JumpIfTrue(t)
+            | Instr::BranchFieldIntCmp { target: t, .. }
+                if *t < targets.len() =>
+            {
                 targets[*t] = true;
             }
             _ => {}
@@ -236,10 +261,13 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
                 (Instr::AssignVar(name.clone()), 1)
             }
             // Control-flow joins and side-effecting instructions
-            // invalidate the entire constant map.
+            // invalidate the entire constant map. P6 adds
+            // `BranchFieldIntCmp` here because it is a conditional
+            // branch — the same way `JumpIfFalse`/`JumpIfTrue` are.
             Instr::Jump(_)
             | Instr::JumpIfFalse(_)
             | Instr::JumpIfTrue(_)
+            | Instr::BranchFieldIntCmp { .. }
             | Instr::PushScope
             | Instr::PopScope
             | Instr::Call { .. }
@@ -261,11 +289,16 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
     // Rewrite jump targets through the index mapping. Any jump
     // that targeted a consumed instruction now targets the fold
     // result (or, for instructions past the end, the end of the
-    // code — clamped defensively).
+    // code — clamped defensively). P6 adds `BranchFieldIntCmp`
+    // here — its `target` is also a jump target the mapping must
+    // preserve.
     let out_len = out.len();
     for instr in out.iter_mut() {
         match instr {
-            Instr::Jump(t) | Instr::JumpIfFalse(t) | Instr::JumpIfTrue(t) => {
+            Instr::Jump(t)
+            | Instr::JumpIfFalse(t)
+            | Instr::JumpIfTrue(t)
+            | Instr::BranchFieldIntCmp { target: t, .. } => {
                 if *t < old_to_new.len() {
                     let mapped = old_to_new[*t];
                     *t = if mapped == usize::MAX {
@@ -284,7 +317,167 @@ fn pass_propagate_and_fold(code: &[Instr]) -> (Vec<Instr>, bool) {
     (out, changed)
 }
 
-// ----- pass 2: dead-branch elimination -----------------------------------
+// ----- pass 2: instruction fusion (P6) -----------------------------------
+
+/// Fuse the four-instruction pattern
+/// `LoadField(int_field); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into a
+/// single `Instr::BranchFieldIntCmp { .. }`. The fused instruction
+/// reads the integer route field directly, compares against the
+/// constant, and branches — no stack pushes, no stack pops, no
+/// intermediate `Value` allocation. The pattern is the
+/// `#19`-documented hotspot: `if_local_pref` (the canonical import
+/// policy shape `if bgp.local_pref OP N then accept;`) compiles to
+/// exactly this sequence, and the unfused VM pays four 64 B
+/// cache-line fetches + three stack writes + two stack pops per
+/// route on this shape; the fused instruction pays one fetch and
+/// zero stack traffic.
+///
+/// Safety predicates:
+///
+/// * `LoadField`'s kind must be one of the integer-typed route
+///   fields (`BgpLocalPref`, `BgpMed`, `BgpOrigin`, `Source`) —
+///   `read_route_field` returns `Value::Int(_)` for these with the
+///   `unwrap_or(0)` semantics the fused instruction preserves.
+///   Other kinds (Net, Proto, BgpNextHop, BgpAsPath, BgpCommunities,
+///   BgpLargeCommunities, BgpExtCommunities, RoaState) return non-int
+///   `Value` variants and the comparison would not typecheck at
+///   runtime — refuse to fuse.
+/// * `Bin`'s operator must be in `{Eq, Ne, Lt, Le, Gt, Ge}` —
+///   these are the only operators whose semantics the fused
+///   instruction implements in its `match op { .. }` body. Arithmetic
+///   ops (`Add`, `Mul`, ...) are not branch directions; refuse.
+/// * None of the four instructions in the pattern may be the target
+///   of an external jump — collapsing the middle of the pattern
+///   would leave a jump landing on a different stack state than the
+///   unfused sequence would have at that label. The
+///   `collect_jump_targets` table covers `BranchFieldIntCmp`'s own
+///   `target`, so fusing is only blocked when an *external* jump
+///   lands inside the pattern.
+/// * The fused instruction's `target` is preserved verbatim from
+///   the original `JumpIfFalse` / `JumpIfTrue` — the jump-target
+///   remapping at the end of the pass rewrites it through the
+///   old-to-new index map exactly like `Jump`/`JumpIfFalse`/
+///   `JumpIfTrue` targets are rewritten.
+fn pass_fuse_branches(code: &[Instr]) -> (Vec<Instr>, bool) {
+    let jump_targets = collect_jump_targets(code);
+
+    let mut out: Vec<Instr> = Vec::with_capacity(code.len());
+    let mut old_to_new: Vec<usize> = vec![usize::MAX; code.len()];
+    let mut changed = false;
+
+    let mut i = 0;
+    while i < code.len() {
+        old_to_new[i] = out.len();
+        // Pattern: LoadField(field); Push(Int(c)); Bin(op); JumpIf*(t).
+        // The four instructions must be contiguous, none of
+        // indices i+1..i+3 may be an external jump target, and
+        // `Bin`'s operator must be a comparison op on an int-typed
+        // field — see the safety predicates in the doc comment.
+        if i + 3 < code.len()
+            && !jump_targets[i + 1]
+            && !jump_targets[i + 2]
+            && !jump_targets[i + 3]
+        {
+            // Pattern: LoadField(field); Push(Int(c)); Bin(op);
+            // JumpIfFalse(t) | JumpIfTrue(t). The `|` pattern
+            // binds `t` for both jump directions; `jump_if_true`
+            // is recovered from the concrete instruction kind
+            // (the bind does not carry which arm matched).
+            if let (
+                Instr::LoadField(field),
+                Instr::Push(Value::Int(c)),
+                Instr::Bin(op),
+                Instr::JumpIfFalse(_) | Instr::JumpIfTrue(_),
+            ) = (&code[i], &code[i + 1], &code[i + 2], &code[i + 3])
+            {
+                if is_int_field(field.kind) && is_int_cmp_op(op) {
+                    let (target, jump_if_true) = match &code[i + 3] {
+                        Instr::JumpIfFalse(t) => (*t, false),
+                        Instr::JumpIfTrue(t) => (*t, true),
+                        // Covered by the `|` pattern in the
+                        // enclosing `if let`; unreachable here.
+                        _ => unreachable!(),
+                    };
+                    // Mark the three consumed instructions as
+                    // remapped to the fused instruction's index
+                    // in `out`. Any external jump that targeted
+                    // them lands on the fused instruction.
+                    old_to_new[i + 1] = out.len();
+                    old_to_new[i + 2] = out.len();
+                    old_to_new[i + 3] = out.len();
+                    changed = true;
+                    out.push(Instr::BranchFieldIntCmp {
+                        field: *field,
+                        op: *op,
+                        val: *c,
+                        target,
+                        jump_if_true,
+                    });
+                    i += 4;
+                    continue;
+                }
+            }
+        }
+        // Fallback: emit verbatim.
+        out.push(code[i].clone());
+        i += 1;
+    }
+
+    // Rewrite jump targets through the index map — same shape as
+    // the constant-propagation pass's remap, applied to the new
+    // `BranchFieldIntCmp.target` field too.
+    let out_len = out.len();
+    for instr in out.iter_mut() {
+        match instr {
+            Instr::Jump(t)
+            | Instr::JumpIfFalse(t)
+            | Instr::JumpIfTrue(t)
+            | Instr::BranchFieldIntCmp { target: t, .. } => {
+                if *t < old_to_new.len() {
+                    let mapped = old_to_new[*t];
+                    *t = if mapped == usize::MAX {
+                        out_len
+                    } else {
+                        mapped
+                    };
+                } else {
+                    *t = out_len;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    (out, changed)
+}
+
+/// `read_route_field` returns `Value::Int(_)` for these field kinds
+/// (with `unwrap_or(0)` semantics for absent attributes). The
+/// fused `BranchFieldIntCmp` only fires on this set — see the
+/// safety predicates in `pass_fuse_branches`.
+fn is_int_field(kind: RouteFieldKind) -> bool {
+    matches!(
+        kind,
+        RouteFieldKind::BgpLocalPref
+            | RouteFieldKind::BgpMed
+            | RouteFieldKind::BgpOrigin
+            | RouteFieldKind::Source
+    )
+}
+
+/// The fused `BranchFieldIntCmp`'s `match op { .. }` body implements
+/// exactly these comparison operators (the operators whose runtime
+/// semantics on `i64` operands are `bool` and whose branch direction
+/// is well-defined). Arithmetic ops and `Match` / `NotMatch` are
+/// not branch directions; refuse to fuse.
+fn is_int_cmp_op(op: &BinaryOp) -> bool {
+    matches!(
+        op,
+        BinaryOp::Eq | BinaryOp::Ne | BinaryOp::Lt | BinaryOp::Le | BinaryOp::Gt | BinaryOp::Ge
+    )
+}
+
+// ----- pass 3: dead-branch elimination -----------------------------------
 
 /// Eliminate branches whose direction is known at compile time
 /// after constant folding. `Push(Bool(true)); JumpIfFalse(X)` always
@@ -359,7 +552,10 @@ fn pass_dead_branch(code: &[Instr]) -> (Vec<Instr>, bool) {
     let out_len = out.len();
     for instr in out.iter_mut() {
         match instr {
-            Instr::Jump(t) | Instr::JumpIfFalse(t) | Instr::JumpIfTrue(t) => {
+            Instr::Jump(t)
+            | Instr::JumpIfFalse(t)
+            | Instr::JumpIfTrue(t)
+            | Instr::BranchFieldIntCmp { target: t, .. } => {
                 if *t < old_to_new.len() {
                     let mapped = old_to_new[*t];
                     *t = if mapped == usize::MAX {
@@ -378,13 +574,19 @@ fn pass_dead_branch(code: &[Instr]) -> (Vec<Instr>, bool) {
     (out, changed)
 }
 
-// ----- pass 3: jump threading --------------------------------------------
+// ----- pass 4: jump threading --------------------------------------------
 
 /// Thread unconditional-jump chains. For each `Jump`, `JumpIfFalse`,
-/// or `JumpIfTrue` targeting an unconditional `Jump`, redirect to
-/// that Jump's target. Iterates per-instruction through chains
-/// (bounded by the code length to defend against pathological
-/// cycles).
+/// `JumpIfTrue`, or `BranchFieldIntCmp` targeting an unconditional
+/// `Jump`, redirect to that Jump's target. Iterates per-instruction
+/// through chains (bounded by the code length to defend against
+/// pathological cycles).
+///
+/// Conditional-jump-to-conditional-jump is NOT threaded: the target
+/// conditional pops a stack value (or reads the route field, for the
+/// fused `BranchFieldIntCmp`), so redirecting would skip the read
+/// and corrupt the comparison. Only `Jump` is a safe thread target
+/// — it has no precondition on the stack or route state.
 fn pass_thread_jumps(code: &mut [Instr]) {
     // Compute the new targets first, then apply — this avoids
     // borrow-checker conflicts between `code.iter()` and
@@ -394,7 +596,10 @@ fn pass_thread_jumps(code: &mut [Instr]) {
         .iter()
         .map(|instr| {
             let target = match instr {
-                Instr::Jump(t) | Instr::JumpIfFalse(t) | Instr::JumpIfTrue(t) => *t,
+                Instr::Jump(t)
+                | Instr::JumpIfFalse(t)
+                | Instr::JumpIfTrue(t)
+                | Instr::BranchFieldIntCmp { target: t, .. } => *t,
                 _ => return usize::MAX, // sentinel: not a jump
             };
             let mut cur = target;
@@ -426,7 +631,10 @@ fn pass_thread_jumps(code: &mut [Instr]) {
             continue;
         }
         match instr {
-            Instr::Jump(t) | Instr::JumpIfFalse(t) | Instr::JumpIfTrue(t) => *t = new_t,
+            Instr::Jump(t)
+            | Instr::JumpIfFalse(t)
+            | Instr::JumpIfTrue(t)
+            | Instr::BranchFieldIntCmp { target: t, .. } => *t = new_t,
             _ => unreachable!("new_targets[i] == usize::MAX only for non-jumps"),
         }
     }
@@ -770,11 +978,15 @@ mod tests {
         );
     }
 
-    /// A pure `LoadField` filter (`if bgp.local_pref > 100 then
-    /// accept; reject;`) has no constants to fold — the pass
-    /// should be a no-op.
+    /// `if bgp.local_pref > 100 then accept; reject;` — the canonical
+    /// import-policy shape and the documented `#19` hotspot. P6 fuses
+    /// the four-instruction pattern `LoadField(int); Push(Int(c));
+    /// Bin(Cmp); JumpIf*(t)` into one `BranchFieldIntCmp { .. }`
+    /// that reads the field, compares, and branches with zero stack
+    /// traffic. The fused `target` is the original `JumpIfFalse`'s
+    /// target (the `Reject` at index 2 in the rewritten stream).
     #[test]
-    fn no_op_on_dynamic_filter() {
+    fn fuses_local_pref_branch_pattern() {
         let code = vec![
             Instr::LoadField(field(RouteFieldKind::BgpLocalPref)),
             Instr::Push(Value::Int(100)),
@@ -783,8 +995,115 @@ mod tests {
             Instr::Accept,
             Instr::Reject { from_stack: false },
         ];
+        let opt = optimize(code);
+        let expected = vec![
+            Instr::BranchFieldIntCmp {
+                field: field(RouteFieldKind::BgpLocalPref),
+                op: BinaryOp::Gt,
+                val: 100,
+                target: 2,
+                jump_if_true: false,
+            },
+            Instr::Accept,
+            Instr::Reject { from_stack: false },
+        ];
+        assert_eq!(opt, expected);
+    }
+
+    /// The fusion pass only fires on the four int-typed fields.
+    /// `if proto == "bgp" then accept; reject;` reads the `Proto`
+    /// field which returns `Value::Str(_)` — `is_int_field` rejects
+    /// it, and the unfused four-instruction sequence stays.
+    #[test]
+    fn does_not_fuse_non_int_field_branch() {
+        let code = vec![
+            Instr::LoadField(field(RouteFieldKind::Proto)),
+            Instr::Push(Value::Str("bgp".to_string())),
+            Instr::Bin(BinaryOp::Eq),
+            Instr::JumpIfFalse(5),
+            Instr::Accept,
+            Instr::Reject { from_stack: false },
+        ];
         let opt = optimize(code.clone());
+        // Pass-through — no fold, no fusion.
         assert_eq!(opt, code);
+    }
+
+    /// The fusion pass only fires on the six comparison ops. A branch
+    /// whose operator is `Match` (membership test) is not a
+    /// comparison; refuse to fuse.
+    #[test]
+    fn does_not_fuse_non_comparison_op() {
+        // The pattern would not typecheck at the AST level (the
+        // match operator binds an Expr on the rhs, not an int
+        // constant), but the safety check defends against any
+        // future lowering that emits it.
+        let code = vec![
+            Instr::LoadField(field(RouteFieldKind::BgpLocalPref)),
+            Instr::Push(Value::Int(100)),
+            Instr::Bin(BinaryOp::BitAnd),
+            Instr::JumpIfFalse(5),
+            Instr::Accept,
+            Instr::Reject { from_stack: false },
+        ];
+        let opt = optimize(code.clone());
+        // Pass-through — no fold, no fusion.
+        assert_eq!(opt, code);
+    }
+
+    /// The fusion pass refuses to fire when an external jump lands
+    /// inside the four-instruction pattern. The `Push(Int(c))` at
+    /// index 1 is the target of an external `Jump(1)` at the end —
+    /// fusing it would skip the stack push the external jump expects.
+    #[test]
+    fn does_not_fuse_when_jump_lands_in_pattern() {
+        // LoadField(0); Push(Int(100))(1); Bin(Gt)(2); JumpIfFalse(5)(3);
+        // Accept(4); Reject(5); Jump(1)(6) — the trailing Jump
+        // targets `Push`, blocking the fuse.
+        let code = vec![
+            Instr::LoadField(field(RouteFieldKind::BgpLocalPref)),
+            Instr::Push(Value::Int(100)),
+            Instr::Bin(BinaryOp::Gt),
+            Instr::JumpIfFalse(5),
+            Instr::Accept,
+            Instr::Reject { from_stack: false },
+            Instr::Jump(1),
+        ];
+        let opt = optimize(code.clone());
+        // The pattern is unfused because `Push` at index 1 is a
+        // jump target. The rest of the pass is also a no-op
+        // (nothing else to fold or thread).
+        assert_eq!(opt, code);
+    }
+
+    /// `JumpIfTrue` direction: the fused instruction sets
+    /// `jump_if_true: true` so the VM inverts the comparison's
+    /// result correctly. The fused `target` is the
+    /// `Reject`'s new index (1) after the pattern's four
+    /// instructions collapse to one — the pass's old-to-new
+    /// index map rewrites the original `JumpIfTrue(4)` target
+    /// through the consumed-instruction remap.
+    #[test]
+    fn fuses_jump_if_true_direction() {
+        let code = vec![
+            Instr::LoadField(field(RouteFieldKind::BgpMed)),
+            Instr::Push(Value::Int(50)),
+            Instr::Bin(BinaryOp::Le),
+            Instr::JumpIfTrue(4),
+            Instr::Reject { from_stack: false },
+        ];
+        let opt = optimize(code);
+        let expected = vec![
+            Instr::BranchFieldIntCmp {
+                field: field(RouteFieldKind::BgpMed),
+                op: BinaryOp::Le,
+                val: 50,
+                target: 1,
+                jump_if_true: true,
+            },
+            Instr::Reject { from_stack: false },
+        ];
+        assert_eq!(opt, expected);
     }
 
     /// Empty filter — optimize is a no-op.
