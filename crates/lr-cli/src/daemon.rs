@@ -4843,19 +4843,12 @@ fn reload_config(
     let Some(path) = path else {
         return vec!["reload: no config file in use; nothing to reload".into()];
     };
-    let text = match std::fs::read_to_string(path) {
-        Ok(t) => t,
-        Err(e) => {
-            return vec![format!(
-                "reload: cannot read {}: {} (keeping current config)",
-                path, e
-            )]
-        }
-    };
     let mut fresh = DaemonConfig::default();
     // The reload goes through the same dialect path as startup: a
     // config loaded from a BIRD/FRR file re-parses as BIRD/FRR, so a
-    // compat-mode daemon does not break on SIGHUP.
+    // compat-mode daemon does not break on SIGHUP. `load_config_file`
+    // is the shared entry point (issue #18 Phase 1) — startup, reload
+    // and `config check` cannot drift apart.
     let forced = match dialect {
         Some("bird") => Some(crate::compat::Dialect::Bird),
         Some("frr") => Some(crate::compat::Dialect::Frr),
@@ -4867,7 +4860,7 @@ fn reload_config(
             )]
         }
     };
-    if let Err(e) = crate::compat::load_config_text(&text, forced, &mut fresh) {
+    if let Err(e) = daemon_config::load_config_file(path, forced, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
     }
     // Finalize exactly like startup (ROADMAP-v3 D2.5): the reload path

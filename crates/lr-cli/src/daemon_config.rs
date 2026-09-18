@@ -3775,6 +3775,38 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
     Ok(true)
 }
 
+/// Shared configuration-file entry point (issue #18 Phase 1): daemon
+/// startup ([`parse_args`]), SIGHUP / API `reload` (`daemon.rs`) and
+/// the `lr-daemon config check` validator all load through this one
+/// function, so the set of configs a daemon accepts is exactly the set
+/// `check` accepts and the three surfaces cannot drift apart.
+///
+/// Reads `path`, resolves the dialect (the `--config-dialect` override
+/// wins, else the content is recognised) and parses into `cfg` through
+/// `crate::compat::load_config_text` — BIRD / FRR files go through the
+/// compat surface and end up in the same TOML parse, so every dialect
+/// lands in the same typed IR. On success the IR carries
+/// `config_path` / `config_dialect`; parse warnings stay in
+/// `cfg.warnings` for the caller to present in its own voice.
+pub(crate) fn load_config_file(
+    path: &str,
+    forced: Option<crate::compat::Dialect>,
+    cfg: &mut DaemonConfig,
+) -> Result<(), String> {
+    let text =
+        std::fs::read_to_string(path).map_err(|e| format!("cannot read config {path}: {e}"))?;
+    crate::compat::load_config_text(&text, forced, cfg)?;
+    if cfg.config_dialect.is_none() {
+        cfg.config_dialect = forced
+            .map(|d| d.name().to_string())
+            .or_else(|| crate::compat::detect_dialect(&text).map(|d| d.name().to_string()));
+    }
+    // Remember the file so `status` can show it and SIGHUP / `reload`
+    // can re-apply it.
+    cfg.config_path = Some(path.to_string());
+    Ok(())
+}
+
 pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
     let args: Vec<String> = std::env::args().collect();
     let mut cfg = DaemonConfig::with_defaults();
@@ -4305,16 +4337,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
         cfg.protocol = protocol_flags.join(",");
     }
     if let Some(path) = config_path {
-        let text = std::fs::read_to_string(&path).map_err(|e| {
-            eprintln!("cannot read config {}: {}", path, e);
-            ExitCode::from(1)
-        })?;
         // Dialect resolution: `--config-dialect` forces an
         // interpretation, otherwise the content is recognised (lr
-        // TOML, BIRD 2 or FRR). Bird/frr files go through the compat
-        // surface (parse → render → the same TOML loader below), so
-        // `lr-daemon --config bird.conf` runs the source config
-        // directly in the compatible form.
+        // TOML, BIRD 2 or FRR) — `load_config_file` owns the details,
+        // shared with reload and `config check`.
         let forced = match config_dialect.as_deref() {
             Some(f) => match crate::compat::Dialect::from_flag(f) {
                 Ok(d) => Some(d),
@@ -4325,21 +4351,13 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             },
             None => None,
         };
-        crate::compat::load_config_text(&text, forced, &mut cfg).map_err(|e| {
-            eprintln!("config parse error: {}", e);
+        load_config_file(&path, forced, &mut cfg).map_err(|e| {
+            eprintln!("error: {e}");
             ExitCode::from(1)
         })?;
-        if cfg.config_dialect.is_none() {
-            cfg.config_dialect = forced
-                .map(|d| d.name().to_string())
-                .or_else(|| crate::compat::detect_dialect(&text).map(|d| d.name().to_string()));
-        }
         for w in &cfg.warnings {
             eprintln!("config warning: {}", w);
         }
-        // Remember the file so `status` can show it and SIGHUP / `reload`
-        // can re-apply it.
-        cfg.config_path = Some(path);
     }
     Ok(cfg)
 }
