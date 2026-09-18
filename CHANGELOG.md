@@ -35,6 +35,44 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- OSPFv3 SRv6 LAN End.X SID origination — RFC 9513 §9.2 over RFC 8362
+  (ROADMAP-v3 D13 slice 4).
+  - **`[[ospf.interface]] srv6_end_x_lan`** — the broadcast form: an
+    at-most-/96 IPv6 prefix inside an `[[ospf.srv6_locator]]`
+    (broadcast-only, fail-closed). Each Full BDR/DR-Other neighbor `R`
+    derives one §9.2 LAN End.X SID as `base | R` — the Router-ID fills
+    the low 32 bits, so the mapping is deterministic, collision-free
+    and provably inside the locator. On broadcast segments the
+    existing `srv6_end_x` knob now covers the §9.1 DR adjacency.
+    Both forms ride the transit Router-Link TLV's sub-TLV region of
+    the E-Router-LSA (topology carrier under `extended_lsas`,
+    sparse-mode companion under legacy mode) and surface on the
+    runtime API `status` as `srv6-endx` lines (`lan` marker on the
+    §9.2 projections).
+  - **`tests/interop/ospf6_e_lsa_endx_lan.sh`** — a three-router
+    bridge broadcast segment: the DR projects the plain §9.1 SID, the
+    BDR the derived §9.2 LAN SID, the originator self-projects both,
+    and all six adjacencies reach Full.
+
+### Fixed
+
+- OSPF DD/LSR packets are now unicast at the peer's address on
+  broadcast segments (RFC 2328 §8.1 via RFC 5340 §4.2), in both the
+  v2 and v3 daemons. Previously every session packet was multicast to
+  AllSPFRouters, which deadlocked the DBD exchange
+  nondeterministically on segments with three or more speakers: the
+  DR's two independent sequence-numbered conversations interleaved
+  inside each DR-Other's single session with it. Two-router segments
+  were unaffected (all prior labs are two-router). The v3 OSPFv3
+  pseudo-header checksum is finalized for the actual unicast
+  destination.
+- An OSPF adjacency demoted Full → 2-Way (the §10.4 gate closing on
+  an election change) now schedules Router-LSA re-origination
+  immediately; previously the stale link lingered until the §14.1
+  refresh (30 minutes).
+
+### Added
+
 - OSPFv3 Extended LSAs — RFC 8362 (ROADMAP-v3 D13 slices 1-2).
   - **`lr_ospf::lsa::e_v3`** — the eight TLV-bodied E-LSA codecs:
     E-Router 0xA021 (function code 33), E-Network 0xA022,

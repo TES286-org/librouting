@@ -102,7 +102,7 @@ use lr_router::{
     DefaultRouter, OspfGraceEvent, OspfNetworkType, RouterInstance, SessionConfig, SessionHandle,
 };
 
-use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec};
+use crate::daemon_config::{area_label, DaemonConfig, OspfIfSpec, OspfSrv6LocatorSpec};
 use crate::daemon_multi::{EngineHost, EngineReport};
 use crate::daemon_ospf::{
     grace_sequence_base, GRACE_FLOOD_INTERVAL_MS, GRACE_FLOOD_REPEATS, GRACE_PUMP_SLICE_MS,
@@ -146,30 +146,147 @@ fn lsa_seq_floor(
     }
 }
 
+/// RFC 9513 §9.2: resolve the LAN End.X derivation base — the
+/// configured prefix masked to its length (host bits cleared, so the
+/// derived `base | R` SIDs are pure functions of the base and the
+/// neighbor's Router-ID), with the covering locator's algorithm (0
+/// when the locator leaves it default). The finalize pass already
+/// fail-closed on containment and the ≤ /96 length.
+fn mask_lan_base(text: &str, locators: &[OspfSrv6LocatorSpec]) -> Option<([u8; 16], u8)> {
+    let p: lr_core::addr::Prefix = text.parse().ok()?;
+    let lr_core::addr::IpAddr::V6(octets) = p.addr else {
+        return None;
+    };
+    let len = (p.prefix_len as usize).min(128);
+    let mut base = octets;
+    for (i, b) in base.iter_mut().enumerate() {
+        let bit_start = i * 8;
+        if bit_start >= len {
+            *b = 0;
+        } else if bit_start + 8 > len {
+            *b &= !0u8 << (8 - (len - bit_start));
+        }
+    }
+    let algorithm = covering_locator_algorithm(locators, &base).unwrap_or(0);
+    Some((base, algorithm))
+}
+
+/// The algorithm of the first `[[ospf.srv6_locator]]` whose prefix
+/// covers `sid` (RFC 9513 §9's containment requirement), or `None`
+/// when no locator covers it. The finalize pass fail-closes on
+/// uncovered SIDs; this is the resolve-time lookup shared by the §9.1
+/// SID and the §9.2 LAN base.
+fn covering_locator_algorithm(locators: &[OspfSrv6LocatorSpec], sid: &[u8; 16]) -> Option<u8> {
+    locators.iter().find_map(|loc| {
+        let p: lr_core::addr::Prefix = loc.prefix.as_deref()?.parse().ok()?;
+        let lr_core::addr::IpAddr::V6(pb) = p.addr else {
+            return None;
+        };
+        let len = (p.prefix_len as usize).min(128);
+        let full = len / 8;
+        let rem = len % 8;
+        let covered = sid[..full] == pb[..full]
+            && (rem == 0 || {
+                let mask = !0u8 << (8 - rem);
+                sid[full] & mask == pb[full] & mask
+            });
+        covered.then_some(loc.algorithm.unwrap_or(0))
+    })
+}
+
 /// The Router-Link TLV form of a legacy link descriptor (RFC 8362
 /// §3.2) — the E-Router-LSA origination switch. p2p links on an
 /// interface with a configured End.X SID (`[[ospf.interface]]
 /// srv6_end_x`, RFC 9513 §9.1) carry it in the sub-TLV region.
+/// Broadcast transit links carry the RFC 9513 §9 set: the plain
+/// §9.1 End.X for the DR adjacency (when we are not the DR) plus one
+/// §9.2 LAN End.X per Full BDR/DR-Other neighbor.
+///
+/// The RFC 9513 §9 origination inputs for one broadcast interface.
+struct LanEndXSpec {
+    /// §9.1: the DR adjacency rides the plain End.X sub-TLV — `None`
+    /// when we are the DR (no adjacency to ourselves), when the DR
+    /// adjacency is not Full, or when `srv6_end_x` is not configured.
+    dr_sid: Option<([u8; 16], u8)>,
+    /// §9.2: the masked `srv6_end_x_lan` base + the covering
+    /// locator's algorithm; each Full neighbor `R` in `neighbors`
+    /// gets the SID `base | R`.
+    base: Option<([u8; 16], u8)>,
+    /// The Full neighbors the LAN End.X sub-TLVs cover: everyone but
+    /// the DR (the BDR + the DR-Others; RFC 2328 §A.4 keeps
+    /// DR-Others at 2-Way with each other, so this is exactly our
+    /// Full set minus the DR). Router-ID order (the neighbors
+    /// BTreeMap's iteration order).
+    neighbors: Vec<u32>,
+}
+
 fn e_router_links(
     links: &[lr_ospf::lsa::v3::V3RouterLink],
     end_x_by_if: &BTreeMap<u32, ([u8; 16], u8)>,
+    lan_end_x_by_if: &BTreeMap<u32, LanEndXSpec>,
 ) -> Vec<ERouterLinkTlv> {
     links
         .iter()
         .map(|l| {
             let mut sub_tlvs = Vec::new();
-            if l.link_type == LINK_TYPE_POINTTOPOINT {
-                if let Some((sid, algorithm)) = end_x_by_if.get(&l.interface_id) {
-                    lr_ospf::lsa::Srv6EndXSidSubTlv {
-                        flags: 0,
-                        behavior: 5, // End.X (RFC 8986)
-                        algorithm: *algorithm,
-                        weight: 0,
-                        sid: *sid,
-                        structure: None,
+            match l.link_type {
+                LINK_TYPE_POINTTOPOINT => {
+                    if let Some((sid, algorithm)) = end_x_by_if.get(&l.interface_id) {
+                        lr_ospf::lsa::Srv6EndXSidSubTlv {
+                            flags: 0,
+                            behavior: 5, // End.X (RFC 8986)
+                            algorithm: *algorithm,
+                            weight: 0,
+                            sid: *sid,
+                            structure: None,
+                        }
+                        .encode(&mut sub_tlvs);
                     }
-                    .encode(&mut sub_tlvs);
                 }
+                LINK_TYPE_TRANSIT => {
+                    // RFC 9513 §9, broadcast segments: the plain §9.1
+                    // End.X covers the DR adjacency (a non-DR router's
+                    // view of the network vertex), and one §9.2 LAN
+                    // End.X per Full BDR/DR-Other neighbor — the
+                    // neighbor Router-ID field distinguishing the
+                    // per-neighbor SIDs riding the same link.
+                    if let Some(spec) = lan_end_x_by_if.get(&l.interface_id) {
+                        if let Some((sid, algorithm)) = spec.dr_sid {
+                            lr_ospf::lsa::Srv6EndXSidSubTlv {
+                                flags: 0,
+                                behavior: 5, // End.X (RFC 8986)
+                                algorithm,
+                                weight: 0,
+                                sid,
+                                structure: None,
+                            }
+                            .encode(&mut sub_tlvs);
+                        }
+                        if let Some((base, algorithm)) = spec.base {
+                            for rid in &spec.neighbors {
+                                // `base | R`: the Router-ID fills the
+                                // low 32 bits (the base is masked, so
+                                // the OR never collides with prefix
+                                // bits).
+                                let mut sid = base;
+                                for (i, b) in rid.to_be_bytes().iter().enumerate() {
+                                    sid[12 + i] |= b;
+                                }
+                                lr_ospf::lsa::Srv6LanEndXSidSubTlv {
+                                    flags: 0,
+                                    behavior: 5, // End.X (RFC 8986)
+                                    algorithm,
+                                    weight: 0,
+                                    neighbor_router_id: *rid,
+                                    sid,
+                                    structure: None,
+                                }
+                                .encode(&mut sub_tlvs);
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
             ERouterLinkTlv {
                 link_type: l.link_type,
@@ -252,8 +369,16 @@ struct Ospf3Interface {
     /// RFC 9513 §9.1: the local End.X SID
     /// (`[[ospf.interface]] srv6_end_x`) with the algorithm of the
     /// locator it is allocated from — rides the E-Router-LSA's p2p
-    /// Router-Link TLV sub-TLV region once the adjacency is Full.
+    /// Router-Link TLV sub-TLV region once the adjacency is Full; on
+    /// broadcast segments it covers the adjacency to the DR.
     end_x_sid: Option<([u8; 16], u8)>,
+    /// RFC 9513 §9.2: the LAN End.X derivation base
+    /// (`[[ospf.interface]] srv6_end_x_lan`, masked to its prefix
+    /// length) with the covering locator's algorithm — one LAN End.X
+    /// sub-TLV per Full BDR/DR-Other neighbor `R` on the broadcast
+    /// segment, the SID derived as `base | R` (the Router-ID fills
+    /// the low 32 bits, the RFC 8402 argument position).
+    end_x_lan: Option<([u8; 16], u8)>,
     /// Router Priority advertised in Hellos (§A.3.2; 0 = never DR/BDR).
     priority: u8,
     /// Interface FSM state (§9.1): Waiting until the WaitTimer or
@@ -884,28 +1009,20 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
     // algorithm — 0 when the locator leaves it default).
     let end_x_sid = spec.srv6_end_x.as_deref().and_then(|text| {
         let sid: Ipv6Addr = text.parse().ok()?;
-        let algorithm = cfg
-            .ospf_srv6_locators
-            .iter()
-            .find_map(|loc| {
-                let p: lr_core::addr::Prefix = loc.prefix.as_deref()?.parse().ok()?;
-                let lr_core::addr::IpAddr::V6(pb) = p.addr else {
-                    return None;
-                };
-                let len = (p.prefix_len as usize).min(128);
-                let full = len / 8;
-                let rem = len % 8;
-                let bytes = sid.octets();
-                let covered = bytes[..full] == pb[..full]
-                    && (rem == 0 || {
-                        let mask = !0u8 << (8 - rem);
-                        bytes[full] & mask == pb[full] & mask
-                    });
-                covered.then_some(loc.algorithm.unwrap_or(0))
-            })
-            .unwrap_or(0);
+        let algorithm =
+            covering_locator_algorithm(&cfg.ospf_srv6_locators, &sid.octets()).unwrap_or(0);
         Some((sid.octets(), algorithm))
     });
+    // RFC 9513 §9.2: resolve the LAN End.X derivation base — the
+    // configured prefix masked to its length (host bits cleared, so
+    // the derived `base | R` SIDs are pure functions of the base and
+    // the neighbor's Router-ID), with the covering locator's
+    // algorithm. The finalize pass already fail-closed on
+    // containment and the ≤ /96 length.
+    let end_x_lan = spec
+        .srv6_end_x_lan
+        .as_deref()
+        .and_then(|text| mask_lan_base(text, &cfg.ospf_srv6_locators));
     Ok(Ospf3Interface {
         name,
         area: spec.area.unwrap_or(cfg.ospf_area),
@@ -921,6 +1038,7 @@ fn resolve_interface(cfg: &DaemonConfig, spec: &OspfIfSpec) -> Result<Ospf3Inter
         heard: BTreeMap::new(),
         network_type,
         end_x_sid,
+        end_x_lan,
         priority,
         // §9.3: broadcast interfaces come up in Waiting and wait
         // RouterDeadInterval before electing (p2p has no election;
@@ -2182,6 +2300,9 @@ impl Ospf3Daemon {
         // ride the DR's network-referenced Intra-Area-Prefix-LSA, not
         // our router-referenced one (§4.4.3.5).
         let mut transit_reported: BTreeMap<u32, ()> = BTreeMap::new();
+        // The Full neighbor set per interface — the RFC 9513 §9.2 LAN
+        // End.X inputs below need it alongside the link builder.
+        let mut established_by_if: BTreeMap<u32, Vec<u32>> = BTreeMap::new();
         for iface in &mut self.interfaces {
             if iface.area != area {
                 continue;
@@ -2194,6 +2315,7 @@ impl Ospf3Daemon {
                 })
                 .map(|(&(_, rid), _)| rid)
                 .collect();
+            established_by_if.insert(iface.interface_id, established.clone());
             match iface.network_type {
                 OspfNetworkType::PointToPoint => {
                     for rid in &established {
@@ -2364,15 +2486,48 @@ impl Ospf3Daemon {
             bits |= ROUTER_BIT_B;
         }
         // RFC 9513 §9: the interface End.X SIDs ride the E-Router-LSA's
-        // p2p Router-Link TLV sub-TLVs. In extended mode the E-Router-LSA
-        // is the topology carrier; in legacy mode (RFC 8362 §6.2
-        // sparse-mode) a complete E-Router-LSA companion carries them
-        // alongside the legacy topology — receivers ignore it for the
-        // SPF but the SRv6 database still projects the SIDs.
+        // Router-Link TLV sub-TLVs — the §9.1 form on p2p links and on
+        // the broadcast DR adjacency, the §9.2 LAN form per Full
+        // BDR/DR-Other broadcast neighbor. In extended mode the
+        // E-Router-LSA is the topology carrier; in legacy mode
+        // (RFC 8362 §6.2 sparse-mode) a complete E-Router-LSA companion
+        // carries them alongside the legacy topology — receivers
+        // ignore it for the SPF but the SRv6 database still projects
+        // the SIDs.
         let end_x_by_if: BTreeMap<u32, ([u8; 16], u8)> = self
             .interfaces
             .iter()
             .filter_map(|i| i.end_x_sid.map(|sid| (i.interface_id, sid)))
+            .collect();
+        let lan_end_x_by_if: BTreeMap<u32, LanEndXSpec> = self
+            .interfaces
+            .iter()
+            .filter(|i| i.area == area && i.network_type == OspfNetworkType::Broadcast)
+            .filter_map(|i| {
+                let established = established_by_if.get(&i.interface_id)?;
+                let we_are_dr = i.if_state == IfState::Dr && i.dr == self.router_id.as_u32();
+                // §9.1 covers the DR adjacency: only a non-DR router
+                // has one, and only once it is Full (the transit link
+                // carrying it is described under the same conditions).
+                let dr_sid = (!we_are_dr && i.dr != 0 && established.contains(&i.dr))
+                    .then_some(i.end_x_sid)
+                    .flatten();
+                // §9.2 covers everyone else we are Full with — the
+                // BDR and the DR-Others (as the DR: every neighbor).
+                let neighbors: Vec<u32> = established
+                    .iter()
+                    .copied()
+                    .filter(|rid| *rid != i.dr)
+                    .collect();
+                (dr_sid.is_some() || (i.end_x_lan.is_some() && !neighbors.is_empty())).then_some((
+                    i.interface_id,
+                    LanEndXSpec {
+                        dr_sid,
+                        base: i.end_x_lan,
+                        neighbors,
+                    },
+                ))
+            })
             .collect();
         let router_lsa_type = if self.extended_lsas {
             LS_TYPE_E_ROUTER
@@ -2392,7 +2547,7 @@ impl Ospf3Daemon {
                 self.router_id.as_u32(),
                 bits,
                 OSPF_V3_OPTIONS_DEFAULT,
-                e_router_links(&links, &end_x_by_if),
+                e_router_links(&links, &end_x_by_if, &lan_end_x_by_if),
                 seq,
             )
         } else {
@@ -2489,7 +2644,7 @@ impl Ospf3Daemon {
         // same LSU as the legacy topology — legacy receivers store and
         // re-flood it (U-bit) without using it for the SPF, and the
         // SRv6 database projects the adjacency SIDs from it.
-        if !self.extended_lsas && !end_x_by_if.is_empty() {
+        if !self.extended_lsas && (!end_x_by_if.is_empty() || !lan_end_x_by_if.is_empty()) {
             let e_seq = lsa_seq_floor(
                 router,
                 area,
@@ -2502,7 +2657,7 @@ impl Ospf3Daemon {
                 self.router_id.as_u32(),
                 bits,
                 OSPF_V3_OPTIONS_DEFAULT,
-                e_router_links(&links, &end_x_by_if),
+                e_router_links(&links, &end_x_by_if, &lan_end_x_by_if),
                 e_seq,
             ) {
                 Some(lsa) => {
@@ -2910,5 +3065,153 @@ mod tests {
         first.encode(&mut wire);
         let (decoded, _) = Srv6LocatorTlv::decode(&wire, 0).expect("decodable");
         assert_eq!(&decoded, first);
+    }
+
+    #[test]
+    fn lan_end_x_base_masks_host_bits() {
+        // /96: the low 32 bits clear — the Router-ID argument slot.
+        assert_eq!(
+            mask_lan_base("2001:db8:a:1:ffff:ffff:ffff:ffff/96", &[])
+                .unwrap()
+                .0,
+            v6_octets("2001:db8:a:1:ffff:ffff::")
+        );
+        // /64: everything below the prefix clears.
+        assert_eq!(
+            mask_lan_base("2001:db8:a:1:dead:beef::1/64", &[])
+                .unwrap()
+                .0,
+            v6_octets("2001:db8:a:1::")
+        );
+        // A non-byte-aligned length keeps the partial octet's high
+        // bits (100 = 12 bytes + 4 bits: 0xff & 0xf0 = 0xf0).
+        assert_eq!(
+            mask_lan_base("2001:db8:a:1:0:0:ffff:ffff/100", &[])
+                .unwrap()
+                .0,
+            v6_octets("2001:db8:a:1::f000:0")
+        );
+        // The covering locator's algorithm rides along (algorithm 128
+        // on the covering locator, 0 default on the other).
+        let locators = vec![
+            locator_spec("2001:db8:a:1::/48"),
+            OspfSrv6LocatorSpec {
+                prefix: Some("2001:db8:b::/48".to_string()),
+                algorithm: Some(128),
+                ..Default::default()
+            },
+        ];
+        assert_eq!(
+            mask_lan_base("2001:db8:b:ffff::/96", &locators).unwrap().1,
+            128
+        );
+        assert_eq!(
+            mask_lan_base("2001:db8:a:1:ffff::/96", &locators)
+                .unwrap()
+                .1,
+            0
+        );
+    }
+
+    #[test]
+    fn e_router_links_broadcast_carries_9_1_and_9_2() {
+        // A BDR's transit link (§A.4.3 type 2): Full with the DR
+        // 3.3.3.3 and the DR-Others 4.4.4.4 + 5.5.5.5. RFC 9513 §9:
+        // the plain End.X (§9.1) covers the DR adjacency, one LAN
+        // End.X (§9.2) per DR-Other, all riding the same link.
+        let links = vec![lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_TRANSIT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 77,
+            neighbor_router_id: 0x0303_0303, // the DR
+        }];
+        let end_x_by_if = BTreeMap::new();
+        let mut lan_end_x_by_if = BTreeMap::new();
+        lan_end_x_by_if.insert(
+            5u32,
+            LanEndXSpec {
+                dr_sid: Some((v6_octets("2001:db8:a:1::100"), 0)),
+                base: Some((v6_octets("2001:db8:a:1:ffff::"), 0)),
+                neighbors: vec![0x0404_0404, 0x0505_0505],
+            },
+        );
+        let out = e_router_links(&links, &end_x_by_if, &lan_end_x_by_if);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].link_type, LINK_TYPE_TRANSIT);
+        // §9.1: one plain End.X, the configured SID verbatim.
+        let plain = lr_ospf::lsa::srv6::walk_end_x_sub_tlvs(&out[0].sub_tlvs);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].sid, v6_octets("2001:db8:a:1::100"));
+        assert_eq!(plain[0].behavior, 5); // End.X (RFC 8986)
+        assert_eq!(plain[0].algorithm, 0);
+        assert_eq!(plain[0].flags, 0);
+        // §9.2: one LAN End.X per neighbor, the SID derived as
+        // base | Router-ID (the RID fills the low 32 bits).
+        let lan = lr_ospf::lsa::srv6::walk_lan_end_x_sub_tlvs(&out[0].sub_tlvs);
+        assert_eq!(lan.len(), 2);
+        assert_eq!(lan[0].neighbor_router_id, 0x0404_0404);
+        assert_eq!(lan[0].sid, v6_octets("2001:db8:a:1:ffff::404:404"));
+        assert_eq!(lan[0].behavior, 5);
+        assert_eq!(lan[1].neighbor_router_id, 0x0505_0505);
+        assert_eq!(lan[1].sid, v6_octets("2001:db8:a:1:ffff::505:505"));
+        // The §9.1 sub-TLV precedes the §9.2 instances on the wire
+        // (type 31 before 32 in emission order; the §9.1 instance is
+        // 4 + 24 = 28 octets, 4-aligned, so the LAN form starts at
+        // 28).
+        let t = u16::from_be_bytes([out[0].sub_tlvs[0], out[0].sub_tlvs[1]]);
+        assert_eq!(t, lr_ospf::lsa::srv6::EXT_SUBTLV_END_X_SID);
+        let t2 = u16::from_be_bytes([out[0].sub_tlvs[28], out[0].sub_tlvs[29]]);
+        assert_eq!(t2, lr_ospf::lsa::srv6::EXT_SUBTLV_LAN_END_X_SID);
+    }
+
+    #[test]
+    fn e_router_links_dr_has_no_9_1_dr_adjacency() {
+        // The DR describes itself (§A.4.3 self-referential shape): it
+        // has no adjacency to a DR, so no §9.1 sub-TLV — only the
+        // §9.2 LAN End.X per Full neighbor (BDR + DR-Others).
+        let links = vec![lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_TRANSIT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 5,
+            neighbor_router_id: 0x0303_0303, // ourselves
+        }];
+        let end_x_by_if = BTreeMap::new();
+        let mut lan_end_x_by_if = BTreeMap::new();
+        lan_end_x_by_if.insert(
+            5u32,
+            LanEndXSpec {
+                dr_sid: None,
+                base: Some((v6_octets("2001:db8:a:1:ffff::"), 0)),
+                neighbors: vec![0x0202_0202, 0x0404_0404],
+            },
+        );
+        let out = e_router_links(&links, &end_x_by_if, &lan_end_x_by_if);
+        assert!(lr_ospf::lsa::srv6::walk_end_x_sub_tlvs(&out[0].sub_tlvs).is_empty());
+        let lan = lr_ospf::lsa::srv6::walk_lan_end_x_sub_tlvs(&out[0].sub_tlvs);
+        assert_eq!(lan.len(), 2);
+        assert_eq!(lan[0].neighbor_router_id, 0x0202_0202);
+        assert_eq!(lan[0].sid, v6_octets("2001:db8:a:1:ffff::202:202"));
+    }
+
+    #[test]
+    fn e_router_links_p2p_keeps_the_plain_form() {
+        // A p2p link (§A.4.3 type 1) with the §9.1 SID configured:
+        // exactly one plain End.X, no LAN forms.
+        let links = vec![lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 77,
+            neighbor_router_id: 0x0202_0202,
+        }];
+        let mut end_x_by_if = BTreeMap::new();
+        end_x_by_if.insert(5u32, (v6_octets("2001:db8:a:1::100"), 0));
+        let out = e_router_links(&links, &end_x_by_if, &BTreeMap::new());
+        let plain = lr_ospf::lsa::srv6::walk_end_x_sub_tlvs(&out[0].sub_tlvs);
+        assert_eq!(plain.len(), 1);
+        assert_eq!(plain[0].sid, v6_octets("2001:db8:a:1::100"));
+        assert!(lr_ospf::lsa::srv6::walk_lan_end_x_sub_tlvs(&out[0].sub_tlvs).is_empty());
     }
 }
