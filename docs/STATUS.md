@@ -182,6 +182,7 @@ Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified
 | Go bindings | ✅ 🧪 | `bindings/lr-go` |
 | Python bindings | ✅ 🧪 | `bindings/lr-python` (cffi) |
 | C++ bindings | ✅ | header-only RAII wrapper over the C ABI (`include/librouting.hpp`) |
+| Config validation + typed IR (issue #18 Phase 1) | ✅ 🧪 | `lr-daemon config check <file>`: loads + finalizes a config without starting the daemon — same `daemon_config::load_config_file` entry startup and reload use (one path, no drift) — and prints the resolved view (dialect, protocol set, peers, networks, policy bank, babel/ospf/roa/redistribute counts, warnings); exit 0 valid / 1 invalid / 2 usage. `DaemonConfig` derives `PartialEq` (the typed IR), so configs are comparable for semantic equality; IR-equality golden tests pin determinism, variant equivalence, semantic `[[peer]]` ordering and the shipped template. Also fixed: TOML inline comments (`entry = 20 # …`) now parse — the shipped template previously did not |
 | Signal handling / privilege drop / config reload / runtime API in daemon | ✅ 🧪 | SIGTERM/SIGINT close sessions with a NOTIFICATION (RFC 4271 §6.4) then exit 0; SIGHUP + API `reload` re-apply `networks` (bad config keeps running); `--user`/`--group` setuid/setgid after bind; `--api-socket` Unix-socket management plane (status/sessions/routes/reload/shutdown); `daemon_runtime.rs` E2E |
 
 ## Testing & CI

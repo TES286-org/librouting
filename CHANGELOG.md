@@ -18,6 +18,24 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- **Typed configuration IR + `lr-daemon config check` (issue #18
+  Phase 1)** — the second slice of the TOML→DSL configuration
+  migration. `DaemonConfig` is now the single typed IR: it derives
+  `PartialEq`, so two parsed configurations are comparable for
+  semantic equality — the golden property the DSL frontend will be
+  validated against (a TOML config and its DSL translation are
+  equivalent iff they produce equal IRs). Daemon startup, SIGHUP/API
+  reload and the new validator all load through one
+  `daemon_config::load_config_file` entry point, so a config `check`
+  accepts is exactly a config a daemon accepts. `lr-daemon config
+  check <file>` loads + finalizes the file without starting the
+  daemon — template inheritance, cross-section name references and
+  every other `finalize` invariant run at config-editing time — and
+  prints the resolved view (dialect, protocol set, peers, networks,
+  policy bank, babel/ospf/roa/redistribute counts, parse warnings);
+  exit 0 valid / 1 invalid / 2 usage. IR-equality golden tests pin
+  parse determinism, variant equivalence, the semantic peer ordering
+  and the shipped template; 8 e2e tests cover the check paths.
 - **Filter DSL source spans + positioned diagnostics (issue #18
   Phase 0)** — the foundation for the TOML→DSL configuration
   migration. Every token, AST node and error produced by the filter
@@ -133,6 +151,14 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed
 
+- Inline comments in the daemon TOML subset parser. TOML allows a
+  `#` comment after any value, but `parse_toml_subset` only skipped
+  whole-line comments, so `entry = 20      # …` — present in the
+  shipped `templates/daemon.toml` itself — failed to parse as a bad
+  entry and `lr-daemon --config templates/daemon.toml` rejected the
+  template. Inline comments are now stripped with a quoted-string
+  -aware scanner: hashes inside values (`md5_key = "a#b"`, filter
+  bodies) stay data, and a `\` escape does not close the string.
 - OSPF DD/LSR packets are now unicast at the peer's address on
   broadcast segments (RFC 2328 §8.1 via RFC 5340 §4.2), in both the
   v2 and v3 daemons. Previously every session packet was multicast to

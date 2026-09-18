@@ -1950,10 +1950,10 @@ refactor — needs extensive regression tests.
 
 ## D16 — Configuration DSL migration (GitHub #18)
 
-**Status:** Phase 0 landed. Tracks `lr-policy::filter` + `lr-cli`
-(daemon config + `lrctl`). The tracked issue carries the full
-analysis and the phased compatibility plan; the phases land here as
-struck-through audit entries.
+**Status:** Phase 0 + Phase 1 landed. Tracks `lr-policy::filter` +
+`lr-cli` (daemon config + `lrctl`). The tracked issue carries the
+full analysis and the phased compatibility plan; the phases land here
+as struck-through audit entries.
 
 **Current gap.** The daemon runs two configuration languages inside
 one file: TOML for structure (~25 table types in `daemon_config.rs`)
@@ -1980,11 +1980,43 @@ is removed in 2.x, with a conversion tool in between (the existing
    decision either way. `MAX_EXPR_DEPTH` was recalibrated 128 → 108 to
    keep the recursion guard's debug-build stack margin under the
    fatter AST nodes (corpus boundary tests updated).
-2. **Phase 1 — IR extraction.** `daemon_config.rs` parses TOML into
-   the typed IR; new `lr config check` subcommand (validate + report
-   without starting the daemon). The IR-equality property (a TOML
-   config and its DSL translation are equivalent iff they produce
-   equal IRs) becomes the golden test.
+2. ~~**Phase 1 — IR extraction.**~~ Landed in five slices
+   (`516ad9e` IR equality, `5ca7f36` shared load entry,
+   `6c8b999` inline-comment fix, `9a95201` golden tests,
+   `1d587ca` e2e). The typed IR is `DaemonConfig` itself: every
+   section spec struct already derived `PartialEq` — the root
+   `DaemonConfig` gained it, so two parsed configurations are
+   comparable for semantic equality and the IR-equality property is
+   directly executable. Three surfaces load through one
+   `daemon_config::load_config_file` entry point (read file →
+   resolve dialect → parse → stamp `config_path`/`config_dialect`):
+   daemon startup (`parse_args`), SIGHUP / API `reload` and the new
+   `lr-daemon config check` validator, so the set of configs the
+   daemon accepts is exactly the set `check` accepts and the three
+   cannot drift apart. `config check` (riding the daemon binary like
+   `translate`/`yang`, no lib.rs split) runs the shared load plus
+   `finalize` — template inheritance, cross-section name references
+   (peer → peer-template, route-map → prefix-list), RPKI interval
+   bounds — and prints the resolved view (dialect, protocol set,
+   peers, networks, the policy bank, babel/ospf/roa/redistribute
+   counts, every parse warning) without starting the daemon;
+   exit 0 valid / 1 invalid / 2 usage. The golden tests pin the
+   equality contract Phase 2 will validate the DSL frontend against:
+   parse determinism (the shipped template twice → equal IRs),
+   variant equivalence (the two top-level protocol-set spellings and
+   re-ordered keys inside a table → equal IRs), inequality (one
+   differing field separates IRs; `[[peer]]` order is semantic —
+   peers match by index), and the shipped template as the standing
+   structured golden file. Eight e2e tests cover the check paths
+   (valid multi-section TOML, the golden template, positioned parse
+   errors, a finalize-only cross-section failure, BIRD detection,
+   forced dialect, usage errors, missing file). The golden test run
+   also exposed and fixed a real parser bug: TOML inline comments
+   (`entry = 20      # …`, present in `templates/daemon.toml`
+   itself) were rejected — `parse_toml_subset` now strips them with
+   a quoted-string-aware scanner (`md5_key = "a#b"` keeps its hash),
+   so `lr-daemon --config templates/daemon.toml` accepts the shipped
+   template again.
 3. **Phase 2 — DSL grammar for declarative sections.** Section
    declarations, typed key-value options (unit suffixes), named-object
    lists, `include "path";`, checked name resolution. Deliberately
@@ -2023,7 +2055,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D13       | landed                | —     | OSPFv3 E-LSA + SRv6 End.X — codecs (`lsa::e_v3`, the eight RFC 8362 types byte-pinned), reception (per-speaker E-preference in `run_spf_v3_extended`/`summary_routes_v3_extended`/`external_routes_v3_extended`, receiver-decided per §6.1/§6.2 — no wire negotiation exists), origination (`[ospf] extended_lsas` switches the daemon's E-Router/E-Network/E-Link/E-IAP forms; ABR/ASBR stays legacy), End.X/LAN End.X codecs (RFC 9513 §9.1/§9.2, types 31/32) + srv6db projection (§9 containment/algorithm gates) + `srv6_end_x` origination (sparse-mode companion E-Router-LSA under legacy mode) + **LAN End.X origination** (`srv6_end_x_lan` base derives per-neighbor §9.2 SIDs as `base | Router-ID` on broadcast segments, `srv6_end_x` covering the §9.1 DR adjacency); labs `ospf6_e_lsa.sh` + `ospf6_e_lsa_endx.sh` + `ospf6_e_lsa_endx_lan.sh` (the three-router bridge lab also pinned the multicast-DD fix: RFC 2328 §8.1 per-adjacency DD/LSR now unicast in both v2 and v3 daemons, and Full→2-Way demotions re-originate immediately). Follow-ups: BGP-LS projection (D11) |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
-| D16      | Phase 0 landed        | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics landed (lexer/AST/eval/VM + daemon/lrctl snippets, `MAX_EXPR_DEPTH` recalibrated 128 → 108); Phase 1 (typed IR extraction + `lr config check`) next |
+| D16      | Phase 0 + Phase 1 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics landed (lexer/AST/eval/VM + daemon/lrctl snippets, `MAX_EXPR_DEPTH` recalibrated 128 → 108); Phase 1 (typed IR + `lr config check`) landed — `PartialEq` IR equality, one `load_config_file` entry for startup/reload/check, the `lr-daemon config check` validator (shared load + finalize + resolved-view report), IR-equality golden tests (determinism, variant equivalence, peer-order semantics, shipped-template golden file) and 8 e2e tests; golden run exposed + fixed the inline-comment parser bug in the shipped template; Phase 2 (declarative DSL grammar + `lr config to-dsl`) next |
 
 Items flip to `~~struck through~~` here as they land, with a pointer
 to the landing commit. `STATUS.md` remains the live capability

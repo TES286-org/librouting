@@ -192,12 +192,17 @@ USAGE:
   lr-daemon --config bird.conf|frr.conf   (the dialect is auto-detected)
   lr-daemon translate <bird|frr> <config-file>
   lr-daemon yang render <config-file> [--model babel|keychain|all]
+  lr-daemon config check <config-file> [--dialect bird|frr|toml]
 
 SUBCOMMANDS:
   translate bird|frr FILE  Best-effort conversion of a BIRD 2 / FRR BGP
                            config into lr daemon TOML.
   yang render FILE         Render the Babel subset of a daemon TOML as
                            RFC 9647 / RFC 8177 XML instance data.
+  config check FILE        Validate a config file and print what it
+                           resolves to, without starting the daemon
+                           (same loader + finalize as startup; exit 0
+                           valid / 1 invalid / 2 usage).
 ```
 
 ### Quick start — single-peer BGP

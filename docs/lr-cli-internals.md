@@ -32,6 +32,7 @@ crates/lr-cli/src/
 ├── daemon_policy.rs    prefix-list / AS-path list / community-list /
 │                       route-map model — the config-side of lr-policy
 ├── translate.rs        `lr-daemon translate bird|frr FILE` (W5.1)
+├── config_check.rs     `lr-daemon config check FILE` (issue #18 Phase 1)
 ├── parity.rs           `lr parity-replay` + `lr mrt diff` (W5.3)
 ├── yang.rs             `lr-daemon yang render` (RFC 9647 / RFC 8177)
 ├── api.rs              Runtime API on the --api-socket Unix socket
