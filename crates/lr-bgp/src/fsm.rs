@@ -944,7 +944,9 @@ impl BgpPeer {
         // not substitute our own value.
         self.negotiated_hold_time = open.hold_time.min(self.cfg.hold_time);
         self.hold_remaining = (self.negotiated_hold_time as u64) * 1000;
-        self.keepalive_remaining = (self.cfg.keepalive_interval() as u64) * 1000;
+        let keepalive = self.cfg.keepalive_interval();
+        self.keepalive_remaining =
+            u64::from(keepalive.min((self.negotiated_hold_time / 3).max(1))) * 1000;
         let mut actions = vec![];
         if self.negotiated_hold_time > 0 {
             self.enqueue_keepalive();
@@ -1032,7 +1034,7 @@ impl BgpPeer {
                 self.enqueue_keepalive();
                 my_actions.push(BgpAction::SetTimer(
                     timer_ids::KEEPALIVE,
-                    TimerSpec::once((self.cfg.keepalive_interval() as u64) * 1000),
+                    TimerSpec::once(self.keepalive_remaining),
                 ));
                 BgpState::Established
             }
