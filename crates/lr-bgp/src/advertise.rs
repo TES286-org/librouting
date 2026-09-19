@@ -90,7 +90,7 @@ impl BgpPeer {
 
         // --- AS_PATH ---
         let mut as_path = attrs.as_path().unwrap_or_default();
-        if topo.role.prepends_as_path() {
+        if topo.role.prepends_as_path() && !topo.rs_client {
             as_path.prepend(self.cfg.local_as);
         }
         attrs.remove(AttrType::AsPath);
@@ -130,7 +130,7 @@ impl BgpPeer {
         let mut next_hop = route
             .next_hop
             .or_else(|| attrs.next_hop().map(|n| n.to_ip()));
-        if topo.role.rewrites_next_hop() {
+        if topo.role.rewrites_next_hop() && !topo.rs_client {
             if let Some(local) = self.cfg.local_address {
                 let enh_ipv4_over_v6 = route.key.family == NlriFamily::IPV4_UNICAST
                     && self.extended_next_hop_for(1, 1, 2);
