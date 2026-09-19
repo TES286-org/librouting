@@ -24,9 +24,9 @@ vendor lr):
 
 ```toml
 [dependencies]
-lr-bgp = "0.1"
-lr-core = "0.1"
-lr-router = "0.1"
+lr-bgp = "1.0.0-rc.4"
+lr-core = "1.0.0-rc.4"
+lr-router = "1.0.0-rc.4"
 ```
 
 ## Chapter 1 — the wire

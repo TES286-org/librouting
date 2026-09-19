@@ -28,7 +28,7 @@ the source is optional, so ordinary RFC 8966 routes are the
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-babel = "0.1"
+// lr-babel = "1.0.0-rc.4"
 
 use lr_babel::route::{BabelRoute, BabelRouteTable, RouteKey};
 use lr_babel::source::SourcePrefix;

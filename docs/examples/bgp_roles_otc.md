@@ -17,7 +17,7 @@ mechanically reject leaks (the defect `docs/research/BGP-DEFECTS.md`
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "0.1"
+// lr-bgp = "1.0.0-rc.4"
 
 use lr_bgp::role::OtcRole;
 

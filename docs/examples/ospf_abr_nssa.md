@@ -23,7 +23,7 @@ intra-area cost:
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-ospf = "0.1"
+// lr-ospf = "1.0.0-rc.4"
 
 use lr_core::addr::Prefix;
 use lr_ospf::abr::{originate_summary_lsa, SummaryDestination};

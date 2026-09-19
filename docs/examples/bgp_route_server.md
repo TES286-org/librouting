@@ -21,8 +21,8 @@ route directly to the original originator without transiting the RS).
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "0.1"
-// lr-policy = "0.1"
+// lr-bgp = "1.0.0-rc.4"
+// lr-policy = "1.0.0-rc.4"
 
 use lr_bgp::{BgpPeer, PeerConfig};
 use lr_bgp::role::RouteServerConfig;

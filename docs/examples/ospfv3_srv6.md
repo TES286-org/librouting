@@ -38,8 +38,8 @@ SIDs are derived from the locators by composition.
 // Cargo.toml:
 // [dependencies]
 // lr-srv6 = "0.1"
-// lr-ospf = "0.1"
-// lr-core = "0.1"
+// lr-ospf = "1.0.0-rc.4"
+// lr-core = "1.0.0-rc.4"
 
 use lr_core::addr::Prefix;
 use lr_ospf::lsa::srv6::{

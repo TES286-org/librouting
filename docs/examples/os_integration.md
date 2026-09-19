@@ -7,7 +7,7 @@ without further user-space intervention.
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-osroute = "0.1"
+// lr-osroute = "1.0.0-rc.4"
 
 use lr_osroute::{OsRouteTable, RtNetlink};
 use lr_core::addr::{Prefix, IpAddr};

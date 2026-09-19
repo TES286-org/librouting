@@ -12,9 +12,9 @@ shows the library-level pieces an embedder composes.
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "0.1"
-// lr-bfd = "0.1"
-// lr-core = "0.1"
+// lr-bgp = "1.0.0-rc.4"
+// lr-bfd = "1.0.0-rc.4"
+// lr-core = "1.0.0-rc.4"
 
 use lr_bgp::{BgpPeer, BgpEvent, PeerConfig};
 use lr_bfd::{BfdConfig, BfdSession, SessionRole};

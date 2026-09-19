@@ -42,8 +42,8 @@ real FRR `ldpd` in `tests/interop/ldp_frr.sh`.
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-ldp = "0.1"
-// lr-core = "0.1"
+// lr-ldp = "1.0.0-rc.4"
+// lr-core = "1.0.0-rc.4"
 
 use lr_core::addr::IpAddr;
 use lr_core::time::Instant;

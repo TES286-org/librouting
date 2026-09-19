@@ -43,9 +43,9 @@ AF_MPLS table.
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "0.1"
-// lr-mpls = "0.1"
-// lr-core = "0.1"
+// lr-bgp = "1.0.0-rc.4"
+// lr-mpls = "1.0.0-rc.4"
+// lr-core = "1.0.0-rc.4"
 
 use lr_bgp::path::AttrType;
 use lr_core::attr::{Attr, AttrTag};
