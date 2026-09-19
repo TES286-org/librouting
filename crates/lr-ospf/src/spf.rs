@@ -930,7 +930,7 @@ use crate::lsa::{
     V3RouterLsaBody, LINK_TYPE_POINTTOPOINT, LINK_TYPE_TRANSIT, LINK_TYPE_VIRTUAL,
     LS_TYPE_E_INTER_PREFIX, LS_TYPE_E_INTRA_PREFIX, LS_TYPE_E_LINK, LS_TYPE_E_NETWORK,
     LS_TYPE_E_ROUTER, LS_TYPE_INTER_PREFIX, LS_TYPE_INTRA_PREFIX, LS_TYPE_LINK, LS_TYPE_NETWORK,
-    LS_TYPE_ROUTER, PREFIX_OPT_LA, PREFIX_OPT_NU,
+    LS_TYPE_ROUTER, PREFIX_OPT_NU,
 };
 
 /// One vertex in the v3 SPF tree. Unlike v2, the Network vertex needs
@@ -1250,8 +1250,8 @@ impl V3Topology {
 ///   which indexes their Link-LSA;
 /// - deeper vertices inherit their parent's next hop (§16.1.1 (2)-(3));
 /// - the prefixes themselves arrive via Intra-Area-Prefix-LSAs attached
-///   to Router- or Network-LSAs (§4.4.3.5) — prefixes with the NU or LA
-///   bit set take no part in the unicast calculation (§A.4.1).
+///   to Router- or Network-LSAs (§4.4.3.9) — only the NU bit excludes
+///   prefixes from the unicast calculation (§4.8.1).
 ///
 /// Unresolvable next hops (missing Link-LSAs) still admit the vertex to
 /// the tree but leave the route without a gateway — the embedder
@@ -1462,10 +1462,8 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
         };
         let next_hop = result.next_hops.get(&vertex).copied();
         for p in prefixes {
-            // §A.4.1: NU-marked prefixes are excluded from the unicast
-            // calculation; LA-marked prefixes are the advertising
-            // router's own local address, never a forwarding target.
-            if p.options & (PREFIX_OPT_NU | PREFIX_OPT_LA) != 0 {
+            // §4.8.1: only NU excludes a prefix from unicast calculation.
+            if p.options & PREFIX_OPT_NU != 0 {
                 continue;
             }
             let prefix = Prefix::new_v6(p.addr, p.prefix_len);
@@ -1955,10 +1953,10 @@ mod v3_tests {
         assert_eq!(route.next_hop, None);
     }
 
-    /// Prefixes carrying the NU or LA bit are excluded from the unicast
-    /// calculation (§A.4.1).
+    /// RFC 5340 §4.8.1 excludes NU prefixes; LA interface addresses
+    /// remain reachable through their advertising router (§A.4.1).
     #[test]
-    fn v3_nu_and_la_prefixes_excluded() {
+    fn v3_la_prefixes_are_reachable_unless_nu_is_set() {
         let mut db = Lsdb::new();
         let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
         let link = crate::lsa::v3::V3RouterLink {
@@ -1991,12 +1989,16 @@ mod v3_tests {
             originate_v3_link_lsa(r2, 3, 1, 0x13, fe80(2), vec![], None).unwrap(),
             0,
         );
-        // r2 advertises three prefixes: normal, NU, LA.
+        // r2 advertises normal, NU, LA and LA+NU prefixes.
         let normal = net64(3);
         let mut nu = net64(4);
         nu.options = crate::lsa::v3::PREFIX_OPT_NU;
         let mut la = net64(5);
+        la.prefix_len = 128;
         la.options = crate::lsa::v3::PREFIX_OPT_LA;
+        let mut la_nu = net64(6);
+        la_nu.prefix_len = 128;
+        la_nu.options = crate::lsa::v3::PREFIX_OPT_LA | crate::lsa::v3::PREFIX_OPT_NU;
         db.install(
             originate_v3_intra_area_prefix_lsa(
                 r2,
@@ -2004,16 +2006,24 @@ mod v3_tests {
                 LS_TYPE_ROUTER,
                 0,
                 r2,
-                vec![normal.clone(), nu, la],
+                vec![normal.clone(), nu.clone(), la.clone(), la_nu.clone()],
                 None,
             )
             .unwrap(),
             0,
         );
-        let spf = run_spf_v3(&db, r1);
-        assert!(spf.routes.iter().any(|r| r.prefix == route_of(&normal)));
-        assert!(!spf.routes.iter().any(|r| r.prefix == route_of(&net64(4))));
-        assert!(!spf.routes.iter().any(|r| r.prefix == route_of(&net64(5))));
+        for spf in [run_spf_v3(&db, r1), run_spf_v3_extended(&db, r1)] {
+            assert!(spf.routes.iter().any(|r| r.prefix == route_of(&normal)));
+            assert!(!spf.routes.iter().any(|r| r.prefix == route_of(&nu)));
+            assert!(!spf.routes.iter().any(|r| r.prefix == route_of(&la_nu)));
+            let host = spf
+                .routes
+                .iter()
+                .find(|r| r.prefix == route_of(&la))
+                .unwrap();
+            assert_eq!(host.metric, 10);
+            assert_eq!(host.next_hop, Some(IpAddr::V6(fe80(2))));
+        }
     }
 
     /// A missing Link-LSA leaves the vertex reachable but without a
