@@ -4854,19 +4854,24 @@ fn reload_config(
     let mut fresh = DaemonConfig::default();
     // The reload goes through the same dialect path as startup: a
     // config loaded from a BIRD/FRR file re-parses as BIRD/FRR, so a
-    // compat-mode daemon does not break on SIGHUP. `load_config_file`
-    // is the shared entry point (issue #18 Phase 1) — startup, reload
-    // and `config check` cannot drift apart.
+    // compat-mode daemon does not break on SIGHUP. The name here is
+    // the effective dialect `load_config_file` stamped at startup, so
+    // resolve it through `Dialect::from_flag` — the same parser the
+    // `--config-dialect` flag uses. (A hand-rolled match stood here
+    // and was exactly how the match drifted from the frontend work:
+    // the native `.lr` dialect landed in Phase 2 but reload kept
+    // reporting "unknown config dialect 'lr'".) `load_config_file` is
+    // the shared entry point (issue #18 Phase 1) — startup, reload
+    // and `config check` cannot drift apart. No stamped dialect (an
+    // empty file) keeps the historical TOML-subset fallback shape.
     let forced = match dialect {
-        Some("bird") => Some(crate::compat::Dialect::Bird),
-        Some("frr") => Some(crate::compat::Dialect::Frr),
-        Some("toml") | None => Some(crate::compat::Dialect::Toml),
-        Some(other) => {
-            return vec![format!(
-                "reload: unknown config dialect '{}' (keeping current config)",
-                other
-            )]
-        }
+        Some(name) => match crate::compat::Dialect::from_flag(name) {
+            Ok(d) => Some(d),
+            Err(e) => {
+                return vec![format!("reload: {e} (keeping current config)")];
+            }
+        },
+        None => Some(crate::compat::Dialect::Toml),
     };
     if let Err(e) = daemon_config::load_config_file(path, forced, &mut fresh) {
         return vec![format!("reload: {} (keeping current config)", e)];
