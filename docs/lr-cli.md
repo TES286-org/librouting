@@ -192,7 +192,8 @@ USAGE:
   lr-daemon --config bird.conf|frr.conf   (the dialect is auto-detected)
   lr-daemon translate <bird|frr> <config-file>
   lr-daemon yang render <config-file> [--model babel|keychain|all]
-  lr-daemon config check <config-file> [--dialect bird|frr|toml]
+  lr-daemon config check <config-file> [--dialect lr|toml|bird|frr]
+  lr-daemon config to-dsl <config-file> [--dialect lr|toml|bird|frr]
 
 SUBCOMMANDS:
   translate bird|frr FILE  Best-effort conversion of a BIRD 2 / FRR BGP
@@ -203,6 +204,11 @@ SUBCOMMANDS:
                            resolves to, without starting the daemon
                            (same loader + finalize as startup; exit 0
                            valid / 1 invalid / 2 usage).
+  config to-dsl FILE       Print the config as an equivalent native
+                           .lr program (see docs/config_dsl_grammar.md).
+                           Deterministic; refuses input it cannot
+                           represent faithfully; exit 0 ok / 1 error /
+                           2 usage.
 ```
 
 ### Quick start — single-peer BGP
@@ -354,8 +360,8 @@ overrides live under `[[peer]]` and inherit the global when omitted.
 | `--local-as AS` | `local_as` | (required) | Local autonomous system. |
 | `--peer-as AS` | `peer_as` | (required for legacy single-peer) | Remote AS for `--peer`. Per-peer `peer_as` overrides. |
 | `--router-id A.B.C.D` | `router_id` | (required for BGP) | BGP Identifier. |
-| `--config PATH` | (config file) | — | The dialect (lr TOML, BIRD 2, FRR) is auto-detected. |
-| `--config-dialect D` | — | auto | `bird` / `frr` / `toml` forces one. |
+| `--config PATH` | (config file) | — | The dialect (lr TOML, the native `.lr` DSL, BIRD 2, FRR) is auto-detected. |
+| `--config-dialect D` | — | auto | `lr` / `toml` / `bird` / `frr` forces one. Filter-only `.lr` files are ambiguous with BIRD and need the flag. |
 | `--peer ADDR:PORT` | `[[peer]] remote` | (repeatable) | Outbound peer; per-peer `--peer-as` shared. |
 | `--listen ADDR:PORT` | `listen_addr` | — | Accept inbound BGP connections. |
 | `--network PREFIX` | `[[networks]] prefix` | (repeatable) | Locally originate prefix. |

@@ -18,6 +18,28 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- **Native `.lr` configuration DSL + `lr-daemon config to-dsl`
+  converter (issue #18 Phase 2)** — the TOML→DSL migration's core
+  slice. The daemon now accepts a declarative DSL
+  (`docs/config_dsl_grammar.md`): blocks with identity arguments,
+  typed key-value statements with whitelisted duration/scale unit
+  suffixes (`hold_time 90s;`), verbatim filter bodies between braces
+  (no string escaping — `filter in { if roa.state == ROA_UNKNOWN
+  then accept; }`), and cycle-checked `include "peers.lr";` with
+  per-file diagnostics. Both frontends lower through one
+  `apply_config_key` dispatch, so `.lr` and TOML share the exact
+  fail-closed key schema and cannot drift; `--config-dialect lr`
+  forces the dialect and content detection recognizes lr-exclusive
+  block headers. `lr-daemon config to-dsl <file>` converts any
+  accepted config (TOML, BIRD, FRR, `.lr`) into a deterministic `.lr`
+  program — fixed order, unset fields omitted — refusing rather than
+  silently dropping anything unrepresentable (parse warnings, filter
+  descriptions). Correctness is pinned by the IR-equality round-trip
+  property: a kitchen-sink fixture covering every key of every
+  section and the shipped template must survive
+  `parse(TOML) → to-dsl → parse(lr)` byte-equal; 7 e2e tests cover
+  the CLI. Also fixed: a TOML file whose first line is an assignment
+  (`protocol = "bgp"`) was misdetected as BIRD.
 - **Typed configuration IR + `lr-daemon config check` (issue #18
   Phase 1)** — the second slice of the TOML→DSL configuration
   migration. `DaemonConfig` is now the single typed IR: it derives

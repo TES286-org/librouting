@@ -23,12 +23,16 @@ Design ground rules (issue #18, maintainer guidance 2026-09-15):
   options (with duration/scale unit suffixes), named-object blocks and
   `include`. Deliberately absent: loops, arbitrary expressions,
   variables, side effects.
-- **Fail closed.** Unknown keys inside a known section are errors
-  (typo protection), exactly like the TOML frontend. Unknown block
-  names are errors too — the TOML frontend tolerates unknown sections
-  with a warning for forward compatibility, but a brand-new DSL has no
-  legacy files to keep loadable, so it can afford strictness from day
-  one.
+- **Fail closed where it matters.** The key schema is literally the
+  TOML frontend's shared dispatch: unknown keys inside the protocol
+  and policy sections (`ospf`, `babel`, `ldp`, `damping`, `rpki`,
+  `peer`, the policy bank, `roa`, `filter`, `redistribute`,
+  `aggregate`) are hard errors (typo protection), while unknown keys
+  under `[bgp]` and at top level stay tolerated-with-warning for
+  forward compatibility — the exact posture of the TOML frontend,
+  because it is the same code. Unknown block names are always errors:
+  a brand-new DSL has no legacy files to keep loadable, so it can
+  afford strictness from day one.
 
 ## Lexical structure
 

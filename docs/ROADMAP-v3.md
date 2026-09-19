@@ -2017,14 +2017,38 @@ is removed in 2.x, with a conversion tool in between (the existing
    a quoted-string-aware scanner (`md5_key = "a#b"` keeps its hash),
    so `lr-daemon --config templates/daemon.toml` accepts the shipped
    template again.
-3. **Phase 2 — DSL grammar for declarative sections.** Section
-   declarations, typed key-value options (unit suffixes), named-object
-   lists, `include "path";`, checked name resolution. Deliberately
-   NOT added: loops, arbitrary expressions, side effects — the
-   declarative layer stays non-Turing-complete. Deterministic
-   `lr config to-dsl` converter following the `translate.rs` philosophy
-   (unmappable → loud error, never silent drop); golden-file tests +
-   the IR-equality round-trip property.
+3. ~~**Phase 2 — DSL grammar for declarative sections.**~~ Landed
+   in four slices (`b8f84e1` grammar spec, `e2f803d` shared
+   `apply_config_key` dispatch refactor, `5ec47f9` lexer + parser +
+   lowering + dialect wiring, `a378dd5` converter, `a195fcc`
+   kitchen-sink + e2e tests). The native `.lr` dialect is specified
+   in `docs/config_dsl_grammar.md`: blocks with identity arguments
+   (`peer "core-1" { … }`), typed key-value statements with
+   whitelisted duration/scale unit suffixes (`hold_time 90s;` —
+   scoped per (section, key) because `hello_interval` is seconds
+   under OSPF but milliseconds in a Babel interface), verbatim filter
+   bodies between braces (no string escaping; brace matching is
+   string/comment-aware via the shared lexer, so `case` blocks,
+   prefix ranges and `#` comments survive), and cycle-checked
+   `include` splicing with per-file diagnostics. The parser holds no
+   AST: every statement lowers immediately into
+   `daemon_config::apply_config_key` — the dispatch extracted from
+   the TOML subset parser — so both frontends share one fail-closed
+   key schema and cannot drift. `Dialect::Lr` joins toml/bird/frr in
+   `--config-dialect` and content detection (lr-exclusive block
+   headers; `filter`-only files stay with BIRD's heuristic and need
+   the flag). `lr-daemon config to-dsl <file>` renders the
+   pre-finalize IR deterministically (fixed order, BTreeMap-sorted
+   templates, unset fields omitted) and refuses — never silently
+   drops — configs carrying parse warnings, filters with
+   `description` (no DSL spelling yet), and list elements that cannot
+   round-trip through the array channel. Emission rule: emit every
+   field differing from `DaemonConfig::default()`, which makes
+   `parse(TOML) → to-dsl → parse(lr)` an IR-equality identity from
+   both seed contexts; the kitchen-sink fixture exercises every key
+   of every section and the shipped template pins the golden file.
+   Deliberately NOT added: loops, arbitrary expressions, side
+   effects — the declarative layer stays non-Turing-complete.
 4. **Phase 3 — daemon accepts `.lr` natively.** Docs/examples switch
    to DSL-first; TOML remains fully supported.
 5. **Phase 4 — TOML deprecation window.** Load-time warning +
@@ -2055,7 +2079,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D13       | landed                | —     | OSPFv3 E-LSA + SRv6 End.X — codecs (`lsa::e_v3`, the eight RFC 8362 types byte-pinned), reception (per-speaker E-preference in `run_spf_v3_extended`/`summary_routes_v3_extended`/`external_routes_v3_extended`, receiver-decided per §6.1/§6.2 — no wire negotiation exists), origination (`[ospf] extended_lsas` switches the daemon's E-Router/E-Network/E-Link/E-IAP forms; ABR/ASBR stays legacy), End.X/LAN End.X codecs (RFC 9513 §9.1/§9.2, types 31/32) + srv6db projection (§9 containment/algorithm gates) + `srv6_end_x` origination (sparse-mode companion E-Router-LSA under legacy mode) + **LAN End.X origination** (`srv6_end_x_lan` base derives per-neighbor §9.2 SIDs as `base | Router-ID` on broadcast segments, `srv6_end_x` covering the §9.1 DR adjacency); labs `ospf6_e_lsa.sh` + `ospf6_e_lsa_endx.sh` + `ospf6_e_lsa_endx_lan.sh` (the three-router bridge lab also pinned the multicast-DD fix: RFC 2328 §8.1 per-adjacency DD/LSR now unicast in both v2 and v3 daemons, and Full→2-Way demotions re-originate immediately). Follow-ups: BGP-LS projection (D11) |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
-| D16      | Phase 0 + Phase 1 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics landed (lexer/AST/eval/VM + daemon/lrctl snippets, `MAX_EXPR_DEPTH` recalibrated 128 → 108); Phase 1 (typed IR + `lr config check`) landed — `PartialEq` IR equality, one `load_config_file` entry for startup/reload/check, the `lr-daemon config check` validator (shared load + finalize + resolved-view report), IR-equality golden tests (determinism, variant equivalence, peer-order semantics, shipped-template golden file) and 8 e2e tests; golden run exposed + fixed the inline-comment parser bug in the shipped template; Phase 2 (declarative DSL grammar + `lr config to-dsl`) next |
+| D16      | Phase 0 + Phase 1 + Phase 2 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics (Phase 0); typed IR + `lr config check` (Phase 1); native `.lr` DSL (Phase 2) — grammar spec in `docs/config_dsl_grammar.md`, blocks with identities, unit suffixes whitelisted per (section, key), verbatim filter bodies, includes, shared `apply_config_key` dispatch so TOML and `.lr` cannot drift, `Dialect::Lr` detection + `--config-dialect lr`, deterministic `lr config to-dsl` converter (fail-loud on unrepresentables), kitchen-sink round-trip over every key + 7 e2e tests; Phase 3 (daemon accepts `.lr` natively everywhere, docs/examples switch DSL-first) next |
 
 Items flip to `~~struck through~~` here as they land, with a pointer
 to the landing commit. `STATUS.md` remains the live capability
