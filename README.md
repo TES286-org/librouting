@@ -95,12 +95,12 @@ lr-daemon --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
 
 **Multi-peer.** The daemon runs any number of BGP sessions at once.
 `--peer` is repeatable (all such peers share `--peer-as`); full
-per-peer configuration uses `[[peer]]` tables in the TOML config
-(see `templates/daemon.toml`): per-peer AS, hold time, graceful
+per-peer configuration uses `peer` blocks in the native `.lr` config
+(see `templates/daemon.lr`): per-peer AS, hold time, graceful
 restart, auth, GTSM, maximum-prefix, Add-Path, MP families and
-next-hop source, each inheriting the `[bgp]` globals when omitted.
-Reusable defaults live in `[peer-template.<name>]` tables that peers
-pull in via `extends = "<name>"` (per-peer keys override template
+next-hop source, each inheriting the `bgp` block globals when
+omitted. Reusable defaults live in `peer-template` blocks that peers
+pull in via `extends "name"` (per-peer keys override template
 keys; chains supported). Outbound peers get one connector thread each
 (independent reconnect backoff); the listener accepts concurrent
 inbound sessions and matches them to configured peers by source
@@ -108,35 +108,40 @@ address (`address` key), rejecting connections that match none. Event consumptio
 installation) is centralised on the ticker thread, preserving Loc-RIB
 ordering across sessions.
 
-```toml
-[bgp]
-local_as = 64512
-router_id = "10.0.0.1"
-local_address = "192.0.2.1"
-listen_addr = "0.0.0.0:1179"
-networks = ["203.0.113.0/24"]
+```lr
+bgp {
+    local_as 64512;
+    router_id "10.0.0.1";
+    local_address "192.0.2.1";
+    listen_addr "0.0.0.0:1179";
+    networks ["203.0.113.0/24"];
+}
 
-[[peer]]
-name = "transit-a"
-remote = "192.0.2.2:179"    # outbound: dial this peer
-peer_as = 64513
-md5_key = "alpha"
+peer "transit-a" {
+    remote "192.0.2.2:179";     # outbound: dial this peer
+    peer_as 64513;
+    md5_key "alpha";
+}
 
-[[peer]]
-name = "customer-b"
-address = "198.51.100.2"    # inbound: accept from this source
-peer_as = 64514
-max_prefixes = 1000
+peer "customer-b" {
+    address "198.51.100.2";     # inbound: accept from this source
+    peer_as 64514;
+    max_prefixes 1000;
+}
 ```
 
-A TOML config (`templates/daemon.toml`) is supported via `--config`,
-including routing policy: `[[prefix-list]]`, `[[as-path-list]]`,
-`[[community-list]]` and `[[route-map]]` tables attached per peer
-with `import = "<route-map>"` / `export = "<route-map>"` (FRR-style
-first-match / implicit-deny semantics; set actions include
-`set_local_pref`, `set_med`, `set_next_hop`, `prepend` and
-`add_community`). Unknown references fail at startup — policy never
-silently passes traffic.
+The native `.lr` DSL (grammar: `docs/config_dsl_grammar.md`) carries
+the structure *and* the policy: `prefix-list` / `as-path-list` /
+`community-list` / `route-map` blocks attached per peer with
+`import "route-map"` / `export "route-map"` (FRR-style first-match /
+implicit-deny semantics; set actions include `set_local_pref`,
+`set_med`, `set_next_hop`, `prepend` and `add_community`), and
+`filter` blocks embed the BIRD-like filter language verbatim — no
+string escaping. Unknown references fail at startup — policy never
+silently passes traffic. The TOML subset (`templates/daemon.toml`)
+stays fully supported as the compatibility spelling — deprecated
+through 1.x, planned for removal in 2.x — and
+`lr-daemon config to-dsl` converts existing files.
 
 **OSPF mode.** `--protocol ospf` runs the OSPFv2 daemon instead of
 BGP: one raw socket (IP protocol 89) per configured interface,
@@ -144,9 +149,10 @@ multicast Hellos to 224.0.0.5, dynamic neighbor discovery, the full
 RFC 2328 §7.2 DBD/LSR database exchange to Full adjacency
 (interop-verified against BIRD 2), per-area Router-LSA origination
 and dead-timer teardown. Interfaces and areas
-are configured with `[[ospf.interface]]` / `[[ospf.area]]` tables
+are configured with `ospf { interface "eth0" { } }` /
+`ospf { area 1 { type "stub"; } }` blocks in the native `.lr` config
 (stub/NSSA area types supported) or the `--ospf-interface` /
-`--ospf-area` CLI flags; BGP tables in the same file are ignored in
+`--ospf-area` CLI flags; BGP blocks in the same file are ignored in
 OSPF mode. Raw sockets need root or a user/network namespace — the
 interop lab runs the whole thing rootless via `unshare -Urn` (see
 `tests/interop/ospf.sh`). Current scope: OSPFv2; segments behave
@@ -201,7 +207,7 @@ group (224.0.0.2) per configured interface originates link Hellos
 every hold-time third with TTL 1, targeted Hellos reach peers without
 a shared link, and the TCP session transport carries Initialization,
 Address and Label Mapping messages (§2.5.4 negotiation, downstream
-unsolicited). Configured FEC-label bindings (`[[ldp.bind]]`, label
+unsolicited). Configured FEC-label bindings (`ldp { bind … }` blocks, label
 16..=1048575 with `0` auto-allocating from 16) are advertised to every
 operational peer; learned bindings surface as events and in the
 runtime API status. Verified against FRR 10 ldpd (see
@@ -269,7 +275,7 @@ librouting/
 │   ├── examples/*.md                    # per-scenario deep dives
 │   ├── research/{BGP-DEFECTS,EXCHANGE-PLANE}.md
 │   └── scaffolding/README.md            # starter project generator
-├── templates/                            # scaffolding templates + daemon.toml
+├── templates/                            # scaffolding templates + daemon.lr/daemon.toml
 ├── tests/                                # FFI harness + interop scripts (BIRD/FRR)
 ├── include/{lr_ffi.h, librouting.hpp}   # C ABI header + C++ RAII wrapper
 └── .github/workflows/                    # ci.yml + nightly miri + release.yml
@@ -297,7 +303,7 @@ readers by audience. The canonical references:
 | Per-scenario example walkthroughs                              | [`docs/examples/`](docs/examples/)         | operators     |
 | BGP defects catalogue + exchange-plane design                 | [`docs/research/`](docs/research/)         | contributors  |
 | Scaffolding guide (starter projects)                           | [`docs/scaffolding/README.md`](docs/scaffolding/README.md) | contributors  |
-| Templates (incl. fully-commented `daemon.toml`)                | [`templates/`](templates/)                 | operators     |
+| Templates (incl. fully-commented `daemon.lr`/`daemon.toml`)     | [`templates/`](templates/)                 | operators     |
 
 ## BGP topology support
 
@@ -376,7 +382,7 @@ received route, and one without an export policy advertises nothing —
 stale Adj-RIB-Out entries are withdrawn. Policy presence is declared per
 session with `set_session_policy(handle, import, export)`; iBGP is
 exempt. The shipped daemon enables the mode by default
-(`[bgp] ebgp_policy = "rfc8212"`; `accept-all` restores the RFC 4271
+(`ebgp_policy "rfc8212";` in the bgp block; `accept-all` restores the RFC 4271
 default-accept the RFC permits as a deviation).
 
 ### FRR `bgp enforce-first-as` + `bgp bestpath compare-routerid`
@@ -385,11 +391,11 @@ default-accept the RFC permits as a deviation).
 bgp enforce-first-as`) drops eBGP UPDATEs whose leftmost AS_PATH
 sequence segment's first AS is not the peer's negotiated AS, surfacing
 the rejection as a `RouterEvent::Log`. iBGP and confederation-internal
-sessions are exempt. The shipped daemon exposes it as `[bgp]
-enforce_first_as = true` (CLI `--enforce-first-as` /
+sessions are exempt. The shipped daemon exposes it as
+`bgp { enforce_first_as true; }` (CLI `--enforce-first-as` /
 `--no-enforce-first-as`); FFI/Go/Python bindings mirror the call. FRR
-`bgp bestpath compare-routerid` is exposed via `[bgp]
-bestpath_compare_routerid` (default `true` — RFC 5004 deterministic; the
+`bgp bestpath compare-routerid` is exposed via the bgp block's
+`bestpath_compare_routerid` key (default `true` — RFC 5004 deterministic; the
 inverse of FRR's default).
 
 ### FRR `bgp default ipv4-unicast`
@@ -400,7 +406,8 @@ unicast is implicitly active for a peer even when `mp_families` does
 not list it. The FSM gates legacy-section IPv4 NLRI (withdrawals,
 NLRI, EoR) on `PeerConfig::ipv4_unicast_active()`; egress in
 `advertise.rs` and the families listed by Add-Path / LLGR capabilities
-follow. The shipped daemon exposes it as `[bgp] default_ipv4_unicast`
+follow. The shipped daemon exposes it as the bgp block key
+`default_ipv4_unicast`
 (default `true`) with per-peer override; CLI `--no-default-ipv4-unicast`
 matches FRR `no bgp default ipv4-unicast`.
 
@@ -410,7 +417,8 @@ matches FRR `no bgp default ipv4-unicast`.
 of the local AS in a received AS_PATH — RFC 4271 §9.1.2.15) controls
 the per-peer AS-loop tolerance. `N > 0` admits up to N occurrences
 (FRR `allowas-in N`); `u32::MAX` admits any number (FRR `allowas-any`).
-iBGP is exempt. The shipped daemon exposes it as `[bgp] allow_local_as`
+iBGP is exempt. The shipped daemon exposes it as the bgp block key
+`allow_local_as`
 (default `0`) with per-peer override; CLI `--allow-local-as [N]` /
 `--allowas-any`. Landing this also fixed a latent bug in the safety
 net's `local_as_count` that silently broke `reject_as_loop` for routes
@@ -426,14 +434,14 @@ from the peer (`clear ip bgp * soft in`). The cost is duplicate RIB
 memory per peer, which is why it is opt-in.
 `DefaultRouter::soft_reconfig_inbound(h)` is the op that re-evaluates
 the import policy against the stored pre-policy routes. The shipped
-daemon exposes it as `[bgp] soft_reconfig_inbound` (default `false`)
+daemon exposes it as the bgp block key `soft_reconfig_inbound` (default `false`)
 with per-peer override; CLI `--soft-reconfig-inbound` /
 `--no-soft-reconfig-inbound`.
 
 ### ROA prefix-origin validation (RFC 6811)
 
-`[bgp] roa_validate = true` arms RFC 6811 §2 prefix-origin validation.
-`[[roa]]` tables load ROA entries at startup; every received BGP
+`roa_validate true;` in the bgp block arms RFC 6811 §2 prefix-origin validation.
+`roa` blocks load ROA entries at startup; every received BGP
 UPDATE is validated against the router-wide `RoaTable` at import
 time. `roa_invalid_action` controls the `Invalid` outcome:
 `"reject"` (default, drop), `"warn"` (accept with log), or
@@ -444,8 +452,8 @@ same table regardless of `roa_validate` — so
 
 ### BIRD-like filter DSL
 
-`[[filter]]` tables compile a BIRD-like filter body and attach it to
-peers via `import_filter = "name"` / `export_filter = "name"`. The
+`filter` blocks capture a BIRD-like filter body verbatim and attach
+it to peers via `import_filter "name"` / `export_filter "name"`. The
 DSL supports `if/then/else`, `let` bindings, arithmetic, comparison,
 boolean and bitwise operators, prefix-set membership
 (`net ~ [ 10.0.0.0/8{16,24} ]`), route attribute access and mutation
@@ -457,7 +465,7 @@ See `docs/examples/filter_dsl_roa.md` for the full grammar and
 
 ### Babel multi-NIC with glob patterns
 
-`[[babel.interface]]` blocks configure per-interface Babel parameters
+`babel { interface "eth*" { } }` blocks configure per-interface Babel parameters
 (RFC 8966 §A.2) with shell-like glob patterns (`*`, `?`, `\`). The
 daemon enumerates system interfaces via `getifaddrs(3)`, matches
 each name against the patterns in file order, and uses the first
@@ -529,7 +537,8 @@ The documentation set lives under `docs/`. Start at
 - User-facing: [`docs/lr-cli.md`](docs/lr-cli.md) (CLI user guide),
   [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (operations),
   [`docs/tutorial.md`](docs/tutorial.md) (book-style tutorial),
-  `templates/daemon.toml` (fully-commented reference config).
+  `templates/daemon.lr` (fully-commented reference config, native
+  DSL) and its TOML twin `templates/daemon.toml`.
 - Embedder-facing: [`docs/API.md`](docs/API.md) (public Rust API tour),
   [`docs/bindings/{c,cpp,go,python}.md`](docs/bindings) (per-language
   embedding guides), [`docs/examples/`](docs/examples) (worked scenarios).

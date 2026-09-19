@@ -283,8 +283,9 @@ interop suite.
 
 * **Policy**: import/export hooks, prefix-lists, route-maps —
   `docs/API.md` §Policy and `crates/lr-policy`.
-* **The daemon**: TOML config, runtime API, kernel FIB mirroring —
-  `README.md`'s quick start and `templates/daemon.toml`.
+* **The daemon**: the native `.lr` config, runtime API, kernel FIB
+  mirroring —
+  `README.md`'s quick start and `templates/daemon.lr`.
 * **Interop**: how lr is verified against BIRD 2 and FRR 10 —
   `docs/INTEROP.md`.
 * **Architecture**: the layering and extension points behind the

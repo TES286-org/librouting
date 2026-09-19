@@ -30,7 +30,8 @@ layout and extension points see
 [`lr-cli-internals.md`](lr-cli-internals.md). For the runtime API
 exposed on the management socket, see
 [`RUNBOOK.md`](RUNBOOK.md). For every config key (with line-by-line
-explanation), see `templates/daemon.toml`.
+explanation), see `templates/daemon.lr` — the fully-commented native
+DSL reference (`templates/daemon.toml` is its TOML twin).
 
 ---
 
@@ -188,7 +189,7 @@ USAGE:
   lr-daemon --local-as AS --peer-as AS --router-id A.B.C.D \
             [--peer ADDR:PORT]... [--listen ADDR:PORT] \
             [--network PREFIX]... [--hold-time SEC]
-  lr-daemon --config daemon.toml [--install-kernel-routes]
+  lr-daemon --config daemon.lr [--install-kernel-routes]
   lr-daemon --config bird.conf|frr.conf   (the dialect is auto-detected)
   lr-daemon translate <bird|frr> <config-file>
   lr-daemon yang render <config-file> [--model babel|keychain|all]
@@ -225,53 +226,56 @@ cargo build --release -p lr-cli
     --install-kernel-routes
 ```
 
-The same shape as a TOML file:
+The same shape as a native `.lr` config file:
 
-```toml
-[bgp]
-local_as     = 64512
-peer_as      = 64513
-router_id    = "10.0.0.1"
-peer_addr    = "192.0.2.2:179"
-local_address = "192.0.2.1"
-hold_time    = 90
-install_kernel = true
-
-[[networks]]
-prefix = "203.0.113.0/24"
+```lr
+bgp {
+    local_as       64512;
+    peer_as        64513;
+    router_id      "10.0.0.1";
+    peer_addr      "192.0.2.2:179";
+    local_address  "192.0.2.1";
+    hold_time      90s;
+    install_kernel true;
+    networks       ["203.0.113.0/24"];
+}
 ```
 
 ```sh
-./target/release/lr-daemon --config daemon.toml
+./target/release/lr-daemon --config daemon.lr
 ```
 
-### Multi-peer — `[[peer]]` tables
+### Multi-peer — `peer` blocks
 
-Add one `[[peer]]` table per remote. Every key inherits the `[bgp]`
+Add one `peer` block per remote. Every key inherits the `bgp` block
 globals when omitted, so a peer can be as short as the address:
 
-```toml
-[bgp]
-local_as  = 64512
-router_id = "10.0.0.1"
+```lr
+bgp {
+    local_as  64512;
+    router_id "10.0.0.1";
+}
 
-[[peer]]
-remote   = "192.0.2.2:179"
-peer_as  = 64513
-import   = "from-upstream"
-export   = "to-upstream"
+peer "upstream" {
+    remote "192.0.2.2:179";      # outbound: dial this peer
+    peer_as 64513;
+    import "from-upstream";
+    export "to-upstream";
+}
 
-[[peer]]
-address  = "192.0.2.3"        # listen-only, expected source IP
-peer_as  = 64514
-bfd      = true
+peer "customer" {
+    address "192.0.2.3";         # listen-only, expected source IP
+    peer_as 64514;
+    bfd true;
+}
 ```
 
 The same shape on the command line: `--peer ADDR:PORT` is
 repeatable; all `--peer` instances share `--peer-as`. Per-peer
-settings require TOML.
+settings require a config file (the native `.lr` DSL, or the TOML
+twin with the same key names).
 
-A `[[peer]]` that combines `remote` and `address` is bidirectional:
+A `peer` block that combines `remote` and `address` is bidirectional:
 the daemon connects out **and** accepts inbound connections for it,
 running the two transports on separate sessions and resolving the
 collision per RFC 4271 §6.8 — the connection initiated by the
@@ -351,20 +355,21 @@ plane (see [`RUNBOOK.md`](RUNBOOK.md) for the command protocol).
 
 ### Daemon flag reference (BGP)
 
-Every flag below has a TOML counterpart documented in
-`templates/daemon.toml`. "Global" keys live under `[bgp]`; per-peer
-overrides live under `[[peer]]` and inherit the global when omitted.
+Every flag below has a config counterpart documented in
+`templates/daemon.lr` (the TOML twin keeps the same key names).
+"Global" keys live in the `bgp` block; per-peer
+overrides live in `peer` blocks and inherit the global when omitted.
 
-| Flag | TOML | Default | Notes |
+| Flag | Config key | Default | Notes |
 | --- | --- | --- | --- |
 | `--local-as AS` | `local_as` | (required) | Local autonomous system. |
 | `--peer-as AS` | `peer_as` | (required for legacy single-peer) | Remote AS for `--peer`. Per-peer `peer_as` overrides. |
 | `--router-id A.B.C.D` | `router_id` | (required for BGP) | BGP Identifier. |
 | `--config PATH` | (config file) | — | The dialect (lr TOML, the native `.lr` DSL, BIRD 2, FRR) is auto-detected. |
 | `--config-dialect D` | — | auto | `lr` / `toml` / `bird` / `frr` forces one. Filter-only `.lr` files are ambiguous with BIRD and need the flag. |
-| `--peer ADDR:PORT` | `[[peer]] remote` | (repeatable) | Outbound peer; per-peer `--peer-as` shared. |
+| `--peer ADDR:PORT` | `peer` block `remote` | (repeatable) | Outbound peer; per-peer `--peer-as` shared. |
 | `--listen ADDR:PORT` | `listen_addr` | — | Accept inbound BGP connections. |
-| `--network PREFIX` | `[[networks]] prefix` | (repeatable) | Locally originate prefix. |
+| `--network PREFIX` | `networks` list entry | (repeatable) | Locally originate prefix. |
 | `--hold-time SEC` | `hold_time` | 90 | BGP hold time; 0 disables keepalives. |
 | `--graceful-restart SEC` | `gr_restart_time` | 120 | RFC 4724; 0 disables. |
 | `--llgr SEC` | `llgr_stale_time` | 0 | RFC 9494 long-lived GR; 0 disables. |
@@ -431,17 +436,18 @@ keys, unknown protocol names, a pipe into a protocol the daemon does
 not run, and duplicate declarations are start-up errors, not
 warnings.
 
-`[[redistribute]]` installs a redistribution pipe (BIRD `pipe` / FRR
+A `redistribute` block installs a redistribution pipe (BIRD `pipe` / FRR
 `redistribute`): routes from `source` that enter the Loc-RIB are
 re-originated into `target`:
 
-```toml
-[[redistribute]]
-source = "ospf"                  # bgp | ospf | ospf3 | babel
-target = "bgp"                   # bgp | ospf | ospf3
-metric = 100                     # optional fixed metric override
-tag    = 65000                   # optional OSPF external route tag
-allow  = ["10.0.0.0/8"]          # optional prefix allow-list
+```lr
+redistribute {
+    source "ospf";                   # bgp | ospf | ospf3 | babel
+    target "bgp";                    # bgp | ospf | ospf3
+    metric 100;                      # optional fixed metric override
+    tag    65000;                    # optional OSPF external route tag
+    allow  ["10.0.0.0/8"];           # optional prefix allow-list
+}
 ```
 
 Without `metric` the re-originated route inherits the source metric.
@@ -451,16 +457,17 @@ rejected — the daemon has no injection surface for them yet, and a
 permanently inert pipe would silently promise redistribution the
 process can never perform.
 
-`[[aggregate]]` registers a BGP route aggregate (RFC 4271 §9.2.2.2):
+An `aggregate` block registers a BGP route aggregate (RFC 4271 §9.2.2.2):
 while at least one more-specific route exists in the Loc-RIB, the
 aggregate is originated with a zeroed AS_PATH, ATOMIC_AGGREGATE and
 AGGREGATOR; when the last specific disappears the aggregate is
 withdrawn. This is the BIRD `aggregate` / FRR `aggregate-address`
 equivalent:
 
-```toml
-[[aggregate]]
-prefix = "203.0.113.0/24"
+```lr
+aggregate {
+    prefix "203.0.113.0/24";
+}
 ```
 
 Both surfaces print one start-up banner line each
@@ -528,54 +535,60 @@ build carries none of the exchange-plane code. See
 
 **iBGP route reflector**
 
-```toml
-[bgp]
-local_as  = 65000
-router_id = "10.0.0.1"
+```lr
+bgp {
+    local_as  65000;
+    router_id "10.0.0.1";
+}
 
-[[peer]]
-remote = "10.0.0.2:179"
-peer_as = 65000
-route_reflector_client = true
+peer "client-1" {
+    remote "10.0.0.2:179";
+    peer_as 65000;
+    route_reflector_client true;
+}
 ```
 
 **eBGP with BFD fast-fail and RFC 8212 deny-by-default**
 
-```toml
-[bgp]
-local_as   = 64512
-router_id  = "10.0.0.1"
-ebgp_policy = "rfc8212"   # default; explicit for documentation
+```lr
+bgp {
+    local_as    64512;
+    router_id   "10.0.0.1";
+    ebgp_policy "rfc8212";   # default; explicit for documentation
+}
 
-[[peer]]
-remote = "192.0.2.2:179"
-peer_as = 64513
-bfd = true
-bfd_min_tx_ms = 100
-bfd_min_rx_ms = 100
-bfd_multiplier = 3
-import = "from-upstream"
-export = "to-upstream"
+peer "upstream" {
+    remote "192.0.2.2:179";
+    peer_as 64513;
+    bfd true;
+    bfd_min_tx_ms 100ms;
+    bfd_min_rx_ms 100ms;
+    bfd_multiplier 3;
+    import "from-upstream";
+    export "to-upstream";
+}
 ```
 
 **OSPFv3 with SRv6 (RFC 9513)**
 
-```toml
-[ospf]
-version = "v3"
-srv6_receive = true
-srv6_o_flag = true
-srv6_max_sl = 16
+```lr
+ospf {
+    version "v3";
+    srv6_receive true;
+    srv6_o_flag true;
+    srv6_max_sl 16;
 
-[[ospf.interface]]
-name = "eth0"
-area = 0
+    interface "eth0" {
+        area 0;
+    }
 
-[[ospf.srv6_locator]]
-prefix = "fc00:dead:beef::/48"
-algorithm = 0
-behavior = "end"
-sid = "fc00:dead:beef::"
+    srv6-locator "fc00:dead:beef::/48" {
+        algorithm 0;
+        behavior 1;             # End (RFC 9513 §11 behavior code; End.X=5
+                                # is not valid inside an End SID sub-TLV)
+        sid "fc00:dead:beef::";
+    }
+}
 ```
 
 For the full set of worked examples — route reflector, confederation,

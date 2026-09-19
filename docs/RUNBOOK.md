@@ -6,7 +6,7 @@ authoritative documents; this page adds only what those do not cover.
 
 | Task                        | Authoritative source            |
 | --------------------------- | ------------------------------- |
-| Every config key explained  | `templates/daemon.toml`         |
+| Every config key explained  | `templates/daemon.lr` (+ the TOML twin)         |
 | Running BIRD/FRR configs    | `docs/COMPAT.md`                |
 | Behaviour knobs vs BIRD/FRR | `docs/PARITY.md`                |
 | Interop lab (BIRD + FRR)    | `docs/INTEROP.md`               |
@@ -17,7 +17,7 @@ authoritative documents; this page adds only what those do not cover.
 ```sh
 # Build once; the binary is crates/lr-cli's.
 cargo build --release -p lr-cli
-./target/release/lr-daemon --protocol bgp -c /etc/lr/daemon.toml
+./target/release/lr-daemon --protocol bgp -c /etc/lr/daemon.lr
 # Migrating from BIRD 2 or FRR: the daemon reads those configs too.
 ./target/release/lr-daemon --config /etc/bird/bird.conf
 ./target/release/lr-daemon --config /etc/frr/frr.conf
@@ -196,14 +196,15 @@ docker run --rm --network host \
     --api-socket /run/lr-daemon/api.sock \
     --metrics-addr 127.0.0.1:9119
 
-# Production — config file mount.
+# Production — config file mount (native .lr DSL; the TOML subset
+# works the same way).
 docker run --rm -d \
     --name lr-daemon \
     -p 179:179 -p 9119:9119 \
-    -v /etc/lr-daemon/daemon.toml:/etc/lr-daemon/daemon.toml:ro \
+    -v /etc/lr-daemon/daemon.lr:/etc/lr-daemon/daemon.lr:ro \
     -v lr-daemon-run:/run/lr-daemon \
     librouting:rc.3 \
-    --config /etc/lr-daemon/daemon.toml
+    --config /etc/lr-daemon/daemon.lr
 
 # Sidecar lrctl — same image, override the entrypoint.
 docker run --rm --volumes-from lr-daemon \

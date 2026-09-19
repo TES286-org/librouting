@@ -73,7 +73,7 @@ patterns at smaller scale. The interesting pieces:
 
 ### Multi-peer + collision resolution (RFC 4271 §6.8)
 
-A `[[peer]]` table can carry `remote` (outbound), `address`
+A `peer` block (TOML: `[[peer]]`) can carry `remote` (outbound), `address`
 (inbound-only), or both. The "both" case is a bidirectional peer:
 the daemon connects out AND accepts inbound on the same peer entry.
 The two transports run on **separate sessions** (the `handle` /
@@ -338,14 +338,17 @@ so they run on every desktop OS.
 2. Add the `--flag-name` argv parser branch in
    `daemon_config::parse_args` (mirror an existing flag's shape;
    be careful with the `repeatable` flag for repeatable arguments).
-3. Add the TOML counterpart under `[bgp]` (or `[[peer]]`) in
-   `daemon_config::parse_toml_subset`, plus the per-peer override
-   if applicable.
+3. Add the config key to the shared dispatch `apply_config_key` in
+   `daemon_config.rs` — both frontends (the native `.lr` DSL and the
+   TOML subset) fail closed through it, so a key registered there
+   works in both dialects and cannot drift; register the per-peer
+   override in the same match if applicable.
 4. Consume the value in the right `run_*_daemon` function in
    `daemon.rs` / `daemon_*.rs`.
 5. Document the flag in `print_usage()` (in `daemon.rs`) and in
-   `templates/daemon.toml` (the per-key comments there are the
-   canonical user-facing reference).
+   `templates/daemon.lr` / `templates/daemon.toml` (the per-key
+   comments there are the canonical user-facing reference; keep the
+   DSL and TOML twins in sync).
 6. Add a daemon e2e test in `crates/lr-cli/tests/` covering the
    new flag (one of the existing `daemon_*.rs` tests is a good
    template).
@@ -366,15 +369,16 @@ so they run on every desktop OS.
 1. Add `daemon_<proto>.rs` mirroring `daemon_ospf.rs`'s shape.
 2. Add the protocol name to the `matches!(cfg.protocol.as_str(), …)`
    fail-closed check at the top of `daemon::main()`.
-3. Add the `--<proto>-*` flags + TOML tables in `daemon_config.rs`.
+3. Add the `--<proto>-*` flags and the config keys (shared dispatch
+   `apply_config_key` — both frontends) in `daemon_config.rs`.
 4. Add a `run_<proto>_daemon` function in `daemon.rs` that builds
    the router, spawns the transport threads, and runs the poll loop.
 5. Add at least one e2e test in `crates/lr-tests/tests/` and one
    interop script in `tests/interop/` against the reference
    implementation.
 6. Update [`lr-cli.md`](lr-cli.md), [`STATUS.md`](STATUS.md),
-   [`RFC_MAP.md`](RFC_MAP.md), [`ROADMAP.md`](ROADMAP.md) and
-   `templates/daemon.toml`.
+   [`RFC_MAP.md`](RFC_MAP.md), [`ROADMAP.md`](ROADMAP.md) and the
+   `templates/daemon.lr` / `templates/daemon.toml` twins.
 
 ## Where the tests live
 

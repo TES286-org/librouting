@@ -32,7 +32,7 @@ the protocol crates.
 
 | Document                   | Contents                                                             |
 | -------------------------- | -------------------------------------------------------------------- |
-| `templates/daemon.toml`    | Fully commented reference configuration (every key explained)        |
+| `templates/daemon.lr`      | Fully commented reference configuration, native DSL (every key explained); `templates/daemon.toml` is the TOML twin |
 | [`lr-cli.md`](lr-cli.md)   | CLI user guide — every `lr` and `lr-daemon` subcommand, flag and example |
 | [`lr-cli-internals.md`](lr-cli-internals.md) | CLI internals — module layout, run paths, extension patterns |
 | [`RUNBOOK.md`](RUNBOOK.md) | Operations runbook: lifecycle, runtime API, troubleshooting FAQ      |

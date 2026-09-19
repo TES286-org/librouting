@@ -40,7 +40,7 @@ different stability contract:
 | --- | --- | --- |
 | **1 — Rust library API** | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-ldp`, `lr-bfd`, `lr-rib`, `lr-policy`, `lr-router`, `lr-damping`, `lr-mpls`, `lr-mrt`, `lr-bmp`, `lr-srv6`, `lr-osroute` — `pub` items reached from the crate root | Semver-tracked. Breaking changes are gated by a minor (pre-1.0) / major (post-1.0) bump and a release-notes entry. |
 | **2 — C ABI** (`lr-ffi`) | `include/lr_ffi.h`, `include/librouting.hpp` — the `lr_*` symbols exported from `lr-ffi` and the `lr_router_t` / `lr_bytes_t` types | **ABI-stable.** A breaking ABI change is a major version bump *even pre-1.0*, because embedders (Go / Python / C / C++) compile against the published header. The `lr_abi_version()` accessor is bumped in lockstep. |
-| **3 — Daemon flag + config surface** | `lr-daemon` CLI flags, the TOML schema in `templates/daemon.toml`, the `lr:` extension directives, the `--api-socket` line protocol | **Documented stability.** A flag can be renamed only across a minor bump and must be supported as a deprecated alias for at least one minor cycle. The `--api-socket` line protocol's existing commands are stable; new commands are additive. |
+| **3 — Daemon flag + config surface** | `lr-daemon` CLI flags, the config schema (native `.lr` DSL in `templates/daemon.lr` + the TOML subset twin), the `lr:` extension directives, the `--api-socket` line protocol | **Documented stability.** A flag can be renamed only across a minor bump and must be supported as a deprecated alias for at least one minor cycle. The `--api-socket` line protocol's existing commands are stable; new commands are additive. |
 
 ### What is **not** public API
 
@@ -132,7 +132,7 @@ The following must all exist, be reviewed, and reference live code
 - `docs/bindings/{c,cpp,go,python}.md` — per-language embedding guides
 - `docs/examples/*.md` — per-scenario walkthroughs
 - `docs/research/*.md` — research notes (BGP defects, exchange plane)
-- `templates/daemon.toml` — fully-commented reference configuration
+- `templates/daemon.lr` — fully-commented reference configuration (native DSL; `daemon.toml` is the compat twin)
 - `templates/README.md` — scaffolding templates
 - `yang/*.yang` — standards-track YANG models
 

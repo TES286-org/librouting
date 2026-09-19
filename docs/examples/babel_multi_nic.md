@@ -1,6 +1,6 @@
 # Babel multi-NIC with glob patterns
 
-This example demonstrates the `[[babel.interface]]` configuration for
+This example demonstrates the `babel { interface … }` configuration for
 per-interface Babel parameters (RFC 8966 §A.2) with shell-like glob
 pattern matching. The daemon enumerates the system interfaces via
 `getifaddrs(3)`, matches each name against the patterns in file order,
@@ -8,40 +8,41 @@ and uses the first match's parameters for the single Babel session.
 
 ## Configuration
 
-```toml
+```lr
 # Top-level protocol selection.
-protocol = "babel"
+protocol babel;
 
-[babel]
-port = 6696
+babel {
+    port 6696;
 
-# Wired interfaces: low rxcost, fast hello interval.
-[[babel.interface]]
-name = "eth*"
-type = "wired"
-rxcost = 96
-hello_interval_ms = 4000
+    # Wired interfaces: low rxcost, fast hello interval.
+    interface "eth*" {
+        type "wired";
+        rxcost 96;
+        hello_interval_ms 4s;
+    }
 
-# Wireless interface: high rxcost, slow hello interval.
-[[babel.interface]]
-name = "wlan0"
-type = "wireless"
-rxcost = 256
+    # Wireless interface: high rxcost, slow hello interval.
+    interface "wlan0" {
+        type "wireless";
+        rxcost 256;
+    }
 
-# Tunnel interface: RTT-based cost for latency-sensitive routes.
-[[babel.interface]]
-name = "tun0"
-type = "tunnel"
-rxcost = 192
-rtt_cost = 100
-rtt_min_us = 10000       # 10 ms
-rtt_max_us = 120000      # 120 ms
+    # Tunnel interface: RTT-based cost for latency-sensitive routes.
+    interface "tun0" {
+        type "tunnel";
+        rxcost 192;
+        rtt_cost 100;
+        rtt_min 10ms;          # 10 000 us
+        rtt_max 120ms;         # 120 000 us
+    }
 
-# Loopback: inert, high cost (never used for Babel adjacency).
-[[babel.interface]]
-name = "lo"
-type = "wired"
-rxcost = 65535
+    # Loopback: inert, high cost (never used for Babel adjacency).
+    interface "lo" {
+        type "wired";
+        rxcost 65535;
+    }
+}
 ```
 
 ## How it works
@@ -49,7 +50,7 @@ rxcost = 65535
 1. At startup, `run_babel_daemon()` calls
    `lr_osroute::ospf_transport::list_interfaces()` to enumerate every
    system interface with its IPv4 and IPv6 addresses.
-2. For each `[[babel.interface]]` block, the daemon matches the `name`
+2. For each `babel { interface … }` block, the daemon matches the `name`
    glob pattern against the enumerated interfaces using
    `daemon_config::glob_match()` (BIRD's `lib/patmatch.c` semantics:
    `*` matches any sequence, `?` any single character, `\` escapes).

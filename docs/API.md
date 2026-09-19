@@ -125,8 +125,8 @@ router.hooks_mut().export.push(Box::new(hooks));
 
 `ExportHook::on_export_to(route, destination)` receives the egress
 session id (default method delegates to `on_export`, so existing hooks
-are unaffected). The daemon exposes all of this as TOML tables — see
-`templates/daemon.toml`.
+are unaffected). The daemon exposes all of this in the config file —
+see `templates/daemon.lr` (native DSL) and its TOML twin.
 
 ## BFD
 
@@ -961,9 +961,9 @@ let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_
 r.set_session_policy(h, true, false)?; // import policy attached
 ```
 
-The shipped daemon enables the mode by default — `[bgp]
-ebgp_policy = "rfc8212"` with per-peer `import`/`export` route-maps as
-the explicit policy; `ebgp_policy = "accept-all"` (CLI
+The shipped daemon enables the mode by default — `ebgp_policy
+"rfc8212";` in the bgp block, with per-peer `import`/`export` route-maps as
+the explicit policy; `ebgp_policy "accept-all";` (CLI
 `--ebgp-policy accept-all`) is the §3/Appendix-A "insecure-mode"
 deviation, and unknown values fail closed at parse time. The FFI
 mirrors the two calls (`lr_router_set_ebgp_requires_policy`,
@@ -997,10 +997,10 @@ let h = r.add_session(cfg)?;
 `DefaultRouter::set_session_default_ipv4_unicast(h, on)` is the
 post-`add_session` mutator (must be called before `start_session`).
 
-The shipped daemon exposes it as `[bgp] default_ipv4_unicast = bool`
+The shipped daemon exposes it as the bgp block key `default_ipv4_unicast`
 (default `true`) with the CLI `--default-ipv4-unicast` /
-`--no-default-ipv4-unicast` flags and a per-peer override `[peer]
-default_ipv4_unicast = bool`. The daemon's mp_families builder
+`--no-default-ipv4-unicast` flags and a per-peer override in the
+`peer` block (`default_ipv4_unicast`). The daemon's mp_families builder
 ensures `IPV4_UNICAST` is in the family list when the flag is `true`
 (BIRD 2 requires the capability to match one of their channels), and
 leaves the list as configured when `false` (FRR
@@ -1037,9 +1037,10 @@ width-guessing bug in the safety net's `local_as_count` that silently
 broke `reject_as_loop` for routes from any modern peer sending 4-byte
 AS_PATH.
 
-The shipped daemon exposes it as `[bgp] allow_local_as = N|any|true|false`
+The shipped daemon exposes it as the bgp block key
+`allow_local_as` (`0` | `N` | `any`)
 (default `0`) with the CLI `--allow-local-as [N]` / `--allowas-any` flags
-and a per-peer override `[peer] allow_local_as`. The FFI mirrors it as
+and a per-peer override in the `peer` block (`allow_local_as`). The FFI mirrors it as
 `lr_router_set_local_as_tolerance`, as do the Go
 (`Router.SetLocalAsTolerance`) and Python
 (`Router.set_local_as_tolerance`) bindings.
@@ -1076,10 +1077,11 @@ policy change (they reject routes for protocol-level reasons, not
 policy reasons). `DefaultRouter::adj_rib_in_snapshot(h)` exposes the
 pre-policy view.
 
-The shipped daemon exposes it as `[bgp] soft_reconfig_inbound = bool`
-(default `false`) with the CLI `--soft-reconfig-inbound` /
-`--no-soft-reconfig-inbound` flags and a per-peer override
-`[peer] soft_reconfig_inbound`. The FFI mirrors it as
+The shipped daemon exposes it as the bgp block key
+`soft_reconfig_inbound` (default `false`) with the CLI
+`--soft-reconfig-inbound` /
+`--no-soft-reconfig-inbound` flags and a per-peer override in the
+`peer` block (`soft_reconfig_inbound`). The FFI mirrors it as
 `lr_router_set_soft_reconfig_inbound` +
 `lr_router_soft_reconfig_inbound`, as do the Go
 (`Router.SetSoftReconfigInbound` / `Router.SoftReconfigInbound`) and
@@ -1108,7 +1110,7 @@ r.set_enforce_first_as(true);
 // All subsequent eBGP UPDATEs go through the leftmost-AS check.
 ```
 
-The shipped daemon exposes it as `[bgp] enforce_first_as = true` (CLI
+The shipped daemon exposes it as `bgp { enforce_first_as true; }` (CLI
 `--enforce-first-as` / `--no-enforce-first-as`); the startup status
 printout names both this and the bestpath tiebreaker (see below). The
 FFI mirrors it as `lr_router_set_enforce_first_as`, as do the Go
@@ -1128,8 +1130,9 @@ r.best_path_config_mut().deterministic_router_id = false;
 // Fall back to oldest-route-wins (FRR default).
 ```
 
-The shipped daemon exposes it as `[bgp] bestpath_compare_routerid =
-bool` (CLI `--bestpath-compare-routerid` / `--no-bestpath-compare-routerid`);
+The shipped daemon exposes it as the bgp block key
+`bestpath_compare_routerid` (CLI `--bestpath-compare-routerid` /
+`--no-bestpath-compare-routerid`);
 the default keeps the RFC 5004 deterministic posture that the
 library has shipped since day one.
 
