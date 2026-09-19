@@ -15,12 +15,20 @@
 //! loadable), while the per-key schema — including its fail-closed
 //! typo protection — is literally the same code for both frontends.
 
+mod emit;
 mod lexer;
 mod parser;
 
 use std::path::Path;
 
 use crate::daemon_config::DaemonConfig;
+
+/// Render a finalized-or-raw [`DaemonConfig`] IR into a `.lr`
+/// program (the `lr-daemon config to-dsl` backend). See
+/// [`emit`] for the determinism / fail-loud / round-trip contract.
+pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
+    emit::to_dsl(cfg)
+}
 
 /// Parse `.lr` configuration `text` into `cfg`.
 ///

@@ -123,7 +123,13 @@ pub(super) fn detect_dialect(text: &str) -> Option<Dialect> {
             // BIRD: the router id statement, protocol stanzas and
             // filter/function/define definitions.
             ("router", "id") => return Some(Dialect::Bird),
-            ("protocol", _) | ("filter", _) | ("function", _) | ("define", _) | ("include", _) => {
+            // The `=` guard keeps TOML assignments (`protocol = "bgp"`,
+            // the documented multi-protocol spelling) from being
+            // mistaken for BIRD statements — they carry a value
+            // assignment, which BIRD's directive syntax never does.
+            ("protocol", _) | ("filter", _) | ("function", _) | ("define", _) | ("include", _)
+                if !t1.starts_with('=') =>
+            {
                 return Some(Dialect::Bird)
             }
             _ => {}

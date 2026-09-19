@@ -1,6 +1,9 @@
 //! `lr-daemon config check <file>` — validate a configuration file and
 //! report what it resolves to, without starting the daemon
-//! (ROADMAP-v3 D16 Phase 1, GitHub #18).
+//! (ROADMAP-v3 D16 Phase 1, GitHub #18). `lr-daemon config to-dsl
+//! <file>` — the D16 Phase 2 TOML→DSL converter — lives here too: both
+//! subcommands share the same load entry, usage conventions and exit
+//! codes.
 //!
 //! The checker loads through [`crate::daemon_config::load_config_file`]
 //! — the same entry point startup and reload use — and then runs
@@ -21,14 +24,23 @@ use crate::compat::Dialect;
 use crate::daemon_config::{load_config_file, DaemonConfig};
 
 pub(super) fn config_check(args: &[String]) -> ExitCode {
-    // Dispatch shape: `lr-daemon config check [options] <file>` —
-    // `args[0]` is the `check` subcommand word itself.
-    if args.is_empty() || args[0] != "check" {
-        eprintln!("error: unknown config subcommand (expected 'check')");
-        eprintln!("usage: lr-daemon config check [--dialect bird|frr|toml] <config-file>");
-        return ExitCode::from(2);
+    // Dispatch shape: `lr-daemon config <check|to-dsl> [options]
+    // <file>` — `args[0]` is the subcommand word itself.
+    match args.first().map(String::as_str) {
+        Some("check") => config_check_cmd(&args[1..]),
+        Some("to-dsl") => config_to_dsl(&args[1..]),
+        _ => {
+            eprintln!("error: unknown config subcommand (expected 'check' or 'to-dsl')");
+            eprintln!("usage: lr-daemon config check [--dialect lr|toml|bird|frr] <config-file>");
+            eprintln!("       lr-daemon config to-dsl [--dialect lr|toml|bird|frr] <config-file>");
+            ExitCode::from(2)
+        }
     }
-    let args = &args[1..];
+}
+
+/// `lr-daemon config check [options] <file>`.
+fn config_check_cmd(args: &[String]) -> ExitCode {
+    // The outer dispatch already consumed the `check` word.
     let mut path: Option<&str> = None;
     let mut forced: Option<Dialect> = None;
     let mut i = 0;
@@ -36,7 +48,7 @@ pub(super) fn config_check(args: &[String]) -> ExitCode {
         let a = args[i].as_str();
         if a == "--dialect" || a == "--config-dialect" {
             if i + 1 >= args.len() {
-                eprintln!("config check: {a} needs a value (bird | frr | toml)");
+                eprintln!("config check: {a} needs a value (lr | toml | bird | frr)");
                 return ExitCode::from(2);
             }
             match Dialect::from_flag(&args[i + 1]) {
@@ -49,11 +61,11 @@ pub(super) fn config_check(args: &[String]) -> ExitCode {
             i += 2;
         } else if a.starts_with('-') && a != "-" {
             eprintln!("config check: unknown option '{a}'");
-            eprintln!("usage: lr-daemon config check [--dialect bird|frr|toml] <config-file>");
+            eprintln!("usage: lr-daemon config check [--dialect lr|toml|bird|frr] <config-file>");
             return ExitCode::from(2);
         } else if path.is_some() {
             eprintln!("config check: unexpected extra argument '{a}'");
-            eprintln!("usage: lr-daemon config check [--dialect bird|frr|toml] <config-file>");
+            eprintln!("usage: lr-daemon config check [--dialect lr|toml|bird|frr] <config-file>");
             return ExitCode::from(2);
         } else {
             path = Some(a);
@@ -61,7 +73,7 @@ pub(super) fn config_check(args: &[String]) -> ExitCode {
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: lr-daemon config check [--dialect bird|frr|toml] <config-file>");
+        eprintln!("usage: lr-daemon config check [--dialect lr|toml|bird|frr] <config-file>");
         return ExitCode::from(2);
     };
 
@@ -128,4 +140,66 @@ pub(super) fn config_check(args: &[String]) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// `lr-daemon config to-dsl [--dialect lr|toml|bird|frr] <file>` —
+/// print the config as an equivalent `.lr` program (ROADMAP-v3 D16
+/// Phase 2). Loads through the same entry as startup and `check`, so
+/// anything the daemon accepts converts; conversion is deterministic
+/// and refuses input it cannot represent faithfully (parse warnings,
+/// filter descriptions), never silently dropping semantics. Works on
+/// the pre-finalize IR: finalization merges peer templates and would
+/// destroy source-level structure.
+fn config_to_dsl(args: &[String]) -> ExitCode {
+    let mut path: Option<&str> = None;
+    let mut forced: Option<Dialect> = None;
+    let mut i = 0;
+    while i < args.len() {
+        let a = args[i].as_str();
+        if a == "--dialect" || a == "--config-dialect" {
+            if i + 1 >= args.len() {
+                eprintln!("config to-dsl: {a} needs a value (lr | toml | bird | frr)");
+                return ExitCode::from(2);
+            }
+            match Dialect::from_flag(&args[i + 1]) {
+                Ok(d) => forced = Some(d),
+                Err(e) => {
+                    eprintln!("config to-dsl: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            i += 2;
+        } else if a.starts_with('-') && a != "-" {
+            eprintln!("config to-dsl: unknown option '{a}'");
+            eprintln!("usage: lr-daemon config to-dsl [--dialect lr|toml|bird|frr] <config-file>");
+            return ExitCode::from(2);
+        } else if path.is_some() {
+            eprintln!("config to-dsl: unexpected extra argument '{a}'");
+            eprintln!("usage: lr-daemon config to-dsl [--dialect lr|toml|bird|frr] <config-file>");
+            return ExitCode::from(2);
+        } else {
+            path = Some(a);
+            i += 1;
+        }
+    }
+    let Some(path) = path else {
+        eprintln!("usage: lr-daemon config to-dsl [--dialect lr|toml|bird|frr] <config-file>");
+        return ExitCode::from(2);
+    };
+
+    let mut cfg = DaemonConfig::default();
+    if let Err(e) = load_config_file(path, forced, &mut cfg) {
+        eprintln!("config to-dsl: {path}: {e}");
+        return ExitCode::from(1);
+    }
+    match crate::config_dsl::to_dsl(&cfg) {
+        Ok(dsl) => {
+            print!("{dsl}");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("config to-dsl: {path}: {e}");
+            ExitCode::from(1)
+        }
+    }
 }
