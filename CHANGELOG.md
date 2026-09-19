@@ -16,6 +16,61 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ## [Unreleased]
 
+_No changes yet. The next release-event is the final `1.0.0` cut —
+see `docs/RELEASE-PLAN.md` §2.8 for the freeze criteria._
+
+## [1.0.0-rc.4] — config DSL migration + filter VM hardening
+
+The fourth release candidate ships the full configuration-DSL
+migration (GitHub issue #18, Phases 0–4) and the filter-VM
+performance + correctness work (GitHub issue #19, P6 + P7). The
+public Rust API and the C ABI are unchanged since rc.3 — the
+release adds a configuration frontend, positioned diagnostics and
+VM internals; embedders need no code changes, but bindings
+compiled against rc.4 pick up the filter-VM span fix automatically.
+
+**Highlights since rc.3:**
+
+- **Native `.lr` configuration DSL** — the daemon now accepts a
+  declarative DSL alongside TOML, with `lr-daemon config to-dsl`
+  converting any accepted config (TOML, BIRD, FRR, `.lr`) into the
+  deterministic `.lr` form. Both frontends lower through one
+  `apply_config_key` dispatch, so they share the exact fail-closed
+  key schema and cannot drift. `templates/daemon.lr` ships as the
+  fully-commented reference; TOML stays supported through 1.x
+  (deprecated, planned removal in 2.x). See `docs/config_dsl_grammar.md`.
+- **`lr-daemon config check`** — validate + report a config file
+  without starting the daemon; exit 0 valid / 1 invalid / 2 usage.
+- **Positioned filter diagnostics** — every token, AST node and
+  error carries a byte `Span`; parse and evaluation errors point
+  at the exact source location in both engines (interpreter + VM),
+  with a rustc-style caret snippet rendered by the daemon and
+  `lrctl filter compile`.
+- **Filter VM instruction fusion (#19 P6)** — the canonical
+  `if bgp.local_pref > 100` import-policy shape compiles to one
+  `BranchFieldIntCmp` instruction; `vm_if_local_pref` ~66 → ~28 ns
+  (−57 %), `import_pipeline/realistic/10000` −6.5 %.
+- **Filter VM lazy span read (#19 P7)** — the dispatch loop reads
+  the source span lazily inside fallible arms; infallible arms pay
+  zero span cost. Also fixes a latent bug where VM errors inside a
+  user-function body indexed the outer filter's span table instead
+  of the function's own.
+- **RFC 8326 graceful session shutdown** — the
+  `GRACEFUL_SHUTDOWN` community is honoured on receive (best-path
+  step + import hook) and send (export hook with per-peer exempt),
+  gated by `[bgp] graceful_shutdown` (default on).
+- **OSPFv3 Extended-LSA + SRv6 End.X** — RFC 8362 reception +
+  origination; RFC 9513 §9.1 End.X + §9.2 LAN End.X SIDs.
+- **Multi-protocol daemon** (from rc.3, hardened in rc.4) — one
+  `lr-daemon` process runs `bgp,ospf,babel` through a shared-router
+  supervisor.
+- **Interop** — 7 new BIRD/FRR interop labs (E-LSA, End.X, LAN
+  End.X, RFC 8212 BIRD/FRR, multi-protocol, graceful-shutdown
+  receive) wired into CI.
+
+**Full changelog:** the Added / Fixed / Deprecated entries below
+carry the per-feature detail.
+
 ### Added
 
 - **Lazy span read in the filter VM dispatch loop (GitHub #19

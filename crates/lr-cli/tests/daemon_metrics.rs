@@ -190,10 +190,12 @@ fn metrics_endpoint_serves_prometheus_exposition() {
     }
 
     // Identity gauge carries the daemon's local_as and router_id.
+    // The version string tracks the workspace version in Cargo.toml.
     assert!(
-        body.contains(
-            "lr_info{version=\"1.0.0-rc.3\",local_as=\"64512\",router_id=\"10.0.0.1\"} 1"
-        ),
+        body.contains(&format!(
+            "lr_info{{version=\"{}\",local_as=\"64512\",router_id=\"10.0.0.1\"}} 1",
+            env!("CARGO_PKG_VERSION")
+        )),
         "lr_info line missing or wrong; body:\n{body}"
     );
 

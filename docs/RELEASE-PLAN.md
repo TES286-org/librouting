@@ -152,7 +152,7 @@ A single PR (the "1.0 cut" PR) must:
 
 ### 2.8. Current status against these criteria
 
-As of HEAD (`docs/STATUS.md`), the picture is:
+As of HEAD (`v1.0.0-rc.4`), the picture is:
 
 - ✅ 2.1 — RFC coverage at parity for everything in scope; only
   BGPsec is ❌ and is documented out of scope.
@@ -160,25 +160,64 @@ As of HEAD (`docs/STATUS.md`), the picture is:
   OSPFv2/v3, Babel, LDP, BFD, BMP, MRT, parity.
 - ✅ 2.3 — Wire-level parity harness (`lr parity-replay` +
   `tests/interop/parity.sh`) green on `main`.
-- 🟡 2.4 — Linux CI green; macOS + Windows CI matrices were added
-  in this Phase 4 series (commit to be confirmed green by CI on
-  push).
-- ✅ 2.5 — `lr_abi_version()` exists; the 1.0 cut PR will assign the
-  final value.
-- ✅ 2.6 — Documentation set is complete (the Phase 4 series added
-  `lr-cli.md` and `lr-cli-internals.md`; this document
-  (`RELEASE-PLAN.md`) is the last missing piece).
-- 🟡 2.7 — Pending: the 1.0 cut PR is the next release-event after
-  Phase 4 lands and CI on the three platforms is green for one
-  full cycle.
+- ✅ 2.4 — Cross-platform CI green on Linux (Ubuntu 22.04 + 24.04),
+  macOS (Apple Silicon, macos-14) and Windows (2022). The matrix
+  has been green on every push since the Phase 4 series landed.
+- ✅ 2.5 — `lr_abi_version()` exists (`ABI_VERSION = 1`); the 1.0
+  cut PR will confirm the value is still 1 (no ABI break since
+  rc.1) or bump it if a late change requires one.
+- ✅ 2.6 — Documentation set is complete.
+- 🟡 2.7 — The 1.0 cut PR is the next release-event. The criteria
+  it must satisfy are enumerated below.
 
-**Target window**: a 1.0.0 cut is appropriate once Phase 4 (CI
-hardening, lr-cli docs, release flow) has been on `main` for one
-full week of clean CI on Linux + macOS + Windows. The next Phase 3
-items (RFC 8362 E-LSA machinery, BGP-LS, BGP SR Policy) are
-**post-1.0 work** — they extend the surface but do not block the
-freeze, because the surface they extend is already at parity with
-BIRD and FRR for the protocols they touch.
+**When can we cut 1.0.0?**
+
+A `1.0.0` tag is appropriate once **all** of the following are
+true on `main`:
+
+1. **No open `release-blocker` issues.** Every GitHub issue labelled
+   `release-blocker` is closed or re-labelled. Issues #19 (DSL
+   performance) and #20 (publish to package managers) are
+   `enhancement`, not blockers — they do not gate the freeze.
+2. **One full week of clean CI on all three platforms** (Linux,
+   macOS, Windows) on the commit that will be tagged. The rc.4
+   release is the start of this week; if CI stays green through
+   2026-09-26 on `main`, the 1.0 cut can proceed.
+3. **No breaking-change commits since the last `-rc`.** The public
+   Rust API (Tier 1) and the C ABI (Tier 2) must be byte-identical
+   to rc.4. If a breaking change is needed, it ships as rc.5 and
+   the clock restarts.
+4. **The `release.yml` workflow produces all 6 assets** (4 archives
+   + 2 standalone headers) on the rc.4 tag without manual
+   intervention — this is verified by the rc.4 release itself.
+5. **The community validation window.** At least one downstream
+   embedder (or the maintainer's own integration test) confirms the
+   rc.4 artifacts link + run against a real BIRD / FRR peer. The
+   `tests/interop/` suite is the in-repo proxy; an external report
+   is the community signal.
+
+If all five are true, the 1.0 cut PR:
+
+1. Updates `Cargo.toml` to `version = "1.0.0"` (workspace).
+2. Confirms `ABI_VERSION` is still 1 (or bumps it with a
+   `BREAKING CHANGE:` entry).
+3. Regenerates `include/lr_ffi.h` and `include/librouting.hpp`.
+4. Runs `cargo fmt`, `cargo clippy --all-targets --all-features
+   -- -D warnings`, `cargo test --workspace --all-features` on
+   Linux, macOS and Windows.
+5. Writes the 1.0 release notes enumerating the protocol coverage
+   surface, the interop verification, and the
+   deliberately-out-of-scope items.
+6. Tags `v1.0.0` and pushes; `release.yml` builds the final
+   artifacts.
+
+**Target window**: a `1.0.0` cut is appropriate once rc.4 has been
+on `main` for one full week of clean CI on Linux + macOS + Windows
+(target: 2026-09-26) and no `release-blocker` issue is open. The
+next Phase 3 items (BGP-LS, BGP SR Policy, D8.2 RIB sharding, D15
+multi-threaded RIB) are **post-1.0 work** — they extend the surface
+but do not block the freeze, because the surface they extend is
+already at parity with BIRD and FRR for the protocols they touch.
 
 ---
 
@@ -330,7 +369,8 @@ release."
 | v1.0.0-rc.1   | 2026-09-11    | API-freeze pre-release. All §2 freeze criteria verified on commit `1cc6f5d`. CI 11/11 jobs green (Ubuntu, macOS Apple Silicon, Windows, 3 cross-builds, MSRV, Coverage, interop BIRD+FRR, interop-auth TCP-AO). Nightly 2/2 green (Miri, QEMU VM harness). The 1-week clean-CI wait (§2.8) skipped per the user's instruction: functionality is complete (at parity with BIRD 2 + FRR 10, only BGPsec out of scope) and the recent commit history is docs + CI + small fixes (no protocol code changes). Released as a pre-release rather than the final 1.0.0 to test the never-exercised `release.yml` workflow end-to-end and signal API freeze to the community. 6 assets: librouting-{linux-x86_64.tar.gz, macos-x86_64.tar.gz, macos-aarch64.tar.gz, windows-x86_64.zip} + lr_ffi.h + librouting.hpp. |
 | v1.0.0-rc.2   | 2026-09-11    | Adds the `lr` + `lr-daemon` CLI binaries to each per-OS archive. rc.1 archives contained only the shared library and headers; the CLI binaries were built by `cargo build --workspace` but not staged. The `release.yml` matrix gained `lr_bin` and `lrd_bin` entries (`lr` / `lr-daemon` on Unix, `lr.exe` / `lr-daemon.exe` on Windows) and the staging steps copy them into the archive alongside the shared library. Each archive now contains: the shared library, the static archive (where emitted), the two CLI binaries, and the headers. Release workflow 5/5 jobs green. Same 6 standalone assets (4 archives + 2 headers) — the archives are now richer. |
 | v1.0.0-rc.3   | 2026-09-12    | Multi-protocol daemon: one lr-daemon process runs a combination of bgp, ospf and babel (`--protocol bgp,ospf`, TOML `protocols = [...]`) through a shared-router supervisor — one Loc-RIB, one ticker, one API socket, one thread per engine, gated startup (binds → privdrop → release) and fail-closed combinations. Ships the lr-router cross-protocol Loc-RIB merge (admin-distance ordering with withdrawal fallback, direct contributions never evicted by BGP re-ranking, no implicit redistribution into BGP — pipes stay opt-in) plus the Babel idle-spin fix. API unchanged (daemon-layer + router internals only) — bindings need no regeneration. Coverage: 8 new unit tests, 4 new e2e tests, the multi_protocol.sh BIRD interop lab (lr bgp,ospf ↔ BIRD ospf+bgp) wired into CI. |
-| (pending)     | (post-rc.3)   | Final 1.0.0 cut after rc.3 artifacts are validated by the community.                              |
+| v1.0.0-rc.4   | 2026-09-19    | Config DSL migration (issue #18 Phases 0–4) + filter VM hardening (issue #19 P6 + P7). Ships the native `.lr` configuration DSL (`templates/daemon.lr`), `lr-daemon config check`, `lr-daemon config to-dsl`, positioned filter diagnostics (byte `Span` on every token / AST node / error, in both the interpreter and the bytecode VM, with a caret snippet rendered by the daemon and `lrctl filter compile`), the TOML deprecation window, filter VM instruction fusion (`BranchFieldIntCmp` — `vm_if_local_pref` ~66 → ~28 ns, −57 %), the lazy span read + function-body span bug fix (P7), RFC 8326 graceful session shutdown (receive + send + per-peer exempt), and OSPFv3 Extended-LSA + SRv6 End.X (RFC 8362 + RFC 9513 §9.1/§9.2). Public Rust API + C ABI unchanged since rc.3 — no breaking changes. 174 commits, 1891 tests pass (was 1733 at rc.3). 7 new interop labs wired into CI. |
+| (pending)     | (post-rc.4)   | Final 1.0.0 cut — see §2.8 for the freeze criteria.                                              |
 
 The tag history is the canonical release record; this table is the
 human-readable index.
