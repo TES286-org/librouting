@@ -60,6 +60,7 @@ use std::collections::HashMap;
 mod api;
 mod compat;
 mod config_check;
+mod config_dsl;
 mod daemon_bfd;
 mod daemon_config;
 mod daemon_ldp;

@@ -2379,6 +2379,7 @@ route-map FILTER-IN permit 10
              # lr: graceful_restart = 240\n\
              # lr: install-kernel\n",
             Some(crate::compat::Dialect::Frr),
+            None,
             &mut cfg,
         )
         .unwrap();

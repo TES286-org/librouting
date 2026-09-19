@@ -26,6 +26,8 @@ use crate::daemon_config::DaemonConfig;
 pub(super) enum Dialect {
     /// lr daemon TOML (the native schema).
     Toml,
+    /// The native `.lr` DSL (ROADMAP-v3 D16 Phase 2).
+    Lr,
     /// BIRD 2 configuration (BGP control plane).
     Bird,
     /// FRR (bgpd) configuration (BGP control plane).
@@ -37,10 +39,11 @@ impl Dialect {
     pub(super) fn from_flag(value: &str) -> Result<Dialect, String> {
         match value {
             "toml" => Ok(Dialect::Toml),
+            "lr" => Ok(Dialect::Lr),
             "bird" => Ok(Dialect::Bird),
             "frr" => Ok(Dialect::Frr),
             other => Err(format!(
-                "bad --config-dialect '{other}' (expected bird | frr | toml)"
+                "bad --config-dialect '{other}' (expected lr | toml | bird | frr)"
             )),
         }
     }
@@ -49,6 +52,7 @@ impl Dialect {
     pub(super) fn name(self) -> &'static str {
         match self {
             Dialect::Toml => "toml",
+            Dialect::Lr => "lr",
             Dialect::Bird => "bird",
             Dialect::Frr => "frr",
         }
@@ -69,6 +73,25 @@ impl Dialect {
 ///   `key = value` assignments.
 pub(super) fn detect_dialect(text: &str) -> Option<Dialect> {
     let mut toml_assignments = 0usize;
+    // The lr DSL pre-pass: block headers only the native dialect
+    // uses (`bgp {`, `peer "x" {`, `ospf {`, …). `filter` is
+    // deliberately absent — BIRD files open filter blocks the same
+    // way, so `filter f { … }` alone stays with the BIRD heuristic
+    // and filter-only `.lr` files need `--config-dialect lr`.
+    for raw in text.lines() {
+        let line = raw.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if lr_block_header(line) {
+            return Some(Dialect::Lr);
+        }
+        // lr includes usually carry the `.lr` extension; BIRD
+        // `include` markers keep their existing meaning otherwise.
+        if line.starts_with("include") && line.contains(".lr") {
+            return Some(Dialect::Lr);
+        }
+    }
     for raw in text.lines() {
         let line = raw.trim_start();
         if line.is_empty() {
@@ -119,6 +142,40 @@ pub(super) fn detect_dialect(text: &str) -> Option<Dialect> {
     None
 }
 
+/// Recognise an lr-DSL block header line: an lr-exclusive block name
+/// followed by `{`, a quoted identity or a bare identity — never `=`,
+/// so TOML assignments like `peer = "x"` cannot false-positive.
+fn lr_block_header(line: &str) -> bool {
+    let word: &str = line
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '-' || c == '_'))
+        .next()
+        .unwrap_or("");
+    let strong = matches!(
+        word,
+        "bgp"
+            | "ospf"
+            | "babel"
+            | "ldp"
+            | "damping"
+            | "peer"
+            | "peer-template"
+            | "prefix-list"
+            | "as-path-list"
+            | "community-list"
+            | "route-map"
+            | "roa"
+            | "redistribute"
+            | "aggregate"
+    );
+    if !strong {
+        return false;
+    }
+    let rest = line[word.len()..].trim_start();
+    // `{` opens a bare block; `"` opens an identity argument. An `=`
+    // means this is a TOML assignment (`peer = "x"`) — not ours.
+    rest.starts_with('{') || rest.starts_with('"')
+}
+
 /// Load a native BIRD/FRR config: parse the dialect, render daemon
 /// TOML through the shared converter, and return the TOML text plus
 /// the operator-facing warnings (ignored non-BGP protocols, unmapped
@@ -130,7 +187,9 @@ pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<S
     let out = match dialect {
         Dialect::Bird => crate::translate::parse_bird_config(text),
         Dialect::Frr => crate::translate::parse_frr_config(text),
-        Dialect::Toml => return Err("load_native is only for the bird/frr dialects".into()),
+        Dialect::Toml | Dialect::Lr => {
+            return Err("load_native is only for the bird/frr dialects".into())
+        }
     };
     let mut warnings: Vec<String> = out
         .ignored_protocols
@@ -161,19 +220,27 @@ pub(super) fn load_native(dialect: Dialect, text: &str) -> Result<(String, Vec<S
 /// fail closed. Feeds the rendered TOML through
 /// `parse_toml_subset` so every compat-mode config follows the same
 /// parse path as a native one.
+///
+/// `source` carries the file's display name and path when the config
+/// was read from disk — the native `.lr` dialect needs the path to
+/// resolve `include` directives; inline text (tests) passes `None`.
 pub(super) fn load_config_text(
     text: &str,
     forced: Option<Dialect>,
+    source: Option<(&str, &std::path::Path)>,
     cfg: &mut DaemonConfig,
 ) -> Result<(), String> {
     let dialect = match forced {
         Some(d) => d,
         None => detect_dialect(text).ok_or_else(|| {
-            "cannot recognise the config dialect (expected lr TOML, BIRD 2 or FRR); \
-             force one with --config-dialect bird|frr|toml"
+            "cannot recognise the config dialect (expected lr TOML, the .lr DSL, BIRD 2 or FRR); \
+             force one with --config-dialect lr|toml|bird|frr"
                 .to_string()
         })?,
     };
+    if dialect == Dialect::Lr {
+        return crate::config_dsl::parse_dsl_text(text, source, cfg);
+    }
     if dialect == Dialect::Toml {
         crate::daemon_config::parse_toml_subset(text, cfg)?;
         return Ok(());
@@ -262,7 +329,7 @@ protocol bgp uplink {
 # lr: install-kernel
 "#;
         let mut cfg = DaemonConfig::with_defaults();
-        load_config_text(text, Some(Dialect::Bird), &mut cfg).expect("compat load");
+        load_config_text(text, Some(Dialect::Bird), None, &mut cfg).expect("compat load");
         cfg.finalize().expect("finalize");
         assert_eq!(cfg.router_id, "10.0.0.1");
         assert_eq!(cfg.local_as, 64512);
@@ -288,7 +355,7 @@ protocol bgp uplink {
                     !\n\
                     # lr: neighbor 192.0.2.2 add-path\n";
         let mut cfg = DaemonConfig::with_defaults();
-        load_config_text(text, Some(Dialect::Frr), &mut cfg).expect("compat load");
+        load_config_text(text, Some(Dialect::Frr), None, &mut cfg).expect("compat load");
         cfg.finalize().expect("finalize");
         assert_eq!(cfg.local_as, 64512);
         assert_eq!(cfg.router_id, "10.0.0.2");
@@ -310,7 +377,7 @@ protocol bgp uplink {
                      # lr: graceful-restart 300\n\
                      ! lr: user nobody\n";
         let mut cfg = DaemonConfig::with_defaults();
-        load_config_text(text, Some(Dialect::Frr), &mut cfg).expect("compat load");
+        load_config_text(text, Some(Dialect::Frr), None, &mut cfg).expect("compat load");
         assert_eq!(cfg.api_socket.as_deref(), Some("/tmp/lr-api.sock"));
         assert_eq!(cfg.gr_restart_time, 300);
         assert_eq!(cfg.user.as_deref(), Some("nobody"));
@@ -327,7 +394,7 @@ protocol bgp uplink {
                         neighbor 192.0.2.2 as 64513;\n\
                     }\n";
         let mut cfg = DaemonConfig::with_defaults();
-        load_config_text(text, Some(Dialect::Bird), &mut cfg).expect("compat load");
+        load_config_text(text, Some(Dialect::Bird), None, &mut cfg).expect("compat load");
         assert!(cfg
             .warnings
             .iter()
@@ -340,7 +407,7 @@ protocol bgp uplink {
                      neighbor 192.0.2.2 remote-as 64513\n\
                      # lr: warp-drive enabled\n";
         let mut cfg = DaemonConfig::with_defaults();
-        load_config_text(text, Some(Dialect::Frr), &mut cfg).expect("compat load");
+        load_config_text(text, Some(Dialect::Frr), None, &mut cfg).expect("compat load");
         // The unknown directive must appear in the warnings.
         assert!(cfg
             .warnings
@@ -354,7 +421,7 @@ protocol bgp uplink {
         // Not valid BIRD/FRR either — forcing toml makes it parse as
         // TOML (which errors on the garbage) rather than fail on
         // detection.
-        let err = load_config_text("plainly not a config", Some(Dialect::Toml), &mut cfg);
+        let err = load_config_text("plainly not a config", Some(Dialect::Toml), None, &mut cfg);
         assert!(err.is_err());
     }
 

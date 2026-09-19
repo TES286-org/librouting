@@ -2057,6 +2057,28 @@ fn parse_bool(value: &str) -> bool {
 /// string literals, e.g. `if proto == \"bgp\"`). The caller has
 /// already stripped the outer `"` quotes via `trim_matches('"')` —
 /// this function only walks the interior, replacing escape sequences.
+/// The inverse of [`unescape_toml_string`]: escape a raw string into
+/// the TOML string channel the shared key dispatch receives filter
+/// bodies through. The native `.lr` DSL (config_dsl) captures filter
+/// bodies verbatim between braces and hands them to
+/// `apply_config_key` through this escape, so `escape ∘ unescape` is
+/// the identity and both frontends store byte-identical bodies
+/// (ROADMAP-v3 D16 Phase 2).
+pub(crate) fn escape_toml_string(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for c in value.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 fn unescape_toml_string(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     let mut chars = value.chars();
@@ -3838,7 +3860,7 @@ pub(crate) fn load_config_file(
 ) -> Result<(), String> {
     let text =
         std::fs::read_to_string(path).map_err(|e| format!("cannot read config {path}: {e}"))?;
-    crate::compat::load_config_text(&text, forced, cfg)?;
+    crate::compat::load_config_text(&text, forced, Some((path, std::path::Path::new(path))), cfg)?;
     if cfg.config_dialect.is_none() {
         cfg.config_dialect = forced
             .map(|d| d.name().to_string())
