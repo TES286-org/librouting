@@ -140,7 +140,8 @@ implicit-deny semantics; set actions include `set_local_pref`,
 string escaping. Unknown references fail at startup — policy never
 silently passes traffic. The TOML subset (`templates/daemon.toml`)
 stays fully supported as the compatibility spelling — deprecated
-through 1.x, planned for removal in 2.x — and
+through 1.x, planned for removal in 2.x, with a load-time notice on
+every daemon start, reload and `config check` — and
 `lr-daemon config to-dsl` converts existing files.
 
 **OSPF mode.** `--protocol ospf` runs the OSPFv2 daemon instead of

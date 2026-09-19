@@ -31,7 +31,11 @@ layout and extension points see
 exposed on the management socket, see
 [`RUNBOOK.md`](RUNBOOK.md). For every config key (with line-by-line
 explanation), see `templates/daemon.lr` — the fully-commented native
-DSL reference (`templates/daemon.toml` is its TOML twin).
+DSL reference (`templates/daemon.toml` is its TOML twin). The TOML
+twin is deprecated — fully supported through the 1.x series,
+planned for removal in 2.x — and the daemon prints a deprecation
+notice on every load of a TOML config; `lr-daemon config to-dsl`
+converts existing files.
 
 ---
 
@@ -204,7 +208,9 @@ SUBCOMMANDS:
   config check FILE        Validate a config file and print what it
                            resolves to, without starting the daemon
                            (same loader + finalize as startup; exit 0
-                           valid / 1 invalid / 2 usage).
+                           valid / 1 invalid / 2 usage; a TOML file
+                           also reports the dialect's deprecation
+                           line).
   config to-dsl FILE       Print the config as an equivalent native
                            .lr program (see docs/config_dsl_grammar.md).
                            Deterministic; refuses input it cannot

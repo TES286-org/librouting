@@ -193,6 +193,24 @@ ship, breaking changes that affect embedders, dependency bumps.
     BDR the derived §9.2 LAN SID, the originator self-projects both,
     and all six adjacencies reach Full.
 
+### Deprecated
+
+- **The TOML configuration dialect is deprecated (issue #18 Phase
+  4)** — the window the DSL-first migration promised. TOML stays
+  fully supported through the 1.x release series and is planned for
+  removal in 2.0; `lr-daemon config to-dsl daemon.toml > daemon.lr`
+  converts existing files (deterministic, refuses unrepresentable
+  input rather than silently dropping it). Every surface that loads
+  a config for a running daemon now announces the window when the
+  resolved dialect is TOML: daemon startup (`config deprecation: …`
+  on stderr), SIGHUP / API `reload` (`reload: config deprecation: …`
+  through the same channel as its parse warnings) and `config check`
+  (a `deprecation:` line in the resolved-view report). The notice is
+  a policy announcement, not a parse warning — it does not join
+  `DaemonConfig::warnings` and `config to-dsl` stays silent about it
+  (the converter is the migration path itself, and its stderr
+  belongs to scripts).
+
 ### Fixed
 
 - Inline comments in the daemon TOML subset parser. TOML allows a

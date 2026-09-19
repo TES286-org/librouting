@@ -235,6 +235,16 @@ a newer config does not brick an older daemon. If the warning names
 a key you meant to use, it is misspelled — everything else is a
 warning only.
 
+**`config deprecation: the TOML configuration dialect is
+deprecated ...` at startup / on reload.**
+Not a parse problem — the config loaded fine, but the TOML spelling
+is inside its deprecation window (supported through the 1.x series,
+planned for removal in 2.0). Migrate with
+`lr-daemon config to-dsl daemon.toml > daemon.lr` and switch the
+daemon to the `.lr` file; see `docs/config_dsl_grammar.md`. The
+notice is informational: nothing is rejected, and it disappears on
+its own once the dialect is `.lr`.
+
 **Session stuck in Connect/Active.**
 For outbound peers the daemon retries with backoff; check the peer
 address/port, then GTSM (`--gtsm` requires the peer to send TTL 255

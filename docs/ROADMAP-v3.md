@@ -1950,8 +1950,8 @@ refactor — needs extensive regression tests.
 
 ## D16 — Configuration DSL migration (GitHub #18)
 
-**Status:** Phase 0 + Phase 1 + Phase 2 + Phase 3 landed. Tracks
-`lr-policy::filter` +
+**Status:** Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 landed.
+Tracks `lr-policy::filter` +
 `lr-cli` (daemon config + `lrctl`). The tracked issue carries the
 full analysis and the phased compatibility plan; the phases land here
 as struck-through audit entries.
@@ -2081,9 +2081,26 @@ is removed in 2.x, with a conversion tool in between (the existing
    passing (`[[networks]]` array tables never were a schema key; the
    OSPFv3 SRv6 locator `behavior` is the RFC 9513 u16 code, End = 1,
    not the string `"end"`).
-5. **Phase 4 — TOML deprecation window.** Load-time warning +
-   changelog; removal after an agreed number of releases (1.x
-   deprecated, 2.x removed).
+5. ~~**Phase 4 — TOML deprecation window.**~~ Landed in three
+   slices (`bb163ff` notice, `13d440e` tests, docs). The window the
+   docs and README promised is now announced by the code: daemon
+   startup prints `config deprecation: …` on stderr, SIGHUP / API
+   reload re-states it through the same channel as its parse
+   warnings (`reload: config deprecation: …`), and `config check`
+   carries a `deprecation:` line in the resolved-view report — keyed
+   on the resolved dialect (TOML only; `.lr`, BIRD and FRR are
+   quiet) and worded exactly as the window is documented (supported
+   through 1.x, removed in 2.0, `config to-dsl` as the migration
+   path). Two deliberate exclusions, both pinned by tests: the
+   notice does not join `DaemonConfig::warnings` (that vector is the
+   parse-warning contract — counted by `check`, refused by `to-dsl`,
+   compared by the IR-equality golden tests; a dialect-dependent
+   policy notice in it would break the TOML↔DSL equality property
+   and make the converter refuse its own input), and `config to-dsl`
+   stays silent (the converter is the migration tool itself; its
+   stderr belongs to scripts). `templates/daemon.toml` names the
+   window in its header; the CHANGELOG gained a `Deprecated`
+   section. Removal itself is a 2.x event.
 
 IDE integration (tree-sitter grammar, LSP) starts once the DSL is
 fully stable (Phase 3+), per the maintainer's note.
@@ -2109,7 +2126,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D13       | landed                | —     | OSPFv3 E-LSA + SRv6 End.X — codecs (`lsa::e_v3`, the eight RFC 8362 types byte-pinned), reception (per-speaker E-preference in `run_spf_v3_extended`/`summary_routes_v3_extended`/`external_routes_v3_extended`, receiver-decided per §6.1/§6.2 — no wire negotiation exists), origination (`[ospf] extended_lsas` switches the daemon's E-Router/E-Network/E-Link/E-IAP forms; ABR/ASBR stays legacy), End.X/LAN End.X codecs (RFC 9513 §9.1/§9.2, types 31/32) + srv6db projection (§9 containment/algorithm gates) + `srv6_end_x` origination (sparse-mode companion E-Router-LSA under legacy mode) + **LAN End.X origination** (`srv6_end_x_lan` base derives per-neighbor §9.2 SIDs as `base | Router-ID` on broadcast segments, `srv6_end_x` covering the §9.1 DR adjacency); labs `ospf6_e_lsa.sh` + `ospf6_e_lsa_endx.sh` + `ospf6_e_lsa_endx_lan.sh` (the three-router bridge lab also pinned the multicast-DD fix: RFC 2328 §8.1 per-adjacency DD/LSR now unicast in both v2 and v3 daemons, and Full→2-Way demotions re-originate immediately). Follow-ups: BGP-LS projection (D11) |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
-| D16      | Phase 0 + Phase 1 + Phase 2 + Phase 3 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics (Phase 0); typed IR + `lr config check` (Phase 1); native `.lr` DSL (Phase 2) — grammar spec in `docs/config_dsl_grammar.md`, blocks with identities, unit suffixes whitelisted per (section, key), verbatim filter bodies, includes, shared `apply_config_key` dispatch so TOML and `.lr` cannot drift, `Dialect::Lr` detection + `--config-dialect lr`, deterministic `lr config to-dsl` converter (fail-loud on unrepresentables), kitchen-sink round-trip over every key + 7 e2e tests; DSL-first everywhere (Phase 3) — `templates/daemon.lr` ships (IR-equal to the TOML twin, golden tests both frontends + e2e), reload re-resolves the dialect through the shared `from_flag` parser (fixed "unknown config dialect 'lr'" on SIGHUP), lexer UTF-8 comments fixed, daemon e2e runs the fanout topology on `.lr` configs, docs/README/examples switched DSL-first; Phase 4 (TOML deprecation window: load-time warning + changelog) next |
+| D16      | Phase 0 + Phase 1 + Phase 2 + Phase 3 + Phase 4 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics (Phase 0); typed IR + `lr config check` (Phase 1); native `.lr` DSL (Phase 2) — grammar spec in `docs/config_dsl_grammar.md`, blocks with identities, unit suffixes whitelisted per (section, key), verbatim filter bodies, includes, shared `apply_config_key` dispatch so TOML and `.lr` cannot drift, `Dialect::Lr` detection + `--config-dialect lr`, deterministic `lr config to-dsl` converter (fail-loud on unrepresentables), kitchen-sink round-trip over every key + 7 e2e tests; DSL-first everywhere (Phase 3) — `templates/daemon.lr` ships (IR-equal to the TOML twin, golden tests both frontends + e2e), reload re-resolves the dialect through the shared `from_flag` parser (fixed "unknown config dialect 'lr'" on SIGHUP), lexer UTF-8 comments fixed, daemon e2e runs the fanout topology on `.lr` configs, docs/README/examples switched DSL-first; TOML deprecation window (Phase 4) — load-time notice on startup/reload/`config check` keyed on the resolved dialect (not a parse warning; `to-dsl` silent by design, both pinned by tests), template header + CHANGELOG `Deprecated` section; TOML removal is a 2.x event |
 
 Items flip to `~~struck through~~` here as they land, with a pointer
 to the landing commit. `STATUS.md` remains the live capability
