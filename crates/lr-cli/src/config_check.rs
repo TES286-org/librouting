@@ -21,7 +21,7 @@
 use std::process::ExitCode;
 
 use crate::compat::Dialect;
-use crate::daemon_config::{load_config_file, DaemonConfig};
+use crate::daemon_config::{deprecation_notice, load_config_file, DaemonConfig};
 
 pub(super) fn config_check(args: &[String]) -> ExitCode {
     // Dispatch shape: `lr-daemon config <check|to-dsl> [options]
@@ -95,6 +95,15 @@ fn config_check_cmd(args: &[String]) -> ExitCode {
         .clone()
         .unwrap_or_else(|| "toml".to_string());
     println!("config check: {path}: OK (dialect {dialect})");
+    // TOML deprecation window (issue #18 Phase 4): the report names
+    // the dialect, so it also carries the deprecation notice for the
+    // dialects inside their window. The notice is keyed on the
+    // stamped dialect only — an unstamped dialect (an empty file)
+    // gets no notice even though the display above falls back to
+    // "toml".
+    if let Some(notice) = deprecation_notice(cfg.config_dialect.as_deref()) {
+        println!("  deprecation: {notice}");
+    }
     println!("  protocols: {}", cfg.protocol_set().join(","));
     if cfg.explicit_peers {
         println!(

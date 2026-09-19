@@ -3840,6 +3840,38 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
     Ok(true)
 }
 
+/// The operator-facing TOML deprecation notice text (issue #18 Phase
+/// 4). One line, log-friendly, and stating the window exactly as the
+/// roadmap and README promise it: fully supported through the 1.x
+/// series, removed in 2.x, `config to-dsl` is the migration path.
+const TOML_DEPRECATION_NOTICE: &str = "the TOML configuration dialect is deprecated - \
+    migrate to the native .lr dialect (`lr-daemon config to-dsl daemon.toml > daemon.lr`); \
+    TOML stays fully supported through the 1.x series and is planned for removal in 2.0";
+
+/// The deprecation notice for a resolved config dialect, if it is in
+/// its deprecation window (issue #18 Phase 4). Only the native TOML
+/// subset is: the `.lr` DSL is the migration target, and BIRD / FRR
+/// files are adoption inputs, not an lr authoring dialect.
+///
+/// Surfaces that load a config *for a running daemon* — startup
+/// (`parse_args`), SIGHUP / API `reload`, `config check` — surface
+/// the notice when the resolved dialect is TOML. `config to-dsl`
+/// deliberately stays quiet: it is the migration tool itself, runs
+/// on TOML by design, and its stdout is consumed by scripts.
+///
+/// The notice is deliberately NOT carried in `DaemonConfig::warnings`:
+/// that vector is the parse-warning contract — counted by `config
+/// check`, refused by `to-dsl` and compared by the IR-equality golden
+/// tests — and a dialect-dependent policy notice in it would break
+/// the TOML↔DSL equality property and make the converter refuse its
+/// own input.
+pub(crate) fn deprecation_notice(dialect: Option<&str>) -> Option<&'static str> {
+    match dialect {
+        Some("toml") => Some(TOML_DEPRECATION_NOTICE),
+        _ => None,
+    }
+}
+
 /// Shared configuration-file entry point (issue #18 Phase 1): daemon
 /// startup ([`parse_args`]), SIGHUP / API `reload` (`daemon.rs`) and
 /// the `lr-daemon config check` validator all load through this one
@@ -4422,6 +4454,13 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
         })?;
         for w in &cfg.warnings {
             eprintln!("config warning: {}", w);
+        }
+        // TOML deprecation window (issue #18 Phase 4): an operator
+        // starting the daemon on the deprecated dialect must see the
+        // window on stderr, in the same voice as the parse warnings
+        // but a distinct `deprecation` class.
+        if let Some(notice) = deprecation_notice(cfg.config_dialect.as_deref()) {
+            eprintln!("config deprecation: {notice}");
         }
     }
     Ok(cfg)
@@ -6481,5 +6520,21 @@ mod tests {
         .unwrap();
         let err = cfg.finalize().expect_err("duplicate aggregate");
         assert!(err.contains("declared twice"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn deprecation_notice_keys_on_the_resolved_dialect() {
+        // Only the TOML subset is inside its deprecation window.
+        let notice = deprecation_notice(Some("toml")).expect("toml is deprecated");
+        assert!(notice.contains("to-dsl"), "notice: {notice}");
+        assert!(notice.contains("1.x"), "notice: {notice}");
+        assert!(notice.contains("2.0"), "notice: {notice}");
+        // The migration target and the adoption dialects are quiet.
+        for d in [Some("lr"), Some("bird"), Some("frr"), None, Some("")] {
+            assert!(
+                deprecation_notice(d).is_none(),
+                "unexpected deprecation notice for {d:?}"
+            );
+        }
     }
 }

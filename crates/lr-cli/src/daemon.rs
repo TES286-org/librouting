@@ -4890,6 +4890,13 @@ fn reload_config(
         .iter()
         .map(|w| format!("reload: config warning: {}", w))
         .collect();
+    // TOML deprecation window (issue #18 Phase 4): the reload reports
+    // the notice through the same channel as its parse warnings, so a
+    // daemon kept running on the deprecated dialect keeps showing the
+    // window on every SIGHUP / API reload.
+    if let Some(notice) = daemon_config::deprecation_notice(fresh.config_dialect.as_deref()) {
+        lines.push(format!("reload: config deprecation: {notice}"));
+    }
 
     let old = current_networks.lock().unwrap().clone();
     let new = fresh.networks.clone();
