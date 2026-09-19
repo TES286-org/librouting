@@ -246,7 +246,10 @@ fn sighup_reloads_an_lr_config() {
         ],
         "lr-hup",
     );
-    wait_log_all(&d.log, &["originating 203.0.113.0/24", "listening on"]);
+    let text = wait_log_all(&d.log, &["originating 203.0.113.0/24", "listening on"]);
+    // The native dialect is the migration target — no deprecation
+    // notice fires on .lr loads (issue #18 Phase 4).
+    assert!(!text.contains("deprecation"), "log: {text}");
 
     // Rewrite the config (still `.lr`): drop the old network, add a
     // new one, and send SIGHUP — both changes must apply live.

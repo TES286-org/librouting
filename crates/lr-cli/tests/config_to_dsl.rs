@@ -199,6 +199,24 @@ fn refuses_configs_with_parse_warnings() {
 }
 
 #[test]
+fn to_dsl_stays_silent_about_the_toml_deprecation() {
+    // Phase 4 decision (issue #18): the deprecation notice fires on
+    // the surfaces that load a config for a *running* daemon —
+    // startup, reload, `config check`. The converter is the
+    // migration tool itself, runs on TOML by design, and its stderr
+    // stays clean for scripts.
+    let path = fixture(
+        "quiet",
+        "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\n",
+        "toml",
+    );
+    let (code, _stdout, stderr) = to_dsl(&["config", "to-dsl", path.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(!stderr.contains("deprecation"), "stderr: {stderr}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn usage_errors_exit_two() {
     let (code, _, stderr) = to_dsl(&["config", "to-dsl"]);
     assert_eq!(code, 2);

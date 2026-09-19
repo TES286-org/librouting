@@ -77,6 +77,9 @@ fn valid_config_reports_resolved_ir() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("warnings: 0"), "stdout: {stdout}");
+    // The deprecated dialect announces its window in the report
+    // (issue #18 Phase 4).
+    assert!(stdout.contains("deprecation:"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&path);
 }
 
@@ -112,6 +115,9 @@ fn shipped_lr_template_passes() {
         "stdout: {stdout}"
     );
     assert!(stdout.contains("warnings: 0"), "stdout: {stdout}");
+    // The native dialect is the migration target — no deprecation
+    // notice fires on .lr loads (issue #18 Phase 4).
+    assert!(!stdout.contains("deprecation:"), "stdout: {stdout}");
 }
 
 #[test]
@@ -177,6 +183,9 @@ fn bird_dialect_is_detected_and_reported() {
     let (code, stdout, stderr) = check(&["config", "check", path.to_str().unwrap()]);
     assert_eq!(code, 0, "stderr: {stderr}");
     assert!(stdout.contains("OK (dialect bird)"), "stdout: {stdout}");
+    // BIRD files are adoption inputs, not an lr authoring dialect —
+    // no deprecation notice (issue #18 Phase 4).
+    assert!(!stdout.contains("deprecation:"), "stdout: {stdout}");
     let _ = std::fs::remove_file(&path);
 }
 

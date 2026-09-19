@@ -241,7 +241,16 @@ fn sighup_reloads_networks_from_config_file() {
         ],
         "hup",
     );
-    wait_log_all(&d.log, &["originating 203.0.113.0/24", "listening on"]);
+    wait_log_all(
+        &d.log,
+        &[
+            "originating 203.0.113.0/24",
+            "listening on",
+            // The deprecated dialect announces its window at startup
+            // (issue #18 Phase 4) — stderr is captured into the log.
+            "config deprecation:",
+        ],
+    );
 
     // Rewrite the config: drop the old network, add a new one, and send
     // SIGHUP — both changes must be applied without a restart.
@@ -258,6 +267,9 @@ fn sighup_reloads_networks_from_config_file() {
             "SIGHUP received",
             "reload: originating 198.51.100.0/24",
             "reload: unoriginating 203.0.113.0/24",
+            // Every reload re-states the deprecation window, through
+            // the same channel as the parse warnings.
+            "reload: config deprecation:",
         ],
     );
     assert!(text.contains("require a restart"), "log: {text}");
