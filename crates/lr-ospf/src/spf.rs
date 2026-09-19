@@ -1250,8 +1250,8 @@ impl V3Topology {
 ///   which indexes their Link-LSA;
 /// - deeper vertices inherit their parent's next hop (§16.1.1 (2)-(3));
 /// - the prefixes themselves arrive via Intra-Area-Prefix-LSAs attached
-///   to Router- or Network-LSAs (§4.4.3.5) — prefixes with the NU or LA
-///   bit set take no part in the unicast calculation (§A.4.1).
+///   to Router- or Network-LSAs (§4.4.3.9) — only the NU bit excludes
+///   prefixes from the unicast calculation (§4.8.1).
 ///
 /// Unresolvable next hops (missing Link-LSAs) still admit the vertex to
 /// the tree but leave the route without a gateway — the embedder
