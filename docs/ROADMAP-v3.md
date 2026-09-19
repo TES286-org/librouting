@@ -1222,12 +1222,90 @@ that change semantics), and the dispatch is one new arm in the
 VM loop. The bench confirms the prediction.
 
 The `#19` phasing is now: P0 ✓, P1 reverted, P2 ✓, P3 ✓,
-P4 ✓, P5 ✓, P6 ✓. The DSL perf optimisation is at a natural
-stopping point again — the only remaining hot shape where the
+P4 ✓, P5 ✓, P6 ✓, P7 ✓. The DSL perf optimisation is at a
+natural stopping point again — the only remaining hot shape where the
 VM might still lose to the tree walker is `complex_chain`
 (~225 ns in both engines), which is already dominated by
 prefix-set membership and user-function call dispatch (P4/P2
 respectively) rather than per-instruction overhead.
+
+---
+
+### D6 follow-up — P7 lazy span read (GitHub #19 P7) — ~~landed~~
+
+P6 closed the four-instruction pattern cost on the canonical
+import-policy shape, but the VM dispatch loop still paid a span-table
+read at every instruction — `let span = cf.span_at(ip);` ran at the
+top of the `while ip < code.len()` loop, even for the eight infallible
+arms (Push / Jump / Accept / Reject / Return / Pop / PushScope /
+PopScope / StoreTmp) that never thread `span` into an error path. The
+read itself was a defensive `.get(ip).copied().unwrap_or_default()`
+— a Vec bounds check, an `Option<&Span>` construction, a `.copied()`
+map and a `.unwrap_or_default()` branch per dispatch.
+
+**What landed.**
+
+* **Lazy span read inside fallible arms.** `run_code` no longer reads
+  the span at the loop top. Each fallible arm reads `spans[ip]`
+  directly when it needs the span for an error path; infallible arms
+  pay zero span cost. The `spans` slice is parallel to `code`
+  (verified by a `debug_assert_eq!(code.len(), spans.len())` at
+  entry) and `ip` is bounds-checked by the loop, so direct indexing
+  is safe — the defensive `.get().copied().unwrap_or_default()` path
+  is gone.
+* **`spans: &[Span]` parameter on `run_code`.** The signature change
+  from `run_code(code, cf, route)` to `run_code(code, spans, cf,
+  route)` is the surface for the lazy read, but it also fixes a
+  latent bug: when `run_code` was called for a user-function body
+  (`code = &f.code`), it still read `cf.span_at(ip)` — the *outer
+  filter's* span table. The outer table is parallel to `cf.code`,
+  not to `f.code`, so an error at `f.code[ip]` read the wrong span
+  (or `Span::default()` when `ip >= cf.spans.len()`).
+  `call_compiled_function` now passes `&f.spans`, so the VM reads the
+  function's own span at every `ip`. The fix is pinned by
+  `vm_error_inside_user_function_carries_function_span`, which
+  constructs a filter where the function body is *longer* than the
+  outer filter body — the pre-fix path would have indexed past the
+  end of `cf.spans` and returned `Span::default()`.
+* **Bench impact.** Criterion `filter_eval` (5 s measurement, 100
+  samples):
+  * `vm_large_community_set/hit_last`: −0.60 % (p = 0.00)
+  * `vm_large_community_set/miss`:    −0.38 % (p = 0.00)
+  * `vm_if_local_pref`, `vm_complex_chain`,
+    `vm_large_prefix_set`, `vm_simple_accept`, `vm_const_fold`,
+    `vm_user_functions`: within noise (p > 0.05) but consistently
+    below the baseline median across runs. The community-set shape
+    sees the most consistent win because it runs the most
+    instructions per route (10 membership tests × match dispatch),
+    so it benefits most from skipping span reads on the infallible
+    arms between matches.
+
+* **1 new unit test** in
+  `crates/lr-policy/src/filter/eval.rs` pins the function-body span
+  fix. The existing equivalence tables
+  (`vm_matches_interpreter_on_policy_table`,
+  `vm_matches_interpreter_on_bench_shapes`,
+  `prefix_trie_matches_linear_scan_across_set_shapes`,
+  `vm_errors_match_interpreter_spans`,
+  `vm_error_spans_survive_peephole_optimisation`) cover the
+  semantic-preservation contract; 1891 tests pass workspace-wide.
+
+**Why P7 was not in the original P0–P6 plan.** The plan's headline
+wins were the per-shape optimisations (P3 attribute fast path, P4
+prefix trie, P6 instruction fusion); the per-dispatch overhead was
+below the noise floor of the original P0 baseline measurement, so it
+did not surface as a target until P6 had collapsed the four-instruction
+`if_local_pref` pattern into a single `BranchFieldIntCmp`. With the
+P6 win landed, the span read became a larger fraction of the
+remaining per-instruction cost, which made it measurable and worth
+folding. The fix is mechanical (move the read inside the arms, thread
+the right spans slice through `call_compiled_function`), the
+correctness contract is pinned by the existing equivalence tables, and
+the function-body span fix is a strict bug fix (no behaviour change
+for the happy path; errors now point at the right source).
+
+The `#19` phasing is now: P0 ✓, P1 reverted, P2 ✓, P3 ✓,
+P4 ✓, P5 ✓, P6 ✓, P7 ✓.
 
 ---
 
@@ -2116,7 +2194,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D3        | landed                | —     | Filter DSL parity — D3.1–D3.7 all in: user functions, large/extended communities, set ops, `defined()`/`exists()`, `proto` format, bytecode VM + equivalence table |
 | D4        | landed                | —     | Daemon surface — damping + redistribution + aggregate wired; FFI + interop scripts landed (D4.1–D4.5) |
 | D5        | landed                | —     | FFI expansion — encoders, event polling, withdraw, v6 originate, OSPFv2/v3/Babel sessions, policy objects (route handle + prefix-list + route-map + resolver) and the Filter DSL with a C-callback context all in; LDP sessions stay daemon-side (documented in the D5 audit trail) |
-| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; **GitHub #19 P6 landed** — new `Instr::BranchFieldIntCmp` variant + `pass_fuse_branches` peephole pass collapse the four-instruction pattern `LoadField(int); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into one instruction with zero stack traffic; only the four int-typed fields (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`) and six comparison ops fuse, and only when no external jump lands inside the pattern; `vm_if_local_pref` ~66 → ~28 ns (−57 %, 2.3×), `import_pipeline/realistic/10000` ~12.27 → ~11.47 ms (−6.5 %); 5 new unit tests pin the rewrite (positive shapes + non-int-field + non-cmp-op + jump-into-pattern refusals); existing equivalence tables already cover the dispatch (`if bgp.local_pref > 100 then accept; reject;` is in `vm_matches_interpreter_on_policy_table`); #19 phasing now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓, P6 ✓ |
+| D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; **GitHub #19 P6 landed** — new `Instr::BranchFieldIntCmp` variant + `pass_fuse_branches` peephole pass collapse the four-instruction pattern `LoadField(int); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into one instruction with zero stack traffic; only the four int-typed fields (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`) and six comparison ops fuse, and only when no external jump lands inside the pattern; `vm_if_local_pref` ~66 → ~28 ns (−57 %, 2.3×), `import_pipeline/realistic/10000` ~12.27 → ~11.47 ms (−6.5 %); 5 new unit tests pin the rewrite (positive shapes + non-int-field + non-cmp-op + jump-into-pattern refusals); existing equivalence tables already cover the dispatch (`if bgp.local_pref > 100 then accept; reject;` is in `vm_matches_interpreter_on_policy_table`); **GitHub #19 P7 landed** — `run_code` reads the source span lazily inside the fallible arms (LoadVar / AssignVar / Bin / Neg / Call / CallFn / Method / AssignField / AppendField) instead of once per dispatch at the loop top; infallible arms (Push / Jump / Accept / Reject / Return / Pop / PushScope / PopScope / StoreTmp) pay zero span cost; `spans: &[Span]` threaded as a parameter to `run_code` alongside `code`, which also fixes a latent bug where a user-function body indexed the *outer filter's* span table (`cf.spans`) instead of its own (`f.spans`) — `call_compiled_function` now passes `&f.spans`; `vm_large_community_set/hit_last` −0.60 % (p = 0.00), `vm_large_community_set/miss` −0.38 % (p = 0.00); 1 new test (`vm_error_inside_user_function_carries_function_span`) pins the function-body span fix; #19 phasing now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓, P6 ✓, P7 ✓ |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
 | D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |

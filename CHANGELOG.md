@@ -18,6 +18,41 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- **Lazy span read in the filter VM dispatch loop (GitHub #19
+  P7)** — the bytecode VM's `run_code` no longer reads the source
+  span at the top of every dispatch iteration. The span is now read
+  lazily inside the fallible arms (`LoadVar` / `AssignVar` / `Bin` /
+  `Neg` / `Call` / `CallFn` / `Method` / `AssignField` /
+  `AppendField`); infallible arms (`Push` / `Jump` / `Accept` /
+  `Reject` / `Return` / `Pop` / `PushScope` / `PopScope` /
+  `StoreTmp`) pay zero span cost. The `spans` slice is threaded as a
+  parameter to `run_code` alongside `code`, replacing the defensive
+  `cf.span_at(ip)` call (a Vec `.get().copied().unwrap_or_default()`
+  per dispatch) with a direct `spans[ip]` load on the fallible path.
+  Criterion measures a small but consistent improvement on the
+  `vm_large_community_set` shape (−0.60 % hit_last, −0.38 % miss,
+  both p = 0.00); the other `filter_eval` shapes stay within noise.
+
+### Fixed
+
+- **VM errors inside a user-function body now carry the function's
+  own source span** — a latent indexing bug in the filter VM. When
+  `run_code` was called for a user-function body (`code = &f.code`),
+  it still read `cf.span_at(ip)` — the *outer filter's* span table
+  — instead of the function's own `f.spans[ip]`. The outer table is
+  parallel to `cf.code`, not to `f.code`, so an error at
+  `f.code[ip]` read the wrong span (or `Span::default()` when `ip`
+  exceeded the outer filter's code length). The lazy-span refactor
+  threads `&f.spans` through `call_compiled_function` → `run_code`,
+  so the VM reads the function's own span at every `ip`. The fix is
+  pinned by `vm_error_inside_user_function_carries_function_span`,
+  which constructs a filter whose function body is longer than the
+  outer filter body — the pre-fix path indexed past the end of
+  `cf.spans` and returned `Span::default()`. No behaviour change for
+  the happy path; errors now point at the right source.
+
+### Added
+
 - **The daemon runs natively on `.lr` everywhere (issue #18 Phase
   3)** — the DSL-first slice of the configuration migration.
   `templates/daemon.lr` ships as the fully-commented reference
