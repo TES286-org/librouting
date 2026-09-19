@@ -1757,7 +1757,7 @@ pub fn execute(cf: &CompiledFilter, route: &mut Route, ctx: &dyn FilterContext) 
         pending_verdict: None,
         line_index: &cf.line_index,
     };
-    match ev.run_code(&cf.code, cf, route) {
+    match ev.run_code(&cf.code, &cf.spans, cf, route) {
         Ok(VmFlow::Continue) => EvalResult::Fallthrough,
         Ok(VmFlow::Accept) => EvalResult::Accept,
         Ok(VmFlow::Reject(reason)) => EvalResult::Reject(reason),
@@ -1787,9 +1787,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     fn run_code(
         &mut self,
         code: &[Instr],
+        spans: &[Span],
         cf: &CompiledFilter,
         route: &mut Route,
     ) -> Result<VmFlow, EvalError> {
+        debug_assert_eq!(code.len(), spans.len());
         let mut ip = 0usize;
         // No upfront capacity: trivial filters (bare accept/reject)
         // run zero stack operations, so eager allocation would be a
@@ -1797,14 +1799,24 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         let mut stack: Vec<Value> = Vec::new();
         let mut tmp: Option<Value> = None;
         while ip < code.len() {
-            // The source span of the current instruction — read once
-            // per dispatch and threaded into every fallible operation,
-            // so VM errors carry the same positions as the
-            // interpreter's (issue #18 Phase 0). Cold cost only.
-            let span = cf.span_at(ip);
+            // GitHub #19 P7: the source span is read lazily inside
+            // the fallible arms, not at the dispatch top. The spans
+            // table is parallel to `code` (verified by the
+            // debug_assert above), and `ip` is bounds-checked by the
+            // loop, so a direct index is safe and infallible arms
+            // (Push, Jump, Accept, ...) pay zero span cost. The lazy
+            // read preserves the issue #18 Phase 0 contract — every
+            // error still carries the span of the instruction that
+            // produced it. Passing `spans` as a parameter (instead
+            // of reading `cf.spans`) also fixes the latent bug where
+            // a user-function body would index the *outer filter's*
+            // span table — `call_compiled_function` now passes
+            // `&f.spans`, so errors inside a function body point at
+            // the function's own source.
             match &code[ip] {
                 Instr::Push(v) => stack.push(v.clone()),
                 Instr::LoadVar(name) => {
+                    let span = spans[ip];
                     let v = self.lookup(name, span)?;
                     stack.push(v);
                 }
@@ -1822,6 +1834,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 }
                 Instr::AssignVar(name) => {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let span = spans[ip];
                     self.assign(name, v, span)?;
                 }
                 Instr::StoreTmp => {
@@ -1833,6 +1846,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Instr::Bin(op) => {
                     let r = stack.pop().ok_or_else(vm_stack_error)?;
                     let l = stack.pop().ok_or_else(vm_stack_error)?;
+                    let span = spans[ip];
                     let v = self.eval_binary(*op, l, r, span)?;
                     stack.push(v);
                 }
@@ -1845,7 +1859,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     match v {
                         Value::Int(n) => stack.push(Value::Int(-n)),
                         other => {
-                            return Err(type_mismatch("neg", &other, "int", span, self.line_index))
+                            let span = spans[ip];
+                            return Err(type_mismatch("neg", &other, "int", span, self.line_index));
                         }
                     }
                 }
@@ -1929,6 +1944,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Instr::Call { name, argc } => {
                     let args: Vec<Value> =
                         stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let span = spans[ip];
                     let v = self.eval_call(name, &args, route, span)?;
                     stack.push(v);
                     if let Some(verdict) = self.pending_verdict.take() {
@@ -1944,6 +1960,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Instr::CallFn { idx, argc } => {
                     let args: Vec<Value> =
                         stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let span = spans[ip];
                     let f = cf.functions.get(*idx).ok_or_else(|| EvalError {
                         kind: EvalErrorKind::UnknownFunction(format!(
                             "function index {idx} out of range"
@@ -1969,15 +1986,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 } => {
                     let args: Vec<Value> =
                         stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let span = spans[ip];
                     let v = self.eval_method(field, method, &args, route, span)?;
                     stack.push(v);
                 }
                 Instr::AssignField(field) => {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let span = spans[ip];
                     self.assign_route_field(field, v, route, span)?;
                 }
                 Instr::AppendField(field) => {
                     let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let span = spans[ip];
                     self.append_route_field(field, v, route, span)?;
                 }
                 Instr::Pop => {
@@ -2053,7 +2073,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 .vars
                 .insert(param.clone(), arg.clone());
         }
-        let result = self.run_code(&f.code, cf, route);
+        let result = self.run_code(&f.code, &f.spans, cf, route);
         self.pop_scope();
         self.call_depth -= 1;
         let outcome = match result? {
@@ -3745,7 +3765,7 @@ mod tests {
             pending_verdict: None,
             line_index: &compiled.line_index,
         };
-        match ev.run_code(&compiled.code, &compiled, &mut r) {
+        match ev.run_code(&compiled.code, &compiled.spans, &compiled, &mut r) {
             Err(e) => e,
             other => panic!("VM did not error: {other:?}"),
         }
@@ -3819,5 +3839,45 @@ mod tests {
         );
         assert_eq!(e.span.slice(src), Some("missing"), "{e:?}");
         assert_eq!((e.line, e.col), (2, 1));
+    }
+
+    /// GitHub #19 P7 — the lazy-span refactor moves `run_code` to
+    /// take the spans slice as a parameter alongside `code`. This
+    /// fixes a latent bug where a user-function body would index
+    /// the *outer filter's* span table (`cf.spans`) instead of its
+    /// own (`f.spans`): the outer table is parallel to `cf.code`,
+    /// not to `f.code`, so an error at `f.code[ip]` read the wrong
+    /// span (or `Span::default()` when `ip >= cf.spans.len()`).
+    /// The fix threads `&f.spans` through `call_compiled_function`
+    /// → `run_code`, so the VM reads the function's own span at
+    /// every `ip`.
+    ///
+    /// The test constructs a filter where the function body is
+    /// *longer* than the outer filter body, so the pre-fix path
+    /// would have indexed past the end of `cf.spans` and returned
+    /// `Span::default()` — the slice assertion would fail with
+    /// `Some(None)` vs `Some("missing")`.
+    #[test]
+    fn vm_error_inside_user_function_carries_function_span() {
+        // The outer body is two statements (`bad(); accept;`); the
+        // function body is three (`missing; return true; <Return>`).
+        // The `missing` reference sits at index 0 of `f.code` but
+        // the outer filter's span table only has entries for the
+        // outer body's instructions — pre-fix, the VM read
+        // `cf.spans[0]` (the span of the outer body's first
+        // instruction, `CallFn`) instead of `f.spans[0]` (the span
+        // of `missing`).
+        let src = "function bad() {\n  missing;\n  return true;\n}\nbad();\naccept;";
+        let a = run_err(src);
+        let b = run_vm_err(src);
+        assert_eq!(a.kind, b.kind, "kind mismatch (interpreter vs VM)");
+        assert_eq!(a.span, b.span, "span mismatch (interpreter vs VM)");
+        assert_eq!((a.line, a.col), (b.line, b.col), "line/col mismatch");
+        assert!(
+            matches!(&b.kind, EvalErrorKind::UndefinedVar(v) if v == "missing"),
+            "{b:?}"
+        );
+        assert_eq!(b.span.slice(src), Some("missing"), "{b:?}");
+        assert_eq!((b.line, b.col), (2, 3));
     }
 }
