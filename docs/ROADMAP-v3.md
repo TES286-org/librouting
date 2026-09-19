@@ -1950,7 +1950,8 @@ refactor — needs extensive regression tests.
 
 ## D16 — Configuration DSL migration (GitHub #18)
 
-**Status:** Phase 0 + Phase 1 landed. Tracks `lr-policy::filter` +
+**Status:** Phase 0 + Phase 1 + Phase 2 + Phase 3 landed. Tracks
+`lr-policy::filter` +
 `lr-cli` (daemon config + `lrctl`). The tracked issue carries the
 full analysis and the phased compatibility plan; the phases land here
 as struck-through audit entries.
@@ -2049,8 +2050,37 @@ is removed in 2.x, with a conversion tool in between (the existing
    of every section and the shipped template pins the golden file.
    Deliberately NOT added: loops, arbitrary expressions, side
    effects — the declarative layer stays non-Turing-complete.
-4. **Phase 3 — daemon accepts `.lr` natively.** Docs/examples switch
-   to DSL-first; TOML remains fully supported.
+4. ~~**Phase 3 — daemon accepts `.lr` natively.**~~ Landed in five
+   slices (`b8e296c` lexer UTF-8 fix, `49ce5e0` template + golden
+   tests, `bb61ecb` reload dialect fix, `9191d93` daemon e2e,
+   `b595c7a` docs). The
+   substance of "natively everywhere": the daemon now runs a `.lr`
+   config end to end — content detection at startup (no
+   `--config-dialect` flag), SIGHUP / API reload re-resolves the
+   dialect through the shared `Dialect::from_flag` parser (reload
+   previously kept the current config with "unknown config dialect
+   'lr'" — a hand-rolled match that predated the DSL and was exactly
+   the drift Phase 1's shared load path was meant to prevent), and
+   the runtime-visible config surface is identical whichever
+   frontend loaded it. `templates/daemon.lr` ships as the DSL-first
+   reference template — the same active configuration as
+   `daemon.toml`, documented with commented DSL examples for every
+   optional feature — and the golden property is pinned three ways:
+   unit tests assert the pair parses to equal IRs pre- and
+   post-finalize, e2e asserts `config check` accepts it out of the
+   box and `--dialect lr` forces filter-only files, and e2e asserts
+   both templates render byte-identical `to-dsl` output with the
+   conversion a fixpoint. The lexer also learned that comments are
+   documentation: non-ASCII text inside a comment used to panic the
+   byte-stepping scanner (char-boundary slice), now `find('\n')`
+   with regression tests. Docs/examples switched DSL-first (README,
+   `lr-cli.md`, recipes, `filter_dsl_roa.md` showing the no-escaping
+   filter blocks, `babel_multi_nic.md`, RUNBOOK, API, tutorial,
+   internals, RELEASE-PLAN, STATUS); the TOML twin remains fully
+   supported. Two stale doc claims the code disproved got fixed in
+   passing (`[[networks]]` array tables never were a schema key; the
+   OSPFv3 SRv6 locator `behavior` is the RFC 9513 u16 code, End = 1,
+   not the string `"end"`).
 5. **Phase 4 — TOML deprecation window.** Load-time warning +
    changelog; removal after an agreed number of releases (1.x
    deprecated, 2.x removed).
@@ -2079,7 +2109,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D13       | landed                | —     | OSPFv3 E-LSA + SRv6 End.X — codecs (`lsa::e_v3`, the eight RFC 8362 types byte-pinned), reception (per-speaker E-preference in `run_spf_v3_extended`/`summary_routes_v3_extended`/`external_routes_v3_extended`, receiver-decided per §6.1/§6.2 — no wire negotiation exists), origination (`[ospf] extended_lsas` switches the daemon's E-Router/E-Network/E-Link/E-IAP forms; ABR/ASBR stays legacy), End.X/LAN End.X codecs (RFC 9513 §9.1/§9.2, types 31/32) + srv6db projection (§9 containment/algorithm gates) + `srv6_end_x` origination (sparse-mode companion E-Router-LSA under legacy mode) + **LAN End.X origination** (`srv6_end_x_lan` base derives per-neighbor §9.2 SIDs as `base | Router-ID` on broadcast segments, `srv6_end_x` covering the §9.1 DR adjacency); labs `ospf6_e_lsa.sh` + `ospf6_e_lsa_endx.sh` + `ospf6_e_lsa_endx_lan.sh` (the three-router bridge lab also pinned the multicast-DD fix: RFC 2328 §8.1 per-adjacency DD/LSR now unicast in both v2 and v3 daemons, and Full→2-Way demotions re-originate immediately). Follow-ups: BGP-LS projection (D11) |
 | D14       | partial (D14.1–D14.6 landed) | —     | BIRD filters → lr DSL (fail-closed, verified against BIRD grammar) + babel interfaces + `!~` + `case`; FRR route-map/neighbor pre-existing; per-protocol attrs + external corpus open |
 | D15       | not started           | —     | Multi-threaded RIB + lock-free event bus  |
-| D16      | Phase 0 + Phase 1 + Phase 2 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics (Phase 0); typed IR + `lr config check` (Phase 1); native `.lr` DSL (Phase 2) — grammar spec in `docs/config_dsl_grammar.md`, blocks with identities, unit suffixes whitelisted per (section, key), verbatim filter bodies, includes, shared `apply_config_key` dispatch so TOML and `.lr` cannot drift, `Dialect::Lr` detection + `--config-dialect lr`, deterministic `lr config to-dsl` converter (fail-loud on unrepresentables), kitchen-sink round-trip over every key + 7 e2e tests; Phase 3 (daemon accepts `.lr` natively everywhere, docs/examples switch DSL-first) next |
+| D16      | Phase 0 + Phase 1 + Phase 2 + Phase 3 landed | —     | Config DSL migration (GitHub #18): spans + positioned diagnostics (Phase 0); typed IR + `lr config check` (Phase 1); native `.lr` DSL (Phase 2) — grammar spec in `docs/config_dsl_grammar.md`, blocks with identities, unit suffixes whitelisted per (section, key), verbatim filter bodies, includes, shared `apply_config_key` dispatch so TOML and `.lr` cannot drift, `Dialect::Lr` detection + `--config-dialect lr`, deterministic `lr config to-dsl` converter (fail-loud on unrepresentables), kitchen-sink round-trip over every key + 7 e2e tests; DSL-first everywhere (Phase 3) — `templates/daemon.lr` ships (IR-equal to the TOML twin, golden tests both frontends + e2e), reload re-resolves the dialect through the shared `from_flag` parser (fixed "unknown config dialect 'lr'" on SIGHUP), lexer UTF-8 comments fixed, daemon e2e runs the fanout topology on `.lr` configs, docs/README/examples switched DSL-first; Phase 4 (TOML deprecation window: load-time warning + changelog) next |
 
 Items flip to `~~struck through~~` here as they land, with a pointer
 to the landing commit. `STATUS.md` remains the live capability

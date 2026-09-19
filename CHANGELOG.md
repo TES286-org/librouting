@@ -18,6 +18,28 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Added
 
+- **The daemon runs natively on `.lr` everywhere (issue #18 Phase
+  3)** — the DSL-first slice of the configuration migration.
+  `templates/daemon.lr` ships as the fully-commented reference
+  configuration: the same active configuration as
+  `templates/daemon.toml`, documented with commented DSL examples for
+  every optional feature, and pinned by golden tests to resolve to
+  the identical IR as the TOML twin (both frontends, pre- and
+  post-finalize; `config to-dsl` renders both byte-identically and
+  the conversion is a fixpoint). SIGHUP / API reload now re-resolves
+  the config dialect through the same shared parser the
+  `--config-dialect` flag uses — a daemon running a `.lr` file
+  previously kept its current configuration on reload with
+  `unknown config dialect 'lr'`. README, `docs/lr-cli.md`, the
+  recipes and the per-scenario examples show `.lr` syntax first; the
+  TOML subset remains fully supported (deprecated through 1.x,
+  planned for removal in 2.x — `config to-dsl` migrates). Two
+  documentation claims the code disproved were corrected in passing
+  (`[[networks]]` array tables are not a schema key; the OSPFv3 SRv6
+  locator `behavior` is the RFC 9513 §11 u16 code, End = 1). Also
+  fixed: the `.lr` lexer panicked on multi-byte characters inside
+  comments (char-boundary slice) — comments accept any UTF-8 text
+  now.
 - **Native `.lr` configuration DSL + `lr-daemon config to-dsl`
   converter (issue #18 Phase 2)** — the TOML→DSL migration's core
   slice. The daemon now accepts a declarative DSL
