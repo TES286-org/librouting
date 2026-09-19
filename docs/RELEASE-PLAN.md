@@ -92,8 +92,12 @@ The CI matrix in `.github/workflows/ci.yml` must cover:
 
 - **Linux** (Ubuntu LTS, 22.04 and the latest LTS in flight) —
   the full interop suite + kernel-gated tests.
-- **macOS** (Intel + Apple Silicon) — `cargo build --workspace`,
-  `cargo test --workspace`, `cargo clippy -D warnings`.
+- **macOS** (Apple Silicon, `macos-14`) — `cargo build --workspace`,
+  `cargo test --workspace`, `cargo clippy -D warnings`. Intel macOS
+  is covered by cross-compilation to `x86_64-apple-darwin` from the
+  Apple Silicon runner (GitHub Actions retired the Intel `macos-13`
+  pool in 2025); the `lr-osroute` BSD backend is shared between Intel
+  and Apple Silicon macOS, so the cross-build covers the Intel path.
 - **Windows** (x86_64, MSVC toolchain) — `cargo build --workspace`,
   `cargo test --workspace`, `cargo clippy -D warnings`.
 

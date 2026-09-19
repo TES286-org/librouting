@@ -9,7 +9,7 @@ failure detection, route flap damping (RFC 2439) is available, and an OS
 route-table reference implementation (Linux rtnetlink, BSD route(4),
 Windows IP Helper) plus a Linux MPLS dataplane mirror are provided as
 opt-in crates. The library is verified bidirectionally against BIRD 2 and
-FRR 10 in CI on Linux, macOS (Intel + Apple Silicon) and Windows.
+FRR 10 in CI on Linux, macOS (Apple Silicon) and Windows.
 
 ## Design
 
@@ -282,29 +282,9 @@ librouting/
 └── .github/workflows/                    # ci.yml + nightly miri + release.yml
 ```
 
-## Documentation
-
-The documentation index at [`docs/README.md`](docs/README.md) orients new
-readers by audience. The canonical references:
-
-| Document                                                       | Path                                       | Audience      |
-| -------------------------------------------------------------- | ------------------------------------------ | ------------- |
-| Documentation index                                            | [`docs/README.md`](docs/README.md)         | everyone      |
-| Architecture (layering, RIB pipeline, extension points)        | [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) | contributors  |
-| RFC reference map (per-RFC coverage)                           | [`docs/RFC_MAP.md`](docs/RFC_MAP.md)       | contributors  |
-| Public API tour (per-crate, with snippets)                     | [`docs/API.md`](docs/API.md)               | embedders     |
-| Implemented-vs-missing gap analysis + roadmap state           | [`docs/STATUS.md`](docs/STATUS.md)         | everyone      |
-| Roadmap v2 landing log (design decisions, evidence)          | [`docs/ROADMAP.md`](docs/ROADMAP.md)       | contributors   |
-| OS route-table integration guide (Linux/BSD/Windows + porting) | [`docs/OS-INTEGRATION.md`](docs/OS-INTEGRATION.md) | embedders      |
-| Interop testing guide (BIRD/FRR lab)                           | [`docs/INTEROP.md`](docs/INTEROP.md)       | contributors  |
-| Behaviour parity flags vs BIRD 2 / FRR 10                     | [`docs/PARITY.md`](docs/PARITY.md)         | operators     |
-| Operations runbook (lifecycle, runtime API, FAQ)               | [`docs/RUNBOOK.md`](docs/RUNBOOK.md)       | operators     |
-| Book-style tutorial                                            | [`docs/tutorial.md`](docs/tutorial.md)     | newcomers     |
-| Per-language binding guides (Go / Python / C / C++)            | [`docs/bindings/`](docs/bindings/)         | embedders     |
-| Per-scenario example walkthroughs                              | [`docs/examples/`](docs/examples/)         | operators     |
-| BGP defects catalogue + exchange-plane design                 | [`docs/research/`](docs/research/)         | contributors  |
-| Scaffolding guide (starter projects)                           | [`docs/scaffolding/README.md`](docs/scaffolding/README.md) | contributors  |
-| Templates (incl. fully-commented `daemon.lr`/`daemon.toml`)     | [`templates/`](templates/)                 | operators     |
+The full documentation set is listed under
+[Documentation](#documentation) below (per-audience index), or see
+[`docs/README.md`](docs/README.md) directly.
 
 ## BGP topology support
 
@@ -512,10 +492,12 @@ Implemented and missing features are tracked in detail in
   and external routing, broadcast segments with DR election, SRv6
   (RFC 9513) and graceful restart (RFC 5187, helper + restarting
   router, interop-verified against FRR ospf6d).
-- Not yet production-ready: see the open items in `docs/ROADMAP.md`
-  (RFC 8362 extended LSAs / SRv6 adjacency SIDs, BGP-LS and SR
-  Policy are the next planned slices; SR-MPLS remains v2-only). The
-  C ABI is **unstable** until v0.5.
+- The project is at **1.0.0-rc.4**: the public Rust API and the C ABI
+  are frozen for the 1.0 cut. See `docs/RELEASE-PLAN.md` §2.8 for the
+  remaining 1.0.0 freeze criteria. The open roadmap items
+  (BGP-LS / SR Policy, D8.2 RIB sharding, D15 multi-threaded RIB) are
+  post-1.0 work; SR-MPLS is v2-only, OSPFv3 E-LSA + SRv6 End.X
+  (RFC 8362 / RFC 9513) are landed.
 
 ## CI/CD
 
@@ -523,34 +505,54 @@ GitHub Actions workflows live in `.github/workflows/` and run on push to
 `main` and on PRs: fmt + clippy + workspace tests + C harness + Go bindings +
 Python bindings + MSRV + cross-build (aarch64 Linux, Windows) + **interop
 jobs against BIRD and FRR** + a **cross-platform matrix** that runs
-`cargo build` and `cargo test` natively on Ubuntu, macOS (Intel + Apple
-Silicon) and Windows. The tag-driven `release.yml` produces a per-OS
-tarball (`liblr_ffi.{so,dylib,dll}` + the static archive + the C / C++
-headers) on each of the four targets and assembles them into a single
-draft GitHub Release. Nightly runs `miri` for the unsafe audit on
-`lr-osroute` FFI.
+`cargo build` and `cargo test` natively on Ubuntu, macOS (Apple
+Silicon) and Windows (Intel macOS is covered by cross-compilation
+from the Apple Silicon runner — GitHub Actions retired the Intel
+macos-13 pool in 2025). The tag-driven `release.yml` produces a per-OS
+tarball per platform containing: `liblr_ffi.{so,dylib,dll}` (the C ABI
+shared library), the static archive (where emitted), the C / C++
+headers (`lr_ffi.h` + `librouting.hpp`), and the three CLI binaries
+(`lr`, `lr-daemon`, `lrctl` — or `.exe` on Windows). The `lr_ffi.h`
+and `librouting.hpp` headers are also attached standalone so a
+packaging system can pull them without unpacking an archive. Nightly
+runs `miri` for the unsafe audit on `lr-osroute` FFI.
 
 ## Documentation
 
 The documentation set lives under `docs/`. Start at
 [`docs/README.md`](docs/README.md) for the per-audience index:
 
-- User-facing: [`docs/lr-cli.md`](docs/lr-cli.md) (CLI user guide),
-  [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (operations),
+- **User-facing** — [`docs/lr-cli.md`](docs/lr-cli.md) (CLI user guide),
+  [`docs/RUNBOOK.md`](docs/RUNBOOK.md) (operations runbook),
   [`docs/tutorial.md`](docs/tutorial.md) (book-style tutorial),
+  [`docs/COMPAT.md`](docs/COMPAT.md) (running BIRD/FRR configs natively),
+  [`docs/PARITY.md`](docs/PARITY.md) (behaviour knobs vs BIRD 2 / FRR 10),
   `templates/daemon.lr` (fully-commented reference config, native
-  DSL) and its TOML twin `templates/daemon.toml`.
-- Embedder-facing: [`docs/API.md`](docs/API.md) (public Rust API tour),
-  [`docs/bindings/{c,cpp,go,python}.md`](docs/bindings) (per-language
-  embedding guides), [`docs/examples/`](docs/examples) (worked scenarios).
-- Contributor-facing: [`docs/lr-cli-internals.md`](docs/lr-cli-internals.md)
-  (CLI internals + extension patterns),
+  DSL) and its deprecated TOML twin `templates/daemon.toml`.
+- **Embedder-facing** — [`docs/API.md`](docs/API.md) (public Rust API tour),
   [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) (layering + RIB pipeline),
-  [`docs/STATUS.md`](docs/STATUS.md) (implemented-vs-missing),
-  [`docs/ROADMAP.md`](docs/ROADMAP.md) (workstream landing log),
-  [`docs/RFC_MAP.md`](docs/RFC_MAP.md) (RFC coverage table).
-- Maintainer-facing: [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md)
+  [`docs/bindings/{c,cpp,go,python}.md`](docs/bindings) (per-language
+  embedding guides), [`docs/ffi_design.md`](docs/ffi_design.md) (FFI
+  design + panic-barrier contract), [`docs/examples/`](docs/examples)
+  (worked scenarios), [`docs/OS-INTEGRATION.md`](docs/OS-INTEGRATION.md)
+  (kernel backends + porting guide).
+- **Contributor-facing** — [`docs/lr-cli-internals.md`](docs/lr-cli-internals.md)
+  (CLI internals + extension patterns),
+  [`docs/STATUS.md`](docs/STATUS.md) (implemented-vs-missing gap analysis),
+  [`docs/ROADMAP.md`](docs/ROADMAP.md) (v2 workstream landing log),
+  [`docs/ROADMAP-v3.md`](docs/ROADMAP-v3.md) (v3 maturity directions),
+  [`docs/RFC_MAP.md`](docs/RFC_MAP.md) (RFC coverage table),
+  [`docs/INTEROP.md`](docs/INTEROP.md) (BIRD/FRR interop lab),
+  [`docs/config_dsl_grammar.md`](docs/config_dsl_grammar.md) (native
+  `.lr` config grammar),
+  [`docs/filter_dsl_grammar.md`](docs/filter_dsl_grammar.md) (filter
+  DSL EBNF grammar),
+  [`docs/research/`](docs/research) (BGP defects, exchange-plane,
+  E-LSA design notes).
+- **Maintainer-facing** — [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md)
   (semver policy, 1.0 freeze criteria, release flow, post-1.0 governance).
+- **AI-agent-facing** — [`AGENTS.md`](AGENTS.md) (project state +
+  workflow constraints for AI contributors).
 
 ## License
 
