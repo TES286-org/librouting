@@ -115,9 +115,15 @@ pub(super) fn lex(text: &str) -> Result<Vec<Tok>, String> {
             }
             '#' => {
                 // Line comment — skip to end of line (the newline
-                // itself is consumed by the loop above).
-                while i < n && !bytes[i..].starts_with('\n') {
-                    i += 1;
+                // itself is consumed by the loop above). Comments may
+                // carry non-ASCII text (em-dashes, CJK notes), so the
+                // scan must move in whole characters: `find` returns
+                // the byte offset of the newline, which always lands
+                // on a char boundary — stepping `i += 1` here would
+                // panic the `bytes[i..]` slice on a multi-byte char.
+                match bytes[i..].find('\n') {
+                    Some(rel) => i += rel,
+                    None => i = n,
                 }
             }
             '{' => {
@@ -447,6 +453,40 @@ mod tests {
                 TokKind::RBrace,
             ]
         );
+    }
+
+    /// Regression: the comment scanner used to step one *byte* per
+    /// iteration, so a multi-byte character inside a comment (an
+    /// em-dash, a CJK note) landed the cursor mid-char and the next
+    /// `text[i..]` slice panicked. Comments are documentation — they
+    /// must accept any UTF-8 text.
+    #[test]
+    fn comments_accept_non_ascii_text() {
+        let toks = kinds("# em-dash — and café naïve ✓\nbgp { # — } [ ] ;\n}");
+        assert_eq!(
+            toks,
+            vec![
+                TokKind::Ident("bgp".into()),
+                TokKind::LBrace,
+                TokKind::RBrace,
+            ]
+        );
+        // A trailing comment without a newline (EOF comment) too.
+        assert_eq!(
+            kinds("bgp; # — tail"),
+            vec![TokKind::Ident("bgp".into()), TokKind::Semi]
+        );
+    }
+
+    /// Offsets stay byte-true across non-ASCII comments: filter-body
+    /// slicing rides these offsets, so a token after a multi-byte
+    /// comment must still slice the raw source correctly.
+    #[test]
+    fn offsets_survive_non_ascii_comments() {
+        let text = "# —\nbgp;";
+        let toks = lex(text).unwrap();
+        assert_eq!(toks.len(), 2);
+        assert_eq!(&text[toks[0].offset..], "bgp;");
     }
 
     #[test]
