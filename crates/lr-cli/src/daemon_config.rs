@@ -2269,256 +2269,271 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
         };
         let key = key.trim();
         let value = value.trim().trim_matches('"');
-        if section == "peer" {
-            let Some(peer) = cfg.peers.last_mut() else {
-                return Err(format!("line {}: key outside a [[peer]] table", lineno + 1));
-            };
-            if !apply_peer_key(peer, key, value)
-                .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-            {
-                cfg.warnings.push(format!(
-                    "line {}: unknown peer key '{}' (ignored)",
-                    lineno + 1,
-                    key
-                ));
-            }
-            continue;
-        }
-        if let Some(name) = section.strip_prefix("peer-template.") {
-            let Some(template) = cfg.peer_templates.get_mut(name) else {
-                return Err(format!("line {}: unknown template", lineno + 1));
-            };
-            if !apply_peer_key(template, key, value)
-                .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-            {
-                return Err(format!(
-                    "line {}: unknown peer-template key '{}' (typo protection)",
-                    lineno + 1,
-                    key
-                ));
-            }
-            continue;
-        }
-        // Policy table sections have their own key schemas; unknown
-        // keys inside them are hard errors (typo protection for
-        // policy the operator expects to be in force — fail closed).
-        if apply_policy_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        // Babel tables and globals: protocol configuration is fail-closed —
-        // an unknown key is a typo that could silently disable link
-        // authentication or alter replay handling.
-        if apply_babel_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        // ROA and filter tables: fail-closed like every other
-        // protocol surface — a typo'd prefix or filter body silently
-        // changes origin validation behaviour.
-        if apply_roa_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        if apply_filter_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        if apply_damping_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        // Redistribution and aggregation tables (ROADMAP-v3 D4.1/D4.2):
-        // fail-closed — a typo'd protocol name or prefix silently
-        // changes which routes cross the pipe or get aggregated.
-        if apply_redistribute_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        if apply_aggregate_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        // RPKI-RTR cache client (`[bgp.rpki]`): fail-closed — a typo'd
-        // cache address or a mis-scaled interval silently changes
-        // which ROA database the origin validation runs against.
-        if apply_rpki_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        // OSPF tables and globals: protocol configuration is fail-closed —
-        // an unknown key is a typo that could silently alter adjacency
-        // behaviour (hello intervals, area types), so it is an error.
-        if apply_ospf_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        // LDP tables and globals: same fail-closed posture — a typo'd
-        // hold time or a mis-spelled bind silently changes discovery
-        // or label origination.
-        if apply_ldp_key(cfg, &section, key, value)
-            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
-        {
-            continue;
-        }
-        let full = if section.is_empty() {
-            key.to_string()
-        } else {
-            format!("{}.{}", section, key)
+        apply_config_key(cfg, &section, key, value, lineno)?;
+    }
+    Ok(())
+}
+
+/// Apply one `key value` pair to `cfg` within `section` — the single
+/// dispatch both configuration frontends drive (ROADMAP-v3 D16
+/// Phase 2, GitHub #18): the TOML subset parser calls it once per
+/// `key = value` line, the native `.lr` DSL lowering once per
+/// `key value;` statement. Sharing the dispatch is what makes the
+/// two frontends unable to drift: the same fail-closed key schemas,
+/// the same typo protection, the same IR.
+///
+/// `lineno` is the 0-based source line the pair came from (diagnostics
+/// report `lineno + 1`, matching the TOML parser's convention).
+pub(crate) fn apply_config_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+    lineno: usize,
+) -> Result<(), String> {
+    if section == "peer" {
+        let Some(peer) = cfg.peers.last_mut() else {
+            return Err(format!("line {}: key outside a [[peer]] table", lineno + 1));
         };
-        match full.as_str() {
-            "bgp.local_as" => {
-                cfg.local_as = value
-                    .parse()
-                    .map_err(|_| format!("line {}: bad local_as", lineno + 1))?
-            }
-            "bgp.peer_as" => {
-                cfg.peer_as = value
-                    .parse()
-                    .map_err(|_| format!("line {}: bad peer_as", lineno + 1))?
-            }
-            "bgp.router_id" => cfg.router_id = value.to_string(),
-            "bgp.peer_addr" => cfg.peer_addr = Some(value.to_string()),
-            "bgp.listen_addr" => cfg.listen_addr = Some(value.to_string()),
-            "bgp.local_address" => cfg.local_address = Some(value.to_string()),
-            "bgp.hold_time" => cfg.hold_time = value.parse().unwrap_or(90),
-            "bgp.graceful_restart_time" => {
-                cfg.gr_restart_time = value.parse().unwrap_or(120);
-            }
-            "bgp.llgr_stale_time" => {
-                cfg.llgr_stale_time = value.parse().unwrap_or(0);
-            }
-            "bgp.llgr_max_stale_time" => {
-                cfg.llgr_max_stale_time = value.parse().unwrap_or(0);
-            }
-            "bgp.install_kernel" => cfg.install_kernel = parse_bool(value),
-            "bgp.add_path" => cfg.add_path = parse_bool(value),
-            "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
-            "bgp.extended_next_hop" => cfg.extended_next_hop = parse_bool(value),
-            "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
-            "bgp.gtsm" => cfg.gtsm_hops = parse_gtsm(value),
-            "bgp.max_prefixes" => {
-                cfg.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);
-            }
-            "bgp.max_prefix_action" => {
-                cfg.max_prefix_action = value.to_string();
-            }
-            "bgp.max_prefix_threshold" => {
-                cfg.max_prefix_threshold = value.parse().unwrap_or(75);
-            }
-            "bgp.mp_families" => cfg.mp_families = parse_str_array(value),
-            "bgp.bfd" => cfg.bfd_enabled = parse_bool(value),
-            "bgp.bfd_multihop" => cfg.bfd_multihop = parse_bool(value),
-            "bgp.bfd_min_tx_ms" => {
-                cfg.bfd_min_tx_ms = value.parse().unwrap_or(100);
-            }
-            "bgp.bfd_min_rx_ms" => {
-                cfg.bfd_min_rx_ms = value.parse().unwrap_or(100);
-            }
-            "bgp.bfd_multiplier" => {
-                cfg.bfd_multiplier = value.parse().unwrap_or(3);
-            }
-            "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
-            "bgp.bmp_target" => cfg.bmp_target = Some(value.to_string()),
-            "bgp.ebgp_policy" => {
-                if value != "rfc8212" && value != "accept-all" {
-                    return Err(format!(
-                        "line {}: bad ebgp_policy '{}' (expected \"rfc8212\" or \"accept-all\")",
-                        lineno + 1,
-                        value
-                    ));
-                }
-                cfg.ebgp_policy = value.to_string();
-            }
-            "bgp.enforce_first_as" => cfg.enforce_first_as = parse_bool(value),
-            "bgp.bestpath_compare_routerid" => {
-                cfg.bestpath_compare_routerid = parse_bool(value);
-            }
-            "bgp.graceful_shutdown" => cfg.graceful_shutdown = parse_bool(value),
-            "bgp.default_ipv4_unicast" => cfg.default_ipv4_unicast = parse_bool(value),
-            "bgp.allow_local_as" => {
-                // Accept "any" / "allowas-any" as the u32::MAX sentinel,
-                // integers as N. FRR `allow-local-as [N]` defaults to
-                // N=1 when the value is omitted — but a TOML value
-                // without an integer would be a syntax error; the
-                // daemon accepts `true`/`false` to mean N=1/0 for
-                // BIRD `allow local as` parity.
-                cfg.allow_local_as = match value.trim() {
-                    "any" | "allowas-any" => u32::MAX,
-                    "true" => 1,
-                    "false" => 0,
-                    other => other.parse().map_err(|_| {
-                        format!("line {}: bad allow_local_as '{other}' (expected integer N, 'any', or 'true'/'false')", lineno + 1)
-                    })?,
-                };
-            }
-            "bgp.soft_reconfig_inbound" => cfg.soft_reconfig_inbound = parse_bool(value),
-            "bgp.exchange_plane" => cfg.exchange_plane = parse_bool(value),
-            "bgp.exchange_plane_keys" => cfg.exchange_plane_keys = parse_str_array(value),
-            "bgp.roa_validate" | "roa_validate" => cfg.roa_validate = parse_bool(value),
-            "bgp.roa_invalid_action" | "roa_invalid_action" => {
-                if !matches!(value, "reject" | "warn" | "accept") {
-                    return Err(format!(
-                        "line {}: bad roa_invalid_action '{}' (expected \"reject\" | \"warn\" | \"accept\")",
-                        lineno + 1,
-                        value
-                    ));
-                }
-                cfg.roa_invalid_action = value.to_string();
-            }
-            "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
-            "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
-            "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
-            // rc.3 multi-protocol selection. Top-level keys: the
-            // string form mirrors the CLI (`protocol = "bgp,ospf"`),
-            // the array form reads better in operator configs
-            // (`protocols = ["bgp", "ospf"]`). Like every other
-            // overlapping key they override the CLI value. Names are
-            // validated fail-closed by the dispatcher, not here, so
-            // the reload diagnostics name the same error.
-            "protocol" => {
-                if value.is_empty() {
-                    return Err(format!(
-                        "line {}: an empty protocol value needs at least one name",
-                        lineno + 1
-                    ));
-                }
-                cfg.protocol = value.to_string();
-            }
-            "protocols" => {
-                let list = parse_str_array(value);
-                if list.is_empty() {
-                    return Err(format!(
-                        "line {}: protocols = [...] needs at least one name",
-                        lineno + 1
-                    ));
-                }
-                cfg.protocol = list.join(",");
-            }
-            "user" => cfg.user = Some(value.to_string()),
-            "group" => cfg.group = Some(value.to_string()),
-            "api_socket" => cfg.api_socket = Some(value.to_string()),
-            "metrics_addr" => cfg.metrics_addr = Some(value.to_string()),
-            "networks" | "bgp.networks" => cfg.networks = parse_str_array(value),
-            "labeled_networks" | "bgp.labeled_networks" => {
-                cfg.labeled_networks = parse_str_array(value)
-            }
-            _ => {
-                cfg.warnings.push(format!(
-                    "line {}: unknown key '{}' (ignored)",
+        if !apply_peer_key(peer, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))? {
+            cfg.warnings.push(format!(
+                "line {}: unknown peer key '{}' (ignored)",
+                lineno + 1,
+                key
+            ));
+        }
+        return Ok(());
+    }
+    if let Some(name) = section.strip_prefix("peer-template.") {
+        let Some(template) = cfg.peer_templates.get_mut(name) else {
+            return Err(format!("line {}: unknown template", lineno + 1));
+        };
+        if !apply_peer_key(template, key, value)
+            .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+        {
+            return Err(format!(
+                "line {}: unknown peer-template key '{}' (typo protection)",
+                lineno + 1,
+                key
+            ));
+        }
+        return Ok(());
+    }
+    // Policy table sections have their own key schemas; unknown
+    // keys inside them are hard errors (typo protection for
+    // policy the operator expects to be in force — fail closed).
+    if apply_policy_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // Babel tables and globals: protocol configuration is fail-closed —
+    // an unknown key is a typo that could silently disable link
+    // authentication or alter replay handling.
+    if apply_babel_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // ROA and filter tables: fail-closed like every other
+    // protocol surface — a typo'd prefix or filter body silently
+    // changes origin validation behaviour.
+    if apply_roa_key(cfg, section, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))? {
+        return Ok(());
+    }
+    if apply_filter_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    if apply_damping_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // Redistribution and aggregation tables (ROADMAP-v3 D4.1/D4.2):
+    // fail-closed — a typo'd protocol name or prefix silently
+    // changes which routes cross the pipe or get aggregated.
+    if apply_redistribute_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    if apply_aggregate_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // RPKI-RTR cache client (`[bgp.rpki]`): fail-closed — a typo'd
+    // cache address or a mis-scaled interval silently changes
+    // which ROA database the origin validation runs against.
+    if apply_rpki_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // OSPF tables and globals: protocol configuration is fail-closed —
+    // an unknown key is a typo that could silently alter adjacency
+    // behaviour (hello intervals, area types), so it is an error.
+    if apply_ospf_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // LDP tables and globals: same fail-closed posture — a typo'd
+    // hold time or a mis-spelled bind silently changes discovery
+    // or label origination.
+    if apply_ldp_key(cfg, section, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))? {
+        return Ok(());
+    }
+    let full = if section.is_empty() {
+        key.to_string()
+    } else {
+        format!("{}.{}", section, key)
+    };
+    match full.as_str() {
+        "bgp.local_as" => {
+            cfg.local_as = value
+                .parse()
+                .map_err(|_| format!("line {}: bad local_as", lineno + 1))?
+        }
+        "bgp.peer_as" => {
+            cfg.peer_as = value
+                .parse()
+                .map_err(|_| format!("line {}: bad peer_as", lineno + 1))?
+        }
+        "bgp.router_id" => cfg.router_id = value.to_string(),
+        "bgp.peer_addr" => cfg.peer_addr = Some(value.to_string()),
+        "bgp.listen_addr" => cfg.listen_addr = Some(value.to_string()),
+        "bgp.local_address" => cfg.local_address = Some(value.to_string()),
+        "bgp.hold_time" => cfg.hold_time = value.parse().unwrap_or(90),
+        "bgp.graceful_restart_time" => {
+            cfg.gr_restart_time = value.parse().unwrap_or(120);
+        }
+        "bgp.llgr_stale_time" => {
+            cfg.llgr_stale_time = value.parse().unwrap_or(0);
+        }
+        "bgp.llgr_max_stale_time" => {
+            cfg.llgr_max_stale_time = value.parse().unwrap_or(0);
+        }
+        "bgp.install_kernel" => cfg.install_kernel = parse_bool(value),
+        "bgp.add_path" => cfg.add_path = parse_bool(value),
+        "bgp.add_path_max_paths" => cfg.add_path_max_paths = value.parse().unwrap_or(6),
+        "bgp.extended_next_hop" => cfg.extended_next_hop = parse_bool(value),
+        "bgp.local_address_v6" => cfg.local_address_v6 = Some(value.to_string()),
+        "bgp.gtsm" => cfg.gtsm_hops = parse_gtsm(value),
+        "bgp.max_prefixes" => {
+            cfg.max_prefixes = value.parse::<u32>().ok().filter(|&n| n > 0);
+        }
+        "bgp.max_prefix_action" => {
+            cfg.max_prefix_action = value.to_string();
+        }
+        "bgp.max_prefix_threshold" => {
+            cfg.max_prefix_threshold = value.parse().unwrap_or(75);
+        }
+        "bgp.mp_families" => cfg.mp_families = parse_str_array(value),
+        "bgp.bfd" => cfg.bfd_enabled = parse_bool(value),
+        "bgp.bfd_multihop" => cfg.bfd_multihop = parse_bool(value),
+        "bgp.bfd_min_tx_ms" => {
+            cfg.bfd_min_tx_ms = value.parse().unwrap_or(100);
+        }
+        "bgp.bfd_min_rx_ms" => {
+            cfg.bfd_min_rx_ms = value.parse().unwrap_or(100);
+        }
+        "bgp.bfd_multiplier" => {
+            cfg.bfd_multiplier = value.parse().unwrap_or(3);
+        }
+        "bgp.md5_key" => cfg.md5_key = Some(value.to_string()),
+        "bgp.bmp_target" => cfg.bmp_target = Some(value.to_string()),
+        "bgp.ebgp_policy" => {
+            if value != "rfc8212" && value != "accept-all" {
+                return Err(format!(
+                    "line {}: bad ebgp_policy '{}' (expected \"rfc8212\" or \"accept-all\")",
                     lineno + 1,
-                    full
+                    value
                 ));
             }
+            cfg.ebgp_policy = value.to_string();
+        }
+        "bgp.enforce_first_as" => cfg.enforce_first_as = parse_bool(value),
+        "bgp.bestpath_compare_routerid" => {
+            cfg.bestpath_compare_routerid = parse_bool(value);
+        }
+        "bgp.graceful_shutdown" => cfg.graceful_shutdown = parse_bool(value),
+        "bgp.default_ipv4_unicast" => cfg.default_ipv4_unicast = parse_bool(value),
+        "bgp.allow_local_as" => {
+            // Accept "any" / "allowas-any" as the u32::MAX sentinel,
+            // integers as N. FRR `allow-local-as [N]` defaults to
+            // N=1 when the value is omitted — but a TOML value
+            // without an integer would be a syntax error; the
+            // daemon accepts `true`/`false` to mean N=1/0 for
+            // BIRD `allow local as` parity.
+            cfg.allow_local_as = match value.trim() {
+                "any" | "allowas-any" => u32::MAX,
+                "true" => 1,
+                "false" => 0,
+                other => other.parse().map_err(|_| {
+                    format!("line {}: bad allow_local_as '{other}' (expected integer N, 'any', or 'true'/'false')", lineno + 1)
+                })?,
+            };
+        }
+        "bgp.soft_reconfig_inbound" => cfg.soft_reconfig_inbound = parse_bool(value),
+        "bgp.exchange_plane" => cfg.exchange_plane = parse_bool(value),
+        "bgp.exchange_plane_keys" => cfg.exchange_plane_keys = parse_str_array(value),
+        "bgp.roa_validate" | "roa_validate" => cfg.roa_validate = parse_bool(value),
+        "bgp.roa_invalid_action" | "roa_invalid_action" => {
+            if !matches!(value, "reject" | "warn" | "accept") {
+                return Err(format!(
+                    "line {}: bad roa_invalid_action '{}' (expected \"reject\" | \"warn\" | \"accept\")",
+                    lineno + 1,
+                    value
+                ));
+            }
+            cfg.roa_invalid_action = value.to_string();
+        }
+        "bgp.tcp_ao_keys" => cfg.tcp_ao_keys = parse_str_array(value),
+        "bgp.tcp_ao_algorithm" => cfg.tcp_ao_algorithm = value.to_string(),
+        "bgp.tcp_ao_maclen" => cfg.tcp_ao_maclen = value.parse().unwrap_or(0),
+        // rc.3 multi-protocol selection. Top-level keys: the
+        // string form mirrors the CLI (`protocol = "bgp,ospf"`),
+        // the array form reads better in operator configs
+        // (`protocols = ["bgp", "ospf"]`). Like every other
+        // overlapping key they override the CLI value. Names are
+        // validated fail-closed by the dispatcher, not here, so
+        // the reload diagnostics name the same error.
+        "protocol" => {
+            if value.is_empty() {
+                return Err(format!(
+                    "line {}: an empty protocol value needs at least one name",
+                    lineno + 1
+                ));
+            }
+            cfg.protocol = value.to_string();
+        }
+        "protocols" => {
+            let list = parse_str_array(value);
+            if list.is_empty() {
+                return Err(format!(
+                    "line {}: protocols = [...] needs at least one name",
+                    lineno + 1
+                ));
+            }
+            cfg.protocol = list.join(",");
+        }
+        "user" => cfg.user = Some(value.to_string()),
+        "group" => cfg.group = Some(value.to_string()),
+        "api_socket" => cfg.api_socket = Some(value.to_string()),
+        "metrics_addr" => cfg.metrics_addr = Some(value.to_string()),
+        "networks" | "bgp.networks" => cfg.networks = parse_str_array(value),
+        "labeled_networks" | "bgp.labeled_networks" => {
+            cfg.labeled_networks = parse_str_array(value)
+        }
+        _ => {
+            cfg.warnings.push(format!(
+                "line {}: unknown key '{}' (ignored)",
+                lineno + 1,
+                full
+            ));
         }
     }
     Ok(())
