@@ -1085,6 +1085,7 @@ impl BgpPeer {
 
     /// Reset to Idle. Does not close transport — embedder handles that.
     pub fn reset(&mut self) {
+        self.codec = BgpCodec::new().with_asn4(self.cfg.asn4);
         self.state = BgpState::Idle;
         self.established = false;
         self.peer_bgp_id = None;
