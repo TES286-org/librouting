@@ -147,6 +147,42 @@ fn converts_the_shipped_template() {
 }
 
 #[test]
+fn the_shipped_lr_template_round_trips_idempotently() {
+    // Phase 3's DSL-first twin is itself a converter citizen: the
+    // .lr template converts, converting the conversion is byte-stable
+    // (the emission rule is a fixpoint), and the result still checks.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let template = format!("{manifest}/../../templates/daemon.lr");
+    let args = ["config", "to-dsl", template.as_str()];
+    let (code, out1, stderr) = to_dsl(&args);
+    assert_eq!(code, 0, "{stderr}");
+    let rt = fixture("lr-template-rt", &out1, "lr");
+    let (code, out2, stderr) = to_dsl(&["config", "to-dsl", rt.to_str().unwrap()]);
+    assert_eq!(code, 0, "{stderr}");
+    assert_eq!(out1, out2, "to-dsl must be a fixpoint on its own output");
+    let (code, stdout, _) = check(&["config", "check", rt.to_str().unwrap()]);
+    assert_eq!(code, 0);
+    assert!(stdout.contains("dialect lr"), "{stdout}");
+}
+
+#[test]
+fn both_shipped_templates_convert_identically() {
+    // The golden cross-frontend property, end to end: daemon.lr
+    // documents the same configuration as daemon.toml, so both
+    // templates must render the same .lr program — the standing
+    // guarantee operators rely on when migrating with `config to-dsl`.
+    let manifest = env!("CARGO_MANIFEST_DIR");
+    let toml_template = format!("{manifest}/../../templates/daemon.toml");
+    let lr_template = format!("{manifest}/../../templates/daemon.lr");
+    let (_, from_toml, stderr) = to_dsl(&["config", "to-dsl", toml_template.as_str()]);
+    assert_eq!(
+        to_dsl(&["config", "to-dsl", lr_template.as_str()]),
+        (0, from_toml.clone(), String::new()),
+        "stderr: {stderr}"
+    );
+}
+
+#[test]
 fn refuses_configs_with_parse_warnings() {
     // Unknown tables are tolerated-with-warning by the TOML frontend;
     // the converter refuses rather than emitting a file that means

@@ -1,0 +1,551 @@
+# lr-daemon configuration (native .lr DSL, ROADMAP-v3 D16 Phase 3).
+#
+# This is the DSL-first configuration template: the same active
+# configuration as `templates/daemon.toml`, in the dialect the daemon
+# prefers. Grammar reference: docs/config_dsl_grammar.md. The TOML
+# subset stays fully supported (deprecated in 1.x, planned for removal
+# in 2.x); `lr-daemon config to-dsl templates/daemon.toml` converts.
+#
+# Equivalent CLI:
+#   lr-daemon --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+#             --peer 192.0.2.2:179 --local-address 192.0.2.1 \
+#             --network 203.0.113.0/24 --hold-time 90
+#
+# Lexical rules in one glance:
+#   - `block identity { ... }` opens a section (`peer "core-1" { }`);
+#     the identity is sugar for the block's identity key.
+#   - `key value;` statements inside keep their exact TOML spelling
+#     (both frontends share one key schema and cannot drift).
+#   - Durations/sizes may carry unit suffixes on whitelisted keys only
+#     (`hold_time 90s;` — seconds here; a Babel `hello_interval_ms`
+#     takes ms). A suffix on any other key is a parse error.
+#   - Filter bodies sit verbatim between braces — no string escaping.
+#   - `#` starts a comment; `include "file.lr";` splices another file
+#     (cycle-checked, relative to the including file).
+
+# ---------------------------------------------------------------------
+# Protocol set (top level)
+# ---------------------------------------------------------------------
+# Multi-protocol combinations (rc.3): bgp, ospf and babel can run in
+# one process sharing one Loc-RIB. `protocol bgp,ospf;` (string form,
+# mirrors the CLI) or `protocols [bgp, ospf];` (list form). Cross-
+# protocol advertisement into BGP stays opt-in (redistribute blocks);
+# bmp and ldp cannot combine. A single name (or omitting the key
+# entirely) keeps the classic single-protocol daemon:
+#
+# protocol bgp;
+
+# ---------------------------------------------------------------------
+# BGP
+# ---------------------------------------------------------------------
+# Every key below doubles as the default each `peer` block inherits
+# unless it sets its own value.
+
+bgp {
+    local_as 64512;
+    peer_as 64513;
+    router_id "10.0.0.1";
+
+    # Outbound: connect to the peer (legacy single-peer key; omit when
+    # `listen_addr` is used). Repeatable per-peer remotes use `peer`
+    # blocks instead.
+    peer_addr "192.0.2.2:179";
+
+    # Inbound: accept BGP connections. With only the legacy single peer
+    # the listener accepts any connection on session #1 (historical
+    # behaviour); once `peer` blocks exist, inbound connections are
+    # matched to peers by source address and unmatched connections are
+    # rejected.
+    # listen_addr "0.0.0.0:179";
+
+    # Source address for next-hop-self egress. Required when the daemon
+    # peers over an address not derivable from peer_addr/listen_addr.
+    local_address "192.0.2.1";
+
+    # Hold time in seconds (default 90; 0 disables keepalives).
+    hold_time 90s;
+
+    # Install best routes into the kernel FIB (root + Linux; the CLI
+    # flag is --install-kernel-routes).
+    # install_kernel false;
+
+    # RFC 8212 default eBGP route behavior for peers without an
+    # explicit import/export route-map:
+    #   "rfc8212"    (default) deny-in/deny-out — external peers without
+    #                an import route-map have their received routes
+    #                discarded, peers without an export route-map are
+    #                announced nothing.
+    #   "accept-all" the legacy RFC 4271 default-accept the RFC permits
+    #                as a deviation (Appendix A "insecure-mode"). iBGP
+    #                peers are never affected — RFC 8212 scopes to EBGP
+    #                sessions.
+    # ebgp_policy "rfc8212";
+
+    # FRR `bgp enforce-first-as`: when on, an eBGP UPDATE whose
+    # leftmost AS_PATH sequence segment's first AS is not the peer's AS
+    # is rejected before Adj-RIB-In. Off by default — matches FRR
+    # `no bgp enforce-first-as`. iBGP and confederation-internal
+    # sessions are exempt. CLI: --enforce-first-as / --no-enforce-first-as
+    # enforce_first_as false;
+
+    # FRR `bgp bestpath compare-routerid`: when on (the default), the
+    # best-path tiebreaker is the lowest BGP IDENTIFIER (RFC 5004
+    # deterministic mode). When off, the oldest-received route wins
+    # (FRR's default).
+    # bestpath_compare_routerid true;
+
+    # FRR `bgp default ipv4-unicast`: when on (the default), IPv4
+    # unicast is implicitly active for every BGP peer even when its
+    # mp_families does not list it. When off, IPv4 unicast must be
+    # added explicitly (per-peer override: `default_ipv4_unicast false;`
+    # inside the peer block).
+    # default_ipv4_unicast true;
+
+    # FRR `bgp allow-local-as [N]` / BIRD `allow local as`: admit a
+    # route whose AS_PATH contains the local AS up to N times. 0 (the
+    # default) rejects any occurrence; `any` admits any number. iBGP
+    # sessions are exempt.
+    # allow_local_as 0;
+
+    # FRR `bgp soft-reconfiguration inbound`: retain the pre-policy
+    # Adj-RIB-In so a policy reconfiguration applies without re-fetching
+    # from the peer. Off by default (the cost is duplicate RIB memory).
+    # soft_reconfig_inbound false;
+
+    # W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md).
+    # Experimental: requires a binary built with
+    # `--features exchange-plane`; the plane only activates between two
+    # lr speakers sharing a key id — non-lr peers are unaffected.
+    # exchange_plane true;
+    # exchange_plane_keys ["1:first-secret", "2:second-secret"];
+
+    # RFC 4724 graceful restart: restart time advertised to the peer,
+    # in seconds (0 disables). Stale routes from the peer are retained
+    # for this window after a session loss.
+    graceful_restart_time 120s;
+
+    # RFC 9494 long-lived graceful restart: stale time advertised per
+    # address family, in seconds (0 disables).
+    # llgr_stale_time 3600s;
+
+    # Optional local cap on the LLGR stale time received from the peer
+    # (seconds; 0 = honour the peer's value).
+    # llgr_max_stale_time 7200s;
+
+    # RFC 2385 TCP MD5 session authentication (transport level). The
+    # same secret must be configured on the peer. Mutually exclusive
+    # with tcp_ao_keys.
+    # md5_key "alpha";
+
+    # RFC 5925 TCP-AO session authentication (Linux 6.7+). Keys are
+    # "id:secret"; the first key is Current/RNext.
+    # tcp_ao_keys ["1:alpha"];
+    # tcp_ao_algorithm "hmac-sha1";
+    # tcp_ao_maclen 12;
+
+    # RFC 7911 Add-Path: advertise the capability (send + receive) so
+    # the session can carry multiple paths per prefix. Effective only
+    # when the peer also offers it. add_path_max_paths caps how many
+    # paths per prefix the decision process keeps (default 6).
+    # add_path true;
+    # add_path_max_paths 6;
+
+    # RFC 4760 MP-BGP address families advertised in OPEN. Defaults to
+    # IPv4 unicast only. Recognised values: "ipv4-unicast" (default),
+    # "ipv6-unicast", "ipv4-labeled-unicast", "ipv6-labeled-unicast".
+    # mp_families ["ipv4-unicast", "ipv6-unicast", "ipv4-labeled-unicast"];
+
+    # RFC 5549 Extended Next-Hop: advertise the (1,1,2) tuple so IPv4
+    # NLRI may be resolved over an IPv6 next-hop.
+    # extended_next_hop true;
+
+    # Local IPv6 source address for next-hop-self egress over IPv6
+    # NLRI or RFC 5549 ENH.
+    # local_address_v6 "2001:db8::1";
+
+    # Locally originated networks. Reloadable via SIGHUP / the runtime
+    # API `reload` command: added prefixes are originated, removed ones
+    # withdrawn.
+    networks ["203.0.113.0/24"];
+
+    # RFC 8277 labelled networks — each entry is "<prefix> <labels>"
+    # where <labels> is a comma-separated list of 20-bit MPLS label
+    # values (top of stack first). Requires the matching family in
+    # mp_families above.
+    # labeled_networks ["198.51.100.0/24 100", "10.0.0.0/8 100,200,3"];
+
+    # --- BFD fast-fail (RFC 5880/5881; applies to every peer that
+    # enables bfd). A BFD Up->Down transition tears the BGP session
+    # down immediately instead of waiting out the hold timer. Requires
+    # a local_address (the BFD sockets bind it).
+    # bfd true;
+    # bfd_multihop false;      # RFC 5883 multihop (UDP 4784, no TTL check)
+    # bfd_min_tx_ms 100ms;     # DesiredMinTxInterval (RFC 5880 6.8.1)
+    # bfd_min_rx_ms 100ms;     # RequiredMinRxInterval
+    # bfd_multiplier 3;        # packets lost before Down (~300ms at 100ms)
+
+    # --- ROA validation (RFC 6482 / RFC 6811). When roa_validate is
+    # on, every received BGP UPDATE is validated per RFC 6811 2:
+    # routes whose (prefix, origin_as) is not authorized by a `roa`
+    # block are rejected at import time. The filter DSL's roa.state
+    # accessor reads the same table regardless of roa_validate.
+    # roa_validate true;
+    # roa_invalid_action "reject";   # "reject" (default) | "warn" | "accept"
+}
+
+# ---------------------------------------------------------------------
+# Daemon hardening (top-level keys)
+# ---------------------------------------------------------------------
+
+# Drop privileges to this user (name or numeric uid) after the listener
+# is bound and session auth armed. Default group: the user's login
+# group. Unix only.
+# user "lr";
+
+# Override the privilege-drop group (name or numeric gid).
+# group "lr";
+
+# Runtime API on a Unix stream socket (0600) for operational visibility:
+# status / sessions / routes / reload / shutdown / help (one command per
+# line, e.g. `echo status | socat - UNIX-CONNECT:/run/lr-daemon.api`).
+# SIGTERM/SIGINT shut the daemon down gracefully; SIGHUP is equivalent
+# to `reload`.
+# api_socket "/run/lr-daemon.api";
+
+# Prometheus /metrics HTTP endpoint (ROADMAP-v3 D12.2/D12.4). When set,
+# the daemon serves the Prometheus text exposition format on
+# `GET /metrics` (session gauges, RIB sizes, per-peer UPDATE counters,
+# filter latency histograms). Bind to a loopback address for scrape
+# security.
+# metrics_addr "127.0.0.1:9119";
+
+# ---------------------------------------------------------------------
+# Multi-peer configuration
+# ---------------------------------------------------------------------
+# Each `peer` block configures one BGP session. Keys left unset inherit
+# the bgp block above. A peer is either outbound (`remote` — the daemon
+# dials it, with its own reconnect thread and backoff) or inbound
+# (`address` — the expected source IP of connections the listener
+# matches to this peer). Combining both makes it bidirectional, with
+# the RFC 4271 6.8 connection collision resolution.
+#
+# Reusable defaults: `peer-template NAME { }` blocks hold any peer key;
+# peers pull them in with `extends "name"` and override per-peer.
+# Templates may extend other templates (most specific key wins; cycles
+# and unknown names are startup errors).
+#
+# Available keys: name, remote, address, peer_as, hold_time,
+# graceful_restart_time, llgr_stale_time, llgr_max_stale_time,
+# local_address, local_address_v6, md5_key, tcp_ao_keys,
+# tcp_ao_algorithm, tcp_ao_maclen, add_path, add_path_max_paths,
+# mp_families, extended_next_hop, gtsm, max_prefixes, max_prefix_action,
+# max_prefix_threshold, bfd, bfd_multihop, import, export,
+# import_filter, export_filter.
+#
+# Note: inbound peers must share one auth configuration (the listener
+# socket is armed once); heterogeneous listener keys are future work.
+
+# peer "transit-a" {
+#     remote "192.0.2.2:179";
+#     peer_as 64513;
+#     md5_key "alpha";
+# }
+
+# peer-template "customer" {
+#     peer_as 64514;
+#     hold_time 30s;
+#     max_prefixes 1000;
+#     max_prefix_action "teardown";
+#     import "from-customer";
+# }
+#
+# peer "customer-b" {
+#     address "198.51.100.2";
+#     extends "customer";
+# }
+#
+# peer "customer-c" {
+#     address "198.51.100.3";
+#     extends "customer";
+#     max_prefixes 500;        # per-peer override
+# }
+
+# ---------------------------------------------------------------------
+# Routing policy: named lists + route-maps, attached per peer
+# ---------------------------------------------------------------------
+# Lists are first-match / implicit-deny, FRR-style. Route-map entries
+# apply in ascending `entry` order (ties keep file order); `permit`
+# sets the verdict of that entry, omit it to fall through to the next
+# entry after applying the sets.
+#
+#   prefix-list NAME    — prefix, ge (default: prefix len),
+#                         le (default: unbounded), permit (default true)
+#   as-path-list NAME   — pattern, permit; pattern tokens: ^ start,
+#                         $ end, _ any separator; e.g. "_65000$" =
+#                         learned from AS65000
+#   community-list NAME — communities (["asn:value", "no-export", ...]),
+#                         permit
+#   route-map NAME      — entry, match_prefix, match_as_path,
+#                         match_community (AND), set_local_pref, set_med,
+#                         set_metric, set_next_hop, prepend
+#                         ("65001 65001"), add_community ("64512:100"),
+#                         permit
+#
+# Peers attach policy with `import "route-map"` / `export "route-map"`
+# (or `import_filter` / `export_filter` for filter blocks). Unknown
+# references fail at startup — policy never silently passes traffic.
+#
+# Under the default ebgp_policy "rfc8212" an external peer without an
+# import route-map discards every received route and one without an
+# export route-map is announced nothing, so production eBGP peers
+# always want explicit policy in both directions; a permit-all
+# route-map restores the flow when intended.
+
+prefix-list "customer-space" {
+    prefix "203.0.113.0/24";
+}
+
+route-map "to-customer" {
+    entry 10;
+    match_prefix "customer-space";
+    permit true;
+}
+
+route-map "to-customer" {
+    entry 20;                # everything else stays internal
+    permit false;
+}
+
+# route-map "permit-all" {
+#     entry 10;
+#     permit true;
+# }
+#
+# peer "customer-a" {
+#     address "198.51.100.2";
+#     peer_as 64514;
+#     export "to-customer";
+# }
+
+# ---------------------------------------------------------------------
+# Filter blocks (BIRD-syntax subset; see docs/filter_dsl_grammar.md)
+# ---------------------------------------------------------------------
+# A real expression language for import/export policy. Features:
+# if/then/else, let bindings, arithmetic, comparison, boolean and
+# bitwise operators, prefix-set membership (net ~ [ 10.0.0.0/8{16,24} ]),
+# route attribute access (net, bgp.local_pref, bgp.med, bgp.as_path,
+# bgp.communities, bgp.next_hop, proto, roa.state), assignment, append,
+# method calls (bgp.as_path.prepend(65001)), accept/reject (with
+# optional reason), case/switch, function calls (len(), first(),
+# last()).
+#
+# The body sits verbatim between the braces — no string escaping; a `}`
+# inside "..." or after # does not close the block. Attach with
+# `import_filter "name"` / `export_filter "name"` on a peer.
+
+# filter "customer-in" {
+#     if net ~ [ 203.0.113.0/24, 198.51.100.0/24 ] then {
+#         bgp.local_pref = 200;
+#         accept;
+#     }
+#     reject;
+# }
+#
+# filter "roa-guard" {
+#     if roa.state == "invalid" then { reject with "ROA invalid"; }
+#     accept;
+# }
+
+# ---------------------------------------------------------------------
+# ROA — Route Origin Authorization (RFC 6482 / RFC 6811)
+# ---------------------------------------------------------------------
+# Load ROA entries at startup into the router-wide RoaTable (see the
+# roa_validate keys in the bgp block above). max_length defaults to the
+# prefix length (exact match); it must be >= prefix length and <= 32
+# (v4) or 128 (v6) — fail-closed on violation.
+
+# roa {
+#     prefix "203.0.113.0/24";
+#     asn 64512;
+#     max_length 24;
+# }
+#
+# roa {
+#     prefix "2001:db8::/32";
+#     asn 64512;
+#     max_length 48;
+# }
+
+# ---------------------------------------------------------------------
+# OSPF daemon mode (protocol ospf; BGP blocks above are ignored)
+# ---------------------------------------------------------------------
+# CLI equivalent (single area, defaults):
+#   lr-daemon --protocol ospf --router-id 10.0.0.1 \
+#             --ospf-interface eth0 [--ospf-area 0]
+#
+# Raw OSPF sockets (IP protocol 89, multicast 224.0.0.5) need root or a
+# user/network namespace: `unshare -Urn lr-daemon --protocol ospf ...`.
+# OSPFv2 scope (no DR election; segments behave p2p).
+
+# ospf {
+#     hello_interval 10s;          # per-interface default (RFC 2328)
+#     dead_interval 40s;           # per-interface default (4x hello)
+#     graceful_restart false;      # RFC 3623 / RFC 5187 restarting side
+#     grace_period 120s;           # 1..=1800 (BIRD/FRR default 120)
+#     graceful_restart_helper true;  # helper side, default on
+#     helper_grace_cap 120s;       # longest grace honoured (FRR
+#                                  # supported_grace_time: clamped)
+#     gr_state_file "/run/lr/ospf.gr";  # where the grace deadline
+#                                  # survives the restart
+#     srgb_base 16000;             # RFC 8665 3.2 Segment Routing
+#     srgb_range 8000;             # Global Block (FRR's default block)
+#     sr_receive false;            # RFC 8665 reception: resolve
+#                                  # Prefix-SIDs into Loc-RIB labels
+#                                  # (off by default, fail closed)
+#
+#     # RFC 8665 6: locally originated prefixes advertised with a
+#     # Segment Routing Prefix-SID (Extended Prefix Opaque LSA).
+#     prefix-sid "10.99.2.0/24" {
+#         sid 100;                 # index into the SRGB (required)
+#         node true;               # RFC 7684 6 N-flag (node segment)
+#         no_php true;             # RFC 8665 5 NP flag (default PHP)
+#     }
+#
+#     # SR Mapping Server (RFC 8665 4 / RFC 8661 3.2): advertise
+#     # prefix-SID bindings for prefixes this router does not own.
+#     mapping-server "10.77.0.0/24" {
+#         sid 500;                 # index of the range's FIRST prefix
+#         range_size 4;            # consecutive prefixes covered
+#     }
+#
+#     # Non-backbone areas must be declared before interfaces reference
+#     # them; the backbone (area 0) is implicit and always "normal".
+#     area 1 {
+#         type "stub";             # normal | stub | nssa
+#         no_summary true;         # totally-stubby / totally-NSSA
+#         stub_metric 10;          # default-route metric into the area
+#     }
+#
+#     interface "eth0" {
+#         area 0;                  # inherits the daemon default
+#         cost 10;                 # Router-LSA link metric
+#         hello_interval 10s;
+#         dead_interval 40s;
+#         priority 1;              # inert today (p2p segments only)
+#         adj_sid 24000;           # RFC 8665 6 adjacency segment
+#                                  # (absolute SRLB label, 16..=1048575)
+#     }
+# }
+
+# ---------------------------------------------------------------------
+# LDP daemon mode (protocol ldp; BGP/OSPF blocks above are ignored)
+# ---------------------------------------------------------------------
+# CLI equivalent:
+#   lr-daemon --protocol ldp --router-id 10.0.0.1 \
+#             --ldp-interface eth0 --ldp-bind 203.0.113.0/24=24000
+#
+# UDP port 646 is privileged: run as root, inside a namespace, or
+# override the port. Landed scope: RFC 7552 IPv6 discovery, kernel MPLS
+# installation, automatic label allocation, RFC 5036 2.8 loop detection.
+
+# ldp {
+#     transport "10.0.0.1";        # advertised transport address
+#     port 646;                    # LDP UDP/TCP port (RFC 5036 3.10.1)
+#     keepalive_time 15s;          # session KeepAlive Time (3.5.3)
+#     link_hold_time 15s;          # link Hello hold time (3.5.2.1)
+#     targeted_hold_time 45s;      # targeted Hello hold time
+#     loop_detection false;        # RFC 5036 2.8 (per-domain option)
+#     loop_hop_count_limit 32;     # max accepted Hop Count (0 = unknown)
+#     loop_path_vector_limit 32;   # max Path Vector length (PVLim)
+#     install_kernel true;         # install learned bindings into MPLS
+#     label_min 16;                # automatic allocation range
+#     label_max 1048575;
+#
+#     interface "eth0" { }         # basic (link) discovery, multicast
+#                                  # Hellos to 224.0.0.2
+#
+#     targeted "192.0.2.5" {       # extended (targeted) discovery —
+#         address "192.0.2.5";     # unicast Hellos; ADDR:PORT selects a
+#     }                            # peer on a different port
+#
+#     bind "203.0.113.0/24" {      # local FEC-label bindings,
+#         label 24000;             # downstream-unsolicited to every
+#     }                            # operational peer; 0 auto-allocates
+# }
+
+# ---------------------------------------------------------------------
+# Babel multi-NIC with glob patterns (RFC 8966)
+# ---------------------------------------------------------------------
+# Per-interface Babel parameters. The `interface` identity accepts
+# shell-like glob patterns (*, ?, \) so the same parameters can apply
+# to a fleet of similar interfaces; the daemon enumerates the system
+# interfaces (getifaddrs) and the first matching pattern wins (BIRD
+# interface directive parity). When interface blocks exist,
+# --local-address is optional — the daemon picks the first matched
+# interface's primary address as the bind source.
+
+# babel {
+#     interface "eth*" {
+#         type "wired";            # "wired" (default) | "wireless" | "tunnel"
+#         rxcost 96;               # BIRD default 96 wired, 256 wireless
+#         hello_interval_ms 4s;    # BIRD default 4000 ms wired
+#         update_interval_ms 16s;  # 4x hello by default
+#         rtt_cost 0;              # RTT-based cost (off when 0)
+#         rtt_min 10ms;            # lower RTT bound (us), BIRD 10 ms
+#         rtt_max 120ms;           # upper RTT bound (us), BIRD 120 ms
+#         next_hop_ipv4 "10.0.0.1";
+#         next_hop_ipv6 "fe80::1";
+#         extended_next_hop false; # RFC 5549
+#         check_link true;         # withdraw on interface down
+#         port 6696;               # override the babel port
+#         group "224.0.0.111";     # override the babel group
+#     }
+#
+#     interface "wlan0" {
+#         type "wireless";
+#         rxcost 256;
+#     }
+#
+#     # Per-interface authentication (D1.3): keys without an
+#     # `interface` pattern apply everywhere; keys with one only to
+#     # matching interfaces. algorithm: hmac-sha256 | blake2s.
+#     key {
+#         secret "hex-or-passphrase";
+#         algorithm "blake2s";
+#         interface "eth*";
+#     }
+# }
+
+# ---------------------------------------------------------------------
+# Redistribution, aggregation, damping (cross-protocol pipes)
+# ---------------------------------------------------------------------
+# Cross-protocol advertisement is opt-in per pipe: `source` and
+# `target` name the protocols (bgp | ospf | ospf3 | babel | static |
+# connected), with an optional metric, tag and an allow-list of
+# prefixes:
+#
+# redistribute {
+#     source "ospf";
+#     target "bgp";
+#     metric 100;
+#     tag 65000;
+#     allow ["10.0.0.0/8", "172.16.0.0/12"];
+# }
+#
+# Aggregation contributes an aggregate prefix to the BGP decision
+# process:
+#
+# aggregate {
+#     prefix "10.0.0.0/8";
+# }
+#
+# BGP route flap damping (RFC 2439-style stability model):
+#
+# damping {
+#     enabled true;
+#     additive_incr 1000;        # per-flap penalty
+#     suppress_threshold 2000;   # penalty that suppresses a route
+#     reuse_threshold 750;       # penalty that releases it
+#     upper_limit 10000;         # penalty ceiling
+#     decay_interval_s 5;        # decay tick (seconds)
+# }

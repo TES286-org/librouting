@@ -93,6 +93,47 @@ fn shipped_template_passes() {
 }
 
 #[test]
+fn shipped_lr_template_passes() {
+    // Phase 3's DSL-first twin: the native dialect the daemon prefers
+    // must be checkable out of the box — content detection (no
+    // --config-dialect flag) recognises the .lr block grammar.
+    let template =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../templates/daemon.lr");
+    let (code, stdout, stderr) = check(&["config", "check", template.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("OK (dialect lr)"), "stdout: {stdout}");
+    assert!(stdout.contains("protocols: bgp"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("peers: 1 (legacy single-peer, 0 templates)"),
+        "stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("2 route-maps, 1 prefix-lists"),
+        "stdout: {stdout}"
+    );
+    assert!(stdout.contains("warnings: 0"), "stdout: {stdout}");
+}
+
+#[test]
+fn lr_dialect_forcing_still_works_on_filter_only_files() {
+    // A file whose top-level statements are only `filter` blocks rides
+    // BIRD's detection heuristic (`filter f { … }` is ambiguous with
+    // BIRD), so an explicit `--dialect lr` must force the native
+    // frontend — the documented flag contract from Phase 2.
+    let path = std::env::temp_dir().join(format!(
+        "lr-config-check-lr-forced-{}.lr",
+        std::process::id()
+    ));
+    std::fs::write(&path, "filter \"in\" {\n    accept;\n}\n").expect("write fixture");
+    let (code, stdout, stderr) =
+        check(&["config", "check", "--dialect", "lr", path.to_str().unwrap()]);
+    assert_eq!(code, 0, "stderr: {stderr}");
+    assert!(stdout.contains("OK (dialect lr)"), "stdout: {stdout}");
+    assert!(stdout.contains("warnings: 0"), "stdout: {stdout}");
+    let _ = std::fs::remove_file(&path);
+}
+
+#[test]
 fn parse_error_fails_with_position() {
     let path = fixture("parse-error", "[bgp]\nlocal_as = 64512\nthis is not toml\n");
     let (code, stdout, stderr) = check(&["config", "check", path.to_str().unwrap()]);

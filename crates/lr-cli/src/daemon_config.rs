@@ -4584,6 +4584,64 @@ mod tests {
         assert!(cfg.warnings.is_empty(), "warnings: {:?}", cfg.warnings);
     }
 
+    /// The DSL-first twin (`templates/daemon.lr`, Phase 3) walks the
+    /// same golden IR through the native-DSL frontend: the .lr file
+    /// documents the identical active configuration, so both templates
+    /// must resolve to the same warnings-free `DaemonConfig`.
+    #[test]
+    fn shipped_lr_template_resolves_to_expected_ir() {
+        let text = include_str!("../../../templates/daemon.lr");
+        let mut cfg = DaemonConfig::default();
+        crate::config_dsl::parse_dsl_text(text, None, &mut cfg).unwrap();
+        cfg.finalize().unwrap();
+
+        assert_eq!(cfg.local_as, 64512);
+        assert_eq!(cfg.peer_as, 64513);
+        assert_eq!(cfg.router_id, "10.0.0.1");
+        assert_eq!(cfg.hold_time, 90);
+        assert_eq!(cfg.gr_restart_time, 120);
+        assert_eq!(cfg.local_address.as_deref(), Some("192.0.2.1"));
+        assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
+        // Unit suffixes expanded: `hold_time 90s` / `graceful_restart_time
+        // 120s` carry the same numbers as the TOML template's raw fields.
+        assert!(!cfg.explicit_peers);
+        assert_eq!(cfg.peers.len(), 1);
+        assert_eq!(cfg.peers[0].remote.as_deref(), Some("192.0.2.2:179"));
+        assert_eq!(cfg.prefix_lists.len(), 1);
+        assert_eq!(cfg.prefix_lists[0].name, "customer-space");
+        assert_eq!(cfg.route_maps.len(), 2);
+        assert!(cfg.route_maps.iter().all(|rm| rm.name == "to-customer"));
+        assert_eq!(cfg.route_maps[0].entry, 10);
+        assert_eq!(cfg.route_maps[0].permit, Some(true));
+        assert_eq!(cfg.route_maps[1].entry, 20);
+        assert_eq!(cfg.route_maps[1].permit, Some(false));
+        assert!(cfg.warnings.is_empty(), "warnings: {:?}", cfg.warnings);
+    }
+
+    /// The golden cross-frontend property, pinned on the shipped pair:
+    /// `templates/daemon.lr` documents exactly the configuration
+    /// `templates/daemon.toml` carries, so the two frontends must
+    /// produce equal IRs — before and after finalize. This is the
+    /// standing guarantee that makes the template pair a safe
+    /// migration target for `config to-dsl` users.
+    #[test]
+    fn shipped_templates_match_across_frontends() {
+        let toml_text = include_str!("../../../templates/daemon.toml");
+        let lr_text = include_str!("../../../templates/daemon.lr");
+
+        let mut toml_cfg = DaemonConfig::default();
+        parse_toml_subset(toml_text, &mut toml_cfg).unwrap();
+        let mut lr_cfg = DaemonConfig::default();
+        crate::config_dsl::parse_dsl_text(lr_text, None, &mut lr_cfg).unwrap();
+        assert_eq!(toml_cfg, lr_cfg, "pre-finalize IRs must be equal");
+        assert!(toml_cfg.warnings.is_empty());
+        assert!(lr_cfg.warnings.is_empty());
+
+        toml_cfg.finalize().unwrap();
+        lr_cfg.finalize().unwrap();
+        assert_eq!(toml_cfg, lr_cfg, "post-finalize IRs must be equal");
+    }
+
     #[test]
     fn legacy_single_peer_is_synthesised() {
         let mut cfg = DaemonConfig::with_defaults();
