@@ -2991,12 +2991,15 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         None => Arc::new(Runtime {
             reload: Arc::new({
                 let router = Arc::clone(&router);
+                let config_path = cfg.config_path.clone();
+                let config_dialect = cfg.config_dialect.clone();
+                let current_networks = Arc::new(Mutex::new(cfg.networks.clone()));
                 move || {
                     reload_config(
-                        None,
-                        None,
+                        config_path.as_deref(),
+                        config_dialect.as_deref(),
                         &router,
-                        &Arc::new(Mutex::new(Vec::new())),
+                        &current_networks,
                         None,
                         None,
                     )

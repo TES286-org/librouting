@@ -404,3 +404,83 @@ fn api_socket_failure_is_fatal() {
     let text = String::from_utf8_lossy(&out.stderr);
     assert!(text.contains("runtime API"), "stderr: {text}");
 }
+
+/// The standalone Babel daemon's reload closure must re-read the
+/// configuration file from disk — historically the closure was wired
+/// with `None` for the path and reported "no config file in use;
+/// nothing to reload" for every reload attempt. This test pins down
+/// the fix: writing a new network and sending SIGHUP applies it.
+#[test]
+fn babel_sighup_reloads_networks_from_config_file() {
+    let dir = std::env::temp_dir().join(format!("lr-daemon-test-bhup-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("daemon.toml");
+    let socket = dir.join("daemon.api");
+
+    // 127.0.0.1 + a non-privileged port: the babel UDP transport binds
+    // a normal datagram socket, so the test does not need CAP_NET_RAW.
+    // An odd port avoids colliding with a system babeld.
+    std::fs::write(
+        &conf,
+        "protocol = \"babel\"\n\
+         [bgp]\n\
+         router_id = \"10.0.0.1\"\n\
+         local_address = \"127.0.0.1\"\n\
+         networks = [\"203.0.113.0/24\"]\n\
+         [babel]\n\
+         port = 16697\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "bhup",
+    );
+    wait_log_all(
+        &d.log,
+        &[
+            "babel listening on",
+            "originating 203.0.113.0/24",
+            "runtime API on",
+        ],
+    );
+
+    // Rewrite the config: drop the old network and add a new one.
+    // SIGHUP must apply the change without a restart.
+    std::fs::write(
+        &conf,
+        "protocol = \"babel\"\n\
+         [bgp]\n\
+         router_id = \"10.0.0.1\"\n\
+         local_address = \"127.0.0.1\"\n\
+         networks = [\"198.51.100.0/24\"]\n\
+         [babel]\n\
+         port = 16697\n",
+    )
+    .unwrap();
+    d.signal(SIGHUP);
+    let text = wait_log_all(
+        &d.log,
+        &[
+            "SIGHUP received",
+            "reload: originating 198.51.100.0/24",
+            "reload: unoriginating 203.0.113.0/24",
+        ],
+    );
+    assert!(text.contains("require a restart"), "log: {text}");
+
+    // The runtime API sees the reloaded RIB.
+    let routes = api_ask(&socket, "routes");
+    assert!(routes.contains("198.51.100.0/24"), "routes: {routes}");
+    assert!(!routes.contains("203.0.113.0/24"), "routes: {routes}");
+
+    d.signal(SIGTERM);
+    let (ok, log) = d.wait_exit();
+    assert!(ok, "babel daemon must exit 0 after SIGTERM; log:\n{log}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
