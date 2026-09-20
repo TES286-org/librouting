@@ -268,13 +268,63 @@ mod imp {
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
 
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    /// Source-bound TCP connect using the `socket2` crate.
+    ///
+    /// On non-Linux platforms (Windows, macOS, BSD), the hand-rolled
+    /// `socket()` + `bind()` + `connect()` path is not available
+    /// because it depends on POSIX libc FFI. The `socket2` crate
+    /// provides a portable abstraction that works on every platform
+    /// the project compiles for — and `socket2` is already a
+    /// workspace dependency.
+    ///
+    /// Without source binding, BGP peers that match inbound
+    /// connections by source IP (the standard `neighbor <ip>` pattern)
+    /// would reject the daemon's outbound connections on multihomed
+    /// hosts where the kernel's default source-address choice differs
+    /// from the configured `local_address`. This was the root cause
+    /// of the "peer closed connection" symptom on Windows.
     pub fn connect_bound(
-        _local: SocketAddr,
+        local: SocketAddr,
         peer: SocketAddr,
         timeout: Duration,
     ) -> Result<TcpStream, std::io::Error> {
-        // No portable pre-bind; the kernel picks the source address.
-        TcpStream::connect_timeout(&peer, timeout)
+        if local.is_ipv4() != peer.is_ipv4() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local and peer address families differ",
+            ));
+        }
+        let domain = if peer.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+        let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+
+        // Bind the source address (port 0 = ephemeral).
+        let local_bind = match local {
+            SocketAddr::V4(mut a) => {
+                a.set_port(0);
+                SocketAddr::V4(a)
+            }
+            SocketAddr::V6(mut a) => {
+                a.set_port(0);
+                SocketAddr::V6(a)
+            }
+        };
+        sock.bind(&local_bind.into())?;
+
+        // Connect with a timeout. `socket2`'s `connect_timeout`
+        // handles the non-blocking + poll internally.
+        sock.set_nonblocking(false)?;
+        sock.connect_timeout(&peer.into(), timeout)?;
+
+        // Convert the socket2::Socket into a std::net::TcpStream.
+        // socket2 0.6+ with the "all" feature implements
+        // `From<Socket>` for `TcpStream` on every platform.
+        Ok(sock.into())
     }
 }
 

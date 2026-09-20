@@ -27,6 +27,7 @@ std = ["lr-core/std"]
 lr-core = { workspace = true }
 lr-mpls = { workspace = true }
 lr-srv6 = { workspace = true }
+socket2.workspace = true
 
 # Windows IP Helper API (`GetAdaptersAddresses`, `GetIpForwardTable2`,
 # route-table backends). The `windows-sys` crate is Microsoft's

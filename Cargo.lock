@@ -617,6 +617,7 @@ dependencies = [
  "lr-mpls",
  "lr-ospf",
  "lr-srv6",
+ "socket2",
  "windows-sys",
 ]
 
