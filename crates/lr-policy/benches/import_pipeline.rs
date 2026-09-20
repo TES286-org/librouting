@@ -101,7 +101,6 @@ impl FilterContext for BenchCtx {
             return Vec::new();
         };
         let mut out = Vec::new();
-        #[allow(clippy::chunks_exact_to_as_chunks)]
         for chunk in b.chunks_exact(4) {
             out.push((
                 Asn(u16::from_be_bytes([chunk[0], chunk[1]]) as u32),

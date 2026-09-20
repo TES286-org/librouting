@@ -2264,7 +2264,6 @@ mod tests {
             // `array_chunks::<4>()` would be the clippy-preferred
             // form, but it is not stable on the project's MSRV
             // (Rust 1.88). `chunks_exact(4)` is the portable choice.
-            #[allow(clippy::chunks_exact_to_as_chunks)]
             for chunk in b.chunks_exact(4) {
                 let asn = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
                 let val = u16::from_be_bytes([chunk[2], chunk[3]]);
