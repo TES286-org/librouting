@@ -55,4 +55,8 @@ pub mod prelude {
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// ABI version packed into a u32 (major << 16 | minor << 8 | patch).
-pub const ABI_VERSION: u32 = 1;
+/// Bumped to 2 when `lr_router_install_static_v4`/`_v6` and
+/// `lr_router_uninstall_static_v4`/`_v6` were added (the static-route
+/// FFI surface). Existing callers see the same surface plus the new
+/// functions — no breaking change.
+pub const ABI_VERSION: u32 = 2;

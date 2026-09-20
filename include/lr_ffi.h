@@ -1659,6 +1659,70 @@ int32_t lr_router_withdraw_v4(lr_router_t r, const uint8_t *prefix_addr, uint8_t
 int32_t lr_router_withdraw_v6(lr_router_t r, const uint8_t *prefix_addr, uint8_t prefix_len);
 
 /**
+ * Install a static IPv4 route into the Loc-RIB (BIRD `protocol
+ * static`, FRR `ip route`). The route's `protocol` is
+ * `Protocol::Static` and its admin distance is 1, so it wins over
+ * every dynamic protocol except Connected. When `next_hop` is NULL,
+ * the route is a blackhole (FRR `Null0`, BIRD `blackhole`). Returns
+ * 0 on success, negative on error.
+ *
+ * `metric` is the per-route metric within the static protocol
+ * (FRR's `metric` keyword on `ip route`); lower wins. `tag` is an
+ * optional 32-bit route tag carried through redistribution pipes;
+ * pass `0` when not set.
+ *
+ * # Safety
+ * `prefix_addr` and `next_hop` (when non-NULL) must be valid
+ * pointers to 4 readable bytes.
+ */
+int32_t lr_router_install_static_v4(lr_router_t r,
+                                    const uint8_t *prefix_addr,
+                                    uint8_t prefix_len,
+                                    const uint8_t *next_hop,
+                                    uint32_t metric,
+                                    uint32_t tag);
+
+/**
+ * Install a static IPv6 route into the Loc-RIB. The v6 counterpart
+ * of [`lr_router_install_static_v4`]; see that function for the
+ * semantics. `prefix_len` must be <= 128.
+ *
+ * # Safety
+ * `prefix_addr` and `next_hop` (when non-NULL) must be valid
+ * pointers to 16 readable bytes.
+ */
+int32_t lr_router_install_static_v6(lr_router_t r,
+                                    const uint8_t *prefix_addr,
+                                    uint8_t prefix_len,
+                                    const uint8_t *next_hop,
+                                    uint32_t metric,
+                                    uint32_t tag);
+
+/**
+ * Withdraw a previously-installed static IPv4 route. Returns 0 when
+ * a static route was removed, **1 when the prefix was not a static
+ * route** (idempotent no-op, matching `unoriginate`'s contract),
+ * negative on error.
+ *
+ * # Safety
+ * `prefix_addr` must point to 4 readable bytes.
+ */
+int32_t lr_router_uninstall_static_v4(lr_router_t r,
+                                      const uint8_t *prefix_addr,
+                                      uint8_t prefix_len);
+
+/**
+ * Withdraw a previously-installed static IPv6 route. The v6
+ * counterpart of [`lr_router_uninstall_static_v4`].
+ *
+ * # Safety
+ * `prefix_addr` must point to 16 readable bytes.
+ */
+int32_t lr_router_uninstall_static_v6(lr_router_t r,
+                                      const uint8_t *prefix_addr,
+                                      uint8_t prefix_len);
+
+/**
  * Query the kernel's MPLS platform-labels capability (Linux only).
  * Returns the value of `/proc/sys/net/mpls/platform_labels` (0 when
  * MPLS routing is not enabled, 16 or 20 when it is). On non-Linux

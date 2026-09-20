@@ -585,6 +585,65 @@ func TestOriginateAndWithdrawLifecycle(t *testing.T) {
 	}
 }
 
+func TestStaticRouteLifecycle(t *testing.T) {
+	r, err := NewRouter()
+	if err != nil {
+		t.Fatalf("NewRouter: %v", err)
+	}
+	defer func() { r.ptr = nil }()
+
+	v4 := [4]byte{203, 0, 113, 0}
+	v6 := [16]byte{0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0}
+	nh4 := [4]byte{192, 0, 2, 1}
+	nh6 := [16]byte{0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1}
+	bhV4 := [4]byte{10, 0, 0, 0}
+
+	// install_static_v4 with a real next-hop + metric.
+	if err := r.InstallStaticV4(v4, 24, &nh4, 10, 0); err != nil {
+		t.Fatalf("InstallStaticV4 with nh: %v", err)
+	}
+	// install_static_v4 as a blackhole (nil next-hop).
+	if err := r.InstallStaticV4(bhV4, 8, nil, 0, 65000); err != nil {
+		t.Fatalf("InstallStaticV4 blackhole: %v", err)
+	}
+	// install_static_v6 with a real next-hop.
+	if err := r.InstallStaticV6(v6, 32, &nh6, 0, 0); err != nil {
+		t.Fatalf("InstallStaticV6: %v", err)
+	}
+	n, err := r.RibLen()
+	if err != nil || n != 3 {
+		t.Fatalf("RibLen after statics: got (%d, %v), want (3, nil)", n, err)
+	}
+
+	// Out-of-range prefix lengths are rejected up front.
+	if err := r.InstallStaticV4(v4, 33, &nh4, 0, 0); err == nil {
+		t.Fatal("InstallStaticV4 with plen 33 must fail")
+	}
+	if err := r.InstallStaticV6(v6, 129, &nh6, 0, 0); err == nil {
+		t.Fatal("InstallStaticV6 with plen 129 must fail")
+	}
+
+	// Uninstall removes the routes one at a time.
+	if w, err := r.UninstallStaticV4(v4, 24); err != nil || !w {
+		t.Fatalf("UninstallStaticV4 of installed route: got (%v, %v), want (true, nil)", w, err)
+	}
+	if w, err := r.UninstallStaticV4(bhV4, 8); err != nil || !w {
+		t.Fatalf("UninstallStaticV4 of blackhole: got (%v, %v), want (true, nil)", w, err)
+	}
+	if w, err := r.UninstallStaticV6(v6, 32); err != nil || !w {
+		t.Fatalf("UninstallStaticV6: got (%v, %v), want (true, nil)", w, err)
+	}
+	n, err = r.RibLen()
+	if err != nil || n != 0 {
+		t.Fatalf("RibLen after uninstalls: got (%d, %v), want (0, nil)", n, err)
+	}
+
+	// Repeated uninstall is an idempotent no-op.
+	if w, err := r.UninstallStaticV4(v4, 24); err != nil || w {
+		t.Fatalf("repeat UninstallStaticV4: got (%v, %v), want (false, nil)", w, err)
+	}
+}
+
 func TestBGPMessageEncoders(t *testing.T) {
 	// OPEN with the ASN4 capability.
 	open, err := EncodeOpen(64512, 90, [4]byte{10, 0, 0, 1}, true)

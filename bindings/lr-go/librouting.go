@@ -560,6 +560,82 @@ func (r *Router) WithdrawV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, e
 	return rc == 0, nil
 }
 
+// InstallStaticV4 installs a static IPv4 route into the Loc-RIB (BIRD
+// "protocol static", FRR "ip route"). The route's protocol is Static
+// and its admin distance is 1, so it wins over every dynamic protocol
+// except Connected. Pass nil for nextHop to install a blackhole route
+// (FRR "Null0", BIRD "blackhole"). metric is the per-route metric
+// within the static protocol (lower wins); tag is an optional 32-bit
+// route tag carried through redistribution pipes (pass 0 when not set).
+func (r *Router) InstallStaticV4(prefix [4]byte, prefixLen uint8, nextHop *[4]byte, metric uint32, tag uint32) error {
+	var nhPtr *C.uint8_t
+	if nextHop != nil {
+		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+	}
+	rc := C.lr_router_install_static_v4(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+		nhPtr,
+		C.uint32_t(metric),
+		C.uint32_t(tag),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_install_static_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// InstallStaticV6 installs a static IPv6 route into the Loc-RIB.
+// See InstallStaticV4 for the semantics.
+func (r *Router) InstallStaticV6(prefix [16]byte, prefixLen uint8, nextHop *[16]byte, metric uint32, tag uint32) error {
+	var nhPtr *C.uint8_t
+	if nextHop != nil {
+		nhPtr = (*C.uint8_t)(unsafe.Pointer(&nextHop[0]))
+	}
+	rc := C.lr_router_install_static_v6(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+		nhPtr,
+		C.uint32_t(metric),
+		C.uint32_t(tag),
+	)
+	if rc != 0 {
+		return fmt.Errorf("lr_router_install_static_v6: %s (rc=%d)", LastError(), int(rc))
+	}
+	return nil
+}
+
+// UninstallStaticV4 removes a previously-installed static IPv4 route.
+// Returns nil and withdrawn=false when the prefix was not a static
+// route (idempotent no-op, matching WithdrawV4's contract).
+func (r *Router) UninstallStaticV4(prefix [4]byte, prefixLen uint8) (withdrawn bool, err error) {
+	rc := C.lr_router_uninstall_static_v4(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+	)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_uninstall_static_v4: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 0, nil
+}
+
+// UninstallStaticV6 removes a previously-installed static IPv6 route.
+// See UninstallStaticV4 for the semantics.
+func (r *Router) UninstallStaticV6(prefix [16]byte, prefixLen uint8) (withdrawn bool, err error) {
+	rc := C.lr_router_uninstall_static_v6(
+		r.ptr,
+		(*C.uint8_t)(unsafe.Pointer(&prefix[0])),
+		C.uint8_t(prefixLen),
+	)
+	if rc < 0 {
+		return false, fmt.Errorf("lr_router_uninstall_static_v6: %s (rc=%d)", LastError(), int(rc))
+	}
+	return rc == 0, nil
+}
+
 // OriginateLabeledV4 injects an RFC 8277 labelled IPv4 BGP route
 // (AFI=1, SAFI=4) into Loc-RIB. The label stack is supplied as a slice
 // of 20-bit label values; the bottom-of-stack bit is set automatically.

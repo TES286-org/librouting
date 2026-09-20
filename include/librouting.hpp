@@ -437,6 +437,76 @@ inline bool withdraw_v6(Router& r, const std::array<std::uint8_t, 16>& prefix,
     return rc == 0;
 }
 
+// ===== Static routes (BIRD `protocol static`, FRR `ip route`) =====
+
+/// Install a static IPv4 route into the Loc-RIB. The route's protocol
+/// is `Protocol::Static` and its admin distance is 1, so it wins over
+/// every dynamic protocol except Connected. Pass `nullptr` for
+/// `next_hop` to install a blackhole route (FRR `Null0`, BIRD
+/// `blackhole`). `metric` is the per-route metric within the static
+/// protocol (lower wins); `tag` is an optional 32-bit route tag
+/// carried through redistribution pipes (pass 0 when not set).
+inline void install_static_v4(Router& r,
+                              const std::array<std::uint8_t, 4>& prefix,
+                              std::uint8_t prefix_len,
+                              const std::uint8_t* next_hop,
+                              std::uint32_t metric = 0,
+                              std::uint32_t tag = 0) {
+    int rc = lr_router_install_static_v4(r.get(), prefix.data(), prefix_len,
+                                         next_hop, metric, tag);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_install_static_v4 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Install a static IPv6 route into the Loc-RIB. See `install_static_v4`
+/// for the semantics.
+inline void install_static_v6(Router& r,
+                              const std::array<std::uint8_t, 16>& prefix,
+                              std::uint8_t prefix_len,
+                              const std::uint8_t* next_hop,
+                              std::uint32_t metric = 0,
+                              std::uint32_t tag = 0) {
+    int rc = lr_router_install_static_v6(r.get(), prefix.data(), prefix_len,
+                                         next_hop, metric, tag);
+    if (rc != 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_install_static_v6 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+}
+
+/// Withdraw a previously-installed static IPv4 route. Returns true when
+/// a static route was removed; false when the prefix was not a static
+/// route (idempotent no-op, matching `withdraw_v4`'s contract).
+inline bool uninstall_static_v4(Router& r,
+                                const std::array<std::uint8_t, 4>& prefix,
+                                std::uint8_t prefix_len) {
+    int rc = lr_router_uninstall_static_v4(r.get(), prefix.data(), prefix_len);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_uninstall_static_v4 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 0;
+}
+
+/// Withdraw a previously-installed static IPv6 route. See
+/// `uninstall_static_v4` for the semantics and the return value.
+inline bool uninstall_static_v6(Router& r,
+                                const std::array<std::uint8_t, 16>& prefix,
+                                std::uint8_t prefix_len) {
+    int rc = lr_router_uninstall_static_v6(r.get(), prefix.data(), prefix_len);
+    if (rc < 0) {
+        const char* err = lr_last_error();
+        throw Error("lr_router_uninstall_static_v6 failed: " +
+                    std::string(err ? err : "unknown"));
+    }
+    return rc == 0;
+}
+
 // ===== D4.4 — redistribution / aggregation / damping =====
 
 /// Wire protocol identifiers for redistribution pipes. Mirrors

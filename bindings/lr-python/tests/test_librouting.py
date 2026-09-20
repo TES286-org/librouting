@@ -383,6 +383,40 @@ def test_originate_and_withdraw_lifecycle():
             except librouting.LrError:
                 pass
 
+
+def test_static_route_lifecycle():
+    """install_static_v4/v6 + uninstall_static_v4/v6 mirror BIRD
+    `protocol static` and FRR `ip route`. Blackhole (next_hop=None),
+    metric, and tag are exercised; repeated uninstall is an idempotent
+    no-op.
+
+    Out-of-range prefix lengths are rejected by Python's ipaddress
+    module before reaching the FFI; the C harness and Rust FFI tests
+    cover the FFI-level rejection."""
+    with librouting.Router() as r:
+        # Withdrawing a prefix that was never installed is a no-op.
+        assert r.uninstall_static_v4("203.0.113.0/24") is False
+        assert r.uninstall_static_v6("2001:db8::/32") is False
+
+        # install with a real next-hop + metric.
+        r.install_static_v4("203.0.113.0/24", "192.0.2.1", metric=10)
+        # install as a blackhole (next_hop=None) with a tag.
+        r.install_static_v4("10.0.0.0/8", next_hop=None, tag=65000)
+        # v6 install with a real next-hop.
+        r.install_static_v6("2001:db8::/32", "fe80::1")
+        assert r.rib_len() == 3
+
+        # Uninstall removes the routes one at a time.
+        assert r.uninstall_static_v4("203.0.113.0/24") is True
+        assert r.uninstall_static_v4("10.0.0.0/8") is True
+        assert r.uninstall_static_v6("2001:db8::/32") is True
+        assert r.rib_len() == 0
+
+        # Repeated uninstall is a no-op.
+        assert r.uninstall_static_v4("203.0.113.0/24") is False
+        assert r.uninstall_static_v6("2001:db8::/32") is False
+
+
 def test_bgp_message_encoders():
     # OPEN with the ASN4 capability.
     open_msg = librouting.encode_open(64512, 90, "10.0.0.1")

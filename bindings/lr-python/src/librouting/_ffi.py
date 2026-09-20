@@ -133,6 +133,24 @@ int32_t lr_router_withdraw_v4(lr_router_t r,
 int32_t lr_router_withdraw_v6(lr_router_t r,
                                const uint8_t *prefix_addr,
                                uint8_t prefix_len);
+int32_t lr_router_install_static_v4(lr_router_t r,
+                                    const uint8_t *prefix_addr,
+                                    uint8_t prefix_len,
+                                    const uint8_t *next_hop,
+                                    uint32_t metric,
+                                    uint32_t tag);
+int32_t lr_router_install_static_v6(lr_router_t r,
+                                    const uint8_t *prefix_addr,
+                                    uint8_t prefix_len,
+                                    const uint8_t *next_hop,
+                                    uint32_t metric,
+                                    uint32_t tag);
+int32_t lr_router_uninstall_static_v4(lr_router_t r,
+                                      const uint8_t *prefix_addr,
+                                      uint8_t prefix_len);
+int32_t lr_router_uninstall_static_v6(lr_router_t r,
+                                      const uint8_t *prefix_addr,
+                                      uint8_t prefix_len);
 int32_t lr_router_originate_labeled_v4(lr_router_t r,
                                        const uint8_t *prefix_addr,
                                        uint8_t prefix_len,

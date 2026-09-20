@@ -1097,6 +1097,200 @@ pub unsafe extern "C" fn lr_router_withdraw_v6(
     )
 }
 
+/// Install a static IPv4 route into the Loc-RIB (BIRD `protocol
+/// static`, FRR `ip route`). The route's `protocol` is
+/// `Protocol::Static` and its admin distance is 1, so it wins over
+/// every dynamic protocol except Connected. When `next_hop` is NULL,
+/// the route is a blackhole (FRR `Null0`, BIRD `blackhole`). Returns
+/// 0 on success, negative on error.
+///
+/// `metric` is the per-route metric within the static protocol
+/// (FRR's `metric` keyword on `ip route`); lower wins. `tag` is an
+/// optional 32-bit route tag carried through redistribution pipes;
+/// pass `0` when not set.
+///
+/// # Safety
+/// `prefix_addr` and `next_hop` (when non-NULL) must be valid
+/// pointers to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_install_static_v4(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    next_hop: *const u8,
+    metric: u32,
+    tag: u32,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 32 {
+                set_last_error(format!(
+                    "invalid IPv4 prefix length {prefix_len}: must be <= 32"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 4];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 4)) };
+            let nh = if next_hop.is_null() {
+                None
+            } else {
+                let mut n = [0u8; 4];
+                unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 4)) };
+                Some(lr_core::addr::IpAddr::V4(n))
+            };
+            let tag_opt = if tag == 0 { None } else { Some(tag) };
+            router.install_static(
+                lr_core::addr::Prefix::new_v4(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+                nh,
+                metric,
+                tag_opt,
+            );
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Install a static IPv6 route into the Loc-RIB. The v6 counterpart
+/// of [`lr_router_install_static_v4`]; see that function for the
+/// semantics. `prefix_len` must be <= 128.
+///
+/// # Safety
+/// `prefix_addr` and `next_hop` (when non-NULL) must be valid
+/// pointers to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_install_static_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+    next_hop: *const u8,
+    metric: u32,
+    tag: u32,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 128 {
+                set_last_error(format!(
+                    "invalid IPv6 prefix length {prefix_len}: must be <= 128"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 16];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+            let nh = if next_hop.is_null() {
+                None
+            } else {
+                let mut n = [0u8; 16];
+                unsafe { n.copy_from_slice(std::slice::from_raw_parts(next_hop, 16)) };
+                Some(lr_core::addr::IpAddr::V6(n))
+            };
+            let tag_opt = if tag == 0 { None } else { Some(tag) };
+            router.install_static(
+                lr_core::addr::Prefix::new_v6(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+                nh,
+                metric,
+                tag_opt,
+            );
+            0
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw a previously-installed static IPv4 route. Returns 0 when
+/// a static route was removed, **1 when the prefix was not a static
+/// route** (idempotent no-op, matching `unoriginate`'s contract),
+/// negative on error.
+///
+/// # Safety
+/// `prefix_addr` must point to 4 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_uninstall_static_v4(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 32 {
+                set_last_error(format!(
+                    "invalid IPv4 prefix length {prefix_len}: must be <= 32"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 4];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 4)) };
+            let key = RouteKey::new(
+                lr_core::addr::Prefix::new_v4(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            );
+            i32::from(!router.uninstall_static(&key))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
+/// Withdraw a previously-installed static IPv6 route. The v6
+/// counterpart of [`lr_router_uninstall_static_v4`].
+///
+/// # Safety
+/// `prefix_addr` must point to 16 readable bytes.
+#[no_mangle]
+pub unsafe extern "C" fn lr_router_uninstall_static_v6(
+    r: lr_router_t,
+    prefix_addr: *const u8,
+    prefix_len: u8,
+) -> i32 {
+    guarded(
+        || {
+            if prefix_addr.is_null() {
+                return -1;
+            }
+            if prefix_len > 128 {
+                set_last_error(format!(
+                    "invalid IPv6 prefix length {prefix_len}: must be <= 128"
+                ));
+                return -3;
+            }
+            let mut router = match unsafe { lock_router(r) } {
+                Some(g) => g,
+                None => return -2,
+            };
+            let mut addr = [0u8; 16];
+            unsafe { addr.copy_from_slice(std::slice::from_raw_parts(prefix_addr, 16)) };
+            let key = RouteKey::new(
+                lr_core::addr::Prefix::new_v6(addr, prefix_len),
+                lr_core::nlri::NlriFamily::IPV6_UNICAST,
+            );
+            i32::from(!router.uninstall_static(&key))
+        },
+        LR_ERR_PANIC,
+    )
+}
+
 /// Build a `LabelStack` from a flat C array of 20-bit label values.
 /// Returns `None` (after recording the last error) when any value exceeds
 /// `Label::MAX_VALUE` or when `n_labels` exceeds [`MAX_LABEL_STACK_DEPTH`] —

@@ -495,6 +495,72 @@ class Router:
             raise LrError(f"lr_router_withdraw_v6 failed (rc={rc}): {last_error()}")
         return rc == 0
 
+    def install_static_v4(self, prefix: str, next_hop: str | None = None,
+                          metric: int = 0, tag: int = 0) -> None:
+        """Install a static IPv4 route into the Loc-RIB (BIRD ``protocol
+        static``, FRR ``ip route``).
+
+        The route's protocol is ``Static`` and its admin distance is 1,
+        so it wins over every dynamic protocol except Connected. Pass
+        ``next_hop=None`` to install a blackhole route (FRR ``Null0``,
+        BIRD ``blackhole``). ``metric`` is the per-route metric within
+        the static protocol (lower wins); ``tag`` is an optional 32-bit
+        route tag carried through redistribution pipes (0 means no tag).
+        """
+        addr, plen = _parse_v4_prefix(prefix)
+        nh_buf = _parse_v4_next_hop(next_hop)
+        rc = get_lib().lr_router_install_static_v4(
+            self._ptr, addr, plen, nh_buf, int(metric), int(tag)
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_install_static_v4 failed (rc={rc}): {last_error()}"
+            )
+
+    def install_static_v6(self, prefix: str, next_hop: str | None = None,
+                          metric: int = 0, tag: int = 0) -> None:
+        """Install a static IPv6 route into the Loc-RIB.
+
+        See ``install_static_v4`` for the semantics.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        nh_buf = _parse_v6_next_hop(next_hop)
+        rc = get_lib().lr_router_install_static_v6(
+            self._ptr, addr, plen, nh_buf, int(metric), int(tag)
+        )
+        if rc != 0:
+            raise LrError(
+                f"lr_router_install_static_v6 failed (rc={rc}): {last_error()}"
+            )
+
+    def uninstall_static_v4(self, prefix: str) -> bool:
+        """Remove a previously-installed static IPv4 route.
+
+        Returns ``True`` when a route was removed; ``False`` when the
+        prefix was not a static route (an idempotent no-op, matching
+        ``withdraw_v4``'s contract).
+        """
+        addr, plen = _parse_v4_prefix(prefix)
+        rc = get_lib().lr_router_uninstall_static_v4(self._ptr, addr, plen)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_uninstall_static_v4 failed (rc={rc}): {last_error()}"
+            )
+        return rc == 0
+
+    def uninstall_static_v6(self, prefix: str) -> bool:
+        """Remove a previously-installed static IPv6 route.
+
+        See ``uninstall_static_v4`` for the semantics and the return value.
+        """
+        addr, plen = _parse_v6_prefix(prefix)
+        rc = get_lib().lr_router_uninstall_static_v6(self._ptr, addr, plen)
+        if rc < 0:
+            raise LrError(
+                f"lr_router_uninstall_static_v6 failed (rc={rc}): {last_error()}"
+            )
+        return rc == 0
+
     def originate_labeled_v4(self, prefix: str, labels: list[int],
                               next_hop: str | None = None) -> None:
         """Originate an RFC 8277 labelled IPv4 BGP route (AFI=1, SAFI=4).
