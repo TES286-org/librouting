@@ -2261,10 +2261,10 @@ mod tests {
             let mut out = Vec::new();
             // RFC 1997 §4: communities are 4 bytes — the high two
             // bytes are the ASN, the low two are the value.
-            // `array_chunks::<4>()` would be the clippy-preferred
-            // form, but it is not stable on the project's MSRV
-            // (Rust 1.88). `chunks_exact(4)` is the portable choice.
-            for chunk in b.chunks_exact(4) {
+            // `as_chunks::<4>()` is the clippy-preferred form and
+            // is stable since Rust 1.52 (well within the project's
+            // MSRV of 1.88).
+            for chunk in b.as_chunks::<4>().0 {
                 let asn = u16::from_be_bytes([chunk[0], chunk[1]]) as u32;
                 let val = u16::from_be_bytes([chunk[2], chunk[3]]);
                 out.push((Asn(asn), val));

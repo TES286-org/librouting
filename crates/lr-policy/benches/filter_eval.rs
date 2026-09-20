@@ -112,7 +112,7 @@ impl FilterContext for BenchCtx {
             return Vec::new();
         };
         let mut out = Vec::new();
-        for chunk in b.chunks_exact(4) {
+        for chunk in b.as_chunks::<4>().0 {
             out.push((
                 Asn(u16::from_be_bytes([chunk[0], chunk[1]]) as u32),
                 u16::from_be_bytes([chunk[2], chunk[3]]),
