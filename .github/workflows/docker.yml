@@ -88,7 +88,7 @@ jobs:
         # so the next step can inspect it. Without `--load` Buildx
         # would build the image but not register it with the local
         # Docker daemon (it would be in the BuildKit cache only).
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
