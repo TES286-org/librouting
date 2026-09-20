@@ -274,7 +274,12 @@ Kernel installation is opt-in: `--install-kernel-routes` (or
 `install_kernel = true`). For BGP-LU routes and OSPF Segment Routing
 prefix-SIDs (`[ospf] sr_receive`) the mirror needs the `AF_MPLS` stack
 (see above); without it only the plain IP routes install and the LSP
-halves log a note.
+halves log a note. Linux/BSD require root or the corresponding route
+capability; Windows requires an elevated Administrator console. Check for
+`mirror: route installed ...` or `mirror: route install failed ...` in the
+daemon log, then verify independently with `lr routes list` (or
+`ip route` / `Get-NetRoute`). The mirror is shared by BGP, OSPFv2/v3,
+Babel, static, and redistributed best routes.
 
 **Reload ignored my peer edits.**
 Reload re-applies `networks` only. Peer, AS, router-id, and auth

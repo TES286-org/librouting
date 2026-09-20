@@ -32,7 +32,43 @@
 //! ```
 //!
 //! The daemon does **not** install routes into the kernel by default (safe
-//! in any environment). `--install-kernel-routes` enables it (root + Linux).
+//! in any environment). `--install-kernel-routes` enables it (administrator
+//! privileges are required).
+
+mod daemon_logger;
+
+// Keep every daemon console record atomic across transport and service
+// threads, including writes split between stdout and stderr. Defining these
+// before the child modules brings the macros into their lexical scope too.
+macro_rules! println {
+    () => {
+        $crate::daemon_logger::write_line(
+            $crate::daemon_logger::Stream::Stdout,
+            format_args!(""),
+        )
+    };
+    ($($arg:tt)*) => {
+        $crate::daemon_logger::write_line(
+            $crate::daemon_logger::Stream::Stdout,
+            format_args!($($arg)*),
+        )
+    };
+}
+
+macro_rules! eprintln {
+    () => {
+        $crate::daemon_logger::write_line(
+            $crate::daemon_logger::Stream::Stderr,
+            format_args!(""),
+        )
+    };
+    ($($arg:tt)*) => {
+        $crate::daemon_logger::write_line(
+            $crate::daemon_logger::Stream::Stderr,
+            format_args!($($arg)*),
+        )
+    };
+}
 
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
@@ -2495,6 +2531,19 @@ impl KernelMirror {
         }
     }
 
+    #[cfg(test)]
+    fn with_ip_table(
+        ip_table: Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>,
+    ) -> Self {
+        Self {
+            ip_table: Some(ip_table),
+            #[cfg(target_os = "linux")]
+            tails: HashMap::new(),
+            #[cfg(target_os = "linux")]
+            mpls: None,
+        }
+    }
+
     fn apply(&mut self, events: &[RouterEvent]) {
         for ev in events {
             match ev {
@@ -2590,11 +2639,15 @@ impl KernelMirror {
                                 _ => 0,
                             };
                             if let Some(table) = self.ip_table.as_mut() {
-                                if let Err(e) = table.add_route(r.key.prefix, nh, oif) {
-                                    eprintln!(
+                                match table.add_route(r.key.prefix, nh, oif) {
+                                    Ok(()) => println!(
+                                        "mirror: route installed {} via {} oif {}",
+                                        r.key.prefix, nh, oif
+                                    ),
+                                    Err(e) => eprintln!(
                                         "mirror: route install failed for {} via {} oif {}: {}",
                                         r.key.prefix, nh, oif, e
-                                    );
+                                    ),
                                 }
                             }
                         }
@@ -2613,7 +2666,12 @@ impl KernelMirror {
                         }
                     }
                     if let Some(table) = self.ip_table.as_mut() {
-                        let _ = table.delete_route(k.prefix);
+                        match table.delete_route(k.prefix) {
+                            Ok(()) => println!("mirror: route removed {}", k.prefix),
+                            Err(e) => {
+                                eprintln!("mirror: route removal failed for {}: {}", k.prefix, e)
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -3100,7 +3158,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }),
     };
     let running = Arc::clone(&runtime.running);
-    match &host {
+    let ticker = match &host {
         None => {
             if let Err(e) = spawn_api(cfg, &runtime) {
                 eprintln!("daemon: {}", e);
@@ -3111,25 +3169,14 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 return ExitCode::from(1);
             }
 
-            // Ticker thread.
-            {
-                let router = Arc::clone(&runtime.router);
-                let running = Arc::clone(&running);
-                thread::spawn(move || {
-                    let start = WallClock::now();
-                    while running.load(Ordering::Relaxed) {
-                        let now_ms = start.elapsed().as_millis() as u64;
-                        {
-                            let mut r = router.write().unwrap();
-                            r.tick(lr_core::time::Instant(now_ms));
-                            for ev in r.poll_events() {
-                                log_event(&ev);
-                            }
-                        }
-                        thread::sleep(Duration::from_millis(50));
-                    }
-                });
-            }
+            // Use the same event consumer as BGP, OSPF, and supervised
+            // multi-protocol mode. In particular, this is what connects
+            // Babel Loc-RIB changes to --install-kernel-routes.
+            Some(spawn_ticker(
+                &runtime,
+                cfg.install_kernel,
+                Arc::new(AtomicUsize::new(0)),
+            ))
         }
         Some(h) => {
             // Embedded: report the binds, wait for the supervisor's
@@ -3139,8 +3186,9 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 println!("daemon: babel engine startup aborted");
                 return ExitCode::SUCCESS;
             }
+            None
         }
-    }
+    };
 
     // ---- the polling loop ----
     for iface in &ifaces {
@@ -3309,6 +3357,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         // (exact group destination) and unicast (exact local
         // destination).
         for iface in &mut ifaces {
+            // A down interface was flushed above and must stay quiescent.
+            // Reading buffered multicast here would immediately re-learn the
+            // routes we just withdrew and prevent a clean reconvergence.
+            if !iface.link_up {
+                continue;
+            }
             for ti in 0..iface.transports.len() {
                 let transport = &mut iface.transports[ti];
                 let uc = &transport.uc;
@@ -3464,6 +3518,9 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             "daemon: babel dropped {} unauthenticated/replayed datagrams",
             dropped
         );
+    }
+    if let Some(ticker) = ticker {
+        let _ = ticker.join();
     }
     println!("daemon: babel shutdown complete");
     ExitCode::SUCCESS
@@ -5309,6 +5366,110 @@ mod lsp_tests {
                 );
             }
             other => panic!("expected Push, got {:?}", other),
+        }
+    }
+}
+
+#[cfg(test)]
+mod kernel_mirror_tests {
+    use super::*;
+    use lr_core::attr::Attributes;
+    use lr_core::rib::{Preference, Protocol, Route, RouteKey, RouteOrigin};
+    use lr_osroute::{KernelRoute, OsRouteError, OsRouteTable};
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    enum Operation {
+        Add(Prefix, IpAddr, u32),
+        Delete(Prefix),
+    }
+
+    struct RecordingTable {
+        operations: Arc<Mutex<Vec<Operation>>>,
+    }
+
+    impl OsRouteTable for RecordingTable {
+        type Error = OsRouteError;
+
+        fn add_route(
+            &mut self,
+            prefix: Prefix,
+            next_hop: IpAddr,
+            if_index: u32,
+        ) -> Result<(), Self::Error> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(Operation::Add(prefix, next_hop, if_index));
+            Ok(())
+        }
+
+        fn delete_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(Operation::Delete(prefix));
+            Ok(())
+        }
+
+        fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error> {
+            Ok(Vec::new())
+        }
+    }
+
+    fn route(protocol: Protocol, octet: u8) -> Route {
+        let prefix = Prefix::new_v4([10, octet, 0, 0], 16);
+        Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin {
+                proto: u32::from(octet) + 10,
+                peer: 1,
+            },
+            protocol,
+            preference: Preference::new(protocol.default_admin_distance(), 10),
+            next_hop: Some(IpAddr::V4([192, 0, 2, octet])),
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        }
+    }
+
+    #[test]
+    fn every_routing_protocol_uses_the_kernel_mirror() {
+        let operations = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RecordingTable {
+            operations: Arc::clone(&operations),
+        }));
+        let routes = [
+            route(Protocol::Bgp, 1),
+            route(Protocol::Ospfv2, 2),
+            route(Protocol::Ospfv3, 3),
+            route(Protocol::Babel, 4),
+        ];
+
+        let mut events: Vec<_> = routes
+            .iter()
+            .cloned()
+            .map(RouterEvent::RouteInstalled)
+            .collect();
+        events.extend(
+            routes
+                .iter()
+                .map(|route| RouterEvent::RouteWithdrawn(route.key.clone())),
+        );
+        mirror.apply(&events);
+
+        let operations = operations.lock().unwrap();
+        assert_eq!(operations.len(), 8);
+        for (index, route) in routes.iter().enumerate() {
+            assert_eq!(
+                operations[index],
+                Operation::Add(route.key.prefix, route.next_hop.unwrap(), 0)
+            );
+            assert_eq!(
+                operations[index + routes.len()],
+                Operation::Delete(route.key.prefix)
+            );
         }
     }
 }
