@@ -11,10 +11,20 @@ env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
 
+# NOTE on timeouts: GitHub Actions' default job timeout is 360
+# minutes (6 h). Past incidents saw the macOS runner hit that
+# ceiling on a single hung `cargo test` step — every commit then
+# cost a full 6 h before a clean "cancelled" signal. Each job and
+# each long-running step below now carries an explicit
+# `timeout-minutes` so a hang is reported as a failure within
+# minutes instead. The ceilings are calibrated to ~6x the worst
+# observed legitimate runtime on a cold runner; tighten as needed.
+
 jobs:
   rust-tests:
     name: Rust fmt + clippy + test
     runs-on: ubuntu-22.04
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -25,25 +35,37 @@ jobs:
         with:
           shared-key: "rust-tests"
       - name: Install system deps
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             libc6-dev gcc g++ cbindgen python3 python3-pip python3-venv \
             golang-go bird2
       - name: Install Python test deps
+        timeout-minutes: 5
         run: |
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --upgrade pip
           /tmp/venv/bin/pip install cffi pytest
       - name: cargo fmt
+        timeout-minutes: 5
         run: cargo fmt --all -- --check
       - name: cargo clippy
+        timeout-minutes: 30
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: cargo test (workspace)
+        # 30 min ceiling: an unbounded `cargo test` step has been
+        # the historic CI hang culprit. A clean workspace test run
+        # finishes in ~5 min on the runner; 30 min is 6x slack for
+        # a cold cache + slow CI I/O, but bounded so a hang fails
+        # the job instead of running out the GHA default budget.
+        timeout-minutes: 30
         run: cargo test --workspace --all-features
       - name: Build lr-ffi (release)
+        timeout-minutes: 15
         run: cargo build --release -p lr-ffi
       - name: C harness
+        timeout-minutes: 5
         run: |
           # NB: sources MUST come before -l: Ubuntu's default `ld --as-needed`
           # drops a shared library that appears before the objects that
@@ -51,6 +73,7 @@ jobs:
           cc -Iinclude tests/ffi/harness.c -Ltarget/release -llr_ffi -o /tmp/lr_harness
           LD_LIBRARY_PATH=target/release /tmp/lr_harness
       - name: C++ harness (librouting.hpp RAII wrapper)
+        timeout-minutes: 5
         run: |
           # The C++ wrapper is header-only (include/librouting.hpp).
           # This step exercises the same FFI surface as the C harness but
@@ -59,35 +82,43 @@ jobs:
           c++ -std=c++17 -Iinclude tests/ffi/harness.cpp -Ltarget/release -llr_ffi -o /tmp/lr_harness_cpp
           LD_LIBRARY_PATH=target/release /tmp/lr_harness_cpp
       - name: Python bindings test
+        timeout-minutes: 10
         run: |
           /tmp/venv/bin/python -m pytest bindings/lr-python/tests -v
           /tmp/venv/bin/python bindings/lr-python/tests/test_librouting.py
       - name: Go bindings test
+        timeout-minutes: 10
         env:
           LD_LIBRARY_PATH: ${{ github.workspace }}/target/release
           CGO_LDFLAGS: "-L${{ github.workspace }}/target/release -llr_ffi"
         run: |
           cd bindings/lr-go && go test -v ./...
       - name: Two-daemon TCP interop test
+        timeout-minutes: 10
         run: |
           cargo build -p lr-cli
           ./tests/interop/two_daemon.sh
       - name: Add-Path interop (RFC 7911, two-daemon)
+        timeout-minutes: 10
         run: |
           ./tests/interop/addpath.sh
       - name: Filter DSL + ROA interop (BIRD 2)
+        timeout-minutes: 10
         run: |
           ./tests/interop/filter_dsl_bird.sh
       - name: Babel multi-NIC pattern matching
+        timeout-minutes: 10
         run: |
           ./tests/interop/babel_multi_nic.sh
       - name: Babel multi-session transit + check link
+        timeout-minutes: 10
         run: |
           ./tests/interop/babel_multihop.sh
 
   msrv:
     name: MSRV (1.88)
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@1.88.0
@@ -96,11 +127,14 @@ jobs:
         with:
           shared-key: "msrv-1.88"
       - run: cargo --version
-      - run: cargo build --workspace --all-features
+      - name: cargo build (workspace, MSRV)
+        timeout-minutes: 25
+        run: cargo build --workspace --all-features
 
   coverage:
     name: Coverage
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -109,11 +143,18 @@ jobs:
         with:
           shared-key: "coverage"
       - name: Install tarpaulin
+        timeout-minutes: 15
         run: cargo install cargo-tarpaulin --version 0.30.0
       - name: Run coverage
         # --timeout is per-test-process (default 60s); the daemon e2e
         # suites spawn real lr-daemon pairs and under tarpaulin's
         # instrumentation the collision e2e alone can exceed 60s.
+        # The step ceiling is 60 min — tarpaulin's whole-workspace
+        # coverage run with --timeout 600 typically finishes in
+        # ~15-20 min on a warm cache; 60 min gives 3x slack while
+        # bounding a hang to a single failed coverage job instead
+        # of a 6-hour workflow hang.
+        timeout-minutes: 60
         run: cargo tarpaulin --workspace --all-features --out xml --timeout 600
       - uses: codecov/codecov-action@v7
         with:
@@ -123,6 +164,7 @@ jobs:
   cross:
     name: Cross-build (${{ matrix.target }})
     runs-on: ubuntu-22.04
+    timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
@@ -139,6 +181,7 @@ jobs:
         with:
           shared-key: "cross-${{ matrix.target }}"
       - name: Install cross linkers
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
@@ -147,6 +190,7 @@ jobs:
             libgcc-11-dev-arm64-cross \
             gcc-mingw-w64-x86-64
       - name: cargo build (${{ matrix.target }})
+        timeout-minutes: 20
         run: cargo build --workspace --target ${{ matrix.target }} --all-features
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
@@ -162,6 +206,7 @@ jobs:
   cross-macos-intel:
     name: Cross-build (x86_64-apple-darwin, from macos-14)
     runs-on: macos-14
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -172,6 +217,7 @@ jobs:
         with:
           shared-key: "cross-x86_64-apple-darwin"
       - name: cargo build (x86_64-apple-darwin)
+        timeout-minutes: 20
         run: cargo build --workspace --target x86_64-apple-darwin --all-features
 
   # Native build + test on the three primary desktop platforms. The
@@ -196,6 +242,7 @@ jobs:
   # platform-conditional code path.
   cross-platform:
     name: Native (${{ matrix.os }})
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -219,12 +266,25 @@ jobs:
       - name: cargo fmt
         # Formatting check is platform-independent; running it on
         # three OSes is belt-and-braces against a toolchain drift.
+        timeout-minutes: 5
         run: cargo fmt --all -- --check
       - name: cargo clippy
+        timeout-minutes: 30
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: cargo build (workspace)
+        timeout-minutes: 30
         run: cargo build --workspace --all-features
       - name: cargo test (workspace)
+        # 30 min ceiling. The historic macOS CI hang lived here: a
+        # single e2e test's `Drop` impl called `child.wait()`
+        # blocking, so when a daemon's shutdown path wedged the
+        # test binary — and therefore this step — hung until GHA's
+        # 6 h default job timeout. 30 min is 6x the worst observed
+        # legitimate runtime (~5 min cold); a step timeout turns
+        # the next regression into a 30-minute failure with a
+        # clean "The action has timed out" signal in the log
+        # instead of a silent 6-hour stall.
+        timeout-minutes: 30
         # On Windows the lr-cli daemon tests spawn the daemon binary on
         # loopback TCP sockets. They use std::net primitives that work
         # cross-platform; the lr-osroute Windows backend compiles and
@@ -240,6 +300,7 @@ jobs:
   interop:
     name: Interop (BIRD + FRR)
     runs-on: ubuntu-22.04
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -248,24 +309,33 @@ jobs:
         with:
           shared-key: "interop"
       - name: Install reference daemons
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bird2 frr iproute2
       - name: Build lr-daemon
+        timeout-minutes: 15
         run: cargo build -p lr-cli
       - name: Build the RTR mock cache example
+        timeout-minutes: 10
         run: cargo build -p lr-bgp --example rtr_cache_mock
       - name: RTR codec interop (RFC 8210, lr-bgp mock cache x BIRD 2 rpki)
+        timeout-minutes: 5
         run: ./tests/interop/rtr_bird.sh
       - name: RTR daemon e2e (RFC 8210, lr-daemon [bgp.rpki] x lr-bgp mock cache)
+        timeout-minutes: 5
         run: ./tests/interop/rtr_lr.sh
       - name: Two-daemon interop (librouting ↔ librouting)
+        timeout-minutes: 5
         run: ./tests/interop/two_daemon.sh
       - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)
+        timeout-minutes: 5
         run: ./tests/interop/labeled_unicast.sh
       - name: RFC 8277 BGP-LU -> MPLS dataplane interop (kernel-gated, user namespace)
+        timeout-minutes: 10
         run: ./tests/interop/mpls_lsp.sh
       - name: SRv6 seg6/seg6local kernel interop (RFC 8754 / RFC 8986, kernel-gated)
+        timeout-minutes: 10
         run: |
           sudo sysctl -w net.ipv6.conf.all.seg6_enabled=1 || true
           sudo sysctl -w net.ipv6.conf.lo.seg6_enabled=1 || true
@@ -276,90 +346,133 @@ jobs:
           # the cargo test --workspace step above.
           cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
       - name: OSPF two-daemon interop (raw sockets, user namespace)
+        timeout-minutes: 10
         run: ./tests/interop/ospf.sh
       - name: Babel MAC auth e2e (RFC 8967 + RFC 9467, two daemons)
+        timeout-minutes: 10
         run: ./tests/interop/babel_auth.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_bird.sh
       - name: OSPF x FRR interop (real DBD/LSR exchange, RFC 2328 7.2)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_frr.sh
       - name: OSPF broadcast interop (RFC 2328 9.4 DR election, lr x lr + lr x BIRD)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_broadcast.sh
       - name: OSPF graceful restart interop (RFC 3623, two daemons)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_gr.sh
       - name: OSPF graceful restart x BIRD helper (RFC 3623)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_gr_bird.sh
       - name: OSPF Segment Routing interop (RFC 8665 slice 1, lr x FRR ospfd)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_sr_frr.sh
       - name: OSPF Segment Routing interop (RFC 8665 slice 2 reception, lr x lr)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_sr.sh
       - name: OSPF SR adjacency + mapping server interop (RFC 8665 slice 3, lr x lr)
+        timeout-minutes: 10
         run: ./tests/interop/ospf_sr_adj.sh
       - name: OSPFv3 two-daemon interop (RFC 5340, raw IPv6 sockets, user namespace)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6.sh
       - name: OSPFv3 Extended-LSA interop (RFC 8362, two daemons)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_e_lsa.sh
       - name: OSPFv3 SRv6 End.X interop (RFC 9513 9.1 over RFC 8362, sparse mode)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_e_lsa_endx.sh
       - name: OSPFv3 SRv6 LAN End.X interop (RFC 9513 9.2, three-router broadcast segment)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_e_lsa_endx_lan.sh
       - name: OSPFv3 broadcast interop (RFC 5340 4.1.2 election, lr x lr)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_broadcast.sh
       - name: OSPFv3 x FRR ospf6d interop (RFC 5340, real DBD/LSR exchange)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_frr.sh
       - name: OSPFv3 broadcast x FRR ospf6d interop (RFC 5340 4.1.2, default FRR type)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_frr_broadcast.sh
       - name: OSPFv3 graceful restart interop (RFC 5187, two daemons)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_gr.sh
       - name: OSPFv3 graceful restart x FRR ospf6d helper (RFC 5187)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_gr_frr.sh
       - name: OSPFv3 SRv6 interop (RFC 9513, lr x FRR relay x lr)
+        timeout-minutes: 10
         run: ./tests/interop/ospf6_frr_srv6.sh
       - name: MRT interop (BIRD dump -> lr parse; daemon Loc-RIB round-trip)
+        timeout-minutes: 10
         run: ./tests/interop/mrt.sh
       - name: Wire-level parity harness (replay captured stream, diff Loc-RIBs)
+        timeout-minutes: 10
         run: ./tests/interop/parity.sh
       - name: BMP collector e2e (daemon mirroring -> daemon collector)
+        timeout-minutes: 10
         run: ./tests/interop/bmp.sh
       - name: BGP MD5 auth interop (RFC 2385)
+        timeout-minutes: 10
         run: ./tests/interop/md5.sh
       - name: Multi-protocol interop (rc.3, lr --protocol bgp,ospf ↔ BIRD ospf+bgp)
+        timeout-minutes: 10
         run: ./tests/interop/multi_protocol.sh
       - name: BIRD interop (librouting ↔ BIRD)
+        timeout-minutes: 10
         run: ./tests/interop/bird.sh
       - name: BIRD compat interop (lr-daemon runs a BIRD config natively ↔ BIRD)
+        timeout-minutes: 10
         run: ./tests/interop/compat_bird.sh
       - name: FRR compat interop (lr-daemon runs an FRR config natively ↔ bgpd)
+        timeout-minutes: 10
         run: ./tests/interop/compat_frr.sh
       - name: BIRD IPv6 interop (librouting ↔ BIRD, pure IPv6)
+        timeout-minutes: 10
         run: ./tests/interop/bird_ipv6.sh
       - name: BIRD GTSM interop (librouting ↔ BIRD, RFC 5082)
+        timeout-minutes: 10
         run: ./tests/interop/bird_gtsm.sh
       - name: BIRD ENH interop (librouting ↔ BIRD, RFC 5549)
+        timeout-minutes: 10
         run: ./tests/interop/bird_enh.sh
       - name: BIRD LLGR interop (librouting ↔ BIRD, RFC 9494)
+        timeout-minutes: 10
         run: ./tests/interop/bird_llgr.sh
       - name: BFD interop (librouting ↔ BIRD, RFC 5880/5881/5883)
+        timeout-minutes: 10
         run: ./tests/interop/bfd_bird.sh
       - name: LDP two-daemon interop (RFC 5036, multicast discovery, user namespace)
+        timeout-minutes: 10
         run: ./tests/interop/ldp.sh
       - name: LDP interop (librouting ↔ FRR ldpd, RFC 5036)
+        timeout-minutes: 10
         run: ./tests/interop/ldp_frr.sh
       - name: LDP x FRR dual-stack interop (RFC 7552, zebra + ldpd)
+        timeout-minutes: 10
         run: ./tests/interop/ldp_frr_v6.sh
       - name: FRR interop (librouting ↔ FRR bgpd)
+        timeout-minutes: 10
         run: ./tests/interop/frr.sh
       - name: Redistribution interop (BGP↔OSPF pipes ↔ BIRD 2, ROADMAP-v3 D4.5)
+        timeout-minutes: 10
         run: ./tests/interop/redistribute_bird.sh
       - name: Aggregation interop (RFC 4271 9.2.2.2 ↔ BIRD 2, ROADMAP-v3 D4.5)
+        timeout-minutes: 10
         run: ./tests/interop/aggregate_bird.sh
       - name: Route flap damping interop (RFC 2439 ↔ FRR bgpd, ROADMAP-v3 D4.5)
+        timeout-minutes: 10
         run: ./tests/interop/damping_frr.sh
       - name: RFC 8212 interop (default eBGP policy ↔ BIRD 2, ROADMAP-v3 D10.6)
+        timeout-minutes: 10
         run: ./tests/interop/rfc8212_bird.sh
       - name: RFC 8212 interop (default eBGP policy ↔ FRR bgpd, ROADMAP-v3 D10.6)
+        timeout-minutes: 10
         run: ./tests/interop/rfc8212_frr.sh
       - name: YANG surface gate (RFC 9647 + RFC 8177, libyang when present)
+        timeout-minutes: 10
         run: ./tests/interop/yang.sh
       # W6.3 exchange-plane exit criteria (docs/research/EXCHANGE-PLANE.md
       # §10): rebuild the daemon with the feature, then
@@ -369,10 +482,13 @@ jobs:
       #     above were run against the plain build; the loopback e2e
       #     with the flag on lives in crates/lr-cli/tests (rust-tests).
       - name: Rebuild lr-daemon with the exchange-plane feature
+        timeout-minutes: 15
         run: cargo build -p lr-cli --features exchange-plane
       - name: Wire-level parity gate with the exchange-plane build (flag off)
+        timeout-minutes: 10
         run: ./tests/interop/parity.sh
       - name: Exchange-plane fallback gate (plane on ↔ plain BIRD 2)
+        timeout-minutes: 10
         run: ./tests/interop/exchange_plane.sh
 
   # TCP-AO needs Linux >= 6.7: ubuntu-24.04 ships a 6.8 kernel. The
@@ -381,6 +497,7 @@ jobs:
   interop-auth:
     name: Interop auth (TCP-AO, ubuntu-24.04)
     runs-on: ubuntu-24.04
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -389,12 +506,16 @@ jobs:
         with:
           shared-key: "interop-auth"
       - name: Install reference daemons
+        timeout-minutes: 10
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends bird2 frr iproute2
       - name: Build lr-daemon
+        timeout-minutes: 15
         run: cargo build -p lr-cli
       - name: TCP-AO two-daemon interop (kernel-gated)
+        timeout-minutes: 10
         run: ./tests/interop/tcp_ao.sh
       - name: MD5 auth interop (RFC 2385, incl. BIRD/FRR)
+        timeout-minutes: 10
         run: ./tests/interop/md5.sh
