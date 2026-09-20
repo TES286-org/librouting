@@ -28,103 +28,27 @@ use std::time::Duration;
 
 use lr_router::{DefaultRouter, RouterInstance};
 
+use windows_sys::Win32::Foundation::{
+    CloseHandle, DuplicateHandle, GetLastError, DUPLICATE_SAME_ACCESS, ERROR_BROKEN_PIPE,
+    ERROR_PIPE_CONNECTED, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
+};
+use windows_sys::Win32::System::Pipes::{
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, SetNamedPipeHandleState,
+    NAMED_PIPE_MODE, PIPE_NOWAIT, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+};
+use windows_sys::Win32::System::Threading::GetCurrentProcess;
+
 use super::{ApiContext, DaemonInfo};
 
-// ---------------------------------------------------------------------------
-// Win32 constants
-// ---------------------------------------------------------------------------
-
-/// `PIPE_ACCESS_DUPLEX` — clients and server can both read and write.
-const PIPE_ACCESS_DUPLEX: u32 = 0x00000003;
-/// `PIPE_TYPE_BYTE` — data on the pipe is a byte stream (no message
-/// boundaries). Matches how the Unix side reads the line protocol.
-const PIPE_TYPE_BYTE: u32 = 0x00000000;
-/// `PIPE_WAIT` — blocking I/O.
-const PIPE_WAIT: u32 = 0x00000000;
-/// `PIPE_NOWAIT` — non-blocking I/O, used briefly between idle reads
-/// so the connection thread can notice the daemon shutting down.
-const PIPE_NOWAIT: u32 = 0x00000001;
-/// `PIPE_UNLIMITED_INSTANCES` — the server can create as many
-/// concurrent pipe instances as there are clients.
-const PIPE_UNLIMITED_INSTANCES: u32 = 255;
-/// `INVALID_HANDLE_VALUE` — the sentinel `CreateNamedPipeW` returns
-/// on failure.
-const INVALID_HANDLE_VALUE: isize = -1;
-/// `ERROR_PIPE_CONNECTED` — `ConnectNamedPipe` returns 0 with this
-/// last error when a client already connected between the
-/// `CreateNamedPipeW` and `ConnectNamedPipe` calls (a race the
-/// Windows API documents as benign).
-const ERROR_PIPE_CONNECTED: u32 = 535;
-/// `ERROR_BROKEN_PIPE` — the client closed the pipe cleanly; the
-/// Windows analogue of EOF on a Unix socket.
-const ERROR_BROKEN_PIPE: u32 = 109;
-/// `DUPLICATE_SAME_ACCESS` — `DuplicateHandle` option that produces a
-/// second handle with the same access rights as the source.
-const DUPLICATE_SAME_ACCESS: u32 = 0x00000002;
-
-// ---------------------------------------------------------------------------
-// FFI
-// ---------------------------------------------------------------------------
-
-/// `OVERLAPPED` — declared so we can pass `*mut Overlapped` (NULL)
-/// for blocking behaviour without pulling in a crate. The struct's
-/// full layout matches the Win32 header.
-#[repr(C)]
-struct Overlapped {
-    internal: usize,
-    internal_high: usize,
-    offset: u32,
-    offset_high: u32,
-    event: isize,
-}
-
-extern "system" {
-    fn CreateNamedPipeW(
-        name: *const u16,
-        open_mode: u32,
-        pipe_mode: u32,
-        max_instances: u32,
-        out_buffer_size: u32,
-        in_buffer_size: u32,
-        default_timeout: u32,
-        security_attributes: *mut core::ffi::c_void,
-    ) -> isize;
-    fn ConnectNamedPipe(handle: isize, overlapped: *mut Overlapped) -> i32;
-    fn DisconnectNamedPipe(handle: isize) -> i32;
-    fn CloseHandle(handle: isize) -> i32;
-    fn DuplicateHandle(
-        source_process: isize,
-        source_handle: isize,
-        target_process: isize,
-        target_handle: *mut isize,
-        desired_access: u32,
-        inherit_handle: i32,
-        options: u32,
-    ) -> i32;
-    fn GetCurrentProcess() -> isize;
-    fn ReadFile(
-        handle: isize,
-        buffer: *mut u8,
-        bytes_to_read: u32,
-        bytes_read: *mut u32,
-        overlapped: *mut Overlapped,
-    ) -> i32;
-    fn WriteFile(
-        handle: isize,
-        buffer: *const u8,
-        bytes_to_write: u32,
-        bytes_written: *mut u32,
-        overlapped: *mut Overlapped,
-    ) -> i32;
-    fn FlushFileBuffers(handle: isize) -> i32;
-    fn SetNamedPipeHandleState(
-        handle: isize,
-        mode: *const u32,
-        max_collection_count: *const u32,
-        collect_data_timeout: *const u32,
-    ) -> i32;
-    fn GetLastError() -> u32;
-}
+/// Named-pipe handles are safe to move between threads — the kernel
+/// handles the synchronization. `HANDLE` is `*mut c_void` which is
+/// not `Send` by default; we store the handle as `isize` (the same
+/// bit pattern) and cast to `HANDLE` at the FFI boundary, mirroring
+/// the original hand-rolled approach.
+unsafe impl Send for NamedPipeStream {}
 
 /// `route_label` — same as the Unix side; defined here so the
 /// `routes` command's output is byte-identical across platforms.
@@ -162,18 +86,20 @@ impl NamedPipeStream {
         let rc = unsafe {
             DuplicateHandle(
                 current,
-                self.handle,
+                self.handle as HANDLE,
                 current,
-                &mut new_handle,
+                &mut new_handle as *mut isize as *mut HANDLE,
                 0,
-                1,
+                1, // TRUE — inherit handle
                 DUPLICATE_SAME_ACCESS,
             )
         };
         if rc == 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(NamedPipeStream { handle: new_handle })
+            Ok(NamedPipeStream {
+                handle: new_handle as isize,
+            })
         }
     }
 
@@ -182,8 +108,8 @@ impl NamedPipeStream {
     /// the daemon's `running` flag is polled at least once every
     /// 250 ms (matching the Unix side's `set_read_timeout` cadence).
     fn set_nonblocking(&self, on: bool) -> io::Result<()> {
-        let mode: u32 = if on { PIPE_NOWAIT } else { PIPE_WAIT };
-        let rc = unsafe { SetNamedPipeHandleState(self.handle, &mode, &0, &0) };
+        let mode: NAMED_PIPE_MODE = if on { PIPE_NOWAIT } else { PIPE_WAIT };
+        let rc = unsafe { SetNamedPipeHandleState(self.handle as HANDLE, &mode, &0, &0) };
         if rc == 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -197,7 +123,7 @@ impl Read for NamedPipeStream {
         let mut bytes_read: u32 = 0;
         let rc = unsafe {
             ReadFile(
-                self.handle,
+                self.handle as HANDLE,
                 buf.as_mut_ptr(),
                 buf.len() as u32,
                 &mut bytes_read,
@@ -221,7 +147,7 @@ impl Write for NamedPipeStream {
         let mut bytes_written: u32 = 0;
         let rc = unsafe {
             WriteFile(
-                self.handle,
+                self.handle as HANDLE,
                 buf.as_ptr(),
                 buf.len() as u32,
                 &mut bytes_written,
@@ -235,7 +161,7 @@ impl Write for NamedPipeStream {
     }
 
     fn flush(&mut self) -> io::Result<()> {
-        let rc = unsafe { FlushFileBuffers(self.handle) };
+        let rc = unsafe { FlushFileBuffers(self.handle as HANDLE) };
         if rc == 0 {
             Err(io::Error::last_os_error())
         } else {
@@ -249,8 +175,8 @@ impl Drop for NamedPipeStream {
         // Best-effort cleanup; the handle is going away with the
         // stream either way.
         unsafe {
-            let _ = DisconnectNamedPipe(self.handle);
-            let _ = CloseHandle(self.handle);
+            let _ = DisconnectNamedPipe(self.handle as HANDLE);
+            let _ = CloseHandle(self.handle as HANDLE);
         }
     }
 }
@@ -284,10 +210,10 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
             65536,
             65536,
             0,
-            std::ptr::null_mut(),
-        )
+            std::ptr::null(),
+        ) as isize
     };
-    if probe == INVALID_HANDLE_VALUE {
+    if probe == INVALID_HANDLE_VALUE as isize {
         let err = unsafe { GetLastError() };
         return Err(format!(
             "bind {path}: CreateNamedPipeW failed (error {err})"
@@ -340,14 +266,14 @@ fn accept_loop(
         // Wait for a client to connect. Blocks until a client opens
         // the pipe or the daemon stops; the latter is noticed on the
         // next loop iteration after the client disconnects.
-        let connected = unsafe { ConnectNamedPipe(handle, std::ptr::null_mut()) };
+        let connected = unsafe { ConnectNamedPipe(handle as HANDLE, std::ptr::null_mut()) };
         if connected == 0 {
             let err = unsafe { GetLastError() };
             if err != ERROR_PIPE_CONNECTED {
                 // Anything other than the benign "already connected"
                 // race: close the handle, sleep briefly to avoid a
                 // busy loop, and recreate the pipe instance.
-                unsafe { CloseHandle(handle) };
+                unsafe { CloseHandle(handle as HANDLE) };
                 thread::sleep(Duration::from_millis(100));
                 first_handle = unsafe {
                     CreateNamedPipeW(
@@ -358,10 +284,10 @@ fn accept_loop(
                         65536,
                         65536,
                         0,
-                        std::ptr::null_mut(),
-                    )
+                        std::ptr::null(),
+                    ) as isize
                 };
-                if first_handle == INVALID_HANDLE_VALUE {
+                if first_handle == INVALID_HANDLE_VALUE as isize {
                     thread::sleep(Duration::from_millis(100));
                 }
                 continue;
@@ -379,10 +305,10 @@ fn accept_loop(
                 65536,
                 65536,
                 0,
-                std::ptr::null_mut(),
-            )
+                std::ptr::null(),
+            ) as isize
         };
-        if first_handle == INVALID_HANDLE_VALUE {
+        if first_handle == INVALID_HANDLE_VALUE as isize {
             // No fresh instance — the next iteration's
             // ConnectNamedPipe would fail. Close the current stream
             // and sleep until the next round.

@@ -7,202 +7,29 @@
 //! `interface_v4_addrs`, `interface_v6_addrs` and `ifindex_of` work,
 //! so Babel's `[[babel.interface]]` glob matcher is fully operational.
 //!
-//! ## Struct layouts (verified against Windows SDK `iptypes.h`)
+//! ## Struct layouts
 //!
-//! `IP_ADAPTER_ADDRESSES_LH` on 64-bit (field → offset):
-//! ```text
-//!   Alignment union        @0   (8 bytes)
-//!   Next                   @8   (pointer)
-//!   AdapterName            @16  (PCHAR)
-//!   FriendlyName           @24  (PWSTR)         ← we use this
-//!   FirstUnicastAddress     @32  (pointer)       ← we use this
-//!   FirstAnycastAddress    @40
-//!   FirstMulticastAddress  @48
-//!   FirstDnsServerAddress  @56
-//!   DnsSuffix              @64
-//!   Description             @72
-//!   ... (PhysicalAddress, Flags, Mtu, IfType, OperStatus, Ipv6IfIndex,
-//!        ZoneIndices[16], IfIndex, ...)
-//! ```
-//!
-//! `IP_ADAPTER_UNICAST_ADDRESS_LH` on 64-bit:
-//! ```text
-//!   Alignment union        @0   (8 bytes)
-//!   Next                   @8   (pointer)
-//!   Address                @16  (SOCKET_ADDRESS, 16 bytes)
-//!   AddressPrefix          @32  (IP_ADDRESS_PREFIX, 24 bytes)
-//!   DadState               @56  (4 bytes)
-//!   ValidLifetime          @60
-//!   PreferredLifetime      @64
-//!   LeaseLifetime          @68
-//!   OnLinkPrefixLength     @72  (ULONG)         ← we read this
-//! ```
-//!
-//! `SOCKET_ADDRESS` on 64-bit is 16 bytes: `lpSockaddr` (8-byte
-//! pointer) + `iSockaddrLength` (4-byte INT) + 4 bytes padding for
-//! 8-byte alignment.
+//! All Win32 structs (`IP_ADAPTER_ADDRESSES`, `IP_ADAPTER_UNICAST_ADDRESS`,
+//! `SOCKET_ADDRESS`) and the `GetAdaptersAddresses` function are imported
+//! from the `windows-sys` crate — Microsoft's auto-generated, zero-overhead
+//! FFI binding. The struct layouts are machine-generated from the official
+//! Windows SDK metadata (win32metadata), so they cannot drift from the
+//! SDK the way hand-rolled `#[repr(C)]` structs can. Two struct-layout
+//! bugs on Windows in this crate's history (a misaligned pointer
+//! dereference and a swapped field order) motivated the migration.
 
-use std::ffi::c_void;
 use std::net::{Ipv4Addr, Ipv6Addr};
 use std::ptr;
 
+use windows_sys::Win32::Foundation::{ERROR_BUFFER_OVERFLOW, ERROR_SUCCESS};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    GetAdaptersAddresses, GAA_FLAG_INCLUDE_PREFIX, GAA_FLAG_SKIP_ANYCAST, GAA_FLAG_SKIP_DNS_SERVER,
+    GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_UNICAST_ADDRESS_LH,
+};
+use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+
 use super::{InterfaceEntry, InterfaceV4Addr, InterfaceV6Addr, OspfTransportError};
-
-// ---------------------------------------------------------------------------
-// Constants — Windows SDK values
-// ---------------------------------------------------------------------------
-
-/// `AF_INET` — Winsock2 value (same as on every platform).
-const AF_INET: u16 = 2;
-/// `AF_INET6` — Windows defines this as 23 (`WSA_ADDRESS_FAMILY`).
-const AF_INET6: u16 = 23;
-
-/// `GAA_FLAG_SKIP_ANYCAST` — omit anycast addresses.
-const GAA_FLAG_SKIP_ANYCAST: u32 = 0x0002;
-/// `GAA_FLAG_SKIP_MULTICAST` — omit multicast addresses.
-const GAA_FLAG_SKIP_MULTICAST: u32 = 0x0004;
-/// `GAA_FLAG_INCLUDE_PREFIX` — request `OnLinkPrefixLength` on each
-/// unicast address (Vista+; the field is only populated when this
-/// flag is set).
-const GAA_FLAG_INCLUDE_PREFIX: u32 = 0x0010;
-/// `GAA_FLAG_SKIP_DNS_SERVER` — omit DNS server addresses.
-const GAA_FLAG_SKIP_DNS_SERVER: u32 = 0x0080;
-
-const ERROR_SUCCESS: u32 = 0;
-const ERROR_BUFFER_OVERFLOW: u32 = 111;
-
-/// `IfOperStatusUp` (`IfOperStatus` enumeration).
-const IF_OPER_STATUS_UP: u32 = 1;
-
-// ---------------------------------------------------------------------------
-// FFI struct declarations — match Windows SDK `iptypes.h` exactly
-// ---------------------------------------------------------------------------
-
-/// `SOCKET_ADDRESS` — a pointer + length pair wrapping a `sockaddr*`.
-/// On 64-bit: 8 (ptr) + 4 (int) + 4 (pad) = 16 bytes.
-#[repr(C)]
-struct SocketAddress {
-    lp_sockaddr: *mut u8,
-    i_sockaddr_length: i32,
-    _padding: u32,
-}
-
-/// `IP_ADAPTER_UNICAST_ADDRESS_LH` (Vista+ form). We declare the full
-/// struct up to and including `OnLinkPrefixLength` so Rust's
-/// `#[repr(C)]` layout matches the SDK and the offset of every field
-/// is correct by construction — no manual offset arithmetic.
-///
-/// Fields after `OnLinkPrefixLength` (e.g. `FirstGatewayAddress`) are
-/// not declared because we never read them; the SDK struct continues
-/// but truncating a `#[repr(C)]` struct at any point is safe as long
-/// as we never read past what we declared.
-#[repr(C)]
-struct IpAdapterUnicastAddress {
-    /// Union `{ ULONGLONG Alignment; struct { ULONG Length; DWORD Reserved; } }`
-    _alignment: u64,
-    /// `struct _IP_ADAPTER_UNICAST_ADDRESS *Next`
-    next: *mut IpAdapterUnicastAddress,
-    /// `SOCKET_ADDRESS Address` — 16 bytes on 64-bit.
-    address: SocketAddress,
-    /// `IP_ADDRESS_PREFIX AddressPrefix` — `SOCKET_ADDRESS Prefix` +
-    /// `UINT8 PrefixLength` + 7 bytes padding = 24 bytes on 64-bit.
-    _address_prefix: [u8; 24],
-    /// `NL_DAD_STATE DadState` (enum = ULONG = 4 bytes).
-    _dad_state: u32,
-    /// `ULONG ValidLifetime`.
-    _valid_lifetime: u32,
-    /// `ULONG PreferredLifetime`.
-    _preferred_lifetime: u32,
-    /// `ULONG LeaseLifetime`.
-    _lease_lifetime: u32,
-    /// `ULONG OnLinkPrefixLength` — the prefix length we want.
-    on_link_prefix_length: u32,
-}
-
-/// `IP_ADAPTER_ADDRESSES_LH` (Vista+ form). We declare the full
-/// struct up to `IfIndex` so every field offset is correct by
-/// construction. Fields after `IfIndex` (FirstPrefix, etc.) are
-/// omitted — we never read them.
-///
-/// ## Field order (verified against Windows SDK `iptypes.h`)
-///
-/// ```text
-///   offset  field                    type         size
-///      0    Alignment (union)        ULONGLONG     8
-///      8    Next                     ptr           8
-///     16    AdapterName              PCHAR         8
-///     24    FirstUnicastAddress      ptr           8  ← we read
-///     32    FirstAnycastAddress      ptr           8
-///     40    FirstMulticastAddress    ptr           8
-///     48    FirstDnsServerAddress    ptr           8
-///     56    DnsSuffix                PWCHAR        8
-///     64    Description              PWCHAR        8
-///     72    FriendlyName             PWCHAR        8  ← we read
-///     80    PhysicalAddress          UCHAR[8]      8
-///     88    PhysicalAddressLength    ULONG         4
-///     92    Flags                    ULONG         4
-///     96    Mtu                      ULONG         4
-///    100    IfType                   ULONG         4
-///    104    OperStatus               ULONG         4  ← we read
-///    108    Ipv6IfIndex               ULONG         4
-///    112    ZoneIndices[16]          ULONG[16]    64
-///    176    IfIndex                  ULONG         4  ← we read
-/// ```
-///
-/// Note: `FriendlyName` comes AFTER `Description`, not after `AdapterName`.
-/// This is the most common mistake when hand-rolling this struct.
-#[repr(C)]
-struct IpAdapterAddresses {
-    /// Union `{ ULONGLONG Alignment; struct { ULONG Length; IF_INDEX IfIndex; } }`
-    /// — the union is 8 bytes; `IfIndex` sits at offset 4 inside it.
-    _alignment: u64,
-    /// `struct _IP_ADAPTER_ADDRESSES *Next`
-    next: *mut IpAdapterAddresses,
-    /// `PCHAR AdapterName` — ANSI (latin-1) name.
-    _adapter_name: *mut u8,
-    /// `struct _IP_ADAPTER_UNICAST_ADDRESS *FirstUnicastAddress`
-    first_unicast_address: *mut IpAdapterUnicastAddress,
-    /// `struct _IP_ADAPTER_ANYCAST_ADDRESS *FirstAnycastAddress`
-    _first_anycast_address: *mut c_void,
-    /// `struct _IP_ADAPTER_MULTICAST_ADDRESS *FirstMulticastAddress`
-    _first_multicast_address: *mut c_void,
-    /// `struct _IP_ADAPTER_DNS_SERVER_ADDRESS *FirstDnsServerAddress`
-    _first_dns_server_address: *mut c_void,
-    /// `PWCHAR DnsSuffix`
-    _dns_suffix: *mut u16,
-    /// `PWCHAR Description`
-    _description: *mut u16,
-    /// `PWCHAR FriendlyName` — UTF-16 display name (e.g. "Ethernet").
-    friendly_name: *mut u16,
-    /// `UCHAR PhysicalAddress[MAX_ADAPTER_ADDRESS_LENGTH]` (8 bytes).
-    _physical_address: [u8; 8],
-    /// `ULONG PhysicalAddressLength`.
-    _physical_address_length: u32,
-    /// `ULONG Flags`.
-    _flags: u32,
-    /// `ULONG Mtu`.
-    _mtu: u32,
-    /// `ULONG IfType`.
-    _if_type: u32,
-    /// `IF_OPER_STATUS OperStatus` (enum = ULONG = 4 bytes).
-    oper_status: u32,
-    /// `ULONG Ipv6IfIndex`.
-    _ipv6_if_index: u32,
-    /// `ULONG ZoneIndices[16]` — 64 bytes.
-    _zone_indices: [u32; 16],
-    /// `IF_INDEX IfIndex` — the standalone interface index field.
-    if_index: u32,
-}
-
-extern "system" {
-    fn GetAdaptersAddresses(
-        family: u32,
-        flags: u32,
-        reserved: *mut c_void,
-        adapter_addresses: *mut IpAdapterAddresses,
-        size_pointer: *mut u32,
-    ) -> u32;
-}
 
 /// Owned adapter list — the `Box<[u8]>` holds the backing allocation
 /// returned by `GetAdaptersAddresses`, and `head` is the typed head
@@ -210,7 +37,7 @@ extern "system" {
 struct AdapterList {
     #[allow(dead_code)]
     buf: Box<[u8]>,
-    head: *mut IpAdapterAddresses,
+    head: *mut IP_ADAPTER_ADDRESSES_LH,
 }
 
 /// Call `GetAdaptersAddresses` for both IPv4 and IPv6, with the
@@ -244,7 +71,7 @@ fn get_adapters_addresses() -> Result<AdapterList, OspfTransportError> {
             0,
             flags,
             ptr::null_mut(),
-            buf.as_mut_ptr() as *mut IpAdapterAddresses,
+            buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH,
             &mut size,
         )
     };
@@ -254,7 +81,7 @@ fn get_adapters_addresses() -> Result<AdapterList, OspfTransportError> {
             errno: rc as i32,
         });
     }
-    let head = buf.as_mut_ptr() as *mut IpAdapterAddresses;
+    let head = buf.as_mut_ptr() as *mut IP_ADAPTER_ADDRESSES_LH;
     Ok(AdapterList {
         buf: buf.into_boxed_slice(),
         head,
@@ -269,13 +96,17 @@ pub fn ifindex_of(interface: &str) -> Option<u32> {
         // SAFETY: `cur` was returned by GetAdaptersAddresses inside
         // the buffer owned by `list`.
         let entry = unsafe { &*cur };
-        if let Some(name) = unsafe { friendly_name(entry.friendly_name) } {
+        if let Some(name) = unsafe { friendly_name(entry.FriendlyName) } {
             if name == interface {
-                let idx = entry.if_index;
-                return Some(idx);
+                // IfIndex is inside the alignment union at offset 4
+                // (the union overlays {ULONGLONG Alignment} and
+                // {ULONG Length, IF_INDEX IfIndex}). We read it via
+                // the Anonymous variant of the union.
+                let if_index = unsafe { entry.Anonymous1.Anonymous.IfIndex };
+                return Some(if_index);
             }
         }
-        cur = entry.next;
+        cur = entry.Next;
     }
     None
 }
@@ -305,53 +136,51 @@ fn os_error(context: &'static str) -> OspfTransportError {
     }
 }
 
-/// Read `(Ipv4Addr, prefix_len)` out of an `IP_ADAPTER_UNICAST_ADDRESS`
+/// Read `(Ipv4Addr, prefix_len)` out of an `IP_ADAPTER_UNICAST_ADDRESS_LH`
 /// when its embedded `SOCKET_ADDRESS` points at an `AF_INET`
 /// `sockaddr_in`.
 ///
 /// # Safety
-/// `u` must point at a valid `IpAdapterUnicastAddress` returned by
+/// `u` must point at a valid `IP_ADAPTER_UNICAST_ADDRESS_LH` returned by
 /// `GetAdaptersAddresses`.
-unsafe fn read_v4(u: &IpAdapterUnicastAddress) -> Option<(Ipv4Addr, u8)> {
-    let sa = &u.address;
-    if sa.i_sockaddr_length < 16 || sa.lp_sockaddr.is_null() {
+unsafe fn read_v4(u: &IP_ADAPTER_UNICAST_ADDRESS_LH) -> Option<(Ipv4Addr, u8)> {
+    let sa = &u.Address;
+    if sa.iSockaddrLength < 16 || sa.lpSockaddr.is_null() {
         return None;
     }
     // Winsock2 `sockaddr` has a 2-byte `sa_family` at offset 0. On
-    // Windows the family is a `ADDRESS_FAMILY` (u16), not the BSD
-    // `sa_family_t` (which can be u8). Reading as u16 is safe because
-    // the struct is 2-byte aligned (it starts at the beginning of a
-    // malloc'd buffer, or at an 8-byte-aligned offset within one).
-    let family = unsafe { ptr::read_unaligned(sa.lp_sockaddr as *const u16) };
-    if family != AF_INET {
+    // Windows the family is a `ADDRESS_FAMILY` (u16). `lpSockaddr` is
+    // a `*mut SOCKADDR` which is always at least 2-byte aligned.
+    let family = unsafe { ptr::read_unaligned(sa.lpSockaddr as *const u16) };
+    if family != AF_INET as u16 {
         return None;
     }
     // Winsock2 `sockaddr_in`: family(2) + port(2) + addr(4) + zero(8).
-    let bytes = unsafe { ptr::read_unaligned(sa.lp_sockaddr.add(4) as *const [u8; 4]) };
+    let bytes = unsafe { ptr::read_unaligned(sa.lpSockaddr.add(4) as *const [u8; 4]) };
     let addr = Ipv4Addr::from(bytes);
-    Some((addr, u.on_link_prefix_length as u8))
+    Some((addr, u.OnLinkPrefixLength))
 }
 
-/// Read `(Ipv6Addr, prefix_len)` out of an `IP_ADAPTER_UNICAST_ADDRESS`
+/// Read `(Ipv6Addr, prefix_len)` out of an `IP_ADAPTER_UNICAST_ADDRESS_LH`
 /// when its embedded `SOCKET_ADDRESS` points at an `AF_INET6`
 /// `sockaddr_in6`.
 ///
 /// # Safety
-/// `u` must point at a valid `IpAdapterUnicastAddress` returned by
+/// `u` must point at a valid `IP_ADAPTER_UNICAST_ADDRESS_LH` returned by
 /// `GetAdaptersAddresses`.
-unsafe fn read_v6(u: &IpAdapterUnicastAddress) -> Option<(Ipv6Addr, u8)> {
-    let sa = &u.address;
-    if sa.i_sockaddr_length < 28 || sa.lp_sockaddr.is_null() {
+unsafe fn read_v6(u: &IP_ADAPTER_UNICAST_ADDRESS_LH) -> Option<(Ipv6Addr, u8)> {
+    let sa = &u.Address;
+    if sa.iSockaddrLength < 28 || sa.lpSockaddr.is_null() {
         return None;
     }
-    let family = unsafe { ptr::read_unaligned(sa.lp_sockaddr as *const u16) };
-    if family != AF_INET6 {
+    let family = unsafe { ptr::read_unaligned(sa.lpSockaddr as *const u16) };
+    if family != AF_INET6 as u16 {
         return None;
     }
     // Winsock2 `sockaddr_in6`: family(2) + port(2) + flowinfo(4) +
     // addr(16) + scope_id(4). Address sits at offset 8.
-    let bytes = unsafe { ptr::read_unaligned(sa.lp_sockaddr.add(8) as *const [u8; 16]) };
-    Some((Ipv6Addr::from(bytes), u.on_link_prefix_length as u8))
+    let bytes = unsafe { ptr::read_unaligned(sa.lpSockaddr.add(8) as *const [u8; 16]) };
+    Some((Ipv6Addr::from(bytes), u.OnLinkPrefixLength))
 }
 
 /// Enumerate every adapter on the system with its IPv4 and IPv6
@@ -364,19 +193,19 @@ pub fn list_interfaces() -> Result<Vec<InterfaceEntry>, OspfTransportError> {
         // SAFETY: `cur` was returned by GetAdaptersAddresses inside
         // the buffer owned by `list`.
         let entry = unsafe { &*cur };
-        let name = unsafe { friendly_name(entry.friendly_name) }.unwrap_or_default();
+        let name = unsafe { friendly_name(entry.FriendlyName) }.unwrap_or_default();
         if name.is_empty() {
-            cur = entry.next;
+            cur = entry.Next;
             continue;
         }
-        let up = entry.oper_status == IF_OPER_STATUS_UP;
+        let up = entry.OperStatus == IfOperStatusUp;
         // Windows has no direct `IFF_RUNNING` analogue; treat `up` as
         // `running` (the carrier state is folded into OperStatus when
         // the media is disconnected).
         let running = up;
         let mut v4 = Vec::new();
         let mut v6 = Vec::new();
-        let mut ua = entry.first_unicast_address;
+        let mut ua = entry.FirstUnicastAddress;
         while !ua.is_null() {
             // SAFETY: `ua` was returned by GetAdaptersAddresses.
             let u = unsafe { &*ua };
@@ -386,7 +215,7 @@ pub fn list_interfaces() -> Result<Vec<InterfaceEntry>, OspfTransportError> {
             if let Some((addr, _)) = unsafe { read_v6(u) } {
                 v6.push(addr);
             }
-            ua = u.next;
+            ua = u.Next;
         }
         out.push(InterfaceEntry {
             name,
@@ -395,7 +224,7 @@ pub fn list_interfaces() -> Result<Vec<InterfaceEntry>, OspfTransportError> {
             up,
             running,
         });
-        cur = entry.next;
+        cur = entry.Next;
     }
     Ok(out)
 }
@@ -408,20 +237,20 @@ pub fn interface_v4_addrs(interface: &str) -> Result<Vec<InterfaceV4Addr>, OspfT
     let mut cur = list.head;
     while !cur.is_null() {
         let entry = unsafe { &*cur };
-        if let Some(name) = unsafe { friendly_name(entry.friendly_name) } {
+        if let Some(name) = unsafe { friendly_name(entry.FriendlyName) } {
             if name == interface {
                 exists = true;
-                let mut ua = entry.first_unicast_address;
+                let mut ua = entry.FirstUnicastAddress;
                 while !ua.is_null() {
                     let u = unsafe { &*ua };
                     if let Some((addr, prefix_len)) = unsafe { read_v4(u) } {
                         out.push(InterfaceV4Addr { addr, prefix_len });
                     }
-                    ua = u.next;
+                    ua = u.Next;
                 }
             }
         }
-        cur = entry.next;
+        cur = entry.Next;
     }
     if !exists {
         return Err(OspfTransportError::UnknownInterface(interface.to_string()));
@@ -437,10 +266,10 @@ pub fn interface_v6_addrs(interface: &str) -> Result<Vec<InterfaceV6Addr>, OspfT
     let mut cur = list.head;
     while !cur.is_null() {
         let entry = unsafe { &*cur };
-        if let Some(name) = unsafe { friendly_name(entry.friendly_name) } {
+        if let Some(name) = unsafe { friendly_name(entry.FriendlyName) } {
             if name == interface {
                 exists = true;
-                let mut ua = entry.first_unicast_address;
+                let mut ua = entry.FirstUnicastAddress;
                 while !ua.is_null() {
                     let u = unsafe { &*ua };
                     if let Some((addr, prefix_len)) = unsafe { read_v6(u) } {
@@ -456,11 +285,11 @@ pub fn interface_v6_addrs(interface: &str) -> Result<Vec<InterfaceV6Addr>, OspfT
                             });
                         }
                     }
-                    ua = u.next;
+                    ua = u.Next;
                 }
             }
         }
-        cur = entry.next;
+        cur = entry.Next;
     }
     if !exists {
         return Err(OspfTransportError::UnknownInterface(interface.to_string()));
@@ -588,65 +417,6 @@ impl OspfV6Transport {
 mod tests {
     use super::*;
 
-    /// Compile-time check: the `SocketAddress` struct is 16 bytes on
-    /// 64-bit (8 for the pointer, 4 for the int, 4 padding). This
-    /// pins down the layout the rest of the code depends on.
-    #[test]
-    fn socket_address_size_is_16() {
-        assert_eq!(
-            std::mem::size_of::<SocketAddress>(),
-            16,
-            "SOCKET_ADDRESS must be 16 bytes on 64-bit (8 ptr + 4 int + 4 pad)"
-        );
-    }
-
-    /// Compile-time check: `IpAdapterUnicastAddress` has the
-    /// `on_link_prefix_length` field at the expected offset (72 on
-    /// 64-bit). If the struct layout drifts from the Windows SDK,
-    /// this test catches it before the field is read at runtime.
-    #[test]
-    fn unicast_address_on_link_prefix_length_offset() {
-        assert_eq!(
-            std::mem::offset_of!(IpAdapterUnicastAddress, on_link_prefix_length),
-            72,
-            "OnLinkPrefixLength must be at offset 72 on 64-bit \
-             (8 alignment + 8 next + 16 address + 24 address_prefix \
-             + 4 dad_state + 4*3 lifetimes = 72)"
-        );
-    }
-
-    /// Compile-time check: `IpAdapterAddresses` field offsets match the
-    /// Windows SDK `iptypes.h` layout. This is the most critical
-    /// assertion — a wrong field order here produces the "all
-    /// interfaces named @" symptom (FriendlyName was at the wrong
-    /// offset, reading the FirstUnicastAddress pointer as a string).
-    #[test]
-    fn adapter_addresses_field_offsets_match_sdk() {
-        // Fields we read at runtime — their offsets must match the SDK.
-        assert_eq!(
-            std::mem::offset_of!(IpAdapterAddresses, first_unicast_address),
-            24,
-            "FirstUnicastAddress must be at offset 24 (after Alignment + Next + AdapterName)"
-        );
-        assert_eq!(
-            std::mem::offset_of!(IpAdapterAddresses, friendly_name),
-            72,
-            "FriendlyName must be at offset 72 \
-             (after AdapterName + FirstUnicastAddress + Anycast + Multicast + \
-             DnsServer + DnsSuffix + Description = 16 + 7*8 = 72)"
-        );
-        assert_eq!(
-            std::mem::offset_of!(IpAdapterAddresses, oper_status),
-            104,
-            "OperStatus must be at offset 104"
-        );
-        assert_eq!(
-            std::mem::offset_of!(IpAdapterAddresses, if_index),
-            176,
-            "IfIndex must be at offset 176 (after ZoneIndices[16])"
-        );
-    }
-
     /// Live test — enumerates this machine's adapters. Windows only.
     /// Skips on CI containers that have no network adapters by
     /// returning early when the list is empty. When adapters ARE
@@ -668,13 +438,11 @@ mod tests {
         }
         for i in &ifaces {
             assert!(!i.name.is_empty(), "adapter name empty: {i:?}");
-            // The struct layout bug produced 1-character names like
-            // "@" (the FirstUnicastAddress pointer's low bytes read
-            // as UTF-16). Real Windows adapter names are human-readable
-            // ("Ethernet", "Wi-Fi", "Loopback Pseudo-Interface 1",
-            // "vEthernet (Hyper-V...)"). Assert the name has at least
-            // 3 characters and contains at least one alphabetic code
-            // point — this catches the garbage-pointer-as-string bug.
+            // Real Windows adapter names are human-readable ("Ethernet",
+            // "Wi-Fi", "Loopback Pseudo-Interface 1"). The struct layout
+            // bug produced 1-character names like "@" — assert the name
+            // has at least 3 characters and contains alphabetic code
+            // points to catch any future struct-layout regression.
             assert!(
                 i.name.chars().count() >= 3,
                 "adapter name too short (likely a struct layout bug): '{}' ({:?})",

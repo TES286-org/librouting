@@ -52,6 +52,20 @@ lr-mpls = { workspace = true }
 lr-damping = { workspace = true }
 siphasher.workspace = true
 
+# Windows named-pipe transport for the runtime API
+# (`CreateNamedPipeW`, `ConnectNamedPipe`, `ReadFile`, `WriteFile`,
+# `DuplicateHandle`). The `windows-sys` crate provides correct,
+# auto-generated struct layouts — the same rationale as lr-osroute's
+# Windows migration.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+] }
+
 [features]
 default = ["std"]
 std = []

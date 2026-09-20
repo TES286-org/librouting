@@ -8,38 +8,18 @@
 //! * [`GetIpForwardTable2`] — snapshot the whole table as an array of
 //!   `MIB_IPFORWARD_ROW2`.
 //! * [`FreeMibTable`] — release the buffer returned by the getter.
+//! * [`InitializeIpForwardEntry`] — zero a `MIB_IPFORWARD_ROW2` and apply
+//!   the documented defaults (infinite lifetimes, not published, immortal).
 //!
-//! ## Struct layout (win32/64, verified against `netioapi.h` in the
-//! Windows SDK)
+//! ## Struct layouts
 //!
-//! ```text
-//! typedef struct _MIB_IPFORWARD_ROW2 {
-//!     NET_LUID          InterfaceLuid;        // u64   @0
-//!     NET_IFINDEX       InterfaceIndex;       // u32   @8
-//!     IP_ADDRESS_PREFIX DestinationPrefix;    //       @12 (32 bytes)
-//!     SOCKADDR_INET     NextHop;              //       @44 (28 bytes)
-//!     ULONG             SitePrefixLength;     // u32   @72
-//!     ULONG             ValidLifetime;        // u32   @76
-//!     ULONG             PreferredLifetime;    // u32   @80
-//!     ULONG             Metric;               // u32   @84
-//!     NL_ROUTE_PROTOCOL Protocol;             // u32   @88
-//!     BOOLEAN           Loopback;             // u8    @92
-//!     BOOLEAN           AutoconfigureAddress; // u8    @93
-//!     BOOLEAN           Publish;              // u8    @94
-//!     BOOLEAN           Immortal;             // u8    @95
-//!     ULONG             Age;                  // u32   @96
-//!     NL_ROUTE_ORIGIN   Origin;               // u32   @100
-//! } MIB_IPFORWARD_ROW2;                       //       = 104 bytes
-//!
-//! typedef struct _MIB_IPFORWARD_TABLE2 {
-//!     ULONG NumEntries;                        // u32   @0
-//!     MIB_IPFORWARD_ROW2 Table[1];             //       @8 (8-byte aligned)
-//! } MIB_IPFORWARD_TABLE2;
-//! ```
-//!
-//! `SOCKADDR_INET` is a union of `sockaddr_in` (16 bytes) and
-//! `sockaddr_in6` (28 bytes) where the first 2 bytes alias the family:
-//! `AF_INET = 2`, `AF_INET6 = 23` (note: *not* the BSD values).
+//! All Win32 structs (`MIB_IPFORWARD_ROW2`, `MIB_IPFORWARD_TABLE2`,
+//! `SOCKADDR_INET`, `IP_ADDRESS_PREFIX`, `SOCKADDR_IN`, `SOCKADDR_IN6`,
+//! `IN_ADDR`, `IN6_ADDR`) and the FFI functions are imported from the
+//! `windows-sys` crate — Microsoft's auto-generated, zero-overhead FFI
+//! binding. The struct layouts are machine-generated from the official
+//! Windows SDK metadata, so they cannot drift from the SDK the way
+//! hand-rolled `#[repr(C)]` structs can.
 //!
 //! ## Lifetime semantics
 //!
@@ -47,117 +27,22 @@
 //! (infinite) survive reboots only when also registered as persistent by
 //! an external agent; for a routing daemon the standard pattern is to
 //! re-install best paths after restart, which is what `lr-daemon` does.
-//!
-//! ## Implementation notes
-//!
-//! * No `windows-sys` dependency: the handful of structs and entry points
-//!   are declared by hand, mirroring the Linux/BSD backends' zero-dependency
-//!   approach. `#[link(name = "iphlpapi")]` pulls the import library that
-//!   ships with every mingw-w64 and MSVC toolchain.
-//! * The row is zeroed and then initialised with the same defaults the
-//!   documented `InitializeIpForwardEntry` helper applies (infinite
-//!   lifetimes, not published, immortal) so we do not depend on that
-//!   export being present in older import libraries.
-//! * When `if_index == 0` the interface is resolved by finding the
-//!   longest-prefix match for the next hop in the current table — the
-//!   same behaviour as `route add ... mask ... gw` accepting an interface
-//!   inferred from the gateway.
 
 use crate::{KernelRoute, OsRouteError, OsRouteTable};
 use lr_core::addr::{IpAddr, Prefix};
 use lr_core::rib::Protocol;
 
-// Address families (Windows values).
-const AF_INET: u16 = 2;
-const AF_INET6: u16 = 23;
-
-// NL_ROUTE_PROTOCOL values (netioapi.h).
-const MIB_PROTOCOL_BGP: u32 = 14;
-const MIB_PROTOCOL_LOCAL: u32 = 2;
-const MIB_PROTOCOL_NETMGMT: u32 = 3;
-
-// Common Win32 error codes returned by the IP Helper API.
-const NO_ERROR: u32 = 0;
-const ERROR_INVALID_PARAMETER: u32 = 87;
-const ERROR_NOT_FOUND: u32 = 1168;
-const ERROR_OBJECT_ALREADY_EXISTS: u32 = 5010;
-
-const SIZEOF_ROW: usize = 104;
-const SIZEOF_TABLE_HEADER: usize = 8; // ULONG + alignment padding
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-union SockaddrInet {
-    v4: SockaddrIn,
-    v6: SockaddrIn6,
-    family: u16,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SockaddrIn {
-    family: u16,
-    port: u16,
-    addr: [u8; 4],
-    zero: [u8; 8],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct SockaddrIn6 {
-    family: u16,
-    port: u16,
-    flowinfo: u32,
-    addr: [u8; 16],
-    scope_id: u32,
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct IpAddressPrefix {
-    prefix: SockaddrInet,
-    prefix_length: u8,
-    _pad: [u8; 3],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy)]
-struct MibIpForwardRow2 {
-    interface_luid: u64,
-    interface_index: u32,
-    destination_prefix: IpAddressPrefix,
-    next_hop: SockaddrInet,
-    site_prefix_length: u32,
-    valid_lifetime: u32,
-    preferred_lifetime: u32,
-    metric: u32,
-    protocol: u32,
-    loopback: u8,
-    autoconfigure_address: u8,
-    publish: u8,
-    immortal: u8,
-    age: u32,
-    origin: u32,
-}
-
-const _: () = assert!(core::mem::size_of::<MibIpForwardRow2>() == SIZEOF_ROW);
-const _: () = assert!(core::mem::size_of::<SockaddrInet>() == 28);
-const _: () = assert!(core::mem::size_of::<IpAddressPrefix>() == 32);
-
-#[repr(C)]
-struct MibIpForwardTable2 {
-    num_entries: u32,
-    // Flexible-array style: rows follow the header at offset 8.
-    _table_first: MibIpForwardRow2,
-}
-
-#[link(name = "iphlpapi")]
-extern "system" {
-    fn CreateIpForwardEntry2(row: *const MibIpForwardRow2) -> u32;
-    fn DeleteIpForwardEntry2(row: *const MibIpForwardRow2) -> u32;
-    fn GetIpForwardTable2(family: u16, table: *mut *mut MibIpForwardTable2) -> u32;
-    fn FreeMibTable(buffer: *mut core::ffi::c_void);
-}
+use windows_sys::Win32::Foundation::{
+    ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR,
+};
+use windows_sys::Win32::NetworkManagement::IpHelper::{
+    CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2,
+    InitializeIpForwardEntry, IP_ADDRESS_PREFIX, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+};
+use windows_sys::Win32::Networking::WinSock::{
+    RouteProtocolBgp, RouteProtocolLocal, RouteProtocolNetMgmt, AF_INET, AF_INET6, SOCKADDR_IN,
+    SOCKADDR_IN6, SOCKADDR_INET,
+};
 
 /// IP Helper backed implementation of [`OsRouteTable`].
 pub struct IpHelper {
@@ -169,7 +54,7 @@ impl IpHelper {
     pub fn connect() -> Result<Self, OsRouteError> {
         // Windows needs no handle; the API is stateless. Probe the table
         // once so a missing/unusable iphlpapi surfaces immediately.
-        let mut table: *mut MibIpForwardTable2 = core::ptr::null_mut();
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: `table` is an out-pointer; the allocation it receives is
         // owned by us and freed below with FreeMibTable.
         let rc = unsafe { GetIpForwardTable2(0, &mut table) };
@@ -178,38 +63,29 @@ impl IpHelper {
         }
         if !table.is_null() {
             // SAFETY: pointer came from GetIpForwardTable2.
-            unsafe { FreeMibTable(table as *mut core::ffi::c_void) };
+            unsafe { FreeMibTable(table as *const core::ffi::c_void) };
         }
         Ok(Self { if_index: 0 })
     }
 
-    fn make_row(prefix: &Prefix, next_hop: &IpAddr, if_index: u32) -> MibIpForwardRow2 {
-        let mut row = MibIpForwardRow2 {
-            interface_luid: 0,
-            interface_index: if_index,
-            destination_prefix: IpAddressPrefix {
-                prefix: sockaddr_for(&prefix.addr),
-                prefix_length: prefix.prefix_len,
-                _pad: [0; 3],
-            },
-            next_hop: sockaddr_for(next_hop),
-            site_prefix_length: 0,
-            // Infinite lifetimes = permanent entry (mirrors the defaults of
-            // InitializeIpForwardEntry).
-            valid_lifetime: u32::MAX,
-            preferred_lifetime: u32::MAX,
-            metric: 0,
-            protocol: MIB_PROTOCOL_BGP,
-            loopback: 0,
-            autoconfigure_address: 0,
-            publish: 0,
-            immortal: 1,
-            age: 0,
-            origin: 0, // NlroManual
+    fn make_row(prefix: &Prefix, next_hop: &IpAddr, if_index: u32) -> MIB_IPFORWARD_ROW2 {
+        // SAFETY: InitializeIpForwardEntry zeroes the struct and applies
+        // the documented defaults (infinite lifetimes, not published,
+        // immortal). The `Default` impl does the same via `mem::zeroed`
+        // but does NOT set the lifetime defaults.
+        let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        unsafe { InitializeIpForwardEntry(&mut row) };
+        row.InterfaceIndex = if_index;
+        row.DestinationPrefix = IP_ADDRESS_PREFIX {
+            Prefix: sockaddr_for(&prefix.addr),
+            PrefixLength: prefix.prefix_len,
         };
+        row.NextHop = sockaddr_for(next_hop);
+        row.Protocol = RouteProtocolBgp;
+        row.Immortal = true;
         if prefix.prefix_len == 0 {
             // A /0 destination carries no address bits.
-            row.destination_prefix.prefix_length = 0;
+            row.DestinationPrefix.PrefixLength = 0;
         }
         row
     }
@@ -217,7 +93,7 @@ impl IpHelper {
     /// Resolve the interface leading towards `next_hop` by longest-prefix
     /// match against the current table. Returns 0 when nothing matches.
     fn resolve_interface(next_hop: &IpAddr) -> u32 {
-        let mut table: *mut MibIpForwardTable2 = core::ptr::null_mut();
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: out-pointer, ownership transferred to us.
         let rc = unsafe { GetIpForwardTable2(0, &mut table) };
         if rc != NO_ERROR || table.is_null() {
@@ -229,19 +105,17 @@ impl IpHelper {
         let mut best: Option<(u8, u32)> = None;
         if !rows.is_null() {
             for row in unsafe { core::slice::from_raw_parts(rows, len) } {
-                // SAFETY: reading the union through its family alias is the
-                // documented way to inspect a SOCKADDR_INET.
                 let (dst, plen) = unsafe { prefix_of(row) };
                 if prefix_contains(dst, plen, next_hop) {
                     let better = best.map(|(b, _)| plen > b).unwrap_or(true);
-                    if better && row.interface_index != 0 {
-                        best = Some((plen, row.interface_index));
+                    if better && row.InterfaceIndex != 0 {
+                        best = Some((plen, row.InterfaceIndex));
                     }
                 }
             }
         }
         // SAFETY: release the API-allocated buffer.
-        unsafe { FreeMibTable(table as *mut core::ffi::c_void) };
+        unsafe { FreeMibTable(table as *const core::ffi::c_void) };
         best.map(|(_, idx)| idx).unwrap_or(0)
     }
 }
@@ -263,7 +137,7 @@ impl OsRouteTable for IpHelper {
             Self::resolve_interface(&next_hop)
         };
         let row = Self::make_row(&prefix, &next_hop, if_index);
-        // SAFETY: `row` is a fully-initialised stack value; the API only
+        // SAFETY: `row` is a fully initialised stack value; the API only
         // reads from it.
         let mut rc = unsafe { CreateIpForwardEntry2(&row) };
         if rc == ERROR_OBJECT_ALREADY_EXISTS {
@@ -283,7 +157,7 @@ impl OsRouteTable for IpHelper {
     fn delete_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
         // Deleting requires the full key (prefix + next hop + interface);
         // scan the table for rows matching the prefix and delete each.
-        let mut table: *mut MibIpForwardTable2 = core::ptr::null_mut();
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: out-pointer, ownership transferred to us.
         let rc = unsafe { GetIpForwardTable2(0, &mut table) };
         if rc != NO_ERROR {
@@ -304,7 +178,7 @@ impl OsRouteTable for IpHelper {
                 if !addr_eq(&dst, &prefix.addr) {
                     continue;
                 }
-                if row.protocol != MIB_PROTOCOL_BGP {
+                if row.Protocol != RouteProtocolBgp as i32 {
                     continue; // never touch rows we did not install
                 }
                 // SAFETY: row is a copy of a table entry; the API matches on
@@ -316,7 +190,7 @@ impl OsRouteTable for IpHelper {
             }
         }
         // SAFETY: release the API-allocated buffer.
-        unsafe { FreeMibTable(table as *mut core::ffi::c_void) };
+        unsafe { FreeMibTable(table as *const core::ffi::c_void) };
         if last_rc == ERROR_NOT_FOUND {
             // Nothing matched — an idempotent delete succeeds.
             return Ok(());
@@ -328,7 +202,7 @@ impl OsRouteTable for IpHelper {
     }
 
     fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error> {
-        let mut table: *mut MibIpForwardTable2 = core::ptr::null_mut();
+        let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: out-pointer, ownership transferred to us.
         let rc = unsafe { GetIpForwardTable2(0, &mut table) };
         if rc != NO_ERROR {
@@ -347,89 +221,107 @@ impl OsRouteTable for IpHelper {
                     IpAddr::V4(b) => Prefix::new_v4(b, plen.min(32)),
                     IpAddr::V6(b) => Prefix::new_v6(b, plen.min(128)),
                 };
-                // SAFETY: reading the union's family alias then the matching
-                // arm is the documented SOCKADDR_INET access pattern.
                 let next_hop = unsafe { next_hop_of(row) };
-                let protocol = match row.protocol {
-                    MIB_PROTOCOL_LOCAL => Protocol::Connected,
-                    MIB_PROTOCOL_NETMGMT => Protocol::Static,
-                    MIB_PROTOCOL_BGP => Protocol::Bgp,
-                    _ => Protocol::Other(row.protocol as u16),
+                let protocol = match row.Protocol as u32 {
+                    p if p == RouteProtocolLocal as u32 => Protocol::Connected,
+                    p if p == RouteProtocolNetMgmt as u32 => Protocol::Static,
+                    p if p == RouteProtocolBgp as u32 => Protocol::Bgp,
+                    other => Protocol::Other(other as u16),
                 };
                 out.push(KernelRoute {
                     prefix,
                     next_hop,
-                    if_index: Some(row.interface_index),
-                    metric: row.metric,
+                    if_index: Some(row.InterfaceIndex),
+                    metric: row.Metric,
                     protocol,
                 });
             }
         }
         // SAFETY: release the API-allocated buffer.
-        unsafe { FreeMibTable(table as *mut core::ffi::c_void) };
+        unsafe { FreeMibTable(table as *const core::ffi::c_void) };
         Ok(out)
     }
 }
 
 // ===== helpers =====
 
-fn sockaddr_for(addr: &IpAddr) -> SockaddrInet {
+/// Build a `SOCKADDR_INET` from an `IpAddr`. The union is zeroed first
+/// so unused arms (and padding) are deterministic.
+fn sockaddr_for(addr: &IpAddr) -> SOCKADDR_INET {
+    // SAFETY: SOCKADDR_INET implements Default via mem::zeroed, which
+    // is safe for this POD union.
+    let mut sa: SOCKADDR_INET = unsafe { core::mem::zeroed() };
     match addr {
-        IpAddr::V4(b) => SockaddrInet {
-            v4: SockaddrIn {
-                family: AF_INET,
-                port: 0,
-                addr: *b,
-                zero: [0; 8],
-            },
-        },
-        IpAddr::V6(b) => SockaddrInet {
-            v6: SockaddrIn6 {
-                family: AF_INET6,
-                port: 0,
-                flowinfo: 0,
-                addr: *b,
-                scope_id: 0,
-            },
-        },
+        IpAddr::V4(b) => {
+            // SAFETY: writing the Ipv4 arm of the union. The union is
+            // zeroed so unused fields are 0.
+            let v4 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN>() };
+            v4.sin_family = AF_INET;
+            v4.sin_addr.S_un.S_un_b.s_b1 = b[0];
+            v4.sin_addr.S_un.S_un_b.s_b2 = b[1];
+            v4.sin_addr.S_un.S_un_b.s_b3 = b[2];
+            v4.sin_addr.S_un.S_un_b.s_b4 = b[3];
+        }
+        IpAddr::V6(b) => {
+            // SAFETY: writing the Ipv6 arm of the union.
+            let v6 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN6>() };
+            v6.sin6_family = AF_INET6;
+            v6.sin6_addr.u.Byte = *b;
+        }
     }
+    sa
 }
 
 /// # Safety
 /// The caller must guarantee the union holds a valid socket address.
-unsafe fn inet_addr_of(sa: &SockaddrInet) -> IpAddr {
-    // SAFETY: family aliases the first two bytes of both arms.
-    match unsafe { sa.family } {
-        AF_INET6 => IpAddr::V6(unsafe { sa.v6.addr }),
-        _ => IpAddr::V4(unsafe { sa.v4.addr }),
+unsafe fn inet_addr_of(sa: &SOCKADDR_INET) -> IpAddr {
+    // SAFETY: `si_family` aliases the first two bytes of both arms.
+    let family = unsafe { sa.si_family };
+    match family {
+        AF_INET6 => {
+            // SAFETY: reading the Ipv6 arm.
+            let v6 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN6>() };
+            IpAddr::V6(v6.sin6_addr.u.Byte)
+        }
+        _ => {
+            // SAFETY: reading the Ipv4 arm.
+            let v4 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN>() };
+            let s = &v4.sin_addr.S_un.S_un_b;
+            IpAddr::V4([s.s_b1, s.s_b2, s.s_b3, s.s_b4])
+        }
     }
 }
 
 /// # Safety
 /// `table` must point to a live MIB_IPFORWARD_TABLE2 allocation.
-unsafe fn table_rows(table: *mut MibIpForwardTable2) -> (*const MibIpForwardRow2, usize) {
+unsafe fn table_rows(table: *mut MIB_IPFORWARD_TABLE2) -> (*const MIB_IPFORWARD_ROW2, usize) {
     // SAFETY: the table header is followed by `num_entries` rows.
-    let n = unsafe { (*table).num_entries } as usize;
+    let n = unsafe { (*table).NumEntries } as usize;
     if n == 0 {
         return (core::ptr::null(), 0);
     }
-    let rows = (table as *const u8).add(SIZEOF_TABLE_HEADER) as *const MibIpForwardRow2;
+    // `Table` is a `[MIB_IPFORWARD_ROW2; 1]` flexible-array-style
+    // member at offset 8 (after `NumEntries: u32` + 4 bytes padding).
+    // We compute the first row address from the struct's `Table`
+    // field directly — the SDK declares it as `[MIB_IPFORWARD_ROW2; 1]`
+    // and the rows are contiguous from there.
+    let rows = unsafe { core::ptr::addr_of!((*table).Table) as *const MIB_IPFORWARD_ROW2 };
     (rows, n)
 }
 
 /// # Safety
 /// `row` must be a valid MIB_IPFORWARD_ROW2.
-unsafe fn prefix_of(row: &MibIpForwardRow2) -> (IpAddr, u8) {
-    // SAFETY: reading the destination prefix union.
-    let addr = unsafe { inet_addr_of(&row.destination_prefix.prefix) };
-    (addr, row.destination_prefix.prefix_length)
+unsafe fn prefix_of(row: &MIB_IPFORWARD_ROW2) -> (IpAddr, u8) {
+    // SAFETY: reading the destination prefix.
+    let addr = unsafe { inet_addr_of(&row.DestinationPrefix.Prefix) };
+    (addr, row.DestinationPrefix.PrefixLength)
 }
 
 /// # Safety
 /// `row` must be a valid MIB_IPFORWARD_ROW2.
-unsafe fn next_hop_of(row: &MibIpForwardRow2) -> Option<IpAddr> {
+unsafe fn next_hop_of(row: &MIB_IPFORWARD_ROW2) -> Option<IpAddr> {
     // SAFETY: reading the next-hop union.
-    let addr = unsafe { inet_addr_of(&row.next_hop) };
+    let addr = unsafe { inet_addr_of(&row.NextHop) };
     match addr {
         IpAddr::V4([0, 0, 0, 0]) => None,
         _ => Some(addr),
@@ -489,16 +381,6 @@ fn win_err(api: &str, code: u32) -> OsRouteError {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn struct_sizes_match_sdk() {
-        // Compile-time layout guards (see const asserts above); this test
-        // documents the expected numbers explicitly.
-        assert_eq!(core::mem::size_of::<MibIpForwardRow2>(), 104);
-        assert_eq!(core::mem::size_of::<SockaddrInet>(), 28);
-        assert_eq!(core::mem::size_of::<IpAddressPrefix>(), 32);
-        assert_eq!(core::mem::size_of::<SockaddrIn>(), 16);
-    }
 
     #[test]
     fn prefix_contains_v4() {

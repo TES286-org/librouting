@@ -535,6 +535,7 @@ dependencies = [
  "lr-router",
  "siphasher",
  "socket2",
+ "windows-sys",
 ]
 
 [[package]]
@@ -616,6 +617,7 @@ dependencies = [
  "lr-mpls",
  "lr-ospf",
  "lr-srv6",
+ "windows-sys",
 ]
 
 [[package]]

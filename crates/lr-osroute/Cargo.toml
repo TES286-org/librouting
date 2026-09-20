@@ -28,5 +28,20 @@ lr-core = { workspace = true }
 lr-mpls = { workspace = true }
 lr-srv6 = { workspace = true }
 
+# Windows IP Helper API (`GetAdaptersAddresses`, `GetIpForwardTable2`,
+# route-table backends). The `windows-sys` crate is Microsoft's
+# auto-generated, zero-overhead FFI binding — the struct layouts are
+# machine-generated from the official Windows SDK metadata, so they
+# cannot drift from the SDK the way hand-rolled `#[repr(C)]` structs
+# can (two struct-layout bugs on Windows in this crate's history
+# motivated the migration). Only pulled in on `target_os = "windows"`.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_NetworkManagement_IpHelper",
+    "Win32_NetworkManagement_Ndis",
+    "Win32_Networking_WinSock",
+    "Win32_Foundation",
+] }
+
 [dev-dependencies]
 lr-ospf = { workspace = true }
