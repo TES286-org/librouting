@@ -27,7 +27,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     GAA_FLAG_SKIP_MULTICAST, IP_ADAPTER_ADDRESSES_LH, IP_ADAPTER_UNICAST_ADDRESS_LH,
 };
 use windows_sys::Win32::NetworkManagement::Ndis::IfOperStatusUp;
-use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6};
+use windows_sys::Win32::Networking::WinSock::{AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
 
 use super::{InterfaceEntry, InterfaceV4Addr, InterfaceV6Addr, OspfTransportError};
 
@@ -148,16 +148,21 @@ unsafe fn read_v4(u: &IP_ADAPTER_UNICAST_ADDRESS_LH) -> Option<(Ipv4Addr, u8)> {
     if sa.iSockaddrLength < 16 || sa.lpSockaddr.is_null() {
         return None;
     }
-    // Winsock2 `sockaddr` has a 2-byte `sa_family` at offset 0. On
-    // Windows the family is a `ADDRESS_FAMILY` (u16). `lpSockaddr` is
-    // a `*mut SOCKADDR` which is always at least 2-byte aligned.
-    let family = unsafe { ptr::read_unaligned(sa.lpSockaddr as *const u16) };
-    if family != AF_INET {
+    // `lpSockaddr` is `*mut SOCKADDR` (a typed pointer, 16-byte struct).
+    // Cast to `*const SOCKADDR_IN` and read through that — the SDK
+    // guarantees the pointer points at a `sockaddr_in` when the family
+    // is `AF_INET`. This avoids manual byte offset arithmetic which is
+    // error-prone with typed pointers (`.add(4)` on `*mut SOCKADDR`
+    // would advance by 4 structs, not 4 bytes).
+    let sa_in = sa.lpSockaddr as *const SOCKADDR_IN;
+    // SAFETY: `sa_in` is valid for `iSockaddrLength` bytes (≥ 16), and
+    // `SOCKADDR_IN` is 16 bytes. `read_unaligned` handles any alignment.
+    let sa_in = unsafe { ptr::read_unaligned(sa_in) };
+    if sa_in.sin_family != AF_INET {
         return None;
     }
-    // Winsock2 `sockaddr_in`: family(2) + port(2) + addr(4) + zero(8).
-    let bytes = unsafe { ptr::read_unaligned(sa.lpSockaddr.add(4) as *const [u8; 4]) };
-    let addr = Ipv4Addr::from(bytes);
+    let s = &sa_in.sin_addr.S_un.S_un_b;
+    let addr = Ipv4Addr::new(s.s_b1, s.s_b2, s.s_b3, s.s_b4);
     Some((addr, u.OnLinkPrefixLength))
 }
 
@@ -173,14 +178,18 @@ unsafe fn read_v6(u: &IP_ADAPTER_UNICAST_ADDRESS_LH) -> Option<(Ipv6Addr, u8)> {
     if sa.iSockaddrLength < 28 || sa.lpSockaddr.is_null() {
         return None;
     }
-    let family = unsafe { ptr::read_unaligned(sa.lpSockaddr as *const u16) };
-    if family != AF_INET6 {
+    // Cast to `*const SOCKADDR_IN6` — same rationale as `read_v4`.
+    let sa_in6 = sa.lpSockaddr as *const SOCKADDR_IN6;
+    // SAFETY: `sa_in6` is valid for `iSockaddrLength` bytes (≥ 28),
+    // and `SOCKADDR_IN6` is 28 bytes.
+    let sa_in6 = unsafe { ptr::read_unaligned(sa_in6) };
+    if sa_in6.sin6_family != AF_INET6 {
         return None;
     }
-    // Winsock2 `sockaddr_in6`: family(2) + port(2) + flowinfo(4) +
-    // addr(16) + scope_id(4). Address sits at offset 8.
-    let bytes = unsafe { ptr::read_unaligned(sa.lpSockaddr.add(8) as *const [u8; 16]) };
-    Some((Ipv6Addr::from(bytes), u.OnLinkPrefixLength))
+    Some((
+        Ipv6Addr::from(sa_in6.sin6_addr.u.Byte),
+        u.OnLinkPrefixLength,
+    ))
 }
 
 /// Enumerate every adapter on the system with its IPv4 and IPv6
