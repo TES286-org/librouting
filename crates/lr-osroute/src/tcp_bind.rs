@@ -337,7 +337,12 @@ mod tests {
     /// address (Linux; other platforms exercise the fallback).
     #[test]
     fn bound_connection_sources_from_local() {
-        // 127.0.0.9 is a valid loopback alias on Linux.
+        // 127.0.0.9 is a valid loopback alias on Linux. On macOS it
+        // is NOT configured on lo0 by default (only 127.0.0.1 is),
+        // so binding to it returns EADDRNOTAVAIL — the test must
+        // skip cleanly without leaving a background thread blocked
+        // on `listener.accept()` (which never returns because no
+        // connection ever arrives).
         let local = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)), 0);
         let listener = match TcpListener::bind("127.0.0.1:0") {
             Ok(l) => l,
@@ -347,6 +352,22 @@ mod tests {
             }
         };
         let peer = listener.local_addr().unwrap();
+
+        // Call connect_bound BEFORE spawning the accept thread.
+        // The kernel queues any inbound connection in the listener's
+        // accept backlog, so the accept thread dequeues it later
+        // without a race. If connect_bound fails (the macOS
+        // EADDRNOTAVAIL path), the test skips here — no thread is
+        // spawned, no `t.join()` blocks forever, no 5-minute
+        // slow-timeout from nextest's `.config/nextest.toml`.
+        let stream = match connect_bound(local, peer, Duration::from_secs(3)) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("skipped (bound connect): {e}");
+                return;
+            }
+        };
+
         let got = std::sync::Arc::new(std::sync::Mutex::new(None));
         let got2 = std::sync::Arc::clone(&got);
         let t = std::thread::spawn(move || {
@@ -355,31 +376,23 @@ mod tests {
                 drop(s);
             }
         });
-        match connect_bound(local, peer, Duration::from_secs(3)) {
-            Ok(stream) => {
-                let addr = stream.peer_addr().unwrap();
-                assert_eq!(addr, peer);
-                drop(stream);
-                t.join().unwrap();
-                let seen = got.lock().unwrap().take();
-                match seen {
-                    Some(src) => {
-                        if cfg!(target_os = "linux") {
-                            assert_eq!(
-                                src.ip(),
-                                std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)),
-                                "connection sourced from {src}, expected 127.0.0.9"
-                            );
-                        }
-                    }
-                    None if !cfg!(target_os = "linux") => {}
-                    None => panic!("accept never saw the connection"),
+        let addr = stream.peer_addr().unwrap();
+        assert_eq!(addr, peer);
+        drop(stream);
+        t.join().unwrap();
+        let seen = got.lock().unwrap().take();
+        match seen {
+            Some(src) => {
+                if cfg!(target_os = "linux") {
+                    assert_eq!(
+                        src.ip(),
+                        std::net::IpAddr::V4(Ipv4Addr::new(127, 0, 0, 9)),
+                        "connection sourced from {src}, expected 127.0.0.9"
+                    );
                 }
             }
-            Err(e) => {
-                eprintln!("skipped (bound connect): {e}");
-                let _ = t.join();
-            }
+            None if !cfg!(target_os = "linux") => {}
+            None => panic!("accept never saw the connection"),
         }
     }
 }
