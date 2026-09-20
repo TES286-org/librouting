@@ -231,7 +231,30 @@ const SIGHUP: i32 = 1;
 impl Drop for Daemon {
     fn drop(&mut self) {
         let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Bounded wait: a daemon wedged in a syscall (D-state,
+        // e.g. a TCP close that never returns) cannot be reaped
+        // immediately even after SIGKILL — the kernel queues the
+        // signal but does not deliver it until the syscall exits.
+        // A blocking `wait()` here would then stall the test
+        // binary indefinitely, which is the historic macOS CI
+        // hang pattern. Poll `try_wait()` for up to 10 s; if the
+        // process is still alive after SIGKILL + 10 s, leave the
+        // zombie for init to reap when the test process exits.
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = self.child.kill();
+                        let _ = self.child.wait();
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
         let _ = std::fs::remove_file(&self.log);
     }
 }
