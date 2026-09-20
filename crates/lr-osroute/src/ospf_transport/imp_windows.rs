@@ -123,6 +123,34 @@ struct IpAdapterUnicastAddress {
 /// struct up to `IfIndex` so every field offset is correct by
 /// construction. Fields after `IfIndex` (FirstPrefix, etc.) are
 /// omitted — we never read them.
+///
+/// ## Field order (verified against Windows SDK `iptypes.h`)
+///
+/// ```text
+///   offset  field                    type         size
+///      0    Alignment (union)        ULONGLONG     8
+///      8    Next                     ptr           8
+///     16    AdapterName              PCHAR         8
+///     24    FirstUnicastAddress      ptr           8  ← we read
+///     32    FirstAnycastAddress      ptr           8
+///     40    FirstMulticastAddress    ptr           8
+///     48    FirstDnsServerAddress    ptr           8
+///     56    DnsSuffix                PWCHAR        8
+///     64    Description              PWCHAR        8
+///     72    FriendlyName             PWCHAR        8  ← we read
+///     80    PhysicalAddress          UCHAR[8]      8
+///     88    PhysicalAddressLength    ULONG         4
+///     92    Flags                    ULONG         4
+///     96    Mtu                      ULONG         4
+///    100    IfType                   ULONG         4
+///    104    OperStatus               ULONG         4  ← we read
+///    108    Ipv6IfIndex               ULONG         4
+///    112    ZoneIndices[16]          ULONG[16]    64
+///    176    IfIndex                  ULONG         4  ← we read
+/// ```
+///
+/// Note: `FriendlyName` comes AFTER `Description`, not after `AdapterName`.
+/// This is the most common mistake when hand-rolling this struct.
 #[repr(C)]
 struct IpAdapterAddresses {
     /// Union `{ ULONGLONG Alignment; struct { ULONG Length; IF_INDEX IfIndex; } }`
@@ -132,8 +160,6 @@ struct IpAdapterAddresses {
     next: *mut IpAdapterAddresses,
     /// `PCHAR AdapterName` — ANSI (latin-1) name.
     _adapter_name: *mut u8,
-    /// `PWSTR FriendlyName` — UTF-16 display name (e.g. "Ethernet").
-    friendly_name: *mut u16,
     /// `struct _IP_ADAPTER_UNICAST_ADDRESS *FirstUnicastAddress`
     first_unicast_address: *mut IpAdapterUnicastAddress,
     /// `struct _IP_ADAPTER_ANYCAST_ADDRESS *FirstAnycastAddress`
@@ -146,6 +172,8 @@ struct IpAdapterAddresses {
     _dns_suffix: *mut u16,
     /// `PWCHAR Description`
     _description: *mut u16,
+    /// `PWCHAR FriendlyName` — UTF-16 display name (e.g. "Ethernet").
+    friendly_name: *mut u16,
     /// `UCHAR PhysicalAddress[MAX_ADAPTER_ADDRESS_LENGTH]` (8 bytes).
     _physical_address: [u8; 8],
     /// `ULONG PhysicalAddressLength`.
@@ -587,9 +615,44 @@ mod tests {
         );
     }
 
+    /// Compile-time check: `IpAdapterAddresses` field offsets match the
+    /// Windows SDK `iptypes.h` layout. This is the most critical
+    /// assertion — a wrong field order here produces the "all
+    /// interfaces named @" symptom (FriendlyName was at the wrong
+    /// offset, reading the FirstUnicastAddress pointer as a string).
+    #[test]
+    fn adapter_addresses_field_offsets_match_sdk() {
+        // Fields we read at runtime — their offsets must match the SDK.
+        assert_eq!(
+            std::mem::offset_of!(IpAdapterAddresses, first_unicast_address),
+            24,
+            "FirstUnicastAddress must be at offset 24 (after Alignment + Next + AdapterName)"
+        );
+        assert_eq!(
+            std::mem::offset_of!(IpAdapterAddresses, friendly_name),
+            72,
+            "FriendlyName must be at offset 72 \
+             (after AdapterName + FirstUnicastAddress + Anycast + Multicast + \
+             DnsServer + DnsSuffix + Description = 16 + 7*8 = 72)"
+        );
+        assert_eq!(
+            std::mem::offset_of!(IpAdapterAddresses, oper_status),
+            104,
+            "OperStatus must be at offset 104"
+        );
+        assert_eq!(
+            std::mem::offset_of!(IpAdapterAddresses, if_index),
+            176,
+            "IfIndex must be at offset 176 (after ZoneIndices[16])"
+        );
+    }
+
     /// Live test — enumerates this machine's adapters. Windows only.
     /// Skips on CI containers that have no network adapters by
-    /// returning early when the list is empty.
+    /// returning early when the list is empty. When adapters ARE
+    /// present, verifies the names look like real Windows adapter
+    /// names (not garbage like "@" which was the symptom of a struct
+    /// layout bug where FriendlyName was at the wrong offset).
     #[test]
     fn list_interfaces_smoke() {
         let ifaces = match list_interfaces() {
@@ -603,11 +666,27 @@ mod tests {
             eprintln!("skipped (no adapters returned)");
             return;
         }
-        // Each adapter has a non-empty name; no other invariant —
-        // CI's Hyper-V virtual ethernet may be the only adapter and
-        // it can be either up or down depending on the runner.
         for i in &ifaces {
             assert!(!i.name.is_empty(), "adapter name empty: {i:?}");
+            // The struct layout bug produced 1-character names like
+            // "@" (the FirstUnicastAddress pointer's low bytes read
+            // as UTF-16). Real Windows adapter names are human-readable
+            // ("Ethernet", "Wi-Fi", "Loopback Pseudo-Interface 1",
+            // "vEthernet (Hyper-V...)"). Assert the name has at least
+            // 3 characters and contains at least one alphabetic code
+            // point — this catches the garbage-pointer-as-string bug.
+            assert!(
+                i.name.chars().count() >= 3,
+                "adapter name too short (likely a struct layout bug): '{}' ({:?})",
+                i.name,
+                i
+            );
+            assert!(
+                i.name.chars().any(|c| c.is_alphabetic()),
+                "adapter name has no alphabetic chars (likely a struct layout bug): '{}' ({:?})",
+                i.name,
+                i
+            );
         }
     }
 }
