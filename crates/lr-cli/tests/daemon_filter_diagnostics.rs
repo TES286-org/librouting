@@ -54,7 +54,23 @@ fn run_daemon_with_config(tag: &str, toml: &str) -> (Option<i32>, String) {
         thread::sleep(Duration::from_millis(100));
     }
     let _ = child.kill();
-    let _ = child.wait();
+    {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+    }
     let output = std::fs::read_to_string(&log).unwrap_or_default();
     let _ = std::fs::remove_file(&path);
     let _ = std::fs::remove_file(&log);

@@ -55,7 +55,21 @@ impl Drop for Daemon {
         unsafe {
             kill(self.pid(), 15);
         }
-        let _ = self.child.wait();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = self.child.kill();
+                        let _ = self.child.wait();
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
         let _ = std::fs::remove_file(&self.log);
     }
 }
@@ -289,6 +303,22 @@ fn sighup_reloads_an_lr_config() {
     assert!(text.contains("reload:"), "log: {text}");
 
     d.signal(SIGTERM);
-    let _ = d.child.wait();
+    {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            match d.child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = d.child.kill();
+                        let _ = d.child.wait();
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(50));
+                }
+                Err(_) => break,
+            }
+        }
+    }
     let _ = std::fs::remove_dir_all(&dir);
 }
