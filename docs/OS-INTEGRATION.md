@@ -65,7 +65,9 @@ dumps are `RTM_GETROUTE` + `NLM_F_DUMP` requests. No external crates are
 used — the handful of C ABI entry points (`socket`, `bind`, `sendmsg`,
 `recv`) are declared directly. When `if_index == 0` the `RTA_OIF`
 attribute is omitted so the kernel resolves the output interface from the
-gateway (`ip route add ... via GW` semantics).
+gateway (`ip route add ... via GW` semantics). Adds carry
+`NLM_F_CREATE | NLM_F_REPLACE`: a missing route is created and an existing
+best route for the prefix is atomically replaced.
 
 ### BSD family — route(4) socket (`bsd.rs`)
 
@@ -97,17 +99,17 @@ reconciliation loops are idempotent.
 Windows' FIB lives behind `iphlpapi.dll`:
 
 - `CreateIpForwardEntry2` / `DeleteIpForwardEntry2` modify rows described
-  by `MIB_IPFORWARD_ROW2` (104 bytes; layout asserted at compile time).
+  by `MIB_IPFORWARD_ROW2`; the SDK layouts and entry points come from
+  Microsoft's generated `windows-sys` bindings.
 - `GetIpForwardTable2` snapshots the whole table; `FreeMibTable` releases
   the buffer.
-- Rows are initialised with the same defaults as the documented
-  `InitializeIpForwardEntry` (infinite lifetimes, `Publish=FALSE`,
-  `Immortal=TRUE`) so we do not depend on that export.
+- Rows are initialised by `InitializeIpForwardEntry` (infinite lifetimes,
+  `Publish=FALSE`, `Immortal=TRUE`).
 - `NL_ROUTE_PROTOCOL` is set to `MIB_PROTOCOL_BGP` (14) — matching what
   `Get-NetRoute -Protocol` reports for BGP-learned routes.
-- When `if_index == 0` the interface is resolved by longest-prefix match
-  for the next hop against the current table, mirroring
-  `route add ... mask ... gw` behaviour.
+- When `if_index == 0`, `GetBestRoute2` resolves the interface separately
+  for every next hop using Windows' actual forwarding policy and interface
+  metrics. IPv6 link-local gateways carry that interface as their scope ID.
 - Deletes scan the table and only remove rows **we** installed
   (`Protocol == BGP`) — foreign rows are never touched.
 
@@ -133,9 +135,10 @@ pub trait OsRouteTable {
 
 Guidelines distilled from the three in-tree backends:
 
-1. **Zero dependencies.** Declare the handful of C ABI symbols you need
-   (`extern "C" { ... }`) instead of pulling a bindings crate. The Linux
-   backend needs six functions; the Windows one needs four.
+1. **Use authoritative bindings.** A small direct syscall surface is
+   reasonable on Linux, where the UAPI is stable and tested from synthetic
+   messages. For SDK-defined structures such as Windows IP Helper, prefer
+   generated vendor bindings (`windows-sys`) so layouts cannot drift.
 2. **Idempotency.** Route daemons reconcile state in loops: re-adding an
    existing route and deleting a missing one should both succeed (or
    return a typed "already exists / not found" the caller can treat as
@@ -197,9 +200,8 @@ Quagga ports worked on several proprietary platforms.
 
 ## Testing backends
 
-- **Unit tests** build synthetic messages and assert they parse (see
-  `bsd.rs::tests::dump_parser_synthetic_v4` and
-  `windows.rs::tests::struct_sizes_match_sdk`).
+- **Unit tests** build synthetic messages and assert they parse, and verify
+  platform-specific row construction and route resolution.
 - **Cross-compile checks** catch cfg/layout mistakes even without access
   to the target OS — the CI `cross` job builds the full workspace for
   `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-gnu`; run locally

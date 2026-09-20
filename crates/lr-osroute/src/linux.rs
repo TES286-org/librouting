@@ -81,6 +81,8 @@ const AF_INET6: u8 = 10;
 // Netlink flags.
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_ACK: u16 = 0x04;
+const NLM_F_REPLACE: u16 = 0x100;
+const NLM_F_CREATE: u16 = 0x400;
 const NLM_F_DUMP: u16 = 0x300;
 
 const NETLINK_ROUTE: i32 = 0;
@@ -375,7 +377,10 @@ impl OsRouteTable for RtNetlink {
         let _ = (addr_len, dst_len); // for documentation
         let buf = self.build_request(
             RTM_NEWROUTE,
-            NLM_F_REQUEST | NLM_F_ACK,
+            // Create a missing route and atomically replace an existing
+            // route for the same prefix. Without CREATE, a first install is
+            // an update-only request and the kernel returns ENOENT.
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
             family,
             prefix.prefix_len,
             RTPROT_BGP,
@@ -729,6 +734,14 @@ mod tests {
     fn rtprot_bgp_is_186() {
         assert_eq!(RTPROT_BGP, 186);
         assert_ne!(RTPROT_BGP, 14); // 14 = RTPROT_XORP
+    }
+
+    #[test]
+    fn route_install_flags_create_or_replace() {
+        let flags = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+        assert_eq!(flags, 0x0505);
+        assert_ne!(flags & NLM_F_CREATE, 0);
+        assert_ne!(flags & NLM_F_REPLACE, 0);
     }
 
     /// The parse loop must advance past NLMSG_NOOP — a `continue` before

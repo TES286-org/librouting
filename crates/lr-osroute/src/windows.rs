@@ -36,7 +36,7 @@ use windows_sys::Win32::Foundation::{
     ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable, GetIpForwardTable2,
+    CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable, GetBestRoute2, GetIpForwardTable2,
     InitializeIpForwardEntry, IP_ADDRESS_PREFIX, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
 };
 use windows_sys::Win32::Networking::WinSock::{
@@ -45,10 +45,7 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 
 /// IP Helper backed implementation of [`OsRouteTable`].
-pub struct IpHelper {
-    /// Cached interface index (0 = resolve per operation).
-    if_index: u32,
-}
+pub struct IpHelper;
 
 impl IpHelper {
     pub fn connect() -> Result<Self, OsRouteError> {
@@ -65,7 +62,7 @@ impl IpHelper {
             // SAFETY: pointer came from GetIpForwardTable2.
             unsafe { FreeMibTable(table as *const core::ffi::c_void) };
         }
-        Ok(Self { if_index: 0 })
+        Ok(Self)
     }
 
     fn make_row(prefix: &Prefix, next_hop: &IpAddr, if_index: u32) -> MIB_IPFORWARD_ROW2 {
@@ -77,10 +74,10 @@ impl IpHelper {
         unsafe { InitializeIpForwardEntry(&mut row) };
         row.InterfaceIndex = if_index;
         row.DestinationPrefix = IP_ADDRESS_PREFIX {
-            Prefix: sockaddr_for(&prefix.addr),
+            Prefix: sockaddr_for(&prefix.addr, 0),
             PrefixLength: prefix.prefix_len,
         };
-        row.NextHop = sockaddr_for(next_hop);
+        row.NextHop = sockaddr_for(next_hop, if_index);
         row.Protocol = RouteProtocolBgp;
         row.Immortal = true;
         if prefix.prefix_len == 0 {
@@ -90,33 +87,35 @@ impl IpHelper {
         row
     }
 
-    /// Resolve the interface leading towards `next_hop` by longest-prefix
-    /// match against the current table. Returns 0 when nothing matches.
-    fn resolve_interface(next_hop: &IpAddr) -> u32 {
-        let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
-        // SAFETY: out-pointer, ownership transferred to us.
-        let rc = unsafe { GetIpForwardTable2(0, &mut table) };
-        if rc != NO_ERROR || table.is_null() {
-            return 0;
+    /// Ask Windows to resolve the interface leading towards `next_hop`.
+    /// `GetBestRoute2` applies the same policy and interface metrics as the
+    /// forwarding stack; a local table scan cannot reproduce those rules.
+    fn resolve_interface(next_hop: &IpAddr) -> Result<u32, OsRouteError> {
+        let destination = sockaddr_for(next_hop, 0);
+        let mut best_route: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        let mut best_source: SOCKADDR_INET = unsafe { core::mem::zeroed() };
+        // SAFETY: null InterfaceLuid/source select the current compartment
+        // and any source; both output pointers refer to live stack values.
+        let rc = unsafe {
+            GetBestRoute2(
+                core::ptr::null(),
+                0,
+                core::ptr::null(),
+                &destination,
+                0,
+                &mut best_route,
+                &mut best_source,
+            )
+        };
+        if rc != NO_ERROR {
+            return Err(win_err("GetBestRoute2", rc));
         }
-        // SAFETY: rows live inside the allocation `table` points to; we
-        // only read while it is alive and free it before returning.
-        let (rows, len) = unsafe { table_rows(table) };
-        let mut best: Option<(u8, u32)> = None;
-        if !rows.is_null() {
-            for row in unsafe { core::slice::from_raw_parts(rows, len) } {
-                let (dst, plen) = unsafe { prefix_of(row) };
-                if prefix_contains(dst, plen, next_hop) {
-                    let better = best.map(|(b, _)| plen > b).unwrap_or(true);
-                    if better && row.InterfaceIndex != 0 {
-                        best = Some((plen, row.InterfaceIndex));
-                    }
-                }
-            }
+        if best_route.InterfaceIndex == 0 {
+            return Err(OsRouteError(format!(
+                "GetBestRoute2 returned no interface for next hop {next_hop}"
+            )));
         }
-        // SAFETY: release the API-allocated buffer.
-        unsafe { FreeMibTable(table as *const core::ffi::c_void) };
-        best.map(|(_, idx)| idx).unwrap_or(0)
+        Ok(best_route.InterfaceIndex)
     }
 }
 
@@ -131,10 +130,8 @@ impl OsRouteTable for IpHelper {
     ) -> Result<(), Self::Error> {
         let if_index = if if_index != 0 {
             if_index
-        } else if self.if_index != 0 {
-            self.if_index
         } else {
-            Self::resolve_interface(&next_hop)
+            Self::resolve_interface(&next_hop)?
         };
         let row = Self::make_row(&prefix, &next_hop, if_index);
         // SAFETY: `row` is a fully initialised stack value; the API only
@@ -150,7 +147,6 @@ impl OsRouteTable for IpHelper {
         if rc != NO_ERROR {
             return Err(win_err("CreateIpForwardEntry2", rc));
         }
-        self.if_index = if_index;
         Ok(())
     }
 
@@ -247,7 +243,7 @@ impl OsRouteTable for IpHelper {
 
 /// Build a `SOCKADDR_INET` from an `IpAddr`. The union is zeroed first
 /// so unused arms (and padding) are deterministic.
-fn sockaddr_for(addr: &IpAddr) -> SOCKADDR_INET {
+fn sockaddr_for(addr: &IpAddr, scope_id: u32) -> SOCKADDR_INET {
     // SAFETY: SOCKADDR_INET implements Default via mem::zeroed, which
     // is safe for this POD union.
     let mut sa: SOCKADDR_INET = unsafe { core::mem::zeroed() };
@@ -267,6 +263,9 @@ fn sockaddr_for(addr: &IpAddr) -> SOCKADDR_INET {
             let v6 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN6>() };
             v6.sin6_family = AF_INET6;
             v6.sin6_addr.u.Byte = *b;
+            if b[..2] == [0xfe, 0x80] {
+                v6.Anonymous.sin6_scope_id = scope_id;
+            }
         }
     }
     sa
@@ -332,42 +331,6 @@ fn addr_eq(a: &IpAddr, b: &IpAddr) -> bool {
     a == b
 }
 
-/// Longest-prefix containment check used for interface resolution.
-fn prefix_contains(prefix_addr: IpAddr, plen: u8, addr: &IpAddr) -> bool {
-    match (prefix_addr, addr) {
-        (IpAddr::V4(p), IpAddr::V4(a)) => {
-            let bits = plen.min(32) as u32;
-            if bits == 0 {
-                return true;
-            }
-            let mask = u32::MAX << (32 - bits);
-            let p = u32::from_be_bytes(p);
-            let a = u32::from_be_bytes(*a);
-            (p & mask) == (a & mask)
-        }
-        (IpAddr::V6(p), IpAddr::V6(a)) => {
-            let bits = plen.min(128) as usize;
-            if bits == 0 {
-                return true;
-            }
-            for i in 0..bits / 8 {
-                if p[i] != a[i] {
-                    return false;
-                }
-            }
-            let rem = bits % 8;
-            if rem > 0 {
-                let mask = 0xffu8 << (8 - rem);
-                if p[bits / 8] & mask != a[bits / 8] & mask {
-                    return false;
-                }
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
 fn win_err(api: &str, code: u32) -> OsRouteError {
     let hint = match code {
         ERROR_INVALID_PARAMETER => " (invalid parameter — check prefix/next-hop family)",
@@ -383,25 +346,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn prefix_contains_v4() {
-        let net = IpAddr::V4([10, 1, 0, 0]);
-        assert!(prefix_contains(net, 16, &IpAddr::V4([10, 1, 99, 5])));
-        assert!(!prefix_contains(net, 16, &IpAddr::V4([10, 2, 0, 0])));
-        assert!(prefix_contains(net, 0, &IpAddr::V4([192, 0, 2, 1])));
+    fn explicit_interface_scopes_link_local_gateway() {
+        let prefix = Prefix::new_v6([0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 64);
+        let gateway = IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
+        let row = IpHelper::make_row(&prefix, &gateway, 42);
+        assert_eq!(row.InterfaceIndex, 42);
+        // SAFETY: make_row populated the IPv6 arm for an IPv6 gateway.
+        let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN6>() };
+        // SAFETY: the anonymous union holds the scope-id member initialized
+        // by make_row for this link-local gateway.
+        assert_eq!(unsafe { next_hop.Anonymous.sin6_scope_id }, 42);
     }
 
     #[test]
-    fn prefix_contains_v6() {
-        let net = IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        assert!(prefix_contains(
-            net,
-            32,
-            &IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0xff, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,])
-        ));
-        assert!(!prefix_contains(
-            net,
-            32,
-            &IpAddr::V6([0x20, 0x01, 0x0d, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,])
-        ));
+    fn best_route_resolves_loopback_interface() {
+        let index = IpHelper::resolve_interface(&IpAddr::V4([127, 0, 0, 1])).unwrap();
+        assert_ne!(index, 0);
     }
 }
