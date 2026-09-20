@@ -56,11 +56,32 @@ impl Daemon {
         assert_eq!(rc, 0, "kill({}) failed", sig);
     }
 
-    /// Wait for exit; returns (success?, log text).
+    /// Wait for exit with a 30s timeout; returns (success?, log text).
+    /// The timeout prevents a hung daemon from stalling the test
+    /// binary (seen on macOS CI runners).
     fn wait_exit(&mut self) -> (bool, String) {
-        let status = self.child.wait().expect("wait for daemon exit");
-        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        (status.success(), text)
+        let deadline = Instant::now() + Duration::from_secs(30);
+        loop {
+            match self.child.try_wait() {
+                Ok(Some(status)) => {
+                    let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+                    return (status.success(), text);
+                }
+                Ok(None) => {
+                    if Instant::now() >= deadline {
+                        let _ = self.child.kill();
+                        let _ = self.child.wait();
+                        let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+                        return (false, text);
+                    }
+                    thread::sleep(Duration::from_millis(100));
+                }
+                Err(_) => {
+                    let text = std::fs::read_to_string(&self.log).unwrap_or_default();
+                    return (false, text);
+                }
+            }
+        }
     }
 }
 
