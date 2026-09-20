@@ -47,20 +47,38 @@ jobs:
           python3 -m venv /tmp/venv
           /tmp/venv/bin/pip install --upgrade pip
           /tmp/venv/bin/pip install cffi pytest
+      - name: Install cargo-nextest
+        # nextest runs each test in its own process and supports a
+        # per-test slow-timeout via .config/nextest.toml, so a hung
+        # test is killed (and named in the log) within minutes
+        # instead of stalling the whole `cargo test` invocation
+        # for the GHA-default 6 h.
+        timeout-minutes: 5
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: cargo fmt
         timeout-minutes: 5
         run: cargo fmt --all -- --check
       - name: cargo clippy
         timeout-minutes: 30
         run: cargo clippy --all-targets --all-features -- -D warnings
-      - name: cargo test (workspace)
-        # 30 min ceiling: an unbounded `cargo test` step has been
-        # the historic CI hang culprit. A clean workspace test run
-        # finishes in ~5 min on the runner; 30 min is 6x slack for
-        # a cold cache + slow CI I/O, but bounded so a hang fails
-        # the job instead of running out the GHA default budget.
+      - name: cargo nextest (workspace, unit + integration)
+        # nextest isolates each test in its own process: a hang in
+        # one test no longer takes down the rest of the suite, and
+        # .config/nextest.toml's slow-timeout (5 min of no stdout)
+        # kills the hung test with a clear "marked as timed out"
+        # diagnostic. Combined with the step-level 30 min ceiling,
+        # this bounds the historic macOS-runner hang pattern from
+        # 6 h down to ≤5 min per hung test.
         timeout-minutes: 30
-        run: cargo test --workspace --all-features
+        run: cargo nextest run --workspace --all-features
+      - name: cargo test --doc (workspace)
+        # nextest's doctest support is still unstable; the stable
+        # path is cargo test --doc. Doctests are typically fast
+        # (no daemon spawns), so a 10 min ceiling is generous.
+        timeout-minutes: 10
+        run: cargo test --doc --workspace --all-features
       - name: Build lr-ffi (release)
         timeout-minutes: 15
         run: cargo build --release -p lr-ffi
@@ -263,6 +281,14 @@ jobs:
       - name: Configure Git PATH (Windows)
         if: runner.os == 'Windows'
         run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
+      - name: Install cargo-nextest
+        # See rust-tests job for rationale. taiki-e/install-action
+        # ships a prebuilt binary for linux/macos/windows, so this
+        # step is fast (~10 s) on every matrix entry.
+        timeout-minutes: 5
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: cargo fmt
         # Formatting check is platform-independent; running it on
         # three OSes is belt-and-braces against a toolchain drift.
@@ -274,24 +300,29 @@ jobs:
       - name: cargo build (workspace)
         timeout-minutes: 30
         run: cargo build --workspace --all-features
-      - name: cargo test (workspace)
-        # 30 min ceiling. The historic macOS CI hang lived here: a
-        # single e2e test's `Drop` impl called `child.wait()`
-        # blocking, so when a daemon's shutdown path wedged the
-        # test binary — and therefore this step — hung until GHA's
-        # 6 h default job timeout. 30 min is 6x the worst observed
-        # legitimate runtime (~5 min cold); a step timeout turns
-        # the next regression into a 30-minute failure with a
-        # clean "The action has timed out" signal in the log
-        # instead of a silent 6-hour stall.
-        timeout-minutes: 30
+      - name: cargo nextest (workspace, unit + integration)
         # On Windows the lr-cli daemon tests spawn the daemon binary on
         # loopback TCP sockets. They use std::net primitives that work
         # cross-platform; the lr-osroute Windows backend compiles and
         # its kernel-gated sisters (srv6_kernel, ospf6_kernel) are
         # Linux-only at the file level, so they are excluded by the
         # compiler, not by the test runner.
-        run: cargo test --workspace --all-features
+        #
+        # nextest + .config/nextest.toml's slow-timeout is the
+        # per-test layer of the hang defense. The historic macOS CI
+        # hang lived in this step's `cargo test` equivalent — a
+        # Drop impl's blocking `child.wait()` wedged the whole test
+        # binary. nextest runs each test in its own process and
+        # kills any that produce no output for 5 min, so the same
+        # regression would now fail in ≤5 min with the culprit
+        # test name in the log, instead of stalling for 6 h.
+        timeout-minutes: 30
+        run: cargo nextest run --workspace --all-features
+      - name: cargo test --doc (workspace)
+        # nextest's doctest support is still unstable; the stable
+        # path is cargo test --doc.
+        timeout-minutes: 10
+        run: cargo test --doc --workspace --all-features
 
   # Real-world interop: exchange BGP with BIRD and FRR (FRR's bgpd) on
   # loopback TCP sockets and verify routes propagate in both directions.

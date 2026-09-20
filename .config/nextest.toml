@@ -1,0 +1,37 @@
+# cargo-nextest configuration.
+# https://nextest.org/docs/configuration/
+#
+# Per-test slow-timeout: kill a test that produces no output (stdout
+# or stderr) for 5 minutes. The Rust standard test harness writes
+# "running test_foo ..." at the start of each test and "test test_foo
+# ... ok" at the end; the daemon e2e tests in crates/lr-cli/tests
+# spawn real lr-daemon subprocesses that write to log files (not to
+# stdout) and assert on the file contents. Under libtest, then, a
+# legitimately-long-running daemon test produces no intermediate
+# stdout — the only output is at the start and at the end.
+#
+# The 5-minute ceiling is calibrated against:
+#   - daemon_collision.rs tests: ~60 s under tarpaulin instrumentation
+#     (per the ci.yml coverage-step comment).
+#   - daemon_runtime.rs / daemon_policy.rs / daemon_multi_protocol.rs
+#     tests: ~30 s deadline each.
+#   - 5 min = 5x slack over the slowest legitimate path, while
+#     bounded so the historic "macOS runner stuck for 6 h" hang
+#     pattern is killed within 5 min and the rest of the test suite
+#     can continue.
+#
+# When the slow-timeout fires, nextest prints a clear "test marked
+# as timed out" message and the failing test name — far more
+# diagnostic than cargo test's silent stall.
+
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 5 }
+
+# No retries: a failure surfaces the actual culprit on the first
+# run, instead of washing the diagnostic out under retry noise.
+retries = 0
+
+# fail-with-no-tests = false is nextest's default — some test
+# binaries (e.g. the Linux-only kernel-gated tests in lr-osroute)
+# compile-conditionally exclude themselves on Windows/macOS, so
+# an empty test list is expected and not a failure.
