@@ -152,7 +152,7 @@ unsafe fn read_v4(u: &IP_ADAPTER_UNICAST_ADDRESS_LH) -> Option<(Ipv4Addr, u8)> {
     // Windows the family is a `ADDRESS_FAMILY` (u16). `lpSockaddr` is
     // a `*mut SOCKADDR` which is always at least 2-byte aligned.
     let family = unsafe { ptr::read_unaligned(sa.lpSockaddr as *const u16) };
-    if family != AF_INET as u16 {
+    if family != AF_INET {
         return None;
     }
     // Winsock2 `sockaddr_in`: family(2) + port(2) + addr(4) + zero(8).
@@ -174,7 +174,7 @@ unsafe fn read_v6(u: &IP_ADAPTER_UNICAST_ADDRESS_LH) -> Option<(Ipv6Addr, u8)> {
         return None;
     }
     let family = unsafe { ptr::read_unaligned(sa.lpSockaddr as *const u16) };
-    if family != AF_INET6 as u16 {
+    if family != AF_INET6 {
         return None;
     }
     // Winsock2 `sockaddr_in6`: family(2) + port(2) + flowinfo(4) +

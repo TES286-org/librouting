@@ -97,9 +97,7 @@ impl NamedPipeStream {
         if rc == 0 {
             Err(io::Error::last_os_error())
         } else {
-            Ok(NamedPipeStream {
-                handle: new_handle as isize,
-            })
+            Ok(NamedPipeStream { handle: new_handle })
         }
     }
 

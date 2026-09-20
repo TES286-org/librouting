@@ -178,7 +178,7 @@ impl OsRouteTable for IpHelper {
                 if !addr_eq(&dst, &prefix.addr) {
                     continue;
                 }
-                if row.Protocol != RouteProtocolBgp as i32 {
+                if row.Protocol != RouteProtocolBgp {
                     continue; // never touch rows we did not install
                 }
                 // SAFETY: row is a copy of a table entry; the API matches on
@@ -222,10 +222,10 @@ impl OsRouteTable for IpHelper {
                     IpAddr::V6(b) => Prefix::new_v6(b, plen.min(128)),
                 };
                 let next_hop = unsafe { next_hop_of(row) };
-                let protocol = match row.Protocol as u32 {
-                    p if p == RouteProtocolLocal as u32 => Protocol::Connected,
-                    p if p == RouteProtocolNetMgmt as u32 => Protocol::Static,
-                    p if p == RouteProtocolBgp as u32 => Protocol::Bgp,
+                let protocol = match row.Protocol {
+                    p if p == RouteProtocolLocal => Protocol::Connected,
+                    p if p == RouteProtocolNetMgmt => Protocol::Static,
+                    p if p == RouteProtocolBgp => Protocol::Bgp,
                     other => Protocol::Other(other as u16),
                 };
                 out.push(KernelRoute {
