@@ -37,9 +37,8 @@ use lr_router::DefaultRouter;
 
 /// Static daemon facts served by `status`.
 ///
-/// The fields are only read by the Unix server below; on other targets
-/// the type exists so callers compile unchanged (`spawn` refuses there).
-#[cfg_attr(not(unix), expect(dead_code))]
+/// Read by the platform-specific `spawn` implementation (Unix
+/// domain socket on Unix, named pipe on Windows).
 pub struct DaemonInfo {
     pub version: String,
     pub local_as: u32,
@@ -50,8 +49,8 @@ pub struct DaemonInfo {
 
 /// Everything the API thread needs to answer commands.
 ///
-/// See [`DaemonInfo`] for why some fields are unread on non-Unix targets.
-#[cfg_attr(not(unix), expect(dead_code))]
+/// See [`DaemonInfo`] for the platform-specific use of these fields.
+#[cfg_attr(not(any(unix, windows)), expect(dead_code))]
 pub struct ApiContext {
     pub info: DaemonInfo,
     pub router: Arc<RwLock<DefaultRouter>>,
@@ -556,14 +555,11 @@ mod imp {
 }
 
 #[cfg(not(unix))]
-mod imp {
-    use super::ApiContext;
+#[path = "api_imp_windows.rs"]
+mod imp;
 
-    /// Unix domain sockets are the transport; other platforms get a
-    /// clear refusal instead of a pretend API.
-    pub fn spawn(_path: &str, _ctx: ApiContext) -> Result<String, String> {
-        Err("runtime API requires Unix domain sockets (not supported here)".to_string())
-    }
-}
+#[cfg(unix)]
+pub use imp::spawn;
 
+#[cfg(not(unix))]
 pub use imp::spawn;

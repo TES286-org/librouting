@@ -4540,8 +4540,10 @@ fn spawn_bmp_sender(target: &str, router: &Arc<RwLock<DefaultRouter>>) -> Result
 /// OSPF and Babel routes reference the synthetic local peer 0, exactly
 /// how BIRD's `protocol mrt` represents non-BGP sources. Returns the
 /// number of RIB records written.
-/// Unix-only: the runtime API that drives it is Unix-gated.
-#[cfg(unix)]
+/// Available wherever the runtime API runs (Unix sockets on Unix,
+/// named pipes on Windows) — the MRT dump is a pure filesystem
+/// operation that does not depend on the transport.
+///
 /// Write the Loc-RIB as an RFC 6396 TABLE_DUMP_V2 dump.
 ///
 /// `routes` and `summaries` are caller-provided snapshots so the file I/O
