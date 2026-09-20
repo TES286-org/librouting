@@ -805,6 +805,12 @@ fn babel_block(cfg: &DaemonConfig, base: &DaemonConfig) -> Vec<(String, String)>
     if cfg.babel_pc_window != base.babel_pc_window {
         v.push(("pc_window".into(), cfg.babel_pc_window.to_string()));
     }
+    if let Some(x) = &cfg.babel_import_filter {
+        v.push(("import_filter".into(), fmt_string(x)));
+    }
+    if let Some(x) = &cfg.babel_export_filter {
+        v.push(("export_filter".into(), fmt_string(x)));
+    }
     v
 }
 

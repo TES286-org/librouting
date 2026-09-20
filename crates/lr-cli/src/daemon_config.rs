@@ -694,6 +694,22 @@ pub(crate) struct DaemonConfig {
     pub babel_split_unicast_multicast: bool,
     /// RFC 9467 §3.2 window size for PC verification (OPTIONAL; 0 = off).
     pub babel_pc_window: usize,
+    /// Name of a `[[filter]]` body applied to every Babel UPDATE
+    /// received on every Babel interface before the route enters the
+    /// Loc-RIB (BIRD `protocol babel { import filter ...; }`). `None`
+    /// (the default) admits every route. The filter runs through the
+    /// router's import hook chain, so an operator-supplied body that
+    /// scopes itself with `if proto != "babel" then accept;` is a
+    /// no-op for non-Babel routes (e.g. a BGP route being installed in
+    /// a multi-protocol daemon). Reloadable via SIGHUP / the runtime
+    /// API `reload` command.
+    pub babel_import_filter: Option<String>,
+    /// Name of a `[[filter]]` body applied to every route the daemon
+    /// selects for a Babel announcement (BIRD `protocol babel {
+    /// export filter ...; }`). `None` (the default) advertises every
+    /// route the Loc-RIB holds that is not itself a Babel-learned
+    /// route (the §3.7.5 split-horizon carve-out). Reloadable.
+    pub babel_export_filter: Option<String>,
     /// `[[babel.interface]]` blocks — per-interface Babel parameters
     /// with shell-like name wildcards (RFC 8966 §A.2). When empty
     /// the daemon runs the legacy single-socket path bound to
@@ -1038,6 +1054,8 @@ impl DaemonConfig {
             babel_accept_unauthenticated: false,
             babel_split_unicast_multicast: true,
             babel_pc_window: 0,
+            babel_import_filter: None,
+            babel_export_filter: None,
             babel_interfaces: Vec::new(),
             ebgp_policy: "rfc8212".to_string(),
             enforce_first_as: false,
@@ -2695,6 +2713,12 @@ fn apply_babel_key(
                 cfg.babel_pc_window = value
                     .parse()
                     .map_err(|_| format!("bad babel pc_window '{value}'"))?;
+            }
+            "import_filter" => {
+                cfg.babel_import_filter = Some(value.trim().trim_matches('"').to_string());
+            }
+            "export_filter" => {
+                cfg.babel_export_filter = Some(value.trim().trim_matches('"').to_string());
             }
             _ => {
                 return Err(format!(

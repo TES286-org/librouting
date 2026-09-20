@@ -303,6 +303,7 @@ pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter
 /// thread swaps snapshots underneath as syncs land, so `roa.state`
 /// in every filter tracks the live cache data without any
 /// recompilation (ROADMAP-v3 D2.3/D2.4).
+#[derive(Debug)]
 pub(crate) struct DaemonFilterContext {
     roa: std::sync::Arc<lr_bgp::RoaStore>,
 }
@@ -514,6 +515,108 @@ impl lr_policy::hooks::ExportHook for FilterExportHook {
     }
 }
 
+/// One end of a Babel import/export filter pair: a compiled bytecode
+/// filter and its evaluation context. Held by the daemon and consulted
+/// per route — for the import direction the [`BabelFilterImportHook`]
+/// wrapper does the per-route check; for the export direction the
+/// daemon's announcement builder calls [`BabelFilter::accepts`].
+///
+/// Constructed by [`build_babel_filter`].
+#[derive(Debug)]
+pub(crate) struct BabelFilter {
+    pub name: String,
+    pub compiled: lr_policy::filter::bytecode::CompiledFilter,
+    pub ctx: std::sync::Arc<DaemonFilterContext>,
+}
+
+impl BabelFilter {
+    /// True when the route is accepted by the filter (`accept` or
+    /// `fallthrough`); false when rejected. The export path uses this
+    /// to skip routes the operator does not want announced over Babel.
+    pub fn accepts(&self, route: &lr_core::rib::Route) -> bool {
+        let mut tmp = route.clone();
+        let verdict =
+            lr_policy::filter::bytecode::execute(&self.compiled, &mut tmp, self.ctx.as_ref());
+        !matches!(verdict, EvalResult::Reject(_))
+    }
+}
+
+/// Look up the named filter in the daemon's `[[filter]]` tables and
+/// compile it for use as a Babel import or export filter. `None` when
+/// the name is `None` (no filter configured). Errors out when the
+/// filter name is unknown or fails to compile — Babel filter wiring
+/// fails closed like every other protocol surface.
+pub(crate) fn build_babel_filter(
+    cfg: &DaemonConfig,
+    name: &Option<String>,
+    roa: &std::sync::Arc<lr_bgp::RoaStore>,
+) -> Result<Option<BabelFilter>, String> {
+    let Some(name) = name.as_deref() else {
+        return Ok(None);
+    };
+    let filters = build_filters(cfg)?;
+    let Some((_, filter)) = filters.iter().find(|(n, _)| n == name) else {
+        return Err(format!(
+            "babel: unknown filter '{name}' (declared filters: {})",
+            filters
+                .iter()
+                .map(|(n, _)| n.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    let compiled = lr_policy::filter::bytecode::compile(filter);
+    Ok(Some(BabelFilter {
+        name: name.to_string(),
+        compiled,
+        ctx: std::sync::Arc::new(DaemonFilterContext::new(std::sync::Arc::clone(roa))),
+    }))
+}
+
+/// Babel import hook: runs a compiled DSL filter on every route
+/// received on a Babel session (the route's `protocol` field is
+/// `Protocol::Babel`). Routes from any other protocol pass through
+/// unchanged — the operator's filter body does not need to scope
+/// itself with `if proto == "babel"`.
+///
+/// Mirrors [`FilterImportHook`] but adds the protocol gate so the
+/// filter and BGP's per-peer filters can coexist on the same router
+/// (the Babel filter never evaluates against a BGP-learned route,
+/// and vice versa).
+pub(crate) struct BabelFilterImportHook {
+    pub inner: BabelFilter,
+    /// See [`FilterImportHook::stats`].
+    pub stats: Option<std::sync::Arc<crate::metrics::DurationHistogram>>,
+}
+
+impl lr_policy::hooks::ImportHook for BabelFilterImportHook {
+    fn name(&self) -> &str {
+        &self.inner.name
+    }
+    fn on_import(&self, route: &mut lr_core::rib::Route) -> lr_policy::hooks::HookVerdict {
+        if route.protocol != lr_core::rib::Protocol::Babel {
+            return lr_policy::hooks::HookVerdict::Keep;
+        }
+        match &self.stats {
+            Some(hist) => {
+                let t0 = std::time::Instant::now();
+                let verdict = lr_policy::filter::bytecode::execute(
+                    &self.inner.compiled,
+                    route,
+                    self.inner.ctx.as_ref(),
+                );
+                hist.record(t0.elapsed().as_nanos() as u64);
+                map_verdict(verdict)
+            }
+            None => map_verdict(lr_policy::filter::bytecode::execute(
+                &self.inner.compiled,
+                route,
+                self.inner.ctx.as_ref(),
+            )),
+        }
+    }
+}
+
 /// Build the router-wide ROA table from the `[[roa]]` config tables.
 pub(crate) fn build_roa_table(cfg: &DaemonConfig) -> Result<lr_bgp::RoaTable, String> {
     let mut builder = lr_bgp::RoaTableBuilder::new();
@@ -695,5 +798,127 @@ mod tests {
         other.key.prefix = lr_core::addr::Prefix::new_v4([198, 51, 100, 0], 24);
         assert!(matches!(hook.on_import(&mut other), HookVerdict::Drop));
         assert_eq!(hist.count(), 2, "second evaluation recorded");
+    }
+
+    /// Babel filter lookup: a named filter declared in `[[filter]]`
+    /// blocks resolves to a compiled BabelFilter; an unknown name
+    /// fails closed.
+    #[test]
+    fn babel_filter_builds_from_named_filter() {
+        let cfg = parse(
+            "[[filter]]\nname = \"babel-in\"\nbody = \"if net ~ [ 10.0.0.0/8 ] then accept; reject;\"\n",
+        );
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let f = build_babel_filter(&cfg, &Some("babel-in".into()), &roa)
+            .expect("filter must compile")
+            .expect("filter must be found");
+        assert_eq!(f.name, "babel-in");
+    }
+
+    /// Unknown babel filter name → startup error (typo protection;
+    /// the daemon must not silently run with no filter).
+    #[test]
+    fn babel_filter_unknown_name_fails() {
+        let cfg = parse("[[filter]]\nname = \"babel-in\"\nbody = \"accept;\"\n");
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let err = build_babel_filter(&cfg, &Some("ghost".into()), &roa).unwrap_err();
+        assert!(err.contains("unknown filter 'ghost'"), "{err}");
+    }
+
+    /// `None` filter name → no filter (the historical accept-all
+    /// behaviour). This is the path every existing config takes.
+    #[test]
+    fn babel_filter_none_when_unconfigured() {
+        let cfg = DaemonConfig::with_defaults();
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let f = build_babel_filter(&cfg, &None, &roa).unwrap();
+        assert!(f.is_none(), "no filter name → no filter");
+    }
+
+    /// The BabelFilterImportHook only runs the DSL against
+    /// `Protocol::Babel` routes; BGP/OSPF/connected routes pass
+    /// through unchanged (the operator's filter body does not need
+    /// to scope itself with `if proto == "babel"`).
+    #[test]
+    fn babel_import_hook_skips_non_babel_routes() {
+        use lr_core::rib::Route;
+        use lr_policy::hooks::{HookVerdict, ImportHook};
+
+        // The filter rejects everything — but the hook must only
+        // apply to Babel routes, so a BGP route passing through this
+        // hook should still be kept (it never reaches the DSL).
+        let cfg = parse("[[filter]]\nname = \"drop-all\"\nbody = \"reject;\"\n");
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let f = build_babel_filter(&cfg, &Some("drop-all".into()), &roa)
+            .unwrap()
+            .unwrap();
+        let hook = BabelFilterImportHook {
+            inner: BabelFilter {
+                name: f.name.clone(),
+                compiled: f.compiled.clone(),
+                ctx: f.ctx.clone(),
+            },
+            stats: None,
+        };
+
+        // A BGP route: must pass through unchanged.
+        let mut bgp_route = Route {
+            key: lr_core::rib::RouteKey::new(
+                lr_core::addr::Prefix::new_v4([192, 0, 2, 0], 24),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            ),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 1 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 100),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        assert!(
+            matches!(hook.on_import(&mut bgp_route), HookVerdict::Keep),
+            "BGP route must bypass the babel filter"
+        );
+
+        // A Babel route: must be dropped by the `reject;` body.
+        let mut babel_route = bgp_route.clone();
+        babel_route.protocol = lr_core::rib::Protocol::Babel;
+        assert!(
+            matches!(hook.on_import(&mut babel_route), HookVerdict::Drop),
+            "Babel route must hit the filter and be dropped"
+        );
+    }
+
+    /// The export-side `BabelFilter::accepts` mirrors the import-side
+    /// verdict: accept / fallthrough → true, reject → false.
+    #[test]
+    fn babel_export_filter_accepts_routes() {
+        let cfg = parse(
+            "[[filter]]\nname = \"out\"\nbody = \"if net ~ [ 10.0.0.0/8 ] then accept; reject;\"\n",
+        );
+        let roa = std::sync::Arc::new(lr_bgp::RoaStore::new());
+        let f = build_babel_filter(&cfg, &Some("out".into()), &roa)
+            .unwrap()
+            .unwrap();
+
+        let mut route = lr_core::rib::Route {
+            key: lr_core::rib::RouteKey::new(
+                lr_core::addr::Prefix::new_v4([10, 0, 0, 0], 8),
+                lr_core::nlri::NlriFamily::IPV4_UNICAST,
+            ),
+            origin: lr_core::rib::RouteOrigin { proto: 0, peer: 0 },
+            protocol: lr_core::rib::Protocol::Bgp,
+            preference: lr_core::rib::Preference::new(20, 0),
+            next_hop: None,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        assert!(f.accepts(&route), "10.0.0.0/8 matches → accept");
+
+        route.key.prefix = lr_core::addr::Prefix::new_v4([192, 0, 2, 0], 24);
+        assert!(!f.accepts(&route), "192.0.2.0/24 does not match → reject");
     }
 }

@@ -2974,6 +2974,60 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }
     }
 
+    // ---- Babel import/export filters (RFC 8966 §3.7 / BIRD `protocol
+    // babel { import filter ...; export filter ...; }`). The import
+    // filter attaches to the router's import hook chain and only
+    // evaluates against Babel-learned routes (the hook gates on
+    // `Protocol::Babel`); the export filter is consulted directly in
+    // `build_babel_announcement` against every Loc-RIB route the
+    // daemon is about to advertise. Both fail closed — a typo'd
+    // filter name stops the daemon at startup, not silently at first
+    // UPDATE.
+    //
+    // The Babel daemon has no RPKI cache of its own, but the filter
+    // DSL exposes `roa.state`; the daemon-side `RoaStore` is the
+    // router-wide one a BGP+Babel multi-protocol daemon would share.
+    // In standalone Babel mode the store is empty — `roa.state`
+    // returns `NotFound` for every prefix, which is the RFC 6811
+    // §2-correct answer when no ROAs are configured.
+    let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::new());
+    let babel_export_filter =
+        match daemon_policy::build_babel_filter(cfg, &cfg.babel_export_filter, &roa_store) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("daemon: babel export filter: {e}");
+                return ExitCode::from(2);
+            }
+        };
+    let babel_import_filter =
+        match daemon_policy::build_babel_filter(cfg, &cfg.babel_import_filter, &roa_store) {
+            Ok(f) => f,
+            Err(e) => {
+                eprintln!("daemon: babel import filter: {e}");
+                return ExitCode::from(2);
+            }
+        };
+    if let Some(f) = &babel_import_filter {
+        let hook = daemon_policy::BabelFilterImportHook {
+            inner: daemon_policy::BabelFilter {
+                name: f.name.clone(),
+                compiled: f.compiled.clone(),
+                ctx: std::sync::Arc::clone(&f.ctx),
+            },
+            stats: None,
+        };
+        router
+            .write()
+            .unwrap()
+            .hooks_mut()
+            .import
+            .push(Box::new(hook));
+        println!("daemon: babel import filter '{}' attached", f.name);
+    }
+    if let Some(f) = &babel_export_filter {
+        println!("daemon: babel export filter '{}' attached", f.name);
+    }
+
     // Signal handling (idempotent — the multi-protocol supervisor
     // already installed the handlers; re-registering the same static
     // handler is harmless).
@@ -3180,7 +3234,15 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 let transport_local = iface.transports[ti].local;
                 let announce = {
                     let r = router.read().unwrap();
-                    build_babel_announcement(&r, iface, transport_local, now_ms, now_us, rtt_echo)
+                    build_babel_announcement(
+                        &r,
+                        iface,
+                        transport_local,
+                        now_ms,
+                        now_us,
+                        rtt_echo,
+                        babel_export_filter.as_ref(),
+                    )
                 };
                 let transport = &mut iface.transports[ti];
                 let payload = match &mut iface.auth {
@@ -4092,6 +4154,7 @@ fn build_babel_announcement(
     now_ms: u64,
     now_us: u32,
     rtt_echo: Option<(u32, u32)>,
+    export_filter: Option<&daemon_policy::BabelFilter>,
 ) -> Vec<u8> {
     use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
     use lr_babel::tlv::{Tlv, TlvType};
@@ -4138,11 +4201,20 @@ fn build_babel_announcement(
     let update_cs = u16::try_from(iface.update_interval_ms / 10).unwrap_or(u16::MAX);
 
     // What to advertise: our Loc-RIB contributions (anything not
-    // learned over Babel) plus the other interfaces' lessons.
+    // learned over Babel) plus the other interfaces' lessons. The
+    // operator's export filter (BIRD `protocol babel { export filter
+    // ...; }`) scopes the Loc-RIB half — a route the filter rejects
+    // is held back from this announcement and the §3.7 seqno does not
+    // bump for it. The babel_reachable set already passed the import
+    // filter when it was learned on another interface, so re-running
+    // the export filter on those would double-apply (the operator's
+    // intent for "export filter" is "what routes from elsewhere in
+    // the Loc-RIB should Babel advertise", matching BIRD semantics).
     let snapshot: Vec<_> = router
         .rib_snapshot()
         .into_iter()
         .filter(|r| r.protocol != lr_core::rib::Protocol::Babel)
+        .filter(|r| export_filter.is_none_or(|f| f.accepts(r)))
         .map(|r| r.key.prefix)
         .collect();
     let reachable = router.babel_reachable(iface.session);

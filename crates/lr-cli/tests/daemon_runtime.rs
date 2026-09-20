@@ -484,3 +484,89 @@ fn babel_sighup_reloads_networks_from_config_file() {
     assert!(ok, "babel daemon must exit 0 after SIGTERM; log:\n{log}");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A Babel daemon with `import_filter` and `export_filter` keys
+/// configured must attach both filters at startup and log a
+/// line naming them. An unknown filter name must fail closed (exit
+/// code 2, like every other policy typo).
+#[test]
+fn babel_filters_attach_at_startup_and_unknown_name_fails() {
+    let dir = std::env::temp_dir().join(format!("lr-daemon-test-bflt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    // Happy path: declared filters are attached.
+    let conf = dir.join("daemon.toml");
+    let socket = dir.join("daemon.api");
+    std::fs::write(
+        &conf,
+        "protocol = \"babel\"\n\
+         [bgp]\n\
+         router_id = \"10.0.0.1\"\n\
+         local_address = \"127.0.0.1\"\n\
+         networks = [\"203.0.113.0/24\"]\n\
+         [babel]\n\
+         port = 16698\n\
+         import_filter = \"babel-in\"\n\
+         export_filter = \"babel-out\"\n\
+         [[filter]]\n\
+         name = \"babel-in\"\n\
+         body = \"if net ~ [ 10.0.0.0/8 ] then accept; reject;\"\n\
+         [[filter]]\n\
+         name = \"babel-out\"\n\
+         body = \"accept;\"\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "bflt",
+    );
+    wait_log_all(
+        &d.log,
+        &[
+            "babel listening on",
+            "babel import filter 'babel-in' attached",
+            "babel export filter 'babel-out' attached",
+            "runtime API on",
+        ],
+    );
+    d.signal(SIGTERM);
+    let (ok, _log) = d.wait_exit();
+    assert!(ok, "daemon must exit cleanly");
+
+    // Failure path: an unknown filter name is a typo that must stop
+    // the daemon at startup, not silently run with no filter.
+    let conf2 = dir.join("daemon-bad.toml");
+    std::fs::write(
+        &conf2,
+        "protocol = \"babel\"\n\
+         [bgp]\n\
+         router_id = \"10.0.0.1\"\n\
+         local_address = \"127.0.0.1\"\n\
+         [babel]\n\
+         port = 16699\n\
+         import_filter = \"ghost\"\n",
+    )
+    .unwrap();
+    let out = Command::new(BIN)
+        .args([
+            "--config",
+            conf2.to_str().unwrap(),
+            "--api-socket",
+            "/tmp/lr-daemon-bad-bflt.sock",
+        ])
+        .output()
+        .expect("spawn lr-daemon");
+    assert!(!out.status.success(), "daemon must exit nonzero");
+    let text = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        text.contains("unknown filter 'ghost'"),
+        "stderr must name the typo; got: {text}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
