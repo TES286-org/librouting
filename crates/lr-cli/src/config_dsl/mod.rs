@@ -304,6 +304,81 @@ bgp { hold_time 90s; peer_as 65000; }
     }
 
     #[test]
+    fn glob_include_splices_every_match_in_sorted_order() {
+        let dir = std::env::temp_dir().join(format!("lr-dsl-glob-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Three peer files: a, b, c. The glob `peers/*.lr` must
+        // splice all three in lexicographic order so the peer list
+        // ends up deterministic regardless of filesystem readdir
+        // order (readdir order is unspecified on most platforms).
+        let peers = dir.join("peers");
+        std::fs::create_dir_all(&peers).unwrap();
+        std::fs::write(peers.join("a.lr"), "peer \"a\" { remote 192.0.2.1:179; }\n").unwrap();
+        std::fs::write(peers.join("b.lr"), "peer \"b\" { remote 192.0.2.2:179; }\n").unwrap();
+        std::fs::write(peers.join("c.lr"), "peer \"c\" { remote 192.0.2.3:179; }\n").unwrap();
+        // A non-matching file (wrong extension) must be ignored.
+        std::fs::write(
+            peers.join("d.txt"),
+            "peer \"d\" { remote 192.0.2.4:179; }\n",
+        )
+        .unwrap();
+        let main = dir.join("main.lr");
+        std::fs::write(&main, "include \"peers/*.lr\";\n").unwrap();
+        let text = std::fs::read_to_string(&main).unwrap();
+        let mut cfg = DaemonConfig::default();
+        parse_dsl_text(&text, Some(("main.lr", &main)), &mut cfg).unwrap();
+        assert_eq!(cfg.peers.len(), 3, "expected 3 peers, got {:?}", cfg.peers);
+        // Sorted lexicographically: a, b, c.
+        assert_eq!(cfg.peers[0].name.as_deref(), Some("a"));
+        assert_eq!(cfg.peers[1].name.as_deref(), Some("b"));
+        assert_eq!(cfg.peers[2].name.as_deref(), Some("c"));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn glob_include_with_no_matches_warns_but_does_not_fail() {
+        let dir = std::env::temp_dir().join(format!("lr-dsl-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let peers = dir.join("peers");
+        std::fs::create_dir_all(&peers).unwrap();
+        let main = dir.join("main.lr");
+        std::fs::write(&main, "include \"peers/*.lr\";\n").unwrap();
+        let text = std::fs::read_to_string(&main).unwrap();
+        let mut cfg = DaemonConfig::default();
+        parse_dsl_text(&text, Some(("main.lr", &main)), &mut cfg).unwrap();
+        // No peers were loaded — the daemon should still start.
+        assert!(cfg.peers.is_empty(), "no peers should be loaded");
+        // The warning surfaces through the config's warning channel.
+        assert!(
+            cfg.warnings.iter().any(|w| w.contains("matched 0 files")),
+            "warnings: {:?}",
+            cfg.warnings
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn glob_include_in_a_subblock_splices_into_the_block() {
+        // `include` splices into the current context (BIRD semantics);
+        // a glob include inside a `bgp { ... }` block contributes its
+        // files' contents to that block.
+        let dir = std::env::temp_dir().join(format!("lr-dsl-glob-bg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let fragments = dir.join("fragments");
+        std::fs::create_dir_all(&fragments).unwrap();
+        std::fs::write(fragments.join("a.lr"), "local_as 64512;\n").unwrap();
+        std::fs::write(fragments.join("b.lr"), "peer_as 64513;\n").unwrap();
+        let main = dir.join("main.lr");
+        std::fs::write(&main, "bgp {\n  include \"fragments/*.lr\";\n}\n").unwrap();
+        let text = std::fs::read_to_string(&main).unwrap();
+        let mut cfg = DaemonConfig::default();
+        parse_dsl_text(&text, Some(("main.lr", &main)), &mut cfg).unwrap();
+        assert_eq!(cfg.local_as, 64512);
+        assert_eq!(cfg.peer_as, 64513);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
     fn peer_templates_take_their_name_from_the_header() {
         let cfg = parse(
             r#"

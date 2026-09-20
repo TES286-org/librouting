@@ -421,11 +421,142 @@ impl<'a> Parser<'a> {
         if self.frames.len() >= MAX_INCLUDE_DEPTH {
             return Err(self.err(format!("include nesting deeper than {MAX_INCLUDE_DEPTH}")));
         }
+        // Glob include (e.g. `include "peers/*.lr";`): the path's
+        // basename contains a shell-like pattern that should match
+        // multiple files in the parent directory. We enumerate the
+        // directory, sort the matches for deterministic include
+        // order, and splice each one in turn. Each file goes through
+        // the same cycle-check and depth-limit guards as a plain
+        // single-file include.
+        if Self::path_has_glob(&path) {
+            return self.parse_glob_include(&path);
+        }
+        self.splice_include(&path)
+    }
+
+    /// True when `path` contains a shell-like glob metacharacter that
+    /// `glob_match` would interpret specially. Used to decide between
+    /// the single-file include path and the multi-file glob path.
+    fn path_has_glob(path: &str) -> bool {
+        // A literal backslash escapes the next char, so a `*`/`?`
+        // after a `\` is not a metacharacter — skip past the escape.
+        let bytes = path.as_bytes();
+        let mut i = 0;
+        while i < bytes.len() {
+            match bytes[i] {
+                b'\\' => i = i.saturating_add(2),
+                b'*' | b'?' | b'[' => return true,
+                _ => i += 1,
+            }
+        }
+        false
+    }
+
+    /// Enumerate every file in the include's parent directory whose
+    /// basename matches the glob pattern, sorted lexicographically
+    /// for deterministic include order. Each match goes through the
+    /// same splice as a plain single-file include.
+    fn parse_glob_include(&mut self, pattern: &str) -> Result<(), String> {
+        // Resolve the parent directory and the basename glob pattern
+        // against the current frame. This block scopes the immutable
+        // borrow of `self.frame()` so the empty-match warning below
+        // can take a fresh mutable borrow of `self.cfg`.
+        let (dir, file_pattern) = {
+            let frame = self.frame();
+            let path = Path::new(pattern);
+            match path.parent() {
+                Some(parent) if !parent.as_os_str().is_empty() => {
+                    let dir = if parent.is_absolute() {
+                        parent.to_path_buf()
+                    } else {
+                        frame.dir.join(parent)
+                    };
+                    let file_pattern = path
+                        .file_name()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    (dir, file_pattern)
+                }
+                _ => (frame.dir.clone(), pattern.to_string()),
+            }
+        };
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) => {
+                return Err(self.err(format!(
+                    "cannot read include directory '{}': {e}",
+                    dir.display()
+                )));
+            }
+        };
+        // Collect matching file paths, sorted for deterministic
+        // include order. Subdirectories are skipped — glob include
+        // is one level deep (BIRD's `include` has the same
+        // restriction; the operator who wants recursion can write
+        // the includes out explicitly).
+        let mut matches: Vec<PathBuf> = Vec::new();
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    return Err(self.err(format!(
+                        "include directory '{}': entry read failed: {e}",
+                        dir.display()
+                    )));
+                }
+            };
+            let ftype = match entry.file_type() {
+                Ok(t) => t,
+                Err(_) => continue,
+            };
+            if !ftype.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if crate::daemon_config::glob_match(&file_pattern, &name) {
+                matches.push(entry.path());
+            }
+        }
+        matches.sort();
+        if matches.is_empty() {
+            // An empty glob is not an error — operators write
+            // `include "peers/*.lr";` before any peers exist and
+            // expect the daemon to start cleanly. Log a warning
+            // through the config's warning channel so the operator
+            // sees the no-op, but keep going.
+            self.cfg
+                .warnings
+                .push(format!("include '{pattern}' matched 0 files"));
+            return Ok(());
+        }
+        // Push the matching frames in reverse lexicographic order so
+        // the parser's LIFO frame stack pops them in forward order
+        // (file `a.lr` is processed before `b.lr` before `c.lr`).
+        // Each file goes through the same cycle-check and depth-limit
+        // guards as a plain single-file include.
+        for path in matches.into_iter().rev() {
+            let p_str = path.to_string_lossy().into_owned();
+            self.splice_include(&p_str)?;
+        }
+        Ok(())
+    }
+
+    /// Splice one resolved-or-relative include path into the parser's
+    /// frame stack. Called by [`parse_include`] for single-file
+    /// includes and by [`parse_glob_include`] for each match of a
+    /// glob include. The path is resolved relative to the current
+    /// frame's directory (or used as-is when absolute).
+    ///
+    /// Depth and cycle checks are NOT done here — the depth check
+    /// lives in `parse_include` (so a glob include does not
+    /// double-count its N matches as N levels of nesting), and the
+    /// cycle check is done via `self.chain` here.
+    fn splice_include(&mut self, path: &str) -> Result<(), String> {
         let frame = self.frame();
-        let resolved = if Path::new(&path).is_absolute() {
-            PathBuf::from(&path)
+        let resolved = if Path::new(path).is_absolute() {
+            PathBuf::from(path)
         } else {
-            frame.dir.join(&path)
+            frame.dir.join(path)
         };
         let display = resolved.display().to_string();
         let canonical = std::fs::canonicalize(&resolved)
