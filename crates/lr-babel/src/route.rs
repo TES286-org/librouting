@@ -106,8 +106,28 @@ impl BabelRouteTable {
     }
 
     pub fn withdraw(&mut self, key: &RouteKey) {
+        let source = key.source.as_ref().map(|source| source.prefix);
+        let selected_successor = self
+            .routes
+            .values()
+            .filter(|route| {
+                route.feasible
+                    && route.key.destination == key.destination
+                    && route.key.source.as_ref().map(|source| source.prefix) == source
+            })
+            .min_by_key(|route| route.metric)
+            .is_some_and(|route| route.key == *key);
         self.routes.remove(key);
         self.timing.remove(key);
+        if selected_successor {
+            // RFC 8966 §3.5.1: an update from the currently selected
+            // next-hop is feasible irrespective of the feasibility
+            // distance. A table instance represents one neighbor, so after
+            // that successor retracts its route, forget this instance's FD;
+            // otherwise the same (seqno, metric) cannot return when a link
+            // flaps and the implementation spuriously starves forever.
+            self.feasible.remove(&(key.destination, source));
+        }
     }
 
     /// Expire the routes whose re-announcement hold time lapsed
@@ -239,5 +259,21 @@ mod tests {
         t.insert_timed(r, 0, 0);
         assert!(t.expire(14_999).is_empty());
         assert_eq!(t.expire(15_001), vec![key]);
+    }
+
+    #[test]
+    fn selected_successor_can_return_after_retraction() {
+        let mut t = BabelRouteTable::new();
+        let route = make_route(7, 100, [1; 8]);
+        let key = route.key.clone();
+        t.insert(route.clone());
+        assert_eq!(t.best_routes().len(), 1);
+
+        t.withdraw(&key);
+        t.insert(route);
+
+        let best = t.best_routes();
+        assert_eq!(best.len(), 1);
+        assert!(best[0].feasible);
     }
 }

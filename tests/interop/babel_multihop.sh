@@ -20,13 +20,15 @@
 #      preserved (RFC 8966 §3.7.5) and per-session split horizon
 #      (M never echoes A's routes back through veth0b).
 #   2. C's log shows A's prefix 10.99.1.0/24 installed.
-#   3. M's log shows both — the merged transit RIB.
-#   4. `ip link set veth0b down` (check link): M withdraws A's routes
+#   3. With --install-kernel-routes, A, M, and C mirror every learned
+#      best route into their namespace FIB.
+#   4. M's log shows both — the merged transit RIB.
+#   5. `ip link set veth0b down` (check link): M withdraws A's routes
 #      from its RIB and retracts them on veth1b (RFC 8966 §3.5.5);
 #      C's copy vanishes immediately, A's copy of C's prefix dies with
 #      A's neighbour-death retraction (RFC 8966 §3.2.5) — the chain is
 #      broken end to end.
-#   5. `ip link set veth0b up`: routes return on both ends.
+#   6. `ip link set veth0b up`: routes return on both ends.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -122,17 +124,18 @@ start() { # name netns args...
 # A: manual single-interface daemon on veth0a (in its namespace).
 A_PID=$(start a "$NS_A" --protocol babel \
     --local-address 192.0.2.1 --babel-group "$GROUP" --babel-port "$PORT" \
-    --network 10.99.1.0/24)
+    --network 10.99.1.0/24 --install-kernel-routes)
 DAEMONS="$DAEMONS $A_PID"
 # C: manual single-interface daemon on veth1a (in its namespace).
 C_PID=$(start c "$NS_C" --protocol babel \
     --local-address 198.51.100.1 --babel-group "$GROUP" --babel-port "$PORT" \
-    --network 10.99.3.0/24)
+    --network 10.99.3.0/24 --install-kernel-routes)
 DAEMONS="$DAEMONS $C_PID"
 # M: the multi-session middle box in this namespace. Force the TOML
 # dialect (the compat auto-detector sees `protocol = "babel"` as a
 # BIRD directive).
-M_PID=$(start m - --config "$OUT/m.conf" --config-dialect toml)
+M_PID=$(start m - --config "$OUT/m.conf" --config-dialect toml \
+    --install-kernel-routes)
 DAEMONS="$DAEMONS $M_PID"
 
 wait_for() { # <timeout-s> <file:string>...
@@ -147,6 +150,25 @@ wait_for() { # <timeout-s> <file:string>...
         done
         [ "$ok" = 1 ] && return 0
         sleep 0.25
+    done
+    return 1
+}
+
+wait_route() { # <timeout-s> <netns-or-dash> <prefix> <present|absent>
+    local timeout=$1 netns=$2 prefix=$3 expected=$4
+    local deadline=$(( $(date +%s) + timeout ))
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        local route
+        if [ "$netns" = "-" ]; then
+            route=$(ip route show "$prefix")
+        else
+            route=$(nsenter -t "$netns" -n ip route show "$prefix")
+        fi
+        if { [ "$expected" = present ] && grep -qF "$prefix" <<<"$route"; } ||
+           { [ "$expected" = absent ] && ! grep -qF "$prefix" <<<"$route"; }; then
+            return 0
+        fi
+        sleep 0.1
     done
     return 1
 }
@@ -167,6 +189,23 @@ if ! wait_for 60 \
 fi
 echo "PASS: both directions propagate through the multi-session middle box"
 
+for check in \
+    "$NS_A:10.99.3.0/24" \
+    "$NS_C:10.99.1.0/24"; do
+    ns=${check%%:*}; prefix=${check#*:}
+    if ! wait_route 10 "$ns" "$prefix" present; then
+        echo "FAIL: learned Babel route $prefix is absent from namespace $ns FIB"
+        exit 1
+    fi
+done
+for prefix in 10.99.1.0/24 10.99.3.0/24; do
+    if ! wait_route 10 - "$prefix" present; then
+        echo "FAIL: transit Babel route $prefix is absent from middle FIB"
+        exit 1
+    fi
+done
+echo "PASS: Babel best routes are installed in all three kernel FIBs"
+
 echo "== phase 2: check link — veth0b goes down =="
 ip link set veth0b down
 if ! wait_for 30 \
@@ -180,13 +219,17 @@ if ! wait_for 30 \
     exit 1
 fi
 echo "PASS: the dead segment's routes are withdrawn end-to-end"
+if ! wait_route 10 "$NS_C" 10.99.1.0/24 absent; then
+    echo "FAIL: withdrawn Babel route survived in C's kernel FIB"
+    exit 1
+fi
+echo "PASS: Babel withdrawal removes the kernel route"
 
 echo "== phase 3: the link returns =="
 ip link set veth0b up
-if ! wait_for 60 \
-    "m.log:link up — resuming announcements" \
-    "a.log:route installed 10.99.3.0/24" \
-    "c.log:route installed 10.99.1.0/24"; then
+if ! wait_for 60 "m.log:link up — resuming announcements" ||
+   ! wait_route 60 "$NS_A" 10.99.3.0/24 present ||
+   ! wait_route 60 "$NS_C" 10.99.1.0/24 present; then
     echo "FAIL: link-up reconvergence failed"
     echo "--- a.log tail ---"; tail -8 "$OUT/a.log"
     echo "--- c.log tail ---"; tail -8 "$OUT/c.log"
@@ -194,6 +237,7 @@ if ! wait_for 60 \
     exit 1
 fi
 echo "PASS: routes return when the link comes back"
+echo "PASS: reconvergence restores the kernel route"
 
 echo "== all babel multihop phases passed =="
 exit 0
