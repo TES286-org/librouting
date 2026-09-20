@@ -570,3 +570,82 @@ fn babel_filters_attach_at_startup_and_unknown_name_fails() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A daemon with `[[static.route]]` tables installs them at startup
+/// (BIRD `protocol static`, FRR `ip route`). The Loc-RIB surfaces
+/// them via the runtime API `routes` command, marked `Static`. A
+/// SIGHUP rewrites the table — added routes install, removed routes
+/// withdraw, identical routes are left alone.
+#[test]
+fn static_routes_install_and_reload() {
+    let dir = std::env::temp_dir().join(format!("lr-daemon-test-srt-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let conf = dir.join("daemon.toml");
+    let socket = dir.join("daemon.api");
+
+    std::fs::write(
+        &conf,
+        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+         listen_addr = \"127.0.0.1:17987\"\n\n\
+         [[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.1\"\nmetric = 10\n\n\
+         [[static.route]]\nprefix = \"10.0.0.0/8\"\nnext_hop = \"blackhole\"\n",
+    )
+    .unwrap();
+
+    let mut d = Daemon::spawn(
+        &[
+            "--config",
+            conf.to_str().unwrap(),
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "srt",
+    );
+    wait_log_all(
+        &d.log,
+        &[
+            "static:      203.0.113.0/24 via 198.51.100.1 metric=10",
+            "static:      10.0.0.0/8 blackhole metric=0",
+            "runtime API on",
+        ],
+    );
+
+    // The Loc-RIB shows both static routes installed.
+    let routes = api_ask(&socket, "routes");
+    assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
+    assert!(routes.contains("10.0.0.0/8"), "routes: {routes}");
+    // Static protocol surfaces as `Static` in the route dump.
+    assert!(routes.contains("proto=Static"), "routes: {routes}");
+
+    // Rewrite the config: drop 10.0.0.0/8, change 203.0.113.0/24's
+    // next-hop, add a new 198.51.100.0/24 blackhole.
+    std::fs::write(
+        &conf,
+        "[bgp]\nlocal_as = 64512\npeer_as = 64513\nrouter_id = \"10.0.0.1\"\n\
+         listen_addr = \"127.0.0.1:17987\"\n\n\
+         [[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.2\"\nmetric = 10\n\n\
+         [[static.route]]\nprefix = \"198.51.100.0/24\"\nnext_hop = \"blackhole\"\n",
+    )
+    .unwrap();
+    d.signal(SIGHUP);
+    wait_log_all(
+        &d.log,
+        &[
+            "SIGHUP received",
+            "reload: static 203.0.113.0/24 withdrawn (replaced)",
+            "reload: static 203.0.113.0/24 installed",
+            "reload: static 198.51.100.0/24 installed",
+            "reload: static 10.0.0.0/8 withdrawn",
+        ],
+    );
+
+    let routes = api_ask(&socket, "routes");
+    assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
+    assert!(routes.contains("198.51.100.0/24"), "routes: {routes}");
+    assert!(!routes.contains("10.0.0.0/8"), "routes: {routes}");
+
+    d.signal(SIGTERM);
+    let (ok, _log) = d.wait_exit();
+    assert!(ok, "daemon must exit cleanly");
+    let _ = std::fs::remove_dir_all(&dir);
+}

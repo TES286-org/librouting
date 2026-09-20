@@ -321,4 +321,34 @@ peer "edge-1" {
         assert!(cfg.peer_templates.contains_key("rr-client"));
         assert_eq!(cfg.peers[0].extends.as_deref(), Some("rr-client"));
     }
+
+    #[test]
+    fn static_route_blocks_parse_in_dsl() {
+        let cfg = parse(
+            r#"
+static {
+    route "203.0.113.0/24" {
+        next_hop "198.51.100.1";
+        metric 10;
+    }
+    route "10.0.0.0/8" {
+        next_hop "blackhole";
+    }
+}
+"#,
+        )
+        .unwrap();
+        assert_eq!(cfg.static_routes.len(), 2);
+        assert_eq!(
+            cfg.static_routes[0].prefix.as_deref(),
+            Some("203.0.113.0/24")
+        );
+        assert_eq!(
+            cfg.static_routes[0].next_hop.as_deref(),
+            Some("198.51.100.1")
+        );
+        assert_eq!(cfg.static_routes[0].metric, Some(10));
+        // The blackhole keyword is normalised to None at parse time.
+        assert_eq!(cfg.static_routes[1].next_hop, None);
+    }
 }

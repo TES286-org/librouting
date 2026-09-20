@@ -1069,6 +1069,12 @@ pub struct DefaultRouter {
     add_path_max_paths: usize,
     /// Locally originated routes (kept so unoriginate can remove them).
     originated: BTreeMap<RouteKey, Route>,
+    /// Operator-configured static routes (BIRD `protocol static`, FRR
+    /// `ip route`). Kept so [`Self::uninstall_static`] can remove
+    /// them, and so a configuration reload can diff old vs new (the
+    /// daemon's reload path re-applies the static table wholesale
+    /// like it does for the ROA table).
+    static_routes: BTreeMap<RouteKey, Route>,
     pending_events: Vec<RouterEvent>,
     /// OSPF: per-area link-state databases, shared by all sessions of an
     /// area and keyed by area ID.
@@ -1276,6 +1282,7 @@ impl Default for DefaultRouter {
             best_path_cfg: BestPathConfig::default(),
             add_path_max_paths: 1,
             originated: BTreeMap::new(),
+            static_routes: BTreeMap::new(),
             pending_events: Vec::new(),
             ospf_areas: BTreeMap::new(),
             ospf_grace_seen: BTreeMap::new(),
@@ -2137,6 +2144,72 @@ impl DefaultRouter {
         } else {
             false
         }
+    }
+
+    /// Install a static route into the Loc-RIB (BIRD `protocol static
+    /// { route; }`, FRR `ip route <prefix> <next-hop>`). The route's
+    /// `protocol` is [`Protocol::Static`]; its admin distance is 1
+    /// (FRR's default for static); its metric is the operator-
+    /// configured value (default 0). The route is tracked in the
+    /// router's static-route map so [`Self::uninstall_static`] can
+    /// remove it and the daemon's reload path can re-apply the table
+    /// wholesale.
+    ///
+    /// A static route wins over every other protocol except Connected
+    /// (admin distance 0) and competes with BGP-originated routes
+    /// (admin distance 20) by admin distance — the FRR/BIRD model.
+    /// When `next_hop` is `None`, the route is a blackhole (FRR
+    /// `ip route <prefix> Null0`, BIRD `route <prefix> blackhole`).
+    pub fn install_static(
+        &mut self,
+        prefix: Prefix,
+        family: NlriFamily,
+        next_hop: Option<IpAddr>,
+        metric: u32,
+        tag: Option<u32>,
+    ) -> RouteKey {
+        let key = RouteKey::new(prefix, family);
+        let route = Route {
+            key: key.clone(),
+            origin: RouteOrigin { proto: 2, peer: 0 },
+            protocol: Protocol::Static,
+            preference: lr_core::rib::Preference::new(
+                Protocol::Static.default_admin_distance(),
+                metric,
+            ),
+            next_hop,
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag,
+        };
+        self.loc_rib.install_set(&key, vec![route.clone()]);
+        self.static_routes.insert(key.clone(), route.clone());
+        self.pending_events
+            .push(RouterEvent::RouteInstalled(route.clone()));
+        self.export_selection(&key, &[route]);
+        key
+    }
+
+    /// Remove a previously-installed static route. Returns `true` when
+    /// a static route was removed and `false` when the key was not a
+    /// static route (matching `unoriginate`'s contract for BGP
+    /// originated routes).
+    pub fn uninstall_static(&mut self, key: &RouteKey) -> bool {
+        if self.static_routes.remove(key).is_some() {
+            self.unredistribute_route(key);
+            self.reselect(key);
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Read-only access to the operator-configured static routes —
+    /// the daemon's reload path diffs the configured set against
+    /// this map and removes dropped entries.
+    pub fn static_routes(&self) -> &BTreeMap<RouteKey, Route> {
+        &self.static_routes
     }
 
     /// Register a BGP route aggregate (RFC 4271 §9.2.2.2). When the

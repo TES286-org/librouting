@@ -376,6 +376,36 @@ pub(crate) struct RoaSpec {
     pub asn: Option<u32>,
 }
 
+/// One `[[static.route]]` table — an operator-configured static route
+/// (BIRD `protocol static { route <prefix> via <gateway>; }`, FRR
+/// `ip route <prefix> <gateway>`). Installed into the Loc-RIB at
+/// startup with `Protocol::Static` and admin distance 1, winning over
+/// every dynamic protocol except Connected. Reloadable via SIGHUP /
+/// the runtime API `reload` command: added routes are installed,
+/// removed routes are withdrawn, identical routes are left alone.
+///
+/// A route with `next_hop = None` is a blackhole (FRR `Null0`,
+/// BIRD `blackhole`). The `family` is derived from the prefix's
+/// address family — no separate v4/v6 table is needed.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct StaticRouteSpec {
+    /// Destination prefix (`"203.0.113.0/24"`), required. IPv4 or
+    /// IPv6; the family is derived from the address.
+    pub prefix: Option<String>,
+    /// Next-hop gateway (`"198.51.100.1"`). `None` (the default)
+    /// installs a blackhole route — packets to `prefix` are dropped
+    /// at this router (FRR `Null0`, BIRD `blackhole`).
+    pub next_hop: Option<String>,
+    /// Route metric within the static protocol (default 0). Used as
+    /// the right half of [`lr_core::rib::Preference`]; lower wins.
+    pub metric: Option<u32>,
+    /// Operator-assigned 32-bit route tag (RFC 4271 §9.1.2 path
+    /// attribute space; OSPF external LSAs carry it as the External
+    /// Route Tag). Cross-protocol redistribution pipes propagate
+    /// the tag through.
+    pub tag: Option<u32>,
+}
+
 /// The `[bgp.rpki]` table — the RPKI-RTR cache client configuration
 /// (RFC 8210; ROADMAP-v3 D2.4). When `cache` is set the daemon spawns
 /// an RTR client thread at startup: it connects to the cache, syncs
@@ -719,6 +749,11 @@ pub(crate) struct DaemonConfig {
     /// session. The first matching pattern wins (BIRD `interface`
     /// directive parity).
     pub babel_interfaces: Vec<BabelInterfaceSpec>,
+    /// `[[static.route]]` tables — operator-configured static routes
+    /// (BIRD `protocol static`, FRR `ip route`). Installed into the
+    /// Loc-RIB at startup with `Protocol::Static` and admin distance 1.
+    /// Reloadable via SIGHUP / the runtime API `reload` command.
+    pub static_routes: Vec<StaticRouteSpec>,
     /// BMP monitoring station to mirror Peer Up/Down + Route Monitoring
     /// to (`--bmp-target host:port` / `[bgp] bmp_target`).
     pub bmp_target: Option<String>,
@@ -1057,6 +1092,7 @@ impl DaemonConfig {
             babel_import_filter: None,
             babel_export_filter: None,
             babel_interfaces: Vec::new(),
+            static_routes: Vec::new(),
             ebgp_policy: "rfc8212".to_string(),
             enforce_first_as: false,
             bestpath_compare_routerid: true,
@@ -1188,8 +1224,41 @@ impl DaemonConfig {
         self.finalize_rpki()?;
         self.finalize_filters()?;
         self.finalize_babel_interfaces()?;
+        self.finalize_static_routes()?;
         self.finalize_redistribution()?;
         self.finalize_aggregates()?;
+        Ok(())
+    }
+
+    /// Validate the `[[static.route]]` tables: every entry has a
+    /// `prefix`, the prefix parses, and `next_hop` (when present)
+    /// parses as an IP address. The family mismatch check (v4 prefix
+    /// with v6 next-hop and vice versa) is enforced here too — a
+    /// typo'd static route silently wins over every dynamic protocol
+    /// and is a fail-closed error.
+    fn finalize_static_routes(&mut self) -> Result<(), String> {
+        for route in &self.static_routes {
+            let Some(prefix_str) = route.prefix.as_deref() else {
+                return Err("[[static.route]] without 'prefix'".to_string());
+            };
+            let prefix: lr_core::addr::Prefix = prefix_str
+                .parse()
+                .map_err(|_| format!("[[static.route]] bad prefix '{prefix_str}'"))?;
+            if let Some(nh_str) = route.next_hop.as_deref() {
+                let nh: std::net::IpAddr = nh_str.parse().map_err(|_| {
+                    format!("[[static.route]] {prefix_str}: bad next_hop '{nh_str}'")
+                })?;
+                let prefix_is_v4 = prefix.addr.is_ipv4();
+                let nh_is_v4 = nh.is_ipv4();
+                if prefix_is_v4 != nh_is_v4 {
+                    return Err(format!(
+                        "[[static.route]] {prefix_str}: next_hop family mismatch (prefix is {}, next_hop is {})",
+                        if prefix_is_v4 { "v4" } else { "v6" },
+                        if nh_is_v4 { "v4" } else { "v6" },
+                    ));
+                }
+            }
+        }
         Ok(())
     }
 
@@ -2234,6 +2303,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.babel_interfaces.push(BabelInterfaceSpec::default());
                     section = "babel.interface".to_string();
                 }
+                "static.route" => {
+                    cfg.static_routes.push(StaticRouteSpec::default());
+                    section = "static.route".to_string();
+                }
                 "roa" => {
                     cfg.roas.push(RoaSpec::default());
                     section = "roa".to_string();
@@ -2379,6 +2452,11 @@ pub(crate) fn apply_config_key(
     // protocol surface — a typo'd prefix or filter body silently
     // changes origin validation behaviour.
     if apply_roa_key(cfg, section, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))? {
+        return Ok(());
+    }
+    if apply_static_route_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
         return Ok(());
     }
     if apply_filter_key(cfg, section, key, value)
@@ -2887,6 +2965,68 @@ fn apply_roa_key(
         _ => {
             return Err(format!(
                 "unknown [[roa]] key '{key}' (typo protection; ROA config fails closed)"
+            ))
+        }
+    }
+    Ok(true)
+}
+
+/// Apply one `key = value` pair to the static-route schema: the
+/// `[[static.route]]` tables. Fail-closed like every other policy
+/// surface — a typo'd prefix or next-hop silently installs the wrong
+/// route. Returns `Ok(true)` when the key was consumed here,
+/// `Ok(false)` to fall through to the next section schema.
+fn apply_static_route_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "static.route" {
+        return Ok(false);
+    }
+    let Some(route) = cfg.static_routes.last_mut() else {
+        return Err("key outside a [[static.route]] table".into());
+    };
+    match key {
+        "prefix" => {
+            let v = value.trim().trim_matches('"');
+            if v.parse::<lr_core::addr::Prefix>().is_err() {
+                return Err(format!("bad static route prefix '{v}' (expected CIDR)"));
+            }
+            route.prefix = Some(v.to_string());
+        }
+        "next_hop" | "via" | "gateway" => {
+            let v = value.trim().trim_matches('"');
+            // Allow the operator to spell out "blackhole" or "Null0"
+            // for clarity — the daemon treats these the same as a
+            // missing next_hop (FRR/BIRD parity).
+            if v.eq_ignore_ascii_case("blackhole") || v.eq_ignore_ascii_case("Null0") {
+                route.next_hop = None;
+            } else {
+                if v.parse::<std::net::IpAddr>().is_err() {
+                    return Err(format!("bad static route next_hop '{v}' (expected IP)"));
+                }
+                route.next_hop = Some(v.to_string());
+            }
+        }
+        "metric" => {
+            route.metric = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad static route metric '{value}' (u32)"))?,
+            );
+        }
+        "tag" => {
+            route.tag = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad static route tag '{value}' (u32)"))?,
+            );
+        }
+        _ => {
+            return Err(format!(
+                "unknown [[static.route]] key '{key}' (typo protection; static route config fails closed)"
             ))
         }
     }
@@ -6151,6 +6291,62 @@ mod tests {
         assert_eq!(cfg.babel_interfaces[0].kind.as_deref(), Some("wired"));
         assert_eq!(cfg.babel_interfaces[0].rxcost, Some(96));
         assert_eq!(cfg.babel_interfaces[1].kind.as_deref(), Some("wireless"));
+    }
+
+    #[test]
+    fn static_routes_parse_and_finalize() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"198.51.100.1\"\nmetric = 10\n\n\
+             [[static.route]]\nprefix = \"2001:db8:1::/48\"\nnext_hop = \"2001:db8:2::1\"\n\n\
+             [[static.route]]\nprefix = \"10.0.0.0/8\"\nnext_hop = \"blackhole\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.static_routes.len(), 3);
+        assert_eq!(
+            cfg.static_routes[0].prefix.as_deref(),
+            Some("203.0.113.0/24")
+        );
+        assert_eq!(
+            cfg.static_routes[0].next_hop.as_deref(),
+            Some("198.51.100.1")
+        );
+        assert_eq!(cfg.static_routes[0].metric, Some(10));
+        // The blackhole keyword is normalised to None.
+        assert_eq!(cfg.static_routes[2].next_hop, None);
+    }
+
+    #[test]
+    fn static_routes_reject_missing_prefix() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset("[[static.route]]\nnext_hop = \"198.51.100.1\"\n", &mut cfg).unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("without 'prefix'"), "{err}");
+    }
+
+    #[test]
+    fn static_routes_reject_family_mismatch() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"2001:db8::1\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.finalize().unwrap_err();
+        assert!(err.contains("family mismatch"), "{err}");
+    }
+
+    #[test]
+    fn static_routes_reject_bad_next_hop() {
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset(
+            "[[static.route]]\nprefix = \"203.0.113.0/24\"\nnext_hop = \"not-an-ip\"\n",
+            &mut cfg,
+        )
+        .unwrap_err();
+        assert!(err.contains("bad static route next_hop"), "{err}");
     }
 
     #[test]

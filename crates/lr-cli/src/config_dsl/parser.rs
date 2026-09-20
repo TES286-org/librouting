@@ -17,7 +17,7 @@ use crate::daemon_config::{
     apply_config_key, escape_toml_string, AggregateSpec, BabelInterfaceSpec, BabelKeySpec,
     DaemonConfig, FilterSpec, LdpBindSpec, LdpIfSpec, LdpTargetedSpec, OspfAreaSpec, OspfIfSpec,
     OspfMappingServerSpec, OspfPrefixSidSpec, OspfSrv6LocatorSpec, PeerSpec, RedistributeSpec,
-    RoaSpec,
+    RoaSpec, StaticRouteSpec,
 };
 use crate::daemon_policy::{AsPathListSpec, CommunityListSpec, PrefixListSpec, RouteMapSpec};
 
@@ -77,6 +77,8 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("", "babel") => Some(single("babel")),
         ("babel", "key") => Some(array("babel.key", None)),
         ("babel", "interface") => Some(array("babel.interface", Some("name"))),
+        ("", "static") => Some(single("static")),
+        ("static", "route") => Some(array("static.route", Some("prefix"))),
         ("", "ldp") => Some(single("ldp")),
         ("ldp", "interface") => Some(array("ldp.interface", Some("name"))),
         ("ldp", "targeted") => Some(array("ldp.targeted", Some("address"))),
@@ -623,6 +625,7 @@ impl<'a> Parser<'a> {
             "ospf.srv6_locator" => cfg.ospf_srv6_locators.push(OspfSrv6LocatorSpec::default()),
             "babel.key" => cfg.babel_keys.push(BabelKeySpec::default()),
             "babel.interface" => cfg.babel_interfaces.push(BabelInterfaceSpec::default()),
+            "static.route" => cfg.static_routes.push(StaticRouteSpec::default()),
             "ldp.interface" => cfg.ldp_interfaces.push(LdpIfSpec::default()),
             "ldp.targeted" => cfg.ldp_targeted.push(LdpTargetedSpec::default()),
             "ldp.bind" => cfg.ldp_binds.push(LdpBindSpec::default()),

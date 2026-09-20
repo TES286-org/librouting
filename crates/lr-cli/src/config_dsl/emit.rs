@@ -245,6 +245,26 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
+    // --- static routes ------------------------------------------------------
+    if !cfg.static_routes.is_empty() {
+        e.open(0, "static", None);
+        for route in &cfg.static_routes {
+            let prefix = route.prefix.as_deref().unwrap_or("");
+            e.open(1, "route", Some(&fmt_string(prefix)));
+            if let Some(v) = &route.next_hop {
+                e.kv(2, "next_hop", &fmt_string(v));
+            }
+            if let Some(v) = route.metric {
+                e.kv(2, "metric", &v.to_string());
+            }
+            if let Some(v) = route.tag {
+                e.kv(2, "tag", &v.to_string());
+            }
+            e.close(1);
+        }
+        e.close(0);
+    }
+
     // --- ospf ---------------------------------------------------------------
     let ospf = ospf_block(cfg, &base);
     let ospf_sub = ospf_sub_blocks(cfg)?;

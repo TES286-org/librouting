@@ -402,12 +402,12 @@ impl PeerEntry {
 /// the protocol set (`finalize_redistribution`), so any error here is
 /// a programming bug and surfaces as one.
 ///
-/// Returns the number of pipes and aggregates installed (for the
-/// startup banner).
+/// Returns the number of pipes, aggregates and static routes installed
+/// (for the startup banner).
 fn apply_cross_protocol_config(
     cfg: &DaemonConfig,
     r: &mut DefaultRouter,
-) -> Result<(usize, usize), String> {
+) -> Result<(usize, usize, usize), String> {
     for spec in &cfg.redistributes {
         let source = spec
             .source
@@ -459,7 +459,39 @@ fn apply_cross_protocol_config(
         println!("  aggregate:    {} (rfc4271 §9.2.2.2)", prefix);
         r.add_aggregate(prefix);
     }
-    Ok((cfg.redistributes.len(), cfg.aggregates.len()))
+    // Static routes — BIRD `protocol static`, FRR `ip route`. Installed
+    // into the Loc-RIB with `Protocol::Static` and admin distance 1
+    // (wins over every dynamic protocol except Connected). A reload
+    // re-applies the table wholesale (see `reload_static_routes`).
+    for spec in &cfg.static_routes {
+        let text = spec
+            .prefix
+            .as_deref()
+            .ok_or_else(|| "[[static.route]] without 'prefix'".to_string())?;
+        let prefix: Prefix = text
+            .parse()
+            .map_err(|_| format!("[[static.route]] bad prefix '{text}'"))?;
+        let family = match prefix.addr {
+            IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
+            IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+        };
+        let next_hop = spec
+            .next_hop
+            .as_deref()
+            .and_then(|s| s.parse::<lr_core::addr::IpAddr>().ok());
+        let metric = spec.metric.unwrap_or(0);
+        r.install_static(prefix, family, next_hop, metric, spec.tag);
+        let nh_label = match next_hop {
+            Some(nh) => format!(" via {}", nh),
+            None => " blackhole".to_string(),
+        };
+        println!("  static:      {}{} metric={}", prefix, nh_label, metric);
+    }
+    Ok((
+        cfg.redistributes.len(),
+        cfg.aggregates.len(),
+        cfg.static_routes.len(),
+    ))
 }
 
 /// Run the BGP engine. `host = None` is the classic standalone
@@ -5059,6 +5091,66 @@ fn reload_config(
                      (removing the RTR thread live is not supported)"
                         .to_string(),
                 );
+            }
+        }
+    }
+    // Static routes re-application (BIRD `protocol static` reload, FRR
+    // `ip route` re-application). The fresh config's `[[static.route]]`
+    // tables are diffed against the router's currently-installed static
+    // routes: added routes are installed, removed routes are withdrawn,
+    // identical routes are left alone. Per-route identity is the
+    // (prefix, family) key — a next-hop or metric change replaces the
+    // entry wholesale.
+    {
+        let mut r = router.write().unwrap();
+        let mut installed: Vec<lr_core::rib::RouteKey> =
+            r.static_routes().keys().cloned().collect();
+        // Diff: build the fresh set, drop entries no longer present,
+        // install entries that are new or changed.
+        let mut fresh_keys: std::collections::BTreeSet<lr_core::rib::RouteKey> =
+            std::collections::BTreeSet::new();
+        for spec in &fresh.static_routes {
+            let Some(text) = spec.prefix.as_deref() else {
+                continue;
+            };
+            let Ok(prefix) = text.parse::<Prefix>() else {
+                continue;
+            };
+            let family = match prefix.addr {
+                IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
+                IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+            };
+            let key = lr_core::rib::RouteKey::new(prefix, family);
+            let next_hop = spec
+                .next_hop
+                .as_deref()
+                .and_then(|s| s.parse::<lr_core::addr::IpAddr>().ok());
+            let metric = spec.metric.unwrap_or(0);
+            // Compare against the currently-installed route: if the
+            // next_hop, metric or tag changed, withdraw the old one
+            // first so `install_static` replaces it cleanly.
+            let needs_reinstall = match r.static_routes().get(&key) {
+                None => true,
+                Some(existing) => {
+                    existing.next_hop != next_hop
+                        || existing.preference.metric != metric
+                        || existing.tag != spec.tag
+                }
+            };
+            if needs_reinstall {
+                if r.static_routes().contains_key(&key) {
+                    r.uninstall_static(&key);
+                    lines.push(format!("reload: static {} withdrawn (replaced)", prefix));
+                }
+                r.install_static(prefix, family, next_hop, metric, spec.tag);
+                lines.push(format!("reload: static {} installed", prefix));
+            }
+            fresh_keys.insert(key);
+        }
+        for key in installed.drain(..) {
+            if !fresh_keys.contains(&key) {
+                r.uninstall_static(&key);
+                lines.push(format!("reload: static {} withdrawn", key.prefix));
             }
         }
     }
