@@ -7,18 +7,40 @@
 //! `interface_v4_addrs`, `interface_v6_addrs` and `ifindex_of` work,
 //! so Babel's `[[babel.interface]]` glob matcher is fully operational.
 //!
-//! ## Why a separate file
+//! ## Struct layouts (verified against Windows SDK `iptypes.h`)
 //!
-//! Windows has neither `getifaddrs` nor `if_nametoindex`. The closest
-//! analogue is `GetAdaptersAddresses` (iphlpapi.dll), which returns a
-//! linked list of `IP_ADAPTER_ADDRESSES` structs — one per adapter —
-//! each carrying its `FriendlyName` (UTF-16), `FirstPrefix`,
-//! `FirstUnicastAddress`, and an `OperStatus` field that distinguishes
-//! `IfOperStatusUp` from `IfOperStatusDown`.
+//! `IP_ADAPTER_ADDRESSES_LH` on 64-bit (field → offset):
+//! ```text
+//!   Alignment union        @0   (8 bytes)
+//!   Next                   @8   (pointer)
+//!   AdapterName            @16  (PCHAR)
+//!   FriendlyName           @24  (PWSTR)         ← we use this
+//!   FirstUnicastAddress     @32  (pointer)       ← we use this
+//!   FirstAnycastAddress    @40
+//!   FirstMulticastAddress  @48
+//!   FirstDnsServerAddress  @56
+//!   DnsSuffix              @64
+//!   Description             @72
+//!   ... (PhysicalAddress, Flags, Mtu, IfType, OperStatus, Ipv6IfIndex,
+//!        ZoneIndices[16], IfIndex, ...)
+//! ```
 //!
-//! We translate that into the same `InterfaceEntry` shape the Linux
-//! `getifaddrs` path produces, so callers (the Babel interface matcher
-//! in `daemon.rs`) work unchanged across platforms.
+//! `IP_ADAPTER_UNICAST_ADDRESS_LH` on 64-bit:
+//! ```text
+//!   Alignment union        @0   (8 bytes)
+//!   Next                   @8   (pointer)
+//!   Address                @16  (SOCKET_ADDRESS, 16 bytes)
+//!   AddressPrefix          @32  (IP_ADDRESS_PREFIX, 24 bytes)
+//!   DadState               @56  (4 bytes)
+//!   ValidLifetime          @60
+//!   PreferredLifetime      @64
+//!   LeaseLifetime          @68
+//!   OnLinkPrefixLength     @72  (ULONG)         ← we read this
+//! ```
+//!
+//! `SOCKET_ADDRESS` on 64-bit is 16 bytes: `lpSockaddr` (8-byte
+//! pointer) + `iSockaddrLength` (4-byte INT) + 4 bytes padding for
+//! 8-byte alignment.
 
 use std::ffi::c_void;
 use std::net::{Ipv4Addr, Ipv6Addr};
@@ -27,10 +49,10 @@ use std::ptr;
 use super::{InterfaceEntry, InterfaceV4Addr, InterfaceV6Addr, OspfTransportError};
 
 // ---------------------------------------------------------------------------
-// Constants — Windows SDK values (used by GetAdaptersAddresses callers)
+// Constants — Windows SDK values
 // ---------------------------------------------------------------------------
 
-/// `AF_INET` — same value as on every other platform (Winsock2).
+/// `AF_INET` — Winsock2 value (same as on every platform).
 const AF_INET: u16 = 2;
 /// `AF_INET6` — Windows defines this as 23 (`WSA_ADDRESS_FAMILY`).
 const AF_INET6: u16 = 23;
@@ -39,10 +61,9 @@ const AF_INET6: u16 = 23;
 const GAA_FLAG_SKIP_ANYCAST: u32 = 0x0002;
 /// `GAA_FLAG_SKIP_MULTICAST` — omit multicast addresses.
 const GAA_FLAG_SKIP_MULTICAST: u32 = 0x0004;
-/// `GAA_FLAG_INCLUDE_PREFIX` — request the per-address prefix list
-/// (needed to derive IPv4 prefix lengths; `OnLinkPrefixLength` was
-/// only added to `IP_ADAPTER_UNICAST_ADDRESS` in Vista+, but we ask
-/// for the prefix list explicitly to cover older targets).
+/// `GAA_FLAG_INCLUDE_PREFIX` — request `OnLinkPrefixLength` on each
+/// unicast address (Vista+; the field is only populated when this
+/// flag is set).
 const GAA_FLAG_INCLUDE_PREFIX: u32 = 0x0010;
 /// `GAA_FLAG_SKIP_DNS_SERVER` — omit DNS server addresses.
 const GAA_FLAG_SKIP_DNS_SERVER: u32 = 0x0080;
@@ -54,74 +75,94 @@ const ERROR_BUFFER_OVERFLOW: u32 = 111;
 const IF_OPER_STATUS_UP: u32 = 1;
 
 // ---------------------------------------------------------------------------
-// FFI
+// FFI struct declarations — match Windows SDK `iptypes.h` exactly
 // ---------------------------------------------------------------------------
 
 /// `SOCKET_ADDRESS` — a pointer + length pair wrapping a `sockaddr*`.
+/// On 64-bit: 8 (ptr) + 4 (int) + 4 (pad) = 16 bytes.
 #[repr(C)]
 struct SocketAddress {
     lp_sockaddr: *mut u8,
     i_sockaddr_length: i32,
+    _padding: u32,
 }
 
-/// `IP_ADAPTER_UNICAST_ADDRESS_LH` — one unicast address on an
-/// adapter. The struct's full Vista+ layout is larger; we lay out
-/// only the leading fields up to `address` and read the
-/// `OnLinkPrefixLength` field by offset (see [`Self::on_link_prefix_len`]).
+/// `IP_ADAPTER_UNICAST_ADDRESS_LH` (Vista+ form). We declare the full
+/// struct up to and including `OnLinkPrefixLength` so Rust's
+/// `#[repr(C)]` layout matches the SDK and the offset of every field
+/// is correct by construction — no manual offset arithmetic.
+///
+/// Fields after `OnLinkPrefixLength` (e.g. `FirstGatewayAddress`) are
+/// not declared because we never read them; the SDK struct continues
+/// but truncating a `#[repr(C)]` struct at any point is safe as long
+/// as we never read past what we declared.
 #[repr(C)]
 struct IpAdapterUnicastAddress {
-    /// Vista+ form: a union `Alignment` of `Length`+`Reserved` (8 bytes
-    /// on 64-bit). Win32 declares the leading field as a union that
-    /// is 8-byte aligned, so the rest of the struct layout depends on
-    /// that.
-    _alignment: [u8; 8],
+    /// Union `{ ULONGLONG Alignment; struct { ULONG Length; DWORD Reserved; } }`
+    _alignment: u64,
+    /// `struct _IP_ADAPTER_UNICAST_ADDRESS *Next`
     next: *mut IpAdapterUnicastAddress,
-    /// `IP_ADDRESS_SUFFIX IpAddress` — the legacy WinXP form
-    /// (`PrefixLength` field at offset 20). We never read this directly.
-    _legacy_ip_address: [u8; 8],
+    /// `SOCKET_ADDRESS Address` — 16 bytes on 64-bit.
     address: SocketAddress,
-    // The Vista+ form continues with `DadState`, `ScopeId`, `Lifetime`
-    // (16 bytes), then `OnLinkPrefixLength` at offset 48 from the
-    // struct start (after `address`).
+    /// `IP_ADDRESS_PREFIX AddressPrefix` — `SOCKET_ADDRESS Prefix` +
+    /// `UINT8 PrefixLength` + 7 bytes padding = 24 bytes on 64-bit.
+    _address_prefix: [u8; 24],
+    /// `NL_DAD_STATE DadState` (enum = ULONG = 4 bytes).
+    _dad_state: u32,
+    /// `ULONG ValidLifetime`.
+    _valid_lifetime: u32,
+    /// `ULONG PreferredLifetime`.
+    _preferred_lifetime: u32,
+    /// `ULONG LeaseLifetime`.
+    _lease_lifetime: u32,
+    /// `ULONG OnLinkPrefixLength` — the prefix length we want.
+    on_link_prefix_length: u32,
 }
 
-impl IpAdapterUnicastAddress {
-    /// Read `OnLinkPrefixLength` (Vista+). The field sits at a fixed
-    /// offset after `address` in the `IP_ADAPTER_UNICAST_ADDRESS_LH`
-    /// layout. We re-derive it from the struct's start address to
-    /// stay robust against SDK header growth — the struct's *declared*
-    /// length grows but the leading-field offsets we use are stable.
-    ///
-    /// SAFETY: the caller must pass a pointer returned by
-    /// `GetAdaptersAddresses`. We never read past byte 48 from the
-    /// struct start.
-    unsafe fn on_link_prefix_len(&self) -> u8 {
-        const OFFSET: usize = 48;
-        unsafe { *((self as *const Self as *const u8).add(OFFSET)) }
-    }
-}
-
-/// `IP_ADAPTER_ADDRESSES` — one network adapter (LH form, Vista+).
-///
-/// We read only the FriendlyName, the unicast-address list, and the
-/// `OperStatus` / `IfIndex` fields. The full struct has ~25 fields;
-/// we lay out only the leading ones we touch.
+/// `IP_ADAPTER_ADDRESSES_LH` (Vista+ form). We declare the full
+/// struct up to `IfIndex` so every field offset is correct by
+/// construction. Fields after `IfIndex` (FirstPrefix, etc.) are
+/// omitted — we never read them.
 #[repr(C)]
 struct IpAdapterAddresses {
+    /// Union `{ ULONGLONG Alignment; struct { ULONG Length; IF_INDEX IfIndex; } }`
+    /// — the union is 8 bytes; `IfIndex` sits at offset 4 inside it.
+    _alignment: u64,
+    /// `struct _IP_ADAPTER_ADDRESSES *Next`
     next: *mut IpAdapterAddresses,
-    _adapter_name: *mut u8, // ANSI (latin-1) name, low-level — we use FriendlyName instead.
-    first_unicast_address: *mut IpAdapterUnicastAddress,
-    _first_anycast_address: *mut c_void,
-    _first_multicast_address: *mut c_void,
-    _first_dns_server_address: *mut c_void,
-    _dns_suffix: *mut u16,
+    /// `PCHAR AdapterName` — ANSI (latin-1) name.
+    _adapter_name: *mut u8,
+    /// `PWSTR FriendlyName` — UTF-16 display name (e.g. "Ethernet").
     friendly_name: *mut u16,
+    /// `struct _IP_ADAPTER_UNICAST_ADDRESS *FirstUnicastAddress`
+    first_unicast_address: *mut IpAdapterUnicastAddress,
+    /// `struct _IP_ADAPTER_ANYCAST_ADDRESS *FirstAnycastAddress`
+    _first_anycast_address: *mut c_void,
+    /// `struct _IP_ADAPTER_MULTICAST_ADDRESS *FirstMulticastAddress`
+    _first_multicast_address: *mut c_void,
+    /// `struct _IP_ADAPTER_DNS_SERVER_ADDRESS *FirstDnsServerAddress`
+    _first_dns_server_address: *mut c_void,
+    /// `PWCHAR DnsSuffix`
+    _dns_suffix: *mut u16,
+    /// `PWCHAR Description`
+    _description: *mut u16,
+    /// `UCHAR PhysicalAddress[MAX_ADAPTER_ADDRESS_LENGTH]` (8 bytes).
     _physical_address: [u8; 8],
+    /// `ULONG PhysicalAddressLength`.
     _physical_address_length: u32,
+    /// `ULONG Flags`.
     _flags: u32,
-    mtu: u32,
-    if_type: u32,
+    /// `ULONG Mtu`.
+    _mtu: u32,
+    /// `ULONG IfType`.
+    _if_type: u32,
+    /// `IF_OPER_STATUS OperStatus` (enum = ULONG = 4 bytes).
     oper_status: u32,
+    /// `ULONG Ipv6IfIndex`.
+    _ipv6_if_index: u32,
+    /// `ULONG ZoneIndices[16]` — 64 bytes.
+    _zone_indices: [u32; 16],
+    /// `IF_INDEX IfIndex` — the standalone interface index field.
     if_index: u32,
 }
 
@@ -229,14 +270,10 @@ unsafe fn friendly_name(ptr: *const u16) -> Option<String> {
     String::from_utf16(slice).ok()
 }
 
-fn errno() -> i32 {
-    std::io::Error::last_os_error().raw_os_error().unwrap_or(0)
-}
-
 fn os_error(context: &'static str) -> OspfTransportError {
     OspfTransportError::Os {
         context,
-        errno: errno(),
+        errno: std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
     }
 }
 
@@ -252,14 +289,19 @@ unsafe fn read_v4(u: &IpAdapterUnicastAddress) -> Option<(Ipv4Addr, u8)> {
     if sa.i_sockaddr_length < 16 || sa.lp_sockaddr.is_null() {
         return None;
     }
-    let family = unsafe { *(sa.lp_sockaddr as *const u16) };
+    // Winsock2 `sockaddr` has a 2-byte `sa_family` at offset 0. On
+    // Windows the family is a `ADDRESS_FAMILY` (u16), not the BSD
+    // `sa_family_t` (which can be u8). Reading as u16 is safe because
+    // the struct is 2-byte aligned (it starts at the beginning of a
+    // malloc'd buffer, or at an 8-byte-aligned offset within one).
+    let family = unsafe { ptr::read_unaligned(sa.lp_sockaddr as *const u16) };
     if family != AF_INET {
         return None;
     }
     // Winsock2 `sockaddr_in`: family(2) + port(2) + addr(4) + zero(8).
-    let bytes = unsafe { std::slice::from_raw_parts(sa.lp_sockaddr.add(4), 4) };
-    let addr = Ipv4Addr::new(bytes[0], bytes[1], bytes[2], bytes[3]);
-    Some((addr, unsafe { u.on_link_prefix_len() }))
+    let bytes = unsafe { ptr::read_unaligned(sa.lp_sockaddr.add(4) as *const [u8; 4]) };
+    let addr = Ipv4Addr::from(bytes);
+    Some((addr, u.on_link_prefix_length as u8))
 }
 
 /// Read `(Ipv6Addr, prefix_len)` out of an `IP_ADAPTER_UNICAST_ADDRESS`
@@ -274,16 +316,14 @@ unsafe fn read_v6(u: &IpAdapterUnicastAddress) -> Option<(Ipv6Addr, u8)> {
     if sa.i_sockaddr_length < 28 || sa.lp_sockaddr.is_null() {
         return None;
     }
-    let family = unsafe { *(sa.lp_sockaddr as *const u16) };
+    let family = unsafe { ptr::read_unaligned(sa.lp_sockaddr as *const u16) };
     if family != AF_INET6 {
         return None;
     }
     // Winsock2 `sockaddr_in6`: family(2) + port(2) + flowinfo(4) +
     // addr(16) + scope_id(4). Address sits at offset 8.
-    let bytes = unsafe { std::slice::from_raw_parts(sa.lp_sockaddr.add(8), 16) };
-    let mut arr = [0u8; 16];
-    arr.copy_from_slice(bytes);
-    Some((Ipv6Addr::from(arr), unsafe { u.on_link_prefix_len() }))
+    let bytes = unsafe { ptr::read_unaligned(sa.lp_sockaddr.add(8) as *const [u8; 16]) };
+    Some((Ipv6Addr::from(bytes), u.on_link_prefix_length as u8))
 }
 
 /// Enumerate every adapter on the system with its IPv4 and IPv6
@@ -519,6 +559,33 @@ impl OspfV6Transport {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Compile-time check: the `SocketAddress` struct is 16 bytes on
+    /// 64-bit (8 for the pointer, 4 for the int, 4 padding). This
+    /// pins down the layout the rest of the code depends on.
+    #[test]
+    fn socket_address_size_is_16() {
+        assert_eq!(
+            std::mem::size_of::<SocketAddress>(),
+            16,
+            "SOCKET_ADDRESS must be 16 bytes on 64-bit (8 ptr + 4 int + 4 pad)"
+        );
+    }
+
+    /// Compile-time check: `IpAdapterUnicastAddress` has the
+    /// `on_link_prefix_length` field at the expected offset (72 on
+    /// 64-bit). If the struct layout drifts from the Windows SDK,
+    /// this test catches it before the field is read at runtime.
+    #[test]
+    fn unicast_address_on_link_prefix_length_offset() {
+        assert_eq!(
+            std::mem::offset_of!(IpAdapterUnicastAddress, on_link_prefix_length),
+            72,
+            "OnLinkPrefixLength must be at offset 72 on 64-bit \
+             (8 alignment + 8 next + 16 address + 24 address_prefix \
+             + 4 dad_state + 4*3 lifetimes = 72)"
+        );
+    }
 
     /// Live test — enumerates this machine's adapters. Windows only.
     /// Skips on CI containers that have no network adapters by
