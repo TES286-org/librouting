@@ -117,19 +117,15 @@ fn wait_installed_hop(path: &std::path::Path, prefix: &str, next_hop: &str) -> S
 }
 
 fn free_port() -> u16 {
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    loop {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let port = 32000u32 + (seed.wrapping_add(n.wrapping_mul(7919)) % 12_000);
-        if std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
-            return port as u16;
+    for _ in 0..5 {
+        if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") {
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            return port;
         }
     }
+    panic!("could not bind a free port after 5 attempts");
 }
 
 /// Shared topology for the §4 receiver tests:

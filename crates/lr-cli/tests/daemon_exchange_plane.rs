@@ -65,26 +65,15 @@ extern "C" {
 }
 
 fn free_port() -> u16 {
-    // A fixed range *below* the OS ephemeral allocations (Linux
-    // 32768+, macOS 49152+) closes the classic bind(:0)-then-drop
-    // TOCTOU: the kernel never hands these ports to a sibling probe
-    // or an outbound connection, so the only contenders are sibling
-    // tests in this binary — and the per-process counter makes the
-    // pick unique per call (observed live as "Address already in
-    // use" on a macOS CI runner with the :0 probe).
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    loop {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let port = 20000u32 + (seed.wrapping_add(n.wrapping_mul(7919)) % 12_000);
-        if std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
-            return port as u16;
+    for _ in 0..5 {
+        if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") {
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            return port;
         }
     }
+    panic!("could not bind a free port after 5 attempts");
 }
 
 fn wait_log_all(path: &std::path::Path, needles: &[&str]) -> String {
