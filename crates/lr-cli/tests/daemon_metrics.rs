@@ -65,31 +65,33 @@ impl Drop for Daemon {
     }
 }
 
-/// Pick a free TCP port on loopback. The daemon's metrics listener
-/// will rebind it; the brief window between this bind and the daemon's
-/// bind is racy, but the daemon sets `SO_REUSEADDR` (the macOS fix
-/// `1862a91`) so a stale TIME_WAIT does not block the rebind.
+/// Pick a free TCP port on loopback by binding to port 0 (the kernel
+/// assigns an ephemeral port), reading the assigned port, then dropping
+/// the listener. The daemon's metrics listener rebinds it; the brief
+/// window between this bind and the daemon's bind is racy, but the
+/// daemon sets `SO_REUSEADDR` (the macOS fix `1862a91`) so a stale
+/// TIME_WAIT does not block the rebind.
+///
+/// Using port 0 avoids collisions with other CI jobs that might pick
+/// the same fixed port range — the kernel's ephemeral port allocator
+/// is the single source of truth.
 fn free_port() -> u16 {
-    // A fixed range *below* the OS ephemeral allocations (Linux
-    // 32768+, macOS 49152+) closes the classic bind(:0)-then-drop
-    // TOCTOU: the kernel never hands these ports to a sibling probe
-    // or an outbound connection, so the only contenders are sibling
-    // tests in this binary — and the per-process counter makes the
-    // pick unique per call (observed live as "Address already in
-    // use" on a macOS CI runner with the :0 probe).
-    use std::sync::atomic::{AtomicU32, Ordering};
-    static COUNTER: AtomicU32 = AtomicU32::new(0);
-    loop {
-        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let seed = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.subsec_nanos())
-            .unwrap_or(0);
-        let port = 20000u32 + (seed.wrapping_add(n.wrapping_mul(7919)) % 12_000);
-        if std::net::TcpListener::bind(format!("127.0.0.1:{port}")).is_ok() {
-            return port as u16;
+    // Bind to :0, let the kernel pick, read the port, drop the listener.
+    // Retry a few times in case the port is grabbed between drop and the
+    // daemon's bind (extremely rare, but seen on macOS CI runners under
+    // load).
+    for _ in 0..5 {
+        if let Ok(listener) = std::net::TcpListener::bind("127.0.0.1:0") {
+            let port = listener.local_addr().unwrap().port();
+            drop(listener);
+            // Brief sleep to let the kernel release the port before
+            // the daemon rebinds it. Without this, macOS can return
+            // EADDRINUSE on the immediate rebind even with SO_REUSEADDR.
+            std::thread::sleep(std::time::Duration::from_millis(10));
+            return port;
         }
     }
+    panic!("could not bind a free port after 5 attempts");
 }
 
 /// One HTTP round trip: send `GET <path> HTTP/1.0`, return the raw
