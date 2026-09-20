@@ -30,14 +30,19 @@
 //!
 //! ## Platform support
 //!
-//! | Platform | Status |
-//! |----------|--------|
-//! | Linux    | yes — `SO_BINDTODEVICE` + `ip_mreqn` membership by index |
-//! | other    | [`OspfTransportError::Unsupported`] |
+//! | Platform | OSPF raw socket | Interface enumeration |
+//! |----------|-----------------|------------------------|
+//! | Linux    | yes — `SO_BINDTODEVICE` + `ip_mreqn` membership by index | yes — `getifaddrs(3)` |
+//! | macOS / FreeBSD / NetBSD / OpenBSD | unsupported | yes — `getifaddrs(3)` (BSD `sa_len`+`sa_family` layout) |
+//! | Windows  | unsupported | yes — `GetAdaptersAddresses` (IP Helper API) |
+//! | other    | [`OspfTransportError::Unsupported`] | [`OspfTransportError::Unsupported`] |
 //!
 //! Raw sockets require `CAP_NET_RAW`: the daemon must run as root, or
 //! inside a user+network namespace (`unshare -Urn`) where the capability
 //! is granted — the interop scripts use the latter to stay rootless.
+//!
+//! Babel's `[[babel.interface]]` glob matcher (which needs only
+//! enumeration, not raw sockets) works on every platform listed above.
 //!
 //! ## Example
 //!
@@ -192,9 +197,77 @@ pub use imp::{
     OspfV6Transport,
 };
 
-#[cfg(all(feature = "std", not(target_os = "linux")))]
+// BSD-family: macOS, FreeBSD, NetBSD, OpenBSD, iOS, DragonFlyBSD.
+// `list_interfaces` and friends are real (via getifaddrs); the raw
+// OSPF socket types stay stubs (returns Unsupported).
+#[cfg(all(
+    feature = "std",
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+    )
+))]
+#[path = "imp_bsd.rs"]
+mod imp;
+#[cfg(all(
+    feature = "std",
+    any(
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+    )
+))]
+pub use imp::{
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, OspfV2Transport,
+    OspfV6Transport,
+};
+
+// Windows: `list_interfaces` and friends are real (via
+// GetAdaptersAddresses); the raw OSPF socket types stay stubs.
+#[cfg(all(feature = "std", target_os = "windows"))]
+#[path = "imp_windows.rs"]
+mod imp;
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub use imp::{
+    ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, OspfV2Transport,
+    OspfV6Transport,
+};
+
+// Fallback: every method returns Unsupported.
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "windows",
+    ))
+))]
 mod stub;
-#[cfg(all(feature = "std", not(target_os = "linux")))]
+#[cfg(all(
+    feature = "std",
+    not(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "ios",
+        target_os = "freebsd",
+        target_os = "netbsd",
+        target_os = "openbsd",
+        target_os = "dragonfly",
+        target_os = "windows",
+    ))
+))]
 pub use stub::{
     ifindex_of, interface_v4_addrs, interface_v6_addrs, list_interfaces, OspfV2Transport,
     OspfV6Transport,
