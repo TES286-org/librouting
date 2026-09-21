@@ -20,6 +20,12 @@
 # falling back to the host-installed BIRD binary when no WSL2 is
 # available. This makes it a portable superset of bird.sh.
 #
+# Windows Server 2022 (the windows-2022 GitHub Actions runner base
+# image) has no Microsoft Store, so `wsl --install -d Ubuntu` does
+# not work. The script uses `wsl --import` with an Ubuntu
+# cloud-images rootfs tarball — the canonical Windows Server 2022
+# WSL2 distro install path.
+#
 # SKIP gracefully when neither WSL2 nor a host BIRD is available.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -69,42 +75,51 @@ protocol bgp lr {
 EOF
 
 # Detect a usable BIRD runtime. The first match wins:
-#   1. WSL2 + Ubuntu 22.04 (Windows GitHub Actions runner — WSL2 is
-#      enabled but no distro is pre-installed; install Ubuntu on the
-#      fly, then install bird2 inside it).
+#   1. WSL2 + Ubuntu (Windows GitHub Actions runner — WSL2 is enabled
+#      but no distro is registered. The windows-2022 runner runs
+#      Windows Server 2022 which has no Microsoft Store, so
+#      `wsl --install -d Ubuntu` does not work. Use `wsl --import`
+#      with an Ubuntu cloud-images rootfs tarball instead — the
+#      canonical Windows Server 2022 WSL2 install path).
 #   2. Host-installed `bird` / `birdc` on PATH (Linux).
 #   3. SKIP if neither is available.
 BIRD_RUNTIME=""
+WSL_DISTRO=lr-bird  # the name we register the imported rootfs under
 if command -v wsl >/dev/null 2>&1; then
-    # Make sure WSL2 has a usable Ubuntu distro. The windows-2022
-    # runner ships WSL2 enabled but no distribution registered —
-    # `wsl --install -d Ubuntu --no-launch` downloads and registers
-    # Ubuntu without launching it (so no first-run user setup is
-    # needed). The default user is root, which makes the apt-get
-    # install below work without sudo. The install takes ~1-2 min
-    # the first time (downloads ~600 MB); subsequent runs in the
-    # same job skip it (the distro persists for the job's lifetime).
-    if ! wsl --list --quiet 2>/dev/null | tr -d '\0' | grep -qi ubuntu; then
-        echo "== registering an Ubuntu distro inside WSL2 =="
-        # `--no-launch` keeps the distro from starting the first-run
-        # setup; `--name` overrides the auto-generated name so the
-        # `wsl -d Ubuntu` invocation below is stable.
-        wsl --install -d Ubuntu --no-launch --name Ubuntu 2>&1 | tail -5 || true
+    # If a previously-imported distro exists, reuse it; otherwise
+    # download the Ubuntu 22.04 rootfs and import it. The tarball
+    # is ~470 MB; the download is cached on the GitHub Actions
+    # runner's temp dir for the duration of the job.
+    if ! wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
+        echo "== downloading the Ubuntu 22.04 rootfs tarball =="
+        TARBALL="$OUT/ubuntu-22.04.rootfs.tar.gz"
+        # The cloud-images.ubuntu.com rootfs is the same one the
+        # Microsoft Store ships inside its .appx wrapper — directly
+        # importable via `wsl --import`.
+        curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 5 \
+            -fL -o "$TARBALL" \
+            "https://cloud-images.ubuntu.com/wsl/jammy/current/ubuntu-jammy-wsl-amd64-22.04lts.rootfs.tar.gz" \
+            2>&1 | tail -3 || true
+        if [ -s "$TARBALL" ]; then
+            echo "== importing the rootfs as WSL2 distro '$WSL_DISTRO' =="
+            # `--import <name> <install-path> <tarball>` registers the
+            # distro. The install path is a Windows-style directory
+            # that WSL2 creates; we put it under $OUT so it gets
+            # cleaned up with the test artifacts.
+            wsl --import "$WSL_DISTRO" "$OUT/wsl-install" "$TARBALL" \
+                2>&1 | tail -5 || true
+        fi
     fi
-    if wsl --list --quiet 2>/dev/null | tr -d '\0' | grep -qi ubuntu; then
-        # WSL2 distros don't ship bird2 by default — install it now.
-        # `apt-get install` is idempotent and quick on a warm WSL2
-        # package cache; the install only runs once per runner
-        # lifetime (the WSL2 distro persists for the duration of the
-        # job). The default user for `--no-launch` distros is root,
-        # so no sudo needed.
+    if wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
+        # Install bird2 inside the imported distro. The default user
+        # for `wsl --import` is root, so no sudo needed.
         echo "== ensuring bird2 is installed inside WSL2 =="
-        wsl -d Ubuntu -- bash -c "command -v bird >/dev/null 2>&1 || \
+        wsl -d "$WSL_DISTRO" -- bash -c "command -v bird >/dev/null 2>&1 || \
             (apt-get update -qq && apt-get install -y -qq bird2)" \
             >/dev/null 2>&1 || true
         # Confirm bird is now available; if apt-get failed (no network,
         # package mirror issue), fall through to the host-installed path.
-        if wsl -d Ubuntu -- bash -c "command -v bird" >/dev/null 2>&1; then
+        if wsl -d "$WSL_DISTRO" -- bash -c "command -v bird" >/dev/null 2>&1; then
             BIRD_RUNTIME=wsl
         fi
     fi
@@ -113,7 +128,7 @@ if [ -z "$BIRD_RUNTIME" ] && command -v bird >/dev/null 2>&1; then
     BIRD_RUNTIME=host
 fi
 if [ -z "$BIRD_RUNTIME" ]; then
-    echo "SKIP: no BIRD runtime available (WSL2+Ubuntu not present, no host bird)"
+    echo "SKIP: no BIRD runtime available (WSL2+Ubuntu import failed, no host bird)"
     exit 0
 fi
 
@@ -128,11 +143,11 @@ bird_run() { # <config-path>
             # Convert the Windows path of the config to a WSL2 path
             # (C:\... → /mnt/c/...). wslpath handles the translation.
             local wsl_cfg
-            wsl_cfg=$(wsl -d Ubuntu -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
+            wsl_cfg=$(wsl -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
             # Run BIRD in foreground mode (-f) inside WSL2, in the
             # background of the bash subshell. The PID is the WSL2
             # process's PID; the trap below stops it via `wsl -- pkill`.
-            wsl -d Ubuntu -- bird -f -c "$wsl_cfg" >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
+            wsl -d "$WSL_DISTRO" -- bird -f -c "$wsl_cfg" >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
             BIRD_HANDLE=$!
             ;;
         host)
@@ -143,7 +158,7 @@ bird_run() { # <config-path>
 }
 birdc_cmd() { # <args...>
     case "$BIRD_RUNTIME" in
-        wsl) wsl -d Ubuntu -- birdc "$@" 2>/dev/null ;;
+        wsl) wsl -d "$WSL_DISTRO" -- birdc "$@" 2>/dev/null ;;
         host) birdc "$@" 2>/dev/null ;;
     esac
 }
@@ -152,7 +167,7 @@ bird_shutdown() {
         case "$BIRD_RUNTIME" in
             wsl)
                 # Kill the BIRD process inside WSL2.
-                wsl -d Ubuntu -- pkill -TERM -x bird 2>/dev/null || true
+                wsl -d "$WSL_DISTRO" -- pkill -TERM -x bird 2>/dev/null || true
                 # And the bash subshell we spawned.
                 kill "$BIRD_HANDLE" 2>/dev/null || true
                 ;;
