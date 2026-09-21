@@ -33,12 +33,27 @@ impl LocRib {
     /// Install one path for a key, replacing any existing path with the
     /// same RFC 7911 identifier. Callers that only ever install the
     /// single best path get exactly the pre-Add-Path behaviour.
+    ///
+    /// A re-install of a byte-identical route (same key, same path_id,
+    /// same content) is a no-op: the generation counter is not bumped
+    /// and no `RibDiff` is pushed. OSPF / Babel runtimes call this
+    /// after every SPF recompute, and a recompute that yields the same
+    /// routes must not produce a storm of spurious "modified" events
+    /// downstream (the API socket thread, the BMP mirror, the
+    /// redistribution pipe).
     pub fn install(&mut self, route: Route) {
         let key = route.key.clone();
         let was_present = self.inner.contains_key(&key);
         let set = self.inner.entry(key.clone()).or_default();
         match set.iter_mut().find(|r| r.path_id == route.path_id) {
-            Some(existing) => *existing = route,
+            Some(existing) => {
+                if *existing == route {
+                    // Byte-identical re-install: silent no-op. Matches
+                    // `install_set`'s identical-set early-return.
+                    return;
+                }
+                *existing = route;
+            }
             None => set.push(route),
         }
         self.gen += 1;
@@ -268,5 +283,59 @@ mod tests {
         let gen = rib.generation();
         rib.install_set(&key, vec![a]);
         assert_eq!(rib.generation(), gen, "no change → no generation bump");
+    }
+
+    /// Single-path `install` of a byte-identical route is a no-op —
+    /// no generation bump, no diff entry. Mirrors `install_set`'s
+    /// identical-set early-return. OSPF / Babel runtimes call `install`
+    /// after every SPF recompute, and a recompute that yields the
+    /// same routes must not produce a storm of spurious "modified"
+    /// diffs downstream.
+    #[test]
+    fn install_identical_route_is_no_op() {
+        let mut rib = LocRib::new();
+        let r = route([192, 0, 2, 0], 24);
+        rib.install(r.clone());
+        let gen = rib.generation();
+        let diff_len_before = rib.diff_since(gen).added.len()
+            + rib.diff_since(gen).modified.len()
+            + rib.diff_since(gen).removed.len();
+        // Re-install the byte-identical route.
+        rib.install(r);
+        assert_eq!(
+            rib.generation(),
+            gen,
+            "identical re-install does not bump the generation"
+        );
+        let diff = rib.diff_since(gen);
+        let diff_len_after = diff.added.len() + diff.modified.len() + diff.removed.len();
+        assert_eq!(diff_len_before, 0);
+        assert_eq!(diff_len_after, 0, "no diff entries pushed");
+    }
+
+    /// `install` still detects a content change (different metric on
+    /// the same path_id) and bumps the generation accordingly. The
+    /// no-op fast path only fires on full byte equality, matching
+    /// `install_set`'s identical-set contract.
+    #[test]
+    fn install_with_changed_metric_bumps_generation() {
+        let mut rib = LocRib::new();
+        let mut a = route([192, 0, 2, 0], 24);
+        a.preference.metric = 5;
+        rib.install(a.clone());
+        let gen = rib.generation();
+        let mut b = route([192, 0, 2, 0], 24);
+        b.preference.metric = 9;
+        rib.install(b.clone());
+        assert_eq!(
+            rib.generation(),
+            gen + 1,
+            "different content → generation bump"
+        );
+        assert_eq!(
+            rib.best(&a.key).unwrap().preference.metric,
+            9,
+            "new content took effect"
+        );
     }
 }
