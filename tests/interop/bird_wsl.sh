@@ -87,18 +87,17 @@ BIRD_RUNTIME=""
 WSL_DISTRO=lr-bird  # the name we register the imported rootfs under
 if command -v wsl >/dev/null 2>&1; then
     # If a previously-imported distro exists, reuse it; otherwise
-    # download the Ubuntu 22.04 rootfs and import it. The tarball
-    # is ~470 MB; the download is cached on the GitHub Actions
-    # runner's temp dir for the duration of the job.
+    # download the Ubuntu 22.04 base rootfs and import it. The
+    # tarball is ~100 MB (the minimal `ubuntu-base` image — same
+    # rootfs Docker's official `ubuntu:22.04` image is built from,
+    # with apt sources pre-configured so `apt-get install` works
+    # after `apt-get update`).
     if ! wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
-        echo "== downloading the Ubuntu 22.04 rootfs tarball =="
-        TARBALL="$OUT/ubuntu-22.04.rootfs.tar.gz"
-        # The cloud-images.ubuntu.com rootfs is the same one the
-        # Microsoft Store ships inside its .appx wrapper — directly
-        # importable via `wsl --import`.
+        echo "== downloading the Ubuntu 22.04 base rootfs tarball =="
+        TARBALL="$OUT/ubuntu-22.04-base.tar.gz"
         curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 5 \
             -fL -o "$TARBALL" \
-            "https://cloud-images.ubuntu.com/wsl/jammy/current/ubuntu-jammy-wsl-amd64-22.04lts.rootfs.tar.gz" \
+            "https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/ubuntu-base-22.04-base-amd64.tar.gz" \
             2>&1 | tail -3 || true
         if [ -s "$TARBALL" ]; then
             echo "== importing the rootfs as WSL2 distro '$WSL_DISTRO' =="
