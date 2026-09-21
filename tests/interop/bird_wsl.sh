@@ -134,14 +134,17 @@ if command -v wsl >/dev/null 2>&1; then
                 2>&1 | tail -5 || true
         fi
     fi
-    # `wsl -l -q` has no path arguments, so MSYS translation is a
-    # no-op — use plain `wsl` for simplicity.
     if wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
-        # Install bird2 inside the imported distro. The default user
-        # for `wsl --import` is root, so no sudo needed.
-        echo "== ensuring bird2 is installed inside WSL2 =="
+        # Install bird2 and wslu inside the imported distro. The
+        # default user for `wsl --import` is root, so no sudo needed.
+        # `wslu` provides `wslpath` — the Windows ↔ WSL2 path
+        # translator — which the ubuntu-base image does not ship by
+        # default. Without it, the script cannot translate the host's
+        # /tmp path of bird.conf to the /mnt/c/... form BIRD inside
+        # WSL2 needs.
+        echo "== ensuring bird2 + wslu are installed inside WSL2 =="
         wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c "command -v bird >/dev/null 2>&1 || \
-            (apt-get update -qq && apt-get install -y -qq bird2)" \
+            (apt-get update -qq && apt-get install -y -qq bird2 wslu)" \
             >/dev/null 2>&1 || true
         # Confirm bird is now available; if apt-get failed (no network,
         # package mirror issue), fall through to the host-installed path.
