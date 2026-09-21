@@ -136,29 +136,25 @@ fi
 # caller stores the resulting process handle in $BIRD_HANDLE for the
 # cleanup trap. `birdc_cmd` runs birdc once and returns its output.
 #
-# The control socket path is `$OUT/bird.ctl` on the host (Linux path
-# `/tmp/lr_bird_wsl/bird.ctl`). The ubuntu-base image does not ship
-# the `/run/bird/` directory the Debian bird2 package would normally
-# create, so BIRD's default control-socket path fails with
-# `Cannot create control socket /run/bird/bird.ctl: No such file or
-# directory` — pin the path explicitly so both bird and birdc agree.
-BIRD_CTL="$OUT/bird.ctl"
-BIRD_CTL_HOST=$BIRD_CTL  # the host-visible path (same as OUT)
+# Control socket: BIRD's default control socket at /run/bird/bird.ctl
+# fails because the ubuntu-base image does not ship the /run/bird/
+# directory. Pin the path explicitly:
+#   * WSL2: /tmp/lr-bird.ctl (WSL2's own /tmp, always exists, no
+#     path translation needed).
+#   * Host: $OUT/bird.ctl (Linux host's /tmp/lr_bird_wsl/bird.ctl).
+BIRD_CTL_HOST="$OUT/bird.ctl"
+BIRD_CTL_WSL="/tmp/lr-bird.ctl"
 bird_run() { # <config-path>
     local cfg="$1"
     case "$BIRD_RUNTIME" in
         wsl)
-            # Convert the Windows paths of the config and control
-            # socket to WSL2 paths (C:\... → /mnt/c/...). wslpath
-            # handles the translation.
-            local wsl_cfg wsl_ctl
+            # Convert the Windows path of the config to a WSL2 path
+            # (C:\... → /mnt/c/...). wslpath handles the translation;
+            # the control socket stays on WSL2's own /tmp so no
+            # translation is needed.
+            local wsl_cfg
             wsl_cfg=$(wsl -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
-            wsl_ctl=$(wsl -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$BIRD_CTL_HOST" 2>/dev/null || echo "$BIRD_CTL_HOST")" 2>/dev/null || echo "$BIRD_CTL_HOST")
-            # Run BIRD in foreground mode (-f) inside WSL2, in the
-            # background of the bash subshell. The PID is the WSL2
-            # subshell's PID; the trap below stops BIRD via
-            # `wsl -- pkill`.
-            wsl -d "$WSL_DISTRO" -- bird -f -c "$wsl_cfg" -s "$wsl_ctl" \
+            wsl -d "$WSL_DISTRO" -- bird -f -c "$wsl_cfg" -s "$BIRD_CTL_WSL" \
                 >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
             BIRD_HANDLE=$!
             ;;
@@ -171,14 +167,8 @@ bird_run() { # <config-path>
 }
 birdc_cmd() { # <args...>
     case "$BIRD_RUNTIME" in
-        wsl)
-            local wsl_ctl
-            wsl_ctl=$(wsl -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$BIRD_CTL_HOST" 2>/dev/null || echo "$BIRD_CTL_HOST")" 2>/dev/null || echo "$BIRD_CTL_HOST")
-            wsl -d "$WSL_DISTRO" -- birdc -s "$wsl_ctl" "$@" 2>/dev/null
-            ;;
-        host)
-            birdc -s "$BIRD_CTL_HOST" "$@" 2>/dev/null
-            ;;
+        wsl) wsl -d "$WSL_DISTRO" -- birdc -s "$BIRD_CTL_WSL" "$@" 2>/dev/null ;;
+        host) birdc -s "$BIRD_CTL_HOST" "$@" 2>/dev/null ;;
     esac
 }
 bird_shutdown() {
