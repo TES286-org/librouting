@@ -127,6 +127,228 @@ of the session's negotiated width (ingress normalizes, egress re-encodes).
 This means best-path, the safety net and the egress rules never have to
 guess the wire format of a route's provenance.
 
+## Router instance internals
+
+`crates/lr-router/src/instance.rs` is the Layer 3 orchestrator (a single
+~11.7k-line file). Every cross-protocol concern — sessions, Adj-RIBs,
+Loc-RIB, policy hooks, redistribution, aggregates, MRAI, Graceful Restart,
+maximum-prefix, OSPF areas + virtual links, Babel runtime — lives behind
+one `DefaultRouter` struct that the embedder drives through the poll-based
+`RouterInstance` trait. This section is the architecture-level map of that
+struct; the inline doc comments on each field are the authoritative
+reference.
+
+### `DefaultRouter` shape
+
+The struct holds three kinds of state:
+
+| Kind | Fields |
+| ---- | ------ |
+| Per-session runtime | `sessions: BTreeMap<u64, SessionState>` (BGP/OSPF/Babel FSM + transport), `mrai`, `graceful_restart`, `llgr_caps`, `max_prefix_state`, `collision_meta`, `session_policy` |
+| Loc-RIB + Adj-RIBs | `adj_rib_in`, `pre_policy_adj_rib_in` (soft-reconfig inbound, W2.4), `adj_rib_out`, `loc_rib`, `originated`, `static_routes`, `direct_rib`, `redistributed_bgp` |
+| Cross-protocol OSPF | `ospf_areas`, `ospf_published`, `ospf_externals`, `ospf_v3_externals`, `ospf_v3_external_lsids`, `ospf_v3_summary_lsids`, `ospf_translations`, `ospf_vlinks`, `ospf_grace_seen`, `ospf_grace_events` |
+| Cross-protocol misc | `pipes` (redistribution pipes), `aggregates` (BGP aggregates), `bmp_sink` (RFC 7854 mirror) |
+
+The session map is keyed by a `u64` handle that `add_session` mints
+monotonically; that handle is what every per-session BTreeMap (`mrai`,
+`graceful_restart`, `max_prefix_state`, `collision_meta`,
+`session_policy`, `llgr_caps`) keys on, so a session teardown leaves the
+slot absent everywhere after a single sweep.
+
+`SessionState` is an `enum` with one variant per protocol — `Bgp`,
+`Ospf`, `Babel` — each carrying the per-session FSM, a `MemoryConn`
+(the output buffer the embedder drains via `drain_output`), and a
+protocol-specific runtime. The BGP peer is `Box<BgpPeer>`: the FSM
+outweighs the other runtimes by far and would inflate every session
+slot if kept inline.
+
+### Per-protocol runtime structs
+
+* **`OspfRuntime`** — one OSPF adjacency: the neighbor FSM, a streaming
+  `OspfCodec` (carryover must never leak between peers), the
+  `DbExchange` driver (RFC 2328 §7.2 DD/LSR sequencing), the segment
+  identity pair `our_ip` / `neighbor_ip` / `dr` / `bdr` (the §10.4
+  adjacency gate), and the interface `network_type` + `iface_mtu`
+  needed to rebuild the exchange when a §10.4 demotion resets the
+  adjacency. The LSDB is **per area**, shared by every session attached
+  to the area and keyed in `ospf_areas: BTreeMap<u32, OspfAreaState>`
+  — LSAs flooded within an area belong to the area, not to the
+  adjacency that happened to deliver them.
+
+* **`OspfAreaState`** — the per-area LSDB plus the area type policy
+  (`OspfAreaType` — stub / NSSA / Totally-stubby, driving the §3.6 /
+  RFC 3101 LSA acceptance gate), and a monotonic `topology_version`
+  counter bumped on every *content* topology change (RFC 3623 §3.2
+  (3)) so embedders can terminate Graceful-Restart helper mode when
+  the topology actually moves — periodic refreshes that only bump
+  age / sequence do not increment it.
+
+* **`BabelRuntime`** — one Babel adjacency: the neighbor table, the
+  route table, a streaming `BabelCodec`, the current `next_hop`
+  learned from NextHop TLVs (RFC 8966 §4.6.4), the peer's `router_id`
+  (8 bytes, learned from Router-Id TLVs), and a `published` snapshot
+  of what the runtime has already pushed to Loc-RIB. The `diff()`
+  method is the bridge to Loc-RIB: every Hello / IHU / Update TLV
+  mutates the route table, and `diff()` computes the
+  installed / withdrawn delta against `published` so the router only
+  emits one `RouterEvent` per actual route change.
+
+* **`RuntimeDelta`** — `{ installed: Vec<Route>, withdrawn:
+  Vec<RouteKey> }`, the universal return shape of one protocol-runtime
+  step. `apply_runtime_delta` installs the delta directly into Loc-RIB
+  *without* going through the Adj-RIB-In pipeline (OSPF and Babel are
+  trusted sources — their routes are protocol-direct Loc-RIB
+  contributions, kept in `direct_rib` so a BGP re-ranking of a shared
+  key never evicts them).
+
+The Babel runtime state is entirely session-scoped — there is no
+top-level `babel_*` field on `DefaultRouter`. The OSPF surface, by
+contrast, is area-scoped and therefore top-level (see the table below).
+
+### Loc-RIB data structures
+
+Loc-RIB itself lives in `lr-rib::loc_rib::LocRib`, but four sibling
+maps in `DefaultRouter` carry the Loc-RIB *contributions* that the
+decision process must consult alongside `adj_rib_in`:
+
+1. **`originated: BTreeMap<RouteKey, Route>`** — locally originated
+   routes (BIRD `protocol direct`, FRR `network` statements). Kept so
+   `unoriginate` can remove them and so a config reload can diff old
+   vs new.
+2. **`static_routes: BTreeMap<RouteKey, Route>`** — operator-configured
+   static routes (BIRD `protocol static`, FRR `ip route`). Same
+   reload-diff contract as `originated`.
+3. **`direct_rib: BTreeMap<RouteKey, Route>`** — protocol-direct
+   contributions from OSPF / Babel runtimes (rc.3 shared RIB). These
+   never enter BGP advertisements — cross-protocol export stays
+   opt-in through `pipes` (FRR `redistribute` / BIRD `pipe`).
+4. **`redistributed_bgp: BTreeMap<RouteKey, Route>`** — routes this
+   router has redistributed into BGP through a pipe. The re-originated
+   copy keeps the source route's peer so the export split horizon
+   (RFC 4271 §9.1.3 Phase 3) never re-advertises it to the session it
+   came from; the copy competes with the peer's Adj-RIB-In paths for
+   the Loc-RIB slot through the decision process.
+
+`reselect(key)` is the function that merges these four sources
+(`adj_rib_in` + `originated` + `direct_rib`; the redistributed BGP
+copy is already in `adj_rib_in`-compatible form via the pipe arm of
+`redistribute_route`) and picks the Loc-RIB best for one prefix:
+
+1. Collect every candidate for `key` from `adj_rib_in`, `originated`
+   and `direct_rib`.
+2. If every candidate is BGP, run `BestPath::rank` (RFC 4271 §9.1.2
+   decision process) and take `add_path_max_paths` of them (RFC 7911);
+   otherwise run `RouteSelector::select` (admin-distance + metric
+   comparator for non-BGP protocols).
+3. Hand the ranking to `apply_selection`, which installs the new set
+   into `loc_rib`, emits `RouteInstalled` / `RouteWithdrawn` events,
+   recurses into `redistribute_route` (so a new best propagates
+   through pipes) and into `export_selection` (so the ranking reaches
+   every BGP session).
+
+### Export hook ordering
+
+`export_selection(key, ranked)` walks every established BGP session
+and computes a per-session (advertise, withdraw) delta. The ordering
+matters — every later stage only sees routes that survived the
+earlier ones:
+
+1. **iBGP split-horizon / RR / OTC** (RFC 4271 §9.1.3 Phase 3 +
+   RFC 4456 + RFC 9234 §5): a path learned from a session is never
+   re-advertised to that same session (`route.origin.peer == session`
+   skip); the role / RR / RS topology gates which sessions a path may
+   reach at all.
+2. **Protocol gate**: `direct_rib` (OSPF / Babel) routes never enter
+   BGP advertisements — cross-protocol export stays opt-in through
+   `pipes`. Only BGP routes are eligible for the BGP Adj-RIB-Out.
+3. **RFC 8212 §3**: an external session with no explicit export policy
+   must not carry routes in its Adj-RIB-Out — the desired set stays
+   empty so the diff against Adj-RIB-Out withdraws anything the
+   session still advertises.
+4. **Export hook chain** (`HookChain::run_export_to`): the surviving
+   candidates are passed through every registered `ExportHook`, which
+   may drop, modify or set attributes on each route.
+5. **Add-Path vs single-path** (RFC 7911): Add-Path TX peers receive
+   each path under a transmit identifier of `rank slot + 1`;
+   single-path peers receive only the best path.
+6. **Diff against Adj-RIB-Out**: the desired set is diffed against the
+   session's `adj_rib_out` view; paths that fell out of the ranking (or
+   are no longer exported) become withdrawals, new / changed paths
+   become UPDATEs.
+
+Because the hook chain borrows `&self` immutably while session
+enumeration requires `&mut self`, the export pipeline runs in two
+phases: collect (policy-approved work per session) → transmit. This
+is why `export_work_for` is a `&self` method and `export_selection`
+restores the hook chain after the collect pass.
+
+### MRAI and the per-prefix advertisement queue
+
+The MRAI timer (RFC 4271 §9.2.1.1) is *per-destination*, not
+per-session — `MraiState.last_sent` and `MraiState.pending` are keyed
+by `RouteKey`, so unrelated routes are never delayed by a busy peer.
+A pending set supersedes any older pending one, so route churn
+collapses to the final state at MRAI expiry. Withdrawals bypass MRAI
+entirely and are transmitted immediately (RFC 4271 §9.2.2).
+
+### Redistribution tracking
+
+`redistribute_route(route)` is invoked from `apply_selection` after
+every Loc-RIB best change. The function:
+
+1. **Terminates the feedback loop**: if a stored copy already exists
+   with identical protocol / origin / preference / attributes /
+   next_hop, the function returns immediately. This is the
+   `MetricPolicy::Add(N)` fixpoint — under additive metric policies
+   the produced copy never equals the stored one and the recursion
+   would only stop when the stack overflows without this guard.
+2. **Collects matching pipes**: a pipe matches when `pipe.source ==
+   route.protocol` and `pipe.matches(prefix)`. OSPF pipes call
+   `ospf_redistribute`; BGP pipes re-originate the route as a BGP
+   path and run the decision process to install it.
+3. **Re-originates the BGP copy** with `origin.proto = 2` (locally
+   re-originated), keeping the source route's `origin.peer` so the
+   export split horizon never re-advertises it to the session it came
+   from.
+4. **Runs the decision process** rather than a wholesale `install_set`:
+   the best path by admin distance / BGP decision wins the Loc-RIB
+   slot, and a beaten peer path stays in Adj-RIB-In to be restored
+   when the winner disappears (RFC 4271 §9.1.2).
+
+When the source route disappears, `unredistribute_route(key)` drops
+the copy and `reselect(key)` runs again, restoring the next-best
+candidate.
+
+### OSPF top-level state map
+
+The OSPF surface in `DefaultRouter` is the largest cross-protocol
+block because OSPF is area-scoped, not session-scoped:
+
+| Field | Purpose |
+| ----- | ------- |
+| `ospf_areas: BTreeMap<u32, OspfAreaState>` | per-area LSDB + type policy + `topology_version` |
+| `ospf_published: BTreeMap<RouteKey, Route>` | routes currently published to Loc-RIB — diffed on every recompute |
+| `ospf_externals: BTreeMap<u32, ExternalDestination>` | redistributed IPv4 destinations (RFC 2328 §12.4.3) keyed by LS ID |
+| `ospf_v3_externals: BTreeMap<Prefix, V3ExternalDestination>` | redistributed IPv6 destinations (RFC 5340 §4.4.3.6) |
+| `ospf_v3_external_lsids: BTreeMap<Prefix, u32>` | stable 0x4005 LS IDs per external prefix |
+| `ospf_v3_summary_lsids: BTreeMap<u32, BTreeMap<Prefix, u32>>` | stable 0x2003 inter-area-prefix LS IDs per (area, prefix) |
+| `ospf_translations: BTreeSet<(u32, u32, u32)>` | type-7 → type-5 translations this router maintains as an elected NSSA border router (RFC 3101 §3.2) |
+| `ospf_vlinks: BTreeMap<(u32, u32), OspfVirtualLink>` | configured virtual links (RFC 2328 §15) keyed by (transit area, endpoint router ID) |
+| `ospf_grace_seen: BTreeMap<(u32, u32), (u32, u16, u16, u16)>` | last seen Grace-LSA instance per (area, advertising router) — dedup so retransmissions emit one `OspfGraceEvent` |
+| `ospf_grace_events: Vec<OspfGraceEvent>` | received Grace-LSA instances awaiting the embedder's helper-mode policy |
+
+The stable-LS-ID maps (`ospf_v3_external_lsids`,
+`ospf_v3_summary_lsids`) exist because the OSPFv3 LS ID carries no
+addressing semantics (RFC 5340 §4.4.3.4 / §4.4.3.6), so the ABR /
+ASBR must keep a stable prefix → LS ID mapping across re-origination
+— FRR reuses the previous instance's LS ID, and so does lr.
+
+The Grace-LSA dedup map keys on the RFC 2328 §13 instance identity
+tuple `(sequence, age, checksum, length)`, not on sequence alone: a
+flush (MaxAge, empty body) and a fresh announcement can share a
+sequence number at second boundaries of the wallclock-derived
+lineage and are different LSAs.
+
 ## Extension points
 
 | Hook trait      | Stage          | Crate      |

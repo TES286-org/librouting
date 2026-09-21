@@ -1413,12 +1413,12 @@ radix tree + RwLock first (low risk), async I/O last (high risk).
 
 ## D9 — Documentation: architecture deep-dive + contributor guide
 
-**Status:** partial — ~~D9.2 (filter DSL EBNF grammar)~~, ~~D9.6
+**Status:** landed — ~~D9.2 (filter DSL EBNF grammar)~~, ~~D9.6
 (`docs/ffi_design.md`)~~, ~~D9.3 (`CONTRIBUTING.md`)~~, ~~D9.4
-(`SECURITY.md`)~~, ~~D9.5 (`CHANGELOG.md`)~~ and ~~D9.1 (Filter DSL
+(`SECURITY.md`)~~, ~~D9.5 (`CHANGELOG.md`)~~, ~~D9.1 (Filter DSL
 chapter + thread model + performance chapter in `ARCHITECTURE.md`)~~
-landed; the `instance.rs` internal-structure chapter inside D9.1
-remains open. Tracks `docs/`.
+and ~~D9.1 (`instance.rs` internal-structure chapter)~~ all landed.
+Tracks `docs/`.
 
 **Current gap.** ~~Existing docs target operators and embedders
 (`README.md`, `tutorial.md`, `API.md`, `lr-cli.md`, `RUNBOOK.md`,
@@ -1426,19 +1426,15 @@ remains open. Tracks `docs/`.
 docs are thin: no Filter DSL architecture write-up, no internal
 structure document for `lr-router/src/instance.rs` (a 11 158-LoC
 single file), no thread model document.~~ The Filter DSL chapter
-(D9.1, this revision), the thread-model + lock-strategy chapter
-(D8.6, `ARCHITECTURE.md` "Performance characteristics"), the formal
-EBNF (D9.2, `docs/filter_dsl_grammar.md`), the FFI design doc
-(D9.6, `docs/ffi_design.md`), the contributor checklist (D9.3,
-`CONTRIBUTING.md`), the security policy (D9.4, `SECURITY.md`) and
-the structured changelog (D9.5, `CHANGELOG.md`, 1 384 lines covering
-`rc.1` → `rc.4`) all landed. The remaining open piece inside D9.1
-is the `instance.rs` internal-structure chapter (Loc-RIB data
-structures, reselect path, export hook ordering, redistribution
-tracking, `redistributed_bgp` BTreeMap design, OSPF / Babel runtime
-structs) — the per-session state and the cross-protocol bookkeeping
-are documented inline in `crates/lr-router/src/instance.rs` but
-have no architecture-level overview yet.
+(D9.1), the thread-model + lock-strategy chapter (D8.6,
+`ARCHITECTURE.md` "Performance characteristics"), the formal EBNF
+(D9.2, `docs/filter_dsl_grammar.md`), the FFI design doc (D9.6,
+`docs/ffi_design.md`), the contributor checklist (D9.3,
+`CONTRIBUTING.md`), the security policy (D9.4, `SECURITY.md`), the
+structured changelog (D9.5, `CHANGELOG.md`, 1 384 lines covering
+`rc.1` → `rc.4`) and the `instance.rs` internal-structure chapter
+(D9.1, `ARCHITECTURE.md` "Router instance internals") all landed.
+D9 is now complete.
 
 **Proposed work.**
 
@@ -1463,11 +1459,32 @@ have no architecture-level overview yet.
    chapter (~~global Mutex design,~~ thread-per-peer, lock
    contention analysis, scalability ceiling) and Performance
    chapter (~~expected throughput,~~ bottleneck analysis,
-   optimisation directions) landed earlier in D8.6. The remaining
-   piece is the `instance.rs` internal-structure chapter (Loc-RIB
+   optimisation directions) landed earlier in D8.6. ~~The remaining
+   piece — the `instance.rs` internal-structure chapter (Loc-RIB
    data structures, reselect path, export hook ordering,
    redistribution tracking, `redistributed_bgp` BTreeMap design,
-   OSPF / Babel runtime structs).
+   OSPF / Babel runtime structs) — landed as the new "Router
+   instance internals" section in `docs/ARCHITECTURE.md`.~~ The
+   chapter covers: the three kinds of `DefaultRouter` state
+   (per-session runtime / Loc-RIB + Adj-RIBs / cross-protocol OSPF
+   + misc) with a field map; the per-protocol runtime structs
+   (`OspfRuntime`, `OspfAreaState`, `BabelRuntime`, `RuntimeDelta`)
+   and why the LSDB is per-area while the Babel runtime is
+   session-scoped; the four Loc-RIB contribution maps
+   (`originated` / `static_routes` / `direct_rib` /
+   `redistributed_bgp`) and how `reselect(key)` merges them; the
+   six-stage export hook ordering (split horizon → protocol gate →
+   RFC 8212 → export hooks → Add-Path vs single-path → Adj-RIB-Out
+   diff) with the two-phase collect/transmit split that the borrow
+   checker forces; the per-destination MRAI queue and why
+   withdrawals bypass it; the `redistribute_route` feedback-loop
+   guard and the `MetricPolicy::Add(N)` fixpoint it protects
+   against; and the OSPF top-level state map (areas / published /
+   externals / stable LS IDs / NSSA translations / virtual links /
+   Grace-LSA dedup) including why the stable-LS-ID maps exist (v3
+   LS IDs carry no addressing semantics) and why Grace-LSA dedup
+   keys on the (seq, age, checksum, length) tuple rather than on
+   sequence alone.
 2. ~~**`docs/filter_dsl_grammar.md`.** Formal EBNF for the Filter DSL.~~
    Landed. ISO/IEC 14977 EBNF derived directly from the lexer +
    Pratt parser source: lexical structure (identifiers, keywords,
@@ -1561,8 +1578,9 @@ have no architecture-level overview yet.
 
 **Estimated size.** ~1500–2000 lines of docs (D9.2 lands ~680 of
 those; D9.6 lands ~310; D9.3 / D9.4 / D9.5 together ~580; D9.1's
-Filter DSL chapter ~165; the remaining `instance.rs` deep-dive is
-the last ~200-line slice).
+Filter DSL chapter ~165; ~~the `instance.rs` deep-dive landed as
+a ~220-line "Router instance internals" section in
+`docs/ARCHITECTURE.md`~~).
 
 ---
 
@@ -2270,7 +2288,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; **GitHub #19 P6 landed** — new `Instr::BranchFieldIntCmp` variant + `pass_fuse_branches` peephole pass collapse the four-instruction pattern `LoadField(int); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into one instruction with zero stack traffic; only the four int-typed fields (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`) and six comparison ops fuse, and only when no external jump lands inside the pattern; `vm_if_local_pref` ~66 → ~28 ns (−57 %, 2.3×), `import_pipeline/realistic/10000` ~12.27 → ~11.47 ms (−6.5 %); 5 new unit tests pin the rewrite (positive shapes + non-int-field + non-cmp-op + jump-into-pattern refusals); existing equivalence tables already cover the dispatch (`if bgp.local_pref > 100 then accept; reject;` is in `vm_matches_interpreter_on_policy_table`); **GitHub #19 P7 landed** — `run_code` reads the source span lazily inside the fallible arms (LoadVar / AssignVar / Bin / Neg / Call / CallFn / Method / AssignField / AppendField) instead of once per dispatch at the loop top; infallible arms (Push / Jump / Accept / Reject / Return / Pop / PushScope / PopScope / StoreTmp) pay zero span cost; `spans: &[Span]` threaded as a parameter to `run_code` alongside `code`, which also fixes a latent bug where a user-function body indexed the *outer filter's* span table (`cf.spans`) instead of its own (`f.spans`) — `call_compiled_function` now passes `&f.spans`; `vm_large_community_set/hit_last` −0.60 % (p = 0.00), `vm_large_community_set/miss` −0.38 % (p = 0.00); 1 new test (`vm_error_inside_user_function_carries_function_span`) pins the function-body span fix; #19 phasing now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓, P6 ✓, P7 ✓ |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
-| D9        | partial (D9.1 Filter DSL chapter + D9.2 EBNF + D9.3 CONTRIBUTING + D9.4 SECURITY + D9.5 CHANGELOG + D9.6 ffi_design landed; `instance.rs` deep-dive still open) | —     | Filter DSL architecture chapter in `docs/ARCHITECTURE.md` (AST / Pratt parser / evaluator / `FilterContext` / bytecode VM + peephole / BIRD `f_line` comparison), formal EBNF grammar + corpus test, `docs/ffi_design.md`, the 173-line `CONTRIBUTING.md`, the 93-line `SECURITY.md` (rc.4 version pin, 90-day coordinated disclosure, threat model) and the 1 384-line `CHANGELOG.md` (rc.1 → rc.4) all landed; the `instance.rs` internal-structure chapter (Loc-RIB data structures, reselect path, export hook ordering, redistribution tracking, OSPF / Babel runtime structs) remains |
+| D9        | landed                | —     | Filter DSL architecture chapter in `docs/ARCHITECTURE.md` (AST / Pratt parser / evaluator / `FilterContext` / bytecode VM + peephole / BIRD `f_line` comparison), formal EBNF grammar + corpus test, `docs/ffi_design.md`, the 173-line `CONTRIBUTING.md`, the 93-line `SECURITY.md` (rc.4 version pin, 90-day coordinated disclosure, threat model), the 1 384-line `CHANGELOG.md` (rc.1 → rc.4) and the new ~220-line "Router instance internals" chapter in `docs/ARCHITECTURE.md` (DefaultRouter state shape, per-protocol runtime structs, Loc-RIB contribution maps + reselect, six-stage export hook ordering, MRAI per-prefix queue, redistribution tracking + feedback-loop guard, OSPF top-level state map) all landed; D9 is complete |
 | D10       | partial (D10.1 + follow-up + D10.6 landed) | —     | RFC 8326 receive side (§4 best-path step + §4.1 import hook + `[bgp]`/`[[peer]]` graceful_shutdown knobs) + sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | partial (D12.1 + D12.2 + D12.3 + D12.4 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint (now with per-session UPDATE counters `lr_bgp_updates_total` and filter-eval latency histograms `lr_filter_eval_duration_seconds` — D12.4, incl. the RFC 8212 filter-bindings-count-as-policy fix) + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) open |

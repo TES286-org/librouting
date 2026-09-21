@@ -34,7 +34,7 @@ table.
 **Open roadmap directions** (post-1.0, tracked in `docs/ROADMAP-v3.md`):
 
 - D8.2 — per-AFI RIB sharding (perf)
-- D9.1/D9.3–D9.5 — ARCHITECTURE expansion, CONTRIBUTING/SECURITY refresh
+- D8.3 — async I/O migration (`mio` / `tokio` event loop)
 - D10.2/D10.3/D10.4 — RFC 5666 (EPE), BGP-LS, SR Policy
 - D11 — BGP-LS (RFC 7752 + RFC 9552)
 - D14.7 — external BIRD/FRR conversion corpus
