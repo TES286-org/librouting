@@ -1413,30 +1413,61 @@ radix tree + RwLock first (low risk), async I/O last (high risk).
 
 ## D9 — Documentation: architecture deep-dive + contributor guide
 
-**Status:** partial — ~~D9.2 (filter DSL EBNF grammar)~~ and
-~~D9.6 (`docs/ffi_design.md`)~~ landed; D9.1, D9.3–D9.5 still open.
-Tracks `docs/`.
+**Status:** partial — ~~D9.2 (filter DSL EBNF grammar)~~, ~~D9.6
+(`docs/ffi_design.md`)~~, ~~D9.3 (`CONTRIBUTING.md`)~~, ~~D9.4
+(`SECURITY.md`)~~, ~~D9.5 (`CHANGELOG.md`)~~ and ~~D9.1 (Filter DSL
+chapter + thread model + performance chapter in `ARCHITECTURE.md`)~~
+landed; the `instance.rs` internal-structure chapter inside D9.1
+remains open. Tracks `docs/`.
 
-**Current gap.** Existing docs target operators and embedders
+**Current gap.** ~~Existing docs target operators and embedders
 (`README.md`, `tutorial.md`, `API.md`, `lr-cli.md`, `RUNBOOK.md`,
 `PARITY.md`, `INTEROP.md`, 13 example files). Contributor-facing
 docs are thin: no Filter DSL architecture write-up, no internal
 structure document for `lr-router/src/instance.rs` (a 11 158-LoC
-single file), no thread model document. ~~No formal EBNF for the
-Filter DSL.~~ D9.2 closed that gap. ~~No FFI design document.~~
-D9.6 closed that gap.
+single file), no thread model document.~~ The Filter DSL chapter
+(D9.1, this revision), the thread-model + lock-strategy chapter
+(D8.6, `ARCHITECTURE.md` "Performance characteristics"), the formal
+EBNF (D9.2, `docs/filter_dsl_grammar.md`), the FFI design doc
+(D9.6, `docs/ffi_design.md`), the contributor checklist (D9.3,
+`CONTRIBUTING.md`), the security policy (D9.4, `SECURITY.md`) and
+the structured changelog (D9.5, `CHANGELOG.md`, 1 384 lines covering
+`rc.1` → `rc.4`) all landed. The remaining open piece inside D9.1
+is the `instance.rs` internal-structure chapter (Loc-RIB data
+structures, reselect path, export hook ordering, redistribution
+tracking, `redistributed_bgp` BTreeMap design, OSPF / Babel runtime
+structs) — the per-session state and the cross-protocol bookkeeping
+are documented inline in `crates/lr-router/src/instance.rs` but
+have no architecture-level overview yet.
 
 **Proposed work.**
 
-1. **`docs/ARCHITECTURE.md` expansion.** Filter DSL chapter (AST
+1. ~~**`docs/ARCHITECTURE.md` expansion.** Filter DSL chapter (AST
    structure, Pratt parser flow, tree-walking evaluator design,
-   `FilterContext` trait intent, comparison to BIRD `f_line`).
-   `instance.rs` internal structure chapter (Loc-RIB data
-   structures, reselect path, export hook ordering, redistribution
-   tracking, `redistributed_bgp` BTreeMap design). Thread model
-   chapter (global Mutex design, thread-per-peer, lock contention
-   analysis, scalability ceiling). Performance chapter (expected
-   throughput, bottleneck analysis, optimisation directions).
+   `FilterContext` trait intent, comparison to BIRD `f_line`).~~
+   Landed. The chapter covers the lexer / parser / evaluator /
+   bytecode VM data flow with an inline ASCII diagram, the AST
+   shape (`Filter` / `FilterBody` / `Stmt` / `Expr` /
+   `RouteFieldKind`), the Pratt `parse_binary` precedence-climbing
+   loop with the right-associative fixpoint, the
+   `Evaluator<'a, C: FilterContext + ?Sized>` scope-stack +
+   `MAX_CALL_DEPTH` guard, the three payoffs of the `FilterContext`
+   trait (absent-vs-zero distinction, shared
+   `DaemonFilterContext` + `lr_filter_context_t` surface, the
+   GitHub #19 P3 in-place int fast paths), the bytecode VM
+   instruction set + `EvalTree` fallback as the differential oracle,
+   the peephole passes + the P6 `BranchFieldIntCmp` fusion, and a
+   comparison to BIRD's `f_line` (structurally similar; lr keeps the
+   tree-walker as the oracle, and the P1 side-table interning
+   attempt and its measured regression are recorded). Thread model
+   chapter (~~global Mutex design,~~ thread-per-peer, lock
+   contention analysis, scalability ceiling) and Performance
+   chapter (~~expected throughput,~~ bottleneck analysis,
+   optimisation directions) landed earlier in D8.6. The remaining
+   piece is the `instance.rs` internal-structure chapter (Loc-RIB
+   data structures, reselect path, export hook ordering,
+   redistribution tracking, `redistributed_bgp` BTreeMap design,
+   OSPF / Babel runtime structs).
 2. ~~**`docs/filter_dsl_grammar.md`.** Formal EBNF for the Filter DSL.~~
    Landed. ISO/IEC 14977 EBNF derived directly from the lexer +
    Pratt parser source: lexical structure (identifiers, keywords,
@@ -1455,15 +1486,55 @@ D9.6 closed that gap.
    wildcard token is parsed but does not yet carry meaning inside
    `~` patterns). Both are now documented as current behaviour
    with a follow-up pointer.
-3. **`CONTRIBUTING.md`.** PR checklist (fmt / clippy / test green,
+3. ~~**`CONTRIBUTING.md`.** PR checklist (fmt / clippy / test green,
    `-D warnings` clean, every new feature has tests + docs), commit
    message format (`type(scope): summary`), Rust style guide,
-   testing strategy (unit + interop + RFC test vectors).
-4. **`SECURITY.md`.** Vulnerability reporting flow (email to
+   testing strategy (unit + interop + RFC test vectors).~~ Landed.
+   The 173-line contributor guide covers: quick-start build + test,
+   how to land a change (issue-first, branch off `main`, small
+   self-contained commits, Conventional Commits, PR-against-main),
+   the commit message format with the `type` table + the `scope`
+   list + worked examples, the code review checklist (fmt / clippy
+   `-D warnings` / nextest green / public-API doc comment +
+   `docs/API.md` entry / `STATUS.md` capability row +
+   `RFC_MAP.md` pin / fuzz target or proptest on new wire codecs /
+   FFI header regeneration + Go/Python/C++ bindings sync), the
+   four-layer testing strategy (unit / integration / interop /
+   kernel-gated), how to add a new crate, how to add a new RFC pin,
+   the release flow, and the dual `MIT OR Apache-2.0` license. The
+   Rust style guide content lives in `AGENTS.md` §4.2 (Rust stable
+   + MSRV 1.88, no `#[allow(...)]` without justification, `cargo
+   fmt --check` clean, no `println!`/`dbg!`, English-only files,
+   RFC-section citations in doc comments) and is cross-referenced
+   from the review checklist.
+4. ~~**`SECURITY.md`.** Vulnerability reporting flow (email to
    security@tes286.top), coordinated disclosure (90-day embargo),
-   affected version range, PGP public key.
-5. **`CHANGELOG.md`.** Version history from `git log`, organised by
-   version, marking breaking changes and new features.
+   affected version range, PGP public key.~~ Landed. The 93-line
+   policy covers: the supported-versions table (the latest `-rc`
+   line on `main`, with the post-1.0 policy spelled out), the
+   private reporting flow (mail to `security@tes286.top` with the
+   four required pieces — description, reproducer, affected version,
+   mitigations), the 72-hour acknowledgement window, the 90-day
+   coordinated-disclosure timeline (Day 0 acknowledge, Day 0–14
+   triage, Day 14–30 fix, Day 30 coordinate release, Day 90 public
+   disclosure), the threat model (every wire codec is panic-free
+   against arbitrary input, fuzzing targets in D6, miri on the FFI
+   surface in nightly CI, the `CAP_NET_RAW` recommendation for
+   OSPFv2/v3 / SRv6 / MPLS), and the PGP placeholder (published
+   once 1.0 ships; out-of-band key exchange for the rc line).
+5. ~~**`CHANGELOG.md`.** Version history from `git log`, organised by
+   version, marking breaking changes and new features.~~ Landed.
+   The 1 384-line changelog follows [Keep a Changelog] with
+   `Added` / `Fixed` / `Changed` / `Deprecated` sections per
+   release: `[Unreleased]` placeholder, `[1.0.0-rc.4]` (config DSL
+   migration + filter VM hardening), `[1.0.0-rc.3]` (multi-protocol
+   daemon), `[1.0.0-rc.2]` (LRXP exchange-plane prototype), and the
+   earlier pre-1.0 sections. The dual `MIT OR Apache-2.0` license
+   header, the Semantic Versioning adherence note, the pre-1.0
+   freeze contract (breaking changes after a `-rc` lands recorded
+   under the next `-rc` heading with a `BREAKING CHANGE:` marker),
+   and cross-references to the ROADMAP-v3 audit trail close the
+   loop.
 6. ~~**`docs/ffi_design.md`.** FFI design: panic barrier contract
    (`catch_unwind` so panics never cross the C ABI), `lr_bytes_t`
    ownership model (caller frees), cbindgen pipeline (`build.rs` →
@@ -1489,7 +1560,9 @@ D9.6 closed that gap.
    source file that implements it.
 
 **Estimated size.** ~1500–2000 lines of docs (D9.2 lands ~680 of
-those; D9.6 lands ~310; the rest is split across D9.1 + D9.3–D9.5).
+those; D9.6 lands ~310; D9.3 / D9.4 / D9.5 together ~580; D9.1's
+Filter DSL chapter ~165; the remaining `instance.rs` deep-dive is
+the last ~200-line slice).
 
 ---
 
@@ -2197,7 +2270,7 @@ fully stable (Phase 3+), per the maintainer's note.
 | D6        | landed                | —     | proptest + RFC vectors + criterion benches + cargo-fuzz targets; nightly `fuzz` and `bench-smoke` jobs wired; **GitHub #19 P0 landed** — `filter_eval` grows to 6 shapes (large prefix set / large community set / user functions) + new `import_pipeline` bench (DSL eval → Adj-RIB-In → Loc-RIB at 100/1k/10k scales) + equivalence test on the bench-sized shapes; **GitHub #19 P4 landed** — `PrefixSetTrie` (Patricia trie borrowing from `lr-bgp::roa_trie`) replaces the O(n) `MatchRhs::Set` prefix scan with O(prefix_len) covering walk; `vm_large_prefix_set` 3.3× faster (−70 %), import-pipeline −8.8 % to −10.4 % at 10 k routes; P1 (compact instruction encoding) attempted and reverted (2–10 % regression from side-table indirection, documented in the D6 follow-up); **GitHub #19 P5 landed** — `crates/lr-policy/src/filter/peephole.rs` runs 3 passes (constant propagation + literal folding, dead-branch elimination, jump threading) inside `bytecode::compile`; new `const_fold` bench shape shows −25 % (1.34×) on the VM; existing shapes within ±2 % of P4 (noise); jump-target safety preserves the `&&`/`||` short-circuit semantics; 14 unit tests pin golden output; `Instr`/`MatchItem`/`MatchRhs`/`DefinedTarget`/`Expr` derive `PartialEq, Eq` (additive); **GitHub #19 P2 landed** — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; `CompiledFilter.functions` is now `Vec<CompiledFunction>` + `function_index: BTreeMap<String, usize>` (BREAKING CHANGE for direct `.functions` access); `vm_user_functions` −1.25 % (437 → 430 ns, p=0.05); variable slot resolution prototyped and reverted (frame/scope double-write regressed `vm_simple_accept` +10 %, `vm_const_fold` +29 %); **GitHub #19 P3 landed** — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); new `lr_policy::bgp::origin` function; `local_pref`/`med` updated to use `get_u32_be`; bench `BenchCtx` updated to match production; `vm_if_local_pref` −21 % (83.5 → 66.4 ns), `vm_complex_chain` −8 %, `vm_user_functions` −8 %, `import_pipeline/realistic/1000` −5.4 %; no API break, 2 new tests; **GitHub #19 P6 landed** — new `Instr::BranchFieldIntCmp` variant + `pass_fuse_branches` peephole pass collapse the four-instruction pattern `LoadField(int); Push(Int(c)); Bin(Cmp); JumpIf*(t)` into one instruction with zero stack traffic; only the four int-typed fields (`BgpLocalPref`/`BgpMed`/`BgpOrigin`/`Source`) and six comparison ops fuse, and only when no external jump lands inside the pattern; `vm_if_local_pref` ~66 → ~28 ns (−57 %, 2.3×), `import_pipeline/realistic/10000` ~12.27 → ~11.47 ms (−6.5 %); 5 new unit tests pin the rewrite (positive shapes + non-int-field + non-cmp-op + jump-into-pattern refusals); existing equivalence tables already cover the dispatch (`if bgp.local_pref > 100 then accept; reject;` is in `vm_matches_interpreter_on_policy_table`); **GitHub #19 P7 landed** — `run_code` reads the source span lazily inside the fallible arms (LoadVar / AssignVar / Bin / Neg / Call / CallFn / Method / AssignField / AppendField) instead of once per dispatch at the loop top; infallible arms (Push / Jump / Accept / Reject / Return / Pop / PushScope / PopScope / StoreTmp) pay zero span cost; `spans: &[Span]` threaded as a parameter to `run_code` alongside `code`, which also fixes a latent bug where a user-function body indexed the *outer filter's* span table (`cf.spans`) instead of its own (`f.spans`) — `call_compiled_function` now passes `&f.spans`; `vm_large_community_set/hit_last` −0.60 % (p = 0.00), `vm_large_community_set/miss` −0.38 % (p = 0.00); 1 new test (`vm_error_inside_user_function_carries_function_span`) pins the function-body span fix; #19 phasing now: P0 ✓, P1 reverted, P2 ✓, P3 ✓, P4 ✓, P5 ✓, P6 ✓, P7 ✓ |
 | D7        | landed                | —     | Supply-chain: cargo-audit + cargo-deny + Dependabot + governance docs |
 | D8        | partial (D8.1 + D8.4 + D8.6 landed) | —     | RwLock read/write split + ROA Patricia trie + perf docs; per-AFI sharding (D8.2) and async I/O (D8.3) open |
-| D9        | partial (D9.2 + D9.6 landed) | —     | Filter DSL formal EBNF grammar + corpus test + `docs/ffi_design.md` landed; ARCHITECTURE expansion, CONTRIBUTING/SECURITY/CHANGELOG refresh still open |
+| D9        | partial (D9.1 Filter DSL chapter + D9.2 EBNF + D9.3 CONTRIBUTING + D9.4 SECURITY + D9.5 CHANGELOG + D9.6 ffi_design landed; `instance.rs` deep-dive still open) | —     | Filter DSL architecture chapter in `docs/ARCHITECTURE.md` (AST / Pratt parser / evaluator / `FilterContext` / bytecode VM + peephole / BIRD `f_line` comparison), formal EBNF grammar + corpus test, `docs/ffi_design.md`, the 173-line `CONTRIBUTING.md`, the 93-line `SECURITY.md` (rc.4 version pin, 90-day coordinated disclosure, threat model) and the 1 384-line `CHANGELOG.md` (rc.1 → rc.4) all landed; the `instance.rs` internal-structure chapter (Loc-RIB data structures, reselect path, export hook ordering, redistribution tracking, OSPF / Babel runtime structs) remains |
 | D10       | partial (D10.1 + follow-up + D10.6 landed) | —     | RFC 8326 receive side (§4 best-path step + §4.1 import hook + `[bgp]`/`[[peer]]` graceful_shutdown knobs) + sender-side hook + RFC 8212 BIRD/FRR interop scripts landed; BGP-LS / SR Policy post-1.0 |
 | D11       | not started (post-1.0)| —     | BGP-LS                                   |
 | D12       | partial (D12.1 + D12.2 + D12.3 + D12.4 landed) | —     | `lrctl` operational CLI + Prometheus `/metrics` endpoint (now with per-session UPDATE counters `lr_bgp_updates_total` and filter-eval latency histograms `lr_filter_eval_duration_seconds` — D12.4, incl. the RFC 8212 filter-bindings-count-as-policy fix) + multi-stage Dockerfile + `.dockerignore` + `docker/README.md` + `.github/workflows/docker.yml` CI verification landed; Helm chart (separate repo) open |
