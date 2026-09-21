@@ -52,9 +52,15 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 # (rather than depending on a third-party image like pierky/bird2)
 # keeps the BIRD version aligned with what the Linux CI installs
 # (Ubuntu 22.04's bird2 package).
+#
+# `--platform=linux/amd64` forces Docker Desktop on Windows to pull
+# the Linux variant of ubuntu:22.04 (the Windows runner's default
+# Docker context is Windows containers; without this flag the pull
+# fails with "no matching manifest for windows/amd64"). On Linux
+# Docker the flag is a no-op (the host platform already matches).
 echo "== building the BIRD Docker image ($IMAGE_TAG) =="
-docker build --tag "$IMAGE_TAG" -f - . <<'DOCKERFILE'
-FROM ubuntu:22.04
+docker build --platform=linux/amd64 --tag "$IMAGE_TAG" -f - . <<'DOCKERFILE'
+FROM --platform=linux/amd64 ubuntu:22.04
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update \
     && apt-get install -y --no-install-recommends bird2 \
@@ -102,11 +108,15 @@ protocol bgp lr {
 EOF
 
 echo "== starting BIRD in a Docker container =="
+# --platform=linux/amd64: force the Linux variant (Windows runner
+#   Docker default is Windows containers; the explicit platform flag
+#   routes the run through the LinuxKit backend).
 # --add-host: host.docker.internal → the Docker host's loopback
 #   (Docker Engine 20.10+ supports the host-gateway alias).
 # -v: mount the BIRD config read-only (Windows host → Linux container
 #   volume mount; Docker Desktop translates the path automatically).
 docker run --rm -d \
+    --platform=linux/amd64 \
     --name "$CONTAINER" \
     --add-host=host.docker.internal:host-gateway \
     -v "$OUT/bird.conf:/bird.conf:ro" \
