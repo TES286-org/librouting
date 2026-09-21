@@ -484,13 +484,13 @@ enum OspfKind {
 }
 
 impl OspfTableEntry {
-    fn intra(metric: u64) -> Self {
+    fn intra(metric: u64, next_hop: Option<IpAddr>) -> Self {
         Self {
             metric,
             kind: OspfKind::Intra,
             label: None,
             label_nh: None,
-            next_hop: None,
+            next_hop,
         }
     }
 
@@ -4962,7 +4962,7 @@ impl DefaultRouter {
             .iter()
             .chain(spf_result.transit_routes.iter())
         {
-            table.insert(r.prefix, OspfTableEntry::intra(r.metric));
+            table.insert(r.prefix, OspfTableEntry::intra(r.metric, r.next_hop));
         }
         for r in spf::summary_routes(lsdb, spf_result) {
             // `no_summary` areas must only ever derive the default from
@@ -10373,14 +10373,19 @@ mod tests {
             (r, h)
         };
 
-        // Default: SR reception off — the route installs unlabelled.
+        // Default: SR reception off — the route installs unlabelled
+        // but still carries the resolved next hop toward the prefix's
+        // originator (the kernel FIB mirror needs the next hop to
+        // install the route; the OSPFv2 stub_route path used to
+        // discard it, which is why --install-kernel-routes did not
+        // mirror OSPF intra-area routes into the kernel).
         let (r, _) = build(false);
         let route = r
             .rib_snapshot()
             .into_iter()
             .find(|rt| rt.key.prefix == Prefix::new_v4([10, 20, 0, 0], 24))
             .expect("route installed");
-        assert!(route.next_hop.is_none());
+        assert_eq!(route.next_hop, Some(IpAddr::V4([10, 0, 0, 2])));
         assert!(
             route
                 .attributes
@@ -10447,9 +10452,13 @@ mod tests {
             .into_iter()
             .find(|rt| rt.key.prefix == Prefix::new_v4([10, 20, 0, 0], 24))
             .expect("route installed");
-        // Penultimate hop: no label, no next hop — the route itself is
-        // untouched.
-        assert!(route.next_hop.is_none());
+        // Penultimate hop: no label (PHP), but the route's next hop
+        // toward the originator is still populated — the kernel FIB
+        // mirror needs it to install the route. The OSPFv2 stub-route
+        // path used to discard the resolved next hop, which made
+        // --install-kernel-routes silently skip OSPF intra-area
+        // routes.
+        assert_eq!(route.next_hop, Some(IpAddr::V4([10, 0, 0, 2])));
         assert!(route
             .attributes
             .get(lr_core::attr::AttrTag(
