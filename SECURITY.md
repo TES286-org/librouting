@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-librouting is pre-1.0 (currently `1.0.0-rc.3`). Security fixes are
+librouting is pre-1.0 (currently `1.0.0-rc.4`). Security fixes are
 backported only to the latest `-rc` line on `main`; there is no
 separate release branch until 1.0 ships. Once 1.0 lands, the policy
 becomes:

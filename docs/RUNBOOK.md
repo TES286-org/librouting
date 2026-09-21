@@ -51,7 +51,7 @@ socket. Connect with `socat - UNIX-CONNECT:/run/lr.sock` (or
 
 ```
 > status
-version 0.1.0
+version 1.0.0-rc.4
 local-as 64512
 ...
 > sessions
@@ -113,7 +113,7 @@ Scrape with any HTTP client:
 $ curl -s http://127.0.0.1:9119/metrics
 # HELP lr_info librouting daemon identity (always 1).
 # TYPE lr_info gauge
-lr_info{version="1.0.0-rc.3",local_as="64512",router_id="10.0.0.1"} 1
+lr_info{version="1.0.0-rc.4",local_as="64512",router_id="10.0.0.1"} 1
 # HELP lr_uptime_seconds Daemon uptime in seconds.
 # TYPE lr_uptime_seconds gauge
 lr_uptime_seconds 42
@@ -186,11 +186,11 @@ mount, sidecar `lrctl`, image layout, exposed ports, volumes, the
 
 ```sh
 # Build.
-docker build -t librouting:rc.3 .
+docker build -t librouting:rc.4 .
 
 # Quick start — single-peer BGP on loopback.
 docker run --rm --network host \
-    librouting:rc.3 \
+    librouting:rc.4 \
     --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
     --listen 127.0.0.1:1179 --network 203.0.113.0/24 \
     --api-socket /run/lr-daemon/api.sock \
@@ -203,12 +203,12 @@ docker run --rm -d \
     -p 179:179 -p 9119:9119 \
     -v /etc/lr-daemon/daemon.lr:/etc/lr-daemon/daemon.lr:ro \
     -v lr-daemon-run:/run/lr-daemon \
-    librouting:rc.3 \
+    librouting:rc.4 \
     --config /etc/lr-daemon/daemon.lr
 
 # Sidecar lrctl — same image, override the entrypoint.
 docker run --rm --volumes-from lr-daemon \
-    librouting:rc.3 \
+    librouting:rc.4 \
     lrctl --socket /run/lr-daemon/api.sock status
 ```
 
