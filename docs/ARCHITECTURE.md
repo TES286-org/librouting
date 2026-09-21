@@ -173,6 +173,166 @@ Multipath (`multipath()`) collects all routes that tie on steps 1–11 (the
 final peer-id tiebreaker is by definition different for different peers).
 `multipath_relax=true` allows mixing neighbors.
 
+## Filter DSL
+
+`lr-policy::filter` is a self-contained BIRD-style filter language.
+The daemon references a filter by name from a peer's
+`import_filter` / `export_filter` table, the FFI exposes
+`lr_filter_compile` / `lr_filter_evaluate`, and embedders can call
+`lr_policy::filter::compile` directly. The subsystem is split into six
+files in `crates/lr-policy/src/filter/`, with a typed AST as the
+contract between the parser and the evaluators:
+
+```
+   source text
+        │
+        ▼
+   lexer.rs        hand-rolled scanner: 1-char/2-char/keyword tokens,
+   (Token, Span)    each token carries its byte Span (issue #18 P0)
+        │
+        ▼
+   parser.rs      Pratt parser for expressions (parse_binary with
+   (Filter)        operator-precedence + right-assoc fixpoint) +
+        │         recursive descent for statements; validates call
+        │         targets (user fn vs built-in) up front
+        │
+        ├──────────────────────┐
+        ▼                      ▼
+   eval.rs                 bytecode.rs + peephole.rs
+   tree-walking             flat Instr stream + peephole passes
+   interpreter              (constant propagation + literal folding +
+   (semantic oracle)         dead-branch elimination + jump threading
+                            + BranchFieldIntCmp fusion)
+        │                      │
+        └──────┬───────────────┘
+               ▼
+         EvalResult (Accept / Reject(reason) / Fallthrough)
+```
+
+### AST
+
+The AST is `Filter { name, body: FilterBody, functions: Vec<FunctionDecl>, line_index }`
+where `FilterBody { stmts: Vec<Stmt> }`. `Stmt` carries the imperative
+side (`If` / `Case` / `Let` / `Assign` / `AssignRouteField` /
+`AppendRouteField` / `Expr` / `Block` / `Return` / `Accept` / `Reject`);
+`Expr` carries the functional side (`Lit` / `Var` / `RouteField` /
+`Call` / `Defined` / `Method` / `Binary` / `Unary` / `Set` /
+`PrefixSet`). Every node owns its byte `Span`; structural equality is
+span-blind (hand-written `PartialEq` ignores spans) so peephole golden
+tables and proptest oracles don't shift when the source is reformatted.
+`RouteFieldKind` enumerates the settable (`bgp.local_pref` / `med` /
+`next_hop` / `communities` / `ext_communities` / `large_communities`)
+and read-only (`net` / `proto` / `source` / `bgp.as_path` /
+`bgp.origin` / `roa.state`) attributes; the parser rejects assignment
+to a non-settable field at compile time.
+
+### Pratt parser
+
+`parse_binary(min_prec)` is the precedence-climbing loop: it peeks
+the next operator (`TokenKind::Plus` → `BinaryOp::Add`, …, including
+`Tilde`/`BangTilde` for `~`/`!~` membership), checks the operator's
+`precedence()` against `min_prec`, advances, recurses with the
+right-associative fixpoint (`prec` for right-assoc, `prec + 1`
+otherwise), then folds the result into an `Expr::Binary` node. Unary
+(`!x`, `-x`) and postfix (`.method(...)`) sit above the binary loop;
+primaries (`Lit`, `Var`, `RouteField`, `(` expr `)`, set literals,
+prefix-set literals) sit at the bottom. The parser runs a `validate_calls`
+pass after the body so every `Expr::Call` name resolves to either a
+user-declared function or a known built-in (`len`, `bgp.first_as`,
+`bgp.contains`, …) — the bytecode compiler relies on this totality
+to resolve user calls to indices (GitHub #19 P2).
+
+### Tree-walking evaluator (the oracle)
+
+`eval::Evaluator<'a, C: FilterContext + ?Sized>` holds the scope
+stack (`Vec<Scope>` of `BTreeMap<String, Value>`), the user functions,
+and a call-depth counter (capped at `MAX_CALL_DEPTH = 64` so runaway
+recursion surfaces as `CallDepthExceeded` instead of a thread-stack
+overflow). The evaluator walks the AST statement-by-statement; the
+first `accept` / `reject` short-circuits the whole filter
+(`ControlFlow::Accept` / `Reject(reason)`), and `return` exits the
+enclosing user function (the DSL's `accept` inside a function
+terminates the *whole filter*, BIRD parity). `EvalResult::Fallthrough`
+is the no-terminal-hit case the daemon falls back to (the
+`[[peer]] import_filter` with no `accept`/`reject` matching a route
+leaves it for the next route-map entry).
+
+### FilterContext trait
+
+The evaluator never touches a `Route` directly — it goes through the
+`FilterContext` trait, an interface of typed accessors
+(`bgp_local_pref(&Route) -> Option<u32>`,
+`bgp_communities(&Route) -> Vec<(Asn, u16)>`, `roa_state(&Route) -> RoaStateLit`,
+…) plus mutators (`set_bgp_local_pref(&mut Route, u32)`,
+`bgp_as_path_prepend(&mut Route, Asn)`, …). This has three payoffs:
+
+1. The DSL never collapses an absent attribute to its default
+   (`Option<u32>` preserves "unset" vs "set to zero" — BIRD's
+   `defined()` semantics depend on it; the `Defined` AST node is
+   specifically an unevaluated probe that goes through the typed
+   presence check, not a value read).
+2. The daemon's `DaemonFilterContext` and the FFI's C-callback
+   context (`lr_filter_context_t`, 19 optional function pointers,
+   NULL = the built-in route-backed default) share the same evaluator,
+   so a C embedder's `bgp.local_pref` reads the same path the daemon
+   does.
+3. The in-place integer fast paths (`Attributes::get_u32_be` /
+   `get_u8`, GitHub #19 P3) live behind the trait, so the evaluator
+   reads LOCAL_PREF / MED / ORIGIN without cloning the `Vec<u8>`
+   attribute payload.
+
+### Bytecode VM
+
+`bytecode::compile` lowers the whole AST to a flat `Vec<Instr>` plus
+a per-function `Vec<Instr>` for each user function; the daemon's
+`daemon_policy::build_filters` precompiles every `[[filter]]` at
+startup so import/export hot loops run the VM. The instruction set
+is small and flat (`Push` / `LoadVar` / `LoadField` / `StoreVar` /
+`AssignVar` / `StoreTmp` / `LoadTmp` / `Bin` / `Not` / `Neg` /
+`JumpIfFalse` / `JumpIfTrue` / `Jump` / `Truthy` / `Match` /
+`BranchFieldIntCmp` / `Defined` / `Call` / `CallFn` / `Method` /
+`AssignField` / `AppendField` / `Pop` / `PushScope` / `PopScope` /
+`Accept` / `Reject` / `Return` / `EvalTree`) — `EvalTree(Expr)` is
+the tree-walking fallback for dynamic subtrees (e.g. `defined()` on
+an arbitrary expression), so the VM and the interpreter cannot diverge
+semantically. A 27-source × 4-route equivalence table pins verdict
++ attribute-state equality across both engines (`vm_matches_interpreter_on_policy_table`
+plus the bench-shaped `vm_matches_interpreter_on_bench_shapes`).
+
+`peephole::optimize_with_spans` runs three passes inside `compile`:
+constant propagation + literal folding (tracks `let` constants,
+folds `Push; Push; Bin` triples and `Push; Not/Neg` pairs, refuses
+div-by-zero / overflow / bad-shift), dead-branch elimination
+(`Push(Bool(c)); JumpIfFalse/JumpIfTrue` → drop or `Jump`, only when
+the conditional is not a jump target — preserves `&&`/`||`
+short-circuit semantics), and jump threading (`Jump(X) → Jump(Y)`
+chains). GitHub #19 P6 adds a fourth fused pass that collapses the
+canonical `LoadField(int); Push(Int(c)); Bin(op); JumpIf*(t)` pattern
+into one `BranchFieldIntCmp` instruction (zero stack traffic) for the
+four int-typed fields and six comparison ops.
+
+### Comparison to BIRD `f_line`
+
+BIRD compiles its filter AST to an `f_line` (a flat instruction
+array with embedded constant pools) and runs it through `f_run`. lr's
+design is structurally similar — flat `Vec<Instr>`, per-function
+instruction arrays, a small constant pool embedded in the `Push` /
+`Match` operands, the same `accept` / `reject` short-circuit
+semantics — with two deliberate differences:
+
+- lr keeps the tree-walking interpreter as the semantic oracle and
+  uses `EvalTree` as the dynamic-subtree fallback. BIRD removed its
+  tree-walker when `f_line` landed; lr keeps it so the bytecode VM
+  has a differential oracle for the equivalence table.
+- lr does not intern strings or attributes inside the VM. Names
+  (`LoadVar` / `AssignVar` / `Call` / `Method`) are still `String`
+  clones. The P1 attempt at side-table interning (compact
+  `Instr { op, a: u32, b: u32 }` + `consts` / `matches` / `trees`
+  side tables) measured a 2–10 % regression from the indirection
+  and was reverted; the current `Instr` is a fat enum (64 B) but the
+  fetch loop is branch-predicted and cache-line-aligned, which is
+  where the hot loop wins.
+
 ## Performance characteristics
 
 ### ROA validation (RFC 6811)
@@ -200,10 +360,15 @@ table — the trie removes that ceiling entirely.
 
 ### Filter DSL evaluation
 
-Policy filters run the D3.7 stack-machine bytecode: filters compile
-once at configuration time and each route evaluation is a flat opcode
-loop with no AST re-walking and no per-route allocation on the match
-path (`crates/lr-policy/src/filter/bytecode.rs`).
+Policy filters run the D3.7 stack-machine bytecode (see the
+[Filter DSL](#filter-dsl) chapter for the AST, parser, evaluator and
+peephole design). Filters compile once at startup and each route
+evaluation is a flat opcode loop with no AST re-walking and no
+per-route allocation on the match path
+(`crates/lr-policy/src/filter/bytecode.rs`). Criterion harnesses:
+`crates/lr-policy/benches/filter_eval.rs` (seven shapes under both
+engines) and `crates/lr-policy/benches/import_pipeline.rs` (the
+daemon per-UPDATE cost at 100 / 1k / 10k routes).
 
 ### Daemon thread model and lock strategy
 
@@ -307,7 +472,7 @@ embedders. Notable toggles:
 ## Testing
 
 - Unit tests live alongside the source (`#[cfg(test)]` modules).
-- End-to-end tests live in `crates/lr-tests/tests/` — currently 16 files:
+- End-to-end tests live in `crates/lr-tests/tests/` — 16 files:
   - `tcp_smoke.rs` — two librouting BGP peers exchange OPEN+KEEPALIVE over
     real TCP.
   - `route_propagation.rs` — originate → Adj-RIB-In → Loc-RIB →
@@ -324,25 +489,54 @@ embedders. Notable toggles:
   - `ospf_multi_area.rs`, `ospf_external.rs`, `ospf_stub_nssa.rs`,
     `ospf_virtual_link.rs` — OSPF area/ABR/NSSA/§15 coverage.
   - `tutorial_snippets.rs` — compile-and-run anchors for `docs/tutorial.md`.
-- Daemon-level integration tests in `crates/lr-cli/tests/` (8 files)
+- Daemon-level integration tests in `crates/lr-cli/tests/` (20 files)
   spawn the real `lr-daemon` binary (runtime API, signals, reload,
   privilege drop, multi-peer fan-out, RFC 8212 policy, FRR parity knobs,
-  exchange-plane prototype, BFD fast-fail).
-- `crates/lr-ldp/tests/` carries the LDP session-FSM and transit-LSR e2e
-  suites (two binaries, ~5 KLOC).
+  exchange-plane prototype, BFD fast-fail, filter diagnostics,
+  graceful-shutdown receive, metrics endpoint, config `check` /
+  `to-dsl`, `lrctl` proxy surface).
+- Per-crate integration suites: `crates/lr-bgp/tests/` (5 files,
+  incl. RFC 4271 Appendix A vectors and the codec-reset regression),
+  `crates/lr-ldp/tests/` (2 files, the LDP session-FSM and
+  transit-LSR e2e suites, ~5 KLOC), `crates/lr-router/tests/`
+  (2 files, Babel announcement + multihop), `crates/lr-policy/tests/`
+  (3 files: filter corpus + proptest + grammar corpus),
+  `crates/lr-osroute/tests/` (2 files, the OSPFv3-transport + SRv6
+  kernel-gated suites).
 - Interop scripts against the BIRD and FRR reference routers live in
-  `tests/interop/` (run in CI on ubuntu runners with the reference
-  daemons installed via apt; they skip gracefully when absent).
-- Total: 1,631 unit + integration tests across 75 test binaries (18
-  workspace crates + doc-tests + interop scripts).
+  `tests/interop/` — 54 scripts covering BGP / OSPF / Babel / LDP /
+  BFD / BMP / RPKI-RTR / TCP-AO / Add-Path / route-server / E-LSA /
+  End.X / SRv6 / graceful-shutdown / RFC 8212 / filter DSL / damping /
+  aggregation / multi-protocol / redistribute / MPLS-LSP / MRT /
+  labelled-unicast. They run in CI on ubuntu runners with the
+  reference daemons installed via apt; they skip gracefully when
+  absent.
+- Total: ~1,900 nextest cases run on every push across 50
+  integration test files in `crates/*/tests/` plus per-crate unit
+  tests, doc-tests across every public API, and 54 interop scripts.
+  Run `cargo nextest list --workspace --all-features` for the live
+  count.
 
 ## CI/CD
 
 `.github/workflows/`:
 
-- `ci.yml` — fmt + clippy + tests + C harness + Go + Python + MSRV + cross
-- `nightly.yml` — miri for unsafe audit
-- `release.yml` — cross-compiled binaries + cargo publish
+- `ci.yml` — fmt + clippy + nextest + doc-tests + C/C++ harness +
+  Python bindings + Go bindings + 5 in-process interop labs
+  (`two_daemon.sh`, `addpath.sh`, `filter_dsl_bird.sh`,
+  `babel_multi_nic.sh`, `babel_multihop.sh`) + MSRV 1.88 + cross
+  builds (`aarch64-unknown-linux-gnu`,
+  `x86_64-pc-windows-gnu`, `x86_64-apple-darwin`) + native macOS /
+  Windows runners + coverage (`cargo-tarpaulin`).
+- `nightly.yml` — `miri` (UB audit on the FFI unsafe surface),
+  `supply-chain` (`cargo audit` + `cargo deny`), `vm-kernel-gated`
+  (QEMU VM with `CAP_NET_ADMIN` for TCP-AO / MPLS / SRv6), `fuzz`
+  (the three `cargo-fuzz` targets: `bgp_decode`, `filter_parser`,
+  `roa_validate`), `bench-smoke` (criterion smoke run).
+- `docker.yml` — multi-stage Dockerfile build verification
+  (ROADMAP-v3 D12.3) on push / PR / nightly.
+- `release.yml` — tag-driven cross-compiled binaries + `cargo publish`
+  + GitHub Release archives.
 
 ## License
 
