@@ -62,14 +62,19 @@ impl AdjRibOut {
 
     /// Every key of `dest` belonging to `family`, with its advertised
     /// path identifiers — the withdrawal bookkeeping for table refreshes.
+    ///
+    /// Range-bounded to the destination's slot in the `(dest, key)`
+    /// ordering — the previous `iter().filter()` shape scanned the whole
+    /// Adj-RIB-Out to find one peer's slice of it. Family filtering happens
+    /// after the range bounds.
     pub fn advertised_keys(
         &self,
         dest: RouteOrigin,
         family: lr_core::nlri::NlriFamily,
     ) -> Vec<(RouteKey, Vec<u32>)> {
         self.inner
-            .iter()
-            .filter(|((d, k), _)| *d == dest && k.family == family)
+            .range((dest, crate::min_route_key())..=(dest, crate::max_route_key()))
+            .filter(|((_, k), _)| k.family == family)
             .map(|((_, k), m)| (k.clone(), m.keys().copied().collect()))
             .collect()
     }
@@ -95,12 +100,15 @@ impl AdjRibOut {
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+    /// Drop every route advertised to `dest`. Range-bounded to the
+    /// destination's slot in the `(dest, key)` ordering — the old
+    /// `keys().filter()` shape scanned the whole Adj-RIB-Out to clear
+    /// one peer's slice of it.
     pub fn clear_for(&mut self, dest: RouteOrigin) {
         let keys: Vec<_> = self
             .inner
-            .keys()
-            .filter(|(d, _)| *d == dest)
-            .cloned()
+            .range((dest, crate::min_route_key())..=(dest, crate::max_route_key()))
+            .map(|(k, _)| k.clone())
             .collect();
         for k in keys {
             self.inner.remove(&k);
@@ -202,5 +210,41 @@ mod tests {
         let other = RouteOrigin { proto: 0, peer: 2 };
         rib.advertise(other, &route([10, 0, 0, 0], 8, 0), 1);
         assert_eq!(rib.iter_for(dest).count(), 3);
+    }
+
+    /// `advertised_keys` returns exactly the keys `dest` was advertised
+    /// under `family`, across every peer in the table — the range bound
+    /// to the destination's slot in the `(dest, key)` ordering ensures
+    /// other destinations are never visited.
+    #[test]
+    fn advertised_keys_filters_by_dest_and_family() {
+        let mut rib = AdjRibOut::new();
+        let a = RouteOrigin { proto: 0, peer: 1 };
+        let b = RouteOrigin { proto: 0, peer: 2 };
+        rib.advertise(a, &route([203, 0, 113, 0], 24, 0), 1);
+        rib.advertise(
+            a,
+            &route_in(
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    32,
+                ),
+                NlriFamily::IPV6_UNICAST,
+                0,
+            ),
+            1,
+        );
+        // Same prefix / family from `b`: must not surface in `a`'s query.
+        rib.advertise(b, &route([203, 0, 113, 0], 24, 0), 1);
+
+        let v4: Vec<_> = rib.advertised_keys(a, NlriFamily::IPV4_UNICAST);
+        assert_eq!(v4.len(), 1, "one v4 key for dest a");
+        assert_eq!(v4[0].1, vec![1], "one tx path id");
+
+        let v6: Vec<_> = rib.advertised_keys(a, NlriFamily::IPV6_UNICAST);
+        assert_eq!(v6.len(), 1, "one v6 key for dest a");
+
+        let labeled: Vec<_> = rib.advertised_keys(a, NlriFamily::IPV4_LABELED_UNICAST);
+        assert!(labeled.is_empty(), "a advertised nothing labelled");
     }
 }

@@ -60,15 +60,32 @@ impl AdjRibIn {
     /// restart / LLGR retention logic to mark or purge retained routes in
     /// place (RFC 4724 §4, RFC 9494 §4.2). Returns the number of routes
     /// removed, so callers can keep incremental per-origin counters exact.
+    ///
+    /// The closure is contractually expected to preserve the route's
+    /// `(origin, key, path_id)` identity — only the route content (its
+    /// attributes, metric, age) may change. The map key tuple is rebuilt
+    /// from the original `origin` parameter and the route's own
+    /// `key` / `path_id`, so a closure that mutates those fields would
+    /// drop the route under its old identity and re-insert it under a
+    /// new one — but no current caller does that.
+    ///
+    /// Performance: the (origin, key, path_id) ordering keeps every
+    /// key for one origin contiguous in the BTreeMap, so a single
+    /// `range` walk collects exactly the matching keys. The previous
+    /// `keys().filter()` implementation was O(N) over the *whole*
+    /// Adj-RIB-In on every GR / LLGR pass — a full-table peer
+    /// restart paid 800k iterations to find ~10k matching keys.
     pub fn mutate_origin<F>(&mut self, origin: RouteOrigin, mut f: F) -> usize
     where
         F: FnMut(Route) -> Option<Route>,
     {
         let keys: Vec<(RouteOrigin, RouteKey, u32)> = self
             .inner
-            .keys()
-            .filter(|(o, _, _)| *o == origin)
-            .cloned()
+            .range(
+                (origin, crate::min_route_key(), u32::MIN)
+                    ..=(origin, crate::max_route_key(), u32::MAX),
+            )
+            .map(|(k, _)| k.clone())
             .collect();
         let mut removed = 0usize;
         for k in keys {
@@ -104,12 +121,18 @@ impl AdjRibIn {
     pub fn clear(&mut self) {
         self.inner.clear();
     }
+    /// Drop every route `origin` contributed. Range-bounded to the
+    /// origin's slot in the (origin, key, path_id) ordering — the old
+    /// `keys().filter()` shape scanned the whole Adj-RIB-In to clear
+    /// one peer's slice of it.
     pub fn clear_for(&mut self, origin: RouteOrigin) {
-        let keys: Vec<_> = self
+        let keys: Vec<(RouteOrigin, RouteKey, u32)> = self
             .inner
-            .keys()
-            .filter(|(o, _, _)| *o == origin)
-            .cloned()
+            .range(
+                (origin, crate::min_route_key(), u32::MIN)
+                    ..=(origin, crate::max_route_key(), u32::MAX),
+            )
+            .map(|(k, _)| k.clone())
             .collect();
         for k in keys {
             self.inner.remove(&k);
@@ -255,5 +278,113 @@ mod tests {
         rib.feed_pre_policy(other, route([10, 0, 0, 0], 8, other, 0));
         assert_eq!(rib.iter_origin(o).count(), 4);
         assert_eq!(rib.iter_origin(other).count(), 1);
+    }
+
+    /// `mutate_origin` must touch only the routes of one origin across
+    /// every family — the (origin, key, path_id) range bounds cover v4,
+    /// v6 and labelled-unicast keys alike. Exercises the GR / LLGR
+    /// retention path (RFC 4724 §4, RFC 9494 §4.2).
+    #[test]
+    fn mutate_origin_only_touches_one_origin_across_families() {
+        let mut rib = AdjRibIn::new();
+        let a = RouteOrigin { proto: 0, peer: 1 };
+        let b = RouteOrigin { proto: 0, peer: 2 };
+        // Three routes for `a` across three families + one for `b`.
+        rib.feed_pre_policy(a, route([203, 0, 113, 0], 24, a, 0));
+        rib.feed_pre_policy(
+            a,
+            route_in(
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    32,
+                ),
+                NlriFamily::IPV6_UNICAST,
+                a,
+                0,
+            ),
+        );
+        rib.feed_pre_policy(
+            a,
+            route_in(
+                Prefix::new_v4([198, 51, 100, 0], 24),
+                NlriFamily::IPV4_LABELED_UNICAST,
+                a,
+                0,
+            ),
+        );
+        rib.feed_pre_policy(b, route([10, 0, 0, 0], 8, b, 0));
+        assert_eq!(rib.len(), 4);
+
+        // Drop only `a`'s routes; `b`'s contribution must survive.
+        let removed = rib.mutate_origin(a, |_| None);
+        assert_eq!(removed, 3, "all three of a's families purged");
+        assert_eq!(rib.len(), 1, "b's route untouched");
+        assert_eq!(rib.iter_origin(a).count(), 0);
+        assert_eq!(rib.iter_origin(b).count(), 1);
+
+        // Rebuild `a`'s slice and verify the closure sees every family.
+        rib.feed_pre_policy(a, route([203, 0, 113, 0], 24, a, 0));
+        rib.feed_pre_policy(
+            a,
+            route_in(
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    32,
+                ),
+                NlriFamily::IPV6_UNICAST,
+                a,
+                0,
+            ),
+        );
+        let mut seen_families = std::collections::BTreeSet::new();
+        rib.mutate_origin(a, |r| {
+            seen_families.insert(r.key.family);
+            Some(r)
+        });
+        assert!(seen_families.contains(&NlriFamily::IPV4_UNICAST));
+        assert!(seen_families.contains(&NlriFamily::IPV6_UNICAST));
+        // `b` was never visited: its slice is intact.
+        assert_eq!(rib.iter_origin(b).count(), 1, "b's route still there");
+    }
+
+    /// `clear_for` mirrors the multi-family, multi-origin contract: only
+    /// the named origin's slice is dropped, every other origin keeps its
+    /// routes across every family.
+    #[test]
+    fn clear_for_only_drops_one_origin_across_families() {
+        let mut rib = AdjRibIn::new();
+        let a = RouteOrigin { proto: 0, peer: 1 };
+        let b = RouteOrigin { proto: 0, peer: 2 };
+        rib.feed_pre_policy(a, route([203, 0, 113, 0], 24, a, 0));
+        rib.feed_pre_policy(
+            a,
+            route_in(
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    32,
+                ),
+                NlriFamily::IPV6_UNICAST,
+                a,
+                0,
+            ),
+        );
+        rib.feed_pre_policy(b, route([10, 0, 0, 0], 8, b, 0));
+        rib.feed_pre_policy(
+            b,
+            route_in(
+                Prefix::new_v6(
+                    [0x20, 0x01, 0x0d, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+                    32,
+                ),
+                NlriFamily::IPV6_UNICAST,
+                b,
+                0,
+            ),
+        );
+        assert_eq!(rib.len(), 4);
+        rib.clear_for(a);
+        assert_eq!(rib.len(), 2, "only a's slice (v4 + v6) is gone");
+        assert_eq!(rib.iter_origin(a).count(), 0);
+        assert_eq!(rib.iter_origin(b).count(), 2);
     }
 }
