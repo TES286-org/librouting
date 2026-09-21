@@ -21,10 +21,17 @@ env:
 # observed legitimate runtime on a cold runner; tighten as needed.
 
 jobs:
-  rust-tests:
-    name: Rust fmt + clippy + test
+  # Lint: fmt + clippy. Fast (~10 min wallclock), runs in parallel
+  # with the unit-tests and ffi-bindings jobs below. Clippy builds
+  # the workspace once but does not run any tests, so this job is
+  # the gate that fails first on a missing doc comment or a lint
+  # regression. Splitting it out from the test job means a fmt or
+  # clippy failure surfaces in ~10 min instead of after the
+  # ~25-min sequential test job.
+  lint:
+    name: Lint (fmt + clippy)
     runs-on: ubuntu-22.04
-    timeout-minutes: 60
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -33,20 +40,29 @@ jobs:
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "rust-tests"
-      - name: Install system deps
-        timeout-minutes: 10
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libc6-dev gcc g++ cbindgen python3 python3-pip python3-venv \
-            golang-go bird2
-      - name: Install Python test deps
+          shared-key: "lint"
+      - name: cargo fmt
         timeout-minutes: 5
-        run: |
-          python3 -m venv /tmp/venv
-          /tmp/venv/bin/pip install --upgrade pip
-          /tmp/venv/bin/pip install cffi pytest
+        run: cargo fmt --all -- --check
+      - name: cargo clippy
+        timeout-minutes: 15
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+  # Unit + integration tests + doctests. Runs in parallel with lint
+  # and ffi-bindings. nextest isolates each test in its own process
+  # so a hung test is killed within the slow-timeout window instead
+  # of stalling the whole `cargo test` invocation.
+  unit-tests:
+    name: Unit + integration tests
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "unit-tests"
       - name: Install cargo-nextest
         # nextest runs each test in its own process and supports a
         # per-test slow-timeout via .config/nextest.toml, so a hung
@@ -57,12 +73,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: cargo fmt
-        timeout-minutes: 5
-        run: cargo fmt --all -- --check
-      - name: cargo clippy
-        timeout-minutes: 30
-        run: cargo clippy --all-targets --all-features -- -D warnings
       - name: cargo nextest (workspace, unit + integration)
         # nextest isolates each test in its own process: a hang in
         # one test no longer takes down the rest of the suite, and
@@ -79,6 +89,35 @@ jobs:
         # (no daemon spawns), so a 10 min ceiling is generous.
         timeout-minutes: 10
         run: cargo test --doc --workspace --all-features
+
+  # FFI + bindings: C/C++/Python/Go harnesses. Needs release build
+  # of lr-ffi (cbindgen regenerates include/lr_ffi.h via build.rs).
+  # Runs in parallel with lint + unit-tests; the four harnesses are
+  # sequential within the job because they share the release artifact.
+  ffi-bindings:
+    name: FFI + bindings (C/C++/Python/Go)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "ffi-bindings"
+      - name: Install system deps
+        timeout-minutes: 10
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libc6-dev gcc g++ cbindgen python3 python3-pip python3-venv \
+            golang-go
+      - name: Install Python test deps
+        timeout-minutes: 5
+        run: |
+          python3 -m venv /tmp/venv
+          /tmp/venv/bin/pip install --upgrade pip
+          /tmp/venv/bin/pip install cffi pytest
       - name: Build lr-ffi (release)
         timeout-minutes: 15
         run: cargo build --release -p lr-ffi
@@ -111,27 +150,6 @@ jobs:
           CGO_LDFLAGS: "-L${{ github.workspace }}/target/release -llr_ffi"
         run: |
           cd bindings/lr-go && go test -v ./...
-      - name: Two-daemon TCP interop test
-        timeout-minutes: 10
-        run: |
-          cargo build -p lr-cli
-          ./tests/interop/two_daemon.sh
-      - name: Add-Path interop (RFC 7911, two-daemon)
-        timeout-minutes: 10
-        run: |
-          ./tests/interop/addpath.sh
-      - name: Filter DSL + ROA interop (BIRD 2)
-        timeout-minutes: 10
-        run: |
-          ./tests/interop/filter_dsl_bird.sh
-      - name: Babel multi-NIC pattern matching
-        timeout-minutes: 10
-        run: |
-          ./tests/interop/babel_multi_nic.sh
-      - name: Babel multi-session transit + check link
-        timeout-minutes: 10
-        run: |
-          ./tests/interop/babel_multihop.sh
 
   msrv:
     name: MSRV (1.88)
@@ -362,6 +380,9 @@ jobs:
       - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)
         timeout-minutes: 5
         run: ./tests/interop/labeled_unicast.sh
+      - name: Add-Path interop (RFC 7911, two-daemon)
+        timeout-minutes: 5
+        run: ./tests/interop/addpath.sh
       - name: RFC 8277 BGP-LU -> MPLS dataplane interop (kernel-gated, user namespace)
         timeout-minutes: 10
         run: ./tests/interop/mpls_lsp.sh
@@ -382,6 +403,12 @@ jobs:
       - name: Babel MAC auth e2e (RFC 8967 + RFC 9467, two daemons)
         timeout-minutes: 10
         run: ./tests/interop/babel_auth.sh
+      - name: Babel multi-NIC pattern matching (RFC 8966 §A.2, lr ↔ lr)
+        timeout-minutes: 10
+        run: ./tests/interop/babel_multi_nic.sh
+      - name: Babel multi-session transit + check link (RFC 8966, lr ↔ lr)
+        timeout-minutes: 10
+        run: ./tests/interop/babel_multihop.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)
         timeout-minutes: 10
         run: ./tests/interop/ospf_bird.sh
@@ -454,6 +481,9 @@ jobs:
       - name: BIRD interop (librouting ↔ BIRD)
         timeout-minutes: 10
         run: ./tests/interop/bird.sh
+      - name: Filter DSL + ROA interop (BIRD 2 filter → lr DSL)
+        timeout-minutes: 10
+        run: ./tests/interop/filter_dsl_bird.sh
       - name: BIRD compat interop (lr-daemon runs a BIRD config natively ↔ BIRD)
         timeout-minutes: 10
         run: ./tests/interop/compat_bird.sh
