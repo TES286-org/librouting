@@ -19,10 +19,14 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-BIN=target/debug/lr-daemon
-if [ ! -x "$BIN" ]; then
-    BIN=target/release/lr-daemon
-fi
+BIN=$(./tests/interop/_lr_daemon.sh)
+# The path-id assertion needs the runtime API socket via python3 +
+# AF_UNIX — skip gracefully on runners without python3 (e.g. Git Bash
+# for Windows where the default Python invocation is `python`).
+command -v python3 >/dev/null 2>&1 || {
+    echo "SKIP: python3 not installed (Add-Path path-id needs API socket)"
+    exit 0
+}
 PORT1=${PORT1:-11821}
 PORT2=${PORT2:-11822}
 OUT=/tmp/lr_addpath_interop

@@ -27,14 +27,10 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-DAEMON=target/debug/lr-daemon
-if [ ! -x "$DAEMON" ]; then
-    DAEMON=target/release/lr-daemon
-fi
-if [ ! -x "$DAEMON" ]; then
+DAEMON=$(./tests/interop/_lr_daemon.sh 2>/dev/null) || {
     echo "SKIP: lr-daemon not built (cargo build -p lr-cli)"
     exit 0
-fi
+}
 command -v python3 >/dev/null 2>&1 || {
     echo "SKIP: python3 not installed (API socket queries)"
     exit 0

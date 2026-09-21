@@ -15,10 +15,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-BIN=target/debug/lr-daemon
-if [ ! -x "$BIN" ]; then
-    BIN=target/release/lr-daemon
-fi
+BIN=$(./tests/interop/_lr_daemon.sh)
 PORT=${PORT:-11794}
 OUT=/tmp/lr_interop_labeled
 rm -rf "$OUT"; mkdir -p "$OUT"
