@@ -386,26 +386,26 @@ jobs:
         shell: bash
         run: ./tests/interop/labeled_unicast.sh
 
-  # Windows lr-vs-BIRD interop via Docker. The Windows runner has
-  # Docker installed (the Moby engine, supports Linux containers via
-  # a LinuxKit VM). The bird_docker.sh script builds a small BIRD 2
-  # image from ubuntu:22.04 + apt-get install bird2, starts BIRD in
-  # a container with `--add-host=host.docker.internal:host-gateway`,
-  # and runs lr-daemon.exe on the Windows host against it. The TCP
-  # path goes through Docker's port forwarding, exercising lr-daemon's
-  # Windows TCP stack against BIRD's Linux TCP stack.
+  # Windows lr-vs-BIRD interop via WSL2. The Windows runner ships
+  # WSL2 + Ubuntu 22.04 by default; the bird_wsl.sh script installs
+  # bird2 inside WSL2, starts BIRD, and runs lr-daemon.exe on the
+  # Windows host against it. The TCP path goes through WSL2's
+  # automatic localhost forwarding — BIRD inside WSL2 connecting to
+  # 127.0.0.1:LR_PORT reaches lr-daemon.exe's listener on the Windows
+  # host.
   #
-  # The script also runs on Linux (Docker Engine 20.10+) — the same
-  # architecture, but on Linux host.docker.internal resolves to the
-  # Docker bridge gateway (172.17.0.1).
+  # The script also runs on Linux (where it uses the host-installed
+  # bird binary via apt-get install bird2 — the existing Linux CI
+  # already covers that path through bird.sh, so the WSL2 path is the
+  # novel coverage on Windows).
   #
-  # `continue-on-error: true` while the test stabilises — Docker on
-  # Windows runners can be flaky (image pulls, port-forward races,
-  # container startup latency on cold runners). A red X here does not
-  # block the workflow; flip to a hard gate once it's been green for
-  # several consecutive runs.
+  # `continue-on-error: true` while the test stabilises — WSL2 on
+  # Windows runners can be flaky (distro startup, package cache init,
+  # WSL networking quirks). A red X here does not block the workflow;
+  # flip to a hard gate once it's been green for several consecutive
+  # runs.
   windows-bird-interop:
-    name: Windows BIRD interop (lr ↔ BIRD-in-Docker)
+    name: Windows BIRD interop (lr ↔ BIRD-in-WSL2)
     runs-on: windows-2022
     timeout-minutes: 30
     continue-on-error: true
@@ -421,14 +421,14 @@ jobs:
       - name: Build lr-daemon (debug)
         timeout-minutes: 25
         run: cargo build -p lr-cli
-      - name: BIRD-in-Docker interop (lr ↔ BIRD 2)
-        # The script SKIPs gracefully if Docker is unavailable, so
-        # the step is safe to run on every push. The hard gate is the
+      - name: BIRD-in-WSL2 interop (lr ↔ BIRD 2)
+        # The script SKIPs gracefully if WSL2+Ubuntu is unavailable
+        # or no host bird binary is on PATH. The hard gate is the
         # `continue-on-error: true` at the job level — a transient
-        # Docker Desktop hiccup does not block the rest of the PR.
+        # WSL2 hiccup does not block the rest of the PR.
         timeout-minutes: 15
         shell: bash
-        run: ./tests/interop/bird_docker.sh
+        run: ./tests/interop/bird_wsl.sh
 
   # Real-world interop: exchange BGP with BIRD and FRR (FRR's bgpd) on
   # loopback TCP sockets and verify routes propagate in both directions.
