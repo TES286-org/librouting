@@ -69,25 +69,42 @@ protocol bgp lr {
 EOF
 
 # Detect a usable BIRD runtime. The first match wins:
-#   1. WSL2 + Ubuntu 22.04 (Windows GitHub Actions runner default).
+#   1. WSL2 + Ubuntu 22.04 (Windows GitHub Actions runner — WSL2 is
+#      enabled but no distro is pre-installed; install Ubuntu on the
+#      fly, then install bird2 inside it).
 #   2. Host-installed `bird` / `birdc` on PATH (Linux).
 #   3. SKIP if neither is available.
 BIRD_RUNTIME=""
 if command -v wsl >/dev/null 2>&1; then
-    # Make sure WSL2 has a usable distro. The windows-2022 runner
-    # ships Ubuntu-22.04 by default, but forked runners might not.
+    # Make sure WSL2 has a usable Ubuntu distro. The windows-2022
+    # runner ships WSL2 enabled but no distribution registered —
+    # `wsl --install -d Ubuntu --no-launch` downloads and registers
+    # Ubuntu without launching it (so no first-run user setup is
+    # needed). The default user is root, which makes the apt-get
+    # install below work without sudo. The install takes ~1-2 min
+    # the first time (downloads ~600 MB); subsequent runs in the
+    # same job skip it (the distro persists for the job's lifetime).
+    if ! wsl --list --quiet 2>/dev/null | tr -d '\0' | grep -qi ubuntu; then
+        echo "== registering an Ubuntu distro inside WSL2 =="
+        # `--no-launch` keeps the distro from starting the first-run
+        # setup; `--name` overrides the auto-generated name so the
+        # `wsl -d Ubuntu` invocation below is stable.
+        wsl --install -d Ubuntu --no-launch --name Ubuntu 2>&1 | tail -5 || true
+    fi
     if wsl --list --quiet 2>/dev/null | tr -d '\0' | grep -qi ubuntu; then
         # WSL2 distros don't ship bird2 by default — install it now.
         # `apt-get install` is idempotent and quick on a warm WSL2
-        # package cache; the install only runs once per runner lifetime
-        # (the WSL2 distro persists for the duration of the job).
+        # package cache; the install only runs once per runner
+        # lifetime (the WSL2 distro persists for the duration of the
+        # job). The default user for `--no-launch` distros is root,
+        # so no sudo needed.
         echo "== ensuring bird2 is installed inside WSL2 =="
-        wsl -- bash -c "command -v bird >/dev/null 2>&1 || \
-            (sudo apt-get update -qq && sudo apt-get install -y -qq bird2)" \
+        wsl -d Ubuntu -- bash -c "command -v bird >/dev/null 2>&1 || \
+            (apt-get update -qq && apt-get install -y -qq bird2)" \
             >/dev/null 2>&1 || true
         # Confirm bird is now available; if apt-get failed (no network,
-        # no sudo), fall through to the host-installed path.
-        if wsl -- bash -c "command -v bird" >/dev/null 2>&1; then
+        # package mirror issue), fall through to the host-installed path.
+        if wsl -d Ubuntu -- bash -c "command -v bird" >/dev/null 2>&1; then
             BIRD_RUNTIME=wsl
         fi
     fi
@@ -111,11 +128,11 @@ bird_run() { # <config-path>
             # Convert the Windows path of the config to a WSL2 path
             # (C:\... → /mnt/c/...). wslpath handles the translation.
             local wsl_cfg
-            wsl_cfg=$(wsl -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
+            wsl_cfg=$(wsl -d Ubuntu -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
             # Run BIRD in foreground mode (-f) inside WSL2, in the
             # background of the bash subshell. The PID is the WSL2
             # process's PID; the trap below stops it via `wsl -- pkill`.
-            wsl -- bird -f -c "$wsl_cfg" >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
+            wsl -d Ubuntu -- bird -f -c "$wsl_cfg" >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
             BIRD_HANDLE=$!
             ;;
         host)
@@ -126,7 +143,7 @@ bird_run() { # <config-path>
 }
 birdc_cmd() { # <args...>
     case "$BIRD_RUNTIME" in
-        wsl) wsl -- birdc "$@" 2>/dev/null ;;
+        wsl) wsl -d Ubuntu -- birdc "$@" 2>/dev/null ;;
         host) birdc "$@" 2>/dev/null ;;
     esac
 }
@@ -135,7 +152,7 @@ bird_shutdown() {
         case "$BIRD_RUNTIME" in
             wsl)
                 # Kill the BIRD process inside WSL2.
-                wsl -- pkill -TERM -x bird 2>/dev/null || true
+                wsl -d Ubuntu -- pkill -TERM -x bird 2>/dev/null || true
                 # And the bash subshell we spawned.
                 kill "$BIRD_HANDLE" 2>/dev/null || true
                 ;;
