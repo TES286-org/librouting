@@ -124,12 +124,19 @@ if command -v wsl >/dev/null 2>&1; then
             # `--import <name> <install-path> <tarball>` registers the
             # distro. The install path is a Windows-style directory
             # that WSL2 creates; we put it under $OUT so it gets
-            # cleaned up with the test artifacts.
-            wsl_no_pathconv --import "$WSL_DISTRO" "$OUT/wsl-install" "$TARBALL" \
+            # cleaned up with the test artifacts. NB: this call uses
+            # plain `wsl` (NOT `wsl_no_pathconv`) because both
+            # <install-path> and <tarball> are Windows paths that
+            # need MSYS translation from the host's `/tmp/...` form
+            # to the Windows `%TEMP%\...` form before wsl.exe can
+            # consume them.
+            wsl --import "$WSL_DISTRO" "$OUT/wsl-install" "$TARBALL" \
                 2>&1 | tail -5 || true
         fi
     fi
-    if wsl_no_pathconv -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
+    # `wsl -l -q` has no path arguments, so MSYS translation is a
+    # no-op — use plain `wsl` for simplicity.
+    if wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
         # Install bird2 inside the imported distro. The default user
         # for `wsl --import` is root, so no sudo needed.
         echo "== ensuring bird2 is installed inside WSL2 =="
