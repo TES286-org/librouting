@@ -251,8 +251,13 @@ Recorded so nobody "fixes" them by accident:
 ## 12. BIRD-like filter DSL
 
 lr's `[[filter]]` tables target a subset of BIRD's filter grammar,
-compiled by `lr_policy::filter::compile()` and evaluated via a
-tree-walking interpreter with a scoped variable stack.
+compiled by `lr_policy::filter::compile()` into a flat instruction
+stream and executed by a stack-machine bytecode VM with a tree-walking
+interpreter as the semantic oracle (ROADMAP-v3 D3.7). An equivalence
+table (27 sources × 4 routes) pins verdict + attribute-state equality
+between the two engines so they cannot drift, and the daemon
+precompiles every `[[filter]]` at startup so each import/export
+evaluation runs the bytecode path.
 
 | Feature | lr | BIRD |
 |---------|-----|------|
@@ -270,11 +275,21 @@ tree-walking interpreter with a scoped variable stack.
 | `case` / switch | yes | yes |
 | `len(bgp.as_path)` | yes | yes |
 | `roa.state == "invalid"` | yes | `roa_check()` |
-| Bytecode compilation | no (tree-walk) | yes (`f_line`) |
+| Bytecode compilation | yes (stack VM, GitHub #19 P2–P7) | yes (`f_line`) |
 
-The tree-walking evaluator is sufficient for the typical route-per-
-second rate of import/export policy; a bytecode compiler can be
-layered on later without changing the `Filter::evaluate` API.
+GitHub issue #19 tracked the bytecode VM's performance work to
+parity-and-beyond with the interpreter: P2 resolved user-function calls
+to a `Vec` index at compile time, P3 read fixed-width integer
+attributes in place, P4 replaced the linear `MatchRhs::Set` scan with a
+Patricia trie (3.3× on `vm_large_prefix_set`), P5 added a peephole
+pass (constant propagation + literal folding + dead-branch elimination
++ jump threading), P6 fused the canonical
+`LoadField; Push; Bin(Cmp); JumpIf*` pattern into a single
+`BranchFieldIntCmp` instruction (`vm_if_local_pref` ~66 → ~28 ns,
+−57 %), and P7 read the source span lazily inside the fallible arms.
+See `crates/lr-policy/src/filter/{bytecode,peephole}.rs` for the
+implementation and `crates/lr-policy/benches/{filter_eval,import_pipeline}.rs`
+for the criterion harnesses.
 
 ## 13. Babel multi-NIC with glob patterns
 
