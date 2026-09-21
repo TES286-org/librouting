@@ -30,6 +30,17 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
+# Disable Git Bash's MSYS path translation when invoking wsl.exe.
+# Without this, paths like `/tmp/lr-bird.ctl` (which should be a WSL2
+# path) get auto-translated by MSYS to `C:\Users\runneradmin\AppData\
+# Local\Temp\lr-bird.ctl` before being passed to wsl.exe — and BIRD
+# inside WSL2 then receives the Windows path as a literal Linux path,
+# failing with "No such file or directory" because the parent
+# directory does not exist relative to BIRD's working directory.
+# `MSYS_NO_PATHCONV=1` keeps the Unix-style paths intact when calling
+# wsl.exe. (Harmless on Linux where bash has no such translation.)
+export MSYS_NO_PATHCONV=1
+
 BIN=$(./tests/interop/_lr_daemon.sh 2>/dev/null) || {
     echo "SKIP: lr-daemon not built (run \`cargo build -p lr-cli\` first)"
     exit 0
