@@ -30,19 +30,23 @@
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-# Disable Git Bash's MSYS path translation ONLY when invoking
-# wsl.exe. Without this, paths like `/tmp/lr-bird.ctl` (which should
-# be a WSL2 path) get auto-translated by MSYS to `C:\Users\runneradmin\
-# AppData\Local\Temp\lr-bird.ctl` before being passed to wsl.exe —
-# and BIRD inside WSL2 then receives the Windows path as a literal
-# Linux path, failing with "No such file or directory".
+# Git Bash for Windows auto-translates Unix-style paths to Windows
+# paths when calling non-MSYS binaries (MSYS2's path mangling). This
+# breaks wsl.exe invocations: paths like `/tmp/lr-bird.ctl` (a WSL2
+# path) become `C:\Users\runneradmin\AppData\Local\Temp\lr-bird.ctl`
+# before wsl.exe sees them, and BIRD inside WSL2 then receives the
+# Windows path as a literal Linux path it cannot create.
 #
-# `MSYS_NO_PATHCONV=1` is applied per-wsl-invocation via `MSYS_NO_PATHCONV=1 wsl ...`
-# rather than `export`-ed globally, because the script also calls
-# curl.exe, mkdir, tee, etc. — Windows binaries on Git Bash that
-# *need* MSYS path translation so `/tmp/foo` resolves to the host's
-# %TEMP%\foo. Exporting globally would break those.
-wsl() {
+# Setting `MSYS_NO_PATHCONV=1` inline before each `wsl` invocation
+# disables the translation for that single command. The variable
+# is *not* exported globally — other Windows binaries (curl, mkdir,
+# tee) keep the MSYS translation so `/tmp/foo` still resolves to
+# %TEMP%\foo for them.
+#
+# `WSL_INVOKES` is a tiny wrapper that prefixes the env var. Defining
+# it as a function would shadow the real `wsl` binary and break
+# `command -v wsl` detection, so we use a different name.
+wsl_no_pathconv() {
     MSYS_NO_PATHCONV=1 command wsl "$@"
 }
 
@@ -108,7 +112,7 @@ if command -v wsl >/dev/null 2>&1; then
     # rootfs Docker's official `ubuntu:22.04` image is built from,
     # with apt sources pre-configured so `apt-get install` works
     # after `apt-get update`).
-    if ! wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
+    if ! wsl_no_pathconv -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
         echo "== downloading the Ubuntu 22.04 base rootfs tarball =="
         TARBALL="$OUT/ubuntu-22.04-base.tar.gz"
         curl --proto '=https' --tlsv1.2 --retry 3 --retry-delay 5 \
@@ -121,20 +125,20 @@ if command -v wsl >/dev/null 2>&1; then
             # distro. The install path is a Windows-style directory
             # that WSL2 creates; we put it under $OUT so it gets
             # cleaned up with the test artifacts.
-            wsl --import "$WSL_DISTRO" "$OUT/wsl-install" "$TARBALL" \
+            wsl_no_pathconv --import "$WSL_DISTRO" "$OUT/wsl-install" "$TARBALL" \
                 2>&1 | tail -5 || true
         fi
     fi
-    if wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
+    if wsl_no_pathconv -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
         # Install bird2 inside the imported distro. The default user
         # for `wsl --import` is root, so no sudo needed.
         echo "== ensuring bird2 is installed inside WSL2 =="
-        wsl -d "$WSL_DISTRO" -- bash -c "command -v bird >/dev/null 2>&1 || \
+        wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c "command -v bird >/dev/null 2>&1 || \
             (apt-get update -qq && apt-get install -y -qq bird2)" \
             >/dev/null 2>&1 || true
         # Confirm bird is now available; if apt-get failed (no network,
         # package mirror issue), fall through to the host-installed path.
-        if wsl -d "$WSL_DISTRO" -- bash -c "command -v bird" >/dev/null 2>&1; then
+        if wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c "command -v bird" >/dev/null 2>&1; then
             BIRD_RUNTIME=wsl
         fi
     fi
@@ -169,8 +173,8 @@ bird_run() { # <config-path>
             # the control socket stays on WSL2's own /tmp so no
             # translation is needed.
             local wsl_cfg
-            wsl_cfg=$(wsl -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
-            wsl -d "$WSL_DISTRO" -- bird -f -c "$wsl_cfg" -s "$BIRD_CTL_WSL" \
+            wsl_cfg=$(wsl_no_pathconv -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
+            wsl_no_pathconv -d "$WSL_DISTRO" -- bird -f -c "$wsl_cfg" -s "$BIRD_CTL_WSL" \
                 >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
             BIRD_HANDLE=$!
             ;;
@@ -183,7 +187,7 @@ bird_run() { # <config-path>
 }
 birdc_cmd() { # <args...>
     case "$BIRD_RUNTIME" in
-        wsl) wsl -d "$WSL_DISTRO" -- birdc -s "$BIRD_CTL_WSL" "$@" 2>/dev/null ;;
+        wsl) wsl_no_pathconv -d "$WSL_DISTRO" -- birdc -s "$BIRD_CTL_WSL" "$@" 2>/dev/null ;;
         host) birdc -s "$BIRD_CTL_HOST" "$@" 2>/dev/null ;;
     esac
 }
@@ -192,7 +196,7 @@ bird_shutdown() {
         case "$BIRD_RUNTIME" in
             wsl)
                 # Kill the BIRD process inside WSL2.
-                wsl -d "$WSL_DISTRO" -- pkill -TERM -x bird 2>/dev/null || true
+                wsl_no_pathconv -d "$WSL_DISTRO" -- pkill -TERM -x bird 2>/dev/null || true
                 # And the bash subshell we spawned.
                 kill "$BIRD_HANDLE" 2>/dev/null || true
                 ;;
