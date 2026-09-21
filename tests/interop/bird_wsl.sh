@@ -141,9 +141,11 @@ if command -v wsl >/dev/null 2>&1; then
         # translator — which the ubuntu-base image does not ship by
         # default. Without it, the script cannot translate the host's
         # /tmp path of bird.conf to the /mnt/c/... form BIRD inside
-        # WSL2 needs.
+        # WSL2 needs. Check BOTH binaries so a half-installed state
+        # (bird present but wslu missing) triggers a re-install.
         echo "== ensuring bird2 + wslu are installed inside WSL2 =="
-        wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c "command -v bird >/dev/null 2>&1 || \
+        wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c \
+            "command -v bird >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1 || \
             (apt-get update -qq && apt-get install -y -qq bird2 wslu)" \
             >/dev/null 2>&1 || true
         # Confirm bird is now available; if apt-get failed (no network,
@@ -179,11 +181,19 @@ bird_run() { # <config-path>
     case "$BIRD_RUNTIME" in
         wsl)
             # Convert the Windows path of the config to a WSL2 path
-            # (C:\... → /mnt/c/...). wslpath handles the translation;
-            # the control socket stays on WSL2's own /tmp so no
-            # translation is needed.
-            local wsl_cfg
-            wsl_cfg=$(wsl_no_pathconv -d "$WSL_DISTRO" -- wslpath -u "$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")" 2>/dev/null || echo "$cfg")
+            # (C:\... → /mnt/c/...). wslpath (from the wslu package,
+            # installed above) handles the translation. As a manual
+            # fallback if wslpath is somehow still missing, sed-
+            # translate the Windows path: replace backslashes with
+            # forward slashes and prefix the drive letter with
+            # /mnt/<lowercase-drive-letter>.
+            local wsl_cfg win_cfg
+            win_cfg=$(cygpath -w "$cfg" 2>/dev/null || echo "$cfg")
+            wsl_cfg=$(wsl_no_pathconv -d "$WSL_DISTRO" -- wslpath -u "$win_cfg" 2>/dev/null || true)
+            if [ -z "$wsl_cfg" ] || [ "$wsl_cfg" = "$win_cfg" ]; then
+                # Manual fallback: C:\Users\... → /mnt/c/Users/...
+                wsl_cfg=$(echo "$win_cfg" | sed 's|\\|/|g' | sed 's|^\([A-Za-z]\):|/mnt/\L\1|')
+            fi
             wsl_no_pathconv -d "$WSL_DISTRO" -- bird -f -c "$wsl_cfg" -s "$BIRD_CTL_WSL" \
                 >"$OUT/bird.stdout" 2>"$OUT/bird.stderr" &
             BIRD_HANDLE=$!
