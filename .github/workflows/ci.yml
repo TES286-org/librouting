@@ -342,6 +342,50 @@ jobs:
         timeout-minutes: 10
         run: cargo test --doc --workspace --all-features
 
+  # Windows lr-vs-lr interop. The two scripts that don't query the
+  # runtime API socket (two_daemon, labeled_unicast) run end-to-end
+  # on windows-2022 via Git Bash. The two that do (addpath, bmp)
+  # need a Windows transport for lrctl or a Windows-aware Python
+  # client; they stay on the Linux interop job until that lands.
+  #
+  # The scripts already build the Windows lr-daemon binary via
+  # `cargo build -p lr-cli` (the .exe suffix is handled by the
+  # shared `tests/interop/_lr_daemon.sh` resolver). The BGP TCP
+  # listener binds to 127.0.0.1 — the same loopback path the
+  # cross-platform nextest matrix already exercises through the
+  # daemon_runtime / daemon_multi_peer tests.
+  windows-interop:
+    name: Windows interop (lr ↔ lr)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "windows-interop"
+      - name: Configure Git PATH (bash + grep + kill)
+        # Git Bash ships the POSIX tools the interop scripts depend
+        # on (bash, grep, kill, sleep, seq). The same env tweak the
+        # cross-platform matrix uses; safe to repeat here because
+        # GITHUB_PATH appends.
+        run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
+      - name: Build lr-daemon (debug)
+        # Debug build is faster than release and the interop scripts
+        # don't need the optimised codec path. The shared
+        # _lr_daemon.sh resolver checks debug before release.
+        timeout-minutes: 25
+        run: cargo build -p lr-cli
+      - name: Two-daemon TCP interop (lr ↔ lr)
+        timeout-minutes: 10
+        shell: bash
+        run: ./tests/interop/two_daemon.sh
+      - name: RFC 8277 labelled-unicast interop (lr ↔ lr)
+        timeout-minutes: 10
+        shell: bash
+        run: ./tests/interop/labeled_unicast.sh
+
   # Real-world interop: exchange BGP with BIRD and FRR (FRR's bgpd) on
   # loopback TCP sockets and verify routes propagate in both directions.
   # The scripts skip gracefully when the daemon binaries are absent, so the
