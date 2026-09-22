@@ -4962,7 +4962,19 @@ impl DefaultRouter {
             .iter()
             .chain(spf_result.transit_routes.iter())
         {
-            table.insert(r.prefix, OspfTableEntry::intra(r.metric, r.next_hop));
+            // SPF visits vertices in order of increasing distance, so
+            // the first entry for a given prefix has the lowest metric.
+            // Use `or_insert_with` so a connected stub route (next_hop
+            // = None, lowest metric) is NOT overwritten by a via-peer
+            // route to the same prefix (next_hop = Some, higher metric).
+            // Overwriting would install a gateway route for a directly
+            // connected network, which the kernel FIB mirror then uses
+            // to replace the connected route — breaking reachability to
+            // the gateway itself and cascading ENETUNREACH on every
+            // downstream route that points through it.
+            table
+                .entry(r.prefix)
+                .or_insert_with(|| OspfTableEntry::intra(r.metric, r.next_hop));
         }
         for r in spf::summary_routes(lsdb, spf_result) {
             // `no_summary` areas must only ever derive the default from

@@ -53,6 +53,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Duration;
 
+use crate::KernelMirror;
 use lr_core::addr::RouterId;
 use lr_core::error::EncodeError;
 use lr_ospf::codec::OspfCodec;
@@ -304,6 +305,17 @@ struct OspfDaemon {
     /// `status` command (shared with the API thread).
     gr_status: Arc<std::sync::Mutex<Vec<String>>>,
     router_id: RouterId,
+    /// Kernel FIB mirror — the Loc-RIB → kernel route installer.
+    /// The OSPF daemon's main loop drains RouterEvents via
+    /// `router.poll_events()` (in `pump_gr`, the packet-receive path,
+    /// the dead-neighbor path and the shutdown path) before the
+    /// ticker thread's `mirror.apply(&events)` can see them — so the
+    /// ticker's own mirror (created in `spawn_ticker`) never receives
+    /// OSPF events and never installs anything. Storing the mirror
+    /// on the daemon struct lets `handle_router_events` call
+    /// `mirror.apply` on the events the main thread already polled,
+    /// restoring the Loc-RIB → kernel FIB path for OSPF routes.
+    kernel_mirror: KernelMirror,
 }
 
 /// One configured prefix SID (RFC 8665 §5): the prefix, its SID index
@@ -470,6 +482,7 @@ pub(super) fn run_ospf_daemon(
         sr_seq: BTreeMap::new(),
         gr_status: Arc::new(std::sync::Mutex::new(Vec::new())),
         router_id: rid,
+        kernel_mirror: KernelMirror::new(cfg.install_kernel),
     };
     // RFC 3623 §2: recovery is *resumed*, not assumed — the state
     // file written by the pre-restart process carries the grace
@@ -800,9 +813,12 @@ pub(super) fn run_ospf_daemon(
         for anchor in daemon.anchors.values() {
             router.close_session(*anchor);
         }
-        for ev in router.poll_events() {
-            log_event(&ev);
-        }
+        // Close sessions emit RouteWithdrawn events — mirror them into
+        // the kernel FIB so the routes are removed on shutdown, not
+        // left dangling until the netns is torn down.
+        let events = router.poll_events();
+        drop(router);
+        daemon.handle_router_events(events);
     }
     println!("daemon: ospf shutdown complete");
     ExitCode::SUCCESS
@@ -2161,14 +2177,22 @@ impl OspfDaemon {
     // RFC 3623 graceful restart: helper mode + restarting-recovery
     // -----------------------------------------------------------------
 
-    /// Route polled router events to the log. Grace-LSA events ride
-    /// their own channel (`drain_ospf_grace_events`, drained in
-    /// pump_gr) so the ticker thread's share of `poll_events()` can
-    /// never swallow one.
+    /// Route polled router events to the log + the kernel FIB mirror.
+    /// Grace-LSA events ride their own channel (`drain_ospf_grace_events`,
+    /// drained in pump_gr) so the ticker thread's share of `poll_events()`
+    /// can never swallow one.
+    ///
+    /// The kernel mirror is called here (not in the ticker thread) because
+    /// the OSPF daemon's main loop drains events via `poll_events()` before
+    /// the ticker can see them — the ticker's own `mirror.apply` gets an
+    /// empty vec. By applying the mirror on the events the main thread
+    /// already polled, OSPF Loc-RIB changes reach the kernel FIB via the
+    /// same `KernelMirror::apply` path BGP/Babel use.
     fn handle_router_events(&mut self, events: Vec<RouterEvent>) {
-        for ev in events {
-            log_event(&ev);
+        for ev in &events {
+            log_event(ev);
         }
+        self.kernel_mirror.apply(&events);
     }
 
     /// One received Grace-LSA (the router already decoded + deduped
