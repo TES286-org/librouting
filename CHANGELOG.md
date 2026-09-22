@@ -16,8 +16,42 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ## [Unreleased]
 
-_No changes yet. The next release-event is the final `1.0.0` cut —
-see `docs/RELEASE-PLAN.md` §2.8 for the freeze criteria._
+### Changed (CI)
+
+- **CI now exercises the kernel route-table backends on macOS and
+  Windows.** A new `macos-interop` job runs `bgp_kernel_install.sh`
+  under sudo against the BSD `route(4)` socket (previously
+  cross-compile-only), and the Windows interop job runs the same
+  script against the IP-Helper backend in the runner's Administrator
+  shell. Both assert the learn → install → decide → teardown chain
+  against the real OS FIB.
+- **The learn → install → forward contract is now verified for BGP on
+  Linux in the regular CI job** (`bgp_kernel_install.sh`,
+  `bgp_transit.sh`): kernel FIB install with `proto bgp`, OS lookup
+  via `ip route get`, ICMP delivery through the installed route, and
+  peer-death withdrawal. The transit-forwarding phase (ip_forward)
+  runs as root in the nightly QEMU VM harness.
+- The nightly VM job installs `linux-modules-extra-$(uname -r)`, so
+  the MPLS dataplane phases of `mpls_lsp.sh` / `ldp.sh` actually run
+  inside the VM instead of SKIPping (the runner's base azure kernel
+  package does not ship `mpls_router`).
+- The Windows BIRD-in-WSL2 interop job is now a hard gate (its
+  stabilisation period passed).
+- The native cross-platform matrix dropped its ubuntu entry and
+  formatting step — both fully duplicated by the `lint` and
+  `unit-tests` jobs on the same image.
+
+### Added (tests)
+
+- `tests/interop/_lib.sh` gained portable (Linux/macOS/Windows-Git-
+  Bash) kernel-FIB helpers and an elevated (sudo) daemon spawner with
+  pidfile-tracked real pids; `two_daemon.sh` and
+  `labeled_unicast.sh` were refactored onto the shared library and
+  are now platform-portable.
+
+_No code changes — the Rust crates, the C ABI and the daemon CLI are
+untouched. The next release-event is the final `1.0.0` cut — see
+`docs/RELEASE-PLAN.md` §2.8 for the freeze criteria._
 
 ## [1.0.0-rc.4] — config DSL migration + filter VM hardening
 

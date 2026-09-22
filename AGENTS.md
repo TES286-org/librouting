@@ -140,8 +140,12 @@ least code):
 2. **Integration tests** — `crates/*/tests/*.rs`. Cross-crate, daemon
    end-to-end against itself.
 3. **Interop tests** — `tests/interop/*.sh`. Bash scripts spawning
-   `lr-daemon` against BIRD 2 / FRR 10. Linux-only; skip gracefully
-   when the reference daemon is absent.
+   `lr-daemon` against BIRD 2 / FRR 10 (reference-daemon scripts are
+   Linux-only) or against a second `lr-daemon` (the library-based
+   scripts — `two_daemon.sh`, `labeled_unicast.sh`,
+   `bgp_kernel_install.sh` — are portable and run on the macOS and
+   Windows interop CI jobs too). All skip gracefully when the
+   reference daemon is absent.
 4. **Kernel-gated tests** — `#[ignore]`'d tests needing root +
    specific kernel modules (TCP-AO, MPLS, SRv6). Run in the
    `tests/vm/run_vm.sh` QEMU harness in the nightly job.

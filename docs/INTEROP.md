@@ -6,7 +6,9 @@ job `interop`) and can all be reproduced locally:
 
 | Test            | Script                        | Peers                                                                    | What it proves                                                                                                                                                                                                                                                   |
 | --------------- | ----------------------------- | ------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Two-daemon      | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP                                      | FSM + codec consistency in both roles                                                                                                                                                                                                                            |
+| Two-daemon      | `tests/interop/two_daemon.sh` | lr-daemon ↔ lr-daemon over real TCP                                      | FSM + codec consistency in both roles, route propagation + session-loss withdrawal; portable (Linux, macOS, Windows/Git-Bash) — the macOS/Windows interop CI jobs run it natively |
+| BGP kernel-install | `tests/interop/bgp_kernel_install.sh` | lr-daemon ↔ lr-daemon, `--install-kernel-routes` | The learn → install → decide → forward → teardown contract on the **real OS FIB**: Loc-RIB convergence, kernel route install (`proto bgp` on Linux), the OS lookup picking the BGP gateway (`ip route get` / `route -n get` / `Find-NetRoute`), ICMP delivery through the installed route, and peer-death withdrawal from the FIB. Linux netns form runs all five steps rootlessly; the macOS loopback form (sudo + BSD route(4) backend) and the Windows loopback form (admin + IP-Helper backend) run steps 1-3 + 5 against their native route-table backends |
+| BGP transit     | `tests/interop/bgp_transit.sh` | r1 ↔ r2 (transit, `[[peer]]` multi-peer config) ↔ r3 over two veth pairs | Three-router re-advertisement: the edge route transits r2 into r3's Loc-RIB **and** kernel FIB with r2's egress as next hop, the far-edge lookup uses it, and the announcer's death withdraws it through r2. The ip_forward transit-forwarding phase runs as root in the QEMU VM harness (nightly) |
 | OSPF two-daemon | `tests/interop/ospf.sh`       | lr-daemon ↔ lr-daemon over real raw sockets (multicast 224.0.0.5)        | OSPF daemon mode end-to-end: Hello exchange, real DBD/LSR exchange to Full adjacency, Router-LSA origination + flooding, stub-net route propagation **in both directions**, dead-timer teardown                                                                  |
 | OSPF x BIRD     | `tests/interop/ospf_bird.sh`  | lr-daemon ↔ BIRD 2 (ospf v2, ptp) over a veth pair                       | Wire compatibility with BIRD's OSPF: DBD master/slave negotiation, header exchange, LSR loading to **Full on both sides**, stub nets propagated in both directions (birdc-verified)                                                                              |
 | OSPF x FRR      | `tests/interop/ospf_frr.sh`   | lr-daemon ↔ FRR 10 (zebra + ospfd, ptp) over a veth pair                 | Wire compatibility with FRR's OSPF: DBD master/slave negotiation, LSR loading to **Full on both sides**, stub nets propagated in both directions (vty-verified), dead-timer teardown observed by ospfd                                                            |
@@ -79,6 +81,8 @@ The RTR suite is separate (no BGP session involved):
 ```bash
 cargo build -p lr-cli                       # builds target/debug/lr-daemon
 ./tests/interop/two_daemon.sh               # no external dependencies
+./tests/interop/bgp_kernel_install.sh       # needs iproute2 + user namespaces (Linux); sudo (macOS); admin shell (Windows)
+./tests/interop/bgp_transit.sh              # needs iproute2 + user namespaces; the transit-forward phase needs root (VM harness)
 ./tests/interop/ospf.sh                     # needs iproute2 + user namespaces
 ./tests/interop/ospf_sr_frr.sh              # needs FRR (or skips) — RFC 8665 slice 1; SRDB + phase-2 reception kernel-MPLS-gated
 ./tests/interop/ospf_sr.sh                  # RFC 8665 slice 2 — SR reception, lr x lr (no kernel MPLS needed)
@@ -189,7 +193,31 @@ LR_VM_KERNEL=/opt/lr-kernel tests/vm/run_vm.sh
 
 See `tests/vm/README.md` for requirements and knobs. CI self-tests the
 harness on `ubuntu-24.04` (nightly `vm-kernel-gated` job, which boots
-the runner's own kernel).
+the runner's own kernel; the job installs
+`linux-modules-extra-$(uname -r)` first so the MPLS dataplane phases
+actually run instead of SKIPping).
+
+## Platform coverage of the learn → install → forward contract
+
+The interop suite is not Linux-only anymore. CI verifies the
+"routes learned, routes installable, data forwardable" contract on
+every primary platform, each with the strongest check that platform
+can honestly support:
+
+| Platform | Job | LEARNED | INSTALLED | DECISION | FORWARD | TEARDOWN |
+| -------- | --- | ------- | --------- | -------- | ------- | -------- |
+| Linux (rootless netns) | `interop` | `bgp_kernel_install.sh` | `ip route show` (`proto bgp`) | `ip route get` | ICMP delivered via the route | `bgp_kernel_install.sh` phase 5 |
+| Linux (root, QEMU VM) | nightly `vm-kernel-gated` | idem | idem | idem | idem **+ transit hop through an ip_forward router** (`bgp_transit.sh` phase 4) | idem |
+| macOS (BSD route(4)) | `macos-interop` | `bgp_kernel_install.sh` (loopback) | `netstat -rn` | `route -n get` | — (single stack; proven on Linux + VM) | kernel-route absence after peer death |
+| Windows (IP Helper) | `windows-interop` | `bgp_kernel_install.sh` (loopback) | `route.exe print -4` | `Find-NetRoute` | — (single stack; proven on Linux + VM) | idem |
+
+The macOS and Windows rows are the first CI runs that execute the
+`lr-osroute` BSD and IP-Helper backends end-to-end (previously they
+were cross-compile-only). Their FORWARD cell is deliberately empty:
+a single-host runner has one network stack, so a "via 127.0.0.x"
+gateway cannot demonstrate transit forwarding — pretending otherwise
+would test the loopback interface, not the FIB. The Linux netns +
+QEMU VM rows cover that cell with real two-stack forwarding.
 
 ## Configuration used
 
