@@ -119,6 +119,12 @@ echo "   PASS: OS decision uses the transit next hop"
 # --- 4. TRANSIT: forwarded data through r2 (root only) ---
 echo "== 4. TRANSIT: data forwarded through r2 =="
 lr_ns_exec "$R1" ip addr add 203.0.113.1/24 dev lo 2>/dev/null || true
+# Reply-path infrastructure reachability: r3's ping carries source
+# 10.97.2.2, and r1 has no BGP/connected route for that transit link
+# (only the payload prefix 203.0.113.0/24 is announced). A real
+# deployment's IGP carries the inter-router links; pin the static
+# equivalent on r1 so the ICMP echo reply can return through r2.
+lr_ns_exec "$R1" ip route add 10.97.2.0/24 via 10.97.1.2 2>/dev/null || true
 lr_disable_rp_filter "$R1" all
 lr_disable_rp_filter "$R2" all
 lr_disable_rp_filter "$R2" veth0b
