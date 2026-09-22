@@ -256,14 +256,24 @@ jobs:
         timeout-minutes: 20
         run: cargo build --workspace --target x86_64-apple-darwin --all-features
 
-  # Native build + test on the three primary desktop platforms. The
+  # Native build + test on the non-Linux primary platforms. The
   # workspace is already target-aware: lr-osroute carries a Windows
   # IP-Helper backend, a BSD/macOS route-socket backend, a Linux
   # rtnetlink backend, and a compile-only stub; lr-cli::signal splits
   # along #[cfg(unix)] / #[cfg(not(unix))]; and every Linux-only
   # kernel-gated test uses #![cfg(target_os = "linux")] so the
   # Windows/macOS runners skip them automatically. The BIRD/FRR interop
-  # suite is not portable — it stays on the ubuntu job above.
+  # suite is not portable — it stays on the ubuntu interop job below.
+  #
+  # ubuntu was dropped from this matrix (conservative dedup): the
+  # lint job (fmt + clippy --all-targets) and the unit-tests job
+  # (nextest + doctests) already run the identical commands on
+  # ubuntu-22.04, so the matrix entry was a full duplicate costing
+  # ~25 min of CI time per run. The fmt check was dropped from the
+  # matrix for the same reason — rustfmt is deterministic and
+  # platform-independent, and the lint job gates it on every push.
+  # clippy stays: platform-conditional code (windows/bsd backends)
+  # only compiles on its own OS, so per-OS lints are NOT redundant.
   #
   # macOS coverage is Apple Silicon only (macos-14). GitHub Actions
   # retired the Intel macos-13 runner pool in 2025; the runner has
@@ -283,7 +293,6 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-22.04
           - macos-14   # Apple Silicon (Intel macOS retired by GitHub Actions)
           - windows-2022
     runs-on: ${{ matrix.os }}
@@ -307,12 +316,11 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-      - name: cargo fmt
-        # Formatting check is platform-independent; running it on
-        # three OSes is belt-and-braces against a toolchain drift.
-        timeout-minutes: 5
-        run: cargo fmt --all -- --check
       - name: cargo clippy
+        # fmt is NOT run here: the lint job (ubuntu) gates formatting on
+        # every push/PR and rustfmt output is platform-independent.
+        # clippy IS per-OS: the windows/bsd cfg-gated backends only
+        # compile on their own platform.
         timeout-minutes: 30
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: cargo build (workspace)
@@ -342,11 +350,19 @@ jobs:
         timeout-minutes: 10
         run: cargo test --doc --workspace --all-features
 
-  # Windows lr-vs-lr interop. The two scripts that don't query the
-  # runtime API socket (two_daemon, labeled_unicast) run end-to-end
-  # on windows-2022 via Git Bash. The two that do (addpath, bmp)
-  # need a Windows transport for lrctl or a Windows-aware Python
+  # Windows lr-vs-lr interop. The scripts that don't query the runtime
+  # API socket (two_daemon, labeled_unicast, bgp_kernel_install) run
+  # end-to-end on windows-2022 via Git Bash. The two that do (addpath,
+  # bmp) need a Windows transport for lrctl or a Windows-aware Python
   # client; they stay on the Linux interop job until that lands.
+  #
+  # bgp_kernel_install.sh additionally exercises the Windows IP-Helper
+  # backend end-to-end: the GitHub Windows runner shell is already
+  # elevated, so --install-kernel-routes works, and the script asserts
+  # the route lands in the kernel FIB (route.exe print), the OS lookup
+  # picks it (Find-NetRoute) and the teardown removes it. That is the
+  # Windows half of the "learn → install → decide" contract; the full
+  # data-plane FORWARD step lives on Linux (netns + QEMU VM harness).
   #
   # The scripts already build the Windows lr-daemon binary via
   # `cargo build -p lr-cli` (the .exe suffix is handled by the
