@@ -122,6 +122,7 @@ echo "== starting lr-daemon (1.1.1.1, stub nets 10.99.1.0/24 + 10.99.2.0/24) =="
 nsenter -t "$R1" -n "$BIN" --protocol ospf --router-id 1.1.1.1 \
     --ospf-interface veth0 \
     --ospf-hello-interval 1 --ospf-dead-interval 4 \
+    --install-kernel-routes \
     --api-socket "$OUT/r1.ctl" >"$OUT/r1.log" 2>&1 &
 LR_PID=$!
 
@@ -154,8 +155,55 @@ grep -q "10.99.2.0/24" "$OUT/bird.routes" || {
 }
 echo "   BIRD knows our stub net 10.99.2.0/24"
 
+echo "== kernel FIB: lr-daemon installed BIRD's stub net via --install-kernel-routes =="
+# Wait for the OSPF route to BIRD's stub net (10.99.3.0/24) to appear
+# in r1's kernel FIB. The daemon's KernelMirror (called from
+# handle_router_events on the main thread) mirrors the Loc-RIB
+# change into rtnetlink.
+KERNEL_ROUTE=""
+for i in $(seq 1 100); do
+    KERNEL_ROUTE=$(nsenter -t "$R1" -n ip route show 10.99.3.0/24 2>/dev/null || true)
+    [ -n "$KERNEL_ROUTE" ] && break
+    sleep 0.1
+done
+[ -n "$KERNEL_ROUTE" ] || {
+    echo "FAIL: OSPF route 10.99.3.0/24 not in r1's kernel FIB"
+    nsenter -t "$R1" -n ip route show
+    exit 1
+}
+echo "$KERNEL_ROUTE" | grep -q "via 10.99.1.2" || {
+    echo "FAIL: kernel route does not use the BIRD gateway 10.99.1.2"
+    echo "$KERNEL_ROUTE"
+    exit 1
+}
+echo "$KERNEL_ROUTE" | grep -q "dev veth0" || {
+    echo "FAIL: kernel route does not use veth0"
+    echo "$KERNEL_ROUTE"
+    exit 1
+}
+echo "   r1 FIB: $KERNEL_ROUTE"
+echo "   kernel FIB: OK (lr learned BIRD's route AND installed it)"
+
+echo "== kernel forwarding decision: ip route get =="
+R1_GET=$(nsenter -t "$R1" -n ip route get 10.99.3.5 2>/dev/null || true)
+[ -n "$R1_GET" ] || { echo "FAIL: ip route get on r1 returned nothing"; exit 1; }
+echo "$R1_GET" | grep -q "via 10.99.1.2" || {
+    echo "FAIL: ip route get on r1 did not use the OSPF gateway 10.99.1.2"
+    echo "$R1_GET"
+    exit 1
+}
+echo "$R1_GET" | grep -q "dev veth0" || {
+    echo "FAIL: ip route get on r1 did not use veth0"
+    echo "$R1_GET"
+    exit 1
+}
+echo "   r1 route get: $R1_GET"
+echo "   ip route get: OK (kernel would use the OSPF route learned from BIRD)"
+
 echo
 echo "OSPF x BIRD interop: PASS"
 echo "  - Full adjacency via real DBD/LSR exchange (RFC 2328 7.2)"
 echo "  - stub nets propagated in both directions"
+echo "  - Kernel FIB carries BIRD's stub net (--install-kernel-routes)"
+echo "  - ip route get confirms the kernel would use the BIRD-learned route"
 INNER
