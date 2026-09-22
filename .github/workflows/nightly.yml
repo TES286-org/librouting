@@ -77,9 +77,10 @@ jobs:
         run: cargo deny check
 
   # Self-test of the tests/vm harness: boot a minimal initramfs VM with
-  # the runner's own kernel (6.8 has TCP-AO + the MPLS modules) and run
-  # the kernel-gated interop scripts (tcp_ao.sh, mpls_lsp.sh, ldp.sh)
-  # inside it as root — the same path restricted environments use.
+  # the runner's own kernel (6.8+ has TCP-AO + the MPLS modules) and run
+  # the kernel-gated interop scripts (tcp_ao.sh, mpls_lsp.sh, ldp.sh,
+  # ospf.sh, bgp_kernel_install.sh, bgp_transit.sh) inside it as root —
+  # the same path restricted environments use.
   vm-kernel-gated:
     name: VM harness (kernel-gated interop, QEMU)
     runs-on: ubuntu-24.04
@@ -90,6 +91,21 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends qemu-system-x86
+      - name: Install the full kernel module set
+        # The runner's linux-azure image ships only linux-modules-*
+        # (base); mpls_router / mpls_iptunnel live in
+        # linux-modules-extra-$(uname -r). Without them the VM's
+        # modprobe fails silently and the MPLS dataplane phases of
+        # mpls_lsp.sh + ldp.sh SKIP — which is how the nightly log
+        # showed "load mpls_router to exercise it" while claiming
+        # success. The initramfs copies the host module tree, so the
+        # install must happen BEFORE build_initramfs.sh runs (i.e.
+        # before run_vm.sh).
+        run: |
+          sudo apt-get install -y --no-install-recommends \
+            "linux-modules-extra-$(uname -r)" || \
+            echo "warn: linux-modules-extra unavailable; MPLS dataplane phases will SKIP" >&2
+          ls /lib/modules/$(uname -r)/kernel/net/mpls/ 2>/dev/null || true
       - name: Rebuild the module index
         run: sudo depmod -a "$(uname -r)"
       - name: Run kernel-gated interop in the VM
