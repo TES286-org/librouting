@@ -81,14 +81,14 @@ jobs:
         # Buildx is the BuildKit-native builder. It is pre-installed
         # on GitHub Actions runners; this step enables it for the
         # job and is idempotent.
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build the image
         # `--load` makes the built image available to `docker images`
         # so the next step can inspect it. Without `--load` Buildx
         # would build the image but not register it with the local
         # Docker daemon (it would be in the BuildKit cache only).
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: ./Dockerfile
