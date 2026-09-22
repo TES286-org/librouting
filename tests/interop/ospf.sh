@@ -95,6 +95,7 @@ echo "== starting router r1 (1.1.1.1, stub nets 10.99.1.0/24 + 10.99.2.0/24) =="
 nsenter -t "$R1" -n "$BIN" --protocol ospf --router-id 1.1.1.1 \
     --ospf-interface veth0 \
     --ospf-hello-interval 1 --ospf-dead-interval 4 \
+    --install-kernel-routes \
     --api-socket "$OUT/r1.ctl" >"$OUT/r1.log" 2>&1 &
 DAEMON_A=$!
 
@@ -102,6 +103,7 @@ echo "== starting router r2 (2.2.2.2, stub nets 10.99.1.0/24 + 10.99.3.0/24) =="
 nsenter -t "$R2" -n "$BIN" --protocol ospf --router-id 2.2.2.2 \
     --ospf-interface veth1 \
     --ospf-hello-interval 1 --ospf-dead-interval 4 \
+    --install-kernel-routes \
     --api-socket "$OUT/r2.ctl" >"$OUT/r2.log" 2>&1 &
 DAEMON_B=$!
 disown "$DAEMON_B"
@@ -121,11 +123,84 @@ echo "   propagation: OK (r1 knows 10.99.3.0/24, r2 knows 10.99.2.0/24)"
 grep -qF "10.99.3.0/24" "$OUT/r1.log"
 grep -qF "10.99.2.0/24" "$OUT/r2.log"
 
+# Wait for the kernel FIB mirror to install the OSPF routes. The
+# daemon's KernelMirror (called from handle_router_events on the
+# main thread) mirrors Loc-RIB changes into rtnetlink.
+wait_kernel_route() { # <netns-pid> <prefix> <present|absent> [timeout-s]
+    local netns=$1 prefix=$2 expected=$3 tmo=${4:-10} i
+    for ((i = 0; i < tmo * 10; i++)); do
+        local route
+        route=$(nsenter -t "$netns" -n ip route show "$prefix" 2>/dev/null || true)
+        if { [ "$expected" = present ] && [ -n "$route" ]; } || \
+           { [ "$expected" = absent ] && [ -z "$route" ]; }; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+echo "== kernel FIB: OSPF routes installed (--install-kernel-routes) =="
+if ! wait_kernel_route "$R1" "10.99.3.0/24" present 10; then
+    echo "FAIL: OSPF route 10.99.3.0/24 not in r1's kernel FIB"
+    nsenter -t "$R1" -n ip route show
+    exit 1
+fi
+if ! wait_kernel_route "$R2" "10.99.2.0/24" present 10; then
+    echo "FAIL: OSPF route 10.99.2.0/24 not in r2's kernel FIB"
+    nsenter -t "$R2" -n ip route show
+    exit 1
+fi
+R1_FIB=$(nsenter -t "$R1" -n ip route show 10.99.3.0/24)
+R2_FIB=$(nsenter -t "$R2" -n ip route show 10.99.2.0/24)
+echo "   r1 FIB: $R1_FIB"
+echo "   r2 FIB: $R2_FIB"
+echo "   kernel FIB: OK"
+
+echo "== kernel forwarding decision: ip route get =="
+# ip route get queries the kernel's FIB lookup — the actual routing
+# decision the kernel would make for a packet to that destination.
+R1_GET=$(nsenter -t "$R1" -n ip route get 10.99.3.5 2>/dev/null || true)
+R2_GET=$(nsenter -t "$R2" -n ip route get 10.99.2.5 2>/dev/null || true)
+[ -n "$R1_GET" ] || { echo "FAIL: ip route get on r1 returned nothing"; exit 1; }
+[ -n "$R2_GET" ] || { echo "FAIL: ip route get on r2 returned nothing"; exit 1; }
+echo "$R1_GET" | grep -q "via 10.99.1.2" || {
+    echo "FAIL: ip route get on r1 did not use the OSPF gateway 10.99.1.2"
+    echo "$R1_GET"
+    exit 1
+}
+echo "$R1_GET" | grep -q "dev veth0" || {
+    echo "FAIL: ip route get on r1 did not use veth0"
+    echo "$R1_GET"
+    exit 1
+}
+echo "$R2_GET" | grep -q "via 10.99.1.1" || {
+    echo "FAIL: ip route get on r2 did not use the OSPF gateway 10.99.1.1"
+    echo "$R2_GET"
+    exit 1
+}
+echo "$R2_GET" | grep -q "dev veth1" || {
+    echo "FAIL: ip route get on r2 did not use veth1"
+    echo "$R2_GET"
+    exit 1
+}
+echo "   r1 route get: $R1_GET"
+echo "   r2 route get: $R2_GET"
+echo "   ip route get: OK"
+
 echo "== dead-timer teardown: SIGKILL r2, expect r1 to close the session =="
 kill -9 "$DAEMON_B" 2>/dev/null || true
 DAEMON_B=""
 wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 dead (area" 20
 echo "   dead timer: OK"
+
+# The kernel route should be withdrawn after the neighbor dies.
+if ! wait_kernel_route "$R1" "10.99.3.0/24" absent 10; then
+    echo "FAIL: OSPF kernel route 10.99.3.0/24 survived the teardown on r1"
+    nsenter -t "$R1" -n ip route show
+    exit 1
+fi
+echo "   kernel FIB cleanup: OK (OSPF route withdrawn)"
 
 kill "$DAEMON_A" 2>/dev/null || true
 DAEMON_A=""
@@ -135,5 +210,7 @@ echo
 echo "OSPF two-daemon interop: PASS"
 echo "  - Full adjacency over raw multicast (224.0.0.5) in both directions"
 echo "  - Router-LSA exchange and stub-net route installation both ways"
-echo "  - Dead-timer session teardown after peer loss"
+echo "  - Kernel FIB carries the OSPF routes (--install-kernel-routes)"
+echo "  - ip route get confirms the kernel would use the OSPF route"
+echo "  - Dead-timer session teardown + kernel route withdrawal after peer loss"
 INNER
