@@ -112,7 +112,13 @@ while read -r so; do
     tgt="$RFS/lib/x86_64-linux-gnu/$(basename "$so")"
     [ -f "$tgt" ] || cp -L "$so" "$tgt"
 done
-for s in tcp_ao.sh mpls_lsp.sh ldp.sh; do
+# Copy the shared library first (every new-style script sources it),
+# then the scripts the VM runs. The VM runs as root, so the scripts'
+# step-4 forwarding verification (lr_enable_forwarding + lr_verify_ping)
+# actually executes — unlike the rootless unshare -Urn path where it
+# SKIPs.
+cp "$REPO/tests/interop/_lib.sh" "$RFS/work/librouting/tests/interop/"
+for s in tcp_ao.sh mpls_lsp.sh ldp.sh ospf.sh; do
     cp "$REPO/tests/interop/$s" "$RFS/work/librouting/tests/interop/"
 done
 
@@ -139,7 +145,9 @@ modprobe mpls_router && echo "modprobe mpls_router OK"
 modprobe mpls_iptunnel && echo "modprobe mpls_iptunnel OK"
 cd /work/librouting
 rc_all=0
-for t in tcp_ao.sh mpls_lsp.sh ldp.sh; do
+# ospf.sh runs as root here — its step-4 forwarding test (lr_verify_ping)
+# actually executes (unlike the rootless CI where it SKIPs).
+for t in tcp_ao.sh mpls_lsp.sh ldp.sh ospf.sh; do
     bash tests/interop/$t; rc=$?
     echo "MARKER $t rc=$rc"
     [ $rc -ne 0 ] && rc_all=1
