@@ -351,7 +351,14 @@ impl OsRouteTable for RouteSocket {
             Some(&next_hop),
         );
         let errno = self.roundtrip(&msg)?;
-        if errno != 0 {
+        // EEXIST: the route is already installed with the same key —
+        // an idempotent success. The Linux backend reaches the same
+        // semantics through NLM_F_CREATE | NLM_F_REPLACE, and the
+        // Windows backend through its ERROR_OBJECT_ALREADY_EXISTS
+        // branch, so RTM_ADD here mirrors them: a reconciliation-
+        // driven caller (the daemon's kernel mirror re-installing a
+        // byte-identical route) must not surface a spurious error.
+        if errno != 0 && errno != ERR_EEXIST {
             return Err(OsRouteError(format!(
                 "RTM_ADD {}: {}",
                 prefix,
@@ -663,6 +670,8 @@ unsafe fn libc_sysctl(
 
 // ESRCH: "no such process" doubles as "no such route" on the BSDs.
 const ERR_ESRCH: i32 = 3;
+// EEXIST: an identical route is already in the table.
+const ERR_EEXIST: i32 = 17;
 
 #[allow(dead_code)]
 const UNUSED_RT_FLAGS_DOC: u32 = RTF_PROTO1;
