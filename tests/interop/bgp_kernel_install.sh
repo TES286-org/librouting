@@ -265,8 +265,8 @@ darwin | windows)
 
     # --- 3. DECISION ---
     echo "== 3. DECISION: the OS route lookup uses the BGP gateway =="
-    lr_kernel_decision_uses 203.0.113.9 "$GW_A" || exit 1
-    lr_kernel_decision_uses 198.51.100.9 "$GW_B" || exit 1
+    lr_kernel_decision_uses 203.0.113.9 "$GW_A" 203.0.113.0/24 || exit 1
+    lr_kernel_decision_uses 198.51.100.9 "$GW_B" 198.51.100.0/24 || exit 1
     echo "   PASS: OS forwarding decision uses the BGP routes"
 
     # --- 4. FORWARD ---

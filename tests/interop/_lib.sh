@@ -408,11 +408,19 @@ _lr_fib_grep() { # <prefix> — platform FIB grep pattern for <prefix>
             printf '%s' "$prefix" | sed 's/\./\\./g'
             ;;
         darwin)
-            # macOS netstat strips trailing zero octets: 10.0.0.0/8
-            # prints as "10/8", 203.0.113.0/24 as "203.0.113/24".
-            # Split the dotted quad, count the trailing zeros and emit
-            # each as an optional group: "10(\.0){0,3}/8".
-            local base len head n pat
+            # macOS netstat compresses prefixes aggressively:
+            #   198.51.100.0/24 -> "198.51.100"  (trailing zero AND the
+            #                                    /24 omitted — class-C
+            #                                    natural mask)
+            #   10.0.0.0/8      -> "10"
+            #   192.168.64.1/32 -> "192.168.64.1/32" (unnatural lengths
+            #                                    keep the explicit /len)
+            # Emit two alternatives: the fully-compressed natural form
+            # (only when len equals the classful mask of the first
+            # octet, so a /25 cannot match a /24's line) and the
+            # explicit /len form with each stripped zero optional
+            # (which also matches FreeBSD-style netstat output).
+            local base len head n o1 natural esc form1 form2
             base=${prefix%/*}
             len=${prefix##*/}
             head=$base
@@ -421,12 +429,23 @@ _lr_fib_grep() { # <prefix> — platform FIB grep pattern for <prefix>
                 head="${head%.*}"
                 n=$((n + 1))
             done
-            head=$(printf '%s' "$head" | sed 's/\./\\./g')
-            pat="$head"
+            o1=${base%%.*}
+            natural=8
+            [ "$o1" -ge 128 ] && natural=16
+            [ "$o1" -ge 192 ] && natural=24
+            [ "$o1" -ge 224 ] && natural=32
+            esc=$(printf '%s' "$head" | sed 's/\./\\./g')
             if [ "$n" -gt 0 ]; then
-                pat="$pat(\\.0){0,$n}"
+                form2="$esc(\\.0){0,$n}/$len"
+            else
+                form2="$esc/$len"
             fi
-            printf '%s/%s' "$pat" "$len"
+            if [ "$len" -eq "$natural" ]; then
+                form1="$esc($|[[:space:]])"
+                printf '%s|%s' "$form1" "$form2"
+            else
+                printf '%s' "$form2"
+            fi
             ;;
         windows)
             local mask
@@ -506,8 +525,16 @@ lr_route_decision() { # <dest> — print the OS route decision for dest
     esac
 }
 
-lr_kernel_decision_uses() { # <dest> <gateway>
-    local dest=$1 gateway=$2
+lr_kernel_decision_uses() { # <dest> <gateway> [expected-prefix]
+    # Assert the OS's route decision for <dest> points at <gateway>.
+    # On Windows an optional <expected-prefix> switches the assertion
+    # to the selected route's DestinationPrefix: a next hop equal to
+    # the interface's own address (the route-to-self idiom the
+    # single-host tests use) is normalised to on-link delivery, so
+    # Find-NetRoute reports NextHop 0.0.0.0 — the gateway is not
+    # printable there, but the selected route's prefix still proves
+    # the OS picked the BGP route over the default.
+    local dest=$1 gateway=$2 prefix=${3:-}
     local decision
     decision=$(lr_route_decision "$dest") || {
         echo "FAIL: no OS route decision for $dest"
@@ -517,12 +544,20 @@ lr_kernel_decision_uses() { # <dest> <gateway>
         echo "FAIL: empty OS route decision for $dest"
         return 1
     }
-    printf '%s\n' "$decision" | grep -qF "$gateway" || {
-        echo "FAIL: OS decision for $dest does not use gateway $gateway:"
+    local ok=0
+    if printf '%s\n' "$decision" | grep -qF "$gateway"; then
+        ok=1
+    elif [ -n "$prefix" ] && [ "$(lr_os)" = windows ] &&
+        printf '%s\n' "$decision" | grep -qx "$prefix"; then
+        ok=1
+    fi
+    if [ "$ok" -ne 1 ]; then
+        echo "FAIL: OS decision for $dest does not use gateway $gateway" \
+            "(prefix $prefix):"
         printf '%s\n' "$decision"
         return 1
-    }
-    echo "   OS decision for $dest: $(printf '%s' "$decision" | head -1) [gw $gateway]"
+    fi
+    echo "   OS decision for $dest: $(printf '%s' "$decision" | head -1) [gw $gateway${prefix:+, prefix $prefix}]"
     return 0
 }
 
