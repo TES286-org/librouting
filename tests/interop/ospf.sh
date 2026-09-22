@@ -1,216 +1,150 @@
 #!/usr/bin/env bash
-# OSPF two-daemon interop test over real raw sockets.
+# OSPF two-daemon interop test — the new library-based form.
 #
-# Topology — each router in its own network namespace joined by a veth
-# pair (the real two-router model, no loopback shortcuts):
-#
+# Topology:
 #   netns r1: lr-daemon router-id 1.1.1.1
-#             veth0: 10.99.1.1/24 (transit) + 10.99.2.1/24 (stub net A)
-#        ↑↓ OSPFv2 multicast 224.0.0.5, Hellos + LS-Updates
+#             veth0: 10.99.1.1/24 (transit) + 10.99.2.1/24 (stub A)
+#        ↑↓ OSPFv2 multicast 224.0.0.5
 #   netns r2: lr-daemon router-id 2.2.2.2
-#             veth1: 10.99.1.2/24 (transit) + 10.99.3.1/24 (stub net B)
+#             veth1: 10.99.1.2/24 (transit) + 10.99.3.1/24 (stub B)
 #
-# Success criteria:
-#   1. Both daemons reach Full adjacency (session log).
-#   2. r1's Loc-RIB contains 10.99.3.0/24 (r2's stub net, Ospfv2).
-#   3. r2's Loc-RIB contains 10.99.2.0/24 (r1's stub net, Ospfv2).
-#   4. SIGKILL on r2 → r1's dead timer tears the neighbor session down.
-#
-# Raw OSPF sockets need CAP_NET_RAW. The whole lab runs inside
-# `unshare -Urn` (user + network namespace) where the capability is
-# granted — rootless, exactly what CI does. Environments without
-# unprivileged user namespaces (or without iproute2) SKIP gracefully.
-#
-# NOTE: log matching uses POSIX `grep -qF` — CI images do not guarantee
-# `rg` on PATH.
+# Verification chain (the user's "learn → install → forward" contract):
+#   1. LEARNED:   daemon log shows "route installed 10.99.3.0/24".
+#   2. INSTALLED: ip route show 10.99.3.0/24 on r1 returns the route.
+#   3. DECISION:  ip route get 10.99.3.5 returns the OSPF gateway + dev.
+#   4. FORWARD:   ping 10.99.3.1 from r1 succeeds (requires ip_forward
+#                 on r1 + r2; only when running as root or in the VM
+#                 harness — rootless unshare -Urn cannot set ip_forward).
+#   5. TEARDOWN:  SIGKILL r2 → kernel route withdrawn from r1.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-BIN=target/debug/lr-daemon
-if [ ! -x "$BIN" ]; then
-    BIN=target/release/lr-daemon
-fi
-if [ ! -x "$BIN" ]; then
-    echo "SKIP: lr-daemon not built (cargo build -p lr-cli)"
-    exit 0
-fi
-command -v ip >/dev/null 2>&1 || {
-    echo "SKIP: iproute2 (ip) not installed"
-    exit 0
-}
-command -v nsenter >/dev/null 2>&1 || {
-    echo "SKIP: nsenter (util-linux) not installed"
-    exit 0
-}
-unshare -Urn true 2>/dev/null || {
-    echo "SKIP: unprivileged user namespaces unavailable — no CAP_NET_RAW for OSPF"
-    exit 0
-}
+source tests/interop/_lib.sh
+
+# --- prerequisites ---
+BIN=$(lr_resolve_daemon) || exit 0
+command -v ip >/dev/null 2>&1 || { echo "SKIP: iproute2 not installed"; exit 0; }
+command -v nsenter >/dev/null 2>&1 || { echo "SKIP: nsenter not installed"; exit 0; }
+unshare -Urn true 2>/dev/null || { echo "SKIP: unprivileged user namespaces unavailable"; exit 0; }
 
 REPO=$(pwd)
 export REPO BIN
+export LR_BIN="$BIN"
 
 exec unshare -Urn bash -euo pipefail <<'INNER'
 cd "$REPO"
+source tests/interop/_lib.sh
 OUT=/tmp/lr_ospf_interop
 rm -rf "$OUT"; mkdir -p "$OUT"
 
-echo "== building the two-router lab (veth pair, one netns per router) =="
-ip link set lo up
-ip link add veth0 type veth peer name veth1
-# Holder processes keep the two router namespaces alive.
-unshare -n sleep 120 &
-R1=$!
-unshare -n sleep 120 &
-R2=$!
-cleanup() {
-    kill "${DAEMON_A:-}" "${DAEMON_B:-}" 2>/dev/null || true
-    kill "$R1" "$R2" 2>/dev/null || true
-}
-trap cleanup EXIT
-sleep 0.3
-ip link set veth0 netns "$R1"
-ip link set veth1 netns "$R2"
-nsenter -t "$R1" -n ip link set lo up
-nsenter -t "$R2" -n ip link set lo up
-nsenter -t "$R1" -n ip addr add 10.99.1.1/24 dev veth0
-nsenter -t "$R1" -n ip addr add 10.99.2.1/24 dev veth0
-nsenter -t "$R1" -n ip link set veth0 up
-nsenter -t "$R2" -n ip addr add 10.99.1.2/24 dev veth1
-nsenter -t "$R2" -n ip addr add 10.99.3.1/24 dev veth1
-nsenter -t "$R2" -n ip link set veth1 up
+# --- build the lab ---
+echo "== building the two-router lab =="
+lr_create_lab 2
+lr_set_addr "$R1" "$VETH_R1" 10.99.1.1/24
+lr_set_addr "$R1" "$VETH_R1" 10.99.2.1/24
+lr_set_addr "$R2" "$VETH_R2" 10.99.1.2/24
+lr_set_addr "$R2" "$VETH_R2" 10.99.3.1/24
 
-wait_log() { # <file> <pattern> [timeout-seconds]
-    local file=$1 pat=$2 tmo=${3:-15} i
-    for ((i = 0; i < tmo * 10; i++)); do
-        grep -qF "$pat" "$file" && return 0
-        sleep 0.1
-    done
-    echo "-- $file --"
-    cat "$file"
-    return 1
-}
-
-echo "== starting router r1 (1.1.1.1, stub nets 10.99.1.0/24 + 10.99.2.0/24) =="
-nsenter -t "$R1" -n "$BIN" --protocol ospf --router-id 1.1.1.1 \
-    --ospf-interface veth0 \
+# --- start daemons with --install-kernel-routes ---
+echo "== starting r1 (1.1.1.1) =="
+DAEMON_A=$(lr_start_daemon "$R1" "$OUT/r1.log" \
+    --protocol ospf --router-id 1.1.1.1 \
+    --ospf-interface "$VETH_R1" \
     --ospf-hello-interval 1 --ospf-dead-interval 4 \
     --install-kernel-routes \
-    --api-socket "$OUT/r1.ctl" >"$OUT/r1.log" 2>&1 &
-DAEMON_A=$!
+    --api-socket "$OUT/r1.ctl")
 
-echo "== starting router r2 (2.2.2.2, stub nets 10.99.1.0/24 + 10.99.3.0/24) =="
-nsenter -t "$R2" -n "$BIN" --protocol ospf --router-id 2.2.2.2 \
-    --ospf-interface veth1 \
+echo "== starting r2 (2.2.2.2) =="
+DAEMON_B=$(lr_start_daemon "$R2" "$OUT/r2.log" \
+    --protocol ospf --router-id 2.2.2.2 \
+    --ospf-interface "$VETH_R2" \
     --ospf-hello-interval 1 --ospf-dead-interval 4 \
     --install-kernel-routes \
-    --api-socket "$OUT/r2.ctl" >"$OUT/r2.log" 2>&1 &
-DAEMON_B=$!
-disown "$DAEMON_B"
+    --api-socket "$OUT/r2.ctl")
 
-echo "== waiting for Full adjacency on both routers =="
-wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 Full (area" 20
-wait_log "$OUT/r2.log" "ospf neighbor 1.1.1.1 Full (area" 20
-echo "   adjacency: OK"
+# --- 1. LEARNED: adjacency + route propagation ---
+echo "== 1. LEARNED: waiting for Full adjacency + route propagation =="
+lr_wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 Full (area" 20
+lr_wait_log "$OUT/r2.log" "ospf neighbor 1.1.1.1 Full (area" 20
+lr_wait_log "$OUT/r1.log" "route installed 10.99.3.0/24" 20
+lr_wait_log "$OUT/r2.log" "route installed 10.99.2.0/24" 20
+echo "   PASS: adjacency + route propagation"
 
-echo "== waiting for stub-net propagation (Router-LSA + LSU flooding) =="
-wait_log "$OUT/r1.log" "route installed 10.99.3.0/24" 20
-wait_log "$OUT/r2.log" "route installed 10.99.2.0/24" 20
-echo "   propagation: OK (r1 knows 10.99.3.0/24, r2 knows 10.99.2.0/24)"
-
-# The routes must be OSPF-sourced with the expected metric: cost 10 for
-# the direct stub link plus 10 across the veth transit (p2p link).
-grep -qF "10.99.3.0/24" "$OUT/r1.log"
-grep -qF "10.99.2.0/24" "$OUT/r2.log"
-
-# Wait for the kernel FIB mirror to install the OSPF routes. The
-# daemon's KernelMirror (called from handle_router_events on the
-# main thread) mirrors Loc-RIB changes into rtnetlink.
-wait_kernel_route() { # <netns-pid> <prefix> <present|absent> [timeout-s]
-    local netns=$1 prefix=$2 expected=$3 tmo=${4:-10} i
-    for ((i = 0; i < tmo * 10; i++)); do
-        local route
-        route=$(nsenter -t "$netns" -n ip route show "$prefix" 2>/dev/null || true)
-        if { [ "$expected" = present ] && [ -n "$route" ]; } || \
-           { [ "$expected" = absent ] && [ -z "$route" ]; }; then
-            return 0
-        fi
-        sleep 0.1
-    done
-    return 1
-}
-
-echo "== kernel FIB: OSPF routes installed (--install-kernel-routes) =="
-if ! wait_kernel_route "$R1" "10.99.3.0/24" present 10; then
+# --- 2. INSTALLED: kernel FIB mirror ---
+echo "== 2. INSTALLED: kernel FIB carries the OSPF routes =="
+lr_wait_kernel_route "$R1" "10.99.3.0/24" present 10 || {
     echo "FAIL: OSPF route 10.99.3.0/24 not in r1's kernel FIB"
-    nsenter -t "$R1" -n ip route show
-    exit 1
-fi
-if ! wait_kernel_route "$R2" "10.99.2.0/24" present 10; then
+    lr_ns_exec "$R1" ip route show; exit 1
+}
+lr_wait_kernel_route "$R2" "10.99.2.0/24" present 10 || {
     echo "FAIL: OSPF route 10.99.2.0/24 not in r2's kernel FIB"
-    nsenter -t "$R2" -n ip route show
-    exit 1
+    lr_ns_exec "$R2" ip route show; exit 1
+}
+echo "   r1 FIB: $(lr_ns_exec "$R1" ip route show 10.99.3.0/24)"
+echo "   r2 FIB: $(lr_ns_exec "$R2" ip route show 10.99.2.0/24)"
+echo "   PASS: kernel FIB install"
+
+# --- 3. DECISION: ip route get ---
+echo "== 3. DECISION: ip route get confirms OS forwarding decision =="
+lr_verify_route_get "$R1" 10.99.3.5 "via 10.99.1.2" "dev $VETH_R1" || exit 1
+lr_verify_route_get "$R2" 10.99.2.5 "via 10.99.1.1" "dev $VETH_R2" || exit 1
+echo "   PASS: OS forwarding decision uses OSPF routes"
+
+# --- 4. FORWARD: real packet forwarding (requires root) ---
+echo "== 4. FORWARD: real packet forwarding =="
+# Assign stub IPs to lo so pings are delivered locally.
+lr_ns_exec "$R2" ip addr add 10.99.3.1/24 dev lo 2>/dev/null || true
+lr_ns_exec "$R1" ip addr add 10.99.2.1/24 dev lo 2>/dev/null || true
+# Enable ip_forward on both routers (this is the transit path).
+# In a user namespace this fails — the rootless test can only do
+# steps 1-3. The VM harness (tests/vm/run_vm.sh) runs as root and
+# can do this step.
+if lr_enable_forwarding "$R1" && lr_enable_forwarding "$R2"; then
+    lr_disable_rp_filter "$R1" all
+    lr_disable_rp_filter "$R1" "$VETH_R1"
+    lr_disable_rp_filter "$R2" all
+    lr_disable_rp_filter "$R2" "$VETH_R2"
+    sleep 0.5
+    if lr_verify_ping "$R1" 10.99.3.1 1 3; then
+        echo "   PASS: r1 → r2 stub IP forwarded via OSPF route"
+    else
+        echo "   FAIL: r1 → 10.99.3.1 ping did not get a reply"
+        lr_ns_exec "$R1" ip route show
+        lr_ns_exec "$R2" ip route show
+        exit 1
+    fi
+    if lr_verify_ping "$R2" 10.99.2.1 1 3; then
+        echo "   PASS: r2 → r1 stub IP forwarded via OSPF route"
+    else
+        echo "   FAIL: r2 → 10.99.2.1 ping did not get a reply"
+        exit 1
+    fi
+    echo "   PASS: real data forwarding verified"
+else
+    echo "   SKIP: ip_forward not available (rootless unshare) — steps 1-3 verified"
 fi
-R1_FIB=$(nsenter -t "$R1" -n ip route show 10.99.3.0/24)
-R2_FIB=$(nsenter -t "$R2" -n ip route show 10.99.2.0/24)
-echo "   r1 FIB: $R1_FIB"
-echo "   r2 FIB: $R2_FIB"
-echo "   kernel FIB: OK"
 
-echo "== kernel forwarding decision: ip route get =="
-# ip route get queries the kernel's FIB lookup — the actual routing
-# decision the kernel would make for a packet to that destination.
-R1_GET=$(nsenter -t "$R1" -n ip route get 10.99.3.5 2>/dev/null || true)
-R2_GET=$(nsenter -t "$R2" -n ip route get 10.99.2.5 2>/dev/null || true)
-[ -n "$R1_GET" ] || { echo "FAIL: ip route get on r1 returned nothing"; exit 1; }
-[ -n "$R2_GET" ] || { echo "FAIL: ip route get on r2 returned nothing"; exit 1; }
-echo "$R1_GET" | grep -q "via 10.99.1.2" || {
-    echo "FAIL: ip route get on r1 did not use the OSPF gateway 10.99.1.2"
-    echo "$R1_GET"
-    exit 1
-}
-echo "$R1_GET" | grep -q "dev veth0" || {
-    echo "FAIL: ip route get on r1 did not use veth0"
-    echo "$R1_GET"
-    exit 1
-}
-echo "$R2_GET" | grep -q "via 10.99.1.1" || {
-    echo "FAIL: ip route get on r2 did not use the OSPF gateway 10.99.1.1"
-    echo "$R2_GET"
-    exit 1
-}
-echo "$R2_GET" | grep -q "dev veth1" || {
-    echo "FAIL: ip route get on r2 did not use veth1"
-    echo "$R2_GET"
-    exit 1
-}
-echo "   r1 route get: $R1_GET"
-echo "   r2 route get: $R2_GET"
-echo "   ip route get: OK"
-
-echo "== dead-timer teardown: SIGKILL r2, expect r1 to close the session =="
+# --- 5. TEARDOWN: dead-timer + kernel route withdrawal ---
+echo "== 5. TEARDOWN: dead-timer + kernel route withdrawal =="
 kill -9 "$DAEMON_B" 2>/dev/null || true
-DAEMON_B=""
-wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 dead (area" 20
-echo "   dead timer: OK"
-
-# The kernel route should be withdrawn after the neighbor dies.
-if ! wait_kernel_route "$R1" "10.99.3.0/24" absent 10; then
-    echo "FAIL: OSPF kernel route 10.99.3.0/24 survived the teardown on r1"
-    nsenter -t "$R1" -n ip route show
-    exit 1
-fi
-echo "   kernel FIB cleanup: OK (OSPF route withdrawn)"
-
-kill "$DAEMON_A" 2>/dev/null || true
-DAEMON_A=""
-sleep 0.5
+LR_DAEMON_PIDS="${LR_DAEMON_PIDS/$DAEMON_B/}"
+lr_wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 dead (area" 20
+echo "   PASS: dead timer fired"
+lr_wait_kernel_route "$R1" "10.99.3.0/24" absent 10 || {
+    echo "FAIL: OSPF kernel route survived teardown"
+    lr_ns_exec "$R1" ip route show; exit 1
+}
+echo "   PASS: kernel route withdrawn"
 
 echo
-echo "OSPF two-daemon interop: PASS"
-echo "  - Full adjacency over raw multicast (224.0.0.5) in both directions"
-echo "  - Router-LSA exchange and stub-net route installation both ways"
-echo "  - Kernel FIB carries the OSPF routes (--install-kernel-routes)"
-echo "  - ip route get confirms the kernel would use the OSPF route"
-echo "  - Dead-timer session teardown + kernel route withdrawal after peer loss"
+echo "OSPF interop: PASS"
+echo "  1. LEARNED   — adjacency + route propagation (Loc-RIB)"
+echo "  2. INSTALLED — kernel FIB carries the OSPF routes"
+echo "  3. DECISION  — ip route get confirms OS forwarding"
+if lr_enable_forwarding "$R1" 2>/dev/null; then
+    echo "  4. FORWARD   — real ICMP packets forwarded via OSPF routes"
+else
+    echo "  4. FORWARD   — skipped (rootless; ip_forward unavailable)"
+fi
+echo "  5. TEARDOWN  — dead-timer + kernel route withdrawal"
 INNER
