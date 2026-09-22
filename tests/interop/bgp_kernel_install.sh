@@ -24,13 +24,19 @@
 #        ↑↓ eBGP over TCP
 #   netns r2: lr-daemon AS64513, 10.98.1.2/24, originates 198.51.100.0/24
 #
-# Topology (macOS/Windows loopback form):
-#   daemon A: AS64512, listens 127.0.0.1:PORT, local-address 127.0.0.1,
-#             originates 203.0.113.0/24
-#   daemon B: AS64513, peer 127.0.0.1:PORT, local-address 127.0.0.2,
-#             originates 198.51.100.0/24
-#   Both run --install-kernel-routes: A's kernel carries 198.51.100.0/24
-#   via 127.0.0.2, B's carries 203.0.113.0/24 via 127.0.0.1.
+# Topology (macOS/Windows single-host form):
+#   daemon A: AS64512, originates 203.0.113.0/24
+#   daemon B: AS64513, originates 198.51.100.0/24
+#   Both run --install-kernel-routes over a local TCP session. The
+#   next hops are platform-adaptive (see the GW_A/GW_B selection in
+#   the script): macOS uses 127.0.0.5/127.0.0.6 — the safety net only
+#   rejects the exact 127.0.0.1 martian, and the BSD route socket
+#   accepts 127/8 gateways on lo0; Windows uses the runner's primary
+#   IPv4, because CreateIpForwardEntry2 rejects 127/8 next hops
+#   outright (error 87). A's route 198.51.100.0/24 points at GW_B and
+#   B's 203.0.113.0/24 at GW_A — a next hop equal to a local address
+#   makes the OS deliver locally, so the FIB install + lookup + teardown
+#   chain is fully real even though both daemons share one stack.
 #
 # Prefixes are RFC 5737 documentation blocks, so a stale route on a
 # shared runner can never hijack real traffic.
@@ -171,39 +177,70 @@ darwin | windows)
         echo "SKIP: kernel route install needs root/sudo (macOS) or an Administrator shell (Windows)"
         exit 0
     }
+    # Next-hop selection: the daemon's safety net rejects a NEXT_HOP
+    # of exactly 127.0.0.1 (RFC martian), and Windows' IP-Helper API
+    # rejects any 127/8 next hop outright (CreateIpForwardEntry2 error
+    # 87). The platform-adaptive session addresses avoid both:
+    #
+    #   macOS   - 127.0.0.5 / 127.0.0.6 pass the martian check (only
+    #             the exact 127.0.0.1 is listed) and the BSD route
+    #             socket accepts 127/8 gateways on lo0.
+    #   Windows - the runner's real primary IPv4 works as both the
+    #             session address and the route gateway (a next hop
+    #             equal to a local address makes Windows deliver
+    #             locally, the classic route-add-to-self idiom).
+    if [ "$OS" = darwin ]; then
+        GW_A=127.0.0.5   # A's announced next hop (B's route gateway)
+        GW_B=127.0.0.6   # B's announced next hop (A's route gateway)
+        LISTEN_ADDR=127.0.0.1
+        PEER_ADDR=127.0.0.1
+    else
+        # The runner's primary IPv4: the interface that owns the
+        # default route. Get-NetIPConfiguration is the stable form
+        # (Find-NetRoute's [0] element shape varies by PS version).
+        GW_A=$(powershell.exe -NoProfile -Command \
+            "(Get-NetIPConfiguration | Where-Object { \$_.IPv4DefaultGateway } | Select-Object -First 1).IPv4Address.IPAddress" \
+            2>/dev/null | tr -d '\r\n ')
+        [ -n "$GW_A" ] || { echo "SKIP: no local IPv4 address found"; exit 0; }
+        GW_B=$GW_A
+        LISTEN_ADDR=$GW_A
+        PEER_ADDR=$GW_A
+        echo "== using the runner's primary IPv4 $GW_A as session + gateway =="
+    fi
+
     # A stale route from a previous crashed run would make the absent
     # checks below lie about the teardown; start from a clean slate.
-    lr_kernel_route_delete 203.0.113.0/24 127.0.0.1
-    lr_kernel_route_delete 198.51.100.0/24 127.0.0.2
+    lr_kernel_route_delete 203.0.113.0/24 "$GW_A"
+    lr_kernel_route_delete 198.51.100.0/24 "$GW_B"
 
     if [ "$OS" = darwin ]; then
         # macOS: the route(4) socket needs root, so both daemons run
         # elevated with pidfile-tracked real pids (see _lib.sh).
-        echo "== starting daemon A (AS64512, 127.0.0.1, originates 203.0.113.0/24) =="
+        echo "== starting daemon A (AS64512, $GW_A, originates 203.0.113.0/24) =="
         PID_A=$(lr_daemon_spawn_elevated "$OUT/a.pid" "$OUT/a.log" \
             --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
             --ebgp-policy accept-all \
-            --listen 127.0.0.1:$PORT --local-address 127.0.0.1 \
+            --listen $LISTEN_ADDR:$PORT --local-address $GW_A \
             --network 203.0.113.0/24 --install-kernel-routes)
-        echo "== starting daemon B (AS64513, 127.0.0.2, originates 198.51.100.0/24) =="
+        echo "== starting daemon B (AS64513, $GW_B, originates 198.51.100.0/24) =="
         PID_B=$(lr_daemon_spawn_elevated "$OUT/b.pid" "$OUT/b.log" \
             --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
             --ebgp-policy accept-all \
-            --peer 127.0.0.1:$PORT --local-address 127.0.0.2 \
+            --peer $PEER_ADDR:$PORT --local-address $GW_B \
             --network 198.51.100.0/24 --install-kernel-routes)
     else
         # Windows admin shell: no elevation wrapper, direct spawn.
-        echo "== starting daemon A (AS64512, 127.0.0.1, originates 203.0.113.0/24) =="
+        echo "== starting daemon A (AS64512, $GW_A, originates 203.0.113.0/24) =="
         PID_A=$(lr_daemon_spawn "$OUT/a.log" \
             --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
             --ebgp-policy accept-all \
-            --listen 127.0.0.1:$PORT --local-address 127.0.0.1 \
+            --listen $LISTEN_ADDR:$PORT --local-address $GW_A \
             --network 203.0.113.0/24 --install-kernel-routes)
-        echo "== starting daemon B (AS64513, 127.0.0.2, originates 198.51.100.0/24) =="
+        echo "== starting daemon B (AS64513, $GW_B, originates 198.51.100.0/24) =="
         PID_B=$(lr_daemon_spawn "$OUT/b.log" \
             --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
             --ebgp-policy accept-all \
-            --peer 127.0.0.1:$PORT --local-address 127.0.0.2 \
+            --peer $PEER_ADDR:$PORT --local-address $GW_B \
             --network 198.51.100.0/24 --install-kernel-routes)
     fi
 
@@ -228,8 +265,8 @@ darwin | windows)
 
     # --- 3. DECISION ---
     echo "== 3. DECISION: the OS route lookup uses the BGP gateway =="
-    lr_kernel_decision_uses 203.0.113.9 127.0.0.1 || exit 1
-    lr_kernel_decision_uses 198.51.100.9 127.0.0.2 || exit 1
+    lr_kernel_decision_uses 203.0.113.9 "$GW_A" || exit 1
+    lr_kernel_decision_uses 198.51.100.9 "$GW_B" || exit 1
     echo "   PASS: OS forwarding decision uses the BGP routes"
 
     # --- 4. FORWARD ---
@@ -260,8 +297,8 @@ darwin | windows)
     echo "   PASS: kernel route withdrawn"
 
     # B was crash-killed: its own installed route (203.0.113.0/24 via
-    # 127.0.0.1) goes stale — crash semantics, nobody withdraws it.
-    # Stop A gracefully and clean up any leftovers explicitly.
+    # $GW_A) goes stale — crash semantics, nobody withdraws it. Stop A
+    # gracefully and clean up any leftovers explicitly.
     if [ "$OS" = darwin ]; then
         lr_daemon_kill_elevated "$PID_A" TERM
         sleep 2
@@ -273,7 +310,8 @@ darwin | windows)
         kill -9 "$PID_A" 2>/dev/null || true
         LR_DAEMON_PIDS="${LR_DAEMON_PIDS/$PID_A/}"
     fi
-    lr_kernel_route_delete 203.0.113.0/24 127.0.0.1
+    lr_kernel_route_delete 203.0.113.0/24 "$GW_A"
+    lr_kernel_route_delete 198.51.100.0/24 "$GW_B"
     lr_wait_kernel_route_host 203.0.113.0/24 absent 5 || {
         echo "FAIL: stale route 203.0.113.0/24 not cleaned up"
         _lr_fib_show; exit 1
