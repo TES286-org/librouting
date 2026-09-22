@@ -4,7 +4,7 @@
 # labelled BGP UPDATE (AFI=1, SAFI=4), and verify the label stack
 # propagates from A to B.
 #
-#   A (AS64512, listens :1179, originates 198.51.100.0/24 label 100)
+#   A (AS64512, listens :11794, originates 198.51.100.0/24 label 100)
 #        ↑↓ TCP
 #   B (AS64513, connects, receives the labelled route)
 #
@@ -12,68 +12,49 @@
 # ipv4-labeled-unicast` and disable RFC 8212 policy with
 # `--ebgp-policy accept-all` so the route is accepted without an
 # explicit import filter.
+#
+# Library-based (tests/interop/_lib.sh): portable across Linux, macOS
+# and Windows/Git-Bash.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
-BIN=$(./tests/interop/_lr_daemon.sh)
+source tests/interop/_lib.sh
+
+BIN=$(lr_resolve_daemon) || exit 0
 PORT=${PORT:-11794}
 OUT=/tmp/lr_interop_labeled
 rm -rf "$OUT"; mkdir -p "$OUT"
 
 echo "== starting daemon A (listener, AS64512, label 100) =="
-"$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+DAEMON_A=$(lr_daemon_spawn "$OUT/a.log" \
+    --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
     --ebgp-policy accept-all \
     --listen 127.0.0.1:$PORT --local-address 192.0.2.1 \
     --mp-family ipv4-unicast --mp-family ipv4-labeled-unicast \
-    --labeled-network "198.51.100.0/24 100" \
-    >"$OUT/a.log" 2>&1 &
-A_PID=$!
-trap 'kill $A_PID 2>/dev/null || true' EXIT
-
-sleep 1
+    --labeled-network "198.51.100.0/24 100")
 
 echo "== starting daemon B (connector, AS64513) =="
-"$BIN" --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
+DAEMON_B=$(lr_daemon_spawn "$OUT/b.log" \
+    --local-as 64513 --peer-as 64512 --router-id 10.0.0.2 \
     --ebgp-policy accept-all \
     --peer 127.0.0.1:$PORT --local-address 192.0.2.2 \
-    --mp-family ipv4-unicast --mp-family ipv4-labeled-unicast \
-    >"$OUT/b.log" 2>&1 &
-B_PID=$!
+    --mp-family ipv4-unicast --mp-family ipv4-labeled-unicast)
 
-# Wait for the session to establish and the labelled route to propagate.
-ok=1
-reason="timeout waiting for labelled route propagation"
-for i in $(seq 1 120); do
-    sleep 0.25
-    if grep -qF "route installed 198.51.100.0/24" "$OUT/b.log" 2>/dev/null; then
-        ok=0
-        break
-    fi
-    if ! kill -0 $A_PID 2>/dev/null || ! kill -0 $B_PID 2>/dev/null; then
-        reason="a daemon died"
-        break
-    fi
-done
+# --- 1. ESTABLISHED + LEARNED (up to 30 s: slow CI runners) ---
+echo "== waiting for the session to establish and the labelled route to propagate =="
+lr_wait_log "$OUT/a.log" "session #1 → Established" 30
+lr_wait_log "$OUT/b.log" "session #1 → Established" 30
+lr_wait_log "$OUT/a.log" "originating labelled 198.51.100.0/24" 30
+lr_wait_log "$OUT/b.log" "route installed 198.51.100.0/24" 30
+kill -0 "$DAEMON_A" 2>/dev/null || { echo "FAIL: daemon A died"; cat "$OUT/a.log"; exit 1; }
+kill -0 "$DAEMON_B" 2>/dev/null || { echo "FAIL: daemon B died"; cat "$OUT/b.log"; exit 1; }
 
-kill $B_PID 2>/dev/null || true
-kill $A_PID 2>/dev/null || true
-wait 2>/dev/null || true
+# --- 2. TEARDOWN: A's death withdraws the labelled route from B ---
+echo "== teardown: A's death withdraws the labelled route from B =="
+kill -9 "$DAEMON_A" 2>/dev/null || true
+LR_DAEMON_PIDS="${LR_DAEMON_PIDS/$DAEMON_A/}"
+lr_wait_log "$OUT/b.log" "route withdrawn 198.51.100.0/24" 30
+echo "   PASS: labelled route withdrawn after session loss"
 
-echo "== daemon A log =="
-cat "$OUT/a.log"
-echo "== daemon B log =="
-cat "$OUT/b.log"
-
-if [ $ok -ne 0 ]; then
-    echo "FAIL: labelled route did not propagate to B ($reason)"
-    exit 1
-fi
-if ! grep -qF "session #1 → Established" "$OUT/b.log"; then
-    echo "FAIL: B never reached Established"
-    exit 1
-fi
-if ! grep -qF "originating labelled 198.51.100.0/24" "$OUT/a.log"; then
-    echo "FAIL: A did not originate the labelled network"
-    exit 1
-fi
-echo "PASS: two-daemon RFC 8277 labelled-unicast interop — labelled route propagated"
+echo
+echo "PASS: two-daemon RFC 8277 labelled-unicast interop — labelled route propagated + withdrawn"
