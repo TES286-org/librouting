@@ -449,16 +449,14 @@ jobs:
   # already covers that path through bird.sh, so the WSL2 path is the
   # novel coverage on Windows).
   #
-  # `continue-on-error: true` while the test stabilises — WSL2 on
-  # Windows runners can be flaky (distro startup, package cache init,
-  # WSL networking quirks). A red X here does not block the workflow;
-  # flip to a hard gate once it's been green for several consecutive
-  # runs.
+  # Hard gate: the WSL2 bootstrap has been green on every run since
+  # the rootfs import + wslu path-translation fixes landed, so the
+  # early `continue-on-error: true` stabilisation period is over. A
+  # failure here now means a real interop regression, not runner flake.
   windows-bird-interop:
     name: Windows BIRD interop (lr ↔ BIRD-in-WSL2)
     runs-on: windows-2022
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -473,9 +471,9 @@ jobs:
         run: cargo build -p lr-cli
       - name: BIRD-in-WSL2 interop (lr ↔ BIRD 2)
         # The script SKIPs gracefully if WSL2+Ubuntu is unavailable
-        # or no host bird binary is on PATH. The hard gate is the
-        # `continue-on-error: true` at the job level — a transient
-        # WSL2 hiccup does not block the rest of the PR.
+        # or no host bird binary is on PATH; a real interop failure
+        # (no route exchange, session never established) is a hard
+        # error for this job.
         timeout-minutes: 15
         shell: bash
         run: ./tests/interop/bird_wsl.sh
