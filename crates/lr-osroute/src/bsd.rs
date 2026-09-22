@@ -240,6 +240,24 @@ impl RouteSocket {
     /// Send a message and wait for the reply with the matching sequence
     /// number. Returns the reply's `rtm_errno`.
     fn roundtrip(&self, msg: &[u8]) -> Result<i32, OsRouteError> {
+        self.roundtrip_raw(msg).map_err(|(errno, phase)| {
+            OsRouteError(format!(
+                "{phase}: {}",
+                std::io::Error::from_raw_os_error(errno)
+            ))
+        })
+    }
+
+    /// Send a message and read its reply, surfacing the operation's
+    /// errno whichever phase produced it. The BSDs disagree on where a
+    /// routing-table conflict surfaces: macOS fails the `send(2)`
+    /// itself (EEXIST on an RTM_ADD for an installed route), while
+    /// FreeBSD accepts the write and reports EEXIST in the reply's
+    /// `rtm_errno`. Callers that treat specific errnos as idempotent
+    /// success (add: EEXIST; delete: ESRCH) need one code path that
+    /// covers both, so the raw errno travels out instead of being
+    /// flattened into a display string.
+    fn roundtrip_raw(&self, msg: &[u8]) -> Result<i32, (i32, &'static str)> {
         let seq = i32::from_ne_bytes([
             msg[layout::OFF_SEQ],
             msg[layout::OFF_SEQ + 1],
@@ -257,10 +275,10 @@ impl RouteSocket {
             )
         };
         if n < 0 {
-            return Err(OsRouteError(format!(
-                "send(PF_ROUTE): {}",
-                std::io::Error::last_os_error()
-            )));
+            return Err((
+                std::io::Error::last_os_error().raw_os_error().unwrap_or(0),
+                "send(PF_ROUTE)",
+            ));
         }
         // Read replies until the sequence matches; routing sockets also
         // deliver asynchronous route-change notifications which we skip.
@@ -277,7 +295,7 @@ impl RouteSocket {
             };
             if n < 0 {
                 let e = std::io::Error::last_os_error();
-                return Err(OsRouteError(format!("recv(PF_ROUTE): {}", e)));
+                return Err((e.raw_os_error().unwrap_or(0), "recv(PF_ROUTE)"));
             }
             let n = n as usize;
             if n < layout::HDR {
@@ -300,9 +318,7 @@ impl RouteSocket {
         // with notifications) — report it rather than swallowing
         // EPERM/EEXIST/etc. and letting the caller believe the route was
         // installed.
-        Err(OsRouteError(
-            "PF_ROUTE: no reply with matching rtm_seq".to_string(),
-        ))
+        Err((0, "PF_ROUTE: no reply with matching rtm_seq"))
     }
 }
 
@@ -350,7 +366,13 @@ impl OsRouteTable for RouteSocket {
             &prefix,
             Some(&next_hop),
         );
-        let errno = self.roundtrip(&msg)?;
+        // roundtrip_raw covers both phases where an EEXIST can
+        // surface: macOS fails the send(2) itself for an installed
+        // route, FreeBSD reports it in the reply's rtm_errno.
+        let errno = match self.roundtrip_raw(&msg) {
+            Ok(reply_errno) => reply_errno,
+            Err((send_errno, _phase)) => send_errno,
+        };
         // EEXIST: the route is already installed with the same key —
         // an idempotent success. The Linux backend reaches the same
         // semantics through NLM_F_CREATE | NLM_F_REPLACE, and the
@@ -375,7 +397,12 @@ impl OsRouteTable for RouteSocket {
             flags |= RTF_HOST;
         }
         let msg = self.build_message(RTM_DELETE, flags, RTA_DST | RTA_NETMASK, &prefix, None);
-        let errno = self.roundtrip(&msg)?;
+        // Symmetric with add_route: macOS surfaces a missing-route
+        // ESRCH at the send(2) phase, FreeBSD in the reply.
+        let errno = match self.roundtrip_raw(&msg) {
+            Ok(reply_errno) => reply_errno,
+            Err((send_errno, _phase)) => send_errno,
+        };
         // ESRCH: the route is already gone — idempotent delete is a success
         // for a reconciliation-driven caller.
         if errno != 0 && errno != ERR_ESRCH {
