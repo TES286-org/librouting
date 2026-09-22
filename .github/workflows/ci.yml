@@ -385,6 +385,56 @@ jobs:
         timeout-minutes: 10
         shell: bash
         run: ./tests/interop/labeled_unicast.sh
+      - name: BGP kernel-route install interop (IP-Helper backend)
+        # The runner shell is an Administrator shell, so the daemon's
+        # CreateIpForwardEntry2 path works without any elevation step;
+        # the script's Windows branch verifies the FIB install, the
+        # Find-NetRoute decision and the teardown, and cleans up the
+        # crash-stale route at the end.
+        timeout-minutes: 10
+        shell: bash
+        run: ./tests/interop/bgp_kernel_install.sh
+
+  # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
+  # This is the macOS half of the "CI reflects real usage" goal:
+  # before this job the BSD backend was only ever cross-compiled
+  # (cross-macos-intel), never executed. The macos-14 runner has
+  # passwordless sudo, so bgp_kernel_install.sh runs its daemons
+  # elevated (the PF_ROUTE socket needs root) and asserts the
+  # learn → install → decide → teardown chain against the real macOS
+  # kernel FIB via netstat/route. two_daemon + labeled_unicast cover
+  # the plain control-plane path without sudo.
+  macos-interop:
+    name: macOS interop (lr ↔ lr, BSD route socket)
+    runs-on: macos-14
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "macos-interop"
+      - name: Build lr-daemon (debug)
+        timeout-minutes: 25
+        run: cargo build -p lr-cli
+      - name: Two-daemon TCP interop (lr ↔ lr)
+        timeout-minutes: 10
+        shell: bash
+        run: ./tests/interop/two_daemon.sh
+      - name: RFC 8277 labelled-unicast interop (lr ↔ lr)
+        timeout-minutes: 10
+        shell: bash
+        run: ./tests/interop/labeled_unicast.sh
+      - name: BGP kernel-route install interop (BSD route(4) backend)
+        # sudo is passwordless on GitHub macOS runners; the script
+        # elevates the daemons itself (pidfile-tracked real pids) and
+        # verifies netstat -rn / route -n get / teardown. Prefixes are
+        # RFC 5737 documentation blocks, so a stale route on the shared
+        # runner cannot hijack real traffic.
+        timeout-minutes: 10
+        shell: bash
+        run: ./tests/interop/bgp_kernel_install.sh
 
   # Windows lr-vs-BIRD interop via WSL2. The Windows runner ships
   # WSL2 + Ubuntu 22.04 by default; the bird_wsl.sh script installs
@@ -468,6 +518,23 @@ jobs:
       - name: RFC 8277 labelled-unicast interop (librouting ↔ librouting)
         timeout-minutes: 5
         run: ./tests/interop/labeled_unicast.sh
+      - name: BGP kernel-install interop (learn → install → decide → forward → teardown)
+        # The user contract this repo promises: a BGP-learned route is
+        # installed into the kernel FIB (proto bgp), the OS lookup uses
+        # it, real ICMP packets are delivered through it, and the peer's
+        # death withdraws it. Rootless user namespaces support every
+        # step (the FORWARD ping is locally-originated + locally-
+        # delivered, so no ip_forward is needed); the transit-forwarding
+        # phase lives in bgp_transit.sh below + the nightly VM harness.
+        timeout-minutes: 10
+        run: ./tests/interop/bgp_kernel_install.sh
+      - name: BGP transit interop (three-router re-advertisement + far-edge FIB)
+        # A route learned on edge r1 must survive the transit router's
+        # re-advertisement into r3's kernel FIB; the ip_forward data
+        # phase runs in the QEMU VM harness (nightly) where root is
+        # available, and SKIPs cleanly in this rootless job.
+        timeout-minutes: 10
+        run: ./tests/interop/bgp_transit.sh
       - name: Add-Path interop (RFC 7911, two-daemon)
         timeout-minutes: 5
         run: ./tests/interop/addpath.sh
