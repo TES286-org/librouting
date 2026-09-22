@@ -40,11 +40,10 @@ unshare -Urn true 2>/dev/null || {
 }
 
 REPO=$(pwd)
-if [ "${1:-}" = "--kernel" ]; then
-    export KERNEL=1
-else
-    export KERNEL=0
-fi
+# Kernel FIB install is now the default — the user's requirement is
+# to verify routes are installed AND the OS uses them. The old
+# `--kernel` flag is accepted for backward compatibility but is a no-op.
+export KERNEL=1
 export REPO BIN
 
 exec unshare -Urn bash -euo pipefail <<'INNER'
@@ -197,6 +196,20 @@ if [ "$KERNEL" = "1" ]; then
         exit 1
     }
     echo "PASS: kernel FIB on r1: $KERNEL_ROUTE"
+
+    echo "== kernel forwarding decision: ip -6 route get =="
+    # ip -6 route get queries the kernel's IPv6 FIB lookup — the
+    # actual routing decision the kernel would make for a packet to
+    # that destination.
+    R1_GET=$(nsenter -t "$R1" -n ip -6 route get 2001:db8:2::5 2>/dev/null || true)
+    [ -n "$R1_GET" ] || { echo "FAIL: ip -6 route get on r1 returned nothing"; exit 1; }
+    echo "$R1_GET" | grep -q "dev veth0" || {
+        echo "FAIL: ip -6 route get on r1 did not use veth0"
+        echo "$R1_GET"
+        exit 1
+    }
+    echo "   r1 route get: $R1_GET"
+    echo "PASS: kernel forwarding decision uses the OSPFv3-installed route"
 else
     echo "== kernel mirror phase skipped (run with --kernel to enable) =="
 fi
