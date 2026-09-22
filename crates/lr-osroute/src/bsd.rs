@@ -239,17 +239,10 @@ impl RouteSocket {
 
     /// Send a message and wait for the reply with the matching sequence
     /// number. Returns the reply's `rtm_errno`.
-    fn roundtrip(&self, msg: &[u8]) -> Result<i32, OsRouteError> {
-        self.roundtrip_raw(msg).map_err(|(errno, phase)| {
-            OsRouteError(format!(
-                "{phase}: {}",
-                std::io::Error::from_raw_os_error(errno)
-            ))
-        })
-    }
-
     /// Send a message and read its reply, surfacing the operation's
-    /// errno whichever phase produced it. The BSDs disagree on where a
+    /// errno whichever phase produced it (callers format the error
+    /// themselves so specific errnos stay matchable). The BSDs disagree
+    /// on where a
     /// routing-table conflict surfaces: macOS fails the `send(2)`
     /// itself (EEXIST on an RTM_ADD for an installed route), while
     /// FreeBSD accepts the write and reports EEXIST in the reply's
@@ -745,7 +738,7 @@ mod tests {
         assert_eq!(roundup(0), 8);
     }
 
-    /// Reply matching used by `roundtrip`: the echo must carry both the
+    /// Reply matching used by `roundtrip_raw`: the echo must carry both the
     /// same rtm_seq and the same message type as the request.
     #[test]
     fn is_reply_matches_seq_and_type() {

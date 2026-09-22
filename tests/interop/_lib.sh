@@ -571,7 +571,14 @@ lr_kernel_route_delete() { # <prefix> <gateway> — best-effort manual cleanup
             lr_elevate route delete -net "$prefix" "$gateway" 2>/dev/null || true
             ;;
         windows)
-            route.exe delete "${prefix%/*}" mask "$(_lr_netmask "${prefix##*/}")" "$gateway" >/dev/null 2>&1 || true
+            # The gateway is deliberately NOT passed: Windows normalises
+            # a next hop equal to the interface's own address to on-link,
+            # and `route delete <dest> mask <mask> <gw>` only removes
+            # rows whose gateway matches the argument — an On-link row
+            # survives a gateway-qualified delete. Destination+mask alone
+            # removes every row for the prefix, which is what a cleanup
+            # of RFC 5737 documentation prefixes wants.
+            route.exe delete "${prefix%/*}" mask "$(_lr_netmask "${prefix##*/}")" >/dev/null 2>&1 || true
             ;;
     esac
 }
