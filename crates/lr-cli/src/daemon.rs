@@ -2016,6 +2016,22 @@ fn listener_gtsm(g: &DaemonConfig, entries: &[PeerEntry]) -> Gtsm {
 /// `peer`. Explicit peers derive from the listener only (deriving from
 /// the *peer's* address would advertise the peer's IP as next-hop);
 /// the legacy single peer keeps the historical derivation order.
+///
+/// Precedence (first match wins):
+/// 1. Per-peer `local_address` / per-protocol `bgp.local_address` (the
+///    operator's explicit override).
+/// 2. The configured `--router-id` when it parses as a literal IPv4.
+///    This is the production default: the router-id is the BGP
+///    IDENTIFIER and almost always a real IPv4 on the host; sourcing
+///    the outbound TCP connection from it makes the peer's source-IP
+///    match (`neighbor <ip>` style configs) succeed without forcing
+///    the operator to repeat the address as `--local-address`. On
+///    multihomed Windows hosts the kernel's default source-IP choice
+///    can pick a different interface, which makes BIRD close the TCP
+///    without a NOTIFICATION (the `peer closed connection` loop).
+/// 3. `listen_addr` (the historical default — `0.0.0.0:179` → the
+///    kernel picks the source IP, the same path that produced the
+///    Windows closed-connection loop).
 fn peer_local_address(g: &DaemonConfig, p: &PeerSpec) -> Option<IpAddr> {
     let configured = p.local_address.as_ref().or(g.local_address.as_ref());
     if let Some(s) = configured {
@@ -2027,6 +2043,20 @@ fn peer_local_address(g: &DaemonConfig, p: &PeerSpec) -> Option<IpAddr> {
             return Some(ip);
         }
         return None;
+    }
+    // The router-id is the operator's declared identity for this
+    // speaker. When it is a literal IPv4 the daemon owns (BGP requires
+    // it as the BGP-IDENTIFIER) and the operator did not pick a
+    // distinct `local_address`, source the connection from it so the
+    // peer's source-IP match succeeds on multihomed hosts.
+    if let Ok(v4) = g
+        .router_id
+        .split(':')
+        .next()
+        .unwrap_or("")
+        .parse::<std::net::Ipv4Addr>()
+    {
+        return Some(IpAddr::V4(v4.octets()));
     }
     if g.explicit_peers {
         g.listen_addr.as_deref().and_then(transport_ip)
@@ -5537,6 +5567,91 @@ mod babel_router_id_tests {
     }
 }
 
+#[cfg(test)]
+mod peer_local_address_tests {
+    use super::*;
+    use crate::daemon_config::{DaemonConfig, PeerSpec};
+
+    /// When the operator did not set `local_address`, the daemon's
+    /// `router-id` is the next-best source IP for outbound BGP — it
+    /// is a real IPv4 on the host (BGP requires it as the
+    /// BGP-IDENTIFIER) and sourcing from it makes the peer's
+    /// source-IP match succeed. This is the regression that produced
+    /// the `peer closed connection` loop on Windows when the kernel
+    /// picked a different interface's source IP.
+    #[test]
+    fn router_id_is_default_source_when_local_address_unset() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        let peer = PeerSpec::default();
+        assert_eq!(
+            peer_local_address(&cfg, &peer),
+            Some(IpAddr::V4([172, 23, 10, 102]))
+        );
+    }
+
+    /// An explicit `local_address` always wins over the router-id
+    /// default — operators with a loopback-anycast source need to
+    /// override the inferred value.
+    #[test]
+    fn explicit_local_address_wins_over_router_id_default() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        cfg.local_address = Some("10.0.0.1".to_string());
+        let peer = PeerSpec::default();
+        assert_eq!(
+            peer_local_address(&cfg, &peer),
+            Some(IpAddr::V4([10, 0, 0, 1]))
+        );
+    }
+
+    /// Per-peer `local_address` overrides the per-protocol value,
+    /// which overrides the router-id default.
+    #[test]
+    fn per_peer_local_address_wins_over_protocol_value() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        cfg.local_address = Some("10.0.0.1".to_string());
+        let peer = PeerSpec {
+            local_address: Some("10.0.0.2".to_string()),
+            ..PeerSpec::default()
+        };
+        assert_eq!(
+            peer_local_address(&cfg, &peer),
+            Some(IpAddr::V4([10, 0, 0, 2]))
+        );
+    }
+
+    /// `host:port` legacy form still parses out the host portion so
+    /// the router-id default survives a config that writes the
+    /// listen address into the router-id slot by mistake.
+    #[test]
+    fn router_id_with_port_suffix_still_parses() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102:179".to_string();
+        let peer = PeerSpec::default();
+        assert_eq!(
+            peer_local_address(&cfg, &peer),
+            Some(IpAddr::V4([172, 23, 10, 102]))
+        );
+    }
+
+    /// When neither `local_address` nor a usable router-id is
+    /// configured, the function falls through to the historical
+    /// listen_addr path — no regression for embedders that ship a
+    /// bare `--listen` config without `--router-id`.
+    #[test]
+    fn falls_back_to_listen_addr_when_no_router_id() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = String::new();
+        cfg.listen_addr = Some("0.0.0.0:179".to_string());
+        let peer = PeerSpec::default();
+        assert_eq!(
+            peer_local_address(&cfg, &peer),
+            Some(IpAddr::V4([0, 0, 0, 0]))
+        );
+    }
+}
 
 #[cfg(test)]
 mod kernel_mirror_tests {
