@@ -83,8 +83,21 @@ impl RttState {
     /// The `(hello_send_us, hello_receive_us)` pair to echo in an IHU,
     /// valid only while the Hello it answers is fresh
     /// ([`RTT_ECHO_FRESHNESS_MS`], babeld's 1 s window).
+    ///
+    /// The boundary is exclusive: a Hello received exactly
+    /// `RTT_ECHO_FRESHNESS_MS` ago is still echoed. The daemon's
+    /// periodic announce loop runs at exactly `hello_interval_ms`
+    /// (default 1000 ms), which equals `RTT_ECHO_FRESHNESS_MS`. With
+    /// the previous `>=` comparison, a Hello that landed one tick
+    /// before the announce boundary (e.g. received at T=0, announce
+    /// at T=1000) was dropped exactly when the announce needed it,
+    /// so the next IHU went out without an echo and the peer never
+    /// got a sample to compute RTT from — producing the persistent
+    /// `RTT 0.000 ms` line on BIRD's `show babel neighbors` output
+    /// even when both sides advertised `rtt cost > 0`. Babeld itself
+    /// uses the strict `>` form (`now - t < 1000`); this matches.
     pub fn echo_pair(&self, now_ms: u64) -> Option<(u32, u32)> {
-        if now_ms.saturating_sub(self.hello_receive_ms) >= RTT_ECHO_FRESHNESS_MS {
+        if now_ms.saturating_sub(self.hello_receive_ms) > RTT_ECHO_FRESHNESS_MS {
             return None;
         }
         Some((self.hello_send_us, self.hello_receive_us))
@@ -364,7 +377,18 @@ mod tests {
             n.rtt_echo_pair(500 + RTT_ECHO_FRESHNESS_MS - 1),
             Some((777, 888_888))
         );
-        assert_eq!(n.rtt_echo_pair(500 + RTT_ECHO_FRESHNESS_MS), None);
+        // The boundary is exclusive on the upper end: a Hello received
+        // exactly `RTT_ECHO_FRESHNESS_MS` ago is still echoed. The
+        // daemon's announce loop runs at `hello_interval_ms` (default
+        // 1000 ms) — `>=` would drop the echo at the exact tick the
+        // announce needs it, producing the persistent `RTT 0.000`
+        // symptom on the BIRD peer even with both sides advertising
+        // `rtt cost > 0`.
+        assert_eq!(
+            n.rtt_echo_pair(500 + RTT_ECHO_FRESHNESS_MS),
+            Some((777, 888_888))
+        );
+        assert_eq!(n.rtt_echo_pair(500 + RTT_ECHO_FRESHNESS_MS + 1), None);
     }
 
     #[test]
