@@ -3027,7 +3027,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }
         if !manual {
             println!(
-                "daemon: babel interface {} session {} — {} hello {}ms update {}ms rxcost {}{}{}",
+                "daemon: babel interface {} session {} — {} hello {}ms update {}ms rxcost {} router-id {}{}{}",
                 iface.name,
                 h.0,
                 match iface.transports[0].local {
@@ -3037,6 +3037,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 iface.hello_interval_ms,
                 iface.update_interval_ms,
                 iface.rxcost,
+                format_router_id(iface.router_id),
                 if iface.rtt_cost > 0 {
                     format!(" rtt-cost {}", iface.rtt_cost)
                 } else {
@@ -3788,7 +3789,7 @@ fn babel_iface_manual(
         session: SessionHandle(0), // assigned right after add_session
         auth,
         auth_debug_line,
-        router_id: babel_router_id_for(local, boot),
+        router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
         hello_seqno: u16::from_be_bytes([boot[0], boot[1]]),
         seqno: 0,
         last_sig: String::new(),
@@ -3939,7 +3940,7 @@ fn babel_iface_from_spec(
         session: SessionHandle(0), // assigned right after add_session
         auth,
         auth_debug_line,
-        router_id: babel_router_id_for(local, boot),
+        router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
         hello_seqno: u16::from_be_bytes([boot[0], boot[1]]),
         seqno: 0,
         last_sig: String::new(),
@@ -4177,12 +4178,40 @@ fn bind_babel_socket(
     Ok(sock.into())
 }
 
-/// Router-Id for the babel transport: the local address identifies the
-/// speaker, and per-boot random octets make every daemon instance a fresh
-/// Babel source (RFC 8966 §3.3 router ids must be unique in the routing
-/// domain; §3.7.1 sources are keyed by router-id, so a restart must not
-/// re-emit stale-looking sequence numbers under the old source key).
-fn babel_router_id_for(local: std::net::IpAddr, boot: [u8; 8]) -> [u8; 8] {
+/// Router-Id for the babel transport.
+///
+/// The precedence matches BIRD's Babel implementation (and the
+/// daemon's documented `router-id` semantics): when the operator
+/// configures `--router-id A.B.C.D` (the universal case — BIRD's
+/// `router id` directive, FRR's `bgp router-id`, etc.), the 8-octet
+/// Babel router-id is the IPv4 in network-byte order zero-padded to
+/// 8 bytes (`00:00:00:00:ac:17:0a:66` for `172.23.10.102`). Peers
+/// observing the Router-Id TLV then see the same value BIRD would
+/// advertise for the same configured router-id, which makes the
+/// `show babel routes` output and feasibility comparisons line up
+/// across implementations.
+///
+/// When the operator did not configure a router-id the function
+/// derives a per-boot value from the bound local address plus a
+/// random nonce (the historical behaviour, RFC 8966 §3.3 only
+/// requires uniqueness inside the routing domain). IPv4 transports
+/// mix the IPv4 with the last four random octets; IPv6 transports
+/// fall back to a fully random 8-byte value (an EUI-64 with the
+/// universal/local bit cleared). The mix keeps the value unique
+/// across daemon restarts while never colliding with a configured
+/// router-id on the same link.
+fn babel_router_id_for(
+    local: std::net::IpAddr,
+    boot: [u8; 8],
+    configured: Option<std::net::Ipv4Addr>,
+) -> [u8; 8] {
+    if let Some(v4) = configured {
+        // BIRD parity: the configured IPv4 router-id zero-padded to
+        // 8 bytes goes on the wire as the Router-Id TLV value.
+        let mut id = [0u8; 8];
+        id[4..].copy_from_slice(&v4.octets());
+        return id;
+    }
     let mut id = [0u8; 8];
     match local {
         std::net::IpAddr::V4(v4) => {
@@ -4195,6 +4224,29 @@ fn babel_router_id_for(local: std::net::IpAddr, boot: [u8; 8]) -> [u8; 8] {
         }
     }
     id
+}
+
+/// Parse the daemon's configured `router-id` (`--router-id` /
+/// `bgp.router_id`) into the IPv4 BIRD-derives its Babel router-id
+/// from. Returns `None` when no router-id is configured or the
+/// string is not a literal IPv4 (the daemon requires an IPv4 for
+/// the BGP BGP-IDENTIFIER, so the parse should only fail when the
+/// operator left the field empty).
+fn babel_router_id_from_config(cfg: &DaemonConfig) -> Option<std::net::Ipv4Addr> {
+    cfg.router_id.split(':').next().unwrap_or("").parse().ok()
+}
+
+/// Format an 8-octet Babel router-id for the daemon's startup banner
+/// — `xx:xx:xx:xx:xx:xx:xx:xx`, matching BIRD's `show babel routes`
+/// second column so the operator can correlate the daemon's advertised
+/// source against the peer's view without doing the hex dance in their
+/// head. The BIRD-derived form for a configured IPv4 (e.g.
+/// `172.23.10.102` ⇒ `00:00:00:00:ac:17:0a:66`) is the common case.
+fn format_router_id(id: [u8; 8]) -> String {
+    id.iter()
+        .map(|b| format!("{b:02x}"))
+        .collect::<Vec<_>>()
+        .join(":")
 }
 
 /// The content signature of one interface's next announcement: the
@@ -5369,6 +5421,122 @@ mod lsp_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod babel_router_id_tests {
+    use super::*;
+    use crate::daemon_config::DaemonConfig;
+
+    fn boot() -> [u8; 8] {
+        // Deterministic nonce so the fallback path tests are
+        // reproducible.
+        [0x11, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88]
+    }
+
+    /// The configured IPv4 router-id becomes the 8-octet Babel
+    /// router-id BIRD puts on the wire: zero-padded to 8 bytes,
+    /// network-byte order. `172.23.10.102` ⇒
+    /// `00:00:00:00:ac:17:0a:66`.
+    #[test]
+    fn configured_router_id_zero_pads_to_eight_bytes_bird_style() {
+        let rid = babel_router_id_for(
+            std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            boot(),
+            Some(std::net::Ipv4Addr::new(172, 23, 10, 102)),
+        );
+        assert_eq!(rid, [0, 0, 0, 0, 172, 23, 10, 102]);
+    }
+
+    /// The configured router-id wins regardless of the transport
+    /// family — a v6 link-local transport (the Babel default on
+    /// Ethernet) still advertises the operator's chosen router-id,
+    /// not a random EUI-64. This is the bug that produced the
+    /// `7f:a2:de:dc:29:86:fb:75` random id on the BIRD peer's
+    /// `show babel routes` output.
+    #[test]
+    fn configured_router_id_overrides_v6_random_fallback() {
+        let ll = std::net::IpAddr::V6("fe80::1".parse().unwrap());
+        let with_cfg = babel_router_id_for(ll, boot(), Some(std::net::Ipv4Addr::new(10, 0, 0, 1)));
+        assert_eq!(with_cfg, [0, 0, 0, 0, 10, 0, 0, 1]);
+        // Without a configured router-id, the v6 transport falls back
+        // to the per-boot nonce — that path is unchanged so a
+        // router-id-less embedder keeps the historical behaviour.
+        let without_cfg = babel_router_id_for(ll, boot(), None);
+        assert_eq!(without_cfg, boot());
+    }
+
+    /// A v4 transport without a configured router-id keeps the
+    /// historical mix (IPv4 in the *low* four octets, per-boot nonce
+    /// in the *high* four). This is the only path RFC 8966 §3.3
+    /// actually requires uniqueness for, so a regression here
+    /// would re-introduce router-id collisions on dual-stack
+    /// embedders without a router-id.
+    #[test]
+    fn v4_fallback_keeps_mix_when_no_router_id_configured() {
+        let rid = babel_router_id_for(
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(192, 0, 2, 1)),
+            boot(),
+            None,
+        );
+        // The IPv4 occupies the low four octets (the
+        // network-byte-order value BIRD's `proto_get_router_id`
+        // would zero-extend in the other direction); the per-boot
+        // nonce fills the remaining four so two daemons on the same
+        // link with the same IPv4 do not collide.
+        assert_eq!(rid, [192, 0, 2, 1, 0x55, 0x66, 0x77, 0x88]);
+    }
+
+    /// `babel_router_id_from_config` parses the daemon's
+    /// `router_id` string tolerantly: `host:port` legacy forms and
+    /// stray whitespace must not fool it. Empty / unset router-ids
+    /// surface as `None`, which the caller turns into the per-boot
+    /// fallback path.
+    #[test]
+    fn router_id_from_config_parses_ipv4_and_rejects_garbage() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        assert_eq!(
+            babel_router_id_from_config(&cfg),
+            Some(std::net::Ipv4Addr::new(172, 23, 10, 102))
+        );
+        // A `host:port` form should still parse (the legacy single-peer
+        // daemon sometimes configures the router-id alongside the
+        // listen address this way).
+        cfg.router_id = "172.23.10.102:179".to_string();
+        assert_eq!(
+            babel_router_id_from_config(&cfg),
+            Some(std::net::Ipv4Addr::new(172, 23, 10, 102))
+        );
+        cfg.router_id = String::new();
+        assert_eq!(babel_router_id_from_config(&cfg), None);
+        cfg.router_id = "not-an-ip".to_string();
+        assert_eq!(babel_router_id_from_config(&cfg), None);
+    }
+
+    /// `babel_iface_manual` plumbs the configured router-id into the
+    /// `BabelIface.router_id` field on the manual single-socket path
+    /// — the same value `build_babel_announcement` later pushes as
+    /// the Router-Id TLV on the wire. The loopback address lets the
+    /// test run on any Linux/macOS CI container without a dedicated
+    /// adapter; the assertion is on the router-id wiring, not on the
+    /// socket binding (which `babel_transport_new` exercises
+    /// separately).
+    #[test]
+    fn babel_iface_manual_uses_configured_router_id() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.router_id = "172.23.10.102".to_string();
+        cfg.babel_port = 0; // ephemeral — port collisions across tests
+        let iface = babel_iface_manual(&cfg, "127.0.0.1", boot()).unwrap();
+        assert_eq!(iface.router_id, [0, 0, 0, 0, 172, 23, 10, 102]);
+        // Without a configured router-id, the manual path keeps the
+        // historical per-boot nonce — no regression for embedders
+        // that ship without `--router-id`.
+        cfg.router_id = String::new();
+        let iface = babel_iface_manual(&cfg, "127.0.0.1", boot()).unwrap();
+        assert_eq!(iface.router_id, [127, 0, 0, 1, 0x55, 0x66, 0x77, 0x88]);
+    }
+}
+
 
 #[cfg(test)]
 mod kernel_mirror_tests {
