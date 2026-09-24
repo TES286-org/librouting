@@ -119,7 +119,7 @@ protocol babel interconn {
     ipv4 { import all; export all; };
     ipv6 { import all; export all; };
     interface "veth0b" {
-        type tunnel;
+        type wireless;
         rxcost 192;
     }
 }
