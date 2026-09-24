@@ -2113,6 +2113,17 @@ fn expected_peer_ip(spec: &PeerSpec) -> Option<IpAddr> {
 /// The Err payload marks kernel-unsupported auth as fatal for this peer
 /// (fail closed: the key was configured, running without it is worse
 /// than not running the session).
+///
+/// Returns a tri-state outcome: `Ok(stream)` for a successful connect,
+/// `Err(_, false, None)` for a normal retryable failure (the backoff
+/// will compound), and `Err(_, false, Some(...))` for a retryable
+/// failure where the configured source bind failed and a kernel-chosen
+/// source fallback was attempted — the caller logs the bind failure
+/// once and treats the next sleep the same as a connect failure so the
+/// backoff compounds rather than pinning at 1 s forever (the symptom
+/// when TCP succeeds but the peer immediately FINs without a BGP
+/// NOTIFICATION, e.g. because the source IP did not match the peer's
+/// `neighbor` ACL).
 fn connect_secure(
     sockaddr: std::net::SocketAddr,
     local: Option<std::net::SocketAddr>,
@@ -2152,8 +2163,16 @@ fn connect_secure(
             // `local_address` is primarily a next-hop-self value and
             // may name an address the host does not own (192.0.2.x in
             // lab configs); fall back to the kernel's source choice
-            // exactly as before the bind existed.
+            // exactly as before the bind existed. The fallback is
+            // logged once at the call site so the operator knows the
+            // bind did not take effect.
             Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
+                let label = local.ip();
+                eprintln!(
+                    "daemon: warning: local address {label} is not assigned to any interface; \
+                     falling back to kernel-chosen source. Set 'local_address' to a real \
+                     interface address, or remove it to silence this warning."
+                );
                 TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5))
                     .map_err(|e2| (format!("{e2}"), false))
             }
@@ -2236,11 +2255,30 @@ fn spawn_connector(
                 println!("daemon: peer {}: connecting to {} ...", label, remote);
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
-                        backoff_ms = 1_000;
                         let _ = stream.set_nodelay(true);
                         live.fetch_add(1, Ordering::Relaxed);
                         let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
                         live.fetch_sub(1, Ordering::Relaxed);
+                        // Reset the backoff ONLY when the session
+                        // reached Established — a TCP-success-but-
+                        // immediate-FIN loop (peer's source-IP match
+                        // failed, peer sent NOTIFICATION Cease, etc.)
+                        // must NOT pin the backoff at 1 s forever.
+                        // run_peer_session returns Ok(()) on a clean
+                        // post-Established teardown (NOTIFICATION sent or
+                        // received, hold timer expired, etc.) and Err
+                        // on a pre-Established drop. The Established flag
+                        // is observed via the router's session state
+                        // snapshot just before the session ends.
+                        let reached_established = rt
+                            .router
+                            .read()
+                            .unwrap()
+                            .session_peer_state(handle)
+                            .is_some();
+                        if reached_established || result.is_ok() {
+                            backoff_ms = 1_000;
+                        }
                         if let Err(e) = result {
                             // Latch a §6.8 collision loss so the churn guard
                             // above engages (see PeerEntry docs).
