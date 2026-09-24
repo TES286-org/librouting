@@ -3128,6 +3128,31 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 },
                 if iface.check_link { " check-link" } else { "" },
             );
+            // Diagnostic: list every transport bound to this interface
+            // so operators can verify whether a v4 transport was created
+            // alongside the v6 one. The 'v6 hello 1000ms ...' line above
+            // only prints transports[0]; this addendum prints the full
+            // picture, including the absence of a v4 transport (which
+            // triggers the extended_next_hop auto-enable warning above).
+            let summary = iface
+                .transports
+                .iter()
+                .map(|t| match t.local {
+                    std::net::IpAddr::V4(a) => format!("v4({})", a),
+                    std::net::IpAddr::V6(a) => format!("v6({})", a),
+                })
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "daemon: babel interface {} transports: {}{}",
+                iface.name,
+                summary,
+                if iface.extended_next_hop {
+                    " [extended_next_hop on]"
+                } else {
+                    ""
+                },
+            );
         }
     }
     // Locally originated networks enter the Loc-RIB and are announced as
