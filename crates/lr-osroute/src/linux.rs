@@ -60,6 +60,19 @@ const RTA_GATEWAY: u16 = 5;
 const RTA_OIF: u16 = 4;
 const RTA_PRIORITY: u16 = 6;
 
+// Route types (RTN_* in `uapi/linux/rtnetlink.h`).
+const RTN_UNICAST: u8 = 1;
+/// "Drop" route — packets matching the destination are silently discarded.
+/// Used for the `next_hop = blackhole` static-route form (RFC 4271 §9.1.2
+/// "Unreachable" BGP routes commonly map to this in the kernel FIB).
+const RTN_BLACKHOLE: u8 = 6;
+
+// Route scopes (RT_SCOPE_*).
+const RT_SCOPE_UNIVERSE: u8 = 0;
+/// Scope `nowhere` (255) — the kernel's `lo` table convention for
+/// blackhole / reject routes when no output interface is given.
+const RT_SCOPE_NOWHERE: u8 = 255;
+
 // Route protocol origins (RTPROT_*).
 #[allow(dead_code)]
 const RTPROT_UNSPEC: u8 = 0;
@@ -289,6 +302,8 @@ impl RtNetlink {
         rtm_family: u8,
         rtm_dst_len: u8,
         rtm_protocol: u8,
+        rtm_type: u8,
+        rtm_scope: u8,
         attributes: &[u8],
     ) -> Vec<u8> {
         let total_len = 16 + 12 + attributes.len();
@@ -322,8 +337,8 @@ impl RtNetlink {
         buf[19] = 0; // rtm_tos
         buf[20] = 254; // RT_TABLE_MAIN
         buf[21] = rtm_protocol;
-        buf[22] = 0; // RT_SCOPE_UNIVERSE
-        buf[23] = 1; // RTN_UNICAST
+        buf[22] = rtm_scope;
+        buf[23] = rtm_type;
         buf[24..28].copy_from_slice(&0u32.to_ne_bytes()); // rtm_flags
                                                           // Attributes
         buf[28..28 + attributes.len()].copy_from_slice(attributes);
@@ -354,27 +369,40 @@ impl OsRouteTable for RtNetlink {
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: IpAddr,
+        next_hop: Option<IpAddr>,
         if_index: u32,
     ) -> Result<(), Self::Error> {
-        let (family, addr, dst_len, addr_len) = match prefix.addr {
-            IpAddr::V4(b) => (AF_INET, b.to_vec(), prefix.prefix_len, 4),
-            IpAddr::V6(b) => (AF_INET6, b.to_vec(), prefix.prefix_len, 16),
+        let (family, addr) = match prefix.addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
         };
         let mut attrs = Vec::new();
         attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
-        attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, next_hop.octets()));
-        // With no explicit output interface the kernel resolves the gateway
-        // against the existing table (`ip route add ... via GW` semantics).
-        // Passing RTA_OIF=0 would be rejected with EINVAL, so omit it.
-        if if_index != 0 {
-            attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
-        }
+        let (rtm_type, rtm_scope) = match next_hop {
+            Some(nh) => {
+                attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, nh.octets()));
+                // With no explicit output interface the kernel resolves the
+                // gateway against the existing table (`ip route add ... via GW`
+                // semantics). Passing RTA_OIF=0 would be rejected with EINVAL,
+                // so omit it.
+                if if_index != 0 {
+                    attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
+                }
+                (RTN_UNICAST, RT_SCOPE_UNIVERSE)
+            }
+            None => {
+                // RTN_BLACKHOLE — no gateway, no output interface. The
+                // kernel drops packets matching `prefix` at the input
+                // boundary. `rtm_scope = RT_SCOPE_UNIVERSE` is the canonical
+                // value used by `ip route add blackhole PREFIX`; the kernel
+                // uses rtm_type to discriminate the discard semantics.
+                (RTN_BLACKHOLE, RT_SCOPE_UNIVERSE)
+            }
+        };
         // Pad to 4-byte alignment
         while attrs.len() % 4 != 0 {
             attrs.push(0);
         }
-        let _ = (addr_len, dst_len); // for documentation
         let buf = self.build_request(
             RTM_NEWROUTE,
             // Create a missing route and atomically replace an existing
@@ -384,6 +412,8 @@ impl OsRouteTable for RtNetlink {
             family,
             prefix.prefix_len,
             RTPROT_BGP,
+            rtm_type,
+            rtm_scope,
             &attrs,
         );
         let resp = self.sendmsg_and_recv(&buf)?;
@@ -408,6 +438,8 @@ impl OsRouteTable for RtNetlink {
             family,
             prefix.prefix_len,
             0,
+            RTN_UNICAST,
+            RT_SCOPE_NOWHERE,
             &attrs,
         );
         let resp = self.sendmsg_and_recv(&buf)?;
@@ -421,6 +453,8 @@ impl OsRouteTable for RtNetlink {
             AF_UNSPEC, // we want both v4 and v6
             0,
             0,
+            RTN_UNICAST,
+            RT_SCOPE_UNIVERSE,
             &[],
         );
         let resp = self.sendmsg_and_recv_dump(&buf)?;

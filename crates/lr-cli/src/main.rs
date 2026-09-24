@@ -219,7 +219,7 @@ fn routes(args: &[String]) -> ExitCode {
                 }
             };
             use lr_osroute::OsRouteTable;
-            if let Err(e) = rt.add_route(prefix, gw, if_index) {
+            if let Err(e) = rt.add_route(prefix, Some(gw), if_index) {
                 eprintln!("add_route: {}", e);
                 return ExitCode::from(1);
             }

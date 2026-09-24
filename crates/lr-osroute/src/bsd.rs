@@ -65,6 +65,9 @@ const RTF_UP: u32 = 0x1;
 const RTF_GATEWAY: u32 = 0x2;
 const RTF_HOST: u32 = 0x4;
 const RTF_STATIC: u32 = 0x800;
+/// Packets matching this route are discarded (`route add -blackhole`).
+/// Documented in `route(8)` and `net/route.h` on all four BSDs/macOS.
+const RTF_BLACKHOLE: u32 = 0x1000;
 
 const RTF_PROTO1: u32 = 0x8000; // protocol-specific flag (unused, documented)
 
@@ -344,21 +347,34 @@ impl OsRouteTable for RouteSocket {
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: IpAddr,
+        next_hop: Option<IpAddr>,
         _if_index: u32,
     ) -> Result<(), Self::Error> {
         let host = prefix.prefix_len == prefix_len_max(&prefix.addr);
-        let mut flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
-        if host {
-            flags |= RTF_HOST;
-        }
-        let msg = self.build_message(
-            RTM_ADD,
-            flags,
-            RTA_DST | RTA_GATEWAY | RTA_NETMASK,
-            &prefix,
-            Some(&next_hop),
-        );
+        // Blackhole route: no gateway; the kernel drops the packet at the
+        // input boundary. The RTF_BLACKHOLE flag is the documented BSD/macOS
+        // mechanism — see `route add -blackhole PREFIX` in `route(8)`. A
+        // gateway-bearing route uses RTF_GATEWAY so the kernel performs the
+        // next-hop resolution at output time.
+        let (flags, addrs, gateway) = match next_hop {
+            Some(gw) => {
+                let mut flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
+                if host {
+                    flags |= RTF_HOST;
+                }
+                (flags, RTA_DST | RTA_GATEWAY | RTA_NETMASK, Some(&gw))
+            }
+            None => {
+                let mut flags = RTF_UP | RTF_STATIC | RTF_BLACKHOLE;
+                if host {
+                    flags |= RTF_HOST;
+                }
+                // No gateway sockaddr for a blackhole route — only the
+                // destination prefix and netmask are emitted.
+                (flags, RTA_DST | RTA_NETMASK, None)
+            }
+        };
+        let msg = self.build_message(RTM_ADD, flags, addrs, &prefix, gateway);
         // roundtrip_raw covers both phases where an EEXIST can
         // surface: macOS fails the send(2) itself for an installed
         // route, FreeBSD reports it in the reply's rtm_errno.

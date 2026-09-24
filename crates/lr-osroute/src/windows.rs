@@ -47,6 +47,12 @@ use windows_sys::Win32::Networking::WinSock::{
 /// IP Helper backed implementation of [`OsRouteTable`].
 pub struct IpHelper;
 
+/// The loopback interface index on Windows — always 1 (the "Loopback
+/// Pseudo-Interface 1"). Used as the egress for blackhole routes: the
+/// kernel forwards the packet to loopback, where it is dropped because
+/// the destination is not a local address.
+const LOOPBACK_IF_INDEX: u32 = 1;
+
 impl IpHelper {
     pub fn connect() -> Result<Self, OsRouteError> {
         // Windows needs no handle; the API is stateless. Probe the table
@@ -82,6 +88,39 @@ impl IpHelper {
         row.Immortal = true;
         if prefix.prefix_len == 0 {
             // A /0 destination carries no address bits.
+            row.DestinationPrefix.PrefixLength = 0;
+        }
+        row
+    }
+
+    /// Build a blackhole route row — packets matching `prefix` are dropped
+    /// by the kernel. Windows has no explicit "discard" flag in
+    /// `MIB_IPFORWARD_ROW2`; the convention is to point the route at the
+    /// loopback interface with a zero next-hop. The forwarding stack will
+    /// deliver packets to loopback where, because the destination address
+    /// is not a local IP, they are silently discarded. This mirrors the
+    /// `route add PREFIX mask MASK 0.0.0.0 IF 1` idiom documented in
+    /// Microsoft's `route.exe` since Windows NT.
+    fn make_blackhole_row(prefix: &Prefix) -> MIB_IPFORWARD_ROW2 {
+        // SAFETY: same defaults as `make_row`.
+        let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        unsafe { InitializeIpForwardEntry(&mut row) };
+        row.InterfaceIndex = LOOPBACK_IF_INDEX;
+        row.DestinationPrefix = IP_ADDRESS_PREFIX {
+            Prefix: sockaddr_for(&prefix.addr, 0),
+            PrefixLength: prefix.prefix_len,
+        };
+        // Zero next-hop sockaddr of the destination's family. The
+        // si_family field is what Windows reads to know the address
+        // family; the rest of the union stays zeroed.
+        let zero_nh: IpAddr = match prefix.addr {
+            IpAddr::V4(_) => IpAddr::V4([0, 0, 0, 0]),
+            IpAddr::V6(_) => IpAddr::V6([0; 16]),
+        };
+        row.NextHop = sockaddr_for(&zero_nh, 0);
+        row.Protocol = RouteProtocolBgp;
+        row.Immortal = true;
+        if prefix.prefix_len == 0 {
             row.DestinationPrefix.PrefixLength = 0;
         }
         row
@@ -125,15 +164,20 @@ impl OsRouteTable for IpHelper {
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: IpAddr,
+        next_hop: Option<IpAddr>,
         if_index: u32,
     ) -> Result<(), Self::Error> {
-        let if_index = if if_index != 0 {
-            if_index
-        } else {
-            Self::resolve_interface(&next_hop)?
+        let row = match next_hop {
+            Some(nh) => {
+                let if_index = if if_index != 0 {
+                    if_index
+                } else {
+                    Self::resolve_interface(&nh)?
+                };
+                Self::make_row(&prefix, &nh, if_index)
+            }
+            None => Self::make_blackhole_row(&prefix),
         };
-        let row = Self::make_row(&prefix, &next_hop, if_index);
         // SAFETY: `row` is a fully initialised stack value; the API only
         // reads from it.
         let mut rc = unsafe { CreateIpForwardEntry2(&row) };
@@ -362,5 +406,31 @@ mod tests {
     fn best_route_resolves_loopback_interface() {
         let index = IpHelper::resolve_interface(&IpAddr::V4([127, 0, 0, 1])).unwrap();
         assert_ne!(index, 0);
+    }
+
+    #[test]
+    fn blackhole_row_v4_uses_loopback_and_zero_next_hop() {
+        let prefix = Prefix::new_v4([192, 0, 2, 0], 24);
+        let row = IpHelper::make_blackhole_row(&prefix);
+        assert_eq!(row.InterfaceIndex, LOOPBACK_IF_INDEX);
+        // SAFETY: make_blackhole_row populated the IPv4 arm for an IPv4 prefix.
+        let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN>() };
+        assert_eq!(next_hop.sin_family, AF_INET);
+        let s = &next_hop.sin_addr.S_un.S_un_b;
+        assert_eq!([s.s_b1, s.s_b2, s.s_b3, s.s_b4], [0, 0, 0, 0]);
+    }
+
+    #[test]
+    fn blackhole_row_v6_uses_loopback_and_zero_next_hop() {
+        let prefix = Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            64,
+        );
+        let row = IpHelper::make_blackhole_row(&prefix);
+        assert_eq!(row.InterfaceIndex, LOOPBACK_IF_INDEX);
+        // SAFETY: make_blackhole_row populated the IPv6 arm for an IPv6 prefix.
+        let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN6>() };
+        assert_eq!(next_hop.sin6_family, AF_INET6);
+        assert_eq!(next_hop.sin6_addr.u.Byte, [0u8; 16]);
     }
 }
