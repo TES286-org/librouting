@@ -86,6 +86,15 @@ ip -6 addr add fe80::1/64 dev veth0a nodad 2>/dev/null || ip -6 addr add fe80::1
 ip -6 addr add fd00:286:11e:6::1/64 dev veth0a nodad 2>/dev/null || ip -6 addr add fd00:286:11e:6::1/64 dev veth0a
 ip -6 addr add fe80::2/64 dev veth0b nodad 2>/dev/null || ip -6 addr add fe80::2/64 dev veth0b
 ip -6 addr add fd00:286:11e:6::2/64 dev veth0b nodad 2>/dev/null || ip -6 addr add fd00:286:11e:6::2/64 dev veth0b
+# Assign a dummy IPv4 address to veth0b (BIRD's side) ONLY — not to
+# veth0a (lr's side). lr's interface stays v6-only (triggering the
+# extended_next_hop auto-enable), but BIRD 2.0.x requires an IPv4
+# address on the receiving interface to accept v4-over-v6 routes
+# (RFC 5549). Without it BIRD logs 'Missing IPv4 next hop address'
+# and silently drops every IPv4 Update TLV. This is a BIRD-side
+# requirement, not a lr bug — lr correctly emits AE=1 Updates
+# preceded by an AE=2 NextHop TLV.
+ip addr add 10.0.0.2/32 dev veth0b
 # Brief settle so the kernel finishes configuring the addresses.
 sleep 0.5
 # Add a static blackhole route to lr's own /32 (mirrors the user's
