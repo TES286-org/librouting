@@ -347,34 +347,21 @@ impl OsRouteTable for RouteSocket {
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: Option<IpAddr>,
+        next_hop: IpAddr,
         _if_index: u32,
     ) -> Result<(), Self::Error> {
         let host = prefix.prefix_len == prefix_len_max(&prefix.addr);
-        // Blackhole route: no gateway; the kernel drops the packet at the
-        // input boundary. The RTF_BLACKHOLE flag is the documented BSD/macOS
-        // mechanism — see `route add -blackhole PREFIX` in `route(8)`. A
-        // gateway-bearing route uses RTF_GATEWAY so the kernel performs the
-        // next-hop resolution at output time.
-        let (flags, addrs, gateway) = match next_hop {
-            Some(gw) => {
-                let mut flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
-                if host {
-                    flags |= RTF_HOST;
-                }
-                (flags, RTA_DST | RTA_GATEWAY | RTA_NETMASK, Some(&gw))
-            }
-            None => {
-                let mut flags = RTF_UP | RTF_STATIC | RTF_BLACKHOLE;
-                if host {
-                    flags |= RTF_HOST;
-                }
-                // No gateway sockaddr for a blackhole route — only the
-                // destination prefix and netmask are emitted.
-                (flags, RTA_DST | RTA_NETMASK, None)
-            }
-        };
-        let msg = self.build_message(RTM_ADD, flags, addrs, &prefix, gateway);
+        let mut flags = RTF_UP | RTF_GATEWAY | RTF_STATIC;
+        if host {
+            flags |= RTF_HOST;
+        }
+        let msg = self.build_message(
+            RTM_ADD,
+            flags,
+            RTA_DST | RTA_GATEWAY | RTA_NETMASK,
+            &prefix,
+            Some(&next_hop),
+        );
         // roundtrip_raw covers both phases where an EEXIST can
         // surface: macOS fails the send(2) itself for an installed
         // route, FreeBSD reports it in the reply's rtm_errno.
@@ -392,6 +379,32 @@ impl OsRouteTable for RouteSocket {
         if errno != 0 && errno != ERR_EEXIST {
             return Err(OsRouteError(format!(
                 "RTM_ADD {}: {}",
+                prefix,
+                std::io::Error::from_raw_os_error(errno)
+            )));
+        }
+        Ok(())
+    }
+
+    fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
+        let host = prefix.prefix_len == prefix_len_max(&prefix.addr);
+        // Blackhole route: no gateway; the kernel drops the packet at the
+        // input boundary. The RTF_BLACKHOLE flag is the documented BSD/macOS
+        // mechanism — see `route add -blackhole PREFIX` in `route(8)`. No
+        // gateway sockaddr is emitted — only the destination prefix and
+        // netmask.
+        let mut flags = RTF_UP | RTF_STATIC | RTF_BLACKHOLE;
+        if host {
+            flags |= RTF_HOST;
+        }
+        let msg = self.build_message(RTM_ADD, flags, RTA_DST | RTA_NETMASK, &prefix, None);
+        let errno = match self.roundtrip_raw(&msg) {
+            Ok(reply_errno) => reply_errno,
+            Err((send_errno, _phase)) => send_errno,
+        };
+        if errno != 0 && errno != ERR_EEXIST {
+            return Err(OsRouteError(format!(
+                "RTM_ADD blackhole {}: {}",
                 prefix,
                 std::io::Error::from_raw_os_error(errno)
             )));

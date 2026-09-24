@@ -30,9 +30,14 @@ impl OsRouteTable for StubRouteTable {
     fn add_route(
         &mut self,
         _prefix: Prefix,
-        _next_hop: Option<IpAddr>,
+        _next_hop: IpAddr,
         _if_index: u32,
     ) -> Result<(), Self::Error> {
+        Err(OsRouteError(
+            "stub: OS route table not available".to_string(),
+        ))
+    }
+    fn add_blackhole_route(&mut self, _prefix: Prefix) -> Result<(), Self::Error> {
         Err(OsRouteError(
             "stub: OS route table not available".to_string(),
         ))
@@ -56,14 +61,14 @@ mod tests {
         let mut s = StubRouteTable::new();
         let p: Prefix = "10.0.0.0/8".parse().unwrap();
         let gw: IpAddr = "1.2.3.4".parse().unwrap();
-        assert!(s.add_route(p, Some(gw), 1).is_err());
+        assert!(s.add_route(p, gw, 1).is_err());
     }
 
     #[test]
     fn stub_rejects_blackhole_add() {
         let mut s = StubRouteTable::new();
         let p: Prefix = "10.0.0.0/8".parse().unwrap();
-        assert!(s.add_route(p, None, 0).is_err());
+        assert!(s.add_blackhole_route(p).is_err());
     }
 
     #[test]

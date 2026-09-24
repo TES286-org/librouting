@@ -164,20 +164,15 @@ impl OsRouteTable for IpHelper {
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: Option<IpAddr>,
+        next_hop: IpAddr,
         if_index: u32,
     ) -> Result<(), Self::Error> {
-        let row = match next_hop {
-            Some(nh) => {
-                let if_index = if if_index != 0 {
-                    if_index
-                } else {
-                    Self::resolve_interface(&nh)?
-                };
-                Self::make_row(&prefix, &nh, if_index)
-            }
-            None => Self::make_blackhole_row(&prefix),
+        let if_index = if if_index != 0 {
+            if_index
+        } else {
+            Self::resolve_interface(&next_hop)?
         };
+        let row = Self::make_row(&prefix, &next_hop, if_index);
         // SAFETY: `row` is a fully initialised stack value; the API only
         // reads from it.
         let mut rc = unsafe { CreateIpForwardEntry2(&row) };
@@ -190,6 +185,23 @@ impl OsRouteTable for IpHelper {
         }
         if rc != NO_ERROR {
             return Err(win_err("CreateIpForwardEntry2", rc));
+        }
+        Ok(())
+    }
+
+    fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
+        let row = Self::make_blackhole_row(&prefix);
+        // SAFETY: `row` is a fully initialised stack value; the API only
+        // reads from it.
+        let mut rc = unsafe { CreateIpForwardEntry2(&row) };
+        if rc == ERROR_OBJECT_ALREADY_EXISTS {
+            rc = unsafe { DeleteIpForwardEntry2(&row) };
+            if rc == NO_ERROR || rc == ERROR_NOT_FOUND {
+                rc = unsafe { CreateIpForwardEntry2(&row) };
+            }
+        }
+        if rc != NO_ERROR {
+            return Err(win_err("CreateIpForwardEntry2 (blackhole)", rc));
         }
         Ok(())
     }
@@ -416,7 +428,8 @@ mod tests {
         // SAFETY: make_blackhole_row populated the IPv4 arm for an IPv4 prefix.
         let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN>() };
         assert_eq!(next_hop.sin_family, AF_INET);
-        let s = &next_hop.sin_addr.S_un.S_un_b;
+        // SAFETY: accessing the S_un union — the Ipv4 arm was initialized.
+        let s = unsafe { next_hop.sin_addr.S_un.S_un_b };
         assert_eq!([s.s_b1, s.s_b2, s.s_b3, s.s_b4], [0, 0, 0, 0]);
     }
 
@@ -431,6 +444,8 @@ mod tests {
         // SAFETY: make_blackhole_row populated the IPv6 arm for an IPv6 prefix.
         let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN6>() };
         assert_eq!(next_hop.sin6_family, AF_INET6);
-        assert_eq!(next_hop.sin6_addr.u.Byte, [0u8; 16]);
+        // SAFETY: accessing the u union — the Byte array was initialized.
+        let bytes = unsafe { next_hop.sin6_addr.u.Byte };
+        assert_eq!(bytes, [0u8; 16]);
     }
 }

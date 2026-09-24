@@ -50,8 +50,7 @@
 //! let mut rt = lr_osroute::RtNetlink::connect().unwrap();
 //! let prefix: Prefix = "203.0.113.0/24".parse().unwrap();
 //! let gw: IpAddr = "198.51.100.1".parse().unwrap();
-//! // Gateway routes pass Some(gw); blackhole / discard routes pass None.
-//! rt.add_route(prefix, Some(gw), 0).unwrap();
+//! rt.add_route(prefix, gw, 0).unwrap();
 //! ```
 
 // SAFETY: this crate necessarily performs FFI to platform syscalls, so
@@ -246,18 +245,18 @@ pub trait OsRouteTable {
     type Error: std::error::Error;
 
     /// Add a route: "to reach `prefix`, send via `next_hop` on `if_index`".
-    ///
-    /// When `next_hop` is `None`, the route is installed as a *blackhole*
-    /// (a.k.a. *discard*) route — packets matching `prefix` are dropped by
-    /// the kernel instead of being forwarded. The `if_index` argument is
-    /// ignored for blackhole routes; the kernel assigns them to the
-    /// loopback / null interface on platforms that require one.
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: Option<IpAddr>,
+        next_hop: IpAddr,
         if_index: u32,
     ) -> Result<(), Self::Error>;
+
+    /// Add a *blackhole* (discard) route: packets matching `prefix` are
+    /// silently dropped by the kernel instead of being forwarded. Used for
+    /// static `next_hop = "blackhole"` routes (FRR `Null0`, BIRD
+    /// `blackhole`) and the BGP `BLACKHOLE` well-known community.
+    fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error>;
 
     /// Delete a route matching the prefix.
     fn delete_route(&mut self, prefix: Prefix) -> Result<(), Self::Error>;

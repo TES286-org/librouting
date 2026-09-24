@@ -370,7 +370,7 @@ impl OsRouteTable for RtNetlink {
     fn add_route(
         &mut self,
         prefix: Prefix,
-        next_hop: Option<IpAddr>,
+        next_hop: IpAddr,
         if_index: u32,
     ) -> Result<(), Self::Error> {
         let (family, addr) = match prefix.addr {
@@ -379,27 +379,13 @@ impl OsRouteTable for RtNetlink {
         };
         let mut attrs = Vec::new();
         attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
-        let (rtm_type, rtm_scope) = match next_hop {
-            Some(nh) => {
-                attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, nh.octets()));
-                // With no explicit output interface the kernel resolves the
-                // gateway against the existing table (`ip route add ... via GW`
-                // semantics). Passing RTA_OIF=0 would be rejected with EINVAL,
-                // so omit it.
-                if if_index != 0 {
-                    attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
-                }
-                (RTN_UNICAST, RT_SCOPE_UNIVERSE)
-            }
-            None => {
-                // RTN_BLACKHOLE — no gateway, no output interface. The
-                // kernel drops packets matching `prefix` at the input
-                // boundary. `rtm_scope = RT_SCOPE_UNIVERSE` is the canonical
-                // value used by `ip route add blackhole PREFIX`; the kernel
-                // uses rtm_type to discriminate the discard semantics.
-                (RTN_BLACKHOLE, RT_SCOPE_UNIVERSE)
-            }
-        };
+        attrs.extend(Self::build_rta_attribute(RTA_GATEWAY, next_hop.octets()));
+        // With no explicit output interface the kernel resolves the gateway
+        // against the existing table (`ip route add ... via GW` semantics).
+        // Passing RTA_OIF=0 would be rejected with EINVAL, so omit it.
+        if if_index != 0 {
+            attrs.extend(Self::build_rta_attribute(RTA_OIF, &if_index.to_ne_bytes()));
+        }
         // Pad to 4-byte alignment
         while attrs.len() % 4 != 0 {
             attrs.push(0);
@@ -413,13 +399,39 @@ impl OsRouteTable for RtNetlink {
             family,
             prefix.prefix_len,
             RTPROT_BGP,
-            rtm_type,
-            rtm_scope,
+            RTN_UNICAST,
+            RT_SCOPE_UNIVERSE,
             &attrs,
         );
         let resp = self.sendmsg_and_recv(&buf)?;
         // For RTM_NEWROUTE with NLM_F_ACK, kernel sends NLMSG_ERROR with
         // error=0 on success.
+        check_ack(&resp)
+    }
+
+    fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
+        let (family, addr) = match prefix.addr {
+            IpAddr::V4(b) => (AF_INET, b.to_vec()),
+            IpAddr::V6(b) => (AF_INET6, b.to_vec()),
+        };
+        let mut attrs = Vec::new();
+        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
+        // No RTA_GATEWAY, no RTA_OIF — RTN_BLACKHOLE carries neither; the
+        // kernel drops packets matching `prefix` at the input boundary.
+        while attrs.len() % 4 != 0 {
+            attrs.push(0);
+        }
+        let buf = self.build_request(
+            RTM_NEWROUTE,
+            NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
+            family,
+            prefix.prefix_len,
+            RTPROT_BGP,
+            RTN_BLACKHOLE,
+            RT_SCOPE_UNIVERSE,
+            &attrs,
+        );
+        let resp = self.sendmsg_and_recv(&buf)?;
         check_ack(&resp)
     }
 
