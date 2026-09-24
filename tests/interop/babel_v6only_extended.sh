@@ -121,7 +121,7 @@ protocol babel interconn {
     interface "veth0b" {
         type wireless;
         rxcost 192;
-    }
+    };
 }
 EOF
 
