@@ -108,6 +108,7 @@ trap "kill $TCPDUMP_PID 2>/dev/null || true" EXIT
 cat > "$OUT/bird.conf" <<EOF
 log "$OUT/bird.log" all;
 log stderr all;
+router id 10.0.0.2;
 ipv4 table lr_v4;
 ipv6 table lr_v6;
 protocol device { }
@@ -132,10 +133,17 @@ trap "kill $BIRD_PID 2>/dev/null || true; kill $TCPDUMP_PID 2>/dev/null || true"
 # Wait for BIRD to come up.
 for i in $(seq 1 30); do
     if [ -S "$OUT/bird.ctl" ]; then break; fi
+    # Check if BIRD died early (e.g. config error).
+    if ! kill -0 "$BIRD_PID" 2>/dev/null; then
+        echo "FAIL: BIRD exited early — log:"
+        cat "$OUT/bird.log" 2>/dev/null || echo "(no log file)"
+        exit 1
+    fi
     sleep 0.5
 done
 if [ ! -S "$OUT/bird.ctl" ]; then
-    echo "FAIL: BIRD control socket did not appear"
+    echo "FAIL: BIRD control socket did not appear — log:"
+    cat "$OUT/bird.log" 2>/dev/null || echo "(no log file)"
     exit 1
 fi
 
