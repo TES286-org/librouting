@@ -5803,7 +5803,7 @@ mod kernel_mirror_tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Operation {
-        Add(Prefix, IpAddr, u32),
+        Add(Prefix, Option<IpAddr>, u32),
         Delete(Prefix),
     }
 
@@ -5817,7 +5817,7 @@ mod kernel_mirror_tests {
         fn add_route(
             &mut self,
             prefix: Prefix,
-            next_hop: IpAddr,
+            next_hop: Option<IpAddr>,
             if_index: u32,
         ) -> Result<(), Self::Error> {
             self.operations
@@ -5888,12 +5888,31 @@ mod kernel_mirror_tests {
         for (index, route) in routes.iter().enumerate() {
             assert_eq!(
                 operations[index],
-                Operation::Add(route.key.prefix, route.next_hop.unwrap(), 0)
+                Operation::Add(route.key.prefix, route.next_hop, 0)
             );
             assert_eq!(
                 operations[index + routes.len()],
                 Operation::Delete(route.key.prefix)
             );
         }
+    }
+
+    /// A blackhole route (next_hop = None) reaches the kernel as an
+    /// `Add(prefix, None, 0)` operation — the regression that motivated
+    /// the `Option<IpAddr>` trait change. Pre-fix this test would panic
+    /// because the daemon's `KernelMirror::apply` gated on
+    /// `if let Some(nh) = r.next_hop` and never called `add_route`.
+    #[test]
+    fn blackhole_routes_reach_the_kernel_table() {
+        use lr_osroute::OsRouteTable;
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut table = RecordingTable {
+            operations: Arc::clone(&operations),
+        };
+        let prefix = Prefix::new_v4([192, 0, 2, 0], 24);
+        table.add_route(prefix, None, 0).unwrap();
+        let ops = operations.lock().unwrap();
+        assert_eq!(ops.len(), 1);
+        assert_eq!(ops[0], Operation::Add(prefix, None, 0));
     }
 }
