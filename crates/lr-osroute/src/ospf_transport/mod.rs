@@ -188,6 +188,18 @@ pub fn prefix_mask(prefix_len: u8) -> u32 {
 // Platform dispatch
 // ---------------------------------------------------------------------------
 
+/// Resolve an interface name to the **IPv6 scope id** — the index IPv6
+/// sockets, multicast memberships and link-local addresses are scoped
+/// by. Windows carries a dedicated `Ipv6IfIndex` that can diverge from
+/// the adapter's `IfIndex`; elsewhere the kernel has a single index and
+/// this is [`ifindex_of`].
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub use imp::ipv6_ifindex_of;
+#[cfg(all(feature = "std", not(target_os = "windows")))]
+pub fn ipv6_ifindex_of(interface: &str) -> Option<u32> {
+    ifindex_of(interface)
+}
+
 #[cfg(all(feature = "std", target_os = "linux"))]
 #[path = "imp_linux.rs"]
 mod imp;

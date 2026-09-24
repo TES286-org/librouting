@@ -85,6 +85,24 @@ const RTPROT_STATIC: u8 = 4;
 // RTPROT_BGP is 186 in uapi/linux/rtnetlink.h (14 is RTPROT_XORP). FRR
 // also uses 186, so routes installed here display as "bgp" in `ip route`.
 const RTPROT_BGP: u8 = 186;
+// uapi/linux/rtnetlink.h: 10 = RTPROT_OSPF (ospfd), 42 = RTPROT_BABEL
+// (babeld — in the kernel headers since 4.12).
+const RTPROT_OSPF: u8 = 10;
+const RTPROT_BABEL: u8 = 42;
+
+/// Map the library's route origin to the kernel `RTPROT_*` tag — what
+/// `ip route show` (and `lr routes list`) print as the route origin.
+/// Tagging every install RTPROT_BGP made babel-learned routes and static
+/// blackholes all show up as `proto bgp` in the operator's FIB.
+fn rtprot(protocol: lr_core::rib::Protocol) -> u8 {
+    match protocol {
+        lr_core::rib::Protocol::Bgp => RTPROT_BGP,
+        lr_core::rib::Protocol::Ospfv2 | lr_core::rib::Protocol::Ospfv3 => RTPROT_OSPF,
+        lr_core::rib::Protocol::Babel => RTPROT_BABEL,
+        lr_core::rib::Protocol::Static | lr_core::rib::Protocol::Connected => RTPROT_STATIC,
+        lr_core::rib::Protocol::Other(_) => RTPROT_STATIC,
+    }
+}
 
 // Address families.
 const AF_UNSPEC: u8 = 0;
@@ -373,6 +391,16 @@ impl OsRouteTable for RtNetlink {
         next_hop: IpAddr,
         if_index: u32,
     ) -> Result<(), Self::Error> {
+        self.add_route_tagged(prefix, next_hop, if_index, lr_core::rib::Protocol::Bgp)
+    }
+
+    fn add_route_tagged(
+        &mut self,
+        prefix: Prefix,
+        next_hop: IpAddr,
+        if_index: u32,
+        protocol: lr_core::rib::Protocol,
+    ) -> Result<(), Self::Error> {
         let (family, addr) = match prefix.addr {
             IpAddr::V4(b) => (AF_INET, b.to_vec()),
             IpAddr::V6(b) => (AF_INET6, b.to_vec()),
@@ -398,7 +426,7 @@ impl OsRouteTable for RtNetlink {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
             family,
             prefix.prefix_len,
-            RTPROT_BGP,
+            rtprot(protocol),
             RTN_UNICAST,
             RT_SCOPE_UNIVERSE,
             &attrs,
@@ -426,7 +454,7 @@ impl OsRouteTable for RtNetlink {
             NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE,
             family,
             prefix.prefix_len,
-            RTPROT_BGP,
+            RTPROT_STATIC,
             RTN_BLACKHOLE,
             RT_SCOPE_UNIVERSE,
             &attrs,

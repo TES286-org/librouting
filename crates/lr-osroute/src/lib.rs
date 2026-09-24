@@ -252,6 +252,21 @@ pub trait OsRouteTable {
         if_index: u32,
     ) -> Result<(), Self::Error>;
 
+    /// Add a route carrying the originating protocol's tag — the
+    /// `RTPROT_*` / `RouteProtocol*` kernel identifier shown by
+    /// `ip route` / `route print` and `lr routes list`. Backends that
+    /// cannot tag fall back to [`OsRouteTable::add_route`].
+    fn add_route_tagged(
+        &mut self,
+        prefix: Prefix,
+        next_hop: IpAddr,
+        if_index: u32,
+        protocol: Protocol,
+    ) -> Result<(), Self::Error> {
+        let _ = protocol;
+        self.add_route(prefix, next_hop, if_index)
+    }
+
     /// Add a *blackhole* (discard) route: packets matching `prefix` are
     /// silently dropped by the kernel instead of being forwarded. Used for
     /// static `next_hop = "blackhole"` routes (FRR `Null0`, BIRD

@@ -111,6 +111,36 @@ pub fn ifindex_of(interface: &str) -> Option<u32> {
     None
 }
 
+/// Resolve an interface name (the FriendlyName) to its **IPv6** scope
+/// id — the index IPv6 sockets, group memberships and link-local
+/// addresses are scoped by. `IP_ADAPTER_ADDRESSES_LH` carries this as a
+/// *separate* `Ipv6IfIndex` field: it usually equals `IfIndex`, but the
+/// two can diverge (adapters that gained IPv6 late, stack resets), and
+/// a membership joined on `IfIndex` when the scope is `Ipv6IfIndex`
+/// never matches an arriving datagram — the socket goes deaf while its
+/// own multicast egress keeps working. Falls back to `IfIndex` when
+/// the IPv6 index reads zero.
+pub fn ipv6_ifindex_of(interface: &str) -> Option<u32> {
+    let list = get_adapters_addresses().ok()?;
+    let mut cur = list.head;
+    while !cur.is_null() {
+        // SAFETY: `cur` was returned by GetAdaptersAddresses inside
+        // the buffer owned by `list`.
+        let entry = unsafe { &*cur };
+        if let Some(name) = unsafe { friendly_name(entry.FriendlyName) } {
+            if name == interface {
+                let v6 = unsafe { entry.Ipv6IfIndex };
+                if v6 != 0 {
+                    return Some(v6);
+                }
+                return Some(unsafe { entry.Anonymous1.Anonymous.IfIndex });
+            }
+        }
+        cur = entry.Next;
+    }
+    None
+}
+
 /// Read a NUL-terminated UTF-16 wide string into a Rust `String`.
 ///
 /// # Safety

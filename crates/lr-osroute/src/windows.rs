@@ -40,18 +40,50 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
     InitializeIpForwardEntry, IP_ADDRESS_PREFIX, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
 };
 use windows_sys::Win32::Networking::WinSock::{
-    RouteProtocolBgp, RouteProtocolLocal, RouteProtocolNetMgmt, AF_INET, AF_INET6, SOCKADDR_IN,
-    SOCKADDR_IN6, SOCKADDR_INET,
+    RouteProtocolBgp, RouteProtocolLocal, RouteProtocolNetMgmt, RouteProtocolOspf,
+    RouteProtocolRip, AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
 };
 
 /// IP Helper backed implementation of [`OsRouteTable`].
 pub struct IpHelper;
 
 /// The loopback interface index on Windows — always 1 (the "Loopback
-/// Pseudo-Interface 1"). Used as the egress for blackhole routes: the
-/// kernel forwards the packet to loopback, where it is dropped because
-/// the destination is not a local address.
+/// Pseudo-Interface 1"). Used as the egress for blackhole routes.
 const LOOPBACK_IF_INDEX: u32 = 1;
+
+/// The loopback *gateway* of a blackhole route. Microsoft's documented
+/// `route add PREFIX mask MASK 127.0.0.1` idiom (in force since
+/// Windows NT, and what `route.exe ?` still prints): forwarding the
+/// packet toward the loopback address makes the stack treat it as a
+/// transit delivery to a non-local destination, which is discarded.
+/// A zero next-hop with the loopback interface — what lr previously
+/// installed — is an *on-link* route on loopback instead: the stack
+/// then accepts packets for the covered space as addressed to the
+/// local machine (weak host model), so a daemon listening on
+/// 0.0.0.0 answers SYNs for addresses it never owned. That turned a
+/// configured blackhole into a live loopback service and produced
+/// TCP "peer closed connection" storms against lr's own listener.
+fn loopback_gateway(prefix: &Prefix) -> IpAddr {
+    match prefix.addr {
+        IpAddr::V4(_) => IpAddr::V4([127, 0, 0, 1]),
+        IpAddr::V6(_) => IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+    }
+}
+
+/// Map the library's route origin to the MIB `RouteProtocol` tag the
+/// row is created with (and `list_routes` maps back). The tag is what
+/// `route print`/`Get-NetRoute` and `lr routes list` show as the route
+/// origin — tagging every installed row `Bgp` made static blackholes
+/// appear as BGP-learned routes in the operator's FIB dumps.
+fn mib_protocol(protocol: Protocol) -> i32 {
+    match protocol {
+        Protocol::Bgp => RouteProtocolBgp,
+        Protocol::Ospfv2 | Protocol::Ospfv3 => RouteProtocolOspf,
+        Protocol::Babel => RouteProtocolRip,
+        Protocol::Static | Protocol::Connected => RouteProtocolNetMgmt,
+        Protocol::Other(_) => RouteProtocolNetMgmt,
+    }
+}
 
 impl IpHelper {
     pub fn connect() -> Result<Self, OsRouteError> {
@@ -71,7 +103,12 @@ impl IpHelper {
         Ok(Self)
     }
 
-    fn make_row(prefix: &Prefix, next_hop: &IpAddr, if_index: u32) -> MIB_IPFORWARD_ROW2 {
+    fn make_row(
+        prefix: &Prefix,
+        next_hop: &IpAddr,
+        if_index: u32,
+        protocol: Protocol,
+    ) -> MIB_IPFORWARD_ROW2 {
         // SAFETY: InitializeIpForwardEntry zeroes the struct and applies
         // the documented defaults (infinite lifetimes, not published,
         // immortal). The `Default` impl does the same via `mem::zeroed`
@@ -84,7 +121,7 @@ impl IpHelper {
             PrefixLength: prefix.prefix_len,
         };
         row.NextHop = sockaddr_for(next_hop, if_index);
-        row.Protocol = RouteProtocolBgp;
+        row.Protocol = mib_protocol(protocol);
         row.Immortal = true;
         if prefix.prefix_len == 0 {
             // A /0 destination carries no address bits.
@@ -93,14 +130,14 @@ impl IpHelper {
         row
     }
 
-    /// Build a blackhole route row — packets matching `prefix` are dropped
-    /// by the kernel. Windows has no explicit "discard" flag in
-    /// `MIB_IPFORWARD_ROW2`; the convention is to point the route at the
-    /// loopback interface with a zero next-hop. The forwarding stack will
-    /// deliver packets to loopback where, because the destination address
-    /// is not a local IP, they are silently discarded. This mirrors the
-    /// `route add PREFIX mask MASK 0.0.0.0 IF 1` idiom documented in
-    /// Microsoft's `route.exe` since Windows NT.
+    /// Build a blackhole route row — packets matching `prefix` are
+    /// discarded by the kernel. Windows has no explicit "discard" flag
+    /// in `MIB_IPFORWARD_ROW2`; the documented convention is the
+    /// `route add PREFIX mask MASK 127.0.0.1` idiom — point the route at
+    /// the loopback *gateway*, which makes the forwarding stack treat
+    /// matching packets as transit deliveries to a non-local
+    /// destination and silently discard them. See [`loopback_gateway`]
+    /// for why the previous zero-next-hop form was wrong.
     fn make_blackhole_row(prefix: &Prefix) -> MIB_IPFORWARD_ROW2 {
         // SAFETY: same defaults as `make_row`.
         let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
@@ -110,15 +147,8 @@ impl IpHelper {
             Prefix: sockaddr_for(&prefix.addr, 0),
             PrefixLength: prefix.prefix_len,
         };
-        // Zero next-hop sockaddr of the destination's family. The
-        // si_family field is what Windows reads to know the address
-        // family; the rest of the union stays zeroed.
-        let zero_nh: IpAddr = match prefix.addr {
-            IpAddr::V4(_) => IpAddr::V4([0, 0, 0, 0]),
-            IpAddr::V6(_) => IpAddr::V6([0; 16]),
-        };
-        row.NextHop = sockaddr_for(&zero_nh, 0);
-        row.Protocol = RouteProtocolBgp;
+        row.NextHop = sockaddr_for(&loopback_gateway(prefix), 0);
+        row.Protocol = RouteProtocolNetMgmt;
         row.Immortal = true;
         if prefix.prefix_len == 0 {
             row.DestinationPrefix.PrefixLength = 0;
@@ -167,12 +197,22 @@ impl OsRouteTable for IpHelper {
         next_hop: IpAddr,
         if_index: u32,
     ) -> Result<(), Self::Error> {
+        self.add_route_tagged(prefix, next_hop, if_index, Protocol::Bgp)
+    }
+
+    fn add_route_tagged(
+        &mut self,
+        prefix: Prefix,
+        next_hop: IpAddr,
+        if_index: u32,
+        protocol: Protocol,
+    ) -> Result<(), Self::Error> {
         let if_index = if if_index != 0 {
             if_index
         } else {
             Self::resolve_interface(&next_hop)?
         };
-        let row = Self::make_row(&prefix, &next_hop, if_index);
+        let row = Self::make_row(&prefix, &next_hop, if_index, protocol);
         // SAFETY: `row` is a fully initialised stack value; the API only
         // reads from it.
         let mut rc = unsafe { CreateIpForwardEntry2(&row) };
@@ -230,7 +270,13 @@ impl OsRouteTable for IpHelper {
                 if !addr_eq(&dst, &prefix.addr) {
                     continue;
                 }
-                if row.Protocol != RouteProtocolBgp {
+                if !matches!(
+                    row.Protocol,
+                    p if p == RouteProtocolBgp
+                        || p == RouteProtocolOspf
+                        || p == RouteProtocolRip
+                        || p == RouteProtocolNetMgmt
+                ) {
                     continue; // never touch rows we did not install
                 }
                 // SAFETY: row is a copy of a table entry; the API matches on
@@ -278,6 +324,8 @@ impl OsRouteTable for IpHelper {
                     p if p == RouteProtocolLocal => Protocol::Connected,
                     p if p == RouteProtocolNetMgmt => Protocol::Static,
                     p if p == RouteProtocolBgp => Protocol::Bgp,
+                    p if p == RouteProtocolOspf => Protocol::Ospfv2,
+                    p if p == RouteProtocolRip => Protocol::Babel,
                     other => Protocol::Other(other as u16),
                 };
                 out.push(KernelRoute {
@@ -405,7 +453,7 @@ mod tests {
     fn explicit_interface_scopes_link_local_gateway() {
         let prefix = Prefix::new_v6([0x20, 1, 0xdb, 8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 64);
         let gateway = IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]);
-        let row = IpHelper::make_row(&prefix, &gateway, 42);
+        let row = IpHelper::make_row(&prefix, &gateway, 42, Protocol::Babel);
         assert_eq!(row.InterfaceIndex, 42);
         // SAFETY: make_row populated the IPv6 arm for an IPv6 gateway.
         let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN6>() };
@@ -421,7 +469,7 @@ mod tests {
     }
 
     #[test]
-    fn blackhole_row_v4_uses_loopback_and_zero_next_hop() {
+    fn blackhole_row_v4_uses_loopback_gateway() {
         let prefix = Prefix::new_v4([192, 0, 2, 0], 24);
         let row = IpHelper::make_blackhole_row(&prefix);
         assert_eq!(row.InterfaceIndex, LOOPBACK_IF_INDEX);
@@ -430,11 +478,14 @@ mod tests {
         assert_eq!(next_hop.sin_family, AF_INET);
         // SAFETY: accessing the S_un union — the Ipv4 arm was initialized.
         let s = unsafe { next_hop.sin_addr.S_un.S_un_b };
-        assert_eq!([s.s_b1, s.s_b2, s.s_b3, s.s_b4], [0, 0, 0, 0]);
+        // The Microsoft `route add PREFIX mask MASK 127.0.0.1` blackhole
+        // idiom — NOT the zero gateway (which makes an on-link loopback
+        // route the local stack happily accepts packets for).
+        assert_eq!([s.s_b1, s.s_b2, s.s_b3, s.s_b4], [127, 0, 0, 1]);
     }
 
     #[test]
-    fn blackhole_row_v6_uses_loopback_and_zero_next_hop() {
+    fn blackhole_row_v6_uses_loopback_gateway() {
         let prefix = Prefix::new_v6(
             [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             64,
@@ -446,6 +497,7 @@ mod tests {
         assert_eq!(next_hop.sin6_family, AF_INET6);
         // SAFETY: accessing the u union — the Byte array was initialized.
         let bytes = unsafe { next_hop.sin6_addr.u.Byte };
-        assert_eq!(bytes, [0u8; 16]);
+        assert_eq!(bytes[..15], [0u8; 15]);
+        assert_eq!(bytes[15], 1);
     }
 }
