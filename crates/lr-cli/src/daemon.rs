@@ -3865,7 +3865,11 @@ fn babel_iface_from_spec(
     let rtt_min = spec.rtt_min_us.unwrap_or(10_000);
     let rtt_max = spec.rtt_max_us.unwrap_or(120_000);
     let check_link = spec.check_link.unwrap_or(true);
-    let extended_next_hop = spec.extended_next_hop.unwrap_or(false);
+    // extended_next_hop will be reconciled with the transport list
+    // below — the spec default is false (matches BIRD), but a v6-only
+    // tunnel cannot carry IPv4 routes without it, so auto-enable and
+    // log a warning when that condition is detected.
+    let extended_next_hop_requested = spec.extended_next_hop.unwrap_or(false);
     let port = spec.port.unwrap_or(cfg.babel_port);
     let group: Option<std::net::IpAddr> = match spec.group.as_deref() {
         Some(g) => Some(
@@ -3926,6 +3930,49 @@ fn babel_iface_from_spec(
             bind_errors.join("; ")
         ));
     }
+    let has_v4_transport = transports.iter().any(|t| t.local.is_ipv4());
+    let has_v6_transport = transports.iter().any(|t| t.local.is_ipv6());
+    // Reconcile extended_next_hop with the actual transport list. A
+    // v6-only tunnel cannot carry IPv4 routes unless RFC 5549
+    // extended-next-hop is enabled — the IPv4 prefix would have no
+    // usable next hop. When the operator has not opted in but the
+    // topology requires it (v6 transport, no v4 transport, tunnel
+    // kind), auto-enable and log a one-shot warning so the operator
+    // can either confirm the inference by setting the option
+    // explicitly or disable it intentionally.
+    let extended_next_hop = if extended_next_hop_requested {
+        if !has_v4_transport {
+            println!(
+                "daemon: babel interface {} extended_next_hop on (v4-over-v6)",
+                entry.name
+            );
+        }
+        true
+    } else if has_v6_transport && !has_v4_transport && is_tunnel {
+        println!(
+            "daemon: babel interface {} no IPv4 transport — auto-enabling extended_next_hop \
+             (RFC 5549) so IPv4 routes can ride the v6 next hop. Set 'extended_next_hop true' \
+             explicitly to silence this, or 'extended_next_hop false' to disable the \
+             auto-inference.",
+            entry.name
+        );
+        true
+    } else if has_v6_transport && !has_v4_transport {
+        // Non-tunnel v6-only interface: keep the operator's choice but
+        // make the consequence visible. Without extended_next_hop the
+        // IPv4 routes in the RIB will be silently dropped at announce
+        // time.
+        println!(
+            "daemon: babel interface {} no IPv4 transport and extended_next_hop is off — \
+             IPv4 routes will not be announced on this interface. Set 'extended_next_hop true' \
+             to enable RFC 5549 v4-over-v6 next hops.",
+            entry.name
+        );
+        false
+    } else {
+        false
+    };
+    let _ = has_v4_transport;
 
     // Advertised next hops (§3.5.3): the explicit overrides, else the
     // bound addresses of the matching family.
