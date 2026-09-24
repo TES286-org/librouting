@@ -295,6 +295,7 @@ impl RtNetlink {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn build_request(
         &self,
         msg_type: u16,
