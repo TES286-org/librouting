@@ -2113,17 +2113,6 @@ fn expected_peer_ip(spec: &PeerSpec) -> Option<IpAddr> {
 /// The Err payload marks kernel-unsupported auth as fatal for this peer
 /// (fail closed: the key was configured, running without it is worse
 /// than not running the session).
-///
-/// Returns a tri-state outcome: `Ok(stream)` for a successful connect,
-/// `Err(_, false, None)` for a normal retryable failure (the backoff
-/// will compound), and `Err(_, false, Some(...))` for a retryable
-/// failure where the configured source bind failed and a kernel-chosen
-/// source fallback was attempted — the caller logs the bind failure
-/// once and treats the next sleep the same as a connect failure so the
-/// backoff compounds rather than pinning at 1 s forever (the symptom
-/// when TCP succeeds but the peer immediately FINs without a BGP
-/// NOTIFICATION, e.g. because the source IP did not match the peer's
-/// `neighbor` ACL).
 fn connect_secure(
     sockaddr: std::net::SocketAddr,
     local: Option<std::net::SocketAddr>,
@@ -2163,15 +2152,12 @@ fn connect_secure(
             // `local_address` is primarily a next-hop-self value and
             // may name an address the host does not own (192.0.2.x in
             // lab configs); fall back to the kernel's source choice
-            // exactly as before the bind existed. The fallback is
-            // logged once at the call site so the operator knows the
-            // bind did not take effect.
+            // exactly as before the bind existed.
             Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
-                let label = local.ip();
                 eprintln!(
-                    "daemon: warning: local address {label} is not assigned to any interface; \
-                     falling back to kernel-chosen source. Set 'local_address' to a real \
-                     interface address, or remove it to silence this warning."
+                    "daemon: warning: local address {} not assigned to any interface; \
+                     falling back to kernel-chosen source",
+                    local.ip()
                 );
                 TcpStream::connect_timeout(&sockaddr, Duration::from_secs(5))
                     .map_err(|e2| (format!("{e2}"), false))
@@ -2255,30 +2241,11 @@ fn spawn_connector(
                 println!("daemon: peer {}: connecting to {} ...", label, remote);
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
+                        backoff_ms = 1_000;
                         let _ = stream.set_nodelay(true);
                         live.fetch_add(1, Ordering::Relaxed);
                         let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
                         live.fetch_sub(1, Ordering::Relaxed);
-                        // Reset the backoff ONLY when the session
-                        // reached Established — a TCP-success-but-
-                        // immediate-FIN loop (peer's source-IP match
-                        // failed, peer sent NOTIFICATION Cease, etc.)
-                        // must NOT pin the backoff at 1 s forever.
-                        // run_peer_session returns Ok(()) on a clean
-                        // post-Established teardown (NOTIFICATION sent or
-                        // received, hold timer expired, etc.) and Err
-                        // on a pre-Established drop. The Established flag
-                        // is observed via the router's session state
-                        // snapshot just before the session ends.
-                        let reached_established = rt
-                            .router
-                            .read()
-                            .unwrap()
-                            .session_peer_state(handle)
-                            .is_some();
-                        if reached_established || result.is_ok() {
-                            backoff_ms = 1_000;
-                        }
                         if let Err(e) = result {
                             // Latch a §6.8 collision loss so the churn guard
                             // above engages (see PeerEntry docs).
@@ -2693,47 +2660,67 @@ impl KernelMirror {
                     // encap install failed (reachability first, labels
                     // second — BIRD behaves the same way).
                     if !mirrored {
-                        // A link-local gateway only works with its
-                        // outgoing interface (netlink EINVAL
-                        // otherwise); the protocol daemons register
-                        // the mapping as they learn peers. Blackhole
-                        // routes (`next_hop = None`, e.g. static
-                        // discard routes and BGP `BLACKHOLE` community
-                        // routes) carry no gateway — pass `None` so the
-                        // backend installs an RTN_BLACKHOLE / RTF_BLACKHOLE
-                        // / loopback-discarded row.
-                        let oif = match r.next_hop {
-                            Some(IpAddr::V6(a)) if a[..2] == [0xfe, 0x80] => v6_nexthop_oifs()
-                                .lock()
-                                .ok()
-                                .and_then(|m| m.get(&r.next_hop.unwrap()).copied())
-                                .unwrap_or(0),
-                            _ => 0,
-                        };
-                        if let Some(table) = self.ip_table.as_mut() {
-                            match table.add_route(r.key.prefix, r.next_hop, oif) {
-                                Ok(()) => match r.next_hop {
-                                    Some(nh) => println!(
-                                        "mirror: route installed {} via {} oif {}",
-                                        r.key.prefix, nh, oif
-                                    ),
-                                    None => println!(
-                                        "mirror: blackhole route installed {} (loopback discard)",
+                        // A static route with `next_hop = None` is a
+                        // blackhole (FRR `Null0`, BIRD `blackhole`) —
+                        // the operator wrote `next_hop "blackhole"` or
+                        // omitted `next_hop` entirely (the daemon's
+                        // static-route parser normalises both to None).
+                        // Install via the platform's native discard
+                        // mechanism (RTN_BLACKHOLE / RTF_BLACKHOLE /
+                        // loopback-with-zero-next-hop).
+                        //
+                        // Connected routes and BGP aggregates also
+                        // have `next_hop = None` but a different
+                        // `protocol` — skip them (the kernel already
+                        // has connected routes from interface
+                        // assignment; aggregates have no meaningful
+                        // gateway to install).
+                        let is_blackhole =
+                            r.protocol == lr_core::rib::Protocol::Static && r.next_hop.is_none();
+                        if is_blackhole {
+                            if let Some(table) = self.ip_table.as_mut() {
+                                match table.add_blackhole_route(r.key.prefix) {
+                                    Ok(()) => println!(
+                                        "mirror: blackhole route installed {} (kernel discard)",
                                         r.key.prefix
                                     ),
-                                },
-                                Err(e) => match r.next_hop {
-                                    Some(nh) => eprintln!(
-                                        "mirror: route install failed for {} via {} oif {}: {}",
-                                        r.key.prefix, nh, oif, e
-                                    ),
-                                    None => eprintln!(
+                                    Err(e) => eprintln!(
                                         "mirror: blackhole route install failed for {}: {}",
                                         r.key.prefix, e
                                     ),
-                                },
+                                }
+                            }
+                        } else if let Some(nh) = r.next_hop {
+                            // A link-local gateway only works with its
+                            // outgoing interface (netlink EINVAL
+                            // otherwise); the protocol daemons register
+                            // the mapping as they learn peers.
+                            let oif = match nh {
+                                IpAddr::V6(a) if a[..2] == [0xfe, 0x80] => v6_nexthop_oifs()
+                                    .lock()
+                                    .ok()
+                                    .and_then(|m| m.get(&nh).copied())
+                                    .unwrap_or(0),
+                                _ => 0,
+                            };
+                            if let Some(table) = self.ip_table.as_mut() {
+                                match table.add_route(r.key.prefix, nh, oif) {
+                                    Ok(()) => println!(
+                                        "mirror: route installed {} via {} oif {}",
+                                        r.key.prefix, nh, oif
+                                    ),
+                                    Err(e) => eprintln!(
+                                        "mirror: route install failed for {} via {} oif {}: {}",
+                                        r.key.prefix, nh, oif, e
+                                    ),
+                                }
                             }
                         }
+                        // else: connected/aggregate route with no
+                        // gateway and no blackhole marker — skip the
+                        // kernel install (the kernel already has the
+                        // connected route from the interface; the
+                        // aggregate has no meaningful next-hop).
                     }
                 }
                 RouterEvent::RouteWithdrawn(k) => {
@@ -5803,7 +5790,8 @@ mod kernel_mirror_tests {
 
     #[derive(Debug, Clone, PartialEq, Eq)]
     enum Operation {
-        Add(Prefix, Option<IpAddr>, u32),
+        Add(Prefix, IpAddr, u32),
+        AddBlackhole(Prefix),
         Delete(Prefix),
     }
 
@@ -5817,13 +5805,21 @@ mod kernel_mirror_tests {
         fn add_route(
             &mut self,
             prefix: Prefix,
-            next_hop: Option<IpAddr>,
+            next_hop: IpAddr,
             if_index: u32,
         ) -> Result<(), Self::Error> {
             self.operations
                 .lock()
                 .unwrap()
                 .push(Operation::Add(prefix, next_hop, if_index));
+            Ok(())
+        }
+
+        fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
+            self.operations
+                .lock()
+                .unwrap()
+                .push(Operation::AddBlackhole(prefix));
             Ok(())
         }
 
@@ -5888,7 +5884,7 @@ mod kernel_mirror_tests {
         for (index, route) in routes.iter().enumerate() {
             assert_eq!(
                 operations[index],
-                Operation::Add(route.key.prefix, route.next_hop, 0)
+                Operation::Add(route.key.prefix, route.next_hop.unwrap(), 0)
             );
             assert_eq!(
                 operations[index + routes.len()],
@@ -5897,22 +5893,63 @@ mod kernel_mirror_tests {
         }
     }
 
-    /// A blackhole route (next_hop = None) reaches the kernel as an
-    /// `Add(prefix, None, 0)` operation — the regression that motivated
-    /// the `Option<IpAddr>` trait change. Pre-fix this test would panic
-    /// because the daemon's `KernelMirror::apply` gated on
-    /// `if let Some(nh) = r.next_hop` and never called `add_route`.
+    /// A blackhole static route (next_hop = None, protocol = Static)
+    /// reaches the kernel via `add_blackhole_route` — not via
+    /// `add_route(None, ...)`. Pre-fix this test would fail because the
+    /// daemon's KernelMirror::apply had no blackhole path and skipped
+    /// every None-next-hop route (silently dropping the static discard).
     #[test]
-    fn blackhole_routes_reach_the_kernel_table() {
-        use lr_osroute::OsRouteTable;
+    fn blackhole_static_routes_use_add_blackhole_route() {
         let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
-        let mut table = RecordingTable {
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RecordingTable {
             operations: Arc::clone(&operations),
-        };
+        }));
         let prefix = Prefix::new_v4([192, 0, 2, 0], 24);
-        table.add_route(prefix, None, 0).unwrap();
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 2, peer: 0 },
+            protocol: Protocol::Static,
+            preference: Preference::new(1, 10),
+            next_hop: None,
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        mirror.apply(&[RouterEvent::RouteInstalled(route)]);
         let ops = operations.lock().unwrap();
         assert_eq!(ops.len(), 1);
-        assert_eq!(ops[0], Operation::Add(prefix, None, 0));
+        assert_eq!(ops[0], Operation::AddBlackhole(prefix));
+    }
+
+    /// A connected route (next_hop = None, protocol = Connected) must
+    /// NOT reach the kernel — the kernel already has it from the
+    /// interface assignment. Pre-fix this test would fail because the
+    /// daemon installed every None-next-hop route as blackhole,
+    /// breaking OSPF HELLO reception on the interface's own prefix.
+    #[test]
+    fn connected_routes_with_none_next_hop_are_skipped() {
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RecordingTable {
+            operations: Arc::clone(&operations),
+        }));
+        let prefix = Prefix::new_v4([10, 99, 1, 0], 24);
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer: 0 },
+            protocol: Protocol::Connected,
+            preference: Preference::new(0, 0),
+            next_hop: None,
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        mirror.apply(&[RouterEvent::RouteInstalled(route)]);
+        let ops = operations.lock().unwrap();
+        assert!(
+            ops.is_empty(),
+            "connected route must not be installed or blackholed, got: {ops:?}"
+        );
     }
 }
