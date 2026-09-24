@@ -2655,30 +2655,45 @@ impl KernelMirror {
                     // encap install failed (reachability first, labels
                     // second — BIRD behaves the same way).
                     if !mirrored {
-                        if let Some(nh) = r.next_hop {
-                            // A link-local gateway only works with its
-                            // outgoing interface (netlink EINVAL
-                            // otherwise); the protocol daemons register
-                            // the mapping as they learn peers.
-                            let oif = match nh {
-                                IpAddr::V6(a) if a[..2] == [0xfe, 0x80] => v6_nexthop_oifs()
-                                    .lock()
-                                    .ok()
-                                    .and_then(|m| m.get(&nh).copied())
-                                    .unwrap_or(0),
-                                _ => 0,
-                            };
-                            if let Some(table) = self.ip_table.as_mut() {
-                                match table.add_route(r.key.prefix, nh, oif) {
-                                    Ok(()) => println!(
+                        // A link-local gateway only works with its
+                        // outgoing interface (netlink EINVAL
+                        // otherwise); the protocol daemons register
+                        // the mapping as they learn peers. Blackhole
+                        // routes (`next_hop = None`, e.g. static
+                        // discard routes and BGP `BLACKHOLE` community
+                        // routes) carry no gateway — pass `None` so the
+                        // backend installs an RTN_BLACKHOLE / RTF_BLACKHOLE
+                        // / loopback-discarded row.
+                        let oif = match r.next_hop {
+                            Some(IpAddr::V6(a)) if a[..2] == [0xfe, 0x80] => v6_nexthop_oifs()
+                                .lock()
+                                .ok()
+                                .and_then(|m| m.get(&r.next_hop.unwrap()).copied())
+                                .unwrap_or(0),
+                            _ => 0,
+                        };
+                        if let Some(table) = self.ip_table.as_mut() {
+                            match table.add_route(r.key.prefix, r.next_hop, oif) {
+                                Ok(()) => match r.next_hop {
+                                    Some(nh) => println!(
                                         "mirror: route installed {} via {} oif {}",
                                         r.key.prefix, nh, oif
                                     ),
-                                    Err(e) => eprintln!(
+                                    None => println!(
+                                        "mirror: blackhole route installed {} (loopback discard)",
+                                        r.key.prefix
+                                    ),
+                                },
+                                Err(e) => match r.next_hop {
+                                    Some(nh) => eprintln!(
                                         "mirror: route install failed for {} via {} oif {}: {}",
                                         r.key.prefix, nh, oif, e
                                     ),
-                                }
+                                    None => eprintln!(
+                                        "mirror: blackhole route install failed for {}: {}",
+                                        r.key.prefix, e
+                                    ),
+                                },
                             }
                         }
                     }
