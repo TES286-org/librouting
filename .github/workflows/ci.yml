@@ -581,6 +581,19 @@ jobs:
       - name: Babel v6-only tunnel + extended_next_hop + blackhole (RFC 5549, lr ↔ BIRD, pcap)
         timeout-minutes: 10
         run: ./tests/interop/babel_v6only_extended.sh
+      - name: Babel dual-stack BIRD interop (full production topology: v4-on-v6, forwarding, BGP-over-Babel, pcap)
+        # The complete reproduction of the reported Windows production
+        # scenario: dual-stack babel link, both sides originating the same
+        # aggregates (Loc-RIB preference), real ICMP delivery through the
+        # Babel-installed kernel routes, a BGP session to a
+        # Babel-only-reachable peer, and packet-capture TLV analysis
+        # (babel_decode.py) of the announcements both daemons put on the
+        # wire. BIRD 2.x (this runner's bird2) accepts the AE 1
+        # v4-over-v6 form; the AE 4 (RFC 9229) path is covered by the
+        # v6-only job above at the emission level and hard-asserted on
+        # BIRD >= 3.
+        timeout-minutes: 10
+        run: ./tests/interop/babel_dualstack_bird.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)
         timeout-minutes: 10
         run: ./tests/interop/ospf_bird.sh

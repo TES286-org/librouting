@@ -106,7 +106,7 @@ ip route add blackhole 172.23.10.96/27 metric 10
 
 # Start tcpdump in the background to capture Babel traffic on veth0a.
 # Filter: only Babel (UDP port 6696).
-tcpdump -i veth0a -w "$OUT/babel.pcap" -U 'udp port 6696' &
+tcpdump -i veth0a -Z root -w "$OUT/babel.pcap" -U 'udp port 6696' &
 TCPDUMP_PID=$!
 trap "kill $TCPDUMP_PID 2>/dev/null || true" EXIT
 
@@ -242,28 +242,30 @@ for prefix in "172.23.10.102/32" "10.127.32.0/24" "172.23.10.96/27"; do
     fi
 done
 
-# Phase 3: wait for Babel convergence — BIRD should see lr's v4 routes.
+# Phase 3: wait for Babel convergence.
 echo "=== Waiting for Babel convergence (max 30s) ==="
 # BIRD 2.x uses 'show babel routes', BIRD 3.x uses 'show babel entries' —
-# try both. Also check 'show babel neighbors' to verify adjacency formed.
+# try both. The adjacency and the v6 routes are HARD requirements; the
+# v4-over-v6 (RFC 9229 AE 4) routes are asserted on BIRD >= 3 — BIRD 2.x
+# has no AE 4 support (silently ignored, no datagram abort) so there the
+# emission is pcap-verified instead.
+BIRD_VERSION=$(birdc -s "$OUT/bird.ctl" show status 2>/dev/null | grep -oE "BIRD [0-9]+\.[0-9]+" | head -1 || true)
+echo "BIRD version: ${BIRD_VERSION:-unknown}"
+BIRD_MAJOR=$(echo "$BIRD_VERSION" | grep -oE "[0-9]+" | head -1 || echo 0)
 BIRD_BABEL_CMD="show babel entries"
+ENTRIES=""
 for i in $(seq 1 60); do
     ENTRIES=$(birdc -s "$OUT/bird.ctl" show babel entries 2>/dev/null || true)
-    if echo "$ENTRIES" | grep -q "172.23.10.102/32"; then
-        echo "PASS: BIRD learned 172.23.10.102/32 from lr"
-        break
+    if [ -z "$ENTRIES" ]; then
+        ENTRIES=$(birdc -s "$OUT/bird.ctl" show babel routes 2>/dev/null || true)
+        if [ -n "$ENTRIES" ]; then BIRD_BABEL_CMD="show babel routes"; fi
     fi
-    # BIRD 2.x fallback
-    ENTRIES=$(birdc -s "$OUT/bird.ctl" show babel routes 2>/dev/null || true)
-    if echo "$ENTRIES" | grep -q "172.23.10.102/32"; then
-        BIRD_BABEL_CMD="show babel routes"
-        echo "PASS: BIRD learned 172.23.10.102/32 from lr (BIRD 2.x syntax)"
+    if echo "$ENTRIES" | grep -q "fd00:286:11e:6::/64"; then
         break
     fi
     sleep 0.5
 done
 
-# Verify BIRD sees lr's v4 routes.
 BIRD_ENTRIES=$(birdc -s "$OUT/bird.ctl" $BIRD_BABEL_CMD 2>/dev/null || true)
 echo "=== BIRD babel entries ($BIRD_BABEL_CMD) ==="
 echo "$BIRD_ENTRIES"
@@ -273,66 +275,28 @@ echo "$BIRD_NEIGHBORS"
 echo "=== BIRD log (last 20 lines) ==="
 tail -20 "$OUT/bird.log" 2>/dev/null || echo "(no log file)"
 
-# The BIRD-interoperability assertions are SOFT: if BIRD and lr fail
-# to form a Babel adjacency (a known issue with v6-only veth pairs
-# in some CI environments — the multicast delivery depends on kernel
-# IPv6 multicast forwarding settings that vary by kernel version), the
-# test SKIPs the BIRD-dependent checks rather than failing the whole
-# CI pipeline. The daemon-side fixes (extended_next_hop auto-enable,
-# blackhole route install, source-metric propagation) are already
-# verified by the PASS lines above.
-if ! echo "$BIRD_NEIGHBORS" | grep -qE "fe80::|172\.|10\."; then
-    echo "SKIP: BIRD has no Babel neighbors — the v6-only veth pair did not"
-    echo "      deliver multicast Babel packets in this environment. The"
-    echo "      daemon-side fixes are already verified by the PASS lines above."
-    # Still verify the pcap shows Babel packets were emitted by lr.
-    kill $LR_PID 2>/dev/null || true
-    kill $BIRD_PID 2>/dev/null || true
-    sleep 1
-    kill $TCPDUMP_PID 2>/dev/null || true
-    trap - EXIT
-    echo "=== Babel packets captured ==="
-    tcpdump -r "$OUT/babel.pcap" -nn -c 20 2>&1 | head -20 || true
-    if tcpdump -r "$OUT/babel.pcap" -xx 'udp port 6696' 2>/dev/null | head -200 | \
-        grep -q "0x2a 0x02"; then
-        echo "PASS: Babel magic + version present in captured packets (lr IS sending)"
-        echo "=== ALL DAEMON-SIDE CHECKS PASSED, BIRD ADJACENCY SKIPPED ==="
-        exit 0
-    else
-        echo "NOTE: no Babel packets captured — lr may not have emitted any"
-        echo "      (check the lr log for send errors)"
-        exit 0
-    fi
-fi
+# HARD: the adjacency must form. A v6-only veth pair delivers multicast
+# reliably in the unshare -Urn environment (the earlier SKIP was hiding
+# real regressions).
+echo "$BIRD_NEIGHBORS" | grep -q "fe80::1" \
+    || { echo "FAIL: BIRD has no Babel adjacency with lr"; cat "$OUT/lr.log"; exit 1; }
+echo "PASS: babel adjacency formed on the v6-only link"
 
-for prefix in "172.23.10.102/32" "10.127.32.0/24" "172.23.10.96/27"; do
-    if echo "$BIRD_ENTRIES" | grep -q "$prefix"; then
-        echo "PASS: BIRD learned $prefix from lr"
-    else
-        # SOFT failure: the adjacency formed and the daemon-side fixes
-        # are verified, but BIRD 2.0.x may not install v4-over-v6 routes
-        # in this environment. Don't block the CI pipeline.
-        echo "SKIP: BIRD did not learn $prefix from lr — the v4-over-v6"
-        echo "      route propagation needs further investigation (BIRD 2.0.x"
-        echo "      may require additional configuration for RFC 5549)."
-        echo "      The daemon-side fixes (extended_next_hop auto-enable,"
-        echo "      blackhole route install) are already verified above."
-        # Dump the pcap to confirm lr IS emitting Babel packets.
-        kill $LR_PID 2>/dev/null || true
-        kill $BIRD_PID 2>/dev/null || true
-        sleep 1
-        kill $TCPDUMP_PID 2>/dev/null || true
-        trap - EXIT
-        echo "=== Babel packets captured (lr's emission proof) ==="
-        tcpdump -r "$OUT/babel.pcap" -nn -c 20 2>&1 | head -20 || true
-        if tcpdump -r "$OUT/babel.pcap" -xx 'udp port 6696' 2>/dev/null | head -200 | \
-            grep -q "0x2a 0x02"; then
-            echo "PASS: Babel magic + version present in captured packets (lr IS sending)"
-        fi
-        echo "=== ALL DAEMON-SIDE CHECKS PASSED, BIRD v4-ROUTE INTEROP SKIPPED ==="
-        exit 0
-    fi
-done
+# HARD: the v6 routes must propagate.
+echo "$BIRD_ENTRIES" | grep -q "fd00:286:11e:6::/64" \
+    || { echo "FAIL: BIRD did not learn fd00:286:11e:6::/64 from lr"; exit 1; }
+echo "PASS: BIRD learned the v6 routes from lr"
+
+# HARD on BIRD >= 3 (AE 4 support), pcap-verified on BIRD 2.
+if [ "$BIRD_MAJOR" -ge 3 ] 2>/dev/null; then
+    for prefix in "172.23.10.102/32" "10.127.32.0/24" "172.23.10.96/27"; do
+        echo "$BIRD_ENTRIES" | grep -q "$prefix" \
+            || { echo "FAIL: BIRD 3 did not learn $prefix (v4-over-v6, AE 4)"; exit 1; }
+    done
+    echo "PASS: BIRD learned the v4-over-v6 routes (AE 4, RFC 9229)"
+else
+    echo "NOTE: BIRD 2 has no AE 4 support — the v4-over-v6 emission is pcap-verified below"
+fi
 
 # Phase 4: stop the daemons and analyse the pcap.
 kill $LR_PID 2>/dev/null || true
@@ -341,38 +305,39 @@ sleep 1
 kill $TCPDUMP_PID 2>/dev/null || true
 trap - EXIT
 
-# Phase 5: verify the Babel Update TLVs in the pcap carry AE=1 (IPv4)
-# prefixes preceded by a NextHop TLV with AE=2 (IPv6). We use
-# tcpdump's hex output and check for the Babel magic + the AE bytes.
-echo "=== Babel packets captured ==="
-tcpdump -r "$OUT/babel.pcap" -nn -c 20 2>&1 | head -20 || true
+# Phase 5: full TLV-level pcap analysis with the babel_decode.py
+# decoder (the same one babel_dualstack_bird.sh uses).
+DECODE="$REPO/tests/interop/babel_decode.py"
+DECODED=$(python3 "$DECODE" "$OUT/babel.pcap" 500 2>/dev/null || true)
+echo "=== lr's first v6-transport announcement carrying Updates ==="
+echo "$DECODED" | grep "fe80:0000:0000:0000:0000:0000:0000:0001:6696" | grep "Update(" | head -1 || true
 
-# Extract raw hex of the first Babel packet (after the Ethernet/IP/UDP
-# headers). We look for the Babel magic 0x2a and version 0x02, then
-# walk TLVs to find an Update TLV (type 0x08) with AE=1 (IPv4).
-# This is a coarse check — a full TLV walker would be a Rust unit test.
-if tcpdump -r "$OUT/babel.pcap" -xx 'udp port 6696' 2>/dev/null | head -200 | \
-    grep -q "0x2a 0x02"; then
-    echo "PASS: Babel magic + version present in captured packets"
-else
-    echo "FAIL: no Babel magic (0x2a 0x02) in captured packets"
+# HARD: lr is announcing on the v6-only link.
+echo "$DECODED" | grep -q "fe80:0000:0000:0000:0000:0000:0000:0001:6696" \
+    || { echo "FAIL: no Babel packets from lr in the capture"; exit 1; }
+echo "PASS: lr emitted Babel packets on the v6-only link"
+
+# HARD: the v4 routes ride the AE 4 (IPv4-via-IPv6, RFC 9229 2.4)
+# encoding — the form BIRD 3 and babeld accept. The previous
+# AE 1 + AE 2-NextHop pairing made BIRD abort the whole datagram
+# ("Update must have next hop"), which is what the old soft-SKIP hid.
+LR_AE4=$(echo "$DECODED" | grep "fe80:0000:0000:0000:0000:0000:0000:0001:6696" | grep "Update(ae=v4via6 172.23.10.102/32" || true)
+[ -n "$LR_AE4" ] || { echo "FAIL: no AE 4 v4 Update for 172.23.10.102/32 on the v6-only link"; exit 1; }
+# On a v6-only interface every v4 Update must be AE 4 (there is no v4
+# next hop to announce, so plain AE 1 is never legal here).
+BAD_AE1=$(echo "$DECODED" | grep "fe80:0000:0000:0000:0000:0000:0000:0001:6696" | grep "Update(ae=v4 " || true)
+if [ -n "$BAD_AE1" ]; then
+    echo "FAIL: plain AE 1 v4 Update on a v6-only link (must be AE 4, RFC 9229):"
+    echo "$BAD_AE1" | head -2
     exit 1
 fi
+echo "PASS: v4-over-v6 Updates use the AE 4 encoding"
 
-# A more thorough check: look for the Update TLV (type 0x08) with
-# AE=1 (IPv4) following a NextHop TLV (type 0x07) with AE=2 (IPv6).
-# We use tshark if available for a cleaner decode; fall back to
-# tcpdump's hex dump.
-if command -v tshark >/dev/null 2>&1; then
-    echo "=== tshark Babel decode (first 20 packets) ==="
-    tshark -r "$OUT/babel.pcap" -Y "babel" -V 2>/dev/null | head -100 || true
-    if tshark -r "$OUT/babel.pcap" -Y "babel.tlv.type == 8 && babel.update.ae == 1" 2>/dev/null | \
-        head -1 | grep -q "."; then
-        echo "PASS: tshark confirms an IPv4 Update TLV (AE=1) was emitted"
-    else
-        echo "NOTE: tshark did not confirm AE=1 Update (decoder may not know babel.update.ae)"
-    fi
-fi
+# The v6 next hop TLV precedes the Updates it carries.
+V6_ANNOUNCE=$(echo "$DECODED" | grep "fe80:0000:0000:0000:0000:0000:0000:0001:6696" | grep "Update(ae=v4via6 172.23.10.102/32" | head -1 || true)
+echo "$V6_ANNOUNCE" | grep -q "NextHop(ae=v6 fe80:0000:0000:0000:0000:0000:0000:0001)" \
+    || { echo "FAIL: no AE 2 NextHop TLV in the announcement"; exit 1; }
+echo "PASS: AE 2 NextHop TLV carries the v4-over-v6 Updates"
 
 echo "=== ALL CHECKS PASSED ==="
 INNER
