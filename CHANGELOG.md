@@ -16,7 +16,74 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ## [Unreleased]
 
+### Fixed (Babel — production interop with BIRD/babeld)
+
+- **IPv4 routes are now announced on the IPv6 transport.** BIRD and
+  babeld listen exclusively on `ff02::1:6` — v4 routes that only rode
+  the v4 multicast transport (224.0.0.111) were invisible to every
+  reference peer. A dual-stack interface now emits babeld's shape
+  (a NextHop TLV with the interface's IPv4 address before the AE 1
+  Updates); a v6-only link with `extended_next_hop` uses the
+  RFC 9229 §2.4 AE 4 (IPv4-via-IPv6) encoding. The previous
+  AE 1-Update-after-AE 2-NextHop pairing made BIRD abort the whole
+  datagram at the first Update ("Update must have next hop"),
+  poisoning every route behind it in the same packet.
+- **RFC 8966 §4.5.2 omitted-octet prefix compression is now
+  reconstructed.** BIRD compresses consecutive v6 Updates (Prefix
+  flag + omitted count); lr learned corrupted prefixes (the in-band
+  tail octets read as the head — `fd10:127:286:6::/64` became
+  `1001:2702:8600:6::/64` in reproduction) and dropped
+  fully-compressed Updates outright (a /48 with six omitted octets
+  carries zero prefix bytes).
+- **A Babel-learned route no longer displaces the operator's static
+  for the same prefix.** Both tunnel ends originating the same
+  aggregate made lr replace its own static in the Loc-RIB, stop
+  announcing it, and let the remote copy expire ("babel routes not
+  fully propagated"); the kernel mirror also clobbered the operator's
+  blackhole. Direct (OSPF/Babel) routes now go through the merged
+  preference order (static 1 < BGP 20 < OSPF 110 < Babel 120) with
+  fallback when the learned copy retracts.
+- Updates echoing our own router-id back (a no-split-horizon peer
+  re-advertising our claims) are ignored, matching BIRD's guard.
+- The announcement seqno is seeded randomly (babeld parity) instead
+  of starting at 0/1 — with a stable configured router-id, a restart
+  made every previously-announced route stale at peers; recovery is
+  the now-implemented Seqno-Request handshake (RFC 8966 §3.2.6.2),
+  and Route Requests get an immediate announcement.
+- An Update without a preceding NextHop TLV resolves its next hop to
+  the datagram sender (RFC 8966 §3.5.3) instead of the local bind
+  address — BIRD omits the v6 NextHop TLV for its own announcements.
+- `--protocol babel` / `--protocol ospf` daemons now apply their
+  `[[static]]` / `[[aggregate]]` / `[[redistribute]]` config like the
+  multi-protocol supervisor; previously a standalone Babel daemon
+  announced nothing at all.
+
+### Fixed (kernel FIB interaction)
+
+- Windows blackhole routes use the documented `route add PREFIX mask
+  MASK 127.0.0.1` idiom. The previous zero-next-hop loopback row was
+  an on-link route the weak-host stack happily accepted packets for —
+  a daemon listening on 0.0.0.0 answered SYNs for addresses it never
+  owned (the "peer closed connection" retry storm).
+- Installed routes carry the originating protocol's tag
+  (RTPROT_BABEL/OSPF/STATIC on Linux, the NL_ROUTE_PROTOCOL MIB
+  values on Windows) instead of every row showing up as `bgp`.
+- The kernel mirror refuses to replace a kernel-owned *connected*
+  route for the same prefix (NLM_F_REPLACE used to swap the on-link
+  row out and break the link's own gateway resolution), and withdraws
+  every installed route on daemon shutdown.
+- Windows: the babel v6 scope resolves through the adapter's
+  Ipv6IfIndex (which can diverge from IfIndex), the unicast socket
+  also joins the multicast group (Windows delivers only to joined
+  sockets), and receive errors are logged instead of silently
+  breaking the read loop. The babel daemon registers learned
+  link-local next hops in the v6-nexthop oif registry so routes via
+  `fe80::` gateways install on Linux and Windows.
+- The BGP "received End-of-RIB — synchronization complete" event now
+  fires for every session, not only graceful-restart-retained ones.
+
 ### Changed (CI)
+
 
 - **CI now exercises the kernel route-table backends on macOS and
   Windows.** A new `macos-interop` job runs `bgp_kernel_install.sh`
