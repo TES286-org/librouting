@@ -235,18 +235,33 @@ done
 
 # Phase 3: wait for Babel convergence — BIRD should see lr's v4 routes.
 echo "=== Waiting for Babel convergence (max 30s) ==="
+# BIRD 2.x uses 'show babel routes', BIRD 3.x uses 'show babel entries' —
+# try both. Also check 'show babel neighbors' to verify adjacency formed.
+BIRD_BABEL_CMD="show babel entries"
 for i in $(seq 1 60); do
-    if birdc -s "$OUT/bird.ctl" show babel entries 2>/dev/null | grep -q "172.23.10.102/32"; then
+    ENTRIES=$(birdc -s "$OUT/bird.ctl" show babel entries 2>/dev/null || true)
+    if echo "$ENTRIES" | grep -q "172.23.10.102/32"; then
         echo "PASS: BIRD learned 172.23.10.102/32 from lr"
+        break
+    fi
+    # BIRD 2.x fallback
+    ENTRIES=$(birdc -s "$OUT/bird.ctl" show babel routes 2>/dev/null || true)
+    if echo "$ENTRIES" | grep -q "172.23.10.102/32"; then
+        BIRD_BABEL_CMD="show babel routes"
+        echo "PASS: BIRD learned 172.23.10.102/32 from lr (BIRD 2.x syntax)"
         break
     fi
     sleep 0.5
 done
 
 # Verify BIRD sees lr's v4 routes.
-BIRD_ENTRIES=$(birdc -s "$OUT/bird.ctl" show babel entries 2>/dev/null || true)
-echo "=== BIRD babel entries ==="
+BIRD_ENTRIES=$(birdc -s "$OUT/bird.ctl" $BIRD_BABEL_CMD 2>/dev/null || true)
+echo "=== BIRD babel entries ($BIRD_BABEL_CMD) ==="
 echo "$BIRD_ENTRIES"
+echo "=== BIRD babel neighbors ==="
+birdc -s "$OUT/bird.ctl" show babel neighbors 2>/dev/null || true
+echo "=== BIRD log (last 20 lines) ==="
+tail -20 "$OUT/bird.log" 2>/dev/null || echo "(no log file)"
 
 for prefix in "172.23.10.102/32" "10.127.32.0/24" "172.23.10.96/27"; do
     if echo "$BIRD_ENTRIES" | grep -q "$prefix"; then
