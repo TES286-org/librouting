@@ -84,6 +84,7 @@ use lr_core::addr::{Asn, IpAddr, Prefix, RouterId};
 use lr_core::nlri::NlriFamily;
 use lr_osroute::gtsm::Gtsm;
 use lr_osroute::tcp_auth::{TcpAoAlgorithm, TcpAoKey, TcpAuth};
+use lr_osroute::OsRouteTable;
 use lr_router::{
     DefaultRouter, MetricPolicy, RedistributionPipe, RouterEvent, RouterInstance, SessionConfig,
     SessionHandle,
@@ -2519,6 +2520,18 @@ fn lsp_decision(route: &lr_core::rib::Route) -> LspDecision {
 /// Withdrawals reverse both halves.
 struct KernelMirror {
     ip_table: Option<Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>>,
+    /// Prefixes the kernel itself owns — connected routes (`proto
+    /// kernel` / `RouteProtocolLocal`), scanned once at connect. A
+    /// learned route for the *exact* same prefix would atomically
+    /// REPLACE the connected row (`NLM_F_REPLACE` / the IP Helper's
+    /// delete+recreate), severing the link its own gateway resolves
+    /// over — observed live: a peer re-advertising the link's subnet
+    /// (`169.254.6.0/24 via 169.254.6.2`) replaced the on-link route
+    /// and every later install failed with ENETUNREACH. BIRD and FRR
+    /// keep the connected route because it wins preference 0; lr's
+    /// Loc-RIB has no connected import, so the mirror refuses the
+    /// install instead.
+    connected: std::collections::HashSet<Prefix>,
     /// Locally originated in-labels currently installed, keyed by
     /// prefix — `RouteWithdrawn` carries only the key, so the tail half
     /// needs this side table to know which label to delete.
@@ -2531,12 +2544,29 @@ struct KernelMirror {
 impl KernelMirror {
     fn new(install_kernel: bool) -> Self {
         let mut ip_table = None;
+        let mut connected = std::collections::HashSet::new();
         #[cfg(target_os = "linux")]
         let mut mpls = None;
         if install_kernel {
             match lr_osroute::SystemRouteTable::connect() {
                 Ok(t) => {
                     println!("daemon: os route table connected — installing kernel routes");
+                    let mut t = t;
+                    // Snapshot the kernel-owned (connected) prefixes the
+                    // mirror must never replace — see `connected`.
+                    match t.list_routes() {
+                        Ok(rows) => {
+                            for row in rows {
+                                if row.protocol == lr_core::rib::Protocol::Connected {
+                                    connected.insert(row.prefix);
+                                }
+                            }
+                        }
+                        Err(e) => eprintln!(
+                            "daemon: initial FIB scan failed ({}); connected-route protection off",
+                            e
+                        ),
+                    }
                     ip_table = Some(Box::new(t)
                         as Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>);
                 }
@@ -2559,6 +2589,7 @@ impl KernelMirror {
         }
         Self {
             ip_table,
+            connected,
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -2572,6 +2603,7 @@ impl KernelMirror {
     ) -> Self {
         Self {
             ip_table: Some(ip_table),
+            connected: std::collections::HashSet::new(),
             #[cfg(target_os = "linux")]
             tails: HashMap::new(),
             #[cfg(target_os = "linux")]
@@ -2703,11 +2735,23 @@ impl KernelMirror {
                                     .unwrap_or(0),
                                 _ => 0,
                             };
-                            if let Some(table) = self.ip_table.as_mut() {
-                                match table.add_route(r.key.prefix, nh, oif) {
+                            // The kernel-owned guard: a learned route for
+                            // a prefix the kernel holds as *connected*
+                            // must not replace the on-link row — see
+                            // `KernelMirror::connected`.
+                            if self.connected.contains(&r.key.prefix) {
+                                println!(
+                                    "mirror: keeping kernel connected route {} over learned route via {}",
+                                    r.key.prefix, nh
+                                );
+                            } else if let Some(table) = self.ip_table.as_mut() {
+                                match table.add_route_tagged(r.key.prefix, nh, oif, r.protocol) {
                                     Ok(()) => println!(
-                                        "mirror: route installed {} via {} oif {}",
-                                        r.key.prefix, nh, oif
+                                        "mirror: route installed {} via {} oif {} ({})",
+                                        r.key.prefix,
+                                        nh,
+                                        oif,
+                                        r.protocol.bird_name()
                                     ),
                                     Err(e) => eprintln!(
                                         "mirror: route install failed for {} via {} oif {}: {}",
@@ -3092,6 +3136,14 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             }
         };
         iface.session = h;
+        // RFC 8966 §3.3 + babeld parity: pin the announced router-id so
+        // updates echoing our own claims back (a no-split-horizon peer
+        // re-advertising them) are ignored instead of being learned as
+        // Babel routes that displace the statics we originate them from.
+        router
+            .write()
+            .unwrap()
+            .set_babel_own_router_id(h, iface.router_id);
         if !iface.auth_debug_line.is_empty() {
             println!("daemon: {}", iface.auth_debug_line);
         }
@@ -3397,7 +3449,10 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             };
             // RFC 8966 §3.7.1: the *Update* seqno tracks route changes,
             // not the refresh cadence — bump it only when the advertised
-            // set moved since the last announcement.
+            // set (or any route's metric) moved since the last
+            // announcement. A metric change without a seqno bump leaves
+            // peers holding an infeasible higher-metric update they
+            // cannot accept (same seqno, worse metric).
             {
                 let r = router.read().unwrap();
                 let sig = babel_announcement_signature(&r, iface);
@@ -3479,6 +3534,23 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                 if peer.port() != iface.port || locals.contains(&peer.ip()) {
                                     continue;
                                 }
+                                // Register the neighbour's link-local
+                                // address against this transport's
+                                // interface index: Babel next hops are the
+                                // announcer's link-locals, and the kernel
+                                // mirror needs the egress interface for a
+                                // link-local gateway (Linux netlink
+                                // refuses it without RTA_OIF; Windows'
+                                // GetBestRoute2 cannot resolve an
+                                // unscoped link-local at all).
+                                if let std::net::IpAddr::V6(a) = peer.ip() {
+                                    if a.segments()[0] & 0xffc0 == 0xfe80 && transport.scope_id != 0
+                                    {
+                                        if let Ok(mut m) = v6_nexthop_oifs().lock() {
+                                            m.insert(lr_ip(peer.ip()), transport.scope_id);
+                                        }
+                                    }
+                                }
                                 let dest = if is_multicast {
                                     transport.group
                                 } else {
@@ -3491,6 +3563,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                     destination_port: iface.port,
                                 };
                                 let mut r = router.write().unwrap();
+                                // RFC 8966 §3.5.3: the peer's source
+                                // address is the next hop of last resort
+                                // for Updates without a preceding
+                                // NextHop TLV — BIRD's v6 announcements
+                                // rely on exactly this rule.
+                                r.babel_note_peer(iface.session, lr_ip(peer.ip()));
                                 match &mut iface.auth {
                                     Some(auth) => {
                                         let out = auth.verify(&buf[..n], ph, now_ms);
@@ -3551,7 +3629,24 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                             {
                                 break;
                             }
-                            Err(_) => {
+                            Err(e) => {
+                                // Unexpected receive error: log it, rate
+                                // limited. A silent `break` here hid real
+                                // Windows receive failures (e.g. the
+                                // WSAECONNRESET an earlier sendto to an
+                                // unreachable destination queues on this
+                                // socket) behind an empty routing table.
+                                static RECV_ERRORS: std::sync::atomic::AtomicU64 =
+                                    std::sync::atomic::AtomicU64::new(0);
+                                let n = RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
+                                if n.is_multiple_of(100) {
+                                    eprintln!(
+                                        "daemon: babel recv on {} ({}): {}",
+                                        iface.name,
+                                        if is_multicast { "mc" } else { "uc" },
+                                        e
+                                    );
+                                }
                                 break;
                             }
                         }
@@ -3567,6 +3662,48 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 if let Some(auth) = &mut iface.auth {
                     let _ = auth.gc(now_ms);
                 }
+            }
+        }
+
+        // ---- answer Route/Seqno Requests (RFC 8966 §3.2.6) ----
+        // BIRD sends a wildcard Route Request at adjacency start; a
+        // peer that remembers a higher seqno than our boot seed sends a
+        // Seqno Request naming our router-id. Both are answered by an
+        // immediate announcement instead of waiting out the periodic
+        // tick; the seqno request additionally lifts the announcement
+        // seqno to (at least) the requested value so the peer's
+        // feasibility check accepts our routes again.
+        for iface in &mut ifaces {
+            if !iface.link_up {
+                continue;
+            }
+            let (route_req, seqno_req) = {
+                let mut r = router.write().unwrap();
+                (
+                    r.babel_take_route_request(iface.session),
+                    r.babel_take_own_seqno_request(iface.session),
+                )
+            };
+            if let Some(wanted) = seqno_req {
+                let cur = iface.seqno;
+                let delta = (wanted as i16).wrapping_sub(cur as i16);
+                iface.seqno = if delta > 0 {
+                    wanted
+                } else {
+                    cur.wrapping_add(1)
+                };
+                iface.last_sig = String::new(); // the announcement changes
+                iface.last_announce_ms = 0;
+                println!(
+                    "daemon: babel seqno request on {} — seqno {} → {}",
+                    iface.name, cur, iface.seqno
+                );
+            } else if route_req {
+                iface.last_announce_ms = 0;
+                println!(
+                    "daemon: babel route request on {} — announcing now",
+                    iface.name
+                );
             }
         }
 
@@ -3886,7 +4023,12 @@ fn babel_iface_manual(
         auth_debug_line,
         router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
         hello_seqno: u16::from_be_bytes([boot[0], boot[1]]),
-        seqno: 0,
+        // RFC 8966 §3.1 + babeld parity: seed the announcement seqno
+        // randomly. A fresh 0/1 with a *stable* configured router-id
+        // makes every previously-announced route stale at the peers
+        // after a restart (their remembered seqno is higher), and the
+        // recovery path is the Seqno-Request handshake (§3.2.6.2).
+        seqno: u16::from_be_bytes([boot[2], boot[3]]),
         last_sig: String::new(),
         advertised: std::collections::BTreeMap::new(),
         last_announce_ms: 0,
@@ -3934,7 +4076,10 @@ fn babel_iface_from_spec(
     // addresses. A candidate is skipped when its sockets cannot bind —
     // most commonly the link-local still being DAD-tentative.
     let is_ll = |a: &std::net::Ipv6Addr| (a.segments()[0] & 0xffc0) == 0xfe80;
-    let scope_id = lr_osroute::ospf_transport::ifindex_of(&entry.name).unwrap_or(0);
+    // The IPv6 scope id: on Windows the adapter's Ipv6IfIndex (which can
+    // diverge from IfIndex — a membership joined on the wrong one is a
+    // socket that never receives); elsewhere the plain kernel index.
+    let scope_id = lr_osroute::ospf_transport::ipv6_ifindex_of(&entry.name).unwrap_or(0);
     let mut transports: Vec<BabelTransport> = Vec::new();
     let mut bind_errors: Vec<String> = Vec::new();
     for cand in entry
@@ -4084,7 +4229,10 @@ fn babel_iface_from_spec(
         auth_debug_line,
         router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
         hello_seqno: u16::from_be_bytes([boot[0], boot[1]]),
-        seqno: 0,
+        // Random per-boot seed — see `babel_iface_manual` for the RFC
+        // 8966 §3.1 rationale (restart staleness with a stable
+        // router-id).
+        seqno: u16::from_be_bytes([boot[2], boot[3]]),
         last_sig: String::new(),
         advertised: std::collections::BTreeMap::new(),
         last_announce_ms: 0,
@@ -4133,6 +4281,17 @@ fn babel_transport_new(
     let _ = uc.set_ttl(255);
     if local.is_ipv6() {
         let _ = uc.set_multicast_loop_v6(true);
+        // Also join the group on the unicast socket itself. On Linux a
+        // socket bound to a unicast address never receives multicast, so
+        // the join is inert there (delivery still comes through the
+        // wildcard mc socket below). On Windows delivery *requires* the
+        // membership on the receiving socket — relying on the separate
+        // wildcard mc socket left the daemon deaf on wintun-style
+        // adapters: hellos went out (peers saw the adjacency) while
+        // nothing that came back was ever read.
+        if let std::net::IpAddr::V6(g) = group {
+            let _ = uc.join_multicast_v6(&g, scope_id);
+        }
     } else if let std::net::IpAddr::V4(v4) = local {
         // Keep multicast egress on this interface when several v4
         // interfaces carry Babel (the bound source address usually
@@ -4400,7 +4559,12 @@ fn babel_announcement_signature(router: &DefaultRouter, iface: &BabelIface) -> S
     let mut parts: Vec<String> = Vec::new();
     for r in router.rib_snapshot() {
         if r.protocol != lr_core::rib::Protocol::Babel {
-            parts.push(format!("o{}", r.key.prefix));
+            // Include the metric: an own route whose metric changed (a
+            // static `metric` edit, an rtt_penalty step) must bump the
+            // announcement seqno, or peers reject the new value as
+            // infeasible (same seqno, worse metric) and hold the stale
+            // route.
+            parts.push(format!("o{}:{}", r.key.prefix, r.preference.metric));
         }
     }
     for r in router.babel_reachable(iface.session) {
@@ -4511,23 +4675,35 @@ fn build_babel_announcement(
     let reachable = router.babel_reachable(iface.session);
 
     // Next hops per family (§4.6.8 precedes the Updates using it),
-    // gated by what *this transport* can carry: the v6 transport takes
-    // IPv6 destinations (and IPv4 ones when extended next hop is
-    // enabled, §3.5.3); the v4 transport takes IPv4 destinations only
-    // (an IPv6 next hop is useless over an IPv4-only link).
+    // gated by what *this transport* can carry. The v6 transport carries
+    // BOTH families — that is how BIRD and babeld listen (they never
+    // join 224.0.0.111): IPv4 Updates ride it with an AE 1 NextHop TLV
+    // when this interface has an IPv4 address (babeld's dual-stack
+    // shape), or as AE 4 IPv4-via-IPv6 Updates over the v6 next hop
+    // when `extended_next_hop` is on (RFC 9229 §2.4). The v4 transport
+    // carries IPv4 destinations only (an IPv6 next hop is useless over
+    // an IPv4-only link) and exists for IPv4-only peers.
     let on_v4_transport = transport_local.is_ipv4();
     let want_v4 = snapshot.iter().any(|(p, _)| p.addr.is_ipv4())
         || reachable.iter().any(|r| r.key.destination.addr.is_ipv4());
     let want_v6 = snapshot.iter().any(|(p, _)| p.addr.is_ipv6())
         || reachable.iter().any(|r| r.key.destination.addr.is_ipv6());
+    // v4 routes are carried on the v6 transport either through an AE 1
+    // NextHop TLV (dual-stack interface) or via AE 4 (extended next hop).
+    let v4_on_v6 =
+        iface.next_hop_v4.is_some() || (iface.extended_next_hop && iface.next_hop_v6.is_some());
     let (v4_ok, v6_ok) = if on_v4_transport {
         (want_v4 && iface.next_hop_v4.is_some(), false)
     } else {
-        (
-            want_v4 && iface.extended_next_hop && iface.next_hop_v6.is_some(),
-            want_v6 && iface.next_hop_v6.is_some(),
-        )
+        (want_v4 && v4_on_v6, want_v6 && iface.next_hop_v6.is_some())
     };
+    // The AE a v4 destination uses on THIS transport: 1 (plain IPv4)
+    // when we advertise a v4 next hop alongside, 4 (IPv4-via-IPv6,
+    // RFC 9229) when only a v6 next hop carries it. Emitting an AE 1
+    // Update with only an AE 2 NextHop before it makes BIRD abort the
+    // whole datagram ("Update must have next hop") — one malformed TLV
+    // poisons every Update behind it in the same packet.
+    let v4_ae = if iface.next_hop_v4.is_some() { 1 } else { 4 };
     if v6_ok {
         let nh = iface.next_hop_v6.expect("v6_ok implies a v6 next hop");
         frame.body.push(Tlv::new(
@@ -4579,7 +4755,7 @@ fn build_babel_announcement(
         frame.body.push(Tlv::new(
             TlvType::Update,
             Update {
-                ae: if v4 { 1 } else { 2 },
+                ae: if v4 { v4_ae } else { 2 },
                 flags: 0,
                 prefix_len: prefix.prefix_len,
                 omitted: 0,
@@ -4625,7 +4801,7 @@ fn build_babel_announcement(
             frame.body.push(Tlv::new(
                 TlvType::Update,
                 Update {
-                    ae: if v4 { 1 } else { 2 },
+                    ae: if v4 { v4_ae } else { 2 },
                     flags: 0,
                     prefix_len: dest.prefix_len,
                     omitted: 0,
@@ -4689,7 +4865,7 @@ fn build_babel_announcement(
             frame.body.push(Tlv::new(
                 TlvType::Update,
                 Update {
-                    ae: if v4 { 1 } else { 2 },
+                    ae: if v4 { v4_ae } else { 2 },
                     flags: 0,
                     prefix_len: k.destination.prefix_len,
                     omitted: 0,
