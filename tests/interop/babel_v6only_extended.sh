@@ -64,10 +64,30 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 ip link add veth0a type veth peer name veth0b
 ip link set veth0a up
 ip link set veth0b up
-ip -6 addr add fe80::1/64 dev veth0a
-ip -6 addr add fd00:286:11e:6::1/64 dev veth0a
-ip -6 addr add fe80::2/64 dev veth0b
-ip -6 addr add fd00:286:11e:6::2/64 dev veth0b
+# Disable DAD on the veth pair so the link-local addresses are
+# immediately usable — otherwise the kernel marks them tentative
+# for ~1 s and bind(2) returns EADDRNOTAVAIL (os error 99), which
+# is the exact failure the CI interop job saw. BIRD and babeld
+# test scripts do the same (`accept_dad=0`, `dad_transmits=0`).
+sysctl -w net.ipv6.conf.veth0a.accept_dad=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.veth0a.dad_transmits=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.veth0b.accept_dad=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.veth0b.dad_transmits=0 >/dev/null 2>&1 || true
+# Ensure IPv6 is enabled on the interfaces (some kernels default to
+# disabled_ipv6=1 in new netns).
+sysctl -w net.ipv6.conf.veth0a.disable_ipv6=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.veth0b.disable_ipv6=0 >/dev/null 2>&1 || true
+sysctl -w net.ipv6.conf.all.disable_ipv6=0 >/dev/null 2>&1 || true
+# Use 'nodad' flag so the addresses are immediately usable even if
+# the sysctl above didn't take effect (some kernels restrict sysctl
+# in user namespaces). The 'nodad' flag is the documented way to
+# skip DAD per-address (iproute2 `ip addr add ... nodad`).
+ip -6 addr add fe80::1/64 dev veth0a nodad 2>/dev/null || ip -6 addr add fe80::1/64 dev veth0a
+ip -6 addr add fd00:286:11e:6::1/64 dev veth0a nodad 2>/dev/null || ip -6 addr add fd00:286:11e:6::1/64 dev veth0a
+ip -6 addr add fe80::2/64 dev veth0b nodad 2>/dev/null || ip -6 addr add fe80::2/64 dev veth0b
+ip -6 addr add fd00:286:11e:6::2/64 dev veth0b nodad 2>/dev/null || ip -6 addr add fd00:286:11e:6::2/64 dev veth0b
+# Brief settle so the kernel finishes configuring the addresses.
+sleep 0.5
 # Add a static blackhole route to lr's own /32 (mirrors the user's
 # static-route stanza) — both v4 and v6 forms.
 ip route add blackhole 172.23.10.102/32 metric 10
@@ -83,7 +103,9 @@ trap "kill $TCPDUMP_PID 2>/dev/null || true" EXIT
 
 # Start the reference BIRD daemon. Minimal config: Babel on veth0b,
 # listening for lr's announcements. We accept all routes.
-cat > "$OUT/bird.conf" <<'EOF'
+# Use <<EOF (not <<'EOF') so $OUT is expanded by the shell — BIRD
+# needs the absolute path, not a shell variable.
+cat > "$OUT/bird.conf" <<EOF
 log "$OUT/bird.log" all;
 log stderr all;
 ipv4 table lr_v4;
