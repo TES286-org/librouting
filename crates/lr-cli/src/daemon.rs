@@ -4481,12 +4481,20 @@ fn build_babel_announcement(
     // the export filter on those would double-apply (the operator's
     // intent for "export filter" is "what routes from elsewhere in
     // the Loc-RIB should Babel advertise", matching BIRD semantics).
-    let snapshot: Vec<_> = router
+    //
+    // Capture the route's intra-protocol metric (Preference.metric)
+    // so it can be folded into the advertised Update metric —
+    // babeld/BIRD both add the source route's metric to the
+    // interface's rxcost+rtt_penalty; lr was previously emitting
+    // `base.min(0xfffe)` alone, dropping the operator's static
+    // `metric 10` on the floor and making every originated route
+    // look the same cost regardless of the underlying path.
+    let snapshot: Vec<(Prefix, u32)> = router
         .rib_snapshot()
         .into_iter()
         .filter(|r| r.protocol != lr_core::rib::Protocol::Babel)
         .filter(|r| export_filter.is_none_or(|f| f.accepts(r)))
-        .map(|r| r.key.prefix)
+        .map(|r| (r.key.prefix, r.preference.metric))
         .collect();
     let reachable = router.babel_reachable(iface.session);
 
@@ -4496,9 +4504,9 @@ fn build_babel_announcement(
     // enabled, §3.5.3); the v4 transport takes IPv4 destinations only
     // (an IPv6 next hop is useless over an IPv4-only link).
     let on_v4_transport = transport_local.is_ipv4();
-    let want_v4 = snapshot.iter().any(|p| p.addr.is_ipv4())
+    let want_v4 = snapshot.iter().any(|(p, _)| p.addr.is_ipv4())
         || reachable.iter().any(|r| r.key.destination.addr.is_ipv4());
-    let want_v6 = snapshot.iter().any(|p| p.addr.is_ipv6())
+    let want_v6 = snapshot.iter().any(|(p, _)| p.addr.is_ipv6())
         || reachable.iter().any(|r| r.key.destination.addr.is_ipv6());
     let (v4_ok, v6_ok) = if on_v4_transport {
         (want_v4 && iface.next_hop_v4.is_some(), false)
@@ -4543,11 +4551,19 @@ fn build_babel_announcement(
         .encode()
         .to_vec(),
     ));
-    for prefix in &snapshot {
+    for (prefix, route_metric) in &snapshot {
         let v4 = prefix.addr.is_ipv4();
         if !(if v4 { v4_ok } else { v6_ok }) {
             continue; // no usable next hop for this family
         }
+        // RFC 8966 §3.4.4: the advertised metric is the cost of the
+        // route to the destination plus the cost of the link to the
+        // receiver. For an originated route this is the route's own
+        // metric (e.g. the static `metric 10`) plus the interface's
+        // rxcost+rtt_penalty. babeld computes this identically as
+        // `metric = route_metric + add_metric` where `add_metric` is
+        // the per-interface `rxcost + rtt_cost`.
+        let metric = (base + *route_metric).min(0xfffe) as u16;
         frame.body.push(Tlv::new(
             TlvType::Update,
             Update {
@@ -4557,7 +4573,7 @@ fn build_babel_announcement(
                 omitted: 0,
                 interval_cs: update_cs,
                 seqno: iface.seqno,
-                metric: base.min(0xfffe) as u16,
+                metric,
                 prefix: prefix_octets(prefix),
                 src_prefix_len: 0,
                 src_prefix: Vec::new(),
