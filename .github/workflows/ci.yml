@@ -581,7 +581,7 @@ jobs:
       - name: Babel v6-only tunnel + extended_next_hop + blackhole (RFC 5549, lr ↔ BIRD, pcap)
         timeout-minutes: 10
         run: ./tests/interop/babel_v6only_extended.sh
-      - name: Babel dual-stack BIRD interop (full production topology: v4-on-v6, forwarding, BGP-over-Babel, pcap)
+      - name: "Babel dual-stack BIRD interop (full production topology, v4-on-v6, forwarding, BGP-over-Babel, pcap)"
         # The complete reproduction of the reported Windows production
         # scenario: dual-stack babel link, both sides originating the same
         # aggregates (Loc-RIB preference), real ICMP delivery through the
