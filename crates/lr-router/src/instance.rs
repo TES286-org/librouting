@@ -196,6 +196,13 @@ pub trait RouterInstance {
     /// a Babel runtime.
     fn babel_note_peer(&mut self, _h: SessionHandle, _peer: lr_core::addr::IpAddr) {}
 
+    /// Withdraw every Loc-RIB route (queueing the RouteWithdrawn events
+    /// the kernel mirror consumes). Called once during daemon shutdown
+    /// after the sessions flushed their close NOTIFICATIONs, so the
+    /// routes this daemon installed leave the kernel with it — BIRD's
+    /// krt parity. Default: no-op for implementors without a RIB.
+    fn flush_rib_for_shutdown(&mut self) {}
+
     /// Take the pending "a Route Request arrived" flag (RFC 8966
     /// §3.2.6): true exactly once after any Route Request TLV (wildcard
     /// or specific) was seen on session `h`. The transport answers by
@@ -4152,20 +4159,33 @@ impl DefaultRouter {
         }
     }
 
-    /// End-of-RIB received for one family (RFC 4724 §4): the peer finished
-    /// re-advertising its table. Stale routes it did not refresh are
-    /// deleted and the family's LLGR deadline is retired (RFC 9494 §4.2).
+    /// End-of-RIB received for one family (RFC 4271 initial
+    /// synchronization / RFC 4724 §4): the peer finished re-advertising
+    /// its table. The convergence event is emitted for EVERY session —
+    /// the marker is how a speaker signals "initial table dump complete"
+    /// regardless of graceful restart; operators and e2e suites key on
+    /// it ("session established + synchronized"). Pre-fix the event only
+    /// fired for GR-retained sessions, so an ordinary iBGP session
+    /// synchronized silently. The stale-route purge only applies to
+    /// GR-retained sessions.
     fn on_end_of_rib(&mut self, session: u64, family: NlriFamily) {
-        let Some(state) = self.graceful_restart.get_mut(&session) else {
-            return;
+        // Collect the GR bookkeeping without holding the borrow across
+        // the removal.
+        let refreshed = match self.graceful_restart.get_mut(&session) {
+            Some(state) => {
+                state.llgr_deadlines.remove(&family);
+                let refreshed = state.refreshed.clone();
+                let more_families = !state.llgr_deadlines.is_empty();
+                if !more_families {
+                    self.graceful_restart.remove(&session);
+                }
+                Some(refreshed)
+            }
+            None => None,
         };
-        state.llgr_deadlines.remove(&family);
-        let refreshed = state.refreshed.clone();
-        let more_families = !state.llgr_deadlines.is_empty();
-        if !more_families {
-            self.graceful_restart.remove(&session);
+        if let Some(refreshed) = refreshed {
+            self.purge_unrefreshed_family(session, family, &refreshed);
         }
-        self.purge_unrefreshed_family(session, family, &refreshed);
         self.pending_events.push(RouterEvent::Log(format!(
             "session {} received End-of-RIB for AFI {}/SAFI {} — synchronization complete",
             session, family.afi, family.safi
@@ -4995,6 +5015,17 @@ impl RouterInstance for DefaultRouter {
             // multicasts (the `locals` set); every datagram that reaches
             // here is a genuine peer source.
             runtime.neighbor.address = peer;
+        }
+    }
+
+    fn flush_rib_for_shutdown(&mut self) {
+        // The process is on its way out: queue one withdrawal per
+        // Loc-RIB key. The event consumer (the ticker's final drain)
+        // hands them to the kernel mirror; no bookkeeping beyond the
+        // events is needed.
+        let keys: Vec<RouteKey> = self.loc_rib.iter_best().map(|r| r.key.clone()).collect();
+        for key in keys {
+            self.pending_events.push(RouterEvent::RouteWithdrawn(key));
         }
     }
 

@@ -2425,6 +2425,14 @@ fn spawn_ticker(
             // Final drain: the last events queued by closing sessions.
             {
                 let mut r = rt.router.write().unwrap();
+                // Shutdown withdrawal: everything this daemon installed
+                // into the kernel FIB goes away with it (BIRD's krt does
+                // the same on stop unless `persist` is configured;
+                // babeld removes its routes at exit). Without this a
+                // crashed or restarted daemon left stale babel/static
+                // routes in the table — a silent blackhole after the
+                // next restart re-adds only its own set.
+                r.flush_rib_for_shutdown();
                 let events = r.poll_events();
                 for ev in &events {
                     log_event(ev);
@@ -3119,6 +3127,20 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         Some(h) => Arc::clone(&h.runtime.router),
         None => Arc::new(RwLock::new(DefaultRouter::new())),
     };
+    // Standalone: apply the cross-protocol config ([[static]],
+    // [[aggregate]], [[redistribute]]) exactly like the BGP engine and
+    // the multi-protocol supervisor do. Without this a
+    // `--protocol babel` daemon silently ignored its [[static]] table —
+    // the Loc-RIB stayed empty, nothing was ever announced, and the
+    // blackhole/kernel checks only passed because the *test* pre-added
+    // the routes by hand.
+    if host.is_none() {
+        let mut r = router.write().unwrap();
+        if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
+            eprintln!("error: {}", e);
+            return ExitCode::from(2);
+        }
+    }
     let mut ifaces = ifaces;
     for iface in &mut ifaces {
         let sc = SessionConfig::babel(lr_ip(iface.transports[0].local));

@@ -653,11 +653,23 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             }
         }
     }
+    // Standalone: apply the cross-protocol config ([[static]],
+    // [[aggregate]], [[redistribute]]) like the multi-protocol
+    // supervisor — a `--protocol ospf` daemon must not silently ignore
+    // its [[static]] table.
+    let router: Arc<RwLock<DefaultRouter>> = match &host {
+        Some(h) => Arc::clone(&h.runtime.router),
+        None => {
+            let router = Arc::new(RwLock::new(DefaultRouter::new()));
+            if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
+                eprintln!("error: {}", e);
+                return ExitCode::from(2);
+            }
+            router
+        }
+    };
     let mut daemon = Ospf3Daemon {
-        router: match &host {
-            Some(h) => Arc::clone(&h.runtime.router),
-            None => Arc::new(RwLock::new(DefaultRouter::new())),
-        },
+        router,
         interfaces,
         neighbors: BTreeMap::new(),
         pending_reorig: BTreeMap::new(),
