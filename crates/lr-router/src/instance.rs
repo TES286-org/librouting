@@ -178,6 +178,43 @@ pub trait RouterInstance {
     /// should call this about once a second. Default: no-op for
     /// implementors without a Babel runtime.
     fn babel_gc(&mut self, _now_ms: u64) {}
+
+    /// Pin the Babel router-id this node announces on session `h`
+    /// (RFC 8966 §3.3). Updates that echo it back — a peer re-advertising
+    /// our own claims — are then ignored, exactly like BIRD's
+    /// `babel_handle_update` self-router-id guard. Default: no-op for
+    /// implementors without a Babel runtime.
+    fn set_babel_own_router_id(&mut self, _h: SessionHandle, _id: [u8; 8]) {}
+
+    /// Tell the Babel runtime the address the peer's datagrams come
+    /// from. RFC 8966 §3.5.3: an Update with no preceding NextHop TLV
+    /// resolves its next hop to the *sender* — BIRD relies on this and
+    /// omits the v6 NextHop TLV for its own announcements. The runtime
+    /// is constructed with the local bind address, so the transport
+    /// MUST call this per datagram or v6 routes fall back to our own
+    /// address as the next hop. Default: no-op for implementors without
+    /// a Babel runtime.
+    fn babel_note_peer(&mut self, _h: SessionHandle, _peer: lr_core::addr::IpAddr) {}
+
+    /// Take the pending "a Route Request arrived" flag (RFC 8966
+    /// §3.2.6): true exactly once after any Route Request TLV (wildcard
+    /// or specific) was seen on session `h`. The transport answers by
+    /// announcing immediately instead of waiting for the periodic tick.
+    /// Default: `false` for implementors without a Babel runtime.
+    fn babel_take_route_request(&mut self, _h: SessionHandle) -> bool {
+        false
+    }
+
+    /// Take the pending "a Seqno Request for *our own* router-id
+    /// arrived" event (RFC 8966 §3.2.6.2): `Some(seqno)` exactly once
+    /// after a peer asked us to re-announce with (at least) that seqno
+    /// — the restart-recovery path when a peer remembers a higher
+    /// seqno than our fresh boot value. The transport bumps its
+    /// announcement seqno to at least `seqno` and re-announces.
+    /// Default: `None` for implementors without a Babel runtime.
+    fn babel_take_own_seqno_request(&mut self, _h: SessionHandle) -> Option<u16> {
+        None
+    }
 }
 
 /// Per-session protocol runtime.
@@ -782,10 +819,32 @@ struct BabelRuntime {
     /// Per-session streaming decoder (carryover must never leak between
     /// different peers' transports).
     codec: BabelCodec,
-    /// Current next-hop (learned from NextHop TLVs, RFC 8966 §4.6.4).
-    next_hop: Option<IpAddr>,
+    /// Current IPv4 next hop (learned from AE 1 NextHop TLVs,
+    /// RFC 8966 §4.6.4).
+    next_hop_v4: Option<IpAddr>,
+    /// Current IPv6 next hop (AE 2 / AE 3 NextHop TLVs; the AE 4
+    /// IPv4-via-IPv6 encoding resolves against this one).
+    next_hop_v6: Option<IpAddr>,
     /// Router-id of the peer (learned from Router-Id TLVs).
     router_id: [u8; 8],
+    /// Our own router-id, when the embedder pinned one
+    /// ([`RouterApi::set_babel_own_router_id`]). Updates echoing it back
+    /// (a peer re-advertising our own claims) are ignored — BIRD's
+    /// `babel_handle_update` guard, and the cheap half of RFC 8966's
+    /// loop prevention.
+    own_router_id: Option<[u8; 8]>,
+    /// A Route Request (RFC 8966 §3.2.6) arrived — the embedder should
+    /// trigger an immediate announcement. Set by any request (wildcard
+    /// or specific); drained through
+    /// [`RouterApi::babel_take_route_request`].
+    route_request: bool,
+    /// A Seqno Request (RFC 8966 §3.2.6.2) for *our own* router-id
+    /// arrived — a peer holds a higher seqno than our fresh boot value
+    /// (the classic restart-staleness recovery). Carries the seqno the
+    /// peer asked for; the embedder bumps its announcement seqno to at
+    /// least that value and re-announces; drained through
+    /// [`RouterApi::babel_take_own_seqno_request`].
+    own_seqno_request: Option<u16>,
     /// Routes previously published to Loc-RIB — used to compute deltas.
     published: BTreeMap<RouteKey, Route>,
 }
@@ -804,8 +863,12 @@ impl BabelRuntime {
             neighbor: BabelNeighbor::new(local, now_ms),
             routes: BabelRouteTable::new(),
             codec: BabelCodec::new(),
-            next_hop: None,
+            next_hop_v4: None,
+            next_hop_v6: None,
             router_id: [0; 8],
+            own_router_id: None,
+            route_request: false,
+            own_seqno_request: None,
             published: BTreeMap::new(),
         }
     }
@@ -818,9 +881,15 @@ impl BabelRuntime {
     /// timestamps are drawn from keeps the round-trip differences
     /// single-clock.
     fn handle_frame(&mut self, frame: &BabelFrame, now_ms: u64, now_us: u32) -> RuntimeDelta {
-        use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
+        use lr_babel::message::{
+            Hello, Ihu, NextHop, PrefixCache, RouteRequest, RouterId as RouterIdTlv, SeqnoRequest,
+            Update,
+        };
         use lr_babel::tlv::TlvType;
 
+        // RFC 8966 §4.5.2 prefix-compression state — one per packet,
+        // exactly like BIRD's parse state.
+        let mut cache = PrefixCache::default();
         for tlv in &frame.body {
             match tlv.kind {
                 TlvType::Hello => {
@@ -860,12 +929,51 @@ impl BabelRuntime {
                 }
                 TlvType::NextHop => {
                     if let Some(nh) = NextHop::decode(&tlv.value) {
-                        self.next_hop = Some(nh.address);
+                        // Per-family next-hop state (RFC 8966 §3.5.3):
+                        // AE 1 feeds the IPv4 Updates, AE 2/3 the IPv6
+                        // ones (and AE 4 v4-over-v6 resolution).
+                        match nh.ae {
+                            1 => self.next_hop_v4 = Some(nh.address),
+                            _ => self.next_hop_v6 = Some(nh.address),
+                        }
                     }
                 }
                 TlvType::Update => {
                     if let Some(u) = Update::decode(&tlv.value) {
-                        self.apply_update(&u, now_ms);
+                        if let Some(u) = cache.expand(&u) {
+                            self.apply_update(&u, now_ms);
+                        }
+                    }
+                }
+                TlvType::RouteRequest => {
+                    // RFC 8966 §3.2.6: answer any request (wildcard or
+                    // specific) with the routes we announce — the
+                    // embedder drains the flag and announces immediately.
+                    if RouteRequest::decode(&tlv.value).is_some() {
+                        self.route_request = true;
+                    }
+                }
+                TlvType::SeqnoRequest => {
+                    if let Some(req) = SeqnoRequest::decode(&tlv.value) {
+                        // §3.2.6.2: a request naming our own router-id
+                        // means a peer remembers a higher seqno than our
+                        // boot value — bump and re-announce so its
+                        // feasibility check accepts our routes again.
+                        if let Some(own) = self.own_router_id {
+                            if req.router_id == own {
+                                self.own_seqno_request =
+                                    Some(self.own_seqno_request.map_or(req.seqno, |prev| {
+                                        // Several requests: serve the highest.
+                                        let a = prev as i16;
+                                        let b = req.seqno as i16;
+                                        if b.wrapping_sub(a) > 0 {
+                                            req.seqno
+                                        } else {
+                                            prev
+                                        }
+                                    }));
+                            }
+                        }
                     }
                 }
                 _ => {}
@@ -875,9 +983,22 @@ impl BabelRuntime {
     }
 
     fn apply_update(&mut self, u: &lr_babel::message::Update, now_ms: u64) {
-        // AE 0 = wildcard; AE 1 = IPv4; AE 2 = IPv6. Both are handled.
+        // A peer re-advertising our own claims back at us: ignore (BIRD's
+        // `msg->router_id == p->router_id` guard). Without this, our own
+        // /64s echoed by a no-split-horizon peer would be learned as
+        // Babel routes and — pre-fix — displaced the static routes we
+        // originate them from.
+        if let Some(own) = self.own_router_id {
+            if u.metric != 0xFFFF && self.router_id == own {
+                return;
+            }
+        }
+        // AE 0 = wildcard retraction; AE 1 = IPv4; AE 2 = IPv6;
+        // AE 4 = IPv4-via-IPv6 (RFC 9229 §2.4 — an IPv4 destination
+        // reached over the IPv6 next hop). AE 3 (link-local IPv6) is not
+        // a destination encoding and is ignored like BIRD does.
         let prefix = match u.ae {
-            1 => {
+            1 | 4 => {
                 if u.prefix.is_empty() || u.prefix.len() > 4 {
                     return;
                 }
@@ -893,13 +1014,21 @@ impl BabelRuntime {
                 addr[..u.prefix.len()].copy_from_slice(&u.prefix);
                 Prefix::new_v6(addr, u.prefix_len)
             }
-            _ => return, // AE 0 (wildcard) and unknown AEs are ignored.
+            0 => {
+                // Wildcard retraction (§4.6.9): flush everything this
+                // neighbour taught us — babeld's `retract_neighbour_routes`.
+                if u.metric == 0xFFFF && !self.routes.is_empty() {
+                    self.routes = lr_babel::BabelRouteTable::new();
+                }
+                return;
+            }
+            _ => return, // AE 3 and unknown AEs are ignored.
         };
         // Source-specific destination (RFC 9079) — tracked in the route key.
         // The source prefix uses the same AE as the destination.
         let source = if u.src_prefix_len > 0 && !u.src_prefix.is_empty() {
             match u.ae {
-                1 if u.src_prefix.len() <= 4 => {
+                1 | 4 if u.src_prefix.len() <= 4 => {
                     let mut s = [0u8; 4];
                     s[..u.src_prefix.len()].copy_from_slice(&u.src_prefix);
                     Some(lr_babel::source::SourcePrefix::new(Prefix::new_v4(
@@ -930,7 +1059,31 @@ impl BabelRuntime {
             self.routes.withdraw(&key);
             return;
         }
-        let nh = self.next_hop.unwrap_or(self.neighbor.address);
+        // Per-family next-hop resolution (RFC 8966 §3.5.3): an AE 1
+        // Update rides the AE 1 NextHop TLV (or, in its absence, the
+        // neighbour's own v4 address — the v4-transport shape); AE 2/3
+        // and the AE 4 IPv4-via-IPv6 encoding ride the v6 next hop (or
+        // the neighbour's address). An AE 1 Update with no usable v4
+        // next hop is dropped exactly like BIRD's "Update must have
+        // next hop" PARSE_ERROR.
+        let peer_v4 = match self.neighbor.address {
+            IpAddr::V4(_) => Some(self.neighbor.address),
+            IpAddr::V6(_) => None,
+        };
+        let peer_v6 = match self.neighbor.address {
+            IpAddr::V6(_) => Some(self.neighbor.address),
+            IpAddr::V4(_) => None,
+        };
+        let nh = match u.ae {
+            1 => match self.next_hop_v4.or(peer_v4) {
+                Some(nh) => nh,
+                None => return,
+            },
+            _ => self
+                .next_hop_v6
+                .or(peer_v6)
+                .unwrap_or(self.neighbor.address),
+        };
         self.routes.insert_timed(
             BabelRoute {
                 key,
@@ -994,7 +1147,25 @@ impl BabelRuntime {
 
     /// Convert the Babel route table's feasible best routes into RIB routes.
     fn best_routes(&mut self) -> Vec<Route> {
-        let nh_default = self.next_hop.unwrap_or(self.neighbor.address);
+        // The per-family "next hop of last resort" for a 0.0.0.0 / ::
+        // next hop announced on the wire: the family's NextHop TLV value
+        // when seen, else the neighbour's own address.
+        let peer_v4 = match self.neighbor.address {
+            IpAddr::V4(_) => Some(self.neighbor.address),
+            IpAddr::V6(_) => None,
+        };
+        let peer_v6 = match self.neighbor.address {
+            IpAddr::V6(_) => Some(self.neighbor.address),
+            IpAddr::V4(_) => None,
+        };
+        let nh_v4_default = self
+            .next_hop_v4
+            .or(peer_v4)
+            .unwrap_or(self.neighbor.address);
+        let nh_v6_default = self
+            .next_hop_v6
+            .or(peer_v6)
+            .unwrap_or(self.neighbor.address);
         self.routes
             .best_routes()
             .into_iter()
@@ -1005,6 +1176,11 @@ impl BabelRuntime {
                 let family = match r.key.destination.addr {
                     lr_core::addr::IpAddr::V4(_) => NlriFamily::IPV4_UNICAST,
                     lr_core::addr::IpAddr::V6(_) => NlriFamily::IPV6_UNICAST,
+                };
+                let next_hop = match r.next_hop {
+                    lr_core::addr::IpAddr::V4([0, 0, 0, 0]) => nh_v4_default,
+                    lr_core::addr::IpAddr::V6(b) if b == [0u8; 16] => nh_v6_default,
+                    other => other,
                 };
                 Route {
                     key: RouteKey::new(r.key.destination, family),
@@ -1022,11 +1198,7 @@ impl BabelRuntime {
                         Protocol::Babel.default_admin_distance(),
                         r.metric,
                     ),
-                    next_hop: Some(if r.next_hop == lr_core::addr::IpAddr::V4([0, 0, 0, 0]) {
-                        nh_default
-                    } else {
-                        r.next_hop
-                    }),
+                    next_hop: Some(next_hop),
                     attributes: lr_core::attr::Attributes::new(),
                     age_ms: 0,
                     path_id: 0,
@@ -2857,6 +3029,12 @@ impl DefaultRouter {
             .filter(|r| &r.key == key)
             .cloned()
             .chain(self.originated.values().filter(|r| r.key == *key).cloned())
+            .chain(
+                self.static_routes
+                    .values()
+                    .filter(|r| r.key == *key)
+                    .cloned(),
+            )
             .chain(self.direct_rib.values().filter(|r| r.key == *key).cloned())
             .collect();
 
@@ -4804,6 +4982,37 @@ impl RouterInstance for DefaultRouter {
             self.apply_runtime_delta(delta);
         }
     }
+
+    fn set_babel_own_router_id(&mut self, h: SessionHandle, id: [u8; 8]) {
+        if let Some(SessionState::Babel { runtime, .. }) = self.sessions.get_mut(&h.0) {
+            runtime.own_router_id = Some(id);
+        }
+    }
+
+    fn babel_note_peer(&mut self, h: SessionHandle, peer: lr_core::addr::IpAddr) {
+        if let Some(SessionState::Babel { runtime, .. }) = self.sessions.get_mut(&h.0) {
+            // The transport already filters our own looped-back
+            // multicasts (the `locals` set); every datagram that reaches
+            // here is a genuine peer source.
+            runtime.neighbor.address = peer;
+        }
+    }
+
+    fn babel_take_route_request(&mut self, h: SessionHandle) -> bool {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Babel { runtime, .. }) => {
+                core::mem::replace(&mut runtime.route_request, false)
+            }
+            _ => false,
+        }
+    }
+
+    fn babel_take_own_seqno_request(&mut self, h: SessionHandle) -> Option<u16> {
+        match self.sessions.get_mut(&h.0) {
+            Some(SessionState::Babel { runtime, .. }) => runtime.own_seqno_request.take(),
+            _ => None,
+        }
+    }
 }
 
 impl DefaultRouter {
@@ -4817,20 +5026,32 @@ impl DefaultRouter {
     /// rc.3 shared RIB: the OSPF/Babel runtimes install *protocol-direct*
     /// routes that never passed through the Adj-RIB-In pipeline. When the
     /// key also carries BGP candidates (Adj-RIB-In paths or a local
-    /// origination), the change goes through the merged decision process
-    /// so the best path falls out of the full preference order (BGP 20 <
-    /// OSPF 110 < Babel 120) and a withdrawal from either side falls back
-    /// to the other's contribution. Keys with no BGP side keep the
-    /// historical direct-install behaviour (single-path `install` + event)
-    /// — exactly what a single-protocol OSPF/Babel daemon sees today.
+    /// origination) — or an operator-configured static route — the change
+    /// goes through the merged decision process so the best path falls
+    /// out of the full preference order (static 1 < BGP 20 < OSPF 110 <
+    /// Babel 120) and a withdrawal from either side falls back to the
+    /// other's contribution. Keys with no other contributor keep the
+    /// historical direct-install behaviour (single-path `install` +
+    /// event) — exactly what a single-protocol OSPF/Babel daemon sees
+    /// today.
+    ///
+    /// The static-side comparison is load-bearing: before it existed, a
+    /// Babel-learned route for a prefix the operator had *also*
+    /// configured as a static (e.g. both ends of a tunnel announcing the
+    /// same aggregate) blindly replaced the static in the Loc-RIB — the
+    /// daemon then stopped announcing its own aggregate (the remote
+    /// peer's copy expired: "babel routes not fully propagated") and the
+    /// kernel mirror clobbered the operator's blackhole with the learned
+    /// route.
     fn apply_runtime_delta(&mut self, delta: RuntimeDelta) {
         for route in delta.installed {
             let key = route.key.clone();
             self.direct_rib.insert(key.clone(), route.clone());
-            let bgp_side = self.adj_rib_in.iter_all().any(|r| r.key == key)
+            let other_side = self.adj_rib_in.iter_all().any(|r| r.key == key)
                 || self.originated.contains_key(&key)
-                || self.redistributed_bgp.contains_key(&key);
-            if bgp_side {
+                || self.redistributed_bgp.contains_key(&key)
+                || self.static_routes.contains_key(&key);
+            if other_side {
                 self.reselect(&key);
             } else {
                 self.loc_rib.install(route.clone());
@@ -4858,8 +5079,8 @@ impl DefaultRouter {
                     self.unredistribute_route(&key);
                 }
                 // The direct contribution is gone; the merged decision
-                // process restores a surviving BGP/originated candidate
-                // (or uninstalls the key when none is left).
+                // process restores a surviving BGP/originated/static
+                // candidate (or uninstalls the key when none is left).
                 self.reselect(&key);
             } else {
                 self.loc_rib.uninstall(&key);

@@ -475,6 +475,121 @@ impl Update {
             _ => None,
         }
     }
+
+    /// The destination prefix of this Update with the RFC 8966 §4.5.2
+    /// omitted-octet compression already applied by
+    /// [`PrefixCache::expand`]: `omitted == 0` and the full octets
+    /// in-band. AE 4 (IPv4-via-IPv6, RFC 9229 §2.4) decodes like AE 1 —
+    /// an IPv4 destination announced over an IPv6 next hop.
+    pub fn expanded_prefix_value(&self) -> Option<Prefix> {
+        if self.omitted != 0 {
+            return None;
+        }
+        match self.ae {
+            1 | 4 => {
+                let mut addr = [0u8; 4];
+                let n = self.prefix.len().min(4);
+                addr[..n].copy_from_slice(&self.prefix[..n]);
+                Some(Prefix::new_v4(addr, self.prefix_len))
+            }
+            2 | 3 => {
+                let mut addr = [0u8; 16];
+                let n = self.prefix.len().min(16);
+                addr[..n].copy_from_slice(&self.prefix[..n]);
+                Some(Prefix::new_v6(addr, self.prefix_len))
+            }
+            _ => None,
+        }
+    }
+}
+
+/// Per-packet prefix-compression state (RFC 8966 §4.5.2): the last
+/// Update of each address encoding that carried the Prefix flag
+/// (`FLAG_PREFIX`, 0x80). BIRD and babeld both compress consecutive
+/// Updates sharing leading octets — BIRD's v6 announcements routinely
+/// omit 6 or 7 of every 8 prefix octets — so a receiver that ignores
+/// the compression learns *corrupted* prefixes (the in-band tail
+/// octets read as the head) and drops fully-compressed Updates
+/// outright. One cache lives per decoded packet ("within the same
+/// packet", §4.5.2), keyed per AE exactly like BIRD's parse state
+/// (`def_ip4_prefix` / `def_ip4_via_ip6_prefix` / `def_ip6_prefix`).
+#[derive(Debug, Default, Clone)]
+pub struct PrefixCache {
+    v4: Option<[u8; 4]>,
+    v4_via_v6: Option<[u8; 4]>,
+    v6: Option<[u8; 16]>,
+}
+
+impl PrefixCache {
+    /// Expand one decoded Update against the compression state and
+    /// update the state when the Update carries the Prefix flag.
+    /// Returns a copy with the full prefix octets in-band and
+    /// `omitted = 0`, or `None` when the Update is corrupt
+    /// (`omitted` without a saved prefix, or inconsistent lengths).
+    pub fn expand(&mut self, u: &Update) -> Option<Update> {
+        if u.ae == 0 {
+            // Wildcard retraction: no prefix to expand.
+            return Some(u.clone());
+        }
+        let full = usize::from(u.prefix_len).div_ceil(8);
+        let omit = usize::from(u.omitted);
+        if omit > full || u.prefix.len() + omit != full {
+            return None; // corrupt lengths (§4.5.2)
+        }
+        if omit > 0 {
+            let saved_len = self.saved(u.ae).map_or(0, |s| s.len());
+            if saved_len < omit {
+                return None; // "cannot omit data if there is no saved prefix"
+            }
+        }
+        let mut full_octets = vec![0u8; full];
+        if omit > 0 {
+            let saved = self.saved(u.ae)?;
+            full_octets[..omit].copy_from_slice(&saved[..omit]);
+        }
+        full_octets[omit..].copy_from_slice(&u.prefix);
+        if u.flags & Update::FLAG_PREFIX != 0 {
+            self.save(u.ae, &full_octets);
+        }
+        let mut out = u.clone();
+        out.omitted = 0;
+        out.prefix = full_octets;
+        Some(out)
+    }
+
+    /// The saved prefix octets of the cache matching `ae`.
+    fn saved(&self, ae: u8) -> Option<&[u8]> {
+        match ae {
+            1 => self.v4.as_ref().map(|a| &a[..]),
+            4 => self.v4_via_v6.as_ref().map(|a| &a[..]),
+            _ => self.v6.as_ref().map(|a| &a[..]),
+        }
+    }
+
+    /// Save `octets` as the new default prefix of the cache for `ae`
+    /// (the Prefix flag, §4.5.2).
+    fn save(&mut self, ae: u8, octets: &[u8]) {
+        match ae {
+            1 => {
+                let mut a = [0u8; 4];
+                let n = octets.len().min(4);
+                a[..n].copy_from_slice(&octets[..n]);
+                self.v4 = Some(a);
+            }
+            4 => {
+                let mut a = [0u8; 4];
+                let n = octets.len().min(4);
+                a[..n].copy_from_slice(&octets[..n]);
+                self.v4_via_v6 = Some(a);
+            }
+            _ => {
+                let mut a = [0u8; 16];
+                let n = octets.len().min(16);
+                a[..n].copy_from_slice(&octets[..n]);
+                self.v6 = Some(a);
+            }
+        }
+    }
 }
 
 /// Route-Request TLV body (RFC 8966 §4.6.10): `AE(1) | Plen(1) | Prefix`.
@@ -893,5 +1008,147 @@ mod tests {
         let ihu = Ihu::decode(&enc).unwrap();
         assert_eq!(ihu.timestamp_echo, None);
         assert_eq!(ihu.rxcost, 96);
+    }
+}
+
+#[cfg(test)]
+mod prefix_cache_tests {
+    use super::*;
+
+    fn update(ae: u8, plen: u8, flags: u8, omitted: u8, prefix: &[u8]) -> Update {
+        Update {
+            ae,
+            flags,
+            prefix_len: plen,
+            omitted,
+            interval_cs: 300,
+            seqno: 7,
+            metric: 202,
+            prefix: prefix.to_vec(),
+            src_prefix_len: 0,
+            src_prefix: Vec::new(),
+        }
+    }
+
+    /// The exact shape BIRD 3.x puts on the wire: a /64 with the Prefix
+    /// flag, followed by sibling /64s omitting the shared leading octets.
+    #[test]
+    fn expands_bird_style_compressed_v6_updates() {
+        let mut cache = PrefixCache::default();
+        // fd00:286:11e:6::/64, full 8 octets, sets the default prefix.
+        let first = cache
+            .expand(&update(
+                2,
+                64,
+                Update::FLAG_PREFIX,
+                0,
+                &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            ))
+            .unwrap();
+        assert_eq!(first.omitted, 0);
+        assert_eq!(
+            first.prefix,
+            vec![0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06]
+        );
+        // fd10:127:286:6::/64 announced as omit=1 + the last 7 octets.
+        let second = cache
+            .expand(&update(
+                2,
+                64,
+                0,
+                1,
+                &[0x10, 0x01, 0x27, 0x02, 0x86, 0x00, 0x06],
+            ))
+            .unwrap();
+        // Reconstructed: fd | 10 01 27 02 86 00 06.
+        assert_eq!(
+            second.prefix,
+            vec![0xfd, 0x10, 0x01, 0x27, 0x02, 0x86, 0x00, 0x06]
+        );
+        // The lab-observed corruption (tail octets read as the head)
+        // must not survive: 1001:2702:8600:6::/64 is wrong.
+        assert_ne!(
+            second.prefix,
+            vec![0x10, 0x01, 0x27, 0x02, 0x86, 0x00, 0x06, 0x00]
+        );
+    }
+
+    /// BIRD's fully-compressed /48 announcement: plen 48, omitted 6,
+    /// zero in-band octets. Pre-fix this TLV was dropped outright.
+    #[test]
+    fn expands_fully_compressed_v6_update() {
+        let mut cache = PrefixCache::default();
+        cache
+            .expand(&update(
+                2,
+                64,
+                Update::FLAG_PREFIX,
+                0,
+                &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            ))
+            .unwrap();
+        // fd00:286:11e::/48 with the first 6 octets omitted.
+        let out = cache.expand(&update(2, 48, 0, 6, &[])).unwrap();
+        assert_eq!(out.prefix, vec![0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e]);
+        assert_eq!(out.prefix_len, 48);
+    }
+
+    /// Omission without a saved prefix is corrupt (BIRD: PARSE_ERROR).
+    #[test]
+    fn omission_without_saved_prefix_is_rejected() {
+        let mut cache = PrefixCache::default();
+        assert!(cache.expand(&update(2, 48, 0, 6, &[])).is_none());
+    }
+
+    /// Lengths that do not add up are corrupt.
+    #[test]
+    fn inconsistent_lengths_are_rejected() {
+        let mut cache = PrefixCache::default();
+        cache
+            .expand(&update(
+                2,
+                64,
+                Update::FLAG_PREFIX,
+                0,
+                &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            ))
+            .unwrap();
+        // plen 64 -> 8 octets; omitted 1 + 6 octets = 7 != 8.
+        assert!(cache
+            .expand(&update(2, 64, 0, 1, &[0x10, 0x01, 0x27, 0x02, 0x86, 0x00]))
+            .is_none());
+        // omitted beyond the prefix length.
+        assert!(cache.expand(&update(2, 64, 0, 9, &[])).is_none());
+    }
+
+    /// The compression caches are keyed per AE (BIRD keeps three
+    /// separate defaults); a v4 default must not leak into a v6 lookup.
+    #[test]
+    fn caches_are_keyed_per_ae() {
+        let mut cache = PrefixCache::default();
+        // 10.127.32.0/24 sets the AE 1 default.
+        cache
+            .expand(&update(1, 24, Update::FLAG_PREFIX, 0, &[10, 127, 32]))
+            .unwrap();
+        // An AE 2 update omitting octets has no v6 default to draw from.
+        assert!(cache
+            .expand(&update(2, 64, 0, 2, &[0x00, 0x06, 0x00, 0x00, 0x00, 0x00]))
+            .is_none());
+        // The AE 4 (IPv4-via-IPv6) cache is separate from AE 1 too.
+        assert!(cache.expand(&update(4, 24, 0, 1, &[127, 32])).is_none());
+    }
+
+    /// Round trip: encode an expanded Update and decode it back through
+    /// a fresh cache (in-band full prefix, no compression).
+    #[test]
+    fn expanded_update_roundtrips() {
+        let mut cache = PrefixCache::default();
+        let u = update(2, 48, 0, 0, &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e]);
+        let out = cache.expand(&u).unwrap();
+        let bytes = out.encode();
+        let back = Update::decode(&bytes).unwrap();
+        assert_eq!(back.omitted, 0);
+        assert_eq!(back.prefix, u.prefix);
+        assert_eq!(back.prefix_len, 48);
     }
 }
