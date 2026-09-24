@@ -513,7 +513,7 @@ jobs:
         timeout-minutes: 10
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends bird2 frr iproute2
+          sudo apt-get install -y --no-install-recommends bird2 frr iproute2 tcpdump
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
@@ -578,6 +578,9 @@ jobs:
       - name: Babel multi-session transit + check link (RFC 8966, lr ↔ lr)
         timeout-minutes: 10
         run: ./tests/interop/babel_multihop.sh
+      - name: Babel v6-only tunnel + extended_next_hop + blackhole (RFC 5549, lr ↔ BIRD, pcap)
+        timeout-minutes: 10
+        run: ./tests/interop/babel_v6only_extended.sh
       - name: OSPF x BIRD interop (real DBD/LSR exchange, RFC 2328 7.2)
         timeout-minutes: 10
         run: ./tests/interop/ospf_bird.sh
