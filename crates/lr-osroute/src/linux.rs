@@ -62,6 +62,13 @@ const RTA_PRIORITY: u16 = 6;
 
 // Route types (RTN_* in `uapi/linux/rtnetlink.h`).
 const RTN_UNICAST: u8 = 1;
+/// RTN_UNSPEC (0) — the wildcard route type. On RTM_DELROUTE the
+/// kernel's IPv4 fib matcher treats it as "any type": a delete that
+/// names a specific type (unicast) never matches an RTN_BLACKHOLE
+/// row and fails with ESRCH, so the blackhole survives the daemon's
+/// teardown/reload. iproute2's plain `ip route del PREFIX` relies on
+/// exactly this wildcard.
+const RTN_UNSPEC: u8 = 0;
 /// "Drop" route — packets matching the destination are silently discarded.
 /// Used for the `next_hop = blackhole` static-route form (RFC 4271 §9.1.2
 /// "Unreachable" BGP routes commonly map to this in the kernel FIB).
@@ -473,18 +480,26 @@ impl OsRouteTable for RtNetlink {
         while attrs.len() % 4 != 0 {
             attrs.push(0);
         }
+        // rtm_type MUST be the RTN_UNSPEC wildcard: the IPv4 fib
+        // delete matcher compares the requested type against every
+        // candidate row's type, and a delete naming RTN_UNICAST never
+        // matches an installed RTN_BLACKHOLE (add_blackhole_route) —
+        // the withdrawal is refused with ESRCH and the blackhole
+        // stays in the kernel after the operator removed the static
+        // route or shut the daemon down. IPv6's fib6 ignores the type
+        // on delete, which is why only v4 exhibited it.
         let buf = self.build_request(
             RTM_DELROUTE,
             NLM_F_REQUEST | NLM_F_ACK,
             family,
             prefix.prefix_len,
             0,
-            RTN_UNICAST,
+            RTN_UNSPEC,
             RT_SCOPE_NOWHERE,
             &attrs,
         );
         let resp = self.sendmsg_and_recv(&buf)?;
-        check_ack(&resp)
+        check_ack_idempotent_delete(&resp)
     }
 
     fn list_routes(&mut self) -> Result<Vec<KernelRoute>, Self::Error> {
@@ -602,6 +617,38 @@ fn check_ack(resp: &[u8]) -> Result<(), OsRouteError> {
     }
     let err = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
     if err != 0 {
+        return Err(OsRouteError(format!("rtnetlink: error {}", err)));
+    }
+    Ok(())
+}
+
+/// [`check_ack`] for RTM_DELROUTE: ESRCH ("no such route") is success —
+/// the delete is idempotent and the target's absence is the requested
+/// end state. The kernel answers ESRCH both for a prefix never installed
+/// and for one already withdrawn; without this mapping every redundant
+/// withdrawal (a peer's retraction racing our own, a reload diffing an
+/// empty static table) logs a spurious failure. The Windows backend —
+/// which treats ERROR_NOT_FOUND as success for exactly this reason —
+/// and this mapping keep the trait's contract platform-uniform.
+fn check_ack_idempotent_delete(resp: &[u8]) -> Result<(), OsRouteError> {
+    if resp.len() < 20 {
+        return Err(OsRouteError(format!(
+            "rtnetlink: short ack response (len={})",
+            resp.len()
+        )));
+    }
+    let nlmsg_type = u16::from_ne_bytes([resp[4], resp[5]]);
+    if nlmsg_type != NLMSG_ERROR {
+        return Err(OsRouteError(format!(
+            "rtnetlink: unexpected response type {}",
+            nlmsg_type
+        )));
+    }
+    // Netlink NLMSG_ERROR carries a NEGATIVE errno (the kernel's
+    // nlmsgerr.error is -ESRCH for "no such route").
+    const ESRCH: i32 = -3;
+    let err = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
+    if err != 0 && err != ESRCH {
         return Err(OsRouteError(format!("rtnetlink: error {}", err)));
     }
     Ok(())
