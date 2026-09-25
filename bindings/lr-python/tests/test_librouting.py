@@ -99,8 +99,10 @@ def test_srv6_srh_roundtrip():
     srh = librouting.encode_srv6_srh(sids)
     # SRH length: 8 fixed + 2*16 segments = 40.
     assert len(srh) == 40
-    # Routing Type at offset 2 = 43 (RFC 8754 §2).
-    assert srh[2] == 43
+    # Routing Type at offset 2 = 4 (RFC 8754 §2; IANA "IPv6 Routing
+    # Types" registry — 43 is the Routing header's Next Header value,
+    # a different field at a different layer).
+    assert srh[2] == 4
     # Decode back — the returned bytes are the segment list concatenated.
     decoded = librouting.decode_srv6_srh(srh)
     assert decoded == sids

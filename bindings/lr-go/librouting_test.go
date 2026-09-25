@@ -75,9 +75,11 @@ func TestEncodeSRv6SRH(t *testing.T) {
 	if len(srh) != 40 {
 		t.Fatalf("expected 40-byte SRH, got %d", len(srh))
 	}
-	// Routing Type at offset 2 = 43 (RFC 8754 §2).
-	if srh[2] != 43 {
-		t.Fatalf("expected Routing Type 43, got %d", srh[2])
+	// Routing Type at offset 2 = 4 (RFC 8754 §2; IANA "IPv6 Routing
+	// Types" registry — 43 is the Routing header's Next Header value,
+	// a different field at a different layer).
+	if srh[2] != 4 {
+		t.Fatalf("expected Routing Type 4, got %d", srh[2])
 	}
 	// Decode back — the returned bytes are the segment list concatenated.
 	decoded, err := DecodeSRv6SRH(srh)
