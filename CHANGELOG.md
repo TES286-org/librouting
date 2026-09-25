@@ -118,6 +118,25 @@ ship, breaking changes that affect embedders, dependency bumps.
   A VPN's on-link route for the same prefix (WireGuard AllowedIPs
   rows are `MIB_IPPROTO_NETMGMT`, the same tag lr's statics use)
   previously died with the daemon's withdrawal.
+- **Windows withdrawals match the row the stack actually stored.**
+  `CreateIpForwardEntry2` normalises row shapes at create time: a
+  next hop equal to the egress interface's own address (the BGP
+  next-hop-self shape) is stored as the on-link form — `route print`
+  shows "On-link" where a gateway was requested. The install ledger
+  recorded the *requested* next hop, so a scoped withdrawal never
+  matched the normalised table row and silently no-oped as an
+  "idempotent success" while the route stayed live in the FIB (the
+  "BGP kernel route survived peer teardown" failure). After every
+  successful create the backend now reads the row back with the O(1)
+  per-row getter (`GetIpForwardEntry2` — no table scan) and ledgers
+  the *effective* next hop the stack holds.
+- **Windows rows no longer inherit the initializer's `Loopback` flag.**
+  `InitializeIpForwardEntry` leaves `MIB_IPFORWARD_ROW2.Loopback` TRUE
+  on audited builds (the SDK documents no such default); a set flag is
+  loopback delivery under the weak-host model — the local-accept trap
+  the on-link blackhole idiom exists to close, still present on every
+  row the backend installed. Both row builders now clear the flag
+  explicitly and a unit test pins it for both families.
 - **Windows routes learned over Babel egress the right interface.**
   The kernel mirror passed `oif 0` for every non-link-local next hop
   and let the OS resolve it; Windows' `GetBestRoute2` longest-prefix
@@ -194,9 +213,31 @@ ship, breaking changes that affect embedders, dependency bumps.
   package does not ship `mpls_router`).
 - The Windows BIRD-in-WSL2 interop job is now a hard gate (its
   stabilisation period passed).
-- The native cross-platform matrix dropped its ubuntu entry and
+- **The native cross-platform matrix dropped its ubuntu entry and
   formatting step — both fully duplicated by the `lint` and
   `unit-tests` jobs on the same image.
+- The SRv6 kernel interop tests run inside the rootless netns instead
+  of bare on the runner: without CAP_NET_ADMIN every install died
+  with EPERM and the `#[ignore]`d tests passed as vacuous SKIPs
+  ("SKIP: add_seg6local_route returned EPERM"). The step now wraps
+  the suite in `unshare -Urn` and enables `seg6_enabled` inside that
+  netns (per-netns sysctl, rootless-writable — the same pattern the
+  MPLS dataplane phase uses).
+- The Windows FIB-semantics probe is a manual `workflow_dispatch`
+  workflow (`windows-fib-probe.yml`) instead of a branch-gated job in
+  the push pipeline: a job gated off main-line triggers shows up as
+  permanently "skipped" on every run. The probe payload also runs
+  detached with per-test `timeout` guards and the step prints the
+  transcript itself — the runner cannot always reap cargo's process
+  tree on Windows, and a wedged test used to carry the job to its
+  timeout with the transcript lost.
+- The interop resolution-steal shape is staged as 169.254.188.0/24
+  instead of the full APIPA /16: making 169.254.169.254 (the cloud
+  metadata service) on-link on a runner's primary adapter kills the
+  guest agent's health check and GitHub cancels the job. The
+  longest-prefix steal mechanism the tests reproduce is identical.
+- The FIB-mutating Windows tests run with `--test-threads=1` (they
+  mutate the same rows and reuse the same probe port).
 
 ### Added (tests)
 
