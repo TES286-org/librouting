@@ -20,6 +20,18 @@
 //!   sub-attribute whose payload is `struct seg6_local_arg` (a u32
 //!   action + a list of (u16 param, nla) pairs).
 //!
+//! ## Egress device requirement
+//!
+//! Linux's `fib6_nh_init` (net/ipv6/route.c) refuses every IPv6 route
+//! that names neither an egress device (`RTA_OIF`) nor a gateway with
+//! `ENODEV` — there is no implicit device pick. `iproute2` commands
+//! and FRR (`zclient_send_localsid`, which pins every local SID to a
+//! real interface) therefore always carry a device. Callers must do
+//! the same: `Seg6Route::with_if_index` /
+//! `Seg6LocalRoute::with_if_index`. The loopback index resolves via
+//! `ospf_transport::ifindex_of("lo")` (`if_nametoindex`), which is
+//! netns-aware for rootless namespace use.
+//!
 //! ## Capability detection
 //!
 //! The kernel gates SRv6 on `CONFIG_IPV6_SEG6_LWTUNNEL` and the per-
@@ -241,6 +253,16 @@ pub struct Seg6LocalRoute {
     pub sid: Sid,
     /// The behavior the kernel runs when the SID is hit (RFC 8986 §4).
     pub behavior: Behavior,
+    /// Route-level egress interface index (`RTA_OIF`). The kernel's
+    /// `fib6_nh_init` refuses every IPv6 route that names neither an
+    /// egress device nor a gateway with `ENODEV`, so a seg6local
+    /// install needs one. FRR's `zclient_send_localsid` pins every
+    /// local SID to a real interface for the same reason.
+    ///
+    /// This is the *route's* device, distinct from the `oif` action
+    /// parameter (the `End.X`/`End.DX2` forwarding interface, which
+    /// rides inside `RTA_ENCAP` as `SEG6_LOCAL_OIF`).
+    pub if_index: u32,
     /// Optional next-hop IPv4 address (for End.DX4 / End.X.PS, etc.).
     pub nh4: Option<[u8; 4]>,
     /// Optional next-hop IPv6 address (for End.DX6 / End.X, etc.).
@@ -257,17 +279,32 @@ impl Seg6LocalRoute {
     /// Build a `seg6local` route with no extra parameters. The kernel
     /// rejects behaviors that require parameters (End.DX6 needs NH6,
     /// End.DT6 needs TABLE, etc.) — the caller adds them via the
-    /// builder methods.
+    /// builder methods. Set the egress device with
+    /// [`Seg6LocalRoute::with_if_index`] unless the environment
+    /// guarantees one is already implied (it never is on Linux: the
+    /// kernel returns `ENODEV` for a device-less, gateway-less IPv6
+    /// route).
     pub fn new(sid: Sid, behavior: Behavior) -> Self {
         Self {
             sid,
             behavior,
+            if_index: 0,
             nh4: None,
             nh6: None,
             iif: None,
             oif: None,
             table: None,
         }
+    }
+
+    /// Set the route-level egress interface index (`RTA_OIF`).
+    /// Required for the install to be accepted: the kernel's
+    /// `fib6_nh_init` (net/ipv6/route.c) fails a route with neither an
+    /// egress device nor a gateway with `ENODEV`. Builder-style.
+    #[must_use]
+    pub fn with_if_index(mut self, if_index: u32) -> Self {
+        self.if_index = if_index;
+        self
     }
 
     /// Set the IPv4 next-hop. Builder-style.
@@ -621,6 +658,12 @@ impl Seg6Netlink {
 
         let mut attrs = Vec::new();
         attrs.extend(Self::build_rta_attribute(RTA_DST, route.sid.as_bytes()));
+        if route.if_index != 0 {
+            attrs.extend(Self::build_rta_attribute(
+                RTA_OIF,
+                &route.if_index.to_ne_bytes(),
+            ));
+        }
         attrs.extend(Self::build_rta_attribute(
             RTA_ENCAP_TYPE,
             &LWTUNNEL_ENCAP_SEG6_LOCAL.to_ne_bytes(),
@@ -713,9 +756,14 @@ fn errno_str(err: i32) -> &'static str {
     match err {
         -1 => "EPERM (insufficient privileges)",
         -2 => "ENOENT (no such entry)",
+        -13 => "EACCES (IPv6 is disabled on the egress device)",
         -17 => "EEXIST (entry already installed)",
+        -19 => "ENODEV (egress device not specified or does not exist — set the route's if_index)",
         -22 => "EINVAL (malformed request)",
         -95 => "EOPNOTSUPP (SRv6 not supported)",
+        -99 => "EADDRNOTAVAIL",
+        -101 => "ENETUNREACH (egress device has no route)",
+        -119 => "ENETDOWN (egress device is down)",
         _ => "unknown error",
     }
 }
@@ -979,6 +1027,63 @@ mod tests {
         let table =
             u32::from_ne_bytes([table_attr[0], table_attr[1], table_attr[2], table_attr[3]]);
         assert_eq!(table, 100);
+    }
+
+    #[test]
+    fn seg6local_route_emits_rta_oif_for_the_egress_device() {
+        // The kernel's fib6_nh_init rejects an IPv6 route naming
+        // neither an egress device nor a gateway with ENODEV, so a
+        // seg6local install MUST carry RTA_OIF (run 36136529031's
+        // "netlink error -19").
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        let route = Seg6LocalRoute::new(sid, Behavior::End).with_if_index(1);
+        let req = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap();
+        let oif = find_attr(&req, RTA_OIF).expect("seg6local request must carry RTA_OIF");
+        assert_eq!(oif.len(), 4);
+        assert_eq!(u32::from_ne_bytes([oif[0], oif[1], oif[2], oif[3]]), 1);
+        // The route-level RTA_OIF is distinct from the End.X action
+        // parameter: with no action oif set, SEG6_LOCAL_OIF must be
+        // absent from the encap attributes.
+        let encap = find_attr(&req, RTA_ENCAP).unwrap();
+        assert!(find_encap_attr(encap, SEG6_LOCAL_OIF).is_none());
+    }
+
+    #[test]
+    fn seg6local_route_omits_rta_oif_when_unset() {
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        let route = Seg6LocalRoute::new(sid, Behavior::End);
+        let req = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap();
+        assert!(find_attr(&req, RTA_OIF).is_none());
+    }
+
+    #[test]
+    fn seg6_route_emits_rta_oif_when_if_index_set() {
+        let sid1 = Sid::from_str("fcbb:bb00::1").unwrap();
+        let srh = Srh::new(vec![sid1]).unwrap();
+        let prefix: lr_core::addr::Prefix = "2001:db8:1::/48".parse().unwrap();
+        let route = Seg6Route::new(prefix, srh).with_if_index(3);
+        let req = test_netlink()
+            .build_seg6_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap();
+        let oif = find_attr(&req, RTA_OIF).expect("RTA_OIF expected");
+        assert_eq!(u32::from_ne_bytes([oif[0], oif[1], oif[2], oif[3]]), 3);
+    }
+
+    #[test]
+    fn check_ack_names_enodev() {
+        let mut resp = vec![0u8; 20];
+        resp[0..4].copy_from_slice(&20u32.to_ne_bytes());
+        resp[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        resp[16..20].copy_from_slice(&(-19i32).to_ne_bytes());
+        let err = check_ack(&resp).unwrap_err();
+        match err {
+            Seg6RouteError::Kernel(s) => assert!(s.contains("ENODEV")),
+            other => panic!("expected Kernel error, got {:?}", other),
+        }
     }
 
     #[test]
