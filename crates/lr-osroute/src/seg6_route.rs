@@ -386,6 +386,11 @@ pub struct Seg6Netlink {
     fd: RawFd,
     seq: AtomicU32,
     pid: u32,
+    /// The most recent request sent (for diagnostics: a failed
+    /// install's exact bytes, printable by the caller).
+    last_req: std::cell::RefCell<Option<Vec<u8>>>,
+    /// The most recent response received (diagnostics, as above).
+    last_resp: std::cell::RefCell<Option<Vec<u8>>>,
 }
 
 impl Seg6Netlink {
@@ -465,7 +470,24 @@ impl Seg6Netlink {
             fd,
             seq: AtomicU32::new(1),
             pid: local.nl_pid,
+            last_req: std::cell::RefCell::new(None),
+            last_resp: std::cell::RefCell::new(None),
         })
+    }
+
+    /// The exact bytes of the most recent request sent — the
+    /// diagnostic for "the kernel rejected this and I need to see
+    /// what \"this\" was" (hex-dump it on failure and compare against
+    /// a reference implementation's bytes).
+    pub fn last_request_bytes(&self) -> Option<Vec<u8>> {
+        self.last_req.borrow().clone()
+    }
+
+    /// The exact bytes of the most recent response received — the
+    /// raw NAK, extack attributes included, for the same purpose as
+    /// [`Seg6Netlink::last_request_bytes`].
+    pub fn last_response_bytes(&self) -> Option<Vec<u8>> {
+        self.last_resp.borrow().clone()
     }
 
     fn next_seq(&self) -> u32 {
@@ -473,6 +495,9 @@ impl Seg6Netlink {
     }
 
     fn sendmsg_and_recv(&self, buf: &[u8]) -> Result<Vec<u8>, Seg6RouteError> {
+        if let Ok(mut slot) = self.last_req.try_borrow_mut() {
+            *slot = Some(buf.to_vec());
+        }
         let dest = libc_sockaddr_nl {
             nl_family: AF_NETLINK as u16,
             nl_pad: 0,
@@ -515,6 +540,9 @@ impl Seg6Netlink {
             )));
         }
         out.truncate(n as usize);
+        if let Ok(mut slot) = self.last_resp.try_borrow_mut() {
+            *slot = Some(out.clone());
+        }
         Ok(out)
     }
 
@@ -1040,6 +1068,8 @@ mod tests {
             fd: -1,
             seq: AtomicU32::new(7),
             pid: 123,
+            last_req: std::cell::RefCell::new(None),
+            last_resp: std::cell::RefCell::new(None),
         }
     }
 

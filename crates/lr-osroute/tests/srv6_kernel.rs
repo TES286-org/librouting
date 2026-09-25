@@ -253,6 +253,29 @@ fn seg6local_route_installs_into_kernel_local_table() {
             return;
         }
         eprintln!("add_seg6local_route failed: {}\n{}", e, show_seg6_routes());
+        // The exact bytes the kernel rejected, and its exact reply —
+        // the ground truth for diffing against a reference
+        // implementation's accepted request.
+        if let Some(req) = nl.last_request_bytes() {
+            eprintln!(
+                "rejected request ({} bytes): {}",
+                req.len(),
+                req.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+        if let Some(resp) = nl.last_response_bytes() {
+            eprintln!(
+                "kernel reply ({} bytes): {}",
+                resp.len(),
+                resp.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
         // Reference contrasts: iproute2 building the same shapes — one
         // per table idiom. If both fail the same way, the kernel/env
         // is the arbiter (and the local-table idiom itself is the
