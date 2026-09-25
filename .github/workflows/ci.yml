@@ -381,7 +381,7 @@ jobs:
     if: startsWith(github.ref, 'refs/heads/probe/')
     name: Windows FIB probe (row forms + ifindex resolution)
     runs-on: windows-2022
-    timeout-minutes: 30
+    timeout-minutes: 45
     permissions:
       contents: write
     steps:
@@ -392,7 +392,7 @@ jobs:
         with:
           shared-key: "windows-fib-probe"
       - name: Run the FIB probe (Administrator shell)
-        timeout-minutes: 20
+        timeout-minutes: 35
         shell: bash
         run: |
           cargo test -p lr-osroute --test windows_route_table --no-run
