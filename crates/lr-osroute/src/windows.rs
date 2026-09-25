@@ -45,29 +45,108 @@ use windows_sys::Win32::Networking::WinSock::{
 };
 
 /// IP Helper backed implementation of [`OsRouteTable`].
-pub struct IpHelper;
+///
+/// The struct carries an install ledger (see [`InstalledRow`]) so
+/// withdrawals delete exactly the rows this instance created — never
+/// a foreign row that happens to share the prefix.
+pub struct IpHelper {
+    /// Rows this instance installed: `(prefix, (next hop, interface
+    /// index))` pairs. `delete_route` matches these exactly; only when
+    /// the ledger has no entry for a prefix (fresh process, routes
+    /// left by a predecessor) does it fall back to deleting every
+    /// protocol-tagged row for the prefix.
+    installed: std::collections::HashMap<Prefix, Vec<InstalledRow>>,
+    /// Lazily-resolved blackhole egress interfaces, one per family
+    /// (`[v4, v6]`, `None` until the first install of that family):
+    /// resolution walks the FIB and the adapter list once per family
+    /// for the instance's lifetime, not once per installed anchor.
+    blackhole_if: [Option<u32>; 2],
+}
+
+/// One ledger entry — the row identity Windows routes are keyed by
+/// (`CreateIpForwardEntry2` duplicates = same prefix **and** next hop
+/// **and** interface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InstalledRow {
+    next_hop: IpAddr,
+    if_index: u32,
+}
 
 /// The loopback interface index on Windows — always 1 (the "Loopback
-/// Pseudo-Interface 1"). Used as the egress for blackhole routes.
+/// Pseudo-Interface 1"). **Not** usable as a blackhole egress: every
+/// delivery form on it is local delivery (weak host), so a daemon
+/// listening on 0.0.0.0 answers SYNs for the covered space — observed
+/// live in production as lr's own BGP listener accepting its own
+/// outbound connections (the "peer closed connection" storm).
 const LOOPBACK_IF_INDEX: u32 = 1;
 
-/// The loopback *gateway* of a blackhole route. Microsoft's documented
-/// `route add PREFIX mask MASK 127.0.0.1` idiom (in force since
-/// Windows NT, and what `route.exe ?` still prints): forwarding the
-/// packet toward the loopback address makes the stack treat it as a
-/// transit delivery to a non-local destination, which is discarded.
-/// A zero next-hop with the loopback interface — what lr previously
-/// installed — is an *on-link* route on loopback instead: the stack
-/// then accepts packets for the covered space as addressed to the
-/// local machine (weak host model), so a daemon listening on
-/// 0.0.0.0 answers SYNs for addresses it never owned. That turned a
-/// configured blackhole into a live loopback service and produced
-/// TCP "peer closed connection" storms against lr's own listener.
-fn loopback_gateway(prefix: &Prefix) -> IpAddr {
+/// The zero next hop of `prefix`'s family, with the sockaddr family
+/// set — the documented on-link form (`route print` shows it as the
+/// "On-link" gateway). This is the row shape WireGuard for Windows
+/// installs for every AllowedIPs route, so it is the best-supported
+/// `CreateIpForwardEntry2` form on real interfaces.
+fn on_link_next_hop(prefix: &Prefix) -> IpAddr {
     match prefix.addr {
-        IpAddr::V4(_) => IpAddr::V4([127, 0, 0, 1]),
-        IpAddr::V6(_) => IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+        IpAddr::V4(_) => IpAddr::V4([0, 0, 0, 0]),
+        IpAddr::V6(_) => IpAddr::V6([0u8; 16]),
     }
+}
+
+/// The egress interface for a blackhole route: the interface that owns
+/// the family's default route (the box's real uplink), else the first
+/// up interface with a family-matching address. Windows has **no**
+/// blackhole route type — every loopback-delivery form is local
+/// delivery (weak host), and `CreateIpForwardEntry2` rejects loopback
+/// gateways outright with `ERROR_INVALID_PARAMETER` — so the discard
+/// idiom is an on-link row on a *real* interface: the stack resolves
+/// the covered destination itself as a neighbour, the resolution
+/// fails, and matching traffic dies as host-unreachable instead of
+/// being forwarded (the Windows null-route convention: an unroutable
+/// delivery, `ERROR_NOT_FOUND` semantics rather than Linux's silent
+/// `RTN_BLACKHOLE`).
+fn blackhole_if_index(prefix: &Prefix) -> u32 {
+    let family_probe = match prefix.addr {
+        IpAddr::V4(_) => IpAddr::V4([0, 0, 0, 0]),
+        IpAddr::V6(_) => IpAddr::V6([0u8; 16]),
+    };
+    if let Ok(idx) = IpHelper::resolve_interface(&family_probe) {
+        if idx != LOOPBACK_IF_INDEX {
+            return idx;
+        }
+    }
+    // No default route for the family (lab boxes, v6-less hosts): any
+    // up adapter with a family address still gives ARP-fail discard.
+    blackhole_if_index_by_scan(prefix)
+}
+
+/// The enumeration fallback of [`blackhole_if_index`] — also the
+/// cache-miss path: one `GetAdaptersAddresses` scan serving every
+/// blackhole install of the family.
+fn blackhole_if_index_by_scan(prefix: &Prefix) -> u32 {
+    let want_v4 = prefix.addr.is_ipv4();
+    if let Ok(ifaces) = crate::ospf_transport::list_interfaces() {
+        for i in ifaces {
+            if !i.up {
+                continue;
+            }
+            let family_ok = if want_v4 {
+                !i.v4.is_empty()
+            } else {
+                !i.v6.is_empty()
+            };
+            if family_ok {
+                if let Some(idx) = crate::ospf_transport::ifindex_of(&i.name) {
+                    if idx != LOOPBACK_IF_INDEX {
+                        return idx;
+                    }
+                }
+            }
+        }
+    }
+    // Degenerate host (only loopback exists): the local-accept caveat
+    // applies, but a route beats no route — and this path is all but
+    // unreachable in practice.
+    LOOPBACK_IF_INDEX
 }
 
 /// Map the library's route origin to the MIB `RouteProtocol` tag the
@@ -100,7 +179,10 @@ impl IpHelper {
             // SAFETY: pointer came from GetIpForwardTable2.
             unsafe { FreeMibTable(table as *const core::ffi::c_void) };
         }
-        Ok(Self)
+        Ok(Self {
+            installed: std::collections::HashMap::new(),
+            blackhole_if: [None, None],
+        })
     }
 
     fn make_row(
@@ -131,23 +213,45 @@ impl IpHelper {
     }
 
     /// Build a blackhole route row — packets matching `prefix` are
-    /// discarded by the kernel. Windows has no explicit "discard" flag
-    /// in `MIB_IPFORWARD_ROW2`; the documented convention is the
-    /// `route add PREFIX mask MASK 127.0.0.1` idiom — point the route at
-    /// the loopback *gateway*, which makes the forwarding stack treat
-    /// matching packets as transit deliveries to a non-local
-    /// destination and silently discard them. See [`loopback_gateway`]
-    /// for why the previous zero-next-hop form was wrong.
-    fn make_blackhole_row(prefix: &Prefix) -> MIB_IPFORWARD_ROW2 {
+    /// discarded (as host-unreachable) instead of forwarded.
+    ///
+    /// Windows has no discard route type, and the historically
+    /// suggested forms are all unusable from `CreateIpForwardEntry2`:
+    ///
+    /// * loopback *gateway* (the `route add ... 127.0.0.1` idiom) —
+    ///   rejected with `ERROR_INVALID_PARAMETER` (87); netio refuses
+    ///   loopback next hops (observed on production Windows 11, and
+    ///   already documented in `tests/interop/bgp_kernel_install.sh`'s
+    ///   Windows next-hop selection note);
+    /// * any delivery through the loopback *interface* (zero next hop
+    ///   or the `MIB_IPFORWARD_ROW2.Loopback` flag) — local delivery
+    ///   under the weak host model, so a daemon listening on 0.0.0.0
+    ///   answers SYNs for the covered space (the production "peer
+    ///   closed connection" storm).
+    ///
+    /// The idiom this installs is the Windows null-route convention —
+    /// an on-link row on a real egress interface (see
+    /// [`blackhole_if_index`]): the stack tries to resolve the covered
+    /// destination itself as a neighbour on that link, resolution
+    /// fails, and the traffic dies. This is `unreachable`-flavoured
+    /// discard (ARP-fail → host-unreachable), not Linux's silent
+    /// `RTN_BLACKHOLE` — the distinction is invisible to routing
+    /// correctness (nothing is forwarded, nothing loops), which is
+    /// what a BGP aggregate anchor or a `next_hop "blackhole"`
+    /// static needs.
+    fn make_blackhole_row(prefix: &Prefix, if_index: u32) -> MIB_IPFORWARD_ROW2 {
         // SAFETY: same defaults as `make_row`.
         let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
         unsafe { InitializeIpForwardEntry(&mut row) };
-        row.InterfaceIndex = LOOPBACK_IF_INDEX;
+        row.InterfaceIndex = if_index;
         row.DestinationPrefix = IP_ADDRESS_PREFIX {
             Prefix: sockaddr_for(&prefix.addr, 0),
             PrefixLength: prefix.prefix_len,
         };
-        row.NextHop = sockaddr_for(&loopback_gateway(prefix), 0);
+        // The on-link form: family set, address all zeros ("On-link"
+        // in `route print`). Not the `Loopback` flag — see the method
+        // docs for why every loopback-delivery form is a trap.
+        row.NextHop = sockaddr_for(&on_link_next_hop(prefix), if_index);
         row.Protocol = RouteProtocolNetMgmt;
         row.Immortal = true;
         if prefix.prefix_len == 0 {
@@ -185,6 +289,15 @@ impl IpHelper {
             )));
         }
         Ok(best_route.InterfaceIndex)
+    }
+
+    /// Record an installed row in the ledger (deduplicated — repeated
+    /// idempotent installs of the same row are a no-op).
+    fn remember(&mut self, prefix: Prefix, row: InstalledRow) {
+        let entry = self.installed.entry(prefix).or_default();
+        if !entry.contains(&row) {
+            entry.push(row);
+        }
     }
 }
 
@@ -226,11 +339,24 @@ impl OsRouteTable for IpHelper {
         if rc != NO_ERROR {
             return Err(win_err("CreateIpForwardEntry2", rc));
         }
+        self.remember(prefix, InstalledRow { next_hop, if_index });
         Ok(())
     }
 
     fn add_blackhole_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
-        let row = Self::make_blackhole_row(&prefix);
+        // Family-indexed cache: the default-route owner and adapter
+        // scan run once per family for the daemon's lifetime, not once
+        // per installed anchor.
+        let fam = usize::from(prefix.addr.is_ipv6());
+        let if_index = match self.blackhole_if[fam] {
+            Some(idx) => idx,
+            None => {
+                let idx = blackhole_if_index(&prefix);
+                self.blackhole_if[fam] = Some(idx);
+                idx
+            }
+        };
+        let row = Self::make_blackhole_row(&prefix, if_index);
         // SAFETY: `row` is a fully initialised stack value; the API only
         // reads from it.
         let mut rc = unsafe { CreateIpForwardEntry2(&row) };
@@ -243,12 +369,28 @@ impl OsRouteTable for IpHelper {
         if rc != NO_ERROR {
             return Err(win_err("CreateIpForwardEntry2 (blackhole)", rc));
         }
+        self.remember(
+            prefix,
+            InstalledRow {
+                next_hop: on_link_next_hop(&prefix),
+                if_index,
+            },
+        );
         Ok(())
     }
 
     fn delete_route(&mut self, prefix: Prefix) -> Result<(), Self::Error> {
-        // Deleting requires the full key (prefix + next hop + interface);
-        // scan the table for rows matching the prefix and delete each.
+        // Deleting requires the full row key (prefix + next hop +
+        // interface). With an install ledger for the prefix (the normal
+        // lifecycle) delete exactly the rows this instance created —
+        // a foreign row that happens to share the prefix (a VPN's
+        // on-link route for the same allowed-IP, for instance) is
+        // never touched. Without a ledger entry (a fresh process
+        // withdrawing routes a predecessor installed) fall back to
+        // deleting every protocol-tagged row for the prefix — the
+        // pre-ledger recovery semantics.
+        let ledger: Vec<InstalledRow> = self.installed.get(&prefix).cloned().unwrap_or_default();
+        let scoped = !ledger.is_empty();
         let mut table: *mut MIB_IPFORWARD_TABLE2 = core::ptr::null_mut();
         // SAFETY: out-pointer, ownership transferred to us.
         let rc = unsafe { GetIpForwardTable2(0, &mut table) };
@@ -256,11 +398,13 @@ impl OsRouteTable for IpHelper {
             return Err(win_err("GetIpForwardTable2", rc));
         }
         if table.is_null() {
+            self.installed.remove(&prefix);
             return Ok(());
         }
         // SAFETY: rows are read while the allocation is alive.
         let (rows, len) = unsafe { table_rows(table) };
         let mut last_rc = ERROR_NOT_FOUND;
+        let mut removed_all = true;
         if !rows.is_null() {
             for row in unsafe { core::slice::from_raw_parts(rows, len) } {
                 let (dst, plen) = unsafe { prefix_of(row) };
@@ -270,27 +414,47 @@ impl OsRouteTable for IpHelper {
                 if !addr_eq(&dst, &prefix.addr) {
                     continue;
                 }
-                if !matches!(
+                if scoped {
+                    // Exact-ledger mode: next hop + interface must both
+                    // match a row this instance installed.
+                    // SAFETY: reading the next-hop union.
+                    let row_nh = unsafe { inet_addr_of(&row.NextHop) };
+                    if !ledger
+                        .iter()
+                        .any(|e| e.next_hop == row_nh && e.if_index == row.InterfaceIndex)
+                    {
+                        continue;
+                    }
+                } else if !matches!(
                     row.Protocol,
                     p if p == RouteProtocolBgp
                         || p == RouteProtocolOspf
                         || p == RouteProtocolRip
                         || p == RouteProtocolNetMgmt
                 ) {
-                    continue; // never touch rows we did not install
+                    // Legacy fallback: never touch rows routing
+                    // protocols do not own (Local, DHCP, ...).
+                    continue;
                 }
                 // SAFETY: row is a copy of a table entry; the API matches on
                 // destination prefix + next hop + interface.
                 let rc2 = unsafe { DeleteIpForwardEntry2(row) };
                 if rc2 != NO_ERROR {
                     last_rc = rc2;
+                    removed_all = false;
                 }
             }
         }
         // SAFETY: release the API-allocated buffer.
         unsafe { FreeMibTable(table as *const core::ffi::c_void) };
+        if scoped && removed_all {
+            self.installed.remove(&prefix);
+        }
         if last_rc == ERROR_NOT_FOUND {
             // Nothing matched — an idempotent delete succeeds.
+            if scoped {
+                self.installed.remove(&prefix);
+            }
             return Ok(());
         }
         if last_rc != NO_ERROR {
@@ -468,36 +632,76 @@ mod tests {
         assert_ne!(index, 0);
     }
 
+    /// The blackhole row is the on-link form — family set, address all
+    /// zeros — NOT a loopback gateway: netio rejects 127/8 and ::1 next
+    /// hops with `ERROR_INVALID_PARAMETER` (the rc.4 production
+    /// failure), and any loopback-delivery form is local delivery
+    /// under the weak host model.
     #[test]
-    fn blackhole_row_v4_uses_loopback_gateway() {
+    fn blackhole_row_v4_is_on_link_with_family_set() {
         let prefix = Prefix::new_v4([192, 0, 2, 0], 24);
-        let row = IpHelper::make_blackhole_row(&prefix);
-        assert_eq!(row.InterfaceIndex, LOOPBACK_IF_INDEX);
-        // SAFETY: make_blackhole_row populated the IPv4 arm for an IPv4 prefix.
+        let row = IpHelper::make_blackhole_row(&prefix, 7);
+        assert_eq!(row.InterfaceIndex, 7);
+        assert_ne!(row.InterfaceIndex, LOOPBACK_IF_INDEX);
+        assert!(!row.Loopback);
+        // SAFETY: make_blackhole_row populated the IPv4 arm for an IPv4
+        // prefix.
         let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN>() };
         assert_eq!(next_hop.sin_family, AF_INET);
         // SAFETY: accessing the S_un union — the Ipv4 arm was initialized.
         let s = unsafe { next_hop.sin_addr.S_un.S_un_b };
-        // The Microsoft `route add PREFIX mask MASK 127.0.0.1` blackhole
-        // idiom — NOT the zero gateway (which makes an on-link loopback
-        // route the local stack happily accepts packets for).
-        assert_eq!([s.s_b1, s.s_b2, s.s_b3, s.s_b4], [127, 0, 0, 1]);
+        assert_eq!([s.s_b1, s.s_b2, s.s_b3, s.s_b4], [0, 0, 0, 0]);
     }
 
     #[test]
-    fn blackhole_row_v6_uses_loopback_gateway() {
+    fn blackhole_row_v6_is_on_link_with_family_set() {
         let prefix = Prefix::new_v6(
             [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             64,
         );
-        let row = IpHelper::make_blackhole_row(&prefix);
-        assert_eq!(row.InterfaceIndex, LOOPBACK_IF_INDEX);
-        // SAFETY: make_blackhole_row populated the IPv6 arm for an IPv6 prefix.
+        let row = IpHelper::make_blackhole_row(&prefix, 7);
+        assert_eq!(row.InterfaceIndex, 7);
+        assert!(!row.Loopback);
+        // SAFETY: make_blackhole_row populated the IPv6 arm for an IPv6
+        // prefix.
         let next_hop = unsafe { &*core::ptr::addr_of!(row.NextHop).cast::<SOCKADDR_IN6>() };
         assert_eq!(next_hop.sin6_family, AF_INET6);
         // SAFETY: accessing the u union — the Byte array was initialized.
         let bytes = unsafe { next_hop.sin6_addr.u.Byte };
-        assert_eq!(bytes[..15], [0u8; 15]);
-        assert_eq!(bytes[15], 1);
+        assert_eq!(bytes, [0u8; 16]);
+    }
+
+    /// The install ledger deduplicates repeated installs of the same
+    /// row identity and `delete_route` only removes what the ledger
+    /// knows about.
+    #[test]
+    fn ledger_deduplicates_and_scopes_deletes() {
+        let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
+        let mut helper = IpHelper {
+            installed: std::collections::HashMap::new(),
+            blackhole_if: [None, None],
+        };
+        helper.remember(
+            prefix,
+            InstalledRow {
+                next_hop: IpAddr::V4([10, 0, 0, 1]),
+                if_index: 7,
+            },
+        );
+        helper.remember(
+            prefix,
+            InstalledRow {
+                next_hop: IpAddr::V4([10, 0, 0, 1]),
+                if_index: 7,
+            },
+        );
+        helper.remember(
+            prefix,
+            InstalledRow {
+                next_hop: IpAddr::V4([10, 0, 0, 2]),
+                if_index: 8,
+            },
+        );
+        assert_eq!(helper.installed[&prefix].len(), 2);
     }
 }
