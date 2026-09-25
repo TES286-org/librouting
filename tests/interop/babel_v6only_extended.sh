@@ -25,14 +25,14 @@
 #   1. lr's startup banner shows the auto-enable warning OR
 #      'extended_next_hop on (v4-over-v6)' (operator opted in).
 #   2. The remote BIRD sees lr's v4 routes in 'show babel entries'.
-#   3. tcpdump on the v6 link confirms the Babel Update TLVs carry
-#      AE=1 (IPv4) prefixes preceded by a NextHop TLV with AE=2
+#   3. packet capture on the v6 link confirms the Babel Update TLVs
+#      carry AE=1 (IPv4) prefixes preceded by a NextHop TLV with AE=2
 #      (IPv6 next-hop, the RFC 5549 form).
 #   4. Blackhole routes (next_hop = None) are mirrored into the
 #      kernel FIB as RTN_BLACKHOLE (verified via 'ip route show').
 #
 # The test gracefully SKIPs when any required tool is missing
-# (birdc, tcpdump, ip, unshare).
+# (birdc, python3, ip, unshare).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 
@@ -47,7 +47,7 @@ fi
 command -v ip >/dev/null 2>&1 || { echo "SKIP: iproute2 (ip) not installed"; exit 0; }
 command -v nsenter >/dev/null 2>&1 || { echo "SKIP: nsenter (util-linux) not installed"; exit 0; }
 command -v birdc >/dev/null 2>&1 || { echo "SKIP: birdc not installed"; exit 0; }
-command -v tcpdump >/dev/null 2>&1 || { echo "SKIP: tcpdump not installed"; exit 0; }
+command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 unshare -Urn true 2>/dev/null || { echo "SKIP: unprivileged user namespaces unavailable"; exit 0; }
 
 REPO=$(pwd)
@@ -104,11 +104,17 @@ ip route add blackhole 10.127.32.0/24 metric 10
 ip route add blackhole fd00:286:11e:6::/64 metric 10
 ip route add blackhole 172.23.10.96/27 metric 10
 
-# Start tcpdump in the background to capture Babel traffic on veth0a.
-# Filter: only Babel (UDP port 6696).
-tcpdump -i veth0a -Z root -w "$OUT/babel.pcap" -U 'udp port 6696' &
-TCPDUMP_PID=$!
-trap "kill $TCPDUMP_PID 2>/dev/null || true" EXIT
+# Start the packet capture on veth0a (only Babel, UDP port 6696).
+# tcpdump cannot run here: inside an unprivileged user+net namespace
+# its mandatory privilege drop calls initgroups()/setgroups(), which
+# the kernel denies ("Couldn't change to 'root' ... Operation not
+# permitted") — it dies before capturing anything. pcap_sniff.py uses
+# a plain AF_PACKET raw socket, which needs only CAP_NET_RAW — a
+# capability every fresh user namespace grants — and writes the same
+# classic-pcap output babel_decode.py parses.
+python3 "$REPO/tests/interop/pcap_sniff.py" veth0a "$OUT/babel.pcap" 6696 2>"$OUT/sniff.log" &
+SNIFF_PID=$!
+trap "kill $SNIFF_PID 2>/dev/null || true" EXIT
 
 # Start the reference BIRD daemon. Minimal config: Babel on veth0b,
 # listening for lr's announcements. We accept all routes.
@@ -137,7 +143,7 @@ EOF
 
 bird -f -c "$OUT/bird.conf" -s "$OUT/bird.ctl" &
 BIRD_PID=$!
-trap "kill $BIRD_PID 2>/dev/null || true; kill $TCPDUMP_PID 2>/dev/null || true" EXIT
+trap "kill $BIRD_PID 2>/dev/null || true; kill $SNIFF_PID 2>/dev/null || true" EXIT
 
 # Wait for BIRD to come up.
 for i in $(seq 1 30); do
@@ -210,7 +216,7 @@ EOF
 # under unshare -Urn we have it (the new user+net ns grants it).
 $BIN --config "$OUT/lr.lr" --install-kernel-routes > "$OUT/lr.log" 2>&1 &
 LR_PID=$!
-trap "kill $LR_PID 2>/dev/null || true; kill $BIRD_PID 2>/dev/null || true; kill $TCPDUMP_PID 2>/dev/null || true" EXIT
+trap "kill $LR_PID 2>/dev/null || true; kill $BIRD_PID 2>/dev/null || true; kill $SNIFF_PID 2>/dev/null || true" EXIT
 
 # Wait for lr's babel interface to come up.
 for i in $(seq 1 30); do
@@ -302,7 +308,8 @@ fi
 kill $LR_PID 2>/dev/null || true
 kill $BIRD_PID 2>/dev/null || true
 sleep 1
-kill $TCPDUMP_PID 2>/dev/null || true
+kill $SNIFF_PID 2>/dev/null || true
+sleep 0.5
 trap - EXIT
 
 # Phase 5: full TLV-level pcap analysis with the babel_decode.py

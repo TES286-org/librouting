@@ -41,7 +41,7 @@
 #   9. Teardown: SIGTERM withdraws lr's routes from the kernel.
 #
 # Hard failure in any phase fails the job. The test SKIPs gracefully
-# when a required tool is missing (bird/birdc, tcpdump, python3, ip,
+# when a required tool is missing (bird/birdc, python3, ip,
 # nsenter, unprivileged user namespaces).
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -58,7 +58,6 @@ command -v ip >/dev/null 2>&1 || { echo "SKIP: iproute2 (ip) not installed"; exi
 command -v nsenter >/dev/null 2>&1 || { echo "SKIP: nsenter (util-linux) not installed"; exit 0; }
 command -v bird >/dev/null 2>&1 || { echo "SKIP: bird not installed"; exit 0; }
 command -v birdc >/dev/null 2>&1 || { echo "SKIP: birdc not installed"; exit 0; }
-command -v tcpdump >/dev/null 2>&1 || { echo "SKIP: tcpdump not installed"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "SKIP: python3 not installed"; exit 0; }
 unshare -Urn true 2>/dev/null || { echo "SKIP: unprivileged user namespaces unavailable"; exit 0; }
 
@@ -109,9 +108,15 @@ $BIRDNS ip -6 addr add fd10:127:286:1::1/64 dev dummy0 nodad
 sleep 0.5
 
 # ---- packet capture on the babel link ----
-tcpdump -i veth0a -Z root -w "$OUT/babel.pcap" -U 'udp port 6696' &
-TCPDUMP_PID=$!
-trap "kill $TCPDUMP_PID 2>/dev/null || true" EXIT
+# pcap_sniff.py instead of tcpdump: tcpdump's mandatory privilege drop
+# calls initgroups()/setgroups(), which the kernel denies inside an
+# unprivileged user namespace ("Couldn't change to 'root' ... Operation
+# not permitted") — it dies before capturing a single packet. The
+# AF_PACKET raw socket needs only CAP_NET_RAW, which this fresh user
+# namespace grants, and emits the same classic pcap the decoder reads.
+python3 "$REPO/tests/interop/pcap_sniff.py" veth0a "$OUT/babel.pcap" 6696 2>"$OUT/sniff.log" &
+SNIFF_PID=$!
+trap "kill $SNIFF_PID 2>/dev/null || true" EXIT
 
 # ---- BIRD: statics (the same aggregates lr originates) + babel + bgp + kernel ----
 cat > "$OUT/bird.conf" <<EOF
@@ -164,7 +169,7 @@ protocol bgp rr_hk01 {
 EOF
 $BIRDNS bird -f -c "$OUT/bird.conf" -s "$OUT/bird.ctl" &
 BIRD_PID=$!
-trap "kill $BIRD_PID 2>/dev/null || true; kill $TCPDUMP_PID 2>/dev/null || true; kill $BIRD_NS 2>/dev/null || true" EXIT
+trap "kill $BIRD_PID 2>/dev/null || true; kill $SNIFF_PID 2>/dev/null || true; kill $BIRD_NS 2>/dev/null || true" EXIT
 
 for i in $(seq 1 30); do
     [ -S "$OUT/bird.ctl" ] && break
@@ -241,7 +246,7 @@ filter "babel-export-static-babel" {
 EOF
 $BIN --config "$OUT/lr.lr" --install-kernel-routes > "$OUT/lr.log" 2>&1 &
 LR_PID=$!
-trap "kill $LR_PID 2>/dev/null || true; kill $BIRD_PID 2>/dev/null || true; kill $TCPDUMP_PID 2>/dev/null || true; kill $BIRD_NS 2>/dev/null || true" EXIT
+trap "kill $LR_PID 2>/dev/null || true; kill $BIRD_PID 2>/dev/null || true; kill $SNIFF_PID 2>/dev/null || true; kill $BIRD_NS 2>/dev/null || true" EXIT
 
 # ---- phase 1: adjacency + RTT ----
 NEIGHBORS=""
@@ -354,7 +359,7 @@ echo "$BGP_STATE" | grep -q Established \
 echo "PASS: BGP session established through the Babel-learned route (production symptom resolved)"
 
 # ---- phase 8: packet-capture analysis ----
-kill $TCPDUMP_PID 2>/dev/null || true
+kill $SNIFF_PID 2>/dev/null || true
 sleep 0.5
 DECODED=$(python3 "$DECODE" "$OUT/babel.pcap" 500 2>/dev/null || true)
 echo "=== pcap: lr's first v6 multicast announcement ==="
