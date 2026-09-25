@@ -372,6 +372,74 @@ jobs:
   # is dispatched manually on a disposable branch whenever a Windows
   # build needs its FIB semantics re-audited.
 
+  # TEMPORARY (probe branch only): ref-gated probe job for one more
+  # empirical matrix run. Main carries windows-fib-probe.yml
+  # (workflow_dispatch) instead; this copy exists because the PAT
+  # cannot dispatch workflows (no Actions:write). Remove after the
+  # transcript lands.
+  windows-fib-probe:
+    if: startsWith(github.ref, 'refs/heads/probe/')
+    name: Windows FIB probe (row forms + ifindex resolution)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "windows-fib-probe"
+      - name: Run the FIB probe (Administrator shell)
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          cargo test -p lr-osroute --test windows_route_table --no-run
+          (
+            set +e
+            {
+              echo "PROBE|=== matrix ==="
+              timeout 300 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 fib_semantics_probe_matrix
+              echo "PROBE|=== matrix rc=$? ==="
+              echo "PROBE|=== ifidx ==="
+              timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 probe_next_hop_interface_resolution
+              echo "PROBE|=== ifidx rc=$? ==="
+              echo "PROBE|=== blackhole ==="
+              timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 blackhole_route_discards_not_accepts
+              echo "PROBE|=== blackhole rc=$? ==="
+              echo "PROBE|=== explicit-oif ==="
+              timeout 240 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 explicit_oif_beats_fib_resolution
+              echo "PROBE|=== explicit-oif rc=$? ==="
+            } > probe-output.log 2>&1
+          ) &
+          PROBE_PID=$!
+          for i in $(seq 1 900); do
+              kill -0 "$PROBE_PID" 2>/dev/null || break
+              sleep 1
+          done
+          if kill -0 "$PROBE_PID" 2>/dev/null; then
+              echo "##[warning]probe payload still running after 900s — killing"
+              kill "$PROBE_PID" 2>/dev/null || true
+              sleep 2
+              kill -9 "$PROBE_PID" 2>/dev/null || true
+              echo "PROBE|=== payload killed at the 900s wall ===" >> probe-output.log
+          fi
+          wait "$PROBE_PID" 2>/dev/null || true
+          echo "===== probe transcript ====="
+          cat probe-output.log
+      - name: Commit the probe transcript back to the branch
+        if: always()
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          grep '^PROBE|' probe-output.log > probe-results.md || echo "no PROBE lines captured" > probe-results.md
+          git config user.name "TES286-bot"
+          git config user.email "bot@tes286.top"
+          git add probe-results.md
+          git commit -m "probe: record windows FIB results (run ${{ github.run_id }})" || echo "nothing to commit"
+          git push origin HEAD:${{ github.ref_name }}
+
   # The scripts already build the Windows lr-daemon binary via
   # `cargo build -p lr-cli` (the .exe suffix is handled by the
   # shared `tests/interop/_lr_daemon.sh` resolver). The BGP TCP
