@@ -453,6 +453,28 @@ fn powershell(script: &str) -> Result<String, String> {
 #[test]
 #[ignore = "research probe — mutates the real FIB; run as Administrator"]
 fn fib_semantics_probe_matrix() {
+    // Transcript the initializer's defaults: the unit tests in
+    // src/windows.rs assert the blackhole row carries Loopback=FALSE,
+    // which only holds if `InitializeIpForwardEntry` does not turn the
+    // flag on. Record the defaults on the audited build so the unit
+    // tests' assumption is pinned to the transcript.
+    {
+        let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        unsafe { InitializeIpForwardEntry(&mut row) };
+        log(format!(
+            "init-defaults loopback={} publish={} immortal={} autoconf={} \
+             valid={} preferred={} proto={} metric={}",
+            row.Loopback,
+            row.Publish,
+            row.Immortal,
+            row.AutoconfigureAddress,
+            row.ValidLifetime,
+            row.PreferredLifetime,
+            row.Protocol,
+            row.Metric
+        ));
+    }
+
     log("=== reference rows (the system's own loopback routes) ===".into());
     for p in [
         Prefix::new_v4([127, 0, 0, 0], 8),
@@ -529,6 +551,19 @@ fn fib_semantics_probe_matrix() {
                 "form [{name}] DeleteIpForwardEntry2 rc={drc} left={:?}",
                 fib_row(&V4_PREFIX)
             ));
+            // The daemon's delete_route deletes by the row AS READ FROM
+            // the table (never by the constructed form). Transcript that
+            // path separately: if the stack normalized the row at create
+            // time (e.g. a gateway equal to a local address becomes the
+            // on-link form), delete-by-constructed-row misses while
+            // delete-by-table-row must still succeed.
+            if fib_row(&V4_PREFIX).is_some() {
+                log(format!(
+                    "form [{name}] delete-by-table-row rc={} left={:?}",
+                    delete_all_for(&V4_PREFIX),
+                    fib_row(&V4_PREFIX)
+                ));
+            }
         }
     }
 

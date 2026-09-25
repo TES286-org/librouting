@@ -391,6 +391,11 @@ jobs:
           set -o pipefail
           cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture 2>&1 | tee probe-output.log
       - name: Commit the probe transcript back to the branch
+        # The probe matrix prints findings without asserting; the
+        # assertive regression tests in the same file MAY fail on an
+        # unaudited Windows build. The transcript is the deliverable —
+        # commit it regardless of the test step's outcome.
+        if: always()
         timeout-minutes: 5
         shell: bash
         run: |
