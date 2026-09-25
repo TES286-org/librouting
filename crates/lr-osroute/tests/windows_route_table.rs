@@ -38,10 +38,11 @@
 
 #![cfg(windows)]
 
+use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use lr_core::addr::{IpAddr as LrIpAddr, Prefix};
 use lr_osroute::ospf_transport;
@@ -329,6 +330,15 @@ fn best_route_if(dest: IpAddr) -> Option<u32> {
 /// `accept:<peer>` (a 0.0.0.0 listener answered — local-accept),
 /// `timeout` (packet discarded — true blackhole), `refused` (RST),
 /// or `err:<e>` (fast path error, e.g. host unreachable).
+///
+/// Every wait here is bounded and every resource is released before
+/// returning: the accept thread polls a non-blocking listener and
+/// stops on a shared flag, so the listener is dropped within
+/// milliseconds of the measurement ending. The earlier shape moved
+/// the listener into a thread blocked forever in `accept()` — the
+/// port then stayed bound for the process's lifetime and every later
+/// call in the same probe run returned `listener-error`, silently
+/// degrading the whole measurement series.
 fn tcp_connect_behaviour(dest: IpAddr) -> String {
     let bind: SocketAddr = match dest {
         IpAddr::V4(_) => SocketAddr::new(IpAddr::V4(Ipv4Addr::UNSPECIFIED), PROBE_PORT),
@@ -338,16 +348,33 @@ fn tcp_connect_behaviour(dest: IpAddr) -> String {
         Ok(l) => l,
         Err(e) => return format!("listener-error:{e}"),
     };
+    if let Err(e) = listener.set_nonblocking(true) {
+        return format!("listener-error:{e}");
+    }
     let seen = Arc::new(AtomicBool::new(false));
     let seen_t = Arc::clone(&seen);
+    let stop = Arc::new(AtomicBool::new(false));
+    let stop_t = Arc::clone(&stop);
     let peer_log = Arc::new(std::sync::Mutex::new(String::new()));
     let peer_t = Arc::clone(&peer_log);
-    std::thread::spawn(move || {
-        if let Ok((s, peer)) = listener.accept() {
-            seen_t.store(true, Ordering::SeqCst);
-            *peer_t.lock().unwrap() = peer.to_string();
-            // Half-close without reading: keep the socket quiet.
-            let _ = s.shutdown(std::net::Shutdown::Both);
+    let accept_thread = std::thread::spawn(move || {
+        // Hard self-limit: even if the join below is skipped by a
+        // panic elsewhere, this thread ends and frees the port.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !stop_t.load(Ordering::SeqCst) && Instant::now() < deadline {
+            match listener.accept() {
+                Ok((s, peer)) => {
+                    seen_t.store(true, Ordering::SeqCst);
+                    *peer_t.lock().unwrap() = peer.to_string();
+                    // Half-close without reading: keep the socket quiet.
+                    let _ = s.shutdown(std::net::Shutdown::Both);
+                    return;
+                }
+                Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(20));
+                }
+                Err(_) => return,
+            }
         }
     });
     std::thread::sleep(Duration::from_millis(200));
@@ -356,6 +383,10 @@ fn tcp_connect_behaviour(dest: IpAddr) -> String {
     let _ = res.as_ref().map(|s| {
         let _ = s.shutdown(std::net::Shutdown::Both);
     });
+    // Unblock the accept thread and reap it: bounded, and the listener
+    // (owned by that thread) is dropped with it.
+    stop.store(true, Ordering::SeqCst);
+    let _ = accept_thread.join();
     match res {
         Ok(_) => {
             if seen.load(Ordering::SeqCst) {
@@ -373,21 +404,24 @@ fn tcp_connect_behaviour(dest: IpAddr) -> String {
 }
 
 /// ICMP echo behaviour: `reply:<from>` (local-accept) vs `timeout` vs
-/// `unreachable`. Returns "n/a" when ping.exe is missing.
+/// `unreachable`. Returns "n/a" when ping.exe is missing or wedged
+/// past its own `-w` plus a 30 s hard budget (see [`run_bounded`]).
 fn ping_behaviour(dest: IpAddr) -> String {
-    let out = match std::process::Command::new("ping")
-        .arg("-n")
-        .arg("1")
-        .arg("-w")
-        .arg("2000")
-        .arg(if dest.is_ipv6() { "-6" } else { "-4" })
-        .arg(dest.to_string())
-        .output()
-    {
-        Ok(o) => o,
+    let args = [
+        "-n",
+        "1",
+        "-w",
+        "2000",
+        if dest.is_ipv6() { "-6" } else { "-4" },
+        &dest.to_string(),
+    ];
+    let (text, status) = match run_bounded("ping.exe", &args, Duration::from_secs(30)) {
+        Ok(v) => v,
         Err(_) => return "n/a".into(),
     };
-    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    if status.is_none() {
+        return "n/a (ping exceeded the 30s budget)".into();
+    }
     if text.contains("Request timed out") || text.contains("timed out") {
         "timeout".into()
     } else if text.contains("Reply from") || text.contains("reply from") {
@@ -432,45 +466,58 @@ fn primary_interface() -> Option<(String, u32, Ipv4Addr)> {
     None
 }
 
-/// PowerShell with a watchdog: `New-NetIPAddress` and friends talk to
-/// WMI/NDIS and have been observed hanging indefinitely on runner
-/// builds (the run-36125163593 probe wedged until the job timeout).
-/// `std::process` has no wait-with-timeout, so poll `try_wait` and
-/// kill the child when the budget expires. The pipes are drained on
-/// dedicated threads so a child blocked writing a full pipe buffer
-/// cannot deadlock the watchdog, and the kill unblocks the reads.
-fn powershell(script: &str) -> Result<String, String> {
-    let mut child = std::process::Command::new("powershell.exe")
-        .args(["-NoProfile", "-Command", script])
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
+/// Run `program args` under a hard wall-clock budget, returning its
+/// combined output. `New-NetIPAddress` and friends talk to WMI/NDIS
+/// and have been observed hanging indefinitely on runner builds (the
+/// run-36125163593 probe wedged until the job timeout), so the child
+/// is killed when the budget expires.
+///
+/// Output goes to temp FILES, never pipes: a grandchild that inherits
+/// the write end of a pipe (the WMI provider host, `conhost`, anything
+/// the child spawns) keeps the pipe open after the child dies, and a
+/// blocked `read_to_string` on the other end never sees EOF. That
+/// exact deadlock — a killed `powershell.exe` whose pipe was still
+/// held open — is what stalled runs 36125163593 / 36132336028 /
+/// 36136529031 at the route-table step until the job was killed: the
+/// watchdog fired, but the reader threads blocked anyway and the test
+/// binary never exited. Files always reach EOF at the current write
+/// position, so after the kill the read below is immediate and final:
+/// whatever the child wrote before the budget expired is what the
+/// caller sees.
+fn run_bounded(
+    program: &str,
+    args: &[&str],
+    budget: Duration,
+) -> Result<(String, Option<bool>), String> {
+    let tag = program
+        .rsplit(['\\', '/'])
+        .next()
+        .unwrap_or(program)
+        .replace('.', "_");
+    let out_path = std::env::temp_dir().join(format!(
+        "lr-osroute-probe-{}-{}.out",
+        std::process::id(),
+        tag
+    ));
+    let err_path = std::env::temp_dir().join(format!(
+        "lr-osroute-probe-{}-{}.err",
+        std::process::id(),
+        tag
+    ));
+    let out_file = std::fs::File::create(&out_path).map_err(|e| e.to_string())?;
+    let err_file = std::fs::File::create(&err_path).map_err(|e| e.to_string())?;
+    let mut child = std::process::Command::new(program)
+        .args(args)
+        .stdout(out_file)
+        .stderr(err_file)
         .spawn()
         .map_err(|e| e.to_string())?;
-    let stdout = child.stdout.take();
-    let stderr = child.stderr.take();
-    let out_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(mut p) = stdout {
-            use std::io::Read;
-            let _ = p.read_to_string(&mut buf);
-        }
-        buf
-    });
-    let err_handle = std::thread::spawn(move || {
-        let mut buf = String::new();
-        if let Some(mut p) = stderr {
-            use std::io::Read;
-            let _ = p.read_to_string(&mut buf);
-        }
-        buf
-    });
-    const BUDGET: Duration = Duration::from_secs(60);
-    let deadline = std::time::Instant::now() + BUDGET;
+    let deadline = Instant::now() + budget;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break Some(status),
             Ok(None) => {
-                if std::time::Instant::now() >= deadline {
+                if Instant::now() >= deadline {
                     let _ = child.kill();
                     let _ = child.wait();
                     break None;
@@ -483,15 +530,32 @@ fn powershell(script: &str) -> Result<String, String> {
             }
         }
     };
-    let out = out_handle.join().unwrap_or_default();
-    let err = err_handle.join().unwrap_or_default();
-    match status {
-        Some(status) if status.success() => Ok(format!("{out}{err}")),
-        Some(_) => Err(format!("{out}{err}")),
-        None => Err(format!(
+    let out = std::fs::read_to_string(&out_path).unwrap_or_default();
+    let err = std::fs::read_to_string(&err_path).unwrap_or_default();
+    let _ = std::fs::remove_file(&out_path);
+    let _ = std::fs::remove_file(&err_path);
+    let success = status.map(|s| s.success());
+    Ok((format!("{out}{err}"), success))
+}
+
+/// PowerShell with a 60 s budget — see [`run_bounded`] for why the
+/// output goes through files and why the kill at the budget's end is
+/// final (the historical pipe-based shape deadlocked on inherited
+/// write handles and wedged whole CI jobs).
+fn powershell(script: &str) -> Result<String, String> {
+    const BUDGET: Duration = Duration::from_secs(60);
+    match run_bounded(
+        "powershell.exe",
+        &["-NoProfile", "-Command", script],
+        BUDGET,
+    ) {
+        Ok((out, Some(true))) => Ok(out),
+        Ok((out, Some(false))) => Err(out),
+        Ok((_, None)) => Err(format!(
             "powershell timed out after {}s: {script}",
             BUDGET.as_secs()
         )),
+        Err(e) => Err(e),
     }
 }
 
@@ -606,20 +670,21 @@ fn fib_semantics_probe_matrix() {
         }
     }
 
-    // route.exe itself (what the classic advice installs).
+    // route.exe itself (what the classic advice installs) — through
+    // the same bounded runner so it cannot wedge the probe either.
     delete_all_for(&V4_PREFIX);
-    let rcout = std::process::Command::new("route.exe")
-        .args(["add", "198.51.100.0", "mask", "255.255.255.0", "127.0.0.1"])
-        .output();
-    match rcout {
-        Ok(o) => log(format!(
-            "form [route-exe-127] rc={} out={:?} err={:?}",
-            o.status,
-            String::from_utf8_lossy(&o.stdout).trim(),
-            String::from_utf8_lossy(&o.stderr).trim()
-        )),
-        Err(e) => log(format!("form [route-exe-127] spawn-error {e}")),
-    }
+    let (rcout, _) = match run_bounded(
+        "route.exe",
+        &["add", "198.51.100.0", "mask", "255.255.255.0", "127.0.0.1"],
+        Duration::from_secs(30),
+    ) {
+        Ok(v) => v,
+        Err(e) => {
+            log(format!("form [route-exe-127] spawn-error {e}"));
+            (String::new(), None)
+        }
+    };
+    log(format!("form [route-exe-127] out={rcout:?}"));
     if fib_row(&V4_PREFIX).is_some() {
         log(format!(
             "form [route-exe-127] row={:?}",
