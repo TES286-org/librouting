@@ -129,7 +129,10 @@ pub fn ipv6_ifindex_of(interface: &str) -> Option<u32> {
         let entry = unsafe { &*cur };
         if let Some(name) = unsafe { friendly_name(entry.FriendlyName) } {
             if name == interface {
-                let v6 = unsafe { entry.Ipv6IfIndex };
+                // A plain struct field on the `windows-sys` binding — no
+                // union is crossed, so no `unsafe` is needed (unlike the
+                // `Anonymous1` union reads above).
+                let v6 = entry.Ipv6IfIndex;
                 if v6 != 0 {
                     return Some(v6);
                 }
