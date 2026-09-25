@@ -29,7 +29,9 @@ use std::process::Command;
 
 use lr_core::addr::Prefix;
 use lr_osroute::ospf_transport;
-use lr_osroute::seg6_route::{seg6_enabled, Seg6EncapMode, Seg6LocalRoute, Seg6Netlink, Seg6Route};
+use lr_osroute::seg6_route::{
+    seg6_enabled, Seg6EncapMode, Seg6LocalRoute, Seg6Netlink, Seg6Route, Seg6RouteError,
+};
 use lr_srv6::{Behavior, Sid, Srh};
 use std::str::FromStr;
 
@@ -73,6 +75,23 @@ fn ip(args: &[&str]) -> String {
     }
 }
 
+/// Run an `ip` command and return its combined output + exit status —
+/// used for the reference-implementation contrast printed when an
+/// install fails (if iproute2's own command fails the same way, the
+/// kernel/env is the arbiter; if it succeeds, the request bytes
+/// differ and the delta is ours).
+fn ip_verbose(args: &[&str]) -> String {
+    match Command::new("ip").args(args).output() {
+        Ok(o) => format!(
+            "rc={} out={:?} err={:?}",
+            o.status.code().unwrap_or(-1),
+            String::from_utf8_lossy(&o.stdout).trim(),
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => format!("spawn-error: {e}"),
+    }
+}
+
 /// Parse and pretty-print the seg6 routes the kernel has installed.
 /// Used for diagnostics.
 fn show_seg6_routes() -> String {
@@ -104,10 +123,10 @@ fn kernel_unavailable() -> Option<&'static str> {
 /// process lacks CAP_NET_ADMIN. The test skips in that case rather
 /// than failing: the wire format itself is already verified by the
 /// unit tests in seg6_route.rs.
-fn is_privilege_error(e: &lr_osroute::seg6_route::Seg6RouteError) -> bool {
+fn is_privilege_error(e: &Seg6RouteError) -> bool {
     matches!(
         e,
-        lr_osroute::seg6_route::Seg6RouteError::Kernel(s)
+        Seg6RouteError::Kernel(s)
             if s.contains("EPERM") || s.contains("insufficient privileges")
     )
 }
@@ -154,6 +173,27 @@ fn seg6_route_installs_into_kernel_main_table() {
             return;
         }
         eprintln!("add_seg6_route failed: {}\n{}", e, show_seg6_routes());
+        // Reference contrast: iproute2 building the same shape itself.
+        eprintln!(
+            "iproute2 contrast: {}",
+            ip_verbose(&[
+                "-6",
+                "route",
+                "add",
+                "2001:db8:1::/48",
+                "encap",
+                "seg6",
+                "mode",
+                "encap",
+                "segs",
+                "2001:db8:dead:beef::1,2001:db8:dead:beef::2",
+                "dev",
+                "lo",
+            ])
+        );
+        let _ = Command::new("ip")
+            .args(["-6", "route", "del", "2001:db8:1::/48", "dev", "lo"])
+            .status();
     }
     // Always clean up, even on failure, so the test is idempotent.
     let _ = nl.delete_seg6_route(prefix);
@@ -213,6 +253,48 @@ fn seg6local_route_installs_into_kernel_local_table() {
             return;
         }
         eprintln!("add_seg6local_route failed: {}\n{}", e, show_seg6_routes());
+        // Reference contrasts: iproute2 building the same shapes — one
+        // per table idiom. If both fail the same way, the kernel/env
+        // is the arbiter (and the local-table idiom itself is the
+        // problem); if the main-table form succeeds, the table choice
+        // is the delta to fix.
+        eprintln!(
+            "iproute2 contrast (table local): {}",
+            ip_verbose(&[
+                "-6",
+                "route",
+                "add",
+                "2001:db8:dead:beef::abcd",
+                "encap",
+                "seg6local",
+                "action",
+                "End",
+                "table",
+                "local",
+                "dev",
+                "lo",
+            ])
+        );
+        eprintln!(
+            "iproute2 contrast (table main): {}",
+            ip_verbose(&[
+                "-6",
+                "route",
+                "add",
+                "2001:db8:dead:beef::abcd",
+                "encap",
+                "seg6local",
+                "action",
+                "End",
+                "dev",
+                "lo",
+            ])
+        );
+        for t in ["local", "main"] {
+            let _ = Command::new("ip")
+                .args(["-6", "route", "del", "2001:db8:dead:beef::abcd", "table", t])
+                .status();
+        }
     }
     let _ = nl.delete_seg6local_route(sid);
     res.expect("seg6local End route should install into the kernel");
