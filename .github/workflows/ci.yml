@@ -622,14 +622,21 @@ jobs:
       - name: SRv6 seg6/seg6local kernel interop (RFC 8754 / RFC 8986, kernel-gated)
         timeout-minutes: 10
         run: |
-          sudo sysctl -w net.ipv6.conf.all.seg6_enabled=1 || true
-          sudo sysctl -w net.ipv6.conf.lo.seg6_enabled=1 || true
-          # The tests are #[ignore] (kernel-gated). They skip cleanly
-          # when seg6 is unavailable or when the process lacks
-          # CAP_NET_ADMIN — the wire format itself is pinned by the
-          # 17 unit tests in seg6_route.rs that run unconditionally in
-          # the cargo test --workspace step above.
-          cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
+          cargo test -p lr-osroute --test srv6_kernel --all-features --no-run
+          # Run inside a rootless user+net namespace like the
+          # route_kernel step below: a bare runner process lacks
+          # CAP_NET_ADMIN, so every install used to die with EPERM and
+          # the #[ignore]d tests passed as vacuous SKIPs (run
+          # 36121452689's "SKIP: add_seg6local_route returned EPERM").
+          # The user namespace grants CAP_NET_ADMIN over the new netns;
+          # seg6_enabled is per-netns and defaults to 0, so it is
+          # enabled inside that netns before the tests run.
+          unshare -Urn bash -c '
+            set -euo pipefail
+            sysctl -w net.ipv6.conf.all.seg6_enabled=1
+            sysctl -w net.ipv6.conf.lo.seg6_enabled=1
+            cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
+          '
       - name: Route-table backend kernel tests (Linux netlink, rootless netns)
         # Real-kernel round trips the mock-socket unit tests cannot prove:
         # blackhole install → delete (the RTN_UNSPEC withdrawal fix — a
