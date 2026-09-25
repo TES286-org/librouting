@@ -365,7 +365,7 @@ jobs:
   # data-plane FORWARD step lives on Linux (netns + QEMU VM harness).
   #
   # Windows FIB semantics probe (probe branch only). Runs the
-  # windows_fib_probe integration test as Administrator on a real
+  # windows_route_table research matrix as Administrator on a real
   # windows-2022 runner, tees every PROBE| line into probe-results.md
   # and commits that transcript back to the branch so the findings are
   # readable without Actions log access. This is the empirical half of
