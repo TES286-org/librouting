@@ -29,7 +29,14 @@ jobs:
   fib-probe:
     name: Windows FIB probe (row forms + ifindex resolution)
     runs-on: windows-2022
-    timeout-minutes: 30
+    # Worst-case step runtime: cold compile (~10 min) + the payload's
+    # 900 s wall + overhead ≈ 26 min. The STEP timeout must sit ABOVE
+    # that (35 min) and the job above the step (45 min): when the step
+    # timeout fires while the runner cannot reap cargo's process tree,
+    # the job wedges to its own timeout and the transcript dies with it
+    # (run 36132336028). The step's own 900 s watch-loop is the real
+    # bound; these ceilings are pure headroom.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -46,7 +53,7 @@ jobs:
         # own child keeps the step well-behaved, so the commit step and
         # the log upload always happen. `--test-threads=1`: every test
         # mutates the same FIB rows and reuses the same probe port.
-        timeout-minutes: 20
+        timeout-minutes: 35
         shell: bash
         run: |
           cargo test -p lr-osroute --test windows_route_table --no-run
