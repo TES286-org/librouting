@@ -28,9 +28,30 @@
 use std::process::Command;
 
 use lr_core::addr::Prefix;
+use lr_osroute::ospf_transport;
 use lr_osroute::seg6_route::{seg6_enabled, Seg6EncapMode, Seg6LocalRoute, Seg6Netlink, Seg6Route};
 use lr_srv6::{Behavior, Sid, Srh};
 use std::str::FromStr;
+
+/// The loopback interface's ifindex — the egress device every route
+/// in this suite installs with. The kernel's `fib6_nh_init` rejects a
+/// device-less, gateway-less IPv6 route with `ENODEV` (run 36136529031
+/// failed exactly so), and inside the rootless netns the only interface
+/// is `lo`. `if_nametoindex` is netns-aware, so the lookup resolves the
+/// *current* namespace's loopback (index 1 in a fresh netns, but not
+/// assumed). The device is also brought up when possible: newer kernels
+/// additionally refuse a down egress device with `ENETDOWN`.
+fn loopback_ifindex() -> u32 {
+    // Best effort: newer kernels refuse an egress device that is
+    // administratively down with ENETDOWN, and a fresh netns starts
+    // with lo down. Bringing it up needs CAP_NET_ADMIN, which the
+    // rootless user namespace grants; elsewhere the failure is
+    // ignored and the install surfaces the real kernel errno.
+    let _ = Command::new("ip")
+        .args(["link", "set", "lo", "up"])
+        .status();
+    ospf_transport::ifindex_of("lo").unwrap_or(1)
+}
 
 /// True when `ip -6 route` exists and accepts the `seg6`/`seg6local`
 /// keywords (Linux 4.10+ with `CONFIG_IPV6_SEG6_LWTUNNEL`).
@@ -112,7 +133,9 @@ fn seg6_route_installs_into_kernel_main_table() {
 
     // Build a seg6 encap route: 2001:db8:1::/48 → push SRH with two
     // segments. The SIDs are in the IANA IPv6 documentation prefix
-    // (RFC 3849) so they don't accidentally route real traffic.
+    // (RFC 3849) so they don't accidentally route real traffic. The
+    // egress device is the namespace's loopback — mandatory, see
+    // `loopback_ifindex`.
     let sid1 = Sid::from_str("2001:db8:dead:beef::1").unwrap();
     let sid2 = Sid::from_str("2001:db8:dead:beef::2").unwrap();
     let srh = Srh::new(vec![sid1, sid2])
@@ -120,7 +143,9 @@ fn seg6_route_installs_into_kernel_main_table() {
         .with_next_header(59) // No Next Header
         .with_tag(0xa1b2);
     let prefix: Prefix = "2001:db8:1::/48".parse().unwrap();
-    let route = Seg6Route::new(prefix, srh).with_mode(Seg6EncapMode::Encap);
+    let route = Seg6Route::new(prefix, srh)
+        .with_mode(Seg6EncapMode::Encap)
+        .with_if_index(loopback_ifindex());
 
     let res = nl.add_seg6_route(&route);
     if let Err(e) = &res {
@@ -172,9 +197,12 @@ fn seg6local_route_installs_into_kernel_local_table() {
 
     // Build a seg6local End route: a SID whose behavior is plain
     // `End` (RFC 8986 §4.1 — the simplest endpoint, no parameters
-    // required).
+    // required). The route-level egress device is the namespace's
+    // loopback — the kernel rejects a device-less IPv6 route with
+    // ENODEV (this is distinct from the End.X action's own `oif`
+    // parameter, which rides inside RTA_ENCAP).
     let sid = Sid::from_str("2001:db8:dead:beef::abcd").unwrap();
-    let route = Seg6LocalRoute::new(sid, Behavior::End);
+    let route = Seg6LocalRoute::new(sid, Behavior::End).with_if_index(loopback_ifindex());
 
     let res = nl.add_seg6local_route(&route);
     if let Err(e) = &res {
