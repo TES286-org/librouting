@@ -211,6 +211,29 @@ pub trait RouterInstance {
     /// a Babel runtime.
     fn babel_note_peer(&mut self, _h: SessionHandle, _peer: lr_core::addr::IpAddr) {}
 
+    /// The current next-hop addresses the Babel peer of session `h`
+    /// advertises in its Update streams — `(AE 1 v4, AE 2/3 v6)` as
+    /// learned from the NextHop TLVs (RFC 8966 §4.6.4), plus the
+    /// implicit peer-address fallbacks once a datagram has been seen.
+    ///
+    /// The egress interface for every route learned on the session is
+    /// the session's own interface (babeld installs kernel routes with
+    /// `neigh->ifp`; BIRD resolves through the neighbour's iface) —
+    /// *not* whatever interface the kernel's own next-hop resolution
+    /// prefers. Embedders that mirror the Loc-RIB into the kernel FIB
+    /// use these addresses to pin the egress interface per next hop,
+    /// especially for v4-in-v6 transport where the v4 next hop is not
+    /// on-link anywhere and longest-prefix resolution can land the
+    /// route on an unrelated adapter (the rc.4 Windows production
+    /// defect). Default: `None` for implementors without a Babel
+    /// runtime.
+    fn babel_egress_nexthops(
+        &self,
+        _h: SessionHandle,
+    ) -> Option<(Option<lr_core::addr::IpAddr>, Option<lr_core::addr::IpAddr>)> {
+        None
+    }
+
     /// Withdraw every Loc-RIB route (queueing the RouteWithdrawn events
     /// the kernel mirror consumes). Called once during daemon shutdown
     /// after the sessions flushed their close NOTIFICATIONs, so the
@@ -5091,6 +5114,31 @@ impl RouterInstance for DefaultRouter {
             // here is a genuine peer source.
             runtime.neighbor.address = peer;
         }
+    }
+
+    fn babel_egress_nexthops(
+        &self,
+        h: SessionHandle,
+    ) -> Option<(Option<lr_core::addr::IpAddr>, Option<lr_core::addr::IpAddr>)> {
+        let SessionState::Babel { runtime, .. } = self.sessions.get(&h.0)? else {
+            return None;
+        };
+        // The next hop of last resort per family is the peer's own
+        // source address (RFC 8966 §3.5.3) — once traffic has been seen
+        // both that and any TLV-advertised address egress the session's
+        // interface, so both are useful to an egress-pinning embedder.
+        let peer_v4 = match runtime.neighbor.address {
+            IpAddr::V4(_) => Some(runtime.neighbor.address),
+            IpAddr::V6(_) => None,
+        };
+        let peer_v6 = match runtime.neighbor.address {
+            IpAddr::V6(_) => Some(runtime.neighbor.address),
+            IpAddr::V4(_) => None,
+        };
+        Some((
+            runtime.next_hop_v4.or(peer_v4),
+            runtime.next_hop_v6.or(peer_v6),
+        ))
     }
 
     fn flush_rib_for_shutdown(&mut self) {
