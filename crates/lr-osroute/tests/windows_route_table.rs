@@ -771,9 +771,15 @@ fn blackhole_route_discards_not_accepts() {
         .and_then(|s| s.parse().ok())
         .unwrap_or(0);
     assert!(
-        row_if == ifidx || row_if != 0,
-        "blackhole egress must be a real interface: {row}"
+        row_if != 0 && row_if != LOOPBACK_IF,
+        "blackhole egress must be a real interface, not loopback/unresolved: {row}"
     );
+    if row_if != ifidx {
+        println!(
+            "note: blackhole egress {row_if} differs from the primary adapter {ifidx} \
+             (the default-route owner won — expected on multihomed runners)"
+        );
+    }
 
     // (c): a connect into the covered space is discarded — the listener
     // must NOT see the connection. Both a timeout (silent discard) and
