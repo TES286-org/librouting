@@ -364,61 +364,13 @@ jobs:
   # Windows half of the "learn → install → decide" contract; the full
   # data-plane FORWARD step lives on Linux (netns + QEMU VM harness).
   #
-  # Windows FIB semantics probe (probe branch only). Runs the
-  # windows_route_table research matrix as Administrator on a real
-  # windows-2022 runner, tees every PROBE| line into probe-results.md
-  # and commits that transcript back to the branch so the findings are
-  # readable without Actions log access. This is the empirical half of
-  # the Windows blackhole/egress-interface investigation.
-  windows-fib-probe:
-    if: startsWith(github.ref, 'refs/heads/probe/')
-    name: Windows FIB probe (row forms + ifindex resolution)
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "windows-fib-probe"
-      - name: Run the FIB probe (Administrator shell)
-        # One invocation per test, each under an external timeout and
-        # `if: always()`: a wedged test (run 36125163593 hung until the
-        # job timeout on a New-NetIPAddress call) must not starve the
-        # rest of the transcript. The matrix runs first — it is the
-        # deliverable.
-        timeout-minutes: 20
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test -p lr-osroute --test windows_route_table --no-run
-          # Each guarded with || echo so -e cannot abort the group on a
-          # failing (or timeout-killed) invocation — every probe still
-          # runs and the transcript captures all of them.
-          {
-            timeout 300 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture fib_semantics_probe_matrix || echo "PROBE|matrix rc=$?"
-            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture probe_next_hop_interface_resolution || echo "PROBE|ifidx rc=$?"
-            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture blackhole_route_discards_not_accepts || echo "PROBE|blackhole rc=$?"
-            timeout 240 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture explicit_oif_beats_fib_resolution || echo "PROBE|explicit-oif rc=$?"
-          } 2>&1 | tee probe-output.log
-      - name: Commit the probe transcript back to the branch
-        # The probe matrix prints findings without asserting; the
-        # assertive regression tests in the same file MAY fail on an
-        # unaudited Windows build. The transcript is the deliverable —
-        # commit it regardless of the test step's outcome.
-        if: always()
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          grep '^PROBE|' probe-output.log > probe-results.md || echo "no PROBE lines captured" > probe-results.md
-          git config user.name "TES286-bot"
-          git config user.email "bot@tes286.top"
-          git add probe-results.md
-          git commit -m "probe: record windows FIB results (run ${{ github.run_id }})" || echo "nothing to commit"
-          git push origin HEAD:${{ github.ref_name }}
+  # Windows FIB semantics probe. MOVED OUT of this workflow: a job
+  # gated off the main-line trigger showed up as permanently
+  # "skipped" on every push run, which both hid real skips and
+  # wasted a runner slot. It now lives in
+  # .github/workflows/windows-fib-probe.yml (workflow_dispatch) and
+  # is dispatched manually on a disposable branch whenever a Windows
+  # build needs its FIB semantics re-audited.
 
   # The scripts already build the Windows lr-daemon binary via
   # `cargo build -p lr-cli` (the .exe suffix is handled by the
@@ -479,7 +431,9 @@ jobs:
         # broke every BGP session above it). The research-transcript
         # matrix (fib_semantics_probe_matrix) stays manually-invoked.
         timeout-minutes: 10
-        run: cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture blackhole_route_discards_not_accepts explicit_oif_beats_fib_resolution
+        # --test-threads=1: both tests mutate the same FIB rows and stage
+        # the same 169.254.188.0/24 shape — they must not interleave.
+        run: cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 blackhole_route_discards_not_accepts explicit_oif_beats_fib_resolution
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
   # This is the macOS half of the "CI reflects real usage" goal:
@@ -641,14 +595,21 @@ jobs:
       - name: SRv6 seg6/seg6local kernel interop (RFC 8754 / RFC 8986, kernel-gated)
         timeout-minutes: 10
         run: |
-          sudo sysctl -w net.ipv6.conf.all.seg6_enabled=1 || true
-          sudo sysctl -w net.ipv6.conf.lo.seg6_enabled=1 || true
-          # The tests are #[ignore] (kernel-gated). They skip cleanly
-          # when seg6 is unavailable or when the process lacks
-          # CAP_NET_ADMIN — the wire format itself is pinned by the
-          # 17 unit tests in seg6_route.rs that run unconditionally in
-          # the cargo test --workspace step above.
-          cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
+          cargo test -p lr-osroute --test srv6_kernel --all-features --no-run
+          # Run inside a rootless user+net namespace like the
+          # route_kernel step below: a bare runner process lacks
+          # CAP_NET_ADMIN, so every install used to die with EPERM and
+          # the #[ignore]d tests passed as vacuous SKIPs (run
+          # 36121452689's "SKIP: add_seg6local_route returned EPERM").
+          # The user namespace grants CAP_NET_ADMIN over the new netns;
+          # seg6_enabled is per-netns and defaults to 0, so it is
+          # enabled inside that netns before the tests run.
+          unshare -Urn bash -c '
+            set -euo pipefail
+            sysctl -w net.ipv6.conf.all.seg6_enabled=1
+            sysctl -w net.ipv6.conf.lo.seg6_enabled=1
+            cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
+          '
       - name: Route-table backend kernel tests (Linux netlink, rootless netns)
         # Real-kernel round trips the mock-socket unit tests cannot prove:
         # blackhole install → delete (the RTN_UNSPEC withdrawal fix — a

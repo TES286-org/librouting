@@ -36,8 +36,9 @@ use windows_sys::Win32::Foundation::{
     ERROR_INVALID_PARAMETER, ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR,
 };
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable, GetBestRoute2, GetIpForwardTable2,
-    InitializeIpForwardEntry, IP_ADDRESS_PREFIX, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+    CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable, GetBestRoute2, GetIpForwardEntry2,
+    GetIpForwardTable2, InitializeIpForwardEntry, IP_ADDRESS_PREFIX, MIB_IPFORWARD_ROW2,
+    MIB_IPFORWARD_TABLE2,
 };
 use windows_sys::Win32::Networking::WinSock::{
     RouteProtocolBgp, RouteProtocolLocal, RouteProtocolNetMgmt, RouteProtocolOspf,
@@ -65,7 +66,12 @@ pub struct IpHelper {
 
 /// One ledger entry — the row identity Windows routes are keyed by
 /// (`CreateIpForwardEntry2` duplicates = same prefix **and** next hop
-/// **and** interface).
+/// **and** interface). The next hop recorded here is the *effective*
+/// one read back from the stack after the create (see
+/// [`IpHelper::effective_next_hop`]), not the requested form — the
+/// stack normalises gateway-equals-own-address rows to the on-link
+/// shape at create time, and a delete keyed by the requested form
+/// would silently miss the row it must remove.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct InstalledRow {
     next_hop: IpAddr,
@@ -197,6 +203,13 @@ impl IpHelper {
         // but does NOT set the lifetime defaults.
         let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
         unsafe { InitializeIpForwardEntry(&mut row) };
+        // The initializer turns the Loopback flag ON on the audited
+        // builds (windows-2022 runner, probe transcript `init-defaults
+        // loopback=TRUE`); the SDK never documents that default. A set
+        // Loopback flag means loopback delivery under the weak host
+        // model, which is exactly the local-accept trap this crate
+        // exists to avoid — clear it explicitly on every row.
+        row.Loopback = false;
         row.InterfaceIndex = if_index;
         row.DestinationPrefix = IP_ADDRESS_PREFIX {
             Prefix: sockaddr_for(&prefix.addr, 0),
@@ -243,6 +256,11 @@ impl IpHelper {
         // SAFETY: same defaults as `make_row`.
         let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
         unsafe { InitializeIpForwardEntry(&mut row) };
+        // Same as `make_row`: the initializer's undocumented Loopback
+        // default is TRUE on audited builds; a blackhole row with the
+        // flag set is the weak-host local-accept trap in its purest
+        // form. Clear it explicitly.
+        row.Loopback = false;
         row.InterfaceIndex = if_index;
         row.DestinationPrefix = IP_ADDRESS_PREFIX {
             Prefix: sockaddr_for(&prefix.addr, 0),
@@ -289,6 +307,36 @@ impl IpHelper {
             )));
         }
         Ok(best_route.InterfaceIndex)
+    }
+
+    /// Read back the row the stack actually holds for `(prefix,
+    /// if_index)` and return its next hop — the *effective* row
+    /// identity, which `CreateIpForwardEntry2` is free to normalise at
+    /// create time. A next hop equal to the egress interface's own
+    /// address (the BGP next-hop-self shape) is stored as the on-link
+    /// form (`route print` shows "On-link"), so a ledger holding the
+    /// requested next hop would never match the table row again and
+    /// `delete_route` would silently no-op — the run-36121452689
+    /// teardown failure. The per-row getter is O(1); no table scan.
+    /// Falls back to `requested` when the row cannot be read (e.g. it
+    /// vanished between create and readback).
+    fn effective_next_hop(prefix: &Prefix, if_index: u32, requested: &IpAddr) -> IpAddr {
+        // SAFETY: same defaults as `make_row`.
+        let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        unsafe { InitializeIpForwardEntry(&mut row) };
+        row.InterfaceIndex = if_index;
+        row.DestinationPrefix = IP_ADDRESS_PREFIX {
+            Prefix: sockaddr_for(&prefix.addr, 0),
+            PrefixLength: prefix.prefix_len,
+        };
+        // SAFETY: `row` is a live stack value the API fills in; the
+        // union arms it writes are the ones `inet_addr_of` reads.
+        if unsafe { GetIpForwardEntry2(&mut row) } != NO_ERROR {
+            return *requested;
+        }
+        // SAFETY: reading the next-hop union of a filled row. The
+        // unspecified address (all zeros) is the on-link form.
+        unsafe { inet_addr_of(&row.NextHop) }
     }
 
     /// Record an installed row in the ledger (deduplicated — repeated
@@ -339,7 +387,17 @@ impl OsRouteTable for IpHelper {
         if rc != NO_ERROR {
             return Err(win_err("CreateIpForwardEntry2", rc));
         }
-        self.remember(prefix, InstalledRow { next_hop, if_index });
+        // Ledger the effective identity (see `effective_next_hop`): what
+        // the stack stored, not what was requested, so a later scoped
+        // delete matches the table row it must remove.
+        let stored = Self::effective_next_hop(&prefix, if_index, &next_hop);
+        self.remember(
+            prefix,
+            InstalledRow {
+                next_hop: stored,
+                if_index,
+            },
+        );
         Ok(())
     }
 
@@ -369,10 +427,14 @@ impl OsRouteTable for IpHelper {
         if rc != NO_ERROR {
             return Err(win_err("CreateIpForwardEntry2 (blackhole)", rc));
         }
+        // Same readback discipline as `add_route_tagged`: ledger what the
+        // stack actually holds for the row.
+        let on_link = on_link_next_hop(&prefix);
+        let stored = Self::effective_next_hop(&prefix, if_index, &on_link);
         self.remember(
             prefix,
             InstalledRow {
-                next_hop: on_link_next_hop(&prefix),
+                next_hop: stored,
                 if_index,
             },
         );
@@ -669,6 +731,29 @@ mod tests {
         // SAFETY: accessing the u union — the Byte array was initialized.
         let bytes = unsafe { next_hop.sin6_addr.u.Byte };
         assert_eq!(bytes, [0u8; 16]);
+    }
+
+    /// `InitializeIpForwardEntry` leaves the undocumented `Loopback`
+    /// default TRUE on audited builds (windows-2022 runner — the probe
+    /// transcript's `init-defaults loopback=TRUE` line). Every row this
+    /// backend installs must clear it: a set flag is loopback delivery
+    /// under the weak host model, the local-accept trap.
+    #[test]
+    fn route_row_clears_the_loopback_flag() {
+        let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+        let row = IpHelper::make_row(&prefix, &IpAddr::V4([10, 0, 0, 1]), 42, Protocol::Bgp);
+        assert!(!row.Loopback);
+        let prefix_v6 = Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
+            64,
+        );
+        let row_v6 = IpHelper::make_row(
+            &prefix_v6,
+            &IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
+            42,
+            Protocol::Babel,
+        );
+        assert!(!row_v6.Loopback);
     }
 
     /// The install ledger deduplicates repeated installs of the same

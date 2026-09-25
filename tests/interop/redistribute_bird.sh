@@ -219,7 +219,7 @@ wait_log() { # <file> <pattern> [timeout-seconds]
 }
 
 echo "== waiting for the BGP session and the OSPF adjacency =="
-wait_log "$OUT/lr.log" "session #1 → Established" 25
+wait_log "$OUT/lr.log" "→ Established" 25
 wait_log "$OUT/lr.log" "ospf neighbor 2.2.2.2 Full (area" 25
 echo "   transport: OK (BGP Established + OSPF Full)"
 

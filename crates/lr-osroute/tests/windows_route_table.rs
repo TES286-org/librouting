@@ -17,10 +17,13 @@
 //!    produced "peer closed connection" storms).
 //! 2. **Egress interface resolution** — `GetBestRoute2` resolves a v4
 //!    next hop by longest-prefix over the *current* FIB, so a next hop
-//!    inside an APIPA 169.254.0.0/16 connected route (present on the
+//!    inside a 169.254.0.0/16 APIPA connected route (present on the
 //!    reporter's box via an unrelated adapter) resolves to that adapter
 //!    — not to the tunnel the route was learned on. The regression test
-//!    reproduces the exact shape and proves the explicit-ifindex
+//!    reproduces the shape with a staged 169.254.188.0/24 (same
+//!    longest-prefix steal, but it leaves 169.254.169.254 — the cloud
+//!    metadata service — off-link, which is what killed the first probe
+//!    dispatches on Azure runners) and proves the explicit-ifindex
 //!    install path lands the row on the requested interface.
 //!
 //! Run (Administrator shell):
@@ -705,16 +708,22 @@ fn probe_next_hop_interface_resolution() {
         "env primary-if name={ifname} index={ifidx} addr={primary_v4}"
     ));
 
-    // Reproduce the production shape: an APIPA /16 connected route on
+    // Reproduce the production shape: a 169.254.x.y connected route on
     // the primary interface steals next-hop resolution for the tunnel
-    // peer's 169.254.x.y address.
-    let apipa = Ipv4Addr::new(169, 254, 177, 1);
+    // peer's 169.254.x.y address. The staged prefix is a /24
+    // (169.254.188.0/24 covering the ghost next hop) rather than the
+    // full APIPA /16 the production box had: the longest-prefix steal
+    // mechanism is identical, but 169.254.169.254 (the cloud metadata
+    // service) stays off-link. Staging the real /16 on a cloud runner
+    // makes IMDS unreachable and the runner agent loses its health
+    // check — the run-36125163593/36128494485 cancellations.
+    let apipa = Ipv4Addr::new(169, 254, 188, 1);
     let ps = format!(
-        "New-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -PrefixLength 16 -SkipAsSource $true -PolicyStore ActiveStore",
+        "New-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -PrefixLength 24 -SkipAsSource $true -PolicyStore ActiveStore",
         ifname, apipa
     );
     match powershell(&ps) {
-        Ok(_) => log(format!("env added {apipa}/16 on {ifname}")),
+        Ok(_) => log(format!("env added {apipa}/24 on {ifname}")),
         Err(e) => {
             log(format!(
                 "ifidx-probe degraded: cannot add APIPA address: {e}"
@@ -725,9 +734,9 @@ fn probe_next_hop_interface_resolution() {
 
     let ghost_nexthop = Ipv4Addr::new(169, 254, 188, 9); // the "tunnel peer" address
                                                          // Baseline: with no explicit egress, the daemon's GetBestRoute2
-                                                         // fallback resolves the next hop through the /16 connected route.
+                                                         // fallback resolves the next hop through the staged connected route.
     log(format!(
-        "resolve GetBestRoute2({ghost_nexthop}) -> if={:?} (the APIPA /16 owner is {ifidx}; the tunnel is NOT)",
+        "resolve GetBestRoute2({ghost_nexthop}) -> if={:?} (the staged /24 owner is {ifidx}; the tunnel is NOT)",
         best_route_if(IpAddr::V4(ghost_nexthop))
     ));
 
@@ -768,7 +777,7 @@ fn probe_next_hop_interface_resolution() {
         ifname, apipa
     );
     match powershell(&rm) {
-        Ok(_) => log(format!("env removed {apipa}/16")),
+        Ok(_) => log(format!("env removed {apipa}/24")),
         Err(e) => log(format!("cleanup warning: {e}")),
     }
     log("=== ifidx probe done ===".into());
@@ -855,11 +864,12 @@ fn blackhole_route_discards_not_accepts() {
 }
 
 /// An explicit egress interface must win over the FIB's own
-/// next-hop resolution: reproduce the production shape (an APIPA
-/// /16 connected route on one adapter claiming the tunnel peer's
-/// next hop) and verify the install lands on the *requested*
-/// interface — the rc.4 defect had every Babel route egress the
-/// APIPA adapter instead of the tunnel.
+/// next-hop resolution: reproduce the production shape (a 169.254.x.y
+/// connected route on one adapter claiming the tunnel peer's next
+/// hop) and verify the install lands on the *requested* interface —
+/// the rc.4 defect had every Babel route egress the APIPA adapter
+/// instead of the tunnel. The staged shape is a /24 (see the ifidx
+/// probe above): same steal mechanism, cloud-runner-safe.
 #[test]
 #[ignore = "mutates the real FIB — run as Administrator on Windows"]
 fn explicit_oif_beats_fib_resolution() {
@@ -871,13 +881,13 @@ fn explicit_oif_beats_fib_resolution() {
     // interface stands in for the tunnel (it is a distinct, always-
     // present interface index).
     let pinned_if: u32 = 1;
-    let apipa = Ipv4Addr::new(169, 254, 177, 1);
+    let apipa = Ipv4Addr::new(169, 254, 188, 1);
     let ps = format!(
-        "New-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -PrefixLength 16 -SkipAsSource $true -PolicyStore ActiveStore",
+        "New-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -PrefixLength 24 -SkipAsSource $true -PolicyStore ActiveStore",
         ifname, apipa
     );
     if let Err(e) = powershell(&ps) {
-        eprintln!("skipped: cannot stage the APIPA /16 shape: {e}");
+        eprintln!("skipped: cannot stage the 169.254.188.0/24 shape: {e}");
         return;
     }
 
