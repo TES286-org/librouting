@@ -78,6 +78,21 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed (SRv6 kernel route installation)
 
+- **The SRH Routing Type is 4, not 43 — every encoded SRH was
+  malformed and every decoded one rejected.** RFC 8754 §2 assigns
+  Routing Type 4 to Segment Routing (IANA's "IPv6 Routing Types"
+  registry); 43 is the Next Header value of the Routing extension
+  header *containing* the SRH (IPPROTO_ROUTING) — a different field
+  at a different layer. The constant was 43, so `seg6_build_state`'s
+  `seg6_validate_srh` (`srh->type != IPV6_SRCRT_TYPE_4`) rejected
+  every `ip route add ... encap seg6` install with EINVAL (run
+  36144067883 — surfaced only after the ENODEV fix let the request
+  reach the SRH parser), and `Srh::decode` refused every SRH of real
+  traffic. The SRH flags were at draft-era positions too: the O-flag
+  is 0x20 (IANA "SRH Flags" registry, RFC 9259; Linux
+  `SR6_FLAG1_OAM`), not 0x80, and the HMAC flag is 0x08 (Linux
+  `SR6_FLAG1_HMAC`), not 0x40; the reserved-bit check now accepts the
+  Linux uapi's four deployed positions (Protected/OAM/Alert/HMAC).
 - **seg6/seg6local routes install into the kernel again — the request
   now carries the egress device.** Linux's `fib6_nh_init`
   (net/ipv6/route.c) refuses every IPv6 route that names neither an
