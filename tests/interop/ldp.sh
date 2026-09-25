@@ -174,6 +174,21 @@ wait_log_re() { # <file> <regex> [timeout-seconds]
     return 1
 }
 
+# Poll `ip route show <prefix>` inside namespace <pid> until it matches
+# <egrep-pattern>, up to [timeout-seconds] (default 10). The daemon
+# installs LSP encap routes asynchronously after the binding propagates
+# through the sessions — a single-shot check races the install and flakes
+# (observed: r3's return-direction encap missing 4 ms after the transit
+# swap landed).
+wait_kernel_route() { # <pid> <prefix> <egrep-pattern> [timeout-seconds]
+    local pid=$1 prefix=$2 pat=$3 tmo=${4:-10} i
+    for ((i = 0; i < tmo * 10; i++)); do
+        nsenter -t "$pid" -n ip route show "$prefix" 2>/dev/null | grep -qE "$pat" && return 0
+        sleep 0.1
+    done
+    return 1
+}
+
 echo "== starting LSR r1 (1.1.1.1, binds 203.0.113.0/24 -> 24000) =="
 if [ "$MPLS" -eq 1 ]; then FLAGS=(--ldp-install-kernel); else FLAGS=(); fi
 nsenter -t "$R1" -n "$BIN" --protocol ldp --router-id 1.1.1.1 \
@@ -302,8 +317,9 @@ if [ "$MPLS" -eq 1 ]; then
 
     # r1's ingress half: push the transit label toward r2 (the Hello
     # source — r2's transport address is its loopback 2.2.2.2, which is
-    # not an LSP next hop).
-    if ! nsenter -t "$R1" -n ip route show 192.0.2.0/24 | grep -qE "encap mpls"; then
+    # not an LSP next hop). The encap install trails the mapping-learned
+    # log line by a moment — poll instead of racing it.
+    if ! wait_kernel_route "$R1" "192.0.2.0/24" "encap mpls"; then
         echo "FAIL: kernel route in r1 lacks the MPLS encap for the transit FEC:"
         nsenter -t "$R1" -n ip route show 192.0.2.0/24
         tail -25 "$OUT/r1.log"
@@ -312,8 +328,10 @@ if [ "$MPLS" -eq 1 ]; then
 
     # r3's return-direction LSP: the reply to a ping sourced from
     # r1's stub (203.0.113.1) rides r3's encap route for the FEC r1
-    # originated — the two unidirectional LSPs make the round trip.
-    if ! nsenter -t "$R3" -n ip route show 203.0.113.0/24 | grep -qE "encap mpls"; then
+    # originated — the two unidirectional LSPs make the round trip. The
+    # binding still has to propagate r1 -> r2 -> r3 when this runs —
+    # poll until the encap lands instead of racing it.
+    if ! wait_kernel_route "$R3" "203.0.113.0/24" "encap mpls"; then
         echo "FAIL: kernel route in r3 lacks the return-direction MPLS encap:"
         nsenter -t "$R3" -n ip route show 203.0.113.0/24
         tail -25 "$OUT/r3.log"
