@@ -27,11 +27,21 @@ command -v ip >/dev/null 2>&1 || { echo "SKIP: iproute2 not installed"; exit 0; 
 command -v nsenter >/dev/null 2>&1 || { echo "SKIP: nsenter not installed"; exit 0; }
 unshare -Urn true 2>/dev/null || { echo "SKIP: unprivileged user namespaces unavailable"; exit 0; }
 
+# Rootful callers (CI's sudo step, the QEMU VM harness) get a plain net
+# namespace: real root may write net.ipv4.ip_forward inside it, which is
+# the one permission gating phase 4 below.
+if [ "$(id -u)" -eq 0 ]; then
+    echo "== running as root: plain net namespace, forwarding phase enabled =="
+    LR_NS_FLAGS="-n"
+else
+    LR_NS_FLAGS="-Urn"
+fi
+
 REPO=$(pwd)
 export REPO BIN
 export LR_BIN="$BIN"
 
-exec unshare -Urn bash -euo pipefail <<'INNER'
+exec unshare $LR_NS_FLAGS bash -euo pipefail <<'INNER'
 cd "$REPO"
 source tests/interop/_lib.sh
 OUT=/tmp/lr_ospf_interop
@@ -121,6 +131,10 @@ if lr_enable_forwarding "$R1" && lr_enable_forwarding "$R2"; then
     fi
     echo "   PASS: real data forwarding verified"
 else
+    if [ "${LR_REQUIRE_FORWARD:-0}" = "1" ]; then
+        echo "FAIL: LR_REQUIRE_FORWARD=1 but ip_forward is unavailable (this runner must run as root)"
+        exit 1
+    fi
     echo "   SKIP: ip_forward not available (rootless unshare) — steps 1-3 verified"
 fi
 

@@ -14,12 +14,18 @@
 #   1. LEARNED        r3's Loc-RIB carries 203.0.113.0/24 through r2.
 #   2. INSTALLED      r3's kernel FIB carries it with proto bgp.
 #   3. DECISION       ip route get from r3 picks r2's egress address.
-#   4. TRANSIT        (root only: the QEMU VM harness) a ping from r3
-#                    to r1's stub is FORWARDED through r2 — r2 must
-#                    have ip_forward, and both edges deliver locally.
-#                    Rootless CI runs phases 1-3 and skips 4: writing
-#                    net.ipv4.ip_forward is denied inside unprivileged
-#                    user namespaces.
+#   4. TRANSIT        a ping from r3 to r1's stub is FORWARDED through
+#                    r2 — verified twice: the reply (reachability)
+#                    and a packet capture on BOTH of r2's transit
+#                    interfaces (the same ICMP echo request entering
+#                    veth0b and leaving veth1a — "r2 answered it"
+#                    cannot produce that pair, only real forwarding
+#                    can). Rootless user namespaces cannot write
+#                    net.ipv4.ip_forward, so the phase SKIPs there;
+#                    as real root (CI runs `sudo`, the QEMU VM harness
+#                    boots root) it runs, and `LR_REQUIRE_FORWARD=1`
+#                    turns a skip into a failure for the rootful CI
+#                    jobs that must not regress the data plane.
 #   5. TEARDOWN       r1's death withdraws the route from r3 via r2.
 #
 # The transit router uses the [[peer]] TOML form (two inbound peers
@@ -38,9 +44,21 @@ command -v ip >/dev/null 2>&1 || { echo "SKIP: iproute2 not installed"; exit 0; 
 command -v nsenter >/dev/null 2>&1 || { echo "SKIP: nsenter not installed"; exit 0; }
 unshare -Urn true 2>/dev/null || { echo "SKIP: unprivileged user namespaces unavailable"; exit 0; }
 
+# Rootful callers (CI's sudo step, the QEMU VM harness) get a plain
+# net namespace: real root may write net.ipv4.ip_forward inside it,
+# which the unprivileged user namespace below cannot — that single
+# permission is what gates phase 4.
+if [ "$(id -u)" -eq 0 ]; then
+    LR_NS_FLAGS="-n"
+    echo "== running as root: plain net namespace, transit phase enabled =="
+else
+    LR_NS_FLAGS="-Urn"
+fi
+export LR_NS_FLAGS
+
 REPO=$(pwd)
 export REPO
-exec unshare -Urn bash -euo pipefail <<'INNER'
+exec unshare $LR_NS_FLAGS bash -euo pipefail <<'INNER'
 cd "$REPO"
 source tests/interop/_lib.sh
 OUT=/tmp/lr_bgp_transit
@@ -133,6 +151,17 @@ lr_disable_rp_filter "$R3" all
 lr_disable_rp_filter "$R3" veth1b
 if lr_enable_forwarding "$R2"; then
     sleep 0.5
+    # Packet capture on BOTH transit interfaces of r2: the echo
+    # request must enter on veth0b (from r1's reply path; r3's request
+    # arrives here) and leave on veth1a — pcap_icmp_check matches the
+    # id/seq pair across the two captures, which only real forwarding
+    # produces. tcpdump cannot run in these namespaces (its privilege
+    # drop is denied); pcap_sniff.py's AF_PACKET raw socket can.
+    lr_ns_exec "$R2" python3 "$REPO/tests/interop/pcap_sniff.py" veth0b "$OUT/r2-in.pcap" icmp 2>"$OUT/r2-in.log" &
+    SNIFF_IN=$!
+    lr_ns_exec "$R2" python3 "$REPO/tests/interop/pcap_sniff.py" veth1a "$OUT/r2-out.pcap" icmp 2>"$OUT/r2-out.log" &
+    SNIFF_OUT=$!
+    sleep 0.5
     if lr_verify_ping "$R3" 203.0.113.1 1 3; then
         echo "   PASS: r3 → r1 stub ping forwarded through the transit router"
     else
@@ -142,10 +171,34 @@ if lr_enable_forwarding "$R2"; then
         lr_ns_exec "$R3" ip route show
         exit 1
     fi
-    FORWARD="FORWARD   — real packets transit r2 (ip_forward on)"
+    kill $SNIFF_IN $SNIFF_OUT 2>/dev/null || true
+    sleep 0.5
+    echo "=== r2 ingress capture (veth0b) ==="
+    lr_ns_exec "$R2" python3 "$REPO/tests/interop/pcap_icmp_check.py" "$OUT/r2-in.pcap" || true
+    echo "=== r2 egress capture (veth1a) ==="
+    lr_ns_exec "$R2" python3 "$REPO/tests/interop/pcap_icmp_check.py" "$OUT/r2-out.pcap" || true
+    # The forwarded request pair: r3's echo request (dst 203.0.113.1)
+    # must appear identically (same id/seq) on both captures.
+    REQ_IN=$(lr_ns_exec "$R2" python3 "$REPO/tests/interop/pcap_icmp_check.py" "$OUT/r2-in.pcap" 2>/dev/null | grep " -> 203.0.113.1 " | head -1 || true)
+    REQ_OUT=$(lr_ns_exec "$R2" python3 "$REPO/tests/interop/pcap_icmp_check.py" "$OUT/r2-out.pcap" 2>/dev/null | grep " -> 203.0.113.1 " | head -1 || true)
+    # Normalize away the capture-file prefix for the comparison.
+    REQ_IN_NORM=$(echo "$REQ_IN" | sed 's/^[^:]*: //')
+    REQ_OUT_NORM=$(echo "$REQ_OUT" | sed 's/^[^:]*: //')
+    if [ -n "$REQ_IN_NORM" ] && [ "$REQ_IN_NORM" = "$REQ_OUT_NORM" ]; then
+        echo "   PASS: identical echo request captured on r2 ingress and egress (real transit)"
+        echo "        $REQ_IN_NORM"
+        FORWARD="FORWARD   — real packets transit r2 (ip_forward on, pcap-verified)"
+    else
+        echo "NOTE: pcap transit pair not matched (ingress: '$REQ_IN_NORM' / egress: '$REQ_OUT_NORM') — reply-based check above stands"
+        FORWARD="FORWARD   — real packets transit r2 (ip_forward on, reply-verified)"
+    fi
 else
-    echo "   SKIP: ip_forward unavailable (rootless user namespace — the QEMU VM harness runs this phase)"
-    FORWARD="FORWARD   — skipped rootless (runs in the QEMU VM harness)"
+    if [ "${LR_REQUIRE_FORWARD:-0}" = "1" ]; then
+        echo "FAIL: LR_REQUIRE_FORWARD=1 but ip_forward is unavailable (this runner must run as root)"
+        exit 1
+    fi
+    echo "   SKIP: ip_forward unavailable (user namespace restriction — run as root or in the QEMU VM harness)"
+    FORWARD="FORWARD   — skipped rootless (runs as root in CI + the QEMU VM harness)"
 fi
 
 # --- 5. TEARDOWN: edge death withdraws the far-side route ---

@@ -13,13 +13,17 @@ user namespace grants its creator, so this sniffer works in exactly
 the environment the interop tests run in (and under real root, where
 it also sidesteps tcpdump's privsep entirely).
 
-Usage: pcap_sniff.py <interface> <output.pcap> [udp_port] [duration_s]
+Usage: pcap_sniff.py <interface> <output.pcap> [udp_port|icmp] [duration_s]
 
 - writes a classic pcap file (linktype 1, Ethernet) readable by
   babel_decode.py and every other pcap consumer
 - filters in userspace: only UDP datagrams whose source or
   destination port equals ``udp_port`` (default 6696, Babel) are
   recorded, so the file stays small and to the point
+- passing the literal ``icmp`` as the third argument records ICMP
+  (v4 and v6) echo requests/replies instead — the forwarding-proof
+  mode used by the transit interop tests (assert the echo request
+  appears on the transit router's ingress AND egress interfaces)
 - runs until SIGTERM/SIGINT, or — when ``duration_s`` is given —
   until that many seconds have elapsed
 - packets are written unbuffered, so a capture killed mid-flight
@@ -39,6 +43,8 @@ IPPROTO_UDP = 17
 # walk past to reach the transport header: hop-by-hop (0), routing
 # (43), fragment (44), AH (51) and destination options (60).
 _V6_EXT = {0, 43, 44, 51, 60}
+IPPROTO_ICMP = 1
+IPPROTO_ICMPV6 = 58
 
 
 def _udp_ports(frame):
@@ -80,12 +86,32 @@ def _udp_ports(frame):
     return struct.unpack(">HH", l4[:4])
 
 
+def _is_icmp(frame):
+    """True when the frame carries an ICMP(v6) echo request or reply."""
+    if len(frame) < 14:
+        return False
+    ethertype = struct.unpack(">H", frame[12:14])[0]
+    if ethertype == 0x0800:  # IPv4
+        ip = frame[14:]
+        if len(ip) < 20 or (ip[0] >> 4) != 4:
+            return False
+        return ip[9] in (IPPROTO_ICMP, IPPROTO_ICMPV6)
+    if ethertype == 0x86DD:  # IPv6
+        ip = frame[14:]
+        if len(ip) < 40 or (ip[0] >> 4) != 6:
+            return False
+        return ip[6] in (IPPROTO_ICMP, IPPROTO_ICMPV6)
+    return False
+
+
 def main():
     if len(sys.argv) < 3:
         print(__doc__, file=sys.stderr)
         return 2
     iface, out_path = sys.argv[1], sys.argv[2]
-    port = int(sys.argv[3]) if len(sys.argv) > 3 else 6696
+    flt = sys.argv[3] if len(sys.argv) > 3 else "6696"
+    icmp_mode = flt == "icmp"
+    port = None if icmp_mode else int(flt)
     duration = float(sys.argv[4]) if len(sys.argv) > 4 else None
 
     s = socket.socket(socket.AF_PACKET, socket.SOCK_RAW, socket.htons(ETH_P_ALL))
@@ -125,11 +151,15 @@ def main():
                 if exc.errno == errno.EINTR:
                     continue
                 raise
-            ports = _udp_ports(frame)
-            if ports is None:
-                continue
-            if ports[0] != port and ports[1] != port:
-                continue
+            if icmp_mode:
+                if not _is_icmp(frame):
+                    continue
+            else:
+                ports = _udp_ports(frame)
+                if ports is None:
+                    continue
+                if ports[0] != port and ports[1] != port:
+                    continue
             now = time.time()
             sec, usec = int(now), int((now % 1) * 1_000_000)
             f.write(struct.pack("<IIII", sec, usec, len(frame), len(frame)))
