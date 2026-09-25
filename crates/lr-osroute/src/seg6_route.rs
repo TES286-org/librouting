@@ -108,10 +108,25 @@ const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_ACK: u16 = 0x04;
 const NLM_F_REPLACE: u16 = 0x100;
 const NLM_F_CREATE: u16 = 0x400;
+/// Request the kernel's extended-ack attributes on the NLMSG_ERROR
+/// reply (uapi/linux/netlink.h) — the netlink-level reason in the
+/// kernel's own words, e.g. "Egress device not specified".
+const NLM_F_ACK_TLVS: u16 = 0x200;
+/// Cap the original-message echo inside the error reply to the bare
+/// header (same bit as `NLM_F_REPLACE`; the netlink core reads it as
+/// an ack-shape flag independently of the route operation). Capping
+/// fixes the extack TLVs' start offset at 36.
+const NLM_F_CAPPED: u16 = 0x100;
 
 /// Flags for route installation: CREATE + REPLACE so that installing
-/// over an existing entry *replaces* it (mirrors `mpls_route`).
-const ADD_ROUTE_FLAGS: u16 = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
+/// over an existing entry *replaces* it (mirrors `mpls_route`), plus
+/// the ack shape that carries the extended-ack attributes.
+const ADD_ROUTE_FLAGS: u16 =
+    NLM_F_REQUEST | NLM_F_ACK | NLM_F_ACK_TLVS | NLM_F_CREATE | NLM_F_REPLACE;
+
+/// Flags for route deletion — REPLACE's value doubles as the
+/// cap-the-echo ack shape, keeping the extack at a fixed offset.
+const DEL_ROUTE_FLAGS: u16 = NLM_F_REQUEST | NLM_F_ACK | NLM_F_ACK_TLVS | NLM_F_CAPPED;
 
 // Netlink socket constants.
 const NETLINK_ROUTE: i32 = 0;
@@ -480,7 +495,7 @@ impl Seg6Netlink {
         prefix: lr_core::addr::Prefix,
     ) -> Result<(), Seg6RouteError> {
         let route = Seg6Route::new(prefix, Srh::new(vec![Sid::UNSPECIFIED])?);
-        let buf = self.build_seg6_request(RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK, &route)?;
+        let buf = self.build_seg6_request(RTM_DELROUTE, DEL_ROUTE_FLAGS, &route)?;
         let resp = self.sendmsg_and_recv(&buf)?;
         check_ack(&resp)
     }
@@ -496,7 +511,7 @@ impl Seg6Netlink {
     /// Delete a `seg6local` endpoint route.
     pub fn delete_seg6local_route(&mut self, sid: Sid) -> Result<(), Seg6RouteError> {
         let route = Seg6LocalRoute::new(sid, Behavior::EndUn);
-        let buf = self.build_seg6local_request(RTM_DELROUTE, NLM_F_REQUEST | NLM_F_ACK, &route)?;
+        let buf = self.build_seg6local_request(RTM_DELROUTE, DEL_ROUTE_FLAGS, &route)?;
         let resp = self.sendmsg_and_recv(&buf)?;
         check_ack(&resp)
     }
@@ -722,7 +737,13 @@ impl Drop for Seg6Netlink {
 /// Parse the netlink ACK/NAK response. The kernel replies to a
 /// `NLM_F_ACK`-flagged request with either a `NLMSG_DONE` (success)
 /// or a `NLMSG_ERROR` carrying a non-zero errno (failure). The errno
-/// is in host byte order (it's a plain `int`).
+/// is in host byte order (it's a plain `int`). When the request also
+/// carried `NLM_F_ACK_TLVS`, the error reply appends the kernel's
+/// extended-ack attributes — `NLMSGERR_ATTR_MSG` is the netlink-level
+/// reason in the kernel's own words ("Egress device not specified",
+/// "Nexthop device is not up", …), which the bare errno cannot
+/// convey. Folding it into the error string turns a bare `EINVAL`
+/// into an actionable diagnostic.
 fn check_ack(resp: &[u8]) -> Result<(), Seg6RouteError> {
     if resp.len() < 20 {
         return Err(Seg6RouteError::Kernel(format!(
@@ -745,11 +766,54 @@ fn check_ack(resp: &[u8]) -> Result<(), Seg6RouteError> {
         // NLMSG_ERROR with errno=0 is an ACK.
         return Ok(());
     }
+    let extack = extack_msg(resp)
+        .map(|m| format!(": {m}"))
+        .unwrap_or_default();
     Err(Seg6RouteError::Kernel(format!(
-        "netlink error {} ({})",
+        "netlink error {} ({}){}",
         err,
-        errno_str(err)
+        errno_str(err),
+        extack
     )))
+}
+
+/// Extract `NLMSGERR_ATTR_MSG` (the extended-ack human-readable
+/// reason) from an `NLMSG_ERROR` reply. The reply echoes the original
+/// request header at offset 20; its `NLM_F_CAPPED` bit decides whether
+/// the echo carries the original payload too (TLVs then start after
+/// it) or is capped to the bare header (TLVs start at 36).
+fn extack_msg(resp: &[u8]) -> Option<String> {
+    const NLMSGERR_ATTR_MSG: u16 = 1;
+    if resp.len() < 36 {
+        return None;
+    }
+    let msg_len = u32::from_ne_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
+    let orig_len = u32::from_ne_bytes([resp[20], resp[21], resp[22], resp[23]]) as usize;
+    let orig_flags = u16::from_ne_bytes([resp[26], resp[27]]);
+    let tlv_off = if orig_flags & NLM_F_CAPPED != 0 {
+        36
+    } else {
+        (20 + orig_len + 3) & !3
+    };
+    let bound = msg_len.min(resp.len());
+    let mut cur = tlv_off;
+    while cur + 4 <= bound {
+        let alen = u16::from_ne_bytes([resp[cur], resp[cur + 1]]) as usize;
+        if alen < 4 {
+            break;
+        }
+        let atype = u16::from_ne_bytes([resp[cur + 2], resp[cur + 3]]);
+        if atype == NLMSGERR_ATTR_MSG {
+            let end = (cur + alen).min(bound);
+            return Some(
+                String::from_utf8_lossy(&resp[cur + 4..end])
+                    .trim_end_matches('\0')
+                    .to_string(),
+            );
+        }
+        cur += (alen + 3) & !3;
+    }
+    None
 }
 
 fn errno_str(err: i32) -> &'static str {
@@ -1084,6 +1148,62 @@ mod tests {
             Seg6RouteError::Kernel(s) => assert!(s.contains("ENODEV")),
             other => panic!("expected Kernel error, got {:?}", other),
         }
+    }
+
+    #[test]
+    fn check_ack_carries_the_kernel_extack_message() {
+        // NLMSG_ERROR with a capped echo (orig header only, TLVs at
+        // offset 36) carrying NLMSGERR_ATTR_MSG.
+        let msg = b"Egress device not specified\0";
+        let tlv_len = 4 + msg.len();
+        let total = 36 + tlv_len;
+        let mut resp = vec![0u8; total];
+        resp[0..4].copy_from_slice(&(total as u32).to_ne_bytes());
+        resp[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        // errno at offset 16.
+        resp[16..20].copy_from_slice(&(-22i32).to_ne_bytes());
+        // Echoed original header at 20: length + NLM_F_CAPPED flag.
+        resp[20..24].copy_from_slice(&28u32.to_ne_bytes());
+        resp[26..28].copy_from_slice(&NLM_F_CAPPED.to_ne_bytes());
+        // TLV at 36: NLMSGERR_ATTR_MSG (1).
+        resp[36..38].copy_from_slice(&(tlv_len as u16).to_ne_bytes());
+        resp[38..40].copy_from_slice(&1u16.to_ne_bytes());
+        resp[40..40 + msg.len()].copy_from_slice(msg);
+        let err = check_ack(&resp).unwrap_err();
+        match err {
+            Seg6RouteError::Kernel(s) => {
+                assert!(s.contains("EINVAL"));
+                assert!(
+                    s.contains("Egress device not specified"),
+                    "extack message folded in: {s}"
+                );
+            }
+            other => panic!("expected Kernel error, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn extack_msg_handles_uncapped_echo() {
+        // Without NLM_F_CAPPED the original payload is echoed and the
+        // TLVs start after it (20 + orig_len, aligned).
+        let msg = b"Nexthop device is not up\0";
+        let tlv_len = 4 + msg.len();
+        let orig_len = 28usize; // header + 12-byte rtmsg
+        let tlv_off = (20 + orig_len + 3) & !3; // 48
+        let total = tlv_off + tlv_len;
+        let mut resp = vec![0u8; total];
+        resp[0..4].copy_from_slice(&(total as u32).to_ne_bytes());
+        resp[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        resp[16..20].copy_from_slice(&(-119i32).to_ne_bytes());
+        resp[20..24].copy_from_slice(&(orig_len as u32).to_ne_bytes());
+        // flags empty: uncapped.
+        resp[tlv_off..tlv_off + 2].copy_from_slice(&(tlv_len as u16).to_ne_bytes());
+        resp[tlv_off + 2..tlv_off + 4].copy_from_slice(&1u16.to_ne_bytes());
+        resp[tlv_off + 4..tlv_off + 4 + msg.len()].copy_from_slice(msg);
+        assert_eq!(
+            extack_msg(&resp).as_deref(),
+            Some("Nexthop device is not up")
+        );
     }
 
     #[test]
