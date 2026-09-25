@@ -429,20 +429,66 @@ fn primary_interface() -> Option<(String, u32, Ipv4Addr)> {
     None
 }
 
+/// PowerShell with a watchdog: `New-NetIPAddress` and friends talk to
+/// WMI/NDIS and have been observed hanging indefinitely on runner
+/// builds (the run-36125163593 probe wedged until the job timeout).
+/// `std::process` has no wait-with-timeout, so poll `try_wait` and
+/// kill the child when the budget expires. The pipes are drained on
+/// dedicated threads so a child blocked writing a full pipe buffer
+/// cannot deadlock the watchdog, and the kill unblocks the reads.
 fn powershell(script: &str) -> Result<String, String> {
-    let out = std::process::Command::new("powershell.exe")
+    let mut child = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", script])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() {
-        Ok(text)
-    } else {
-        Err(text)
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut p) = stdout {
+            use std::io::Read;
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut p) = stderr {
+            use std::io::Read;
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    const BUDGET: Duration = Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + BUDGET;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(e.to_string());
+            }
+        }
+    };
+    let out = out_handle.join().unwrap_or_default();
+    let err = err_handle.join().unwrap_or_default();
+    match status {
+        Some(status) if status.success() => Ok(format!("{out}{err}")),
+        Some(_) => Err(format!("{out}{err}")),
+        None => Err(format!(
+            "powershell timed out after {}s: {script}",
+            BUDGET.as_secs()
+        )),
     }
 }
 

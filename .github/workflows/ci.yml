@@ -364,42 +364,13 @@ jobs:
   # Windows half of the "learn → install → decide" contract; the full
   # data-plane FORWARD step lives on Linux (netns + QEMU VM harness).
   #
-  # Windows FIB semantics probe (probe branch only). Runs the
-  # windows_route_table research matrix as Administrator on a real
-  # windows-2022 runner, tees every PROBE| line into probe-results.md
-  # and commits that transcript back to the branch so the findings are
-  # readable without Actions log access. This is the empirical half of
-  # the Windows blackhole/egress-interface investigation.
-  windows-fib-probe:
-    if: startsWith(github.ref, 'refs/heads/probe/')
-    name: Windows FIB probe (row forms + ifindex resolution)
-    runs-on: windows-2022
-    timeout-minutes: 30
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - name: Cache cargo registry + target
-        uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: "windows-fib-probe"
-      - name: Run the FIB probe (Administrator shell)
-        timeout-minutes: 15
-        shell: bash
-        run: |
-          set -o pipefail
-          cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture 2>&1 | tee probe-output.log
-      - name: Commit the probe transcript back to the branch
-        timeout-minutes: 5
-        shell: bash
-        run: |
-          grep '^PROBE|' probe-output.log > probe-results.md || echo "no PROBE lines captured" > probe-results.md
-          git config user.name "TES286-bot"
-          git config user.email "bot@tes286.top"
-          git add probe-results.md
-          git commit -m "probe: record windows FIB results (run ${{ github.run_id }})" || echo "nothing to commit"
-          git push origin HEAD:${{ github.ref_name }}
+  # Windows FIB semantics probe. MOVED OUT of this workflow: a job
+  # gated off the main-line trigger showed up as permanently
+  # "skipped" on every push run, which both hid real skips and
+  # wasted a runner slot. It now lives in
+  # .github/workflows/windows-fib-probe.yml (workflow_dispatch) and
+  # is dispatched manually on a disposable branch whenever a Windows
+  # build needs its FIB semantics re-audited.
 
   # The scripts already build the Windows lr-daemon binary via
   # `cargo build -p lr-cli` (the .exe suffix is handled by the

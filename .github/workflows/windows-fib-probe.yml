@@ -1,0 +1,71 @@
+# Windows FIB semantics probe (manual, on demand).
+#
+# Runs the windows_route_table research matrix as Administrator on a
+# real windows-2022 runner — the empirical half of the Windows
+# blackhole / egress-interface / row-normalisation investigations. It
+# tees every `PROBE|` line into probe-results.md and commits that
+# transcript back so the findings are readable without Actions log
+# access. The assertive regression tests in the same file may fail on
+# an unaudited Windows build; the transcript is the deliverable, so
+# the commit step runs with `if: always()`.
+#
+# Lives OUTSIDE ci.yml on purpose: a branch-gated job in the push
+# workflow shows up as permanently "skipped" on every main-line run.
+# Dispatch it on a disposable branch (NOT main — the transcript is
+# committed back to the dispatched ref):
+#
+#   gh workflow run windows-fib-probe.yml --ref probe/windows-audit
+#   # or: curl -X POST .../actions/workflows/windows-fib-probe.yml/dispatches \
+#   #        -f ref=probe/windows-audit
+name: Windows FIB probe
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  fib-probe:
+    name: Windows FIB probe (row forms + ifindex resolution)
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "windows-fib-probe"
+      - name: Run the FIB probe (Administrator shell)
+        # One invocation per test, each under an external timeout and
+        # `if: always()`: a wedged test (the run-36125163593 probe
+        # hung until the job timeout) must not starve the rest of the
+        # transcript. The matrix runs first — it is the deliverable.
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo test -p lr-osroute --test windows_route_table --no-run
+          # Each guarded with || echo so -e cannot abort the group on a
+          # failing (or timeout-killed) invocation — every probe still
+          # runs and the transcript captures all of them.
+          {
+            timeout 300 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture fib_semantics_probe_matrix || echo "PROBE|matrix rc=$?"
+            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture probe_next_hop_interface_resolution || echo "PROBE|ifidx rc=$?"
+            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture blackhole_route_discards_not_accepts || echo "PROBE|blackhole rc=$?"
+            timeout 240 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture explicit_oif_beats_fib_resolution || echo "PROBE|explicit-oif rc=$?"
+          } 2>&1 | tee probe-output.log
+      - name: Commit the probe transcript back to the ref
+        # Guard against dispatching on a protected ref: the step pushes
+        # a probe-results.md commit to github.ref_name.
+        if: ${{ !endsWith(github.ref, '/main') }}
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          grep '^PROBE|' probe-output.log > probe-results.md || echo "no PROBE lines captured" > probe-results.md
+          git config user.name "TES286-bot"
+          git config user.email "bot@tes286.top"
+          git add probe-results.md
+          git commit -m "probe: record windows FIB results (run ${{ github.run_id }})" || echo "nothing to commit"
+          git push origin HEAD:${{ github.ref_name }}
