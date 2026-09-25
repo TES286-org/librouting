@@ -429,20 +429,66 @@ fn primary_interface() -> Option<(String, u32, Ipv4Addr)> {
     None
 }
 
+/// PowerShell with a watchdog: `New-NetIPAddress` and friends talk to
+/// WMI/NDIS and have been observed hanging indefinitely on runner
+/// builds (the run-36125163593 probe wedged until the job timeout).
+/// `std::process` has no wait-with-timeout, so poll `try_wait` and
+/// kill the child when the budget expires. The pipes are drained on
+/// dedicated threads so a child blocked writing a full pipe buffer
+/// cannot deadlock the watchdog, and the kill unblocks the reads.
 fn powershell(script: &str) -> Result<String, String> {
-    let out = std::process::Command::new("powershell.exe")
+    let mut child = std::process::Command::new("powershell.exe")
         .args(["-NoProfile", "-Command", script])
-        .output()
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| e.to_string())?;
-    let text = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if out.status.success() {
-        Ok(text)
-    } else {
-        Err(text)
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let out_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut p) = stdout {
+            use std::io::Read;
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    let err_handle = std::thread::spawn(move || {
+        let mut buf = String::new();
+        if let Some(mut p) = stderr {
+            use std::io::Read;
+            let _ = p.read_to_string(&mut buf);
+        }
+        buf
+    });
+    const BUDGET: Duration = Duration::from_secs(60);
+    let deadline = std::time::Instant::now() + BUDGET;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Some(status),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            Err(e) => {
+                let _ = child.kill();
+                return Err(e.to_string());
+            }
+        }
+    };
+    let out = out_handle.join().unwrap_or_default();
+    let err = err_handle.join().unwrap_or_default();
+    match status {
+        Some(status) if status.success() => Ok(format!("{out}{err}")),
+        Some(_) => Err(format!("{out}{err}")),
+        None => Err(format!(
+            "powershell timed out after {}s: {script}",
+            BUDGET.as_secs()
+        )),
     }
 }
 
@@ -453,28 +499,6 @@ fn powershell(script: &str) -> Result<String, String> {
 #[test]
 #[ignore = "research probe — mutates the real FIB; run as Administrator"]
 fn fib_semantics_probe_matrix() {
-    // Transcript the initializer's defaults: the unit tests in
-    // src/windows.rs assert the blackhole row carries Loopback=FALSE,
-    // which only holds if `InitializeIpForwardEntry` does not turn the
-    // flag on. Record the defaults on the audited build so the unit
-    // tests' assumption is pinned to the transcript.
-    {
-        let mut row: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
-        unsafe { InitializeIpForwardEntry(&mut row) };
-        log(format!(
-            "init-defaults loopback={} publish={} immortal={} autoconf={} \
-             valid={} preferred={} proto={} metric={}",
-            row.Loopback,
-            row.Publish,
-            row.Immortal,
-            row.AutoconfigureAddress,
-            row.ValidLifetime,
-            row.PreferredLifetime,
-            row.Protocol,
-            row.Metric
-        ));
-    }
-
     log("=== reference rows (the system's own loopback routes) ===".into());
     for p in [
         Prefix::new_v4([127, 0, 0, 0], 8),
@@ -551,19 +575,6 @@ fn fib_semantics_probe_matrix() {
                 "form [{name}] DeleteIpForwardEntry2 rc={drc} left={:?}",
                 fib_row(&V4_PREFIX)
             ));
-            // The daemon's delete_route deletes by the row AS READ FROM
-            // the table (never by the constructed form). Transcript that
-            // path separately: if the stack normalized the row at create
-            // time (e.g. a gateway equal to a local address becomes the
-            // on-link form), delete-by-constructed-row misses while
-            // delete-by-table-row must still succeed.
-            if fib_row(&V4_PREFIX).is_some() {
-                log(format!(
-                    "form [{name}] delete-by-table-row rc={} left={:?}",
-                    delete_all_for(&V4_PREFIX),
-                    fib_row(&V4_PREFIX)
-                ));
-            }
         }
     }
 

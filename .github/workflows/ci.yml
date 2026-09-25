@@ -385,11 +385,25 @@ jobs:
         with:
           shared-key: "windows-fib-probe"
       - name: Run the FIB probe (Administrator shell)
-        timeout-minutes: 15
+        # One invocation per test, each under an external timeout and
+        # `if: always()`: a wedged test (run 36125163593 hung until the
+        # job timeout on a New-NetIPAddress call) must not starve the
+        # rest of the transcript. The matrix runs first — it is the
+        # deliverable.
+        timeout-minutes: 20
         shell: bash
         run: |
           set -o pipefail
-          cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture 2>&1 | tee probe-output.log
+          cargo test -p lr-osroute --test windows_route_table --no-run
+          # Each guarded with || echo so -e cannot abort the group on a
+          # failing (or timeout-killed) invocation — every probe still
+          # runs and the transcript captures all of them.
+          {
+            timeout 300 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture fib_semantics_probe_matrix || echo "PROBE|matrix rc=$?"
+            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture probe_next_hop_interface_resolution || echo "PROBE|ifidx rc=$?"
+            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture blackhole_route_discards_not_accepts || echo "PROBE|blackhole rc=$?"
+            timeout 240 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture explicit_oif_beats_fib_resolution || echo "PROBE|explicit-oif rc=$?"
+          } 2>&1 | tee probe-output.log
       - name: Commit the probe transcript back to the branch
         # The probe matrix prints findings without asserting; the
         # assertive regression tests in the same file MAY fail on an
