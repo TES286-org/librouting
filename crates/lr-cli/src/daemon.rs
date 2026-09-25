@@ -3166,6 +3166,18 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             .write()
             .unwrap()
             .set_babel_own_router_id(h, iface.router_id);
+        // Reception-side link-cost ramp (§A.2.4): the RTT bounds and
+        // maximum penalty applied on top of the txcost learned from the
+        // peer's IHU when an Update's advertised metric is folded into
+        // the local route metric. Without this the runtime keeps the
+        // babeld default (rtt_cost 0 — feature off) regardless of the
+        // interface's `rtt_cost` configuration.
+        router.write().unwrap().set_babel_link_cost_params(
+            h,
+            iface.rtt_min_us,
+            iface.rtt_max_us,
+            iface.rtt_cost,
+        );
         if !iface.auth_debug_line.is_empty() {
             println!("daemon: {}", iface.auth_debug_line);
         }
@@ -3491,7 +3503,6 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         &r,
                         iface,
                         transport_local,
-                        now_ms,
                         now_us,
                         rtt_echo,
                         babel_export_filter.as_ref(),
@@ -4581,12 +4592,11 @@ fn babel_announcement_signature(router: &DefaultRouter, iface: &BabelIface) -> S
     let mut parts: Vec<String> = Vec::new();
     for r in router.rib_snapshot() {
         if r.protocol != lr_core::rib::Protocol::Babel {
-            // Include the metric: an own route whose metric changed (a
-            // static `metric` edit, an rtt_penalty step) must bump the
-            // announcement seqno, or peers reject the new value as
-            // infeasible (same seqno, worse metric) and hold the stale
-            // route.
-            parts.push(format!("o{}:{}", r.key.prefix, r.preference.metric));
+            // Originated routes announce metric 0 (babeld's redistribute
+            // default / BIRD's `ea_babel_metric` default), so the route's
+            // own metric no longer influences the announcement — only
+            // the prefix set belongs in the signature.
+            parts.push(format!("o{}", r.key.prefix));
         }
     }
     for r in router.babel_reachable(iface.session) {
@@ -4606,13 +4616,26 @@ fn babel_announcement_signature(router: &DefaultRouter, iface: &BabelIface) -> S
 ///   interface measures delay, its BABEL-RTT timestamp (§A.2.4).
 /// * IHU (§3.5) tells the peers the receive cost we assign to them,
 ///   echoing the BABEL-RTT pair from their last timestamped Hello.
-/// * Updates advertise the Loc-RIB routes this speaker originates
-///   (metric = interface rxcost + RTT penalty) *and* re-advertise the
-///   routes learned on the speaker's *other* Babel interfaces — with
-///   the origin's (router-id, seqno) preserved (§3.7.5) and the
-///   interface cost added to the metric — grouped per source claim so
-///   each Router-Id TLV (§4.6.7) applies to exactly its Updates.
-///   Per-session split horizon comes from `babel_reachable(exclude)`.
+/// * Updates advertise the Loc-RIB routes this speaker originates with
+///   metric 0 — babeld's redistribute default and BIRD's
+///   `ea_babel_metric` default; the operator's static `metric` stays a
+///   kernel/RIB property exactly as in BIRD, where it never flows into
+///   the Babel metric either — and re-advertise the routes learned on
+///   the speaker's *other* Babel interfaces with the origin's
+///   (router-id, seqno) preserved (§3.7.5) and the route's full local
+///   metric (which already includes the upstream link cost) unchanged,
+///   grouped per source claim so each Router-Id TLV (§4.6.7) applies to
+///   exactly its Updates. Per-session split horizon comes from
+///   `babel_reachable(exclude)`.
+///
+/// Neither kind of Update adds this interface's own cost: the RECEIVER
+/// folds the link cost into its route metric (babeld
+/// `route_metric + neighbour_cost`, BIRD `babel_compute_metric`) from
+/// the txcost our IHU announces plus its measured RTT. Adding our
+/// rxcost to the advertised metric made every hop double-count the
+/// link — the production symptom where BIRD showed metric 394 for
+/// lr-originated routes (192 in the announcement + 192 re-added on
+/// reception) while every BIRD peer's route showed just its link cost.
 ///
 /// The frame is returned WITHOUT the MAC trailer; the caller authenticates
 /// it when keys are configured.
@@ -4620,7 +4643,6 @@ fn build_babel_announcement(
     router: &DefaultRouter,
     iface: &mut BabelIface,
     transport_local: std::net::IpAddr,
-    now_ms: u64,
     now_us: u32,
     rtt_echo: Option<(u32, u32)>,
     export_filter: Option<&daemon_policy::BabelFilter>,
@@ -4655,18 +4677,6 @@ fn build_babel_announcement(
     }
     frame.body.push(Tlv::new(TlvType::Ihu, ihu.encode()));
 
-    // The §A.2.4 penalty this interface's measured RTT adds to every
-    // advertised metric.
-    let penalty = match router.babel_rtt_us(iface.session, now_ms) {
-        Some(rtt) => u32::from(lr_babel::metric::rtt_penalty(
-            rtt,
-            iface.rtt_min_us,
-            iface.rtt_max_us,
-            iface.rtt_cost,
-        )),
-        None => 0,
-    };
-    let base = u32::from(iface.rxcost) + penalty;
     let update_cs = u16::try_from(iface.update_interval_ms / 10).unwrap_or(u16::MAX);
 
     // What to advertise: our Loc-RIB contributions (anything not
@@ -4679,20 +4689,12 @@ fn build_babel_announcement(
     // the export filter on those would double-apply (the operator's
     // intent for "export filter" is "what routes from elsewhere in
     // the Loc-RIB should Babel advertise", matching BIRD semantics).
-    //
-    // Capture the route's intra-protocol metric (Preference.metric)
-    // so it can be folded into the advertised Update metric —
-    // babeld/BIRD both add the source route's metric to the
-    // interface's rxcost+rtt_penalty; lr was previously emitting
-    // `base.min(0xfffe)` alone, dropping the operator's static
-    // `metric 10` on the floor and making every originated route
-    // look the same cost regardless of the underlying path.
-    let snapshot: Vec<(Prefix, u32)> = router
+    let snapshot: Vec<Prefix> = router
         .rib_snapshot()
         .into_iter()
         .filter(|r| r.protocol != lr_core::rib::Protocol::Babel)
         .filter(|r| export_filter.is_none_or(|f| f.accepts(r)))
-        .map(|r| (r.key.prefix, r.preference.metric))
+        .map(|r| r.key.prefix)
         .collect();
     let reachable = router.babel_reachable(iface.session);
 
@@ -4706,9 +4708,9 @@ fn build_babel_announcement(
     // carries IPv4 destinations only (an IPv6 next hop is useless over
     // an IPv4-only link) and exists for IPv4-only peers.
     let on_v4_transport = transport_local.is_ipv4();
-    let want_v4 = snapshot.iter().any(|(p, _)| p.addr.is_ipv4())
+    let want_v4 = snapshot.iter().any(|p| p.addr.is_ipv4())
         || reachable.iter().any(|r| r.key.destination.addr.is_ipv4());
-    let want_v6 = snapshot.iter().any(|(p, _)| p.addr.is_ipv6())
+    let want_v6 = snapshot.iter().any(|p| p.addr.is_ipv6())
         || reachable.iter().any(|r| r.key.destination.addr.is_ipv6());
     // v4 routes are carried on the v6 transport either through an AE 1
     // NextHop TLV (dual-stack interface) or via AE 4 (extended next hop).
@@ -4761,19 +4763,22 @@ fn build_babel_announcement(
         .encode()
         .to_vec(),
     ));
-    for (prefix, route_metric) in &snapshot {
+    for prefix in &snapshot {
         let v4 = prefix.addr.is_ipv4();
         if !(if v4 { v4_ok } else { v6_ok }) {
             continue; // no usable next hop for this family
         }
-        // RFC 8966 §3.4.4: the advertised metric is the cost of the
-        // route to the destination plus the cost of the link to the
-        // receiver. For an originated route this is the route's own
-        // metric (e.g. the static `metric 10`) plus the interface's
-        // rxcost+rtt_penalty. babeld computes this identically as
-        // `metric = route_metric + add_metric` where `add_metric` is
-        // the per-interface `rxcost + rtt_cost`.
-        let metric = (base + *route_metric).min(0xfffe) as u16;
+        // The advertised metric of an originated (redistributed) route
+        // is 0 — babeld's redistribute-filter default (`add_metric` 0)
+        // and BIRD's `ea_babel_metric` default; the static protocol's
+        // `metric` stays a kernel/RIB property, exactly the split BIRD
+        // makes between the generic `metric` attribute and
+        // `babel_metric`. The receiver adds the link cost itself from
+        // the txcost our IHU announces (babeld
+        // `route_metric + neighbour_cost`, BIRD `babel_compute_metric`);
+        // folding our own rxcost in here double-counts the link on
+        // every hop.
+        let metric = 0u16;
         frame.body.push(Tlv::new(
             TlvType::Update,
             Update {
@@ -4793,9 +4798,15 @@ fn build_babel_announcement(
     }
 
     // Foreign claim groups — RFC 8966 §3.7.5: a re-advertised Update
-    // carries the *source's* router-id and seqno (never ours), with our
-    // cost toward the receiver added to the metric, so the receivers'
-    // feasibility conditions keep working and loops stay impossible.
+    // carries the *source's* router-id and seqno (never ours) and the
+    // route's full local metric — which already includes the cost of
+    // the link it was learned over (folded in at reception, babeld
+    // `route_metric(route)`, BIRD `e->metric`) — unchanged, so the
+    // receivers' feasibility conditions keep working, loops stay
+    // impossible and the metric keeps accumulating the true path cost.
+    // The receiver adds the cost of ITS link toward us; adding our own
+    // interface cost here would double-count a hop the receiver never
+    // traverses.
     let mut groups: std::collections::BTreeMap<[u8; 8], Vec<&lr_babel::BabelRoute>> =
         std::collections::BTreeMap::new();
     for r in &reachable {
@@ -4812,7 +4823,7 @@ fn build_babel_announcement(
             if !(if v4 { v4_ok } else { v6_ok }) {
                 continue;
             }
-            let metric = (r.metric + base).min(0xfffe) as u16;
+            let metric = r.metric.min(0xfffe) as u16;
             let (src_prefix_len, src_prefix) = match &r.key.source {
                 Some(src) => {
                     let p = &src.prefix;

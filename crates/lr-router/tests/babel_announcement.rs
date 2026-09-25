@@ -3,19 +3,25 @@
 //! into the Loc-RIB, both unsigned and through the RFC 8967 MAC layer
 //! (the accepted plain body must keep its payload parseable).
 
-use lr_babel::message::{Hello, NextHop, RouterId as RouterIdTlv, Update};
+use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
 use lr_babel::tlv::{Tlv, TlvType};
 use lr_core::addr::{IpAddr, Prefix};
 use lr_core::rib::Protocol;
 use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
 
-/// The exact announcement frame the daemon builds each second.
+/// The exact announcement frame the daemon builds each second: Hello
+/// followed by the IHU carrying the sender's rxcost for us (babeld/BIRD
+/// parity — without an IHU the txcost stays infinite and no Update from
+/// the neighbour can be accepted), then Router-Id + Next-Hop + Update.
 fn announcement_frame(seqno: u16) -> Vec<u8> {
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
         Hello::new(seqno, 100).encode().to_vec(),
     ));
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::RouterId,
         RouterIdTlv {
@@ -60,17 +66,24 @@ fn babel_session() -> (Box<dyn RouterInstance>, lr_router::SessionHandle) {
     (r, h)
 }
 
-fn has_babel_route(r: &dyn RouterInstance) -> bool {
-    r.rib_snapshot().iter().any(|rt| {
-        rt.protocol == Protocol::Babel && rt.key.prefix == Prefix::new_v4([10, 99, 1, 0], 24)
-    })
+fn babel_route_metric(r: &dyn RouterInstance) -> Option<u32> {
+    r.rib_snapshot()
+        .iter()
+        .find(|rt| {
+            rt.protocol == Protocol::Babel && rt.key.prefix == Prefix::new_v4([10, 99, 1, 0], 24)
+        })
+        .map(|rt| rt.preference.metric)
 }
 
 #[test]
 fn unsigned_announcement_installs_route() {
     let (mut r, h) = babel_session();
     r.feed_input(h, &announcement_frame(1)).unwrap();
-    assert!(has_babel_route(r.as_ref()), "update must install");
+    // The route installs with the RECEIVER-side link cost folded in
+    // (RFC 8966 §3.4.3): advertised 96 + txcost 96 from the peer's IHU
+    // = 192 — the metric the daemon re-advertises unchanged and the
+    // Loc-RIB presents.
+    assert_eq!(babel_route_metric(r.as_ref()), Some(192));
 }
 
 #[test]
@@ -136,15 +149,17 @@ fn authenticated_announcement_installs_route() {
     assert!(out.accepted.is_some(), "challenge reply accepted");
 
     // The next announcement is accepted; its plain body still carries the
-    // Update and installs the route.
+    // Update and installs the route (with the IHU-learned link cost
+    // folded into the metric, exactly like the unsigned path).
     let wire = a
         .authenticate_packet(&announcement_frame(2), ph_mc)
         .unwrap();
     let out = b.verify(&wire, ph_mc, 200);
     let plain = out.accepted.expect("authenticated announcement accepted");
     r.feed_input(h, &plain).unwrap();
-    assert!(
-        has_babel_route(r.as_ref()),
+    assert_eq!(
+        babel_route_metric(r.as_ref()),
+        Some(192),
         "route must install through the RFC 8967 layer"
     );
 }

@@ -186,6 +186,21 @@ pub trait RouterInstance {
     /// implementors without a Babel runtime.
     fn set_babel_own_router_id(&mut self, _h: SessionHandle, _id: [u8; 8]) {}
 
+    /// Configure the reception-side link-cost ramp of Babel session `h`
+    /// (RFC 8966 §A.2.4): the RTT penalty bounds and maximum applied on
+    /// top of the txcost learned from the peer's IHU when an Update's
+    /// advertised metric is folded into the local route metric.
+    /// `rtt_cost` 0 (babeld's default) keeps the RTT feature off.
+    /// Default: no-op for implementors without a Babel runtime.
+    fn set_babel_link_cost_params(
+        &mut self,
+        _h: SessionHandle,
+        _rtt_min_us: u32,
+        _rtt_max_us: u32,
+        _rtt_cost: u16,
+    ) {
+    }
+
     /// Tell the Babel runtime the address the peer's datagrams come
     /// from. RFC 8966 §3.5.3: an Update with no preceding NextHop TLV
     /// resolves its next hop to the *sender* — BIRD relies on this and
@@ -826,6 +841,14 @@ struct BabelRuntime {
     /// Per-session streaming decoder (carryover must never leak between
     /// different peers' transports).
     codec: BabelCodec,
+    /// Reception-side link-cost ramp (RFC 8966 §A.2.4): the RTT penalty
+    /// bounds applied on top of the IHU-learned txcost when an Update's
+    /// advertised metric is folded into the local route metric. Set by
+    /// the embedder through [`RouterApi::set_babel_link_cost_params`];
+    /// `rtt_cost` 0 (babeld's default) keeps the feature off.
+    rtt_min_us: u32,
+    rtt_max_us: u32,
+    rtt_cost: u16,
     /// Current IPv4 next hop (learned from AE 1 NextHop TLVs,
     /// RFC 8966 §4.6.4).
     next_hop_v4: Option<IpAddr>,
@@ -870,6 +893,9 @@ impl BabelRuntime {
             neighbor: BabelNeighbor::new(local, now_ms),
             routes: BabelRouteTable::new(),
             codec: BabelCodec::new(),
+            rtt_min_us: 10_000,
+            rtt_max_us: 120_000,
+            rtt_cost: 0,
             next_hop_v4: None,
             next_hop_v6: None,
             router_id: [0; 8],
@@ -878,6 +904,26 @@ impl BabelRuntime {
             own_seqno_request: None,
             published: BTreeMap::new(),
         }
+    }
+
+    /// The reception-side link cost toward this peer (RFC 8966 §3.4.3,
+    /// babeld `neighbour_cost`, BIRD `babel_update_cost`): the
+    /// transmission cost learned from the peer's IHU (its receive cost
+    /// for our packets) plus the measured-RTT penalty. `None` while no
+    /// IHU has arrived — babeld treats such a neighbour's routes as
+    /// unusable (cost INFINITY), so Updates from it are not accepted
+    /// yet.
+    fn link_cost(&self, now_ms: u64) -> Option<u32> {
+        if self.neighbor.txcost >= 0xffff {
+            return None;
+        }
+        let rtt = u32::from(self.neighbor.rtt_cost(
+            now_ms,
+            self.rtt_min_us,
+            self.rtt_max_us,
+            self.rtt_cost,
+        ));
+        Some(self.neighbor.txcost.saturating_add(rtt))
     }
 
     /// Feed one decoded Babel frame; returns the Loc-RIB delta.
@@ -1091,11 +1137,26 @@ impl BabelRuntime {
                 .or(peer_v6)
                 .unwrap_or(self.neighbor.address),
         };
+        // RFC 8966 §3.4.3 (babeld `route_metric + neighbour_cost`, BIRD
+        // `babel_compute_metric`): the RECEIVER folds the link cost
+        // toward the announcer into the route metric — the txcost
+        // learned from the peer's IHU plus the RTT penalty. The
+        // advertised metric never carries the announcer's own interface
+        // cost: adding it there *and* here double-counts the link, the
+        // production symptom where BIRD displayed metric 394 for
+        // lr-originated routes (192 announced + 192 re-added) while
+        // every BIRD peer's route showed just the link cost. Until the
+        // first IHU arrives the txcost is infinite and no Update from
+        // this neighbour is accepted (babeld parity).
+        let Some(link) = self.link_cost(now_ms) else {
+            return;
+        };
+        let metric = u32::from(u.metric).saturating_add(link).min(0xfffe);
         self.routes.insert_timed(
             BabelRoute {
                 key,
                 seqno: u.seqno,
-                metric: u32::from(u.metric),
+                metric,
                 next_hop: nh,
                 feasible: true,
                 installed: false,
@@ -5006,6 +5067,20 @@ impl RouterInstance for DefaultRouter {
     fn set_babel_own_router_id(&mut self, h: SessionHandle, id: [u8; 8]) {
         if let Some(SessionState::Babel { runtime, .. }) = self.sessions.get_mut(&h.0) {
             runtime.own_router_id = Some(id);
+        }
+    }
+
+    fn set_babel_link_cost_params(
+        &mut self,
+        h: SessionHandle,
+        rtt_min_us: u32,
+        rtt_max_us: u32,
+        rtt_cost: u16,
+    ) {
+        if let Some(SessionState::Babel { runtime, .. }) = self.sessions.get_mut(&h.0) {
+            runtime.rtt_min_us = rtt_min_us;
+            runtime.rtt_max_us = rtt_max_us;
+            runtime.rtt_cost = rtt_cost;
         }
     }
 

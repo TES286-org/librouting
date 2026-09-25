@@ -138,13 +138,19 @@ fn babel_update_installs_route() {
         .add_session(SessionConfig::babel(IpAddr::V4([192, 0, 2, 2])))
         .unwrap();
 
-    use lr_babel::message::{Hello, NextHop, RouterId as RouterIdTlv, Update};
+    use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
     use lr_babel::tlv::{Tlv, TlvType};
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
         Hello::new(1, 400).encode().to_vec(),
     ));
+    // The peer's IHU (rxcost 96) supplies the txcost half of the
+    // reception-side link cost — without it no Update is accepted
+    // (babeld/BIRD parity).
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::RouterId,
         RouterIdTlv {
@@ -186,7 +192,8 @@ fn babel_update_installs_route() {
     assert_eq!(snap.len(), 1, "Babel Update must install a route");
     assert_eq!(snap[0].key.prefix, Prefix::new_v4([203, 0, 113, 0], 24));
     assert_eq!(snap[0].protocol, lr_core::rib::Protocol::Babel);
-    assert_eq!(snap[0].preference.metric, 100);
+    // Advertised 100 + txcost 96 from the peer's IHU (RFC 8966 §3.4.3).
+    assert_eq!(snap[0].preference.metric, 196);
     assert_eq!(snap[0].next_hop, Some(IpAddr::V4([192, 0, 2, 10])));
 }
 
@@ -198,13 +205,19 @@ fn babel_infinity_metric_retracts() {
         .add_session(SessionConfig::babel(IpAddr::V4([192, 0, 2, 2])))
         .unwrap();
 
-    use lr_babel::message::{Hello, NextHop, Update};
+    use lr_babel::message::{Hello, Ihu, NextHop, Update};
     use lr_babel::tlv::{Tlv, TlvType};
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
         Hello::new(1, 400).encode().to_vec(),
     ));
+    // The peer's IHU (rxcost 96) supplies the txcost half of the
+    // reception-side link cost — without it no Update is accepted
+    // (babeld/BIRD parity).
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::NextHop,
         NextHop {
@@ -350,13 +363,19 @@ fn cross_protocol_bgp_wins_over_babel() {
         .unwrap();
 
     // Babel route for 203.0.113.0/24.
-    use lr_babel::message::{Hello, NextHop, Update};
+    use lr_babel::message::{Hello, Ihu, NextHop, Update};
     use lr_babel::tlv::{Tlv, TlvType};
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
         Hello::new(1, 400).encode().to_vec(),
     ));
+    // The peer's IHU (rxcost 96) supplies the txcost half of the
+    // reception-side link cost — without it no Update is accepted
+    // (babeld/BIRD parity).
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::NextHop,
         NextHop {
@@ -435,13 +454,19 @@ fn events_carry_route_keys() {
     let h = r
         .add_session(SessionConfig::babel(IpAddr::V4([192, 0, 2, 2])))
         .unwrap();
-    use lr_babel::message::{Hello, NextHop, Update};
+    use lr_babel::message::{Hello, Ihu, NextHop, Update};
     use lr_babel::tlv::{Tlv, TlvType};
     let mut frame = lr_babel::BabelFrame::empty();
     frame.body.push(Tlv::new(
         TlvType::Hello,
         Hello::new(1, 400).encode().to_vec(),
     ));
+    // The peer's IHU (rxcost 96) supplies the txcost half of the
+    // reception-side link cost — without it no Update is accepted
+    // (babeld/BIRD parity).
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::NextHop,
         NextHop {

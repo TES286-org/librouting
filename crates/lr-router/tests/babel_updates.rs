@@ -7,7 +7,7 @@
 //! a Babel-learned route for the same prefix.
 
 use lr_babel::message::{
-    Hello, NextHop, PrefixCache, RouteRequest, RouterId as RouterIdTlv, SeqnoRequest, Update,
+    Hello, Ihu, NextHop, PrefixCache, RouteRequest, RouterId as RouterIdTlv, SeqnoRequest, Update,
 };
 use lr_babel::tlv::{Tlv, TlvType};
 use lr_core::addr::{IpAddr, Prefix};
@@ -22,6 +22,13 @@ fn frame(tlvs: Vec<Tlv>) -> Vec<u8> {
     frame
         .body
         .push(Tlv::new(TlvType::Hello, Hello::new(1, 100).encode()));
+    // The peer's IHU carries its rxcost toward us — the txcost the
+    // reception-side link cost is built from. babeld/BIRD accept no
+    // Update from a neighbour that has not sent an IHU yet, so the
+    // daemon-shaped frame always carries one.
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.extend(tlvs);
     lr_babel::BabelCodec::new().encode_vec(&frame).unwrap()
 }

@@ -12,9 +12,18 @@ use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
 
 /// Build a Babel frame announcing `prefix` on behalf of `router_id`
 /// (the source claim, §4.6.7: the Router-Id TLV applies to the Updates
-/// that follow it).
+/// that follow it). The IHU carries the peer's rxcost toward us —
+/// babeld/BIRD learn nothing from a neighbour that has not yet sent
+/// an IHU (txcost stays infinite), so the daemon-shaped frame always
+/// includes one.
 fn peer_frame(router_id: [u8; 8], prefix: [u8; 3], seqno: u16, metric: u16) -> Vec<u8> {
     let mut frame = lr_babel::BabelFrame::empty();
+    frame
+        .body
+        .push(Tlv::new(TlvType::Hello, Hello::new(seqno, 100).encode()));
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::RouterId,
         RouterIdTlv { id: router_id }.encode().to_vec(),
@@ -107,7 +116,10 @@ fn babel_reachable_dedups_by_source_claim_lowest_metric() {
     .unwrap();
     let from_c = r.babel_reachable(c);
     assert_eq!(from_c.len(), 1);
-    assert_eq!(from_c[0].metric, 96, "the cheaper claim wins");
+    // The learned metric folds in the reception-side link cost (advertised
+    // + txcost 96 from the IHU): 96 + 96 = 192 via A, 150 + 96 = 246 via
+    // B — the cheaper claim wins.
+    assert_eq!(from_c[0].metric, 192, "the cheaper claim wins");
 }
 
 #[test]
@@ -203,6 +215,9 @@ fn babel_gc_expires_stale_routes() {
     frame
         .body
         .push(Tlv::new(TlvType::Hello, Hello::new(1, 600).encode()));
+    frame
+        .body
+        .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
     frame.body.push(Tlv::new(
         TlvType::RouterId,
         RouterIdTlv {
