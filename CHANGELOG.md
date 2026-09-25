@@ -92,11 +92,48 @@ ship, breaking changes that affect embedders, dependency bumps.
   are idempotent, matching the Windows backend's ERROR_NOT_FOUND
   handling. A new kernel-gated test suite (`route_kernel.rs`) proves
   the round trip against a live kernel for both families.
-- Windows blackhole routes use the documented `route add PREFIX mask
-  MASK 127.0.0.1` idiom. The previous zero-next-hop loopback row was
-  an on-link route the weak-host stack happily accepted packets for —
-  a daemon listening on 0.0.0.0 answered SYNs for addresses it never
-  owned (the "peer closed connection" retry storm).
+- **Windows blackhole routes install again — and discard instead of
+  locally accepting.** The rc.4 form (a `127.0.0.1`/`::1` loopback
+  *gateway*, the `route add ... 127.0.0.1` advice) is rejected by
+  `CreateIpForwardEntry2` with `ERROR_INVALID_PARAMETER` (netio
+  refuses loopback next hops), so every static blackhole failed to
+  install in production. The form before that (zero next hop on the
+  loopback *interface*) installed but was local delivery under the
+  weak-host model — a daemon listening on 0.0.0.0 answered SYNs for
+  the covered space (the "peer closed connection" retry storm). The
+  backend now installs the Windows null-route convention: an on-link
+  row on a real egress interface (the default-route owner, cached per
+  family) — neighbour resolution for the covered destination fails
+  and the traffic dies as host-unreachable. Unreachable-flavoured
+  discard rather than Linux's silent `RTN_BLACKHOLE`, but nothing is
+  forwarded and nothing loops, which is what an aggregate anchor
+  needs. The full empirical matrix (modern + legacy IP Helper forms,
+  measured connect/ICMP behaviour per form) is preserved as
+  `windows_route_table.rs::fib_semantics_probe_matrix`.
+- **Windows route withdrawals no longer delete foreign rows.** The
+  backend keeps an install ledger — `(prefix, next hop, if index)`
+  triples it created — and a withdrawal removes exactly those; only
+  for a prefix the ledger never saw (fresh process cleaning a
+  predecessor's routes) does it fall back to the protocol-tag sweep.
+  A VPN's on-link route for the same prefix (WireGuard AllowedIPs
+  rows are `MIB_IPPROTO_NETMGMT`, the same tag lr's statics use)
+  previously died with the daemon's withdrawal.
+- **Windows routes learned over Babel egress the right interface.**
+  The kernel mirror passed `oif 0` for every non-link-local next hop
+  and let the OS resolve it; Windows' `GetBestRoute2` longest-prefix
+  matched the v4-over-v6 Babel next hop (the AE 1 NextHop TLV — the
+  peer's address on the tunnel) against an APIPA `169.254.0.0/16`
+  connected route on an *unrelated* adapter, so every learned route
+  egressed the wrong interface and the BGP sessions that depended on
+  them looped on connect. The mirror now consults a next-hop egress
+  registry fed by the protocol transports (the generalisation of the
+  link-local v6 registry that already existed): the Babel transport
+  registers the peer's addresses and every NextHop TLV value against
+  the session's interface — babeld's `neigh->ifp` rule, exposed to
+  embedders as `RouterInstance::babel_egress_nexthops`. Explicit
+  egress is also now passed for unregistered v4 next hops only when
+  a protocol claimed them; ordinary recursive BGP gateways keep
+  kernel resolution.
 - Installed routes carry the originating protocol's tag
   (RTPROT_BABEL/OSPF/STATIC on Linux, the NL_ROUTE_PROTOCOL MIB
   values on Windows) instead of every row showing up as `bgp`.
@@ -116,7 +153,6 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Changed (CI)
 
-
 - **CI now exercises the kernel route-table backends on macOS and
   Windows.** A new `macos-interop` job runs `bgp_kernel_install.sh`
   under sudo against the BSD `route(4)` socket (previously
@@ -124,6 +160,28 @@ ship, breaking changes that affect embedders, dependency bumps.
   script against the IP-Helper backend in the runner's Administrator
   shell. Both assert the learn → install → decide → teardown chain
   against the real OS FIB.
+- **The Windows route-table backend now has its own kernel-gated
+  regression suite in CI** (`windows_route_table.rs`, Administrator
+  shell): the blackhole install must discard (not locally accept) a
+  connect into the covered space, and an explicit egress interface
+  must beat `GetBestRoute2`'s longest-prefix resolution of an APIPA
+  shape staged with `New-NetIPAddress` — both rc.4 production
+  defects, asserted against the real netio.
+- **The ip_forward transit phase runs in the regular CI job, not
+  only the nightly VM.** `bgp_transit.sh` and `ospf.sh` gained a
+  root-aware namespace mode (`unshare -n` as root, `unshare -Urn`
+  rootless) and an `LR_REQUIRE_FORWARD=1` gate; the interop job now
+  also runs both scripts under `sudo`, where phase 4 genuinely
+  executes — and the BGP transit's forwarding is pcap-verified: the
+  ICMP echo request is captured on BOTH of the transit router's
+  interfaces (`pcap_sniff.py` gained an icmp filter mode;
+  `pcap_icmp_check.py` decodes the captures) and the identical
+  `(id, seq)` pair on ingress and egress is asserted — "r2 answered
+  the ping itself" cannot produce that pair, only real forwarding
+  can. A skip remains a failure under the gate, so the rootful job
+  cannot silently lose the data plane.
+- The interop job installs `libyang-tools`, so `yang.sh` (the RFC
+  9647 YANG surface gate) runs instead of SKIPping.
 - **The learn → install → forward contract is now verified for BGP on
   Linux in the regular CI job** (`bgp_kernel_install.sh`,
   `bgp_transit.sh`): kernel FIB install with `proto bgp`, OS lookup
@@ -147,10 +205,26 @@ ship, breaking changes that affect embedders, dependency bumps.
   pidfile-tracked real pids; `two_daemon.sh` and
   `labeled_unicast.sh` were refactored onto the shared library and
   are now platform-portable.
+- `crates/lr-osroute/tests/windows_route_table.rs` — the Windows
+  sibling of `route_kernel.rs`: two assertive regressions (blackhole
+  discard semantics, explicit-egress installation) plus the
+  `fib_semantics_probe_matrix` research transcript (every plausible
+  blackhole row form across the modern and legacy IP Helper APIs
+  with measured connect/ICMP behaviour — the empirical basis for the
+  idiom the backend now uses).
+- `tests/interop/pcap_icmp_check.py` + `pcap_sniff.py` icmp mode —
+  forwarding-proof packet capture for the transit interop tests.
+- Daemon kernel-mirror unit tests pin the v4 egress pinning (a
+  registered next hop installs with its interface; an unregistered
+  one keeps kernel resolution) and the registry's overwrite/zero
+  semantics.
 
-_No code changes — the Rust crates, the C ABI and the daemon CLI are
-untouched. The next release-event is the final `1.0.0` cut — see
-`docs/RELEASE-PLAN.md` §2.8 for the freeze criteria._
+_Embedder impact: the public surface grows one defaulted trait method
+(`RouterInstance::babel_egress_nexthops`) — no breakage for existing
+implementors; the C ABI, the daemon CLI flags and the config DSL are
+untouched, so the Go/Python/C/C++ bindings need no regeneration. The
+next release-event is the final `1.0.0` cut — see `docs/RELEASE-PLAN.md`
+§2.8 for the freeze criteria._
 
 ## [1.0.0-rc.4] — config DSL migration + filter VM hardening
 

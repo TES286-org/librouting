@@ -620,6 +620,34 @@ let gw: IpAddr = "198.51.100.1".parse().unwrap();
 rt.add_route(prefix, gw, 2)?;
 ```
 
+### Babel egress next hops (kernel-FIB embedders)
+
+`RouterInstance::babel_egress_nexthops(h)` returns the next-hop
+addresses the Babel peer of session `h` is currently advertising —
+`(AE 1 IPv4, AE 2/3 IPv6)` from the NextHop TLVs (RFC 8966 §4.6.4),
+falling back to the peer's own source address (§3.5.3) once traffic
+has been seen. Every route learned on the session egresses *that
+session's interface* (babeld installs through `neigh->ifp`; BIRD
+resolves through the neighbour's iface), so an embedder mirroring the
+Loc-RIB into a kernel FIB should pin the egress interface for these
+addresses instead of letting the kernel's own next-hop resolution
+choose — a v4-over-v6 next hop is on-link only on the session's
+interface, and longest-prefix resolution can land it on an unrelated
+adapter. `lr-daemon`'s kernel mirror consumes exactly this API.
+
+```rust
+use lr_router::{DefaultRouter, RouterInstance, SessionHandle};
+use lr_core::addr::IpAddr;
+
+let mut r = DefaultRouter::new();
+// ... babel session h established, Updates flowing ...
+if let Some((v4, v6)) = r.babel_egress_nexthops(h) {
+    // Pin these addresses to the session's interface index in your
+    // own next-hop → egress map; None means "no traffic seen yet".
+    let _ = (v4, v6);
+}
+```
+
 ## MPLS — label stack codec (`lr-mpls`)
 
 ```rust

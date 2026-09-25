@@ -105,13 +105,40 @@ Windows' FIB lives behind `iphlpapi.dll`:
   the buffer.
 - Rows are initialised by `InitializeIpForwardEntry` (infinite lifetimes,
   `Publish=FALSE`, `Immortal=TRUE`).
-- `NL_ROUTE_PROTOCOL` is set to `MIB_PROTOCOL_BGP` (14) — matching what
-  `Get-NetRoute -Protocol` reports for BGP-learned routes.
+- `NL_ROUTE_PROTOCOL` carries the originating protocol's tag
+  (`MIB_IPPROTO_BGP`/`_OSPF`/`_RIP`/`_NETMGMT` — what `route print`
+  and `lr routes list` report as the origin).
 - When `if_index == 0`, `GetBestRoute2` resolves the interface separately
   for every next hop using Windows' actual forwarding policy and interface
   metrics. IPv6 link-local gateways carry that interface as their scope ID.
-- Deletes scan the table and only remove rows **we** installed
-  (`Protocol == BGP`) — foreign rows are never touched.
+  **Callers that know the egress interface should always pass it**: the
+  resolution is a longest-prefix lookup over the *current* FIB, and a
+  next hop that is on-link only on the protocol's own interface (a Babel
+  v4-over-v6 next hop behind an APIPA `169.254.0.0/16` connected route
+  on an unrelated adapter, the rc.4 production defect) resolves to the
+  wrong adapter.
+- Deletes consult an install ledger — `(prefix, next hop, if index)`
+  rows this instance created — and remove exactly those; only for a
+  prefix the ledger has never seen (a fresh process cleaning up a
+  predecessor's routes) do they fall back to removing every
+  routing-protocol-tagged row for the prefix. Foreign rows sharing a
+  prefix (a VPN's on-link routes) are never touched.
+- **Blackholes have no FIB representation on Windows.** The three
+  "obvious" forms are all unusable: netio rejects a loopback *gateway*
+  (`route add ... 127.0.0.1`) with `ERROR_INVALID_PARAMETER`; any
+  delivery via the loopback *interface* (zero next hop, or the
+  `MIB_IPFORWARD_ROW2.Loopback` flag) is local delivery under the weak
+  host model — a daemon listening on 0.0.0.0 answers SYNs for the
+  covered space. lr installs the Windows null-route convention instead:
+  an **on-link row on a real egress interface** (the interface owning
+  the family's default route, cached per family) — the stack resolves
+  the covered destination itself as a neighbour, the resolution fails,
+  and the traffic dies as host-unreachable. That is
+  `RTN_UNREACHABLE`-flavoured discard rather than Linux's silent
+  `RTN_BLACKHOLE`; routing-wise nothing is forwarded and nothing loops,
+  which is what an aggregate anchor needs. The empirical matrix behind
+  this design lives in `crates/lr-osroute/tests/windows_route_table.rs`
+  (`fib_semantics_probe_matrix`).
 
 Notes: routes created this way are _not_ boot-persistent; a daemon should
 re-install its best paths after restart (which `lr-daemon` does whenever
