@@ -381,7 +381,10 @@ jobs:
   windows-interop:
     name: Windows interop (lr ↔ lr)
     runs-on: windows-2022
-    timeout-minutes: 30
+    # Cold-cache build (~10 min) + the full route-table matrix step
+    # (four bounded tests, ~10 min observed) + the three quick
+    # interop scripts. 40 min covers a fully cold runner.
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -419,21 +422,34 @@ jobs:
         shell: bash
         run: ./tests/interop/bgp_kernel_install.sh
 
-      - name: "Windows route-table backend tests (blackhole + egress pinning, IP-Helper)"
-        # The Windows sibling of route_kernel.rs (Linux netlink): the
-        # rc.4 production regressions asserted against the real FIB.
-        # (1) the blackhole install must succeed AND discard rather
-        # than locally accept a connect into the covered space — the
-        # weak-host loopback trap made lr's own 0.0.0.0:179 listener
-        # answer SYNs for blackholed prefixes; (2) an explicit egress
-        # interface must beat GetBestRoute2's longest-prefix resolution
-        # (the APIPA /16 that captured the tunnel peer's next hop and
-        # broke every BGP session above it). The research-transcript
-        # matrix (fib_semantics_probe_matrix) stays manually-invoked.
-        timeout-minutes: 10
-        # --test-threads=1: both tests mutate the same FIB rows and stage
-        # the same 169.254.188.0/24 shape — they must not interleave.
-        run: cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 blackhole_route_discards_not_accepts explicit_oif_beats_fib_resolution
+      - name: "Windows route-table backend tests (full matrix, IP-Helper)"
+        # All four #[ignore]d windows_route_table tests on every push —
+        # the two assertive regressions AND the two research probes
+        # (fib_semantics_probe_matrix, probe_next_hop_interface_
+        # resolution) that used to live behind the manual
+        # workflow_dispatch probe and showed up as a permanent skip.
+        #
+        # The harness is bounded by construction now: child-process IO
+        # goes through files (a killed powershell.exe cannot leave a
+        # pipe open for an inherited grandchild handle — the deadlock
+        # that stalled runs 36125163593 / 36132336028 / 36136529031
+        # until the job was killed), and the TCP/accept measurement
+        # releases its listener instead of leaking the port for the
+        # process lifetime. The per-test `timeout` below is a plain
+        # backstop that fails loudly, not the hang defense — a hang is
+        # a bug in the test, not something to wait out.
+        shell: bash
+        timeout-minutes: 20
+        run: |
+          cargo test -p lr-osroute --test windows_route_table --no-run
+          for t in fib_semantics_probe_matrix \
+                   probe_next_hop_interface_resolution \
+                   blackhole_route_discards_not_accepts \
+                   explicit_oif_beats_fib_resolution; do
+            echo "=== $t ==="
+            timeout 480 cargo test -p lr-osroute --test windows_route_table -- \
+              --ignored --nocapture --test-threads=1 "$t"
+          done
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
   # This is the macOS half of the "CI reflects real usage" goal:
@@ -603,9 +619,13 @@ jobs:
           # 36121452689's "SKIP: add_seg6local_route returned EPERM").
           # The user namespace grants CAP_NET_ADMIN over the new netns;
           # seg6_enabled is per-netns and defaults to 0, so it is
-          # enabled inside that netns before the tests run.
+          # enabled inside that netns before the tests run. lo is
+          # brought up too: it is the tests' egress device, and a fresh
+          # netns starts with it down (newer kernels refuse a down
+          # egress with ENETDOWN).
           unshare -Urn bash -c '
             set -euo pipefail
+            ip link set lo up
             sysctl -w net.ipv6.conf.all.seg6_enabled=1
             sysctl -w net.ipv6.conf.lo.seg6_enabled=1
             cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture

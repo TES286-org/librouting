@@ -9,14 +9,26 @@
 # an unaudited Windows build; the transcript is the deliverable, so
 # the commit step runs with `if: always()`.
 #
-# Lives OUTSIDE ci.yml on purpose: a branch-gated job in the push
-# workflow shows up as permanently "skipped" on every main-line run.
+# Lives OUTSIDE ci.yml because it COMMITS to the dispatched ref: the
+# same four tests now run on every push inside the ci.yml
+# windows-interop job (assertions + PROBE transcript in the log); this
+# workflow remains the on-demand way to get the transcript as a file
+# on a disposable branch.
+#
 # Dispatch it on a disposable branch (NOT main — the transcript is
 # committed back to the dispatched ref):
 #
 #   gh workflow run windows-fib-probe.yml --ref probe/windows-audit
 #   # or: curl -X POST .../actions/workflows/windows-fib-probe.yml/dispatches \
 #   #        -f ref=probe/windows-audit
+#
+# The historical watchdog tower (detached payload + 900 s watch loop +
+# ceilings raised above the payload's own wall) existed only because a
+# wedged test binary could not be reaped and took the transcript down
+# with the job. The harness is bounded by construction now — child
+# output goes through files, so a killed powershell.exe cannot leave a
+# pipe open for an inherited grandchild handle — which makes plain
+# sequential per-test `timeout` backstops sufficient.
 name: Windows FIB probe
 
 on:
@@ -29,66 +41,39 @@ jobs:
   fib-probe:
     name: Windows FIB probe (row forms + ifindex resolution)
     runs-on: windows-2022
-    # Worst-case step runtime: cold compile (~10 min) + the payload's
-    # 900 s wall + overhead ≈ 26 min. The STEP timeout must sit ABOVE
-    # that (35 min) and the job above the step (45 min): when the step
-    # timeout fires while the runner cannot reap cargo's process tree,
-    # the job wedges to its own timeout and the transcript dies with it
-    # (run 36132336028). The step's own 900 s watch-loop is the real
-    # bound; these ceilings are pure headroom.
-    timeout-minutes: 45
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
+      - name: Configure Git PATH (bash + coreutils)
+        run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "windows-fib-probe"
       - name: Run the FIB probe (Administrator shell)
-        # The payload runs DETACHED and this step watches the clock
-        # itself: cargo's process tree on Windows cannot always be
-        # reaped by the Actions runner (a wedged step once carried the
-        # job to its timeout and the transcript was lost with the
-        # cancelled job — runs 36125163593 / 36128494485). Killing our
-        # own child keeps the step well-behaved, so the commit step and
-        # the log upload always happen. `--test-threads=1`: every test
-        # mutates the same FIB rows and reuses the same probe port.
-        timeout-minutes: 35
+        # `--test-threads=1`: every test mutates the same FIB rows and
+        # reuses the same probe port. The per-test `timeout` is a loud
+        # backstop (a hang is a test bug, not something to wait out);
+        # cold compile sits under the step's own 20-minute ceiling.
+        timeout-minutes: 20
         shell: bash
         run: |
           cargo test -p lr-osroute --test windows_route_table --no-run
-          (
-            set +e
-            {
-              echo "PROBE|=== matrix ==="
-              timeout 300 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 fib_semantics_probe_matrix
-              echo "PROBE|=== matrix rc=$? ==="
-              echo "PROBE|=== ifidx ==="
-              timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 probe_next_hop_interface_resolution
-              echo "PROBE|=== ifidx rc=$? ==="
-              echo "PROBE|=== blackhole ==="
-              timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 blackhole_route_discards_not_accepts
-              echo "PROBE|=== blackhole rc=$? ==="
-              echo "PROBE|=== explicit-oif ==="
-              timeout 240 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 explicit_oif_beats_fib_resolution
-              echo "PROBE|=== explicit-oif rc=$? ==="
-            } > probe-output.log 2>&1
-          ) &
-          PROBE_PID=$!
-          for i in $(seq 1 900); do
-              kill -0 "$PROBE_PID" 2>/dev/null || break
-              sleep 1
-          done
-          if kill -0 "$PROBE_PID" 2>/dev/null; then
-              echo "##[warning]probe payload still running after 900s — killing"
-              kill "$PROBE_PID" 2>/dev/null || true
-              sleep 2
-              kill -9 "$PROBE_PID" 2>/dev/null || true
-              echo "PROBE|=== payload killed at the 900s wall ===" >> probe-output.log
-          fi
-          wait "$PROBE_PID" 2>/dev/null || true
-          echo "===== probe transcript ====="
-          cat probe-output.log
+          {
+            echo "PROBE|=== matrix ==="
+            timeout 480 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 fib_semantics_probe_matrix
+            echo "PROBE|=== matrix rc=$? ==="
+            echo "PROBE|=== ifidx ==="
+            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 probe_next_hop_interface_resolution
+            echo "PROBE|=== ifidx rc=$? ==="
+            echo "PROBE|=== blackhole ==="
+            timeout 180 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 blackhole_route_discards_not_accepts
+            echo "PROBE|=== blackhole rc=$? ==="
+            echo "PROBE|=== explicit-oif ==="
+            timeout 240 cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 explicit_oif_beats_fib_resolution
+            echo "PROBE|=== explicit-oif rc=$? ==="
+          } | tee probe-output.log
       - name: Commit the probe transcript back to the ref
         # Guard against dispatching on a protected ref: the step pushes
         # a probe-results.md commit to github.ref_name.
