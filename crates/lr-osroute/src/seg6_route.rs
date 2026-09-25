@@ -73,6 +73,16 @@ const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
 const RTA_ENCAP_TYPE: u16 = 21;
 const RTA_ENCAP: u16 = 22;
+/// `NLA_F_NESTED` — the flag bit marking an attribute whose payload
+/// is itself a list of attributes. iproute2's `rta_nest()` sets it on
+/// `RTA_ENCAP` for every encap route; the kernel's nested parsers
+/// read it (strict contexts require it), so the canonical wire form
+/// carries it.
+const NLA_F_NESTED: u16 = 0x8000;
+/// The attribute-type mask: the top two bits of the type field are
+/// flags (`NLA_F_NESTED`, `NLA_F_NET_BYTEORDER`), not type bits.
+#[allow(dead_code)]
+const NLA_TYPE_MASK: u16 = 0x3fff;
 #[allow(dead_code)]
 const RTA_TABLE: u16 = 15;
 
@@ -103,35 +113,36 @@ const SEG6_LOCAL_IIF: u16 = 4;
 const SEG6_LOCAL_OIF: u16 = 5;
 const SEG6_LOCAL_TABLE: u16 = 6;
 
-// Netlink flags.
+// Netlink flags. NB: the flag bits are NAMESPACED per message kind —
+// for RTM_NEWROUTE, 0x100/0x200/0x400 read as REPLACE/EXCL/CREATE,
+// while the same bits in an *ack* mean CAPPED/ACK_TLVS. Requesting
+// extended acks therefore belongs on the SOCKET (NETLINK_EXT_ACK /
+// NETLINK_CAP_ACK via setsockopt), never in nlmsg_flags — setting
+// 0x200 "for extack" on a route add silently demands exclusivity and
+// every re-install over an existing row returns EEXIST.
 const NLM_F_REQUEST: u16 = 0x01;
 const NLM_F_ACK: u16 = 0x04;
 const NLM_F_REPLACE: u16 = 0x100;
 const NLM_F_CREATE: u16 = 0x400;
-/// Request the kernel's extended-ack attributes on the NLMSG_ERROR
-/// reply (uapi/linux/netlink.h) — the netlink-level reason in the
-/// kernel's own words, e.g. "Egress device not specified".
-const NLM_F_ACK_TLVS: u16 = 0x200;
-/// Cap the original-message echo inside the error reply to the bare
-/// header (same bit as `NLM_F_REPLACE`; the netlink core reads it as
-/// an ack-shape flag independently of the route operation). Capping
-/// fixes the extack TLVs' start offset at 36.
-const NLM_F_CAPPED: u16 = 0x100;
 
 /// Flags for route installation: CREATE + REPLACE so that installing
-/// over an existing entry *replaces* it (mirrors `mpls_route`), plus
-/// the ack shape that carries the extended-ack attributes.
-const ADD_ROUTE_FLAGS: u16 =
-    NLM_F_REQUEST | NLM_F_ACK | NLM_F_ACK_TLVS | NLM_F_CREATE | NLM_F_REPLACE;
+/// over an existing entry *replaces* it (mirrors `mpls_route`).
+const ADD_ROUTE_FLAGS: u16 = NLM_F_REQUEST | NLM_F_ACK | NLM_F_CREATE | NLM_F_REPLACE;
 
-/// Flags for route deletion — REPLACE's value doubles as the
-/// cap-the-echo ack shape, keeping the extack at a fixed offset.
-const DEL_ROUTE_FLAGS: u16 = NLM_F_REQUEST | NLM_F_ACK | NLM_F_ACK_TLVS | NLM_F_CAPPED;
+/// Flags for route deletion.
+const DEL_ROUTE_FLAGS: u16 = NLM_F_REQUEST | NLM_F_ACK;
 
 // Netlink socket constants.
 const NETLINK_ROUTE: i32 = 0;
 const AF_NETLINK: i32 = 16;
 const SOCK_RAW: i32 = 3;
+/// setsockopt level for netlink socket options (uapi/linux/netlink.h).
+const SOL_NETLINK: i32 = 270;
+/// Include extended-ack attributes in acks (uapi/linux/netlink.h).
+const NETLINK_EXT_ACK: i32 = 11;
+/// Cap the original message echo in acks to the bare header
+/// (uapi/linux/netlink.h) — fixes the extack TLVs' offset at 36.
+const NETLINK_CAP_ACK: i32 = 10;
 
 /// Error returned by SRv6 netlink operations.
 #[derive(Debug, Clone)]
@@ -381,6 +392,13 @@ impl Seg6Netlink {
     /// Open a `NETLINK_ROUTE` socket. Returns
     /// [`Seg6RouteError::NotEnabled`] when SRv6 is not enabled in the
     /// kernel — callers should check [`seg6_enabled`] first.
+    ///
+    /// The socket opts `NETLINK_EXT_ACK` + `NETLINK_CAP_ACK` (the same
+    /// pair iproute2 sets, lib/libnetlink.c) request the kernel's
+    /// extended-ack attributes on error replies and cap the echoed
+    /// request to its bare header — the correct mechanism for extacks,
+    /// since the 0x100/0x200 bits in `nlmsg_flags` are namespaced to
+    /// the route operation (REPLACE/EXCL), not to ack shaping.
     pub fn connect() -> Result<Self, Seg6RouteError> {
         if !seg6_enabled() {
             return Err(Seg6RouteError::NotEnabled);
@@ -391,6 +409,25 @@ impl Seg6Netlink {
                 "socket(AF_NETLINK): {}",
                 std::io::Error::last_os_error()
             )));
+        }
+        // Best effort: an unsupported opt leaves diagnostics degraded,
+        // not broken.
+        let one: i32 = 1;
+        unsafe {
+            libc_setsockopt(
+                fd,
+                SOL_NETLINK,
+                NETLINK_EXT_ACK,
+                (&raw const one) as *const core::ffi::c_void,
+                core::mem::size_of::<i32>() as u32,
+            );
+            libc_setsockopt(
+                fd,
+                SOL_NETLINK,
+                NETLINK_CAP_ACK,
+                (&raw const one) as *const core::ffi::c_void,
+                core::mem::size_of::<i32>() as u32,
+            );
         }
         let addr = libc_sockaddr_nl {
             nl_family: AF_NETLINK as u16,
@@ -489,15 +526,20 @@ impl Seg6Netlink {
         check_ack(&resp)
     }
 
-    /// Delete a `seg6` encap route.
+    /// Delete a `seg6` encap route. The request is the minimal
+    /// prefix-shaped delete iproute2 sends (`ip route del PREFIX`):
+    /// matching in `ip6_route_del` is by table + prefix (+ optional
+    /// metric/protocol/oif filters) — the encap attributes are not
+    /// part of the delete key, and carrying them would run the request
+    /// through `lwtunnel_valid_encap_type` needlessly (and fail on
+    /// kernels without SRv6 compiled in).
     pub fn delete_seg6_route(
         &mut self,
         prefix: lr_core::addr::Prefix,
     ) -> Result<(), Seg6RouteError> {
-        let route = Seg6Route::new(prefix, Srh::new(vec![Sid::UNSPECIFIED])?);
-        let buf = self.build_seg6_request(RTM_DELROUTE, DEL_ROUTE_FLAGS, &route)?;
+        let buf = self.build_prefix_delete(RTM_DELROUTE, prefix, RT_TABLE_MAIN)?;
         let resp = self.sendmsg_and_recv(&buf)?;
-        check_ack(&resp)
+        check_ack_idempotent(&resp)
     }
 
     /// Install a `seg6local` endpoint route (the LSP tail-end: run
@@ -508,12 +550,60 @@ impl Seg6Netlink {
         check_ack(&resp)
     }
 
-    /// Delete a `seg6local` endpoint route.
+    /// Delete a `seg6local` endpoint route — the same minimal
+    /// prefix-shaped delete as [`Seg6Netlink::delete_seg6_route`],
+    /// against the local table (seg6local rows are /128 SIDs).
     pub fn delete_seg6local_route(&mut self, sid: Sid) -> Result<(), Seg6RouteError> {
-        let route = Seg6LocalRoute::new(sid, Behavior::EndUn);
-        let buf = self.build_seg6local_request(RTM_DELROUTE, DEL_ROUTE_FLAGS, &route)?;
+        let prefix = lr_core::addr::Prefix {
+            addr: IpAddr::V6(sid.octets()),
+            prefix_len: 128,
+        };
+        let buf = self.build_prefix_delete(RTM_DELROUTE, prefix, RT_TABLE_LOCAL)?;
         let resp = self.sendmsg_and_recv(&buf)?;
-        check_ack(&resp)
+        check_ack_idempotent(&resp)
+    }
+
+    /// Build the minimal `RTM_DELROUTE` request for `prefix` in
+    /// `table`: nlmsghdr + rtmsg + RTA_DST (+ nothing else — the
+    /// kernel's delete matcher walks table → prefix, and every extra
+    /// attribute is either ignored or, for encap attributes, an
+    /// avoidable validation pass).
+    fn build_prefix_delete(
+        &self,
+        msg_type: u16,
+        prefix: lr_core::addr::Prefix,
+        table: u8,
+    ) -> Result<Vec<u8>, Seg6RouteError> {
+        let addr = match prefix.addr {
+            IpAddr::V4(_) => {
+                return Err(Seg6RouteError::BadSrh(
+                    "IPv6 prefixes only (SRv6 is an IPv6 facility)".into(),
+                ));
+            }
+            IpAddr::V6(b) => b.to_vec(),
+        };
+        let mut attrs = Vec::new();
+        attrs.extend(Self::build_rta_attribute(RTA_DST, &addr));
+        let total_len = 16 + 12 + attrs.len();
+        let aligned = (total_len + 3) & !3;
+        let mut buf = vec![0u8; aligned];
+        buf[0..4].copy_from_slice(&(total_len as u32).to_ne_bytes());
+        buf[4..6].copy_from_slice(&msg_type.to_ne_bytes());
+        buf[6..8].copy_from_slice(&DEL_ROUTE_FLAGS.to_ne_bytes());
+        let seq = self.next_seq();
+        buf[8..12].copy_from_slice(&seq.to_ne_bytes());
+        buf[12..16].copy_from_slice(&self.pid.to_ne_bytes());
+        buf[16] = AF_INET6 as u8;
+        buf[17] = prefix.prefix_len;
+        buf[18] = 0;
+        buf[19] = 0;
+        buf[20] = table;
+        buf[21] = 0; // RTPROT_UNSPEC — no protocol filter on delete
+        buf[22] = 0; // scope: not part of the v6 delete matcher
+        buf[23] = 0; // RTN_UNSPEC — no type filter
+        buf[24..28].copy_from_slice(&0u32.to_ne_bytes());
+        buf[28..28 + attrs.len()].copy_from_slice(&attrs);
+        Ok(buf)
     }
 
     /// Build the rtnetlink request body for a `seg6` encap route
@@ -567,11 +657,13 @@ impl Seg6Netlink {
                 &route.if_index.to_ne_bytes(),
             ));
         }
+        // NLA_U16 payload — the rtnetlink policy for RTA_ENCAP_TYPE is
+        // `.type = NLA_U16`; iproute2 sends the two-byte form.
         attrs.extend(Self::build_rta_attribute(
             RTA_ENCAP_TYPE,
-            &LWTUNNEL_ENCAP_SEG6.to_ne_bytes(),
+            &(LWTUNNEL_ENCAP_SEG6 as u16).to_ne_bytes(),
         ));
-        attrs.extend(Self::build_rta_attribute(RTA_ENCAP, &encap));
+        attrs.extend(Self::build_rta_attribute(RTA_ENCAP | NLA_F_NESTED, &encap));
         while attrs.len() % 4 != 0 {
             attrs.push(0);
         }
@@ -679,11 +771,13 @@ impl Seg6Netlink {
                 &route.if_index.to_ne_bytes(),
             ));
         }
+        // NLA_U16 payload — the rtnetlink policy for RTA_ENCAP_TYPE is
+        // `.type = NLA_U16`; iproute2 sends the two-byte form.
         attrs.extend(Self::build_rta_attribute(
             RTA_ENCAP_TYPE,
-            &LWTUNNEL_ENCAP_SEG6_LOCAL.to_ne_bytes(),
+            &(LWTUNNEL_ENCAP_SEG6_LOCAL as u16).to_ne_bytes(),
         ));
-        attrs.extend(Self::build_rta_attribute(RTA_ENCAP, &encap));
+        attrs.extend(Self::build_rta_attribute(RTA_ENCAP | NLA_F_NESTED, &encap));
         while attrs.len() % 4 != 0 {
             attrs.push(0);
         }
@@ -737,14 +831,35 @@ impl Drop for Seg6Netlink {
 /// Parse the netlink ACK/NAK response. The kernel replies to a
 /// `NLM_F_ACK`-flagged request with either a `NLMSG_DONE` (success)
 /// or a `NLMSG_ERROR` carrying a non-zero errno (failure). The errno
-/// is in host byte order (it's a plain `int`). When the request also
-/// carried `NLM_F_ACK_TLVS`, the error reply appends the kernel's
-/// extended-ack attributes — `NLMSGERR_ATTR_MSG` is the netlink-level
-/// reason in the kernel's own words ("Egress device not specified",
-/// "Nexthop device is not up", …), which the bare errno cannot
-/// convey. Folding it into the error string turns a bare `EINVAL`
-/// into an actionable diagnostic.
+/// is in host byte order (it's a plain `int`). When the socket opts
+/// of [`Seg6Netlink::connect`] were honoured, the error reply also
+/// carries the kernel's extended-ack attributes —
+/// `NLMSGERR_ATTR_MSG` is the netlink-level reason in the kernel's
+/// own words ("Egress device not specified", "Nexthop device is not
+/// up", …), which the bare errno cannot convey. Folding it into the
+/// error string turns a bare `EINVAL` into an actionable diagnostic.
 fn check_ack(resp: &[u8]) -> Result<(), Seg6RouteError> {
+    match ack_errno(resp)? {
+        0 => Ok(()),
+        err => Err(nak_error(resp, err)),
+    }
+}
+
+/// The delete-path variant of [`check_ack`]: `-ESRCH` (no such
+/// entry) maps to success, mirroring the Linux route backend's
+/// idempotent-withdrawal contract — deleting an already-gone row is
+/// not an error.
+fn check_ack_idempotent(resp: &[u8]) -> Result<(), Seg6RouteError> {
+    match ack_errno(resp)? {
+        // -ESRCH: already withdrawn.
+        0 | -3 => Ok(()),
+        err => Err(nak_error(resp, err)),
+    }
+}
+
+/// The raw errno of the kernel's reply: `Ok(0)` for an ACK/DONE,
+/// `Ok(err)` (negative) for a NAK, `Err` for a malformed reply.
+fn ack_errno(resp: &[u8]) -> Result<i32, Seg6RouteError> {
     if resp.len() < 20 {
         return Err(Seg6RouteError::Kernel(format!(
             "short netlink response ({} bytes)",
@@ -753,7 +868,7 @@ fn check_ack(resp: &[u8]) -> Result<(), Seg6RouteError> {
     }
     let msg_type = u16::from_ne_bytes([resp[4], resp[5]]);
     if msg_type == NLMSG_DONE {
-        return Ok(());
+        return Ok(0);
     }
     if msg_type != NLMSG_ERROR {
         return Err(Seg6RouteError::Kernel(format!(
@@ -761,38 +876,44 @@ fn check_ack(resp: &[u8]) -> Result<(), Seg6RouteError> {
             msg_type
         )));
     }
-    let err = i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]);
-    if err == 0 {
-        // NLMSG_ERROR with errno=0 is an ACK.
-        return Ok(());
-    }
+    Ok(i32::from_ne_bytes([resp[16], resp[17], resp[18], resp[19]]))
+}
+
+/// Render a non-zero errno (plus the extended-ack message, when the
+/// socket opts of [`Seg6Netlink::connect`] were honoured) as the
+/// error value.
+fn nak_error(resp: &[u8], err: i32) -> Seg6RouteError {
     let extack = extack_msg(resp)
         .map(|m| format!(": {m}"))
         .unwrap_or_default();
-    Err(Seg6RouteError::Kernel(format!(
+    Seg6RouteError::Kernel(format!(
         "netlink error {} ({}){}",
         err,
         errno_str(err),
         extack
-    )))
+    ))
 }
 
 /// Extract `NLMSGERR_ATTR_MSG` (the extended-ack human-readable
-/// reason) from an `NLMSG_ERROR` reply. The reply echoes the original
-/// request header at offset 20; its `NLM_F_CAPPED` bit decides whether
-/// the echo carries the original payload too (TLVs then start after
-/// it) or is capped to the bare header (TLVs start at 36).
+/// reason) from an `NLMSG_ERROR` reply. The kernel marks the *reply's*
+/// own `nlmsg_flags` with `NLM_F_CAPPED` when it capped the echoed
+/// request to the bare header (TLVs then start at offset 36);
+/// otherwise the echo carries the original payload too and the TLVs
+/// start after it (20 + echoed length, aligned). The socket opts set
+/// in [`Seg6Netlink::connect`] request the capped shape, but the
+/// uncapped branch keeps the parser correct for any socket.
 fn extack_msg(resp: &[u8]) -> Option<String> {
     const NLMSGERR_ATTR_MSG: u16 = 1;
+    const NLM_F_CAPPED_ACK: u16 = 0x100;
     if resp.len() < 36 {
         return None;
     }
     let msg_len = u32::from_ne_bytes([resp[0], resp[1], resp[2], resp[3]]) as usize;
-    let orig_len = u32::from_ne_bytes([resp[20], resp[21], resp[22], resp[23]]) as usize;
-    let orig_flags = u16::from_ne_bytes([resp[26], resp[27]]);
-    let tlv_off = if orig_flags & NLM_F_CAPPED != 0 {
+    let reply_capped = u16::from_ne_bytes([resp[6], resp[7]]) & NLM_F_CAPPED_ACK != 0;
+    let tlv_off = if reply_capped {
         36
     } else {
+        let orig_len = u32::from_ne_bytes([resp[20], resp[21], resp[22], resp[23]]) as usize;
         (20 + orig_len + 3) & !3
     };
     let bound = msg_len.min(resp.len());
@@ -869,6 +990,13 @@ extern "C" {
     fn sendmsg(fd: i32, msg: *const libc_msghdr, flags: i32) -> isize;
     fn recv(fd: i32, buf: *mut core::ffi::c_void, len: usize, flags: i32) -> isize;
     fn close(fd: i32) -> i32;
+    fn setsockopt(
+        fd: i32,
+        level: i32,
+        optname: i32,
+        optval: *const core::ffi::c_void,
+        optlen: u32,
+    ) -> i32;
 }
 
 unsafe fn libc_socket(d: i32, t: i32, p: i32) -> i32 {
@@ -888,6 +1016,15 @@ unsafe fn libc_recv(fd: i32, buf: *mut core::ffi::c_void, len: usize, flags: i32
 }
 unsafe fn libc_close(fd: i32) -> i32 {
     close(fd)
+}
+unsafe fn libc_setsockopt(
+    fd: i32,
+    level: i32,
+    optname: i32,
+    optval: *const core::ffi::c_void,
+    optlen: u32,
+) -> i32 {
+    setsockopt(fd, level, optname, optval, optlen)
 }
 
 #[cfg(test)]
@@ -916,7 +1053,7 @@ mod tests {
             if attr_len < 4 || cursor + attr_len > msg_len {
                 return None;
             }
-            let attr_type = u16::from_ne_bytes([req[cursor + 2], req[cursor + 3]]);
+            let attr_type = u16::from_ne_bytes([req[cursor + 2], req[cursor + 3]]) & NLA_TYPE_MASK;
             if attr_type == want {
                 return Some(&req[cursor + 4..cursor + attr_len]);
             }
@@ -937,7 +1074,8 @@ mod tests {
                 return None;
             }
             let attr_type =
-                u16::from_ne_bytes([encap_payload[cursor + 2], encap_payload[cursor + 3]]);
+                u16::from_ne_bytes([encap_payload[cursor + 2], encap_payload[cursor + 3]])
+                    & NLA_TYPE_MASK;
             if attr_type == want {
                 return Some(&encap_payload[cursor + 4..cursor + attr_len]);
             }
@@ -971,7 +1109,7 @@ mod tests {
         assert_eq!(&dst[..8], &[0x20, 0x01, 0x0d, 0xb8, 0, 1, 0, 0]);
         // RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6 (5).
         let encap_type = find_attr(&req, RTA_ENCAP_TYPE).unwrap();
-        assert_eq!(encap_type, &LWTUNNEL_ENCAP_SEG6.to_ne_bytes());
+        assert_eq!(encap_type, &(LWTUNNEL_ENCAP_SEG6 as u16).to_ne_bytes());
         // RTA_ENCAP is nested, contains SEG6_IPTUNNEL_SRH (type 1).
         let encap = find_attr(&req, RTA_ENCAP).unwrap();
         let srh_attr = find_encap_attr(encap, SEG6_IPTUNNEL_SRH).unwrap();
@@ -1027,7 +1165,10 @@ mod tests {
         assert_eq!(dst, sid.as_bytes());
         // RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6_LOCAL (6).
         let encap_type = find_attr(&req, RTA_ENCAP_TYPE).unwrap();
-        assert_eq!(encap_type, &LWTUNNEL_ENCAP_SEG6_LOCAL.to_ne_bytes());
+        assert_eq!(
+            encap_type,
+            &(LWTUNNEL_ENCAP_SEG6_LOCAL as u16).to_ne_bytes()
+        );
         // The SEG6_LOCAL_ACTION attribute lives directly inside
         // RTA_ENCAP (not nested inside another attribute), with a
         // 4-byte u32 payload = the behavior's wire value.
@@ -1115,6 +1256,46 @@ mod tests {
     }
 
     #[test]
+    fn rta_encap_carries_the_nested_flag_and_u16_encap_type() {
+        // iproute2's rta_nest() marks RTA_ENCAP with NLA_F_NESTED and
+        // sends RTA_ENCAP_TYPE as the policy's NLA_U16 (two-byte
+        // payload) — the canonical wire form the kernel's nested
+        // parsers are written against.
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        let route = Seg6LocalRoute::new(sid, Behavior::End).with_if_index(1);
+        let req = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap();
+        let msg_len = u32::from_ne_bytes(req[0..4].try_into().unwrap()) as usize;
+        let mut cursor = 28;
+        let mut encap_type_payload: Option<Vec<u8>> = None;
+        let mut encap_nested = false;
+        while cursor + 4 <= msg_len {
+            let attr_len = u16::from_ne_bytes([req[cursor], req[cursor + 1]]) as usize;
+            if attr_len < 4 || cursor + attr_len > msg_len {
+                break;
+            }
+            let attr_type = u16::from_ne_bytes([req[cursor + 2], req[cursor + 3]]);
+            match attr_type & NLA_TYPE_MASK {
+                RTA_ENCAP_TYPE => {
+                    encap_type_payload = Some(req[cursor + 4..cursor + attr_len].to_vec());
+                }
+                RTA_ENCAP => {
+                    encap_nested = attr_type & NLA_F_NESTED != 0;
+                }
+                _ => {}
+            }
+            cursor += (attr_len + 3) & !3;
+        }
+        assert_eq!(
+            encap_type_payload.as_deref(),
+            Some((LWTUNNEL_ENCAP_SEG6_LOCAL as u16).to_ne_bytes().as_slice()),
+            "RTA_ENCAP_TYPE is a two-byte NLA_U16 payload"
+        );
+        assert!(encap_nested, "RTA_ENCAP must carry NLA_F_NESTED");
+    }
+
+    #[test]
     fn seg6local_route_omits_rta_oif_when_unset() {
         let sid = Sid::from_str("fcbb:bb00::1").unwrap();
         let route = Seg6LocalRoute::new(sid, Behavior::End);
@@ -1152,19 +1333,22 @@ mod tests {
 
     #[test]
     fn check_ack_carries_the_kernel_extack_message() {
-        // NLMSG_ERROR with a capped echo (orig header only, TLVs at
-        // offset 36) carrying NLMSGERR_ATTR_MSG.
+        // NLMSG_ERROR with a capped echo (TLVs at offset 36) carrying
+        // NLMSGERR_ATTR_MSG. The kernel marks the REPLY's own flags
+        // with NLM_F_CAPPED when it caps the echo.
         let msg = b"Egress device not specified\0";
         let tlv_len = 4 + msg.len();
         let total = 36 + tlv_len;
         let mut resp = vec![0u8; total];
         resp[0..4].copy_from_slice(&(total as u32).to_ne_bytes());
         resp[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        // Reply flags: NLM_F_CAPPED (0x100).
+        resp[6..8].copy_from_slice(&0x100u16.to_ne_bytes());
         // errno at offset 16.
         resp[16..20].copy_from_slice(&(-22i32).to_ne_bytes());
-        // Echoed original header at 20: length + NLM_F_CAPPED flag.
+        // Echoed original header at 20 (its length is irrelevant when
+        // the reply is capped).
         resp[20..24].copy_from_slice(&28u32.to_ne_bytes());
-        resp[26..28].copy_from_slice(&NLM_F_CAPPED.to_ne_bytes());
         // TLV at 36: NLMSGERR_ATTR_MSG (1).
         resp[36..38].copy_from_slice(&(tlv_len as u16).to_ne_bytes());
         resp[38..40].copy_from_slice(&1u16.to_ne_bytes());
@@ -1184,8 +1368,8 @@ mod tests {
 
     #[test]
     fn extack_msg_handles_uncapped_echo() {
-        // Without NLM_F_CAPPED the original payload is echoed and the
-        // TLVs start after it (20 + orig_len, aligned).
+        // Without NLM_F_CAPPED on the reply, the original payload is
+        // echoed and the TLVs start after it (20 + orig_len, aligned).
         let msg = b"Nexthop device is not up\0";
         let tlv_len = 4 + msg.len();
         let orig_len = 28usize; // header + 12-byte rtmsg
@@ -1194,9 +1378,9 @@ mod tests {
         let mut resp = vec![0u8; total];
         resp[0..4].copy_from_slice(&(total as u32).to_ne_bytes());
         resp[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        // Reply flags empty: uncapped.
         resp[16..20].copy_from_slice(&(-119i32).to_ne_bytes());
         resp[20..24].copy_from_slice(&(orig_len as u32).to_ne_bytes());
-        // flags empty: uncapped.
         resp[tlv_off..tlv_off + 2].copy_from_slice(&(tlv_len as u16).to_ne_bytes());
         resp[tlv_off + 2..tlv_off + 4].copy_from_slice(&1u16.to_ne_bytes());
         resp[tlv_off + 4..tlv_off + 4 + msg.len()].copy_from_slice(msg);
@@ -1204,6 +1388,30 @@ mod tests {
             extack_msg(&resp).as_deref(),
             Some("Nexthop device is not up")
         );
+    }
+
+    #[test]
+    fn add_flags_never_set_the_excl_bit() {
+        // NLM_F_ACK_TLVS == NLM_F_EXCL == 0x200: the extack request
+        // belongs on the SOCKET (NETLINK_EXT_ACK), never in the
+        // message flags — 0x200 on a route add silently demands
+        // exclusivity (run 36147424519's re-install EEXIST).
+        assert_eq!(ADD_ROUTE_FLAGS & 0x200, 0, "adds must not set EXCL");
+        assert_eq!(DEL_ROUTE_FLAGS & 0x200, 0, "deletes must not set EXCL");
+        assert_eq!(ADD_ROUTE_FLAGS & 0x100, 0x100, "adds replace");
+    }
+
+    #[test]
+    fn delete_acks_are_idempotent_on_esrch() {
+        // -ESRCH on a delete = already withdrawn = success.
+        let mut resp = vec![0u8; 20];
+        resp[0..4].copy_from_slice(&20u32.to_ne_bytes());
+        resp[4..6].copy_from_slice(&NLMSG_ERROR.to_ne_bytes());
+        resp[16..20].copy_from_slice(&(-3i32).to_ne_bytes());
+        assert!(check_ack_idempotent(&resp).is_ok());
+        // Any other errno still fails.
+        resp[16..20].copy_from_slice(&(-22i32).to_ne_bytes());
+        assert!(check_ack_idempotent(&resp).is_err());
     }
 
     #[test]
