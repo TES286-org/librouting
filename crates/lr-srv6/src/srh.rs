@@ -39,8 +39,15 @@
 //!   counting the first 8 octets. So `Hdr Ext Len = 2 * (n + 1)` for
 //!   a segment list of `n` SIDs (each SID is 16 octets = 2 units).
 //!   RFC 8200 §4.8 / RFC 8754 §2.
-//! - **Routing Type** (1 octet): 43 (the Segment Routing type, RFC
-//!   8754 §2 — assigned by IANA).
+//! - **Routing Type** (1 octet): 4 — Segment Routing (RFC 8754 §2,
+//!   IANA's "IPv6 Routing Types" registry). Do not confuse with 43,
+//!   which is the Next Header value identifying the Routing extension
+//!   header itself (IPPROTO_ROUTING, RFC 8200 §4.4); the Routing Type
+//!   is the *sub-type inside* that header. Linux's
+//!   `seg6_validate_srh` (net/ipv6/seg6.c) rejects any SRH whose
+//!   type byte is not 4 — writing 43 there makes every seg6 route
+//!   install fail with EINVAL and every decoded SRH of real traffic
+//!   fail parsing.
 //! - **Segments Left** (1 octet): the index into the segment list
 //!   that names the *current* destination. Decremented by each
 //!   SR-capable hop. RFC 8754 §4.2.
@@ -66,27 +73,47 @@
 //!
 //! ## Routing Type constant
 //!
-//! IANA assigned Routing Type 43 to Segment Routing (RFC 8754 §2 —
-//! see the "IPv6 Routing Types" registry, `SRH = 43`).
+//! IANA's "IPv6 Routing Types" registry assigns type 4 to Segment
+//! Routing (RFC 8754 §2). 43 is the *Next Header* value of the
+//! Routing extension header (IPPROTO_ROUTING, RFC 8200 §4.4) — the
+//! container header, not the sub-type carried in its Routing Type
+//! field.
 
 use core::fmt;
 
 use crate::sid::Sid;
 
-/// Routing Type 43 — Segment Routing Header (RFC 8754 §2, IANA's
-/// "IPv6 Routing Types" registry).
-pub const ROUTING_TYPE_SRH: u8 = 43;
+/// Routing Type 4 — Segment Routing Header (RFC 8754 §2, IANA's
+/// "IPv6 Routing Types" registry). 43 is the Next Header value of
+/// the Routing extension header itself (IPPROTO_ROUTING), which the
+/// SRH travels inside — a different field at a different layer.
+pub const ROUTING_TYPE_SRH: u8 = 4;
 
-/// Flag bit `O` — OAM packet (RFC 8754 §2.1, the high bit of the
-/// flags octet). When set, the packet is OAM and the egress node
-/// SHOULD treat it as such; forwarding is unaffected.
-pub const FLAG_OAM: u8 = 0x80;
+/// Flag bit `O` — OAM packet. Position per the Linux uapi
+/// (`SR6_FLAG1_OAM = 1 << 5`, include/uapi/linux/seg6.h) and IANA's
+/// "Segment Routing Header Flags" registry (O-flag, RFC 9259;
+/// registry bit 2 in MSB-first numbering = 0x20). When set, the
+/// packet is OAM and the egress node SHOULD treat it as such;
+/// forwarding is unaffected.
+pub const FLAG_OAM: u8 = 0x20;
 
-/// Flag bit `H` — HMAC present (RFC 8754 §2.1, the second-highest
-/// bit). When set, an HMAC TLV follows the segment list (RFC 8754
-/// §2.6.1). This crate parses the TLV bytes but does not validate
-/// the HMAC in this slice.
-pub const FLAG_HMAC: u8 = 0x40;
+/// Flag bit `H` — HMAC present (`SR6_FLAG1_HMAC = 1 << 3` in the
+/// Linux uapi; the flag itself predates RFC 8754's final text — the
+/// RFC defines the HMAC TLV in §2.1.2 but left the flag bit for the
+/// Linux implementation's historical position). When set, an HMAC
+/// TLV follows the segment list (RFC 8754 §2.1.2). This crate parses
+/// the TLV bytes but does not validate the HMAC in this slice.
+pub const FLAG_HMAC: u8 = 0x08;
+
+/// Flag bit `A` — Alert (`SR6_FLAG1_ALERT = 1 << 4` in the Linux
+/// uapi; draft-era flag, unregistered in IANA's SRH flags registry).
+pub const FLAG_ALERT: u8 = 0x10;
+
+/// Flag bit `P` — Protected (`SR6_FLAG1_PROTECTED = 1 << 6` in the
+/// Linux uapi; draft-era flag, unregistered in IANA's SRH flags
+/// registry — RFC 8754's final text leaves all flag bits unused on
+/// transmission).
+pub const FLAG_PROTECTED: u8 = 0x40;
 
 /// The fixed prefix of an SRH: 8 octets of header before the segment
 /// list starts (RFC 8754 §2).
@@ -166,11 +193,15 @@ pub enum SrhError {
     /// `Segments Left` is greater than `Last Entry + 1` (RFC 8754
     /// §4.2 — the pointer must point at a valid segment).
     SegmentsLeftOutOfRange,
-    /// The Routing Type is not 43 (RFC 8754 §2 — the SRH is
-    /// identified by Routing Type 43 in the IPv6 extension header).
+    /// The Routing Type is not 4 (RFC 8754 §2 — the SRH is
+    /// identified by Routing Type 4 in the IPv6 Routing header; 4 is
+    /// not to be confused with 43, the Next Header value of the
+    /// Routing extension header itself).
     WrongRoutingType(u8),
-    /// Reserved flag bits are set (RFC 8754 §2.3 — the high two bits
-    /// are defined, the low six MUST be zero on send).
+    /// Reserved flag bits are set (RFC 8754 §2.1 — the final RFC
+    /// text leaves all flag bits unassigned, so a sender must keep
+    /// them zero; the Linux uapi's four deployed positions
+    /// (Protected/OAM/Alert/HMAC) are the accepted set here).
     ReservedFlagBits(u8),
 }
 
@@ -193,7 +224,7 @@ impl fmt::Display for SrhError {
                 f.write_str("SRH Segments Left is greater than Last Entry + 1")
             }
             Self::WrongRoutingType(t) => {
-                write!(f, "SRH Routing Type is {}, expected 43", t)
+                write!(f, "SRH Routing Type is {}, expected 4", t)
             }
             Self::ReservedFlagBits(flags) => {
                 write!(f, "SRH has reserved flag bits set: 0x{:02x}", flags)
@@ -311,9 +342,11 @@ impl Srh {
         if self.segments.len() > MAX_SEGMENTS {
             return Err(SrhError::TooManySegments);
         }
-        // RFC 8754 §2.3: the reserved flag bits (other than O and H)
-        // MUST be zero on send.
-        if self.flags & !(FLAG_OAM | FLAG_HMAC) != 0 {
+        // RFC 8754 §2.1: the final text leaves all flag bits
+        // unassigned, so a sender must keep undefined bits zero. The
+        // Linux uapi's four deployed positions (Protected/OAM/Alert/
+        // HMAC) are the accepted set — anything else is reserved.
+        if self.flags & !(FLAG_OAM | FLAG_HMAC | FLAG_ALERT | FLAG_PROTECTED) != 0 {
             return Err(SrhError::ReservedFlagBits(self.flags));
         }
         let n = self.segments.len() as u8;
@@ -364,7 +397,7 @@ impl Srh {
     /// the caller has already stripped the IPv6 fixed header).
     ///
     /// Returns `Err` if the input is too short, the Routing Type is
-    /// not 43, or the segment list length is inconsistent with the
+    /// not 4, or the segment list length is inconsistent with the
     /// `Hdr Ext Len` field.
     pub fn decode(bytes: &[u8]) -> Result<Self, SrhError> {
         if bytes.len() < SRH_FIXED_LEN {
@@ -470,9 +503,16 @@ mod tests {
 
     #[test]
     fn srh_constants_match_rfc_8754() {
-        assert_eq!(ROUTING_TYPE_SRH, 43, "IANA IPv6 Routing Types registry");
-        assert_eq!(FLAG_OAM, 0x80, "RFC 8754 §2.1 O bit");
-        assert_eq!(FLAG_HMAC, 0x40, "RFC 8754 §2.1 H bit");
+        assert_eq!(
+            ROUTING_TYPE_SRH, 4,
+            "IANA IPv6 Routing Types registry (RFC 8754 §2)"
+        );
+        // Flag positions per the Linux uapi (include/uapi/linux/seg6.h)
+        // and IANA's SRH flags registry (O-flag, RFC 9259).
+        assert_eq!(FLAG_OAM, 0x20, "SR6_FLAG1_OAM / IANA O-flag");
+        assert_eq!(FLAG_HMAC, 0x08, "SR6_FLAG1_HMAC (Linux uapi)");
+        assert_eq!(FLAG_ALERT, 0x10, "SR6_FLAG1_ALERT (Linux uapi)");
+        assert_eq!(FLAG_PROTECTED, 0x40, "SR6_FLAG1_PROTECTED (Linux uapi)");
         assert_eq!(SRH_FIXED_LEN, 8, "RFC 8754 §2 fixed header");
         assert_eq!(SRH_SEGMENT_LEN, 16, "RFC 8754 §2 segment entry");
         assert_eq!(MAX_SEGMENTS, 127, "Hdr Ext Len upper bound");
@@ -592,7 +632,7 @@ mod tests {
     #[test]
     fn srh_decode_rejects_wrong_routing_type() {
         let mut bytes = vec![0u8; 24];
-        bytes[2] = 99; // not 43
+        bytes[2] = 99; // not 4
         assert_eq!(
             Srh::decode(&bytes).unwrap_err(),
             SrhError::WrongRoutingType(99)
