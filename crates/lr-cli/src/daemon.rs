@@ -2447,20 +2447,59 @@ fn spawn_ticker(
 /// stack through the Loc-RIB (never transmitted on the wire).
 const LR_MPLS_LABEL_STACK_TAG: u8 = 255; // pinned to AttrType::LrMplsLabelStack by a test
 
-/// Link-local IPv6 next hops learned from protocol traffic, mapped to
-/// the outgoing interface index (OSPFv3 daemon writes as it hears
-/// peers; the kernel mirror reads at install time). A link-local
-/// gateway is only routable *through* a specific interface — the
-/// kernel refuses RTM_NEWROUTE with a link-local RTA_GATEWAY and no
-/// RTA_OIF (EINVAL) — so the mirror consults this registry instead of
-/// the per-route ifindex (which plain `Route`s do not carry).
-pub(crate) static V6_NEXTHOP_OIFS: std::sync::OnceLock<
+/// Next-hop addresses learned from protocol traffic, mapped to the
+/// outgoing interface index the protocol decided they egress
+/// (the OSPFv3 daemon writes as it hears peers; the Babel transport
+/// writes the peer's addresses and every NextHop TLV the peer
+/// advertises; the kernel mirror reads at install time).
+///
+/// Two next-hop shapes need this registry, and plain `Route`s carry
+/// no ifindex to serve either:
+///
+/// * a **link-local IPv6 gateway** is only routable *through* a
+///   specific interface — Linux netlink refuses RTM_NEWROUTE with a
+///   link-local RTA_GATEWAY and no RTA_OIF (EINVAL), and Windows'
+///   `GetBestRoute2` cannot resolve an unscoped link-local at all;
+/// * a **v4 next hop over v6 transport** (RFC 5549-shaped Babel: AE 1
+///   Updates with a v4 NextHop TLV) is on-link on the *session's*
+///   interface only — the kernel's own longest-prefix resolution can
+///   land it on an unrelated adapter (the rc.4 Windows defect: an
+///   APIPA 169.254.0.0/16 connected route on another NIC captured the
+///   tunnel peer's next hop, every learned route egressed the wrong
+///   adapter and the BGP sessions above them looped). babeld installs
+///   kernel routes through `neigh->ifp` for exactly this reason; the
+///   registry is lr's equivalent.
+pub(crate) static NEXTHOP_OIFS: std::sync::OnceLock<
     std::sync::Mutex<std::collections::BTreeMap<IpAddr, u32>>,
 > = std::sync::OnceLock::new();
 
-pub(crate) fn v6_nexthop_oifs() -> &'static std::sync::Mutex<std::collections::BTreeMap<IpAddr, u32>>
-{
-    V6_NEXTHOP_OIFS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+/// Record that `next_hop` egresses `if_index`. Overwrites a stale
+/// mapping (a peer that changed its advertised next hop); inserting
+/// a different interface for an address the protocol never re-announced
+/// is the embedder's contract, not this map's.
+pub(crate) fn register_nexthop_oif(next_hop: IpAddr, if_index: u32) {
+    if if_index == 0 {
+        return; // 0 means "unresolved" — never pin
+    }
+    if let Ok(mut m) = nexthop_oifs().lock() {
+        m.insert(next_hop, if_index);
+    }
+}
+
+/// The egress interface the protocols registered for `next_hop`, if
+/// any. `0` (unresolved) when no protocol has claimed the address —
+/// the mirror then leaves the choice to the kernel.
+pub(crate) fn nexthop_oif(next_hop: &IpAddr) -> u32 {
+    nexthop_oifs()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(next_hop).copied())
+        .filter(|i| *i != 0)
+        .unwrap_or(0)
+}
+
+pub(crate) fn nexthop_oifs() -> &'static std::sync::Mutex<std::collections::BTreeMap<IpAddr, u32>> {
+    NEXTHOP_OIFS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
 }
 
 /// Linux loopback is always ifindex 1 inside a network namespace: the
@@ -2731,18 +2770,14 @@ impl KernelMirror {
                                 }
                             }
                         } else if let Some(nh) = r.next_hop {
-                            // A link-local gateway only works with its
-                            // outgoing interface (netlink EINVAL
-                            // otherwise); the protocol daemons register
-                            // the mapping as they learn peers.
-                            let oif = match nh {
-                                IpAddr::V6(a) if a[..2] == [0xfe, 0x80] => v6_nexthop_oifs()
-                                    .lock()
-                                    .ok()
-                                    .and_then(|m| m.get(&nh).copied())
-                                    .unwrap_or(0),
-                                _ => 0,
-                            };
+                            // The egress interface the protocol pinned for
+                            // this next hop (link-local v6 gateways are
+                            // interface-scoped by definition; v4-in-v6
+                            // Babel next hops are on-link only on the
+                            // session's interface — see NEXTHOP_OIFS).
+                            // 0 leaves the choice to the kernel, which is
+                            // right for ordinary recursive gateways.
+                            let oif = nexthop_oif(&nh);
                             // The kernel-owned guard: a learned route for
                             // a prefix the kernel holds as *connected*
                             // must not replace the on-link row — see
@@ -3567,22 +3602,40 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                 if peer.port() != iface.port || locals.contains(&peer.ip()) {
                                     continue;
                                 }
-                                // Register the neighbour's link-local
-                                // address against this transport's
-                                // interface index: Babel next hops are the
-                                // announcer's link-locals, and the kernel
-                                // mirror needs the egress interface for a
-                                // link-local gateway (Linux netlink
-                                // refuses it without RTA_OIF; Windows'
+                                // Register the neighbour's addresses
+                                // against this transport's interface
+                                // index: Babel next hops are the
+                                // announcer's own addresses (RFC 8966
+                                // §3.5.3) or the addresses it advertises
+                                // in NextHop TLVs, and the kernel mirror
+                                // needs the egress interface for either
+                                // (Linux netlink refuses a link-local
+                                // gateway without RTA_OIF; Windows'
                                 // GetBestRoute2 cannot resolve an
-                                // unscoped link-local at all).
-                                if let std::net::IpAddr::V6(a) = peer.ip() {
-                                    if a.segments()[0] & 0xffc0 == 0xfe80 && transport.scope_id != 0
+                                // unscoped link-local at all, and its
+                                // longest-prefix resolution of a v4
+                                // over-v6 next hop can land on an
+                                // unrelated adapter that happens to own
+                                // a covering connected route).
+                                match peer.ip() {
+                                    std::net::IpAddr::V6(a)
+                                        if a.segments()[0] & 0xffc0 == 0xfe80 =>
                                     {
-                                        if let Ok(mut m) = v6_nexthop_oifs().lock() {
-                                            m.insert(lr_ip(peer.ip()), transport.scope_id);
+                                        // The v6 scope id is the Ipv6IfIndex
+                                        // on Windows (may differ from IfIndex);
+                                        // for v6 link-local gateways it is the
+                                        // valid egress index in both worlds.
+                                        if transport.scope_id != 0 {
+                                            register_nexthop_oif(
+                                                lr_ip(peer.ip()),
+                                                transport.scope_id,
+                                            );
                                         }
                                     }
+                                    std::net::IpAddr::V4(_) if iface.if_index != 0 => {
+                                        register_nexthop_oif(lr_ip(peer.ip()), iface.if_index);
+                                    }
+                                    _ => {}
                                 }
                                 let dest = if is_multicast {
                                     transport.group
@@ -3653,6 +3706,35 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                             now_ms,
                                             now_us,
                                         );
+                                    }
+                                }
+                                // Egress pinning for the NextHop TLV
+                                // values the peer's Updates carry (RFC
+                                // 8966 §4.6.4): whatever v4/v6 address
+                                // the peer advertises as next hop lives
+                                // on *this* link (babeld installs
+                                // through `neigh->ifp`, BIRD resolves
+                                // through the neighbour's iface — the
+                                // kernel's own next-hop resolution must
+                                // not second-guess that). Refreshed on
+                                // every datagram; the poll is a BTreeMap
+                                // read away from the lock we already
+                                // hold. Link-local v6 keeps the
+                                // scope-id registration above (the
+                                // Windows Ipv6IfIndex domain).
+                                if iface.if_index != 0 {
+                                    if let Some((tlv_v4, tlv_v6)) =
+                                        r.babel_egress_nexthops(iface.session)
+                                    {
+                                        if let Some(nh) = tlv_v4 {
+                                            register_nexthop_oif(nh, iface.if_index);
+                                        }
+                                        if let Some(nh) = tlv_v6 {
+                                            let is_ll = matches!(nh, IpAddr::V6(a) if a[..2] == [0xfe, 0x80]);
+                                            if !is_ll {
+                                                register_nexthop_oif(nh, iface.if_index);
+                                            }
+                                        }
                                     }
                                 }
                             }
@@ -3834,6 +3916,11 @@ struct BabelIface {
     extended_next_hop: bool,
     /// The Babel session riding this interface.
     session: SessionHandle,
+    /// The interface's kernel index (`if_nametoindex` semantics — the
+    /// Windows IfIndex). 0 when unresolvable; the egress-pinning
+    /// registry then simply stays unseeded for this interface and the
+    /// kernel resolves next hops itself.
+    if_index: u32,
     /// RFC 8967 authentication state, when keys apply to this interface.
     auth: Option<lr_babel::BabelAuthInterface>,
     /// Pre-rendered startup log line for the key set.
@@ -4052,6 +4139,9 @@ fn babel_iface_manual(
         next_hop_v6: nh_v6,
         extended_next_hop: false,
         session: SessionHandle(0), // assigned right after add_session
+        // The manual path has no interface name to resolve; the pinning
+        // registry stays unseeded and the kernel picks egress itself.
+        if_index: 0,
         auth,
         auth_debug_line,
         router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
@@ -4243,6 +4333,11 @@ fn babel_iface_from_spec(
     let (auth, auth_debug_line) = build_babel_auth_interface_for(cfg, &keys, &entry.name);
 
     let local = transports[0].local;
+    // The interface's kernel index for egress pinning (routes learned on
+    // this interface must egress it — see NEXTHOP_OIFS). Windows carries
+    // a separate Ipv6IfIndex that can diverge; for route-row egress the
+    // plain IfIndex is the row's InterfaceIndex domain.
+    let if_index = lr_osroute::ospf_transport::ifindex_of(&entry.name).unwrap_or(0);
     Ok(BabelIface {
         name: entry.name.clone(),
         transports,
@@ -4258,6 +4353,7 @@ fn babel_iface_from_spec(
         next_hop_v6,
         extended_next_hop,
         session: SessionHandle(0), // assigned right after add_session
+        if_index,
         auth,
         auth_debug_line,
         router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
@@ -6160,5 +6256,88 @@ mod kernel_mirror_tests {
             ops.is_empty(),
             "connected route must not be installed or blackholed, got: {ops:?}"
         );
+    }
+
+    /// A registered v4 next hop pins the egress interface of the
+    /// install — the rc.4 Windows production defect: a Babel route
+    /// learned over a tunnel whose v4-in-v6 next hop (the AE 1
+    /// NextHop TLV value) was resolved by the kernel's longest-prefix
+    /// against an APIPA 169.254.0.0/16 connected route on an
+    /// unrelated adapter, so every learned route egressed the wrong
+    /// interface and the BGP sessions above them never connected.
+    /// Pre-fix the mirror only consulted the registry for link-local
+    /// v6 gateways and passed `oif 0` for v4, deferring to the very
+    /// resolution that was wrong.
+    #[test]
+    fn registered_v4_nexthop_pins_the_egress_interface() {
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RecordingTable {
+            operations: Arc::clone(&operations),
+        }));
+        let next_hop = IpAddr::V4([169, 254, 1, 6]); // the peer's v4 on the babel link
+        register_nexthop_oif(next_hop, 58); // the tunnel's ifindex
+        let prefix = Prefix::new_v4([172, 23, 10, 98], 32);
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 4, peer: 6 },
+            protocol: Protocol::Babel,
+            preference: Preference::new(120, 256),
+            next_hop: Some(next_hop),
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        mirror.apply(&[RouterEvent::RouteInstalled(route)]);
+        let ops = operations.lock().unwrap();
+        assert_eq!(ops.len(), 1, "got: {ops:?}");
+        assert_eq!(
+            ops[0],
+            Operation::Add(prefix, next_hop, 58),
+            "the install must carry the session's egress interface, not oif 0"
+        );
+        // Cleanup: the registry is process-global.
+        nexthop_oifs().lock().unwrap().remove(&next_hop);
+    }
+
+    /// An unregistered v4 next hop keeps `oif 0` — the kernel's own
+    /// recursive resolution is correct for ordinary BGP gateways.
+    #[test]
+    fn unregistered_v4_nexthop_leaves_egress_to_the_kernel() {
+        let operations: Arc<Mutex<Vec<Operation>>> = Arc::new(Mutex::new(Vec::new()));
+        let mut mirror = KernelMirror::with_ip_table(Box::new(RecordingTable {
+            operations: Arc::clone(&operations),
+        }));
+        let next_hop = IpAddr::V4([172, 23, 10, 98]);
+        let prefix = Prefix::new_v4([172, 23, 10, 104], 32);
+        let route = Route {
+            key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+            origin: RouteOrigin { proto: 0, peer: 1 },
+            protocol: Protocol::Bgp,
+            preference: Preference::new(20, 0),
+            next_hop: Some(next_hop),
+            attributes: Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+        mirror.apply(&[RouterEvent::RouteInstalled(route)]);
+        let ops = operations.lock().unwrap();
+        assert_eq!(ops.len(), 1, "got: {ops:?}");
+        assert_eq!(ops[0], Operation::Add(prefix, next_hop, 0));
+    }
+
+    /// The registry API never pins a zero interface (the "unresolved"
+    /// sentinel) and overwrites stale mappings.
+    #[test]
+    fn registry_never_pins_zero_and_overwrites() {
+        let nh = IpAddr::V4([169, 254, 200, 1]);
+        register_nexthop_oif(nh, 0);
+        assert_eq!(nexthop_oif(&nh), 0);
+        register_nexthop_oif(nh, 9);
+        assert_eq!(nexthop_oif(&nh), 9);
+        register_nexthop_oif(nh, 10);
+        assert_eq!(nexthop_oif(&nh), 10);
+        nexthop_oifs().lock().unwrap().remove(&nh);
     }
 }

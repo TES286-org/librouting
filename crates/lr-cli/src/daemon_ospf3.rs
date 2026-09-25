@@ -38,7 +38,7 @@
 //!   verification is skipped like FRR's ospf6d.
 //! - **Next-hop bookkeeping for the kernel** — the link-local →
 //!   interface mapping learned from Hello sources feeds
-//!   [`crate::v6_nexthop_oifs`], so the kernel mirror can attach the
+//!   [`crate::nexthop_oifs`], so the kernel mirror can attach the
 //!   RTA_OIF a link-local gateway needs.
 //! - **Graceful restart (RFC 5187)** — the v3 counterpart of the v2
 //!   daemon's RFC 3623 machinery: helper mode (§3 via
@@ -1308,7 +1308,7 @@ impl Ospf3Daemon {
                                     // The neighbor's link-local rides its
                                     // interface: register it for the
                                     // kernel mirror's RTA_OIF lookups.
-                                    crate::v6_nexthop_oifs()
+                                    crate::nexthop_oifs()
                                         .lock()
                                         .map(|mut m| {
                                             m.insert(IpAddr::V6(src.octets()), iface.interface_id)
