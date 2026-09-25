@@ -566,6 +566,19 @@ jobs:
           # 17 unit tests in seg6_route.rs that run unconditionally in
           # the cargo test --workspace step above.
           cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture
+      - name: Route-table backend kernel tests (Linux netlink, rootless netns)
+        # Real-kernel round trips the mock-socket unit tests cannot prove:
+        # blackhole install → delete (the RTN_UNSPEC withdrawal fix — a
+        # delete naming RTN_UNICAST never matched an RTN_BLACKHOLE row on
+        # IPv4 and the blackhole stayed in the kernel), idempotent
+        # withdrawal (-ESRCH mapped to success), and tagged unicast
+        # v4/v6 round trips. #[ignore]-gated like srv6_kernel; the
+        # rootless user+net namespace grants CAP_NET_ADMIN so they
+        # genuinely run here, and they skip cleanly elsewhere.
+        timeout-minutes: 5
+        run: |
+          cargo test -p lr-osroute --test route_kernel --no-run
+          unshare -Urn cargo test -p lr-osroute --test route_kernel -- --ignored --nocapture
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         timeout-minutes: 10
         run: ./tests/interop/ospf.sh

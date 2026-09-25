@@ -78,6 +78,20 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed (kernel FIB interaction)
 
+- **Linux blackhole routes are now actually withdrawn.** RTM_DELROUTE
+  named `rtm_type=RTN_UNICAST`, but the kernel's IPv4 fib delete
+  matcher compares the requested type against every candidate row — a
+  unicast delete never matched an installed `RTN_BLACKHOLE`, failed
+  with ESRCH, and the blackhole stayed in the kernel after the
+  operator removed the static route (or shut the daemon down), keeping
+  the FIB discarding traffic for a prefix that had just been
+  un-configured. IPv6's fib6 ignores the type on delete, which is why
+  only v4 exhibited it. The delete now sends the `RTN_UNSPEC`
+  wildcard (what iproute2's plain `ip route del PREFIX` relies on) and
+  maps the kernel's `-ESRCH` ack to success — redundant withdrawals
+  are idempotent, matching the Windows backend's ERROR_NOT_FOUND
+  handling. A new kernel-gated test suite (`route_kernel.rs`) proves
+  the round trip against a live kernel for both families.
 - Windows blackhole routes use the documented `route add PREFIX mask
   MASK 127.0.0.1` idiom. The previous zero-next-hop loopback row was
   an on-link route the weak-host stack happily accepted packets for —
