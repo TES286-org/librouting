@@ -76,6 +76,61 @@ ship, breaking changes that affect embedders, dependency bumps.
   multi-protocol supervisor; previously a standalone Babel daemon
   announced nothing at all.
 
+### Fixed (SRv6 kernel route installation)
+
+- **seg6/seg6local routes install into the kernel again — the request
+  now carries the egress device.** Linux's `fib6_nh_init`
+  (net/ipv6/route.c) refuses every IPv6 route that names neither an
+  egress device (`RTA_OIF`) nor a gateway with `ENODEV`; there is no
+  implicit device pick, which is why `ip route add ... encap seg6
+  ...` always carries a `dev` and why FRR's `zclient_send_localsid`
+  pins every local SID to a real interface. The seg6local request
+  builder never emitted `RTA_OIF` at all (its `oif` builder only sets
+  the End.X *action* parameter inside `RTA_ENCAP`), and the seg6
+  encap builder only emitted it when the caller set one — so every
+  install from the CI rootless netns died with `netlink error -19
+  (unknown error)` (run 36136529031). `Seg6LocalRoute` gains a
+  route-level `with_if_index` builder and both builders now document
+  the requirement; the kernel-gated tests resolve the namespace's
+  loopback via `if_nametoindex` (netns-aware) and bring it up first
+  (newer kernels also refuse a down egress with `ENETDOWN`). The
+  netlink errno mapping now names `ENODEV`, `EACCES`, `ENETDOWN` and
+  `ENETUNREACH` instead of "unknown error".
+
+### Fixed (Windows test harness — the CI infinite wait)
+
+- **The windows_route_table suite no longer wedges whole CI jobs.**
+  Two defects in the *test harness* (not the production backend)
+  composed into the un-killable hang that stalled runs
+  36125163593 / 36132336028 / 36136529031 until someone cancelled
+  the job — the "ci reports an infinite wait" symptom:
+  1. `powershell()` drained the child through **pipes** while
+     polling `try_wait` and killing at a 60 s budget — but a
+     grandchild that inherits the write end (the WMI provider host,
+     `conhost`, anything `New-NetIPAddress` touches) keeps a pipe
+     open after the kill, so the reader threads blocked on EOF
+     forever, `join()` never returned, and the test binary never
+     exited. Step-level `timeout-minutes` could not reap the tree
+     (a known runner limitation), which is what turned a bounded
+     watchdog into a 35-minute job wedge. Child output now goes to
+     temp **files**: a file always reaches EOF at the current write
+     position, so the budget kill is final and whatever the child
+     wrote before it is exactly what the caller reads. `ping.exe`
+     and `route.exe` ride the same bounded runner.
+  2. `tcp_connect_behaviour` moved its listener into a thread
+     blocked forever in `accept()` — the probe port stayed bound for
+     the process's lifetime, so every measurement after the first
+     in a probe run returned `listener-error` (silently degrading
+     the whole matrix). The accept thread now polls a non-blocking
+     listener under a shared stop flag with a hard self-limit, and
+     the caller reaps it — bounded by construction, port freed
+     within milliseconds.
+  The timeout tower that grew around the wedge (detached payload +
+  900 s watch loop + step ceilings raised above the payload's own
+  wall) is dismantled: the harness is bounded by construction and
+  the remaining per-test `timeout` calls are plain loud backstops,
+  not the hang defense.
+
 ### Fixed (kernel FIB interaction)
 
 - **Linux blackhole routes are now actually withdrawn.** RTM_DELROUTE
@@ -172,6 +227,15 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Changed (CI)
 
+- **The full windows_route_table matrix runs on every push — the
+  permanently-skipped manual probe is gone.** The ci.yml
+  windows-interop step now runs all four `#[ignore]`d tests
+  (fib_semantics_probe_matrix, probe_next_hop_interface_resolution,
+  and the two assertive regressions), each in its own
+  `timeout`-bounded cargo invocation; the transcript lines appear in
+  the Actions log. The separate workflow_dispatch probe remains only
+  as the on-demand way to commit the transcript to a disposable
+  branch — no test is gated behind a manual dispatch anymore.
 - **CI now exercises the kernel route-table backends on macOS and
   Windows.** A new `macos-interop` job runs `bgp_kernel_install.sh`
   under sudo against the BSD `route(4)` socket (previously
