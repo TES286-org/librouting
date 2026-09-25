@@ -431,7 +431,9 @@ jobs:
         # broke every BGP session above it). The research-transcript
         # matrix (fib_semantics_probe_matrix) stays manually-invoked.
         timeout-minutes: 10
-        run: cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture blackhole_route_discards_not_accepts explicit_oif_beats_fib_resolution
+        # --test-threads=1: both tests mutate the same FIB rows and stage
+        # the same 169.254.188.0/24 shape — they must not interleave.
+        run: cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1 blackhole_route_discards_not_accepts explicit_oif_beats_fib_resolution
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
   # This is the macOS half of the "CI reflects real usage" goal:
