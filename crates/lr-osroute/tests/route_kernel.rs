@@ -37,7 +37,7 @@ fn table_has(t: &mut RtNetlink, prefix: Prefix) -> bool {
 }
 
 /// Bring the netns's loopback up — a fresh netns has it DOWN, and a
-/// DOWN lo makes every `via 127.0.0.1` / `via ::1` gateway
+/// DOWN lo makes every `via 127.0.0.1` gateway
 /// unreachable (the kernel answers ENETUNREACH, exactly as it would
 /// for any gateway whose output interface is down). Returns false
 /// when iproute2 is unavailable, in which case the unicast test
@@ -50,6 +50,36 @@ fn loopback_up() -> bool {
         Ok(st) => st.success(),
         Err(_) => false,
     }
+}
+
+/// Create a dummy link and return its ifindex — the IPv6 half of the
+/// unicast round trip needs a real egress device: fib6 rejects a
+/// host-scope loopback gateway (`via ::1`) on some kernels (Azure's
+/// CI kernel answers EINVAL), and the production babel shape is a
+/// link-local gateway over an explicit RTA_OIF anyway, so the test
+/// mirrors that: `via fe80::42 dev dummy0`. Returns None (skip) when
+/// the link cannot be created.
+fn dummy_link() -> Option<u32> {
+    let ok = |args: &[&str]| {
+        std::process::Command::new("ip")
+            .args(args)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    };
+    if !ok(&["link", "add", "dummy0", "type", "dummy"]) {
+        return None;
+    }
+    let _ = ok(&["link", "set", "dummy0", "up"]);
+    let out = std::process::Command::new("ip")
+        .args(["-o", "link", "show", "dummy0"])
+        .output()
+        .ok()?;
+    let s = String::from_utf8_lossy(&out.stdout);
+    // "2: dummy0: <...> ..." — the ifindex is before the colon.
+    s.split(':')
+        .next()
+        .and_then(|idx| idx.trim().parse::<u32>().ok())
 }
 
 /// True when the error is a privilege error — the process lacks
@@ -127,6 +157,10 @@ fn unicast_install_and_delete_round_trip() {
         eprintln!("SKIP: cannot bring lo up (iproute2 missing)");
         return;
     }
+    let Some(dummy) = dummy_link() else {
+        eprintln!("SKIP: cannot create a dummy link for the v6 gateway");
+        return;
+    };
     let mut t = match RtNetlink::connect() {
         Ok(t) => t,
         Err(e) => {
@@ -140,17 +174,17 @@ fn unicast_install_and_delete_round_trip() {
         }
     };
 
-    // A usable next hop for both families: the netns's own loopback. The
-    // v4 form resolves the gateway's output interface from the table
-    // (`via 127.0.0.1`); the v6 fib6 REQUIRES an explicit RTA_OIF for a
-    // host-scope gateway (EINVAL otherwise) — which is also why the
-    // daemon's v6 installs always carry the learned oif.
+    // v4: `via 127.0.0.1` — the kernel resolves the output interface
+    // from the table. v6: the production babel shape — a link-local
+    // gateway over an explicit RTA_OIF (fib6 requires the device for
+    // non-resolvable gateways, and host-scope loopback gateways are
+    // EINVAL on some kernels).
     for (prefix, gateway, oif) in [
         (V4, IpAddr::V4([127, 0, 0, 1]), 0),
         (
             V6,
-            IpAddr::V6([0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1]),
-            1, // lo
+            IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42]),
+            dummy,
         ),
     ] {
         let _ = t.delete_route(prefix);
