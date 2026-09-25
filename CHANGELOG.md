@@ -18,6 +18,24 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed (Babel — production interop with BIRD/babeld)
 
+- **Route metrics no longer double-count the link on every hop.**
+  The advertised Update metric used to include the announcing
+  interface's rxcost + RTT penalty, which every *receiver* then added
+  again from its own link cost — the production symptom where BIRD
+  displayed `metric 394` for lr-originated routes (192 announced +
+  192 re-added) while every BIRD peer's route showed just its link
+  cost. Babeld's `neighbour_cost` and BIRD's `babel_compute_metric`
+  both add the link cost at *reception* (txcost learned from the
+  peer's IHU + the measured-RTT penalty) and never put it in the
+  announcement, so lr now does exactly that: Updates received over a
+  session fold in that session's link cost, re-advertised Updates
+  carry the full local metric unchanged, and originated
+  (redistributed) routes are announced with metric 0 — babeld's
+  redistribute-filter default and BIRD's `ea_babel_metric` default;
+  the static protocol's `metric` stays a kernel/RIB property exactly
+  as in BIRD, where the generic `metric` attribute never flows into
+  `babel_metric`. Until the peer's first IHU arrives the txcost is
+  infinite and its Updates are not accepted (babeld parity).
 - **IPv4 routes are now announced on the IPv6 transport.** BIRD and
   babeld listen exclusively on `ff02::1:6` — v4 routes that only rode
   the v4 multicast transport (224.0.0.111) were invisible to every
