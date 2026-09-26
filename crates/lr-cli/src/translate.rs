@@ -1064,14 +1064,44 @@ fn finish_babel_iface(proto: &mut BabelProtoCapture) {
     }
 }
 
-/// Parse a BIRD babel time value (`4`, `4 s`, `4000 ms`) into
-/// milliseconds. Bare numbers are seconds (BIRD's babel time default).
+/// Parse a BIRD babel time value into milliseconds.
+///
+/// BIRD's lexer accepts the unit glued to the number or separated by
+/// whitespace, with `;` optional at the end of a statement. The
+/// translator's word-splitter (which sees `rtt max 120s;` as one token
+/// "120s;") feeds the joined text `"{value} {unit}"` here, so the
+/// function has to tolerate three concatenated shapes plus the bare
+/// seconds default:
+///
+///   * `4`        — bare seconds (BIRD's babel default)
+///   * `4 s`       — value + unit, whitespace-separated
+///   * `4s`        — value + unit, no separator (BIRD accepts this)
+///   * `4000ms`    — value + ms unit, no separator
+///   * `120s; s`   — the malformed output of the word-splitter when
+///                   the BIRD source was `rtt max 120s;` (the trailing
+///                   `;` glues onto the value, the next-word unit slot
+///                   defaults to `s`, and the join produces this
+///                   pattern). Strip the trailing `s` unit characters
+///                   and the `;` glue before parsing the numeric head.
+///
+/// Returns `None` when no numeric head can be parsed.
 fn parse_time_ms(text: &str) -> Option<u32> {
-    let text = text.trim().trim_end_matches(';');
-    if let Some(ms) = text.strip_suffix("ms") {
+    let text = text.trim().trim_end_matches(';').trim();
+    // `ms` first — the only two-letter unit.
+    if let Some(ms) = text
+        .strip_suffix("ms")
+        .or_else(|| text.strip_suffix("MS"))
+        .or_else(|| text.strip_suffix("Ms"))
+    {
         return ms.trim().parse().ok();
     }
-    let secs: f64 = text.trim_end_matches('s').trim().parse().ok()?;
+    // Strip trailing alphabetic chars AND any `;`/whitespace junk the
+    // word-splitter leaves behind. BIRD's unit set is `s`/`ms`; a future
+    // suffix (`us`, `ns`) would not parse cleanly here, which is the
+    // safe posture (babel only documents `s`/`ms`).
+    let stripped =
+        text.trim_end_matches(|c: char| c.is_alphabetic() || c == ';' || c.is_whitespace());
+    let secs: f64 = stripped.parse().ok()?;
     Some((secs * 1000.0).round() as u32)
 }
 
@@ -2940,5 +2970,45 @@ protocol bgp p1 {
             cfg.networks,
             vec!["198.51.100.0/24".to_string(), "203.0.113.0/24".to_string()]
         );
+    }
+
+    #[test]
+    fn parse_time_ms_accepts_all_bird_unit_shapes() {
+        // Bare seconds — BIRD's babel default.
+        assert_eq!(parse_time_ms("4"), Some(4_000));
+        assert_eq!(parse_time_ms("4;"), Some(4_000));
+        // Seconds with a whitespace-separated unit.
+        assert_eq!(parse_time_ms("4 s"), Some(4_000));
+        assert_eq!(parse_time_ms("4 s;"), Some(4_000));
+        // Seconds with the unit glued to the number — BIRD's lexer
+        // accepts this. The translator's word-splitter sees "120s;" as
+        // one token, and the caller feeds the joined text
+        // `"{value}; {unit}"` here, so the trailing `s` from the
+        // value must be stripped together with the join's `s` slot.
+        assert_eq!(parse_time_ms("120s"), Some(120_000));
+        assert_eq!(parse_time_ms("120s;"), Some(120_000));
+        // The exact malformed join the word-splitter produces when
+        // the BIRD source is `rtt max 120s;` (value "120s;" + default
+        // unit slot "s", joined with a space). Without the alpha-stripping
+        // fallback this returned None and silently fell back to the
+        // 120 ms default — masking the operator's intent.
+        assert_eq!(parse_time_ms("120s; s"), Some(120_000));
+        // Milliseconds, three shapes: bare, glued, whitespace-separated.
+        assert_eq!(parse_time_ms("4000"), Some(4_000_000));
+        assert_eq!(parse_time_ms("4000ms"), Some(4_000));
+        assert_eq!(parse_time_ms("4000 ms"), Some(4_000));
+        assert_eq!(parse_time_ms("4000 ms;"), Some(4_000));
+        // Case-insensitive unit suffix — BIRD's lexer is lowercase-only,
+        // but a stray MS from a templating system should not silently
+        // corrupt the operator's intent.
+        assert_eq!(parse_time_ms("4000MS"), Some(4_000));
+        assert_eq!(parse_time_ms("4000Ms"), Some(4_000));
+        // Sub-second seconds values round to the nearest millisecond
+        // (BIRD's lexer accepts `0.5 s` for 500 ms).
+        assert_eq!(parse_time_ms("0.5 s"), Some(500));
+        assert_eq!(parse_time_ms("0.5s"), Some(500));
+        // Garbage stays garbage — no silent coercion to 0.
+        assert_eq!(parse_time_ms("garbage"), None);
+        assert_eq!(parse_time_ms(""), None);
     }
 }
