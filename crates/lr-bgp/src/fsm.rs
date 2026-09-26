@@ -228,6 +228,12 @@ pub struct BgpPeer {
     /// next transport incarnation) — embedders read it after a session
     /// drops to tell a collision loss from every other Idle cause.
     received_cease_collision: bool,
+    /// Latched when ANY NOTIFICATION arrives from the peer: the peer told
+    /// us the session is going down deliberately (RFC 4486) — the helper
+    /// semantics differ from a silent transport death (BIRD parity: no
+    /// stale-route retention after a NOTIFICATION, the peer announced it
+    /// is not coming back). Cleared by [`BgpPeer::reset`].
+    received_notification: bool,
 }
 
 /// Timer IDs used by BgpPeer.
@@ -271,6 +277,7 @@ impl BgpPeer {
             keepalive_remaining: 0,
             established: false,
             received_cease_collision: false,
+            received_notification: false,
         }
     }
 
@@ -1067,6 +1074,7 @@ impl BgpPeer {
                 // RFC 4271 §6.8 / RFC 4486: a Cease / Connection Collision
                 // Resolution means the peer's resolver closed this
                 // transport — latch it for the embedder's churn guard.
+                self.received_notification = true;
                 if n.error_code == BgpErrorCode::Cease as u8
                     && n.error_subcode == BgpCeaseSubcode::ConnectionCollision as u8
                 {
@@ -1116,6 +1124,7 @@ impl BgpPeer {
         self.keepalive_remaining = 0;
         self.negotiated_hold_time = 0;
         self.received_cease_collision = false;
+        self.received_notification = false;
     }
 
     /// Whether a Cease / Connection Collision Resolution NOTIFICATION
@@ -1125,6 +1134,14 @@ impl BgpPeer {
     /// stop hammering a peer that already holds a live session.
     pub fn received_cease_collision(&self) -> bool {
         self.received_cease_collision
+    }
+
+    /// Whether ANY NOTIFICATION arrived from the peer since the last
+    /// [`BgpPeer::reset`]. RFC 4486 deaths are deliberate goodbyes — the
+    /// helper must not retain the peer's routes (BIRD parity: retention
+    /// follows silent transport deaths, not announced shutdowns).
+    pub fn notification_received(&self) -> bool {
+        self.received_notification
     }
 
     /// Extract routes from an inbound UPDATE (RFC 4271 §9.1.1 "update

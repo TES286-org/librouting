@@ -2379,7 +2379,18 @@ fn run_peer_session(
     // thread) observe the resulting events.
     {
         let mut r = rt.router.write().unwrap();
-        r.shutdown_session(session);
+        // `result.is_ok()` is the signal-shutdown exit — the only pump
+        // exit where WE are the ones ending a live session. Everything
+        // else is a transport death (peer closed, reset, read error,
+        // router-closed collision loser): RFC 4486 has nothing to say
+        // there, and closing with shutdown_session would reclassify a
+        // crash as a deliberate goodbye, costing the peer its RFC
+        // 4724/9494 retention window.
+        if result.is_ok() {
+            r.shutdown_session(session);
+        } else {
+            r.close_session(session);
+        }
         // Drain whatever the close queued (the Cease on an
         // operator-initiated close) and flush it to the wire before the
         // socket goes away.

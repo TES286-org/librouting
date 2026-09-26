@@ -1461,6 +1461,11 @@ pub struct DefaultRouter {
     /// the two Idle causes and stop dialing into a peer that already
     /// holds a live session.
     collision_lost: BTreeSet<u64>,
+    /// Sessions closed by an administrative [`Self::shutdown_session`]:
+    /// the deliberate goodbye (RFC 4486 §4.1) must not arm RFC 4724 /
+    /// RFC 9494 stale-route retention — nobody is restarting, the
+    /// session ended on purpose (BIRD protocol-disable parity).
+    administrative_close: BTreeSet<u64>,
     /// Configured redistribution pipes (BIRD `pipe` / FRR `redistribute`).
     /// Each pipe bridges routes from `source` to `target` protocol.
     pipes: Vec<crate::redistribution::RedistributionPipe>,
@@ -1601,6 +1606,7 @@ impl Default for DefaultRouter {
             max_prefix_state: BTreeMap::new(),
             collision_meta: BTreeMap::new(),
             collision_lost: BTreeSet::new(),
+            administrative_close: BTreeSet::new(),
             pipes: Vec::new(),
             redistributed_bgp: BTreeMap::new(),
             direct_rib: BTreeMap::new(),
@@ -3848,13 +3854,22 @@ impl DefaultRouter {
     /// already Idle (the transport died first, or the peer already sent
     /// its own NOTIFICATION) is closed without a queued message.
     pub fn shutdown_session(&mut self, h: SessionHandle) {
+        let mut administrative = false;
         if let Some(SessionState::Bgp { peer, .. }) = self.sessions.get_mut(&h.0) {
             if peer.state() != BgpState::Idle {
                 peer.enqueue_notification(
                     BgpErrorCode::Cease,
                     BgpCeaseSubcode::AdministrativeShutdown as u8,
                 );
+                administrative = true;
             }
+        }
+        // Only a session we actually said goodbye to (FSM still live,
+        // RFC 4486 §4.1 NOTIFICATION queued) counts as a deliberate
+        // teardown; a session the transport already killed keeps its
+        // silent-death semantics (RFC 4724/9494 retention).
+        if administrative {
+            self.administrative_close.insert(h.0);
         }
         self.close_session(h);
     }
@@ -4061,7 +4076,18 @@ impl DefaultRouter {
                 // mid-handshake (e.g. a §6.8 collision loser) carries no
                 // routes — entering retention would only pin an empty
                 // window and short-circuit the next teardown's cleanup.
-                if !*was_established {
+                //
+                // Deliberate goodbyes never retain either (BIRD parity —
+                // BIRD arms GR only on a silent transport failure, never
+                // on a received NOTIFICATION): the peer announced it is
+                // going away on purpose (any received NOTIFICATION,
+                // RFC 4486), or WE administratively closed the session —
+                // nobody is restarting, so stale routes would only
+                // blackhole traffic for the whole window.
+                if !*was_established
+                    || peer.notification_received()
+                    || self.administrative_close.contains(&session)
+                {
                     return self.session_down_cleanup(session);
                 }
                 let restart_time = peer.negotiated_graceful_restart_time().unwrap_or(0);
@@ -4693,6 +4719,7 @@ impl RouterInstance for DefaultRouter {
             *was_established = false;
         }
         self.collision_lost.remove(&h.0);
+        self.administrative_close.remove(&h.0);
         Ok(())
     }
 
@@ -12270,6 +12297,68 @@ mod collision_tests {
             vec![(6, 2)],
             "Cease / Administrative Shutdown expected on the wire"
         );
+    }
+
+    /// A received NOTIFICATION is a deliberate goodbye (RFC 4486): the
+    /// peer announced it is going away, so RFC 4724/9494 retention must
+    /// NOT arm (BIRD parity — BIRD retains only on silent transport
+    /// deaths; retaining after an announced shutdown would blackhole
+    /// traffic for the whole window).
+    #[test]
+    fn received_notification_purges_instead_of_retaining() {
+        let mut r = DefaultRouter::new();
+        let s = r
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 9]),
+            ))
+            .unwrap();
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+        assert_eq!(handshake(&mut r, s, &mut a, a_session), "Established");
+        let _ = r.drain_output(s);
+        // The peer administratively shuts down: Cease / Administrative
+        // Shutdown (RFC 4486 §4.1 subcode 2).
+        let mut bye = vec![0xffu8; 16];
+        bye.extend_from_slice(&21u16.to_be_bytes());
+        bye.extend_from_slice(&[3, 6, 2]);
+        r.feed_input(s, &bye).unwrap();
+        assert_eq!(r.session_peer_state(s), Some("Idle"));
+        r.close_session(s);
+        let retention = r
+            .poll_events()
+            .iter()
+            .any(|e| matches!(e, RouterEvent::Log(l) if l.contains("entered graceful-restart retention")));
+        assert!(
+            !retention,
+            "a peer's announced shutdown must not arm retention"
+        );
+    }
+
+    /// Our own administrative close (shutdown_session, RFC 4486 §4.1)
+    /// deliberately ends the session — retention must not arm.
+    #[test]
+    fn administrative_close_purges_instead_of_retaining() {
+        let mut r = DefaultRouter::new();
+        let s = r
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 9]),
+            ))
+            .unwrap();
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+        assert_eq!(handshake(&mut r, s, &mut a, a_session), "Established");
+        let _ = r.drain_output(s);
+        r.shutdown_session(s);
+        let out = r.drain_output(s);
+        assert_eq!(notification_codes(&out), vec![(6, 2)]);
+        r.close_session(s);
+        let retention = r
+            .poll_events()
+            .iter()
+            .any(|e| matches!(e, RouterEvent::Log(l) if l.contains("entered graceful-restart retention")));
+        assert!(!retention, "an administrative close must not arm retention");
     }
 
     /// A Cease / Connection Collision Resolution NOTIFICATION received

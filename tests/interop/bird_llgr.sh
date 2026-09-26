@@ -119,7 +119,10 @@ done
 "$BIRDC" -s "$OUT/bird.ctl" show protocols all lr 2>/dev/null | head -45 || true
 
 echo "== phase 2: BIRD as RFC 9494 helper (lr-daemon dies) =="
-kill $LR_PID 2>/dev/null || true
+# Crash semantics: LLGR retention arms on silent transport deaths —
+# a SIGTERM would now deliver our RFC 4486 Cease/Admin-Shutdown and the
+# helper correctly purges instead of retaining.
+kill -9 $LR_PID 2>/dev/null || true
 wait $LR_PID 2>/dev/null || true
 sleep 1
 "$BIRDC" -s "$OUT/bird.ctl" show route 2>/dev/null | grep -q "203.0.113.0/24" \
@@ -138,7 +141,9 @@ sleep $((LLST + 3))
 if "$BIRDC" -s "$OUT/bird.ctl" show route 2>/dev/null | grep -q "203.0.113.0/24"; then
     note_fail "BIRD kept 203.0.113.0/24 past the long-lived stale time"
 fi
-"$BIRDC" -s "$OUT/bird.ctl" down 2>/dev/null || kill $BIRD_PID 2>/dev/null || true
+# Crash semantics for BIRD too (see the note above): a graceful
+# `birdc down` would send BIRD's own Cease and the helper purges.
+kill -9 $BIRD_PID 2>/dev/null || true
 wait 2>/dev/null || true
 sleep 1
 
@@ -152,7 +157,9 @@ for i in $(seq 1 120); do
     grep -qF "route installed 198.51.100.0/24" "$OUT/lr.log" 2>/dev/null && break
     [ "$i" = 120 ] && { note_fail "phase 3 convergence"; }
 done
-kill $BIRD_PID 2>/dev/null || true
+# Crash semantics (see phase 2): a SIGTERM would deliver BIRD's own
+# RFC 4486 Cease and the helper correctly purges instead of retaining.
+kill -9 $BIRD_PID 2>/dev/null || true
 sleep 1
 grep -q "graceful-restart retention" "$OUT/lr.log" \
     || note_fail "lr-daemon did not enter graceful-restart retention"
