@@ -40,21 +40,23 @@
 //!
 //! This suite historically wedged whole CI jobs: the step stayed
 //! `in_progress` past its own `timeout-minutes` until the job ceiling
-//! cancelled everything, on every run from 36125163593 through 365 —
-//! across every harness revision. Runs 362-365 falsified the theories
-//! one layer at a time: MSYS `timeout`'s SIGTERM cannot kill a native
-//! cargo.exe; a bash step spawning cargo is itself a hanging shape;
-//! and even bash running this binary directly — file stdio,
-//! console-less grandchildren, a kernel-mode in-binary watchdog, a
-//! taskkill backstop — still wedged. The surviving mechanism: a
-//! process stuck in an UNINTERRUPTIBLE kernel call (wedged netio) is
-//! marked for death by `TerminateProcess` but never actually reaped,
-//! and everything waiting on its death (bash's `wait`, the runner's
-//! step timeout, the step finalisation) hangs with it. The CI step is
-//! therefore pure PowerShell launching each test DETACHED (own hidden
-//! console, file stdio) with bounded `WaitForExit` budgets — a
-//! kernel-limbo survivor is killed and, if it refuses to die,
-//! abandoned holding nothing of the step's. In here, the defenses:
+//! cancelled everything, on sixteen consecutive runs
+//! (36125163593 … 36217837148) — across every harness revision,
+//! including a final pure-PowerShell step with detached launches and
+//! bounded `WaitForExit` budgets whose script provably finished while
+//! the runner still could not finalise the step. The mechanism that
+//! fits every observation: a process stuck in an UNINTERRUPTIBLE
+//! kernel call (wedged netio) is marked for death by
+//! `TerminateProcess` but never actually reaped, and everything that
+//! waits on its death — bash's `wait`, the runner's step timeout, the
+//! step finalisation itself — hangs with it. Nothing at the workflow
+//! layer can fix that, so the suite moved off the every-push CI job
+//! into windows-fib-probe.yml — a per-test job matrix whose
+//! `if: always()` steps commit each test's transcript to the
+//! dispatched ref even when a sibling wedges. The last timestamped
+//! `PROBE|` line of a wedged run names the exact call site that hung;
+//! that transcript is the data the kernel-level fix needs. Inside
+//! this binary, the defenses:
 //!
 //! 1. **The binary kills itself** — every test arms
 //!    [`arm_watchdog`] before its first netio call; at the budget the

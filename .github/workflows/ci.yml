@@ -381,12 +381,9 @@ jobs:
   windows-interop:
     name: Windows interop (lr ↔ lr)
     runs-on: windows-2022
-    # Ceiling arithmetic: cold-cache build 25 + three quick interop
-    # scripts ~3 + the route-table matrix step 30 (four tests, each
-    # bounded by its own in-binary watchdog at 300 s plus the 360 s
-    # external backstop, plus compile) ≈ 58 — 60 covers the fully
-    # cold, every-test-wedges worst case as a LOUD failure; the
-    # typical warm run finishes in ~8.
+    # Ceiling arithmetic: cold-cache build 25 + three interop script
+    # steps (10-min ceilings each, sub-minute observed) + setup ≈ 57
+    # worst case; the typical warm run finishes in ~3.
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
@@ -425,110 +422,35 @@ jobs:
         shell: bash
         run: ./tests/interop/bgp_kernel_install.sh
 
-      - name: Compile the Windows route-table test binary
-        # Compiled from the DEFAULT (PowerShell) shell for a reason:
-        # every wedge this job has ever recorded (runs 36125163593 …
-        # 363) is a `bash` step that spawned cargo, while the
-        # PowerShell `cargo build` one step above has never failed
-        # once. MSYS bash handing its pty/fd table to a native
-        # cargo.exe is the only shape that correlates with the hang —
-        # so the compile (the one cargo invocation this matrix needs)
-        # rides the proven shape, and the bash step below never
-        # spawns cargo at all.
-        timeout-minutes: 15
-        run: cargo test -p lr-osroute --test windows_route_table --no-run
-
-      - name: "Windows route-table backend tests (full matrix, IP-Helper)"
-        # All four #[ignore]d windows_route_table tests on every push —
-        # the two assertive regressions AND the two research probes
-        # (fib_semantics_probe_matrix, probe_next_hop_interface_
-        # resolution) that used to live behind the manual
-        # workflow_dispatch probe and showed up as a permanent skip.
-        #
-        # THE WEDGE, AND WHY THIS STEP IS PURE POWERSHELL. This step
-        # wedged on every run from 36125163593 through 365 while the
-        # steps around it never failed once, and the successive fixes
-        # each falsified a layer: MSYS `timeout` cannot kill a native
-        # child (SIGTERM undeliverable, run 362); a bash step spawning
-        # cargo is itself the hanging shape (PowerShell cargo steps
-        # and bash spawning leaf daemons are both always-green, run
-        # 363); and even bash running the test binary directly with
-        # file stdio, console-less grandchildren, a kernel-mode
-        # in-binary watchdog and a taskkill //F //T backstop still
-        # wedged (runs 364, 365) — the bash `wait`/runner timeout
-        # hang on a process stuck in an UNINTERRUPTIBLE kernel call
-        # (wedged netio), which TerminateProcess marks for death but
-        # cannot actually reap.
-        #
-        # The final shape removes every identified mechanism at once:
-        # no bash, no MSYS, no signals, no console sharing, no pipe
-        # inheritance, no unbounded waits:
-        # 1. The step is native PowerShell; every wait is
-        #    WaitForExit(<timeout>) — bounded even against a limbo
-        #    process.
-        # 2. Each test launches DETACHED (Start-Process -WindowStyle
-        #    Hidden): its own hidden console, stdio to files. Nothing
-        #    the runner waits on is ever shared with it.
-        # 3. An expired budget Kills the process and — if it is in
-        #    kernel limbo and refuses to die — ABANDONS it: a survivor
-        #    holds a private hidden console and file handles only, so
-        #    the step (and the job) finalise regardless. The VM is
-        #    recycled after the job either way.
-        # 4. The binary's own defenses stay: the in-binary
-        #    TerminateProcess watchdog (exit 70) fires first, every
-        #    PROBE| line is timestamped so a killed run's transcript
-        #    names the hang site, and the binary's own children are
-        #    spawned console-less (CREATE_NO_WINDOW).
-        #
-        # Budgets: 360 s per test; 4 x 360 s + transcript catting sits
-        # under the 30-minute step ceiling. A hang is a bounded, loud,
-        # transcript-annotated failure — never a silent in_progress
-        # that eats the logs.
-        shell: pwsh
-        timeout-minutes: 30
-        run: |
-          $tests = @(
-            'fib_semantics_probe_matrix',
-            'probe_next_hop_interface_resolution',
-            'blackhole_route_discards_not_accepts',
-            'explicit_oif_beats_fib_resolution'
-          )
-          $exe = Get-ChildItem 'target\debug\deps\windows_route_table-*.exe' -ErrorAction SilentlyContinue |
-            Sort-Object LastWriteTime -Descending | Select-Object -First 1
-          if (-not $exe) {
-            Write-Host 'FAIL: no windows_route_table test binary under target\debug\deps\'
-            exit 1
-          }
-          Write-Host "test binary: $($exe.FullName)"
-
-          $rc = 0
-          foreach ($t in $tests) {
-            Write-Host "=== $t (start $([DateTime]::UtcNow.ToString('HH:mm:ss'))) ==="
-            $log = "target\windows-route-table-$t.log"
-            $p = Start-Process -FilePath $exe.FullName `
-              -ArgumentList @('--ignored', '--nocapture', '--test-threads=1', $t) `
-              -WindowStyle Hidden `
-              -RedirectStandardOutput $log `
-              -RedirectStandardError "$log.err" -PassThru
-            if (-not $p.WaitForExit(360000)) {
-              # Bounded even against a kernel-limbo process: Kill is an
-              # async TerminateProcess, and the survivor (if any) is
-              # abandoned detached — it holds nothing of ours.
-              $p.Kill()
-              Start-Sleep -Seconds 5
-              Get-Content $log -ErrorAction SilentlyContinue
-              Get-Content "$log.err" -ErrorAction SilentlyContinue
-              Write-Host "=== $t rc=124 (360s budget exceeded — killed/abandoned detached) ==="
-              $rc = 124
-              continue
-            }
-            Get-Content $log -ErrorAction SilentlyContinue
-            Get-Content "$log.err" -ErrorAction SilentlyContinue
-            $trc = $p.ExitCode
-            Write-Host "=== $t rc=$trc (0 ok / 70 in-binary watchdog) ==="
-            if ($trc -ne 0) { $rc = $trc }
-          }
-          exit $rc
+      # NOTE: the four #[ignore]d windows_route_table kernel-gated
+      # tests (fib_semantics_probe_matrix, probe_next_hop_interface_
+      # resolution, blackhole_route_discards_not_accepts,
+      # explicit_oif_beats_fib_resolution) do NOT run in this job.
+      # They wedged this step on SIXTEEN consecutive runs (36125163593
+      # through 36217837148) across every harness shape: plain
+      # `timeout N cargo test`, file-stdio children, an in-binary
+      # kernel-mode TerminateProcess watchdog, timestamped
+      # transcripts, bash-level taskkill //F //T tree kills, compiling
+      # from PowerShell, running the test binary directly, console-less
+      # CREATE_NO_WINDOW grandchildren, and finally a pure-PowerShell
+      # step with detached launches and bounded WaitForExit budgets —
+      # after which the pwsh script provably finished (its loop is
+      # bounded at 4 x 360 s) and the runner STILL could not finalise
+      # the step for 37+ minutes. The mechanism that fits every
+      # observation: a process wedged in an UNINTERRUPTIBLE kernel
+      # call (netio) is marked for death by TerminateProcess but never
+      # reaped, and the runner's step-finalisation waits on it — no
+      # workflow-level process management can fix that. The unit-level
+      # coverage of the Windows backend runs (and passes) in the
+      # Native (windows-2022) job; the kernel-gated suite runs through
+      # windows-fib-probe.yml — a per-test job matrix whose transcripts
+      # are committed back even when a test wedges its own job — and
+      # the kernel-level hang itself is tracked in issue #29
+      # (https://github.com/TES286-org/librouting/issues/29).
+      #
+      # Removing the step also un-blocks this job's cache: with the
+      # wedge gone, the post-run cache save finally happens, so the
+      # cold-build penalty stops compounding on every push.
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
   # This is the macOS half of the "CI reflects real usage" goal:

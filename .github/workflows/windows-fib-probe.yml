@@ -1,45 +1,44 @@
-# Windows FIB semantics probe (manual, on demand).
+# Windows FIB probe (manual, on demand) — the wedge-tolerant evidence
+# machine for the windows_route_table kernel-gated suite.
 #
-# Runs the windows_route_table research matrix as Administrator on a
-# real windows-2022 runner — the empirical half of the Windows
-# blackhole / egress-interface / row-normalisation investigations. It
-# tees every `PROBE|` line into probe-results.md and commits that
-# transcript back so the findings are readable without Actions log
-# access. The assertive regression tests in the same file may fail on
-# an unaudited Windows build; the transcript is the deliverable, so
-# the commit step runs with `if: always()`.
+# WHY THIS SHAPE. The four #[ignore]d tests (the FIB-semantics matrix,
+# the ifindex-resolution probe, and the two assertive regressions)
+# wedged the every-push CI job on SIXTEEN consecutive runs
+# (36125163593 … 36217837148) across every harness shape ever tried:
+# plain `timeout N cargo test`, file-stdio children, an in-binary
+# kernel-mode TerminateProcess watchdog, timestamped transcripts,
+# bash-level taskkill //F //T tree kills, compiling from PowerShell,
+# running the test binary directly from bash, console-less
+# CREATE_NO_WINDOW grandchildren, and finally a pure-PowerShell step
+# with detached launches and bounded WaitForExit budgets — after which
+# the pwsh loop provably finished (bounded at 4 x 360 s) and the
+# runner STILL could not finalise the step for 37+ minutes. The
+# mechanism that fits every observation: a process wedged in an
+# UNINTERRUPTIBLE kernel call (netio) is marked for death by
+# TerminateProcess but never actually reaped, and the runner's
+# step-finalisation waits on it — nothing at the workflow layer can
+# fix that. The every-push job therefore no longer runs these tests
+# (see ci.yml's windows-interop note); this workflow is where they
+# live, structured so that a wedge costs ONE job, never the evidence:
 #
-# Lives OUTSIDE ci.yml because it COMMITS to the dispatched ref: the
-# same four tests now run on every push inside the ci.yml
-# windows-interop job (assertions + PROBE transcript in the log); this
-# workflow remains the on-demand way to get the transcript as a file
-# on a disposable branch.
+# - ONE JOB PER TEST (fail-fast disabled): a wedged test burns only
+#   its own job to the 25-minute ceiling; the other three complete
+#   and COMMIT THEIR TRANSCRIPTS to the dispatched ref.
+# - The commit step runs `if: always()` and pushes with rebase-retry
+#   against the sibling jobs' concurrent pushes.
+# - Each test launches DETACHED (own hidden console, file stdio) with
+#   a bounded WaitForExit budget; the binary's own defenses (kernel-
+#   mode self-watchdog exit 70, timestamped PROBE lines) are inside.
 #
-# Dispatch it on a disposable branch (NOT main — the transcript is
+# The committed transcripts are the deliverable: the last timestamped
+# PROBE line of a wedged test names the exact call site that hung —
+# the data needed to fix the kernel-level hang itself (tracked in
+# issue #29, https://github.com/TES286-org/librouting/issues/29).
+#
+# Dispatch it on a disposable branch (NOT main — the transcripts are
 # committed back to the dispatched ref):
 #
 #   gh workflow run windows-fib-probe.yml --ref probe/windows-audit
-#   # or: curl -X POST .../actions/workflows/windows-fib-probe.yml/dispatches \
-#   #        -f ref=probe/windows-audit
-#
-# The historical watchdog tower (detached payload + 900 s watch loop +
-# ceilings raised above the payload's own wall) existed only because a
-# wedged test binary could not be reaped and took the transcript down
-# with the job. Runs 36125163593-365 progressively falsified every
-# narrower theory: MSYS `timeout` cannot kill a native Windows child;
-# a bash step spawning cargo is itself a hanging shape; and even bash
-# running the test binary directly (file stdio, console-less
-# grandchildren, kernel-mode in-binary watchdog, taskkill //F //T
-# backstop) wedged — a process stuck in an uninterruptible kernel
-# call (wedged netio) is marked for death by TerminateProcess but
-# never reaped, and everything that waits on it hangs too. The final
-# shape is pure PowerShell with DETACHED test launches (own hidden
-# console, file stdio): every wait is WaitForExit(<timeout>), an
-# expired budget kills and — against a limbo survivor — ABANDONS it
-# detached (it holds nothing of the step's), the binary's own
-# TerminateProcess watchdog (exit 70) fires first, and every PROBE
-# line is timestamped so a killed run's transcript names the hang
-# site. Transcripts are written back and committed either way.
 name: Windows FIB probe
 
 on:
@@ -50,43 +49,40 @@ permissions:
 
 jobs:
   fib-probe:
-    name: Windows FIB probe (row forms + ifindex resolution)
+    name: "Windows FIB probe (${{ matrix.test }})"
     runs-on: windows-2022
-    timeout-minutes: 40
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        test:
+          - fib_semantics_probe_matrix
+          - probe_next_hop_interface_resolution
+          - blackhole_route_discards_not_accepts
+          - explicit_oif_beats_fib_resolution
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
-      - name: Configure Git PATH (bash + coreutils)
-        run: echo "C:\Program Files\Git\usr\bin" >> $env:GITHUB_PATH
       - name: Cache cargo registry + target
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "windows-fib-probe"
       - name: Compile the Windows route-table test binary
-        # Compiled from the DEFAULT (PowerShell) shell: every wedge
-        # this workflow has ever recorded is a bash step spawning
-        # cargo, while PowerShell cargo steps never fail. See ci.yml's
-        # windows-interop job for the full analysis.
+        # PowerShell (the default shell) — the only cargo shape that
+        # has never wedged on these runners.
         timeout-minutes: 15
         run: cargo test -p lr-osroute --test windows_route_table --no-run
-      - name: Run the FIB probe (Administrator shell)
-        # Pure PowerShell, tests launched detached — the same final
-        # wedge-free shape as ci.yml's windows-interop route-table
-        # step (see there for the full run-by-run analysis: bash+
-        # cargo, MSYS timeout, console sharing and unbounded waits
-        # each falsified in turn; a kernel-limbo survivor is killed
-        # and, if it refuses to die, abandoned holding nothing).
-        # Per test: the binary's own watchdog fires at 300 s (exit
-        # 70); the WaitForExit budget at 360 s (rc 124).
-        timeout-minutes: 30
+      - name: Run the test (detached, bounded)
+        # Pure PowerShell: the test launches DETACHED (own hidden
+        # console, stdio to files — nothing the runner waits on is
+        # shared with it), and the only wait is WaitForExit(<budget>),
+        # bounded even against a kernel-limbo process. An expired
+        # budget kills the process; a survivor that refuses to die is
+        # abandoned detached. The binary's own TerminateProcess
+        # watchdog (exit 70) fires first.
+        timeout-minutes: 10
         shell: pwsh
         run: |
-          $tests = @(
-            'fib_semantics_probe_matrix',
-            'probe_next_hop_interface_resolution',
-            'blackhole_route_discards_not_accepts',
-            'explicit_oif_beats_fib_resolution'
-          )
           $exe = Get-ChildItem 'target\debug\deps\windows_route_table-*.exe' -ErrorAction SilentlyContinue |
             Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $exe) {
@@ -94,52 +90,54 @@ jobs:
             exit 1
           }
           Write-Host "test binary: $($exe.FullName)"
-
-          Set-Content -Path probe-output.log -Value '' -NoNewline
-          $rc = 0
-          foreach ($t in $tests) {
-            $head = "=== $t (start $([DateTime]::UtcNow.ToString('HH:mm:ss'))) ==="
-            Write-Host $head
-            Add-Content -Path probe-output.log -Value $head
-            $log = "target\windows-route-table-$t.log"
-            $p = Start-Process -FilePath $exe.FullName `
-              -ArgumentList @('--ignored', '--nocapture', '--test-threads=1', $t) `
-              -WindowStyle Hidden `
-              -RedirectStandardOutput $log `
-              -RedirectStandardError "$log.err" -PassThru
-            if (-not $p.WaitForExit(360000)) {
-              $p.Kill()
-              Start-Sleep -Seconds 5
-              $out = (Get-Content $log -ErrorAction SilentlyContinue) -join "`n"
-              $err = (Get-Content "$log.err" -ErrorAction SilentlyContinue) -join "`n"
-              if ($out) { Add-Content -Path probe-output.log -Value $out }
-              if ($err) { Add-Content -Path probe-output.log -Value $err }
-              Write-Host "=== $t rc=124 (360s budget exceeded — killed/abandoned detached) ==="
-              Add-Content -Path probe-output.log -Value "=== $t rc=124 (budget exceeded) ==="
-              $rc = 124
-              continue
-            }
-            $out = (Get-Content $log -ErrorAction SilentlyContinue) -join "`n"
-            $err = (Get-Content "$log.err" -ErrorAction SilentlyContinue) -join "`n"
-            if ($out) { Add-Content -Path probe-output.log -Value $out }
-            if ($err) { Add-Content -Path probe-output.log -Value $err }
-            $trc = $p.ExitCode
-            $line = "=== $t rc=$trc (0 ok / 70 in-binary watchdog) ==="
-            Write-Host $line
-            Add-Content -Path probe-output.log -Value $line
-            if ($trc -ne 0) { $rc = $trc }
+          $t = '${{ matrix.test }}'
+          $log = "target\windows-route-table-$t.log"
+          $p = Start-Process -FilePath $exe.FullName `
+            -ArgumentList @('--ignored', '--nocapture', '--test-threads=1', $t) `
+            -WindowStyle Hidden `
+            -RedirectStandardOutput $log `
+            -RedirectStandardError "$log.err" -PassThru
+          if (-not $p.WaitForExit(420000)) {
+            $p.Kill()
+            Start-Sleep -Seconds 5
+            Get-Content $log -ErrorAction SilentlyContinue
+            Get-Content "$log.err" -ErrorAction SilentlyContinue
+            Write-Host "=== $t rc=124 (420s budget exceeded — killed/abandoned detached) ==="
+            exit 124
           }
-          exit $rc
+          Get-Content $log -ErrorAction SilentlyContinue
+          Get-Content "$log.err" -ErrorAction SilentlyContinue
+          Write-Host "=== $t rc=$($p.ExitCode) (0 ok / 70 in-binary watchdog) ==="
+          exit $p.ExitCode
       - name: Commit the probe transcript back to the ref
-        # Guard against dispatching on a protected ref: the step pushes
-        # a probe-results.md commit to github.ref_name.
-        if: ${{ !endsWith(github.ref, '/main') }}
+        # ALWAYS runs — the transcript of a wedged/failed test is the
+        # deliverable. Sibling matrix jobs push concurrently to the
+        # same ref; rebase-retry absorbs the collisions.
+        if: ${{ always() && !endsWith(github.ref, '/main') }}
         timeout-minutes: 5
         shell: bash
         run: |
-          grep '^PROBE|' probe-output.log > probe-results.md || echo "no PROBE lines captured" > probe-results.md
+          t='${{ matrix.test }}'
+          grep '^PROBE|' "target/windows-route-table-$t.log" > "probe-results-$t.md" 2>/dev/null \
+            || echo "no PROBE lines captured (test wedged before first output — or compile failed)" > "probe-results-$t.md"
+          {
+            echo ""
+            echo "## rc marker"
+            echo ""
+            tail -3 "target/windows-route-table-$t.log" 2>/dev/null || true
+          } >> "probe-results-$t.md"
           git config user.name "TES286-bot"
           git config user.email "bot@tes286.top"
-          git add probe-results.md
-          git commit -m "probe: record windows FIB results (run ${{ github.run_id }})" || echo "nothing to commit"
-          git push origin HEAD:${{ github.ref_name }}
+          git add "probe-results-$t.md"
+          git commit -m "probe: record windows FIB results for $t (run ${{ github.run_id }})" || echo "nothing to commit"
+          ref="${{ github.ref_name }}"
+          for attempt in 1 2 3 4 5; do
+            git fetch origin "$ref" || true
+            git rebase "origin/$ref" || { git rebase --abort || true; }
+            if git push origin "HEAD:$ref"; then
+              exit 0
+            fi
+            sleep $((attempt * 10))
+          done
+          echo "WARN: could not push the transcript after 5 attempts"
+          exit 0

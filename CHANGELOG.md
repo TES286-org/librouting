@@ -216,26 +216,30 @@ ship, breaking changes that affect embedders, dependency bumps.
   netio) is marked for death by `TerminateProcess` but never actually
   reaped, and everything that waits on its death — bash's `wait`, the
   runner's step timeout, the runner's step finalisation — hangs with
-  it. The final shape removes the waiting entirely:
-  1. **The step is native PowerShell** (`shell: pwsh`): no bash, no
-     MSYS, no signal semantics, no console sharing, no pipe
-     inheritance. Every wait is `WaitForExit(<timeout>)`, bounded
-     even against a limbo process.
-  2. **Each test launches DETACHED** (`Start-Process -WindowStyle
-     Hidden`): its own hidden console, stdio to files. Nothing the
-     runner waits on is ever shared with the test process.
-  3. **An expired budget kills and — against a kernel-limbo
-     survivor — ABANDONS it**: the survivor holds a private hidden
-     console and file handles only, so the step and the job
-     finalise regardless; the VM is recycled after the job. A hang
-     costs one bounded rc-124 failure whose transcript lands in the
-     log instead of dying with a cancelled job.
-  4. **The binary's own defenses stay**: the kernel-mode
-     `TerminateProcess(GetCurrentProcess(), 70)` watchdog fires
-     first, every `PROBE|` line is timestamped so a killed run's
-     transcript names the hang site, and the binary's own children
-     spawn console-less (`CREATE_NO_WINDOW`) — nothing it spawns can
-     hold a console of the step's open either.
+  it. Even the last workflow shape — pure PowerShell, detached
+  launches, bounded `WaitForExit` budgets — wedged (run 366: the pwsh
+  loop is provably bounded at 4 x 360 s, yet the step sat
+  `in_progress` 37+ minutes; the script had finished, the RUNNER could
+  not finalise around the limbo survivor). The conclusion: the
+  kernel-level hang cannot be prevented or reaped from the workflow
+  layer at all, and an every-push job cannot afford it. The suite
+  therefore moved:
+  - **Off the every-push job** — the windows-interop job keeps the
+    three interop scripts (and its cache save finally happens again:
+    the wedge was also starving it); the backend's unit tests keep
+    running (and passing) in the Native (windows-2022) job.
+  - **Into a wedge-tolerant evidence machine** — windows-fib-probe.yml
+    is now a per-test JOB matrix with `fail-fast: false` and an
+    `if: always()` transcript-commit step: a wedged test burns only
+    its own job to the ceiling while the sibling jobs complete and
+    COMMIT their transcripts to the dispatched ref. The last
+    timestamped `PROBE|` line of a wedged test names the exact call
+    site that hung — the data the kernel-level fix needs, which
+    sixteen cancelled jobs never left behind. Each test still runs
+    detached with bounded waits, and the binary's own defenses stay:
+    the kernel-mode `TerminateProcess(GetCurrentProcess(), 70)`
+    watchdog, timestamped `PROBE` lines, console-less
+    (`CREATE_NO_WINDOW`) children.
 
 ### Fixed (kernel FIB interaction)
 
