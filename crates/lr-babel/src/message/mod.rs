@@ -749,6 +749,40 @@ mod tests {
     }
 
     #[test]
+    fn hello_unicast_flag_roundtrip() {
+        // RFC 8966 §4.6.5: the Unicast flag (0x8000) signals a Hello
+        // that was sent to the peer's unicast address rather than the
+        // multicast group. Tunnel interfaces use Unicast Hellos so the
+        // announcement traverses a WireGuard peer's AllowedIPs even
+        // when ff00::/8 is not in that set (see §3.3.1).
+        let h = Hello {
+            flags: Hello::UNICAST,
+            seqno: 42,
+            interval_cs: 1000,
+            timestamp: None,
+        };
+        let enc = h.encode();
+        assert_eq!(u16::from_be_bytes([enc[0], enc[1]]), Hello::UNICAST);
+        assert_eq!(enc, [0x80, 0x00, 0, 42, 0x03, 0xe8]);
+        let dec = Hello::decode(&enc).unwrap();
+        assert_eq!(dec.flags & Hello::UNICAST, Hello::UNICAST);
+        assert_eq!(dec.seqno, 42);
+    }
+
+    #[test]
+    fn hello_unknown_flag_bits_ignored_on_decode() {
+        // RFC 8966 §4.6.5: only the Unicast flag (0x8000) is defined;
+        // all other flag bits MUST be sent as zero and silently ignored
+        // on reception. A future revision cannot break a deployed
+        // decoder by redefining a flag bit.
+        let mut enc = Hello::new(7, 100).encode();
+        enc[0] = 0xff; // every bit set, only 0x80 is meaningful
+        let h = Hello::decode(&enc).unwrap();
+        assert_eq!(h.flags & Hello::UNICAST, Hello::UNICAST);
+        assert_eq!(h.seqno, 7);
+    }
+
+    #[test]
     fn ihu_roundtrip_v4() {
         let ihu = Ihu {
             ae: 1,

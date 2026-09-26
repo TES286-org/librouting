@@ -3617,10 +3617,23 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // — receivers count losses from its gaps.
             iface.hello_seqno = iface.hello_seqno.wrapping_add(1);
             busy = true;
-            let rtt_echo = if iface.rtt_cost > 0 {
-                router.read().unwrap().babel_rtt_echo(iface.session, now_ms)
-            } else {
-                None
+            let (rtt_echo, peer_nexthops) = {
+                let r = router.read().unwrap();
+                let rtt = if iface.rtt_cost > 0 {
+                    r.babel_rtt_echo(iface.session, now_ms)
+                } else {
+                    None
+                };
+                // RFC 8966 §3.3.1: when sending Unicast Hellos on a
+                // tunnel interface, the per-family peer's address is
+                // the unicast destination (the multicast group is a
+                // fallback before the peer is first heard from).
+                let nexthops = if iface.unicast_hellos {
+                    r.babel_egress_nexthops(iface.session)
+                } else {
+                    None
+                };
+                (rtt, nexthops)
             };
             // RFC 8966 §3.7.1: the *Update* seqno tracks route changes,
             // not the refresh cadence — bump it only when the advertised
@@ -3650,12 +3663,43 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     )
                 };
                 let transport = &mut iface.transports[ti];
+                // RFC 8966 §3.3.1: on a tunnel interface, send the
+                // announcement to the peer's unicast address (matching
+                // the family) when known; the multicast group is a
+                // fallback before the peer has been heard from. The
+                // Hello TLV already carries the Unicast flag in this
+                // case (see `build_babel_announcement`).
+                let dest: std::net::SocketAddr = if iface.unicast_hellos {
+                    let family_v4 = transport.local.is_ipv4();
+                    let peer = peer_nexthops.and_then(|(v4, v6)| if family_v4 { v4 } else { v6 });
+                    match peer {
+                        Some(peer_ip) => match peer_ip {
+                            lr_core::addr::IpAddr::V4(p) => std::net::SocketAddr::new(
+                                std::net::IpAddr::V4(std::net::Ipv4Addr::from(p)),
+                                iface.port,
+                            ),
+                            lr_core::addr::IpAddr::V6(p) => {
+                                let peer_v6 = std::net::Ipv6Addr::from(p);
+                                std::net::SocketAddr::V6(std::net::SocketAddrV6::new(
+                                    peer_v6,
+                                    iface.port,
+                                    0,
+                                    transport.scope_id,
+                                ))
+                            }
+                        },
+                        None => babel_mcast_dest(transport),
+                    }
+                } else {
+                    babel_mcast_dest(transport)
+                };
+                let dest_ip = lr_ip(dest.ip());
                 let payload = match &mut iface.auth {
                     Some(auth) => {
                         let ph = lr_babel::BabelPseudoHeader {
                             source: lr_ip(transport.local),
                             source_port: iface.port,
-                            destination: lr_ip(transport.group),
+                            destination: dest_ip,
                             destination_port: iface.port,
                         };
                         match auth.authenticate_packet(&announce, ph) {
@@ -3668,7 +3712,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     }
                     None => announce,
                 };
-                if let Err(e) = transport.uc.send_to(&payload, babel_mcast_dest(transport)) {
+                if let Err(e) = transport.uc.send_to(&payload, dest) {
                     // Routine during a link flap (ENETUNREACH until the
                     // 1 s check-link poll gates the interface): one line
                     // per failed announcement at most.
@@ -4053,6 +4097,14 @@ struct BabelIface {
     last_gc_ms: u64,
     /// `check link` state — initialized from the enumerated state.
     link_up: bool,
+    /// RFC 8966 §3.3.1: tunnels MAY send Unicast-flagged Hellos only.
+    /// Set when the interface's `kind` is `tunnel`. Multicast Hellos do
+    /// not traverse tunnel peers whose `AllowedIPs` (WireGuard) or
+    /// peer routes do not cover `ff00::/8`; a Unicast Hello rides the
+    /// same transport as a regular data packet and reaches the peer
+    /// without any kernel multicast plumbing. BIRD on `type "tunnel"`
+    /// interfaces already defaults to Unicast Hellos — this matches.
+    unicast_hellos: bool,
 }
 
 /// One family's socket pair on one Babel interface.
@@ -4263,6 +4315,7 @@ fn babel_iface_manual(
         last_announce_ms: 0,
         last_gc_ms: 0,
         link_up: true,
+        unicast_hellos: false, // manual single-socket: no tunnel-type plumbing
     })
 }
 
@@ -4473,6 +4526,7 @@ fn babel_iface_from_spec(
         last_announce_ms: 0,
         last_gc_ms: 0,
         link_up: entry.up && entry.running,
+        unicast_hellos: is_tunnel,
     })
 }
 
@@ -4859,6 +4913,17 @@ fn build_babel_announcement(
     // measures delay (RFC 8966 §A.2.4).
     let hello_cs = u16::try_from(iface.hello_interval_ms / 10).unwrap_or(u16::MAX);
     let mut hello = Hello::new(iface.hello_seqno, hello_cs);
+    // RFC 8966 §3.3.1: tunnels MAY send Unicast Hellos. The daemon
+    // delivers the whole announcement as unicast on tunnel interfaces
+    // (see the send site), and the Hello TLV must carry the Unicast
+    // flag so the receiver knows it is not a duplicate of a multicast
+    // Hello it might also see. Without the flag a strict receiver
+    // (babeld) keeps two neighbour states for the same peer — one for
+    // the multicast Hello sequence and one for the unicast one — and
+    // eventually picks the wrong history when computing rxcost.
+    if iface.unicast_hellos {
+        hello.flags |= Hello::UNICAST;
+    }
     if iface.rtt_cost > 0 {
         hello = hello.with_timestamp(now_us);
     }
