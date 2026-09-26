@@ -286,6 +286,42 @@ ship, breaking changes that affect embedders, dependency bumps.
     watchdog, timestamped `PROBE` lines, console-less
     (`CREATE_NO_WINDOW`) children.
 
+### Fixed (BGP — RFC 4271 §6.8 collision resolution on outbound-only peers with a listener)
+
+- **Outbound-only peers no longer loop on `Cease / Connection
+  Collision Resolution` when the daemon is also listening.** An
+  outbound-only peer (only `remote` configured, no `address`)
+  whose daemon had `listen_addr` set still received inbound
+  connections from the same neighbour — `match_inbound_peer`
+  falls back to the host of `remote` via `expected_peer_ip`. The
+  inbound was dispatched onto the SAME `SessionHandle` as the
+  outbound connector (no `handle_in` existed because the
+  bidirectional gate was `is_outbound() && is_inbound()`), and
+  `start_session`'s `peer.reset()` clobbered the outbound FSM
+  mid-handshake. The router never saw two sessions in one
+  `collision_group`, so it could not resolve the collision
+  in-house; the remote's `Cease / Connection Collision Resolution`
+  NOTIFICATION looped indefinitely — the production Windows RR-loop
+  regression. The bidirectional gate is now `is_outbound() &&
+  (is_inbound() || cfg.listen_addr.is_some())`, so any outbound
+  peer receives a challenger session sharing the same
+  `collision_group` whenever the listener is up. The router
+  resolves the collision itself, the outbound connector's churn
+  guard (`lost_once && sibling_in Established`) engages, and the
+  loop converges to exactly one Established session per peer.
+- **`listener_auth` and `listener_gtsm` now arm the listener for
+  outbound-only peers too.** Same expanded definition of
+  "inbound-capable": an outbound-only peer with TCP-MD5/AO or
+  GTSM keyed sessions now has its inbound accepted (otherwise the
+  kernel would drop the SYN before the listener could match it).
+- **The startup log surfaces the new collision topology.** Peers
+  that carry a challenger session are labelled `bidirectional
+  (remote + listener)` (vs the historical `bidirectional (remote
+  + address)`), and the peer summary shows `bidirectional` instead
+  of `outbound` — surfaces the §6.8 resolution in the
+  operator-visible state so a misconfigured listener is obvious at
+  startup.
+
 ### Fixed (kernel FIB interaction)
 
 - **Linux blackhole routes are now actually withdrawn.** RTM_DELROUTE
