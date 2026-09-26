@@ -238,6 +238,17 @@ ship, breaking changes that affect embedders, dependency bumps.
      Budgets: 360 s per test, four tests, well under the 30-minute
      step ceiling; a hang is a bounded, loud, transcript-annotated
      failure — never a silent `in_progress` that eats the logs.
+  6. **Every process the test spawns is console-less**
+     (`CREATE_NO_WINDOW` on ping.exe / powershell.exe / route.exe):
+     `conhost` is owned by the OS, not by any process tree, so a
+     wedged console-attached descendant is the one thing a
+     `taskkill /T` cannot reach — and run 364 (bash running the test
+     binary directly, cargo out of the picture entirely) still
+     wedged, narrowing the survivor to exactly that class. The
+     suite's children are file-redirected anyway; they lose nothing
+     but the ability to hold the step's console open. The step's
+     background jobs also take stdin from /dev/null — no handle of
+     the runner's is inherited anywhere.
 
 ### Fixed (kernel FIB interaction)
 

@@ -487,7 +487,7 @@ jobs:
           # children) and never signal semantics of any kind.
           run_bounded() {
             budget=$1; log=$2; shift 2
-            "$@" >"$log" 2>&1 &
+            "$@" >"$log" 2>&1 </dev/null &
             local pid=$!
             local winpid
             winpid=$(cat "/proc/$pid/winpid" 2>/dev/null \

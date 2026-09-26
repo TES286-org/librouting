@@ -595,20 +595,30 @@ fn primary_interface() -> Option<(String, u32, Ipv4Addr)> {
 /// Output goes to temp FILES, never pipes: a grandchild that inherits
 /// the write end of a pipe (the WMI provider host, `conhost`, anything
 /// the child spawns) keeps the pipe open after the child dies, and a
-/// blocked `read_to_string` on the other end never sees EOF. That
-/// exact deadlock — a killed `powershell.exe` whose pipe was still
-/// held open — is what stalled runs 36125163593 / 36132336028 /
-/// 36136529031 at the route-table step until the job was killed: the
-/// watchdog fired, but the reader threads blocked anyway and the test
-/// binary never exited. Files always reach EOF at the current write
-/// position, so after the kill the read below is immediate and final:
-/// whatever the child wrote before the budget expired is what the
-/// caller sees.
+/// blocked `read_to_string` on the other end never sees EOF. Files
+/// always reach EOF at the current write position, so after the kill
+/// the read below is immediate and final: whatever the child wrote
+/// before the budget expired is what the caller sees.
+///
+/// The child is spawned with `CREATE_NO_WINDOW`: console-subsystem
+/// children otherwise ATTACH to this process's console, and `conhost`
+/// is owned by the OS, not by any process tree — `taskkill /T` from
+/// the CI harness cannot reach it. A wedged console-attached
+/// descendant keeping `conhost` alive after the test binary and the
+/// step's bash have both exited is the surviving explanation for the
+/// step-finalisation wedge the runs 362-364 evidence narrowed to
+/// (bash spawning a LEAF console exe has never wedged; this suite's
+/// binary spawns grandchildren). With no console, the children cannot
+/// hold one open; their stdio is file-redirected anyway.
 fn run_bounded(
     program: &str,
     args: &[&str],
     budget: Duration,
 ) -> Result<(String, Option<bool>), String> {
+    use std::os::windows::process::CommandExt;
+    // CREATE_NO_WINDOW — the child gets no console (and does not
+    // attach the parent's). 0x08000000, winbase.h.
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
     let tag = program
         .rsplit(['\\', '/'])
         .next()
@@ -630,6 +640,7 @@ fn run_bounded(
         .args(args)
         .stdout(out_file)
         .stderr(err_file)
+        .creation_flags(CREATE_NO_WINDOW)
         .spawn()
         .map_err(|e| e.to_string())?;
     let deadline = Instant::now() + budget;
