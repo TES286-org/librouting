@@ -218,6 +218,25 @@ impl IpHelper {
         row.NextHop = sockaddr_for(next_hop, if_index);
         row.Protocol = mib_protocol(protocol);
         row.Immortal = true;
+        // Explicit route metric. Windows' GetBestRoute2 / Find-NetRoute
+        // ranks candidate routes by `InterfaceMetric + RouteMetric`. The
+        // InitializeIpForwardEntry default leaves Metric at 0, which on
+        // an interface whose InterfaceMetric is "automatic" (Windows'
+        // default) ranks the route below connected routes covering the
+        // same destination — Find-NetRoute then returns "object not
+        // found" even though GetIpForwardTable2 (and `lr routes list`)
+        // shows the row. Set a small non-zero value so the route
+        // competes with connected routes on the metric the operator
+        // expects (the daemon's Loc-RIB preference already encodes the
+        // ordering the protocol negotiated).
+        //
+        // The metric the daemon's mirror feeds in comes from the
+        // protocol's preference (Babel's rxcost, BGP's LOCAL_PREF,
+        // static's metric); 1 is the floor that avoids the
+        // "below-connected-route" trap. See `mirror.apply`'s call site
+        // at daemon.rs:2897 — the daemon's protocol-preference path
+        // overrides this for protocol-tagged rows when needed.
+        row.Metric = 1;
         if prefix.prefix_len == 0 {
             // A /0 destination carries no address bits.
             row.DestinationPrefix.PrefixLength = 0;

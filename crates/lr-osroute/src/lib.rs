@@ -196,6 +196,32 @@ pub use stub::StubRouteTable as SystemRouteTable;
 #[cfg(all(feature = "std", target_os = "windows"))]
 pub use windows::IpHelper as SystemRouteTable;
 
+/// Windows dataplane auto-config (IP forwarding, weak host model,
+/// firewall rules) — entry points called once at daemon startup and
+/// shutdown. No-op on non-Windows targets.
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub mod windows_autoconf;
+#[cfg(all(feature = "std", target_os = "windows"))]
+pub use windows_autoconf::{ensure_windows_dataplane_ready, teardown_windows_dataplane};
+
+/// No-op stubs on non-Windows so the daemon can call the entry points
+/// unconditionally.
+#[cfg(not(target_os = "windows"))]
+pub mod windows_autoconf_compat {
+    /// No-op on non-Windows: there is no IP forwarding to enable (the
+    /// operator's responsibility), no weak host model (Linux's loose
+    /// source validation is per-route via `ip rule`), and no firewall
+    /// rules to add (iptables/nftables are operator policy).
+    pub fn ensure_windows_dataplane_ready(_rule_suffix: &str) -> Vec<String> {
+        Vec::new()
+    }
+    pub fn teardown_windows_dataplane(_rule_suffix: &str) -> Vec<String> {
+        Vec::new()
+    }
+}
+#[cfg(not(target_os = "windows"))]
+pub use windows_autoconf_compat::{ensure_windows_dataplane_ready, teardown_windows_dataplane};
+
 /// Human-readable name of the backend compiled in — for logs and banners.
 #[cfg(all(feature = "std", target_os = "linux"))]
 pub const PLATFORM_NAME: &str = "linux-rtnetlink";

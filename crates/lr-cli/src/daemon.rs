@@ -2657,6 +2657,17 @@ fn spawn_ticker(
                     log_event(ev);
                 }
                 mirror.apply(&events);
+                drop(mirror);
+                // Windows dataplane teardown: remove the firewall rules
+                // the daemon added at startup. IP forwarding and the weak
+                // host model are left configured — they are system-wide
+                // settings the operator may have set for other reasons
+                // (a BIRD-on-Windows install, a Hyper-V virtual switch)
+                // and removing them silently would be a regression.
+                let rule_suffix = std::process::id().to_string();
+                for line in lr_osroute::teardown_windows_dataplane(&rule_suffix) {
+                    println!("daemon: {line}");
+                }
             }
         })
         .expect("spawn ticker thread")
@@ -2814,6 +2825,19 @@ impl KernelMirror {
         #[cfg(target_os = "linux")]
         let mut mpls = None;
         if install_kernel {
+            // Windows dataplane bring-up: IP forwarding, weak host model,
+            // and firewall rules for BGP TCP/179 + Babel UDP/6696. No-op
+            // on non-Windows (the function is a stub there). Idempotent —
+            // a second invocation is a no-op. Best-effort — a per-item
+            // failure logs a warning and continues, so a partial-
+            // permission shell still brings up the routes the operator
+            // asked for. The rule_suffix namespaces the firewall rules by
+            // the daemon's PID so concurrent daemons (lab tests) do not
+            // collide on the rule name.
+            let rule_suffix = std::process::id().to_string();
+            for line in lr_osroute::ensure_windows_dataplane_ready(&rule_suffix) {
+                println!("daemon: {line}");
+            }
             match lr_osroute::SystemRouteTable::connect() {
                 Ok(t) => {
                     println!("daemon: os route table connected — installing kernel routes");
