@@ -188,10 +188,6 @@ impl ParamSet {
         table: true,
         ..Self::NONE
     };
-    const IIF: Self = Self {
-        iif: true,
-        ..Self::NONE
-    };
     /// Union of two sets (builder-friendly).
     const fn union(self, other: Self) -> Self {
         Self {
@@ -242,7 +238,7 @@ fn kernel_action_for(behavior: Behavior) -> Result<KernelAction, Seg6RouteError>
         Behavior::EndDX2 => KernelAction {
             code: 4, // SEG6_LOCAL_ACTION_END_DX2
             requires: ParamSet::OIF,
-            tolerates: ParamSet::IIF,
+            tolerates: ParamSet::NONE,
         },
         Behavior::EndDX6 => KernelAction {
             code: 5, // SEG6_LOCAL_ACTION_END_DX6
@@ -468,8 +464,13 @@ pub struct Seg6LocalRoute {
     /// Optional next-hop IPv6 address (the `End.X` / `End.DX6`
     /// parameter).
     pub nh6: Option<[u8; 16]>,
-    /// Optional input interface index (an `End.DX2` steering
-    /// parameter).
+    /// Optional input interface index. The kernel uapi defines
+    /// `SEG6_LOCAL_IIF`, but no mainline `seg6_action_table`
+    /// descriptor consumes it — a route that sets `iif` is rejected
+    /// by the encoder with a descriptive error (the kernel would
+    /// answer a bare `EINVAL` after the round trip) rather than
+    /// silently mis-encoded. The field stays so a future kernel
+    /// action can adopt it with one mapping entry.
     pub iif: Option<u32>,
     /// Optional output interface index (the `End.DX2` parameter; an
     /// optional `End.X` steering parameter).
@@ -524,7 +525,10 @@ impl Seg6LocalRoute {
         self
     }
 
-    /// Set the input interface index. Builder-style.
+    /// Set the input interface index. Builder-style. Note: no
+    /// mainline kernel `seg6local` action consumes the IIF parameter
+    /// today — see the `iif` field's documentation; the install will
+    /// fail with a descriptive error until a kernel action adopts it.
     #[must_use]
     pub fn with_iif(mut self, iif: u32) -> Self {
         self.iif = Some(iif);
