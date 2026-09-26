@@ -25,21 +25,21 @@
 # The historical watchdog tower (detached payload + 900 s watch loop +
 # ceilings raised above the payload's own wall) existed only because a
 # wedged test binary could not be reaped and took the transcript down
-# with the job. Runs 36125163593-363 progressively isolated the real
-# mechanism: MSYS `timeout` cannot kill a native Windows child (its
-# SIGTERM is undeliverable to cargo.exe), and — the deeper constant
-# across every wedged run — a BASH step spawning cargo is itself the
-# hanging shape on these runners, while PowerShell cargo steps never
-# fail once. The harness therefore: compiles from PowerShell (the
-# proven shape), runs the TEST BINARY DIRECTLY from bash (the proven
-# lr-daemon.exe shape — cargo is never spawned from bash), arms a
-# kernel-mode self-watchdog in the binary (TerminateProcess, exit 70),
-# timestamps every PROBE line so a killed run's transcript names the
-# hang site, and bounds each invocation with run_bounded — a
-# background run whose expired budget triggers a Windows-native
-# taskkill //F //T tree kill — with stdio through files so only the
-# bash script ever holds the runner's pipes. The transcripts are
-# cat'd back and committed either way.
+# with the job. Runs 36125163593-365 progressively falsified every
+# narrower theory: MSYS `timeout` cannot kill a native Windows child;
+# a bash step spawning cargo is itself a hanging shape; and even bash
+# running the test binary directly (file stdio, console-less
+# grandchildren, kernel-mode in-binary watchdog, taskkill //F //T
+# backstop) wedged — a process stuck in an uninterruptible kernel
+# call (wedged netio) is marked for death by TerminateProcess but
+# never reaped, and everything that waits on it hangs too. The final
+# shape is pure PowerShell with DETACHED test launches (own hidden
+# console, file stdio): every wait is WaitForExit(<timeout>), an
+# expired budget kills and — against a limbo survivor — ABANDONS it
+# detached (it holds nothing of the step's), the binary's own
+# TerminateProcess watchdog (exit 70) fires first, and every PROBE
+# line is timestamped so a killed run's transcript names the hang
+# site. Transcripts are written back and committed either way.
 name: Windows FIB probe
 
 on:
@@ -70,61 +70,65 @@ jobs:
         timeout-minutes: 15
         run: cargo test -p lr-osroute --test windows_route_table --no-run
       - name: Run the FIB probe (Administrator shell)
-        # `--test-threads=1`: every test mutates the same FIB rows and
-        # reuses the same probe port. The TEST BINARY runs DIRECTLY
-        # from bash (the proven lr-daemon.exe shape — cargo is never
-        # spawned from bash, the one constant of every historical
-        # wedge). Per test: the binary's own watchdog fires at 300 s
-        # (rc 70); run_bounded's taskkill //F //T tree kill fires at
-        # 360 s (rc 124). Stdio goes through files and is cat'd back
-        # into the log and probe-output.log after each invocation.
+        # Pure PowerShell, tests launched detached — the same final
+        # wedge-free shape as ci.yml's windows-interop route-table
+        # step (see there for the full run-by-run analysis: bash+
+        # cargo, MSYS timeout, console sharing and unbounded waits
+        # each falsified in turn; a kernel-limbo survivor is killed
+        # and, if it refuses to die, abandoned holding nothing).
+        # Per test: the binary's own watchdog fires at 300 s (exit
+        # 70); the WaitForExit budget at 360 s (rc 124).
         timeout-minutes: 30
-        shell: bash
+        shell: pwsh
         run: |
-          run_bounded() {
-            budget=$1; log=$2; shift 2
-            "$@" >"$log" 2>&1 </dev/null &
-            local pid=$!
-            local winpid
-            winpid=$(cat "/proc/$pid/winpid" 2>/dev/null \
-              || ps -W | awk -v p="$pid" '$1 == p { print $4; exit }')
-            local waited=0
-            while kill -0 "$pid" 2>/dev/null; do
-              if [ "$waited" -ge "$budget" ]; then
-                echo "run_bounded: budget of ${budget}s exceeded — killing the process tree (pid=$pid winpid=$winpid)"
-                if [ -n "$winpid" ]; then
-                  taskkill //F //T //PID "$winpid" >/dev/null 2>&1 || true
-                fi
-                kill -9 "$pid" 2>/dev/null || true
-                wait "$pid" 2>/dev/null
-                return 124
-              fi
-              sleep 5
-              waited=$((waited + 5))
-            done
-            wait "$pid"
-          }
-          exe=$(ls -t target/debug/deps/windows_route_table-*.exe 2>/dev/null | head -1)
-          if [ -z "$exe" ]; then
-            echo "FAIL: no windows_route_table test binary under target/debug/deps/"
+          $tests = @(
+            'fib_semantics_probe_matrix',
+            'probe_next_hop_interface_resolution',
+            'blackhole_route_discards_not_accepts',
+            'explicit_oif_beats_fib_resolution'
+          )
+          $exe = Get-ChildItem 'target\debug\deps\windows_route_table-*.exe' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host 'FAIL: no windows_route_table test binary under target\debug\deps\'
             exit 1
-          fi
-          echo "test binary: $exe"
-          : > probe-output.log
-          rc=0
-          for t in fib_semantics_probe_matrix \
-                   probe_next_hop_interface_resolution \
-                   blackhole_route_discards_not_accepts \
-                   explicit_oif_beats_fib_resolution; do
-            echo "=== $t (start $(date -u +%H:%M:%S)) ===" | tee -a probe-output.log
-            trc=0
-            run_bounded 360 "target/windows-route-table-$t.log" \
-              "$exe" --ignored --nocapture --test-threads=1 "$t" || trc=$?
-            cat "target/windows-route-table-$t.log" | tee -a probe-output.log
-            echo "=== $t rc=$trc (0 ok / 70 in-binary watchdog / 124 tree-killed) ===" \
-              | tee -a probe-output.log
-            if [ "$trc" -ne 0 ]; then rc=$trc; fi
-          done
+          }
+          Write-Host "test binary: $($exe.FullName)"
+
+          Set-Content -Path probe-output.log -Value '' -NoNewline
+          $rc = 0
+          foreach ($t in $tests) {
+            $head = "=== $t (start $([DateTime]::UtcNow.ToString('HH:mm:ss'))) ==="
+            Write-Host $head
+            Add-Content -Path probe-output.log -Value $head
+            $log = "target\windows-route-table-$t.log"
+            $p = Start-Process -FilePath $exe.FullName `
+              -ArgumentList @('--ignored', '--nocapture', '--test-threads=1', $t) `
+              -WindowStyle Hidden `
+              -RedirectStandardOutput $log `
+              -RedirectStandardError "$log.err" -PassThru
+            if (-not $p.WaitForExit(360000)) {
+              $p.Kill()
+              Start-Sleep -Seconds 5
+              $out = (Get-Content $log -ErrorAction SilentlyContinue) -join "`n"
+              $err = (Get-Content "$log.err" -ErrorAction SilentlyContinue) -join "`n"
+              if ($out) { Add-Content -Path probe-output.log -Value $out }
+              if ($err) { Add-Content -Path probe-output.log -Value $err }
+              Write-Host "=== $t rc=124 (360s budget exceeded — killed/abandoned detached) ==="
+              Add-Content -Path probe-output.log -Value "=== $t rc=124 (budget exceeded) ==="
+              $rc = 124
+              continue
+            }
+            $out = (Get-Content $log -ErrorAction SilentlyContinue) -join "`n"
+            $err = (Get-Content "$log.err" -ErrorAction SilentlyContinue) -join "`n"
+            if ($out) { Add-Content -Path probe-output.log -Value $out }
+            if ($err) { Add-Content -Path probe-output.log -Value $err }
+            $trc = $p.ExitCode
+            $line = "=== $t rc=$trc (0 ok / 70 in-binary watchdog) ==="
+            Write-Host $line
+            Add-Content -Path probe-output.log -Value $line
+            if ($trc -ne 0) { $rc = $trc }
+          }
           exit $rc
       - name: Commit the probe transcript back to the ref
         # Guard against dispatching on a protected ref: the step pushes

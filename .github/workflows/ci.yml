@@ -445,93 +445,89 @@ jobs:
         # resolution) that used to live behind the manual
         # workflow_dispatch probe and showed up as a permanent skip.
         #
-        # THE WEDGE, AND WHY THIS SHAPE: this step wedged on EVERY run
-        # from 36125163593 through 363, across every harness revision
-        # (plain `timeout N cargo test`, file-stdio, in-binary
-        # watchdog + run_bounded/taskkill). The one constant in all
-        # of them: a bash step spawning cargo. The runner can neither
-        # reap that tree nor enforce the step's own timeout-minutes,
-        # so the job burns to its ceiling and the cancellation
-        # destroys the evidence (BlobNotFound on every attempt to
-        # fetch the logs). This step therefore runs the TEST BINARY
-        # DIRECTLY — the exact proven shape of the interop steps
-        # above (bash spawning lr-daemon.exe has never wedged) — and
-        # cargo is never invoked from bash at all.
+        # THE WEDGE, AND WHY THIS STEP IS PURE POWERSHELL. This step
+        # wedged on every run from 36125163593 through 365 while the
+        # steps around it never failed once, and the successive fixes
+        # each falsified a layer: MSYS `timeout` cannot kill a native
+        # child (SIGTERM undeliverable, run 362); a bash step spawning
+        # cargo is itself the hanging shape (PowerShell cargo steps
+        # and bash spawning leaf daemons are both always-green, run
+        # 363); and even bash running the test binary directly with
+        # file stdio, console-less grandchildren, a kernel-mode
+        # in-binary watchdog and a taskkill //F //T backstop still
+        # wedged (runs 364, 365) — the bash `wait`/runner timeout
+        # hang on a process stuck in an UNINTERRUPTIBLE kernel call
+        # (wedged netio), which TerminateProcess marks for death but
+        # cannot actually reap.
         #
-        # Termination is likewise signal-free:
-        # 1. The test binary kills ITSELF at a 300 s budget — a
-        #    watchdog thread calls TerminateProcess(GetCurrentProcess,
-        #    70) before any netio call arms it; kernel-mode, immune to
-        #    the stdio locks that can deadlock process::exit's flush.
-        #    Exit 70 is distinct from libtest's failure codes.
-        # 2. Each PROBE| line is timestamped, so a killed run's
-        #    transcript names the exact call site that hung.
-        # 3. run_bounded backgrounds the binary with stdio to a FILE
-        #    (only this bash script ever holds the runner's pipes),
-        #    polls, and on an expired budget issues a Windows-native
-        #    `taskkill //F //T` tree kill (TerminateProcess over the
-        #    binary and any grandchild) with bash's own `kill -9` as
-        #    the fallback. The transcripts are cat'd back after each
-        #    invocation, so the evidence survives even the kill.
+        # The final shape removes every identified mechanism at once:
+        # no bash, no MSYS, no signals, no console sharing, no pipe
+        # inheritance, no unbounded waits:
+        # 1. The step is native PowerShell; every wait is
+        #    WaitForExit(<timeout>) — bounded even against a limbo
+        #    process.
+        # 2. Each test launches DETACHED (Start-Process -WindowStyle
+        #    Hidden): its own hidden console, stdio to files. Nothing
+        #    the runner waits on is ever shared with it.
+        # 3. An expired budget Kills the process and — if it is in
+        #    kernel limbo and refuses to die — ABANDONS it: a survivor
+        #    holds a private hidden console and file handles only, so
+        #    the step (and the job) finalise regardless. The VM is
+        #    recycled after the job either way.
+        # 4. The binary's own defenses stay: the in-binary
+        #    TerminateProcess watchdog (exit 70) fires first, every
+        #    PROBE| line is timestamped so a killed run's transcript
+        #    names the hang site, and the binary's own children are
+        #    spawned console-less (CREATE_NO_WINDOW).
         #
-        # Budgets: 360 s per test; 4 x 360 s + overhead sits well
-        # under the 30-minute step ceiling. A hang is a bounded,
-        # loud, transcript-annotated failure — never a silent
-        # in_progress.
-        shell: bash
+        # Budgets: 360 s per test; 4 x 360 s + transcript catting sits
+        # under the 30-minute step ceiling. A hang is a bounded, loud,
+        # transcript-annotated failure — never a silent in_progress
+        # that eats the logs.
+        shell: pwsh
         timeout-minutes: 30
         run: |
-          # Bounded execution for Windows: background the command with
-          # stdio to a log, poll, and tree-kill via taskkill on expiry.
-          # Never MSYS `timeout` (its SIGTERM cannot kill native
-          # children) and never signal semantics of any kind.
-          run_bounded() {
-            budget=$1; log=$2; shift 2
-            "$@" >"$log" 2>&1 </dev/null &
-            local pid=$!
-            local winpid
-            winpid=$(cat "/proc/$pid/winpid" 2>/dev/null \
-              || ps -W | awk -v p="$pid" '$1 == p { print $4; exit }')
-            local waited=0
-            while kill -0 "$pid" 2>/dev/null; do
-              if [ "$waited" -ge "$budget" ]; then
-                echo "run_bounded: budget of ${budget}s exceeded — killing the process tree (pid=$pid winpid=$winpid)"
-                if [ -n "$winpid" ]; then
-                  taskkill //F //T //PID "$winpid" >/dev/null 2>&1 || true
-                fi
-                kill -9 "$pid" 2>/dev/null || true
-                wait "$pid" 2>/dev/null
-                return 124
-              fi
-              sleep 5
-              waited=$((waited + 5))
-            done
-            wait "$pid"
-          }
-
-          # The binary compiled by the previous (PowerShell) step;
-          # -t picks the newest hashed copy over any cache-restored
-          # older ones.
-          exe=$(ls -t target/debug/deps/windows_route_table-*.exe 2>/dev/null | head -1)
-          if [ -z "$exe" ]; then
-            echo "FAIL: no windows_route_table test binary under target/debug/deps/"
+          $tests = @(
+            'fib_semantics_probe_matrix',
+            'probe_next_hop_interface_resolution',
+            'blackhole_route_discards_not_accepts',
+            'explicit_oif_beats_fib_resolution'
+          )
+          $exe = Get-ChildItem 'target\debug\deps\windows_route_table-*.exe' -ErrorAction SilentlyContinue |
+            Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $exe) {
+            Write-Host 'FAIL: no windows_route_table test binary under target\debug\deps\'
             exit 1
-          fi
-          echo "test binary: $exe"
+          }
+          Write-Host "test binary: $($exe.FullName)"
 
-          rc=0
-          for t in fib_semantics_probe_matrix \
-                   probe_next_hop_interface_resolution \
-                   blackhole_route_discards_not_accepts \
-                   explicit_oif_beats_fib_resolution; do
-            echo "=== $t (start $(date -u +%H:%M:%S)) ==="
-            trc=0
-            run_bounded 360 "target/windows-route-table-$t.log" \
-              "$exe" --ignored --nocapture --test-threads=1 "$t" || trc=$?
-            cat "target/windows-route-table-$t.log"
-            echo "=== $t rc=$trc (0 ok / 70 in-binary watchdog / 124 tree-killed) ==="
-            if [ "$trc" -ne 0 ]; then rc=$trc; fi
-          done
+          $rc = 0
+          foreach ($t in $tests) {
+            Write-Host "=== $t (start $([DateTime]::UtcNow.ToString('HH:mm:ss'))) ==="
+            $log = "target\windows-route-table-$t.log"
+            $p = Start-Process -FilePath $exe.FullName `
+              -ArgumentList @('--ignored', '--nocapture', '--test-threads=1', $t) `
+              -WindowStyle Hidden `
+              -RedirectStandardOutput $log `
+              -RedirectStandardError "$log.err" -PassThru
+            if (-not $p.WaitForExit(360000)) {
+              # Bounded even against a kernel-limbo process: Kill is an
+              # async TerminateProcess, and the survivor (if any) is
+              # abandoned detached — it holds nothing of ours.
+              $p.Kill()
+              Start-Sleep -Seconds 5
+              Get-Content $log -ErrorAction SilentlyContinue
+              Get-Content "$log.err" -ErrorAction SilentlyContinue
+              Write-Host "=== $t rc=124 (360s budget exceeded — killed/abandoned detached) ==="
+              $rc = 124
+              continue
+            }
+            Get-Content $log -ErrorAction SilentlyContinue
+            Get-Content "$log.err" -ErrorAction SilentlyContinue
+            $trc = $p.ExitCode
+            Write-Host "=== $t rc=$trc (0 ok / 70 in-binary watchdog) ==="
+            if ($trc -ne 0) { $rc = $trc }
+          }
           exit $rc
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.

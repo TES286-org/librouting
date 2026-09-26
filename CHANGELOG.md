@@ -196,59 +196,46 @@ ship, breaking changes that affect embedders, dependency bumps.
   wall) is dismantled: the harness is bounded by construction and
   the remaining per-test `timeout` calls are plain loud backstops,
   not the hang defense.
-- **The wedge survived both fixes — runs 362 and 363 closed the case:
-  a bash step spawning cargo is the hanging shape itself.** The
-  file-IO rework bounded the harness's *own* waits, and the
-  watchdog/timestamp/file-stdio containment of run 362 still wedged
-  (31+ minutes, step `in_progress`, job burned to its ceiling, logs
-  unrecoverable); run 362 also established that GNU coreutils
-  `timeout` fires a SIGTERM that Cygwin/MSYS cannot deliver to a
-  native cargo.exe — the wrapper waits forever on a wedged child,
-  which is why every ceiling stacked around it never fired. Run 363
-  replaced `timeout` with a bash-level `run_bounded` (background
-  run, file stdio, Windows-native `taskkill //F //T` tree kill on
-  expiry) — and the step STILL wedged to the job ceiling. The one
-  constant across all twelve-plus wedged runs, and the one
-  difference from the never-failing steps around them: **the wedged
-  steps spawn cargo.exe from Git-Bash; the green ones run cargo
-  from PowerShell (`cargo build` has never failed in this job) or
-  spawn plain `lr-daemon.exe` from bash.** The MSYS pty/fd handoff
-  to a native cargo is the hang. The final shape removes the shape
-  entirely:
-  1. **Compile from PowerShell.** A separate `cargo test --no-run`
-     step on the default shell — the proven cargo shape — produces
-     the test binary; cargo is never invoked from bash again.
-  2. **The test binary runs DIRECTLY from bash** (the exact shape
-     of the interop steps spawning `lr-daemon.exe`, which have
-     never wedged), one invocation per test, stdio to a transcript
-     file that is cat'd back after each one.
-  3. **The binary kills itself.** Every `windows_route_table` test
-     arms a watchdog thread *before its first netio call*; at the
-     300 s budget it terminates the process from kernel mode —
-     `TerminateProcess(GetCurrentProcess(), 70)` — a kill that
-     cannot block on the user-mode stdio locks which can deadlock
-     `std::process::exit`'s flush. Exit 70 is distinct from
-     libtest's failure codes.
-  4. **Timestamped transcripts.** Every `PROBE|` line carries the
-     elapsed seconds since process start, so a killed run's
-     transcript names the exact call site that hung.
-  5. **`run_bounded` bounds every invocation** with a
-     Windows-native tree kill (`taskkill //F //T`, belt-and-braces
-     `kill -9` on the direct child) — no signal semantics anywhere.
-     Budgets: 360 s per test, four tests, well under the 30-minute
-     step ceiling; a hang is a bounded, loud, transcript-annotated
-     failure — never a silent `in_progress` that eats the logs.
-  6. **Every process the test spawns is console-less**
-     (`CREATE_NO_WINDOW` on ping.exe / powershell.exe / route.exe):
-     `conhost` is owned by the OS, not by any process tree, so a
-     wedged console-attached descendant is the one thing a
-     `taskkill /T` cannot reach — and run 364 (bash running the test
-     binary directly, cargo out of the picture entirely) still
-     wedged, narrowing the survivor to exactly that class. The
-     suite's children are file-redirected anyway; they lose nothing
-     but the ability to hold the step's console open. The step's
-     background jobs also take stdin from /dev/null — no handle of
-     the runner's is inherited anywhere.
+- **The wedge survived every layered fix — runs 362-365 falsified
+  each theory in turn, and the final shape is pure PowerShell with
+  detached launches.** The file-IO rework bounded the harness's own
+  waits; run 362 (in-binary watchdog, timestamped transcripts,
+  file-stdio) still wedged and established that GNU `timeout`'s
+  SIGTERM is undeliverable to a native cargo.exe (Cygwin/MSYS signal
+  emulation only reaches MSYS processes) — the wrapper waits forever,
+  which is why every ceiling stacked around it never fired; run 363
+  (bash-level `run_bounded`, file stdio, Windows-native `taskkill
+  //F //T`) still wedged, establishing that a bash step spawning
+  cargo is itself a hanging shape on these runners (PowerShell cargo
+  steps and bash steps spawning leaf daemons are always-green);
+  runs 364 and 365 (compile from PowerShell, the test binary run
+  DIRECTLY from bash, console-less `CREATE_NO_WINDOW` grandchildren,
+  `/dev/null` stdin, the kernel-mode in-binary watchdog and the
+  taskkill backstop) STILL wedged — leaving exactly one mechanism
+  standing: a process stuck in an UNINTERRUPTIBLE kernel call (wedged
+  netio) is marked for death by `TerminateProcess` but never actually
+  reaped, and everything that waits on its death — bash's `wait`, the
+  runner's step timeout, the runner's step finalisation — hangs with
+  it. The final shape removes the waiting entirely:
+  1. **The step is native PowerShell** (`shell: pwsh`): no bash, no
+     MSYS, no signal semantics, no console sharing, no pipe
+     inheritance. Every wait is `WaitForExit(<timeout>)`, bounded
+     even against a limbo process.
+  2. **Each test launches DETACHED** (`Start-Process -WindowStyle
+     Hidden`): its own hidden console, stdio to files. Nothing the
+     runner waits on is ever shared with the test process.
+  3. **An expired budget kills and — against a kernel-limbo
+     survivor — ABANDONS it**: the survivor holds a private hidden
+     console and file handles only, so the step and the job
+     finalise regardless; the VM is recycled after the job. A hang
+     costs one bounded rc-124 failure whose transcript lands in the
+     log instead of dying with a cancelled job.
+  4. **The binary's own defenses stay**: the kernel-mode
+     `TerminateProcess(GetCurrentProcess(), 70)` watchdog fires
+     first, every `PROBE|` line is timestamped so a killed run's
+     transcript names the hang site, and the binary's own children
+     spawn console-less (`CREATE_NO_WINDOW`) — nothing it spawns can
+     hold a console of the step's open either.
 
 ### Fixed (kernel FIB interaction)
 
