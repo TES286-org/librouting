@@ -636,16 +636,32 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             };
             let gtsm = build_peer_gtsm(cfg, spec);
             let sc = build_session_config(cfg, spec, rid);
-            // RFC 4271 §6.8: a bidirectional peer (both `remote` and
-            // `address`) gets TWO identical sessions in one collision
-            // group — the outbound transport runs on the primary
-            // (locally initiated), inbound connections land on the
-            // challenger (remotely initiated) and the router resolves
-            // the collision when the OPENs arrive, closing the loser
-            // with a Cease / Connection Collision Resolution
-            // NOTIFICATION. Single-direction peers carry no group and
-            // never collide.
-            let bidirectional = spec.is_outbound() && spec.is_inbound();
+            // RFC 4271 §6.8: a peer that can end up with two parallel
+            // transports to the same neighbour — its own outbound dial
+            // plus an inbound accepted from that neighbour — needs TWO
+            // sessions sharing one collision_group, so the router can
+            // resolve the collision when both OPENs land. Without the
+            // challenger session the inbound would be dispatched onto
+            // the SAME SessionHandle as the outbound connector, and
+            // `start_session`'s `peer.reset()` would clobber the
+            // outbound FSM mid-handshake — the router would never
+            // detect the collision and the remote (which correctly
+            // resolves it on its side) would loop closing our outbound
+            // with Cease / Connection Collision Resolution.
+            //
+            // The original gate (`is_outbound() && is_inbound()`)
+            // missed the common case where the operator writes only
+            // `remote` (no `address`) but the daemon is also
+            // listening: the listener still matches the inbound to
+            // this peer via `expected_peer_ip` (which falls back to
+            // the host of `remote`), so the inbound does arrive —
+            // without a collision_group to land on. Treat any
+            // outbound peer as bidirectional for collision purposes
+            // whenever the listener is up. The explicit `address`
+            // field remains an optional override of the expected
+            // source IP; it does not change the collision semantics.
+            let bidirectional =
+                spec.is_outbound() && (spec.is_inbound() || cfg.listen_addr.is_some());
             let group = (entries.len() + 1) as u64;
             let mut sc_out = sc.clone();
             let mut sc_in: Option<SessionConfig> = None;
@@ -759,10 +775,17 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     }
                     if let Some(h2) = handle_in {
                         println!(
-                            "daemon: peer {}: bidirectional (remote + address); \
+                            "daemon: peer {}: bidirectional (remote{}); \
                              collision resolution per RFC 4271 §6.8 on sessions \
                              #{} / #{}",
                             spec.label(),
+                            if spec.address.is_some() {
+                                " + address"
+                            } else if cfg.listen_addr.is_some() {
+                                " + listener"
+                            } else {
+                                ""
+                            },
                             h.0,
                             h2.0
                         );
@@ -1139,18 +1162,25 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     );
     println!("  peers:       {}", entries.len());
     for e in &entries {
+        // The collision-group label surfaces whether RFC 4271 §6.8
+        // resolution is in play for this peer: a bidirectional peer
+        // (handle_in is Some) carries the challenger session that
+        // lets two simultaneous dials converge to one Established.
+        let direction = if e.handle_in.is_some() {
+            "bidirectional"
+        } else if e.spec.is_outbound() {
+            "outbound"
+        } else if e.spec.is_inbound() {
+            "inbound"
+        } else {
+            "any"
+        };
         println!(
             "    #{} {} AS{} ({})",
             e.handle.0,
             e.label(),
             cfg.effective_peer_as(&e.spec),
-            if e.spec.is_outbound() {
-                "outbound"
-            } else if e.spec.is_inbound() {
-                "inbound"
-            } else {
-                "any"
-            }
+            direction,
         );
     }
     println!("  networks:    {:?}", cfg.networks);
@@ -1976,10 +2006,20 @@ fn build_peer_gtsm(g: &DaemonConfig, p: &PeerSpec) -> Gtsm {
 /// inbound-capable peer's auth, which must all be identical (hetero-
 /// geneous listener keys are future work). Legacy mode arms the single
 /// peer's configuration exactly as the historical daemon did.
+///
+/// "Inbound-capable" follows the same definition as the bidirectional
+/// gate above: any outbound peer is inbound-capable when the listener
+/// is up (`expected_peer_ip` matches by `remote` host when `address`
+/// is absent). Otherwise an outbound-only peer with TCP-MD5/AO keyed
+/// sessions would never see its inbound accepted — the listener would
+/// be armed with no key, and the kernel would drop the SYN.
 fn listener_auth(g: &DaemonConfig, entries: &[PeerEntry]) -> Result<TcpAuth, String> {
     let strict = g.explicit_peers || g.peers.len() > 1;
     let inbound: Vec<&PeerEntry> = if strict {
-        entries.iter().filter(|e| e.spec.is_inbound()).collect()
+        entries
+            .iter()
+            .filter(|e| e.spec.is_inbound() || (e.spec.is_outbound() && g.listen_addr.is_some()))
+            .collect()
     } else {
         entries.iter().take(1).collect() // legacy: the single peer
     };
@@ -2006,7 +2046,10 @@ fn listener_auth(g: &DaemonConfig, entries: &[PeerEntry]) -> Result<TcpAuth, Str
 fn listener_gtsm(g: &DaemonConfig, entries: &[PeerEntry]) -> Gtsm {
     let strict = g.explicit_peers || g.peers.len() > 1;
     let inbound: Vec<&PeerEntry> = if strict {
-        entries.iter().filter(|e| e.spec.is_inbound()).collect()
+        entries
+            .iter()
+            .filter(|e| e.spec.is_inbound() || (e.spec.is_outbound() && g.listen_addr.is_some()))
+            .collect()
     } else {
         entries.iter().take(1).collect()
     };
