@@ -41,13 +41,14 @@
 //! This suite historically wedged whole CI jobs: the step stayed
 //! `in_progress` past its own `timeout-minutes` until the job ceiling
 //! cancelled everything, on every run from 36125163593 through run
-//! 361's full-matrix shape — across three harness revisions. The
-//! runner-side mechanism: it cannot reap a Windows process tree, and
-//! it waits for the step's output pipes to reach EOF, which any
-//! orphaned descendant still holding the write end prevents; MSYS
-//! `timeout` kills only the direct child (cargo), orphaning this test
-//! binary with the inherited console handles. The containment now has
-//! three legs, each addressing one link of that chain:
+//! 362 — across every harness revision. Run 362 isolated the root
+//! cause of the INFINITE WAIT itself: MSYS/Git-Bash `timeout` cannot
+//! kill a native Windows child — its SIGTERM is undeliverable to
+//! cargo.exe (Cygwin signal emulation only reaches MSYS processes),
+//! so `timeout N cargo test` waits forever on a wedged child, and
+//! the runner can neither reap the tree nor enforce the step timeout
+//! on that shape. The containment therefore never relies on signal
+//! semantics at all:
 //!
 //! 1. **The binary kills itself** — every test arms
 //!    [`arm_watchdog`] before its first netio call; at the budget the
@@ -59,11 +60,16 @@
 //!    elapsed seconds since the process started, so the transcript of
 //!    a watchdog-killed run names the exact call site that hung (the
 //!    line after the last timestamp).
-//! 3. **The CI step routes each invocation's stdio through files**
-//!    (see ci.yml's windows-interop job): nothing spawned inside the
-//!    step — cargo, this binary, or any grandchild — ever holds the
-//!    runner's output pipes, so no orphan can wedge the step
-//!    finalisation regardless of what hangs.
+//! 3. **The CI steps bound every cargo invocation with a
+//!    Windows-native tree kill** (ci.yml's `run_bounded`): the
+//!    invocation runs in the background with stdio through FILES (so
+//!    nothing but the bash script ever holds the runner's output
+//!    pipes — no orphan can wedge the step finalisation), and an
+//!    expired budget triggers `taskkill //F //T` — TerminateProcess
+//!    over cargo + this binary + every grandchild, no signal
+//!    emulation involved. The transcripts are cat'd back into the
+//!    step log after each invocation, so the evidence survives even
+//!    the kill.
 
 #![cfg(windows)]
 
@@ -122,16 +128,15 @@ fn log(line: String) {
 /// Arm a hard wall-clock watchdog for this test process.
 ///
 /// Why this exists: every prior CI shape for this suite (runs
-/// 36125163593 / 36128494485 / 36132336028 / 36136529031 / 358 / 359 /
-/// 361) ended with the step `in_progress` past its own
-/// `timeout-minutes` until the JOB ceiling cancelled everything —
-/// the runner cannot reap a Windows process tree whose root ignores
-/// termination, and it waits for the step's output pipes to reach
-/// EOF, which an orphaned descendant still holding the write end
-/// prevents. External `timeout` wrappers only kill the DIRECT child
-/// (cargo), orphaning the test binary itself. The watchdog closes
-/// that hole from the inside: the process kills ITSELF at the
-/// budget, unconditionally.
+/// 36125163593 … 362) ended with the step `in_progress` past its own
+/// `timeout-minutes` until the JOB ceiling cancelled everything. Run
+/// 362 isolated the root cause of the infinite wait: MSYS/Git-Bash
+/// `timeout` cannot kill a native Windows child — its SIGTERM is
+/// undeliverable to cargo.exe — so an external wrapper is no
+/// terminator at all, and the runner can neither reap the tree nor
+/// enforce the step timeout on that shape. The watchdog closes the
+/// hole from the inside: whatever hangs, the process kills ITSELF at
+/// the budget, unconditionally.
 ///
 /// Why `TerminateProcess` and not `std::process::exit`: exit() runs
 /// libc's at-exit handlers, which flush every stdio stream — if the

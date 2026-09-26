@@ -432,45 +432,103 @@ jobs:
         # resolution) that used to live behind the manual
         # workflow_dispatch probe and showed up as a permanent skip.
         #
-        # Wedge containment, third leg. This step wedged EVERY run
-        # from 36125163593 through run 361 (step in_progress past its
-        # own timeout-minutes until the job ceiling cancelled it),
-        # across three harness revisions: the runner waits for the
-        # step's output pipes to reach EOF before finalising and
-        # cannot reap a Windows process tree, so any orphan holding
-        # the write end wedges the step forever. Legs one and two
-        # live in the test binary (a kernel-mode self-watchdog and
-        # timestamped PROBE lines — see tests/windows_route_table.rs).
-        # This leg: every invocation's stdio goes through FILES, so
-        # the only process that ever holds the runner's pipes is this
-        # bash script itself. The transcripts are cat'd back into the
-        # step log after each invocation, so the evidence survives
-        # every failure mode — including the ones that kill cargo.
+        # THE WEDGE, ROOT CAUSE (run 362 confirmed it): MSYS/Git-Bash
+        # `timeout` CANNOT kill a native Windows child. Cygwin signal
+        # emulation only delivers to MSYS processes; a SIGTERM aimed
+        # at cargo.exe (native) is a no-op, so `timeout N cargo test`
+        # waits forever on a wedged child — which is exactly the
+        # shape every prior harness revision kept, and why the step
+        # stayed in_progress past its own timeout-minutes until the
+        # job ceiling cancelled it and destroyed the evidence. The
+        # runner can neither reap the tree nor enforce the step
+        # timeout on this shape (documented runner limitation).
         #
-        # Budgets: the in-binary watchdog fires at 300 s (exit code
-        # 70); `timeout 360` is the cargo-level backstop for a hang
-        # that somehow precedes the watchdog arming (rc 124); four
-        # tests at 6 min + compile sit under the 30-minute step
-        # ceiling. A hang is a bounded, loud, transcript-annotated
+        # The containment, therefore, never uses `timeout`:
+        # 1. The test binary kills ITSELF at a 300 s budget — a
+        #    watchdog thread calls TerminateProcess(GetCurrentProcess,
+        #    70) before any netio call arms it; kernel-mode, immune to
+        #    the stdio locks that can deadlock process::exit's flush.
+        #    Exit 70 is distinct from libtest's failure codes.
+        # 2. Each PROBE| line is timestamped, so a killed run's
+        #    transcript names the exact call site that hung.
+        # 3. This step bounds every cargo invocation with
+        #    `run_bounded`: the child runs in the background with
+        #    stdio to a FILE (so nothing but this bash script ever
+        #    holds the runner's output pipes), and an expired budget
+        #    triggers `taskkill //F //T` — a Windows-NATIVE tree kill
+        #    (TerminateProcess over cargo + the test binary + every
+        #    grandchild; no signal emulation involved). The
+        #    transcripts are cat'd back into the step log after each
+        #    invocation, so the evidence survives even the tree kill.
+        #    An empty transcript (no "running 1 test" line) means
+        #    cargo itself never spawned the binary — the next
+        #    diagnostic fork.
+        #
+        # Budgets: 900 s for the compile, 360 s per test (the binary's
+        # own watchdog fires first at 300 s; the taskkill is for a
+        # hang that precedes the watchdog's arming). Worst case
+        # 900 + 4x360 + overhead ≈ 26 min against the 30-minute step
+        # ceiling; a hang is a bounded, loud, transcript-annotated
         # failure — never again a silent in_progress.
         shell: bash
         timeout-minutes: 30
         run: |
-          cargo test -p lr-osroute --test windows_route_table --no-run
+          # Bounded execution for Windows: never rely on MSYS `timeout`
+          # (its SIGTERM cannot kill native children). Background the
+          # command with stdio to a log, poll, and tree-kill via
+          # taskkill on expiry — the only reliable terminator on this
+          # platform. Returns the command's exit code, or 124 when the
+          # budget expired and the tree was killed.
+          run_bounded() {
+            budget=$1; log=$2; shift 2
+            "$@" >"$log" 2>&1 &
+            local pid=$!
+            local winpid
+            winpid=$(cat "/proc/$pid/winpid" 2>/dev/null \
+              || ps -W | awk -v p="$pid" '$1 == p { print $4; exit }')
+            local waited=0
+            while kill -0 "$pid" 2>/dev/null; do
+              if [ "$waited" -ge "$budget" ]; then
+                echo "run_bounded: budget of ${budget}s exceeded — killing the process tree (pid=$pid winpid=$winpid)"
+                # Tree kill first (cargo + test binary + grandchildren),
+                # then bash's own SIGKILL on the direct child as the
+                # belt-and-braces fallback; both are TerminateProcess
+                # under the hood — never a signal-emulation wait.
+                if [ -n "$winpid" ]; then
+                  taskkill //F //T //PID "$winpid" >/dev/null 2>&1 || true
+                fi
+                kill -9 "$pid" 2>/dev/null || true
+                wait "$pid" 2>/dev/null
+                return 124
+              fi
+              sleep 5
+              waited=$((waited + 5))
+            done
+            wait "$pid"
+          }
+          cargo_test_bounded() {
+            test_name=$1
+            run_bounded 360 "target/windows-route-table-$test_name.log" \
+              cargo test -p lr-osroute --test windows_route_table -- \
+              --ignored --nocapture --test-threads=1 "$test_name"
+          }
+
+          run_bounded 900 target/windows-route-table-build.log \
+            cargo test -p lr-osroute --test windows_route_table --no-run
+          brc=$?
+          cat target/windows-route-table-build.log
+          if [ "$brc" -ne 0 ]; then exit "$brc"; fi
+
           rc=0
           for t in fib_semantics_probe_matrix \
                    probe_next_hop_interface_resolution \
                    blackhole_route_discards_not_accepts \
                    explicit_oif_beats_fib_resolution; do
             echo "=== $t ==="
-            transcript="target/windows-route-table-$t.log"
-            set +e
-            timeout 360 cargo test -p lr-osroute --test windows_route_table -- \
-              --ignored --nocapture --test-threads=1 "$t" >"$transcript" 2>&1
-            trc=$?
-            set -e
-            cat "$transcript"
-            echo "=== $t rc=$trc (0 ok / 70 watchdog / 124 external backstop) ==="
+            trc=0
+            cargo_test_bounded "$t" || trc=$?
+            cat "target/windows-route-table-$t.log"
+            echo "=== $t rc=$trc (0 ok / 70 in-binary watchdog / 124 tree-killed) ==="
             if [ "$trc" -ne 0 ]; then rc=$trc; fi
           done
           exit $rc

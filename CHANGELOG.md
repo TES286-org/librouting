@@ -196,18 +196,25 @@ ship, breaking changes that affect embedders, dependency bumps.
   wall) is dismantled: the harness is bounded by construction and
   the remaining per-test `timeout` calls are plain loud backstops,
   not the hang defense.
-- **The wedge survived that fix — the runner-side mechanism is now
-  closed.** The file-IO rework bounded the harness's *own* waits,
-  but runs 358/359/361 (every push after it landed) still ended with
-  the route-table step `in_progress` past its own `timeout-minutes`
-  until the job ceiling cancelled everything: the runner cannot reap
-  a Windows process tree and waits for the step's output pipes to
-  reach EOF before finalising the step — an orphan still holding the
-  write end (an MSYS `timeout` kills only its direct child cargo,
-  orphaning the test binary with the inherited console handles)
-  wedges that wait forever. The containment now has three legs, each
-  closing one link of the chain rather than stacking another
-  ceiling:
+- **The wedge survived that fix — run 362 isolated the root cause:
+  MSYS `timeout` cannot kill a native Windows child.** The file-IO
+  rework bounded the harness's *own* waits, but runs 358/359/361
+  (every push after it landed) still ended with the route-table step
+  `in_progress` past its own `timeout-minutes`, and run 362 — with
+  the in-binary watchdog, timestamped transcripts and file-stdio all
+  in place — wedged identically, 31+ minutes into the step, which
+  ruled out every remaining theory but one: the `timeout N cargo
+  test` wrapper itself never returns. GNU coreutils `timeout` fires
+  SIGTERM at the budget and waits for the child to die — but Cygwin
+  / MSYS signal emulation only delivers to MSYS processes; a SIGTERM
+  aimed at cargo.exe (native) is a no-op, so timeout waits FOREVER
+  on a wedged child. Every harness revision since the suite's
+  introduction kept that shape; that is why the step never once
+  completed. The runner compounds it: it can neither reap the
+  Windows process tree nor enforce the step `timeout-minutes` on
+  this shape, so the job burns to its ceiling and the cancellation
+  destroys the evidence. The containment never touches signal
+  semantics now:
   1. **The test binary kills itself.** Every `windows_route_table`
      test arms a watchdog thread *before its first netio call*; at
      the 300 s budget it terminates the process from kernel mode —
@@ -218,20 +225,24 @@ ship, breaking changes that affect embedders, dependency bumps.
      code 70, never a job.
   2. **Timestamped transcripts.** Every `PROBE|` line carries the
      elapsed seconds since process start, so the transcript of a
-     watchdog-killed run names the exact call site that hung — the
-     evidence the ten wedged runs never left behind.
-  3. **The CI steps route each invocation's stdio through files**
-     (ci.yml's windows-interop job and windows-fib-probe.yml):
-     nothing spawned inside the step — cargo, the test binary, any
-     grandchild — ever holds the runner's output pipes, so no
-     orphan can wedge the step finalisation regardless of what
-     hangs; the transcripts are `cat`d back into the log after each
-     invocation returns. The per-test `timeout 360` remains only as
-     the cargo-level backstop for a hang preceding the watchdog's
-     arming, and the step/job ceilings are recalculated to sit above
-     the payload's own worst-case wall (4 × 360 s + compile) so a
-     fully-wedged run is a loud failure with a full transcript, not
-     a cancellation that eats the logs.
+     killed run names the exact call site that hung — the evidence
+     the wedged runs never left behind.
+  3. **The CI steps bound every cargo invocation with a
+     Windows-native tree kill** (ci.yml's windows-interop job and
+     windows-fib-probe.yml, `run_bounded`): the invocation runs in
+     the background with stdio through FILES (so only the bash
+     script ever holds the runner's output pipes — no orphan can
+     wedge the step finalisation), and an expired budget triggers
+     `taskkill //F //T` — TerminateProcess over cargo, the test
+     binary and every grandchild — with bash's own `kill -9` on the
+     direct child as the belt-and-braces fallback. Transcripts are
+     `cat`d back after each invocation: an empty one (no "running 1
+     test" line) means cargo itself never spawned the binary, which
+     is exactly the fork the next diagnostic needs. The step (30
+     min) / job (60 min) ceilings sit above the payload's own
+     worst-case wall (900 s compile + 4 × 360 s) so a fully-wedged
+     run is a loud failure with a transcript, not a cancellation
+     that eats the logs.
 
 ### Fixed (kernel FIB interaction)
 
