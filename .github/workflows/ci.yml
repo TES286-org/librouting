@@ -422,35 +422,27 @@ jobs:
         shell: bash
         run: ./tests/interop/bgp_kernel_install.sh
 
-      # NOTE: the four #[ignore]d windows_route_table kernel-gated
-      # tests (fib_semantics_probe_matrix, probe_next_hop_interface_
-      # resolution, blackhole_route_discards_not_accepts,
-      # explicit_oif_beats_fib_resolution) do NOT run in this job.
-      # They wedged this step on SIXTEEN consecutive runs (36125163593
-      # through 36217837148) across every harness shape: plain
-      # `timeout N cargo test`, file-stdio children, an in-binary
-      # kernel-mode TerminateProcess watchdog, timestamped
-      # transcripts, bash-level taskkill //F //T tree kills, compiling
-      # from PowerShell, running the test binary directly, console-less
-      # CREATE_NO_WINDOW grandchildren, and finally a pure-PowerShell
-      # step with detached launches and bounded WaitForExit budgets —
-      # after which the pwsh script provably finished (its loop is
-      # bounded at 4 x 360 s) and the runner STILL could not finalise
-      # the step for 37+ minutes. The mechanism that fits every
-      # observation: a process wedged in an UNINTERRUPTIBLE kernel
-      # call (netio) is marked for death by TerminateProcess but never
-      # reaped, and the runner's step-finalisation waits on it — no
-      # workflow-level process management can fix that. The unit-level
-      # coverage of the Windows backend runs (and passes) in the
-      # Native (windows-2022) job; the kernel-gated suite runs through
-      # windows-fib-probe.yml — a per-test job matrix whose transcripts
-      # are committed back even when a test wedges its own job — and
-      # the kernel-level hang itself is tracked in issue #29
-      # (https://github.com/TES286-org/librouting/issues/29).
-      #
-      # Removing the step also un-blocks this job's cache: with the
-      # wedge gone, the post-run cache save finally happens, so the
-      # cold-build penalty stops compounding on every push.
+      - name: Windows route-table backend tests (IP-Helper, kernel-gated)
+        # The four #[ignore]d windows_route_table tests, back on every
+        # push. Their sixteen-run CI wedge (36125163593 … 36217837148)
+        # was root-caused with the per-test probe matrix
+        # (windows-fib-probe.yml, run 36228391549): exactly the two
+        # tests that staged their APIPA environment through
+        # PowerShell's New-NetIPAddress — the WMI/NDIS provider path,
+        # a child process tree the runner's step finalisation waits
+        # on — wedged, while the two talking to netio directly
+        # (CreateIpForwardEntry2 and friends) finished in seconds.
+        # The staging now rides netio's CreateUnicastIpAddressEntry —
+        # in-process, same API family as the daemon's own installs —
+        # so the wedge trigger is gone, not contained (issue #29).
+        # The default pwsh shell is the one cargo shape that never
+        # wedged on these runners; --test-threads=1 serialises the
+        # FIB mutations; the in-binary watchdog (exit 70) bounds any
+        # future regression of this suite.
+        timeout-minutes: 15
+        run: |
+          cargo test -p lr-osroute --test windows_route_table --no-run
+          cargo test -p lr-osroute --test windows_route_table -- --ignored --nocapture --test-threads=1
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
   # This is the macOS half of the "CI reflects real usage" goal:

@@ -35,6 +35,19 @@
 # the data needed to fix the kernel-level hang itself (tracked in
 # issue #29, https://github.com/TES286-org/librouting/issues/29).
 #
+# ROOT CAUSE FOUND AND FIXED (issue #29): this matrix's run 36228391549
+# isolated the wedge to the WMI staging path — the two tests that
+# staged their APIPA environment through PowerShell's
+# New-NetIPAddress (the WMI/NDIS provider path) are exactly the two
+# that wedged, while the two talking to netio directly finished in
+# seconds. The staging now rides netio's CreateUnicastIpAddressEntry
+# (in-process, the same API family as the route installs), the probe
+# child runner reaps a budget-killed child within a bounded grace
+# window instead of waiting on it indefinitely, and the suite is back
+# on the every-push windows-interop job in ci.yml. This workflow
+# stays as the on-demand, per-test evidence machine for any future
+# kernel-level audit of the Windows FIB semantics.
+#
 # Dispatch it on a disposable branch (NOT main — the transcripts are
 # committed back to the dispatched ref):
 #
