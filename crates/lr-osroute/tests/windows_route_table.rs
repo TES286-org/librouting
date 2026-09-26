@@ -587,10 +587,9 @@ fn primary_interface() -> Option<(String, u32, Ipv4Addr)> {
 }
 
 /// Run `program args` under a hard wall-clock budget, returning its
-/// combined output. `New-NetIPAddress` and friends talk to WMI/NDIS
-/// and have been observed hanging indefinitely on runner builds (the
-/// run-36125163593 probe wedged until the job timeout), so the child
-/// is killed when the budget expires.
+/// combined output. A child that outlives its budget is killed and
+/// reaped only within a bounded grace window, then abandoned — see
+/// the kill path below.
 ///
 /// Output goes to temp FILES, never pipes: a grandchild that inherits
 /// the write end of a pipe (the WMI provider host, `conhost`, anything
@@ -650,7 +649,26 @@ fn run_bounded(
             Ok(None) => {
                 if Instant::now() >= deadline {
                     let _ = child.kill();
-                    let _ = child.wait();
+                    // Bounded reaping, never an open-ended wait(): a
+                    // child stuck in an uninterruptible kernel call is
+                    // marked for death by the kill above but its
+                    // process handle never signals, so `wait()` would
+                    // hang this process with it — the amplifier that
+                    // turns one wedged child into a wedged whole CI
+                    // step. Poll a short grace window, then abandon
+                    // the survivor: its stdio is file-redirected and
+                    // it holds no console, so nothing this process's
+                    // callers wait on is shared with it. The overrun
+                    // is reported by the `None` status the caller
+                    // already treats as a budget failure.
+                    let grace = Instant::now() + Duration::from_secs(3);
+                    loop {
+                        match child.try_wait() {
+                            Ok(Some(_)) | Err(_) => break,
+                            Ok(None) if Instant::now() >= grace => break,
+                            Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                        }
+                    }
                     break None;
                 }
                 std::thread::sleep(Duration::from_millis(100));
