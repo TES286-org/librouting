@@ -25,20 +25,21 @@
 # The historical watchdog tower (detached payload + 900 s watch loop +
 # ceilings raised above the payload's own wall) existed only because a
 # wedged test binary could not be reaped and took the transcript down
-# with the job. That claim of "bounded by construction" proved false
-# across runs 36125163593-362, and run 362 isolated the ROOT CAUSE:
-# MSYS/Git-Bash `timeout` cannot kill a native Windows child (its
-# SIGTERM is undeliverable to cargo.exe; only TerminateProcess works),
-# so `timeout N cargo test` waits forever on a wedged child. The
-# containment therefore never uses `timeout`: the test binary kills
-# ITSELF from kernel mode at a hard budget (TerminateProcess
-# self-watchdog, exit code 70), every PROBE line is timestamped so a
-# killed run's transcript names the hang site, and the probe step
-# bounds every cargo invocation with run_bounded — a background run
-# whose expired budget triggers a Windows-native taskkill //F //T
-# tree kill — with stdio through files so only the bash script ever
-# holds the runner's pipes. The transcripts are cat'd back and
-# committed either way.
+# with the job. Runs 36125163593-363 progressively isolated the real
+# mechanism: MSYS `timeout` cannot kill a native Windows child (its
+# SIGTERM is undeliverable to cargo.exe), and — the deeper constant
+# across every wedged run — a BASH step spawning cargo is itself the
+# hanging shape on these runners, while PowerShell cargo steps never
+# fail once. The harness therefore: compiles from PowerShell (the
+# proven shape), runs the TEST BINARY DIRECTLY from bash (the proven
+# lr-daemon.exe shape — cargo is never spawned from bash), arms a
+# kernel-mode self-watchdog in the binary (TerminateProcess, exit 70),
+# timestamps every PROBE line so a killed run's transcript names the
+# hang site, and bounds each invocation with run_bounded — a
+# background run whose expired budget triggers a Windows-native
+# taskkill //F //T tree kill — with stdio through files so only the
+# bash script ever holds the runner's pipes. The transcripts are
+# cat'd back and committed either way.
 name: Windows FIB probe
 
 on:
@@ -61,16 +62,22 @@ jobs:
         uses: Swatinem/rust-cache@v2
         with:
           shared-key: "windows-fib-probe"
+      - name: Compile the Windows route-table test binary
+        # Compiled from the DEFAULT (PowerShell) shell: every wedge
+        # this workflow has ever recorded is a bash step spawning
+        # cargo, while PowerShell cargo steps never fail. See ci.yml's
+        # windows-interop job for the full analysis.
+        timeout-minutes: 15
+        run: cargo test -p lr-osroute --test windows_route_table --no-run
       - name: Run the FIB probe (Administrator shell)
         # `--test-threads=1`: every test mutates the same FIB rows and
-        # reuses the same probe port. NEVER use MSYS `timeout` here —
-        # its SIGTERM cannot kill native Windows children (the root
-        # cause of the historical wedge; see ci.yml's windows-interop
-        # job for the full analysis). Per test: the binary's own
-        # watchdog fires at 300 s (rc 70); run_bounded's taskkill //
-        # F //T tree kill fires at 360 s (rc 124). Stdio goes through
-        # files and is cat'd back into the log and probe-output.log
-        # after each invocation.
+        # reuses the same probe port. The TEST BINARY runs DIRECTLY
+        # from bash (the proven lr-daemon.exe shape — cargo is never
+        # spawned from bash, the one constant of every historical
+        # wedge). Per test: the binary's own watchdog fires at 300 s
+        # (rc 70); run_bounded's taskkill //F //T tree kill fires at
+        # 360 s (rc 124). Stdio goes through files and is cat'd back
+        # into the log and probe-output.log after each invocation.
         timeout-minutes: 30
         shell: bash
         run: |
@@ -97,22 +104,22 @@ jobs:
             done
             wait "$pid"
           }
+          exe=$(ls -t target/debug/deps/windows_route_table-*.exe 2>/dev/null | head -1)
+          if [ -z "$exe" ]; then
+            echo "FAIL: no windows_route_table test binary under target/debug/deps/"
+            exit 1
+          fi
+          echo "test binary: $exe"
           : > probe-output.log
-          run_bounded 900 target/windows-route-table-build.log \
-            cargo test -p lr-osroute --test windows_route_table --no-run
-          brc=$?
-          cat target/windows-route-table-build.log | tee -a probe-output.log
-          if [ "$brc" -ne 0 ]; then exit "$brc"; fi
           rc=0
           for t in fib_semantics_probe_matrix \
                    probe_next_hop_interface_resolution \
                    blackhole_route_discards_not_accepts \
                    explicit_oif_beats_fib_resolution; do
-            echo "=== $t ===" | tee -a probe-output.log
+            echo "=== $t (start $(date -u +%H:%M:%S)) ===" | tee -a probe-output.log
             trc=0
             run_bounded 360 "target/windows-route-table-$t.log" \
-              cargo test -p lr-osroute --test windows_route_table -- \
-              --ignored --nocapture --test-threads=1 "$t" || trc=$?
+              "$exe" --ignored --nocapture --test-threads=1 "$t" || trc=$?
             cat "target/windows-route-table-$t.log" | tee -a probe-output.log
             echo "=== $t rc=$trc (0 ok / 70 in-binary watchdog / 124 tree-killed) ===" \
               | tee -a probe-output.log

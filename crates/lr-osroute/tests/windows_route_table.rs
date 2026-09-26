@@ -41,35 +41,38 @@
 //! This suite historically wedged whole CI jobs: the step stayed
 //! `in_progress` past its own `timeout-minutes` until the job ceiling
 //! cancelled everything, on every run from 36125163593 through run
-//! 362 — across every harness revision. Run 362 isolated the root
-//! cause of the INFINITE WAIT itself: MSYS/Git-Bash `timeout` cannot
-//! kill a native Windows child — its SIGTERM is undeliverable to
-//! cargo.exe (Cygwin signal emulation only reaches MSYS processes),
-//! so `timeout N cargo test` waits forever on a wedged child, and
-//! the runner can neither reap the tree nor enforce the step timeout
-//! on that shape. The containment therefore never relies on signal
-//! semantics at all:
+//! 363 — across every harness revision (plain `timeout N cargo
+//! test`, file-stdio, in-binary watchdog + taskkill-bounded cargo).
+//! Runs 362 and 363 closed the case: GNU `timeout`'s SIGTERM is
+//! undeliverable to a native cargo.exe (Cygwin/MSYS signal emulation
+//! only reaches MSYS processes), so the wrapper waits forever — and
+//! deeper, the ONE constant across every wedged run versus the
+//! never-failing steps around them is that the wedged steps spawn
+//! cargo.exe from Git-Bash, while PowerShell cargo steps and bash
+//! steps spawning plain `lr-daemon.exe` never hang. The MSYS pty/fd
+//! handoff to cargo is the hang. The containment removes that shape
+//! entirely and never relies on signal semantics:
 //!
-//! 1. **The binary kills itself** — every test arms
+//! 1. **Compilation rides the proven shape** — a separate
+//!    PowerShell-shell `cargo test --no-run` CI step; cargo is never
+//!    invoked from bash.
+//! 2. **The binary runs directly from bash** — the proven
+//!    lr-daemon.exe shape — one invocation per test with stdio to a
+//!    transcript file the step cats back afterwards.
+//! 3. **The binary kills itself** — every test arms
 //!    [`arm_watchdog`] before its first netio call; at the budget the
 //!    watchdog thread terminates the process from kernel mode
 //!    (`TerminateProcess(GetCurrentProcess(), 70)` — immune to the
 //!    user-mode stdio locks that can deadlock `process::exit`'s
 //!    flush). A hang costs one bounded, exit-code-70 failure.
-//! 2. **Timestamped transcripts** — every `PROBE|` line carries the
+//! 4. **Timestamped transcripts** — every `PROBE|` line carries the
 //!    elapsed seconds since the process started, so the transcript of
 //!    a watchdog-killed run names the exact call site that hung (the
 //!    line after the last timestamp).
-//! 3. **The CI steps bound every cargo invocation with a
-//!    Windows-native tree kill** (ci.yml's `run_bounded`): the
-//!    invocation runs in the background with stdio through FILES (so
-//!    nothing but the bash script ever holds the runner's output
-//!    pipes — no orphan can wedge the step finalisation), and an
-//!    expired budget triggers `taskkill //F //T` — TerminateProcess
-//!    over cargo + this binary + every grandchild, no signal
-//!    emulation involved. The transcripts are cat'd back into the
-//!    step log after each invocation, so the evidence survives even
-//!    the kill.
+//! 5. **`run_bounded` tree-kills on expiry** — the CI step runs each
+//!    invocation under a budget; expiry triggers `taskkill //F //T`
+//!    (Windows-native TerminateProcess over the binary and any
+//!    grandchild) with no signal emulation involved.
 
 #![cfg(windows)]
 
