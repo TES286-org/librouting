@@ -451,6 +451,41 @@ fn best_route_if(dest: IpAddr) -> Option<u32> {
         .filter(|i| *i != 0)
 }
 
+/// Wait until the FIB genuinely resolves `dest` — bounded polling of
+/// the daemon's own resolution call, not a blind sleep.
+///
+/// `CreateUnicastIpAddressEntry` returns as soon as the stack accepts
+/// the row, while the address is still in duplicate-address detection:
+/// an immediate `GetBestRoute2` over a just-staged /24 answers
+/// `ERROR_NETWORK_UNREACHABLE` (1231) because the connected route is
+/// not published yet, and the baseline transcript would show `if=None`
+/// where the production steal it exists to demonstrate is. Polling the
+/// observable itself (the same call the daemon's oif-0 fallback makes)
+/// until it answers keeps the transcript faithful whatever the DAD
+/// timing is; the budget only bounds the wait, and a `None` return
+/// degrades the baseline log — the tests' own assertions never depend
+/// on the steal being visible.
+fn wait_for_staged_route(dest: IpAddr, budget: Duration) -> Option<u32> {
+    let start = Instant::now();
+    loop {
+        if let Some(ifidx) = best_route_if(dest) {
+            log(format!(
+                "env staged route visible after {:.1}s (DAD done)",
+                start.elapsed().as_secs_f32()
+            ));
+            return Some(ifidx);
+        }
+        if start.elapsed() >= budget {
+            log(format!(
+                "env staged route NOT visible within {}s — the steal baseline below is degraded",
+                budget.as_secs()
+            ));
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 // ---------------------------------------------------------------------
 // Behaviour measurement
 // ---------------------------------------------------------------------
@@ -1009,7 +1044,7 @@ fn probe_next_hop_interface_resolution() {
                                                          // fallback resolves the next hop through the staged connected route.
     log(format!(
         "resolve GetBestRoute2({ghost_nexthop}) -> if={:?} (the staged /24 owner is {ifidx}; the tunnel is NOT)",
-        best_route_if(IpAddr::V4(ghost_nexthop))
+        wait_for_staged_route(IpAddr::V4(ghost_nexthop), Duration::from_secs(10))
     ));
 
     // The fix path: an explicit egress interface must win. Install a
@@ -1171,7 +1206,10 @@ fn explicit_oif_beats_fib_resolution() {
     // Baseline (the bug): with no explicit egress the daemon's
     // GetBestRoute2 fallback resolves the ghost next hop through the
     // APIPA /16 — to the adapter that owns it, not the "tunnel".
-    let resolved = best_route_if(IpAddr::V4(Ipv4Addr::new(169, 254, 188, 9)));
+    let resolved = wait_for_staged_route(
+        IpAddr::V4(Ipv4Addr::new(169, 254, 188, 9)),
+        Duration::from_secs(10),
+    );
     println!(
         "GetBestRoute2(169.254.188.9) -> {resolved:?} (APIPA owner: {ifidx}, pinned egress: {pinned_if})"
     );
