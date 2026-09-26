@@ -15,7 +15,7 @@ use core::fmt;
 
 use crate::capabilities::Capability;
 use crate::codec::BgpCodec;
-use crate::error::{BgpError, BgpErrorCode, BgpNotification};
+use crate::error::{BgpCeaseSubcode, BgpError, BgpErrorCode, BgpNotification};
 use crate::extensions::extended_next_hop::ExtNextHopTuple;
 use crate::message::{keepalive::Keepalive, open::Open, update::Update, BgpMessage};
 use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
@@ -222,6 +222,12 @@ pub struct BgpPeer {
     hold_remaining: u64,
     keepalive_remaining: u64,
     established: bool,
+    /// Latched when a Cease / Connection Collision Resolution NOTIFICATION
+    /// (RFC 4486 subcode 7) arrives from the peer: the peer's §6.8 resolver
+    /// decided against this transport. Cleared by [`BgpPeer::reset`] (the
+    /// next transport incarnation) — embedders read it after a session
+    /// drops to tell a collision loss from every other Idle cause.
+    received_cease_collision: bool,
 }
 
 /// Timer IDs used by BgpPeer.
@@ -264,6 +270,7 @@ impl BgpPeer {
             hold_remaining: 0,
             keepalive_remaining: 0,
             established: false,
+            received_cease_collision: false,
         }
     }
 
@@ -1057,6 +1064,14 @@ impl BgpPeer {
             // (hold-time expiry, ceasing, malformed UPDATE) would leave us
             // stuck in Established.
             (_, BgpEvent::Message(BgpMessage::Notification(n))) => {
+                // RFC 4271 §6.8 / RFC 4486: a Cease / Connection Collision
+                // Resolution means the peer's resolver closed this
+                // transport — latch it for the embedder's churn guard.
+                if n.error_code == BgpErrorCode::Cease as u8
+                    && n.error_subcode == BgpCeaseSubcode::ConnectionCollision as u8
+                {
+                    self.received_cease_collision = true;
+                }
                 my_actions.push(BgpAction::Emit(lr_core::event::Event::PeerStateChange {
                     session: self.cfg.peer_id,
                     peer_state: "Idle (notification received)",
@@ -1100,6 +1115,16 @@ impl BgpPeer {
         self.hold_remaining = 0;
         self.keepalive_remaining = 0;
         self.negotiated_hold_time = 0;
+        self.received_cease_collision = false;
+    }
+
+    /// Whether a Cease / Connection Collision Resolution NOTIFICATION
+    /// (RFC 4486 subcode 7) arrived since the last [`BgpPeer::reset`].
+    /// The embedder combines this with the FSM going Idle to recognise a
+    /// lost §6.8 collision (as opposed to every other Idle cause) and
+    /// stop hammering a peer that already holds a live session.
+    pub fn received_cease_collision(&self) -> bool {
+        self.received_cease_collision
     }
 
     /// Extract routes from an inbound UPDATE (RFC 4271 §9.1.1 "update

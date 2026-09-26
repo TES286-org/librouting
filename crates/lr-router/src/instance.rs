@@ -132,6 +132,26 @@ pub trait RouterInstance {
         None
     }
 
+    /// Consume the §6.8 collision-loss latch of a session: `true` when
+    /// the session lost an RFC 4271 §6.8 collision — its own resolver
+    /// closed it, or a Cease / Connection Collision Resolution
+    /// NOTIFICATION (RFC 4486 subcode 7) arrived — since the latch was
+    /// last consumed (or the session last started). Embedders use it to
+    /// back the connector off instead of redialing into a peer that
+    /// already holds a live session (BIRD parity: the collision loser
+    /// waits out its ConnectRetry, it does not hammer).
+    fn take_collision_lost(&mut self, _h: SessionHandle) -> bool {
+        false
+    }
+
+    /// Whether the session's CURRENT transport incarnation ever reached
+    /// Established. Used by embedders to reset reconnect backoff only
+    /// after a genuinely working session (a handshake that died at
+    /// OpenConfirm must keep the exponential backoff growing).
+    fn session_was_established(&self, _h: SessionHandle) -> bool {
+        false
+    }
+
     /// Every path of every prefix (the RFC 7911 Add-Path view of the
     /// Loc-RIB). Defaults to the best-path snapshot for implementors
     /// without path multiplicity.
@@ -270,6 +290,12 @@ enum SessionState {
         peer: Box<BgpPeer>,
         conn: MemoryConn,
         established: bool,
+        /// Whether THIS transport incarnation ever reached Established.
+        /// Latched for the transport's lifetime: RFC 4724 retention only
+        /// protects routes a session actually learned, so the teardown
+        /// path gates on this instead of the live `established` flag
+        /// (which the FSM clears the moment the session drops).
+        was_established: bool,
     },
     Ospf {
         runtime: OspfRuntime,
@@ -1427,6 +1453,14 @@ pub struct DefaultRouter {
     /// `(group, locally_initiated)`. Sessions absent from the map never
     /// participate in collision resolution.
     collision_meta: BTreeMap<u64, (u64, bool)>,
+    /// Sessions that LOST a §6.8 collision — either the resolver closed
+    /// them (`close_collision_loser`) or a Cease / Connection Collision
+    /// Resolution NOTIFICATION arrived from the peer (the peer's resolver
+    /// decided against us). Latched until the embedder consumes it via
+    /// [`Router::take_collision_lost`], so the embedder can distinguish
+    /// the two Idle causes and stop dialing into a peer that already
+    /// holds a live session.
+    collision_lost: BTreeSet<u64>,
     /// Configured redistribution pipes (BIRD `pipe` / FRR `redistribute`).
     /// Each pipe bridges routes from `source` to `target` protocol.
     pipes: Vec<crate::redistribution::RedistributionPipe>,
@@ -1566,6 +1600,7 @@ impl Default for DefaultRouter {
             llgr_caps: BTreeMap::new(),
             max_prefix_state: BTreeMap::new(),
             collision_meta: BTreeMap::new(),
+            collision_lost: BTreeSet::new(),
             pipes: Vec::new(),
             redistributed_bgp: BTreeMap::new(),
             direct_rib: BTreeMap::new(),
@@ -3957,6 +3992,10 @@ impl DefaultRouter {
         } else {
             return;
         };
+        // Latch the loss so the embedder's connector backs off instead of
+        // redialing while the winning transport (here or at the peer)
+        // completes its handshake.
+        self.collision_lost.insert(loser);
         self.pending_events.push(RouterEvent::Log(format!(
             "connection collision between sessions #{loser} and #{winner} resolved: \
              closing #{loser} — {why}"
@@ -3994,7 +4033,19 @@ impl DefaultRouter {
         // nothing, but keep the ordering explicit: this must run before
         // any mutation that could reset the negotiated state.
         let retention = match self.sessions.get(&session) {
-            Some(SessionState::Bgp { peer, .. }) => {
+            Some(SessionState::Bgp {
+                peer,
+                was_established,
+                ..
+            }) => {
+                // RFC 4724 §2: retention protects the routes an
+                // ESTABLISHED session learned. A transport that died
+                // mid-handshake (e.g. a §6.8 collision loser) carries no
+                // routes — entering retention would only pin an empty
+                // window and short-circuit the next teardown's cleanup.
+                if !*was_established {
+                    return self.session_down_cleanup(session);
+                }
                 let restart_time = peer.negotiated_graceful_restart_time().unwrap_or(0);
                 // RFC 9494 §4.2: per-family LLST extends the retention
                 // window beyond the RFC 4724 restart time. The received
@@ -4410,6 +4461,7 @@ impl RouterInstance for DefaultRouter {
                         peer: Box::new(peer),
                         conn: MemoryConn::new(),
                         established: false,
+                        was_established: false,
                     },
                 );
                 self.mrai.insert(
@@ -4610,10 +4662,19 @@ impl RouterInstance for DefaultRouter {
             }
         }
         // Clear the established latch so a re-established session is
-        // recognised as *newly* established (initial table dump).
-        if let Some(SessionState::Bgp { established, .. }) = self.sessions.get_mut(&h.0) {
+        // recognised as *newly* established (initial table dump), and
+        // start the new transport incarnation with fresh RFC 4724 /
+        // §6.8 bookkeeping.
+        if let Some(SessionState::Bgp {
+            established,
+            was_established,
+            ..
+        }) = self.sessions.get_mut(&h.0)
+        {
             *established = false;
+            *was_established = false;
         }
+        self.collision_lost.remove(&h.0);
         Ok(())
     }
 
@@ -4656,6 +4717,7 @@ impl RouterInstance for DefaultRouter {
                     peer,
                     conn,
                     established,
+                    was_established,
                 } => {
                     conn.push_input(bytes);
                     let input = conn.take_input();
@@ -4664,12 +4726,24 @@ impl RouterInstance for DefaultRouter {
                     }
                     let prev_state = peer.state();
                     let actions = peer.feed_bytes(&input).map_err(|e| e.to_string())?;
-                    let was_established = *established;
+                    let was_established_before = *established;
                     *established = peer.is_established();
+                    if *established {
+                        *was_established = true;
+                    }
+                    // A Cease / Connection Collision Resolution (RFC 4486
+                    // subcode 7) NOTIFICATION means the PEER's resolver
+                    // closed this transport — the same loss a local
+                    // resolver produces, just decided remotely. Latch it
+                    // so the embedder can hold the connector back instead
+                    // of redialing into an occupied peer.
+                    if peer.received_cease_collision() {
+                        self.collision_lost.insert(h.0);
+                    }
                     let post_state = peer.state();
                     Pending::Bgp {
                         actions,
-                        newly_established: *established && !was_established,
+                        newly_established: *established && !was_established_before,
                         prev_state,
                         post_state,
                     }
@@ -5019,6 +5093,19 @@ impl RouterInstance for DefaultRouter {
         match self.sessions.get(&h.0) {
             Some(SessionState::Bgp { peer, .. }) => Some(peer.state().name()),
             _ => None,
+        }
+    }
+
+    fn take_collision_lost(&mut self, h: SessionHandle) -> bool {
+        self.collision_lost.remove(&h.0)
+    }
+
+    fn session_was_established(&self, h: SessionHandle) -> bool {
+        match self.sessions.get(&h.0) {
+            Some(SessionState::Bgp {
+                was_established, ..
+            }) => *was_established,
+            _ => false,
         }
     }
 
@@ -12124,5 +12211,129 @@ mod collision_tests {
         assert_eq!(handshake(&mut r, s2, &mut b, b_session), "Established");
         assert_eq!(r.session_peer_state(s1), Some("Established"));
         assert_eq!(r.session_peer_state(s2), Some("Established"));
+    }
+
+    /// A wire-level Cease / Connection Collision Resolution NOTIFICATION
+    /// (RFC 4486 subcode 7): marker + length + type 3 + code 6 + subcode 7.
+    fn cease_collision_resolution() -> Vec<u8> {
+        // BGP NOTIFICATION (RFC 4271 §4.5): 16-octet marker, length 21,
+        // type 3, Error Code 6 (Cease), Error Subcode 7 (Connection
+        // Collision Resolution), no data.
+        let mut b = vec![0xffu8; 16];
+        b.extend_from_slice(&21u16.to_be_bytes());
+        b.push(3);
+        b.push(6);
+        b.push(7);
+        b
+    }
+
+    /// A Cease / Connection Collision Resolution NOTIFICATION received
+    /// from the peer — its resolver closing our transport — latches the
+    /// same collision-loss signal our own resolver produces, so the
+    /// embedder can hold the connector back in both flavors.
+    #[test]
+    fn received_cease_6_7_latches_collision_loss() {
+        let mut r = DefaultRouter::new();
+        let s_out = collision_session(&mut r, true, [10, 0, 0, 9]);
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+
+        // Single-transport OPEN exchange: no sibling, no local resolution.
+        r.start_session(s_out).unwrap();
+        a.start_session(a_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        r.feed_input(s_out, &a_open).unwrap();
+        assert_eq!(r.session_peer_state(s_out), Some("OpenConfirm"));
+        assert!(!r.take_collision_lost(s_out), "no loss yet");
+
+        // The peer's resolver sends Cease/7 on this transport.
+        r.feed_input(s_out, &cease_collision_resolution()).unwrap();
+        assert_eq!(r.session_peer_state(s_out), Some("Idle"));
+        assert!(
+            r.take_collision_lost(s_out),
+            "a received Cease/7 must latch the loss"
+        );
+        assert!(!r.take_collision_lost(s_out), "the latch is consumed once");
+    }
+
+    /// The collision-loss latch is per transport incarnation: restarting
+    /// the session clears it, so a later unrelated Idle is not mistaken
+    /// for a collision loss.
+    #[test]
+    fn collision_loss_latch_cleared_by_start_session() {
+        let mut r = DefaultRouter::new();
+        // 10.0.0.1 < 10.0.0.9 — the locally initiated transport loses.
+        let s_out = collision_session(&mut r, true, [10, 0, 0, 1]);
+        let s_in = collision_session(&mut r, false, [10, 0, 0, 1]);
+        let (mut a, a_session) = collision_peer([10, 0, 0, 9]);
+        let (mut b, b_session) = collision_peer([10, 0, 0, 9]);
+
+        // s_out loses to the inbound sibling (lower local ID).
+        r.start_session(s_out).unwrap();
+        r.start_session(s_in).unwrap();
+        a.start_session(a_session).unwrap();
+        let a_open = a.drain_output(a_session);
+        r.feed_input(s_out, &a_open).unwrap();
+        assert_eq!(r.session_peer_state(s_out), Some("Idle"));
+        assert!(r.take_collision_lost(s_out));
+
+        // A fresh transport incarnation starts with a clean latch.
+        r.start_session(s_out).unwrap();
+        assert!(!r.take_collision_lost(s_out));
+
+        // The inbound sibling still completes its handshake untouched.
+        let outcome = handshake(&mut r, s_in, &mut b, b_session);
+        assert_eq!(outcome, "Established");
+    }
+
+    /// RFC 4724 §2: retention protects the routes an ESTABLISHED session
+    /// learned. A transport that dies mid-handshake — e.g. a §6.8
+    /// collision loser — must NOT enter retention (the rc.4 defect:
+    /// every collision round pinned a 120 s retention for a session that
+    /// never had routes, short-circuiting the next teardown's cleanup).
+    #[test]
+    fn gr_retention_only_for_established_sessions() {
+        let mut r = DefaultRouter::new();
+        // SessionConfig::bgp defaults negotiate RFC 4724 (restart time
+        // 120 s) with a GR-capable peer.
+        let s_est = r
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 9]),
+            ))
+            .unwrap();
+        let s_never = r
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 9]),
+            ))
+            .unwrap();
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+
+        // Established transport dies → retention applies.
+        assert_eq!(handshake(&mut r, s_est, &mut a, a_session), "Established");
+        r.close_session(s_est);
+        let established_path = r
+            .poll_events()
+            .iter()
+            .filter_map(|e| match e {
+                RouterEvent::Log(line) => Some(line.clone()),
+                _ => None,
+            })
+            .any(|line| line.contains("entered graceful-restart retention"));
+        assert!(established_path, "an Established session enters retention");
+
+        // Never-established transport dies → plain purge, no retention.
+        r.start_session(s_never).unwrap();
+        r.close_session(s_never);
+        let events = r.poll_events();
+        let retention = events.iter().any(|e| {
+            matches!(e, RouterEvent::Log(line) if line.contains("entered graceful-restart retention"))
+        });
+        assert!(
+            !retention,
+            "a never-established session must not enter retention"
+        );
     }
 }

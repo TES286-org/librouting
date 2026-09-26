@@ -249,6 +249,17 @@ fn print_usage() {
 }
 
 fn main() -> ExitCode {
+    let code = daemon_main();
+    // Last action before process exit: release the Windows
+    // CTRL_CLOSE / CTRL_LOGOFF / CTRL_SHUTDOWN handler's bounded wait
+    // (Windows kills the process the moment that handler returns — the
+    // graceful path above must have flushed the session Cease
+    // NOTIFICATIONs and withdrawn the kernel routes by now).
+    signal::mark_shutdown_complete();
+    code
+}
+
+fn daemon_main() -> ExitCode {
     // `lr-daemon translate <dialect> <file>` — the W5.1 config
     // converter rides the daemon binary so it can reuse the daemon's
     // config schema (and round-trip test against the real parser).
@@ -2227,14 +2238,24 @@ fn spawn_connector(
     let auth = entry.auth.clone();
     let gtsm = entry.gtsm;
     let handle = entry.handle;
-    // RFC 4271 §6.8 churn guard: a bidirectional peer's inbound session
-    // suppresses fresh outbound attempts only after this outbound
-    // transport has actually LOST a collision — until then the §6.8
-    // convention needs the dial to happen (the higher-BGP-Identifier
-    // speaker's initiated connection must get its chance to win).
+    // RFC 4271 §6.8 churn guard: a bidirectional peer holds one transport
+    // at a time once its inbound challenger session is Established — the
+    // remote's resolver (or ours) has already picked a winner, so a fresh
+    // outbound dial would only bounce off the peer's Established-protection
+    // rule (Cease / Connection Collision Resolution) and churn both ends.
+    // Stay passive until the winning session goes away.
     let sibling_in = entry.handle_in;
+    // Latched on a §6.8 collision loss (observability + future policy
+    // hooks; the connector's own backoff policy drives the timing).
     let lost_once = Arc::clone(&entry.outbound_lost_collision);
     let label = entry.spec.label().to_string();
+    // Collision-lost cooldown: after THIS transport loses a §6.8 collision
+    // the peer holds a live session we cannot see. Wait out roughly its
+    // hold-time window (clamped 10–120 s) before dialing again — BIRD/FRR
+    // parity: the losing connection waits out its ConnectRetry instead of
+    // hammering the peer at the base delay.
+    let collision_backoff_ms =
+        (entry.spec.hold_time.unwrap_or(cfg.hold_time) as u64).clamp(10, 120) * 1_000;
     let bfd = entry.bfd.clone();
     // Source the connection from the configured local address when
     // one exists (port 0 = ephemeral).
@@ -2259,17 +2280,15 @@ fn spawn_connector(
                     }
                 }
                 // RFC 4271 §6.8 churn guard: the sibling inbound session
-                // is Established AND this transport already lost a
-                // collision — stay passive until the winner goes away.
+                // is Established — the peer already picked its transport.
                 if let Some(hin) = sibling_in {
-                    let hold_off = lost_once.load(Ordering::Relaxed)
-                        && rt
-                            .router
-                            .read()
-                            .unwrap()
-                            .session_peer_state(hin)
-                            .map(|s| s == "Established")
-                            .unwrap_or(false);
+                    let hold_off = rt
+                        .router
+                        .read()
+                        .unwrap()
+                        .session_peer_state(hin)
+                        .map(|s| s == "Established")
+                        .unwrap_or(false);
                     if hold_off {
                         sleep_interruptible(&rt, Duration::from_millis(500));
                         continue;
@@ -2285,15 +2304,14 @@ fn spawn_connector(
                 println!("daemon: peer {}: connecting to {} ...", label, remote);
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
-                        backoff_ms = 1_000;
                         let _ = stream.set_nodelay(true);
                         live.fetch_add(1, Ordering::Relaxed);
                         let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
                         live.fetch_sub(1, Ordering::Relaxed);
-                        if let Err(e) = result {
-                            // Latch a §6.8 collision loss so the churn guard
-                            // above engages (see PeerEntry docs).
+                        let mut collision_lost = false;
+                        if let Err(e) = &result {
                             if e.contains("collision resolution") {
+                                collision_lost = true;
                                 lost_once.store(true, Ordering::Relaxed);
                             }
                             eprintln!("daemon: peer {}: session ended: {}", label, e);
@@ -2301,9 +2319,24 @@ fn spawn_connector(
                         if !rt.running.load(Ordering::Relaxed) {
                             break;
                         }
+                        // Backoff policy: a transport that actually carried
+                        // an Established session resets the ladder; a §6.8
+                        // collision loss waits out the peer's hold window
+                        // (the peer holds a live session we cannot see —
+                        // dialing sooner only bounces off its
+                        // Established-protection rule, RFC 4271 §6.8);
+                        // every other failure grows the ladder.
+                        if collision_lost {
+                            backoff_ms = collision_backoff_ms;
+                        } else if result.is_ok()
+                            || rt.router.read().unwrap().session_was_established(handle)
+                        {
+                            backoff_ms = 1_000;
+                        } else {
+                            backoff_ms = (backoff_ms * 2).min(30_000);
+                        }
                         eprintln!("daemon: peer {}: reconnecting in {}ms", label, backoff_ms);
                         sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
-                        backoff_ms = (backoff_ms * 2).min(30_000);
                     }
                     Err((e, fatal)) => {
                         if fatal {
@@ -2401,16 +2434,26 @@ fn pump_session(
         }
 
         // 2. Drain router output → write to peer.
-        let (out, closed_by_router) = {
+        let (out, closed_by_router, lost_collision) = {
             let mut r = router.write().unwrap();
             let out = r.drain_output(session);
             // RFC 4271 §6.8: the router may have just closed this
-            // session while the TCP connection is still alive — this
-            // transport lost the collision and the Cease / Connection
-            // Collision Resolution NOTIFICATION is part of `out`. Flush
-            // it below, then unwind so the socket closes.
+            // session while the TCP connection is still alive — either
+            // our resolver picked the sibling transport, or the peer's
+            // resolver closed us with a Cease / Connection Collision
+            // Resolution NOTIFICATION (RFC 4486 subcode 7). Flush the
+            // notification below, then unwind so the socket closes.
             let closed = r.session_peer_state(session) == Some("Idle");
-            (out, closed)
+            // Consume the loss latch only when the session actually
+            // went Idle — an Idle FSM with the latch set is the
+            // collision-loss signature; every other Idle (pre-start)
+            // must not read as one.
+            let lost = if closed {
+                r.take_collision_lost(session)
+            } else {
+                false
+            };
+            (out, closed, lost)
         };
         if !out.is_empty() {
             stream
@@ -2418,7 +2461,11 @@ fn pump_session(
                 .map_err(|e| format!("write: {}", e))?;
         }
         if closed_by_router {
-            return Err("connection lost the RFC 4271 §6.8 collision resolution".into());
+            return Err(if lost_collision {
+                "connection lost the RFC 4271 §6.8 collision resolution".into()
+            } else {
+                "session closed by the router (FSM Idle)".into()
+            });
         }
     }
     Ok(())

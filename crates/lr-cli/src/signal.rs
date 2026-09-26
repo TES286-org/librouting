@@ -20,9 +20,12 @@
 //! are identical across every Unix target this workspace compiles for
 //! (Linux, FreeBSD, NetBSD, macOS).
 //!
-//! On non-Unix platforms the API compiles to inert stubs: no signals
-//! exist there and the daemon falls back to platform conventions
-//! (Ctrl-C console events on Windows).
+//! On Windows the API is backed by a `SetConsoleCtrlHandler` console
+//! control handler: CTRL_C / CTRL_BREAK map to SIGINT, and the
+//! console-close / logoff / shutdown events map to SIGTERM with a
+//! bounded in-handler wait — Windows tears the process down the moment
+//! that handler returns, so the daemon must finish withdrawing its
+//! kernel routes before [`mark_shutdown_complete`] releases it.
 
 #[cfg(unix)]
 mod imp {
@@ -89,6 +92,10 @@ mod imp {
         SUPERVISED.load(Ordering::Relaxed)
     }
 
+    /// Unix shutdown completion is ordinary process exit — the flag
+    /// exists for the Windows console handler only.
+    pub fn mark_shutdown_complete() {}
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -117,11 +124,112 @@ mod imp {
     }
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
 mod imp {
-    // No signals on this platform; the daemon's shutdown path relies on
-    // console events / external termination instead.
+    use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+    use std::time::{Duration, Instant};
 
+    pub const SIGHUP: i32 = 1;
+    pub const SIGINT: i32 = 2;
+    pub const SIGTERM: i32 = 15;
+
+    /// Last console control event mapped to a signal (0 = none).
+    static PENDING: AtomicI32 = AtomicI32::new(0);
+
+    /// Set by the daemon right before it returns from `main`. The
+    /// console-control handler for CTRL_CLOSE / CTRL_LOGOFF /
+    /// CTRL_SHUTDOWN waits (bounded) on it: Windows tears the process
+    /// down the moment the handler returns, so without the wait the
+    /// daemon would die before it can withdraw its kernel routes.
+    static SHUTDOWN_COMPLETE: AtomicBool = AtomicBool::new(false);
+
+    /// Multi-protocol supervision flag (see [`set_supervised`]).
+    static SUPERVISED: AtomicBool = AtomicBool::new(false);
+
+    // wincon.h console control events.
+    const CTRL_C_EVENT: u32 = 0;
+    const CTRL_BREAK_EVENT: u32 = 1;
+    const CTRL_CLOSE_EVENT: u32 = 2;
+    const CTRL_LOGOFF_EVENT: u32 = 5;
+    const CTRL_SHUTDOWN_EVENT: u32 = 6;
+
+    /// Windows grants ~5 s for CTRL_CLOSE and ~20 s for CTRL_SHUTDOWN
+    /// before hard-killing the process once the handler returns; stay
+    /// below both so the graceful path (session Cease + kernel-route
+    /// withdrawal) fits inside the budget.
+    const HANDLER_GRACE: Duration = Duration::from_secs(4);
+
+    extern "system" fn on_console_ctrl(ctrl: u32) -> i32 {
+        let graceful = match ctrl {
+            CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+                PENDING.store(SIGINT, Ordering::Relaxed);
+                // Console stays alive: return immediately and let the
+                // daemon's poll loops notice the shutdown flag.
+                return 1;
+            }
+            CTRL_CLOSE_EVENT | CTRL_LOGOFF_EVENT | CTRL_SHUTDOWN_EVENT => {
+                PENDING.store(SIGTERM, Ordering::Relaxed);
+                true
+            }
+            _ => return 0,
+        };
+        if graceful {
+            let deadline = Instant::now() + HANDLER_GRACE;
+            while !SHUTDOWN_COMPLETE.load(Ordering::Relaxed) && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+        }
+        1
+    }
+
+    extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+    }
+
+    /// Install the console control handler. Idempotent (the handler is
+    /// added once; repeat calls are no-ops at the Win32 level).
+    pub fn init() -> Result<(), i32> {
+        let rc = unsafe { SetConsoleCtrlHandler(Some(on_console_ctrl), 1) };
+        if rc == 0 {
+            return Err(SIGINT);
+        }
+        Ok(())
+    }
+
+    /// Consume the pending signal, if any. Same single-consumer swap
+    /// contract as the Unix implementation.
+    pub fn take_pending() -> Option<i32> {
+        let sig = PENDING.swap(0, Ordering::Relaxed);
+        match sig {
+            0 => None,
+            s => Some(s),
+        }
+    }
+
+    /// Set when the multi-protocol supervisor owns signal dispatch
+    /// (same contract as Unix).
+    pub fn set_supervised(on: bool) {
+        SUPERVISED.store(on, Ordering::Relaxed);
+    }
+
+    /// Whether the multi-protocol supervisor owns signal dispatch.
+    pub fn supervised() -> bool {
+        SUPERVISED.load(Ordering::Relaxed)
+    }
+
+    /// Release the CTRL_CLOSE / CTRL_LOGOFF / CTRL_SHUTDOWN handler's
+    /// bounded wait — called once, from `main`, after every engine has
+    /// flushed its Cease NOTIFICATIONs and the kernel FIB mirror has
+    /// withdrawn the routes this daemon installed.
+    pub fn mark_shutdown_complete() {
+        SHUTDOWN_COMPLETE.store(true, Ordering::Relaxed);
+    }
+}
+
+/// Targets with neither Unix signals nor a Win32 console (wasm and
+/// friends): inert stubs so the daemon still compiles.
+#[cfg(not(any(unix, windows)))]
+mod imp {
     pub const SIGHUP: i32 = 1;
     pub const SIGINT: i32 = 2;
     pub const SIGTERM: i32 = 15;
@@ -139,6 +247,10 @@ mod imp {
     pub fn supervised() -> bool {
         false
     }
+
+    pub fn mark_shutdown_complete() {}
 }
 
-pub use imp::{init, set_supervised, supervised, take_pending, SIGHUP, SIGINT, SIGTERM};
+pub use imp::{
+    init, mark_shutdown_complete, set_supervised, supervised, take_pending, SIGHUP, SIGINT, SIGTERM,
+};
