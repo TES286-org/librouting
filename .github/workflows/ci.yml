@@ -381,10 +381,13 @@ jobs:
   windows-interop:
     name: Windows interop (lr ↔ lr)
     runs-on: windows-2022
-    # Cold-cache build (~10 min) + the full route-table matrix step
-    # (four bounded tests, ~10 min observed) + the three quick
-    # interop scripts. 40 min covers a fully cold runner.
-    timeout-minutes: 40
+    # Ceiling arithmetic: cold-cache build 25 + three quick interop
+    # scripts ~3 + the route-table matrix step 30 (four tests, each
+    # bounded by its own in-binary watchdog at 300 s plus the 360 s
+    # external backstop, plus compile) ≈ 58 — 60 covers the fully
+    # cold, every-test-wedges worst case as a LOUD failure; the
+    # typical warm run finishes in ~8.
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -429,27 +432,48 @@ jobs:
         # resolution) that used to live behind the manual
         # workflow_dispatch probe and showed up as a permanent skip.
         #
-        # The harness is bounded by construction now: child-process IO
-        # goes through files (a killed powershell.exe cannot leave a
-        # pipe open for an inherited grandchild handle — the deadlock
-        # that stalled runs 36125163593 / 36132336028 / 36136529031
-        # until the job was killed), and the TCP/accept measurement
-        # releases its listener instead of leaking the port for the
-        # process lifetime. The per-test `timeout` below is a plain
-        # backstop that fails loudly, not the hang defense — a hang is
-        # a bug in the test, not something to wait out.
+        # Wedge containment, third leg. This step wedged EVERY run
+        # from 36125163593 through run 361 (step in_progress past its
+        # own timeout-minutes until the job ceiling cancelled it),
+        # across three harness revisions: the runner waits for the
+        # step's output pipes to reach EOF before finalising and
+        # cannot reap a Windows process tree, so any orphan holding
+        # the write end wedges the step forever. Legs one and two
+        # live in the test binary (a kernel-mode self-watchdog and
+        # timestamped PROBE lines — see tests/windows_route_table.rs).
+        # This leg: every invocation's stdio goes through FILES, so
+        # the only process that ever holds the runner's pipes is this
+        # bash script itself. The transcripts are cat'd back into the
+        # step log after each invocation, so the evidence survives
+        # every failure mode — including the ones that kill cargo.
+        #
+        # Budgets: the in-binary watchdog fires at 300 s (exit code
+        # 70); `timeout 360` is the cargo-level backstop for a hang
+        # that somehow precedes the watchdog arming (rc 124); four
+        # tests at 6 min + compile sit under the 30-minute step
+        # ceiling. A hang is a bounded, loud, transcript-annotated
+        # failure — never again a silent in_progress.
         shell: bash
-        timeout-minutes: 20
+        timeout-minutes: 30
         run: |
           cargo test -p lr-osroute --test windows_route_table --no-run
+          rc=0
           for t in fib_semantics_probe_matrix \
                    probe_next_hop_interface_resolution \
                    blackhole_route_discards_not_accepts \
                    explicit_oif_beats_fib_resolution; do
             echo "=== $t ==="
-            timeout 480 cargo test -p lr-osroute --test windows_route_table -- \
-              --ignored --nocapture --test-threads=1 "$t"
+            transcript="target/windows-route-table-$t.log"
+            set +e
+            timeout 360 cargo test -p lr-osroute --test windows_route_table -- \
+              --ignored --nocapture --test-threads=1 "$t" >"$transcript" 2>&1
+            trc=$?
+            set -e
+            cat "$transcript"
+            echo "=== $t rc=$trc (0 ok / 70 watchdog / 124 external backstop) ==="
+            if [ "$trc" -ne 0 ]; then rc=$trc; fi
           done
+          exit $rc
 
   # macOS lr-vs-lr interop + the BSD route(4) backend end-to-end.
   # This is the macOS half of the "CI reflects real usage" goal:

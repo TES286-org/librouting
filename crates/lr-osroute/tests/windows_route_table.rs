@@ -35,13 +35,42 @@
 //! stack actually treats each (`PROBE|` lines, no assertions — run it
 //! with `-- --ignored --nocapture fib_semantics` when auditing a new
 //! Windows build).
+//!
+//! ## Wedge containment (read before touching the harness)
+//!
+//! This suite historically wedged whole CI jobs: the step stayed
+//! `in_progress` past its own `timeout-minutes` until the job ceiling
+//! cancelled everything, on every run from 36125163593 through run
+//! 361's full-matrix shape — across three harness revisions. The
+//! runner-side mechanism: it cannot reap a Windows process tree, and
+//! it waits for the step's output pipes to reach EOF, which any
+//! orphaned descendant still holding the write end prevents; MSYS
+//! `timeout` kills only the direct child (cargo), orphaning this test
+//! binary with the inherited console handles. The containment now has
+//! three legs, each addressing one link of that chain:
+//!
+//! 1. **The binary kills itself** — every test arms
+//!    [`arm_watchdog`] before its first netio call; at the budget the
+//!    watchdog thread terminates the process from kernel mode
+//!    (`TerminateProcess(GetCurrentProcess(), 70)` — immune to the
+//!    user-mode stdio locks that can deadlock `process::exit`'s
+//!    flush). A hang costs one bounded, exit-code-70 failure.
+//! 2. **Timestamped transcripts** — every `PROBE|` line carries the
+//!    elapsed seconds since the process started, so the transcript of
+//!    a watchdog-killed run names the exact call site that hung (the
+//!    line after the last timestamp).
+//! 3. **The CI step routes each invocation's stdio through files**
+//!    (see ci.yml's windows-interop job): nothing spawned inside the
+//!    step — cargo, this binary, or any grandchild — ever holds the
+//!    runner's output pipes, so no orphan can wedge the step
+//!    finalisation regardless of what hangs.
 
 #![cfg(windows)]
 
 use std::io::ErrorKind;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, TcpListener, TcpStream};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use lr_core::addr::{IpAddr as LrIpAddr, Prefix};
@@ -56,6 +85,7 @@ use windows_sys::Win32::NetworkManagement::IpHelper::{
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
 };
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
 
 const V4_PREFIX: Prefix = Prefix::new_v4([198, 51, 100, 0], 24); // TEST-NET-2
 const V4_PROBE: IpAddr = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 7));
@@ -73,8 +103,90 @@ fn lr4(a: Ipv4Addr) -> LrIpAddr {
     LrIpAddr::V4(a.octets())
 }
 
+/// Test-process start — every `PROBE|` line is stamped with the
+/// elapsed seconds since the first log call, so a wedged run's
+/// transcript shows exactly WHERE it stopped (the last timestamp is
+/// the hang site; the next line names the API that never returned).
+static T0: OnceLock<Instant> = OnceLock::new();
+
 fn log(line: String) {
-    println!("PROBE|{line}");
+    let t0 = T0.get_or_init(Instant::now);
+    println!("PROBE|[{:>7.1}s] {line}", t0.elapsed().as_secs_f32());
+}
+
+// ---------------------------------------------------------------------
+// Self-watchdog — the harness's own guarantee that THIS process
+// cannot be the thing a CI job waits on forever.
+// ---------------------------------------------------------------------
+
+/// Arm a hard wall-clock watchdog for this test process.
+///
+/// Why this exists: every prior CI shape for this suite (runs
+/// 36125163593 / 36128494485 / 36132336028 / 36136529031 / 358 / 359 /
+/// 361) ended with the step `in_progress` past its own
+/// `timeout-minutes` until the JOB ceiling cancelled everything —
+/// the runner cannot reap a Windows process tree whose root ignores
+/// termination, and it waits for the step's output pipes to reach
+/// EOF, which an orphaned descendant still holding the write end
+/// prevents. External `timeout` wrappers only kill the DIRECT child
+/// (cargo), orphaning the test binary itself. The watchdog closes
+/// that hole from the inside: the process kills ITSELF at the
+/// budget, unconditionally.
+///
+/// Why `TerminateProcess` and not `std::process::exit`: exit() runs
+/// libc's at-exit handlers, which flush every stdio stream — if the
+/// wedged code died holding the stdout lock (a `println!` mid-write
+/// against a full/broken pipe), the flush deadlocks and the process
+/// STILL never exits. `TerminateProcess(GetCurrentProcess(), ..)` is
+/// a kernel-mode kill: no user-mode locks, no flushes, no atexit.
+/// Exit code 70 is distinct from libtest's failure codes so the
+/// transcript's tail line ("watchdog budget exceeded") reads as a
+/// watchdog kill, not a test assertion failure.
+///
+/// The guard disarms on drop (normal completion); the watchdog
+/// thread is reaped by the join in `Drop`.
+struct Watchdog {
+    armed: Arc<AtomicBool>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for Watchdog {
+    fn drop(&mut self) {
+        self.armed.store(false, Ordering::SeqCst);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+fn arm_watchdog(budget: Duration) -> Watchdog {
+    const WATCHDOG_EXIT: u32 = 70;
+    let armed = Arc::new(AtomicBool::new(true));
+    let flag = Arc::clone(&armed);
+    let deadline = Instant::now() + budget;
+    let thread = std::thread::Builder::new()
+        .name("test-watchdog".into())
+        .spawn(move || {
+            while flag.load(Ordering::SeqCst) {
+                if Instant::now() >= deadline {
+                    // SAFETY: GetCurrentProcess() returns the current
+                    // process's pseudo-handle (always valid); the call
+                    // terminates this process from kernel mode.
+                    unsafe {
+                        TerminateProcess(GetCurrentProcess(), WATCHDOG_EXIT);
+                    }
+                    // Unreachable on success; fall back to a slow exit
+                    // if the kernel refused (it does not for self-kill).
+                    std::process::exit(WATCHDOG_EXIT as i32);
+                }
+                std::thread::sleep(Duration::from_millis(250));
+            }
+        })
+        .expect("spawn watchdog thread");
+    Watchdog {
+        armed,
+        thread: Some(thread),
+    }
 }
 
 // ---------------------------------------------------------------------
@@ -566,6 +678,13 @@ fn powershell(script: &str) -> Result<String, String> {
 #[test]
 #[ignore = "research probe — mutates the real FIB; run as Administrator"]
 fn fib_semantics_probe_matrix() {
+    // Armed before any netio call: the watchdog guarantees this
+    // process exits within the budget no matter what hangs, so a
+    // wedge costs one bounded, transcript-annotated failure instead
+    // of a whole CI job. Legitimate worst case for the 15-form
+    // matrix is ~2 min (sleeps + bounded connects + bounded pings);
+    // 5 min is the >2x margin.
+    let _watchdog = arm_watchdog(Duration::from_secs(300));
     log("=== reference rows (the system's own loopback routes) ===".into());
     for p in [
         Prefix::new_v4([127, 0, 0, 0], 8),
@@ -765,6 +884,7 @@ fn fib_semantics_probe_matrix() {
 #[test]
 #[ignore = "research probe — mutates the real FIB; run as Administrator"]
 fn probe_next_hop_interface_resolution() {
+    let _watchdog = arm_watchdog(Duration::from_secs(300));
     let Some((ifname, ifidx, primary_v4)) = primary_interface() else {
         log("ifidx-probe skipped: no usable adapter".into());
         return;
@@ -866,6 +986,7 @@ fn probe_next_hop_interface_resolution() {
 #[test]
 #[ignore = "mutates the real FIB — run as Administrator on Windows"]
 fn blackhole_route_discards_not_accepts() {
+    let _watchdog = arm_watchdog(Duration::from_secs(300));
     let Some((_ifname, ifidx, _)) = primary_interface() else {
         eprintln!("skipped: no usable IPv4 adapter");
         return;
@@ -938,6 +1059,7 @@ fn blackhole_route_discards_not_accepts() {
 #[test]
 #[ignore = "mutates the real FIB — run as Administrator on Windows"]
 fn explicit_oif_beats_fib_resolution() {
+    let _watchdog = arm_watchdog(Duration::from_secs(300));
     let Some((ifname, ifidx, _)) = primary_interface() else {
         eprintln!("skipped: no usable IPv4 adapter");
         return;

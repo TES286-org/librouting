@@ -196,6 +196,42 @@ ship, breaking changes that affect embedders, dependency bumps.
   wall) is dismantled: the harness is bounded by construction and
   the remaining per-test `timeout` calls are plain loud backstops,
   not the hang defense.
+- **The wedge survived that fix — the runner-side mechanism is now
+  closed.** The file-IO rework bounded the harness's *own* waits,
+  but runs 358/359/361 (every push after it landed) still ended with
+  the route-table step `in_progress` past its own `timeout-minutes`
+  until the job ceiling cancelled everything: the runner cannot reap
+  a Windows process tree and waits for the step's output pipes to
+  reach EOF before finalising the step — an orphan still holding the
+  write end (an MSYS `timeout` kills only its direct child cargo,
+  orphaning the test binary with the inherited console handles)
+  wedges that wait forever. The containment now has three legs, each
+  closing one link of the chain rather than stacking another
+  ceiling:
+  1. **The test binary kills itself.** Every `windows_route_table`
+     test arms a watchdog thread *before its first netio call*; at
+     the 300 s budget it terminates the process from kernel mode —
+     `TerminateProcess(GetCurrentProcess(), 70)` — a kill that
+     cannot block on the user-mode stdio locks which can deadlock
+     `std::process::exit`'s flush when the wedged code died holding
+     the stdout lock. A hang costs one bounded failure with exit
+     code 70, never a job.
+  2. **Timestamped transcripts.** Every `PROBE|` line carries the
+     elapsed seconds since process start, so the transcript of a
+     watchdog-killed run names the exact call site that hung — the
+     evidence the ten wedged runs never left behind.
+  3. **The CI steps route each invocation's stdio through files**
+     (ci.yml's windows-interop job and windows-fib-probe.yml):
+     nothing spawned inside the step — cargo, the test binary, any
+     grandchild — ever holds the runner's output pipes, so no
+     orphan can wedge the step finalisation regardless of what
+     hangs; the transcripts are `cat`d back into the log after each
+     invocation returns. The per-test `timeout 360` remains only as
+     the cargo-level backstop for a hang preceding the watchdog's
+     arming, and the step/job ceilings are recalculated to sit above
+     the payload's own worst-case wall (4 × 360 s + compile) so a
+     fully-wedged run is a loud failure with a full transcript, not
+     a cancellation that eats the logs.
 
 ### Fixed (kernel FIB interaction)
 

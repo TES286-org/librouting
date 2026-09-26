@@ -42,6 +42,11 @@ windows-sys = { version = "0.61", features = [
     "Win32_NetworkManagement_Ndis",
     "Win32_Networking_WinSock",
     "Win32_Foundation",
+    # TerminateProcess/GetCurrentProcess for the kernel-gated test
+    # harness's self-watchdog (see tests/windows_route_table.rs) —
+    # the kernel-mode kill that cannot block on a user-mode lock the
+    # way std::process::exit's stdio flush can.
+    "Win32_System_Threading",
 ] }
 
 [dev-dependencies]
