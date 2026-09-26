@@ -12,13 +12,20 @@
 //!   binary SRH (RFC 8754 §2 wire format, `struct
 //!   seg6_iptunnel_encap` in `uapi/linux/seg6_iptunnel.h`).
 //!
-//! - **`seg6local`** (lwtunnel encap type 6,
+//! - **`seg6local`** (lwtunnel encap type 7,
 //!   `LWTUNNEL_ENCAP_SEG6_LOCAL`): the endpoint table — what a node
 //!   does when a packet's destination address equals a locally-owned
 //!   SID. The `ip route add <SID> encap seg6local action End` form.
-//!   The encap attribute carries a `SEG6LOCAL_ACTION` (type 1)
-//!   sub-attribute whose payload is `struct seg6_local_arg` (a u32
-//!   action + a list of (u16 param, nla) pairs).
+//!   The encap attribute carries a `SEG6_LOCAL_ACTION` (type 1)
+//!   sub-attribute whose payload is a u32 action code in the
+//!   **kernel's** `SEG6_LOCAL_ACTION_*` numbering, followed by the
+//!   action's parameters as sibling nested attributes
+//!   (`SEG6_LOCAL_NH4`/`NH6`/`IIF`/`OIF`/`TABLE`). The IANA registry
+//!   values `lr_srv6::Behavior` carries are a DIFFERENT numbering —
+//!   see the translation table in [`kernel_action_for`] — and the
+//!   kernel's uapi enum order (UNSPEC, ACTION, SRH, TABLE, NH4, NH6,
+//!   IIF, OIF, …) positions the parameter attributes differently
+//!   than a doc-order reading suggests.
 //!
 //! ## Egress device requirement
 //!
@@ -98,7 +105,15 @@ const RTPROT_BGP: u8 = 186;
 // Lightweight-tunnel encap (uapi/linux/lwtunnel.h, seg6_iptunnel.h,
 // seg6_local.h).
 const LWTUNNEL_ENCAP_SEG6: u32 = 5;
-const LWTUNNEL_ENCAP_SEG6_LOCAL: u32 = 6;
+/// `LWTUNNEL_ENCAP_SEG6_LOCAL` — 7 in the kernel's uapi enum
+/// (`NONE, MPLS, IP, ILA, IP6, SEG6, BPF, SEG6_LOCAL, …`). The value
+/// 6 in that same position is `LWTUNNEL_ENCAP_BPF`: sending it makes
+/// the kernel hand the nested `RTA_ENCAP` payload to the BPF parser,
+/// whose `LWT_BPF_IN` (attr 1, the same number as
+/// `SEG6_LOCAL_ACTION`) rejects the 4-byte action payload with
+/// `EINVAL` — exactly the run-36153545939 failure this constant got
+/// wrong for.
+const LWTUNNEL_ENCAP_SEG6_LOCAL: u32 = 7;
 const SEG6_IPTUNNEL_SRH: u16 = 1;
 const SEG6LOCAL_ACTION: u16 = 1;
 
@@ -106,12 +121,155 @@ const SEG6LOCAL_ACTION: u16 = 1;
 const SEG6_IPTUN_MODE_INLINE: u32 = 0;
 const SEG6_IPTUN_MODE_ENCAP: u32 = 1;
 
-// seg6_local action param types (uapi/linux/seg6_local.h).
-const SEG6_LOCAL_NH4: u16 = 2;
-const SEG6_LOCAL_NH6: u16 = 3;
-const SEG6_LOCAL_IIF: u16 = 4;
-const SEG6_LOCAL_OIF: u16 = 5;
-const SEG6_LOCAL_TABLE: u16 = 6;
+// seg6_local action param types (uapi/linux/seg6_local.h — the enum
+// order is UNSPEC, ACTION, SRH, TABLE, NH4, NH6, IIF, OIF, BPF,
+// VRFTABLE, COUNTERS, FLAVORS).
+const SEG6_LOCAL_TABLE: u16 = 3;
+const SEG6_LOCAL_NH4: u16 = 4;
+const SEG6_LOCAL_NH6: u16 = 5;
+const SEG6_LOCAL_IIF: u16 = 6;
+const SEG6_LOCAL_OIF: u16 = 7;
+
+/// The kernel's `SEG6_LOCAL_ACTION_*` code for a behavior, plus the
+/// parameter attributes the kernel's `seg6_action_table`
+/// (net/ipv6/seg6_local.c) requires and tolerates for it.
+///
+/// The kernel numbers its actions in its OWN uapi order (End=1,
+/// End.X=2, End.T=3, End.DX2=4, …) — deliberately different from
+/// the IANA registry values [`lr_srv6::Behavior`] carries (End=1,
+/// End.X=5, End.T=9, …). The two tables must never be conflated:
+/// the IANA value rides in control-plane identifiers, the kernel
+/// value only inside the `SEG6_LOCAL_ACTION` netlink attribute.
+/// Behaviors the kernel does not implement (the PSP/USP/USD flavor
+/// combinations, End.B6.Red variants, End.MAP, …) map to `Err` —
+/// encoding them would be a silent kernel `EINVAL` at install time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KernelAction {
+    /// `SEG6_LOCAL_ACTION_*` value (uapi/linux/seg6_local.h).
+    code: u32,
+    /// Param attributes the kernel REQUIRES (missing → `EINVAL`).
+    requires: ParamSet,
+    /// Param attributes the kernel TOLERATES in addition (present but
+    /// not in requires ∪ tolerates → `EINVAL`, per `parse_nla_action`).
+    tolerates: ParamSet,
+}
+
+/// The `SEG6_LOCAL_*` parameter attributes a route may carry.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct ParamSet {
+    nh4: bool,
+    nh6: bool,
+    iif: bool,
+    oif: bool,
+    table: bool,
+}
+
+impl ParamSet {
+    const NONE: Self = Self {
+        nh4: false,
+        nh6: false,
+        iif: false,
+        oif: false,
+        table: false,
+    };
+    const NH4: Self = Self {
+        nh4: true,
+        ..Self::NONE
+    };
+    const NH6: Self = Self {
+        nh6: true,
+        ..Self::NONE
+    };
+    const OIF: Self = Self {
+        oif: true,
+        ..Self::NONE
+    };
+    const TABLE: Self = Self {
+        table: true,
+        ..Self::NONE
+    };
+    const IIF: Self = Self {
+        iif: true,
+        ..Self::NONE
+    };
+    /// Union of two sets (builder-friendly).
+    const fn union(self, other: Self) -> Self {
+        Self {
+            nh4: self.nh4 || other.nh4,
+            nh6: self.nh6 || other.nh6,
+            iif: self.iif || other.iif,
+            oif: self.oif || other.oif,
+            table: self.table || other.table,
+        }
+    }
+}
+
+/// Translate an IANA behavior to the kernel's action code and its
+/// parameter contract (net/ipv6/seg6_local.c `seg6_action_table`):
+///
+/// - End: no params.
+/// - End.X: requires NH6; OIF tolerated (optional steering).
+/// - End.T: requires TABLE.
+/// - End.DX2: requires OIF.
+/// - End.DX6: requires NH6.
+/// - End.DX4: requires NH4.
+/// - End.DT6: TABLE tolerated (required on pre-6.x kernels that
+///   lacked the L3-master-dev form, so emitters should always set it).
+/// - End.B6.Insert / End.B6.Encaps: require SRH — not representable
+///   through `Seg6LocalRoute` (no SRH parameter exists), so they are
+///   rejected here rather than mis-encoded.
+/// - Everything else (flavor combinations, .Red variants, the L2
+///   table family, kernel-only actions like End.S): the kernel either
+///   has no descriptor or a parameter this API does not model —
+///   rejected with a descriptive error instead of a wire-level EINVAL.
+fn kernel_action_for(behavior: Behavior) -> Result<KernelAction, Seg6RouteError> {
+    let action = match behavior {
+        Behavior::End => KernelAction {
+            code: 1, // SEG6_LOCAL_ACTION_END
+            requires: ParamSet::NONE,
+            tolerates: ParamSet::NONE,
+        },
+        Behavior::EndX => KernelAction {
+            code: 2, // SEG6_LOCAL_ACTION_END_X
+            requires: ParamSet::NH6,
+            tolerates: ParamSet::OIF,
+        },
+        Behavior::EndT => KernelAction {
+            code: 3, // SEG6_LOCAL_ACTION_END_T
+            requires: ParamSet::TABLE,
+            tolerates: ParamSet::NONE,
+        },
+        Behavior::EndDX2 => KernelAction {
+            code: 4, // SEG6_LOCAL_ACTION_END_DX2
+            requires: ParamSet::OIF,
+            tolerates: ParamSet::IIF,
+        },
+        Behavior::EndDX6 => KernelAction {
+            code: 5, // SEG6_LOCAL_ACTION_END_DX6
+            requires: ParamSet::NH6,
+            tolerates: ParamSet::NONE,
+        },
+        Behavior::EndDX4 => KernelAction {
+            code: 6, // SEG6_LOCAL_ACTION_END_DX4
+            requires: ParamSet::NH4,
+            tolerates: ParamSet::NONE,
+        },
+        Behavior::EndDT6 => KernelAction {
+            code: 7, // SEG6_LOCAL_ACTION_END_DT6
+            requires: ParamSet::NONE,
+            tolerates: ParamSet::TABLE,
+        },
+        other => {
+            return Err(Seg6RouteError::UnsupportedAction(format!(
+                "the Linux kernel's seg6local table has no parameter contract for {other} \
+                 (IANA value {}); only End, End.X, End.T, End.DX2, End.DX6, End.DX4 and \
+                 End.DT6 install via netlink",
+                other.wire_value()
+            )));
+        }
+    };
+    Ok(action)
+}
 
 // Netlink flags. NB: the flag bits are NAMESPACED per message kind —
 // for RTM_NEWROUTE, 0x100/0x200/0x400 read as REPLACE/EXCL/CREATE,
@@ -159,6 +317,13 @@ pub enum Seg6RouteError {
     /// The SRH encode failed (RFC 8754 §2 validation: empty segment
     /// list, reserved flag bits, out-of-range segments_left, etc.).
     BadSrh(String),
+    /// The behavior cannot be encoded as a `seg6local` action: either
+    /// the Linux kernel's `seg6_action_table` has no descriptor for it
+    /// (flavor combinations, .Red variants, End.MAP, …), or the route's
+    /// parameter set does not satisfy the kernel's contract for it
+    /// (missing a required parameter, or carrying one the action
+    /// rejects — `parse_nla_action` answers both with `EINVAL`).
+    UnsupportedAction(String),
 }
 
 impl std::fmt::Display for Seg6RouteError {
@@ -171,6 +336,7 @@ impl std::fmt::Display for Seg6RouteError {
             Self::Syscall(s) => write!(f, "seg6 netlink syscall: {}", s),
             Self::Kernel(s) => write!(f, "seg6 kernel error: {}", s),
             Self::BadSrh(s) => write!(f, "bad SRH: {}", s),
+            Self::UnsupportedAction(s) => write!(f, "unsupported seg6local action: {}", s),
         }
     }
 }
@@ -269,9 +435,17 @@ impl Seg6Route {
 /// destination and runs the SID behavior.
 ///
 /// Wire shape: an IPv6 `RTM_NEWROUTE` with `RTA_ENCAP_TYPE =
-/// LWTUNNEL_ENCAP_SEG6_LOCAL` and a nested `RTA_ENCAP` carrying
-/// `SEG6LOCAL_ACTION`. The action payload is a u32 action code
-/// followed by zero or more (param type, param value) pairs.
+/// LWTUNNEL_ENCAP_SEG6_LOCAL` (7) and a nested `RTA_ENCAP` carrying
+/// `SEG6_LOCAL_ACTION` (a u32 action code in the KERNEL's numbering —
+/// translated from the behavior's IANA value) followed by the
+/// action's parameter attributes as siblings inside the same nested
+/// payload.
+///
+/// Not every [`Behavior`] is installable: the kernel's
+/// `seg6_action_table` implements a subset with per-action parameter
+/// contracts, and [`Seg6Netlink::add_seg6local_route`] fails fast
+/// with [`Seg6RouteError::UnsupportedAction`] for behaviors or
+/// parameter sets the kernel would reject with a bare `EINVAL`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Seg6LocalRoute {
     /// The SID this endpoint matches (RFC 8754 §3 — becomes the IPv6
@@ -289,15 +463,18 @@ pub struct Seg6LocalRoute {
     /// parameter (the `End.X`/`End.DX2` forwarding interface, which
     /// rides inside `RTA_ENCAP` as `SEG6_LOCAL_OIF`).
     pub if_index: u32,
-    /// Optional next-hop IPv4 address (for End.DX4 / End.X.PS, etc.).
+    /// Optional next-hop IPv4 address (the `End.DX4` parameter).
     pub nh4: Option<[u8; 4]>,
-    /// Optional next-hop IPv6 address (for End.DX6 / End.X, etc.).
+    /// Optional next-hop IPv6 address (the `End.X` / `End.DX6`
+    /// parameter).
     pub nh6: Option<[u8; 16]>,
-    /// Optional input interface index (for End.DX2 etc.).
+    /// Optional input interface index (an `End.DX2` steering
+    /// parameter).
     pub iif: Option<u32>,
-    /// Optional output interface index (for End.X, End.DX2, etc.).
+    /// Optional output interface index (the `End.DX2` parameter; an
+    /// optional `End.X` steering parameter).
     pub oif: Option<u32>,
-    /// Optional table ID (for End.DT4 / End.DT6 / End.DT46, etc.).
+    /// Optional table ID (the `End.T` / `End.DT6` parameter).
     pub table: Option<u32>,
 }
 
@@ -729,16 +906,24 @@ impl Seg6Netlink {
     ///   rtm_dst_len = 128
     ///   rtm_table  = RT_TABLE_LOCAL
     ///   RTA_DST = sid (16 bytes)
-    ///   RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6_LOCAL (6)
+    ///   RTA_OIF  = if_index (4 bytes — the egress device, fib6_nh_init
+    ///              refuses a device-less route with ENODEV)
+    ///   RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6_LOCAL (7)
     ///   RTA_ENCAP = nested {
-    ///     SEG6_LOCAL_ACTION (type 1) = <u32 action code>   (4-byte payload)
-    ///     SEG6_LOCAL_NH4   (type 2) = <IPv4 next-hop>      (4-byte payload, optional)
-    ///     SEG6_LOCAL_NH6   (type 3) = <IPv6 next-hop>      (16-byte payload, optional)
-    ///     SEG6_LOCAL_IIF   (type 4) = <input ifindex>      (4-byte payload, optional)
-    ///     SEG6_LOCAL_OIF   (type 5) = <output ifindex>    (4-byte payload, optional)
-    ///     SEG6_LOCAL_TABLE (type 6) = <routing table id>  (4-byte payload, optional)
+    ///     SEG6_LOCAL_ACTION (type 1) = <u32 action code>   (4-byte payload, KERNEL numbering)
+    ///     SEG6_LOCAL_NH4   (type 4) = <IPv4 next-hop>      (4-byte payload, optional)
+    ///     SEG6_LOCAL_NH6   (type 5) = <IPv6 next-hop>      (16-byte payload, optional)
+    ///     SEG6_LOCAL_IIF   (type 6) = <input ifindex>      (4-byte payload, optional)
+    ///     SEG6_LOCAL_OIF   (type 7) = <output ifindex>    (4-byte payload, optional)
+    ///     SEG6_LOCAL_TABLE (type 3) = <routing table id>  (4-byte payload, optional)
     ///   }
     /// ```
+    ///
+    /// The attribute numbers follow the kernel uapi enum order
+    /// (uapi/linux/seg6_local.h: UNSPEC, ACTION, SRH, TABLE, NH4,
+    /// NH6, IIF, OIF, BPF, VRFTABLE, COUNTERS, FLAVORS). The ACTION
+    /// code is the kernel's own numbering, translated from the IANA
+    /// registry value the behavior carries — see [`kernel_action_for`].
     ///
     /// The kernel's `seg6_local_cmp_lwtunnel` /
     /// `parse_nla_action` walks `RTA_ENCAP` as a list of nested
@@ -752,16 +937,54 @@ impl Seg6Netlink {
         flags: u16,
         route: &Seg6LocalRoute,
     ) -> Result<Vec<u8>, Seg6RouteError> {
+        // Translate the IANA behavior into the kernel's ACTION code
+        // and check the parameter set against the kernel's contract
+        // BEFORE encoding — `parse_nla_action` (net/ipv6/seg6_local.c)
+        // rejects a missing required parameter and an unrecognised one
+        // with the same bare EINVAL, so surfacing the contract here
+        // turns a kernel round-trip into a local, descriptive error.
+        let action = kernel_action_for(route.behavior)?;
+        let present = ParamSet {
+            nh4: route.nh4.is_some(),
+            nh6: route.nh6.is_some(),
+            iif: route.iif.is_some(),
+            oif: route.oif.is_some(),
+            table: route.table.is_some(),
+        };
+        let allowed = action.requires.union(action.tolerates);
+        let required = action.requires;
+        for (set, allowed_here, required_here, name) in [
+            (present.nh4, allowed.nh4, required.nh4, "nh4"),
+            (present.nh6, allowed.nh6, required.nh6, "nh6"),
+            (present.iif, allowed.iif, required.iif, "iif"),
+            (present.oif, allowed.oif, required.oif, "oif"),
+            (present.table, allowed.table, required.table, "table"),
+        ] {
+            if set && !allowed_here {
+                return Err(Seg6RouteError::UnsupportedAction(format!(
+                    "{} carries the {name} parameter, but the kernel's action descriptor \
+                     for it does not accept {name} (parse_nla_action answers EINVAL)",
+                    route.behavior
+                )));
+            }
+            if required_here && !set {
+                return Err(Seg6RouteError::UnsupportedAction(format!(
+                    "{} requires the {name} parameter the kernel's action descriptor \
+                     mandates (parse_nla_action answers EINVAL without it)",
+                    route.behavior
+                )));
+            }
+        }
+
         let mut encap = Vec::new();
-        // SEG6_LOCAL_ACTION: 4-byte u32 action code (the only attribute
-        // with a fixed-width payload; everything else is a separate
-        // netlink attribute). The behavior's `wire_value()` is a u16
-        // because the IANA registry assigns 16-bit values, but the
-        // kernel's `struct seg6_local_arg` carries the action as a
-        // u32 (uapi/linux/seg6_local.h) — widen here.
+        // SEG6_LOCAL_ACTION: 4-byte u32 action code — the KERNEL's
+        // numbering (uapi/linux/seg6_local.h), translated from the
+        // IANA registry value the behavior carries (see
+        // `kernel_action_for`; iproute2 emits this same u32 via
+        // addattr32(RTA_ENCAP, SEG6_LOCAL_ACTION, action)).
         encap.extend(Self::build_rta_attribute(
             SEG6LOCAL_ACTION,
-            &(route.behavior.wire_value() as u32).to_ne_bytes(),
+            &action.code.to_ne_bytes(),
         ));
         if let Some(nh4) = route.nh4 {
             encap.extend(Self::build_rta_attribute(SEG6_LOCAL_NH4, &nh4));
@@ -1180,7 +1403,7 @@ mod tests {
     #[test]
     fn seg6local_route_build_request_shape() {
         let sid = Sid::from_str("fcbb:bb00:0:0:0:0:0:1").unwrap();
-        let route = Seg6LocalRoute::new(sid, Behavior::End).with_oif(2);
+        let route = Seg6LocalRoute::new(sid, Behavior::End).with_if_index(2);
         let req = test_netlink()
             .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
             .unwrap();
@@ -1193,7 +1416,11 @@ mod tests {
         let dst = find_attr(&req, RTA_DST).unwrap();
         assert_eq!(dst.len(), 16);
         assert_eq!(dst, sid.as_bytes());
-        // RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6_LOCAL (6).
+        // RTA_ENCAP_TYPE = LWTUNNEL_ENCAP_SEG6_LOCAL — the kernel's
+        // uapi value is 7 (6 in that position is LWTUNNEL_ENCAP_BPF,
+        // whose parser rejects SEG6_LOCAL_ACTION with EINVAL — the
+        // run-36153545939 failure).
+        assert_eq!(LWTUNNEL_ENCAP_SEG6_LOCAL, 7);
         let encap_type = find_attr(&req, RTA_ENCAP_TYPE).unwrap();
         assert_eq!(
             encap_type,
@@ -1201,7 +1428,9 @@ mod tests {
         );
         // The SEG6_LOCAL_ACTION attribute lives directly inside
         // RTA_ENCAP (not nested inside another attribute), with a
-        // 4-byte u32 payload = the behavior's wire value.
+        // 4-byte u32 payload = the KERNEL action code (End: IANA 1 →
+        // kernel 1; the identity ONLY for End — see
+        // seg6local_end_x_encodes_the_kernel_action_code).
         let encap = find_attr(&req, RTA_ENCAP).unwrap();
         let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
         assert_eq!(
@@ -1215,12 +1444,154 @@ mod tests {
             action_attr[2],
             action_attr[3],
         ]);
-        assert_eq!(action, Behavior::End.wire_value() as u32);
-        // The OIF parameter is a sibling attribute inside RTA_ENCAP.
-        let oif_attr = find_encap_attr(encap, SEG6_LOCAL_OIF).unwrap();
-        assert_eq!(oif_attr.len(), 4);
-        let oif = u32::from_ne_bytes([oif_attr[0], oif_attr[1], oif_attr[2], oif_attr[3]]);
-        assert_eq!(oif, 2);
+        assert_eq!(action, 1, "SEG6_LOCAL_ACTION_END");
+    }
+
+    #[test]
+    fn seg6local_request_matches_iproute2_wire() {
+        // Byte-for-byte conformance pin. The reference is the request
+        // iproute2 itself builds for `ip -6 route add
+        // 2001:db8:dead:beef::abcd/128 encap seg6local action End dev
+        // lo table local`, captured off the wire (strace-equivalent
+        // sendmsg dump) and accepted by a real kernel:
+        //
+        //   4c000000 18000506 <seq> <pid>
+        //   0a800000 ff030001 00000000
+        //   14000100 20010db8deadbeef000000000000abcd
+        //   0c001680 0800010001000000
+        //   06001500 07000000
+        //   08000400 01000000
+        //
+        // Attribute ORDER differs (iproute2 emits DST, ENCAP,
+        // ENCAP_TYPE, OIF; this builder emits DST, OIF, ENCAP_TYPE,
+        // ENCAP — the kernel's nla parser is order-insensitive) and
+        // the flags differ by design (iproute2 `add` requests
+        // CREATE|EXCL 0x0605; this builder requests CREATE|REPLACE
+        // 0x0505 so a re-install over an existing row replaces it —
+        // the same choice mpls_route makes). Everything else — the
+        // 76-byte length, the rtmsg, every attribute's type, length
+        // and payload — must match exactly.
+        let sid = Sid::from_str("2001:db8:dead:beef::abcd").unwrap();
+        let route = Seg6LocalRoute::new(sid, Behavior::End).with_if_index(1);
+        let req = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap();
+        let expected: Vec<u8> = [
+            // nlmsghdr: len 76, RTM_NEWROUTE, REQUEST|ACK|REPLACE|CREATE,
+            // seq 7 (test_netlink's first), pid 123.
+            &[
+                0x4c, 0x00, 0x00, 0x00, 0x18, 0x00, 0x05, 0x05, 0x07, 0x00, 0x00, 0x00, 0x7b, 0x00,
+                0x00, 0x00,
+            ][..],
+            // rtmsg: AF_INET6, dst_len 128, table LOCAL(0xff), proto
+            // RTPROT_BGP(0xba), scope UNIVERSE, type UNICAST.
+            &[
+                0x0a, 0x80, 0x00, 0x00, 0xff, 0xba, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00,
+            ][..],
+            // RTA_DST (1) = 2001:db8:dead:beef::abcd.
+            &[0x14, 0x00, 0x01, 0x00][..],
+            &[
+                0x20, 0x01, 0x0d, 0xb8, 0xde, 0xad, 0xbe, 0xef, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+                0xab, 0xcd,
+            ][..],
+            // RTA_OIF (4) = 1.
+            &[0x08, 0x00, 0x04, 0x00, 0x01, 0x00, 0x00, 0x00][..],
+            // RTA_ENCAP_TYPE (21) = 7 (LWTUNNEL_ENCAP_SEG6_LOCAL), u16
+            // payload, NLA_U16 policy form — identical to iproute2's
+            // `06 00 15 00 07 00 00 00`.
+            &[0x06, 0x00, 0x15, 0x00, 0x07, 0x00, 0x00, 0x00][..],
+            // RTA_ENCAP (22|NLA_F_NESTED) = { SEG6_LOCAL_ACTION (1) =
+            // END (1) } — identical to iproute2's
+            // `0c 00 16 80 08 00 01 00 01 00 00 00`.
+            &[
+                0x0c, 0x00, 0x16, 0x80, 0x08, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0x00,
+            ][..],
+        ]
+        .concat();
+        assert_eq!(
+            req, expected,
+            "seg6local wire bytes drifted from the \
+             iproute2-verified form — check LWTUNNEL_ENCAP_SEG6_LOCAL, the \
+             SEG6_LOCAL_* attribute numbers and the ACTION translation"
+        );
+    }
+
+    #[test]
+    fn seg6local_end_x_encodes_the_kernel_action_code() {
+        // End.X is IANA 5 but SEG6_LOCAL_ACTION_END_X is 2 — the two
+        // registries deliberately differ, and conflating them encodes
+        // a different behavior than the caller asked for.
+        assert_eq!(Behavior::EndX.wire_value(), 5);
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        let nh6 = Sid::from_str("2001:db8::1").unwrap().octets();
+        let route = Seg6LocalRoute::new(sid, Behavior::EndX)
+            .with_nh6(nh6)
+            .with_if_index(1);
+        let req = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap();
+        let encap = find_attr(&req, RTA_ENCAP).unwrap();
+        let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+        let action = u32::from_ne_bytes([
+            action_attr[0],
+            action_attr[1],
+            action_attr[2],
+            action_attr[3],
+        ]);
+        assert_eq!(action, 2, "SEG6_LOCAL_ACTION_END_X — kernel numbering");
+    }
+
+    #[test]
+    fn seg6local_rejects_stray_parameters() {
+        // The kernel's parse_nla_action answers EINVAL when an action
+        // carries a parameter its descriptor does not list: plain End
+        // accepts NO parameter attributes.
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        let route = Seg6LocalRoute::new(sid, Behavior::End).with_oif(2);
+        let err = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap_err();
+        match err {
+            Seg6RouteError::UnsupportedAction(s) => {
+                assert!(s.contains("oif"), "error names the stray parameter: {s}");
+            }
+            other => panic!("expected UnsupportedAction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn seg6local_rejects_missing_required_parameters() {
+        // End.X mandates NH6 in the kernel's descriptor — an End.X
+        // route without it would install nothing and EINVAL at the
+        // kernel instead.
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        let route = Seg6LocalRoute::new(sid, Behavior::EndX);
+        let err = test_netlink()
+            .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+            .unwrap_err();
+        match err {
+            Seg6RouteError::UnsupportedAction(s) => {
+                assert!(s.contains("nh6"), "error names the missing parameter: {s}");
+            }
+            other => panic!("expected UnsupportedAction, got {:?}", other),
+        }
+    }
+
+    #[test]
+    fn seg6local_rejects_kernel_unimplemented_behaviors() {
+        // Flavor variants (End.PSP etc.) have no seg6_action_table
+        // descriptor — encoding them would be a guaranteed EINVAL.
+        let sid = Sid::from_str("fcbb:bb00::1").unwrap();
+        for behavior in [Behavior::EndPsp, Behavior::EndDT46, Behavior::EndBM] {
+            let route = Seg6LocalRoute::new(sid, behavior);
+            let err = test_netlink()
+                .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
+                .unwrap_err();
+            assert!(
+                matches!(err, Seg6RouteError::UnsupportedAction(_)),
+                "{behavior} should be rejected before the wire"
+            );
+        }
     }
 
     #[test]
@@ -1232,9 +1603,14 @@ mod tests {
             .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
             .unwrap();
         let encap = find_attr(&req, RTA_ENCAP).unwrap();
-        // SEG6_LOCAL_NH4 is a sibling attribute inside RTA_ENCAP.
+        // SEG6_LOCAL_NH4 (kernel uapi type 4) is a sibling attribute
+        // inside RTA_ENCAP.
+        assert_eq!(SEG6_LOCAL_NH4, 4);
         let nh4_attr = find_encap_attr(encap, SEG6_LOCAL_NH4).unwrap();
         assert_eq!(nh4_attr, &nh4);
+        // End.DX4: IANA 17 → SEG6_LOCAL_ACTION_END_DX4 (6).
+        let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+        assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 6);
     }
 
     #[test]
@@ -1246,8 +1622,12 @@ mod tests {
             .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
             .unwrap();
         let encap = find_attr(&req, RTA_ENCAP).unwrap();
+        assert_eq!(SEG6_LOCAL_NH6, 5);
         let nh6_attr = find_encap_attr(encap, SEG6_LOCAL_NH6).unwrap();
         assert_eq!(nh6_attr, &nh6);
+        // End.DX6: IANA 16 → SEG6_LOCAL_ACTION_END_DX6 (5).
+        let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+        assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 5);
     }
 
     #[test]
@@ -1258,10 +1638,16 @@ mod tests {
             .build_seg6local_request(RTM_NEWROUTE, ADD_ROUTE_FLAGS, &route)
             .unwrap();
         let encap = find_attr(&req, RTA_ENCAP).unwrap();
+        // SEG6_LOCAL_TABLE is kernel uapi type 3 (the enum order is
+        // UNSPEC, ACTION, SRH, TABLE, NH4, NH6, IIF, OIF, …).
+        assert_eq!(SEG6_LOCAL_TABLE, 3);
         let table_attr = find_encap_attr(encap, SEG6_LOCAL_TABLE).unwrap();
         let table =
             u32::from_ne_bytes([table_attr[0], table_attr[1], table_attr[2], table_attr[3]]);
         assert_eq!(table, 100);
+        // End.DT6: IANA 18 → SEG6_LOCAL_ACTION_END_DT6 (7).
+        let action_attr = find_encap_attr(encap, SEG6LOCAL_ACTION).unwrap();
+        assert_eq!(u32::from_ne_bytes(action_attr.try_into().unwrap()), 7);
     }
 
     #[test]

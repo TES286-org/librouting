@@ -337,3 +337,119 @@ fn seg6local_route_installs_into_kernel_local_table() {
     );
     let _ = nl.delete_seg6local_route(sid);
 }
+
+/// The parameterised path: End.X (IANA 5) installs with the kernel's
+/// `SEG6_LOCAL_ACTION_END_X` code (2) and its mandatory `nh6`
+/// parameter riding as `SEG6_LOCAL_NH6` — proving the IANA→kernel
+/// action translation and the parameter attribute numbering against
+/// the real parser, not just the byte pins in the unit tests.
+#[test]
+#[ignore = "kernel-gated: requires seg6_enabled=1 + CAP_NET_ADMIN (run as root or in a rootless netns)"]
+fn seg6local_end_x_with_nh6_installs_into_kernel_local_table() {
+    if let Some(reason) = kernel_unavailable() {
+        eprintln!("SKIP: {}", reason);
+        return;
+    }
+
+    let mut nl = match Seg6Netlink::connect() {
+        Ok(nl) => nl,
+        Err(e) => {
+            if is_privilege_error(&e) {
+                eprintln!("SKIP: Seg6Netlink::connect returned EPERM (run as root or in a rootless netns)");
+                return;
+            }
+            panic!("Seg6Netlink::connect failed unexpectedly: {}", e);
+        }
+    };
+
+    // An End.X SID with a documentation-prefix next hop (RFC 3849).
+    // The egress device is the route-level loopback (RTA_OIF); the
+    // nh6 is the ACTION's forwarding parameter (SEG6_LOCAL_NH6).
+    let sid = Sid::from_str("2001:db8:dead:beef::beef").unwrap();
+    let nh6 = Sid::from_str("2001:db8:feed::1").unwrap().octets();
+    let route = Seg6LocalRoute::new(sid, Behavior::EndX)
+        .with_nh6(nh6)
+        .with_if_index(loopback_ifindex());
+
+    let res = nl.add_seg6local_route(&route);
+    if let Err(e) = &res {
+        if is_privilege_error(e) {
+            eprintln!(
+                "SKIP: add_seg6local_route returned EPERM (run as root or in a rootless netns)"
+            );
+            return;
+        }
+        eprintln!("add_seg6local_route failed: {}\n{}", e, show_seg6_routes());
+        if let Some(req) = nl.last_request_bytes() {
+            eprintln!(
+                "rejected request ({} bytes): {}",
+                req.len(),
+                req.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+        if let Some(resp) = nl.last_response_bytes() {
+            eprintln!(
+                "kernel reply ({} bytes): {}",
+                resp.len(),
+                resp.iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join("")
+            );
+        }
+        eprintln!(
+            "iproute2 contrast: {}",
+            ip_verbose(&[
+                "-6",
+                "route",
+                "add",
+                "2001:db8:dead:beef::beef",
+                "encap",
+                "seg6local",
+                "action",
+                "End.X",
+                "nh6",
+                "2001:db8:feed::1",
+                "table",
+                "local",
+                "dev",
+                "lo",
+            ])
+        );
+        let _ = Command::new("ip")
+            .args([
+                "-6",
+                "route",
+                "del",
+                "2001:db8:dead:beef::beef",
+                "table",
+                "local",
+            ])
+            .status();
+    }
+    let _ = nl.delete_seg6local_route(sid);
+    res.expect("seg6local End.X route should install into the kernel");
+
+    nl.add_seg6local_route(&route)
+        .expect("re-install seg6local End.X route");
+    let local_table = ip(&["-6", "route", "show", "table", "local"]);
+    assert!(
+        local_table.contains("2001:db8:dead:beef::beef"),
+        "seg6local End.X SID missing from local table:\n{}",
+        local_table
+    );
+    assert!(
+        local_table.contains("End.X"),
+        "End.X action not displayed by `ip route`:\n{}",
+        local_table
+    );
+    assert!(
+        local_table.contains("2001:db8:feed::1"),
+        "End.X nh6 parameter not displayed by `ip route`:\n{}",
+        local_table
+    );
+    let _ = nl.delete_seg6local_route(sid);
+}

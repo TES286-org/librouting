@@ -78,6 +78,57 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed (SRv6 kernel route installation)
 
+- **`seg6local` routes install again — the encap type is 7, not 6.**
+  `LWTUNNEL_ENCAP_SEG6_LOCAL` is the 8th member of the kernel's uapi
+  enum (`NONE, MPLS, IP, ILA, IP6, SEG6, BPF, SEG6_LOCAL, …`); the
+  constant carried 6, which is `LWTUNNEL_ENCAP_BPF`. The kernel
+  therefore dispatched the nested `RTA_ENCAP` payload to the BPF
+  parser, whose `LWT_BPF_IN` policy (attr 1 — the same number as
+  `SEG6_LOCAL_ACTION`) rejected the 4-byte action payload with
+  EINVAL (run 36153545939: every `End` install failed while
+  iproute2's byte-identical save for the encap type succeeded). The
+  fix is verified byte-for-byte: a new conformance test pins the
+  full request against the bytes iproute2 itself sends for
+  `ip route add … encap seg6local action End dev lo table local`,
+  captured off the wire with an sendmsg dump.
+- **The `SEG6_LOCAL_*` parameter attributes ride the kernel's uapi
+  numbers, and the ACTION carries the kernel's numbering — not
+  IANA's.** Two further numbering conflation bugs surfaced behind
+  the encap type: the parameter attributes were shifted three
+  places off the kernel enum order (`NH4=2/NH6=3/IIF=4/OIF=5/
+  TABLE=6` instead of the uapi's `TABLE=3/NH4=4/NH6=5/IIF=6/OIF=7`),
+  and the ACTION payload embedded the *IANA* behavior value where
+  the kernel expects its own `SEG6_LOCAL_ACTION_*` code (identical
+  only for `End`; `End.X` is IANA 5 but kernel 2). Both are fixed by
+  an explicit IANA→kernel translation table modelled on the
+  kernel's `seg6_action_table` (net/ipv6/seg6_local.c), which also
+  carries each action's required/tolerated parameter set — a route
+  violating the contract (e.g. `End` with a stray `oif`, or `End.X`
+  without its mandatory `nh6`) now fails locally with
+  `Seg6RouteError::UnsupportedAction` naming the parameter, instead
+  of a bare kernel `EINVAL` after the round trip. Behaviors the
+  kernel's table does not implement (PSP/USP/USD flavors, the .Red
+  variants, End.DT46's VRFTABLE contract, …) are rejected the same
+  way rather than mis-encoded. The kernel-gated suite gains an
+  `End.X` + `nh6` install test, so the parameterised path is proven
+  against the real parser, not just the byte pins.
+- **`lr_srv6::Behavior` now carries the real IANA registry.** The
+  enum's discriminants were a mis-remembered table: everything from
+  13 on was shifted (it modelled `End.DX6=13` where the registry
+  assigns `End.B6.Insert=13` … `End.DT2M=24`, with the B6 family at
+  13-15 and the DX/DT family at 16-24), `End.S`/`End.Un`/
+  `End.X.PS`/`End.X.PSU`/`End.T.PS`/`End.T.PSU` were invented
+  entries (the registry has no such assignments), and the
+  PSP/USP/USD flavors were a flat `2/3/4` scheme where the registry
+  assigns distinct values through 39. The rework models the 38
+  RFC 8986 assignments exactly (1-24, 26-39; 25 is Reserved) and
+  is verified against the live registry table line-by-line in a
+  unit test. `from_wire` for unassigned values still returns
+  `None` — the RFC 8986 §4.19 "treat as End.Un" policy stays with
+  the caller, where it belongs. BREAKING CHANGE for anyone matching
+  the removed variants or depending on the wrong discriminants;
+  the kernel bridge (`lr-osroute::seg6_route`) is the only in-tree
+  consumer and now translates explicitly.
 - **The SRH Routing Type is 4, not 43 — every encoded SRH was
   malformed and every decoded one rejected.** RFC 8754 §2 assigns
   Routing Type 4 to Segment Routing (IANA's "IPv6 Routing Types"
