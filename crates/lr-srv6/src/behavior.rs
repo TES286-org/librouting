@@ -8,33 +8,45 @@
 //! as a Rust enum so callers can match on the behavior in `match`
 //! expressions instead of comparing magic numbers.
 //!
-//! ## Naming
+//! ## Two numbering universes (read this before touching the wire)
 //!
-//! The behaviors are named exactly as in the RFC: `End`, `End.X`,
-//! `End.DX6`, etc. The crate does NOT use the IETF-style underscore
-//! replacements (`End_X`) — RFC 8986 uses the dot notation in its
-//! text and the IANA registry uses the same. Where Rust identifiers
-//! disallow dots, we use a trailing underscore: `End_X` on the wire
-//! is `End.X`.
+//! The IANA registry and the Linux kernel's `seg6local` netlink API
+//! number the *same* behaviors differently:
+//!
+//! | Behavior   | IANA | Linux `SEG6_LOCAL_ACTION_*` |
+//! |------------|------|------------------------------|
+//! | End        | 1    | 1                            |
+//! | End.X      | 5    | 2                            |
+//! | End.T      | 9    | 3                            |
+//! | End.DX6    | 16   | 5                            |
+//! | End.DX4    | 17   | 6                            |
+//! | End.DT6    | 18   | 7                            |
+//!
+//! The IANA values ride in control-plane identifiers (BGP-LS SRv6 SID
+//! TLVs, SR Policy descriptors, the SID's FUNCT field). The kernel
+//! values ride only in the `SEG6_LOCAL_ACTION` netlink attribute.
+//! `lr-osroute::seg6_route` owns the translation between the two;
+//! this crate must never encode a kernel value.
+//!
+//! The enum below carries the **IANA** values, verified line-by-line
+//! against the live registry
+//! (`https://www.iana.org/assignments/segment-routing/`): RFC 8986
+//! assigned the contiguous block 1–24 plus 26–39 (25 is Reserved);
+//! later RFCs appended from 40 (End.MAP/End.Limit, RFC 9433; the
+//! NEXT-CSID family, RFC 9800). Unassigned values are `None` from
+//! [`Behavior::from_wire`]; RFC 8986 §4.19 says the data plane treats
+//! them as "End.Un" (count and drop), which is a *policy*, not a
+//! registry value, so no variant is synthesized for it.
 //!
 //! ## PSP / USP / USD flavors
 //!
-//! RFC 8986 §4.16 introduces three flavors of the same behavior:
-//!
-//! - **PSP** (Penultimate Segment Pop): the SRH is removed one hop
-//!   before the segment's own endpoint.
-//! - **USP** (Ultimate Segment Pop): the SRH is removed at the
-//!   segment's own endpoint (the last hop).
-//! - **USD** (Ultimate Segment Decap): the inner packet is
-//!   decapsulated at the segment's own endpoint.
-//!
-//! The flavors are encoded in the low-order bits of the 16-bit
-//! behavior value (RFC 8986 §9.2 — see the IANA registry's "Flavor"
-//! column). The crate exposes them as separate enum variants
-//! (`EndPsp`, `EndX.Psp` etc.) because the wire format reserves the
-//! low bits of the behavior value for the flavor — but the registry
-//! only assigns values to the few combinations that appear in the
-//! spec, so we enumerate them directly.
+//! RFC 8986 §4.16 defines three flavors; the registry assigns a
+//! distinct value to each base+flavor combination that appears in the
+//! spec (`End with PSP` = 2, `End.X with USP` = 7, … through
+//! `End.T with PSP, USP & USD` = 39). The crate models each assigned
+//! combination as its own variant, mirroring the registry's flat
+//! structure, and exposes [`Behavior::is_psp`] / [`is_usp`] /
+//! [`Behavior::is_usd`] classifiers for the flavor bits.
 
 use core::fmt;
 
@@ -44,7 +56,8 @@ use core::fmt;
 /// The discriminant of each variant is the wire value (lower 16 bits
 /// for the behavior, encoded as `behavior_value` via
 /// [`Behavior::wire_value`]). The wire values match the IANA registry
-/// exactly — the crate does not synthesize new ones.
+/// exactly — the crate does not synthesize new ones. Value 25 is
+/// Reserved by the registry and deliberately has no variant.
 ///
 /// The 16-bit form on the wire is `<behavior_value:16>` (RFC 8986
 /// §4 — the function field of a SID is wide enough to carry the
@@ -60,79 +73,94 @@ pub enum Behavior {
     EndPsp = 2,
     /// End with USP (Ultimate Segment Pop) (RFC 8986 §4.1 + §4.16).
     EndUsp = 3,
-    /// End with USD (Ultimate Segment Decap) (RFC 8986 §4.1 + §4.16).
-    EndUsd = 4,
+    /// End with PSP & USP (RFC 8986 §4.1 + §4.16).
+    EndPspUsp = 4,
     /// End.X — Layer-3 cross-connect to a specific next hop (RFC 8986
     /// §4.2). Identical to `End` but forwards out a specific
     /// adjacency, not the IGP next-hop.
     EndX = 5,
-    /// End.X with PSP.
+    /// End.X with PSP (RFC 8986 §4.2 + §4.16).
     EndXPsp = 6,
-    /// End.X with USP.
+    /// End.X with USP (RFC 8986 §4.2 + §4.16).
     EndXUsp = 7,
-    /// End.X with USD.
-    EndXUsd = 8,
+    /// End.X with PSP & USP (RFC 8986 §4.2 + §4.16).
+    EndXPspUsp = 8,
     /// End.T — Layer-3 cross-connect to a specific table (RFC 8986
     /// §4.3). Forwards the packet by looking it up in a specific
     /// routing table.
     EndT = 9,
-    /// End.T with PSP.
+    /// End.T with PSP (RFC 8986 §4.3 + §4.16).
     EndTPsp = 10,
-    /// End.T with USP.
+    /// End.T with USP (RFC 8986 §4.3 + §4.16).
     EndTUsp = 11,
-    /// End.T with USD.
-    EndTUsd = 12,
-    /// End.DX6 — decap and L3 cross-connect to an IPv6 next hop
-    /// (RFC 8986 §4.5).
-    EndDX6 = 13,
-    /// End.DX4 — decap and L3 cross-connect to an IPv4 next hop
-    /// (RFC 8986 §4.6).
-    EndDX4 = 14,
-    /// End.DT6 — decap and L3 table lookup for IPv6 (RFC 8986 §4.7).
-    EndDT6 = 15,
-    /// End.DT4 — decap and L3 table lookup for IPv4 (RFC 8986 §4.8).
-    EndDT4 = 16,
-    /// End.DT46 — decap and L3 table lookup for both IPv4 and IPv6
-    /// (RFC 8986 §4.9).
-    EndDT46 = 17,
-    /// End.DX2 — decap and L2 cross-connect (RFC 8986 §4.10).
-    EndDX2 = 18,
-    /// End.DX2V — decap and L2 cross-connect to a VLAN (RFC 8986
-    /// §4.11).
-    EndDX2V = 19,
-    /// End.DT2U — decap and L2 table lookup for unicast (RFC 8986
-    /// §4.12).
-    EndDT2U = 20,
-    /// End.DT2M — decap and L2 table lookup for multicast (RFC 8986
-    /// §4.13).
-    EndDT2M = 21,
+    /// End.T with PSP & USP (RFC 8986 §4.3 + §4.16).
+    EndTPspUsp = 12,
+    /// End.B6.Insert — SRH insertion (RFC 8986 §4.14). The endpoint
+    /// inserts the specified SRH into the packet.
+    EndB6Insert = 13,
     /// End.B6.Encaps — SRH encapsulation (RFC 8986 §4.14). The
     /// endpoint adds an outer IPv6 header with an SRH.
-    EndB6Encaps = 22,
+    EndB6Encaps = 14,
+    /// End.BM — SR-MPLS insertion (RFC 8986 §4.15).
+    EndBM = 15,
+    /// End.DX6 — decap and L3 cross-connect to an IPv6 next hop
+    /// (RFC 8986 §4.5).
+    EndDX6 = 16,
+    /// End.DX4 — decap and L3 cross-connect to an IPv4 next hop
+    /// (RFC 8986 §4.6).
+    EndDX4 = 17,
+    /// End.DT6 — decap and L3 table lookup for IPv6 (RFC 8986 §4.7).
+    EndDT6 = 18,
+    /// End.DT4 — decap and L3 table lookup for IPv4 (RFC 8986 §4.8).
+    EndDT4 = 19,
+    /// End.DT46 — decap and L3 table lookup for both IPv4 and IPv6
+    /// (RFC 8986 §4.9).
+    EndDT46 = 20,
+    /// End.DX2 — decap and L2 cross-connect (RFC 8986 §4.10).
+    EndDX2 = 21,
+    /// End.DX2V — decap and L2 cross-connect to a VLAN (RFC 8986
+    /// §4.11).
+    EndDX2V = 22,
+    /// End.DT2U — decap and L2 table lookup for unicast (RFC 8986
+    /// §4.12).
+    EndDT2U = 23,
+    /// End.DT2M — decap and L2 table lookup for multicast (RFC 8986
+    /// §4.13).
+    EndDT2M = 24,
+    // 25 is Reserved by the IANA registry — deliberately no variant.
+    /// End.B6.Insert.Red — SRH insertion with reduced SRH (RFC 8986
+    /// §4.14 + RFC 8754 §4.3.1).
+    EndB6InsertRed = 26,
     /// End.B6.Encaps.Red — SRH encapsulation with reduced SRH (RFC
     /// 8986 §4.14 + RFC 8754 §4.3.1).
-    EndB6EncapsRed = 23,
-    /// End.BM — SR-MPLS insertion (RFC 8986 §4.15).
-    EndBM = 24,
-    /// End.S — SRH inspection (RFC 8986 §4.17).
-    EndS = 25,
-    /// End.B6.Insert — SRH insertion (RFC 8986 §4.18).
-    EndB6Insert = 26,
-    /// End.B6.Insert.Red — SRH insertion with reduced SRH (RFC 8986
-    /// §4.18 + RFC 8754 §4.3.1).
-    EndB6InsertRed = 27,
-    /// End.Un — unknown SID behavior (RFC 8986 §4.19).
-    EndUn = 28,
-    /// End.X.PS — End.X with per-flow steering (RFC 8986 §4.20).
-    EndXPS = 29,
-    /// End.X.PSU — End.X with per-flow steering, unicast mode (RFC
-    /// 8986 §4.20).
-    EndXPSU = 30,
-    /// End.T.PS — End.T with per-flow steering (RFC 8986 §4.21).
-    EndTPS = 31,
-    /// End.T.PSU — End.T with per-flow steering, unicast mode (RFC
-    /// 8986 §4.21).
-    EndTPSU = 32,
+    EndB6EncapsRed = 27,
+    /// End with USD (Ultimate Segment Decap) (RFC 8986 §4.1 + §4.16).
+    EndUsd = 28,
+    /// End with PSP & USD (RFC 8986 §4.1 + §4.16).
+    EndPspUsd = 29,
+    /// End with USP & USD (RFC 8986 §4.1 + §4.16).
+    EndUspUsd = 30,
+    /// End with PSP, USP & USD (RFC 8986 §4.1 + §4.16).
+    EndPspUspUsd = 31,
+    /// End.X with USD (RFC 8986 §4.2 + §4.16).
+    EndXUsd = 32,
+    /// End.X with PSP & USD (RFC 8986 §4.2 + §4.16).
+    EndXPspUsd = 33,
+    /// End.X with USP & USD (RFC 8986 §4.2 + §4.16).
+    EndXUspUsd = 34,
+    /// End.X with PSP, USP & USD (RFC 8986 §4.2 + §4.16).
+    EndXPspUspUsd = 35,
+    /// End.T with USD (RFC 8986 §4.3 + §4.16).
+    EndTUsd = 36,
+    /// End.T with PSP & USD (RFC 8986 §4.3 + §4.16).
+    EndTPspUsd = 37,
+    /// End.T with USP & USD (RFC 8986 §4.3 + §4.16).
+    EndTUspUsd = 38,
+    /// End.T with PSP, USP & USD (RFC 8986 §4.3 + §4.16).
+    EndTPspUspUsd = 39,
+    // Later RFC assignments (40 End.MAP / 41 End.Limit — RFC 9433;
+    // the NEXT-CSID family — RFC 9800) are not modelled yet; add them
+    // here with their registry values when needed.
 }
 
 impl Behavior {
@@ -142,69 +170,78 @@ impl Behavior {
     }
 
     /// Look up a behavior by its 16-bit wire value. Returns `None`
-    /// for unassigned values (RFC 8986 §9.2 — the registry is sparse;
-    /// unassigned values MUST be treated as `End.Un` per §4.19, but
-    /// the crate leaves that policy to the caller).
+    /// for unassigned values (RFC 8986 §9.2 — the registry is sparse:
+    /// 0 is invalid, 25 is Reserved, and everything ≥ 40 currently
+    /// unassigned by this crate is either a later-RFC assignment the
+    /// crate does not model or genuinely unallocated; both MUST be
+    /// treated as `End.Un` per §4.19 by data-plane policy, but the
+    /// crate leaves that decision to the caller).
     pub fn from_wire(v: u16) -> Option<Self> {
-        // Match on the literal value because `Self as u16` is not
-        // available in `const fn` for enums with explicit
-        // discriminants in stable Rust until 1.85+. We list every
-        // variant explicitly so a future RFC 8986 bis assignment can
-        // be added in one place.
+        // Match on the literal value so the mapping stays a
+        // reviewable transcript of the registry itself.
         Some(match v {
             1 => Self::End,
             2 => Self::EndPsp,
             3 => Self::EndUsp,
-            4 => Self::EndUsd,
+            4 => Self::EndPspUsp,
             5 => Self::EndX,
             6 => Self::EndXPsp,
             7 => Self::EndXUsp,
-            8 => Self::EndXUsd,
+            8 => Self::EndXPspUsp,
             9 => Self::EndT,
             10 => Self::EndTPsp,
             11 => Self::EndTUsp,
-            12 => Self::EndTUsd,
-            13 => Self::EndDX6,
-            14 => Self::EndDX4,
-            15 => Self::EndDT6,
-            16 => Self::EndDT4,
-            17 => Self::EndDT46,
-            18 => Self::EndDX2,
-            19 => Self::EndDX2V,
-            20 => Self::EndDT2U,
-            21 => Self::EndDT2M,
-            22 => Self::EndB6Encaps,
-            23 => Self::EndB6EncapsRed,
-            24 => Self::EndBM,
-            25 => Self::EndS,
-            26 => Self::EndB6Insert,
-            27 => Self::EndB6InsertRed,
-            28 => Self::EndUn,
-            29 => Self::EndXPS,
-            30 => Self::EndXPSU,
-            31 => Self::EndTPS,
-            32 => Self::EndTPSU,
+            12 => Self::EndTPspUsp,
+            13 => Self::EndB6Insert,
+            14 => Self::EndB6Encaps,
+            15 => Self::EndBM,
+            16 => Self::EndDX6,
+            17 => Self::EndDX4,
+            18 => Self::EndDT6,
+            19 => Self::EndDT4,
+            20 => Self::EndDT46,
+            21 => Self::EndDX2,
+            22 => Self::EndDX2V,
+            23 => Self::EndDT2U,
+            24 => Self::EndDT2M,
+            26 => Self::EndB6InsertRed,
+            27 => Self::EndB6EncapsRed,
+            28 => Self::EndUsd,
+            29 => Self::EndPspUsd,
+            30 => Self::EndUspUsd,
+            31 => Self::EndPspUspUsd,
+            32 => Self::EndXUsd,
+            33 => Self::EndXPspUsd,
+            34 => Self::EndXUspUsd,
+            35 => Self::EndXPspUspUsd,
+            36 => Self::EndTUsd,
+            37 => Self::EndTPspUsd,
+            38 => Self::EndTUspUsd,
+            39 => Self::EndTPspUspUsd,
             _ => return None,
         })
     }
 
-    /// The behavior's mnemonic name as it appears in RFC 8986
-    /// (e.g. `End`, `End.X`, `End.DX6`). Useful for logs and config
-    /// files — the IANA registry uses these names verbatim.
+    /// The behavior's mnemonic name exactly as the IANA registry
+    /// spells it (e.g. `End`, `End.X`, `End with PSP`, `End.DX6`).
+    /// Useful for logs and config files.
     pub const fn name(self) -> &'static str {
         match self {
             Self::End => "End",
-            Self::EndPsp => "End.PSP",
-            Self::EndUsp => "End.USP",
-            Self::EndUsd => "End.USD",
+            Self::EndPsp => "End with PSP",
+            Self::EndUsp => "End with USP",
+            Self::EndPspUsp => "End with PSP & USP",
             Self::EndX => "End.X",
-            Self::EndXPsp => "End.X.PSP",
-            Self::EndXUsp => "End.X.USP",
-            Self::EndXUsd => "End.X.USD",
+            Self::EndXPsp => "End.X with PSP",
+            Self::EndXUsp => "End.X with USP",
+            Self::EndXPspUsp => "End.X with PSP & USP",
             Self::EndT => "End.T",
-            Self::EndTPsp => "End.T.PSP",
-            Self::EndTUsp => "End.T.USP",
-            Self::EndTUsd => "End.T.USD",
+            Self::EndTPsp => "End.T with PSP",
+            Self::EndTUsp => "End.T with USP",
+            Self::EndTPspUsp => "End.T with PSP & USP",
+            Self::EndB6Insert => "End.B6.Insert",
+            Self::EndB6Encaps => "End.B6.Encaps",
+            Self::EndBM => "End.BM",
             Self::EndDX6 => "End.DX6",
             Self::EndDX4 => "End.DX4",
             Self::EndDT6 => "End.DT6",
@@ -214,38 +251,84 @@ impl Behavior {
             Self::EndDX2V => "End.DX2V",
             Self::EndDT2U => "End.DT2U",
             Self::EndDT2M => "End.DT2M",
-            Self::EndB6Encaps => "End.B6.Encaps",
-            Self::EndB6EncapsRed => "End.B6.Encaps.Red",
-            Self::EndBM => "End.BM",
-            Self::EndS => "End.S",
-            Self::EndB6Insert => "End.B6.Insert",
             Self::EndB6InsertRed => "End.B6.Insert.Red",
-            Self::EndUn => "End.Un",
-            Self::EndXPS => "End.X.PS",
-            Self::EndXPSU => "End.X.PSU",
-            Self::EndTPS => "End.T.PS",
-            Self::EndTPSU => "End.T.PSU",
+            Self::EndB6EncapsRed => "End.B6.Encaps.Red",
+            Self::EndUsd => "End with USD",
+            Self::EndPspUsd => "End with PSP & USD",
+            Self::EndUspUsd => "End with USP & USD",
+            Self::EndPspUspUsd => "End with PSP, USP & USD",
+            Self::EndXUsd => "End.X with USD",
+            Self::EndXPspUsd => "End.X with PSP & USD",
+            Self::EndXUspUsd => "End.X with USP & USD",
+            Self::EndXPspUspUsd => "End.X with PSP, USP & USD",
+            Self::EndTUsd => "End.T with USD",
+            Self::EndTPspUsd => "End.T with PSP & USD",
+            Self::EndTUspUsd => "End.T with USP & USD",
+            Self::EndTPspUspUsd => "End.T with PSP, USP & USD",
         }
     }
 
-    /// True when the behavior is a PSP variant (RFC 8986 §4.16 —
-    /// Penultimate Segment Pop, the SRH is removed one hop before
-    /// the endpoint).
+    /// True when the behavior carries the PSP flavor (RFC 8986
+    /// §4.16 — Penultimate Segment Pop, the SRH is removed one hop
+    /// before the endpoint).
     pub const fn is_psp(self) -> bool {
-        matches!(self, Self::EndPsp | Self::EndXPsp | Self::EndTPsp)
+        matches!(
+            self,
+            Self::EndPsp
+                | Self::EndPspUsp
+                | Self::EndPspUsd
+                | Self::EndPspUspUsd
+                | Self::EndXPsp
+                | Self::EndXPspUsp
+                | Self::EndXPspUsd
+                | Self::EndXPspUspUsd
+                | Self::EndTPsp
+                | Self::EndTPspUsp
+                | Self::EndTPspUsd
+                | Self::EndTPspUspUsd
+        )
     }
 
-    /// True when the behavior is a USP variant (RFC 8986 §4.16 —
-    /// Ultimate Segment Pop, the SRH is removed at the endpoint).
+    /// True when the behavior carries the USP flavor (RFC 8986
+    /// §4.16 — Ultimate Segment Pop, the SRH is removed at the
+    /// endpoint).
     pub const fn is_usp(self) -> bool {
-        matches!(self, Self::EndUsp | Self::EndXUsp | Self::EndTUsp)
+        matches!(
+            self,
+            Self::EndUsp
+                | Self::EndPspUsp
+                | Self::EndUspUsd
+                | Self::EndPspUspUsd
+                | Self::EndXUsp
+                | Self::EndXPspUsp
+                | Self::EndXUspUsd
+                | Self::EndXPspUspUsd
+                | Self::EndTUsp
+                | Self::EndTPspUsp
+                | Self::EndTUspUsd
+                | Self::EndTPspUspUsd
+        )
     }
 
-    /// True when the behavior is a USD variant (RFC 8986 §4.16 —
-    /// Ultimate Segment Decap, the inner packet is decapsulated
-    /// at the endpoint).
+    /// True when the behavior carries the USD flavor (RFC 8986
+    /// §4.16 — Ultimate Segment Decap, the inner packet is
+    /// decapsulated at the endpoint).
     pub const fn is_usd(self) -> bool {
-        matches!(self, Self::EndUsd | Self::EndXUsd | Self::EndTUsd)
+        matches!(
+            self,
+            Self::EndUsd
+                | Self::EndPspUsd
+                | Self::EndUspUsd
+                | Self::EndPspUspUsd
+                | Self::EndXUsd
+                | Self::EndXPspUsd
+                | Self::EndXUspUsd
+                | Self::EndXPspUspUsd
+                | Self::EndTUsd
+                | Self::EndTPspUsd
+                | Self::EndTUspUsd
+                | Self::EndTPspUspUsd
+        )
     }
 
     /// True when the behavior decapsulates a packet (End.D* family,
@@ -273,7 +356,11 @@ impl Behavior {
             Self::EndX
                 | Self::EndXPsp
                 | Self::EndXUsp
+                | Self::EndXPspUsp
                 | Self::EndXUsd
+                | Self::EndXPspUsd
+                | Self::EndXUspUsd
+                | Self::EndXPspUspUsd
                 | Self::EndDX6
                 | Self::EndDX4
                 | Self::EndDX2
@@ -289,7 +376,11 @@ impl Behavior {
             Self::EndT
                 | Self::EndTPsp
                 | Self::EndTUsp
+                | Self::EndTPspUsp
                 | Self::EndTUsd
+                | Self::EndTPspUsd
+                | Self::EndTUspUsd
+                | Self::EndTPspUspUsd
                 | Self::EndDT6
                 | Self::EndDT4
                 | Self::EndDT46
@@ -309,60 +400,88 @@ impl fmt::Display for Behavior {
 mod tests {
     use super::*;
 
-    #[test]
-    fn behavior_wire_values_match_rfc_8986_iana_registry() {
-        // Spot-check every variant against RFC 8986 §9.2's IANA
-        // registry. The crate uses the same numeric assignment, so a
-        // future RFC 8986 bis reassignment would surface as a test
-        // failure here.
-        assert_eq!(Behavior::End.wire_value(), 1);
-        assert_eq!(Behavior::EndPsp.wire_value(), 2);
-        assert_eq!(Behavior::EndUsp.wire_value(), 3);
-        assert_eq!(Behavior::EndUsd.wire_value(), 4);
-        assert_eq!(Behavior::EndX.wire_value(), 5);
-        assert_eq!(Behavior::EndXPsp.wire_value(), 6);
-        assert_eq!(Behavior::EndXUsp.wire_value(), 7);
-        assert_eq!(Behavior::EndXUsd.wire_value(), 8);
-        assert_eq!(Behavior::EndT.wire_value(), 9);
-        assert_eq!(Behavior::EndTPsp.wire_value(), 10);
-        assert_eq!(Behavior::EndTUsp.wire_value(), 11);
-        assert_eq!(Behavior::EndTUsd.wire_value(), 12);
-        assert_eq!(Behavior::EndDX6.wire_value(), 13);
-        assert_eq!(Behavior::EndDX4.wire_value(), 14);
-        assert_eq!(Behavior::EndDT6.wire_value(), 15);
-        assert_eq!(Behavior::EndDT4.wire_value(), 16);
-        assert_eq!(Behavior::EndDT46.wire_value(), 17);
-        assert_eq!(Behavior::EndDX2.wire_value(), 18);
-        assert_eq!(Behavior::EndDX2V.wire_value(), 19);
-        assert_eq!(Behavior::EndDT2U.wire_value(), 20);
-        assert_eq!(Behavior::EndDT2M.wire_value(), 21);
-        assert_eq!(Behavior::EndB6Encaps.wire_value(), 22);
-        assert_eq!(Behavior::EndB6EncapsRed.wire_value(), 23);
-        assert_eq!(Behavior::EndBM.wire_value(), 24);
-        assert_eq!(Behavior::EndS.wire_value(), 25);
-        assert_eq!(Behavior::EndB6Insert.wire_value(), 26);
-        assert_eq!(Behavior::EndB6InsertRed.wire_value(), 27);
-        assert_eq!(Behavior::EndUn.wire_value(), 28);
-        assert_eq!(Behavior::EndXPS.wire_value(), 29);
-        assert_eq!(Behavior::EndXPSU.wire_value(), 30);
-        assert_eq!(Behavior::EndTPS.wire_value(), 31);
-        assert_eq!(Behavior::EndTPSU.wire_value(), 32);
-    }
+    /// Every assigned value in RFC 8986's block, checked against the
+    /// live IANA registry (segment-routing page, "SRv6 Endpoint
+    /// Behaviors" table). 25 is Reserved and MUST stay absent.
+    const RFC_8986_ASSIGNMENTS: &[(u16, &str)] = &[
+        (1, "End"),
+        (2, "End with PSP"),
+        (3, "End with USP"),
+        (4, "End with PSP & USP"),
+        (5, "End.X"),
+        (6, "End.X with PSP"),
+        (7, "End.X with USP"),
+        (8, "End.X with PSP & USP"),
+        (9, "End.T"),
+        (10, "End.T with PSP"),
+        (11, "End.T with USP"),
+        (12, "End.T with PSP & USP"),
+        (13, "End.B6.Insert"),
+        (14, "End.B6.Encaps"),
+        (15, "End.BM"),
+        (16, "End.DX6"),
+        (17, "End.DX4"),
+        (18, "End.DT6"),
+        (19, "End.DT4"),
+        (20, "End.DT46"),
+        (21, "End.DX2"),
+        (22, "End.DX2V"),
+        (23, "End.DT2U"),
+        (24, "End.DT2M"),
+        (26, "End.B6.Insert.Red"),
+        (27, "End.B6.Encaps.Red"),
+        (28, "End with USD"),
+        (29, "End with PSP & USD"),
+        (30, "End with USP & USD"),
+        (31, "End with PSP, USP & USD"),
+        (32, "End.X with USD"),
+        (33, "End.X with PSP & USD"),
+        (34, "End.X with USP & USD"),
+        (35, "End.X with PSP, USP & USD"),
+        (36, "End.T with USD"),
+        (37, "End.T with PSP & USD"),
+        (38, "End.T with USP & USD"),
+        (39, "End.T with PSP, USP & USD"),
+    ];
 
     #[test]
-    fn behavior_from_wire_roundtrip() {
-        for v in 1..=32u16 {
-            let b = Behavior::from_wire(v).unwrap();
-            assert_eq!(b.wire_value(), v, "roundtrip failed for v={}", v);
+    fn behavior_wire_values_match_rfc_8986_iana_registry() {
+        // Every registry assignment round-trips through the enum with
+        // the exact value and the exact registry name.
+        for (v, name) in RFC_8986_ASSIGNMENTS {
+            let b = Behavior::from_wire(*v).unwrap_or_else(|| {
+                panic!("registry value {v} ({name}) has no variant");
+            });
+            assert_eq!(b.wire_value(), *v, "{name}: wire value drifted");
+            assert_eq!(b.name(), *name, "value {v}: name drifted from the registry");
         }
     }
 
     #[test]
+    fn behavior_registry_block_is_fully_modelled() {
+        // 1-24 and 26-39 are all assigned by RFC 8986 and all modelled;
+        // 25 is Reserved; 0 is invalid; 40+ are later/unassigned.
+        let mut assigned = 0;
+        for v in 1..=39u16 {
+            let has = Behavior::from_wire(v).is_some();
+            if v == 25 {
+                assert!(!has, "25 is Reserved by IANA — must have no variant");
+            } else {
+                assert!(has, "RFC 8986 assignment {v} is missing a variant");
+                assigned += 1;
+            }
+        }
+        assert_eq!(assigned, 38, "RFC 8986 assigned 38 values (1-24, 26-39)");
+    }
+
+    #[test]
     fn behavior_from_wire_unassigned() {
-        // 0 and 33+ are unassigned in the IANA registry (RFC 8986
-        // §9.2).
+        // 0 is invalid, 25 Reserved, 40+ unassigned-or-unmodelled,
+        // and the registry's high ranges (32768+ Private Use is the
+        // only other populated block) are not behaviors either.
         assert!(Behavior::from_wire(0).is_none());
-        assert!(Behavior::from_wire(33).is_none());
+        assert!(Behavior::from_wire(25).is_none());
+        assert!(Behavior::from_wire(40).is_none());
         assert!(Behavior::from_wire(u16::MAX).is_none());
     }
 
@@ -376,7 +495,6 @@ mod tests {
         assert_eq!(Behavior::EndDT4.name(), "End.DT4");
         assert_eq!(Behavior::EndDT46.name(), "End.DT46");
         assert_eq!(Behavior::EndB6EncapsRed.name(), "End.B6.Encaps.Red");
-        assert_eq!(Behavior::EndUn.name(), "End.Un");
     }
 
     #[test]
@@ -386,13 +504,13 @@ mod tests {
         assert!(Behavior::EndPsp.is_psp());
         assert!(Behavior::EndXPsp.is_psp());
         assert!(Behavior::EndTPsp.is_psp());
-        assert!(Behavior::EndUsp.is_usp());
-        assert!(Behavior::EndXUsp.is_usp());
-        assert!(Behavior::EndTUsp.is_usp());
-        assert!(Behavior::EndUsd.is_usd());
+        // Combined flavors carry every bit they name.
+        assert!(Behavior::EndPspUsp.is_psp() && Behavior::EndPspUsp.is_usp());
+        assert!(Behavior::EndPspUspUsd.is_psp() && Behavior::EndPspUspUsd.is_usp());
+        assert!(Behavior::EndPspUspUsd.is_usd());
         assert!(Behavior::EndXUsd.is_usd());
         assert!(Behavior::EndTUsd.is_usd());
-        // Cross-flavor: a PSP behavior is not USP/USD.
+        // Cross-flavor: a PSP-only behavior is not USP/USD.
         assert!(!Behavior::EndPsp.is_usp());
         assert!(!Behavior::EndPsp.is_usd());
     }
@@ -443,5 +561,6 @@ mod tests {
         assert_eq!(format!("{}", Behavior::End), "End");
         assert_eq!(format!("{}", Behavior::EndDX6), "End.DX6");
         assert_eq!(format!("{}", Behavior::EndB6EncapsRed), "End.B6.Encaps.Red");
+        assert_eq!(format!("{}", Behavior::EndUsd), "End with USD");
     }
 }
