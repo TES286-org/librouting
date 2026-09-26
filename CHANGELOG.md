@@ -286,6 +286,64 @@ ship, breaking changes that affect embedders, dependency bumps.
     watchdog, timestamped `PROBE` lines, console-less
     (`CREATE_NO_WINDOW`) children.
 
+### Fixed (BGP — the §6.8 collision-loss hammering loop and the RFC 4724 retention scope)
+
+- **Losing a connection collision no longer turns the connector into a
+  1-second hammer.** When the peer holds a live session to a *dead*
+  instance of us — the restart-during-a-link-flap case behind the
+  rc.4 Windows RR loop — every fresh dial bounces off the peer's
+  Established-protection rule with `Cease / Connection Collision
+  Resolution` (RFC 4271 §6.8, RFC 4486 subcode 7). The connector
+  redialed ~1 s after every loss (the reconnect backoff reset on every
+  successful TCP connect) and the churn guard required BOTH a latched
+  loss AND a sibling session already in Established, which never
+  happens while the peer's surviving session is the zombie: the loop
+  ran until the peer's hold timer cleaned the corpse. Now the loss is
+  latched precisely — both when our resolver closes the transport and
+  when a Cease/7 arrives from the peer's resolver (the FSM records
+  RFC 4486 subcode 7; embedders read it via
+  `Router::take_collision_lost`) — the churn guard engages on the
+  sibling being Established alone (FRR stops the doppelganger, BIRD
+  idles the sibling dial), and the connector waits out the peer's hold
+  window (clamped 10–120 s) before dialing again, resetting the
+  exponential ladder only after a transport that actually reached
+  Established (`Router::session_was_established`).
+- **RFC 4724 retention no longer arms for sessions that were never
+  established.** Teardown gated retention on the negotiated GR window
+  alone, so every §6.8 collision loser mid-handshake pinned a 120 s
+  retention for a session that never had routes — visible in the
+  production log as `session 3 entered graceful-restart retention`
+  after every collision round, and short-circuiting the next
+  teardown's Adj-RIB-In purge (the early-return treats an existing
+  entry as "keep the original deadline"). Retention now requires the
+  transport to have been Established (RFC 4724 §2: it protects the
+  routes a session actually learned).
+- **Graceful shutdown sends `Cease / Administrative Shutdown`
+  (RFC 4486 §4.1 subcode 2) instead of a bare FIN.** `close_session`
+  never queued the NOTIFICATION its own comment promised; peers now
+  learn the session is going away deliberately and converge
+  immediately instead of waiting out the hold timer.
+
+### Fixed (daemon — Windows Ctrl+C leaves the kernel FIB dirty)
+
+- **Ctrl+C (and console close / logoff / shutdown) now run the full
+  graceful-shutdown path.** The non-Unix half of `signal` was an inert
+  stub: the default console disposition terminated the process on the
+  spot, so the session Cease, the RIB flush, and the kernel-route
+  withdrawal never executed — every restart left the previous
+  daemon's routes in the Windows table (the rc.4 production report:
+  `--install-kernel-routes` routes surviving Ctrl+C, a silent
+  blackhole until the next restart re-added only its own set). The
+  daemon now installs a `SetConsoleCtrlHandler` handler: CTRL_C /
+  CTRL_BREAK map to SIGINT, and CTRL_CLOSE / CTRL_LOGOFF /
+  CTRL_SHUTDOWN map to SIGTERM with a bounded in-handler wait —
+  Windows tears the process down the moment the handler returns, so
+  the handler holds (≤ 4 s) until `main` marks shutdown complete,
+  which the ticker's final drain (BIRD `persist off` parity: everything
+  this daemon installed is withdrawn) precedes. SIGINT/SIGTERM on Unix
+  run the identical graceful path and are covered by the new
+  `bgp_shutdown_cleanup.sh` interop test.
+
 ### Fixed (BGP — RFC 4271 §6.8 collision resolution on outbound-only peers with a listener)
 
 - **Outbound-only peers no longer loop on `Cease / Connection

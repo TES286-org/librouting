@@ -744,6 +744,15 @@ jobs:
       - name: BIRD interop (librouting ↔ BIRD)
         timeout-minutes: 10
         run: ./tests/interop/bird.sh
+      - name: BGP collision-loss backoff interop (RFC 4271 §6.8 churn guard)
+        timeout-minutes: 5
+        run: ./tests/interop/bgp_collision_backoff.sh
+      - name: BGP collision zombie interop (RFC 4271 §6.8, lr restart vs BIRD zombie session)
+        timeout-minutes: 8
+        run: ./tests/interop/bgp_collision_zombie.sh
+      - name: SIGINT shutdown cleanup interop (kernel routes withdrawn, Cease 6/2)
+        timeout-minutes: 5
+        run: ./tests/interop/bgp_shutdown_cleanup.sh
       - name: Filter DSL + ROA interop (BIRD 2 filter → lr DSL)
         timeout-minutes: 10
         run: ./tests/interop/filter_dsl_bird.sh
