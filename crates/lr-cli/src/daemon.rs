@@ -1566,6 +1566,45 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         );
                         continue;
                     }
+                    // RFC 4271 §6.8 inbound churn guard: mirror of the
+                    // outbound connector's Established-protection rule at
+                    // `spawn_connector`'s `sibling_in` hold-off. When the
+                    // peer's outbound sibling transport is Established,
+                    // the §6.8 collision has already been resolved and a
+                    // winner picked. A peer that keeps redialling our
+                    // listener (BIRD with `connect retry time 2`, or any
+                    // implementation that treats a received Cease/7 as a
+                    // reconnect trigger) would otherwise produce a loop:
+                    // accept → run inbound challenger through the FSM →
+                    // resolver closes inbound as loser with Cease/7 →
+                    // peer redials → repeat. Drop the redial at the TCP
+                    // layer instead of driving the FSM, so the surviving
+                    // transport is not challenged.
+                    if entry.handle_in.is_some() {
+                        let sibling_established = runtime
+                            .router
+                            .read()
+                            .unwrap()
+                            .session_peer_state(entry.handle)
+                            .map(|s| s == "Established")
+                            .unwrap_or(false);
+                        if sibling_established {
+                            entry.busy.store(false, Ordering::Relaxed);
+                            // The socket drops here — the peer observes a
+                            // bare FIN/RST and learns nothing about the
+                            // session's state, which is exactly the
+                            // correct posture for a duplicate transport
+                            // (RFC 4271 §6.8: a connection that is not
+                            // the winner is closed without affecting the
+                            // surviving one).
+                            eprintln!(
+                                "daemon: peer {}: inbound duplicate dropped — \
+                                 outbound transport is Established (RFC 4271 §6.8)",
+                                entry.label()
+                            );
+                            continue;
+                        }
+                    }
                     // RFC 4271 §6.8: a bidirectional peer's inbound
                     // connections run on the challenger session so they
                     // can coexist with the outbound transport while the
