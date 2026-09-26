@@ -2369,15 +2369,20 @@ fn run_peer_session(
             .map_err(|e| format!("start_session: {}", e))?;
     }
     let result = pump_session(&rt, &mut stream, session, bfd);
-    // The transport is gone: drive the FSM to Idle and purge the routes
-    // this session contributed (RFC 4271 §8.2.2). Event consumers (the
-    // ticker thread) observe the resulting events.
+    // The transport is going away. When we initiated the close (signal
+    // shutdown, BFD-down, connector restart), RFC 4486 §4.1 wants a
+    // Cease / Administrative Shutdown NOTIFICATION on the wire rather
+    // than a bare FIN; shutdown_session queues it only when the FSM is
+    // still live (a peer-initiated close already left the FSM Idle).
+    // Then drive the FSM to Idle and purge the routes this session
+    // contributed (RFC 4271 §8.2.2). Event consumers (the ticker
+    // thread) observe the resulting events.
     {
         let mut r = rt.router.write().unwrap();
-        r.close_session(session);
-        // RFC 4271 §6.4: close a live session with a NOTIFICATION
-        // (CEASE) rather than a bare FIN — close_session queues it, so
-        // drain and flush it to the wire before the socket goes away.
+        r.shutdown_session(session);
+        // Drain whatever the close queued (the Cease on an
+        // operator-initiated close) and flush it to the wire before the
+        // socket goes away.
         let out = r.drain_output(session);
         if !out.is_empty() {
             let _ = stream.write_all(&out);

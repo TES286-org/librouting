@@ -3841,6 +3841,24 @@ impl DefaultRouter {
         self.dispatch_bgp_actions(h.0, actions);
     }
 
+    /// Administratively close a live session with a Cease / Administrative
+    /// Shutdown NOTIFICATION (RFC 4486 §4.1 subcode 2) instead of a bare
+    /// FIN — the graceful-shutdown path for embedders (FRR `neighbor
+    /// shutdown`, BIRD protocol disable parity). A session whose FSM is
+    /// already Idle (the transport died first, or the peer already sent
+    /// its own NOTIFICATION) is closed without a queued message.
+    pub fn shutdown_session(&mut self, h: SessionHandle) {
+        if let Some(SessionState::Bgp { peer, .. }) = self.sessions.get_mut(&h.0) {
+            if peer.state() != BgpState::Idle {
+                peer.enqueue_notification(
+                    BgpErrorCode::Cease,
+                    BgpCeaseSubcode::AdministrativeShutdown as u8,
+                );
+            }
+        }
+        self.close_session(h);
+    }
+
     /// RFC 4271 §6.8 connection collision resolution. Called after an
     /// OPEN advanced `session` out of OpenSent (it is in OpenConfirm or
     /// — with an OPEN+KEEPALIVE in one read — Established).
@@ -12225,6 +12243,33 @@ mod collision_tests {
         b.push(6);
         b.push(7);
         b
+    }
+
+    /// RFC 4486 §4.1: an administrative close of a live session queues a
+    /// Cease / Administrative Shutdown NOTIFICATION on the wire before
+    /// the transport goes away.
+    #[test]
+    fn shutdown_session_flushes_cease_admin_shutdown() {
+        let mut r = DefaultRouter::new();
+        let s = r
+            .add_session(SessionConfig::bgp(
+                Asn(64512),
+                Asn(64513),
+                RouterId::from_v4([10, 0, 0, 9]),
+            ))
+            .unwrap();
+        let (mut a, a_session) = collision_peer([10, 0, 0, 1]);
+        assert_eq!(handshake(&mut r, s, &mut a, a_session), "Established");
+        let _ = r.drain_output(s);
+
+        r.shutdown_session(s);
+        assert_eq!(r.session_peer_state(s), Some("Idle"));
+        let out = r.drain_output(s);
+        assert_eq!(
+            notification_codes(&out),
+            vec![(6, 2)],
+            "Cease / Administrative Shutdown expected on the wire"
+        );
     }
 
     /// A Cease / Connection Collision Resolution NOTIFICATION received
