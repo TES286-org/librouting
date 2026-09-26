@@ -163,6 +163,51 @@ ship, breaking changes that affect embedders, dependency bumps.
   netlink errno mapping now names `ENODEV`, `EACCES`, `ENETDOWN` and
   `ENETUNREACH` instead of "unknown error".
 
+### Fixed (Windows route-table suite — wedge root cause, back on every-push CI)
+
+- **The sixteen-run Windows CI wedge is root-caused and fixed — the
+  trigger was the WMI staging path, not netio.** The per-test job
+  matrix of run 36228391549 (windows-fib-probe.yml) delivered the
+  split the bundled suite never could: the two tests that staged
+  their APIPA environment through PowerShell's `New-NetIPAddress` —
+  `probe_next_hop_interface_resolution` and
+  `explicit_oif_beats_fib_resolution` — are exactly the two that
+  wedged their jobs to the ceiling, while the two tests that talk to
+  netio directly (`CreateIpForwardEntry2`, `GetIpForwardTable2`,
+  `GetBestRoute2`, `GetAdaptersAddresses` — the same call set as the
+  always-green windows-interop job and its 60+ always-green interop
+  runs) completed in 66-98 seconds. The WMI/NDIS provider path
+  (`New-NetIPAddress` → WmiPrvSE → NDIS) is the one call shape that
+  wedges the runner at the kernel level; every other API this suite
+  touches was proven safe by that control group. The staging now
+  rides netio's own unicast-address API
+  (`CreateUnicastIpAddressEntry`/`DeleteUnicastIpAddressEntry`) —
+  in-process, no child process, no WMI — replicating the staging
+  contract exactly (a non-persistent manual address excluded from
+  source selection, i.e. `-SkipAsSource $true` +
+  `-PolicyStore ActiveStore` semantics).
+- **The probe child runner no longer waits on a killed child
+  indefinitely.** `run_bounded` called `child.kill()` followed by
+  `child.wait()`; a child marked for death but wedged in an
+  uninterruptible kernel call never signals its handle, so the
+  `wait()` hung the test binary with it — the amplifier that turned
+  one wedged WMI provider into a wedged whole CI step. The kill path
+  now polls `try_wait()` within a bounded 3-second grace window and
+  then abandons the survivor (its stdio is file-redirected and it
+  holds no console, so nothing the harness waits on is shared with
+  it), reporting the overrun through the existing budget-failure
+  status. With the WMI spawn gone this is defense in depth, not the
+  hang defense.
+- **The suite is back on the every-push CI** (the windows-interop
+  job). The `#[ignore]` gate stays — kernel-gated tests run where
+  their environment exists (an elevated shell here; the Linux
+  siblings run under `unshare -Urn` in the interop job) — but
+  nothing is silently skipped on the runners any more: the
+  environment-precondition "skips" (`no usable adapter`, `cannot
+  stage`) are now hard failures, and `powershell()` is gone from the
+  file entirely. The windows-fib-probe.yml evidence machine stays
+  dispatch-only for future kernel-level audits (issue #29 closed).
+
 ### Fixed (Windows test harness — the CI infinite wait)
 
 - **The windows_route_table suite no longer wedges whole CI jobs.**
