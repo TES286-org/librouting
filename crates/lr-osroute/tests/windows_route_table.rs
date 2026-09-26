@@ -36,7 +36,7 @@
 //! with `-- --ignored --nocapture fib_semantics` when auditing a new
 //! Windows build).
 //!
-//! ## Wedge containment (read before touching the harness)
+//! ## Wedge root cause and containment (read before touching the harness)
 //!
 //! This suite historically wedged whole CI jobs: the step stayed
 //! `in_progress` past its own `timeout-minutes` until the job ceiling
@@ -46,17 +46,24 @@
 //! bounded `WaitForExit` budgets whose script provably finished while
 //! the runner still could not finalise the step. The mechanism that
 //! fits every observation: a process stuck in an UNINTERRUPTIBLE
-//! kernel call (wedged netio) is marked for death by
-//! `TerminateProcess` but never actually reaped, and everything that
-//! waits on its death — bash's `wait`, the runner's step timeout, the
-//! step finalisation itself — hangs with it. Nothing at the workflow
-//! layer can fix that, so the suite moved off the every-push CI job
-//! into windows-fib-probe.yml — a per-test job matrix whose
-//! `if: always()` steps commit each test's transcript to the
-//! dispatched ref even when a sibling wedges. The last timestamped
-//! `PROBE|` line of a wedged run names the exact call site that hung;
-//! that transcript is the data the kernel-level fix needs. Inside
-//! this binary, the defenses:
+//! kernel call is marked for death by `TerminateProcess` but never
+//! actually reaped, and everything that waits on its death — bash's
+//! `wait`, the runner's step timeout, the step finalisation itself —
+//! hangs with it. Nothing at the workflow layer can fix that.
+//!
+//! The per-test probe matrix (windows-fib-probe.yml, run 36228391549)
+//! finally split the suite by call site and isolated the trigger:
+//! exactly the two tests that staged their APIPA environment through
+//! PowerShell's `New-NetIPAddress` — the WMI/NDIS provider path, a
+//! child process tree the runner's step finalisation waits on —
+//! wedged, while the two talking to netio directly
+//! (`CreateIpForwardEntry2`, `GetIpForwardTable2`, `GetBestRoute2`,
+//! `GetAdaptersAddresses` — the same call set as the always-green
+//! windows-interop job) completed in seconds. The staging now rides
+//! netio's own unicast-address API ([`stage_apipa_address`]) —
+//! in-process, no child, no WMI — so the trigger is gone rather than
+//! contained, and the suite is back on the every-push CI job. The
+//! residual defenses:
 //!
 //! 1. **The binary kills itself** — every test arms
 //!    [`arm_watchdog`] before its first netio call; at the budget the
@@ -68,11 +75,11 @@
 //!    elapsed seconds since the process started, so a killed run's
 //!    transcript names the exact call site that hung (the line after
 //!    the last timestamp).
-//! 3. **Console-less children** — every process this binary spawns
-//!    (`ping.exe`, `powershell.exe`, `route.exe`) rides
-//!    `CREATE_NO_WINDOW`: it attaches no console, holds nothing the
-//!    step finalisation could wait on, and its stdio is
-//!    file-redirected anyway.
+//! 3. **Console-less, bounded children** — every process this binary
+//!    still spawns (`ping.exe`, `route.exe`) rides
+//!    `CREATE_NO_WINDOW` with file stdio, and a child that outlives
+//!    its budget kill is reaped only within a bounded grace window
+//!    before it is abandoned — never waited on indefinitely.
 
 #![cfg(windows)]
 
@@ -85,11 +92,13 @@ use std::time::{Duration, Instant};
 use lr_core::addr::{IpAddr as LrIpAddr, Prefix};
 use lr_osroute::ospf_transport;
 use lr_osroute::OsRouteTable;
-use windows_sys::Win32::Foundation::{ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR};
+use windows_sys::Win32::Foundation::{ERROR_NOT_FOUND, ERROR_OBJECT_ALREADY_EXISTS, NO_ERROR};
 use windows_sys::Win32::NetworkManagement::IpHelper::{
-    CreateIpForwardEntry, CreateIpForwardEntry2, DeleteIpForwardEntry2, FreeMibTable,
-    GetBestRoute2, GetIpForwardTable2, InitializeIpForwardEntry, MIB_IPFORWARDROW,
-    MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+    CreateIpForwardEntry, CreateIpForwardEntry2, CreateUnicastIpAddressEntry,
+    DeleteIpForwardEntry2, DeleteUnicastIpAddressEntry, FreeMibTable, GetBestRoute2,
+    GetIpForwardTable2, GetUnicastIpAddressEntry, InitializeIpForwardEntry,
+    InitializeUnicastIpAddressEntry, MIB_IPFORWARDROW, MIB_IPFORWARD_ROW2, MIB_IPFORWARD_TABLE2,
+    MIB_UNICASTIPADDRESS_ROW,
 };
 use windows_sys::Win32::Networking::WinSock::{
     AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
@@ -586,10 +595,76 @@ fn primary_interface() -> Option<(String, u32, Ipv4Addr)> {
     None
 }
 
+/// Stage a manual unicast address (`addr/on_link_prefix_len`) on
+/// interface `if_index` through netio's own unicast-address API —
+/// the root-cause fix for this suite's sixteen-run CI wedge (issue
+/// #29).
+///
+/// The previous staging rode PowerShell's `New-NetIPAddress` — the
+/// WMI/NDIS provider path. That path is the wedge trigger the
+/// per-test probe matrix isolated (run 36228391549): a WMI provider
+/// process wedged in an uninterruptible kernel call is marked for
+/// death by `TerminateProcess` but never reaped, and the runner's
+/// step finalisation — which waits on the whole step process tree —
+/// hangs with it; no workflow shape can contain that. The two tests
+/// that staged through WMI are exactly the two that wedged, while
+/// the two talking to netio directly (`CreateIpForwardEntry2` and
+/// friends — this same API family) completed in seconds.
+///
+/// `CreateUnicastIpAddressEntry` replicates the staging contract
+/// exactly — a non-persistent manual address (the `ActiveStore`
+/// semantics) excluded from source selection (the `-SkipAsSource
+/// $true` semantics) — with no child process at all: the call is
+/// in-process, through the same netio stack the daemon itself
+/// installs routes with.
+fn stage_apipa_address(if_index: u32, addr: Ipv4Addr, on_link_prefix_len: u8) -> u32 {
+    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { core::mem::zeroed() };
+    // SAFETY: out-parameter; the initializer applies the documented
+    // defaults (infinite valid/preferred lifetimes — a manual address
+    // that never expires on its own).
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.Address = sockaddr4(addr);
+    row.InterfaceIndex = if_index;
+    // The connected-route prefix the staging creates (169.254.188.0/24
+    // for the resolution-steal shape): the on-link length of the
+    // address — exactly the `New-NetIPAddress -PrefixLength` argument.
+    row.OnLinkPrefixLength = on_link_prefix_len;
+    row.SkipAsSource = true;
+    // SAFETY: `row` is a fully initialised stack value; the API only
+    // reads from it.
+    unsafe { CreateUnicastIpAddressEntry(&row) }
+}
+
+/// Remove an address staged by [`stage_apipa_address`]. The row is
+/// read back through `GetUnicastIpAddressEntry` first so the delete
+/// carries the stack's own row identity — the same belt-and-braces
+/// shape the FIB helpers above use for `DeleteIpForwardEntry2`.
+/// `ERROR_NOT_FOUND` means the address is already gone; the caller
+/// decides whether that counts as success (teardown idempotence).
+fn unstage_apipa_address(if_index: u32, addr: Ipv4Addr) -> u32 {
+    let mut row: MIB_UNICASTIPADDRESS_ROW = unsafe { core::mem::zeroed() };
+    // SAFETY: out-parameter, key-initialised below.
+    unsafe { InitializeUnicastIpAddressEntry(&mut row) };
+    row.Address = sockaddr4(addr);
+    row.InterfaceIndex = if_index;
+    // SAFETY: in/out row keyed on Address + InterfaceIndex; on
+    // success the stack fills in the full row identity.
+    let rc = unsafe { GetUnicastIpAddressEntry(&mut row) };
+    if rc != NO_ERROR {
+        return rc;
+    }
+    // SAFETY: `row` now holds the stack's own row for the address.
+    unsafe { DeleteUnicastIpAddressEntry(&row) }
+}
+
 /// Run `program args` under a hard wall-clock budget, returning its
-/// combined output. A child that outlives its budget is killed and
-/// reaped only within a bounded grace window, then abandoned — see
-/// the kill path below.
+/// combined output. The children are plain user-mode console binaries
+/// (`ping.exe`, `route.exe`); the WMI-staging shape this helper used
+/// to carry (`powershell.exe` + `New-NetIPAddress`) is gone — that
+/// call path was the suite's kernel-level wedge trigger (see
+/// [`stage_apipa_address`]). A child that outlives its budget is
+/// killed and reaped only within a bounded grace window, then
+/// abandoned — see the kill path below.
 ///
 /// Output goes to temp FILES, never pipes: a grandchild that inherits
 /// the write end of a pipe (the WMI provider host, `conhost`, anything
@@ -653,14 +728,14 @@ fn run_bounded(
                     // child stuck in an uninterruptible kernel call is
                     // marked for death by the kill above but its
                     // process handle never signals, so `wait()` would
-                    // hang this process with it — the amplifier that
-                    // turns one wedged child into a wedged whole CI
-                    // step. Poll a short grace window, then abandon
-                    // the survivor: its stdio is file-redirected and
-                    // it holds no console, so nothing this process's
-                    // callers wait on is shared with it. The overrun
-                    // is reported by the `None` status the caller
-                    // already treats as a budget failure.
+                    // hang this process with it — the amplifier half
+                    // of the issue-#29 mechanism. Poll a short grace
+                    // window, then abandon the survivor: its stdio is
+                    // file-redirected and it holds no console, so
+                    // nothing this process's callers wait on is
+                    // shared with it. The overrun is reported by the
+                    // `None` status the caller already treats as a
+                    // budget failure.
                     let grace = Instant::now() + Duration::from_secs(3);
                     loop {
                         match child.try_wait() {
@@ -685,27 +760,6 @@ fn run_bounded(
     let _ = std::fs::remove_file(&err_path);
     let success = status.map(|s| s.success());
     Ok((format!("{out}{err}"), success))
-}
-
-/// PowerShell with a 60 s budget — see [`run_bounded`] for why the
-/// output goes through files and why the kill at the budget's end is
-/// final (the historical pipe-based shape deadlocked on inherited
-/// write handles and wedged whole CI jobs).
-fn powershell(script: &str) -> Result<String, String> {
-    const BUDGET: Duration = Duration::from_secs(60);
-    match run_bounded(
-        "powershell.exe",
-        &["-NoProfile", "-Command", script],
-        BUDGET,
-    ) {
-        Ok((out, Some(true))) => Ok(out),
-        Ok((out, Some(false))) => Err(out),
-        Ok((_, None)) => Err(format!(
-            "powershell timed out after {}s: {script}",
-            BUDGET.as_secs()
-        )),
-        Err(e) => Err(e),
-    }
 }
 
 // ---------------------------------------------------------------------
@@ -923,8 +977,7 @@ fn fib_semantics_probe_matrix() {
 fn probe_next_hop_interface_resolution() {
     let _watchdog = arm_watchdog(Duration::from_secs(300));
     let Some((ifname, ifidx, primary_v4)) = primary_interface() else {
-        log("ifidx-probe skipped: no usable adapter".into());
-        return;
+        panic!("ifidx-probe: no usable IPv4 adapter");
     };
     log(format!(
         "env primary-if name={ifname} index={ifidx} addr={primary_v4}"
@@ -940,19 +993,16 @@ fn probe_next_hop_interface_resolution() {
     // makes IMDS unreachable and the runner agent loses its health
     // check — the run-36125163593/36128494485 cancellations.
     let apipa = Ipv4Addr::new(169, 254, 188, 1);
-    let ps = format!(
-        "New-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -PrefixLength 24 -SkipAsSource $true -PolicyStore ActiveStore",
-        ifname, apipa
+    let rc = stage_apipa_address(ifidx, apipa, 24);
+    // ERROR_OBJECT_ALREADY_EXISTS: a leftover staging from a
+    // cancelled prior run — idempotent success.
+    assert!(
+        rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS,
+        "cannot stage the APIPA shape: CreateUnicastIpAddressEntry rc={rc}"
     );
-    match powershell(&ps) {
-        Ok(_) => log(format!("env added {apipa}/24 on {ifname}")),
-        Err(e) => {
-            log(format!(
-                "ifidx-probe degraded: cannot add APIPA address: {e}"
-            ));
-            return;
-        }
-    }
+    log(format!(
+        "env added {apipa}/24 on {ifname} (CreateUnicastIpAddressEntry rc={rc})"
+    ));
 
     let ghost_nexthop = Ipv4Addr::new(169, 254, 188, 9); // the "tunnel peer" address
                                                          // Baseline: with no explicit egress, the daemon's GetBestRoute2
@@ -993,15 +1043,16 @@ fn probe_next_hop_interface_resolution() {
     }
     let _ = table.delete_route(prefix);
 
-    // Cleanup the APIPA address.
-    let rm = format!(
-        "Remove-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -Confirm:$false -PolicyStore ActiveStore -ErrorAction SilentlyContinue",
-        ifname, apipa
+    // Cleanup the staged address.
+    let drc = unstage_apipa_address(ifidx, apipa);
+    // ERROR_NOT_FOUND: already gone (a prior run's teardown won).
+    assert!(
+        drc == NO_ERROR || drc == ERROR_NOT_FOUND,
+        "staged APIPA address survived teardown: DeleteUnicastIpAddressEntry rc={drc}"
     );
-    match powershell(&rm) {
-        Ok(_) => log(format!("env removed {apipa}/24")),
-        Err(e) => log(format!("cleanup warning: {e}")),
-    }
+    log(format!(
+        "env removed {apipa}/24 (DeleteUnicastIpAddressEntry rc={drc})"
+    ));
     log("=== ifidx probe done ===".into());
 }
 
@@ -1025,8 +1076,7 @@ fn probe_next_hop_interface_resolution() {
 fn blackhole_route_discards_not_accepts() {
     let _watchdog = arm_watchdog(Duration::from_secs(300));
     let Some((_ifname, ifidx, _)) = primary_interface() else {
-        eprintln!("skipped: no usable IPv4 adapter");
-        return;
+        panic!("blackhole test: no usable IPv4 adapter");
     };
     let mut table = lr_osroute::windows::IpHelper::connect().expect("IpHelper::connect");
     let prefix = V4_PREFIX;
@@ -1097,23 +1147,21 @@ fn blackhole_route_discards_not_accepts() {
 #[ignore = "mutates the real FIB — run as Administrator on Windows"]
 fn explicit_oif_beats_fib_resolution() {
     let _watchdog = arm_watchdog(Duration::from_secs(300));
-    let Some((ifname, ifidx, _)) = primary_interface() else {
-        eprintln!("skipped: no usable IPv4 adapter");
-        return;
+    let Some((_ifname, ifidx, _)) = primary_interface() else {
+        panic!("explicit-oif test: no usable IPv4 adapter");
     };
     // The "other" interface to pin egress to: the loopback pseudo-
     // interface stands in for the tunnel (it is a distinct, always-
     // present interface index).
     let pinned_if: u32 = 1;
     let apipa = Ipv4Addr::new(169, 254, 188, 1);
-    let ps = format!(
-        "New-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -PrefixLength 24 -SkipAsSource $true -PolicyStore ActiveStore",
-        ifname, apipa
+    let rc = stage_apipa_address(ifidx, apipa, 24);
+    // ERROR_OBJECT_ALREADY_EXISTS: a leftover staging from a
+    // cancelled prior run — idempotent success.
+    assert!(
+        rc == NO_ERROR || rc == ERROR_OBJECT_ALREADY_EXISTS,
+        "cannot stage the 169.254.188.0/24 shape: CreateUnicastIpAddressEntry rc={rc}"
     );
-    if let Err(e) = powershell(&ps) {
-        eprintln!("skipped: cannot stage the 169.254.188.0/24 shape: {e}");
-        return;
-    }
 
     let mut table = lr_osroute::windows::IpHelper::connect().expect("IpHelper::connect");
     let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
@@ -1148,9 +1196,10 @@ fn explicit_oif_beats_fib_resolution() {
     assert!(fib_row(&prefix).is_none(), "row survived delete: {row}");
 
     // Cleanup the staged APIPA address.
-    let rm = format!(
-        "Remove-NetIPAddress -InterfaceAlias '{}' -IPAddress {} -Confirm:$false -PolicyStore ActiveStore -ErrorAction SilentlyContinue",
-        ifname, apipa
+    let drc = unstage_apipa_address(ifidx, apipa);
+    // ERROR_NOT_FOUND: already gone (a prior run's teardown won).
+    assert!(
+        drc == NO_ERROR || drc == ERROR_NOT_FOUND,
+        "staged APIPA address survived teardown: DeleteUnicastIpAddressEntry rc={drc}"
     );
-    let _ = powershell(&rm);
 }
