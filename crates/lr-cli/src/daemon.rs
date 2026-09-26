@@ -1271,6 +1271,14 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         Some(h) => Arc::clone(&h.live_sessions),
         None => Arc::new(AtomicUsize::new(0)),
     };
+    // Ticker thread handle, kept here so the shutdown path can join it
+    // bounded — see the tail of `run_bgp_daemon`. Without this the
+    // ticker is detached, and on Windows Ctrl+C the main thread can
+    // exit before the ticker reaches its final drain (which is the only
+    // place `flush_rib_for_shutdown` + `mirror.apply` runs), leaving
+    // the kernel routes installed. None when the embedded supervisor
+    // owns the ticker.
+    let mut ticker_handle: Option<thread::JoinHandle<()>> = None;
 
     // ---- BFD fast-fail supervisor (RFC 5880/5881/5883, W1.3). ----
     // One session per `bfd = true` peer; a BFD Down tears the BGP
@@ -1421,7 +1429,11 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // Embedded: the supervisor already spawned one shared ticker (and
     // fed it our live-session counter via the host).
     if host.is_none() {
-        spawn_ticker(&runtime, cfg.install_kernel, Arc::clone(&live_sessions));
+        let ticker = spawn_ticker(&runtime, cfg.install_kernel, Arc::clone(&live_sessions));
+        // Stash the handle so the shutdown path can join it — see
+        // `run_bgp_daemon`'s tail. The handle is dropped on the early-
+        // return error paths below, where the process exits regardless.
+        ticker_handle = Some(ticker);
     }
 
     // ---- Listener (inbound), if configured. ----
@@ -1655,6 +1667,28 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     let deadline = WallClock::now() + Duration::from_secs(3);
     while live_sessions.load(Ordering::Relaxed) > 0 && WallClock::now() < deadline {
         thread::sleep(Duration::from_millis(50));
+    }
+    // Wait for the ticker to finish its final drain. The ticker's last
+    // pass runs `flush_rib_for_shutdown` + `mirror.apply` — the path
+    // that withdraws every Loc-RIB entry the daemon installed into the
+    // kernel FIB. On Windows the daemon's own session-pump threads can
+    // sit on a slow `stream.write_all` for ~30 s (the OS write timeout)
+    // when the peer is not draining, so the 3 s `live_sessions` grace
+    // above is not enough — and `spawn_ticker`'s loop only enters its
+    // final drain once `live==0`. Joining here (bounded) ensures the
+    // FIB cleanup runs before the process exits, regardless of any
+    // wedged session pump. The spawn_ticker also pre-flushes on the
+    // shutting-down transition, so even when a slow write keeps
+    // `live > 0` for the whole join window the routes are withdrawn.
+    if let Some(ticker) = ticker_handle.take() {
+        let join_deadline = WallClock::now() + Duration::from_secs(5);
+        while WallClock::now() < join_deadline {
+            if live_sessions.load(Ordering::Relaxed) == 0 || ticker.is_finished() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(50));
+        }
+        let _ = ticker.join();
     }
     println!("daemon: shutdown complete");
     ExitCode::SUCCESS
@@ -2544,10 +2578,47 @@ fn spawn_ticker(
         .spawn(move || {
             let mut mirror = KernelMirror::new(install_kernel);
             let start = WallClock::now();
+            // Pre-flush gate: on the shutting-down transition, queue a
+            // `flush_rib_for_shutdown` + `mirror.apply` pass BEFORE
+            // waiting on the live session pumps to flush their own
+            // close NOTIFICATIONs. The final drain at the bottom of
+            // this function runs only when `live==0`, which on Windows
+            // Ctrl+C can take up to ~30 s (the OS TCP write timeout
+            // when the peer is not draining the wire). Pre-flushing
+            // here means the kernel FIB is cleaned up within the
+            // ticker's first 10 ms tick after shutdown, regardless of
+            // any wedged session pump. Idempotent: the second call in
+            // the final drain produces no new events (the Loc-RIB is
+            // already empty).
+            let mut shutdown_flushed = false;
             loop {
                 let shutting_down = !rt.running.load(Ordering::Relaxed);
                 if shutting_down && live.load(Ordering::Relaxed) == 0 {
                     break;
+                }
+                if shutting_down && !shutdown_flushed {
+                    // Drain any pending events first, then queue the
+                    // bulk withdrawal so the kernel mirror sees the
+                    // RouteWithdrawn events in order.
+                    let mut r = rt.router.write().unwrap();
+                    let pre = r.poll_events();
+                    for ev in &pre {
+                        log_event(ev);
+                    }
+                    mirror.apply(&pre);
+                    r.flush_rib_for_shutdown();
+                    let events = r.poll_events();
+                    for ev in &events {
+                        log_event(ev);
+                    }
+                    mirror.apply(&events);
+                    drop(r);
+                    shutdown_flushed = true;
+                    // Continue the loop — the ticker keeps draining
+                    // session-pump events until `live==0`, so the
+                    // peer-side NOTIFICATION-driven withdrawals (if
+                    // any) still propagate to the kernel before exit.
+                    continue;
                 }
                 let now_ms = start.elapsed().as_millis() as u64;
                 {
@@ -2568,6 +2639,9 @@ fn spawn_ticker(
                 }
             }
             // Final drain: the last events queued by closing sessions.
+            // Idempotent when `shutdown_flushed` already ran: the
+            // Loc-RIB is empty and `flush_rib_for_shutdown` produces
+            // no new events.
             {
                 let mut r = rt.router.write().unwrap();
                 // Shutdown withdrawal: everything this daemon installed
