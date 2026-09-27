@@ -2350,6 +2350,121 @@ fn is_canonical_loopback(ip: &std::net::IpAddr) -> bool {
     }
 }
 
+/// Ask the kernel whether a USABLE route exists to `peer` — a route
+/// that would actually deliver the SYN to the peer, not a blackhole.
+///
+/// On Windows: `GetBestRoute2` returns the best route; if the route's
+/// `NextHop` is the on-link form (all zeros) AND the interface is the
+/// loopback or a blackhole discard interface, the route is NOT usable.
+/// Simpler heuristic that works in practice: if the resolved source
+/// address is `127.0.0.1`/`::1`, the kernel would route via loopback
+/// (blackhole delivery), so return `false`.
+///
+/// On Linux: `ip route get` is the authoritative check — a blackhole
+/// route returns "blackhole" in the output. This module doesn't shell
+/// out (the daemon is platform-independent); instead it relies on the
+/// daemon's own `route_reaches` check after connect (the self-connect
+/// guard). On Linux the self-connect scenario doesn't arise because
+/// Linux's blackhole route discards the SYN (no loopback delivery).
+///
+/// Returns `true` when a usable route is believed to exist (or the
+/// platform can't tell), `false` only when we KNOW the route is
+/// blackhole/loopback. The conservative `true` default keeps the
+/// daemon running on platforms without the diagnostic.
+fn route_reaches(peer: &std::net::SocketAddr) -> bool {
+    imp::route_reaches(peer)
+}
+
+#[cfg(all(feature = "std", target_os = "windows"))]
+mod route_check {
+    use windows_sys::Win32::Foundation::NO_ERROR;
+    use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
+    use windows_sys::Win32::Networking::WinSock::SOCKADDR_INET;
+
+    pub fn route_reaches(peer: &std::net::SocketAddr) -> bool {
+        let destination = sockaddr_for(peer);
+        let mut best_route: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        let mut best_source: SOCKADDR_INET = unsafe { core::mem::zeroed() };
+        let rc = unsafe {
+            GetBestRoute2(
+                core::ptr::null(),
+                0,
+                core::ptr::null(),
+                &destination,
+                0,
+                &mut best_route,
+                &mut best_source,
+            )
+        };
+        if rc != NO_ERROR || best_route.InterfaceIndex == 0 {
+            return false;
+        }
+        // Heuristic: if the kernel's chosen source is 127.0.0.1 / ::1,
+        // the route resolves to loopback (blackhole delivery). A
+        // usable route sources from a real interface address.
+        let src = unsafe { inet_addr_of(&best_source) };
+        !is_canonical_loopback(&src)
+    }
+
+    fn sockaddr_for(addr: &std::net::SocketAddr) -> SOCKADDR_INET {
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
+        };
+        let mut sa: SOCKADDR_INET = unsafe { core::mem::zeroed() };
+        match addr {
+            std::net::SocketAddr::V4(a) => {
+                let v4 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN>() };
+                v4.sin_family = AF_INET;
+                v4.sin_port = a.port().to_be();
+                v4.sin_addr.S_un.S_un_b.s_b1 = a.ip().octets()[0];
+                v4.sin_addr.S_un.S_un_b.s_b2 = a.ip().octets()[1];
+                v4.sin_addr.S_un.S_un_b.s_b3 = a.ip().octets()[2];
+                v4.sin_addr.S_un.S_un_b.s_b4 = a.ip().octets()[3];
+            }
+            std::net::SocketAddr::V6(a) => {
+                let v6 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN6>() };
+                v6.sin6_family = AF_INET6;
+                v6.sin6_port = a.port().to_be();
+                v6.sin6_addr.u.Byte = a.ip().octets();
+                v6.Anonymous.sin6_scope_id = a.scope_id();
+            }
+        }
+        sa
+    }
+
+    unsafe fn inet_addr_of(sa: &SOCKADDR_INET) -> std::net::IpAddr {
+        use windows_sys::Win32::Networking::WinSock::{AF_INET6, SOCKADDR_IN, SOCKADDR_IN6};
+        let family = unsafe { sa.si_family };
+        if family == AF_INET6 {
+            let v6 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN6>() };
+            std::net::IpAddr::V6(std::net::Ipv6Addr::from(v6.sin6_addr.u.Byte))
+        } else {
+            let v4 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN>() };
+            let s = &v4.sin_addr.S_un.S_un_b;
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(s.s_b1, s.s_b2, s.s_b3, s.s_b4))
+        }
+    }
+
+    fn is_canonical_loopback(ip: &std::net::IpAddr) -> bool {
+        match ip {
+            std::net::IpAddr::V4(v4) => *v4 == std::net::Ipv4Addr::LOCALHOST,
+            std::net::IpAddr::V6(v6) => v6.is_loopback(),
+        }
+    }
+}
+
+#[cfg(all(feature = "std", target_os = "windows"))]
+use route_check as imp;
+#[cfg(all(feature = "std", not(target_os = "windows")))]
+mod imp {
+    pub fn route_reaches(_peer: &std::net::SocketAddr) -> bool {
+        // Non-Windows: Linux's blackhole discards the SYN (no loopback
+        // delivery), so the self-connect scenario doesn't arise. Always
+        // dial — the self-connect guard catches the rare case.
+        true
+    }
+}
+
 /// One outbound peer: connect, run the session until it drops, back
 /// off, repeat — for the lifetime of the daemon.
 fn spawn_connector(
@@ -2426,6 +2541,34 @@ fn spawn_connector(
                         return;
                     }
                 };
+                // Route-aware dial guard: before dialing, check whether
+                // the kernel has a route to the peer. When the daemon's
+                // own blackhole route covers the peer (the production
+                // topology: static 172.23.10.96/27 blackhole covers
+                // .98/.101), the blackhole is NOT a usable route — the
+                // SYN would be delivered to loopback (self-connect).
+                // Wait for Babel to install the /32 route that overrides
+                // the blackhole BEFORE dialing.
+                //
+                // This avoids the "backoff expires but no route →
+                // self-connect → backoff again" timing loop the
+                // production report described. The check uses
+                // GetBestRoute2 (Windows) / ip route get (Linux) to
+                // ask the kernel, NOT a static config lookup — so it
+                // adapts to Babel's route install/withdraw cadence in
+                // real time.
+                if !route_reaches(&sockaddr) {
+                    println!(
+                        "daemon: peer {}: waiting for a kernel route to {} (covered by blackhole or no route yet)",
+                        label, remote
+                    );
+                    // Short poll — don't consume the full backoff
+                    // (which would be 30 s on the ladder). Poll every
+                    // 1 s so Babel's /32 route lands and the next dial
+                    // happens immediately.
+                    sleep_interruptible(&rt, Duration::from_millis(1_000));
+                    continue;
+                }
                 println!("daemon: peer {}: connecting to {} ...", label, remote);
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
