@@ -214,8 +214,10 @@ fn import_pipeline(
         // the selector pick the best across the existing candidates
         // for the same key. Since the bench uses unique /24s, every
         // install is a fresh key — but `install` is the path the
-        // daemon takes when the new route wins.
-        loc_rib.install(route);
+        // daemon takes when the new route wins. The bool return
+        // (whether the install actually changed the Loc-RIB) is not
+        // relevant to this micro-bench's measurement.
+        let _ = loc_rib.install(route);
     }
 }
 
