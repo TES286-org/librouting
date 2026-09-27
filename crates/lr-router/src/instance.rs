@@ -926,14 +926,29 @@ struct BabelRuntime {
     own_seqno_request: Option<u16>,
     /// Routes previously published to Loc-RIB — used to compute deltas.
     published: BTreeMap<RouteKey, Route>,
+    /// The reason the most recent withdrawal happened (empty when the
+    /// last delta carried installs only or no change). Consumed by
+    /// `handle_frame`'s trailing `self.diff()` so the retraction path
+    /// (`metric == 0xFFFF`) can annotate the delta with "peer
+    /// retraction (metric=infinity)" before it surfaces as a Log event.
+    last_withdraw_reason: String,
 }
 
 /// Result of one protocol-runtime step: routes to install into / withdraw
-/// from Loc-RIB.
+/// from Loc-RIB. The `withdraw_reason` is a human-readable string carried
+/// on the first withdrawal's `RouterEvent::Log` so the operator can see
+/// WHY a Babel route disappeared (expiry, explicit retraction, link-down,
+/// or best-path displacement) — essential for diagnosing the
+/// install/withdraw cycle in the Windows production report.
 #[derive(Default)]
 struct RuntimeDelta {
     installed: Vec<Route>,
     withdrawn: Vec<RouteKey>,
+    /// Human-readable reason for the withdrawals (empty when the delta
+    /// carries installs only). Surfaced as a `RouterEvent::Log` line
+    /// in `apply_runtime_delta` so the operator can correlate the
+    /// withdrawal with its cause.
+    withdraw_reason: String,
 }
 
 impl BabelRuntime {
@@ -952,6 +967,7 @@ impl BabelRuntime {
             route_request: false,
             own_seqno_request: None,
             published: BTreeMap::new(),
+            last_withdraw_reason: String::new(),
         }
     }
 
@@ -1081,7 +1097,28 @@ impl BabelRuntime {
                 _ => {}
             }
         }
-        self.diff()
+        let mut delta = self.diff();
+        if !delta.withdrawn.is_empty() && delta.withdraw_reason.is_empty() {
+            // The withdrawal was not annotated by the retraction path
+            // (it came from a best-path displacement in `diff`, not a
+            // metric=infinity Update). Annotate it generically so the
+            // operator still sees a reason.
+            delta.withdraw_reason = format!(
+                "babel best-path displacement ({} route(s) lost the best-path election)",
+                delta.withdrawn.len()
+            );
+        }
+        if !delta.withdrawn.is_empty() {
+            // Consume the retraction-path reason (set by the
+            // metric=infinity branch above) into the delta and clear
+            // the runtime field for the next frame.
+            if !self.last_withdraw_reason.is_empty() && delta.withdraw_reason.is_empty() {
+                delta.withdraw_reason = std::mem::take(&mut self.last_withdraw_reason);
+            } else {
+                self.last_withdraw_reason.clear();
+            }
+        }
+        delta
     }
 
     fn apply_update(&mut self, u: &lr_babel::message::Update, now_ms: u64) {
@@ -1159,6 +1196,10 @@ impl BabelRuntime {
         // metric 0xFFFF (infinity) → retraction (RFC 8966 §3.5.5).
         if u.metric == 0xFFFF {
             self.routes.withdraw(&key);
+            self.last_withdraw_reason = format!(
+                "babel peer retraction (metric=infinity) for {}",
+                key.destination
+            );
             return;
         }
         // Per-family next-hop resolution (RFC 8966 §3.5.3): an AE 1
@@ -1233,8 +1274,21 @@ impl BabelRuntime {
     /// through `routes.expire(now_ms)` within 15–18 s, which is fast
     /// enough for production and avoids the flap.
     fn gc(&mut self, now_ms: u64) -> RuntimeDelta {
-        if !self.routes.expire(now_ms).is_empty() {
-            return self.diff();
+        let expired = self.routes.expire(now_ms);
+        if !expired.is_empty() {
+            let mut delta = self.diff();
+            if delta.withdrawn.is_empty() {
+                // expire() removed routes from the table but they were
+                // not in `published` (already displaced by a better
+                // route). No delta to emit.
+                return RuntimeDelta::default();
+            }
+            delta.withdraw_reason = format!(
+                "babel route hold time expired ({} route(s) aged out at {} ms)",
+                expired.len(),
+                now_ms
+            );
+            return delta;
         }
         RuntimeDelta::default()
     }
@@ -1250,6 +1304,7 @@ impl BabelRuntime {
         let mut delta = RuntimeDelta {
             installed: Vec::new(),
             withdrawn: Vec::new(),
+            withdraw_reason: String::new(),
         };
         for (k, r) in &current {
             match self.published.get(k) {
@@ -4840,6 +4895,7 @@ impl RouterInstance for DefaultRouter {
                     let mut delta = RuntimeDelta {
                         installed: Vec::new(),
                         withdrawn: Vec::new(),
+                        withdraw_reason: String::new(),
                     };
                     let mut r = lr_core::buf::ReadBuf::new(&input);
                     while let Ok(Some(frame)) = runtime.codec.decode(&mut r) {
@@ -5191,7 +5247,13 @@ impl RouterInstance for DefaultRouter {
         // withdrawal delta, and the session stays alive for the link's
         // return (routes re-learn from the peer's Updates).
         runtime.routes = lr_babel::BabelRouteTable::new();
-        let delta = runtime.diff();
+        let mut delta = runtime.diff();
+        if !delta.withdrawn.is_empty() {
+            delta.withdraw_reason = format!(
+                "babel interface link-down flush ({} route(s))",
+                delta.withdrawn.len()
+            );
+        }
         self.apply_runtime_delta(delta);
     }
 
@@ -5370,6 +5432,24 @@ impl DefaultRouter {
                 // redistributed for the key.
                 self.redistribute_route(&route);
             }
+        }
+        // If the delta carries a withdraw reason, surface it as a Log
+        // event BEFORE the RouteWithdrawn events so the operator can
+        // correlate the withdrawal with its cause. This is the
+        // diagnostic the production report asked for: "why does Babel
+        // withdraw routes?" — the reason is now in the daemon log.
+        if !delta.withdrawn.is_empty() && !delta.withdraw_reason.is_empty() {
+            self.pending_events.push(RouterEvent::Log(format!(
+                "babel withdraw: {} — {} route(s): {}",
+                delta.withdraw_reason,
+                delta.withdrawn.len(),
+                delta
+                    .withdrawn
+                    .iter()
+                    .map(|k| k.prefix.to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )));
         }
         for key in delta.withdrawn {
             if let Some(withdrawn) = self.direct_rib.remove(&key) {
@@ -5798,6 +5878,7 @@ impl DefaultRouter {
         let mut delta = RuntimeDelta {
             installed: Vec::new(),
             withdrawn: Vec::new(),
+            withdraw_reason: String::new(),
         };
         for (k, r) in &current {
             match self.ospf_published.get(k) {
@@ -12126,6 +12207,7 @@ mod tests {
         r.apply_runtime_delta(RuntimeDelta {
             installed: vec![route.clone()],
             withdrawn: vec![],
+            ..Default::default()
         });
         let events = r.poll_events();
         let installed_count = events
@@ -12140,6 +12222,7 @@ mod tests {
         r.apply_runtime_delta(RuntimeDelta {
             installed: vec![route.clone()],
             withdrawn: vec![],
+            ..Default::default()
         });
         let events = r.poll_events();
         let installed_count = events
@@ -12159,6 +12242,7 @@ mod tests {
         r.apply_runtime_delta(RuntimeDelta {
             installed: vec![changed],
             withdrawn: vec![],
+            ..Default::default()
         });
         let events = r.poll_events();
         let installed_count = events
@@ -12198,6 +12282,7 @@ mod tests {
         r.apply_runtime_delta(RuntimeDelta {
             installed: vec![route.clone()],
             withdrawn: vec![],
+            ..Default::default()
         });
         let _ = r.poll_events();
 
@@ -12207,12 +12292,14 @@ mod tests {
         r.apply_runtime_delta(RuntimeDelta {
             installed: vec![route],
             withdrawn: vec![],
+            ..Default::default()
         });
         let _ = r.poll_events();
 
         r.apply_runtime_delta(RuntimeDelta {
             installed: vec![],
             withdrawn: vec![key.clone()],
+            ..Default::default()
         });
         let events = r.poll_events();
         let withdrawn_count = events
