@@ -2195,7 +2195,12 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
     // kernel query that might fail (a peer hostname that does not
     // resolve yet, a route that appears later via Babel, etc.).
     match lr_osroute::source_check::check_source_compatibility(local, peer_ip) {
-        lr_osroute::source_check::SourceCheck::Ok => {}
+        lr_osroute::source_check::SourceCheck::Ok => {
+            // The bind test passed (Windows) or the platform does not
+            // implement the diagnostic (Linux/macOS). Either way, no
+            // warning — the daemon's `connect_bound` will use the
+            // configured `local` as the source.
+        }
         lr_osroute::source_check::SourceCheck::NoRoute => {
             eprintln!(
                 "daemon: peer {}: warning: no kernel route to {} — the \
@@ -2209,29 +2214,47 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
             configured,
             kernel_choice,
         } => {
-            // The Windows Strong Host Model default: the kernel sources
-            // the connection from the egress interface's address, not
-            // the configured `local`. The peer's `neighbor <ip>` match
-            // fails, and on Windows the inbound TCP SYN (destined to
-            // `local`) may also be dropped at the receiving interface
-            // because `local` is not assigned to it — both halves of
-            // the bidirectional session break for the same reason.
-            eprintln!(
-                "daemon: peer {}: warning: local_address {} is not on the \
-                 kernel's chosen egress interface (if {}) for {}; the \
-                 kernel will source the TCP from {} instead. The peer's \
-                 neighbor match will fail and the inbound SYN may be \
-                 dropped by the Windows Strong Host Model. Either assign \
-                 {} to the egress interface, configure Weak Host Model \
-                 (netsh interface ipv4 set interface <if> \
-                 weakhostsend=enabled weakhostreceive=enabled), or use a \
-                 local_address that is already on the egress interface.",
+            // Non-Windows platforms: the kernel's default source differs
+            // from the configured `local`, but the daemon binds (which
+            // overrides the default on Linux/macOS). This is
+            // informational — no warning needed unless the bind also
+            // fails (which the non-Windows diagnostic cannot test).
+            // Log at info level (not warning) so the operator sees the
+            // kernel's default choice without being alarmed.
+            println!(
+                "daemon: peer {}: info: kernel default source for {} is \
+                 {} (if {}) — the daemon binds to {} which overrides this; \
+                 verify the actual source via the 'connected from' log line",
                 entry.label(),
-                configured,
-                kernel_choice.if_index,
                 remote,
                 kernel_choice.source,
+                kernel_choice.if_index,
                 configured
+            );
+        }
+        lr_osroute::source_check::SourceCheck::BindFails {
+            configured,
+            kernel_default,
+        } => {
+            // Windows: the bind() to `configured` fails. The daemon's
+            // fallback uses `kernel_default.source` — the peer will see
+            // a different source and reject the session. THIS is the
+            // real problem the operator must fix.
+            eprintln!(
+                "daemon: peer {}: warning: bind() to local_address {} \
+                 fails on Windows — the daemon will fall back to the \
+                 kernel's default source {} (if {}) for {}. The peer's \
+                 neighbor match will fail. Either assign {} to the \
+                 egress interface (if {} or the Babel-learned route's \
+                 interface), or verify the address is actually \
+                 configured on a local adapter (Get-NetIPAddress).",
+                entry.label(),
+                configured,
+                kernel_default.source,
+                kernel_default.if_index,
+                remote,
+                configured,
+                kernel_default.if_index
             );
         }
     }
@@ -2388,6 +2411,19 @@ fn spawn_connector(
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
+                        // Log the actual source IP the kernel assigned
+                        // after the bind+connect. On Windows the Strong
+                        // Host Model can silently override the bound
+                        // source; this log line is the cheapest way to
+                        // confirm whether `connect_bound`'s `bind()`
+                        // was honored. If the source shown here is NOT
+                        // the configured `local_address`, the peer will
+                        // see a different source and reject the session
+                        // (the "peer sent NOTIFICATION code=6 sub=7"
+                        // storm).
+                        if let Ok(local_addr) = stream.local_addr() {
+                            println!("daemon: peer {}: connected from {}", label, local_addr);
+                        }
                         live.fetch_add(1, Ordering::Relaxed);
                         let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
                         live.fetch_sub(1, Ordering::Relaxed);
