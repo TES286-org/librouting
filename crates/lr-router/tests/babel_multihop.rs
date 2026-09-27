@@ -274,17 +274,30 @@ fn babel_gc_expires_stale_routes() {
     assert!(r.babel_reachable(a).is_empty());
 }
 
-/// A neighbour that stops sending Hellos loses its routes without
-/// waiting out every route's own hold time (babeld's
-/// `retract_neighbour_routes`).
+/// A neighbour that stops sending Hellos does NOT lose its routes
+/// immediately — the routes survive until their own re-announcement
+/// hold time lapses. This matches babeld's behaviour: babeld does not
+/// have a "neighbour death → drop all routes" path; it relies on each
+/// route's own hold timer (6× the Update interval, 15 s minimum) and
+/// the neighbour's retraction Updates.
+///
+/// The previous implementation dropped all routes on neighbour death
+/// (4× the Hello interval = 4 s for a 1 s Hello), which caused flaky
+/// route withdrawal on tunnel interfaces where a 4 s Hello gap is
+/// common (latency spikes, packet reordering). The fix: let
+/// `routes.expire(now_ms)` handle it — the routes expire within 15–18 s,
+/// which is fast enough for production and avoids the flap.
 #[test]
-fn babel_gc_retracts_dead_neighbours_routes() {
+fn babel_gc_keeps_routes_past_neighbour_death_until_hold_expires() {
     let mut r = DefaultRouter::new();
     let a = babel_session(&mut r, IpAddr::V4([127, 10, 0, 2]));
-    // One announcement at t=1 s with a long update interval (60 s →
-    // hold 36 s) but a 1 s Hello interval.
-    r.feed_input(a, &peer_frame([8, 8, 8, 8, 0, 0, 0, 1], [10, 99, 1], 7, 96))
-        .unwrap();
+    // One announcement at t=1 s with a 3 s update interval (hold 18 s)
+    // and a 1 s Hello interval.
+    r.feed_input(
+        a,
+        &peer_frame([8, 8, 8, 8, 0, 0, 0, 1], [10, 99, 1], 7, 300),
+    )
+    .unwrap();
     let mut hello = lr_babel::BabelFrame::empty();
     hello
         .body
@@ -300,14 +313,26 @@ fn babel_gc_retracts_dead_neighbours_routes() {
     );
 
     // t = 6 s: five Hello intervals of silence — past the 4× Hello
-    // liveness bound, long before the route's own 36 s hold.
+    // liveness bound, but the route's own 18 s hold has not lapsed.
+    // The route STAYS — no flap on brief neighbour blips.
     r.babel_gc(6_000);
     assert_eq!(
         r.rib_snapshot()
             .iter()
             .filter(|rt| rt.protocol == Protocol::Babel)
             .count(),
+        1,
+        "the route survives a brief neighbour blip (no flap)"
+    );
+
+    // t = 20 s: past the route's 18 s hold. Now the route expires.
+    r.babel_gc(20_000);
+    assert_eq!(
+        r.rib_snapshot()
+            .iter()
+            .filter(|rt| rt.protocol == Protocol::Babel)
+            .count(),
         0,
-        "the dead neighbour's routes are retracted early"
+        "the route expires after its own hold time"
     );
 }

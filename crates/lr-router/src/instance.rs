@@ -1215,20 +1215,24 @@ impl BabelRuntime {
         );
     }
 
-    /// One expiry sweep (RFC 8966 §3.2.5 + babeld's neighbour-death
-    /// retraction): routes whose re-announcement hold time lapsed are
-    /// dropped, and a neighbour that stopped its Hellos loses every
-    /// route it taught us — in both cases the diff against `published`
+    /// One expiry sweep (RFC 8966 §3.2.5): routes whose re-announcement
+    /// hold time lapsed are dropped, and the diff against `published`
     /// becomes the Loc-RIB withdrawal delta.
+    ///
+    /// Unlike the previous implementation, this does NOT drop all routes
+    /// immediately when the neighbour's Hello hold window (4× the Hello
+    /// interval) lapses. On tunnel interfaces (WireGuard, etc.) a 4 s
+    /// Hello gap is common — latency spikes, packet reordering, or
+    /// scheduler hiccups all produce it. Dropping every route on a
+    /// brief blip caused the "flaky Babel" symptom: routes withdrawn,
+    /// then re-installed a second later when the next Hello arrived,
+    /// with a brief outage during the gap. babeld does not have this
+    /// path — it relies on each route's own hold timer (6× the Update
+    /// interval, 15 s minimum) and the neighbour's retraction Updates.
+    /// lr now matches that behaviour: a dead neighbour's routes expire
+    /// through `routes.expire(now_ms)` within 15–18 s, which is fast
+    /// enough for production and avoids the flap.
     fn gc(&mut self, now_ms: u64) -> RuntimeDelta {
-        // Neighbour death: no Hello within the advertised hold window
-        // (4× the Hello interval, the `is_alive` bound). babeld calls
-        // `retract_neighbour_routes` at that point instead of waiting
-        // out every route's own hold time.
-        if !self.neighbor.is_alive(now_ms, 0) && !self.routes.is_empty() {
-            self.routes = lr_babel::BabelRouteTable::new();
-            return self.diff();
-        }
         if !self.routes.expire(now_ms).is_empty() {
             return self.diff();
         }
