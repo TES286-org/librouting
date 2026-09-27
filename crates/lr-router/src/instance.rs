@@ -1098,24 +1098,20 @@ impl BabelRuntime {
             }
         }
         let mut delta = self.diff();
-        if !delta.withdrawn.is_empty() && delta.withdraw_reason.is_empty() {
-            // The withdrawal was not annotated by the retraction path
-            // (it came from a best-path displacement in `diff`, not a
-            // metric=infinity Update). Annotate it generically so the
-            // operator still sees a reason.
-            delta.withdraw_reason = format!(
-                "babel best-path displacement ({} route(s) lost the best-path election)",
-                delta.withdrawn.len()
-            );
-        }
         if !delta.withdrawn.is_empty() {
             // Consume the retraction-path reason (set by the
-            // metric=infinity branch above) into the delta and clear
-            // the runtime field for the next frame.
-            if !self.last_withdraw_reason.is_empty() && delta.withdraw_reason.is_empty() {
+            // metric=infinity branch in `apply_update`) FIRST — it is
+            // the specific, operator-actionable reason. Only when no
+            // retraction happened this frame (the withdrawal came from
+            // a best-path displacement in `diff`) do we fall back to
+            // the generic "best-path displacement" annotation.
+            if !self.last_withdraw_reason.is_empty() {
                 delta.withdraw_reason = std::mem::take(&mut self.last_withdraw_reason);
-            } else {
-                self.last_withdraw_reason.clear();
+            } else if delta.withdraw_reason.is_empty() {
+                delta.withdraw_reason = format!(
+                    "babel best-path displacement ({} route(s) lost the best-path election)",
+                    delta.withdrawn.len()
+                );
             }
         }
         delta
@@ -4902,6 +4898,14 @@ impl RouterInstance for DefaultRouter {
                         let d = runtime.handle_frame(&frame, now_ms, now_us);
                         delta.installed.extend(d.installed);
                         delta.withdrawn.extend(d.withdrawn);
+                        // Preserve the withdraw reason from the last
+                        // frame that carried one — the operator's
+                        // diagnostic. A multi-frame batch where some
+                        // frames retract and others install keeps the
+                        // retraction reason (the actionable one).
+                        if !d.withdraw_reason.is_empty() {
+                            delta.withdraw_reason = d.withdraw_reason;
+                        }
                     }
                     Pending::Other { delta }
                 }

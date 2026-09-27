@@ -516,3 +516,72 @@ fn prefix_cache_expands_bird_wire_form() {
         vec![0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06]
     );
 }
+
+/// A peer retraction (metric=infinity) must annotate the withdrawal
+/// delta with the reason "babel peer retraction (metric=infinity)".
+/// This is the diagnostic the production report asked for: the operator
+/// needs to see WHY a Babel route disappeared.
+#[test]
+fn retraction_withdrawal_carries_reason() {
+    let (mut r, h) = babel_session();
+    let v6_nh = Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 2,
+            address: IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        }
+        .encode(),
+    );
+    let teach = frame(vec![
+        v6_nh.clone(),
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            3,
+            100,
+        ),
+    ]);
+    r.feed_input(h, &teach).unwrap();
+    assert!(snapshot_has(r.as_ref(), fd00_6(), Protocol::Babel));
+    // Drain the install events.
+    let _ = r.poll_events();
+
+    let retract = frame(vec![
+        v6_nh,
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            3,
+            0xFFFF,
+        ),
+    ]);
+    r.feed_input(h, &retract).unwrap();
+    let events = r.poll_events();
+    // The withdrawal reason must surface as a Log event BEFORE the
+    // RouteWithdrawn event.
+    let log_msg = events.iter().find_map(|e| match e {
+        lr_router::RouterEvent::Log(msg) => Some(msg.as_str()),
+        _ => None,
+    });
+    assert!(
+        log_msg.is_some(),
+        "a retraction must emit a Log event with the withdraw reason"
+    );
+    let log_msg = log_msg.unwrap();
+    assert!(
+        log_msg.contains("peer retraction"),
+        "the reason must mention 'peer retraction', got: {log_msg}"
+    );
+    assert!(
+        log_msg.contains("metric=infinity"),
+        "the reason must mention 'metric=infinity', got: {log_msg}"
+    );
+}
