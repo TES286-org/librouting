@@ -2381,6 +2381,26 @@ mod route_check {
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
     use windows_sys::Win32::Networking::WinSock::SOCKADDR_INET;
 
+    /// Ask the kernel whether a USABLE route exists to `peer`.
+    ///
+    /// Windows has no blackhole route type — lr's "blackhole" installs
+    /// are on-link rows on a real interface (the stack ARP-resolves the
+    /// covered destination, resolution fails, traffic dies as
+    /// host-unreachable). `GetBestRoute2` returns the on-link row's
+    /// interface and its address as the source — NOT loopback. So
+    /// checking the source for 127.0.0.1 (the previous approach) never
+    /// fires: the blackhole looks like a normal on-link route to
+    /// `GetBestRoute2`.
+    ///
+    /// The reliable signal: the route's **protocol tag + next hop**.
+    /// lr's blackhole installs use `RouteProtocolNetMgmt` with an
+    /// on-link next hop (0.0.0.0 / ::). A Babel-learned route uses
+    /// `RouteProtocolRip` with a real gateway (e.g. 169.254.1.6).
+    /// A connected route uses `RouteProtocolLocal` with on-link next
+    /// hop — that IS usable (the peer is on-link). So: only treat the
+    /// route as unreachable when it's an lr-installed blackhole
+    /// (NetMgmt + on-link next hop). Everything else (Rip with a
+    /// gateway, Local on-link, Bgp) is usable.
     pub fn route_reaches(peer: &std::net::SocketAddr) -> bool {
         let destination = sockaddr_for(peer);
         let mut best_route: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
@@ -2399,11 +2419,25 @@ mod route_check {
         if rc != NO_ERROR || best_route.InterfaceIndex == 0 {
             return false;
         }
-        // Heuristic: if the kernel's chosen source is 127.0.0.1 / ::1,
-        // the route resolves to loopback (blackhole delivery). A
-        // usable route sources from a real interface address.
-        let src = unsafe { inet_addr_of(&best_source) };
-        !is_canonical_loopback(&src)
+        // lr's blackhole: Protocol == RouteProtocolNetMgmt AND next hop
+        // is the on-link form (0.0.0.0 / ::). Everything else is usable.
+        use windows_sys::Win32::Networking::WinSock::RouteProtocolNetMgmt;
+        if best_route.Protocol == RouteProtocolNetMgmt {
+            let nh = unsafe { inet_addr_of(&best_route.NextHop) };
+            if is_zero_addr(&nh) {
+                // lr's blackhole on-link row — don't dial.
+                return false;
+            }
+        }
+        true
+    }
+
+    /// True for 0.0.0.0 / :: (the on-link next-hop form).
+    fn is_zero_addr(ip: &std::net::IpAddr) -> bool {
+        match ip {
+            std::net::IpAddr::V4(v4) => v4.is_unspecified(),
+            std::net::IpAddr::V6(v6) => v6.is_unspecified(),
+        }
     }
 
     fn sockaddr_for(addr: &std::net::SocketAddr) -> SOCKADDR_INET {
@@ -2442,13 +2476,6 @@ mod route_check {
             let v4 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN>() };
             let s = &v4.sin_addr.S_un.S_un_b;
             std::net::IpAddr::V4(std::net::Ipv4Addr::new(s.s_b1, s.s_b2, s.s_b3, s.s_b4))
-        }
-    }
-
-    fn is_canonical_loopback(ip: &std::net::IpAddr) -> bool {
-        match ip {
-            std::net::IpAddr::V4(v4) => *v4 == std::net::Ipv4Addr::LOCALHOST,
-            std::net::IpAddr::V6(v6) => v6.is_loopback(),
         }
     }
 }
