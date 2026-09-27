@@ -585,3 +585,179 @@ fn retraction_withdrawal_carries_reason() {
         "the reason must mention 'metric=infinity', got: {log_msg}"
     );
 }
+
+/// A wildcard retraction (RFC 8966 §4.6.9 — AE 0, metric 0xFFFF) must
+/// annotate the withdrawal delta with the reason "babel peer wildcard
+/// retraction" — NOT the misleading fallback "babel best-path
+/// displacement". This is the production-report symptom: a BIRD peer
+/// whose BGP upstreams disconnected sent a wildcard retraction, and
+/// the operator saw "best-path displacement" and (correctly) concluded
+/// the message was wrong — with one upstream, no "election" can
+/// produce zero paths. The actual cause is an explicit peer-side
+/// retraction, not a local-decision displacement.
+#[test]
+fn wildcard_retraction_carries_reason() {
+    let (mut r, h) = babel_session();
+    let v6_nh = Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 2,
+            address: IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        }
+        .encode(),
+    );
+    // Teach two routes from the peer — the wildcard retraction will
+    // flush both, and the reason must mention the count.
+    let teach = frame(vec![
+        v6_nh.clone(),
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            3,
+            100,
+        ),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x10, 0x01, 0x27, 0x02, 0x86, 0x00, 0x06],
+            3,
+            100,
+        ),
+    ]);
+    r.feed_input(h, &teach).unwrap();
+    assert!(snapshot_has(r.as_ref(), fd00_6(), Protocol::Babel));
+    assert!(snapshot_has(r.as_ref(), fd10_6(), Protocol::Babel));
+    // Drain the install events.
+    let _ = r.poll_events();
+
+    // The peer sends a wildcard retraction (AE 0, metric 0xFFFF).
+    let retract = frame(vec![
+        v6_nh,
+        router_id_tlv(PEER_ID),
+        update_tlv(0, 0, 0, 0, &[], 0, 0xFFFF),
+    ]);
+    r.feed_input(h, &retract).unwrap();
+    let events = r.poll_events();
+    let log_msg = events.iter().find_map(|e| match e {
+        lr_router::RouterEvent::Log(msg) => Some(msg.as_str()),
+        _ => None,
+    });
+    assert!(
+        log_msg.is_some(),
+        "a wildcard retraction must emit a Log event with the withdraw reason"
+    );
+    let log_msg = log_msg.unwrap();
+    assert!(
+        log_msg.contains("wildcard retraction"),
+        "the reason must mention 'wildcard retraction' (not 'best-path displacement'), got: {log_msg}"
+    );
+    assert!(
+        log_msg.contains("metric=infinity"),
+        "the reason must mention 'metric=infinity', got: {log_msg}"
+    );
+    assert!(
+        log_msg.contains("2 route(s)"),
+        "the reason must mention the route count, got: {log_msg}"
+    );
+    assert!(
+        !log_msg.contains("best-path displacement"),
+        "the misleading fallback must NOT fire for wildcard retractions, got: {log_msg}"
+    );
+}
+
+/// Multiple per-prefix retractions in one frame must produce a
+/// count-annotated reason ("N route(s)") rather than only naming the
+/// LAST prefix. Pre-fix, `last_withdraw_reason` was a single String
+/// overwritten on every retraction TLV — a 29-route retraction frame
+/// logged only the last prefix, hiding the scope of the retraction
+/// from the operator.
+#[test]
+fn multi_prefix_retraction_carries_count() {
+    let (mut r, h) = babel_session();
+    let v6_nh = Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 2,
+            address: IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        }
+        .encode(),
+    );
+    // Teach two routes from the peer.
+    let teach = frame(vec![
+        v6_nh.clone(),
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            3,
+            100,
+        ),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x10, 0x01, 0x27, 0x02, 0x86, 0x00, 0x06],
+            3,
+            100,
+        ),
+    ]);
+    r.feed_input(h, &teach).unwrap();
+    assert!(snapshot_has(r.as_ref(), fd00_6(), Protocol::Babel));
+    assert!(snapshot_has(r.as_ref(), fd10_6(), Protocol::Babel));
+    let _ = r.poll_events();
+
+    // Retract both prefixes in one frame.
+    let retract = frame(vec![
+        v6_nh,
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            3,
+            0xFFFF,
+        ),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x10, 0x01, 0x27, 0x02, 0x86, 0x00, 0x06],
+            3,
+            0xFFFF,
+        ),
+    ]);
+    r.feed_input(h, &retract).unwrap();
+    let events = r.poll_events();
+    let log_msg = events
+        .iter()
+        .find_map(|e| match e {
+            lr_router::RouterEvent::Log(msg) => Some(msg.as_str()),
+            _ => None,
+        })
+        .expect("multi-prefix retraction must emit a Log event");
+    assert!(
+        log_msg.contains("peer retraction"),
+        "the reason must mention 'peer retraction', got: {log_msg}"
+    );
+    assert!(
+        log_msg.contains("metric=infinity"),
+        "the reason must mention 'metric=infinity', got: {log_msg}"
+    );
+    assert!(
+        log_msg.contains("2 route(s)"),
+        "the reason must mention the count (not just the last prefix), got: {log_msg}"
+    );
+}

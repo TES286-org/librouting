@@ -18,6 +18,27 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ### Fixed (Babel — production interop with BIRD/babeld)
 
+- **Wildcard retractions now log "babel peer wildcard retraction"
+  instead of the misleading "babel best-path displacement" fallback.**
+  When a BIRD peer's BGP upstreams disconnect, BIRD's babel export
+  filter (`export where source = RTS_BGP`) no longer has anything to
+  export and BIRD sends a wildcard retraction (RFC 8966 §4.6.9 — AE 0,
+  metric 0xFFFF). The previous `apply_update` code flushed the route
+  table on this signal but returned without setting
+  `last_withdraw_reason`, so `handle_frame` fell back to the generic
+  "best-path displacement" string. The operator (correctly) concluded
+  the message was wrong: with one upstream, no "best-path election"
+  can produce zero paths — the actual cause is an explicit peer-side
+  retraction, not a local-decision displacement. The fix replaces the
+  single `String` field with a structured `LastWithdraw { kind,
+  first_prefix }` that distinguishes per-prefix retractions, wildcard
+  retractions, and the local best-path displacement fallback. The
+  count of affected routes comes from `delta.withdrawn.len()` at
+  render time, so a 29-route retraction frame logs the count (not
+  just the LAST prefix, as the previous overwrite-on-every-TLV
+  behaviour did). Behaviour unchanged: routes still flush on wildcard
+  retraction (RFC 8966 §4.6.9 permits "MAY keep"; babeld clears; lr
+  matches babeld). Only the diagnostic message changes.
 - **Route metrics no longer double-count the link on every hop.**
   The advertised Update metric used to include the announcing
   interface's rxcost + RTT penalty, which every *receiver* then added
