@@ -40,23 +40,31 @@ pub struct KernelSource {
 }
 
 /// The result of [`check_source_compatibility`]. `Ok` means the
-/// configured `local` matches the kernel's choice; the `Mismatch` and
-/// `NoRoute` variants carry the detail the daemon should log.
+/// configured `local` is usable as the source; the other variants
+/// carry the detail the daemon should log.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SourceCheck {
-    /// The configured source matches the kernel's choice (or the
-    /// kernel has no opinion / the platform does not implement the
-    /// diagnostic).
+    /// The configured source is usable — the daemon's `connect_bound`
+    /// will bind to it successfully (verified by a real `bind()` test
+    /// on Windows), so the peer will see the configured source IP.
     Ok,
     /// The kernel would source the connection from a different
-    /// address than the configured `local`. The daemon should warn
-    /// the operator — on Windows this typically means the Strong
-    /// Host Model is in effect and the peer will not recognise the
-    /// connection (the production report's `peer sent NOTIFICATION
-    /// code=6 sub=7` storm).
+    /// address than the configured `local` (informational — the
+    /// daemon binds, overriding this default). This variant is
+    /// returned by the non-Windows implementations that cannot do a
+    /// real bind test.
     Mismatch {
         configured: IpAddr,
         kernel_choice: KernelSource,
+    },
+    /// The `bind()` to the configured `local` fails (e.g.
+    /// `WSAEADDRNOTAVAIL` on Windows). The daemon's fallback uses the
+    /// kernel's default source — `kernel_default` — which the peer
+    /// will reject. The operator must either assign `configured` to
+    /// the egress interface or configure Weak Host Model.
+    BindFails {
+        configured: IpAddr,
+        kernel_default: KernelSource,
     },
     /// The kernel reported no route to the peer at all. The daemon
     /// should warn — the connection will fail with `ENETUNREACH` /
@@ -86,24 +94,147 @@ mod imp {
     use windows_sys::Win32::Foundation::NO_ERROR;
     use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
     use windows_sys::Win32::Networking::WinSock::{
-        AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
+        bind, closesocket, socket, WSAGetLastError, WSAStartup, AF_INET, AF_INET6, INVALID_SOCKET,
+        IPPROTO_TCP, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET, SOCK_STREAM, SOL_SOCKET,
+        SO_REUSEADDR, WSADATA,
     };
 
-    /// Windows IP Helper's `GetBestRoute2` returns both the best route
-    /// and the best source address — exactly the question this
-    /// diagnostic needs to answer. The Strong Host Model is the
-    /// default on Windows; when `local` is on a different interface
-    /// than the egress, `GetBestRoute2` reports the egress interface's
-    /// address as the source, not the configured `local`.
+    /// The diagnostic does TWO things:
+    ///
+    /// 1. Asks `GetBestRoute2` for the kernel's default source
+    ///    choice — informational only. The daemon's `connect_bound`
+    ///    binds to the configured `local`, which OVERRIDES this
+    ///    default (with `IP_UNICAST_IF` pinning the egress interface
+    ///    on Windows). The kernel's default is NOT what the daemon
+    ///    actually sends; reporting it as the actual source (as the
+    ///    rc.1 diagnostic did) was misleading.
+    ///
+    /// 2. Creates a real TCP socket, binds it to the configured
+    ///    `local:0`, and checks whether the bind succeeds. If the
+    ///    bind fails (e.g. `WSAEADDRNOTAVAIL` — the address is not
+    ///    assigned to any interface, or the kernel refuses to bind a
+    ///    non-egress source under the Strong Host Model), the daemon's
+    ///    `connect_bound` will also fail, and the daemon's fallback
+    ///    to kernel-chosen source will produce the wrong source IP.
+    ///    This is the condition the operator actually needs to fix.
     pub fn check_source_compatibility(local: IpAddr, peer: IpAddr) -> SourceCheck {
-        let destination = sockaddr_for(&peer);
+        // Step 1: query the kernel's default source choice
+        // (informational — the daemon binds, so this is NOT the
+        // actual source unless the bind fails).
+        let kernel_info = kernel_default_source(&peer);
+
+        // Step 2: verify the bind actually works with the configured
+        // local address. This is the real test — if bind fails, the
+        // daemon falls back to the kernel's default source, and the
+        // peer sees the wrong source IP.
+        match test_bind(&local) {
+            BindResult::Ok => {
+                // The bind works. The daemon's `connect_bound` will
+                // use `local` as the source (with `IP_UNICAST_IF`
+                // pinning the egress interface on Windows). The
+                // kernel's default is irrelevant.
+                SourceCheck::Ok
+            }
+            BindResult::AddrNotAvailable => {
+                // The bind fails: the address is not assigned to any
+                // interface, or the kernel refuses under the Strong
+                // Host Model. The daemon's fallback uses the kernel's
+                // default source — which the peer will reject.
+                match kernel_info {
+                    Some(ks) => SourceCheck::BindFails {
+                        configured: local,
+                        kernel_default: ks,
+                    },
+                    None => SourceCheck::NoRoute,
+                }
+            }
+            BindResult::OtherError => {
+                // Unexpected bind error — treat as "no route" so the
+                // daemon still dials (the diagnostic is a hint, not a
+                // gate). The operator can investigate via the
+                // "connected from" log line after the first dial.
+                SourceCheck::Ok
+            }
+        }
+    }
+
+    /// The result of a test `bind()` with the configured local address.
+    enum BindResult {
+        /// The bind succeeded — the daemon's `connect_bound` will use
+        /// this address as the source.
+        Ok,
+        /// `WSAEADDRNOTAVAIL`: the address is not assigned to any
+        /// interface, or the kernel refuses under the Strong Host
+        /// Model. The daemon's fallback uses the kernel's default
+        /// source.
+        AddrNotAvailable,
+        /// Any other bind error — non-fatal, the diagnostic returns
+        /// `Ok` so the daemon still dials.
+        OtherError,
+    }
+
+    /// Create a TCP socket, bind it to `local:0`, check the result,
+    /// then close the socket. Does NOT connect — we only need to know
+    /// whether the kernel accepts the bind.
+    fn test_bind(local: &IpAddr) -> BindResult {
+        // Initialise Winsock once. WSAStartup is ref-counted; calling
+        // it multiple times is safe (each WSAStartup needs a matching
+        // WSACleanup, but for a diagnostic that runs once at startup
+        // we can leak the WSAStartup — the process exits soon enough,
+        // and WSACleanup on shutdown is best-effort).
+        let mut wsa_data: WSADATA = unsafe { core::mem::zeroed() };
+        let rc = unsafe { WSAStartup(0x0202, &mut wsa_data) };
+        if rc != 0 {
+            return BindResult::OtherError;
+        }
+
+        let (af, _) = match local {
+            IpAddr::V4(_) => (AF_INET, 4),
+            IpAddr::V6(_) => (AF_INET6, 16),
+        };
+        // SAFETY: plain socket() call. INVALID_SOCKET on error.
+        let sock = unsafe { socket(af as _, SOCK_STREAM, IPPROTO_TCP as _) };
+        if sock == INVALID_SOCKET {
+            return BindResult::OtherError;
+        }
+        // Allow re-binding during the test (in case the daemon is
+        // already listening on 0.0.0.0:0 — unlikely but defensive).
+        let one: i32 = 1;
+        let _ = unsafe {
+            windows_sys::Win32::Networking::WinSock::setsockopt(
+                sock,
+                SOL_SOCKET,
+                SO_REUSEADDR,
+                &one as *const _ as *const u8,
+                core::mem::size_of::<i32>() as i32,
+            )
+        };
+
+        let (sa, len) = sockaddr_for_bind(local);
+        // SAFETY: `sa` is a valid sockaddr of `len` bytes.
+        let rc = unsafe { bind(sock, &sa as *const _ as *const _, len) };
+        let result = if rc == 0 {
+            BindResult::Ok
+        } else {
+            let err = unsafe { WSAGetLastError() };
+            // WSAEADDRNOTAVAIL = 10049
+            if err == 10049 {
+                BindResult::AddrNotAvailable
+            } else {
+                BindResult::OtherError
+            }
+        };
+        // SAFETY: sock is a valid socket; closesocket is safe.
+        let _ = unsafe { closesocket(sock) };
+        result
+    }
+
+    /// Ask `GetBestRoute2` for the kernel's default source choice.
+    /// Returns `None` when the kernel has no route to `peer`.
+    fn kernel_default_source(peer: &IpAddr) -> Option<KernelSource> {
+        let destination = sockaddr_for(peer);
         let mut best_route: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
         let mut best_source: SOCKADDR_INET = unsafe { core::mem::zeroed() };
-        // SAFETY: null InterfaceLuid/source select the current
-        // compartment and any source; both output pointers refer to
-        // live stack values. The struct layouts are
-        // machine-generated from the Windows SDK metadata by the
-        // `windows-sys` crate (same FFI surface `windows.rs` uses).
         let rc = unsafe {
             GetBestRoute2(
                 core::ptr::null(),
@@ -115,38 +246,21 @@ mod imp {
                 &mut best_source,
             )
         };
-        if rc != NO_ERROR {
-            return SourceCheck::NoRoute;
+        if rc != NO_ERROR || best_route.InterfaceIndex == 0 {
+            return None;
         }
-        if best_route.InterfaceIndex == 0 {
-            return SourceCheck::NoRoute;
-        }
-        // SAFETY: `best_source` was initialised by `GetBestRoute2`; the
-        // family tag and the appropriate arm are valid. The read pattern
-        // matches `windows.rs::inet_addr_of`.
         let kernel_source = unsafe { inet_addr_of(&best_source) };
-        if kernel_source == local {
-            return SourceCheck::Ok;
-        }
-        SourceCheck::Mismatch {
-            configured: local,
-            kernel_choice: KernelSource {
-                source: kernel_source,
-                if_index: best_route.InterfaceIndex,
-            },
-        }
+        Some(KernelSource {
+            source: kernel_source,
+            if_index: best_route.InterfaceIndex,
+        })
     }
 
-    /// Build a `SOCKADDR_INET` from an `IpAddr`. Mirrors
-    /// `windows.rs::sockaddr_for` minus the scope-id handling (the
-    /// diagnostic does not need link-local scoping — `GetBestRoute2`
-    /// resolves it from the destination's interface).
+    /// Build a `SOCKADDR_INET` (for `GetBestRoute2`) from an `IpAddr`.
     fn sockaddr_for(addr: &IpAddr) -> SOCKADDR_INET {
         let mut sa: SOCKADDR_INET = unsafe { core::mem::zeroed() };
         match addr {
             IpAddr::V4(b) => {
-                // SAFETY: writing the Ipv4 arm of the union. The
-                // union is zeroed so unused fields are 0.
                 let v4 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN>() };
                 v4.sin_family = AF_INET;
                 v4.sin_addr.S_un.S_un_b.s_b1 = b[0];
@@ -155,7 +269,6 @@ mod imp {
                 v4.sin_addr.S_un.S_un_b.s_b4 = b[3];
             }
             IpAddr::V6(b) => {
-                // SAFETY: writing the Ipv6 arm of the union.
                 let v6 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN6>() };
                 v6.sin6_family = AF_INET6;
                 v6.sin6_addr.u.Byte = *b;
@@ -164,21 +277,62 @@ mod imp {
         sa
     }
 
+    /// Build a `SOCKADDR` (port 0) for `bind()` from an `IpAddr`.
+    /// Returns the raw sockaddr bytes and length.
+    fn sockaddr_for_bind(addr: &IpAddr) -> ([u8; 128], i32) {
+        let mut buf = [0u8; 128];
+        match addr {
+            IpAddr::V4(b) => {
+                let sa = SOCKADDR_IN {
+                    sin_family: AF_INET as _,
+                    sin_port: 0,
+                    sin_addr: windows_sys::Win32::Networking::WinSock::IN_ADDR {
+                        S_un: windows_sys::Win32::Networking::WinSock::IN_ADDR_0 {
+                            S_un_b: windows_sys::Win32::Networking::WinSock::IN_ADDR_0_0 {
+                                s_b1: b[0],
+                                s_b2: b[1],
+                                s_b3: b[2],
+                                s_b4: b[3],
+                            },
+                        },
+                    },
+                    sin_zero: [0; 8],
+                };
+                // SAFETY: SOCKADDR_IN is 16 bytes, fits in buf.
+                let bytes =
+                    unsafe { core::slice::from_raw_parts(&sa as *const _ as *const u8, 16) };
+                buf[..16].copy_from_slice(bytes);
+                (buf, 16)
+            }
+            IpAddr::V6(b) => {
+                let sa = SOCKADDR_IN6 {
+                    sin6_family: AF_INET6 as _,
+                    sin6_port: 0,
+                    sin6_flowinfo: 0,
+                    sin6_addr: windows_sys::Win32::Networking::WinSock::IN6_ADDR {
+                        u: windows_sys::Win32::Networking::WinSock::IN6_ADDR_0 { Byte: *b },
+                    },
+                    Anonymous: windows_sys::Win32::Networking::WinSock::SOCKADDR_IN6_0 {
+                        sin6_scope_id: 0,
+                    },
+                };
+                let bytes =
+                    unsafe { core::slice::from_raw_parts(&sa as *const _ as *const u8, 28) };
+                buf[..28].copy_from_slice(bytes);
+                (buf, 28)
+            }
+        }
+    }
+
     /// # Safety
     /// The caller must guarantee `sa` holds a valid SOCKADDR_INET
-    /// initialised by the IP Helper API (or by `sockaddr_for`). The
-    /// read pattern matches `windows.rs::inet_addr_of`.
+    /// initialised by the IP Helper API (or by `sockaddr_for`).
     unsafe fn inet_addr_of(sa: &SOCKADDR_INET) -> IpAddr {
-        // SAFETY: `si_family` aliases the first two bytes of both
-        // arms — reading it before deciding which arm to read is the
-        // documented SOCKADDR_INET access pattern.
         let family = unsafe { sa.si_family };
         if family == AF_INET6 {
-            // SAFETY: reading the Ipv6 arm.
             let v6 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN6>() };
             IpAddr::V6(v6.sin6_addr.u.Byte)
         } else {
-            // SAFETY: reading the Ipv4 arm.
             let v4 = unsafe { &*core::ptr::addr_of!(*sa).cast::<SOCKADDR_IN>() };
             let s = &v4.sin_addr.S_un.S_un_b;
             IpAddr::V4([s.s_b1, s.s_b2, s.s_b3, s.s_b4])
