@@ -926,12 +926,58 @@ struct BabelRuntime {
     own_seqno_request: Option<u16>,
     /// Routes previously published to Loc-RIB — used to compute deltas.
     published: BTreeMap<RouteKey, Route>,
-    /// The reason the most recent withdrawal happened (empty when the
-    /// last delta carried installs only or no change). Consumed by
-    /// `handle_frame`'s trailing `self.diff()` so the retraction path
-    /// (`metric == 0xFFFF`) can annotate the delta with "peer
-    /// retraction (metric=infinity)" before it surfaces as a Log event.
-    last_withdraw_reason: String,
+    /// Structured record of the withdrawal that happened during this
+    /// frame's `apply_update` calls, consumed by `handle_frame`'s
+    /// trailing `self.diff()` so the delta can be annotated with a
+    /// precise, operator-actionable reason BEFORE it surfaces as a
+    /// `RouterEvent::Log`. Replaces the previous single `String`:
+    /// the string was overwritten on every per-prefix retraction TLV,
+    /// so a 29-route retraction frame logged only the LAST prefix;
+    /// and the wildcard-retraction branch (AE 0, metric 0xFFFF) never
+    /// set it at all, so the misleading fallback "babel best-path
+    /// displacement" fired — the production-report symptom where an
+    /// operator with one upstream saw "best-path displacement" and
+    /// (correctly) concluded the message was wrong.
+    last_withdraw: LastWithdraw,
+}
+
+/// What kind of withdrawal happened in one Babel frame, set
+/// incrementally by `apply_update` and rendered into a reason string
+/// by `handle_frame` after `diff()` produces the delta.
+///
+/// The count of routes affected comes from `delta.withdrawn.len()` at
+/// render time — not tracked here — so a frame that retracts a prefix
+/// not in `published` (a no-op retraction) does not inflate the
+/// logged count.
+#[derive(Default)]
+struct LastWithdraw {
+    kind: WithdrawKind,
+    /// For a single per-prefix retraction, the prefix that was
+    /// retracted — rendered into the reason so the operator can
+    /// `grep` for the exact prefix. `None` for wildcard retractions
+    /// (no single prefix to name) and for multi-prefix frames (the
+    /// count is what matters, not one prefix).
+    first_prefix: Option<lr_core::addr::Prefix>,
+}
+
+#[derive(Default, PartialEq, Eq)]
+enum WithdrawKind {
+    /// No retraction TLV seen this frame — any `delta.withdrawn`
+    /// entries came from `diff()`'s best-path displacement (a better
+    /// route pushed the previous best out of the feasible set). The
+    /// fallback "best-path displacement" message is correct here.
+    #[default]
+    None,
+    /// One or more per-prefix retractions (metric=infinity, AE ≠ 0).
+    /// The first prefix is recorded for the single-prefix message;
+    /// multi-prefix frames get a count-annotated message.
+    PerPrefix,
+    /// A wildcard retraction (AE 0, metric 0xFFFF — RFC 8966 §4.6.9):
+    /// the peer asked us to drop every route it taught us. Distinct
+    /// from `PerPrefix` so the operator sees "wildcard retraction"
+    /// (an explicit peer-side event) rather than the misleading
+    /// "best-path displacement" (a local-decision event).
+    Wildcard,
 }
 
 /// Result of one protocol-runtime step: routes to install into / withdraw
@@ -967,7 +1013,7 @@ impl BabelRuntime {
             route_request: false,
             own_seqno_request: None,
             published: BTreeMap::new(),
-            last_withdraw_reason: String::new(),
+            last_withdraw: LastWithdraw::default(),
         }
     }
 
@@ -1099,20 +1145,39 @@ impl BabelRuntime {
         }
         let mut delta = self.diff();
         if !delta.withdrawn.is_empty() {
-            // Consume the retraction-path reason (set by the
-            // metric=infinity branch in `apply_update`) FIRST — it is
-            // the specific, operator-actionable reason. Only when no
-            // retraction happened this frame (the withdrawal came from
-            // a best-path displacement in `diff`) do we fall back to
-            // the generic "best-path displacement" annotation.
-            if !self.last_withdraw_reason.is_empty() {
-                delta.withdraw_reason = std::mem::take(&mut self.last_withdraw_reason);
-            } else if delta.withdraw_reason.is_empty() {
-                delta.withdraw_reason = format!(
+            // Render the structured `last_withdraw` record into the
+            // delta's `withdraw_reason`. The kind tells the operator
+            // WHAT peer-side event caused the withdrawal (a per-prefix
+            // retraction, a wildcard retraction, or — when kind is None
+            // — a local best-path displacement); the count of affected
+            // routes comes from `delta.withdrawn.len()`, the actual
+            // number that left the Loc-RIB. `std::mem::take` resets
+            // the record for the next frame.
+            let lw = std::mem::take(&mut self.last_withdraw);
+            delta.withdraw_reason = match lw.kind {
+                WithdrawKind::None => format!(
                     "babel best-path displacement ({} route(s) lost the best-path election)",
                     delta.withdrawn.len()
-                );
-            }
+                ),
+                WithdrawKind::PerPrefix => {
+                    if delta.withdrawn.len() == 1 {
+                        format!(
+                            "babel peer retraction (metric=infinity) for {}",
+                            lw.first_prefix
+                                .expect("first_prefix is set on the first per-prefix retraction")
+                        )
+                    } else {
+                        format!(
+                            "babel peer retraction (metric=infinity) for {} route(s)",
+                            delta.withdrawn.len()
+                        )
+                    }
+                }
+                WithdrawKind::Wildcard => format!(
+                    "babel peer wildcard retraction (AE 0, metric=infinity) — {} route(s) flushed",
+                    delta.withdrawn.len()
+                ),
+            };
         }
         delta
     }
@@ -1154,6 +1219,15 @@ impl BabelRuntime {
                 // neighbour taught us — babeld's `retract_neighbour_routes`.
                 if u.metric == 0xFFFF && !self.routes.is_empty() {
                     self.routes = lr_babel::BabelRouteTable::new();
+                    // Record the kind so `handle_frame` renders the
+                    // "wildcard retraction" reason instead of the
+                    // misleading fallback "best-path displacement".
+                    // Wildcard takes precedence over any per-prefix
+                    // retractions in the same frame (the wildcard
+                    // supersedes them — it retracts EVERY route this
+                    // neighbour taught us, not just the named ones).
+                    self.last_withdraw.kind = WithdrawKind::Wildcard;
+                    self.last_withdraw.first_prefix = None;
                 }
                 return;
             }
@@ -1192,10 +1266,21 @@ impl BabelRuntime {
         // metric 0xFFFF (infinity) → retraction (RFC 8966 §3.5.5).
         if u.metric == 0xFFFF {
             self.routes.withdraw(&key);
-            self.last_withdraw_reason = format!(
-                "babel peer retraction (metric=infinity) for {}",
-                key.destination
-            );
+            // Record the retraction so `handle_frame` can render the
+            // "peer retraction (metric=infinity)" reason. The FIRST
+            // per-prefix retraction in a frame records its prefix; a
+            // subsequent retraction in the same frame (or a wildcard
+            // retraction, which sets `Wildcard`) leaves `first_prefix`
+            // alone — `handle_frame` switches to the count-annotated
+            // form when `delta.withdrawn.len() > 1`. A wildcard
+            // retraction already set `kind = Wildcard`, which takes
+            // precedence — do not downgrade it.
+            if self.last_withdraw.kind != WithdrawKind::Wildcard {
+                if self.last_withdraw.kind == WithdrawKind::None {
+                    self.last_withdraw.first_prefix = Some(key.destination);
+                }
+                self.last_withdraw.kind = WithdrawKind::PerPrefix;
+            }
             return;
         }
         // Per-family next-hop resolution (RFC 8966 §3.5.3): an AE 1
