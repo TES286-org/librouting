@@ -5340,15 +5340,30 @@ impl DefaultRouter {
             if other_side {
                 self.reselect(&key);
             } else {
-                self.loc_rib.install(route.clone());
-                self.pending_events
-                    .push(RouterEvent::RouteInstalled(route.clone()));
+                // Deduplicate on the byte-identical re-install: OSPF/Babel
+                // runtimes call this on every SPF recompute / every Babel
+                // UPDATE re-advertisement, and a recompute that yields the
+                // same best route must not emit a fresh `RouteInstalled`
+                // event — without this guard the kernel mirror would
+                // re-issue `CreateIpForwardEntry2` (Windows:
+                // `ERROR_OBJECT_ALREADY_EXISTS` delete+recreate) or
+                // `ip route replace` (Linux: redundant RTM_NEWROUTE) on
+                // every tick, exactly the churn observed in the Windows
+                // production report (`mirror: route installed ...` four
+                // times in a row for the same prefix).
+                let changed = self.loc_rib.install(route.clone());
+                if changed {
+                    self.pending_events
+                        .push(RouterEvent::RouteInstalled(route.clone()));
+                }
                 // Opt-in redistribution still sees the new direct best:
                 // a BGP-side candidate reaches the same call through
                 // apply_selection, and the direct path must not skip it
                 // (an OSPF/Babel-learned route with an Ospf/Babel → BGP
                 // pipe re-originates into BGP exactly like a BGP-side
-                // route would).
+                // route would). `redistribute_route` itself is a no-op
+                // when the route is byte-identical to what was last
+                // redistributed for the key.
                 self.redistribute_route(&route);
             }
         }
@@ -12070,6 +12085,139 @@ mod tests {
                     if msg.contains("redistribute: withdraw 10.10.10.0/24"))),
             "the withdraw log must fire: {:?}",
             events
+        );
+    }
+
+    /// `apply_runtime_delta` must not emit a fresh `RouteInstalled`
+    /// event for a byte-identical re-install — the rc.4 defect flooded
+    /// the kernel mirror with redundant `CreateIpForwardEntry2` /
+    /// `ip route replace` calls on every Babel UPDATE re-advertisement
+    /// (the Windows production report showed `mirror: route installed
+    /// ...` four times in a row for the same prefix). The fix:
+    /// `LocRib::install` now returns a `bool` "did this actually
+    /// change the Loc-RIB?" signal, and `apply_runtime_delta` skips
+    /// the event emission when the signal is `false`.
+    #[test]
+    fn apply_runtime_delta_deduplicates_identical_reinstalls() {
+        use lr_core::addr::Prefix;
+        use lr_core::nlri::NlriFamily;
+        use lr_core::rib::{Preference, Protocol, Route, RouteOrigin};
+
+        let mut r = DefaultRouter::new();
+        let prefix = Prefix::new_v4([203, 0, 113, 0], 24);
+        let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
+        let route = Route {
+            key: key.clone(),
+            origin: RouteOrigin { proto: 1, peer: 1 },
+            protocol: Protocol::Babel,
+            preference: Preference::new(120, 0),
+            next_hop: Some(IpAddr::V4([169, 254, 1, 6])),
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+
+        // First install: must emit exactly one RouteInstalled event.
+        r.apply_runtime_delta(RuntimeDelta {
+            installed: vec![route.clone()],
+            withdrawn: vec![],
+        });
+        let events = r.poll_events();
+        let installed_count = events
+            .iter()
+            .filter(|e| matches!(e, RouterEvent::RouteInstalled(rt) if rt.key == key))
+            .count();
+        assert_eq!(installed_count, 1, "first install emits one RouteInstalled");
+
+        // Byte-identical re-install: must NOT emit a RouteInstalled
+        // event. This is the regression — pre-fix the daemon would
+        // re-emit and the kernel mirror would re-install.
+        r.apply_runtime_delta(RuntimeDelta {
+            installed: vec![route.clone()],
+            withdrawn: vec![],
+        });
+        let events = r.poll_events();
+        let installed_count = events
+            .iter()
+            .filter(|e| matches!(e, RouterEvent::RouteInstalled(rt) if rt.key == key))
+            .count();
+        assert_eq!(
+            installed_count, 0,
+            "byte-identical re-install must not emit RouteInstalled (regression)"
+        );
+
+        // Content change (different metric): must emit a fresh
+        // RouteInstalled event — the deduplication must not swallow
+        // legitimate updates.
+        let mut changed = route.clone();
+        changed.preference.metric = 7;
+        r.apply_runtime_delta(RuntimeDelta {
+            installed: vec![changed],
+            withdrawn: vec![],
+        });
+        let events = r.poll_events();
+        let installed_count = events
+            .iter()
+            .filter(|e| matches!(e, RouterEvent::RouteInstalled(rt) if rt.key == key))
+            .count();
+        assert_eq!(
+            installed_count, 1,
+            "content change must emit RouteInstalled"
+        );
+    }
+
+    /// Withdrawals must still fire `RouteWithdrawn` even after the
+    /// deduplication path was taken — a no-op re-install must not
+    /// suppress the subsequent withdrawal.
+    #[test]
+    fn apply_runtime_delta_withdrawal_after_identical_reinstall() {
+        use lr_core::addr::Prefix;
+        use lr_core::nlri::NlriFamily;
+        use lr_core::rib::{Preference, Protocol, Route, RouteOrigin};
+
+        let mut r = DefaultRouter::new();
+        let prefix = Prefix::new_v4([198, 51, 100, 0], 24);
+        let key = RouteKey::new(prefix, NlriFamily::IPV4_UNICAST);
+        let route = Route {
+            key: key.clone(),
+            origin: RouteOrigin { proto: 1, peer: 1 },
+            protocol: Protocol::Babel,
+            preference: Preference::new(120, 0),
+            next_hop: Some(IpAddr::V4([169, 254, 1, 6])),
+            attributes: lr_core::attr::Attributes::new(),
+            age_ms: 0,
+            path_id: 0,
+            tag: None,
+        };
+
+        r.apply_runtime_delta(RuntimeDelta {
+            installed: vec![route.clone()],
+            withdrawn: vec![],
+        });
+        let _ = r.poll_events();
+
+        // Identical re-install (no-op) followed by withdrawal: the
+        // withdrawal must fire because the route IS still in the
+        // direct_rib and Loc-RIB.
+        r.apply_runtime_delta(RuntimeDelta {
+            installed: vec![route],
+            withdrawn: vec![],
+        });
+        let _ = r.poll_events();
+
+        r.apply_runtime_delta(RuntimeDelta {
+            installed: vec![],
+            withdrawn: vec![key.clone()],
+        });
+        let events = r.poll_events();
+        let withdrawn_count = events
+            .iter()
+            .filter(|e| matches!(e, RouterEvent::RouteWithdrawn(k) if k == &key))
+            .count();
+        assert_eq!(
+            withdrawn_count, 1,
+            "withdrawal must fire after an identical re-install"
         );
     }
 }

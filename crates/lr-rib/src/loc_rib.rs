@@ -41,7 +41,17 @@ impl LocRib {
     /// routes must not produce a storm of spurious "modified" events
     /// downstream (the API socket thread, the BMP mirror, the
     /// redistribution pipe).
-    pub fn install(&mut self, route: Route) {
+    ///
+    /// Returns `true` when the install actually changed the Loc-RIB
+    /// (a new path was added, or an existing path was replaced with a
+    /// non-identical one). Returns `false` for the byte-identical
+    /// no-op so callers can skip the downstream `RouteInstalled`
+    /// event — without this signal, OSPF/Babel runtimes that recompute
+    /// the same best path on every tick (or every Babel UPDATE
+    /// re-advertisement) flood the kernel mirror with redundant
+    /// `CreateIpForwardEntry2` / `ip route replace` calls (Windows
+    /// returns `ERROR_OBJECT_ALREADY_EXISTS`, Linux burns an RTM_NEWROUTE).
+    pub fn install(&mut self, route: Route) -> bool {
         let key = route.key.clone();
         let was_present = self.inner.contains_key(&key);
         let set = self.inner.entry(key.clone()).or_default();
@@ -50,7 +60,7 @@ impl LocRib {
                 if *existing == route {
                     // Byte-identical re-install: silent no-op. Matches
                     // `install_set`'s identical-set early-return.
-                    return;
+                    return false;
                 }
                 *existing = route;
             }
@@ -72,6 +82,7 @@ impl LocRib {
             }
         };
         self.push_history(diff);
+        true
     }
 
     /// Replace the whole ranked path set for a key (best first). An empty
@@ -336,6 +347,32 @@ mod tests {
             rib.best(&a.key).unwrap().preference.metric,
             9,
             "new content took effect"
+        );
+    }
+
+    /// The `bool` return value is the signal `apply_runtime_delta`
+    /// uses to skip the downstream `RouteInstalled` event for
+    /// byte-identical re-installs. A fresh install returns `true`;
+    /// a byte-identical re-install returns `false`; a content change
+    /// returns `true` again.
+    #[test]
+    fn install_returns_changed_signal() {
+        let mut rib = LocRib::new();
+        let r = route([198, 51, 100, 0], 24);
+        assert!(rib.install(r.clone()), "fresh install must signal changed");
+        assert!(
+            !rib.install(r.clone()),
+            "byte-identical re-install must signal unchanged"
+        );
+        let mut changed = route([198, 51, 100, 0], 24);
+        changed.preference.metric = 7;
+        assert!(
+            rib.install(changed.clone()),
+            "content change must signal changed"
+        );
+        assert!(
+            !rib.install(changed),
+            "re-install of the new content must signal unchanged"
         );
     }
 }
