@@ -1522,6 +1522,21 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // historical daemon ignored --peer entirely (listen mode wins).
     let legacy_listen_only = !strict_inbound && listener.is_some();
     if !legacy_listen_only {
+        // Source-address compatibility diagnostic: ask the kernel what
+        // source IP it would use to reach each outbound peer, and warn
+        // at startup when the configured `local_address` is not on the
+        // kernel's chosen egress interface. On Windows this is the
+        // Strong Host Model symptom — the kernel silently overrides the
+        // configured source, the peer sees a TCP from an address it
+        // does not expect, and the session bounces with Cease /
+        // Connection Collision Resolution (RFC 4486 subcode 7) forever.
+        // The diagnostic is a hint, not a gate; the daemon still dials.
+        for entry in &entries {
+            if !entry.spec.is_outbound() {
+                continue;
+            }
+            diagnose_source_address(cfg, entry);
+        }
         for entry in &entries {
             if entry.spec.is_outbound() {
                 spawn_connector(&runtime, entry, cfg, Arc::clone(&live_sessions));
@@ -2152,6 +2167,74 @@ fn expected_peer_ip(spec: &PeerSpec) -> Option<IpAddr> {
         .as_deref()
         .or(spec.remote.as_deref())
         .and_then(transport_ip)
+}
+
+/// Ask the kernel what source IP it would use to reach `entry`'s peer,
+/// and warn at startup when the configured `local_address` is not on
+/// the kernel's chosen egress interface. On Windows this is the
+/// Strong Host Model symptom — the kernel silently overrides the
+/// configured source, the peer sees a TCP from an address it does
+/// not expect, and the session bounces with Cease / Connection
+/// Collision Resolution (RFC 4486 subcode 7) forever.
+///
+/// The diagnostic is a hint, not a gate; the daemon still dials. It
+/// runs once per outbound peer at startup, before the first dial, so
+/// the operator sees the warning before the NOTIFICATION storm rather
+/// than after.
+fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
+    let Some(local) = peer_local_address(cfg, &entry.spec) else {
+        return;
+    };
+    let Some(remote) = entry.spec.remote.as_deref() else {
+        return;
+    };
+    let Some(peer_ip) = transport_ip(remote) else {
+        return;
+    };
+    // The diagnostic is informational — never block the daemon on a
+    // kernel query that might fail (a peer hostname that does not
+    // resolve yet, a route that appears later via Babel, etc.).
+    match lr_osroute::source_check::check_source_compatibility(local, peer_ip) {
+        lr_osroute::source_check::SourceCheck::Ok => {}
+        lr_osroute::source_check::SourceCheck::NoRoute => {
+            eprintln!(
+                "daemon: peer {}: warning: no kernel route to {} — the \
+                 outbound TCP will fail with ENETUNREACH unless a route \
+                 appears (e.g. via Babel) before the first dial",
+                entry.label(),
+                remote
+            );
+        }
+        lr_osroute::source_check::SourceCheck::Mismatch {
+            configured,
+            kernel_choice,
+        } => {
+            // The Windows Strong Host Model default: the kernel sources
+            // the connection from the egress interface's address, not
+            // the configured `local`. The peer's `neighbor <ip>` match
+            // fails, and on Windows the inbound TCP SYN (destined to
+            // `local`) may also be dropped at the receiving interface
+            // because `local` is not assigned to it — both halves of
+            // the bidirectional session break for the same reason.
+            eprintln!(
+                "daemon: peer {}: warning: local_address {} is not on the \
+                 kernel's chosen egress interface (if {}) for {}; the \
+                 kernel will source the TCP from {} instead. The peer's \
+                 neighbor match will fail and the inbound SYN may be \
+                 dropped by the Windows Strong Host Model. Either assign \
+                 {} to the egress interface, configure Weak Host Model \
+                 (netsh interface ipv4 set interface <if> \
+                 weakhostsend=enabled weakhostreceive=enabled), or use a \
+                 local_address that is already on the egress interface.",
+                entry.label(),
+                configured,
+                kernel_choice.if_index,
+                remote,
+                kernel_choice.source,
+                configured
+            );
+        }
+    }
 }
 
 /// Connect with the appropriate transport security:
@@ -6445,5 +6528,43 @@ mod kernel_mirror_tests {
         register_nexthop_oif(nh, 10);
         assert_eq!(nexthop_oif(&nh), 10);
         nexthop_oifs().lock().unwrap().remove(&nh);
+    }
+}
+
+#[cfg(test)]
+mod source_diagnostic_tests {
+    use super::*;
+
+    /// `diagnose_source_address` must not panic when the peer has no
+    /// `local_address` configured — the diagnostic is a no-op in that
+    /// case. This pins the "hint, not a gate" contract: the daemon
+    /// runs unconditionally, the diagnostic only adds information.
+    #[test]
+    fn diagnose_source_address_no_local_is_no_op() {
+        let cfg = DaemonConfig {
+            local_as: 64512,
+            router_id: "10.0.0.1".into(),
+            ..DaemonConfig::default()
+        };
+        // No local_address configured anywhere — the diagnostic must
+        // return without panicking.
+        let spec = PeerSpec {
+            remote: Some("127.0.0.1:179".into()),
+            ..PeerSpec::default()
+        };
+        let auth = TcpAuth::default();
+        let gtsm = Gtsm::default();
+        let entry = PeerEntry {
+            spec,
+            handle: SessionHandle(0),
+            handle_in: None,
+            auth,
+            gtsm,
+            bfd: None,
+            busy: Arc::new(AtomicBool::new(false)),
+            outbound_lost_collision: Arc::new(AtomicBool::new(false)),
+        };
+        // The function returns (); the test is that it does not panic.
+        diagnose_source_address(&cfg, &entry);
     }
 }

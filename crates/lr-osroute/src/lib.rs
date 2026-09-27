@@ -104,6 +104,15 @@ pub mod bfd_transport;
 #[cfg(feature = "std")]
 pub mod tcp_bind;
 
+/// Source-address compatibility diagnostic for outbound TCP
+/// connections. Asks the kernel "what source address would you use
+/// to reach this destination?" and reports a mismatch when the
+/// configured `local_address` is not on the kernel's chosen egress
+/// interface — the root cause of the Windows Strong Host Model
+/// "peer sent NOTIFICATION code=6 sub=7" storm.
+#[cfg(feature = "std")]
+pub mod source_check;
+
 /// MPLS route table installation over Linux `AF_MPLS` netlink
 /// (RFC 3032 LSPs, RFC 8277 BGP-LU kernel binding). MPLS netlink is
 /// Linux-only — this module is not compiled on other platforms, so
