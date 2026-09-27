@@ -208,9 +208,9 @@ fn babel_gc_expires_stale_routes() {
     let mut r = DefaultRouter::new();
     let a = babel_session(&mut r, IpAddr::V4([127, 10, 0, 2]));
     // Peer announces 10.99.1.0/24 with a 3 s update interval at t=1 s
-    // (hold 18 s), and Hellos with a 60 s interval — a live neighbour
-    // whose route times out, isolating §3.2.5 from the neighbour-death
-    // retraction.
+    // (hold 30 s — the 30 s floor applies since 6 × 3s = 18s < 30s),
+    // and Hellos with a 60 s interval — a live neighbour whose route
+    // times out, isolating §3.2.5 from the neighbour-death retraction.
     let mut frame = lr_babel::BabelFrame::empty();
     frame
         .body
@@ -253,7 +253,7 @@ fn babel_gc_expires_stale_routes() {
     );
 
     // Half-way through the hold: nothing expires.
-    r.babel_gc(1_000 + 9_000);
+    r.babel_gc(1_000 + 15_000);
     assert_eq!(
         r.rib_snapshot()
             .iter()
@@ -262,8 +262,8 @@ fn babel_gc_expires_stale_routes() {
         1
     );
 
-    // Past the deadline (18 s + hold): the route is gone.
-    r.babel_gc(1_000 + 18_001);
+    // Past the deadline (30 s hold): the route is gone.
+    r.babel_gc(1_000 + 30_001);
     assert_eq!(
         r.rib_snapshot()
             .iter()
@@ -278,21 +278,21 @@ fn babel_gc_expires_stale_routes() {
 /// immediately — the routes survive until their own re-announcement
 /// hold time lapses. This matches babeld's behaviour: babeld does not
 /// have a "neighbour death → drop all routes" path; it relies on each
-/// route's own hold timer (6× the Update interval, 15 s minimum) and
+/// route's own hold timer (6× the Update interval, 30 s minimum) and
 /// the neighbour's retraction Updates.
 ///
 /// The previous implementation dropped all routes on neighbour death
 /// (4× the Hello interval = 4 s for a 1 s Hello), which caused flaky
 /// route withdrawal on tunnel interfaces where a 4 s Hello gap is
 /// common (latency spikes, packet reordering). The fix: let
-/// `routes.expire(now_ms)` handle it — the routes expire within 15–18 s,
+/// `routes.expire(now_ms)` handle it — the routes expire within 30 s,
 /// which is fast enough for production and avoids the flap.
 #[test]
 fn babel_gc_keeps_routes_past_neighbour_death_until_hold_expires() {
     let mut r = DefaultRouter::new();
     let a = babel_session(&mut r, IpAddr::V4([127, 10, 0, 2]));
-    // One announcement at t=1 s with a 3 s update interval (hold 18 s)
-    // and a 1 s Hello interval.
+    // One announcement at t=1 s with a 3 s update interval (hold 30 s
+    // — the 30 s floor applies) and a 1 s Hello interval.
     r.feed_input(
         a,
         &peer_frame([8, 8, 8, 8, 0, 0, 0, 1], [10, 99, 1], 7, 300),
@@ -313,7 +313,7 @@ fn babel_gc_keeps_routes_past_neighbour_death_until_hold_expires() {
     );
 
     // t = 6 s: five Hello intervals of silence — past the 4× Hello
-    // liveness bound, but the route's own 18 s hold has not lapsed.
+    // liveness bound, but the route's own 30 s hold has not lapsed.
     // The route STAYS — no flap on brief neighbour blips.
     r.babel_gc(6_000);
     assert_eq!(
@@ -325,8 +325,8 @@ fn babel_gc_keeps_routes_past_neighbour_death_until_hold_expires() {
         "the route survives a brief neighbour blip (no flap)"
     );
 
-    // t = 20 s: past the route's 18 s hold. Now the route expires.
-    r.babel_gc(20_000);
+    // t = 35 s: past the route's 30 s hold. Now the route expires.
+    r.babel_gc(35_000);
     assert_eq!(
         r.rib_snapshot()
             .iter()

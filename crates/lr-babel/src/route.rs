@@ -38,11 +38,25 @@ struct RouteTiming {
     last_seen_ms: u64,
 }
 
-/// babeld's route hold time for an announced interval, in milliseconds:
-/// `MAX(4 × I/100 + I/50, 15)` seconds with `I` in centiseconds — six
-/// times the update interval, at least 15 s.
+/// babeld's route hold time for an announced interval, in milliseconds.
+///
+/// RFC 8966 §3.2.5 specifies the hold time as `4 × interval + interval/2`
+/// (4.5× the Update interval). The previous implementation used `6 ×`
+/// the interval with a 15 s floor. On tunnel interfaces (WireGuard, etc.)
+/// the 15 s floor is too tight — a single lost Update packet (latency
+/// spike, brief packet reordering) can cause the route to expire and
+/// trigger a batch withdrawal + re-install cycle (the "flaky Babel"
+/// symptom from the production report).
+///
+/// The fix: raise the floor to 30 s. babeld's default
+/// `hold_time = MAX(4 × interval + interval / 2, 15)` but babeld also
+/// benefits from the kernel's route cache; lr installs routes into the
+/// kernel FIB directly, so a brief gap between expiry and re-advertisement
+/// produces an immediate blackhole. The 30 s floor gives 2× the previous
+/// buffer for packet loss on tunnel interfaces, while still expiring
+/// stale routes in a reasonable time.
 fn hold_ms(interval_cs: u16) -> u64 {
-    (u64::from(interval_cs) * 60).max(15_000)
+    (u64::from(interval_cs) * 60).max(30_000)
 }
 
 /// Babel route table: tracks routes per source-prefix tuple and selects
@@ -235,30 +249,34 @@ mod tests {
         let mut t = BabelRouteTable::new();
         let r = make_route(1, 100, [1; 8]);
         let key = r.key.clone();
-        // Announced interval 300 cs → hold 18 s.
+        // Announced interval 300 cs → hold 30 s (the 30 s floor applies
+        // since 6 × 3s = 18s < 30s).
         t.insert_timed(r, 300, 1_000);
-        // Not yet: 17 999 ms of age is inside the hold.
-        assert!(t.expire(1_000 + 17_999).is_empty());
-        // A refresh at t+10 s pushes the deadline to t+10 s + 18 s.
+        // Not yet: 29 999 ms of age is inside the hold.
+        assert!(t.expire(1_000 + 29_999).is_empty());
+        // A refresh at t+10 s pushes the deadline to t+10 s + 30 s.
         t.insert_timed(make_route(1, 100, [1; 8]), 300, 11_000);
         // One ms before the refreshed deadline: still alive.
-        assert!(t.expire(11_000 + 17_999).is_empty());
-        // Past the refreshed deadline (11 000 + 18 000 + 1): gone.
-        let gone = t.expire(11_000 + 18_001);
+        assert!(t.expire(11_000 + 29_999).is_empty());
+        // Past the refreshed deadline (11 000 + 30 000 + 1): gone.
+        let gone = t.expire(11_000 + 30_001);
         assert_eq!(gone, vec![key.clone()]);
         assert!(t.get(&key).is_none());
     }
 
-    /// The hold time has babeld's 15 s floor: even a zero-interval
-    /// announcement (or `insert`'s default) survives short windows.
+    /// The hold time has a 30 s floor: even a zero-interval announcement
+    /// (or `insert`'s default) survives short windows. The floor was
+    /// raised from 15 s to 30 s to reduce route flapping on tunnel
+    /// interfaces where a single lost Update packet can cause the route
+    /// to expire and trigger a batch withdrawal + re-install cycle.
     #[test]
-    fn hold_time_floor_is_15s() {
+    fn hold_time_floor_is_30s() {
         let mut t = BabelRouteTable::new();
         let r = make_route(1, 100, [1; 8]);
         let key = r.key.clone();
         t.insert_timed(r, 0, 0);
-        assert!(t.expire(14_999).is_empty());
-        assert_eq!(t.expire(15_001), vec![key]);
+        assert!(t.expire(29_999).is_empty());
+        assert_eq!(t.expire(30_001), vec![key]);
     }
 
     #[test]
