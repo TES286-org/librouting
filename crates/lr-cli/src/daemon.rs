@@ -2331,6 +2331,25 @@ fn connect_secure(
     }
 }
 
+/// True for the canonical loopback address (127.0.0.1 or ::1) — NOT
+/// for all of 127.0.0.0/8. Used by the self-connect guard in
+/// `spawn_connector` to detect when an outbound TCP SYN was delivered
+/// to this daemon's own listener via the loopback adapter.
+///
+/// Only the canonical 127.0.0.1 / ::1 counts: Windows sources a
+/// self-routed connection from 127.0.0.1 (the loopback adapter's
+/// primary address), while a legitimate connection from a configured
+/// loopback alias (127.0.0.2, 127.10.0.1, etc. — the standard lab
+/// topology for multi-daemon BGP tests) is NOT a self-connect. The
+/// broader `is_loopback()` check (all of 127.0.0.0/8) would false-
+/// positive on every lab test that uses loopback aliases.
+fn is_canonical_loopback(ip: &std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => *v4 == std::net::Ipv4Addr::LOCALHOST,
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    }
+}
+
 /// One outbound peer: connect, run the session until it drops, back
 /// off, repeat — for the lifetime of the daemon.
 fn spawn_connector(
@@ -2412,17 +2431,67 @@ fn spawn_connector(
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
                         // Log the actual source IP the kernel assigned
-                        // after the bind+connect. On Windows the Strong
-                        // Host Model can silently override the bound
-                        // source; this log line is the cheapest way to
-                        // confirm whether `connect_bound`'s `bind()`
-                        // was honored. If the source shown here is NOT
-                        // the configured `local_address`, the peer will
-                        // see a different source and reject the session
-                        // (the "peer sent NOTIFICATION code=6 sub=7"
-                        // storm).
-                        if let Ok(local_addr) = stream.local_addr() {
-                            println!("daemon: peer {}: connected from {}", label, local_addr);
+                        // after the bind+connect.
+                        let actual_local = stream.local_addr().ok();
+                        if let Some(la) = &actual_local {
+                            println!("daemon: peer {}: connected from {}", label, la);
+                        }
+                        // Self-connect guard: if the kernel routed the
+                        // outbound SYN through loopback (source IP is
+                        // 127.0.0.1 or ::1) AND the destination is NOT
+                        // a loopback address, the connection was
+                        // accepted by THIS daemon's own listener on
+                        // 0.0.0.0:179. Both ends of the TCP connection
+                        // are the same process — the BGP OPEN exchange
+                        // sees the same router-id on both sides, and
+                        // §6.8 collision resolution fires endlessly
+                        // (Cease/7 every reconnect cycle). This happens
+                        // when the destination is covered by a blackhole
+                        // route the daemon itself installed (e.g. a
+                        // static `172.23.10.96/27 blackhole` covering
+                        // the peer `172.23.10.98`) and Windows delivers
+                        // the SYN to loopback instead of discarding it.
+                        //
+                        // The guard ONLY fires when the source is
+                        // 127.0.0.1/::1 AND the destination is NOT
+                        // loopback — a legitimate connection to
+                        // 127.0.0.1 (the standard lab topology) sources
+                        // from 127.0.0.1 too, and that is NOT a
+                        // self-connect. Only a non-loopback destination
+                        // that somehow resolves to a loopback source is
+                        // the self-connect symptom.
+                        //
+                        // Abort the connection immediately — do NOT
+                        // proceed to BGP OPEN exchange. The connector's
+                        // backoff grows the ladder, giving Babel time to
+                        // install the /32 route that overrides the
+                        // blackhole and lets the next dial reach the
+                        // actual peer.
+                        if let Some(la) = &actual_local {
+                            if is_canonical_loopback(&la.ip())
+                                && !is_canonical_loopback(&sockaddr.ip())
+                            {
+                                eprintln!(
+                                    "daemon: peer {}: ABORTED self-connect from {} — \
+                                     the outbound SYN was delivered to this daemon's own \
+                                     listener via loopback (the destination is likely \
+                                     covered by a blackhole route the daemon installed). \
+                                     Waiting for the Babel /32 route to override the \
+                                     blackhole before the next dial.",
+                                    label, la
+                                );
+                                drop(stream);
+                                // Treat as a non-collision failure: grow
+                                // the backoff ladder so the next dial waits
+                                // for Babel to converge.
+                                backoff_ms = (backoff_ms * 2).min(30_000);
+                                eprintln!(
+                                    "daemon: peer {}: reconnecting in {}ms",
+                                    label, backoff_ms
+                                );
+                                sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
+                                continue;
+                            }
                         }
                         live.fetch_add(1, Ordering::Relaxed);
                         let result = run_peer_session(Arc::clone(&rt), stream, handle, bfd.clone());
