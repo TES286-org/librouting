@@ -272,22 +272,30 @@ mod imp {
 
     /// Source-bound TCP connect on Windows.
     ///
-    /// Windows' Strong Host Model (the default, and the production
-    /// report's root cause) can silently override a `bind()` to a
-    /// source address that is not on the kernel's chosen egress
-    /// interface — even when the operator has enabled Weak Host
-    /// Send/Receive on every interface. The `bind()` call succeeds
-    /// (the address IS a local address), but `connect()` may use the
-    /// egress interface's primary address as the source instead.
+    /// Windows' Strong Host Model can silently override a `bind()` to
+    /// a source address that is not on the kernel's chosen egress
+    /// interface. The `IP_UNICAST_IF` socket option pins the egress
+    /// interface so `bind()` + `connect()` use a consistent interface
+    /// and source IP.
     ///
-    /// The fix: set `IP_UNICAST_IF` (or `IPV6_UNICAST_IF`) to pin the
-    /// egress interface BEFORE `bind()` + `connect()`. This socket
-    /// option tells the kernel "send outgoing packets from this socket
-    /// via this interface" — combined with `bind()` to the configured
-    /// source, it ensures both the egress interface AND the source IP
-    /// are correct. The egress interface is resolved via
-    /// `GetBestRoute2` (the same API the kernel uses internally for
-    /// route lookup).
+    /// **Race condition**: at daemon startup, before Babel converges,
+    /// the kernel's route table does not yet have the Babel-learned
+    /// `/32` routes. `GetBestRoute2` returns the DEFAULT route's
+    /// interface (e.g. interface 7, the LAN), not the Babel tunnel
+    /// (interface 58). `IP_UNICAST_IF` is pinned to interface 7, but
+    /// the configured `local_address` (172.23.10.102) is on interface
+    /// 58 — `bind()` fails with `WSAEADDRNOTAVAIL`. The daemon's
+    /// fallback to kernel-chosen source then produces a bogus source
+    /// IP (the production report showed `127.0.0.1` — Windows source
+    /// selection under a blackhole route).
+    ///
+    /// The fix: when `bind()` fails with `AddrNotAvailable` AFTER
+    /// `IP_UNICAST_IF` was set, DISABLE `IP_UNICAST_IF` (set to 0) and
+    /// RETRY `bind()`. The address IS local (on a different interface);
+    /// with Weak Host Send enabled (the operator's configuration), the
+    /// kernel accepts the bind and routes the packet correctly via the
+    /// route table. This handles the Babel-convergence race without
+    /// requiring the operator to wait for Babel before starting BGP.
     ///
     /// On Windows the `IP_UNICAST_IF` value is the interface index in
     /// **network byte order** for IPv4 and in **host byte order** for
@@ -313,11 +321,7 @@ mod imp {
         // Resolve the egress interface for the peer via GetBestRoute2,
         // then pin it with IP_UNICAST_IF so the kernel does not pick a
         // different interface (and a different source IP) at connect
-        // time. This is the belt-and-suspenders companion to bind():
-        // bind() sets the source IP, IP_UNICAST_IF sets the egress
-        // interface. Without IP_UNICAST_IF, Windows' source address
-        // selection can override the bound IP when the egress interface
-        // does not have the bound address assigned.
+        // time.
         let if_index = resolve_egress_if(&peer);
         if let Some(if_index) = if_index {
             pin_unicast_if(&sock, if_index, peer.is_ipv6());
@@ -334,14 +338,26 @@ mod imp {
                 SocketAddr::V6(a)
             }
         };
-        sock.bind(&local_bind.into())?;
+        // Retry logic: if bind() fails with AddrNotAvailable while
+        // IP_UNICAST_IF is pinned, the pinned egress interface does
+        // not have the bound source assigned (the Babel-convergence
+        // race). Disable IP_UNICAST_IF and retry — the bind alone
+        // succeeds because the address IS local, and Weak Host Send
+        // lets the kernel route via the correct interface.
+        match sock.bind(&local_bind.into()) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable && if_index.is_some() => {
+                unpin_unicast_if(&sock, peer.is_ipv6());
+                sock.bind(&local_bind.into())?;
+            }
+            Err(e) => return Err(e),
+        }
 
         // Connect with a timeout. `socket2`'s `connect_timeout`
         // handles the non-blocking + poll internally.
         sock.set_nonblocking(false)?;
         sock.connect_timeout(&peer.into(), timeout)?;
 
-        // Convert the socket2::Socket into a std::net::TcpStream.
         Ok(sock.into())
     }
 
@@ -443,13 +459,47 @@ mod imp {
         if rc != 0 {
             // Non-fatal: the kernel may not support IP_UNICAST_IF
             // (older Windows), or the option may require elevation.
-            // The bind() still applies; the operator's log will show
-            // whether the source IP was honored via the "connected
-            // from" line.
             eprintln!(
                 "daemon: warning: IP_UNICAST_IF({}) failed (rc={}); \
                  relying on bind() alone for source selection",
                 if_index, rc
+            );
+        }
+    }
+
+    /// Disable `IP_UNICAST_IF` (or `IPV6_UNICAST_IF`) by setting the
+    /// interface index to 0. Per Microsoft's documentation: "If the
+    /// interface index is 0, the option is disabled and the system
+    /// will select the appropriate interface." Used when the pinned
+    /// egress interface does not have the bound source address (the
+    /// Babel-convergence race) — disabling lets the kernel route via
+    /// the bound source's interface under Weak Host Send.
+    fn unpin_unicast_if(sock: &Socket, ipv6: bool) {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            setsockopt, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IP_UNICAST_IF,
+        };
+        let raw = sock.as_raw_socket() as usize;
+        let value: u32 = 0;
+        // SAFETY: same as pin_unicast_if — value is a u32 on the
+        // stack, the socket is live.
+        let rc = unsafe {
+            setsockopt(
+                raw,
+                if ipv6 { IPPROTO_IPV6 } else { IPPROTO_IP },
+                if ipv6 { IPV6_UNICAST_IF } else { IP_UNICAST_IF },
+                &value as *const u32 as *const u8,
+                core::mem::size_of::<u32>() as i32,
+            )
+        };
+        if rc != 0 {
+            // Non-fatal: if we cannot unpin, the bind retry will also
+            // fail and the daemon's fallback takes over. Log for
+            // diagnostics.
+            eprintln!(
+                "daemon: warning: unpin IP_UNICAST_IF failed (rc={}); \
+                 bind retry may also fail",
+                rc
             );
         }
     }
