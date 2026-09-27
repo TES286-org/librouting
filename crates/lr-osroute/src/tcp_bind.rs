@@ -263,7 +263,199 @@ mod imp {
     }
 }
 
-#[cfg(all(feature = "std", not(target_os = "linux")))]
+#[cfg(all(feature = "std", target_os = "windows"))]
+mod imp {
+    use std::net::{SocketAddr, TcpStream};
+    use std::time::Duration;
+
+    use socket2::{Domain, Protocol, Socket, Type};
+
+    /// Source-bound TCP connect on Windows.
+    ///
+    /// Windows' Strong Host Model (the default, and the production
+    /// report's root cause) can silently override a `bind()` to a
+    /// source address that is not on the kernel's chosen egress
+    /// interface — even when the operator has enabled Weak Host
+    /// Send/Receive on every interface. The `bind()` call succeeds
+    /// (the address IS a local address), but `connect()` may use the
+    /// egress interface's primary address as the source instead.
+    ///
+    /// The fix: set `IP_UNICAST_IF` (or `IPV6_UNICAST_IF`) to pin the
+    /// egress interface BEFORE `bind()` + `connect()`. This socket
+    /// option tells the kernel "send outgoing packets from this socket
+    /// via this interface" — combined with `bind()` to the configured
+    /// source, it ensures both the egress interface AND the source IP
+    /// are correct. The egress interface is resolved via
+    /// `GetBestRoute2` (the same API the kernel uses internally for
+    /// route lookup).
+    ///
+    /// On Windows the `IP_UNICAST_IF` value is the interface index in
+    /// **network byte order** for IPv4 and in **host byte order** for
+    /// IPv6 (per Microsoft's `IP_UNICAST_IF` documentation).
+    pub fn connect_bound(
+        local: SocketAddr,
+        peer: SocketAddr,
+        timeout: Duration,
+    ) -> Result<TcpStream, std::io::Error> {
+        if local.is_ipv4() != peer.is_ipv4() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "local and peer address families differ",
+            ));
+        }
+        let domain = if peer.is_ipv6() {
+            Domain::IPV6
+        } else {
+            Domain::IPV4
+        };
+        let sock = Socket::new(domain, Type::STREAM, Some(Protocol::TCP))?;
+
+        // Resolve the egress interface for the peer via GetBestRoute2,
+        // then pin it with IP_UNICAST_IF so the kernel does not pick a
+        // different interface (and a different source IP) at connect
+        // time. This is the belt-and-suspenders companion to bind():
+        // bind() sets the source IP, IP_UNICAST_IF sets the egress
+        // interface. Without IP_UNICAST_IF, Windows' source address
+        // selection can override the bound IP when the egress interface
+        // does not have the bound address assigned.
+        let if_index = resolve_egress_if(&peer);
+        if let Some(if_index) = if_index {
+            pin_unicast_if(&sock, if_index, peer.is_ipv6());
+        }
+
+        // Bind the source address (port 0 = ephemeral).
+        let local_bind = match local {
+            SocketAddr::V4(mut a) => {
+                a.set_port(0);
+                SocketAddr::V4(a)
+            }
+            SocketAddr::V6(mut a) => {
+                a.set_port(0);
+                SocketAddr::V6(a)
+            }
+        };
+        sock.bind(&local_bind.into())?;
+
+        // Connect with a timeout. `socket2`'s `connect_timeout`
+        // handles the non-blocking + poll internally.
+        sock.set_nonblocking(false)?;
+        sock.connect_timeout(&peer.into(), timeout)?;
+
+        // Convert the socket2::Socket into a std::net::TcpStream.
+        Ok(sock.into())
+    }
+
+    /// Ask the kernel which interface it would use to reach `peer`,
+    /// via `GetBestRoute2`. Returns `None` when the kernel has no
+    /// route (the caller's `connect()` will then fail with
+    /// `WSAENETUNREACH` — the operator's problem, not ours).
+    fn resolve_egress_if(peer: &SocketAddr) -> Option<u32> {
+        use windows_sys::Win32::Foundation::NO_ERROR;
+        use windows_sys::Win32::NetworkManagement::IpHelper::{GetBestRoute2, MIB_IPFORWARD_ROW2};
+        use windows_sys::Win32::Networking::WinSock::SOCKADDR_INET;
+
+        let destination = sockaddr_for(peer);
+        let mut best_route: MIB_IPFORWARD_ROW2 = unsafe { core::mem::zeroed() };
+        let mut best_source: SOCKADDR_INET = unsafe { core::mem::zeroed() };
+        // SAFETY: null InterfaceLuid/source select the current
+        // compartment and any source; both output pointers refer to
+        // live stack values.
+        let rc = unsafe {
+            GetBestRoute2(
+                core::ptr::null(),
+                0,
+                core::ptr::null(),
+                &destination,
+                0,
+                &mut best_route,
+                &mut best_source,
+            )
+        };
+        if rc != NO_ERROR || best_route.InterfaceIndex == 0 {
+            return None;
+        }
+        Some(best_route.InterfaceIndex)
+    }
+
+    /// Build a `SOCKADDR_INET` from a `SocketAddr` for use with
+    /// `GetBestRoute2`. Mirrors the pattern in `windows.rs` /
+    /// `source_check.rs`.
+    fn sockaddr_for(addr: &SocketAddr) -> windows_sys::Win32::Networking::WinSock::SOCKADDR_INET {
+        use windows_sys::Win32::Networking::WinSock::{
+            AF_INET, AF_INET6, SOCKADDR_IN, SOCKADDR_IN6, SOCKADDR_INET,
+        };
+        let mut sa: SOCKADDR_INET = unsafe { core::mem::zeroed() };
+        match addr {
+            SocketAddr::V4(a) => {
+                let v4 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN>() };
+                v4.sin_family = AF_INET;
+                v4.sin_port = a.port().to_be();
+                v4.sin_addr.S_un.S_un_b.s_b1 = a.ip().octets()[0];
+                v4.sin_addr.S_un.S_un_b.s_b2 = a.ip().octets()[1];
+                v4.sin_addr.S_un.S_un_b.s_b3 = a.ip().octets()[2];
+                v4.sin_addr.S_un.S_un_b.s_b4 = a.ip().octets()[3];
+            }
+            SocketAddr::V6(a) => {
+                let v6 = unsafe { &mut *core::ptr::addr_of_mut!(sa).cast::<SOCKADDR_IN6>() };
+                v6.sin6_family = AF_INET6;
+                v6.sin6_port = a.port().to_be();
+                v6.sin6_addr.u.Byte = a.ip().octets();
+                v6.Anonymous.sin6_scope_id = a.scope_id();
+            }
+        }
+        sa
+    }
+
+    /// Set `IP_UNICAST_IF` (IPv4) or `IPV6_UNICAST_IF` (IPv6) on the
+    /// socket, pinning the egress interface for outgoing packets.
+    ///
+    /// The IPv4 option value is the interface index in **network byte
+    /// order** (`htonl(if_index)`); the IPv6 option value is in **host
+    /// byte order** (per Microsoft's `IP_UNICAST_IF` documentation).
+    /// Getting this wrong is silent — the kernel accepts the option
+    /// but routes via the wrong interface — so the byte-order
+    /// convention is load-bearing.
+    fn pin_unicast_if(sock: &Socket, if_index: u32, ipv6: bool) {
+        use std::os::windows::io::AsRawSocket;
+        use windows_sys::Win32::Networking::WinSock::{
+            setsockopt, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, IP_UNICAST_IF,
+        };
+        let raw = sock.as_raw_socket() as usize;
+        let value: u32 = if ipv6 {
+            // IPv6: host byte order.
+            if_index
+        } else {
+            // IPv4: network byte order.
+            if_index.to_be()
+        };
+        // SAFETY: `value` is a u32 on the stack; the pointer is valid
+        // for the duration of the call. The socket is a live TCP
+        // socket created by socket2.
+        let rc = unsafe {
+            setsockopt(
+                raw,
+                if ipv6 { IPPROTO_IPV6 } else { IPPROTO_IP },
+                if ipv6 { IPV6_UNICAST_IF } else { IP_UNICAST_IF },
+                &value as *const u32 as *const u8,
+                core::mem::size_of::<u32>() as i32,
+            )
+        };
+        if rc != 0 {
+            // Non-fatal: the kernel may not support IP_UNICAST_IF
+            // (older Windows), or the option may require elevation.
+            // The bind() still applies; the operator's log will show
+            // whether the source IP was honored via the "connected
+            // from" line.
+            eprintln!(
+                "daemon: warning: IP_UNICAST_IF({}) failed (rc={}); \
+                 relying on bind() alone for source selection",
+                if_index, rc
+            );
+        }
+    }
+}
+
+#[cfg(all(feature = "std", not(target_os = "linux"), not(target_os = "windows")))]
 mod imp {
     use std::net::{SocketAddr, TcpStream};
     use std::time::Duration;
@@ -272,19 +464,17 @@ mod imp {
 
     /// Source-bound TCP connect using the `socket2` crate.
     ///
-    /// On non-Linux platforms (Windows, macOS, BSD), the hand-rolled
-    /// `socket()` + `bind()` + `connect()` path is not available
-    /// because it depends on POSIX libc FFI. The `socket2` crate
-    /// provides a portable abstraction that works on every platform
-    /// the project compiles for — and `socket2` is already a
-    /// workspace dependency.
+    /// On non-Linux, non-Windows platforms (macOS, BSD), the
+    /// hand-rolled `socket()` + `bind()` + `connect()` path is not
+    /// available because it depends on POSIX libc FFI. The `socket2`
+    /// crate provides a portable abstraction that works on every
+    /// platform the project compiles for.
     ///
     /// Without source binding, BGP peers that match inbound
     /// connections by source IP (the standard `neighbor <ip>` pattern)
     /// would reject the daemon's outbound connections on multihomed
     /// hosts where the kernel's default source-address choice differs
-    /// from the configured `local_address`. This was the root cause
-    /// of the "peer closed connection" symptom on Windows.
+    /// from the configured `local_address`.
     pub fn connect_bound(
         local: SocketAddr,
         peer: SocketAddr,
@@ -321,9 +511,6 @@ mod imp {
         sock.set_nonblocking(false)?;
         sock.connect_timeout(&peer.into(), timeout)?;
 
-        // Convert the socket2::Socket into a std::net::TcpStream.
-        // socket2 0.6+ with the "all" feature implements
-        // `From<Socket>` for `TcpStream` on every platform.
         Ok(sock.into())
     }
 }
@@ -393,6 +580,37 @@ mod tests {
             }
             None if !cfg!(target_os = "linux") => {}
             None => panic!("accept never saw the connection"),
+        }
+    }
+
+    /// `connect_bound` must not panic when the local address is not
+    /// assigned to any interface — the daemon's caller handles the
+    /// `AddrNotAvailable` error with a fallback. This pins the
+    /// "hint, not a gate" contract on every platform.
+    #[test]
+    fn connect_bound_unassigned_address_returns_error_not_panic() {
+        // 192.0.2.1 is TEST-NET-1 (RFC 5737) — never assigned to any
+        // interface. The bind must fail cleanly with AddrNotAvail
+        // (or similar), not panic.
+        let local = SocketAddr::new(std::net::IpAddr::V4(Ipv4Addr::new(192, 0, 2, 1)), 0);
+        let listener = match TcpListener::bind("127.0.0.1:0") {
+            Ok(l) => l,
+            Err(e) => {
+                eprintln!("skipped (loopback listen): {e}");
+                return;
+            }
+        };
+        let peer = listener.local_addr().unwrap();
+        drop(listener);
+        match connect_bound(local, peer, Duration::from_secs(1)) {
+            Ok(_) => {
+                // On some platforms the bind may succeed (IP_FREEBIND
+                // equivalent) — that's fine, the contract is "no panic".
+            }
+            Err(e) => {
+                // Expected: bind fails with AddrNotAvail or similar.
+                eprintln!("expected bind error (ok): {e}");
+            }
         }
     }
 }
