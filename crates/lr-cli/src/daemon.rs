@@ -4533,6 +4533,53 @@ fn resolve_babel_interfaces(cfg: &DaemonConfig) -> Result<Vec<BabelIface>, Strin
     Ok(out)
 }
 
+/// Diff the previously re-advertised claim set (`previous`) against the
+/// current re-advertised claim set (`current`) and return the
+/// `(new_advertised, retracted)` pair for one Babel interface's
+/// periodic announcement:
+///
+/// * `new_advertised` is `current` plus any retraction that this
+///   transport cannot carry (deferred for the other family's transport
+///   to retract — RFC 8966 §3.5.5: a claim stays recorded on the
+///   transport that announced it until that transport can carry the
+///   retraction).
+/// * `retracted` lists the claims that this transport retracts with
+///   an infinity-metric Update.
+///
+/// The `v4_ok` / `v6_ok` flags carry the want-this-family calculation
+/// from `build_babel_announcement` (snapshot ∪ reachable ∪
+/// `iface.advertised`). Including `advertised` in the want-set is the
+/// retraction fix: an interface whose reachable set just went empty
+/// (the upstream session died) MUST still retract the previously
+/// re-advertised claims on the same transport, instead of leaving
+/// them in `advertised` indefinitely — the receiver would otherwise
+/// time them out through its own 30 s hold floor.
+fn babel_retraction_delta(
+    previous: std::collections::BTreeMap<lr_babel::RouteKey, u16>,
+    current: &std::collections::BTreeMap<lr_babel::RouteKey, u16>,
+    v4_ok: bool,
+    v6_ok: bool,
+) -> (
+    std::collections::BTreeMap<lr_babel::RouteKey, u16>,
+    Vec<(lr_babel::RouteKey, u16)>,
+) {
+    let mut new_advertised = current.clone();
+    let mut retracted: Vec<(lr_babel::RouteKey, u16)> = Vec::new();
+    for (k, seqno) in previous {
+        if current.contains_key(&k) {
+            continue; // still reachable — refreshed above
+        }
+        let v4 = k.destination.addr.is_ipv4();
+        let carried = if v4 { v4_ok } else { v6_ok };
+        if carried {
+            retracted.push((k, seqno));
+        } else {
+            new_advertised.insert(k, seqno); // retry on the other transport
+        }
+    }
+    (new_advertised, retracted)
+}
+
 /// Build the manual-path interface: one transport on the given local
 /// address, global parameters, unscoped keys. Keeps the historical
 /// single-session daemon bit-for-bit.
@@ -5268,10 +5315,31 @@ fn build_babel_announcement(
     // carries IPv4 destinations only (an IPv6 next hop is useless over
     // an IPv4-only link) and exists for IPv4-only peers.
     let on_v4_transport = transport_local.is_ipv4();
+    // The advertised set already holds the foreign claims this interface
+    // previously re-advertised (see the retraction block below). A
+    // claim that is no longer reachable — the upstream session died, a
+    // peer retracted it, or the Loc-RIB displaced it — must be withdrawn
+    // on the *same* transport that originally announced it. Without
+    // including `advertised` in the want_v4/want_v6 calculation, an
+    // interface whose reachable set just went empty (the upstream died)
+    // would have `want_v4 = false`, `v4_ok = false`, and the retraction
+    // Update carrying metric 0xFFFF would be dropped as "this transport
+    // cannot carry this family" — leaving the peer to time the route out
+    // through its own hold timer (30 s under the §3.2.5 floor), which
+    // breaks convergence and violates RFC 8966 §3.5.5 (a retraction must
+    // reach the peers immediately, not eventually).
     let want_v4 = snapshot.iter().any(|p| p.addr.is_ipv4())
-        || reachable.iter().any(|r| r.key.destination.addr.is_ipv4());
+        || reachable.iter().any(|r| r.key.destination.addr.is_ipv4())
+        || iface
+            .advertised
+            .keys()
+            .any(|k| k.destination.addr.is_ipv4());
     let want_v6 = snapshot.iter().any(|p| p.addr.is_ipv6())
-        || reachable.iter().any(|r| r.key.destination.addr.is_ipv6());
+        || reachable.iter().any(|r| r.key.destination.addr.is_ipv6())
+        || iface
+            .advertised
+            .keys()
+            .any(|k| k.destination.addr.is_ipv6());
     // v4 routes are carried on the v6 transport either through an AE 1
     // NextHop TLV (dual-stack interface) or via AE 4 (extended next hop).
     let v4_on_v6 =
@@ -5421,20 +5489,7 @@ fn build_babel_announcement(
     let current: std::collections::BTreeMap<lr_babel::RouteKey, u16> =
         reachable.iter().map(|r| (r.key.clone(), r.seqno)).collect();
     let previous = std::mem::take(&mut iface.advertised);
-    let mut new_advertised = current.clone();
-    let mut retracted: Vec<(lr_babel::RouteKey, u16)> = Vec::new();
-    for (k, seqno) in previous {
-        if current.contains_key(&k) {
-            continue; // still reachable — refreshed above
-        }
-        let v4 = k.destination.addr.is_ipv4();
-        let carried = if v4 { v4_ok } else { v6_ok };
-        if carried {
-            retracted.push((k, seqno));
-        } else {
-            new_advertised.insert(k, seqno); // retry on the other transport
-        }
-    }
+    let (new_advertised, retracted) = babel_retraction_delta(previous, &current, v4_ok, v6_ok);
     iface.advertised = new_advertised;
     let mut rgroups: std::collections::BTreeMap<[u8; 8], Vec<(lr_babel::RouteKey, u16)>> =
         std::collections::BTreeMap::new();
@@ -6841,5 +6896,182 @@ mod source_diagnostic_tests {
         };
         // The function returns (); the test is that it does not panic.
         diagnose_source_address(&cfg, &entry);
+    }
+}
+
+#[cfg(test)]
+mod babel_retraction_delta_tests {
+    use super::*;
+    use lr_babel::route::RouteKey;
+    use lr_babel::source::SourcePrefix;
+    use lr_core::addr::{IpAddr, Prefix};
+
+    fn v4_key(router_id: [u8; 8]) -> RouteKey {
+        RouteKey {
+            destination: Prefix::new_v4([10, 99, 1, 0], 24),
+            source: None,
+            router_id,
+        }
+    }
+
+    fn v6_key(router_id: [u8; 8]) -> RouteKey {
+        RouteKey {
+            destination: Prefix::new_v6([0xfd, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0], 64),
+            source: None,
+            router_id,
+        }
+    }
+
+    /// The regression: an interface whose reachable set just went empty
+    /// (the upstream session died) MUST still retract the previously
+    /// re-advertised claims on the same transport. Before the fix,
+    /// `build_babel_announcement` computed `v4_ok = want_v4 &&
+    /// iface.next_hop_v4.is_some()` with `want_v4 = snapshot ∪
+    /// reachable`, which dropped to false the moment the upstream died,
+    /// silently swallowing the retraction and leaving the peer to time
+    /// the route out through its 30 s hold floor (RFC 8966 §3.2.5).
+    /// `babel_multihop.sh` phase 2 pins this convergence contract down.
+    #[test]
+    fn empty_reachable_with_prior_v4_claim_retracts_on_v4_transport() {
+        let previous: std::collections::BTreeMap<RouteKey, u16> =
+            [(v4_key([8, 8, 8, 8, 0, 0, 0, 1]), 7)]
+                .into_iter()
+                .collect();
+        let current = std::collections::BTreeMap::new();
+        let (new_advertised, retracted) = babel_retraction_delta(previous, &current, true, false);
+        assert_eq!(retracted.len(), 1, "the v4 claim must be retracted");
+        assert_eq!(retracted[0].1, 7, "retraction carries the origin's seqno");
+        assert!(
+            new_advertised.is_empty(),
+            "a carried retraction is no longer deferred to the other transport"
+        );
+    }
+
+    /// A claim that is still reachable is NOT retracted — the periodic
+    /// announcement re-emits it under the origin's router-id and
+    /// seqno, refreshing the peer's hold timer (RFC 8966 §3.2.5).
+    #[test]
+    fn still_reachable_claim_is_refreshed_not_retracted() {
+        let key = v4_key([8, 8, 8, 8, 0, 0, 0, 1]);
+        let previous: std::collections::BTreeMap<RouteKey, u16> =
+            [(key.clone(), 7)].into_iter().collect();
+        let current: std::collections::BTreeMap<RouteKey, u16> =
+            [(key.clone(), 7)].into_iter().collect();
+        let (new_advertised, retracted) = babel_retraction_delta(previous, &current, true, false);
+        assert!(
+            retracted.is_empty(),
+            "a still-reachable claim is not retracted"
+        );
+        assert_eq!(new_advertised.len(), 1);
+    }
+
+    /// A v4 claim on a transport that cannot carry v4 (a v6-only link
+    /// with no `next_hop_v4`, no `extended_next_hop`) is deferred to
+    /// the v6 transport that can carry AE 4 — kept in `new_advertised`
+    /// so the next v6 announcement retracts it. Without the defer, the
+    /// retraction would be lost on a v6-only link.
+    #[test]
+    fn v4_claim_on_v6_only_transport_defers_to_other_transport() {
+        let previous: std::collections::BTreeMap<RouteKey, u16> =
+            [(v4_key([8, 8, 8, 8, 0, 0, 0, 1]), 7)]
+                .into_iter()
+                .collect();
+        let current = std::collections::BTreeMap::new();
+        // v4 transport not ok; v6 transport not ok either (no v6 next
+        // hop) — defer.
+        let (new_advertised, retracted) = babel_retraction_delta(previous, &current, false, false);
+        assert!(retracted.is_empty(), "neither transport carries v4 — defer");
+        assert_eq!(
+            new_advertised.len(),
+            1,
+            "claim stays recorded for the other transport's announcement"
+        );
+    }
+
+    /// A v6 claim retracts on a v6 transport (the dual-stack case):
+    /// `v6_ok = true` carries the retraction. Mixed-family claims on
+    /// the same interface each retract on their own transport.
+    #[test]
+    fn v6_claim_retracts_on_v6_transport() {
+        let previous: std::collections::BTreeMap<RouteKey, u16> =
+            [(v6_key([8, 8, 8, 8, 0, 0, 0, 1]), 4)]
+                .into_iter()
+                .collect();
+        let current = std::collections::BTreeMap::new();
+        let (new_advertised, retracted) = babel_retraction_delta(previous, &current, false, true);
+        assert_eq!(retracted.len(), 1);
+        assert!(new_advertised.is_empty());
+    }
+
+    /// A mixed-family prior set on a v4-only transport: v4 retracts,
+    /// v6 defers. The two families don't interfere — a single
+    /// announcement can carry both retractions and deferrals, and the
+    /// deferred v6 claim survives in `advertised` for the next v6
+    /// transport's announcement.
+    #[test]
+    fn mixed_family_prior_retracts_v4_and_defers_v6_on_v4_only_transport() {
+        let v4 = v4_key([8, 8, 8, 8, 0, 0, 0, 1]);
+        let v6 = v6_key([9, 9, 9, 9, 0, 0, 0, 2]);
+        let previous: std::collections::BTreeMap<RouteKey, u16> =
+            [(v4.clone(), 3), (v6.clone(), 5)].into_iter().collect();
+        let current = std::collections::BTreeMap::new();
+        let (new_advertised, retracted) = babel_retraction_delta(previous, &current, true, false);
+        assert_eq!(retracted.len(), 1, "only the v4 claim is retracted");
+        assert_eq!(retracted[0].0, v4);
+        assert_eq!(new_advertised.len(), 1, "the v6 claim is deferred");
+        assert!(new_advertised.contains_key(&v6));
+    }
+
+    /// Source-specific claims (RFC 9079) retract under the same
+    /// (destination, source, router-id) key — the source prefix is
+    /// part of the route key, so two claims for the same destination
+    /// with different source prefixes are independent.
+    #[test]
+    fn source_specific_claims_retract_independently() {
+        let dst = Prefix::new_v4([10, 99, 1, 0], 24);
+        let src1 = SourcePrefix::new(Prefix::new_v4([192, 0, 2, 0], 24));
+        let src2 = SourcePrefix::new(Prefix::new_v4([198, 51, 100, 0], 24));
+        let rid = [8, 8, 8, 8, 0, 0, 0, 1];
+        let k1 = RouteKey {
+            destination: dst,
+            source: Some(src1),
+            router_id: rid,
+        };
+        let k2 = RouteKey {
+            destination: dst,
+            source: Some(src2),
+            router_id: rid,
+        };
+        let previous: std::collections::BTreeMap<RouteKey, u16> =
+            [(k1.clone(), 3), (k2.clone(), 5)].into_iter().collect();
+        // Only k1 is still reachable.
+        let current: std::collections::BTreeMap<RouteKey, u16> =
+            [(k1.clone(), 3)].into_iter().collect();
+        let (_new_advertised, retracted) = babel_retraction_delta(previous, &current, true, false);
+        assert_eq!(
+            retracted.len(),
+            1,
+            "only the unreached source-specific claim is retracted"
+        );
+        assert_eq!(retracted[0].0, k2);
+    }
+
+    /// An empty prior set on an empty current set is a no-op (the
+    /// common steady-state case for a brand-new interface that has not
+    /// learned anything yet).
+    #[test]
+    fn empty_prior_and_current_is_noop() {
+        let previous = std::collections::BTreeMap::new();
+        let current = std::collections::BTreeMap::new();
+        let (new_advertised, retracted) = babel_retraction_delta(previous, &current, true, true);
+        assert!(new_advertised.is_empty());
+        assert!(retracted.is_empty());
+    }
+
+    // Silence the unused-import warning when only some tests use these
+    // helpers in a given build configuration.
+    #[allow(dead_code)]
+    fn _unused_imports() {
+        let _ = IpAddr::V4([0; 4]);
     }
 }
