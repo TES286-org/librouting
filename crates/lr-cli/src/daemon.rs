@@ -3608,7 +3608,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         return ExitCode::from(2);
     }
     // The manual single-socket path keeps its exact historical log line.
-    let manual = ifaces.len() == 1 && ifaces[0].name.is_empty();
+    // The detection now uses the `manual` flag (set by the manual-path
+    // constructor) instead of `name.is_empty()` — the manual path
+    // resolves the device name from the local address to enable
+    // `check link` (see `manual_iface_link_state`), so `name` is no
+    // longer empty when the device is resolvable.
+    let manual = ifaces.len() == 1 && ifaces[0].manual;
     if manual {
         let t = &ifaces[0].transports[0];
         let uc_bind = match t.local {
@@ -4411,6 +4416,14 @@ struct BabelIface {
     last_gc_ms: u64,
     /// `check link` state — initialized from the enumerated state.
     link_up: bool,
+    /// `true` when this interface was built by the manual-path
+    /// constructor (`--local-address` with no `[[babel.interface]]`
+    /// spec). The startup logger uses this to keep the historical
+    /// single-socket "babel listening on <addr>" line for manual-path
+    /// daemons — even when the device name was resolved out of the
+    /// local address and `check link` is on (the per-interface log
+    /// form is reserved for the config-driven multi-interface path).
+    manual: bool,
 }
 
 /// One family's socket pair on one Babel interface.
@@ -4580,6 +4593,35 @@ fn babel_retraction_delta(
     (new_advertised, retracted)
 }
 
+/// Derive the `(name, check_link, if_index)` triple for a manual-path
+/// Babel interface from the device name resolved out of the local
+/// address. BIRD's `check link` defaults to on; the manual path used to
+/// hardcode `false` because it had "no interface name to poll", but the
+/// device IS resolvable from the local address. With `check link` on,
+/// the daemon polls the carrier state once per second and flushes the
+/// session's routes the moment the peer's interface goes down (veth
+/// pair, BIRD `check link` semantics), instead of waiting for the
+/// route hold time to expire (30 s under the §3.2.5 floor). Without
+/// this, the dead-segment routes survive in the daemon's loc_rib and
+/// keep getting re-advertised to other peers — a blackholing path the
+/// interop test (babel_multihop.sh phase 2) pins down.
+///
+/// Pure helper — no syscall side effects. The `if_index` is resolved
+/// through `ifindex_of`; an unresolvable name (race with hot-plug or a
+/// vanishing veth) yields `if_index = 0`, leaving the egress-pinning
+/// registry unseeded (the kernel picks egress itself) but `check_link`
+/// still on (the next poll cycle picks the new index up through
+/// `list_interfaces()`).
+fn manual_iface_link_state(device: Option<&str>) -> (String, bool, u32) {
+    match device {
+        Some(name) => {
+            let idx = lr_osroute::ospf_transport::ifindex_of(name).unwrap_or(0);
+            (name.to_string(), true, idx)
+        }
+        None => (String::new(), false, 0),
+    }
+}
+
 /// Build the manual-path interface: one transport on the given local
 /// address, global parameters, unscoped keys. Keeps the historical
 /// single-session daemon bit-for-bit.
@@ -4635,8 +4677,9 @@ fn babel_iface_manual(
         babel_transport_new(local, scope_id, cfg.babel_port, None, "", device.as_deref())?;
     let (auth, auth_debug_line) =
         build_babel_auth_interface_for(cfg, &cfg.babel_keys.iter().collect::<Vec<_>>(), "");
+    let (iface_name, check_link, if_index) = manual_iface_link_state(device.as_deref());
     Ok(BabelIface {
-        name: String::new(),
+        name: iface_name,
         transports: vec![transport],
         port: cfg.babel_port,
         hello_interval_ms: 1_000,  // the historical cadence
@@ -4645,14 +4688,14 @@ fn babel_iface_manual(
         rtt_cost: 0,               // off on manual interfaces
         rtt_min_us: 10_000,        // §A.2.4 defaults
         rtt_max_us: 120_000,
-        check_link: false, // no interface name to poll
+        check_link,
         next_hop_v4: nh_v4,
         next_hop_v6: nh_v6,
         extended_next_hop: false,
         session: SessionHandle(0), // assigned right after add_session
-        // The manual path has no interface name to resolve; the pinning
-        // registry stays unseeded and the kernel picks egress itself.
-        if_index: 0,
+        // The kernel interface index, used by the egress-pinning
+        // registry when the device is known; 0 when unresolvable.
+        if_index,
         auth,
         auth_debug_line,
         router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
@@ -4668,6 +4711,7 @@ fn babel_iface_manual(
         last_announce_ms: 0,
         last_gc_ms: 0,
         link_up: true,
+        manual: true,
     })
 }
 
@@ -4878,6 +4922,7 @@ fn babel_iface_from_spec(
         last_announce_ms: 0,
         last_gc_ms: 0,
         link_up: entry.up && entry.running,
+        manual: false,
     })
 }
 
@@ -7073,5 +7118,69 @@ mod babel_retraction_delta_tests {
     #[allow(dead_code)]
     fn _unused_imports() {
         let _ = IpAddr::V4([0; 4]);
+    }
+}
+
+#[cfg(test)]
+mod babel_manual_link_state_tests {
+    use super::*;
+
+    /// A device name that resolves out of the local address enables
+    /// `check link` and surfaces the kernel ifindex, so the daemon
+    /// polls the carrier state once per second and flushes a dead
+    /// segment's routes within the 1 s cycle (BIRD `check link`
+    /// semantics, the babel_multihop.sh phase 2 interop gate).
+    ///
+    /// The `lo` interface is always present on every Linux test runner
+    /// and always has ifindex 1, so this is a stable, side-effect-free
+    /// unit test for the resolve-and-enable path.
+    #[test]
+    fn device_resolved_enables_check_link_and_populates_ifindex() {
+        let (name, check_link, if_index) = manual_iface_link_state(Some("lo"));
+        assert_eq!(name, "lo");
+        assert!(check_link, "check_link must be on when the device is known");
+        assert_eq!(
+            if_index, 1,
+            "lo has ifindex 1 inside every network namespace"
+        );
+    }
+
+    /// An unresolvable device (the local address is on an interface the
+    /// kernel does not enumerate, or the enumeration raced with a
+    /// hot-plug) keeps the historical manual-path shape: no name to
+    /// poll, `check_link` off, `if_index` 0. This is the safe fallback —
+    /// the daemon still runs, it just learns about a dead link through
+    /// the route hold time instead of the link poll.
+    #[test]
+    fn device_unresolved_disables_check_link_and_keeps_zero_ifindex() {
+        let (name, check_link, if_index) = manual_iface_link_state(None);
+        assert_eq!(name, "");
+        assert!(
+            !check_link,
+            "check_link stays off when no device name is available"
+        );
+        assert_eq!(if_index, 0);
+    }
+
+    /// A device name that the kernel does not know (race with hot-plug,
+    /// a vanishing veth, an interface that lives in a different network
+    /// namespace) yields `if_index = 0` — the egress-pinning registry
+    /// stays unseeded and the kernel picks egress itself — but
+    /// `check_link` stays on, because the per-second poll cycle still
+    /// re-resolves the index through `list_interfaces()` and the next
+    /// successful resolution picks the right index up. This is the
+    /// behaviour the babel_multihop.sh lab relies on: the daemon
+    /// survives a transient `ifindex_of` miss without losing the link
+    /// poll.
+    #[test]
+    fn device_known_but_ifindex_unresolved_still_enables_check_link() {
+        let (name, check_link, if_index) =
+            manual_iface_link_state(Some("nonexistent-iface-for-tests"));
+        assert_eq!(name, "nonexistent-iface-for-tests");
+        assert!(
+            check_link,
+            "check_link stays on even when ifindex_of missed — list_interfaces re-resolves"
+        );
+        assert_eq!(if_index, 0, "ifindex_of returned 0 for an unknown iface");
     }
 }
