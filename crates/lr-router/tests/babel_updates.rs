@@ -761,3 +761,102 @@ fn multi_prefix_retraction_carries_count() {
         "the reason must mention the count (not just the last prefix), got: {log_msg}"
     );
 }
+
+/// RFC 8966 §3.5.2: an infeasible update (same seqno, worse metric)
+/// MUST NOT displace the existing feasible route. The production
+/// report showed a single-upstream tunnel flapping — routes
+/// installed, withdrawn with the misleading "babel best-path
+/// displacement" reason, re-installed — because the pre-fix
+/// `insert_timed` unconditionally overwrote the feasible route with
+/// the infeasible one. `best_routes()` then skipped the infeasible
+/// entry, `diff()` produced a withdrawal, and the reason renderer
+/// logged the "best-path displacement" fallback.
+///
+/// This test feeds the exact stimulus at the router level: a
+/// feasible Update, then an infeasible Update with the same seqno
+/// but a worse metric. The route must stay installed, and no
+/// "best-path displacement" Log event must fire.
+#[test]
+fn infeasible_update_does_not_displace_feasible_route() {
+    let (mut r, h) = babel_session();
+    let v6_nh = Tlv::new(
+        TlvType::NextHop,
+        NextHop {
+            ae: 2,
+            address: IpAddr::V6([0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]),
+        }
+        .encode(),
+    );
+    // 1. Teach a feasible route: seqno 100, metric 100.
+    let teach = frame(vec![
+        v6_nh.clone(),
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            100,
+            100,
+        ),
+    ]);
+    r.feed_input(h, &teach).unwrap();
+    assert!(
+        snapshot_has(r.as_ref(), fd00_6(), Protocol::Babel),
+        "the feasible route must install"
+    );
+    // Drain the install events.
+    let _ = r.poll_events();
+
+    // 2. Re-advertise with the SAME seqno but a WORSE metric (1000).
+    //    Per RFC 8966 §3.5.1, this is infeasible: seqno == FD.seqno
+    //    AND metric >= FD.metric. The fix ignores it; the pre-fix
+    //    bug overwrote the feasible route and produced a withdrawal.
+    let worse = frame(vec![
+        v6_nh,
+        router_id_tlv(PEER_ID),
+        update_tlv(
+            2,
+            64,
+            0,
+            0,
+            &[0xfd, 0x00, 0x02, 0x86, 0x01, 0x1e, 0x00, 0x06],
+            100,
+            1000,
+        ),
+    ]);
+    r.feed_input(h, &worse).unwrap();
+
+    // 3. The route must STILL be in the RIB.
+    assert!(
+        snapshot_has(r.as_ref(), fd00_6(), Protocol::Babel),
+        "the feasible route must not be displaced by the infeasible update"
+    );
+
+    // 4. No "best-path displacement" Log event must have fired.
+    let events = r.poll_events();
+    let displacement_log = events.iter().find_map(|e| match e {
+        lr_router::RouterEvent::Log(msg) if msg.contains("best-path displacement") => {
+            Some(msg.as_str())
+        }
+        _ => None,
+    });
+    assert!(
+        displacement_log.is_none(),
+        "infeasible update must not produce a 'best-path displacement' withdrawal; got: {:?}",
+        displacement_log
+    );
+
+    // 5. No RouteWithdrawn event for the prefix.
+    let withdrawn = events.iter().any(|e| {
+        matches!(
+            e,
+            lr_router::RouterEvent::RouteWithdrawn(k) if k.prefix == fd00_6()
+        )
+    });
+    assert!(
+        !withdrawn,
+        "infeasible update must not withdraw the feasible route"
+    );
+}
