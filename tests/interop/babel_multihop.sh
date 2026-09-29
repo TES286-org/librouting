@@ -25,9 +25,12 @@
 #   4. M's log shows both — the merged transit RIB.
 #   5. `ip link set veth0b down` (check link): M withdraws A's routes
 #      from its RIB and retracts them on veth1b (RFC 8966 §3.5.5);
-#      C's copy vanishes immediately, A's copy of C's prefix dies with
-#      A's neighbour-death retraction (RFC 8966 §3.2.5) — the chain is
-#      broken end to end.
+#      C's copy vanishes immediately (the infinity-metric retraction),
+#      A's copy of C's prefix dies through the route hold timer
+#      (RFC 8966 §3.2.5 — the manual single-interface daemon has no
+#      `check link` and must not flap on a brief neighbour blip, so it
+#      expires the unrefreshed route after the hold time) — the chain
+#      is broken end to end.
 #   6. `ip link set veth0b up`: routes return on both ends.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
@@ -258,7 +261,14 @@ echo "PASS: kernel forwarding decision uses the Babel-installed routes"
 
 echo "== phase 2: check link — veth0b goes down =="
 ip link set veth0b down
-if ! wait_for 30 \
+# Window calibration: C converges within ~2 s (M's §3.5.5 retraction),
+# but A learns nothing on the wire — its manual single-interface daemon
+# expires the unrefreshed route through the §3.2.5 hold timer, which is
+# MAX(6 × update interval, 30 s) + one 1 s gc sweep, and the last
+# refresh may lag the link-down by up to one 3 s update interval. The
+# window must exceed that 34 s worst case; it was sized for the old 15 s
+# hold floor and timed out when the floor moved to 30 s.
+if ! wait_for 45 \
     "m.log:link down — withdrawing its routes" \
     "a.log:route withdrawn 10.99.3.0/24" \
     "c.log:route withdrawn 10.99.1.0/24"; then
