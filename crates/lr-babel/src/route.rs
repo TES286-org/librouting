@@ -85,6 +85,18 @@ impl BabelRouteTable {
     /// metric) is a *refresh* — it must not re-enter the feasibility
     /// machinery, but it does push the expiry deadline out (the
     /// re-announcement is what keeps the route alive).
+    ///
+    /// Per RFC 8966 §3.5.2, an infeasible update MUST be ignored: it
+    /// must not displace an existing feasible route. The previous
+    /// implementation unconditionally inserted the route (marking it
+    /// `feasible = false` when the feasibility check failed), which
+    /// overwrote the existing feasible route. `best_routes()` then
+    /// skipped the infeasible entry, `diff()` produced a withdrawal,
+    /// and the reason renderer logged the misleading "best-path
+    /// displacement" message — even when the route had a single
+    /// upstream and no competing path existed. babeld's
+    /// `update_route` ignores infeasible updates entirely (and
+    /// optionally sends a unicast seqno request); we mirror that.
     pub fn insert_timed(&mut self, route: BabelRoute, interval_cs: u16, now_ms: u64) {
         let timing = RouteTiming {
             interval_cs,
@@ -103,17 +115,25 @@ impl BabelRouteTable {
             Some((fs, fm)) => feasible(route.seqno, route.metric, fs, fm),
             None => true,
         };
+        // RFC 8966 §3.5.2: an infeasible update is ignored — it must
+        // not displace an existing feasible route. The feasibility
+        // distance stays unchanged so a future feasible update from
+        // the same source can still be accepted. The caller (the
+        // router's Babel runtime) is responsible for sending a
+        // unicast seqno request when the infeasible update is from
+        // the same neighbour as an existing route — babeld parity.
+        if !is_feasible {
+            return;
+        }
         let mut r = route.clone();
-        r.feasible = is_feasible;
-        if is_feasible {
-            let prev = self.feasible.get(&(dst, src)).copied();
-            if prev.is_none_or(|(fs, fm)| {
-                let s_cmp = (route.seqno as i16).wrapping_sub(fs as i16);
-                s_cmp > 0 || (s_cmp == 0 && route.metric < fm)
-            }) {
-                self.feasible
-                    .insert((dst, src), (route.seqno, route.metric));
-            }
+        r.feasible = true;
+        let prev = self.feasible.get(&(dst, src)).copied();
+        if prev.is_none_or(|(fs, fm)| {
+            let s_cmp = (route.seqno as i16).wrapping_sub(fs as i16);
+            s_cmp > 0 || (s_cmp == 0 && route.metric < fm)
+        }) {
+            self.feasible
+                .insert((dst, src), (route.seqno, route.metric));
         }
         self.routes.insert(r.key.clone(), r);
         self.timing.insert(route.key, timing);
@@ -233,12 +253,70 @@ mod tests {
         // First route with seqno 5 metric 100
         t.insert(make_route(5, 100, [1; 8]));
         // Second route (different router-id) with seqno 4 metric 50 (older).
+        // Per RFC 8966 §3.5.2, this infeasible update MUST be ignored —
+        // it must not displace the existing feasible route nor be stored
+        // in the table as infeasible (the previous behaviour caused
+        // `best_routes()` to skip it, producing a spurious withdrawal
+        // with the misleading "best-path displacement" reason).
         t.insert(make_route(4, 50, [2; 8]));
         let routes = t.iter().collect::<Vec<_>>();
-        assert_eq!(routes.len(), 2);
-        // The one with seqno 4 should NOT be feasible.
-        let r4 = routes.iter().find(|(_, r)| r.seqno == 4).unwrap().1;
-        assert!(!r4.feasible);
+        // Only the feasible route is retained.
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].1.seqno, 5);
+        assert!(routes[0].1.feasible);
+    }
+
+    /// RFC 8966 §3.5.2: an infeasible update must not displace an
+    /// existing feasible route. The production report showed routes
+    /// flapping — install, withdraw ("best-path displacement"),
+    /// re-install — because a worse-metric update from the same
+    /// neighbour overwrote the feasible route with an infeasible one.
+    /// This test pins the fix: the feasible route stays, the worse
+    /// update is ignored, and `best_routes()` continues to return it.
+    #[test]
+    fn infeasible_update_does_not_displace_feasible_route() {
+        let mut t = BabelRouteTable::new();
+        // Learn a feasible route: seqno 100, metric 192.
+        let good = make_route(100, 192, [1; 8]);
+        let key = good.key.clone();
+        t.insert(good);
+        assert_eq!(t.best_routes().len(), 1);
+        assert!(t.best_routes()[0].feasible);
+
+        // The neighbour re-advertises with the same seqno but a worse
+        // metric (e.g. RTT cost spiked). This is infeasible per
+        // RFC 8966 §3.5.1 (seqno == FD.seqno AND metric >= FD.metric).
+        let worse = BabelRoute {
+            key: key.clone(),
+            seqno: 100,
+            metric: 44055,
+            ..make_route(100, 192, [1; 8])
+        };
+        t.insert(worse);
+
+        // The feasible route must still be the one in the table.
+        let best = t.best_routes();
+        assert_eq!(best.len(), 1, "feasible route must not be displaced");
+        assert_eq!(best[0].metric, 192);
+        assert!(best[0].feasible);
+    }
+
+    /// A feasible update with a strictly higher seqno DOES displace
+    /// the existing route (the FD is updated, the new route is
+    /// installed). This is the normal route-refresh path and must
+    /// still work after the §3.5.2 fix.
+    #[test]
+    fn newer_seqno_displaces_older() {
+        let mut t = BabelRouteTable::new();
+        t.insert(make_route(100, 192, [1; 8]));
+        // Same router-id, same destination, strictly higher seqno → feasible.
+        let mut newer = make_route(101, 200, [1; 8]);
+        newer.metric = 200;
+        t.insert(newer);
+        let best = t.best_routes();
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].seqno, 101);
+        assert_eq!(best[0].metric, 200);
     }
 
     /// RFC 8966 §3.2.5: a route expires when its hold time (6× the
