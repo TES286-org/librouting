@@ -1,0 +1,7 @@
+# Seeds for failing cases from proptest — do not delete!
+# The CI failure this pins: `filter_compile_is_pure` compared the whole
+# `Filter` debug form (including the operator-facing `name`), so every
+# compilable input failed the purity assertion. The input below was the
+# shrunk minimal case; the test now compares the AST (body + functions)
+# only, and this seed guards the fix.
+cc e409c881e6fafb4ac7e8bec994dab2a6dabf4137a3199a53150958a05d6226cb

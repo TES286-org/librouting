@@ -53,6 +53,24 @@ fn any_prefix() -> impl Strategy<Value = Prefix> {
     prop_oneof![any_v4_prefix(), any_v6_prefix()]
 }
 
+/// Strategy: `n` prefixes of ONE family, coherently drawn — the family
+/// is chosen once per case, so every operand matches without needing
+/// `prop_assume!`. (The containment properties need all their operands
+/// in one family; with a 50/50 v4/v6 mix per operand, `prop_assume!`
+/// burned 50-75% of every batch and tripped proptest's global reject
+/// budget (1024 aborts the run) once `PROPTEST_CASES` was raised — an
+/// abort with zero assertion signal, indistinguishable from a hang.)
+fn same_family_prefixes(n: usize) -> impl Strategy<Value = Vec<Prefix>> {
+    any::<bool>().prop_flat_map(move |v4: bool| {
+        let leaf: proptest::strategy::BoxedStrategy<Prefix> = if v4 {
+            any_v4_prefix().boxed()
+        } else {
+            any_v6_prefix().boxed()
+        };
+        proptest::collection::vec(leaf, n)
+    })
+}
+
 proptest! {
     /// `Prefix::contains_prefix` is reflexive — every prefix contains
     /// itself. Trivially true by construction but cheap to assert and
@@ -67,13 +85,11 @@ proptest! {
     /// cannot contain `a`. The lattice is total within a family.
     #[test]
     fn prefix_contains_antisymmetric(
-        a in any_prefix(),
-        b in any_prefix(),
+        ab in same_family_prefixes(2),
     ) {
-        // Cross-family containment is impossible — skip those cases.
-        prop_assume!(a.is_ipv4() == b.is_ipv4());
-        if a.contains_prefix(&b) && a.prefix_len != b.prefix_len {
-            prop_assert!(!b.contains_prefix(&a));
+        let (a, b) = (&ab[0], &ab[1]);
+        if a.contains_prefix(b) && a.prefix_len != b.prefix_len {
+            prop_assert!(!b.contains_prefix(a));
         }
     }
 
@@ -82,15 +98,11 @@ proptest! {
     /// matching all rely on this property.
     #[test]
     fn prefix_contains_transitive(
-        a in any_prefix(),
-        b in any_prefix(),
-        c in any_prefix(),
+        abc in same_family_prefixes(3),
     ) {
-        // All three must be the same family or the relation is
-        // trivially false.
-        prop_assume!(a.is_ipv4() == b.is_ipv4() && b.is_ipv4() == c.is_ipv4());
-        if a.contains_prefix(&b) && b.contains_prefix(&c) {
-            prop_assert!(a.contains_prefix(&c));
+        let (a, b, c) = (&abc[0], &abc[1], &abc[2]);
+        if a.contains_prefix(b) && b.contains_prefix(c) {
+            prop_assert!(a.contains_prefix(c));
         }
     }
 
@@ -174,9 +186,19 @@ proptest! {
         let f2 = compile("proptest-b", &src);
         prop_assert_eq!(f1.is_ok(), f2.is_ok());
         if let (Ok(a), Ok(b)) = (f1, f2) {
-            // The debug form captures the AST shape, so equality
-            // here means the AST is the same tree.
-            prop_assert_eq!(format!("{a:?}"), format!("{b:?}"));
+            // The two compilations deliberately use DIFFERENT filter
+            // names: `Filter::name` is the operator-facing key the
+            // peers reference (`import_filter` / `export_filter`), not
+            // parse output, so the purity claim covers the AST — the
+            // body statement tree and the user-defined functions — and
+            // those must be byte-equal. Comparing the whole `Filter`
+            // debug form failed for every compilable input (the names
+            // differ), which is the CI flake the input `a;` exposed.
+            prop_assert_eq!(format!("{:?}", a.body), format!("{:?}", b.body));
+            prop_assert_eq!(
+                format!("{:?}", a.functions),
+                format!("{:?}", b.functions)
+            );
         }
     }
 }
