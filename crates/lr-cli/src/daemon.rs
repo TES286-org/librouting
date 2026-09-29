@@ -5379,8 +5379,53 @@ fn build_babel_announcement(
     // whole datagram ("Update must have next hop") — one malformed TLV
     // poisons every Update behind it in the same packet.
     let v4_ae = if iface.next_hop_v4.is_some() { 1 } else { 4 };
-    if v6_ok {
-        let nh = iface.next_hop_v6.expect("v6_ok implies a v6 next hop");
+    // What THIS transport can carry for *retractions* — a transport
+    // capability (does it have a usable next hop for the family?), not
+    // gated by `want_v4`/`want_v6`. Those flags track what we have to
+    // ANNOUNCE right now; the moment the last route of a family
+    // vanishes (link-down flush, origin retraction) they collapse to
+    // false — exactly when the §3.5.5 retraction must go out. Gating
+    // the retraction on them deferred it to a transport that never
+    // carried it, leaving peers to hold the stale route until its hold
+    // time lapsed (the outage window the retraction exists to cut).
+    let (v4_retract_ok, v6_retract_ok) = if on_v4_transport {
+        (iface.next_hop_v4.is_some(), false)
+    } else {
+        (v4_on_v6, iface.next_hop_v6.is_some())
+    };
+    // Detect the retracted claims up front so the Next Hop TLVs below
+    // also cover the retraction families (§4.6.7/§4.6.8: a Next Hop or
+    // Router-Id TLV precedes the Updates using it).
+    let current: std::collections::BTreeMap<lr_babel::RouteKey, u16> =
+        reachable.iter().map(|r| (r.key.clone(), r.seqno)).collect();
+    let previous = std::mem::take(&mut iface.advertised);
+    let mut new_advertised = current.clone();
+    let mut retracted: Vec<(lr_babel::RouteKey, u16)> = Vec::new();
+    for (k, seqno) in previous {
+        if current.contains_key(&k) {
+            continue; // still reachable — refreshed below
+        }
+        let v4 = k.destination.addr.is_ipv4();
+        let carried = if v4 { v4_retract_ok } else { v6_retract_ok };
+        if carried {
+            retracted.push((k, seqno));
+        } else {
+            new_advertised.insert(k, seqno); // retry on the other transport
+        }
+    }
+    iface.advertised = new_advertised;
+    let any_v4_retract = retracted.iter().any(|(k, _)| k.destination.addr.is_ipv4());
+    let any_v6_retract = retracted.iter().any(|(k, _)| !k.destination.addr.is_ipv4());
+    let need_v6_nh = v6_ok
+        || (any_v6_retract && v6_retract_ok)
+        // An AE 4 (IPv4-via-IPv6) retraction rides the v6 next hop.
+        || (any_v4_retract
+            && iface.extended_next_hop
+            && iface.next_hop_v4.is_none()
+            && iface.next_hop_v6.is_some());
+    let need_v4_nh = v4_ok || (any_v4_retract && iface.next_hop_v4.is_some() && v4_retract_ok);
+    if need_v6_nh {
+        let nh = iface.next_hop_v6.expect("need_v6_nh implies a v6 next hop");
         frame.body.push(Tlv::new(
             TlvType::NextHop,
             NextHop {
@@ -5390,7 +5435,7 @@ fn build_babel_announcement(
             .encode(),
         ));
     }
-    if v4_ok {
+    if need_v4_nh {
         if let Some(nh) = iface.next_hop_v4 {
             frame.body.push(Tlv::new(
                 TlvType::NextHop,
@@ -5506,27 +5551,12 @@ fn build_babel_announcement(
     // it, or the session it was learned on went down — is announced as
     // withdrawn with an infinity-metric Update under the origin's
     // Router-Id, so the peers drop it immediately instead of timing it
-    // out (babeld's `route_changed` → `send_update`). A claim whose
-    // family this transport cannot carry stays recorded until the
-    // transport that can carry it sees the change.
-    let current: std::collections::BTreeMap<lr_babel::RouteKey, u16> =
-        reachable.iter().map(|r| (r.key.clone(), r.seqno)).collect();
-    let previous = std::mem::take(&mut iface.advertised);
-    let mut new_advertised = current.clone();
-    let mut retracted: Vec<(lr_babel::RouteKey, u16)> = Vec::new();
-    for (k, seqno) in previous {
-        if current.contains_key(&k) {
-            continue; // still reachable — refreshed above
-        }
-        let v4 = k.destination.addr.is_ipv4();
-        let carried = if v4 { v4_ok } else { v6_ok };
-        if carried {
-            retracted.push((k, seqno));
-        } else {
-            new_advertised.insert(k, seqno); // retry on the other transport
-        }
-    }
-    iface.advertised = new_advertised;
+    // out (babeld's `route_changed` → `send_update`). The retracted set
+    // was detected before the header TLVs above (so the Next Hop TLVs
+    // cover the retraction families); carrying is a transport-capability
+    // decision, deliberately NOT gated by `want_v4`/`want_v6` — those
+    // collapse to false the moment the family's last route vanishes,
+    // which is precisely when the retraction must go out.
     let mut rgroups: std::collections::BTreeMap<[u8; 8], Vec<(lr_babel::RouteKey, u16)>> =
         std::collections::BTreeMap::new();
     for (k, seqno) in retracted {
@@ -6932,5 +6962,212 @@ mod source_diagnostic_tests {
         };
         // The function returns (); the test is that it does not panic.
         diagnose_source_address(&cfg, &entry);
+    }
+}
+
+#[cfg(test)]
+mod babel_retraction_tests {
+    use super::*;
+    use lr_babel::message::{Hello, Ihu, NextHop, RouterId as RouterIdTlv, Update};
+    use lr_babel::tlv::{Tlv, TlvType};
+
+    /// A peer frame announcing `prefix` (24) on behalf of `router_id`:
+    /// Hello + IHU (the peer's rxcost toward us — no IHU, no accepted
+    /// Update) + Router-Id + Next Hop + Update, the daemon wire shape.
+    fn peer_frame(router_id: [u8; 8], prefix: [u8; 3], seqno: u16, metric: u16) -> Vec<u8> {
+        let mut frame = lr_babel::BabelFrame::empty();
+        frame
+            .body
+            .push(Tlv::new(TlvType::Hello, Hello::new(seqno, 100).encode()));
+        frame
+            .body
+            .push(Tlv::new(TlvType::Ihu, Ihu::new(96, 300).encode()));
+        frame.body.push(Tlv::new(
+            TlvType::RouterId,
+            RouterIdTlv { id: router_id }.encode().to_vec(),
+        ));
+        frame.body.push(Tlv::new(
+            TlvType::NextHop,
+            NextHop {
+                ae: 1,
+                address: IpAddr::V4([127, 0, 0, 1]),
+            }
+            .encode(),
+        ));
+        frame.body.push(Tlv::new(
+            TlvType::Update,
+            Update {
+                ae: 1,
+                flags: 0,
+                prefix_len: 24,
+                omitted: 0,
+                interval_cs: 300,
+                seqno,
+                metric,
+                prefix: prefix.to_vec(),
+                src_prefix_len: 0,
+                src_prefix: Vec::new(),
+            }
+            .encode(),
+        ));
+        lr_babel::BabelCodec::new().encode_vec(&frame).unwrap()
+    }
+
+    /// A v4-transport interface on loopback: a real unicast socket (the
+    /// struct embeds one), no multicast, no auth, `next_hop_v4` set —
+    /// the shape `babel_iface_manual` builds for a v4 local address.
+    fn loopback_iface(session: SessionHandle, port: u16) -> BabelIface {
+        let uc = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
+        BabelIface {
+            name: "lo0".into(),
+            transports: vec![BabelTransport {
+                local: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                scope_id: 0,
+                port,
+                group: std::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 111)),
+                uc,
+                mc: None,
+            }],
+            port,
+            hello_interval_ms: 1_000,
+            update_interval_ms: 3_000,
+            rxcost: 96,
+            rtt_cost: 0,
+            rtt_min_us: 10_000,
+            rtt_max_us: 120_000,
+            check_link: false,
+            next_hop_v4: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))),
+            next_hop_v6: None,
+            extended_next_hop: false,
+            session,
+            if_index: 0,
+            auth: None,
+            auth_debug_line: String::new(),
+            router_id: [1, 2, 3, 4, 5, 6, 7, 8],
+            hello_seqno: 0,
+            seqno: 0,
+            last_sig: String::new(),
+            advertised: std::collections::BTreeMap::new(),
+            last_announce_ms: 0,
+            last_gc_ms: 0,
+            link_up: true,
+        }
+    }
+
+    /// Updates and retractions in one decoded frame, as
+    /// `(metric, prefix-octets)` pairs in wire order.
+    fn update_metrics(frame: &[u8]) -> Vec<(u16, Vec<u8>)> {
+        let decoded = lr_babel::BabelCodec::new()
+            .decode_slice(frame)
+            .unwrap()
+            .expect("a whole frame");
+        let mut out = Vec::new();
+        for tlv in &decoded.body {
+            if tlv.kind == TlvType::Update && tlv.value.len() >= 10 {
+                let metric = u16::from_be_bytes([tlv.value[8], tlv.value[9]]);
+                let plen = tlv.value[2] as usize;
+                let pl = plen.div_ceil(8);
+                out.push((metric, tlv.value[10..10 + pl].to_vec()));
+            }
+        }
+        out
+    }
+
+    const ORIGIN: [u8; 8] = [8, 8, 8, 8, 0, 0, 0, 1];
+    const PFX: [u8; 3] = [10, 99, 1];
+
+    /// RFC 8966 §3.5.5 wire regression (the babel_multihop.sh e2e
+    /// failure): when the session a claim was learned on goes down, the
+    /// NEXT announcement on the other interfaces must carry the
+    /// infinity-metric retraction immediately — not defer it. The
+    /// carriage gate used to share `want_v4`/`want_v6` with fresh
+    /// announcements; those collapse to false the moment the family's
+    /// last route vanishes, so the retraction was silently dropped and
+    /// peers held the stale route until its hold time lapsed.
+    #[test]
+    fn link_down_flush_retracts_the_lost_claim_on_the_wire() {
+        let mut r = DefaultRouter::new();
+        // S0: the interface the claim was learned on (veth0b shape).
+        let s0 = r
+            .add_session(SessionConfig::babel(IpAddr::V4([127, 0, 0, 2])))
+            .unwrap();
+        r.start_session(s0).unwrap();
+        // S1: the announcing interface (veth1b shape).
+        let s1 = r
+            .add_session(SessionConfig::babel(IpAddr::V4([127, 0, 1, 2])))
+            .unwrap();
+        r.start_session(s1).unwrap();
+
+        r.feed_input(s0, &peer_frame(ORIGIN, PFX, 7, 96))
+            .expect("a well-formed daemon-shaped frame");
+        assert_eq!(r.babel_reachable(s1).len(), 1, "the claim is reachable");
+
+        let mut iface = loopback_iface(s1, 16_696);
+        // Seed the bookkeeping the way a previous announcement did.
+        iface.advertised = r
+            .babel_reachable(s1)
+            .into_iter()
+            .map(|route| (route.key, route.seqno))
+            .collect();
+
+        // Steady state: the claim is announced with its real metric and
+        // NOT retracted.
+        let steady = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            0,
+            None,
+            None,
+        );
+        let ups = update_metrics(&steady);
+        // The re-advertised metric folds in the reception-side link cost
+        // (advertised 96 + the IHU's txcost 96) — babeld parity.
+        assert!(
+            ups.contains(&(192, PFX.to_vec())),
+            "the claim is announced: {ups:?}"
+        );
+        assert!(
+            !ups.iter().any(|(m, _)| *m == 0xFFFF),
+            "no retraction while the claim is alive: {ups:?}"
+        );
+
+        // The learned-on session dies (check-link flush).
+        r.babel_flush_session(s0);
+        assert!(r.babel_reachable(s1).is_empty());
+
+        // The next announcement must retract the lost claim immediately
+        // (metric=infinity under the origin's Router-Id), so the peers
+        // drop it instead of timing it out.
+        let retraction = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            0,
+            None,
+            None,
+        );
+        let ups = update_metrics(&retraction);
+        assert!(
+            ups.contains(&(0xFFFF, PFX.to_vec())),
+            "the lost claim is retracted on the wire: {ups:?}"
+        );
+        // And the retraction is sent once — the bookkeeping must not
+        // re-retract the claim on the following announcement.
+        let followup = build_babel_announcement(
+            &r,
+            &mut iface,
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            0,
+            None,
+            None,
+        );
+        assert!(
+            !update_metrics(&followup)
+                .iter()
+                .any(|(m, p)| *m == 0xFFFF && p.as_slice() == PFX),
+            "the retraction is not repeated forever: {:?}",
+            update_metrics(&followup)
+        );
     }
 }
