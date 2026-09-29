@@ -1572,7 +1572,24 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         // Historical accept-any: session #1.
                         &entries[0]
                     };
-                    if entry.busy.swap(true, Ordering::Relaxed) {
+                    // RFC 4271 §6.8: a bidirectional peer's inbound
+                    // connections run on the challenger session so they
+                    // can coexist with the outbound transport while the
+                    // router resolves the collision. For bidirectional
+                    // peers (those with a `handle_in`), the `busy` flag
+                    // MUST NOT block the inbound challenger: the previous
+                    // inbound may still be tearing down (collision loser
+                    // dispatch, TCP RST, hold-time sweep) when the remote
+                    // retries, and dropping the new SYN prevents the
+                    // collision resolution from ever converging — both
+                    // sessions die and the outbound connector hammers the
+                    // peer in a 90-second reconnect loop (the production
+                    // "BGP self-connect" symptom). The router's
+                    // `resolve_connection_collision` handles duplicate
+                    // inbounds: an Established sibling closes the new
+                    // challenger immediately per §6.8.
+                    let is_bidirectional = entry.handle_in.is_some();
+                    if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
                         eprintln!(
                             "daemon: peer {} already has an active session; \
                              dropping inbound connection from {}",
@@ -1581,10 +1598,6 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         );
                         continue;
                     }
-                    // RFC 4271 §6.8: a bidirectional peer's inbound
-                    // connections run on the challenger session so they
-                    // can coexist with the outbound transport while the
-                    // router resolves the collision.
                     let handle = entry.handle_in.unwrap_or(entry.handle);
                     let rt = Arc::clone(&runtime);
                     let busy = Arc::clone(&entry.busy);
@@ -1597,13 +1610,22 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                             if let Err(e) = run_peer_session(rt, s, handle, bfd) {
                                 eprintln!("daemon: session #{} ended: {}", handle.0, e);
                             }
-                            busy.store(false, Ordering::Relaxed);
+                            // Only clear the inbound guard for
+                            // non-bidirectional peers (bidirectional
+                            // peers never set it above).
+                            if !is_bidirectional {
+                                busy.store(false, Ordering::Relaxed);
+                            }
                             live.fetch_sub(1, Ordering::Relaxed);
                         });
                     if spawned.is_err() {
-                        // Thread spawn failed: undo the guards so the
-                        // peer is not wedged busy forever.
-                        entry.busy.store(false, Ordering::Relaxed);
+                        // Thread spawn failed: undo the live-session
+                        // guard. The `busy` flag was only set for
+                        // non-bidirectional peers; clear it conditionally
+                        // to match the path above.
+                        if !is_bidirectional {
+                            entry.busy.store(false, Ordering::Relaxed);
+                        }
                         live_sessions.fetch_sub(1, Ordering::Relaxed);
                     }
                     poll_idle = Duration::from_millis(1);
@@ -2601,10 +2623,20 @@ fn spawn_connector(
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
                         // Log the actual source IP the kernel assigned
-                        // after the bind+connect.
+                        // after the bind+connect. The message shows BOTH
+                        // endpoints so the operator can distinguish an
+                        // outbound dial (local → remote) from an inbound
+                        // accept (remote → local). The previous wording
+                        // "connected from <local>" was ambiguous and was
+                        // read as "the peer connected from <local>" —
+                        // i.e. a self-connect — when <local> is the
+                        // daemon's own interface address.
                         let actual_local = stream.local_addr().ok();
                         if let Some(la) = &actual_local {
-                            println!("daemon: peer {}: connected from {}", label, la);
+                            println!(
+                                "daemon: peer {}: outbound TCP established {} -> {}",
+                                label, la, sockaddr
+                            );
                         }
                         // Self-connect guard: if the kernel routed the
                         // outbound SYN through loopback (source IP is

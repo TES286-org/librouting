@@ -333,3 +333,66 @@ fn outbound_only_with_listener_converges_to_one_session() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// The outbound-dial log line must show BOTH endpoints (`local → remote`),
+/// not just the local source. The previous wording "connected from
+/// <local>" was ambiguous and was read by the production operator as
+/// "the peer connected from <local>" — i.e. a self-connect — when
+/// `<local>` is the daemon's own interface address. The new wording
+/// "outbound TCP established <local> -> <remote>" is unambiguous.
+#[test]
+fn outbound_dial_log_shows_both_endpoints() {
+    let dir = std::env::temp_dir().join(format!("lr-daemon-collide-log-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = 18321u16;
+    let port_b = 18322u16;
+
+    let conf_a = dir.join("a.toml");
+    std::fs::write(
+        &conf_a,
+        format!(
+            "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\nebgp_policy = \"accept-all\"\n\
+             listen_addr = \"127.0.0.1:{port_a}\"\nnetworks = [\"203.0.113.0/24\"]\n\n\
+             [[peer]]\nname = \"b\"\nremote = \"127.0.0.1:{port_b}\"\npeer_as = 64513\n"
+        ),
+    )
+    .unwrap();
+    let conf_b = dir.join("b.toml");
+    std::fs::write(
+        &conf_b,
+        format!(
+            "[bgp]\nlocal_as = 64513\nrouter_id = \"10.0.0.2\"\nebgp_policy = \"accept-all\"\n\
+             listen_addr = \"127.0.0.1:{port_b}\"\nnetworks = [\"198.51.100.0/24\"]\n\n\
+             [[peer]]\nname = \"a\"\nremote = \"127.0.0.1:{port_a}\"\npeer_as = 64512\n"
+        ),
+    )
+    .unwrap();
+
+    let a = Daemon::spawn(&["--config", conf_a.to_str().unwrap()], "a-log");
+    let b = Daemon::spawn(&["--config", conf_b.to_str().unwrap()], "b-log");
+
+    // Wait for at least one side to log the outbound dial.
+    wait_log_any(&a.log, &["outbound TCP established", "connect failed"]);
+    wait_log_any(&b.log, &["outbound TCP established", "connect failed"]);
+
+    // The old "connected from" wording must NOT appear — it was
+    // ambiguous and caused the production "self-connect" misdiagnosis.
+    for log in [&a.log, &b.log] {
+        let text = std::fs::read_to_string(log).unwrap_or_default();
+        assert!(
+            !text.contains("connected from"),
+            "old ambiguous 'connected from' log line still present; log:\n{text}"
+        );
+        // When the outbound dial succeeds, the new wording must show
+        // the remote endpoint (the peer's port), not just the local
+        // source.
+        if text.contains("outbound TCP established") {
+            assert!(
+                text.contains("-> 127.0.0.1:"),
+                "outbound log line missing the remote endpoint; log:\n{text}"
+            );
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
