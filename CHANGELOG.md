@@ -14,7 +14,68 @@ The complete narrative for each landed workstream lives in
 This file is the consumer-facing summary — protocol features that
 ship, breaking changes that affect embedders, dependency bumps.
 
-## [Unreleased]
+## [1.0.0-rc.5] — production interop hardening + static-route ABI
+
+The fifth release candidate is the production-hardening wave: almost
+two hundred fixes and tests landed between rc.4 and this cut, almost
+all of them driven by real deployments peering lr with BIRD 2 and
+babeld over real tunnels and real Windows hosts. The headline fixes
+are a Babel metric model that matches babeld/BIRD exactly (the link
+cost is added at reception, never announced), IPv4 routes carried on
+the IPv6 multicast transport (the shape every reference peer actually
+listens on), RFC 8966 §4.5.2 omitted-octet prefix decompression,
+§3.5.5 retraction emission when the last route of a family vanishes,
+and a Windows kernel-mirror skip that keeps the BGP listener
+reachable when the operator blackholes the host's own IP. The public
+surface grows additively: static routes (`Router::install_static_v4/
+_v6` + withdrawals) ship through the Rust API, the C ABI (four new
+`lr_router_*_static_*` symbols, `lr_abi_version()` 1 → 2 — additive,
+no existing symbol changed signature or semantics) and the Go,
+Python and C++ bindings, all with lifecycle tests. 1987 tests pass
+(was 1891 at rc.4); fmt + clippy `-D warnings` clean; the CI matrix
+(Linux, macOS, Windows, BIRD + FRR interop, TCP-AO auth, MSRV,
+coverage, cross-builds) and the Nightly (Miri, QEMU VM) are green on
+this commit.
+
+**Highlights since rc.4:**
+
+- **Static routes through every embedding surface** —
+  `Router::install_static_v4/_v6` / `uninstall_static_v4/_v6`
+  (blackhole via NULL next hop, per-route metric + tag for
+  redistribution pipes), the four-symbol C ABI addition with
+  regenerated headers, and synced Go / Python / C++ bindings.
+- **Babel metric parity with babeld + BIRD** — advertised metrics no
+  longer double-count the announcing link; received Updates fold in
+  the receiving session's cost; originated (redistributed) routes
+  announce metric 0; until the peer's first IHU its Updates are not
+  accepted (babeld parity).
+- **IPv4-over-IPv6 babel transport** — v4 routes ride `ff02::1:6`
+  with the interface's IPv4 address in a NextHop TLV (babeld shape),
+  or RFC 9229 §2.4 AE 4 on v6-only links with `extended_next_hop`.
+- **RFC 8966 wire-correctness** — §4.5.2 omitted-octet prefix
+  compression reconstructed (BIRD's compressed Update trains decode
+  byte-exactly now), §3.5.5 retraction carried whenever the last
+  route of a family vanishes (independently of the announce demand),
+  wildcard retractions log their real reason, infeasible updates no
+  longer displace feasible routes, and the route hold floor rose to
+  30 s (§3.2.5) to stop tunnel flapping.
+- **Windows production hardening** — the source-bind suite
+  (`IP_UNICAST_IF` pinning + retry), the bind-race fix, the
+  Ctrl+C-shutdown FIB cleanup, the adapter-correct route
+  installation (rc.4's wrong-adapter defect) and the static-blackhole
+  / own-listener-IP skip that keeps the BGP listener reachable.
+- **BGP session hygiene** — §6.8 collision loss is a backoff signal
+  (not a hammering loop), collision resolution for outbound-only
+  peers with a listener, RFC 4724 retention follows silent deaths
+  only (BIRD parity), graceful close sends Cease / Admin-Shutdown,
+  and the kernel-mirror installs static routes with their true
+  protocol origin.
+- **Kernel FIB interaction** — connected-route replacements are
+  refused (they used to break the link's own gateway resolution),
+  every installed route is withdrawn on shutdown, duplicate
+  `RouteInstalled` events for identical OSPF/Babel re-installs are
+  suppressed, and the SRv6 `seg6local` encap type is 7 (not 6 — the
+  kernel dispatched the nested payload to the BPF parser before).
 
 ### Fixed (Windows — BGP listener dark when a static blackhole covers the own IP)
 

@@ -156,7 +156,7 @@ A single PR (the "1.0 cut" PR) must:
 
 ### 2.8. Current status against these criteria
 
-As of HEAD (`v1.0.0-rc.4`), the picture is:
+As of HEAD (`v1.0.0-rc.5`), the picture is:
 
 - ✅ 2.1 — RFC coverage at parity for everything in scope; only
   BGPsec is ❌ and is documented out of scope.
@@ -166,10 +166,15 @@ As of HEAD (`v1.0.0-rc.4`), the picture is:
   `tests/interop/parity.sh`) green on `main`.
 - ✅ 2.4 — Cross-platform CI green on Linux (Ubuntu 22.04 + 24.04),
   macOS (Apple Silicon, macos-14) and Windows (2022). The matrix
-  has been green on every push since the Phase 4 series landed.
-- ✅ 2.5 — `lr_abi_version()` exists (`ABI_VERSION = 1`); the 1.0
-  cut PR will confirm the value is still 1 (no ABI break since
-  rc.1) or bump it if a late change requires one.
+  went red on 2026-09-27/29 during the production-hardening wave
+  (a real interop defect, a macOS loopback binding in a new test
+  and an under-sized lab window) and was returned to green at
+  commit `bd4de66`; every job is green on the rc.5 cut commit.
+- ✅ 2.5 — `lr_abi_version()` exists (`ABI_VERSION = 2` as of
+  rc.5). The 1 → 2 bump (commit `1c8b59d`) is purely additive —
+  four new `lr_router_*_static_*` symbols; no existing symbol
+  changed signature or semantics, so existing embedders are
+  unaffected. The 1.0 cut PR confirms no further bump is needed.
 - ✅ 2.6 — Documentation set is complete.
 - 🟡 2.7 — The 1.0 cut PR is the next release-event. The criteria
   it must satisfy are enumerated below.
@@ -215,13 +220,19 @@ If all five are true, the 1.0 cut PR:
 6. Tags `v1.0.0` and pushes; `release.yml` builds the final
    artifacts.
 
-**Target window**: a `1.0.0` cut is appropriate once rc.4 has been
+**Target window**: a `1.0.0` cut is appropriate once rc.5 has been
 on `main` for one full week of clean CI on Linux + macOS + Windows
-(target: 2026-09-26) and no `release-blocker` issue is open. The
-next Phase 3 items (BGP-LS, BGP SR Policy, D8.2 RIB sharding, D15
-multi-threaded RIB) are **post-1.0 work** — they extend the surface
-but do not block the freeze, because the surface they extend is
-already at parity with BIRD and FRR for the protocols they touch.
+(rc.5 cuts 2026-09-30; target: 2026-10-07) and no
+`release-blocker` issue is open. The rc.4 window (target
+2026-09-26) was invalidated on purpose: the production-hardening
+wave that landed 2026-09-26 → 09-29 changed Babel wire behaviour
+(for the better — babeld/BIRD parity), touched the kernel mirror
+and grew the C ABI additively, so the frozen-surface promise of
+1.0.0 is re-anchored on rc.5. The next Phase 3 items (BGP-LS, BGP
+SR Policy, D8.2 RIB sharding, D15 multi-threaded RIB) are
+**post-1.0 work** — they extend the surface but do not block the
+freeze, because the surface they extend is already at parity with
+BIRD and FRR for the protocols they touch.
 
 ---
 
@@ -374,7 +385,8 @@ release."
 | v1.0.0-rc.2   | 2026-09-11    | Adds the `lr` + `lr-daemon` CLI binaries to each per-OS archive. rc.1 archives contained only the shared library and headers; the CLI binaries were built by `cargo build --workspace` but not staged. The `release.yml` matrix gained `lr_bin` and `lrd_bin` entries (`lr` / `lr-daemon` on Unix, `lr.exe` / `lr-daemon.exe` on Windows) and the staging steps copy them into the archive alongside the shared library. Each archive now contains: the shared library, the static archive (where emitted), the two CLI binaries, and the headers. Release workflow 5/5 jobs green. Same 6 standalone assets (4 archives + 2 headers) — the archives are now richer. |
 | v1.0.0-rc.3   | 2026-09-12    | Multi-protocol daemon: one lr-daemon process runs a combination of bgp, ospf and babel (`--protocol bgp,ospf`, TOML `protocols = [...]`) through a shared-router supervisor — one Loc-RIB, one ticker, one API socket, one thread per engine, gated startup (binds → privdrop → release) and fail-closed combinations. Ships the lr-router cross-protocol Loc-RIB merge (admin-distance ordering with withdrawal fallback, direct contributions never evicted by BGP re-ranking, no implicit redistribution into BGP — pipes stay opt-in) plus the Babel idle-spin fix. API unchanged (daemon-layer + router internals only) — bindings need no regeneration. Coverage: 8 new unit tests, 4 new e2e tests, the multi_protocol.sh BIRD interop lab (lr bgp,ospf ↔ BIRD ospf+bgp) wired into CI. |
 | v1.0.0-rc.4   | 2026-09-19    | Config DSL migration (issue #18 Phases 0–4) + filter VM hardening (issue #19 P6 + P7). Ships the native `.lr` configuration DSL (`templates/daemon.lr`), `lr-daemon config check`, `lr-daemon config to-dsl`, positioned filter diagnostics (byte `Span` on every token / AST node / error, in both the interpreter and the bytecode VM, with a caret snippet rendered by the daemon and `lrctl filter compile`), the TOML deprecation window, filter VM instruction fusion (`BranchFieldIntCmp` — `vm_if_local_pref` ~66 → ~28 ns, −57 %), the lazy span read + function-body span bug fix (P7), RFC 8326 graceful session shutdown (receive + send + per-peer exempt), and OSPFv3 Extended-LSA + SRv6 End.X (RFC 8362 + RFC 9513 §9.1/§9.2). Public Rust API + C ABI unchanged since rc.3 — no breaking changes. 174 commits, 1891 tests pass (was 1733 at rc.3). 7 new interop labs wired into CI. |
-| (pending)     | (post-rc.4)   | Final 1.0.0 cut — see §2.8 for the freeze criteria.                                              |
+| v1.0.0-rc.5   | 2026-09-30    | Production interop hardening + static-route ABI. 212 commits since rc.4 (96 fix, 42 test, 25 ci, 18 docs, 11 feat, 2 perf): Babel metric parity with babeld/BIRD (link cost added at reception, originated routes announce metric 0, IHU-gated acceptance), IPv4-over-IPv6 transport (`ff02::1:6` + NextHop TLV / RFC 9229 AE 4), RFC 8966 §4.5.2 omitted-octet prefix decompression, §3.5.5 retraction on family loss, wildcard-retraction reason, infeasible-update displacement, 30 s hold floor, Seqno-Request seeding; Windows source-bind / bind-race / Ctrl+C-FIB / own-IP-blackhole fixes; BGP §6.8 collision backoff + outbound-only-listener resolution, RFC 4724 retention scope (BIRD parity), Cease/Admin-Shutdown on graceful close; kernel-mirror connected-route refusal + shutdown withdrawal + static-route protocol origin; SRv6 `seg6local` encap type fix. Public surface grows additively: static routes through Rust API + C ABI (`lr_router_install_static_v4/_v6`, `lr_router_uninstall_static_v4/_v6`; `ABI_VERSION` 1 → 2, additive) + Go/Python/C++ bindings. No breaking changes. 1987 tests pass (was 1891 at rc.4). The rc.4 clean-CI week was invalidated by this wave on purpose; the 1.0 clock re-anchors on rc.5 (target 2026-10-07). |
+| (pending)     | (post-rc.5)   | Final 1.0.0 cut — see §2.8 for the freeze criteria.                                              |
 
 The tag history is the canonical release record; this table is the
 human-readable index.
