@@ -3118,6 +3118,35 @@ impl KernelMirror {
                     e
                 ),
             }
+            // Also seed `connected` with the host's own interface
+            // addresses (host-scope /32 for v4, /128 for v6). The
+            // kernel holds these as local-delivery routes that win
+            // over any main-table row, but the FIB scan above does
+            // not always surface them — Linux's `RTM_GETROUTE` with
+            // `RT_TABLE_MAIN` skips the local table (RTN_LOCAL rows
+            // live in table 255). Without this enumeration a static
+            // blackhole for an own address (`route <own-ip>/32
+            // next_hop "blackhole"`) would install a parallel
+            // main-table row that, on Windows, shadows the local
+            // delivery route and drops inbound SYNs to the daemon's
+            // own listener. The skip in `apply` relies on this set
+            // containing the assigned /32s.
+            match lr_osroute::ospf_transport::list_interfaces() {
+                Ok(ifaces) => {
+                    for iface in ifaces {
+                        for v4 in &iface.v4 {
+                            connected.insert(Prefix::new_v4(v4.octets(), 32));
+                        }
+                        for v6 in &iface.v6 {
+                            connected.insert(Prefix::new_v6(v6.octets(), 128));
+                        }
+                    }
+                }
+                Err(e) => eprintln!(
+                    "daemon: interface enumeration failed ({}); own-IP blackhole skip disabled",
+                    e
+                ),
+            }
             #[cfg(target_os = "linux")]
             match lr_osroute::mpls_route::MplsNetlink::connect() {
                 Ok(t) => {
@@ -3253,7 +3282,37 @@ impl KernelMirror {
                         let is_blackhole =
                             r.protocol == lr_core::rib::Protocol::Static && r.next_hop.is_none();
                         if is_blackhole {
-                            if let Some(table) = self.ip_table.as_mut() {
+                            // Skip the kernel blackhole install when the
+                            // prefix is already a connected (local)
+                            // route — i.e. one of the host's own
+                            // interface addresses. The static-route
+                            // idiom `route <own-ip>/32 next_hop
+                            // "blackhole"` exists to keep the /32 in
+                            // the Loc-RIB for BGP export across interface
+                            // flaps; it is *not* a request to discard
+                            // traffic to the host's own IP.
+                            //
+                            // On Windows specifically, installing an
+                            // on-link `RouteProtocolNetMgmt` row whose
+                            // destination equals an assigned interface
+                            // address shadows the kernel's local
+                            // delivery route: inbound SYNs to the
+                            // daemon's own BGP listener die as the
+                            // blackhole's ARP-fail discard, and the
+                            // peer's outbound connection never reaches
+                            // the listener. The kernel's connected row
+                            // already provides local delivery (and the
+                            // metric-10 static preference is preserved
+                            // in the Loc-RIB for BGP export), so a
+                            // parallel kernel blackhole would be both
+                            // redundant and harmful.
+                            if self.connected.contains(&r.key.prefix) {
+                                println!(
+                                    "mirror: skipping blackhole install for {} — \
+                                     kernel connected route covers it (own address)",
+                                    r.key.prefix
+                                );
+                            } else if let Some(table) = self.ip_table.as_mut() {
                                 match table.add_blackhole_route(r.key.prefix) {
                                     Ok(()) => println!(
                                         "mirror: blackhole route installed {} (kernel discard)",
