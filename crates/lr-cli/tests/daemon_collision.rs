@@ -396,3 +396,96 @@ fn outbound_dial_log_shows_both_endpoints() {
 
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// A static blackhole for the daemon's own listener address must NOT
+/// prevent the listener from accepting inbound connections.
+///
+/// Reproduces the Windows production issue: the operator's
+/// `static { route <own-ip>/32 next_hop "blackhole" }` idiom (used to
+/// keep the /32 in BGP's Loc-RIB across interface flaps) was being
+/// installed as a parallel NetMgmt on-link row, shadowing the kernel's
+/// local-delivery route. Inbound SYNs to the daemon's own BGP listener
+/// died as the blackhole's ARP-fail discard, the peer's outbound
+/// connection never reached the listener, and the bidirectional peer
+/// churned forever (every retry ended with a Cease / Connection
+/// Collision Resolution notification from the peer, because the
+/// inbound side never established to compete in the §6.8 resolution).
+///
+/// The daemon's mirror logic now detects that the prefix is a kernel
+/// connected route (own interface address) and skips the kernel
+/// blackhole install — the static route still enters the Loc-RIB for
+/// BGP export, but no parallel kernel blackhole row is created.
+#[test]
+fn static_blackhole_for_own_listener_ip_skips_kernel_install() {
+    let dir = std::env::temp_dir().join(format!("lr-daemon-collide-bh-own-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let port_a = 18331u16;
+    let port_b = 18332u16;
+
+    // Daemon A listens on 127.0.0.1 (an address assigned to the
+    // loopback interface — the kernel holds it as a local-delivery
+    // route) and configures a static blackhole for 127.0.0.1/32. The
+    // operator's intent is to keep the /32 in BGP's Loc-RIB for
+    // export; without the fix the mirror would install a parallel
+    // kernel blackhole row that, on Windows, shadows local delivery
+    // and the listener goes dark. `local_address` stays a
+    // documentation IP so the EBGP NEXT_HOP for A's advertisements
+    // is not 127.0.0.1 (which A's safety check would reject).
+    let conf_a = dir.join("a.toml");
+    std::fs::write(
+        &conf_a,
+        format!(
+            "[bgp]\nlocal_as = 64512\nrouter_id = \"10.0.0.1\"\nebgp_policy = \"accept-all\"\n\
+             listen_addr = \"127.0.0.1:{port_a}\"\n\
+             local_address = \"192.0.2.1\"\n\
+             install_kernel = true\n\
+             networks = [\"203.0.113.0/24\"]\n\n\
+             [[static.route]]\nprefix = \"127.0.0.1/32\"\nnext_hop = \"blackhole\"\n\n\
+             [[peer]]\nname = \"b\"\nremote = \"127.0.0.1:{port_b}\"\npeer_as = 64513\n"
+        ),
+    )
+    .unwrap();
+    let conf_b = dir.join("b.toml");
+    std::fs::write(
+        &conf_b,
+        format!(
+            "[bgp]\nlocal_as = 64513\nrouter_id = \"10.0.0.2\"\nebgp_policy = \"accept-all\"\n\
+             listen_addr = \"127.0.0.1:{port_b}\"\n\
+             local_address = \"192.0.2.2\"\n\
+             install_kernel = true\n\
+             networks = [\"198.51.100.0/24\"]\n\n\
+             [[peer]]\nname = \"a\"\nremote = \"127.0.0.1:{port_a}\"\npeer_as = 64512\n"
+        ),
+    )
+    .unwrap();
+
+    let a = Daemon::spawn(&["--config", conf_a.to_str().unwrap()], "a-bh");
+    let b = Daemon::spawn(&["--config", conf_b.to_str().unwrap()], "b-bh");
+
+    // Daemon A MUST log the skip — the static blackhole for its own
+    // listener IP is detected as redundant with the kernel's connected
+    // (local) route, and no parallel blackhole row is installed.
+    wait_log_all(
+        &a.log,
+        &["mirror: skipping blackhole install for 127.0.0.1/32"],
+    );
+    // The static route still enters the Loc-RIB (BGP export works).
+    wait_log_all(&a.log, &["static:      127.0.0.1/32 blackhole"]);
+
+    // Both daemons converge to exactly one Established session — the
+    // listener on A is still reachable despite the static blackhole.
+    wait_log_any(
+        &a.log,
+        &["session #1 → Established", "session #2 → Established"],
+    );
+    wait_log_any(
+        &b.log,
+        &["session #1 → Established", "session #2 → Established"],
+    );
+
+    // Routes propagate across the surviving connection.
+    wait_log_all(&a.log, &["route installed 198.51.100.0/24"]);
+    wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
+
+    let _ = std::fs::remove_dir_all(&dir);
+}

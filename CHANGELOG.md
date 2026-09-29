@@ -16,6 +16,43 @@ ship, breaking changes that affect embedders, dependency bumps.
 
 ## [Unreleased]
 
+### Fixed (Windows — BGP listener dark when a static blackhole covers the own IP)
+
+- **The kernel mirror now skips the blackhole install for prefixes the
+  kernel already holds as connected (local-delivery) routes — typically
+  the host's own interface addresses.** The operator idiom
+  `static { route <own-ip>/32 next_hop "blackhole" }` exists to keep
+  the /32 in BGP's Loc-RIB across interface flaps (so the address
+  keeps being announced even when the underlying interface is briefly
+  down); it is *not* a request to discard traffic to the host's own
+  IP. On Windows the mirror was installing the static as a parallel
+  `RouteProtocolNetMgmt` on-link row whose destination equaled an
+  assigned interface address. The on-link row shadows the kernel's
+  local-delivery route: inbound SYNs to the daemon's own BGP listener
+  die as the blackhole's ARP-fail discard, the peer's outbound TCP
+  never reaches the listener, and a bidirectional peer churns forever
+  (every retry ends with a Cease / Connection Collision Resolution
+  notification from the peer because the inbound side never established
+  to compete in the §6.8 resolution). The mirror now detects the
+  overlap via the FIB scan + interface enumeration and skips the
+  kernel-side install with a `mirror: skipping blackhole install for
+  <prefix> — kernel connected route covers it (own address)` log line.
+  The /32 still enters the Loc-RIB (BGP export unchanged); the
+  kernel's connected route already provides local delivery, so the
+  parallel blackhole row was both redundant and harmful. Linux was
+  unaffected (the local table wins preference over the main-table
+  blackhole) but the skip is now also taken there for consistency and
+  to keep the kernel FIB free of redundant discard rows. The
+  `KernelMirror::connected` set is now seeded with the host's own
+  interface addresses (host-scope /32 for v4, /128 for v6) in
+  addition to the existing FIB scan, because Linux's `RTM_GETROUTE`
+  with `RT_TABLE_MAIN` skips the local table (RTN_LOCAL rows live in
+  table 255) — without the interface enumeration the skip would never
+  fire on Linux. Reproduces with the new
+  `static_blackhole_for_own_listener_ip_skips_kernel_install` test in
+  `daemon_collision.rs` and the `bgp_blackhole_own_ip.sh` BIRD
+  interop.
+
 ### Fixed (Babel — production interop with BIRD/babeld)
 
 - **Wildcard retractions now log "babel peer wildcard retraction"
