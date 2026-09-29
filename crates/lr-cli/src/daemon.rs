@@ -7016,12 +7016,14 @@ mod babel_retraction_tests {
     /// A v4-transport interface on loopback: a real unicast socket (the
     /// struct embeds one), no multicast, no auth, `next_hop_v4` set —
     /// the shape `babel_iface_manual` builds for a v4 local address.
+    /// Bound to 127.0.0.1 (not 127.0.0.2): macOS only configures
+    /// 127.0.0.1 on loopback, while Linux covers the whole 127/8.
     fn loopback_iface(session: SessionHandle, port: u16) -> BabelIface {
-        let uc = std::net::UdpSocket::bind("127.0.0.2:0").unwrap();
+        let uc = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         BabelIface {
             name: "lo0".into(),
             transports: vec![BabelTransport {
-                local: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+                local: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
                 scope_id: 0,
                 port,
                 group: std::net::IpAddr::V4(std::net::Ipv4Addr::new(224, 0, 0, 111)),
@@ -7036,7 +7038,7 @@ mod babel_retraction_tests {
             rtt_min_us: 10_000,
             rtt_max_us: 120_000,
             check_link: false,
-            next_hop_v4: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2))),
+            next_hop_v4: Some(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
             next_hop_v6: None,
             extended_next_hop: false,
             session,
@@ -7115,7 +7117,7 @@ mod babel_retraction_tests {
         let steady = build_babel_announcement(
             &r,
             &mut iface,
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             0,
             None,
             None,
@@ -7142,7 +7144,7 @@ mod babel_retraction_tests {
         let retraction = build_babel_announcement(
             &r,
             &mut iface,
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             0,
             None,
             None,
@@ -7157,7 +7159,7 @@ mod babel_retraction_tests {
         let followup = build_babel_announcement(
             &r,
             &mut iface,
-            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 2)),
+            std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
             0,
             None,
             None,
