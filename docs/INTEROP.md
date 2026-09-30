@@ -45,6 +45,97 @@ job `interop`) and can all be reproduced locally:
 > isolated; the RFC 8212 behavior itself is covered end-to-end by
 > `crates/lr-cli/tests/daemon_rfc8212.rs`.
 
+### Complete lab inventory
+
+The matrix above is the guided tour. The tables below close the set:
+**every** script currently under `tests/interop/` appears either in
+the matrix or here, and `tests/lint_interop_doc.sh` (run by the CI
+`lint` job) fails the build the moment a lab lands without a
+documentation row — or a row outlives its script.
+
+**Shared helpers** — `_lib.sh` (rootless namespace + veth topology
+harness) and `_lr_daemon.sh` (daemon build/spawn/log-capture
+helpers) are infrastructure sourced by the labs, not labs
+themselves; they appear in no matrix column.
+
+BGP — surface and extensions:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `addpath.sh` | two lr-daemons over TCP (`--add-path`) | RFC 7911 Add-Path end to end: the capability negotiates and the route arrives carrying the transmitter-assigned 4-octet path id, visible in the runtime API route dump |
+| `aggregate_bird.sh` | lr-daemon `[[aggregate]]` ↔ BIRD 2 | RFC 4271 §9.2.2.2 aggregation: BIRD ships the specifics, lr originates the aggregate (zeroed AS_PATH + ATOMIC_AGGREGATE) and withdraws it when the specifics vanish |
+| `labeled_unicast.sh` | two lr-daemons over TCP | RFC 8277 BGP-LU: an AFI=1/SAFI=4 UPDATE with label 100 propagates from A to B over a real socket |
+| `mpls_lsp.sh` | two lr-daemons in network namespaces, kernel MPLS enabled | BGP-LU → dataplane: each daemon mirrors its half of the LSP into the kernel (tail pop / head encap) and a ping crosses the LSP |
+| `multi_protocol.sh` | lr `--protocol bgp,ospf` ↔ one BIRD 2 running both protocols | the rc.3 multi-protocol supervisor against the reference stack: one lr process serves BGP and OSPF simultaneously to one BIRD |
+| `bird_ipv6.sh` | lr ↔ BIRD 2 over `[::1]` | pure-IPv6 session: IPv6 transport + IPv6 NLRI exchanged in both directions |
+| `bird_wsl.sh` | lr-daemon on the Windows host ↔ BIRD 2 inside WSL2's Ubuntu | cross-OS BGP: the Windows TCP stack talking to BIRD's Linux stack through WSL2 localhost forwarding — the shape of the CI `Windows BIRD interop` job |
+
+BGP — session hygiene, policy and kernel interaction:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `bgp_collision_backoff.sh` | lr-daemon ↔ a fake speaker answering RFC 4486 subcode 7 | §6.8 collision loss is a backoff signal: the daemon stops redialing ~1 s after every loss (the rc.4 hammering-loop defect), deterministically |
+| `bgp_collision_zombie.sh` | restarted lr-daemon ↔ peer holding a live session to the dead instance | §6.8 zombie resolution: fresh dials bounce off the peer's Established-protection rule and the daemon backs off instead of looping |
+| `bgp_shutdown_cleanup.sh` | lr-daemon under SIGINT | the Ctrl+C contract: Cease sent, every installed route withdrawn — the host kernel FIB is left exactly as found (rc.4 Windows defect) |
+| `bgp_blackhole_own_ip.sh` | lr (static blackhole for its own listener IP) ↔ BIRD 2 | the kernel-mirror skip: the blackhole never shadows local delivery, BIRD's inbound SYN reaches the listener, the session establishes |
+| `rfc8212_bird.sh` | lr ↔ BIRD 2 | RFC 8212 §3 default deny-in/deny-out for policy-less eBGP sessions, and the explicit-policy escape hatch, against BIRD |
+| `rfc8212_frr.sh` | lr ↔ FRR bgpd | RFC 8212 §3 against FRR, same shape |
+| `redistribute_bird.sh` | lr multi-protocol bgp+ospf ↔ BIRD 2 on both sides | `[[redistribute]]` pipes: BGP routes re-originate as OSPF AS-externals and back, with BIRD playing the BGP peer and the OSPF neighbor |
+
+Babel (RFC 8966) — production interop with BIRD/babeld shapes:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `babel_auth.sh` | two lr babel speakers in one rootless netns | RFC 8967 MAC/PC transport auth: same key establishes, a restart re-keys with a fresh Index, wrong keys are rejected |
+| `babel_dualstack_bird.sh` | lr ↔ BIRD 2 babel across two user namespaces | the production dual-stack convergence shape: v4 and v6 routes over one link with BIRD as the peer |
+| `babel_infeasible_no_displace.sh` | lr speakers over a tunnel shape | regression: an infeasible update never displaces a feasible route — the single-upstream install/withdraw churn defect stays dead |
+| `babel_multi_nic.sh` | lr with `[[babel.interface]]` globs on a veth pair | interface enumeration + glob matching resolves per-interface blocks to the right sockets |
+| `babel_multihop.sh` | three speakers in three namespaces (A—M—C) | multi-session transit: routes transit M, the dead segment's routes withdraw end-to-end (§3.5.5 retraction + check link), link return reconverges |
+| `babel_reinstall_churn.sh` | two lr speakers | regression: byte-identical re-installs no longer spam `RouteInstalled` events / the kernel mirror (rc.4 churn defect), deterministically |
+| `babel_router_id_e2e.sh` | two lr speakers with configured `--router-id` | the configured router-id rides the wire as the 8-byte Router-Id TLV BIRD displays |
+| `babel_v6only_extended.sh` | lr over a v6-only tunnel | RFC 9229 extended next hop: v4 routes ride the v6 transport (inferred and explicit), v4 blackhole statics survive the v6-only link |
+| `babel_withdraw_reason.sh` | lr ↔ BIRD 2 | a wildcard retraction (§4.6.9) logs its real reason, not the misleading "best-path displacement" fallback |
+
+OSPF broadcast segments (the DR/BDR election slices):
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `ospf_broadcast.sh` | two lr-daemons, `network_type = "broadcast"` | RFC 2328 §9.4 election (higher router-id wins DR), §10.4 DR↔BDR adjacency, the Network-LSA + network-referenced Intra-Area-Prefix set, phase 2 vs FRR broadcast |
+| `ospf6_broadcast.sh` | two lr-daemons, OSPFv3 broadcast | RFC 5340 §4.1.2 + RFC 2328 §9.4 election on Router-ID identity; the DR originates the Network-LSA and network-referenced IAP; transit links replace p2p descriptions |
+| `ospf6_frr_broadcast.sh` | lr ↔ FRR 10 ospf6d (default broadcast) | both implementations run the §9.4 election independently and agree on the elected pair, then exchange the broadcast LSA set |
+
+Authentication:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `md5.sh` | lr↔lr, lr↔BIRD 2, lr↔FRR | RFC 2385: the right key establishes with all three stacks (lr, BIRD `password`, FRR `password`); a wrong key must not establish |
+| `tcp_ao.sh` | lr↔lr | RFC 5925 TCP-AO: matching key chain establishes, same KeyID with a different secret fails closed (Linux ≥ 6.7 gated) |
+| `bird_gtsm.sh` | lr ↔ BIRD 2 (`ttl security`) | RFC 5082 GTSM: TTL=255 both directions, BIRD's GTSM-enabled session establishes and route exchange flows |
+
+Compatibility and DSL surfaces:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `compat_bird.sh` | lr-daemon fed a native `bird.conf` ↔ real BIRD 2 | the BIRD compat layer: lr consumes BIRD's configuration natively and peers with BIRD itself (W5.4) |
+| `compat_frr.sh` | lr-daemon fed a native `frr.conf` ↔ FRR bgpd | the FRR compat layer, same shape |
+| `filter_dsl_bird.sh` | lr-daemon with `[[filter]]` tables ↔ BIRD 2 | BIRD-shaped filter bodies (prefix-set membership, arithmetic, attribute assignment, if/then/else) evaluate against real BIRD-advertised routes |
+| `damping_frr.sh` | lr `[damping]` ↔ FRR bgpd as the flap generator | RFC 2439 route flap damping: FRR-driven flaps suppress at the threshold, decay reactivates, a post-reuse flap re-installs (BIRD ships no RFD — FRR is the reference) |
+
+LDP:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `ldp.sh` | two lr LSRs in namespaces, multicast discovery | LDP end to end against itself: Hello discovery, TCP 646 session, label bindings, the kernel dataplane phase |
+| `ldp_frr.sh` | lr ↔ FRR 10 (zebra + ldpd) | RFC 5036 wire compatibility with FRR's ldpd over a real veth pair |
+
+RPKI-RTR and governance:
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `rtr_bird.sh` | BIRD 2's RPKI client ↔ lr's mock RTR cache | RFC 8210 codec interop: BIRD's Reset/Serial Query decode through `lr_bgp::rtr` and BIRD consumes the ROAs |
+| `rtr_lr.sh` | lr-daemon `[bgp.rpki]` client ↔ lr's mock RTR cache | the daemon client end to end: sync, delta application, data-expiry withdrawal while disconnected, SIGHUP re-point |
+| `yang.sh` | `lr-daemon yang render` + yanglint (libyang) | the shipped `yang/` modules parse with imports resolved; the RFC 9647 babel instance data validates as config (W3.8) |
+
 ## What the tests actually verify
 
 For every peer pair, all of the following must hold:
@@ -367,6 +458,13 @@ Add a new reference daemon by following the existing pattern:
    for `203.0.113.0/24` and lr-daemon's log for `198.51.100.0/24`.
 4. Print both logs and `PASS`/`FAIL` lines with distinct failure
    reasons; exit non-zero on failure, zero on skip.
+
+**Every new lab needs a documentation row in this file** (the guided
+matrix above or the matching inventory table) — the CI `lint` job
+runs `tests/lint_interop_doc.sh`, which fails when a script under
+`tests/interop/` has no row here or a row references a deleted
+script. The helper note covers `_lib.sh` / `_lr_daemon.sh` only; a
+new shared helper must be added there.
 
 Good next candidates: OpenBGPD (`bgpd` from OpenBSD, has a portable
 build), GoBGP (`gobgpd` with YAML config), and Juniper's open-source
