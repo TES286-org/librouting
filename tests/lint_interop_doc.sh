@@ -14,6 +14,9 @@
 # mentioned somewhere in docs/INTEROP.md too, so nothing in the
 # directory is silent.
 #
+# Dependencies: bash, GNU coreutils, GNU grep — nothing else. It must
+# run on a bare GitHub-hosted runner (no ripgrep there).
+#
 # Usage: tests/lint_interop_doc.sh   (from the repository root)
 
 set -euo pipefail
@@ -32,7 +35,7 @@ missing_doc() {
     for s in tests/interop/*.sh; do
         local base
         base=$(basename "$s")
-        if ! rg -q "\b${base//./\\.}\b" "$DOC"; then
+        if ! grep -Eq "\b${base//./\\.}\b" "$DOC"; then
             echo "UNDOCUMENTED LAB: tests/interop/$base"
             fail=1
         fi
@@ -42,14 +45,14 @@ missing_doc() {
 missing_file() {
     # Scripts referenced by the document that no longer exist
     # (stale rows are as misleading as missing rows).
-    local base
-    while IFS= read -r base; do
-        [ -n "$base" ] || continue
-        if [ ! -f "tests/interop/$base" ]; then
-            echo "STALE DOC ROW: tests/interop/$base is documented but does not exist"
+    local p
+    while IFS= read -r p; do
+        [ -n "$p" ] || continue
+        if [ ! -f "$p" ]; then
+            echo "STALE DOC ROW: $p is documented but does not exist"
             fail=1
         fi
-    done < <(rg -o 'tests/interop/([A-Za-z0-9_]+\.sh)' -r '$1' "$DOC" | sort -u)
+    done < <(grep -oE 'tests/interop/[A-Za-z0-9_]+\.sh' "$DOC" | sort -u)
 }
 
 missing_doc

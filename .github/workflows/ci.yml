@@ -50,7 +50,7 @@ jobs:
       # docs/RELEASE-PLAN.md §2.2: the interop matrix in INTEROP.md
       # must be the live tests/interop/ listing. This guard fails the
       # build the moment a lab lands without a documentation row (or
-      # a row outlives its script). Pure bash + ripgrep — seconds.
+      # a row outlives its script). Pure bash + grep — seconds, no extra tooling on the runner.
       - name: interop doc lint
         timeout-minutes: 2
         run: tests/lint_interop_doc.sh
