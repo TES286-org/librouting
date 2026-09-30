@@ -47,6 +47,59 @@ jobs:
       - name: cargo clippy
         timeout-minutes: 15
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # docs/RELEASE-PLAN.md §2.2: the interop matrix in INTEROP.md
+      # must be the live tests/interop/ listing. This guard fails the
+      # build the moment a lab lands without a documentation row (or
+      # a row outlives its script). Pure bash + ripgrep — seconds.
+      - name: interop doc lint
+        timeout-minutes: 2
+        run: tests/lint_interop_doc.sh
+
+  # ABI freeze gate (docs/RELEASE-PLAN.md §2.8 condition 3): between
+  # the current pre-1.0 tag and any later commit on main, the C ABI
+  # surface (include/lr_ffi.h + include/librouting.hpp) may only GROW.
+  # A removed or modified line in the header diff is a removed or
+  # changed symbol/contract — i.e. a breaking ABI change, which must
+  # ship as a new -rc and restart the freeze clock, never silently.
+  # Additive growth (new symbols) is allowed and expected. The
+  # ABI_VERSION constant must not move within one -rc window either:
+  # it is bumped only by the release commit that cuts the next tag.
+  abi-freeze:
+    name: ABI freeze (additive-only vs baseline tag)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      # Bump at every release cut (the new tag becomes the baseline).
+      ABI_BASELINE_TAG: v1.0.0-rc.5
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history so the baseline tag is present
+      - name: C ABI surface must be additive-only since the baseline
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          echo "Baseline: $ABI_BASELINE_TAG -> HEAD: $(git rev-parse --short HEAD)"
+          removed="$(git diff "$ABI_BASELINE_TAG"..HEAD -- include/lr_ffi.h include/librouting.hpp | grep '^-' | grep -v '^---' || true)"
+          if [ -n "$removed" ]; then
+            echo "::error::Breaking C ABI change since $ABI_BASELINE_TAG — these header lines were removed or modified:"
+            echo "$removed"
+            echo "Per docs/RELEASE-PLAN.md §1 Tier 2, a breaking ABI change is a major version bump, even pre-1.0."
+            exit 1
+          fi
+          echo "OK: no header line was removed or modified since $ABI_BASELINE_TAG (additions are allowed)."
+      - name: ABI_VERSION must hold steady within one -rc window
+        timeout-minutes: 2
+        run: |
+          set -euo pipefail
+          now="$(sed -n 's/.*pub const ABI_VERSION: u32 = \([0-9]*\).*/\1/p' crates/lr-core/src/lib.rs | head -1)"
+          base="$(git show "$ABI_BASELINE_TAG":crates/lr-core/src/lib.rs | sed -n 's/.*pub const ABI_VERSION: u32 = \([0-9]*\).*/\1/p' | head -1)"
+          echo "ABI_VERSION at $ABI_BASELINE_TAG: $base; at HEAD: $now"
+          if [ "$now" != "$base" ]; then
+            echo "::error::ABI_VERSION changed ($base -> $now) without a release cut. Bump it only in the commit that tags the next release."
+            exit 1
+          fi
+          echo "OK: ABI_VERSION unchanged within the window."
 
   # Unit + integration tests + doctests. Runs in parallel with lint
   # and ffi-bindings. nextest isolates each test in its own process
