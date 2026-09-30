@@ -16,14 +16,19 @@ trusting a doc claim.
 
 ---
 
-## 1. Project state (as of v1.0.0-rc.4)
+## 1. Project state (as of v1.0.0-rc.5)
 
-The workspace is at **`1.0.0-rc.4`** (`[workspace.package] version`
-in `Cargo.toml`). The public Rust API (Tier 1) and the C ABI (Tier 2)
-are **frozen** for the 1.0 cut — a breaking change is a major-version
-bump, no exceptions. See `docs/RELEASE-PLAN.md` §2.8 for the remaining
-1.0.0 freeze criteria (one week of clean CI on Linux + macOS + Windows,
-no open `release-blocker` issues).
+The workspace is at **`1.0.0-rc.5`** (`[workspace.package] version`
+in `Cargo.toml`). The public Rust API (Tier 1) and the C ABI (Tier 2,
+`lr_abi_version()` = 2 — the rc.5 static-route addition was purely
+additive) are **frozen** for the 1.0 cut — a breaking change ships as
+a new `-rc` and restarts the freeze clock, no exceptions. The CI
+`abi-freeze` job enforces the C ABI half of this mechanically (the
+headers may only grow relative to the baseline tag; `ABI_VERSION`
+may not move within one `-rc` window). See `docs/RELEASE-PLAN.md`
+§2.8 for the remaining 1.0.0 freeze criteria (one week of clean CI on
+Linux + macOS + Windows — clock re-anchored on rc.5, target
+2026-10-07 — and no open `release-blocker` issues).
 
 **Protocol coverage** is at parity with BIRD 2 + FRR 10 for everything
 in scope (BGP, OSPFv2/v3, Babel, LDP, BFD, BMP, MRT). The only
@@ -40,8 +45,11 @@ table.
 - D14.7 — external BIRD/FRR conversion corpus
 - D15 — multi-threaded RIB + lock-free event bus
 
-**Open GitHub issues** of note: #19 (DSL performance — ongoing), #20
-(publish to package managers — future), #26 (this doc-reorg task).
+**Open GitHub issues** of note: #19 (DSL performance — P0–P7 all
+landed or documented-reverted; closing), #20 (publish to package
+managers — waiting on the maintainer's naming/publishing details),
+#26 (this doc-reorg task), #39 (Babel manual-path `check link`
+parity — deferred to the first post-1.0 maintenance release).
 
 ---
 
@@ -186,7 +194,7 @@ tests. 5 small commits beat 1 megacommit for bisecting regressions.
 - Doc comments cite the RFC section when implementing or extending one:
   `RFC 8966 §A.2.4 — RTT measurement TLV`.
 
-### 4.3 Public API stability (frozen at rc.4)
+### 4.3 Public API stability (frozen at rc.5)
 
 Three tiers with different stability contracts (see
 `docs/RELEASE-PLAN.md` §1):
@@ -232,7 +240,8 @@ or fix the doc in the same PR.
 
 When a location has multiple valid implementations, choose the
 performance-optimal one. The filter DSL bytecode VM is a hot path
-(GitHub issue #19 is the ongoing perf workstream); the RIB selection
+(GitHub issue #19 tracked the perf workstream — P0–P7 landed, P1
+documented as attempted-and-reverted); the RIB selection
 and the codec decode loops are the other two. Benchmarks live in
 `crates/*/benches/` (criterion); run with `cargo bench -p <crate>`.
 Document a measured delta in the commit message when landing a perf

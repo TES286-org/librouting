@@ -4,7 +4,7 @@ Start here. The documentation set is organized by audience: embedders
 writing Rust, operators running the daemon, and contributors extending
 the protocol crates.
 
-The project is at **1.0.0-rc.4**. The public Rust API (Tier 1) and
+The project is at **1.0.0-rc.5**. The public Rust API (Tier 1) and
 the C ABI (Tier 2) are frozen for the 1.0 cut — see
 [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §2.8 for the remaining freeze
 criteria. See [`../AGENTS.md`](../AGENTS.md) for the AI-agent /
@@ -71,7 +71,7 @@ contributor quick-start guide.
 2. `API.md` gains a section whenever a new public API surface appears.
 3. Documents are English-only; keep lines under ~80 characters.
 4. Version references in `Cargo.toml` snippets must match the workspace
-   version in `Cargo.toml` (currently `1.0.0-rc.4`).
+   version in `Cargo.toml` (currently `1.0.0-rc.5`).
 
 ## Contributor and security docs (repo root)
 

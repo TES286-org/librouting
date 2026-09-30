@@ -492,7 +492,7 @@ Implemented and missing features are tracked in detail in
   and external routing, broadcast segments with DR election, SRv6
   (RFC 9513) and graceful restart (RFC 5187, helper + restarting
   router, interop-verified against FRR ospf6d).
-- The project is at **1.0.0-rc.4**: the public Rust API and the C ABI
+- The project is at **1.0.0-rc.5**: the public Rust API and the C ABI
   are frozen for the 1.0 cut. See `docs/RELEASE-PLAN.md` §2.8 for the
   remaining 1.0.0 freeze criteria. The open roadmap items
   (BGP-LS / SR Policy, D8.2 RIB sharding, D15 multi-threaded RIB) are
