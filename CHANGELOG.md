@@ -8,11 +8,10 @@ Pre-1.0 release candidates (`1.0.0-rc.N`) freeze the public API;
 breaking changes after a `-rc` lands are recorded under the next
 `-rc` heading with a `BREAKING CHANGE:` marker.
 
-The complete narrative for each landed workstream lives in
-[`docs/ROADMAP.md`](docs/ROADMAP.md) (the v2 landing log) and
-[`docs/ROADMAP-v3.md`](docs/ROADMAP-v3.md) (forward directions).
-This file is the consumer-facing summary — protocol features that
-ship, breaking changes that affect embedders, dependency bumps.
+The narrative for each landed workstream is the commit history; this file
+is the consumer-facing summary — protocol features that ship, breaking
+changes that affect embedders, dependency bumps. Forward-looking work
+lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [1.0.0-rc.5] — production interop hardening + static-route ABI
 
@@ -405,7 +404,7 @@ this commit.
     watchdog, timestamped `PROBE` lines, console-less
     (`CREATE_NO_WINDOW`) children.
 
-### Fixed (BGP — the §6.8 collision-loss hammering loop and the RFC 4724 retention scope)
+### Fixed (BGP — §6.8 collision loss and RFC 4724 retention scope)
 
 - **Losing a connection collision no longer turns the connector into a
   1-second hammer.** When the peer holds a live session to a *dead*
@@ -463,7 +462,7 @@ this commit.
   run the identical graceful path and are covered by the new
   `bgp_shutdown_cleanup.sh` interop test.
 
-### Fixed (BGP — RFC 4271 §6.8 collision resolution on outbound-only peers with a listener)
+### Fixed (BGP — §6.8 collision resolution with a listener)
 
 - **Outbound-only peers no longer loop on `Cease / Connection
   Collision Resolution` when the daemon is also listening.** An
