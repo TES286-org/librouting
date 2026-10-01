@@ -25,8 +25,8 @@ A locator is an IPv6 prefix (RFC 8754 §3.1). The `End` SID on a node is by conv
 // Cargo.toml:
 // [dependencies]
 // lr-srv6 = "0.1"
-// lr-ospf = "1.0.0-rc.4"
-// lr-core = "1.0.0-rc.4"
+// lr-ospf = "1.0.0-rc.5"
+// lr-core = "1.0.0-rc.5"
 
 use lr_core::addr::Prefix;
 use lr_ospf::lsa::srv6::{

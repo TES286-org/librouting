@@ -21,7 +21,7 @@ Both routes point at the same destination prefix; the source prefix is what sepa
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-babel = "1.0.0-rc.4"
+// lr-babel = "1.0.0-rc.5"
 
 use lr_babel::route::{BabelRoute, BabelRouteTable, RouteKey};
 use lr_babel::source::SourcePrefix;

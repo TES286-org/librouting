@@ -18,7 +18,7 @@ The ABR scans an area's routing table and re-advertises each intra-area network 
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-ospf = "1.0.0-rc.4"
+// lr-ospf = "1.0.0-rc.5"
 
 use lr_core::addr::Prefix;
 use lr_ospf::abr::{originate_summary_lsa, SummaryDestination};

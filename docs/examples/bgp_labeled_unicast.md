@@ -27,9 +27,9 @@ In the simplest one-hop case there is no transit: the ingress pushes the label a
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.4"
-// lr-mpls = "1.0.0-rc.4"
-// lr-core = "1.0.0-rc.4"
+// lr-bgp = "1.0.0-rc.5"
+// lr-mpls = "1.0.0-rc.5"
+// lr-core = "1.0.0-rc.5"
 
 use lr_bgp::path::AttrType;
 use lr_core::attr::{Attr, AttrTag};
