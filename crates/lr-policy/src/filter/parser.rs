@@ -1100,7 +1100,7 @@ impl Parser {
         let Some(tok_kind) = tok_kind else {
             return Err(self.err(self.eof_span(), ParseErrorKind::UnexpectedEof));
         };
-        // Large community triple FIRST: `int : int : int` (RFC 8097;
+        // Large community triple FIRST: `int : int : int` (RFC 8092;
         // roadmap D3.2 syntax `bgp.large_communities += [ 64512:100:200 ]`).
         // The pair arm below would otherwise swallow `a:b` from the
         // triple and leave `:c` dangling.

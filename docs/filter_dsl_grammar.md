@@ -275,7 +275,7 @@ A set literal element is one of:
 set_item     := prefix_set      (* a prefix, optionally ranged    *)
               | integer         (* a bare AS number, port, …      *)
               | comm_pattern    (* "asn:value" and its wildcards  *)
-              | large_comm      (* "g:d1:d2" RFC 8097 triple      *)
+              | large_comm      (* "g:d1:d2" RFC 8092 triple      *)
               | ext_comm        (* "(rt, asn|ip, local)"          *)
               | expr ;          (* anything else, e.g. a variable *)
 comm_pattern := ( integer | "*" ) ":" ( integer | "*" ) ;
@@ -288,7 +288,7 @@ ext_global   := integer | ipv4 ;   (* 4-octet AS or IPv4 administrator *)
 The parser dispatches on the leading tokens, in this order:
 
 - A leading `Int` followed by `:` `Int` `:` `Int` is a large-community triple
-  (RFC 8097). Every component must fit `u32`.
+  (RFC 8092). Every component must fit `u32`.
 - A leading `Int` or `*` followed by `:` is a community pattern (`asn:value`,
   `asn:*`, `*:value`, `*:*`), producing one `Value::CommPattern` node. The ASN
   component must fit `u32` and the value component `u16`. Wildcards apply only
@@ -502,7 +502,7 @@ lists fields accepting the append form.
 | `bgp.as_path`           | `as-path`             |    no    |  no  | BGP AS_PATH. Mutate via `.prepend(int)`.               |
 | `bgp.communities`       | `community-set`       |   yes    | yes  | RFC 1997 32-bit communities.                           |
 | `bgp.ext_communities`   | `ext-community-set`   |   yes    | yes  | RFC 4360 transitive 8-byte communities.                |
-| `bgp.large_communities` | `large-community-set` |   yes    | yes  | RFC 8097 12-byte communities.                          |
+| `bgp.large_communities` | `large-community-set` |   yes    | yes  | RFC 8092 12-byte communities.                          |
 | `bgp.origin`            | `int`                 |    no    |  no  | BGP ORIGIN (0=IGP, 1=EGP, 2=INCOMPLETE).               |
 | `roa.state`             | `roa-state`           |    no    |  no  | RFC 6811 outcome: `valid` / `invalid` / `not-found`.   |
 

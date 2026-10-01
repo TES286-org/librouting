@@ -168,7 +168,7 @@ pub trait FilterContext {
     fn bgp_as_path(&self, route: &Route) -> Vec<Asn>;
     /// BGP COMMUNITIES (`bgp.communities`); empty when absent.
     fn bgp_communities(&self, route: &Route) -> Vec<(Asn, u16)>;
-    /// BGP LARGE_COMMUNITIES (`bgp.large_communities`, RFC 8097) as
+    /// BGP LARGE_COMMUNITIES (`bgp.large_communities`, RFC 8092) as
     /// `(global_admin, local_data1, local_data2)` triples; empty when
     /// absent.
     fn bgp_large_communities(&self, route: &Route) -> Vec<(u32, u32, u32)>;
@@ -199,7 +199,7 @@ pub trait FilterContext {
     /// Replace the AS_PATH with a flat sequence. An empty sequence
     /// drops the attribute. Used by `bgp.as_path.delete/filter`.
     fn set_bgp_as_path(&self, route: &mut Route, seq: Vec<Asn>);
-    /// Replace the whole LARGE_COMMUNITIES attribute (RFC 8097);
+    /// Replace the whole LARGE_COMMUNITIES attribute (RFC 8092);
     /// an empty set drops it.
     fn set_bgp_large_communities(&self, route: &mut Route, set: Vec<(u32, u32, u32)>);
     /// Replace the whole EXTENDED_COMMUNITIES attribute (RFC 4360);
@@ -724,7 +724,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 let cs = self.communities_from_value(&value, "=", span)?;
                 self.ctx.set_bgp_communities(route, cs);
             }
-            // `bgp.large_communities = <set>` (RFC 8097).
+            // `bgp.large_communities = <set>` (RFC 8092).
             RouteFieldKind::BgpLargeCommunities => {
                 let cs = self.large_communities_from_value(&value, "=", span)?;
                 self.ctx.set_bgp_large_communities(route, cs);
@@ -808,7 +808,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         Ok(out)
     }
 
-    /// Normalize a large-community-set RHS (RFC 8097): a bare
+    /// Normalize a large-community-set RHS (RFC 8092): a bare
     /// `LargeCommunities` value, a set literal of triples, or one
     /// triple.
     fn large_communities_from_value(
@@ -1568,7 +1568,7 @@ fn value_match(l: &Value, r: &Value) -> bool {
         (Value::Communities(route_cs), Value::CommPattern { asn, val }) => route_cs
             .iter()
             .any(|(a, v)| asn.is_none_or(|p| p == a.0) && val.is_none_or(|p| p == *v)),
-        // RFC 8097 large communities: exact triple membership.
+        // RFC 8092 large communities: exact triple membership.
         (Value::LargeCommunities(route_cs), Value::LargeCommunities(set_cs)) => {
             set_cs.iter().any(|c| route_cs.contains(c))
         }
@@ -3027,7 +3027,7 @@ mod tests {
         assert_eq!(StubCtx.bgp_communities(&r), communities_to(&[(64512, 100)]));
     }
 
-    // ===== D3.2 — large communities (RFC 8097) =====
+    // ===== D3.2 — large communities (RFC 8092) =====
 
     /// Stamp a LARGE_COMMUNITIES attribute onto a route (test helper).
     fn with_large(mut r: Route, set: &[(u32, u32, u32)]) -> Route {
@@ -3051,7 +3051,7 @@ mod tests {
             EvalResult::Accept,
         );
         assert_eq!(StubCtx.bgp_large_communities(&r), vec![(64512, 100, 200)]);
-        // Wire form must be the 12-byte RFC 8097 record.
+        // Wire form must be the 12-byte RFC 8092 record.
         let raw = r
             .attributes
             .get(AttrTag::raw(TAG_LARGE_COMMUNITIES))
@@ -3094,7 +3094,7 @@ mod tests {
 
     #[test]
     fn large_communities_membership_and_4octet_asn() {
-        // 4-octet ASNs fit without AS_TRANS (RFC 8097 §1 motivation).
+        // 4-octet ASNs fit without AS_TRANS (RFC 8092 §1 motivation).
         let mut r = route_with("203.0.113.0/24", 100, 0);
         assert_eq!(
             run(

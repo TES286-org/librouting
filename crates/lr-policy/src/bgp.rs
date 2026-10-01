@@ -26,7 +26,7 @@ use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
 
 /// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4 /
-/// RFC 4360 §2 / RFC 8097 §2).
+/// RFC 4360 §2 / RFC 8092 §2).
 const TAG_ORIGIN: u8 = 1;
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
@@ -40,7 +40,7 @@ const FLAGS_MED: u8 = 0x80;
 const FLAGS_LOCAL_PREF: u8 = 0x40; // well-known discretionary
 const FLAGS_COMMUNITIES: u8 = 0xC0; // optional transitive
 const FLAGS_EXT_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 4360 §3)
-const FLAGS_LARGE_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 8097 §2)
+const FLAGS_LARGE_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 8092 §2)
 
 fn attr_bytes(route: &Route, tag: u8) -> Option<&[u8]> {
     route
@@ -63,7 +63,7 @@ pub fn ext_communities(route: &Route) -> Vec<ExtendedCommunity> {
         .unwrap_or_default()
 }
 
-/// The route's large communities (RFC 8097); empty when absent.
+/// The route's large communities (RFC 8092); empty when absent.
 pub fn large_communities(route: &Route) -> Vec<LargeCommunity> {
     attr_bytes(route, TAG_LARGE_COMMUNITIES)
         .map(LargeCommunity::decode_set)
@@ -199,7 +199,7 @@ pub fn set_as_sequence(route: &mut Route, seq: Vec<Asn>) {
     put(route, TAG_AS_PATH, FLAGS_AS_PATH, path.encode_4());
 }
 
-/// Append a large community (RFC 8097 §2), creating the attribute
+/// Append a large community (RFC 8092 §2), creating the attribute
 /// when the route has none yet. Duplicates are not added.
 pub fn add_large_community(route: &mut Route, community: LargeCommunity) {
     let mut set = large_communities(route);

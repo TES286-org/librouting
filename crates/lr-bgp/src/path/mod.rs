@@ -1,4 +1,4 @@
-//! BGP path attributes (RFC 4271 §5 + RFC 4360/6675 communities +
+//! BGP path attributes (RFC 4271 §5 + RFC 4360/7153 communities +
 //! RFC 4760 MP-BGP + RFC 7911 AddPath + RFC 4893 AS4_PATH/AS4_AGGREGATOR).
 //!
 //! Every path attribute has a fixed header:
@@ -367,13 +367,13 @@ impl PathAttributes {
             .map(|a| ExtendedCommunity::decode_set(&a.value))
             .unwrap_or_default()
     }
-    /// The route's LARGE_COMMUNITIES (RFC 8097 §2); empty when absent.
+    /// The route's LARGE_COMMUNITIES (RFC 8092 §2); empty when absent.
     pub fn large_communities(&self) -> Vec<LargeCommunity> {
         self.get(AttrType::LargeCommunities)
             .map(|a| LargeCommunity::decode_set(&a.value))
             .unwrap_or_default()
     }
-    /// Attach a large community (RFC 8097 §2), idempotent.
+    /// Attach a large community (RFC 8092 §2), idempotent.
     /// LARGE_COMMUNITIES is optional transitive.
     pub fn insert_large_community(&mut self, c: LargeCommunity) {
         let mut set = self.large_communities();

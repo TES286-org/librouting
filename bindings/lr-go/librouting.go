@@ -1644,7 +1644,7 @@ func (r *Route) Communities() ([]uint64, error) {
 	return out, nil
 }
 
-// AddLargeCommunity appends one RFC 8097 large community.
+// AddLargeCommunity appends one RFC 8092 large community.
 func (r *Route) AddLargeCommunity(globalAdmin, localData1, localData2 uint32) error {
 	if rc := C.lr_route_add_large_community(r.ptr, C.uint32_t(globalAdmin),
 		C.uint32_t(localData1), C.uint32_t(localData2)); rc != 0 {

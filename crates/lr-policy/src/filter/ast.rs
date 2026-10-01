@@ -325,7 +325,7 @@ pub enum Value {
     /// `delete` / `filter`: `65000:*`, `*:100` or `*:*`. `None`
     /// component = wildcard (BIRD `filter/config.Y` `f_pair` patterns).
     CommPattern { asn: Option<u32>, val: Option<u16> },
-    /// A large-community set (RFC 8097) — `(global, data1, data2)`
+    /// A large-community set (RFC 8092) — `(global, data1, data2)`
     /// triples, e.g. `bgp.large_communities += [ 64512:100:200 ]`.
     LargeCommunities(Vec<(u32, u32, u32)>),
     /// An extended-community set (RFC 4360) — raw
@@ -598,7 +598,7 @@ pub enum RouteFieldKind {
     BgpCommunities,
     /// `bgp.ext_communities` — the RFC 4360 extended-community set.
     BgpExtCommunities,
-    /// `bgp.large_communities` — the RFC 8097 large-community set.
+    /// `bgp.large_communities` — the RFC 8092 large-community set.
     BgpLargeCommunities,
     /// `bgp.origin` — the BGP ORIGIN attribute.
     BgpOrigin,

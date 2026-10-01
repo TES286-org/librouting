@@ -158,7 +158,7 @@ on the same route representation — see
 [`../filter_dsl_grammar.md`](../filter_dsl_grammar.md) for the syntax and
 [`../examples/filter_dsl_roa.md`](../examples/filter_dsl_roa.md) for a
 worked ROA filter. The DSL exposes the RFC 6811 validation outcome as
-`roa.state`, alongside the RFC 1997, RFC 4360 and RFC 8097 community
+`roa.state`, alongside the RFC 1997, RFC 4360 and RFC 8092 community
 sets.
 
 ## RFCs
@@ -170,7 +170,7 @@ sets.
   reuse thresholds, and decay. RFC 7196 documents why the RFC 2439
   defaults are harmful in the default-free zone; damping is off unless
   an operator enables it.
-- RFC 1997 communities, RFC 4360 extended communities, RFC 8097 large
+- RFC 1997 communities, RFC 4360 extended communities, RFC 8092 large
   communities — what the community lists match.
 - RFC 6811 — the ROA validation state the filter DSL reads.
 - RFC 8326 — graceful-shutdown signalling, both directions.

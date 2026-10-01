@@ -46,7 +46,10 @@ pub struct BestPathConfig {
     /// paths may be installed. Default 1 (no multipath).
     pub multipath: u32,
     /// Whether multipath may include paths from different neighboring ASes.
-    /// Default false (RFC 4784 §2).
+    /// Default false, which is the conservative reading of RFC 4271 §9.1.2.2:
+    /// two paths to the same prefix are only comparable when they were learned
+    /// from the same neighbor AS. FRR exposes the relaxation as
+    /// `bgp bestpath as-path multipath-relax`; there is no RFC for it.
     pub multipath_relax: bool,
     /// RFC 8326 §4: a route carrying the `GRACEFUL_SHUTDOWN` community
     /// (`0xFFFF:0000`) is the least preferred amongst all other routes
@@ -122,8 +125,9 @@ impl BestPath {
         Some(out)
     }
 
-    /// Like [`Self::compare`] but stops before the final peer-id tiebreaker
-    /// (RFC 4784 §2: multipath peers are by definition different peers).
+    /// Like [`Self::compare`] but stops before the final peer-id tiebreaker:
+    /// two paths from the same peer are the same path, so the router-ID step
+    /// can never separate multipath-eligible candidates.
     pub fn compare_multipath(a: &Route, b: &Route, cfg: &BestPathConfig) -> Ordering {
         let attrs_a: PathAttributes = a.attributes.clone().into();
         let attrs_b: PathAttributes = b.attributes.clone().into();

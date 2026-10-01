@@ -1,4 +1,4 @@
-//! Standard (RFC 1997), Extended (RFC 4360/6675) and Large (RFC 8097)
+//! Standard (RFC 1997), Extended (RFC 4360/7153) and Large (RFC 8092)
 //! communities.
 //!
 //! Standard community: 4 bytes, hi 2 = AS, lo 2 = value.
@@ -141,7 +141,7 @@ pub struct ExtendedCommunity {
     pub local: u16,
 }
 
-/// BGP Large Community (RFC 8097 §2). 12 bytes wire format:
+/// BGP Large Community (RFC 8092 §2). 12 bytes wire format:
 /// `global_admin:local_data1:local_data2`, each a 4-octet field, so
 /// 4-byte ASNs fit without AS_TRANS shenanigans.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -257,7 +257,7 @@ mod tests {
 
     #[test]
     fn large_community_roundtrip_and_wire_form() {
-        // RFC 8097 §2: 12-byte records, big-endian per component.
+        // RFC 8092 §2: 12-byte records, big-endian per component.
         let set = vec![
             LargeCommunity::new(64512, 100, 200),
             LargeCommunity::new(4200000000, 1, 2),

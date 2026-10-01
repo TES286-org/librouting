@@ -126,13 +126,16 @@ pub enum MaxPrefixAction {
     /// is expected to notice the log and adjust the configuration.
     #[default]
     Warn,
-    /// Tear the session down immediately with a NOTIFICATION CEASE
-    /// (subcode 8, "Maximum Number of Prefixes Exceeded"). The routes
-    /// the peer already installed are purged (RFC 4271 §8.2.2).
+    /// Tear the session down immediately with a NOTIFICATION CEASE,
+    /// subcode 1 "Maximum Number of Prefixes Reached" (RFC 4486 §3).
+    /// The routes the peer already installed are purged (RFC 4271 §8.2.2).
     Teardown,
-    /// Tear down and refuse to re-establish for the configured cooldown
-    /// period. The daemon implements the cooldown; the library just
-    /// reports the event.
+    /// Tear down and refuse to re-establish for a cooldown period.
+    ///
+    /// The cooldown is not implemented: the router currently treats
+    /// `Restart` exactly as [`Self::Teardown`], and no daemon key
+    /// configures a cooldown. The variant is accepted so that the
+    /// configuration surface does not have to change when it lands.
     Restart,
 }
 
