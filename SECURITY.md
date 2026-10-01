@@ -1,53 +1,79 @@
-# Security Policy
+# Security policy
 
 ## Supported versions
 
-librouting is pre-1.0 (currently `1.0.0-rc.5`). Security fixes are backported only to the latest `-rc` line on `main`; there is no separate release branch until 1.0 ships. Once 1.0 lands, the policy becomes:
+librouting is pre-1.0. Security fixes land on `main` and are published in
+whatever pre-release tag comes next; there is no maintenance branch for
+older releases. If you run an older build, move to the latest tag.
 
-| Version | Supported          |
-| ------- | ------------------ |
-| 1.0.x   | yes — latest minor |
-| 0.x     | no — pre-release   |
+The workspace version is `[workspace.package] version` in
+[`Cargo.toml`](Cargo.toml) — check that file for what "latest" means
+today.
 
-If you are running an older `-rc`, upgrade to `main` for security fixes; the API is frozen for the rc line, so upgrades are low-friction.
+After 1.0 the policy becomes: the latest minor release is supported, and
+older minors are not.
 
 ## Reporting a vulnerability
 
-**Do not open a public GitHub issue for a security vulnerability.**
+**Do not open a public issue for a security vulnerability.**
 
-Send mail to **<security@tes286.top>** with:
+Mail **<security@tes286.top>** with:
 
-1. A description of the issue and the impact you have observed.
-2. A minimal reproducer (config + commands + observed vs. expected behaviour). If the reproducer involves a live protocol session, a packet capture (`tcpdump -w`) is ideal.
-3. The affected version (output of `lr --version` or the `Cargo.toml` revision you depend on).
-4. Any mitigations you have already tried.
+1. What the issue is and what impact you observed.
+2. A minimal reproducer: configuration, commands, and observed versus
+   expected behaviour. For a live protocol session a packet capture
+   (`tcpdump -w`) is ideal.
+3. The affected version — the output of `lr version`, or the `Cargo.toml`
+   revision you depend on.
+4. Anything you already tried as a mitigation.
 
-You should receive an acknowledgement within **72 hours**. If you do not, ping the maintainers through a public GitHub issue that does _not_ disclose the vulnerability itself — just "the security@ mailbox has not acknowledged report X submitted on YYYY-MM-DD".
+You should get an acknowledgement within 72 hours. If you do not, open a
+public issue that discloses nothing about the vulnerability — just that
+the mailbox has not acknowledged a report — so the maintainers see it.
 
 ## Coordinated disclosure
 
-We follow a **90-day embargo** modelled on the Linux kernel's policy:
+A 90-day embargo, modelled on the Linux kernel's policy:
 
-- Day 0 — you report privately. We acknowledge within 72 hours.
-- Day 0–14 — we reproduce, triage, and assign a severity (low / medium / high / critical).
-- Day 14–30 — we develop and privately verify a fix.
-- Day 30 — if a fix is ready, we coordinate a release with you. If the fix needs longer, we negotiate an extension; you are free to publish details after day 90 regardless.
-- Day 90 — public disclosure with credit (or earlier if a fix has shipped).
+| Day | What happens |
+| --- | --- |
+| 0 | You report privately; we acknowledge within 72 hours. |
+| 0–14 | We reproduce, triage and assign a severity. |
+| 14–30 | We develop and privately verify a fix. |
+| 30 | If the fix is ready we coordinate a release with you. If it needs longer we negotiate an extension. |
+| 90 | Public disclosure with credit, or earlier if the fix has shipped. |
 
-We will credit you in the release notes and the [`CHANGELOG.md`](CHANGELOG.md) entry unless you ask to remain anonymous.
+You are free to publish after day 90 regardless. We credit you in the
+release notes and the [`CHANGELOG.md`](CHANGELOG.md) entry unless you ask
+to stay anonymous.
 
 ## Threat model
 
-librouting parses untrusted network bytes from BGP, OSPF, Babel, LDP, BFD, BMP and MRT peers. By design, every wire codec must be panic-free against arbitrary input — this is what the fuzzing targets in [`docs/ROADMAP-v3.md`](docs/ROADMAP-v3.md) D6 are designed to verify, and why the CI matrix runs `cargo miri` on the FFI crate.
+librouting parses untrusted network bytes from BGP, OSPF, Babel, LDP,
+BFD, BMP and MRT peers. Every wire codec is expected to be panic-free
+against arbitrary input: that is what the cargo-fuzz targets in
+`fuzz/fuzz_targets/` and the nightly job that runs them exist to verify,
+and why the CI matrix runs `cargo miri` over the FFI crate.
 
-The daemon runs as a regular user process. It does not require `CAP_NET_ADMIN` for BGP / Babel / BFD / BMP / MRT; OSPFv2/v3 raw sockets and SRv6 / MPLS kernel-gated features do require elevated privileges, and we recommend running those under a dedicated user with `CAP_NET_RAW` only rather than as root.
+The daemon runs as an ordinary user process. BGP, Babel, BFD, BMP and MRT
+need no privileges. OSPFv2/v3 raw sockets and the kernel-gated SRv6 and
+MPLS features do, and those are better run under a dedicated user with
+`CAP_NET_RAW` than as root.
 
-## What is not in scope
+## Out of scope
 
-- Vulnerabilities in dependencies — report those upstream. We run `cargo audit` and `cargo deny check` nightly ([`.github/workflows/nightly.yml`](.github/workflows/nightly.yml)) and will bump the affected dependency as soon as a patched version is available.
-- Self-DoS scenarios where an operator misconfigures the daemon (e.g. peering with an untrusted router without an import filter). The [`RUNBOOK.md`](docs/RUNBOOK.md) covers the recommended hardening.
-- Issues in BIRD, FRR, or any other reference implementation we interoperate with.
+- **Dependencies.** Report those upstream. We run `cargo audit` and
+  `cargo deny check` nightly
+  ([`.github/workflows/nightly.yml`](.github/workflows/nightly.yml)) and
+  bump the affected dependency once a patched version exists.
+- **Operator misconfiguration.** Peering with an untrusted router without
+  an import filter is a self-inflicted denial of service.
+  [`docs/RUNBOOK.md`](docs/RUNBOOK.md) covers the hardening we recommend.
+- **Other implementations.** Issues in BIRD, FRR or any other daemon we
+  interoperate with belong to their projects.
 
-## PGP
+## Encryption
 
-A PGP key for encrypting vulnerability reports will be published here once 1.0 ships. For the rc line, plain-text mail to security@tes286.top is the canonical channel; if you need end-to-end encryption, ask in your initial report and we will arrange a key exchange out-of-band.
+Plain mail is the canonical channel. If you need end-to-end encryption,
+say so in your first message and we will arrange a key exchange
+out-of-band.
