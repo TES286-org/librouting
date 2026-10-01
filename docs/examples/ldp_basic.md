@@ -29,8 +29,8 @@ This is the same shape the daemon's `daemon_ldp.rs` runs against real FRR `ldpd`
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-ldp = "1.0.0-rc.4"
-// lr-core = "1.0.0-rc.4"
+// lr-ldp = "1.0.0-rc.5"
+// lr-core = "1.0.0-rc.5"
 
 use lr_core::addr::IpAddr;
 use lr_core::time::Instant;

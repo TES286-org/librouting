@@ -18,7 +18,7 @@ A confederation is a group of sub-ASes that internally behave like eBGP but exte
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.4"
+// lr-bgp = "1.0.0-rc.5"
 
 use lr_bgp::{BgpPeer, PeerConfig};
 use lr_bgp::role::{ConfederationConfig, PeerRole};

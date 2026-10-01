@@ -7,9 +7,9 @@ The reference daemon already wires this end-to-end: `lr-daemon --bfd` (one BFD s
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.4"
-// lr-bfd = "1.0.0-rc.4"
-// lr-core = "1.0.0-rc.4"
+// lr-bgp = "1.0.0-rc.5"
+// lr-bfd = "1.0.0-rc.5"
+// lr-core = "1.0.0-rc.5"
 
 use lr_bgp::{BgpPeer, BgpEvent, PeerConfig};
 use lr_bfd::{BfdConfig, BfdSession, SessionRole};

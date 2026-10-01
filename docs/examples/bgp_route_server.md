@@ -18,8 +18,8 @@ At an Internet Exchange (IX), participants peer with a single route server over 
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.4"
-// lr-policy = "1.0.0-rc.4"
+// lr-bgp = "1.0.0-rc.5"
+// lr-policy = "1.0.0-rc.5"
 
 use lr_bgp::{BgpPeer, PeerConfig};
 use lr_bgp::role::RouteServerConfig;

@@ -12,7 +12,7 @@ Roles put the business relationship on the wire. Each eBGP speaker configures it
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.4"
+// lr-bgp = "1.0.0-rc.5"
 
 use lr_bgp::role::OtcRole;
 

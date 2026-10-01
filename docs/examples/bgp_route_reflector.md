@@ -20,8 +20,8 @@ This example wires three BGP speakers in a route-reflection topology:
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.4"
-// lr-router = "1.0.0-rc.4"
+// lr-bgp = "1.0.0-rc.5"
+// lr-router = "1.0.0-rc.5"
 
 use lr_bgp::{BgpPeer, BgpEvent, PeerConfig, fsm::BgpState};
 use lr_bgp::role::{ClusterId, RouteReflectorConfig};
