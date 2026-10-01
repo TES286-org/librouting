@@ -8,6 +8,22 @@
 #include <stdint.h>
 #include <stdlib.h>
 
+/* Return codes for every lr_* entry point: 0 on success, negative on
+ * failure. These mirror the Rust `LrError` enum, which is deliberately
+ * not exported as an enum (see build.rs) so that growing it cannot break
+ * a C consumer. Pointer-returning entry points signal failure with NULL
+ * and set the thread-local message from lr_last_error() instead.
+ *
+ * -5 is intentionally absent: it is not a general error code. The SRv6
+ * codec entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it
+ * for their own codec failures, as documented on those functions. */
+#define LR_ERR_OK 0
+#define LR_ERR_NULL (-1)
+#define LR_ERR_INVALID_HANDLE (-2)
+#define LR_ERR_BAD_UTF8 (-3)
+#define LR_ERR_PANIC (-4)
+#define LR_ERR_OTHER (-6)
+
 /* Wire protocol ids for lr_router_add_redistribution_pipe (LrProtocol). */
 #define LR_PROTO_BGP 0
 #define LR_PROTO_OSPF 1

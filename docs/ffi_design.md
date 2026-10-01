@@ -149,15 +149,20 @@ The pipeline:
 If cbindgen fails, `build.rs` prints `cargo:warning=cbindgen failed: …`
 and the build continues against the header already on disk.
 
-### What the header does not define
+### What the header defines beyond the exported items
 
 `after_includes` defines the `LR_PROTO_*`, `LR_METRIC_*`, `LR_EVENT_*`
-and `LR_MAX_PREFIX_*` blocks and nothing else. The header has **no
-`LR_ERR_*` macro** and **no `LR_ABI_VERSION` macro**, although its doc
-comments refer to `LR_ERR_PANIC`. Error values reach C as `int32_t`
-return codes plus `lr_last_error()`; §10 gives the convention and
+and `LR_MAX_PREFIX_*` blocks, and the `LR_ERR_*` return codes that the
+entry points' own doc comments refer to. Every one of them is a
+preprocessor macro rather than an enum, so the set can grow without
+breaking a C consumer.
+
+There is deliberately no `LR_ABI_VERSION` macro and no
+`LR_ERR_ABI_MISMATCH`. Error values reach C as `int32_t` return codes
+plus `lr_last_error()`; §10 gives the convention and
 [`crates/lr-ffi/src/error.rs`](../crates/lr-ffi/src/error.rs) names the
-values on the Rust side.
+values on the Rust side. Adding a macro to `after_includes` is an
+additive header change, which the ABI freeze allows.
 
 ## 5. The opaque-handle pattern
 
@@ -382,27 +387,26 @@ if (lr_router_add_bgp_session(r, 64512, 64513, bid, 90, 0, 1, &session) != 0) {
 until the next FFI call on the same thread — copy it if you need to keep
 it. It is empty when no call has failed on that thread.
 
-`crates/lr-ffi/src/error.rs` names the values on the Rust side:
+`crates/lr-ffi/src/error.rs` names the values on the Rust side, and the
+header defines the matching `LR_ERR_*` macros:
 
-| Value | `LrError` variant |
-| --- | --- |
-| `0` | `Ok` |
-| `-1` | `Null` |
-| `-2` | `InvalidHandle` |
-| `-3` | `BadUtf8` |
-| `-4` | `Panic` |
-| `-5` | `AbiMismatch` |
-| `-6` | `Other` |
+| Value | macro | `LrError` variant |
+| --- | --- | --- |
+| `0` | `LR_ERR_OK` | `Ok` |
+| `-1` | `LR_ERR_NULL` | `Null` |
+| `-2` | `LR_ERR_INVALID_HANDLE` | `InvalidHandle` |
+| `-3` | `LR_ERR_BAD_UTF8` | `BadUtf8` |
+| `-4` | `LR_ERR_PANIC` | `Panic` |
+| `-6` | `LR_ERR_OTHER` | `Other` |
 
-The enum is not exported to C: the header excludes it (§4) and defines no
-`LR_ERR_*` macro. A C caller compares against the codes documented on the
-entry point it calls. Some of the names do not describe the practice:
+The enum itself is not exported to C (§4), so the macros are the C-side
+contract. Two names need care:
 
 - **`-3`** is also the documented code for a malformed argument on many
   entry points, not only for a string that was not valid UTF-8.
-- **`-5`** is not an ABI-mismatch signal. `LrError::AbiMismatch` is
-  declared but no entry point returns it when versions disagree. The two
-  SRv6 entry points use the bare literal `-5` for an SRH encode or decode
+- **`-5`** has no `LR_ERR_*` macro. `LrError::AbiMismatch` is declared
+  but no entry point returns it when versions disagree. The two SRv6
+  entry points use the bare literal `-5` for an SRH encode or decode
   error, which their doc comments in the header state
   ([`crates/lr-ffi/src/srv6.rs`](../crates/lr-ffi/src/srv6.rs)).
 

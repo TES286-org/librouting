@@ -123,12 +123,14 @@ Two details that trip up C callers:
   next call on that thread, so copy the text before you call anything
   else.
 
-The code values are an implementation detail of
-[`crates/lr-ffi/src/error.rs`](../../crates/lr-ffi/src/error.rs); the
-header defines no `LR_ERR_*` macro, so a C caller uses the codes
-documented on each entry point. [`../ffi_design.md`](../ffi_design.md) §10
-lists the values and notes where the Rust variant names do not match the
-practice.
+The header defines `LR_ERR_OK`, `LR_ERR_NULL`, `LR_ERR_INVALID_HANDLE`,
+`LR_ERR_BAD_UTF8`, `LR_ERR_PANIC` and `LR_ERR_OTHER` for the codes a
+caller is likely to branch on; an entry point whose doc comment names a
+different value is authoritative for that call.
+[`../ffi_design.md`](../ffi_design.md) §10 lists every value and notes
+where the Rust variant names do not match the practice — `-5` in
+particular has no macro, because the SRv6 codec entry points use it for
+their own failures rather than as a general error code.
 
 ## The event loop
 
