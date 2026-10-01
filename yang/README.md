@@ -1,21 +1,24 @@
 # YANG data models
 
-This directory ships the standards-track YANG data models that `lr-daemon` renders configuration into, plus the two modules themselves (verbatim from the RFCs, including their license headers):
+`yang/*.yang` holds the standards-track YANG modules that `lr-daemon yang
+render` validates its output against. `lr-daemon yang render <config-file>
+[--model babel|keychain|all]` emits XML instance data for the Babel subset of
+a daemon configuration, and `tests/interop/yang.sh` checks it with libyang's
+`yanglint` when that tool is available.
 
-| File                             | Module           | Source   |
-| -------------------------------- | ---------------- | -------- |
-| `ietf-babel@2024-10-10.yang`     | `ietf-babel`     | RFC 9647 |
-| `ietf-key-chain@2017-06-15.yang` | `ietf-key-chain` | RFC 8177 |
+| File | Module | RFC |
+| --- | --- | --- |
+| `ietf-babel@2024-10-10.yang` | `ietf-babel` | 9647 |
+| `ietf-key-chain@2017-06-15.yang` | `ietf-key-chain` | 8177 |
 
-`lr-daemon yang render <config.toml> [--model babel|keychain|all]` emits XML instance data for the Babel subset of a daemon configuration, validated in CI (and by `tests/interop/yang.sh`) against these modules with libyang's `yanglint` when the tool is available.
+The mapping is configuration → instance data only. `lr` implements no YANG
+validator and no NETCONF/RESTCONF management plane; an embedder that needs
+one feeds the rendered data into its own stack.
 
-## Rendering scope
+## `--model babel` — `ietf-babel` (RFC 9647)
 
-The mapping is config → instance data only. `lr` does not implement a YANG validator or a NETCONF/RESTCONF management plane; embedders that need one can feed the rendered instance data into their own stack.
-
-### `--model babel` — `ietf-babel` (RFC 9647)
-
-The `babel` container of RFC 9647 does not stand alone: it augments `/rt:routing/rt:control-plane-protocols/rt:control-plane-protocol` (RFC 8349, NMDA). The renderer therefore emits the full envelope:
+The `babel` container augments the RFC 8349 (NMDA) `control-plane-protocol`
+node instead of standing alone, so the renderer emits the full envelope.
 
 ```xml
 <routing xmlns="urn:ietf:params:xml:ns:yang:ietf-routing"
@@ -24,45 +27,54 @@ The `babel` container of RFC 9647 does not stand alone: it augments `/rt:routing
     <control-plane-protocol>
       <type>babel:babel</type>
       <name>lr-babel</name>
-      <babel xmlns="urn:ietf:params:xml:ns:yang:ietf-babel">
-        ...
-      </babel>
+      <babel xmlns="urn:ietf:params:xml:ns:yang:ietf-babel">...</babel>
     </control-plane-protocol>
   </control-plane-protocols>
 </routing>
 ```
 
-| lr TOML                                   | ietf-babel node                                                                                                                                                                                                                 |
-| ----------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| (implicit; the daemon is running)         | `/babel/enable` = `true`                                                                                                                                                                                                        |
-| `[babel] port` (default 6696)             | `/babel/constants/udp-port`                                                                                                                                                                                                     |
-| `[babel] group` (or AF default)           | `/babel/constants/mcast-group`                                                                                                                                                                                                  |
-| `[[babel.key]] secret`                    | `/babel/mac-key-set[name=lr]/keys[name=key-N]/value` (base64 of the raw secret bytes — the same bytes the daemon signs with)                                                                                                    |
-| `[[babel.key]] algorithm` = `hmac-sha256` | `.../algorithm` = `babel:hmac-sha256`                                                                                                                                                                                           |
-| `[[babel.key]] algorithm` = `blake2s`     | `.../algorithm` = `babel:blake2s`                                                                                                                                                                                               |
-| `use-send` / `use-verify`                 | always `true` (the daemon signs and verifies; `[babel] accept_unauthenticated` only relaxes the RFC 8967 §5 unauthenticated-absence case, which the model expresses through `mac-verify` on interface objects lr does not name) |
+| lr TOML | ietf-babel node |
+| --- | --- |
+| (the daemon is running) | `/babel/enable` = `true` |
+| `[babel] port` (default 6696) | `/babel/constants/udp-port` |
+| `[babel] group` (or address-family default) | `/babel/constants/mcast-group` |
+| `[[babel.key]] secret` | `/babel/mac-key-set[name=lr]/keys[name=key-N]/value` |
+| `[[babel.key]] algorithm` | `.../algorithm` = `babel:hmac-sha256` or `babel:blake2s` |
+| `use-send` / `use-verify` | always `true` |
 
-The `interfaces` list is not rendered: the babel transport binds one local address (`--local-address`) and resolves the interface at runtime, so there is no interface name in the config to key a `reference` leaf with. The `metric-algorithm` identity (`babel:two-out-of-three`), the `dtls` subtree and all `config false` state objects are likewise not rendered.
+The `value` leaf is the base64 of the raw secret bytes, the same bytes the
+daemon signs with. `[babel] accept_unauthenticated` relaxes the RFC 8967 §5
+unauthenticated-absence case. `metric-algorithm`, the `dtls` subtree, every
+`config false` state object and the `interfaces` list are not rendered: lr
+names no interface in the config to key a `reference` leaf with.
 
-### `--model keychain` — `ietf-key-chain` (RFC 8177)
+## `--model keychain` — `ietf-key-chain` (RFC 8177)
 
-The same `[[babel.key]]` tables rendered as a generic key chain named `lr-babel`:
+The same `[[babel.key]]` tables as one key chain named `lr-babel`:
 
-| lr TOML                                   | ietf-key-chain node                                  |
-| ----------------------------------------- | ---------------------------------------------------- |
-| `[[babel.key]]` index                     | `/key-chains/key-chain[name=lr-babel]/key[key-id=N]` |
-| `[[babel.key]] algorithm` = `hmac-sha256` | `.../crypto-algorithm` = `key-chain:hmac-sha-256`    |
-| `[[babel.key]] secret`                    | `.../key-string/keystring` (raw string)              |
-| (no lifetime scoping in lr)               | `.../lifetime/send-accept-lifetime/always`           |
+| lr TOML | ietf-key-chain node |
+| --- | --- |
+| `[[babel.key]]` index | `/key-chains/key-chain[name=lr-babel]/key[key-id=N]` |
+| `[[babel.key]] algorithm` = `hmac-sha256` | `.../crypto-algorithm` = `key-chain:hmac-sha-256` |
+| `[[babel.key]] secret` | `.../key-string/keystring`, raw string |
+| (lr has no lifetime scoping) | `.../lifetime/send-accept-lifetime/always` |
 
-Keys configured as `blake2s` are a **hard error** in this view: RFC 8177 defines no `crypto-algorithm` identity for BLAKE2s, and inventing one would produce instance data other tools cannot understand. Render those keys through `--model babel` instead (the `ietf-babel` module defines the `blake2s` MAC identity natively).
+A `blake2s` key is a hard error here: RFC 8177 defines no `crypto-algorithm`
+identity for BLAKE2s, so the renderer fails closed. Use `--model babel`.
 
-### `--model all` (default)
+## `--model all` (default)
 
-Both documents inside a NETCONF-style `<config>` wrapper with the `xmlns:babel` / `xmlns:key-chain` prefixes declared on it, so the identityref values (`babel:babel`, `key-chain:hmac-sha-256`, …) resolve in one document. The wrapper itself is the NETCONF payload container — validators that want a pure data tree should use the single-model views.
+Both documents inside a NETCONF `<config>` wrapper carrying the `xmlns:babel`
+/ `xmlns:key-chain` prefixes, so every identityref value resolves in one
+document.
 
 ## Validation
 
-`tests/interop/yang.sh` runs libyang's `yanglint` over the shipped modules and the rendered instance data when the tool is available (it skips otherwise, like the other environment-gated interop scripts). The unit tests in `crates/lr-cli/src/yang.rs` pin the exact wire shapes.
+`tests/interop/yang.sh` runs `yanglint` over the shipped modules and the
+rendered instance data, writing its output under `/tmp/lr_yang_gate`; it
+skips when the tool is absent. The unit tests in `crates/lr-cli/src/yang.rs`
+pin the wire shapes.
 
-Import chain of the shipped modules (fetched by the gate script into `/tmp/lr_yang_deps`, from the canonical RFC copies): `ietf-routing` (RFC 8349), `ietf-interfaces` (RFC 8343), `ietf-crypto-types` (RFC 9640), `ietf-netconf-acm` (RFC 8341), `ietf-inet-types` / `ietf-yang-types` (RFC 6991).
+The shipped modules import `ietf-routing` (RFC 8349), `ietf-interfaces`
+(RFC 8343), `ietf-crypto-types` (RFC 9640), `ietf-netconf-acm` (RFC 8341)
+and `ietf-inet-types` / `ietf-yang-types` (RFC 6991).

@@ -1,36 +1,43 @@
-# librouting scaffolding templates
+# librouting templates
 
-Each subdirectory of `templates/` is a self-contained Cargo workspace that scaffolds one common librouting use case. Copy it as the starting point for a new project:
+`templates/` holds the reference daemon configuration and the scaffolding
+projects. Copy a project directory as the starting point for a new tool:
 
-```
+```sh
 cp -r templates/analyzer ~/projects/my-analyzer
 cd ~/projects/my-analyzer
-cargo run --release -- --pcap capture.pcap
+# Decode a hex blob on stdin as a BGP message (argv[1] picks the kind).
+echo 'ffffffffffffffffffffffffffffffff001304' | cargo run -- bgp
 ```
+
+Each project directory is a self-contained Cargo workspace with its own
+`[workspace]` table, so it builds outside the librouting workspace.
 
 ## Available templates
 
-| Template           | Description                                            |
-| ------------------ | ------------------------------------------------------ |
-| `daemon.lr`        | lr-daemon configuration, native `.lr` DSL (preferred). |
-| `daemon.toml`      | The same configuration in the TOML subset (compat).    |
-| `analyzer/`        | Pcap-reading tool that decodes BGP/OSPF/Babel traffic. |
-| `bgp-rr/`          | iBGP route reflector cluster with multiple clients.    |
-| `os-integration/`  | librouting + Linux rtnetlink (install routes to FIB).  |
-| `bfd-integration/` | BGP peer with BFD for sub-second failure detection.    |
+| Template | Description |
+| --- | --- |
+| `analyzer/` | Decodes a hex BGP message read from stdin. |
+| `bgp-rr/` | iBGP route reflector cluster (RFC 4456). |
+| `os-integration/` | `lr-osroute` over Linux rtnetlink; installs routes. |
+| `bfd-integration/` | BGP peer with BFD fast failure detection. |
+
+`daemon.lr` and `daemon.toml` are files, not projects: two spellings of one
+daemon configuration that parse to the same IR, pinned by
+`shipped_templates_match_across_frontends` in
+`crates/lr-cli/src/daemon_config.rs`.
 
 ## Daemon configuration
 
-`daemon.lr` and `daemon.toml` are two spellings of one configuration: both parse to the same IR (pinned by tests) and both document every daemon key as commented examples. Start from the `.lr` file — the native dialect is DSL-first since ROADMAP-v3 D16 Phase 3 (issue #18):
+Start from `daemon.lr`; both files comment every daemon key.
 
-```
+```sh
 lr-daemon --config templates/daemon.lr
-lr-daemon config check templates/daemon.lr   # validate without starting
+lr-daemon config check templates/daemon.lr   # validate, do not start
 lr-daemon config to-dsl templates/daemon.toml > converted.lr
 ```
 
-The TOML subset stays fully supported through 1.x (deprecated) and is planned for removal in 2.x; `config to-dsl` is the migration bridge. The DSL grammar is specified in `docs/config_dsl_grammar.md`.
-
-## Customizing
-
-Each template is a minimal Cargo project; edit `Cargo.toml` and `src/main.rs` as needed. The templates don't try to be production-grade — they show the minimal wiring for the use case.
+The TOML subset stays supported and is deprecated. The notice in
+`crates/lr-cli/src/daemon_config.rs` promises removal in 2.0, and
+`config to-dsl` is the migration path. The grammar is specified in
+[`docs/config_dsl_grammar.md`](../docs/config_dsl_grammar.md).

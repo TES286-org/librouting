@@ -1,100 +1,80 @@
 # Scaffolding guide
 
-This document describes how to scaffold a new librouting-based project, either as an analyzer (read-only pcap processor), a partial daemon (only some protocols), or a full daemon (BGP + OSPF + Babel).
+How to start a project on the librouting crates: a decoder that stops at the
+wire codec, a partial daemon that runs some protocols, or a full daemon. Each
+protocol crate exposes three layers — stateless codec, peer FSM, orchestrator
+— described in [`ARCHITECTURE.md`](../ARCHITECTURE.md).
 
-## Option A — Quick start (clone the template)
+[`templates/`](../../templates/README.md) holds working starting points
+(analyzer, route reflector, OS integration, BFD); copy one rather than
+starting from an empty crate.
 
-Use `cargo new` to start a binary crate, then add `librouting` as a dependency:
+## Dependencies
 
-```bash
-cargo new --bin my-router
-cd my-router
-cat >> Cargo.toml <<EOF
+Nothing is published to crates.io; depend on a checkout by `path` or `git`:
+
+```toml
 [dependencies]
 lr-core   = { path = "../librouting/crates/lr-core" }
 lr-bgp    = { path = "../librouting/crates/lr-bgp" }
 lr-router = { path = "../librouting/crates/lr-router" }
-EOF
+# or, without a local checkout:
+# lr-bgp = { git = "https://github.com/TES286-org/librouting.git" }
 ```
 
-For an _external_ project, use the published crate:
+## Workspace structure
 
-```toml
-[dependencies]
-lr-bgp    = "0.1"
-lr-router = "0.1"
-```
+A production router looks like:
 
-## Option B — Workspace structure for forks
-
-A production router built on top of `librouting` typically looks like:
-
-```
+```text
 my-router/
-├── Cargo.toml          # workspace root
-├── crates/
-│   ├── my-router-daemon/      # the binary
-│   ├── my-router-config/      # config parsing (TOML/JSON/YANG)
-│   └── my-router-extensions/  # vendor-specific policy hooks
-├── docs/
-└── tests/
+├── Cargo.toml                  # workspace root
+└── crates/
+    ├── my-router-daemon/       # the binary
+    ├── my-router-config/       # config parsing (TOML/JSON/YANG)
+    └── my-router-extensions/   # vendor-specific policy hooks
 ```
 
-`crates/my-router-daemon/src/main.rs`:
+`crates/my-router-daemon/src/main.rs` drives the router through the
+`RouterInstance` trait in `crates/lr-router/src/instance.rs`:
 
 ```rust
-use std::process::ExitCode;
-use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
 use lr_core::addr::{Asn, RouterId};
+use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
 
-fn main() -> ExitCode {
+fn main() {
     let mut r = DefaultRouter::new();
-    let _h = r.add_session(SessionConfig::bgp(
-        Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]),
-    )).expect("add_session");
-    // ... open TCP, wire bytes into r.feed_input, drain_output
-    ExitCode::SUCCESS
+    let cfg = SessionConfig::bgp(
+        Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]),
+    );
+    let h = r.add_session(cfg).expect("add_session");
+    // Illustrative: `bytes` is what the transport read.
+    r.feed_input(h, &bytes).expect("feed_input");
+    let out = r.drain_output(h);
 }
 ```
 
-## Templates
+## Choosing the layer
 
-The `templates/` directory contains scaffolding for common use cases:
-
-| Template           | Description                                            |
-| ------------------ | ------------------------------------------------------ |
-| `analyzer/`        | Pcap-reading tool that decodes BGP/OSPF/Babel traffic. |
-| `bgp-rr/`          | iBGP route reflector cluster with multiple clients.    |
-| `os-integration/`  | librouting + Linux rtnetlink (install routes to FIB).  |
-| `bfd-integration/` | BGP peer with BFD for sub-second failure detection.    |
-
-Each template is a self-contained Cargo workspace that can be cloned and extended.
-
-## Choosing the right layer
-
-| Use case                                          | Layer | Crates                         |
-| ------------------------------------------------- | ----- | ------------------------------ |
-| Build a pcap analyzer                             | 1     | lr-core + lr-bgp/ospf/babel    |
-| Build a custom protocol FSM driver                | 2     | + lr-bgp/ospf/babel FSM        |
-| Build a router daemon                             | 3     | + lr-router, lr-rib, lr-policy |
-| Add BFD fast detection                            | 3     | + lr-bfd                       |
-| Install routes into the kernel                    | 3     | + lr-osroute                   |
-| Suppress route flaps                              | 3     | + lr-damping                   |
-| Embed in a non-Rust application (Go/Python/C/C++) | —     | lr-ffi + bindings              |
+| Use case | Layer | Crates |
+| --- | --- | --- |
+| Decode wire traffic | 1 | lr-core + lr-bgp/ospf/babel |
+| Drive a protocol FSM yourself | 2 | + the protocol FSM |
+| Run a router daemon | 3 | + lr-router, lr-rib, lr-policy |
+| Add BFD, kernel routes or damping | 3 | + lr-bfd, lr-osroute, lr-damping |
+| Embed from C, C++, Go or Python | — | lr-ffi and [`bindings/`](../bindings/) |
 
 ## Extension points
 
-After scaffolding, the following customization points are available without forking:
+These need no fork:
 
-1. **Policy hooks** — implement `ImportHook` / `ExportHook` / `SelectionHook` to override route handling.
+1. **Hooks** — implement `ImportHook` / `SelectionHook` / `ExportHook`
+   (`crates/lr-policy/src/hooks.rs`).
 2. **Safety net** — toggle individual checks via `SafetyConfig`.
-3. **OS integration** — implement `OsRouteTable` for non-Linux platforms.
-4. **BGP roles** — set `PeerConfig::role_override` / `otc_role` / `confederation` for non-standard topology.
-5. **Best-path tuning** — use `BestPathConfig` to enable `always_compare_med`, `multipath`, `deterministic_router_id`, etc.
+3. **OS integration** — implement `OsRouteTable` for a non-Linux platform.
+4. **BGP roles** — `PeerConfig::role_override`, `otc_role`, `confederation`.
+5. **Best-path tuning** — `BestPathConfig`: `always_compare_med`,
+   `multipath`, `deterministic_router_id`.
 
-## Deployment tips
-
-- Run with `PANIC=abort` to ensure panics don't poison mutexes; the release profile already sets `panic = "abort"`.
-- Build with `--release` for production; `lto = "thin"` + `codegen-units = 1` is already in the workspace profile.
-- For running in a sandboxed environment, exclude `lr-osroute` to avoid FFI side effects.
-- For deterministic path selection in a multi-speaker setup, keep `deterministic_router_id = true` (the default).
+The workspace `[profile.release]` in `Cargo.toml` already sets
+`panic = "abort"`, `lto = "thin"` and `codegen-units = 1`.
