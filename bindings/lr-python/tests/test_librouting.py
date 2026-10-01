@@ -627,3 +627,21 @@ def test_filter_dsl():
     # ROA state defaults to not-found in the built-in context.
     roa = librouting.compile_filter("py-roa", "if roa.state == \"not-found\" then { accept; } reject;")
     assert roa.evaluate(rt)[0] == librouting.FILTER_ACCEPT
+
+
+def test_package_version_tracks_the_workspace():
+    """`librouting.__version__` is the single source for the package
+    version; pyproject.toml reads it via `dynamic = ["version"]`. It has
+    to match the workspace version, and nothing else enforces that."""
+    import re
+
+    cargo = (_ROOT / "Cargo.toml").read_text(encoding="utf-8")
+    section = cargo.split("[workspace.package]")[1].split("\n[")[0]
+    match = re.search(r'^version\s*=\s*"([^"]+)"', section, re.MULTILINE)
+    assert match, "no version in [workspace.package]"
+    workspace = match.group(1)
+
+    assert librouting.__version__ == workspace, (
+        f"librouting.__version__ is {librouting.__version__!r} but the "
+        f"workspace version is {workspace!r}"
+    )
