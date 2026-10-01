@@ -31,17 +31,16 @@ the banner and exits 2.
 
 ### `lr version`
 
-Prints the library version from `Cargo.toml`, then a crate list:
+Prints the library version from `Cargo.toml`, then the crate list:
 
 ```text
 librouting <version>
 crates: <comma-separated crate names>
 ```
 
-The crate list is a fixed string literal in `crates/lr-cli/src/main.rs`.
-It is not derived from the workspace and it names fewer crates than
-`crates/` holds — `lr-srv6`, `lr-cli` and `lr-tests` are missing from
-it. Read it as a build label, not as an inventory.
+The version is `[workspace.package] version` in `Cargo.toml`. The crate
+list is the workspace's `members` array from the same file: `build.rs`
+reads it at build time, so a new member shows up without a code change.
 
 ### `lr decode <kind> <hex>`
 

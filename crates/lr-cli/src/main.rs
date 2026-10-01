@@ -35,6 +35,9 @@ use lr_core::codec::Decoder;
 mod parity;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
+/// The workspace crate list, emitted by `build.rs` from the workspace
+/// manifest so that it cannot drift from the members that exist.
+const CRATE_LIST: &str = env!("LR_CRATE_LIST");
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().collect();
@@ -47,7 +50,7 @@ fn main() -> ExitCode {
     match cmd {
         "version" | "--version" | "-v" => {
             println!("librouting {}", VERSION);
-            println!("crates: lr-core, lr-bgp, lr-ospf, lr-babel, lr-ldp, lr-bfd, lr-rib, lr-policy, lr-router, lr-damping, lr-mpls, lr-mrt, lr-bmp, lr-osroute, lr-ffi");
+            println!("crates: {}", CRATE_LIST);
             ExitCode::SUCCESS
         }
         "decode" => decode(rest),
@@ -425,4 +428,28 @@ fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
         out.push(byte);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CRATE_LIST;
+
+    /// The list used to be a literal that named 15 crates while the
+    /// workspace had 18. It now comes from the manifest; this pins the
+    /// members that were missing.
+    #[test]
+    fn crate_list_covers_every_workspace_member() {
+        let names: Vec<&str> = CRATE_LIST.split(", ").collect();
+        assert!(names.len() >= 18, "suspiciously short list: {CRATE_LIST}");
+        for expected in ["lr-core", "lr-srv6", "lr-ffi", "lr-cli", "lr-tests"] {
+            assert!(
+                names.contains(&expected),
+                "{expected} missing from {CRATE_LIST}"
+            );
+        }
+        assert!(
+            names.iter().all(|n| n.starts_with("lr-")),
+            "unexpected entry in {CRATE_LIST}"
+        );
+    }
 }
