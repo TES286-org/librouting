@@ -125,7 +125,7 @@ fn print_usage() {
          [--hold-time SEC]\n         \
          lr-daemon --config daemon.toml [--install-kernel-routes]\n         \
          lr-daemon --config bird.conf|frr.conf (the dialect is\n         \
-         auto-detected; --config-dialect bird|frr|toml forces one)\n         \
+         auto-detected; --config-dialect lr|bird|frr|toml forces one)\n         \
          lr-daemon translate <bird|frr> <config-file>\n\n\
          lr-daemon yang render <config-file> [--model babel|keychain|all]\n\n\
          SUBCOMMANDS:\n  \
@@ -140,7 +140,7 @@ fn print_usage() {
          --config PATH            Load configuration; the dialect (lr\n  \
          TOML, BIRD 2, FRR) is auto-detected, so a BIRD or FRR file\n  \
          runs directly in the compatible form (see docs/COMPAT.md)\n  \
-         --config-dialect D       Force the config dialect: bird | frr |\n  \
+         --config-dialect D       Force the config dialect: lr | bird |\n  \
          toml (BIRD/FRR files support the lr: comment directives as\n  \
          the lr-specific extension channel)\n  \
          --peer ADDR:PORT         Remote BGP peer to connect to (repeatable;\n  \

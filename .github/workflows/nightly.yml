@@ -121,9 +121,8 @@ jobs:
   # surfaces: BGP wire codec, filter DSL parser, ROA validation.
   # Each target runs for 5 minutes against the seed corpus
   # committed under `fuzz/seeds/<target>/`. The job is
-  # non-blocking: a crash is filed as a GitHub issue via the
-  # `actions/upload-artifact` step (the artifact is the crashing
-  # input), not as a CI failure — fuzzing is exploratory and a
+  # non-blocking: the crashing input is uploaded as a workflow
+  # artifact and no issue is filed; the job does not fail the run — fuzzing is exploratory and a
   # nightly crash from a corner case should not gate the next
   # day's release.
   #

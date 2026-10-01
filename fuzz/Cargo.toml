@@ -6,7 +6,7 @@ edition = "2021"
 rust-version = "1.88"
 license = "MIT OR Apache-2.0"
 authors = ["TES286-org"]
-description = "cargo-fuzz targets for librouting wire codecs and parsers (ROADMAP-v3 D6.4)"
+description = "cargo-fuzz targets for librouting wire codecs and parsers"
 
 [package.metadata]
 cargo-fuzz = true

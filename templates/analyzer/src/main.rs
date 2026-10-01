@@ -1,10 +1,11 @@
-//! Pcap analyzer — decode BGP/OSPF/Babel wire traffic.
+//! Wire-message analyzer — decode a hex blob into readable messages.
 //!
 //! Usage:
-//!   cargo run -- --pcap capture.pcap
+//!   echo 001e0204... | cargo run -- bgp
 //!
-//! This template decodes a hex blob on stdin as BGP/OSPF/Babel messages.
-//! For full pcap support, add the `pcap` crate as a dependency.
+//! The optional positional argument selects the decoder. `bgp` is the
+//! default and the only one implemented in this template; reading a pcap
+//! file instead of a hex blob would need the `pcap` crate as a dependency.
 
 use std::env;
 use std::io::Read;

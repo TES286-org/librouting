@@ -46,10 +46,15 @@ pub enum PeerRole {
     /// learned from iBGP are not re-advertised to other iBGP peers unless the
     /// local speaker is a route reflector (RFC 4456 §9).
     Ibgp,
-    /// Confederation-external eBGP (RFC 6793). Behaves like eBGP for the
-    /// purposes of AS_PATH prepending (using AS_CONFED_SEQUENCE) and NEXT_HOP
-    /// rewriting, but the AS_CONFED_SEQUENCE is removed when the route leaves
-    /// the confederation.
+    /// Confederation-external eBGP (RFC 6793): the peer sits in another
+    /// Member-AS of the same confederation.
+    ///
+    /// RFC 5065 §4.1(b) has the local AS prepended as an
+    /// AS_CONFED_SEQUENCE segment, and §4.1(c)(1) has AS_CONFED_* segments
+    /// removed when the route is advertised to a peer outside the
+    /// confederation. Neither is implemented: this role currently prepends
+    /// into an AS_SEQUENCE, and no egress path strips AS_CONFED_* segments.
+    /// NEXT_HOP rewriting behaves like eBGP.
     ConfederationExternal,
     /// Confederation-internal iBGP (RFC 6793). Behaves like iBGP but confed
     /// peers may exchange routes learned from other confed members.

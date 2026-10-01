@@ -29,11 +29,11 @@
 //! sibling): `lr-ospf::lsa::srv6` (Locator LSA + End SID codecs),
 //! `lr-ospf::srv6db` (the per-node LSDB projection) and the locator
 //! routes in `lr-ospf::spf::run_spf_v3` all ride on the primitives
-//! here. Still ahead: the End.X / LAN End.X SIDs (RFC 9513 §9 on the
-//! RFC 8362 Extended LSAs), BGP-LS SRv6 and BGP SR Policy (RFC 9256 /
-//! 9430), and slice 3's daemon `--srv6-locator` CLI + origination;
-//! the kernel `seg6`/`seg6local` route mirror already exists in
-//! `lr-osroute` from slice 1.
+//! here. Slice 3 landed the End.X / LAN End.X SIDs (RFC 9513 §9 on the
+//! RFC 8362 Extended LSAs), the daemon's `[[ospf.srv6_locator]]`
+//! origination, and the kernel `seg6`/`seg6local` route mirror in
+//! `lr-osroute`. Still ahead: BGP-LS SRv6 and BGP SR Policy (RFC 9256 /
+//! RFC 9430).
 //!
 //! ## Wire layout (RFC 8754 §2)
 //!
