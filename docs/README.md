@@ -1,113 +1,104 @@
 # librouting documentation
 
-Start here. The documentation set is organised by what you are
-trying to do, not by who you are — most readers wear several hats.
+Start here. Each document below names the reader it is for, so pick the
+row that matches what you are doing right now.
 
-The workspace version lives in `Cargo.toml`
-(`[workspace.package] version`); that file is the source of truth.
-The public Rust API and the C ABI are frozen for the 1.0 cut — see
-[`RELEASE-PLAN.md`](RELEASE-PLAN.md) §2.8 for the remaining freeze
-criteria. For the AI-agent / contributor quick-start, see
-[`../AGENTS.md`](../AGENTS.md).
+The workspace version lives in `[workspace.package] version` in
+`../Cargo.toml`; that file is the source of truth. The public Rust API
+and the C ABI are frozen for the 1.0 cut —
+[`RELEASE-PLAN.md`](RELEASE-PLAN.md) has the policy. If you are
+contributing code or documents, read [`../CONTRIBUTING.md`](../CONTRIBUTING.md)
+and [`STYLE.md`](STYLE.md) first.
 
 ## Getting started
 
-| Document                                 | What it covers                                          |
-| ---------------------------------------- | ------------------------------------------------------- |
-| [`../README.md`](../README.md)           | Project overview, quick start, crate map                |
-| [`tutorial.md`](tutorial.md)             | Book-style walk: wire → two FSMs → the router pipeline  |
-| [`../AGENTS.md`](../AGENTS.md)           | Project state, build/test commands, conventions         |
-| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | PR checklist, commit message format, test layers       |
+| Document | For |
+| --- | --- |
+| [`../README.md`](../README.md) | What the project is, and a five-minute quick start |
+| [`tutorial.md`](tutorial.md) | Building a working BGP speaker from the library, step by step |
+| [`../AGENTS.md`](../AGENTS.md) | Orientation: project state, layout, build commands |
 
 ## Embedding the library (Rust)
 
-| Document                                         | What it covers                                          |
-| ------------------------------------------------ | ------------------------------------------------------- |
-| [`API.md`](API.md)                               | Public API tour, layer by layer, with code snippets     |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)             | Layering, RIB pipeline, extension points                |
-| [`filter_dsl_grammar.md`](filter_dsl_grammar.md) | Formal grammar for the BIRD-like filter DSL              |
-| [`config_dsl_grammar.md`](config_dsl_grammar.md) | Grammar for the native `.lr` configuration DSL           |
-| [`examples/`](examples/)                         | Per-scenario walkthroughs (RR, confederation, RS, BFD …) |
+| Document | For |
+| --- | --- |
+| [`api/`](api/) | Every public type, grouped by crate, with examples |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | How the crates fit together, the RIB pipeline, the extension points |
+| [`filter_dsl_grammar.md`](filter_dsl_grammar.md) | Writing policy in the BIRD-like filter language |
+| [`config_dsl_grammar.md`](config_dsl_grammar.md) | The native `.lr` configuration language |
+| [`examples/`](examples/) | One document per scenario: route reflectors, confederations, BFD, SRv6, MPLS |
 
-## Embedding (C / C++ / Go / Python)
+## Embedding from C, C++, Go or Python
 
-| Document                                         | What it covers                                          |
-| ------------------------------------------------ | ------------------------------------------------------- |
-| [`bindings/`](bindings/)                         | Per-language guides with complete, verified programs    |
-| [`ffi_design.md`](ffi_design.md)                 | FFI design: panic barrier, `lr_bytes_t`, cbindgen, handles |
-| [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/`           |
+| Document | For |
+| --- | --- |
+| [`bindings/`](bindings/) | Per-language guides, each with a complete program |
+| [`ffi_design.md`](ffi_design.md) | What the C ABI guarantees and why it is shaped this way |
+| [`scaffolding/README.md`](scaffolding/README.md) | Starting a project from `templates/` |
 
 ## Running the daemon
 
-| Document                                     | What it covers                                          |
-| -------------------------------------------- | ------------------------------------------------------- |
-| `templates/daemon.lr`                        | Fully commented reference config (native DSL)            |
-| `templates/daemon.toml`                      | Deprecated TOML twin (supported through 1.x)              |
-| [`lr-cli.md`](lr-cli.md)                     | CLI user guide — `lr`, `lr-daemon`, `lrctl` subcommands  |
-| [`RUNBOOK.md`](RUNBOOK.md)                   | Operations runbook: lifecycle, runtime API, troubleshooting |
-| [`COMPAT.md`](COMPAT.md)                     | Running BIRD 2 / FRR 10 configs natively                 |
-| [`PARITY.md`](PARITY.md)                     | Behaviour knobs vs BIRD 2 / FRR 10                        |
+| Document | For |
+| --- | --- |
+| [`lr-daemon.md`](lr-daemon.md) | The daemon user guide: sessions, protocols, lifecycle |
+| [`lr-daemon-reference.md`](lr-daemon-reference.md) | Every flag and configuration key |
+| [`lr-cli.md`](lr-cli.md) | The `lr` inspection CLI and the `lrctl` operational CLI |
+| [`RUNBOOK.md`](RUNBOOK.md) | Day-2 operations: runtime API, metrics, troubleshooting |
+| `../templates/daemon.lr` | The fully commented reference configuration |
+| [`COMPAT.md`](COMPAT.md) | Running a BIRD 2 or FRR 10 configuration file unchanged |
+| [`PARITY.md`](PARITY.md) | Where lr behaves differently from BIRD and FRR, and how to change it |
 
 ## Protocol coverage
 
-| Document                                 | What it covers                                          |
-| ---------------------------------------- | ------------------------------------------------------- |
-| [`STATUS.md`](STATUS.md)                 | Implemented-vs-missing gap analysis                      |
-| [`RFC_MAP.md`](RFC_MAP.md)               | RFC-by-RFC coverage table with crate paths               |
-| [`INTEROP.md`](INTEROP.md)               | Interop lab against BIRD / FRR: what is verified         |
+| Document | For |
+| --- | --- |
+| [`STATUS.md`](STATUS.md) | What is implemented and what is not |
+| [`RFC_MAP.md`](RFC_MAP.md) | RFC-by-RFC coverage, with the crate and module |
+| [`INTEROP.md`](INTEROP.md) | The interop lab against BIRD, FRR and a second lr-daemon |
+| [`../CHANGELOG.md`](../CHANGELOG.md) | What changed, per release |
 
 ## Platform porting
 
-| Document                                 | What it covers                                          |
-| ---------------------------------------- | ------------------------------------------------------- |
-| [`OS-INTEGRATION.md`](OS-INTEGRATION.md) | Kernel backends (Linux / BSD / Windows), porting guide   |
+| Document | For |
+| --- | --- |
+| [`OS-INTEGRATION.md`](OS-INTEGRATION.md) | The kernel backends and how to write another one |
 
 ## Internals
 
-| Document                                                 | What it covers                                          |
-| -------------------------------------------------------- | ------------------------------------------------------- |
-| [`lr-cli-internals.md`](lr-cli-internals.md)             | CLI internals: module layout, run paths, extension patterns |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)                     | Layering, RIB pipeline, extension points                |
-| [`ffi_design.md`](ffi_design.md)                         | FFI design + panic-barrier contract                     |
+| Document | For |
+| --- | --- |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md) | The layer model, the RIB pipeline, the hook contracts |
+| [`lr-cli-internals.md`](lr-cli-internals.md) | Inside the binaries: module layout and run paths |
+| [`ffi_design.md`](ffi_design.md) | The C ABI's panic barrier, ownership model and handles |
 
-## Releases and roadmap
+## Releases and plans
 
-| Document                                 | What it covers                                          |
-| ---------------------------------------- | ------------------------------------------------------- |
-| [`RELEASE-PLAN.md`](RELEASE-PLAN.md)     | Semver policy, 1.0 freeze criteria, release flow        |
-| [`ROADMAP.md`](ROADMAP.md)               | Roadmap v2 workstream landing log (audit trail)         |
-| [`ROADMAP-v3.md`](ROADMAP-v3.md)         | Roadmap v3 — 15 maturity directions (forward-looking)    |
+| Document | For |
+| --- | --- |
+| [`RELEASE-PLAN.md`](RELEASE-PLAN.md) | Semver policy, the 1.0 freeze criteria, the release flow |
+| [`ROADMAP.md`](ROADMAP.md) | Open work, grouped by theme |
+| [`research/`](research/) | Design notes: BGP's inherent defects, the LRXP exchange plane |
 
-## Research
+## Repository documents
 
-| Document                                                   | What it covers                                          |
-| ---------------------------------------------------------- | ------------------------------------------------------- |
-| [`research/BGP-DEFECTS.md`](research/BGP-DEFECTS.md)       | BGP's protocol-inherent defects and mitigations         |
-| [`research/EXCHANGE-PLANE.md`](research/EXCHANGE-PLANE.md) | Capability-negotiated private exchange plane design      |
-| [`research/E-LSA-DESIGN.md`](research/E-LSA-DESIGN.md)     | RFC 8362 Extended-LSA implementation plan                |
-
-## Repo-level docs
-
-| Document                                         | What it covers                                          |
-| ------------------------------------------------ | ------------------------------------------------------- |
-| [`../AGENTS.md`](../AGENTS.md)                   | AI-agent + contributor quick-start                     |
-| [`../CONTRIBUTING.md`](../CONTRIBUTING.md)       | PR checklist, commit format, test layers                |
-| [`../SECURITY.md`](../SECURITY.md)               | Vulnerability reporting, embargo, threat model          |
-| [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Contributor Covenant 2.0                                 |
-| [`../CHANGELOG.md`](../CHANGELOG.md)             | Consumer-facing version history (Keep a Changelog)       |
-| [`../deny.toml`](../deny.toml)                   | `cargo-deny` config — advisories, licenses, bans        |
+| Document | For |
+| --- | --- |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | The checklist every change has to satisfy |
+| [`../AGENTS.md`](../AGENTS.md) | Orientation for AI agents |
+| [`STYLE.md`](STYLE.md) | How to write these documents |
+| [`../SECURITY.md`](../SECURITY.md) | Reporting a vulnerability, and the threat model |
+| [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Contributor Covenant |
+| [`../deny.toml`](../deny.toml) | `cargo-deny` configuration |
 
 ## Standing rules
 
-1. Every landed feature updates [`STATUS.md`](STATUS.md) (capability
-   tables) and [`RFC_MAP.md`](RFC_MAP.md) in the same series of
-   commits; the workstream narrative lands in [`ROADMAP.md`](ROADMAP.md)
-   or [`ROADMAP-v3.md`](ROADMAP-v3.md) (enforced at review).
-2. [`API.md`](API.md) gains a section whenever a new public API surface
-   appears.
-3. Documents are English-only; wrap long lines around 80 characters.
-4. Do not stamp a hard-coded version into prose — point to
-   `Cargo.toml` instead. Hard-coded version stamps go stale the
-   moment the next release lands.
-5. Do not maintain a list of open GitHub issues in a doc — the issues
-   page is the canonical list.
+1. A landed feature updates [`STATUS.md`](STATUS.md) and
+   [`RFC_MAP.md`](RFC_MAP.md) in the same series of commits. New public
+   API also updates [`api/`](api/).
+2. Documents follow [`STYLE.md`](STYLE.md), and `tests/lint_docs.sh`
+   enforces the mechanical half of it in CI.
+3. Every interop lab is listed in [`INTEROP.md`](INTEROP.md);
+   `tests/lint_interop_doc.sh` enforces that in CI.
+4. A document carries no version number, date, commit hash or count.
+   Point at the file that holds the fact instead.
+5. Open issues belong on the issues page, not in a document here.
