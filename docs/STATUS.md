@@ -1,279 +1,183 @@
-# Project Status — Implemented vs. Missing
+# Capability status
 
-Honest gap analysis of librouting as of this revision. "Implemented" means: code exists, is unit-tested, and (where marked) is exercised by end-to-end or interop tests. "Partial" means the mechanism exists but a documented subset is missing. "Missing" means not implemented.
+What `librouting` implements today, one row per capability, with the
+module that carries it. Read this before assuming a mechanism exists,
+then read the module's doc comment: a cell holds a few words, and the
+detail belongs next to the code. Planned work is in
+[`ROADMAP.md`](ROADMAP.md), release history in
+[`../CHANGELOG.md`](../CHANGELOG.md), the RFC-to-module mapping in
+[`RFC_MAP.md`](RFC_MAP.md), and the deliberately out-of-scope protocols
+in [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §4.4.
 
-Legend: ✅ implemented · 🟡 partial · ❌ missing · 🧪 E2E-verified (in `cargo test`, the interop suite or the C/Go/Python harnesses)
+Status values: `yes` means the mechanism exists and a test exercises it;
+`partial` means it exists with a documented subset missing. Every row
+names a path that exists in the workspace — modules under `crates/`, or
+files of the `lr-cli` binary crate, which is not a library.
 
-## Layer 1 — core (`lr-core`)
+## Shared primitives — `lr-core`
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| Prefix / IpAddr / Asn / RouterId types | ✅ | v4+v6, no-std compatible |
-| Streaming codec primitives (ReadBuf/WriteBuf) | ✅ |  |
-| Generic FSM + timer framework | ✅ |  |
-| RIB data model (Route, RouteKey, Preference) | ✅ | administrative distances per protocol |
-| Event model | ✅ |  |
+| Capability | Status | Module |
+| --- | --- | --- |
+| Address, prefix, ASN and router-ID types, v4 and v6 | yes | `lr-core::addr` |
+| Path-attribute store with fixed-width read paths | yes | `lr-core::attr` |
+| Streaming read and write buffers | yes | `lr-core::buf` |
+| `Codec`, `Encoder` and `Decoder` traits | yes | `lr-core::codec` |
+| Generic finite-state-machine engine | yes | `lr-core::fsm` |
+| Timer queue over an injected clock | yes | `lr-core::timer`, `lr-core::time` |
+| Event sink model | yes | `lr-core::event` |
+| RIB data model (`Route`, `RouteKey`, `Protocol`) | yes | `lr-core::rib` |
+| NLRI family keys | yes | `lr-core::nlri` |
+| Checksums and bit-flag helpers | yes | `lr-core::util` |
 
-## Layer 2 — protocol crates
+## BGP — `lr-bgp`
 
-### BGP (`lr-bgp`)
+| Capability | Status | Module |
+| --- | --- | --- |
+| FSM, hold and keepalive timers (RFC 4271) | yes | `lr-bgp::fsm` |
+| OPEN, UPDATE, KEEPALIVE, NOTIFICATION codec | yes | `lr-bgp::message`, `lr-bgp::codec` |
+| Capability advertisement (RFC 5492) | yes | `lr-bgp::capabilities` |
+| Four-octet AS and AS4_PATH reconstruction (RFC 6793) | yes | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` |
+| MP-BGP NLRI, IPv4 and IPv6 unicast (RFC 4760) | yes | `lr-bgp::path::mp_nlri` |
+| Extended next hop (RFC 8950) | yes | `lr-bgp::extensions::extended_next_hop` |
+| Add-Path send, receive and path-id framing (RFC 7911) | yes | `lr-bgp::extensions::addpath` |
+| Route refresh (RFC 2918) and BoRR/EoRR (RFC 7313) | yes | `lr-bgp::message::route_refresh`, `lr-bgp::extensions::enhanced_rr` |
+| Graceful restart and End-of-RIB (RFC 4724) | yes | `lr-bgp::extensions::graceful_restart` |
+| Long-lived graceful restart (RFC 9494) | yes | `lr-bgp::extensions::long_lived` |
+| Route reflection, ORIGINATOR_ID and CLUSTER_LIST (RFC 4456) | yes | `lr-bgp::role::cluster` |
+| Confederation segments (RFC 5065) | yes | `lr-bgp::role::confederation` |
+| Route server egress (RFC 7947) | yes | `lr-bgp::role::route_server` |
+| OTC attribute and role negotiation (RFC 9234) | yes | `lr-bgp::role::otc` |
+| Best-path selection and the router-id tiebreak | yes | `lr-bgp::best_path` |
+| Standard, extended and large communities | yes | `lr-bgp::path::communities` |
+| Well-known communities and attribute flags | yes | `lr-bgp::path::well_known`, `lr-bgp::path` |
+| Labelled-unicast NLRI and MP helpers (RFC 8277) | yes | `lr-bgp::path::labeled_nlri` |
+| NLRI types and prefix encoding | yes | `lr-bgp::nlri` |
+| Egress rewrite rules, iBGP split horizon, next-hop-self | yes | `lr-bgp::advertise` |
+| Per-peer configuration: hold time, families, max-prefix, GTSM | yes | `lr-bgp::peer` |
+| RPKI-RTR PDU codec and client (RFC 8210) | yes | `lr-bgp::rtr::pdu`, `lr-bgp::rtr::client` |
+| ROA table and origin validation (RFC 6811) | yes | `lr-bgp::roa`, `lr-bgp::roa_store` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| RFC 4271 FSM (6 states, timers, events) | ✅ 🧪 | incl. NOTIFICATION-as-fatal, session reset semantics |
-| OPEN / KEEPALIVE / UPDATE / NOTIFICATION codec | ✅ 🧪 | interop-verified against BIRD 2 + FRR 10 |
-| Codec state cleared on session reset | ✅ 🧪 | `BgpPeer::reset` rebuilds the `BgpCodec` (`BgpCodec::new().with_asn4(self.cfg.asn4)`) so partial frames from the previous transport are discarded before the new OPEN exchange — a … |
-| RFC 5492 capabilities | ✅ |  |
-| RFC 4760 MP-BGP (IPv4/IPv6 unicast NLRI) | ✅ | BIRD requires it — now advertised by default; FRR `bgp default ipv4-unicast` (W2.1) gates implicit IPv4 unicast |
-| RFC 4893/6793 4-octet AS + dynamic negotiation | ✅ | downgrade to 2-byte when peer lacks the capability |
-| RFC 4456 route reflection (ORIGINATOR_ID, CLUSTER_LIST) | ✅ | correct optional non-transitive flags |
-| RFC 5065 confederations | ✅ |  |
-| RFC 4271 §4.4 negotiated keepalive cadence | ✅ 🧪 | the KEEPALIVE interval is capped at one-third of the negotiated hold time (RFC 4271 §4.4) rather than the configured value — `handle_open_in_opensent` computes … |
-| RFC 7947 route server mode | ✅ 🧪 | transparent egress to RS-client peers: AS_PATH is not prepended and NEXT_HOP is preserved when `topo.rs_client` is set (`advertise.rs` gates both rewrites on `&& … |
-| RFC 9234 OTC / roles | ✅ |  |
-| RFC 4271 §6.8 connection collision detection | ✅ 🧪 | router-level resolver over sessions sharing a `SessionConfig::collision_group` (the group is the §6.8 "BGP Identifier known by means outside of the protocol"); … |
-| RFC 7911 Add-Path | ✅ 🧪 | capability negotiation (per-family send/receive), path-id NLRI framing (plain + MP), Adj-RIB-In keyed by path id, ranked N-path selection (`add_path_max_paths`), per-path … |
-| RFC 5549 Extended Next-Hop | ✅ 🧪 | capability code 5 with `(NLRI AFI, NLRI SAFI, Nexthop AFI)` tuples in the RFC 5549 §4 / RFC 8950 §4 6-byte wire form (AFI:2, SAFI:2, NH-AFI:2 — byte-identical to BIRD 2.x and FRR, … |
-| RFC 2918 route refresh | ✅ | negotiated capability, outbound API, inbound re-advertisement through current export policy |
-| RFC 7313 enhanced route refresh | ✅ | negotiated capability plus BoRR/EoRR demarcation around refreshed tables |
-| RFC 4724 graceful restart | ✅ 🧪 | capability lists address families with F bits; stale-route retention, negotiated expiry purge, EoR-based resynchronization (BIRD-verified) |
-| RFC 9494 LLGR | ✅ 🧪 | capability 71, per-family LLST, LLGR_STALE/NO_LLGR communities, least-preferred selection, egress gating, full retention lifecycle (BIRD-verified) |
-| RFC 8326 Graceful Shutdown (sender) | ✅ 🧪 | `GRACEFUL_SHUTDOWN` community `0xFFFF:0000` honoured on export — LOCAL_PREF zeroed, community preserved; legacy `PLANNED_SHUTDOWN` alias at the same wire value; … |
-| RFC 8326 Graceful Shutdown (receiver) | ✅ 🧪 | §4 best-path step — a tagged route is the least preferred for its prefix (`BestPathConfig::graceful_shutdown_least_preferred`, ahead of LOCAL_PREF so the eBGP pinning cannot mask … |
-| MRAI (Min. Route Advertisement Interval) | ✅ | configurable per-prefix batching (withdrawals immediate); defaults to 30 s eBGP / 5 s iBGP |
-| MD5 / TCP-AO session authentication | ✅ 🧪 | RFC 2385 MD5 + RFC 5925 TCP-AO (hmac(sha1)/cmac(aes), ao_required) via `lr-osroute::tcp_auth`; kernel-signed SYNs, fail-closed arming; BIRD/FRR interop-verified |
-| BGPsec | ❌ | out of scope for now |
-| RFC 8277 BGP labelled unicast (BGP-LU) | ✅ 🧪 | `lr-mpls` (RFC 3032 label + label-stack codec, 4- and 3-octet wire forms) + `lr-bgp::path::labeled_nlri` (RFC 8277 §3 NLRI codec, MP_REACH/MP_UNREACH helpers); … |
-| Best-path selection (RFC 4271 §9) | ✅ | incl. LOCAL_PREF, AS_PATH length, origin, MED, eBGP<iBGP, router-id tiebreak; LLGR_STALE routes least-preferred (RFC 9494 §4.4); … |
-| Route damping (`lr-damping`) | ✅ 🧪 | RFC 2439-style figure-of-merit; wired into the daemon as `DampingImportHook` (opt-in via `[damping] enabled = true`); `ImportHook::on_withdraw` notification feeds the … |
-| BFD interaction (`lr-bfd`) | ✅ 🧪 | RFC 5880 §6.8 state machine + timing (peer detect-multiplier detection time, negotiated tx interval with jitter + 1s idle floor, Poll/Final parameter changes), §6.8.6 MUST-discard … |
-| Policy: prefix-lists, community-lists, AS-path filters, route-maps | ✅ | `lr-policy` — all matchers evaluate real BGP path attributes (feature `bgp`, default): community lists (RFC 1997 first-match/implicit-deny), FRR-style AS-path patterns (`^ $ _`, … |
-| Filter DSL: `defined()` / `exists()` presence checks | ✅ | `lr-policy::filter` (ROADMAP-v3 D3.5) — parsed structurally so the argument stays unevaluated; distinguishes absent attributes from default values (BIRD `defined()` semantics); … |
-| Filter DSL: source spans + positioned diagnostics | ✅ | `lr-policy::filter::span` (issue #18 Phase 0) — every token, AST node and error carries a byte `Span`; `LineIndex` renders `line:col`, `render_snippet` draws a caret diagnostic; … |
-| Filter DSL: bytecode VM (compiled filters) | ✅ | `lr-policy::filter::bytecode` (ROADMAP-v3 D3.7) — total AST→instruction compiler + stack VM sharing the interpreter's scope/function state; … |
-| Filter DSL: perf baseline + import-pipeline bench | ✅ | `crates/lr-policy/benches/` (GitHub #19 P0) — `filter_eval` covers seven shapes (3 original + `large_prefix_set` 100-entry / `large_community_set` 10-entry / `user_functions` … |
-| Filter DSL: peephole optimisation pass | ✅ | `crates/lr-policy/src/filter/peephole.rs` (GitHub #19 P5) — three passes run inside `bytecode::compile`: constant propagation + literal folding (tracks `let` constants, folds … |
-| Filter DSL: user-function call index resolution | ✅ | `crates/lr-policy/src/filter/bytecode.rs` (GitHub #19 P2) — `Instr::CallFn { idx, argc }` resolves user-function calls at compile time; … |
-| Filter DSL: attribute fast paths | ✅ | `crates/lr-core/src/attr.rs` + `crates/lr-policy/src/bgp.rs` (GitHub #19 P3) — `Attributes::get_u32_be`/`get_u8` read fixed-width integer attributes in place (no `Vec<u8>` clone); … |
-| Filter DSL: prefix-trie set matching | ✅ | `lr-policy::filter::bytecode::PrefixSetTrie` (GitHub #19 P4) — path-compressed Patricia trie (borrowing structure from `lr-bgp::roa_trie` D8.4) replaces the O(n) linear scan over … |
-| Filter DSL: lazy span read in the VM dispatch loop | ✅ | `lr-policy::filter::eval` (GitHub #19 P7) — `run_code` reads the source span lazily inside the fallible arms instead of once per dispatch at the loop top; … |
-| Filter DSL: user-defined functions | ✅ | `lr-policy::filter` (ROADMAP-v3 D3.1) — BIRD-style `function` declarations; positional binding in fresh scope frames; bodies mutate the caller's route (BIRD parity); … |
-| Filter DSL: large + extended communities | ✅ | `lr-policy::filter` + `lr-bgp` (ROADMAP-v3 D3.2/D3.3) — RFC 8097 12-byte codec with byte-exact wire test; `bgp.large_communities` (4-octet ASNs native) and `bgp.ext_communities` … |
-| Filter DSL: BIRD set operations (`delete`/`filter`/`empty`/`count`) | ✅ | `lr-policy::filter` (ROADMAP-v3 D3.4) — wildcard community patterns (`asn:*`, `*:val`, `*:*`) in set literals; value-level ops on locals and route-level … |
-| Filter DSL: `!~` (not-match) operator | ✅ | `lr-policy::filter` (ROADMAP-v3 D14.5) — `TokenKind::BangTilde` in the lexer (2-char op alongside `!=`/`==`/…); `BinaryOp::NotMatch` in the parser sharing Match precedence (4); … |
-| Filter DSL: `case` statement | ✅ | `lr-policy::filter` — `case expr { pat => stmt; default => stmt; }` with comma-separated patterns, parenthesised expressions, `default` arm, single-stmt or `{ … }` block arm … |
-| Import/export/safety hooks (violations configurable) | ✅ | safety net rejects AS loops / martians; can be disabled; FRR `bgp enforce-first-as` (W2.2) — router-level flag rejects eBGP UPDATEs whose leftmost AS_PATH AS != peer AS; … |
-| RFC 8212 default eBGP route behaviors | ✅ 🧪 | `lr-router` `set_ebgp_requires_policy` + per-session `set_session_policy`: external sessions (eBGP _and_ confederation boundaries, §1) without explicit import policy discard … |
-| iBGP split-horizon, next-hop-self, LOCAL_PREF injection | ✅ 🧪 |  |
-| GTSM / TTL security (RFC 5082) | ✅ 🧪 | `lr-osroute::gtsm` (IP_TTL + IP_MINTTL / IPV6_MINHOPCOUNT on the listener, outbound TTL on the connector); daemon `--gtsm` / `--gtsm N`; … |
-| Per-peer maximum-prefix | ✅ 🧪 | `with_maximum_prefix(N, action)` + `with_maximum_prefix_threshold(pct)`; warn / teardown / restart actions; CEASE NOTIFICATION subcode 1 (RFC 4486 §3); … |
-| Route aggregation | ✅ 🧪 | `add_aggregate(prefix)` / `remove_aggregate(prefix)` (RFC 4271 §9.2.2.2): originates aggregate with zeroed AS_PATH + ATOMIC_AGGREGATE + AGGREGATOR when specifics exist; … |
-| FFI: BGP message encoders + event polling + route lifecycle | ✅ 🧪 | `lr-ffi` (ROADMAP-v3 D5.4–D5.7) — `lr_bgp_encode_open` (RFC 6793 ASN4 capability, AS_TRANS, hold-time validation), `lr_bgp_encode_notification`, `lr_bgp_encode_update_withdraw_v4` … |
-| FFI: policy objects + Filter DSL + OSPF/Babel sessions | ✅ 🧪 | `lr-ffi` (ROADMAP-v3 D5.1–D5.3) — `lr_route_new_v4/_v6` boxing a real `Route` with `lr_route_set/get` for next hop, LOCAL*PREF, MED, ORIGIN, canonical AS_PATH, … |
-| FFI: redistribution / aggregation / damping | ✅ 🧪 | `lr-ffi::policy` (ROADMAP-v3 D4.4) — `lr_router_add_redistribution_pipe` (LR*PROTO*_/LR*METRIC*_ ids, tag, allow-list), `lr_router_add_aggregate`/`remove_aggregate`, … |
-| BMP monitoring (RFC 7854) | ✅ 🧪 | `lr-bmp` crate (7 message types, streaming codec with split feed/next_message, IPv4/IPv6 peer headers); `DefaultRouter::set_bmp_sink` mirrors Peer Up/Down + Route Monitoring — … |
-| MRT dump import/export (RFC 6396) | ✅ 🧪 | `lr-mrt` crate: streaming TABLE_DUMP_V2 reader/writer (peer index tables, RIB_IPV4/IPv6_UNICAST + ADDPATH) + BGP4MP decode; `lr mrt parse/rib` CLI; … |
-| RPKI-RTR cache client (RFC 8210) | ✅ 🧪 | `lr-bgp::rtr` — the 11-variant PDU codec (v0/v1/v2 + the SIDROPS ASPA PDU, BIRD-parity decode validation, 29 wire-form unit tests) and the transport-agnostic `RtrClient` state … |
-| ROA store + RFC 6811 origin validation | ✅ 🧪 | `lr-bgp::roa` (RoaTable, RFC 6811 §2 validate: Valid/NotFound/Invalid) + `lr-bgp::roa_store::RoaStore` (D2.3): two provenance layers — static `[[roa]]` config / FFI entries and … |
+## OSPF — `lr-ospf`
 
-### OSPF (`lr-ospf`)
+| Capability | Status | Module |
+| --- | --- | --- |
+| v2 and v3 packet codec, including the v3 pseudo-header checksum | yes | `lr-ospf::packet`, `lr-ospf::codec` |
+| Neighbor FSM, Down through Full | yes | `lr-ospf::neighbor` |
+| Interface FSM, DR and BDR election, v2 and v3 | yes | `lr-ospf::interface` |
+| DBD, LSR, LSU and LSAck exchange | yes | `lr-ospf::exchange` |
+| Per-area LSDB and flooding | yes | `lr-ospf::lsdb` |
+| Dijkstra SPF for v2 and v3 | yes | `lr-ospf::spf` |
+| Self-LSA origination: Router-LSA, Network-LSA, refresh | yes | `lr-ospf::origination` |
+| ABR summary-LSAs and ASBR summaries (§12.4.3, §16.2) | yes | `lr-ospf::abr` |
+| AS-external routes and type-5 calculation (§16.4) | yes | `lr-ospf::external` |
+| Stub, totally-stubby and NSSA areas with type-7 translation | yes | `lr-ospf::nssa` |
+| Graceful restart, helper and restarting roles (RFC 3623) | yes | `lr-ospf::gr` |
+| Grace-LSA codec, v2 opaque and v3 link-scoped | yes | `lr-ospf::lsa::grace` |
+| HMAC-SHA authentication (RFC 5709) | yes | `lr-ospf::auth::crypto` |
+| v3 authentication trailer (RFC 7166) | yes | `lr-ospf::auth::v3_auth` |
+| Opaque LSA type space and the O-bit (RFC 5250) | yes | `lr-ospf::lsa`, `lr-ospf::exchange` |
+| OSPFv3 fixed-format LSA bodies (RFC 5340 §A.4) | yes | `lr-ospf::lsa::v3` |
+| Prefix-link-local LSA and its option bits | yes | `lr-ospf::lsa::v3_prefix_options` |
+| Extended LSAs and their TLV framing (RFC 8362) | yes | `lr-ospf::lsa::e_v3` |
+| Router Information LSA and capability TLVs (RFC 7770) | yes | `lr-ospf::lsa::srv6` |
+| OSPFv2 extended prefix and link opaque LSAs (RFC 7684) | yes | `lr-ospf::lsa::sr` |
+| OSPFv2 Segment Routing control plane (RFC 8665) | yes | `lr-ospf::lsa::sr`, `lr-ospf::srdb` |
+| OSPFv3 SRv6 control plane and reception (RFC 9513) | yes | `lr-ospf::lsa::srv6`, `lr-ospf::srv6db` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| Packet codec v2 (RFC 2328) / v3 (RFC 5340) | ✅ 🧪 | hello, DBD, LSR, LSU, LSAck, version-dispatched. v3: 16-byte packet header (§A.3.1, Instance ID at byte 14 — FRR `ospf6_packet_examin` parity), Hello body with FRR … |
-| Neighbor FSM | ✅ | incl. §10.9 restart-to-ExStart on sequence mismatch (Fig. 12) |
-| DBD/LSR exchange (§7.2, §10.3–§10.8) | ✅ 🧪 | `lr-ospf::exchange::DbExchange` + router wiring: master/slave election, header paging by MTU, LSR loading to Full, duplicate handling, RxmtInterval retransmit; … |
-| LSDB + LSA flooding | ✅ | per-area shared LSDB; same-area sessions flood to each other (§13.3 simplified) |
-| SPF (Dijkstra) route computation | ✅ 🧪 | E2E test computes routes over a synthetic topology |
-| Inter-area routes from summary-LSAs (§16.2) | ✅ 🧪 | reachable-border check, dist-to-border + summary metric, LSInfinity skip |
-| ABR summary-LSA origination/flush (§12.4.3) | ✅ 🧪 | type-3 lifecycle with backbone-only loop guard, checksummed LSAs, MaxAge flush |
-| AS-external routes (type-5 LSAs, §16.4) | ✅ 🧪 | origination via `ospf_redistribute`, AS-scope flooding across ABRs, §16.4 calculation (type-1/2 metrics, forwarding-address reachability + next hop), MaxAge flush lifecycle |
-| Summary-ASBR LSAs (type-4, §12.4.3) | ✅ 🧪 | ABR origination for inter-area-only ASBRs, ASBR leg resolution in §16.4 (b) |
-| External route redistribution API | ✅ 🧪 | `DefaultRouter::ospf_redistribute`/`ospf_unredistribute` |
-| Cross-protocol redistribution engine | ✅ 🧪 | `RedistributionPipe` (BIRD `pipe` / FRR `redistribute`); BGP↔BGP, BGP→OSPF, OSPF→BGP; metric policy (Inherit/Fixed/Add); prefix-list filter; withdrawal propagation; 7 e2e tests; … |
-| Designated-router election | ✅ 🧪 | `lr-ospf::interface::elect` implements §9.4 step-by-step (IP-identity electors per §A.3.2, BDR candidates exclude DR-declarers, DR falls back to the elected BDR, step-4 … |
-| Network-LSA (§12.4.2) + transit links (§12.4.1.2) | ✅ 🧪 | `originate_network_lsa` (LS ID = the DR's IP interface address, Advertising Router = its router-id — they differ in general), `RouterLsaLink::Transit`; … |
-| Area support | ✅ | multi-area v2 with ABR summaries (backbone-attached); OSPFv3 multi-area with ABR 0x2003 summaries and 0x2004 ASBR summaries (backbone-attached, all-v3 areas — … |
-| LSA refresh / aging / MaxAge flush | ✅ | periodic self-LSA re-origination at 1800 s, MaxAge expiry at 3600 s, MaxAge purge on receipt (§13) |
-| Daemon transport (`--protocol ospf`) | ✅ 🧪 | `lr-osroute::ospf_transport`: raw `IPPROTO_OSPF` socket per interface (v2: IPv4, `ip_mreqn` membership 224.0.0.5/6, TTL 1; … |
-| Stub/NSSA areas | ✅ 🧪 | `OspfAreaType` (stub / no-summary / NSSA / totally-NSSA): type-5/type-4 refusal at install & AS-scope re-flood, ABR summary-default (type-3) and type-7 default injection, … |
-| Virtual links | ✅ 🧪 | `ospf_add_virtual_link` (§15): up while the transit-area SPF reaches the endpoint; materializes a backbone adjacency restoring ABR status; embedder-routed transport; … |
-| Auth (cryptographic) | ✅ 🧪 | RFC 5709 HMAC-SHA-1/SHA-256 (v2 AuType 2 trailer; Ko/Apad MAC per §3.3, Auth Data Len = digest), RFC 7166 v3 auth trailer (RFC 7166 layout with 16-bit SA ID + 64-bit crypto-seq; … |
-| OSPFv3 inter-area-prefix-LSA (0x2003) | ✅ 🧪 | body encode/decode (§A.4.5: 0\\|metric(3)\\|§A.4.1 prefix); `originate_v3_inter_area_prefix_lsa` (LS ID caller-assigned — §4.4.3.4 strips its addressing semantics); … |
-| OSPFv3 LSA bodies (RFC 5340 §A.4) | ✅ 🧪 | `lr-ospf::lsa::v3`: Router-LSA (0x2001, bits\\|options\\|16-byte descriptors, no count field), Network-LSA (0x2002, LS ID = DR Interface ID), Inter-Area-Router-LSA (0x2004, 12-byte … |
-| OSPFv3 intra-area SPF (§4.8) | ✅ 🧪 | `run_spf_v3`: Network vertices keyed (DR Router ID, DR Interface ID); next hops are (link-local, outgoing Interface ID) pairs — a direct p2p neighbor's link-local resolves from … |
-| OSPFv3 inter-area + AS-external routing (§4.8.3 / §4.8.5) | ✅ 🧪 | `summary_routes_v3` — 0x2003 candidates from intra-area-reachable border routers at dist(border)+metric, LSInfinity skipped, NU-marked prefixes ignored (§4.8.3), best candidate … |
-| OSPFv3 daemon mode (`[ospf] version = "v3"`) | ✅ 🧪 | `daemon_ospf3`: one IPv6 raw socket per interface (no address needed — link-local sources), Interface ID = kernel ifindex (FRR convention), neighbor's Interface ID learned from … |
-| Grace-LSA codec (RFC 3623 / RFC 5187) | ✅ 🧪 | `lr-ospf::lsa::grace` — v2: link-local opaque type 9 with Opaque Type 3 / ID packing (RFC 5250 §3.1); v3: the dedicated link-scoped LS type 0x000b with the Interface ID as the … |
-| RFC 5250 Opaque-LSA capability signalling | ✅ 🧪 | the O-bit rides the DD options byte (`lr-ospf::exchange::db_desc_packet`) — lr both originates and floods opaque LSAs, so peers learn it can receive them; … |
-| GR helper mode (RFC 3623 §3) | ✅ 🧪 | `lr-ospf::gr::HelperEntry` + daemon wiring — §3.1 checks, dead-timer retention, adjacency kept in the Router-LSA, §3.2 exits (flush/timeout/topology change via per-area topology … |
-| GR restarting router (RFC 3623 §2) | ✅ 🧪 | state-file-persisted grace deadline, shutdown Grace-LSA flood, recovery with origination suppression + §2.2 adjacency/back-link verification, §2.3 flush + re-origination above the … |
-| Prefix Link-Local LSA (RFC 7684) | ✅ | `LsaTypeV3::PrefixLinkLocalAsLsa = 0x4004` + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec with optional Address Family ID; 8 unit tests |
-| Extended LSAs (RFC 8362) | ✅ 🧪 | `lr-ospf::lsa::e_v3` — the eight TLV-bodied E-LSA codecs (E-Router 0xA021/fc 33, E-Network 0xA022/34, E-Inter-Area-Prefix 0xA023/35, E-Inter-Area-Router 0xA024/36, E-AS-External … |
-| Segment Routing control plane (RFC 8665) | ✅ 🧪 | control plane (slice 1) + reception (slice 2) + adjacency/mapping-server (slice 3). Slice 1: `lr-ospf::lsa::sr` — RI LSA SR-Algorithm + SID/Label Range TLVs (RFC 8665 §3), … |
-| SRv6 data plane (RFC 8754 / RFC 8402 / RFC 8986) — slice 1 | 🟡 🧪 | `lr-srv6` crate: 128-bit [`Sid`] (RFC 8754 §3, structured LOC:FUNCT:ARGS), [`Locator`] (RFC 8754 §3.1, IPv6 prefix + block bits), [`Srh`] codec (RFC 8754 §2 — Next Header / Hdr … |
-| OSPFv3 SRv6 control plane (RFC 9513) — slices 2-3 | 🟡 🧪 | `lr-ospf::lsa::srv6`: the SRv6 Capabilities TLV (type 20, O-flag bit 1) on the OSPFv3 Router Information LSA (RFC 7770 §2.2 function code 12, 0xA00C area-scoped) with the … |
+## Babel — `lr-babel`
 
-### Babel (`lr-babel`)
+| Capability | Status | Module |
+| --- | --- | --- |
+| Datagram codec and TLV framing (RFC 8966) | yes | `lr-babel::message`, `lr-babel::tlv` |
+| Streaming codec over the TLV set | yes | `lr-babel::codec` |
+| Neighbor state and route table with feasibility | yes | `lr-babel::neighbor`, `lr-babel::route` |
+| Metric computation and sequence-number handling | yes | `lr-babel::metric` |
+| Source-specific routing (RFC 9079) | yes | `lr-babel::source` |
+| MAC authentication and relaxed counter checks | yes | `lr-babel::auth` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| RFC 8966 codec (all core TLVs) | ✅ | magic 42 (0x2A) + version 2 header validated; §4.6 TLV bodies byte-exact (flags/reserved fields, Update Seqno/Metric order) |
-| Neighbor / route table + feasibility (RFC 8966 §3.5.2) | ✅ |  |
-| Route expiry + neighbour-death retraction (RFC 8966 §3.2.5) | ✅ 🧪 | every Update refreshes its claim's hold deadline (babeld's `hold_time = MAX(4·I/100 + I/50, 15)` s, I = the announced interval in centiseconds — six times the update interval, 15 … |
-| BABEL-RTT delay metric (RFC 8966 §A.2.4) | ✅ 🧪 | Timestamp sub-TLV on Hello (1), Timestamp Echo sub-TLV on IHU (2); neighbour state records the peer's `(send, receive)` pair and echoes it while fresh (1 s window), the originator … |
-| Metric computation, seqno handling | ✅ 🧪 | E2E install/withdraw tests |
-| RFC 9079 source-specific routing | ✅ 🧪 | Source Prefix **sub-TLV** (type 128) inside Update / Route Request / Seqno Request per §7.1; IPv4 + IPv6 source prefixes; route table keyed by (destination, source) tuple |
-| RFC 8967 MAC authentication | ✅ 🧪 | stateful `BabelAuthInterface`: full §4.3 reception (MAC test once per key, preparse, PC verification), §4.3.1 Challenge Request/Reply resynchronization (30 s expiry, 300 ms … |
-| RFC 9467 relaxed PC verification | ✅ 🧪 | §3.1 unicast/multicast PC split (PCm/PCu, RECOMMENDED, default on), §3.2 window verification (OPTIONAL, configurable S), §3.3 combined mode with two windows; … |
-| RFC 8966 §4.5.2 prefix compression + AE 4 v4-over-v6 (RFC 9229 §2.4) | ✅ 🧪 | per-packet `PrefixCache` (per-AE, like BIRD's parse state) expands omitted-octet Updates — BIRD compresses its v6 announcements routinely, and a receiver that ignores the … |
-| Babel daemon transport (IPv6 link-local + IPv4 local networks) | ✅ 🧪 | daemon `--protocol babel` mode: UDP 6696, TTL=255 (RFC 8966 §2.1/§4), `%iface` scope carried into bind/join/send; two-socket transport per family (unicast on the local address + … |
-| Dual-stack announcements + Loc-RIB preference + BIRD interop | ✅ 🧪 | the v6 transport carries BOTH families (babeld's shape: NextHop(AE 1, our v4 address) before AE 1 Updates — BIRD/babeld never listen on 224.0.0.111); … |
-| Multi-interface sessions + per-interface parameters (ROADMAP-v3 D1) | ✅ 🧪 | `[[babel.interface]]` glob patterns resolve against the system's interfaces (first match wins, BIRD semantics); each match gets its own session, router-id, socket pair (unicast … |
+## LDP — `lr-ldp`
 
-### LDP (`lr-ldp`)
+| Capability | Status | Module |
+| --- | --- | --- |
+| PDU, TLV and message codec (RFC 5036) | yes | `lr-ldp::pdu`, `lr-ldp::tlv`, `lr-ldp::message` |
+| Session FSM and parameter negotiation (§2.5.4, §3.5.3) | yes | `lr-ldp::session` |
+| Link and targeted discovery (§3.5.2, RFC 7552) | yes | `lr-ldp::discovery` |
+| Label bookkeeping: learn, advertise, withdraw | yes | `lr-ldp::mapping` |
+| Transit-LSR label allocation | yes | `lr-ldp::transit` |
+| Engine glue and session events | yes | `lr-ldp::engine` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| RFC 5036 codec (PDU / TLV / all 11 message types) | ✅ 🧪 | streaming `LdpCodec` (split feed/next-PDU), U/F-bit passthrough, FEC element set (prefix, wildcard, RD-free §3.4.1 subset), generic label, Status TLVs with the §3.9 status-code … |
-| §2.5.4 session FSM + §3.5.3 parameter negotiation | ✅ 🧪 | active/passive roles, Init validation (version, keepalive, advertisement discipline resolution, receiver label-space match), min-of-proposals negotiation, KeepAlive send/hold … |
-| §3.5.2 discovery (link + targeted) | ✅ 🧪 | UDP Hellos with hold/refresh timers, adjacency creation + expiry, extended (targeted) discovery with accept policy, §2.5.2 active-role decision by transport-address comparison, … |
-| Label bookkeeping (downstream unsolicited) | ✅ 🧪 | per-peer LIB (learn/advertise/withdraw), §3.5.8.1 request→mapping/No-Route answers, §3.5.10.1 withdraw→release, wildcard withdraw handling, Address message exchange before … |
-| §3.5.3 Max PDU Length enforcement | ✅ 🧪 | TX: session messages batch into PDUs capped at the negotiated Max PDU Length; RX: an over-long PDU is answered with a fatal Bad PDU Length Notification before the session drops … |
-| §3.5.4 / §3.4.4.1 loop detection (Hop Count + Path Vector) | ✅ 🧪 | configurable per engine (`loop_detection`, default off per RFC 2.8); the Init proposes the D bit with PVLim; with it on, received Label Mappings and Label Requests are checked per … |
-| Engine glue (`LdpEngine`) | ✅ 🧪 | embedder moves bytes; TCP connection lifecycle (EstablishTransport/on_connected/on_accepted), session collision + No-Hello (§2.5.3) rejection, events for … |
-| Daemon transport (`--protocol ldp`, TCP/UDP 646) + FRR ldpd interop | ✅ 🧪 | wildcard UDP socket joins 224.0.0.2 per interface, link Hellos every hold-time third with TTL 1 and per-interface egress (`send_link_hello`), targeted Hellos unicast; … |
-| RFC 7552 IPv6 dual-stack procedures | ✅ 🧪 | §5.1 IPv6 basic discovery (ff02::2 link Hellos, hop-limit-255 GTSM check, link-local sources), §5.2 targeted over global unicast only (link-local rejected at config parse), §6.1 … |
-| Kernel MPLS mirror + label range allocation | ✅ 🧪 | `[ldp] install_kernel` mirrors the LIB into the Linux AF_MPLS dataplane — pop route per local binding (tail, local delivery via `lo`) and encap route per learned binding (head, … |
-| §3.5.7.1.1 transit-LSR label allocation (independent control) | ✅ 🧪 | the engine allocates one local label per FEC learned from peers (platform range 16..=1048575, explicitly configured bind labels reserved), re-advertises it upstream to every … |
-| RFC 3478 graceful restart (LDP GR) | ✅ 🧪 | FT Session TLV (RFC 3479 §8.2: type 0x0503, L flag, Reconnect Timeout + Recovery Time in ms) carried in the Initialization when `[ldp] graceful_restart` / `--ldp-graceful-restart` … |
+## Monitoring, detection and damping
 
-## Layer 3 — router pipeline (`lr-router`)
+| Capability | Status | Module |
+| --- | --- | --- |
+| BFD packet codec and session FSM (RFC 5880) | yes | `lr-bfd::packet`, `lr-bfd::session` |
+| BFD authentication sections | partial | `lr-bfd::auth` |
+| BMP codec, split feed, peer headers (RFC 7854) | yes | `lr-bmp` |
+| MRT TABLE_DUMP_V2 read and write, BGP4MP (RFC 6396) | yes | `lr-mrt` |
+| Route flap damping figure of merit (RFC 2439) | yes | `lr-damping` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| Adj-RIB-In → safety → import hooks → best-path → Loc-RIB → export hooks → Adj-RIB-Out | ✅ 🧪 | full pipeline, per-session attribution |
-| Initial table dump on session establishment + End-of-RIB | ✅ 🧪 | BIRD/FRR see convergence markers; inbound EoR drives restart resynchronization |
-| Session-down Adj-RIB-In purge (RFC 4271 §8.2.2 semantics) | ✅ | routes do not outlive their session — except negotiated RFC 4724/9494 retention |
-| Reconnect-safe session restart | ✅ | FSM reset + established-latch clear |
-| OSPF/Babel delta integration into Loc-RIB | ✅ |  |
-| Cross-protocol administrative distance merge | ✅ 🧪 |  |
-| Route reflection fan-out, originate/unoriginate APIs | ✅ |  |
-| Concurrent daemon access — RwLock read/write split (ROADMAP-v3 D8.1) | ✅ 🧪 | the shared daemon handle is `Arc<RwLock<DefaultRouter>>`: read-only call sites (API `routes`/`status`/`sessions` dumps, session summaries, Babel RTT probes, OSPF/LSDB status … |
+## RIB and router — `lr-rib`, `lr-router`
 
-## Layer 4 — system integration (`lr-osroute`)
+| Capability | Status | Module |
+| --- | --- | --- |
+| Adj-RIB-In, Adj-RIB-Out and Loc-RIB | yes | `lr-rib::adj_rib_in`, `lr-rib::adj_rib_out`, `lr-rib::loc_rib` |
+| Per-protocol route selection | yes | `lr-rib::selection` |
+| Cross-protocol merge by administrative distance | yes | `lr-rib::merging` |
+| Router instance: sessions, Loc-RIB, policy, scheduler | yes | `lr-router::instance` |
+| Session configuration, handles and summaries | yes | `lr-router::session` |
+| Embedder-supplied connection abstraction | yes | `lr-router::connection` |
+| Router events, including OSPF grace events | yes | `lr-router::event` |
+| Cross-protocol redistribution pipes | yes | `lr-router::redistribution` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| Linux rtnetlink add/delete/list | ✅ 🧪 | used by `lr-daemon --install-kernel-routes` |
-| Linux AF_MPLS netlink LSP install/delete | ✅ 🧪 | `lr-osroute::mpls_route` — Pop (label→IP), pop-local (label→`lo`, the kernel's own explicit-null shape for local delivery) and Swap (label→label) via `RTM_NEWROUTE`/`RTM_DELROUTE` … |
-| TCP MD5 / TCP-AO socket auth | ✅ 🧪 | `lr-osroute::tcp_auth` — arm_listener (wildcard keys) + connect_auth (keys before connect, signed SYN); Linux both, other platforms Unsupported |
-| BSD route(4) socket (FreeBSD/NetBSD/OpenBSD/macOS) | ✅ | layouts pinned per-OS; cross-compile checked |
-| Windows IP Helper API | ✅ | full link verified (x86_64-pc-windows-gnu) |
-| Interface auto-resolution when `if_index == 0` | ✅ | gateway-based (Linux), longest-prefix (Windows) |
-| Other systems | ✅ | documented extension path — see `docs/OS-INTEGRATION.md` |
+## Policy — `lr-policy`
 
-## Layer 5 — embedder surface
+| Capability | Status | Module |
+| --- | --- | --- |
+| Route maps, prefix lists, AS-path filters, community lists | yes | `lr-policy::route_map`, `lr-policy::prefix_list`, `lr-policy::as_path_filter`, `lr-policy::community_list` |
+| Import, selection and export hooks | yes | `lr-policy::hooks` |
+| Safety net: AS loops, next-hop sanity, martians | yes | `lr-policy::safety` |
+| Policy chains and verdicts | yes | `lr-policy::policy` |
+| Named policy sets and per-route actions | yes | `lr-policy::set`, `lr-policy::action` |
+| BGP attribute access from policy | yes | `lr-policy::bgp` |
+| Filter DSL: lexer, parser, AST, interpreter | yes | `lr-policy::filter`, `lr-policy::filter::{lexer, parser, ast, eval}` |
+| Filter DSL bytecode compiler and stack VM | yes | `lr-policy::filter::bytecode` |
+| Filter DSL peephole optimisation | yes | `lr-policy::filter::peephole` |
+| Source spans and positioned diagnostics | yes | `lr-policy::filter::span` |
 
-| Capability | Status | Notes |
-| --- | :----: | --- |
-| `lr-daemon` reference daemon (TCP I/O loop, reconnect, config incl. policy tables) | ✅ 🧪 | multi-peer (`peer` blocks in the native `.lr` config, `[[peer]]` tables in the TOML twin / repeatable `--peer`): per-peer AS/hold-time/GR/auth/GTSM/max-prefix/Add-Path/families … |
-| Native BIRD/FRR config run (compat surface) | ✅ 🧪 | `lr-daemon --config bird.conf\\|frr.conf`: dialect auto-detection (BIRD 2 / FRR / lr TOML, `--config-dialect` override, fail-closed on unknown content), the W5.1 converter pipeline … |
-| C ABI FFI (`lr-ffi`) + cbindgen header | ✅ 🧪 | C harness in CI |
-| Go bindings | ✅ 🧪 | `bindings/lr-go` |
-| Python bindings | ✅ 🧪 | `bindings/lr-python` (cffi) |
-| C++ bindings | ✅ | header-only RAII wrapper over the C ABI (`include/librouting.hpp`) |
-| Config validation + typed IR (issue #18 Phase 1) | ✅ 🧪 | `lr-daemon config check <file>`: loads + finalizes a config without starting the daemon — same `daemon_config::load_config_file` entry startup and reload use (one path, no drift) … |
-| Native `.lr` config DSL + `to-dsl` converter (issue #18 Phase 2) | ✅ 🧪 | The declarative DSL specified in `docs/config_dsl_grammar.md`: blocks with identity arguments (`peer "core-1" { … }`), unit suffixes whitelisted per (section, key) (`hold_time … |
-| Signal handling / privilege drop / config reload / runtime API in daemon | ✅ 🧪 | SIGTERM/SIGINT close sessions with a NOTIFICATION (RFC 4271 §6.4) then exit 0; SIGHUP + API `reload` re-apply `networks` (bad config keeps running); … |
+## OS integration and data plane — `lr-osroute`, `lr-mpls`, `lr-srv6`
 
-## Testing & CI
+| Capability | Status | Module |
+| --- | --- | --- |
+| Linux rtnetlink route table | yes | `lr-osroute::linux` |
+| BSD and macOS `route(4)` socket route table | yes | `lr-osroute::bsd` |
+| Windows IP Helper route table | yes | `lr-osroute::windows` |
+| Compile-only stub for other systems | yes | `lr-osroute::stub` |
+| TCP MD5 and TCP-AO socket keys (RFC 2385, RFC 5925) | yes | `lr-osroute::tcp_auth` |
+| GTSM TTL arming and receive filter (RFC 5082) | yes | `lr-osroute::gtsm` |
+| OSPF raw-socket transport | yes | `lr-osroute::ospf_transport` |
+| BFD UDP transport, single-hop and multihop | yes | `lr-osroute::bfd_transport` |
+| Source-bound TCP connect and source-address diagnostic | yes | `lr-osroute::tcp_bind`, `lr-osroute::source_check` |
+| Linux `AF_MPLS` LSP install and delete | yes | `lr-osroute::mpls_route` |
+| Linux `seg6` and `seg6local` route install | yes | `lr-osroute::seg6_route` |
+| MPLS label and label-stack codec (RFC 3032) | yes | `lr-mpls` |
+| SRv6 SID, locator, SRH and behavior registry | yes | `lr-srv6::sid`, `lr-srv6::locator`, `lr-srv6::srh`, `lr-srv6::behavior` |
 
-| Item | Status |
-| --- | --- |
-| Unit tests (workspace) | ✅ 42 binaries / 900+ tests |
-| Two-daemon TCP E2E | ✅ 🧪            \| `lr-tests/tests/tcp_smoke.rs` |
-| Route-propagation E2E (originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out, withdrawal reversal) | ✅ 🧪            \| `lr-tests/tests/route_propagation.rs` |
-| Protocol-runtime E2E (OSPF + Babel delta integration into Loc-RIB) | ✅ 🧪            \| `lr-tests/tests/protocol_runtimes.rs` |
-| Add-Path E2E (two-daemon + full-stack multi-path propagation) | ✅ 🧪 |
-| BGP session-mode E2E (8 modes: standard dual-stack, LL dual-stack, MP-BGP, MP-BGP+LL, ENH, ENH+LL, pure IPv6, pure IPv6+LL) | ✅ 🧪            \| `lr-tests/tests/bgp_session_modes.rs` |
-| RFC 8277 BGP-LU E2E (single-label, multi-label, implicit-null, withdrawal) | ✅ 🧪            \| `lr-tests/tests/bgp_labeled_unicast.rs` |
-| RFC 8277 two-daemon interop (TCP, label=100 for 198.51.100.0/24) | ✅ 🧪            \| `tests/interop/labeled_unicast.sh` |
-| BGP-LU → MPLS dataplane interop (two netns: tail pop + head encap mirrored into the kernel, ICMP echo through the LSP; kernel-gated) | ✅ 🧪            \| `tests/interop/mpls_lsp.sh` |
-| GTSM + maximum-prefix E2E (TTL security + per-peer prefix limit) | ✅ 🧪            \| `lr-tests/tests/gtsm_max_prefix.rs` |
-| Redistribution E2E (BGP↔BGP, BGP→OSPF, metric policy, prefix filter, withdrawal) | ✅ 🧪            \| `lr-tests/tests/redistribution.rs` |
-| Route-aggregation E2E (aggregate origination/withdrawal lifecycle) | ✅ 🧪            \| `lr-tests/tests/route_aggregation.rs` |
-| BMP monitoring E2E (Peer Up/Down + Route Monitoring end-to-end) | ✅ 🧪            \| `lr-tests/tests/bmp_monitoring.rs` |
-| Daemon hardening E2E (signals, reload, runtime API, privilege drop) | ✅ 🧪            \| `lr-cli` integration tests |
-| Cross-protocol daemon E2E (`[[redistribute]]` allow-list through the pipe, `[[aggregate]]` reaching a downstream peer) | ✅ 🧪            \| `crates/lr-cli/tests/daemon_redistribute.rs` |
-| OSPF two-daemon E2E (raw-socket multicast adjacency, stub-net propagation both ways, dead-timer teardown) | ✅ 🧪            \| `tests/interop/ospf.sh` — veth pair, one network namespace per daemon, rootless via `unshare -Urn` |
-| OSPF broadcast-segment E2E (§9.4 DR/BDR election, §10.4 adjacency, Network-LSA + transit links, BIRD default-broadcast interop) | ✅ 🧪            \| `tests/interop/ospf_broadcast.sh` — phase 1: two lr-daemons; phase 2: lr ↔ BIRD 2 on BIRD's default (broadcast) type |
-| OSPF x BIRD E2E (real DBD/LSR exchange to Full adjacency, stub nets propagated in BOTH directions via birdc) | ✅ 🧪            \| `tests/interop/ospf_bird.sh` — lr-daemon ↔ BIRD 2 over a veth pair |
-| Babel MAC auth E2E (two-daemon: propagation, restart challenge resync, wrong-key fail-closed, RFC 8967 §5 incremental deployment) | ✅ 🧪            \| `tests/interop/babel_auth.sh` — IPv4 multicast over loopback, rootless netns |
-| LDP two-daemon E2E (multicast link-Hello discovery over a veth pair, TCP 646 session, bindings both directions, hold-time teardown) | ✅ 🧪            \| `tests/interop/ldp.sh` — rootless netns, one LSR per namespace |
-| LDP transit-LSR E2E (three-LSR chain: middle LSR transit-allocates and re-advertises upstream, peer death tears the LSP down and withdraws it; kernel-gated ICMP echo across the full r1→r2(swap)→r3 LSP) | ✅ 🧪            \| `tests/interop/ldp.sh` phase 3c |
-| MRT interop (BIRD 2 `protocol mrt` dump decoded by `lr mrt rib`; daemon Loc-RIB export round-trip with AS path + next hop) | ✅ 🧪            \| `tests/interop/mrt.sh` |
-| BMP collector E2E (daemon `--bmp-target` mirroring Peer Up + Route Monitoring to a daemon collector; routes + MRT dump via API) | ✅ 🧪            \| `tests/interop/bmp.sh` |
-| Multi-peer daemon E2E (two-outbound-peer fan-out + transit, inbound source-address matching, fail-closed rejection of unmatched peers, per-peer hold-time inheritance) | ✅ 🧪            \| `crates/lr-cli/tests/daemon_multi_peer.rs` |
-| Policy-in-config E2E (export filter, import filter, set-actions keep-route, unknown-reference fail-closed startup) | ✅ 🧪            \| `crates/lr-cli/tests/daemon_policy.rs` |
-| RFC 8212 E2E (default deny-in/deny-out, permit-all route-maps restoring flow, accept-all deviation, iBGP exemption, unknown mode fails closed) | ✅ 🧪            \| `crates/lr-cli/tests/daemon_rfc8212.rs` (in-process) + `tests/interop/rfc8212_bird.sh` + `tests/interop/rfc8212_frr.sh` (D10.6 — real BIRD 2 + FRR bgpd, two-phase: default deny + explicit policy restores flow) |
-| MD5 auth interop (two-daemon positive/negative + BIRD `password` + FRR `neighbor password`) | ✅ 🧪 |
-| TCP-AO interop (two-daemon positive/negative; kernel >= 6.7, else SKIP) | ✅ 🧪 |
-| Kernel-gated tests in a QEMU VM (tests/vm: tcp_ao + MPLS dataplane phases without host kernel/root support) | ✅ 🧪 |
-| OSPF multi-area + ABR inter-area E2E (incl. two-router propagation) | ✅ 🧪 |
-| OSPF external-route E2E (type-5 AS-scope propagation, type-4 ASBR legs, §16.4 type-1/2 + forwarding address, flush lifecycle) | ✅ 🧪 |
-| OSPF stub/NSSA E2E (stub/totally-stubby gating + default injection, NSSA type-7 + P-bit translation with forwarding address, type-7/type-3 defaults, no-summary, translator election, flush lifecycle) | ✅ 🧪 |
-| OSPF virtual-link E2E (§15 backbone partition repair, summaries over the virtual adjacency, teardown + stale-LSA MaxAge age-out, stub-transit refusal) | ✅ 🧪 |
-| OSPFv3 two-daemon E2E (RFC 5340: v3 Hello/DBD/LSR to Full, Router/Link/Intra-Area-Prefix LSAs, IPv6 propagation both directions, dead-timer withdrawal) | ✅ 🧪            \| `tests/interop/ospf6.sh` |
-| OSPFv3 x FRR ospf6d E2E (RFC 5340 wire shapes to Full both ways, link-local next hops, dead-timer teardown) | ✅ 🧪            \| `tests/interop/ospf6_frr.sh` |
-| OSPFv3 broadcast E2E (RFC 5340 §4.1.2 election on Router-ID identity, Network-LSA vertex routing, the DR's network-referenced IAP, dead-timer retraction) | ✅ 🧪            \| `tests/interop/ospf6_broadcast.sh` — two lr-daemons on `network_type = "broadcast"`; r2 (higher Router ID) wins DR, routes resolve through the network vertex both directions, the non-DR carries the shared-segment prefix only via the DR's network IAP |
-| OSPFv3 broadcast x FRR ospf6d E2E (independent §9.4 elections converge; transit links + Network-LSA + network IAP parsed by both) | ✅ 🧪            \| `tests/interop/ospf6_frr_broadcast.sh` — lr ↔ FRR 10.3 ospf6d on FRR's default broadcast type; FRR's vty and lr's log agree on DR 2.2.2.2 / BDR 1.1.1.1; lr resolves FRR's loopback through the network vertex onto a link-local; SIGKILL teardown |
-| OSPFv3 SRv6 E2E (RFC 9513 slice 3: ospf6d stores + re-floods lr's RI/Locator LSAs, lr2 installs the locator through the FRR relay as an Ospfv3 route) | ✅ 🧪            \| `tests/interop/ospf6_frr_srv6.sh` |
-| BIRD 2 interop (bidirectional) | ✅ 🧪 |
-| BIRD 2 LLGR interop (RFC 9494 full lifecycle, both helper roles) | ✅ 🧪 |
-| BFD monitoring fast-fail E2E (two-daemon SIGSTOP freeze: BFD tears BGP down in ~0.5s at 100ms×3 vs 60s hold) | ✅ 🧪            \| `crates/lr-cli/tests/daemon_bfd.rs` |
-| BFD x BIRD interop (single-hop + multihop sessions, `protocol bfd` + `bfd on`, SIGSTOP fast-fail) | ✅ 🧪            \| `tests/interop/bfd_bird.sh` |
-| FRR bgpd interop (bidirectional) | ✅ 🧪 |
-| FRR ldpd interop (RFC 5036: adjacency, session to Operational, imp-null learned from FRR, lr's explicit binding in FRR's LIB) | ✅ 🧪            \| `tests/interop/ldp_frr.sh` — zebra + ldpd in a rootless netns |
-| C / Go / Python binding harnesses | ✅ 🧪 |
-| fmt + clippy (-D warnings) | ✅ |
-| Cross builds: aarch64-linux-gnu, x86_64-windows-gnu (full link), freebsd/netbsd (check) | ✅ |
-| Coverage (tarpaulin) | ✅ |
-| MSRV 1.88 build | ✅ |
-| `cargo audit` (RustSec advisories, nightly) | ✅              \| `.github/workflows/nightly.yml` `supply-chain` job |
-| `cargo deny` (advisories + licenses + bans + sources, nightly) | ✅              \| `deny.toml` at repo root |
-| Dependabot (cargo + github-actions, weekly grouped PRs) | ✅              \| `.github/dependabot.yml` |
+## Embedder surface — `lr-ffi`, `lr-cli`, bindings
 
-## Roadmap v1 — complete
-
-The original 15-item production roadmap is finished. In order: graceful restart (RFC 4724) + LLGR (RFC 9494); OSPF LSA refresh/ABR summaries (§12.4.3, §16.2); Babel HMAC (RFC 8967); BGP MD5/TCP-AO (RFC 2385/5925); daemon hardening (signals, privilege drop, runtime API); RFC 7911 Add-Path end-to-end; OSPF type-5/type-4 external routes (§16.4); OSPF stub/NSSA areas (RFC 3101); OSPF virtual links (§15); BGP dual-stack/MP-BGP/ENH session modes (RFC 5549, 8 modes e2e); OSPF authentication (RFC 5709/7166) + OSPFv3 inter-area; BGP GTSM (RFC 5082) + maximum-prefix; cross-protocol redistribution; Babel daemon parity (IPv6 link-local + RFC 9079 completion); BMP monitoring (RFC 7854). BGP route aggregation (RFC 4271 §9.2.2.2) landed as a bonus item. Per-item details live in the git history; the capability tables above reflect the current state.
-
-## Roadmap v2 — toward a complete routing stack
-
-Six workstreams. Every item except the SR-MPLS placeholder has landed; the per-item narratives (design decisions, evidence, the bugs flushed out) live in [`ROADMAP.md`](ROADMAP.md) — this section tracks the state, that file tracks the how and why.
-
-| Workstream | Scope | State |
-| --- | :----: | --- |
-| W1 — a complete daemon | multi-peer BGP daemon, config, runtime API, privilege drop, MRT/BMP, LDP/OSPF/Babel daemon modes | complete — see [`ROADMAP.md` §W1](ROADMAP.md#w1--a-complete-daemon-lr-daemon) |
-| W2 — BIRD/FRR non-standard compatibility | RFC 8212 default-policy parity, FRR `default ipv4-unicast`, GTSM knobs, ENH defaults, `supported_grace_time`, MRT/BMP shape parity | complete — see [`ROADMAP.md` §W2](ROADMAP.md#w2--bird--frr-non-standard-compatibility-selective) |
-| W3 — RFC coverage gaps | §6.8 collision, RFC 8212, OSPF DBD/LSR exchange, OSPF graceful restart (3623), RFC 7684, Babel MAC (8967/9467), BGP-LU (8277), MPLS dataplane, YANG models (9647/8177) | complete — see [`ROADMAP.md` §W3](ROADMAP.md#w3--rfc-coverage-gaps-from-rfc_mapmd) |
-| W3-extra — comprehensive MPLS | label codec (3032), BGP-LU dataplane mirror, LDP (5036) + dual-stack (7552) + transit allocation + loop detection + GR (3478), kernel mirror, SR-MPLS slices 1–3 (RFC 8665/8660/8661) | SR-MPLS complete; SRv6 slices 1-3 (data plane + OSPFv3 SRv6 control plane + daemon origination, RFC 9513) landed — see [`ROADMAP.md` §W3-extra](ROADMAP.md#w3-extra--comprehensive- … |
-| W4 — documentation | tutorial, per-protocol deep dives, binding guides, runbook | complete — see [`ROADMAP.md` §W4](ROADMAP.md#w4--documentation-guides-tutorials) |
-| W5 — compatibility layer | `translate bird\ | frr`, native BIRD/FRR config run (compat surface), capture/replay parity harness, VM test harness \| complete — see [`ROADMAP.md` §W5](ROADMAP.md#w5--compatibility-layer) |
-| W6 — research: BGP defects + exchange plane | BGP-DEFECTS + EXCHANGE-PLANE research docs, exchange-plane prototype (feature-gated, IANA experimental range) | prototype landed behind `exchange-plane` (off by default) — see [`ROADMAP.md` §W6](ROADMAP.md#w6--research-bgp-defects-and-a-private-exchange-plane) |
-
-**Remaining open items** (nothing else is queued):
-
-1. **SRv6 (RFC 8754 / RFC 8402 / RFC 8986)** — slices 1-3 have landed: slice 1, the data-plane codec + kernel mirror (`lr-srv6` provides the SID/Locator/SRH codec + the RFC 8986 behavior registry; `lr-osroute::seg6_route` installs `seg6`/`seg6local` routes via Linux netlink). Slice 2, the control-plane extensions: the OSPFv3 SRv6 extensions of RFC 9513 (the repo previously cited RFC 9352, which is the IS-IS SRv6 sibling — corrected) — the codec, the per-node SRv6 database, locator routes in the v3 SPF and the fail-closed `ospf_srv6_receive` router gate. Slice 3, the daemon surface: `[[ospf.srv6_locator]]` config + per-area origination of the RFC 9513 Router Information LSA (Capabilities / SR-Algorithm / Node MSD) and the Locator LSA (End SIDs + optional §10 SID Structure), plus the `[ospf] srv6_receive` reception gate on the daemon path; FRR 10.3 ospf6d (no SRv6 support) stores and re-floods the LSAs and a third lr installs the locator through that relay (`tests/interop/ospf6_frr_srv6.sh`). Slice 4, the adjacency SIDs: End.X (RFC 9513 §9.1) and LAN End.X (§9.2) codecs ride the RFC 8362 E-Router-Link TLV's sub-TLV region (registry types 31/32, SID Structure as 30), the srv6db projects them gated on §9 locator containment + algorithm match, and the daemon originates the p2p form per `[[ospf.interface]] srv6_end_x` plus the broadcast forms — the §9.1 sub-TLV for the DR adjacency and one §9.2 LAN End.X per Full BDR/DR-Other neighbor derived from `[[ospf.interface]] srv6_end_x_lan` as `base | Router-ID` — sparse-mode companion E-Router-LSA under legacy mode, in-LSA under `extended_lsas` (`tests/interop/ospf6_e_lsa_endx.sh`, `tests/interop/ospf6_e_lsa_endx_lan.sh`). Still open: BGP-LS / BGP SR Policy (RFC 9256 / 9430). (`ROADMAP.md` W3-extra — "Slice 5 — OSPFv3 SRv6 control plane".)
-2. **OSPFv3 daemon depth** — slices 1-2 landed: the daemon runs v3 end to end (adjacency, v3 LSDB exchange, v3 SPF, IPv6 route publication, kernel mirror), interoperates with FRR 10.3 ospf6d, and the route calculation now covers inter-area summaries (0x2003), inter-area ASBRs (0x2004) and AS externals (0x4005) with ABR summary origination and v6 external redistribution (see the RFC 5340 rows above). Slice 3 landed: broadcast segments — the RFC 5340 §4.1.2 interface FSM over the §9.4 DR/BDR election on Router-ID identity, Hello DR/BDR fields, Router-LSA transit links, the DR's Network-LSA and the network-referenced Intra-Area-Prefix-LSA, interoperating live with FRR ospf6d's default broadcast type (`tests/interop/ospf6_broadcast.sh`, `tests/interop/ospf6_frr_broadcast.sh`). Slice 4 landed: OSPFv3 graceful restart (RFC 5187) — helper + restarting router, verified against FRR ospf6d (`tests/interop/ospf6_gr.sh`, `tests/interop/ospf6_gr_frr.sh`). No v2-only daemon feature remains; the v3 codec + LSA + SPF surfaces are in the capability tables above.
-3. **Phase 4 — pre-1.0 hardening** — landed: cross-platform CI matrix (Ubuntu, macOS Intel, macOS Apple Silicon, Windows x86_64-MSVC) running `cargo fmt`, `cargo clippy -D warnings`, `cargo build --workspace --all-features`, and `cargo test --workspace --all-features` on each runner in `.github/workflows/ci.yml` (the Linux-only interop suite stays on its existing `interop` job; the Windows/macOS runners skip the Linux-only kernel-gated tests at the file level via `#![cfg(target_os = "linux")]`). `docs/lr-cli.md` and `docs/lr-cli-internals.md` document every CLI subcommand and the daemon's module layout + extension patterns. `docs/RELEASE-PLAN.md` defines the semver policy, the three-tier API stability contract, the 1.0 freeze criteria, the release flow, and the post-1.0 governance rules. `.github/workflows/release.yml` builds `lr-ffi` on the four native targets and assembles them into a single draft GitHub Release with auto-generated commit-diff notes. The 1.0 cut PR is the next release-event after one clean week of CI on all three platforms.
-4. **Phase 5 — CI matrix hardening + documentation expansion** — landed: dropped `macos-13` (Intel) from the cross-platform matrix (GitHub Actions retired the Intel runner pool; the runner was queued-for-hours every CI run since Phase 4 landed while the same code paths ran green on `macos-14`). Added a new `cross-macos-intel` job that cross-compiles `x86_64-apple-darwin` from a `macos-14` runner (the universal Apple clang targets both arches natively), so Intel macOS compilation is still covered. Filled the example-doc gaps with three new walkthroughs: `docs/examples/ldp_basic.md` (RFC 5036 LDP label distribution + the kernel MPLS dataplane mirror), `docs/examples/bgp_labeled_unicast.md` (RFC 8277 BGP-LU → MPLS dataplane, the LSP tail/head classification), and `docs/examples/ospfv3_srv6.md` (RFC 9513 OSPFv3 SRv6 — the RI LSA + Locator LSA origination signatures and the `srv6db` reception path). Indexed all three in `docs/README.md`.
-5. **Phase 6 — E-LSA design doc + RUNBOOK expansion + code audit** — landed: `docs/research/E-LSA-DESIGN.md` is the implementation plan for the RFC 8362 Extended-LSA machinery (Phase 3 item 2's prerequisite), laying out the function codes (0xA020–0xA026), the TLV framing, the seven E-LSA body codecs, the U-bit-2 flooding rules, the SPF integration plan, the End.X SID sub-TLV design (RFC 9513 §9), the interop verification plan, and the three-slice breakdown (codecs → SPF → End.X origination). Expanded `docs/RUNBOOK.md` with a "Deeper troubleshooting" section covering BGP session flapping, OSPF adjacency stuck in ExStart/Exchange, LDP label binding not propagating, route flap damping tuning, memory growth on full-table peers, CPU spikes during reconvergence, and MRT dump disk growth. Code audit: replaced two `unwrap()` calls in `lr-core` (the IPv6-address dotted-quad parser and the timer heap's `pop()`) with explicit `match` / `expect()` patterns that document the safety invariant for the reader.
-6. **Phase 7 — v1.0.0-rc.1 pre-release** — landed: bumped the workspace version from `0.1.0` to `1.0.0-rc.1`, tagged `v1.0.0-rc.1`, and triggered the `release.yml` workflow which built per-OS artifacts (Linux x86_64, macOS Intel + Apple Silicon, Windows x86_64-MSVC) and published them as a GitHub pre-release with 6 assets (4 tarballs/zip + 2 standalone headers). All §2 freeze criteria verified on the cut commit; CI 11/11 green, nightly 2/2 green. The 1-week clean-CI wait (RELEASE-PLAN.md §2.8) was skipped per the user's instruction: functionality is complete and no large code changes are expected before 1.0.0 (recent history is docs + CI + small fixes). Released as `rc.1` rather than the final `1.0.0` to test the never-exercised release workflow end-to-end and signal API freeze to the community. The final `1.0.0` follows after rc.1 artifacts are validated. Also fixed the `release.yml` matrix to use `macos-14` (Apple Silicon) for the Intel macOS cross-compile (the `macos-13` Intel runner was retired by GitHub Actions and was stuck queued on the first release run).
-7. **Phase 8 — v1.0.0-rc.3 multi-protocol daemon** — landed: one `lr-daemon` process now runs a combination of BGP, OSPF (v2/v3) and Babel through a shared-router supervisor (`daemon_multi.rs`). `--protocol` became a set (repeatable + comma-separated; TOML `protocol = "a,b"` / `protocols = ["a","b"]`). The engines take an `Option<EngineHost>`: standalone keeps the classic path bit-for-bit (own router, ticker, API socket, privilege drop), embedded shares the supervisor's plumbing (one `DefaultRouter` = one shared Loc-RIB, one running flag, one ticker, one API socket, one thread per engine, per-engine startup gates between the socket binds and the privilege drop). Signal dispatch became supervised: the supervisor is the sole signal consumer, so connector threads and session pumps cannot steal SIGTERM from it. `lr-router` gained the cross-protocol Loc-RIB merge the shared router exposed as missing: protocol-direct contributions (OSPF/Babel runtime deltas) are tracked in a `direct_rib` map, chained into `reselect` (a BGP re-ranking can no longer evict them; a withdrawal falls back to the surviving protocol's contribution), keys with BGP-side candidates rank through the full preference order (BGP 20 < OSPF 110 < Babel 120), and the BGP export path filters non-BGP routes so cross-protocol advertisement stays opt-in through redistribution pipes (FRR `redistribute` / BIRD `pipe` semantics). Direct installs also feed `redistribute_route` now, so Ospf/Babel to BGP pipes see protocol-direct sources. bmp/ldp combinations fail closed; a startup failure aborts the whole combination. The Babel main loop's busy-spin (a full core at idle) was fixed with a 10 ms idle sleep. Coverage: 5 new daemon-config unit tests, 3 new lr-router merge/pipe unit tests, 4 new lr-cli e2e tests, and the `tests/interop/multi_protocol.sh` lab (lr `--protocol bgp,ospf` versus one BIRD 2 process running ospf + bgp: Full adjacency + established BGP in both processes, the shared prefix prefers the BGP path in lr's merged RIB, no OSPF route leaks into lr's BGP advertisements, graceful whole-combination shutdown). Verified against BIRD 2.17.5 locally.
-8. **Phase 9 — D9.2 Filter DSL formal grammar** — landed: the `docs/filter_dsl_grammar.md` reference document derives an ISO/IEC 14977 EBNF grammar directly from the lexer + Pratt parser source (`crates/lr-policy/src/filter/`). It covers the lexical structure (identifiers, reserved words, integer / string / IP / prefix literals, the full operator table with longest-match rules), the full statement + expression grammar (every production traced to its parser function), the operator precedence table mirroring `BinaryOp::precedence`, the route field reference (settable vs `+=`-only vs read-only), the `MAX_EXPR_DEPTH = 108` / `MAX_CALL_DEPTH = 64` limits, a worked-examples section covering accept-on-prefix, prefix-range membership, ROA gating, `case`, user-defined functions, community-set mutation, AS-path membership, extended- and large-community tuples, and a BIRD-comparison table. The companion `crates/lr-policy/tests/grammar_corpus.rs` test suite pins every example — positive cases compile through `lr_policy::filter::compile`, negative cases fail with the documented `ParseErrorKind` — so a doc/source drift fails CI rather than shipping. 30 tests across positive, negative and boundary cases. The grammar captured two real divergences from the older in-tree BIRD example doc (`docs/examples/filter_dsl_roa.md`): the function return-type annotation uses `=>` (the same `TokenKind::Arrow` as `case` arms), not BIRD's `->`; and AS-path `~` is currently flat set-membership, not BIRD regex (the `_` wildcard token is parsed by the lexer but does not yet carry meaning inside `~` patterns). Both are documented as current behaviour with follow-up pointers in ROADMAP-v3 D9.
-9. **Phase 10 — D12.1 `lrctl` operational CLI** — landed: a third `lr-cli` binary (`crates/lr-cli/src/lrctl.rs`) connects to a running `lr-daemon` over its Unix API socket and proxies the line-oriented command protocol. Mirrors the existing `lr` / `lr-daemon` style (hand-rolled `env::args()` parsing, no clap dependency, `ExitCode` returns). Daemon-proxy surface: `lrctl status`, `lrctl sessions [list]`, `lrctl routes show [prefix]` (client-side prefix filter — exact match on the leading token so `203.0.113.0/24` does not also match `203.0.113.0/25`), `lrctl routes dump <path>` (writes an MRT dump via the daemon's `mrt PATH` command), `lrctl reload`, `lrctl shutdown`. Client-side surface: `lrctl filter compile <body>` reuses `lr-policy::filter::compile` directly so operators can validate a filter body before deploying — the same parser path the daemon runs at startup. Default socket path `/run/lr-daemon.api` matches `templates/daemon.toml`; `--socket PATH` overrides on any subcommand. Non-Unix targets refuse with a clear error (the runtime API requires Unix domain sockets). Exit codes: 0 success (or a `routes show <prefix>` with no match — FRR parity), 1 transport failure / daemon `error:` reply / filter parse error, 2 argument error. The release workflow stages `lrctl` alongside `lr` and `lr-daemon` in every platform archive (Linux x86_64, macOS Intel + Apple Silicon, Windows x86_64-MSVC). 10 e2e tests in `crates/lr-cli/tests/lrctl.rs` pin every subcommand including transport-failure and argument-error paths. `lrctl` is documented in `docs/lr-cli.md` (new `lrctl` section) and `docs/RUNBOOK.md` (cross-reference from the Runtime API section). `roa list` deferred — the daemon's `Runtime` struct does not carry a `RoaStore` reference today, so exposing it requires threading the store through `spawn_api` (a follow-up commit).
-10. **Phase 11 — D12.2 Prometheus `/metrics` endpoint** — landed: the daemon gained an opt-in HTTP endpoint that serves the Prometheus text exposition format on `GET /metrics` (`crates/lr-cli/src/metrics.rs`). Hand-rolled HTTP/1.0 responder — no `hyper` / `tokio` dependency, matching the project's stance on `api.rs`. Configuration: `--metrics-addr ADDR` CLI flag / `[bgp] metrics_addr = "…"` TOML key (default off, like `api_socket`); a bind failure is fatal (same stance as `spawn_api`). The thread model mirrors `api.rs`: one thread polls a `set_nonblocking(true)` `TcpListener` with a 100 ms sleep, each accepted connection served on its own short-lived thread so a slow client cannot hold the endpoint hostage. The router lock is held only for the duration of a single `session_summaries()` + `rib_len()` read, never for the network write. The exposition covers: `lr_info` (gauge=1 with `version` / `local_as` / `router_id` labels, for join queries); `lr_uptime_seconds`; `lr_sessions_total{kind,state}`; `lr_established_sessions{kind}` (with explicit-zero for kinds that have sessions but none established, so an alert joining on `kind` does not see a missing series); `lr_adj_rib_in_entries{kind}`; `lr_rib_entries`; and `lr_roa_entries` (omitted entirely when no ROA store is configured — a missing metric is more honest than a misleading zero). `GET /` returns a one-line pointer to `/metrics`, `GET /nonexistent` returns `404`, non-GET methods return `404`. The `Runtime` struct gained an optional `roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>` field so the BGP daemon (which always builds a `RoaStore`) can expose the live count without holding a lock; OSPF/Babel/LDP/ BMP/multi pass `None`. Wired into every daemon entry point (BGP, OSPFv2, OSPFv3, Babel, LDP, BMP, multi-protocol supervisor) via `spawn_metrics()`, paralleling `spawn_api()`. 7 e2e tests in `crates/lr-cli/tests/daemon_metrics.rs` pin the exposition shape, the opt-in default, the 404 paths, non-GET rejection, scrape stability across two scrapes, and bind-failure fatality. Documented in `docs/RUNBOOK.md` (new "Prometheus `/metrics` endpoint" section with the metric table and a live scrape example), `docs/lr-cli.md` (`--metrics-addr` row in the daemon flag reference) and `templates/daemon.toml` (commented-out `metrics_addr` with the metric list). ~~Filter-eval latency histograms and UPDATE tx/rx counters remain open — they require per-session counters the daemon does not track today (a follow-up commit under D12).~~ Closed by Phase 14 (D12.4) below.
-11. **Phase 12 — D12.3 container deployment** — landed: a multi-stage `Dockerfile` at the repo root builds the whole workspace in release mode with all features and ships the three CLI binaries (`lr`, `lr-daemon`, `lrctl`), `liblr_ffi.so` and the C / C++ headers into a `debian:bookworm-slim` runtime image. The builder stage pins `rust:1.88-slim-bookworm` (the workspace MSRV) and uses BuildKit mount caches on the cargo registry + target dir so a no-op rebuild is seconds, not minutes. The runtime stage is `debian:bookworm-slim` — the glibc baseline matches the builder so the dynamically linked `liblr_ffi.so` and CLI binaries load without a compatibility shim. The image creates a non-root `lr` user, `EXPOSE`s `179/tcp` (BGP) and `9119/tcp` (Prometheus metrics — matches the example address in `docs/RUNBOOK.md` and `templates/daemon.toml`), declares `VOLUME /etc/lr-daemon` (config mount) and `VOLUME /run/lr-daemon` (API socket mount for the `lrctl` sidecar pattern), and uses `ENTRYPOINT ["lr-daemon"]` with `CMD ["--help"]` so a bare `docker run` prints the usage banner instead of crashing. The image does NOT ship a default config (operators mount one or pass CLI flags) and does NOT push to a registry from CI (that is a release-event concern). The `.dockerignore` keeps the build context lean (excludes `target/`, editor state, Python / Go binding build artifacts, fuzz corpus, `.git/`, etc.). The `docker/README.md` deployment guide covers quick start, production config-file mount, sidecar `lrctl`, image layout, exposed ports, volumes, the ~100 MB size target, and what the image does NOT include (no default config, no Helm chart, no BIRD/FRR, no process supervisor). The `.github/workflows/docker.yml` CI workflow builds the image on every push / PR / nightly, runs the three CLI binaries with `--help` / `version`, verifies `liblr_ffi.so` is loadable via `ldconfig -p`, and reports the image size. Helm chart deferred — a Helm chart conventionally lives in its own repository so it can version independently of the image; the Dockerfile here is the foundation a chart would reference.
-12. **Phase 13 — D10.6 RFC 8212 interop + D9.6 FFI design doc** — landed: two interop scripts verify lr-daemon's default RFC 8212 eBGP policy against real BIRD 2 and FRR bgpd. `tests/interop/rfc8212_bird.sh` and `tests/interop/rfc8212_frr.sh` each run two phases: Phase 1 (default mode, no explicit policy) asserts the session reaches Established but BIRD/FRR does NOT learn lr-daemon's route and lr-daemon does NOT install BIRD/FRR's route — the RFC 8212 import-deny and export-deny are both exercised; Phase 2 (explicit permit-all route-maps) asserts the route flows both directions, confirming the RFC-intended escape hatch. The startup warnings (`no export route-map; announcing nothing    (RFC 8212)` and `no import route-map; discarding received    routes (RFC 8212)`) are pinned as Phase 1 assertions. Both scripts are wired into the CI interop job. The scripts gracefully SKIP when `bird`/`birdc` or `bgpd` are not on `$PATH` (same pattern as every other interop script). The in-process `daemon_rfc8212.rs` tests (the original D10.6 coverage) remain — the interop scripts are additive, not replacement. `docs/ffi_design.md` (~310 lines) is the canonical FFI design reference: the panic-barrier contract (every `extern "C"` entry point wrapped in `guarded` / `catch_unwind`; the release-profile `panic = "abort"` caveat); the `lr_bytes_t` ownership model (`from_vec` / `reclaim_into_vec` / `lr_bytes_free`; the four embedder rules); the cbindgen pipeline (`build.rs` config, the `LrError` exclusion for pre-C23 portability, the `#define` constants in `after_includes`); the opaque-handle pattern (`#[repr(C)]` + `_private: [u8; 0]`; the handle zoo table; the destroy contract); the non-reentrant lock hazard (every `lr_router_*` holds the `Mutex` for the whole call; hooks must not re-enter); what is NOT exposed and why (OSPF/Babel engines are daemon-driven, LDP has no router session model, BMP/MRT/BFD are codec-only, the exchange-plane prototype is daemon-only); the error model (the `LR_ERR_*` code table, the thread-local last-error string, the `lr_abi_version()` check); and the three-level testing strategy (Rust unit tests, C / C++ harness, Go / Python bindings). Cross-references every section to the source file that implements it. The doc is indexed in `docs/README.md` under "Embedding the library".
-13. **Phase 14 — D12.4 per-session UPDATE counters + filter-eval latency histograms** — landed: two new metric families on the Prometheus endpoint, backed by counters that live where the traffic flows. `lr-bgp::PeerMessageStats` (FRR `show bgp    neighbor` "Message statistics" parity) counts OPEN / UPDATE / NOTIFICATION / KEEPALIVE / ROUTE-REFRESH per direction at the wire boundary — the ten inline encode sites in `fsm.rs`/`advertise.rs` folded into one `send_msg()` choke point, `feed_bytes` counts every decoded message, and the counters are monotonic across session re-establishment (`reset()` leaves them untouched; structurally invalid PDUs never decode and do not count). `SessionSummary` grew `updates_received`/`updates_sent` (0 for OSPF/Babel), surfaced on the runtime API `sessions` command (`updates-rx=`/ `updates-tx=`) and the FFI `lr_router_sessions_dump` text — additive key=value fields. The metrics endpoint renders `lr_bgp_updates_total{session,peer,direction}` (the `peer` label carries the configured name/address; bidirectional peers get an `(inbound)` suffix on the RFC 4271 §6.8 challenger) and `lr_filter_eval_duration_seconds{direction,filter}` histograms — fixed 16-bucket atomic `DurationHistogram`s (100 ns … 10 ms, bounds around the GitHub #19 measured VM hot path of 60–430 ns) recorded by the import/export filter hooks with relaxed atomics, no locks on the per-route path. Recording is opt-in: hooks carry `Option<Arc<DurationHistogram>>` that is `Some` only when `--metrics-addr` is configured, so the hot path pays the two `Instant::now()` calls only while metrics are enabled; the internal `__roa_validate` filter registers like any user filter so ROA-validation cost is separable from user policy. Daemon wiring covers the standalone BGP daemon and the multi-protocol supervisor (the embedded engine pushes its registry + session labels into the supervisor's `Runtime` before reporting Started). Along the way a real RFC 8212 bug was fixed: `set_session_policy` only counted route-map bindings, so a peer configured with `import_filter`/ `export_filter` but no route-map was treated as policy-less and its imports silently discarded under the default `rfc8212` enforcement — DSL filter bindings now count as explicit policy. Coverage: 4 `lr-bgp` unit tests, 1 `lr-router` test (EoR + advertisement + flap survival), 6 `lr-cli` unit tests (bucket cumulativity, exact seconds formatting, registry rendering, empty omission, concurrent recording, hook latency) and the two-daemon e2e `metrics_updates_and_filter_histograms` (the first cargo e2e exercising `import_filter`/`export_filter` bindings).
+| Capability | Status | Module |
+| --- | --- | --- |
+| C ABI entry points and cbindgen header | yes | `lr-ffi` |
+| FFI router, sessions, policy objects and route objects | yes | `lr-ffi::router`, `lr-ffi::sessions`, `lr-ffi::policy_objects`, `lr-ffi::policy` |
+| FFI BGP message encoders and event polling | yes | `lr-ffi::codec`, `lr-ffi::events` |
+| FFI ROA store and origin validation | yes | `lr-ffi::roa_store`, `lr-ffi::filters` |
+| C++ header-only RAII wrapper | yes | `include/librouting.hpp` |
+| Go and Python bindings | yes | `bindings/lr-go`, `bindings/lr-python` |
+| Daemon for BGP, OSPFv2, OSPFv3, Babel, LDP, BMP and combinations | yes | `crates/lr-cli/src/daemon.rs`, `daemon_multi.rs` |
+| Runtime API socket and `lrctl` client | yes | `crates/lr-cli/src/api.rs`, `crates/lr-cli/src/lrctl.rs` |
+| Prometheus exposition on `/metrics` | yes | `crates/lr-cli/src/metrics.rs` |
+| Config: native `.lr` DSL, TOML, BIRD and FRR dialects | yes | `crates/lr-cli/src/daemon_config.rs`, `crates/lr-cli/src/compat.rs`, `crates/lr-cli/src/translate.rs` |
+| Config validation without starting the daemon | yes | `crates/lr-cli/src/config_check.rs` |
+| RPKI-RTR cache client in the daemon | yes | `crates/lr-cli/src/daemon_rpki.rs` |
+| YANG instance data for Babel and key chains | yes | `crates/lr-cli/src/yang.rs`, `yang/ietf-babel@2024-10-10.yang` |
+| Privilege drop, signal handling and reload | yes | `crates/lr-cli/src/privdrop.rs`, `crates/lr-cli/src/signal.rs` |
+| Cross-crate integration tests | yes | `crates/lr-tests/tests/` |

@@ -1,128 +1,107 @@
 # RFC reference map
 
-This document lists the RFCs that `librouting` implements, partially implements, or references. It is grouped by protocol family.
+Which RFCs `librouting` implements, and the module that implements each
+one. Every crate path here exists in the workspace; a capability with no
+module is not listed. See [`STATUS.md`](STATUS.md) for the capability
+view and [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §4.4 for what is out of
+scope.
 
-## BGP — RFC 4271 (BGP-4) + extensions
+## BGP
 
-| RFC | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 4271 | BGP-4 | ✓ core; §6.8 connection collision detection over `SessionConfig::{collision_group, locally_initiated}` — retains the connection initiated by the higher-BGP-Identifier speaker, Established siblings … | `lr-bgp::fsm`, `lr-bgp::message`, `lr-bgp::peer::{ipv4_unicast_active, local_as_tolerance, soft_reconfig_inbound}`, `lr-router::import_route`, `lr-router::resolve_connection_collision`, … |
-| 1997 | BGP Communities Attribute | ✓ | `lr-bgp::path::communities` |
-| 2385 | Protection of BGP Sessions via a TCP MD5 Signature (TCP MD5) | ✓ | `lr-osroute::tcp_auth` (TCP_MD5SIG/\_EXT) |
-| 2439 | BGP Route Flap Damping | ✓ (opt-in; RFC 7196 documents the harm of the defaults) | `lr-damping` |
-| 2545 | BGP-4 Multiprotocol Extensions for IPv6 | ✓ (under mp_bgp) | `lr-bgp::path::mp_nlri` |
-| 2796 | BGP Route Reflection | ✓ (superseded by 4456) | `lr-bgp::role::cluster` |
-| 2918 | BGP Route Refresh | ✓ | `lr-bgp::message::route_refresh` |
-| 3065 | BGP Confederations | ✓ (superseded by 6793) | `lr-bgp::role::confederation` |
-| 4360 | BGP Extended Communities | ✓ | `lr-bgp::path::communities` |
-| 4456 | BGP Route Reflection (revised) | ✓ | `lr-bgp::role::cluster` |
-| 4486 | Subcodes for BGP CEASE NOTIFICATION | ✓ (subcode 1 = max-prefix reached) | `lr-bgp::fsm`, `lr-router` |
-| 4724 | BGP Graceful Restart | ✓ (per-family F bits) | `lr-bgp::extensions::graceful_restart`, `lr-router` |
-| 4760 | Multiprotocol BGP | ✓ | `lr-bgp::path::mp_nlri` |
-| 4784 | BGP Cumulative Bestpath | ✓ (multipath) | `lr-bgp::best_path` |
-| 4893 | BGP Support for 4-byte AS | ✓ | `lr-bgp::extensions::asn4` |
-| 5004 | BGP Deterministic Path Selection | ✓ (default on; exposed as FRR `bgp bestpath compare-routerid` on the daemon, W2.2) | `lr-bgp::best_path` |
-| 5082 | The Generalized TTL Security Mechanism (GTSM) | ✓ (IP_MINTTL / IPV6_MINHOPCOUNT listener filter + outbound TTL; `--gtsm` daemon flag) | `lr-osroute::gtsm` |
-| 5492 | BGP Capabilities | ✓ | `lr-bgp::capabilities` |
-| 5549 | BGP Extended Next-Hop | ✓ (capability 5 in the §4 6-byte tuple form, (1,1,2) negotiation + 16B NEXT_HOP decode + eBGP egress rewrite + e2e 8 modes + BIRD interop) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::capabilities`, `lr-bgp::advertise` |
-| 5666 | BGP Egress Peer Engineering | partial (TBD) | — |
-| 5925 | The TCP Authentication Option (TCP-AO) | ✓ (Linux >= 6.7; RFC 5926 KDFs via kernel) | `lr-osroute::tcp_auth` (TCP_AO_ADD_KEY/INFO) |
-| 6396 | MRT Routing Information Export Format | ✓ TABLE_DUMP_V2 read/write (peer index tables, RIB v4/v6 unicast + add-path), BGP4MP decode | `lr-mrt` |
-| 6793 | BGP Support for 4-byte AS (revised) | ✓ (supersedes 4893; §4.2.3 AS4_PATH reconstruction) | `lr-bgp::path::as_path`, `lr-bgp::extensions::asn4` |
-| 7313 | Enhanced Route Refresh | ✓ | `lr-bgp::extensions::enhanced_rr` |
-| 7854 | BGP Monitoring Protocol (BMP) | ✓ (lr-bmp crate: 7 message types, streaming codec, IPv4/IPv6 peer headers; set_bmp_sink router integration) | `lr-bmp`, `lr-router` |
-| 7911 | BGP Add-Path | ✓ (negotiation, wire framing, N-path selection/export) | `lr-bgp::extensions::addpath`, `lr-bgp::codec`, `lr-bgp::best_path`, `lr-router` |
-| 7947 | Internet Exchange BGP Route Server | ✓ | `lr-bgp::role::route_server` |
-| 8212 | Default EBGP Route Behaviors | ✓ (deny-in/deny-out for external sessions without explicit policy; daemon default-on, `accept-all` deviation) | `lr-router` (`set_ebgp_requires_policy` / `set_session_policy`), `lr-cli` daemon (`ebgp_policy`) |
-| 8277 | BGP and Labeled Address Prefixes (MPLS) | ✓ (lr-mpls: RFC 3032 label + label-stack codec, 4- and 3-octet wire forms; lr-bgp::path::labeled_nlri: RFC 8277 §3 NLRI codec + MP_REACH/MP_UNREACH helpers; lr-router::originate_labeled; … | `lr-mpls`, `lr-bgp::path::labeled_nlri`, `lr-router`, `lr-osroute::mpls_route`, `lr-ffi`, `lr-cli` |
-| 8326 | Graceful BGP Session Shutdown | ✓ (sender side: `GRACEFUL_SHUTDOWN` community `0xFFFF:0000` honoured on export — LOCAL_PREF zeroed, community preserved, per-peer `graceful_shutdown = false` exemption; … | `lr-bgp::path::communities`, `lr-bgp::best_path`, `lr-policy::hooks::{GracefulShutdownExportHook, GracefulShutdownImportHook}`, `lr-cli::daemon` |
-| 8950 | Advertising IPv4 NLRI with an IPv6 Next Hop | ✓ (obsoletes 5549's NLRI encoding; capability encoding identical) | `lr-bgp::extensions::extended_next_hop`, `lr-bgp::path` |
-| 9072 | Extended Message Support for BGP | ✓ (extended length) | `lr-bgp::path::PathAttrFlags` |
-| 9234 | BGP Role (OTC) | ✓ (§5 ingress leak rejection + egress customer/RS-client-only rule) | `lr-bgp::role::otc` |
-| 9494 | Long-Lived Graceful Restart | ✓ | `lr-bgp::extensions::long_lived`, `lr-router` |
-| 1105 | BGP-1 (historic) | not implemented (legacy) | — |
-| 1163 | BGP-3 (historic) | not implemented (legacy) | — |
-| 1267 | BGP-3 → BGP-4 transition (historic) | not implemented | — |
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 1997 | `lr-bgp::path::communities` | COMMUNITIES attribute |
+| 2385 | `lr-osroute::tcp_auth` | TCP MD5 socket authentication |
+| 2439 | `lr-damping` | route flap damping figure of merit |
+| 2545 | `lr-bgp::path::mp_nlri` | IPv6 NLRI over MP-BGP |
+| 2918 | `lr-bgp::message::route_refresh` | ROUTE-REFRESH message |
+| 4271 | `lr-bgp::fsm`, `lr-bgp::message` | FSM, message codec, §9.1.2 selection |
+| 4360 | `lr-bgp::path::communities` | EXTENDED_COMMUNITIES attribute |
+| 4456 | `lr-bgp::role::cluster` | route reflection, ORIGINATOR_ID, CLUSTER_LIST |
+| 4486 | `lr-bgp::message::notification` | CEASE subcodes, subcode 1 for max-prefix |
+| 4724 | `lr-bgp::extensions::graceful_restart` | restart capability and End-of-RIB |
+| 4760 | `lr-bgp::path::mp_nlri` | MP_REACH_NLRI and MP_UNREACH_NLRI |
+| 5004 | `lr-bgp::best_path` | deterministic router-id tiebreak |
+| 5065 | `lr-bgp::role::confederation`, `lr-bgp::path::as_path` | confederation segments |
+| 5082 | `lr-osroute::gtsm` | outbound TTL and minimum-TTL receive filter |
+| 5492 | `lr-bgp::capabilities` | capability optional parameter |
+| 5925 | `lr-osroute::tcp_auth` | TCP-AO key installation |
+| 6396 | `lr-mrt` | TABLE_DUMP_V2 read and write, BGP4MP decode |
+| 6793 | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` | four-octet AS, AS4_PATH reconstruction |
+| 6811 | `lr-bgp::roa`, `lr-bgp::roa_store` | prefix-origin validation |
+| 7313 | `lr-bgp::extensions::enhanced_rr` | BoRR and EoRR demarcation |
+| 7854 | `lr-bmp` | BMP message codec and sink |
+| 7911 | `lr-bgp::extensions::addpath` | path-identifier framing and negotiation |
+| 7947 | `lr-bgp::role::route_server` | transparent route-server egress |
+| 8092 | `lr-bgp::path::communities` | LARGE_COMMUNITIES attribute |
+| 8210 | `lr-bgp::rtr` | RTR PDU codec and client state machine |
+| 8212 | `lr-router::instance` | default external route propagation |
+| 8277 | `lr-bgp::path::labeled_nlri`, `lr-osroute::mpls_route` | labelled NLRI, LSP install |
+| 8326 | `lr-bgp::path::communities`, `lr-policy::hooks` | GRACEFUL_SHUTDOWN community |
+| 8950 | `lr-bgp::extensions::extended_next_hop` | IPv4 NLRI with an IPv6 next hop |
+| 9072 | `lr-bgp::path` | extended-length path-attribute flag |
+| 9234 | `lr-bgp::role::otc` | OTC attribute and role negotiation |
+| 9494 | `lr-bgp::extensions::long_lived` | LLGR capability, LLGR_STALE, NO_LLGR |
 
-## OSPF — RFC 2328 (OSPFv2) + RFC 5340 (OSPFv3) + extensions
+## OSPF
 
-| RFC | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 2328 | OSPF Version 2 | ✓ core + inter-area + external + stub areas + virtual links + daemon transport (raw sockets, Hello/Router-LSA origination, §A.1 packet checksum) + full DBD/LSR exchange (§7.2/§10.3–§10.8, … | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf`, `lr-ospf::abr`, `lr-ospf::external`, `lr-ospf::origination`, `lr-ospf::interface`, `lr-ospf::exchange`, `lr-router`, `lr-osroute::ospf_transport` |
-| 3101 | OSPF Not-So-Stubby Areas (NSSA) | ✓ type-7 origination (P-bit + forwarding-address rules), §2.5 calculation, §3.1 translator election, §3.2 type-5 translation, type-7/type-3 defaults, `no_summary` | `lr-ospf::nssa`, `lr-router` |
-| 3623 | Graceful OSPF Restart | ✓ complete — Grace-LSA codec (`lr-ospf::lsa::grace`), helper + restarting state machines (`lr-ospf::gr`: §3.1 checks, §3.2 exits, §2.2 outcomes), router event surface (`drain_ospf_grace_events()`, … | `lr-ospf::lsa::grace`, `lr-ospf::gr`, `lr-router`, `crates/lr-cli/src/daemon_ospf.rs` |
-| 4577 | OSPF as the Provider Edge-to-CE | partial | — |
-| 5340 | OSPF for IPv6 | ✓ daemon mode (slice 1): v3 wire formats fixed against a reference implementation — 16-byte packet header (§A.3.1, Instance ID), FRR-parity Hello (§A.3.2, 16-bit dead interval), 12-byte DBD (§A.3.3: … | options(3)\\|MTU\\|0\\|flags\\|seq), LSR entries with the leading reserved word (§A.3.4), IPv6 pseudo-header checksum; v3 LSA bodies (§A.4: Router 0x2001, Network 0x2002, Link 0x0008, Intra-Area-Prefix … |
-| 5187 | OSPFv3 Graceful Restart | ✓ complete — the v3 Grace-LSA is the dedicated link-scoped LS type 0x000b with the Interface ID as the Link State ID (§2.1/§2.2, `originate_grace_lsa_v3`, FRR `ospf6_gr_lsa_originate` parity; … | `lr-ospf::lsa::grace`, `lr-ospf::gr`, `lr-router` (`drain_ospf_grace_events`), `lr-cli/src/daemon_ospf3.rs` |
-| 5250 | Opaque LSA Option | ✓ opaque-LSA type space (v2 types 9/10/11 in `LsaTypeV2`), Opaque Type/ID packing for the Link State ID (`opaque_lsa_id`), the O-bit in DD packet options announcing opaque capability — BIRD/FRR gate … | `lr-ospf::lsa`, `lr-ospf::exchange` |
-| 5709 | OSPFv2 HMAC-SHA Cryptographic Auth | ✓ (HMAC-SHA-1 + HMAC-SHA-256 with the §3.3 Ko/Apad construction, Auth Data Len = digest, anti-replay) | `lr-ospf::auth::crypto` |
-| 5643 | Management Information Base for OSPFv3 | partial | — |
-| 6850 | OSPFv3 MIB | partial | — |
-| 7166 | Support for the Auth Trailer in OSPFv3 | ✓ (RFC 7166 trailer: AuthType/SA-ID(16-bit)/crypto-seq + §4.5 Apad MAC embedding the IPv6 source, anti-replay) | `lr-ospf::auth::v3_auth` |
-| 7471 | OSPF TE MIB | partial | — |
-| 7506 | OSPFv3 Auto-Configuration | partial | — |
-| 7684 | OSPFv3 Prefix Link-Local Attributes; OSPFv2 Extended Prefix/Link Opaque LSA | ✓ v3: LSA type 0x4004 (AS-scope, function 4) + `v3_prefix_options` bits (Af, R) + `V3PrefixLinkLocalEntry` codec (W3.5). v2: Extended Prefix Opaque LSA (area-scoped, Opaque Type 7) + Extended Prefix … | `lr-ospf::lsa::{LsaTypeV3::PrefixLinkLocalAsLsa, v3_prefix_options}`, `lr-ospf::lsa::sr::{SrPrefixAdvert, encode_ext_prefix_lsa_body, decode_ext_prefix_lsa_body, SrLinkAdvert, SrAdjSidTlv, … |
-| 7770 | OSPF Node Admin Tags | partial | — |
-| 8036 | Multi-Area OSPF | partial | — |
-| 8362 | OSPFv3 over IPv6 (revised) | ✓ | `lr-ospf::packet` |
-| 8665 | OSPF Extensions for Segment Routing | ✓ control plane + reception (W3-extra.5 slices 1+2): wire codecs (RI LSA SR-Algorithm type 8 + SID/Label Range TLV type 9 per §3, Extended Prefix Opaque LSA + Prefix-SID sub-TLV with … | `lr-ospf::lsa::sr`, `lr-ospf::srdb`, `lr-cli/src/daemon_ospf.rs` (`reoriginate_sr`, `reoriginate_sr_links`), `[ospf] srgb_base/srgb_range/sr_receive` + `[[ospf.prefix_sid]]` + `[[ospf.interface]] … |
-| 9825 | OSPFv3 Segment Routing | partial | — |
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 2328 | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf` | OSPFv2 codec, LSDB and SPF |
+| 3101 | `lr-ospf::nssa` | type-7 origination, P-bit and translation |
+| 3623 | `lr-ospf::gr`, `lr-ospf::lsa::grace` | graceful restart and the Grace-LSA |
+| 5187 | `lr-ospf::lsa::grace`, `lr-ospf::gr` | v3 Grace-LSA, LS type 0x000b |
+| 5250 | `lr-ospf::lsa`, `lr-ospf::exchange` | opaque LSA types and the DD O-bit |
+| 5340 | `lr-ospf::packet`, `lr-ospf::lsa::v3`, `lr-ospf::spf` | OSPFv3 codec, LSA bodies, SPF |
+| 5709 | `lr-ospf::auth::crypto` | HMAC-SHA-1 and HMAC-SHA-256 trailer |
+| 7166 | `lr-ospf::auth::v3_auth` | v3 authentication trailer |
+| 7684 | `lr-ospf::lsa::sr` | extended prefix and link opaque LSAs |
+| 7770 | `lr-ospf::lsa::srv6`, `lr-ospf::srv6db` | Router Information LSA and capability TLVs |
+| 8362 | `lr-ospf::lsa::e_v3` | Extended LSAs and their TLV framing |
+| 8665 | `lr-ospf::lsa::sr`, `lr-ospf::srdb` | OSPFv2 Segment Routing control plane |
+| 9513 | `lr-ospf::lsa::srv6`, `lr-ospf::srv6db` | OSPFv3 SRv6 control plane and reception |
 
-## Babel — RFC 8966 + extensions
+## Babel
 
-| RFC | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 7557 | Babel Source-Specific Extensions (precursor to 9079) | ✓ | `lr-babel::source` |
-| 8966 | Babel | ✓ core | `lr-babel::tlv`, `lr-babel::message` |
-| 8967 | Babel MAC Cryptographic Auth | ✓ (stateful §4.3 interface, §4.3.1 challenge handshake, §4.4 expiry, §5 incremental deployment, HMAC-SHA256 + keyed BLAKE2s-128) | `lr-babel::auth` |
-| 9079 | Babel Source-Specific Routing | ✓ (Source Prefix sub-TLV 128 inside Update / Route Request / Seqno Request, IPv6 source prefixes, route table keyed by (dest, source)) | `lr-babel::source`, `lr-babel::message` |
-| 9229 | Babel RPM (route propagation) — registers AE 4 | ✓ (§2.4 AE 4 "IPv4 via IPv6": announced for v4 destinations over a v6-only next hop when `extended_next_hop` is on, decoded symmetrically — the encoding BIRD 3 and babeld accept on v6-only links) | `lr-babel::message`, `lr-router::instance`, `lr-cli` daemon |
-| 9467 | Relaxed Packet Counter Verification for Babel MAC | ✓ (§3.1 unicast/multicast split, §3.2 window, §3.3 combined) | `lr-babel::auth` |
-| 9647 | Babel YANG Data Model | ✓ (verbatim `ietf-babel@2024-10-10.yang` in `yang/`; `lr-daemon yang render` emits libyang-validated XML instance data for the babel container — NMDA envelope, constants, mac-key-set) | `lr-cli` (`yang` module), `yang/`, `tests/interop/yang.sh` |
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 8966 | `lr-babel::message`, `lr-babel::tlv` | datagram codec and the core TLV set |
+| 8967 | `lr-babel::auth` | MAC authentication and the challenge handshake |
+| 9079 | `lr-babel::source` | source-prefix sub-TLV and the (dest, source) route key |
+| 9229 | `lr-babel::message` | address encoder 4, IPv4 routes over an IPv6 next hop |
+| 9467 | `lr-babel::auth` | relaxed packet-counter verification |
+| 9647 | `yang/ietf-babel@2024-10-10.yang`, `crates/lr-cli/src/yang.rs` | Babel YANG model and rendered instance data |
 
-## BFD — RFC 5880 + extensions
+## BFD
 
-| RFC | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 5880 | Bidirectional Forwarding Detection | ✓ core | `lr-bfd::packet`, `lr-bfd::session` |
-| 5881 | BFD for IPv4 and IPv6 (Single Hop) | ✓ (Linux; TTL check Linux-only) | `lr-osroute::bfd_transport` |
-| 5883 | BFD for Multihop Paths | ✓ (UDP 4784, no TTL filter) | `lr-osroute::bfd_transport`, daemon `--bfd-multihop` |
-| 7130 | BFD for LAG | not impl | — |
-| 8562 | BFD for Multipoint Networks | not impl | — |
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 5880 | `lr-bfd::packet`, `lr-bfd::session` | packet codec and session FSM |
+| 5881 | `lr-osroute::bfd_transport` | single-hop sockets and the TTL receive check |
+| 5883 | `lr-osroute::bfd_transport` | multihop sessions on UDP 4784 |
 
-Notes: the §6.8.6 state machine, §6.8.4 detection time (peer's detect multiplier), §6.8.7 negotiated transmit interval with jitter and the §6.5 Poll/Final sequences are implemented and BIRD-verified (`tests/interop/bfd_bird.sh`). Simple Password auth (§4.2) works end-to-end in sessions; the keyed-hash sections (§4.3/§4.4) are framing-only — digests are embedder-supplied (no crypto dependency in `lr-bfd`). The Echo function (§6.4) is not implemented (single-hop-only and optional; multihop MUST NOT use it, RFC 5883 §3).
+## MPLS and Segment Routing
 
-## MPLS — RFC 3032 + extensions
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 3032 | `lr-mpls` | label and label-stack codec |
+| 5036 | `lr-ldp` | LDP codec, session FSM and label bookkeeping |
+| 5462 | `lr-mpls` | traffic-class field on a label |
+| 5586 | `lr-mpls` | generic associated channel label |
+| 6790 | `lr-mpls` | entropy label indicator |
+| 7552 | `lr-ldp` | IPv6 discovery and targeted sessions |
+| 8660 | `lr-ospf::srdb`, `lr-osroute::mpls_route` | SR-MPLS label resolution and install |
+| 8754 | `lr-srv6::srh`, `lr-srv6::sid`, `lr-srv6::locator` | SRH, segment identifier and locator |
+| 8986 | `lr-srv6::behavior`, `lr-osroute::seg6_route` | endpoint behaviors and seg6local install |
 
-| RFC | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 3032 | MPLS Label Stack Encoding | ✓ (Label + LabelStack types, 4-octet-per-entry wire form §2.1 + 3-octet-per-entry NLRI form for RFC 8277; bottom-of-stack bit handling; named constants for all reserved labels — IPv4/IPv6 … | `lr-mpls` |
-| 5462 | MPLS Label Stack Entry — TC field | ✓ (3-bit TC field on Label) | `lr-mpls` |
-| 6790 | Entropy LSE Indicator | ✓ (Label::ELI constant) | `lr-mpls` |
-| 5586 | GAL (Generic Associated Channel Label) | ✓ (Label::GAL constant) | `lr-mpls` |
-| 8277 | BGP and Labeled Address Prefixes (BGP-LU) | ✓ (NLRI codec, MP_REACH/MP_UNREACH helpers, router originate/withdraw, kernel dataplane mirror — tail pop + head encap LSPs —, FFI + bindings, daemon config, two-daemon interop + kernel dataplane … | `lr-bgp::path::labeled_nlri`, `lr-router`, `lr-osroute::mpls_route`, `lr-ffi`, `lr-cli` |
-| 5036 | LDP (Label Distribution Protocol) | ✓ complete IPv4/IPv6 LSR (PDU/TLV/message codec for all 11 message types with U/F-bit passthrough, §2.5.4 session FSM with §3.5.3 parameter negotiation, §3.5.2 discovery (link + targeted) with the … | `lr-ldp` |
-| 7552 | LDP IPv6 | ✓ (§5.1 IPv6 basic discovery: ff02::2 link Hellos with hop-limit-255 GTSM check and link-local sources; §5.2 targeted over global unicast only, link-local rejected at config parse; … | `lr-ldp` |
-| 8660 | SR-MPLS Data Plane | ✓ head end + tail (the OSPFv2 slice; IS-IS rides no plane here): the Prefix-SID label resolved from the SRDB becomes a Loc-RIB `LrMplsLabelStack` attribute and the shared kernel mirror installs the … | `lr-ospf::srdb`, `lr-router` (SR attach), `lr-osroute::mpls_route`, `lr-cli` |
-| 8667 | IS-IS Extensions for Segment Routing | not impl (IS-IS; the OSPF counterpart is RFC 8665 — see the OSPF table) | — |
-| 8754 | IPv6 Segment Routing Header (SRH) | ✓ (lr-srv6: 128-bit `Sid` (RFC 8754 §3, LOC:FUNCT:ARGS structured), `Locator` (RFC 8754 §3.1, IPv6 prefix + block bits, host-bits masking, from_str/Display with the RFC 5952 canonical form), `Srh` … | `lr-srv6::srh`, `lr-srv6::sid`, `lr-srv6::locator` |
-| 8986 | SRv6 Segment Routing with the IPv6 Data Plane | ✓ (lr-srv6: `Behavior` enum — the 38 RFC 8986 IANA assignments exactly (1-24, 26-39; 25 Reserved): End / End.X / End.T / End.B6.Insert / End.B6.Encaps / End.BM / End.DX6 / End.DX4 / End.DT6 / End.DT4 … | `lr-srv6::behavior`, `lr-osroute::seg6_route` (`Seg6LocalRoute::new` + builder) |
-| 9256 | Segment Routing Policy | not impl (SR Policy; future slice — the slice-1 SRv6 data plane is the foundation, RFC 9256 §2 builds the policy model on top) | — |
-| 9513 | OSPFv3 Extensions for SRv6 | ✓ slice 2 (control plane, library level): the SRv6 Capabilities / SR-Algorithm / Node MSD TLVs on the OSPFv3 Router Information LSA (RFC 7770 §2.2, 0xA00C area-scoped), the SRv6 Locator LSA (function … | `lr-ospf::lsa::srv6`, `lr-ospf::srv6db`, `lr-ospf::spf`, `lr-router` |
+## OS interface
 
-## OS interface — RFC 3549 + Linux
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 3549 | `lr-osroute::linux` | the rtnetlink message set the Linux backend speaks |
 
-| RFC / spec | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 3549 | Linux Netlink as an IP Services Protocol | ✓ | `lr-osroute::linux::RtNetlink` |
-| Linux | `uapi/linux/rtnetlink.h` | ✓ reference | `lr-osroute::linux` |
-| FreeBSD, OpenBSD, NetBSD, macOS | `route(4)` socket | ✓ (per-OS layout tables pinned; cross-compile checked) | `lr-osroute::bsd::RouteSocket` |
-| Windows | IP Helper API (`CreateIpForwardEntry2` / `GetIpForwardTable2`) | ✓ (full link verified, x86_64-windows-gnu) | `lr-osroute::windows::IpHelper` |
+## Policy and models
 
-## Policy
-
-| RFC | Title | Status | Crate path |
-| --- | --- | --- | --- |
-| 2622 | Routing Policy Specification Language (RPSL) | not impl | — |
-| 8195 | Identifiers for BGP-4 | partial | `lr-bgp::path` |
-| 8177 | YANG Data Model for Key Chains | ✓ (verbatim `ietf-key-chain@2017-06-15.yang` in `yang/`; babel MAC keys render as a key chain via `lr-daemon yang render --model keychain`; BLAKE2s fails closed — no RFC 8177 identity) | `lr-cli` (`yang` module), `yang/`, `tests/interop/yang.sh` |
+| RFC | crate::module | what it implements |
+| --- | --- | --- |
+| 8177 | `yang/ietf-key-chain@2017-06-15.yang`, `crates/lr-cli/src/yang.rs` | key-chain instance data for Babel MAC keys |
