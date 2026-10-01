@@ -1,13 +1,6 @@
 # cargo-fuzz targets for librouting (ROADMAP-v3 D6.4)
 
-The `fuzz/` workspace houses the long-running, sanitizer-driven fuzz
-targets that complement the property tests in `crates/*/tests/proptest.rs`.
-Property tests run inside `cargo test` and assert structural invariants
-(prefix lattice, parser purity, codec contract); fuzz targets run under
-`cargo +nightly fuzz` with AddressSanitizer + LibFuzzer's coverage-guided
-input generation, and assert the *security* contract: **the codec / parser
-must never panic, never abort, never exhibit undefined behaviour on
-arbitrary input**.
+The `fuzz/` workspace houses the long-running, sanitizer-driven fuzz targets that complement the property tests in `crates/*/tests/proptest.rs`. Property tests run inside `cargo test` and assert structural invariants (prefix lattice, parser purity, codec contract); fuzz targets run under `cargo +nightly fuzz` with AddressSanitizer + LibFuzzer's coverage-guided input generation, and assert the _security_ contract: **the codec / parser must never panic, never abort, never exhibit undefined behaviour on arbitrary input**.
 
 ## Layout
 
@@ -25,11 +18,7 @@ fuzz/
     └── roa_validate/           # empty table + single exact-match
 ```
 
-The `fuzz/corpus/` and `fuzz/artifacts/` directories are generated at
-run time and `.gitignore`d — they hold the auto-grown corpus and any
-crash artifacts the fuzzer discovers. Seeds under `fuzz/seeds/` are
-committed so anyone running `cargo +nightly fuzz run` starts from a
-meaningful initial coverage point instead of an empty corpus.
+The `fuzz/corpus/` and `fuzz/artifacts/` directories are generated at run time and `.gitignore`d — they hold the auto-grown corpus and any crash artifacts the fuzzer discovers. Seeds under `fuzz/seeds/` are committed so anyone running `cargo +nightly fuzz run` starts from a meaningful initial coverage point instead of an empty corpus.
 
 ## Running locally
 
@@ -56,25 +45,14 @@ done
 
 ## CI integration
 
-The nightly workflow (`.github/workflows/nightly.yml`) runs each
-target for 5 minutes under `cargo +nightly fuzz`. Fuzzing is
-non-blocking on PRs — a regression is filed as an issue, not a CI
-failure, because the corpus growth can take days to surface a bug
-that the build itself cannot detect.
+The nightly workflow (`.github/workflows/nightly.yml`) runs each target for 5 minutes under `cargo +nightly fuzz`. Fuzzing is non-blocking on PRs — a regression is filed as an issue, not a CI failure, because the corpus growth can take days to surface a bug that the build itself cannot detect.
 
 ## Adding a new target
 
-1. Add a new file under `fuzz/fuzz_targets/<name>.rs` with the
-   `#![no_main]` + `fuzz_target!(...)` boilerplate (see
-   `bgp_decode.rs` for the canonical shape).
+1. Add a new file under `fuzz/fuzz_targets/<name>.rs` with the `#![no_main]` + `fuzz_target!(...)` boilerplate (see `bgp_decode.rs` for the canonical shape).
 2. Add a `[[bin]]` entry to `fuzz/Cargo.toml`.
-3. Add a CI step in `.github/workflows/nightly.yml` mirroring the
-   existing fuzz jobs.
+3. Add a CI step in `.github/workflows/nightly.yml` mirroring the existing fuzz jobs.
 
 ## Coverage scope
 
-The current three targets cover the highest-risk input surfaces
-(network wire + operator config + RPKI cache). The remaining ROADMAP
-targets — `ospf_decode`, `babel_decode`, `ldp_decode`, `bfd_decode`,
-`bmp_decode`, `mrt_decode` — follow the same pattern and will be
-added as those crates' codecs stabilise.
+The current three targets cover the highest-risk input surfaces (network wire + operator config + RPKI cache). The remaining ROADMAP targets — `ospf_decode`, `babel_decode`, `ldp_decode`, `bfd_decode`, `bmp_decode`, `mrt_decode` — follow the same pattern and will be added as those crates' codecs stabilise.

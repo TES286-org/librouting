@@ -1,13 +1,8 @@
 # Example: BFD integration for sub-second BGP failure detection
 
-Without BFD, BGP peers take `hold_time` (default 90s) to detect a forwarding
-failure. BFD brings detection down to milliseconds — useful at IXes or for
-high-availability CE/PE links.
+Without BFD, BGP peers take `hold_time` (default 90s) to detect a forwarding failure. BFD brings detection down to milliseconds — useful at IXes or for high-availability CE/PE links.
 
-The reference daemon already wires this end-to-end: `lr-daemon --bfd`
-(one BFD session per peer, UDP 3784 per RFC 5881 / 4784 per RFC 5883,
-tearing the BGP session down the moment BFD goes Down). This example
-shows the library-level pieces an embedder composes.
+The reference daemon already wires this end-to-end: `lr-daemon --bfd` (one BFD session per peer, UDP 3784 per RFC 5881 / 4784 per RFC 5883, tearing the BGP session down the moment BFD goes Down). This example shows the library-level pieces an embedder composes.
 
 ```rust
 // Cargo.toml:
@@ -66,29 +61,15 @@ fn main() {
 
 ## Detection time
 
-Detection time = the *peer's* `detect_mult` × `max(required_min_rx_interval,
-peer's desired_min_tx_interval)` (RFC 5880 §6.8.4 — the multiplier is the
-remote system's, not a negotiated minimum). With `detect_mult=3` and 50ms
-intervals, detection time is 150ms — three orders of magnitude faster than
-BGP-only keepalives.
+Detection time = the _peer's_ `detect_mult` × `max(required_min_rx_interval, peer's desired_min_tx_interval)` (RFC 5880 §6.8.4 — the multiplier is the remote system's, not a negotiated minimum). With `detect_mult=3` and 50ms intervals, detection time is 150ms — three orders of magnitude faster than BGP-only keepalives.
 
-While the session is not Up, the transmit interval is floored at one
-second (RFC 5880 §6.8.3); interval changes while Up are confirmed with
-a Poll/Final sequence (§6.5).
+While the session is not Up, the transmit interval is floored at one second (RFC 5880 §6.8.3); interval changes while Up are confirmed with a Poll/Final sequence (§6.5).
 
 ## What the daemon does
 
-`lr-daemon --bfd --bfd-min-tx-ms 100 --bfd-min-rx-ms 100 --bfd-multiplier 3`
-(or per-peer `bfd = true` in the TOML config, with `bfd_multihop = true`
-for RFC 5883 sessions) runs one BFD session per peer and:
+`lr-daemon --bfd --bfd-min-tx-ms 100 --bfd-min-rx-ms 100 --bfd-multiplier 3` (or per-peer `bfd = true` in the TOML config, with `bfd_multihop = true` for RFC 5883 sessions) runs one BFD session per peer and:
 
-- tears the BGP session down (CEASE NOTIFICATION, route purge per
-  RFC 4271 §8.2.2) the moment BFD goes Down;
-- holds off reconnecting while BFD is down (after it has been up at
-  least once), so a dead path is not connect-stormed.
+- tears the BGP session down (CEASE NOTIFICATION, route purge per RFC 4271 §8.2.2) the moment BFD goes Down;
+- holds off reconnecting while BFD is down (after it has been up at least once), so a dead path is not connect-stormed.
 
-`tests/interop/bfd_bird.sh` verifies both the single-hop and multihop
-modes against BIRD 2 (`protocol bfd` + `bfd on`), including the
-fast-fail: with the BIRD side frozen mid-session (TCP still open), the
-BGP session comes down within ~0.5s at 100ms × 3 timing while the hold
-timer would have waited 60s.
+`tests/interop/bfd_bird.sh` verifies both the single-hop and multihop modes against BIRD 2 (`protocol bfd` + `bfd on`), including the fast-fail: with the BIRD side frozen mid-session (TCP still open), the BGP session comes down within ~0.5s at 100ms × 3 timing while the hold timer would have waited 60s.

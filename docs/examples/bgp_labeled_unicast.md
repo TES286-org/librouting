@@ -1,25 +1,13 @@
 # Example: BGP Labelled Unicast (RFC 8277) → MPLS dataplane
 
-BGP-LU carries MPLS labels inside BGP UPDATEs: the NLRI is
-`(prefix, label)` and the next-hop is the egress LSR's address. This
-is the simplest SR-MPLS dataplane — no LDP, no LSR-by-LSR signalling,
-the labels are pushed onto the stack at the ingress and popped at the
-egress (or at the penultimate hop when the implicit-null label is
-used).
+BGP-LU carries MPLS labels inside BGP UPDATEs: the NLRI is `(prefix, label)` and the next-hop is the egress LSR's address. This is the simplest SR-MPLS dataplane — no LDP, no LSR-by-LSR signalling, the labels are pushed onto the stack at the ingress and popped at the egress (or at the penultimate hop when the implicit-null label is used).
 
 The reference daemon runs this end-to-end on Linux:
 
-- `lr-daemon --network 203.0.113.0/24 --peer ...` with locally
-  originated prefixes implicitly advertises them as BGP-LU when the
-  peer's MP-BGP family includes labelled-unicast.
-- `--install-kernel-routes` mirrors the Loc-RIB into both the plain
-  IP FIB and the `AF_MPLS` netlink table. Locally originated labelled
-  routes install an in-label pop route (LSP tail); peer-advertised
-  routes install an encap route pushing the label stack toward the BGP
-  next hop (LSP head).
+- `lr-daemon --network 203.0.113.0/24 --peer ...` with locally originated prefixes implicitly advertises them as BGP-LU when the peer's MP-BGP family includes labelled-unicast.
+- `--install-kernel-routes` mirrors the Loc-RIB into both the plain IP FIB and the `AF_MPLS` netlink table. Locally originated labelled routes install an in-label pop route (LSP tail); peer-advertised routes install an encap route pushing the label stack toward the BGP next hop (LSP head).
 
-This example shows the library-level pieces an embedder composes; the
-byte-pump pattern mirrors the [LDP example](ldp_basic.md).
+This example shows the library-level pieces an embedder composes; the byte-pump pattern mirrors the [LDP example](ldp_basic.md).
 
 ## The dataplane model
 
@@ -32,11 +20,7 @@ IP packet   ───►  push label  ───►  swap label  ───►  po
                   push 100           swap 100→200       pop 200 → lo
 ```
 
-In the simplest one-hop case there is no transit: the ingress pushes
-the label and the egress pops it. BGP-LU's role is to *distribute*
-the labels: the egress advertises `(prefix, label=200)` to the
-ingress, and the ingress installs `push 200 → next-hop` in its
-AF_MPLS table.
+In the simplest one-hop case there is no transit: the ingress pushes the label and the egress pops it. BGP-LU's role is to _distribute_ the labels: the egress advertises `(prefix, label=200)` to the ingress, and the ingress installs `push 200 → next-hop` in its AF_MPLS table.
 
 ## The label-stack attribute
 
@@ -118,14 +102,13 @@ fn main() {
 
 ## The kernel mirror (Linux)
 
-The daemon's `KernelMirror` (in `crates/lr-cli/src/daemon.rs`) classifies
-each best route and installs the corresponding AF_MPLS entry:
+The daemon's `KernelMirror` (in `crates/lr-cli/src/daemon.rs`) classifies each best route and installs the corresponding AF_MPLS entry:
 
-| Classification                  | Install action                                      |
-| ------------------------------- | --------------------------------------------------- |
-| `LspDecision::PopLocal(label)` | `MplsRoute::pop_local(label, lo_if_index=1)` — in-label → lo, local delivery. The LSP tail. |
-| `LspDecision::Push(stack)`      | `MplsNetlink::add_encap_route(prefix, stack, next_hop, 0)` — push the label stack toward the BGP next hop. The LSP head. |
-| `LspDecision::Plain`            | Plain IP route via `OsRouteTable::add_route` (unlabelled, or PHP / no-label case). |
+| Classification                 | Install action                                                                                                           |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
+| `LspDecision::PopLocal(label)` | `MplsRoute::pop_local(label, lo_if_index=1)` — in-label → lo, local delivery. The LSP tail.                              |
+| `LspDecision::Push(stack)`     | `MplsNetlink::add_encap_route(prefix, stack, next_hop, 0)` — push the label stack toward the BGP next hop. The LSP head. |
+| `LspDecision::Plain`           | Plain IP route via `OsRouteTable::add_route` (unlabelled, or PHP / no-label case).                                       |
 
 ```text
 ingress LSR                                egress LSR (owns 203.0.113.0/24)
@@ -165,11 +148,7 @@ lr-daemon --local-as 64513 --peer-as 64512 \
     --install-kernel-routes
 ```
 
-The interop lab `tests/interop/labeled_unicast.sh` exercises the
-full lifecycle (negotiate, advertise, install, forward, withdraw)
-between two `lr-daemon` instances, and `tests/interop/mpls_lsp.sh`
-extends it through a real Linux kernel MPLS dataplane. See
-[`docs/INTEROP.md`](../INTEROP.md) for the local reproduction steps.
+The interop lab `tests/interop/labeled_unicast.sh` exercises the full lifecycle (negotiate, advertise, install, forward, withdraw) between two `lr-daemon` instances, and `tests/interop/mpls_lsp.sh` extends it through a real Linux kernel MPLS dataplane. See [`docs/INTEROP.md`](../INTEROP.md) for the local reproduction steps.
 
 ## Dataplane requirements
 
@@ -182,6 +161,4 @@ sudo sysctl -w net.mpls.platform_labels=1000
 # Per-interface input is enabled by the interop scripts.
 ```
 
-Without these the daemon prints `mpls route table unavailable; LSP
-install disabled` and falls back to plain IP forwarding only
-(reachability first, labels second — BIRD behaves the same way).
+Without these the daemon prints `mpls route table unavailable; LSP install disabled` and falls back to plain IP forwarding only (reachability first, labels second — BIRD behaves the same way).

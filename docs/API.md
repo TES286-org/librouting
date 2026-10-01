@@ -1,7 +1,6 @@
 # librouting Public API
 
-This is a curated tour of the most useful types and functions. For full
-details, see `cargo doc --workspace --open`.
+This is a curated tour of the most useful types and functions. For full details, see `cargo doc --workspace --open`.
 
 ## Core primitives (`lr-core`)
 
@@ -89,12 +88,7 @@ safety.check(&route, true).unwrap(); // Err on violation
 
 ## Policy — named sets + per-peer dispatch (PolicySet)
 
-`PolicySet` binds user-facing names to prefix-lists / AS-path filters
-/ community lists / route-maps and implements `MatchResolver`, so a
-route-map's `match` clauses resolve through the same set. `PolicyHooks`
-is the import/export dispatch pair: routes whose session has a bound
-route-map are evaluated (FRR semantics: first matching entry wins, no
-match = deny); sessions without a binding pass through.
+`PolicySet` binds user-facing names to prefix-lists / AS-path filters / community lists / route-maps and implements `MatchResolver`, so a route-map's `match` clauses resolve through the same set. `PolicyHooks` is the import/export dispatch pair: routes whose session has a bound route-map are evaluated (FRR semantics: first matching entry wins, no match = deny); sessions without a binding pass through.
 
 ```rust
 use lr_policy::{ListKind, PolicySet, SetAction};
@@ -123,10 +117,7 @@ router.hooks_mut().import.push(Box::new(hooks.clone()));
 router.hooks_mut().export.push(Box::new(hooks));
 ```
 
-`ExportHook::on_export_to(route, destination)` receives the egress
-session id (default method delegates to `on_export`, so existing hooks
-are unaffected). The daemon exposes all of this in the config file —
-see `templates/daemon.lr` (native DSL) and its TOML twin.
+`ExportHook::on_export_to(route, destination)` receives the egress session id (default method delegates to `on_export`, so existing hooks are unaffected). The daemon exposes all of this in the config file — see `templates/daemon.lr` (native DSL) and its TOML twin.
 
 ## BFD
 
@@ -151,76 +142,30 @@ let out = session.drain_outgoing();
 let events = session.tick(Instant(200));
 ```
 
-`feed_bytes` applies the RFC 5880 §6.8.6 MUST-discard rules and drives
-the exact §6.8.6 state machine (Down+Init→Up, Init+Init→Up). The
-detection time is the _peer's_ detect multiplier ×
-`max(required rx, peer desired tx)` (§6.8.4); the transmit interval is
-`max(desired tx, peer required rx)` with 0-25% jitter (§6.8.7) and a
-one-second floor while not Up (§6.8.3). Interval changes while Up go
-through Poll/Final confirmation (§6.5) via
-`update_timers(now, desired_tx_us, required_rx_us)`.
+`feed_bytes` applies the RFC 5880 §6.8.6 MUST-discard rules and drives the exact §6.8.6 state machine (Down+Init→Up, Init+Init→Up). The detection time is the _peer's_ detect multiplier × `max(required rx, peer desired tx)` (§6.8.4); the transmit interval is `max(desired tx, peer required rx)` with 0-25% jitter (§6.8.7) and a one-second floor while not Up (§6.8.3). Interval changes while Up go through Poll/Final confirmation (§6.5) via `update_timers(now, desired_tx_us, required_rx_us)`.
 
-The sockets live in `lr_osroute::bfd_transport`: `BfdRxSocket` (shared
-receive socket on 3784 single-hop / 4784 multihop, single-hop TTL 255
-filter per RFC 5881 §5) and `BfdTxSocket` (per-session ephemeral
-source port in 49152-65535, TTL 255 on transmit). The daemon wires it
-all with `--bfd` / per-peer `bfd = true` — see
-`docs/examples/bfd_integration.md`.
+The sockets live in `lr_osroute::bfd_transport`: `BfdRxSocket` (shared receive socket on 3784 single-hop / 4784 multihop, single-hop TTL 255 filter per RFC 5881 §5) and `BfdTxSocket` (per-session ephemeral source port in 49152-65535, TTL 255 on transmit). The daemon wires it all with `--bfd` / per-peer `bfd = true` — see `docs/examples/bfd_integration.md`.
 
 ## BGP graceful restart
 
-BGP sessions advertise RFC 4724 graceful restart by default through
-`SessionConfig::bgp`. Configure the negotiated restart window with
-`with_graceful_restart(seconds)`. When an established peer's transport closes,
-its imported routes remain selectable until the peer reconnects or the
-negotiated restart window expires; expiry purges both eBGP and iBGP route
-origins. A successful reconnect cancels retention. The embedder must continue
-calling `DefaultRouter::tick` so expiry is enforced.
+BGP sessions advertise RFC 4724 graceful restart by default through `SessionConfig::bgp`. Configure the negotiated restart window with `with_graceful_restart(seconds)`. When an established peer's transport closes, its imported routes remain selectable until the peer reconnects or the negotiated restart window expires; expiry purges both eBGP and iBGP route origins. A successful reconnect cancels retention. The embedder must continue calling `DefaultRouter::tick` so expiry is enforced.
 
 ## Exchange-plane prototype (feature `exchange-plane`)
 
-The W6.3 prototype of the private exchange plane
-(`docs/research/EXCHANGE-PLANE.md`) ships behind the `exchange-plane`
-feature of `lr-bgp` (off by default; the wire format uses experimental
-IANA code points 251 until an RFC 7120 early allocation). The surface:
+The W6.3 prototype of the private exchange plane (`docs/research/EXCHANGE-PLANE.md`) ships behind the `exchange-plane` feature of `lr-bgp` (off by default; the wire format uses experimental IANA code points 251 until an RFC 7120 early allocation). The surface:
 
-* `lr_bgp::extensions::exchange_plane` — the codec. `ExchangePlaneConfig`
-  (nonce + keys + record-class switches) advertises via
-  `ExchangePlaneConfig::capability()`; the peer's OPEN parses with
-  `parse_capability`; `negotiate` applies the activation rule (same
-  version + non-empty key intersection). `ExchangeRecord` encodes and
-  decodes the attribute body carrying `Record::{Hint, Policy, Origin,
-  Segment}` TLVs, `sign`/`verify` add and check the HMAC-SHA256 tag,
-  and `ReplayTracker` enforces the OPEN-nonce binding and the
-  monotonic per-key sequence (design §6).
-* `BgpPeer::set_exchange_plane(cfg)` — advertise the capability in
-  OPEN for this session; `BgpPeer::exchange_plane_session()` — the
-  negotiation result after OPEN (`None` when the peer did not
-  participate; the session itself is unaffected either way, per RFC
-  5492 §3).
+- `lr_bgp::extensions::exchange_plane` — the codec. `ExchangePlaneConfig` (nonce + keys + record-class switches) advertises via `ExchangePlaneConfig::capability()`; the peer's OPEN parses with `parse_capability`; `negotiate` applies the activation rule (same version + non-empty key intersection). `ExchangeRecord` encodes and decodes the attribute body carrying `Record::{Hint, Policy, Origin, Segment}` TLVs, `sign`/`verify` add and check the HMAC-SHA256 tag, and `ReplayTracker` enforces the OPEN-nonce binding and the monotonic per-key sequence (design §6).
+- `BgpPeer::set_exchange_plane(cfg)` — advertise the capability in OPEN for this session; `BgpPeer::exchange_plane_session()` — the negotiation result after OPEN (`None` when the peer did not participate; the session itself is unaffected either way, per RFC 5492 §3).
 
-The decision process is untouched in the prototype: records are
-produced and consumed by the embedder through the codec; a follow-up
-slice wires daemon config (`[peer] exchange_plane`) and the UPDATE
-attach/detach hooks.
+The decision process is untouched in the prototype: records are produced and consumed by the embedder through the codec; a follow-up slice wires daemon config (`[peer] exchange_plane`) and the UPDATE attach/detach hooks.
 
 ## OSPF LSA lifecycle
 
-`DefaultRouter::tick` applies RFC 2328 LSA lifecycle processing to OSPF
-sessions: locally originated LSAs are refreshed and flooded as LSUs after
-1800 seconds, while LSAs that reach MaxAge (3600 seconds) are removed and SPF
-is rerun. The router clock is embedder-driven, so call `tick` with a monotonic
-millisecond timestamp.
+`DefaultRouter::tick` applies RFC 2328 LSA lifecycle processing to OSPF sessions: locally originated LSAs are refreshed and flooded as LSUs after 1800 seconds, while LSAs that reach MaxAge (3600 seconds) are removed and SPF is rerun. The router clock is embedder-driven, so call `tick` with a monotonic millisecond timestamp.
 
 ## OSPF DBD/LSR exchange (RFC 2328 §7.2)
 
-OSPF sessions run the full database synchronization: after 2-Way the
-runtime negotiates master/slave (§10.3, higher router-id wins), pages
-LSA headers through Database Description packets bounded by the
-interface MTU, queues missing/newer LSAs and requests them in the
-Loading phase until the adjacency reaches Full. Sequence mismatches
-restart the negotiation (§10.9); duplicates are answered per §10.6;
-pending DBDs and LS-Requests retransmit on RxmtInterval from `tick()`.
+OSPF sessions run the full database synchronization: after 2-Way the runtime negotiates master/slave (§10.3, higher router-id wins), pages LSA headers through Database Description packets bounded by the interface MTU, queues missing/newer LSAs and requests them in the Loading phase until the adjacency reaches Full. Sequence mismatches restart the negotiation (§10.9); duplicates are answered per §10.6; pending DBDs and LS-Requests retransmit on RxmtInterval from `tick()`.
 
 ```rust
 use lr_router::{DefaultRouter, RouterInstance, SessionConfig};
@@ -235,17 +180,11 @@ let h = r.add_session(
 )?;
 ```
 
-The exchange driver itself (`lr_ospf::exchange::DbExchange`) is
-public for embedders that wire their own OSPF transport — it consumes
-decoded packets plus an `&Lsdb` view and produces the packets to
-transmit, unit-tested through both role assignments.
+The exchange driver itself (`lr_ospf::exchange::DbExchange`) is public for embedders that wire their own OSPF transport — it consumes decoded packets plus an `&Lsdb` view and produces the packets to transmit, unit-tested through both role assignments.
 
 ## OSPF origination + raw transport (speaker building blocks)
 
-The router pipeline is receive-driven; a real OSPF _speaker_ additionally
-produces its own artifacts. `lr-ospf::origination` and
-`lr-osroute::ospf_transport` are the two halves `lr-daemon --protocol ospf`
-is built from — and embedders can reuse them directly:
+The router pipeline is receive-driven; a real OSPF _speaker_ additionally produces its own artifacts. `lr-ospf::origination` and `lr-osroute::ospf_transport` are the two halves `lr-daemon --protocol ospf` is built from — and embedders can reuse them directly:
 
 ```rust
 use lr_ospf::origination::{originate_router_lsa, RouterLsaLink,
@@ -274,17 +213,11 @@ finalize_v2_stream(&mut drained);        // back-to-back packets
 assert!(v2_packet_checksum_ok(&received[..len]));  // ingress gate
 ```
 
-`v2_packet_checksum_ok` excludes the 64-bit authentication field exactly
-as RFC 2328 §A.1 prescribes. On non-Linux platforms the transport returns
-`OspfTransportError::Unsupported`; `is_permission_denied()` detects a
-missing `CAP_NET_RAW` so callers can degrade gracefully.
+`v2_packet_checksum_ok` excludes the 64-bit authentication field exactly as RFC 2328 §A.1 prescribes. On non-Linux platforms the transport returns `OspfTransportError::Unsupported`; `is_permission_denied()` detects a missing `CAP_NET_RAW` so callers can degrade gracefully.
 
 ## OSPF broadcast segments — DR/BDR election (RFC 2328 §9.4/§10.4)
 
-Broadcast segments elect a Designated Router; adjacencies then follow
-the §10.4 relationship. The library keeps the election pure
-(`lr_ospf::interface::elect`) and the session state in the router; the
-embedder drives it:
+Broadcast segments elect a Designated Router; adjacencies then follow the §10.4 relationship. The library keeps the election pure (`lr_ospf::interface::elect`) and the session state in the router; the embedder drives it:
 
 ```rust
 use lr_router::{OspfNetworkType, SessionConfig};
@@ -305,35 +238,11 @@ let (dr, bdr) = elect(&electors_with_self, our_ip);
 router.set_ospf_dr_state(h, dr, bdr)?;   // re-runs §10.4 (AdjOK?)
 ```
 
-`set_ospf_dr_state` returns `Ok(false)` when the pair is unchanged.
-When it changes, the router re-runs the §10.4 decision for the
-neighbor: a 2-Way neighbor that now qualifies advances to ExStart
-(queuing the initial DBD), and one that no longer qualifies demotes to
-2-Way with the DBD exchange state reset (§9.4 step 7 — the AdjOK?
-event). Hellos carry the elected DR/BDR as IP interface addresses
-(§A.3.2); while no DR is elected (interface Waiting) no adjacency
-forms. The DR originates the Network-LSA (`originate_network_lsa`) and
-describes the segment with a transit link (`RouterLsaLink::Transit`);
-`lr-daemon --protocol ospf` wires all of this behind
-`[[ospf.interface]] network_type = "broadcast"`.
+`set_ospf_dr_state` returns `Ok(false)` when the pair is unchanged. When it changes, the router re-runs the §10.4 decision for the neighbor: a 2-Way neighbor that now qualifies advances to ExStart (queuing the initial DBD), and one that no longer qualifies demotes to 2-Way with the DBD exchange state reset (§9.4 step 7 — the AdjOK? event). Hellos carry the elected DR/BDR as IP interface addresses (§A.3.2); while no DR is elected (interface Waiting) no adjacency forms. The DR originates the Network-LSA (`originate_network_lsa`) and describes the segment with a transit link (`RouterLsaLink::Transit`); `lr-daemon --protocol ospf` wires all of this behind `[[ospf.interface]] network_type = "broadcast"`.
 
 ## OSPF external routes (RFC 2328 §12.4.3 / §16.4)
 
-`DefaultRouter::ospf_redistribute` injects an external destination into
-OSPF as a type-5 AS-external-LSA, originated into every attached _regular_
-OSPFv2 area (AS flooding scope) with the requested metric type
-(`ExternalMetricType::Type1`/`Type2`), forwarding address and route tag.
-In NSSA areas the destination is originated as an area-scoped type-7 LSA
-instead (RFC 3101 §2.4): with the P-bit set (`ExternalDestination::p_bit`,
-the default) and a non-zero forwarding address it is translated back into
-a type-5 by the elected border router; a border router that also sources
-the type-5 into its regular areas forces the P-bit clear (§2.4). Stub
-areas receive nothing. `ospf_unredistribute` MaxAge-flushes the type-5 and
-type-7 LSAs across the areas carrying them. The router re-floods received
-type-5s into every other attached regular area, originates type-4
-summary-ASBR-LSAs for ASBRs that are only reachable inter-area, and merges
-the §16.4 external calculation into Loc-RIB — forwarding addresses become
-the route's next hop.
+`DefaultRouter::ospf_redistribute` injects an external destination into OSPF as a type-5 AS-external-LSA, originated into every attached _regular_ OSPFv2 area (AS flooding scope) with the requested metric type (`ExternalMetricType::Type1`/`Type2`), forwarding address and route tag. In NSSA areas the destination is originated as an area-scoped type-7 LSA instead (RFC 3101 §2.4): with the P-bit set (`ExternalDestination::p_bit`, the default) and a non-zero forwarding address it is translated back into a type-5 by the elected border router; a border router that also sources the type-5 into its regular areas forces the P-bit clear (§2.4). Stub areas receive nothing. `ospf_unredistribute` MaxAge-flushes the type-5 and type-7 LSAs across the areas carrying them. The router re-floods received type-5s into every other attached regular area, originates type-4 summary-ASBR-LSAs for ASBRs that are only reachable inter-area, and merges the §16.4 external calculation into Loc-RIB — forwarding addresses become the route's next hop.
 
 ```rust
 use lr_ospf::external::{ExternalDestination, ExternalMetricType};
@@ -347,14 +256,11 @@ let dest = ExternalDestination::new(
 router.ospf_redistribute(dest);
 ```
 
-The C ABI does not expose an OSPF session surface yet; redistribution is
-Rust-level until the daemon gains OSPF support (roadmap item 12).
+The C ABI does not expose an OSPF session surface yet; redistribution is Rust-level until the daemon gains OSPF support (roadmap item 12).
 
 ## OSPF stub/NSSA areas (RFC 2328 §3.6, RFC 3101)
 
-Area types are policy attached to an OSPF area, fixed by the first session
-that connects to it and changeable later via
-`DefaultRouter::ospf_set_area_type`:
+Area types are policy attached to an OSPF area, fixed by the first session that connects to it and changeable later via `DefaultRouter::ospf_set_area_type`:
 
 ```rust
 use lr_router::{OspfAreaType, RouterInstance, SessionConfig};
@@ -371,24 +277,11 @@ OspfAreaType::nssa_no_summary(10); // type-3 default, summaries suppressed
 router.ospf_set_area_type(1, OspfAreaType::nssa(10));
 ```
 
-Behaviour per type: stub/NSSA areas refuse type-5 and type-4 LSAs (both at
-install time and in the AS-scope re-flood path); `no_summary` areas
-additionally refuse every type-3 summary except the default. Border
-routers inject the default route with the configured metric — a type-3
-summary-LSA for stub and `no_summary` areas, a type-7 LSA (P-bit clear)
-for summary-importing NSSAs (RFC 3101 §2.4/§2.7). Type-7 LSAs inside an
-NSSA are calculated by the §2.5 rules (non-zero forwarding addresses must
-be intra-area reachable within the NSSA; border routers only install
-type-7 defaults with the P-bit set) and the elected border router —
-highest router ID among the area's B-bit routers, Nt-bit (RFC 3101
-Appendix B) wins — translates P-bit, non-zero-forwarding-address type-7s
-into AS-scoped type-5s. Stub/NSSA semantics are OSPFv2-only.
+Behaviour per type: stub/NSSA areas refuse type-5 and type-4 LSAs (both at install time and in the AS-scope re-flood path); `no_summary` areas additionally refuse every type-3 summary except the default. Border routers inject the default route with the configured metric — a type-3 summary-LSA for stub and `no_summary` areas, a type-7 LSA (P-bit clear) for summary-importing NSSAs (RFC 3101 §2.4/§2.7). Type-7 LSAs inside an NSSA are calculated by the §2.5 rules (non-zero forwarding addresses must be intra-area reachable within the NSSA; border routers only install type-7 defaults with the P-bit set) and the elected border router — highest router ID among the area's B-bit routers, Nt-bit (RFC 3101 Appendix B) wins — translates P-bit, non-zero-forwarding-address type-7s into AS-scoped type-5s. Stub/NSSA semantics are OSPFv2-only.
 
 ## OSPF virtual links (RFC 2328 §15)
 
-A virtual link is a backbone adjacency between two border routers that
-rides through a non-backbone transit area, repairing a partitioned or
-physically disconnected backbone:
+A virtual link is a backbone adjacency between two border routers that rides through a non-backbone transit area, repairing a partitioned or physically disconnected backbone:
 
 ```rust
 use lr_router::RouterInstance;
@@ -406,26 +299,11 @@ let out = router.drain_output(h);
 router.ospf_remove_virtual_link(1, 0x0202_0202);
 ```
 
-The link is up while the router's transit-area SPF reaches the endpoint;
-coming up materializes an area-0 session — restoring border-router
-status (summaries, defaults, type-4s) for a router without a physical
-backbone attachment — and losing the transit area tears it down again.
-Stub/NSSA transit areas are refused (§15, RFC 3101 §2.1), as is
-configuring the backbone itself as stub. Router-LSA origination stays
-with the embedder, as everywhere in this model: endpoints advertise the
-link as a type-4 link in their backbone router-LSAs (metric = the
-transit-area path cost) and set the V-bit in their transit-area
-router-LSAs.
+The link is up while the router's transit-area SPF reaches the endpoint; coming up materializes an area-0 session — restoring border-router status (summaries, defaults, type-4s) for a router without a physical backbone attachment — and losing the transit area tears it down again. Stub/NSSA transit areas are refused (§15, RFC 3101 §2.1), as is configuring the backbone itself as stub. Router-LSA origination stays with the embedder, as everywhere in this model: endpoints advertise the link as a type-4 link in their backbone router-LSAs (metric = the transit-area path cost) and set the V-bit in their transit-area router-LSAs.
 
 ## Babel MAC authentication (RFC 8967 + RFC 9467)
 
-For the full RFC 8967 reception algorithm (MAC test, PC verification,
-Challenge Request/Reply resynchronization, neighbour-state expiry) use
-the stateful `BabelAuthInterface`. The embedder drives it with the
-datagram, its pseudo-header and a monotonic clock; the interface
-returns the accepted plain body plus the challenge control traffic to
-emit (unicast to the peer). RFC 9467 relaxed PC verification
-(unicast/multicast split, optional window) is built in.
+For the full RFC 8967 reception algorithm (MAC test, PC verification, Challenge Request/Reply resynchronization, neighbour-state expiry) use the stateful `BabelAuthInterface`. The embedder drives it with the datagram, its pseudo-header and a monotonic clock; the interface returns the accepted plain body plus the challenge control traffic to emit (unicast to the peer). RFC 9467 relaxed PC verification (unicast/multicast split, optional window) is built in.
 
 ```rust
 use lr_babel::{
@@ -487,13 +365,7 @@ let _plain = verify_packet(&signed, pseudo_header, &[BabelMacKey::new(b"k")], &m
 
 ## OSPF authentication (RFC 5709 / RFC 7166)
 
-OSPFv2 crypto auth (`CryptoAuth`, AuType 2) and OSPFv3 auth trailer
-(`V3Auth`, RFC 7166) both use HMAC-SHA-1 or HMAC-SHA-256 with the
-RFC 5709 §3.3 / RFC 7166 §4.5 Ko/Apad construction (the digest is
-computed over the packet with the checksum/auth fields zeroed and the
-trailer filled with the Apad constant; the v3 MAC additionally embeds
-the IPv6 source address in Apad). Anti-replay is enforced via a
-monotonic cryptographic sequence number.
+OSPFv2 crypto auth (`CryptoAuth`, AuType 2) and OSPFv3 auth trailer (`V3Auth`, RFC 7166) both use HMAC-SHA-1 or HMAC-SHA-256 with the RFC 5709 §3.3 / RFC 7166 §4.5 Ko/Apad construction (the digest is computed over the packet with the checksum/auth fields zeroed and the trailer filled with the Apad constant; the v3 MAC additionally embeds the IPv6 source address in Apad). Anti-replay is enforced via a monotonic cryptographic sequence number.
 
 ```rust
 use lr_ospf::auth::{CryptoAuth, V3Auth};
@@ -514,11 +386,7 @@ let trailer = v3.sign_trailer(&packet, &[]); // header + body, no LLS
 
 ## OSPFv3 inter-area-prefix-LSA (RFC 5340 §A.4.5)
 
-An OSPFv3 ABR re-advertises reachability between areas using
-inter-area-prefix-LSAs (type 0x2003). The body is
-`Reserved(1) | Metric(3) | PrefixLength(1) | PrefixOptions(1) |
-Reserved(2) | prefix padded to a 32-bit boundary` (the metric is the
-24-bit cost to the prefix).
+An OSPFv3 ABR re-advertises reachability between areas using inter-area-prefix-LSAs (type 0x2003). The body is `Reserved(1) | Metric(3) | PrefixLength(1) | PrefixOptions(1) | Reserved(2) | prefix padded to a 32-bit boundary` (the metric is the 24-bit cost to the prefix).
 
 ```rust
 use lr_ospf::abr::{originate_v3_inter_area_prefix_lsa, SummaryDestination};
@@ -534,17 +402,9 @@ assert!(lsa.checksum_ok());
 
 ## OSPF graceful restart (RFC 3623 / RFC 5187)
 
-The two state machines live in `lr_ospf::gr` and are embedder-driven
-(no internal timers): `HelperEntry` is the §3 helper (per
-`(area, neighbour Router ID)` — feed it `on_grace_lsa` with the §3.1
-checks, `on_flush`/`on_topology_change`/`poll` for the §3.2 exits) and
-`RestartTracker` is the §2 restarting router (suppress topology-LSA
-origination while `recovering()`, report adjacencies through
-`observe_adjacency`, poll for the §2.2 outcome).
+The two state machines live in `lr_ospf::gr` and are embedder-driven (no internal timers): `HelperEntry` is the §3 helper (per `(area, neighbour Router ID)` — feed it `on_grace_lsa` with the §3.1 checks, `on_flush`/`on_topology_change`/`poll` for the §3.2 exits) and `RestartTracker` is the §2 restarting router (suppress topology-LSA origination while `recovering()`, report adjacencies through `observe_adjacency`, poll for the §2.2 outcome).
 
-Received Grace-LSAs — v2's type-9 opaque or v3's LS type 0x000b — never
-enter the area LSDB; the router surfaces each *changed* instance through
-a channel of its own:
+Received Grace-LSAs — v2's type-9 opaque or v3's LS type 0x000b — never enter the area LSDB; the router surfaces each _changed_ instance through a channel of its own:
 
 ```rust
 use lr_router::RouterInstance;
@@ -557,23 +417,14 @@ for ev in r.drain_ospf_grace_events() {
 }
 ```
 
-The events deliberately do not ride `poll_events()`: an embedder that
-delegates general event consumption to a ticker/mirror thread (the
-daemon's shape) still sees every grace instance deterministically.
+The events deliberately do not ride `poll_events()`: an embedder that delegates general event consumption to a ticker/mirror thread (the daemon's shape) still sees every grace instance deterministically.
 
 ## OSPF Segment Routing — adjacency segments + mapping server (RFC 8665 §4/§6)
 
-Beyond the Prefix-SID shapes (RFC 7684 §2 / RFC 8665 §5), `lr-ospf::lsa::sr`
-covers the adjacency and mapping-server halves of RFC 8665:
+Beyond the Prefix-SID shapes (RFC 7684 §2 / RFC 8665 §5), `lr-ospf::lsa::sr` covers the adjacency and mapping-server halves of RFC 8665:
 
-- **Extended Link Opaque LSA** (RFC 7684 §3, Opaque Type 8): one
-  Extended Link TLV per link, each carrying `SrAdjSidTlv` sub-TLVs —
-  the Adj-SID (§6.1) and LAN Adj-SID (§6.2, `neighbor_id` set). V/L
-  flags mean an absolute local label (the length-7/11 encodings);
-  V/L clear mean an index into the originator's SRGB (length-8/12).
-- **Extended Prefix Range TLV** (RFC 8665 §4): the SR Mapping Server's
-  carrier — a contiguous prefix range whose M-flagged Prefix-SID
-  assigns to the range's *first* prefix.
+- **Extended Link Opaque LSA** (RFC 7684 §3, Opaque Type 8): one Extended Link TLV per link, each carrying `SrAdjSidTlv` sub-TLVs — the Adj-SID (§6.1) and LAN Adj-SID (§6.2, `neighbor_id` set). V/L flags mean an absolute local label (the length-7/11 encodings); V/L clear mean an index into the originator's SRGB (length-8/12).
+- **Extended Prefix Range TLV** (RFC 8665 §4): the SR Mapping Server's carrier — a contiguous prefix range whose M-flagged Prefix-SID assigns to the range's _first_ prefix.
 
 ```rust
 use lr_ospf::lsa::sr::{
@@ -598,15 +449,7 @@ let lsa = originate_sr_link_lsa(0x0101_0101, &[(link, vec![adj])], 3, None);
 assert!(lsa.is_some());         // finalized, Opaque Type 8
 ```
 
-The mapping-server shapes decode out of the same LSDB. `SrDatabase`
-(from `lr_ospf::srdb::SrDatabase::from_lsdb`) exposes `links` (per
-advertising router adjacency segments) and `prefix_ranges`; resolvers:
-`SrDatabase::label_for` (direct Prefix-SIDs), `SrRangeMapping::index_for`
-(`sid + offset` for a prefix inside a range, RFC 8665 §4) and
-`SrDatabase::mapping_label_for` (mapping-server fallback — direct
-advertisements win per RFC 8661 §3.2.3, the LSP rides the prefix's own
-path). Embedders project every area with
-`DefaultRouter::ospf_sr_databases()`.
+The mapping-server shapes decode out of the same LSDB. `SrDatabase` (from `lr_ospf::srdb::SrDatabase::from_lsdb`) exposes `links` (per advertising router adjacency segments) and `prefix_ranges`; resolvers: `SrDatabase::label_for` (direct Prefix-SIDs), `SrRangeMapping::index_for` (`sid + offset` for a prefix inside a range, RFC 8665 §4) and `SrDatabase::mapping_label_for` (mapping-server fallback — direct advertisements win per RFC 8661 §3.2.3, the LSP rides the prefix's own path). Embedders project every area with `DefaultRouter::ospf_sr_databases()`.
 
 ## OS routing table
 
@@ -622,18 +465,7 @@ rt.add_route(prefix, gw, 2)?;
 
 ### Babel egress next hops (kernel-FIB embedders)
 
-`RouterInstance::babel_egress_nexthops(h)` returns the next-hop
-addresses the Babel peer of session `h` is currently advertising —
-`(AE 1 IPv4, AE 2/3 IPv6)` from the NextHop TLVs (RFC 8966 §4.6.4),
-falling back to the peer's own source address (§3.5.3) once traffic
-has been seen. Every route learned on the session egresses *that
-session's interface* (babeld installs through `neigh->ifp`; BIRD
-resolves through the neighbour's iface), so an embedder mirroring the
-Loc-RIB into a kernel FIB should pin the egress interface for these
-addresses instead of letting the kernel's own next-hop resolution
-choose — a v4-over-v6 next hop is on-link only on the session's
-interface, and longest-prefix resolution can land it on an unrelated
-adapter. `lr-daemon`'s kernel mirror consumes exactly this API.
+`RouterInstance::babel_egress_nexthops(h)` returns the next-hop addresses the Babel peer of session `h` is currently advertising — `(AE 1 IPv4, AE 2/3 IPv6)` from the NextHop TLVs (RFC 8966 §4.6.4), falling back to the peer's own source address (§3.5.3) once traffic has been seen. Every route learned on the session egresses _that session's interface_ (babeld installs through `neigh->ifp`; BIRD resolves through the neighbour's iface), so an embedder mirroring the Loc-RIB into a kernel FIB should pin the egress interface for these addresses instead of letting the kernel's own next-hop resolution choose — a v4-over-v6 next hop is on-link only on the session's interface, and longest-prefix resolution can land it on an unrelated adapter. `lr-daemon`'s kernel mirror consumes exactly this API.
 
 ```rust
 use lr_router::{DefaultRouter, RouterInstance, SessionHandle};
@@ -702,13 +534,7 @@ mpls.delete_encap_route(&prefix)?;
 mpls.delete_route(Label::new_value(100))?;
 ```
 
-Netlink label attributes follow the kernel's `nla_get_labels()` rules:
-4 bytes per entry, bottom-of-stack on the last entry, TTL and TC
-cleared (the kernel owns the data-plane TTL), and label 3 (implicit
-null) refused — `add_encap_route` and `swap` return
-`MplsRouteError::ImplicitNullLabel` instead of making the syscall. The
-`RTA_VIA` family field is host byte order, exactly like every other
-`sa_family_t`.
+Netlink label attributes follow the kernel's `nla_get_labels()` rules: 4 bytes per entry, bottom-of-stack on the last entry, TTL and TC cleared (the kernel owns the data-plane TTL), and label 3 (implicit null) refused — `add_encap_route` and `swap` return `MplsRouteError::ImplicitNullLabel` instead of making the syscall. The `RTA_VIA` family field is host byte order, exactly like every other `sa_family_t`.
 
 ## LDP — label distribution (RFC 5036 foundation)
 
@@ -750,55 +576,13 @@ engine.withdraw_mapping(Prefix::new_v4([198, 51, 100, 0], 24));
 // engine.lib().label_from(peer, &FecKey::new(prefix)) -> Option<GenericLabel>
 ```
 
-Transit-LSR label allocation (RFC 5036 §3.5.7.1.1, independent
-control) is built into the engine behind
-`cfg.transit_allocation` (default off in the library — the daemon
-turns it on): every FEC learned from a peer gets one locally
-allocated label (`cfg.label_min..=cfg.label_max`, with
-`cfg.reserved_labels` excluded) that is re-advertised upstream to
-every operational peer with the §3.4.4.1 incremented Hop Count and —
-when loop detection is configured — the §A.2.6.4 Path Vector extended
-with the local LSR Id. The embedder sees the resulting LSP state as
-`EngineEvent::TransitSwapChanged { prefix, in_label, next_hop,
-out_label }` (mirror it into the dataplane as a swap) and
-`EngineEvent::TransitSwapRemoved { prefix, in_label }` (the last
-non-reflected downstream binding disappeared: the label is released
-and the FEC withdrawn upstream);
-`EngineEvent::TransitLabelExhausted { prefix }` reports an exhausted
-label range. `engine.transit_label_of(&prefix)` and
-`engine.transit_next_hop(&prefix)` introspect the state; FEC keys are
-normalized to the §3.4.1.1 wire form, so an advertised
-`10.0.0.1/24` and a peer's `10.0.0.0/24` are the same FEC.
+Transit-LSR label allocation (RFC 5036 §3.5.7.1.1, independent control) is built into the engine behind `cfg.transit_allocation` (default off in the library — the daemon turns it on): every FEC learned from a peer gets one locally allocated label (`cfg.label_min..=cfg.label_max`, with `cfg.reserved_labels` excluded) that is re-advertised upstream to every operational peer with the §3.4.4.1 incremented Hop Count and — when loop detection is configured — the §A.2.6.4 Path Vector extended with the local LSR Id. The embedder sees the resulting LSP state as `EngineEvent::TransitSwapChanged { prefix, in_label, next_hop, out_label }` (mirror it into the dataplane as a swap) and `EngineEvent::TransitSwapRemoved { prefix, in_label }` (the last non-reflected downstream binding disappeared: the label is released and the FEC withdrawn upstream); `EngineEvent::TransitLabelExhausted { prefix }` reports an exhausted label range. `engine.transit_label_of(&prefix)` and `engine.transit_next_hop(&prefix)` introspect the state; FEC keys are normalized to the §3.4.1.1 wire form, so an advertised `10.0.0.1/24` and a peer's `10.0.0.0/24` are the same FEC.
 
-RFC 3478 graceful restart rides on top: set `cfg.graceful_restart`
-(the timers default to FRR's — a 15 s advertised Reconnect Timeout, an
-honest Recovery Time of 0) and the Init carries the FT Session TLV.
-When a graceful-restart-capable peer's session then fails unexpectedly
-(`EngineEvent::SessionDown { graceful: true, .. }` — transport closed
-or keepalive expiry), the peer's bindings are retained and the
-dataplane keeps forwarding: they are refreshed if the session
-re-establishes within the reconnect window and the peer preserved its
-forwarding state, and withdrawn through ordinary
-`MappingWithdrawn`/`TransitSwapRemoved` events when it did not.
+RFC 3478 graceful restart rides on top: set `cfg.graceful_restart` (the timers default to FRR's — a 15 s advertised Reconnect Timeout, an honest Recovery Time of 0) and the Init carries the FT Session TLV. When a graceful-restart-capable peer's session then fails unexpectedly (`EngineEvent::SessionDown { graceful: true, .. }` — transport closed or keepalive expiry), the peer's bindings are retained and the dataplane keeps forwarding: they are refreshed if the session re-establishes within the reconnect window and the peer preserved its forwarding state, and withdrawn through ordinary `MappingWithdrawn`/`TransitSwapRemoved` events when it did not.
 
-RFC 7552 (LDP over IPv6) is built in: set
-`cfg.transport_addr_v6` (or construct the engine with an IPv6
-`transport_addr` for a single-stack IPv6 speaker) and the engine
-carries the §6.1.1 Dual-Stack capability in every Hello, applies the
-per-family Transport-Address-TLV rules, scopes Address messages and
-IPv6 bindings per peer (legacy v4 peers never receive IPv6 state), and
-enforces the TR transport-preference — a mismatch resets the session
-with the fatal Transport Connection Mismatch notification.
+RFC 7552 (LDP over IPv6) is built in: set `cfg.transport_addr_v6` (or construct the engine with an IPv6 `transport_addr` for a single-stack IPv6 speaker) and the engine carries the §6.1.1 Dual-Stack capability in every Hello, applies the per-family Transport-Address-TLV rules, scopes Address messages and IPv6 bindings per peer (legacy v4 peers never receive IPv6 state), and enforces the TR transport-preference — a mismatch resets the session with the fatal Transport Connection Mismatch notification.
 
-The crate is protocol-only: it never opens a socket. The embedder owns
-UDP 646 (Hellos) and TCP 646 (the transport), feeds bytes in and drains
-bytes out. Queued session messages are batched into PDUs that respect
-the negotiated Max PDU Length, and a received PDU over that cap is met
-with a fatal Bad PDU Length Notification (§3.5.3). The `lr-ldp` test
-suite includes two-speaker e2e over real loopback sockets (IPv4 and
-IPv6) that runs the whole
-lifecycle (discovery → session → label exchange → withdrawal →
-keepalive expiry / shutdown).
+The crate is protocol-only: it never opens a socket. The embedder owns UDP 646 (Hellos) and TCP 646 (the transport), feeds bytes in and drains bytes out. Queued session messages are batched into PDUs that respect the negotiated Max PDU Length, and a received PDU over that cap is met with a fatal Bad PDU Length Notification (§3.5.3). The `lr-ldp` test suite includes two-speaker e2e over real loopback sockets (IPv4 and IPv6) that runs the whole lifecycle (discovery → session → label exchange → withdrawal → keepalive expiry / shutdown).
 
 ## BGP labelled unicast (RFC 8277)
 
@@ -826,11 +610,7 @@ r.originate_labeled(
 );
 ```
 
-Daemon-side, the same route is originated with `--labeled-network
-"198.51.100.0/24 100"` (or the `labeled_networks` TOML key) plus
-`--mp-family ipv4-labeled-unicast` on the peer. The interop script
-`tests/interop/labeled_unicast.sh` runs the full two-daemon lifecycle
-over a real TCP socket.
+Daemon-side, the same route is originated with `--labeled-network "198.51.100.0/24 100"` (or the `labeled_networks` TOML key) plus `--mp-family ipv4-labeled-unicast` on the peer. The interop script `tests/interop/labeled_unicast.sh` runs the full two-daemon lifecycle over a real TCP socket.
 
 ## Damping (RFC 2439)
 
@@ -859,13 +639,7 @@ let events = r.poll_events();
 
 ### RFC 7911 Add-Path
 
-`SessionConfig::with_add_path()` advertises the Add-Path capability
-(send + receive) for the session's families; it only takes effect when
-the peer offers it too. `set_add_path_max_paths(n)` caps how many paths
-per prefix the decision process keeps in the Loc-RIB (default 1 =
-single-path). Add-Path peers then receive every ranked path, each under
-its own wire path identifier (rank slot + 1), while plain peers continue
-to see only the best path.
+`SessionConfig::with_add_path()` advertises the Add-Path capability (send + receive) for the session's families; it only takes effect when the peer offers it too. `set_add_path_max_paths(n)` caps how many paths per prefix the decision process keeps in the Loc-RIB (default 1 = single-path). Add-Path peers then receive every ranked path, each under its own wire path identifier (rank slot + 1), while plain peers continue to see only the best path.
 
 ```rust
 let h = r.add_session(
@@ -877,25 +651,13 @@ r.set_add_path_max_paths(4);
 
 ### RFC 5549 / RFC 8950 Extended Next-Hop + MP-BGP family / address selection
 
-`SessionConfig` exposes three builders for the dual-stack / MP-BGP / ENH
-session modes:
+`SessionConfig` exposes three builders for the dual-stack / MP-BGP / ENH session modes:
 
-- `with_mp_families(families)` — override the MP-BGP family list
-  advertised in OPEN (default: IPv4 unicast only).
-- `with_extended_next_hop()` — advertise the canonical RFC 5549
-  `(1, 1, 2)` tuple (IPv4 unicast over an IPv6 next-hop). Use
-  `with_extended_next_hop_tuple(afi, safi, nh_afi)` for non-canonical
-  tuples. On the wire the tuples use the RFC 5549 §4 / RFC 8950 §4
-  6-byte form `<AFI:2, SAFI:2, NH-AFI:2>` — byte-identical to what
-  BIRD 2.x and FRR send and the only form both accept.
-- `with_local_address(ip)` — local source for next-hop-self egress.
-  For ENH over IPv6 pass an IPv6 literal; the eBGP egress path then
-  rewrites IPv4 NLRI's NEXT_HOP to a 16-byte IPv6 address.
+- `with_mp_families(families)` — override the MP-BGP family list advertised in OPEN (default: IPv4 unicast only).
+- `with_extended_next_hop()` — advertise the canonical RFC 5549 `(1, 1, 2)` tuple (IPv4 unicast over an IPv6 next-hop). Use `with_extended_next_hop_tuple(afi, safi, nh_afi)` for non-canonical tuples. On the wire the tuples use the RFC 5549 §4 / RFC 8950 §4 6-byte form `<AFI:2, SAFI:2, NH-AFI:2>` — byte-identical to what BIRD 2.x and FRR send and the only form both accept.
+- `with_local_address(ip)` — local source for next-hop-self egress. For ENH over IPv6 pass an IPv6 literal; the eBGP egress path then rewrites IPv4 NLRI's NEXT_HOP to a 16-byte IPv6 address.
 
-The same options are exposed post-creation via mutators:
-`set_session_mp_families`, `set_session_extended_next_hop`, and
-`set_session_local_address`. They must be called before
-`start_session` (OPEN negotiation).
+The same options are exposed post-creation via mutators: `set_session_mp_families`, `set_session_extended_next_hop`, and `set_session_local_address`. They must be called before `start_session` (OPEN negotiation).
 
 ```rust
 let h = r.add_session(
@@ -910,25 +672,13 @@ r.set_session_extended_next_hop(h, &[(1, 1, 2)])?;
 r.set_session_local_address(h, IpAddr::V6([0x20,0x01,0x0d,0xb8, 0,0,0,0, 0,0,0,0, 0,0,0,1]))?;
 ```
 
-The eight BGP session establishment modes (standard dual-stack,
-link-local dual-stack, MP-BGP, MP-BGP+link-local, ENH, ENH+link-local,
-pure IPv6, pure IPv6+link-local) are exercised end-to-end by
-`crates/lr-tests/tests/bgp_session_modes.rs`, and the ENH mode is
-additionally verified against real BIRD by
-`tests/interop/bird_enh.sh`.
+The eight BGP session establishment modes (standard dual-stack, link-local dual-stack, MP-BGP, MP-BGP+link-local, ENH, ENH+link-local, pure IPv6, pure IPv6+link-local) are exercised end-to-end by `crates/lr-tests/tests/bgp_session_modes.rs`, and the ENH mode is additionally verified against real BIRD by `tests/interop/bird_enh.sh`.
 
 ### RFC 5082 GTSM (TTL security)
 
-GTSM is a transport-layer concern: the kernel sets the outbound TTL and
-drops inbound segments whose TTL is below the configured minimum. The
-library never inspects TTL on the wire — it only arms the socket.
+GTSM is a transport-layer concern: the kernel sets the outbound TTL and drops inbound segments whose TTL is below the configured minimum. The library never inspects TTL on the wire — it only arms the socket.
 
-`lr_osroute::gtsm::Gtsm::single_hop()` produces TTL=255 both directions
-(the standard for directly connected eBGP). `Gtsm::multihop(hops)`
-produces outbound TTL = `hops`, minimum inbound TTL = `255 - hops + 1`.
-`arm_listener_gtsm` arms the listener (the min-TTL filter is inherited
-by accepted sockets); `connect_gtsm` arms the connector (outbound TTL
-only — setting min-TTL on the connector would drop the SYN-ACK).
+`lr_osroute::gtsm::Gtsm::single_hop()` produces TTL=255 both directions (the standard for directly connected eBGP). `Gtsm::multihop(hops)` produces outbound TTL = `hops`, minimum inbound TTL = `255 - hops + 1`. `arm_listener_gtsm` arms the listener (the min-TTL filter is inherited by accepted sockets); `connect_gtsm` arms the connector (outbound TTL only — setting min-TTL on the connector would drop the SYN-ACK).
 
 ```rust
 use lr_osroute::gtsm::{Gtsm, arm_listener_gtsm, connect_gtsm};
@@ -937,20 +687,11 @@ arm_listener_gtsm(&listener, &gtsm)?;
 let stream = connect_gtsm(addr, &gtsm, Duration::from_secs(5))?;
 ```
 
-The daemon exposes `--gtsm` (bare = single-hop) and `--gtsm N` (multihop)
-plus the TOML key `bgp.gtsm`. When combined with `--md5-key` /
-`--tcp-ao-key` the connector uses `connect_auth` then sets TTL on the
-stream via `set_ttl`.
+The daemon exposes `--gtsm` (bare = single-hop) and `--gtsm N` (multihop) plus the TOML key `bgp.gtsm`. When combined with `--md5-key` / `--tcp-ao-key` the connector uses `connect_auth` then sets TTL on the stream via `set_ttl`.
 
 ### Per-peer maximum-prefix
 
-`SessionConfig::with_maximum_prefix(limit, action)` configures a
-per-peer prefix ceiling. When the peer's Adj-RIB-In exceeds `limit` the
-router fires `RouterEvent::MaxPrefixExceeded` (once, latched) and, for
-`Teardown`/`Restart`, sends a CEASE NOTIFICATION (subcode 1,
-RFC 4486 §2.1). `with_maximum_prefix_threshold(pct)` sets the
-early-warning percentage (default 75); `RouterEvent::MaxPrefixThreshold`
-fires once when the count crosses it.
+`SessionConfig::with_maximum_prefix(limit, action)` configures a per-peer prefix ceiling. When the peer's Adj-RIB-In exceeds `limit` the router fires `RouterEvent::MaxPrefixExceeded` (once, latched) and, for `Teardown`/`Restart`, sends a CEASE NOTIFICATION (subcode 1, RFC 4486 §2.1). `with_maximum_prefix_threshold(pct)` sets the early-warning percentage (default 75); `RouterEvent::MaxPrefixThreshold` fires once when the count crosses it.
 
 ```rust
 use lr_bgp::MaxPrefixAction;
@@ -963,23 +704,11 @@ let h = r.add_session(
 // at 1001/1000; the latter tears the session down with CEASE subcode 1.
 ```
 
-The daemon exposes `--max-prefixes N`, `--max-prefix-action warn|
-teardown|restart`, `--max-prefix-threshold P` (TOML:
-`bgp.max_prefixes` / `max_prefix_action` / `max_prefix_threshold`).
+The daemon exposes `--max-prefixes N`, `--max-prefix-action warn| teardown|restart`, `--max-prefix-threshold P` (TOML: `bgp.max_prefixes` / `max_prefix_action` / `max_prefix_threshold`).
 
 ### RFC 8212 default eBGP route behaviors
 
-`DefaultRouter::set_ebgp_requires_policy(true)` arms the RFC 8212 §3
-defaults (updating RFC 4271 §9.1/§9.1.3): an _external_ BGP session —
-eBGP **or** a confederation boundary, per §1 — whose embedder declared
-no explicit import policy discards every received route before
-Adj-RIB-In, and one without an explicit export policy advertises
-nothing (stale Adj-RIB-Out entries are withdrawn at the next export
-evaluation). Policy presence is declared per session with
-`set_session_policy(handle, import, export)`; iBGP and
-confederation-internal sessions are exempt. The library default is off
-(RFC 4271 accept-all) — embedder pipelines are untouched until they opt
-in.
+`DefaultRouter::set_ebgp_requires_policy(true)` arms the RFC 8212 §3 defaults (updating RFC 4271 §9.1/§9.1.3): an _external_ BGP session — eBGP **or** a confederation boundary, per §1 — whose embedder declared no explicit import policy discards every received route before Adj-RIB-In, and one without an explicit export policy advertises nothing (stale Adj-RIB-Out entries are withdrawn at the next export evaluation). Policy presence is declared per session with `set_session_policy(handle, import, export)`; iBGP and confederation-internal sessions are exempt. The library default is off (RFC 4271 accept-all) — embedder pipelines are untouched until they opt in.
 
 ```rust
 r.set_ebgp_requires_policy(true);
@@ -989,28 +718,11 @@ let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_
 r.set_session_policy(h, true, false)?; // import policy attached
 ```
 
-The shipped daemon enables the mode by default — `ebgp_policy
-"rfc8212";` in the bgp block, with per-peer `import`/`export` route-maps as
-the explicit policy; `ebgp_policy "accept-all";` (CLI
-`--ebgp-policy accept-all`) is the §3/Appendix-A "insecure-mode"
-deviation, and unknown values fail closed at parse time. The FFI
-mirrors the two calls (`lr_router_set_ebgp_requires_policy`,
-`lr_router_set_session_policy`), as do the Go
-(`SetEbgpRequiresPolicy` / `SetSessionPolicy`) and Python
-(`set_ebgp_requires_policy` / `set_session_policy`) bindings.
+The shipped daemon enables the mode by default — `ebgp_policy "rfc8212";` in the bgp block, with per-peer `import`/`export` route-maps as the explicit policy; `ebgp_policy "accept-all";` (CLI `--ebgp-policy accept-all`) is the §3/Appendix-A "insecure-mode" deviation, and unknown values fail closed at parse time. The FFI mirrors the two calls (`lr_router_set_ebgp_requires_policy`, `lr_router_set_session_policy`), as do the Go (`SetEbgpRequiresPolicy` / `SetSessionPolicy`) and Python (`set_ebgp_requires_policy` / `set_session_policy`) bindings.
 
 ### FRR `bgp default ipv4-unicast` (W2.1)
 
-`PeerConfig::default_ipv4_unicast` (default `true` — matches FRR's
-default and the RFC 4271 implicit IPv4 unicast family) controls whether
-IPv4 unicast is implicitly active for a peer even when
-`mp_families` does not list it. The helper
-`PeerConfig::ipv4_unicast_active()` returns
-`default_ipv4_unicast || mp_families.contains(IPV4_UNICAST)`. The FSM
-gates legacy-section IPv4 NLRI (withdrawals, NLRI, EoR) on it;
-`advertise.rs` gates `advertise()`, `withdraw_paths()` and
-`send_end_of_rib()`; Add-Path / LLGR `advertised_families()` drop the
-implicit IPv4 unicast when the flag is off.
+`PeerConfig::default_ipv4_unicast` (default `true` — matches FRR's default and the RFC 4271 implicit IPv4 unicast family) controls whether IPv4 unicast is implicitly active for a peer even when `mp_families` does not list it. The helper `PeerConfig::ipv4_unicast_active()` returns `default_ipv4_unicast || mp_families.contains(IPV4_UNICAST)`. The FSM gates legacy-section IPv4 NLRI (withdrawals, NLRI, EoR) on it; `advertise.rs` gates `advertise()`, `withdraw_paths()` and `send_end_of_rib()`; Add-Path / LLGR `advertised_families()` drop the implicit IPv4 unicast when the flag is off.
 
 ```rust
 let mut cfg = SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]));
@@ -1022,30 +734,15 @@ cfg.mp_families = vec![NlriFamily::IPV6_UNICAST]; // IPv6-only session
 let h = r.add_session(cfg)?;
 ```
 
-`DefaultRouter::set_session_default_ipv4_unicast(h, on)` is the
-post-`add_session` mutator (must be called before `start_session`).
+`DefaultRouter::set_session_default_ipv4_unicast(h, on)` is the post-`add_session` mutator (must be called before `start_session`).
 
-The shipped daemon exposes it as the bgp block key `default_ipv4_unicast`
-(default `true`) with the CLI `--default-ipv4-unicast` /
-`--no-default-ipv4-unicast` flags and a per-peer override in the
-`peer` block (`default_ipv4_unicast`). The daemon's mp_families builder
-ensures `IPV4_UNICAST` is in the family list when the flag is `true`
-(BIRD 2 requires the capability to match one of their channels), and
-leaves the list as configured when `false` (FRR
-`no bgp default ipv4-unicast`).
+The shipped daemon exposes it as the bgp block key `default_ipv4_unicast` (default `true`) with the CLI `--default-ipv4-unicast` / `--no-default-ipv4-unicast` flags and a per-peer override in the `peer` block (`default_ipv4_unicast`). The daemon's mp_families builder ensures `IPV4_UNICAST` is in the family list when the flag is `true` (BIRD 2 requires the capability to match one of their channels), and leaves the list as configured when `false` (FRR `no bgp default ipv4-unicast`).
 
-The FFI mirrors it as `lr_router_set_default_ipv4_unicast`, as do the
-Go (`Router.SetDefaultIPv4Unicast`) and Python
-(`Router.set_default_ipv4_unicast`) bindings.
+The FFI mirrors it as `lr_router_set_default_ipv4_unicast`, as do the Go (`Router.SetDefaultIPv4Unicast`) and Python (`Router.set_default_ipv4_unicast`) bindings.
 
 ### FRR `neighbor X allowas-in N` / BIRD `allow local as` (W2.3)
 
-`PeerConfig::local_as_tolerance` (default `0` = reject any occurrence
-of the local AS in a received AS_PATH — RFC 4271 §9.1.2.15) controls
-the per-peer AS-loop tolerance. `N > 0` admits a route whose AS_PATH
-contains the local AS up to N times (FRR `allowas-in N`, default
-N=1). `u32::MAX` admits any number (FRR `allowas-any`). iBGP is
-exempt (FRR/BIRD scope the relaxation to eBGP).
+`PeerConfig::local_as_tolerance` (default `0` = reject any occurrence of the local AS in a received AS_PATH — RFC 4271 §9.1.2.15) controls the per-peer AS-loop tolerance. `N > 0` admits a route whose AS_PATH contains the local AS up to N times (FRR `allowas-in N`, default N=1). `u32::MAX` admits any number (FRR `allowas-any`). iBGP is exempt (FRR/BIRD scope the relaxation to eBGP).
 
 ```rust
 let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1])))?;
@@ -1056,31 +753,13 @@ r.set_session_local_as_tolerance(h, 1)?;
 r.set_session_local_as_tolerance(h, u32::MAX)?;
 ```
 
-The router's `import_route` consults the per-peer tolerance when the
-safety net's `reject_as_loop` fires: on an eBGP peer with
-`tolerance > 0`, the route is admitted when the local AS count is ≤
-tolerance. The new `count_local_as` helper reads the FSM-normalized
-canonical AS_PATH via `PathAttributes::as_path()`, fixing a latent
-width-guessing bug in the safety net's `local_as_count` that silently
-broke `reject_as_loop` for routes from any modern peer sending 4-byte
-AS_PATH.
+The router's `import_route` consults the per-peer tolerance when the safety net's `reject_as_loop` fires: on an eBGP peer with `tolerance > 0`, the route is admitted when the local AS count is ≤ tolerance. The new `count_local_as` helper reads the FSM-normalized canonical AS_PATH via `PathAttributes::as_path()`, fixing a latent width-guessing bug in the safety net's `local_as_count` that silently broke `reject_as_loop` for routes from any modern peer sending 4-byte AS_PATH.
 
-The shipped daemon exposes it as the bgp block key
-`allow_local_as` (`0` | `N` | `any`)
-(default `0`) with the CLI `--allow-local-as [N]` / `--allowas-any` flags
-and a per-peer override in the `peer` block (`allow_local_as`). The FFI mirrors it as
-`lr_router_set_local_as_tolerance`, as do the Go
-(`Router.SetLocalAsTolerance`) and Python
-(`Router.set_local_as_tolerance`) bindings.
+The shipped daemon exposes it as the bgp block key `allow_local_as` (`0` | `N` | `any`) (default `0`) with the CLI `--allow-local-as [N]` / `--allowas-any` flags and a per-peer override in the `peer` block (`allow_local_as`). The FFI mirrors it as `lr_router_set_local_as_tolerance`, as do the Go (`Router.SetLocalAsTolerance`) and Python (`Router.set_local_as_tolerance`) bindings.
 
 ### FRR `neighbor X soft-reconfiguration inbound` (W2.4)
 
-`PeerConfig::soft_reconfig_inbound` (default `false` — FRR's default)
-controls whether the router retains the **pre-policy** Adj-RIB-In for
-this peer — the raw received routes before the import hook chain
-runs — so a policy reconfiguration can be applied without re-fetching
-from the peer (`clear ip bgp * soft in`). The cost is duplicate RIB
-memory per peer, which is why it is opt-in.
+`PeerConfig::soft_reconfig_inbound` (default `false` — FRR's default) controls whether the router retains the **pre-policy** Adj-RIB-In for this peer — the raw received routes before the import hook chain runs — so a policy reconfiguration can be applied without re-fetching from the peer (`clear ip bgp * soft in`). The cost is duplicate RIB memory per peer, which is why it is opt-in.
 
 ```rust
 let h = r.add_session(SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1])))?;
@@ -1093,83 +772,35 @@ let n = r.soft_reconfig_inbound(h)?; // re-evaluate, returns count
 let snapshot = r.adj_rib_in_snapshot(h);
 ```
 
-The router's `import_route` populates the pre-policy RIB before any
-safety net or import hook runs; `withdraw_from_session` and
-`session_down_cleanup` purge it in lockstep with the post-policy RIB.
-`DefaultRouter::soft_reconfig_inbound(h)` is the FRR `clear ip bgp *
-soft in` op: it re-runs the import hooks against the stored pre-policy
-routes, replaces the session's entries in the post-policy `adj_rib_in`,
-and re-selects every affected prefix. It does NOT re-run the safety
-net / enforce-first-as / RFC 8212 checks — those are invariant under a
-policy change (they reject routes for protocol-level reasons, not
-policy reasons). `DefaultRouter::adj_rib_in_snapshot(h)` exposes the
-pre-policy view.
+The router's `import_route` populates the pre-policy RIB before any safety net or import hook runs; `withdraw_from_session` and `session_down_cleanup` purge it in lockstep with the post-policy RIB. `DefaultRouter::soft_reconfig_inbound(h)` is the FRR `clear ip bgp * soft in` op: it re-runs the import hooks against the stored pre-policy routes, replaces the session's entries in the post-policy `adj_rib_in`, and re-selects every affected prefix. It does NOT re-run the safety net / enforce-first-as / RFC 8212 checks — those are invariant under a policy change (they reject routes for protocol-level reasons, not policy reasons). `DefaultRouter::adj_rib_in_snapshot(h)` exposes the pre-policy view.
 
-The shipped daemon exposes it as the bgp block key
-`soft_reconfig_inbound` (default `false`) with the CLI
-`--soft-reconfig-inbound` /
-`--no-soft-reconfig-inbound` flags and a per-peer override in the
-`peer` block (`soft_reconfig_inbound`). The FFI mirrors it as
-`lr_router_set_soft_reconfig_inbound` +
-`lr_router_soft_reconfig_inbound`, as do the Go
-(`Router.SetSoftReconfigInbound` / `Router.SoftReconfigInbound`) and
-Python (`Router.set_soft_reconfig_inbound` /
-`Router.soft_reconfig_inbound`) bindings.
+The shipped daemon exposes it as the bgp block key `soft_reconfig_inbound` (default `false`) with the CLI `--soft-reconfig-inbound` / `--no-soft-reconfig-inbound` flags and a per-peer override in the `peer` block (`soft_reconfig_inbound`). The FFI mirrors it as `lr_router_set_soft_reconfig_inbound` + `lr_router_soft_reconfig_inbound`, as do the Go (`Router.SetSoftReconfigInbound` / `Router.SoftReconfigInbound`) and Python (`Router.set_soft_reconfig_inbound` / `Router.soft_reconfig_inbound`) bindings.
 
 ### FRR `bgp enforce-first-as` (W2.2)
 
-`DefaultRouter::set_enforce_first_as(true)` arms the FRR
-`bgp enforce-first-as` import-time safety check: an UPDATE from an
-_external_ BGP peer — eBGP **or** a confederation boundary, mirroring
-the [`set_ebgp_requires_policy`](#rfc-8212-default-ebgp-route-behaviors)
-scope — whose leftmost AS_PATH sequence segment's first AS is not the
-peer's negotiated AS is dropped before Adj-RIB-In, and the rejection
-is surfaced once per session as a `RouterEvent::Log` (`enforce-first-as:
-session N rejected P — first AS A != peer AS B`). iBGP and
-confederation-internal sessions are exempt, mirroring FRR. The library
-default is off — FRR's `no bgp enforce-first-as` and the RFC 4271 §6.3
-"MAY reject" latitude — so embedder pipelines stay untouched until the
-operator opts in. The decoder reads the FSM-normalized canonical
-AS_PATH (always 4-byte after the `lr-bgp` codec's AS4_PATH merge) via
-`PathAttributes::as_path()`, so there is no wire-width guessing.
+`DefaultRouter::set_enforce_first_as(true)` arms the FRR `bgp enforce-first-as` import-time safety check: an UPDATE from an _external_ BGP peer — eBGP **or** a confederation boundary, mirroring the [`set_ebgp_requires_policy`](#rfc-8212-default-ebgp-route-behaviors) scope — whose leftmost AS_PATH sequence segment's first AS is not the peer's negotiated AS is dropped before Adj-RIB-In, and the rejection is surfaced once per session as a `RouterEvent::Log` (`enforce-first-as: session N rejected P — first AS A != peer AS B`). iBGP and confederation-internal sessions are exempt, mirroring FRR. The library default is off — FRR's `no bgp enforce-first-as` and the RFC 4271 §6.3 "MAY reject" latitude — so embedder pipelines stay untouched until the operator opts in. The decoder reads the FSM-normalized canonical AS_PATH (always 4-byte after the `lr-bgp` codec's AS4_PATH merge) via `PathAttributes::as_path()`, so there is no wire-width guessing.
 
 ```rust
 r.set_enforce_first_as(true);
 // All subsequent eBGP UPDATEs go through the leftmost-AS check.
 ```
 
-The shipped daemon exposes it as `bgp { enforce_first_as true; }` (CLI
-`--enforce-first-as` / `--no-enforce-first-as`); the startup status
-printout names both this and the bestpath tiebreaker (see below). The
-FFI mirrors it as `lr_router_set_enforce_first_as`, as do the Go
-(`Router.SetEnforceFirstAs`) and Python (`Router.set_enforce_first_as`)
-bindings.
+The shipped daemon exposes it as `bgp { enforce_first_as true; }` (CLI `--enforce-first-as` / `--no-enforce-first-as`); the startup status printout names both this and the bestpath tiebreaker (see below). The FFI mirrors it as `lr_router_set_enforce_first_as`, as do the Go (`Router.SetEnforceFirstAs`) and Python (`Router.set_enforce_first_as`) bindings.
 
 ### FRR `bgp bestpath compare-routerid` (W2.2)
 
-`BestPathConfig::deterministic_router_id` (default `true` — RFC 5004
-deterministic mode) is the inverse of FRR's `bgp bestpath
-compare-routerid` flag (FRR defaults to oldest-route-wins, lr defaults
-to lowest-router-id-wins). The daemon exposes the knob through
-`best_path_config_mut().deterministic_router_id`:
+`BestPathConfig::deterministic_router_id` (default `true` — RFC 5004 deterministic mode) is the inverse of FRR's `bgp bestpath compare-routerid` flag (FRR defaults to oldest-route-wins, lr defaults to lowest-router-id-wins). The daemon exposes the knob through `best_path_config_mut().deterministic_router_id`:
 
 ```rust
 r.best_path_config_mut().deterministic_router_id = false;
 // Fall back to oldest-route-wins (FRR default).
 ```
 
-The shipped daemon exposes it as the bgp block key
-`bestpath_compare_routerid` (CLI `--bestpath-compare-routerid` /
-`--no-bestpath-compare-routerid`);
-the default keeps the RFC 5004 deterministic posture that the
-library has shipped since day one.
+The shipped daemon exposes it as the bgp block key `bestpath_compare_routerid` (CLI `--bestpath-compare-routerid` / `--no-bestpath-compare-routerid`); the default keeps the RFC 5004 deterministic posture that the library has shipped since day one.
 
 ### Cross-protocol redistribution (BIRD `pipe` / FRR `redistribute`)
 
-`RedistributionPipe` bridges routes from a source protocol to a target
-protocol. When a route enters the Loc-RIB from the source protocol, the
-pipe re-originates it into the target with the configured metric policy.
-Withdrawals propagate automatically.
+`RedistributionPipe` bridges routes from a source protocol to a target protocol. When a route enters the Loc-RIB from the source protocol, the pipe re-originates it into the target with the configured metric policy. Withdrawals propagate automatically.
 
 ```rust
 use lr_router::{RedistributionPipe, MetricPolicy};
@@ -1193,15 +824,11 @@ r.add_redistribution_pipe(
 );
 ```
 
-`MetricPolicy::Inherit` (default) uses the source metric unchanged;
-`Fixed(N)` always advertises N; `Add(N)` adds N to the source metric.
-`remove_redistribution_pipe(source, target)` removes matching pipes.
+`MetricPolicy::Inherit` (default) uses the source metric unchanged; `Fixed(N)` always advertises N; `Add(N)` adds N to the source metric. `remove_redistribution_pipe(source, target)` removes matching pipes.
 
 ### Route aggregation (RFC 4271 §9.2.2.2)
 
-`add_aggregate(prefix)` registers a BGP route aggregate. When the
-Loc-RIB contains at least one route more specific than the aggregate,
-the router originates the aggregate with:
+`add_aggregate(prefix)` registers a BGP route aggregate. When the Loc-RIB contains at least one route more specific than the aggregate, the router originates the aggregate with:
 
 - AS_PATH zeroed (empty AS_SEQUENCE)
 - ATOMIC_AGGREGATE attribute
@@ -1220,11 +847,7 @@ r.remove_aggregate(&Prefix::new_v4([203, 0, 113, 0], 24));
 
 ### BMP monitoring (RFC 7854)
 
-`DefaultRouter::set_bmp_sink` installs a closure that receives encoded
-BMP messages whenever a BGP session transitions to Established (Peer
-Up), goes down (Peer Down), or a route enters the Loc-RIB (Route
-Monitoring). The closure is called from within `feed_input`/`tick`, so
-it must be non-blocking.
+`DefaultRouter::set_bmp_sink` installs a closure that receives encoded BMP messages whenever a BGP session transitions to Established (Peer Up), goes down (Peer Down), or a route enters the Loc-RIB (Route Monitoring). The closure is called from within `feed_input`/`tick`, so it must be non-blocking.
 
 ```rust
 use lr_bmp::BmpCodec;
@@ -1239,27 +862,11 @@ r.set_bmp_sink(move |bytes| {
 // fires a BMP message into the closure.
 ```
 
-The `lr-bmp` crate provides the full BMP message codec (`BmpCodec`,
-`BmpMessage`, `BmpMsgType`, `PeerHeader`) for embedders that need to
-decode the messages on the collector side. `BmpCodec` splits buffering
-from decoding (`feed` + `next_message`) so one `read(2)` carrying
-several messages drains fully. The daemon wires both directions:
-`--bmp-target host:port` mirrors to a monitoring station, and
-`--protocol bmp --listen` runs the collector (decoding Peer Up/Down +
-Route Monitoring, installing monitored prefixes through
-[`originate_with_attributes`]).
+The `lr-bmp` crate provides the full BMP message codec (`BmpCodec`, `BmpMessage`, `BmpMsgType`, `PeerHeader`) for embedders that need to decode the messages on the collector side. `BmpCodec` splits buffering from decoding (`feed` + `next_message`) so one `read(2)` carrying several messages drains fully. The daemon wires both directions: `--bmp-target host:port` mirrors to a monitoring station, and `--protocol bmp --listen` runs the collector (decoding Peer Up/Down + Route Monitoring, installing monitored prefixes through [`originate_with_attributes`]).
 
 ### MRT dumps (RFC 6396)
 
-The `lr-mrt` crate reads and writes the MRT interchange format:
-`MrtReader` (streaming, carryover-safe) decodes TABLE_DUMP_V2 peer
-index tables, RIB_IPV4/IPv6_UNICAST records (including the RFC 7911
-add-path variants) and BGP4MP state changes/messages;
-`MrtRibDump::encode` produces the same shape BIRD's `protocol mrt`
-emits (byte-verified in the interop suite). RIB entries keep path
-attributes as raw TLVs; with the default `bgp` feature,
-`walk_attributes` interprets them (AS path, next hop, communities,
-LOCAL_PREF, MED) through the `lr-bgp` decoders.
+The `lr-mrt` crate reads and writes the MRT interchange format: `MrtReader` (streaming, carryover-safe) decodes TABLE_DUMP_V2 peer index tables, RIB_IPV4/IPv6_UNICAST records (including the RFC 7911 add-path variants) and BGP4MP state changes/messages; `MrtRibDump::encode` produces the same shape BIRD's `protocol mrt` emits (byte-verified in the interop suite). RIB entries keep path attributes as raw TLVs; with the default `bgp` feature, `walk_attributes` interprets them (AS path, next hop, communities, LOCAL_PREF, MED) through the `lr-bgp` decoders.
 
 ```rust
 use lr_mrt::{parse_file, MrtRecord};
@@ -1274,18 +881,11 @@ for record in parse_file("rib.mrt")? {
 }
 ```
 
-Restoring a RIB (offline replay / observation feed) goes through
-`DefaultRouter::originate_with_attributes(prefix, family, next_hop,
-attributes)` — the same entry point the BMP collector uses.
+Restoring a RIB (offline replay / observation feed) goes through `DefaultRouter::originate_with_attributes(prefix, family, next_hop, attributes)` — the same entry point the BMP collector uses.
 
 ### Operational introspection
 
-`session_summaries()` renders one [`SessionSummary`] per session (kind,
-ASNs, FSM state, establishment, peer BGP id, negotiated hold time,
-Adj-RIB-In size) — the data plane behind `lr-daemon --api-socket`
-(`sessions` command), `lr_router_sessions_dump` in the FFI and the
-Go/Python bindings. `rib_snapshot()` (via `RouterInstance`) yields the
-Loc-RIB for `routes`/dumps.
+`session_summaries()` renders one [`SessionSummary`] per session (kind, ASNs, FSM state, establishment, peer BGP id, negotiated hold time, Adj-RIB-In size) — the data plane behind `lr-daemon --api-socket` (`sessions` command), `lr_router_sessions_dump` in the FFI and the Go/Python bindings. `rib_snapshot()` (via `RouterInstance`) yields the Loc-RIB for `routes`/dumps.
 
 ```rust
 for s in r.session_summaries() {

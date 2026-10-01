@@ -1,9 +1,6 @@
 # Example: IX Route Server (RFC 7947)
 
-At an Internet Exchange (IX), participants peer with a single route server
-over a shared broadcast domain. The RS is *transparent*: it forwards routes
-between clients without modifying AS_PATH or NEXT_HOP (so each client can
-route directly to the original originator without transiting the RS).
+At an Internet Exchange (IX), participants peer with a single route server over a shared broadcast domain. The RS is _transparent_: it forwards routes between clients without modifying AS_PATH or NEXT_HOP (so each client can route directly to the original originator without transiting the RS).
 
 ```
                   +-------------+
@@ -50,8 +47,7 @@ IXes typically attach "inbound" communities to identify the source peer:
 - Route from client A → community `64512:1`
 - Route from client B → community `64512:2`
 
-Then per-client "outbound" filters say "only export `64512:1` to client B
-unless B explicitly opts in". This is implemented via:
+Then per-client "outbound" filters say "only export `64512:1` to client B unless B explicitly opts in". This is implemented via:
 
 ```rust
 use lr_policy::{HookChain, ExportHook, HookVerdict};

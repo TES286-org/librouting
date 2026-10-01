@@ -1,11 +1,6 @@
 # Example: BGP roles and the OTC attribute (RFC 9234)
 
-Roles put the business relationship on the wire. Each eBGP speaker
-configures its role *relative to the peer*; the OPEN carries the
-capability, and the egress path stamps customer-bound routes with the
-Only-to-the-Customer (OTC) attribute so downstream providers can
-mechanically reject leaks (the defect `docs/research/BGP-DEFECTS.md`
-§3 documents).
+Roles put the business relationship on the wire. Each eBGP speaker configures its role _relative to the peer_; the OPEN carries the capability, and the egress path stamps customer-bound routes with the Only-to-the-Customer (OTC) attribute so downstream providers can mechanically reject leaks (the defect `docs/research/BGP-DEFECTS.md` §3 documents).
 
 ```
    provider AS65000          customer AS64512          provider AS65001
@@ -48,13 +43,10 @@ fn main() {
 
 What is enforced where, today:
 
-| Direction | Rule | Status |
-| --------- | ---- | ------ |
-| Egress | `otc_can_advertise` — a route carrying OTC is never advertised to providers, peers, or route servers (`lr-bgp::advertise` consults it for every session) | enforced |
-| Ingress | `otc_on_receive` — the §5 leak rules (route from a customer must not carry OTC; from a peer it must carry the peer's AS) | helper shipped; FSM enforcement is future work, so embedders call it from their import hook today |
-| OPEN | the role capability | negotiated like every other capability; an unconfigured (`Unset`) peer is inert |
+| Direction | Rule                                                                                                                                                     | Status                                                                                            |
+| --------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| Egress    | `otc_can_advertise` — a route carrying OTC is never advertised to providers, peers, or route servers (`lr-bgp::advertise` consults it for every session) | enforced                                                                                          |
+| Ingress   | `otc_on_receive` — the §5 leak rules (route from a customer must not carry OTC; from a peer it must carry the peer's AS)                                 | helper shipped; FSM enforcement is future work, so embedders call it from their import hook today |
+| OPEN      | the role capability                                                                                                                                      | negotiated like every other capability; an unconfigured (`Unset`) peer is inert                   |
 
-The daemon-level knob (`[peer] otc_role = "provider" | ...`) follows
-the library wiring; until it lands, embedded users set
-`PeerConfig::otc_role` directly. Compare `docs/PARITY.md` for how
-FRR's `bgp enforce-first-as`-style knobs pair with this one.
+The daemon-level knob (`[peer] otc_role = "provider" | ...`) follows the library wiring; until it lands, embedded users set `PeerConfig::otc_role` directly. Compare `docs/PARITY.md` for how FRR's `bgp enforce-first-as`-style knobs pair with this one.

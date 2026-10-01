@@ -1,10 +1,6 @@
 # OS Integration Guide — `lr-osroute`
 
-`lr-osroute` is librouting's **reference implementation** for the boundary
-between the library's Loc-RIB and the host's kernel forwarding information
-base (FIB). This document explains what exists today, how each backend
-works, and — most importantly — **how to port the integration to a system
-that is not covered out of the box**.
+`lr-osroute` is librouting's **reference implementation** for the boundary between the library's Loc-RIB and the host's kernel forwarding information base (FIB). This document explains what exists today, how each backend works, and — most importantly — **how to port the integration to a system that is not covered out of the box**.
 
 ```text
 +---------------------------------------------------+
@@ -41,10 +37,7 @@ that is not covered out of the box**.
 | Windows  | `windows::IpHelper` (IP Helper API)  | ✅  | ✅     | ✅   | Cross-compile checked (x86_64-pc-windows-gnu), full link against `iphlpapi`       |
 | other    | `stub::StubRouteTable`               | —   | —      | —    | Compile-only stub; returns errors at runtime                                      |
 
-The unified entry point is the type alias `lr_osroute::SystemRouteTable`,
-which resolves to the native backend of the compilation target. The
-historical name `lr_osroute::RtNetlink` keeps working on every platform
-(it aliases the native backend), so older embedders compile unchanged.
+The unified entry point is the type alias `lr_osroute::SystemRouteTable`, which resolves to the native backend of the compilation target. The historical name `lr_osroute::RtNetlink` keeps working on every platform (it aliases the native backend), so older embedders compile unchanged.
 
 ```rust
 use lr_osroute::{OsRouteTable, SystemRouteTable};
@@ -58,27 +51,13 @@ let routes = rt.list_routes()?;
 
 ### Linux — rtnetlink (`linux.rs`)
 
-A `NETLINK_ROUTE` socket speaks the rtnetlink protocol (RFC 3549): route
-additions are `RTM_NEWROUTE` messages with a `struct rtmsg` header plus
-TLV attributes (`RTA_DST`, `RTA_GATEWAY`, `RTA_OIF`, `RTA_PRIORITY`), and
-dumps are `RTM_GETROUTE` + `NLM_F_DUMP` requests. No external crates are
-used — the handful of C ABI entry points (`socket`, `bind`, `sendmsg`,
-`recv`) are declared directly. When `if_index == 0` the `RTA_OIF`
-attribute is omitted so the kernel resolves the output interface from the
-gateway (`ip route add ... via GW` semantics). Adds carry
-`NLM_F_CREATE | NLM_F_REPLACE`: a missing route is created and an existing
-best route for the prefix is atomically replaced.
+A `NETLINK_ROUTE` socket speaks the rtnetlink protocol (RFC 3549): route additions are `RTM_NEWROUTE` messages with a `struct rtmsg` header plus TLV attributes (`RTA_DST`, `RTA_GATEWAY`, `RTA_OIF`, `RTA_PRIORITY`), and dumps are `RTM_GETROUTE` + `NLM_F_DUMP` requests. No external crates are used — the handful of C ABI entry points (`socket`, `bind`, `sendmsg`, `recv`) are declared directly. When `if_index == 0` the `RTA_OIF` attribute is omitted so the kernel resolves the output interface from the gateway (`ip route add ... via GW` semantics). Adds carry `NLM_F_CREATE | NLM_F_REPLACE`: a missing route is created and an existing best route for the prefix is atomically replaced.
 
 ### BSD family — route(4) socket (`bsd.rs`)
 
-All BSDs (and macOS) expose the FIB through the `PF_ROUTE` routing socket:
-messages built from a versioned `struct rt_msghdr` plus the sockaddrs
-selected by the `rtm_addrs` bitmask, and table dumps via
-`sysctl(CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0)`.
+All BSDs (and macOS) expose the FIB through the `PF_ROUTE` routing socket: messages built from a versioned `struct rt_msghdr` plus the sockaddrs selected by the `rtm_addrs` bitmask, and table dumps via `sysctl(CTL_NET, PF_ROUTE, 0, 0, NET_RT_DUMP, 0)`.
 
-The header layout **drifted between the BSDs**, so per-OS compile-time
-constants pin the exact sizes and field offsets (verified against each
-system's `sys/net/route.h`):
+The header layout **drifted between the BSDs**, so per-OS compile-time constants pin the exact sizes and field offsets (verified against each system's `sys/net/route.h`):
 
 | OS            | `sizeof(rt_msghdr)` | `RTM_VERSION` | `AF_INET6` | quirks                                         |
 | ------------- | ------------------: | ------------: | ---------: | ---------------------------------------------- |
@@ -87,62 +66,21 @@ system's `sys/net/route.h`):
 | NetBSD 10     |                 120 |             4 |         24 | `__align64` members                            |
 | macOS (xnu)   |                  92 |             5 |         30 | classic 4.4BSD layout                          |
 
-Sockaddrs inside a message are padded to `sizeof(long)` (8 bytes on
-64-bit): `sockaddr_in` stays 16 bytes, `sockaddr_in6` (28) becomes 32.
-Message replies are matched on `rtm_seq` so unrelated asynchronous
-route-change notifications are skipped, and `SO_RCVTIMEO` bounds every
-read. Deletes treat `ESRCH` ("no such route") as success so
-reconciliation loops are idempotent.
+Sockaddrs inside a message are padded to `sizeof(long)` (8 bytes on 64-bit): `sockaddr_in` stays 16 bytes, `sockaddr_in6` (28) becomes 32. Message replies are matched on `rtm_seq` so unrelated asynchronous route-change notifications are skipped, and `SO_RCVTIMEO` bounds every read. Deletes treat `ESRCH` ("no such route") as success so reconciliation loops are idempotent.
 
 ### Windows — IP Helper API (`windows.rs`)
 
 Windows' FIB lives behind `iphlpapi.dll`:
 
-- `CreateIpForwardEntry2` / `DeleteIpForwardEntry2` modify rows described
-  by `MIB_IPFORWARD_ROW2`; the SDK layouts and entry points come from
-  Microsoft's generated `windows-sys` bindings.
-- `GetIpForwardTable2` snapshots the whole table; `FreeMibTable` releases
-  the buffer.
-- Rows are initialised by `InitializeIpForwardEntry` (infinite lifetimes,
-  `Publish=FALSE`, `Immortal=TRUE`).
-- `NL_ROUTE_PROTOCOL` carries the originating protocol's tag
-  (`MIB_IPPROTO_BGP`/`_OSPF`/`_RIP`/`_NETMGMT` — what `route print`
-  and `lr routes list` report as the origin).
-- When `if_index == 0`, `GetBestRoute2` resolves the interface separately
-  for every next hop using Windows' actual forwarding policy and interface
-  metrics. IPv6 link-local gateways carry that interface as their scope ID.
-  **Callers that know the egress interface should always pass it**: the
-  resolution is a longest-prefix lookup over the *current* FIB, and a
-  next hop that is on-link only on the protocol's own interface (a Babel
-  v4-over-v6 next hop behind an APIPA `169.254.0.0/16` connected route
-  on an unrelated adapter, the rc.4 production defect) resolves to the
-  wrong adapter.
-- Deletes consult an install ledger — `(prefix, next hop, if index)`
-  rows this instance created — and remove exactly those; only for a
-  prefix the ledger has never seen (a fresh process cleaning up a
-  predecessor's routes) do they fall back to removing every
-  routing-protocol-tagged row for the prefix. Foreign rows sharing a
-  prefix (a VPN's on-link routes) are never touched.
-- **Blackholes have no FIB representation on Windows.** The three
-  "obvious" forms are all unusable: netio rejects a loopback *gateway*
-  (`route add ... 127.0.0.1`) with `ERROR_INVALID_PARAMETER`; any
-  delivery via the loopback *interface* (zero next hop, or the
-  `MIB_IPFORWARD_ROW2.Loopback` flag) is local delivery under the weak
-  host model — a daemon listening on 0.0.0.0 answers SYNs for the
-  covered space. lr installs the Windows null-route convention instead:
-  an **on-link row on a real egress interface** (the interface owning
-  the family's default route, cached per family) — the stack resolves
-  the covered destination itself as a neighbour, the resolution fails,
-  and the traffic dies as host-unreachable. That is
-  `RTN_UNREACHABLE`-flavoured discard rather than Linux's silent
-  `RTN_BLACKHOLE`; routing-wise nothing is forwarded and nothing loops,
-  which is what an aggregate anchor needs. The empirical matrix behind
-  this design lives in `crates/lr-osroute/tests/windows_route_table.rs`
-  (`fib_semantics_probe_matrix`).
+- `CreateIpForwardEntry2` / `DeleteIpForwardEntry2` modify rows described by `MIB_IPFORWARD_ROW2`; the SDK layouts and entry points come from Microsoft's generated `windows-sys` bindings.
+- `GetIpForwardTable2` snapshots the whole table; `FreeMibTable` releases the buffer.
+- Rows are initialised by `InitializeIpForwardEntry` (infinite lifetimes, `Publish=FALSE`, `Immortal=TRUE`).
+- `NL_ROUTE_PROTOCOL` carries the originating protocol's tag (`MIB_IPPROTO_BGP`/`_OSPF`/`_RIP`/`_NETMGMT` — what `route print` and `lr routes list` report as the origin).
+- When `if_index == 0`, `GetBestRoute2` resolves the interface separately for every next hop using Windows' actual forwarding policy and interface metrics. IPv6 link-local gateways carry that interface as their scope ID. **Callers that know the egress interface should always pass it**: the resolution is a longest-prefix lookup over the _current_ FIB, and a next hop that is on-link only on the protocol's own interface (a Babel v4-over-v6 next hop behind an APIPA `169.254.0.0/16` connected route on an unrelated adapter, the rc.4 production defect) resolves to the wrong adapter.
+- Deletes consult an install ledger — `(prefix, next hop, if index)` rows this instance created — and remove exactly those; only for a prefix the ledger has never seen (a fresh process cleaning up a predecessor's routes) do they fall back to removing every routing-protocol-tagged row for the prefix. Foreign rows sharing a prefix (a VPN's on-link routes) are never touched.
+- **Blackholes have no FIB representation on Windows.** The three "obvious" forms are all unusable: netio rejects a loopback _gateway_ (`route add ... 127.0.0.1`) with `ERROR_INVALID_PARAMETER`; any delivery via the loopback _interface_ (zero next hop, or the `MIB_IPFORWARD_ROW2.Loopback` flag) is local delivery under the weak host model — a daemon listening on 0.0.0.0 answers SYNs for the covered space. lr installs the Windows null-route convention instead: an **on-link row on a real egress interface** (the interface owning the family's default route, cached per family) — the stack resolves the covered destination itself as a neighbour, the resolution fails, and the traffic dies as host-unreachable. That is `RTN_UNREACHABLE`-flavoured discard rather than Linux's silent `RTN_BLACKHOLE`; routing-wise nothing is forwarded and nothing loops, which is what an aggregate anchor needs. The empirical matrix behind this design lives in `crates/lr-osroute/tests/windows_route_table.rs` (`fib_semantics_probe_matrix`).
 
-Notes: routes created this way are _not_ boot-persistent; a daemon should
-re-install its best paths after restart (which `lr-daemon` does whenever
-the RIB converges). Requires elevation to modify the table.
+Notes: routes created this way are _not_ boot-persistent; a daemon should re-install its best paths after restart (which `lr-daemon` does whenever the RIB converges). Requires elevation to modify the table.
 
 ## Writing a backend for another system
 
@@ -162,48 +100,25 @@ pub trait OsRouteTable {
 
 Guidelines distilled from the three in-tree backends:
 
-1. **Use authoritative bindings.** A small direct syscall surface is
-   reasonable on Linux, where the UAPI is stable and tested from synthetic
-   messages. For SDK-defined structures such as Windows IP Helper, prefer
-   generated vendor bindings (`windows-sys`) so layouts cannot drift.
-2. **Idempotency.** Route daemons reconcile state in loops: re-adding an
-   existing route and deleting a missing one should both succeed (or
-   return a typed "already exists / not found" the caller can treat as
-   success). Linux: delete gets `ESRCH`; Windows: `ERROR_NOT_FOUND`;
-   BSD: `ESRCH`.
-3. **Scope your deletes.** Only remove entries your system created
-   (Linux `RTPROT_BGP`, Windows `MIB_PROTOCOL_BGP`, BSD `RTF_STATIC`).
-   Never modify kernel/RA/DHCP-learned rows.
-4. **Attribute provenance.** Map the OS' route-origin field to
-   `lr_core::rib::Protocol` in `list_routes()` so cross-protocol
-   comparison (administrative distance) works.
-5. **Bound your syscalls.** Any blocking read needs a timeout; the BSD
-   backend sets `SO_RCVTIMEO` for exactly this reason.
-6. **Document the layout.** If your interface is a binary struct (all
-   three are), cite the authoritative header and pin sizes with
-   `const _: () = assert!(size_of::<T>() == N);`.
+1. **Use authoritative bindings.** A small direct syscall surface is reasonable on Linux, where the UAPI is stable and tested from synthetic messages. For SDK-defined structures such as Windows IP Helper, prefer generated vendor bindings (`windows-sys`) so layouts cannot drift.
+2. **Idempotency.** Route daemons reconcile state in loops: re-adding an existing route and deleting a missing one should both succeed (or return a typed "already exists / not found" the caller can treat as success). Linux: delete gets `ESRCH`; Windows: `ERROR_NOT_FOUND`; BSD: `ESRCH`.
+3. **Scope your deletes.** Only remove entries your system created (Linux `RTPROT_BGP`, Windows `MIB_PROTOCOL_BGP`, BSD `RTF_STATIC`). Never modify kernel/RA/DHCP-learned rows.
+4. **Attribute provenance.** Map the OS' route-origin field to `lr_core::rib::Protocol` in `list_routes()` so cross-protocol comparison (administrative distance) works.
+5. **Bound your syscalls.** Any blocking read needs a timeout; the BSD backend sets `SO_RCVTIMEO` for exactly this reason.
+6. **Document the layout.** If your interface is a binary struct (all three are), cite the authoritative header and pin sizes with `const _: () = assert!(size_of::<T>() == N);`.
 
 ### Worked example: illumos/Solaris
 
-illumos exposes routes through a PF_ROUTE-compatible routing socket
-(derived from the same 4.4BSD lineage) plus `UDP` routing-socket
-extensions. A minimal port would:
+illumos exposes routes through a PF_ROUTE-compatible routing socket (derived from the same 4.4BSD lineage) plus `UDP` routing-socket extensions. A minimal port would:
 
-1. `git grep 'target_os = "freebsd"' crates/lr-osroute/src/bsd.rs` and add
-   `target_os = "solaris"` where the layouts match.
-2. Verify `sizeof(struct rt_msghdr)` from
-   `usr/src/uts/common/net/route.h` — illumos kept the classic layout
-   with 32-bit `rtm_inits`, close to the macOS one.
-3. Register the alias in `lib.rs`:
-   `pub use bsd::RouteSocket as SystemRouteTable` for
-   `target_os = "solaris"`, and update the `PLATFORM_NAME` table.
-4. Add a `layout` module with the verified constants and a unit test
-   asserting a synthetic dump parses.
+1. `git grep 'target_os = "freebsd"' crates/lr-osroute/src/bsd.rs` and add `target_os = "solaris"` where the layouts match.
+2. Verify `sizeof(struct rt_msghdr)` from `usr/src/uts/common/net/route.h` — illumos kept the classic layout with 32-bit `rtm_inits`, close to the macOS one.
+3. Register the alias in `lib.rs`: `pub use bsd::RouteSocket as SystemRouteTable` for `target_os = "solaris"`, and update the `PLATFORM_NAME` table.
+4. Add a `layout` module with the verified constants and a unit test asserting a synthetic dump parses.
 
 ### Worked example: command-based fallback
 
-For RTOSes or exotic kernels without a syscall interface, shell out to
-the system's CLI from the trait methods:
+For RTOSes or exotic kernels without a syscall interface, shell out to the system's CLI from the trait methods:
 
 ```rust
 impl OsRouteTable for CliRouteTable {
@@ -221,21 +136,13 @@ impl OsRouteTable for CliRouteTable {
 }
 ```
 
-This is slower than a native interface (one fork per route) but perfectly
-acceptable for control-plane convergence rates; it is also how early
-Quagga ports worked on several proprietary platforms.
+This is slower than a native interface (one fork per route) but perfectly acceptable for control-plane convergence rates; it is also how early Quagga ports worked on several proprietary platforms.
 
 ## Testing backends
 
-- **Unit tests** build synthetic messages and assert they parse, and verify
-  platform-specific row construction and route resolution.
-- **Cross-compile checks** catch cfg/layout mistakes even without access
-  to the target OS — the CI `cross` job builds the full workspace for
-  `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-gnu`; run locally
-  with `cargo check -p lr-osroute --target x86_64-unknown-freebsd`.
-- **E2E**: `lr-daemon --install-kernel-routes` against any peers, then
-  verify with the platform's own tooling (`ip route`, `netstat -rn`,
-  `route print`, `Get-NetRoute`).
+- **Unit tests** build synthetic messages and assert they parse, and verify platform-specific row construction and route resolution.
+- **Cross-compile checks** catch cfg/layout mistakes even without access to the target OS — the CI `cross` job builds the full workspace for `aarch64-unknown-linux-gnu` and `x86_64-pc-windows-gnu`; run locally with `cargo check -p lr-osroute --target x86_64-unknown-freebsd`.
+- **E2E**: `lr-daemon --install-kernel-routes` against any peers, then verify with the platform's own tooling (`ip route`, `netstat -rn`, `route print`, `Get-NetRoute`).
 
 ## Troubleshooting
 

@@ -1,17 +1,8 @@
 # Example: LDP label distribution (RFC 5036)
 
-LDP is the signaling protocol MPLS LSRs use to distribute FEC-to-label
-bindings. Two LSRs discover each other with UDP Hellos on port 646
-(`ff02::1:6` v6 / `224.0.0.106` v4 for link discovery; targeted Hellos
-are unicast), establish a TCP session on port 646, negotiate session
-parameters with the Initialization message, and then exchange Address
-and Label Mapping messages.
+LDP is the signaling protocol MPLS LSRs use to distribute FEC-to-label bindings. Two LSRs discover each other with UDP Hellos on port 646 (`ff02::1:6` v6 / `224.0.0.106` v4 for link discovery; targeted Hellos are unicast), establish a TCP session on port 646, negotiate session parameters with the Initialization message, and then exchange Address and Label Mapping messages.
 
-The reference daemon wires this end-to-end (`lr-daemon --protocol ldp`),
-including the kernel MPLS dataplane mirror on Linux
-(`--install-kernel-routes`). This example shows the library-level pieces
-an embedder composes; the byte-pump pattern mirrors the
-[BFD example](bfd_integration.md) and the daemon's own `daemon_ldp.rs`.
+The reference daemon wires this end-to-end (`lr-daemon --protocol ldp`), including the kernel MPLS dataplane mirror on Linux (`--install-kernel-routes`). This example shows the library-level pieces an embedder composes; the byte-pump pattern mirrors the [BFD example](bfd_integration.md) and the daemon's own `daemon_ldp.rs`.
 
 ## Architecture
 
@@ -29,15 +20,11 @@ an embedder composes; the byte-pump pattern mirrors the
          └─────────────────┘
 ```
 
-The engine is I/O-free: it consumes bytes and connection events,
-produces outbound bytes and connection requests, and reports
-state transitions through `EngineEvent`s. The embedder only moves
-bytes between the engine and the network.
+The engine is I/O-free: it consumes bytes and connection events, produces outbound bytes and connection requests, and reports state transitions through `EngineEvent`s. The embedder only moves bytes between the engine and the network.
 
 ## A complete LSP-establishment cycle
 
-This is the same shape the daemon's `daemon_ldp.rs` runs against
-real FRR `ldpd` in `tests/interop/ldp_frr.sh`.
+This is the same shape the daemon's `daemon_ldp.rs` runs against real FRR `ldpd` in `tests/interop/ldp_frr.sh`.
 
 ```rust
 // Cargo.toml:
@@ -184,27 +171,10 @@ fn pump(
 
 The reference `lr-daemon --protocol ldp`:
 
-1. **Wires the sockets** — UDP discovery (link + targeted) and TCP
-   session, both on port 646. The daemon owns one UDP receive socket
-   per interface for link Hellos and one for targeted Hellos.
-2. **Drives the active/passive decision** — the engine's
-   `EngineEvent::EstablishTransport` tells the daemon which peer to
-   dial (the one with the lower transport address, per §2.5.2). The
-   daemon's `daemon_ldp.rs` does the `TcpStream::connect`.
-3. **Installs the dataplane** — on Linux, the daemon mirrors the
-   learned LIB into the kernel MPLS LSP table via
-   `lr_osroute::mpls_route::MplsNetlink`. A locally originated
-   binding installs an AF_MPLS pop route (LSP tail); a learned
-   binding installs an encap route pushing the label toward the
-   peer (LSP head). See
-   [`docs/examples/os_integration.md`](os_integration.md) for the
-   `OsRouteTable` shape.
-4. **Dual-stack transport (RFC 7552)** — the daemon's
-   `LdpEngineConfig::transport_addr_v6` carries the IPv6 transport
-   address; the engine advertises both v4 and v6 in the Hello's
-   IPv4 Transport Address / IPv6 Transport Address TLVs and picks
-   the family per the §6.1.1 preference rules. The interop suite
-   exercises this in `tests/interop/ldp_frr_v6.sh`.
+1. **Wires the sockets** — UDP discovery (link + targeted) and TCP session, both on port 646. The daemon owns one UDP receive socket per interface for link Hellos and one for targeted Hellos.
+2. **Drives the active/passive decision** — the engine's `EngineEvent::EstablishTransport` tells the daemon which peer to dial (the one with the lower transport address, per §2.5.2). The daemon's `daemon_ldp.rs` does the `TcpStream::connect`.
+3. **Installs the dataplane** — on Linux, the daemon mirrors the learned LIB into the kernel MPLS LSP table via `lr_osroute::mpls_route::MplsNetlink`. A locally originated binding installs an AF_MPLS pop route (LSP tail); a learned binding installs an encap route pushing the label toward the peer (LSP head). See [`docs/examples/os_integration.md`](os_integration.md) for the `OsRouteTable` shape.
+4. **Dual-stack transport (RFC 7552)** — the daemon's `LdpEngineConfig::transport_addr_v6` carries the IPv6 transport address; the engine advertises both v4 and v6 in the Hello's IPv4 Transport Address / IPv6 Transport Address TLVs and picks the family per the §6.1.1 preference rules. The interop suite exercises this in `tests/interop/ldp_frr_v6.sh`.
 
 ## CLI flags
 
@@ -218,7 +188,4 @@ lr-daemon --protocol ldp \
     --install-kernel-routes
 ```
 
-See [`docs/lr-cli.md`](../lr-cli.md) for the full `--ldp-*` flag
-reference and `templates/daemon.toml` for the TOML schema. The
-interop lab `tests/interop/ldp_frr.sh` runs the full lifecycle
-(discovery → session → binding → dataplane) against FRR `ldpd`.
+See [`docs/lr-cli.md`](../lr-cli.md) for the full `--ldp-*` flag reference and `templates/daemon.toml` for the TOML schema. The interop lab `tests/interop/ldp_frr.sh` runs the full lifecycle (discovery → session → binding → dataplane) against FRR `ldpd`.

@@ -1,11 +1,6 @@
 # BIRD-like filter DSL + ROA validation
 
-This example demonstrates the BIRD-like filter DSL (`filter` blocks in
-the native `.lr` config) combined with RFC 6811 prefix-origin validation
-(ROA). The filter language targets a subset of BIRD's filter grammar,
-providing conditionals, variables, arithmetic, prefix-set membership,
-and route attribute mutation — enough for production import/export
-policy.
+This example demonstrates the BIRD-like filter DSL (`filter` blocks in the native `.lr` config) combined with RFC 6811 prefix-origin validation (ROA). The filter language targets a subset of BIRD's filter grammar, providing conditionals, variables, arithmetic, prefix-set membership, and route attribute mutation — enough for production import/export policy.
 
 ## Configuration
 
@@ -83,19 +78,10 @@ peer "customer" {
 
 ## How it works
 
-1. At startup, `daemon_policy::build_roa_table()` compiles the
-   `roa` blocks into an `lr_bgp::RoaTable`.
-2. When `roa_validate true;` is set in the bgp block, the daemon
-   installs a built-in
-   import hook whose body is `if roa.state == "invalid" then { reject; } accept;`
-   — implemented as a tiny DSL filter so the same code path runs as
-   user-supplied filters.
-3. `daemon_policy::build_filters()` compiles each `filter` body
-   via `lr_policy::filter::compile()`, surfacing parse errors at
-   startup (fail-closed).
-4. When a peer has `import_filter "name"`, the daemon attaches a
-   `FilterImportHook` that runs the compiled filter on every received
-   route before it enters Adj-RIB-In.
+1. At startup, `daemon_policy::build_roa_table()` compiles the `roa` blocks into an `lr_bgp::RoaTable`.
+2. When `roa_validate true;` is set in the bgp block, the daemon installs a built-in import hook whose body is `if roa.state == "invalid" then { reject; } accept;` — implemented as a tiny DSL filter so the same code path runs as user-supplied filters.
+3. `daemon_policy::build_filters()` compiles each `filter` body via `lr_policy::filter::compile()`, surfacing parse errors at startup (fail-closed).
+4. When a peer has `import_filter "name"`, the daemon attaches a `FilterImportHook` that runs the compiled filter on every received route before it enters Adj-RIB-In.
 
 ## DSL grammar
 
@@ -136,30 +122,26 @@ route_field := 'net' | 'proto' | 'source'
 
 ## Route attributes
 
-| Field              | Type     | Settable | Description                          |
-|--------------------|----------|----------|--------------------------------------|
-| `net`              | prefix   | no       | The route's prefix                   |
-| `proto`            | string   | no       | Protocol kind (`"Bgp"`, `"Ospfv2"`)  |
-| `source`           | int      | no       | Route source (proto id)              |
-| `bgp.local_pref`   | int      | yes      | BGP LOCAL_PREF (RFC 4271 §5.1.5)     |
-| `bgp.med`          | int      | yes      | BGP MULTI_EXIT_DISC                  |
-| `bgp.next_hop`     | ip       | yes      | BGP NEXT_HOP                         |
-| `bgp.as_path`      | as-path  | no       | BGP AS_PATH (use `.prepend()`)       |
-| `bgp.communities`  | comm-set | +=       | BGP COMMUNITIES (RFC 1997)          |
-| `bgp.origin`       | int      | no       | BGP ORIGIN (0=IGP, 1=EGP, 2=INC)    |
-| `roa.state`        | roa-state| no       | RFC 6811 validation outcome          |
+| Field             | Type      | Settable | Description                         |
+| ----------------- | --------- | -------- | ----------------------------------- |
+| `net`             | prefix    | no       | The route's prefix                  |
+| `proto`           | string    | no       | Protocol kind (`"Bgp"`, `"Ospfv2"`) |
+| `source`          | int       | no       | Route source (proto id)             |
+| `bgp.local_pref`  | int       | yes      | BGP LOCAL_PREF (RFC 4271 §5.1.5)    |
+| `bgp.med`         | int       | yes      | BGP MULTI_EXIT_DISC                 |
+| `bgp.next_hop`    | ip        | yes      | BGP NEXT_HOP                        |
+| `bgp.as_path`     | as-path   | no       | BGP AS_PATH (use `.prepend()`)      |
+| `bgp.communities` | comm-set  | +=       | BGP COMMUNITIES (RFC 1997)          |
+| `bgp.origin`      | int       | no       | BGP ORIGIN (0=IGP, 1=EGP, 2=INC)    |
+| `roa.state`       | roa-state | no       | RFC 6811 validation outcome         |
 
 ## Interop
 
-The `tests/interop/filter_dsl_bird.sh` test runs the full filter DSL
-+ ROA validation pipeline against a real BIRD 2 router. It verifies
-that:
+The `tests/interop/filter_dsl_bird.sh` test runs the full filter DSL + ROA validation pipeline against a real BIRD 2 router. It verifies that:
 
 1. A route authorized by a ROA (`Valid`) is accepted by the filter.
-2. A route not authorized (`Invalid`) is rejected by the built-in
-   ROA validation hook before the user filter sees it.
-3. The daemon prints `filters: N compiled, M import / K export
-   bindings` and `roa: N entries, validate=true` on startup.
+2. A route not authorized (`Invalid`) is rejected by the built-in ROA validation hook before the user filter sees it.
+3. The daemon prints `filters: N compiled, M import / K export   bindings` and `roa: N entries, validate=true` on startup.
 
 ## References
 

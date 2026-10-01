@@ -1,11 +1,6 @@
 # Go binding guide
 
-The Go binding (`bindings/lr-go`) wraps the C ABI with cgo. One
-`Router` owns a librouting router instance; sessions are handles
-(`uint64`); the embedder feeds and drains bytes per session — the
-same contract the Rust `DefaultRouter` exposes. Cleanup rides on
-`runtime.SetFinalizer`, so a `Router` that goes out of scope frees
-its native state; no explicit close call is needed.
+The Go binding (`bindings/lr-go`) wraps the C ABI with cgo. One `Router` owns a librouting router instance; sessions are handles (`uint64`); the embedder feeds and drains bytes per session — the same contract the Rust `DefaultRouter` exposes. Cleanup rides on `runtime.SetFinalizer`, so a `Router` that goes out of scope frees its native state; no explicit close call is needed.
 
 Build the shared library once:
 
@@ -13,9 +8,7 @@ Build the shared library once:
 cargo build --release -p lr-ffi
 ```
 
-A complete program — create a router, add an eBGP session, originate
-a prefix, and dump the wire bytes (here to stderr as hex; point the
-reader at your TCP peer instead):
+A complete program — create a router, add an eBGP session, originate a prefix, and dump the wire bytes (here to stderr as hex; point the reader at your TCP peer instead):
 
 ```go
 package main
@@ -59,8 +52,7 @@ func main() {
 }
 ```
 
-Build and run (the linker must find the shared library at build and
-run time):
+Build and run (the linker must find the shared library at build and run time):
 
 ```sh
 export CGO_LDFLAGS="-L$PWD/target/release -llr_ffi"
@@ -68,16 +60,6 @@ export LD_LIBRARY_PATH="$PWD/target/release"
 go run ./cmd/example
 ```
 
-The binding test suite (`bindings/lr-go/librouting_test.go`) runs the
-same lifecycle — router, session, policy knobs, labelled origination —
-against the real library; `go test ./...` is the fastest way to check
-an installation.
+The binding test suite (`bindings/lr-go/librouting_test.go`) runs the same lifecycle — router, session, policy knobs, labelled origination — against the real library; `go test ./...` is the fastest way to check an installation.
 
-API map: `AddBGPSessionExt` (graceful restart knobs),
-`SetMPFamilies` / `SetExtendedNextHop` / `SetAddPath` (per-session
-families and RFC 7911), `SetEbgpRequiresPolicy` /
-`SetEnforceFirstAs` / `SetSessionPolicy` (RFC 8212 posture),
-`SetLocalAsTolerance` (FRR `allowas-in`), `SetSoftReconfigInbound` /
-`SoftReconfigInbound` (FRR `soft-reconfiguration inbound`),
-`OriginateLabeledV4`/`V6` (RFC 8277), `Tick` (drive timers with a
-monotonic millisecond clock — call it from a loop or `time.Ticker`).
+API map: `AddBGPSessionExt` (graceful restart knobs), `SetMPFamilies` / `SetExtendedNextHop` / `SetAddPath` (per-session families and RFC 7911), `SetEbgpRequiresPolicy` / `SetEnforceFirstAs` / `SetSessionPolicy` (RFC 8212 posture), `SetLocalAsTolerance` (FRR `allowas-in`), `SetSoftReconfigInbound` / `SoftReconfigInbound` (FRR `soft-reconfiguration inbound`), `OriginateLabeledV4`/`V6` (RFC 8277), `Tick` (drive timers with a monotonic millisecond clock — call it from a loop or `time.Ticker`).

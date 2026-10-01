@@ -1,17 +1,8 @@
 # Example: OSPFv3 SRv6 (RFC 9513) — locator distribution and dataplane
 
-SRv6 is the IPv6 dataplane for Segment Routing: a 128-bit SID
-encodes a behavior (End, End.X, End.DX6, etc.), and the SRH
-(Segment Routing Header, RFC 8754) carries an ordered list of
-SIDs that a packet traverses. The control plane that distributes
-SIDs in an OSPFv3 domain is RFC 9513.
+SRv6 is the IPv6 dataplane for Segment Routing: a 128-bit SID encodes a behavior (End, End.X, End.DX6, etc.), and the SRH (Segment Routing Header, RFC 8754) carries an ordered list of SIDs that a packet traverses. The control plane that distributes SIDs in an OSPFv3 domain is RFC 9513.
 
-The reference daemon runs this end-to-end: an OSPFv3 router
-configured with `[[ospf.srv6_locator]]` tables originates the
-SRv6 Capabilities TLV (on the RI LSA) and the SRv6 Locator LSA,
-peers receive and install the locators as IPv6 forwarding entries
-(`--ospf-srv6-receive`), and the kernel dataplane on Linux
-mirrors them into `seg6` / `seg6local` routes.
+The reference daemon runs this end-to-end: an OSPFv3 router configured with `[[ospf.srv6_locator]]` tables originates the SRv6 Capabilities TLV (on the RI LSA) and the SRv6 Locator LSA, peers receive and install the locators as IPv6 forwarding entries (`--ospf-srv6-receive`), and the kernel dataplane on Linux mirrors them into `seg6` / `seg6local` routes.
 
 This example shows the library-level pieces an embedder composes.
 
@@ -26,11 +17,7 @@ This example shows the library-level pieces an embedder composes.
        └─ routable prefix (BGP/IGP-reachable), distributed by RFC 9513
 ```
 
-A locator is an IPv6 prefix (RFC 8754 §3.1). The `End` SID on a
-node is by convention `<locator>::` (the locator itself), and the
-`End.X` SID (per-adjacency, RFC 9513 §9) is `<locator>::<adjacency-
-specific-funct>`. The control plane distributes the locators; the
-SIDs are derived from the locators by composition.
+A locator is an IPv6 prefix (RFC 8754 §3.1). The `End` SID on a node is by convention `<locator>::` (the locator itself), and the `End.X` SID (per-adjacency, RFC 9513 §9) is `<locator>::<adjacency- specific-funct>`. The control plane distributes the locators; the SIDs are derived from the locators by composition.
 
 ## Origination (the SRv6 node)
 
@@ -139,12 +126,7 @@ fn main() {
 
 ## Reception (the SRv6-capable peer)
 
-The `lr_ospf::srv6db` module is the per-node LSDB projection. The
-peer's SPF run attaches locator routes (§5: metric = the
-advertising router's SPF distance, link-local first hop). The
-`DefaultRouter::set_ospf_srv6_receive` flag (off by default,
-fail-closed) installs supported-algorithm (0/SPF) locators as IPv6
-forwarding entries with §5's IAP-beats-locator preference.
+The `lr_ospf::srv6db` module is the per-node LSDB projection. The peer's SPF run attaches locator routes (§5: metric = the advertising router's SPF distance, link-local first hop). The `DefaultRouter::set_ospf_srv6_receive` flag (off by default, fail-closed) installs supported-algorithm (0/SPF) locators as IPv6 forwarding entries with §5's IAP-beats-locator preference.
 
 ```rust
 use lr_router::DefaultRouter;
@@ -198,29 +180,16 @@ lr-daemon --protocol ospf --ospf-version v3 \
 
 ## The interop lab
 
-The 3-node lab `tests/interop/ospf6_frr_srv6.sh` exercises this
-end-to-end:
+The 3-node lab `tests/interop/ospf6_frr_srv6.sh` exercises this end-to-end:
 
 ```text
    lr1 (originator)  ←→  FRR 10.3 ospf6d (relay)  ←→  lr2 (receiver)
 ```
 
-`ospf6d` has no SRv6 support, but per RFC 5340 §4.2.1 it stores and
-re-floods the U-bit-set unknown E-LSAs (the SRv6 RI + Locator LSAs).
-`lr2` installs `lr1`'s locator through the FRR relay as an
-`Ospfv3` route with a link-local next hop.
+`ospf6d` has no SRv6 support, but per RFC 5340 §4.2.1 it stores and re-floods the U-bit-set unknown E-LSAs (the SRv6 RI + Locator LSAs). `lr2` installs `lr1`'s locator through the FRR relay as an `Ospfv3` route with a link-local next hop.
 
 ## What's missing (the roadmap)
 
-The current slice (RFC 9513 slices 1-3) covers Node SIDs only. The
-adjacency SIDs — End.X and LAN End.X (RFC 9513 §9) — ride on the
-RFC 8362 E-Router-Link TLV, which is the next planned slice. See
-[`docs/ROADMAP.md`](../ROADMAP.md) §"Phase 3 — plan" item 2 for
-the design and the interop gate.
+The current slice (RFC 9513 slices 1-3) covers Node SIDs only. The adjacency SIDs — End.X and LAN End.X (RFC 9513 §9) — ride on the RFC 8362 E-Router-Link TLV, which is the next planned slice. See [`docs/ROADMAP.md`](../ROADMAP.md) §"Phase 3 — plan" item 2 for the design and the interop gate.
 
-The `BGP SR Policy` (RFC 9256 / 9430) slice is the consumer side:
-receive candidate/dynamic SR policies as VPN routes, resolve them
-to `lr-srv6` segment lists, and steer matching Loc-RIB entries into
-`seg6` encap routes in the kernel mirror (the BGP-LU LSP-mirror
-slice's shape, extended to SRv6 policies). See
-[`docs/ROADMAP.md`](../ROADMAP.md) §"Phase 3 — plan" item 4.
+The `BGP SR Policy` (RFC 9256 / 9430) slice is the consumer side: receive candidate/dynamic SR policies as VPN routes, resolve them to `lr-srv6` segment lists, and steer matching Loc-RIB entries into `seg6` encap routes in the kernel mirror (the BGP-LU LSP-mirror slice's shape, extended to SRv6 policies). See [`docs/ROADMAP.md`](../ROADMAP.md) §"Phase 3 — plan" item 4.

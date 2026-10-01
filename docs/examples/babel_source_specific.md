@@ -1,10 +1,6 @@
 # Example: Babel source-specific routing (RFC 9079)
 
-Babel's route table keys on more than the destination: RFC 9079 adds
-an optional *source* prefix, so the same destination can carry
-different routes for different traffic sources. The classic use is a
-dual-connected edge network that must pin intra-company traffic to
-the internal path while everything else follows the default:
+Babel's route table keys on more than the destination: RFC 9079 adds an optional _source_ prefix, so the same destination can carry different routes for different traffic sources. The classic use is a dual-connected edge network that must pin intra-company traffic to the internal path while everything else follows the default:
 
 ```
                       +---------+
@@ -16,14 +12,11 @@ the internal path while everything else follows the default:
                        +---------+
 ```
 
-Both routes point at the same destination prefix; the source prefix
-is what separates them.
+Both routes point at the same destination prefix; the source prefix is what separates them.
 
 ## The data model
 
-`lr-babel` keys every route on `(destination, source, router-id)` —
-the source is optional, so ordinary RFC 8966 routes are the
-`None`-source special case and the two classes never collide:
+`lr-babel` keys every route on `(destination, source, router-id)` — the source is optional, so ordinary RFC 8966 routes are the `None`-source special case and the two classes never collide:
 
 ```rust
 // Cargo.toml:
@@ -81,21 +74,8 @@ fn main() {
 
 ## Wire form and daemon support
 
-On the wire the source prefix rides as the Source Prefix sub-TLV
-(type 128, RFC 9079 §4) inside Babel Update TLVs — the codec in
-`lr-babel::tlv` parses and emits it, and `lr-babel::route` tracks
-feasibility per `(destination, source)` tuple exactly as above. The
-daemon's Babel transport carries the same table: source-specific
-entries land in the Loc-RIB alongside plain routes and are visible in
-the runtime API (`routes`) with their prefix.
+On the wire the source prefix rides as the Source Prefix sub-TLV (type 128, RFC 9079 §4) inside Babel Update TLVs — the codec in `lr-babel::tlv` parses and emits it, and `lr-babel::route` tracks feasibility per `(destination, source)` tuple exactly as above. The daemon's Babel transport carries the same table: source-specific entries land in the Loc-RIB alongside plain routes and are visible in the runtime API (`routes`) with their prefix.
 
 ## Kernel caveat
 
-Installing a source-specific route into the Linux FIB means
-`ip route add <dst> from <source> ...` — a policy-route shape the
-plain `RTM_NEWROUTE` mirror does not emit today. Source-specific
-routes therefore participate in the Loc-RIB and best-path selection,
-while the kernel mirror is the same future-work item noted in
-`STATUS.md` for the Babel daemon row; embedders with policy-routing
-needs program those entries through their own FIB layer (the OS
-integration point in `docs/OS-INTEGRATION.md` is the seam).
+Installing a source-specific route into the Linux FIB means `ip route add <dst> from <source> ...` — a policy-route shape the plain `RTM_NEWROUTE` mirror does not emit today. Source-specific routes therefore participate in the Loc-RIB and best-path selection, while the kernel mirror is the same future-work item noted in `STATUS.md` for the Babel daemon row; embedders with policy-routing needs program those entries through their own FIB layer (the OS integration point in `docs/OS-INTEGRATION.md` is the seam).

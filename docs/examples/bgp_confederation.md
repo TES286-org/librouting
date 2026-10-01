@@ -1,8 +1,6 @@
 # Example: BGP Confederation (RFC 6793, originally RFC 3065)
 
-A confederation is a group of sub-ASes that internally behave like eBGP
-but externally appear as one AS. The local AS is announced as the
-confederation's "external" AS.
+A confederation is a group of sub-ASes that internally behave like eBGP but externally appear as one AS. The local AS is announced as the confederation's "external" AS.
 
 ```
   +------+       +------+       +------+
@@ -47,11 +45,6 @@ fn main() {
 
 ## AS_PATH handling
 
-Inside the confederation, AS_CONFED_SEQUENCE / AS_CONFED_SET segments are
-used (see `lr-bgp::path::AsPathType::ConfedSequence` and `ConfedSet`).
-When a route leaves the confederation (via an eBGP peer), all
-AS_CONFED_* segments are removed from the AS_PATH.
+Inside the confederation, AS*CONFED_SEQUENCE / AS_CONFED_SET segments are used (see `lr-bgp::path::AsPathType::ConfedSequence` and `ConfedSet`). When a route leaves the confederation (via an eBGP peer), all AS_CONFED*\* segments are removed from the AS_PATH.
 
-The best-path comparator by default counts AS_CONFED_SEQUENCE in path
-length (RFC 6793 §7); this is controlled by
-`BestPathConfig::count_confed_in_path_len`.
+The best-path comparator by default counts AS_CONFED_SEQUENCE in path length (RFC 6793 §7); this is controlled by `BestPathConfig::count_confed_in_path_len`.

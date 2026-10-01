@@ -60,13 +60,10 @@ fn main() {
 
 ## Verification
 
-When a route arrives from `client`, `rr` advertises it to other RR clients
-by:
+When a route arrives from `client`, `rr` advertises it to other RR clients by:
 
 1. Setting ORIGINATOR_ID = `rr.bgp_id` (if not already set).
 2. Prepending `rr.cluster_id` to CLUSTER_LIST.
 3. Re-exporting to all other RR clients.
 
-The receiving client must reject the route if its own cluster_id is in
-CLUSTER_LIST (RFC 4456 §10 loop detection). See
-`lr-bgp::role::cluster::cluster_list_has_loop`.
+The receiving client must reject the route if its own cluster_id is in CLUSTER_LIST (RFC 4456 §10 loop detection). See `lr-bgp::role::cluster::cluster_list_has_loop`.

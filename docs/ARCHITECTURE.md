@@ -1,8 +1,6 @@
 # librouting Architecture
 
-This document describes the layering, data flow, and extension points of
-`librouting`. It is the canonical reference for new contributors and
-embedders.
+This document describes the layering, data flow, and extension points of `librouting`. It is the canonical reference for new contributors and embedders.
 
 ## High-level layout
 
@@ -42,18 +40,11 @@ embedders.
             +------------------+
 ```
 
-All crates depend on `lr-core` for shared primitives (`IpAddr`, `Prefix`,
-`Asn`, `RouterId`, `Route`, `Attributes`, codec traits, FSM/timer traits).
-`lr-mpls` provides the RFC 3032 label + label-stack codec shared by
-`lr-ldp` and `lr-bgp` (BGP-LU, RFC 8277). `lr-mrt` (RFC 6396) and `lr-bmp`
-(RFC 7854) feed monitoring / dump tooling. `lr-damping` (RFC 2439 flap
-damping) plugs into the selection stage via `lr-policy` hooks. `lr-ffi`
-exposes a C ABI; Go/Python/C/C++ bindings sit on top.
+All crates depend on `lr-core` for shared primitives (`IpAddr`, `Prefix`, `Asn`, `RouterId`, `Route`, `Attributes`, codec traits, FSM/timer traits). `lr-mpls` provides the RFC 3032 label + label-stack codec shared by `lr-ldp` and `lr-bgp` (BGP-LU, RFC 8277). `lr-mrt` (RFC 6396) and `lr-bmp` (RFC 7854) feed monitoring / dump tooling. `lr-damping` (RFC 2439 flap damping) plugs into the selection stage via `lr-policy` hooks. `lr-ffi` exposes a C ABI; Go/Python/C/C++ bindings sit on top.
 
 ## Three-layer API
 
-Every protocol crate is structured so embedders can stop at the right level
-of abstraction:
+Every protocol crate is structured so embedders can stop at the right level of abstraction:
 
 | Layer | Description                                  | Example API            |
 | ----- | -------------------------------------------- | ---------------------- |
@@ -61,15 +52,13 @@ of abstraction:
 | 2     | Protocol FSM — state machine driving actions | `BgpPeer::step`        |
 | 3     | Orchestrator — wires sessions + RIB + timers | `DefaultRouter`        |
 
-Layer 1 is for analyzers (pcap processors, route collectors).
-Layer 2 is for embedders that own their event loop but want protocol logic.
-Layer 3 is for embedders that just want "run BGP for me" and get Loc-RIB
-deltas back.
+Layer 1 is for analyzers (pcap processors, route collectors). <br/>
+Layer 2 is for embedders that own their event loop but want protocol logic. <br/>
+Layer 3 is for embedders that just want "run BGP for me" and get Loc-RIB deltas back.
 
 ## RIB pipeline
 
-Fully implemented in `lr-router::DefaultRouter` (see
-`crates/lr-router/src/instance.rs`):
+Fully implemented in `lr-router::DefaultRouter` (see `crates/lr-router/src/instance.rs`):
 
 ```
 inbound bytes  →  BgpPeer::feed_bytes  →  InstallRoute/WithdrawRoute actions
@@ -89,265 +78,120 @@ inbound bytes  →  BgpPeer::feed_bytes  →  InstallRoute/WithdrawRoute actions
                             OsRouteTable.add_route  (optional, lr-daemon)
 ```
 
-Withdrawals run the same pipeline in reverse: the session reports
-`WithdrawRoute`, the Adj-RIB-In entry is removed, the decision process
-re-runs, and peers that previously received the route get a wire
-withdrawal.
+Withdrawals run the same pipeline in reverse: the session reports `WithdrawRoute`, the Adj-RIB-In entry is removed, the decision process re-runs, and peers that previously received the route get a wire withdrawal.
 
 Each stage is replaceable via traits:
 
-- `ImportHook` / `ExportHook` — arbitrary Rust code that may drop or mutate
-  routes (`DefaultRouter::hooks_mut()`).
-- `SelectionHook` — override the comparator (e.g. prefer routes from a
-  specific peer).
+- `ImportHook` / `ExportHook` — arbitrary Rust code that may drop or mutate routes (`DefaultRouter::hooks_mut()`).
+- `SelectionHook` — override the comparator (e.g. prefer routes from a specific peer).
 - `OsRouteTable` — platform abstraction for the kernel FIB.
 
 ### Timer routing
 
-Timer IDs are encoded as `(session << 8) | timer_code` inside
-`DefaultRouter`, so every FSM timer expiry is routed back to the session
-that armed it — a prerequisite for multi-session deployments where hold
-timers must not cross-fire between peers.
+Timer IDs are encoded as `(session << 8) | timer_code` inside `DefaultRouter`, so every FSM timer expiry is routed back to the session that armed it — a prerequisite for multi-session deployments where hold timers must not cross-fire between peers.
 
 ### OSPF / Babel runtimes
 
-OSPF sessions decode Hellos into the neighbor FSM, install received LSAs
-into the per-session LSDB and re-run SPF on every LSDB change; the
-resulting intra-area routes (stub + transit networks) land in Loc-RIB with
-delta bookkeeping (stale routes are withdrawn). Babel sessions track
-Hello/IHU/Router-Id/NextHop/Update TLVs into the neighbor + route tables,
-apply the feasibility rules of RFC 8966 §3.5, and publish feasible best
-routes to Loc-RIB — including metric-infinity retractions and RFC 9079
-source-specific destinations.
+OSPF sessions decode Hellos into the neighbor FSM, install received LSAs into the per-session LSDB and re-run SPF on every LSDB change; the resulting intra-area routes (stub + transit networks) land in Loc-RIB with delta bookkeeping (stale routes are withdrawn). Babel sessions track Hello/IHU/Router-Id/NextHop/Update TLVs into the neighbor + route tables, apply the feasibility rules of RFC 8966 §3.5, and publish feasible best routes to Loc-RIB — including metric-infinity retractions and RFC 9079 source-specific destinations.
 
 ### Canonical AS_PATH
 
-Route attribute bags store AS_PATH in canonical 4-byte encoding regardless
-of the session's negotiated width (ingress normalizes, egress re-encodes).
-This means best-path, the safety net and the egress rules never have to
-guess the wire format of a route's provenance.
+Route attribute bags store AS_PATH in canonical 4-byte encoding regardless of the session's negotiated width (ingress normalizes, egress re-encodes). This means best-path, the safety net and the egress rules never have to guess the wire format of a route's provenance.
 
 ## Router instance internals
 
-`crates/lr-router/src/instance.rs` is the Layer 3 orchestrator (a single
-~11.7k-line file). Every cross-protocol concern — sessions, Adj-RIBs,
-Loc-RIB, policy hooks, redistribution, aggregates, MRAI, Graceful Restart,
-maximum-prefix, OSPF areas + virtual links, Babel runtime — lives behind
-one `DefaultRouter` struct that the embedder drives through the poll-based
-`RouterInstance` trait. This section is the architecture-level map of that
-struct; the inline doc comments on each field are the authoritative
-reference.
+`crates/lr-router/src/instance.rs` is the Layer 3 orchestrator (a single ~11.7k-line file). Every cross-protocol concern — sessions, Adj-RIBs, Loc-RIB, policy hooks, redistribution, aggregates, MRAI, Graceful Restart, maximum-prefix, OSPF areas + virtual links, Babel runtime — lives behind one `DefaultRouter` struct that the embedder drives through the poll-based `RouterInstance` trait. This section is the architecture-level map of that struct; the inline doc comments on each field are the authoritative reference.
 
 ### `DefaultRouter` shape
 
 The struct holds three kinds of state:
 
-| Kind | Fields |
-| ---- | ------ |
-| Per-session runtime | `sessions: BTreeMap<u64, SessionState>` (BGP/OSPF/Babel FSM + transport), `mrai`, `graceful_restart`, `llgr_caps`, `max_prefix_state`, `collision_meta`, `session_policy` |
-| Loc-RIB + Adj-RIBs | `adj_rib_in`, `pre_policy_adj_rib_in` (soft-reconfig inbound, W2.4), `adj_rib_out`, `loc_rib`, `originated`, `static_routes`, `direct_rib`, `redistributed_bgp` |
+| Kind                | Fields                                                                                                                                                                                               |
+| ------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Per-session runtime | `sessions: BTreeMap<u64, SessionState>` (BGP/OSPF/Babel FSM + transport), `mrai`, `graceful_restart`, `llgr_caps`, `max_prefix_state`, `collision_meta`, `session_policy`                            |
+| Loc-RIB + Adj-RIBs  | `adj_rib_in`, `pre_policy_adj_rib_in` (soft-reconfig inbound, W2.4), `adj_rib_out`, `loc_rib`, `originated`, `static_routes`, `direct_rib`, `redistributed_bgp`                                      |
 | Cross-protocol OSPF | `ospf_areas`, `ospf_published`, `ospf_externals`, `ospf_v3_externals`, `ospf_v3_external_lsids`, `ospf_v3_summary_lsids`, `ospf_translations`, `ospf_vlinks`, `ospf_grace_seen`, `ospf_grace_events` |
-| Cross-protocol misc | `pipes` (redistribution pipes), `aggregates` (BGP aggregates), `bmp_sink` (RFC 7854 mirror) |
+| Cross-protocol misc | `pipes` (redistribution pipes), `aggregates` (BGP aggregates), `bmp_sink` (RFC 7854 mirror)                                                                                                          |
 
-The session map is keyed by a `u64` handle that `add_session` mints
-monotonically; that handle is what every per-session BTreeMap (`mrai`,
-`graceful_restart`, `max_prefix_state`, `collision_meta`,
-`session_policy`, `llgr_caps`) keys on, so a session teardown leaves the
-slot absent everywhere after a single sweep.
+The session map is keyed by a `u64` handle that `add_session` mints monotonically; that handle is what every per-session BTreeMap (`mrai`, `graceful_restart`, `max_prefix_state`, `collision_meta`, `session_policy`, `llgr_caps`) keys on, so a session teardown leaves the slot absent everywhere after a single sweep.
 
-`SessionState` is an `enum` with one variant per protocol — `Bgp`,
-`Ospf`, `Babel` — each carrying the per-session FSM, a `MemoryConn`
-(the output buffer the embedder drains via `drain_output`), and a
-protocol-specific runtime. The BGP peer is `Box<BgpPeer>`: the FSM
-outweighs the other runtimes by far and would inflate every session
-slot if kept inline.
+`SessionState` is an `enum` with one variant per protocol — `Bgp`, `Ospf`, `Babel` — each carrying the per-session FSM, a `MemoryConn` (the output buffer the embedder drains via `drain_output`), and a protocol-specific runtime. The BGP peer is `Box<BgpPeer>`: the FSM outweighs the other runtimes by far and would inflate every session slot if kept inline.
 
 ### Per-protocol runtime structs
 
-* **`OspfRuntime`** — one OSPF adjacency: the neighbor FSM, a streaming
-  `OspfCodec` (carryover must never leak between peers), the
-  `DbExchange` driver (RFC 2328 §7.2 DD/LSR sequencing), the segment
-  identity pair `our_ip` / `neighbor_ip` / `dr` / `bdr` (the §10.4
-  adjacency gate), and the interface `network_type` + `iface_mtu`
-  needed to rebuild the exchange when a §10.4 demotion resets the
-  adjacency. The LSDB is **per area**, shared by every session attached
-  to the area and keyed in `ospf_areas: BTreeMap<u32, OspfAreaState>`
-  — LSAs flooded within an area belong to the area, not to the
-  adjacency that happened to deliver them.
+- **`OspfRuntime`** — one OSPF adjacency: the neighbor FSM, a streaming `OspfCodec` (carryover must never leak between peers), the `DbExchange` driver (RFC 2328 §7.2 DD/LSR sequencing), the segment identity pair `our_ip` / `neighbor_ip` / `dr` / `bdr` (the §10.4 adjacency gate), and the interface `network_type` + `iface_mtu` needed to rebuild the exchange when a §10.4 demotion resets the adjacency. The LSDB is **per area**, shared by every session attached to the area and keyed in `ospf_areas: BTreeMap<u32, OspfAreaState>` — LSAs flooded within an area belong to the area, not to the adjacency that happened to deliver them.
 
-* **`OspfAreaState`** — the per-area LSDB plus the area type policy
-  (`OspfAreaType` — stub / NSSA / Totally-stubby, driving the §3.6 /
-  RFC 3101 LSA acceptance gate), and a monotonic `topology_version`
-  counter bumped on every *content* topology change (RFC 3623 §3.2
-  (3)) so embedders can terminate Graceful-Restart helper mode when
-  the topology actually moves — periodic refreshes that only bump
-  age / sequence do not increment it.
+- **`OspfAreaState`** — the per-area LSDB plus the area type policy (`OspfAreaType` — stub / NSSA / Totally-stubby, driving the §3.6 / RFC 3101 LSA acceptance gate), and a monotonic `topology_version` counter bumped on every _content_ topology change (RFC 3623 §3.2 (3)) so embedders can terminate Graceful-Restart helper mode when the topology actually moves — periodic refreshes that only bump age / sequence do not increment it.
 
-* **`BabelRuntime`** — one Babel adjacency: the neighbor table, the
-  route table, a streaming `BabelCodec`, the current `next_hop`
-  learned from NextHop TLVs (RFC 8966 §4.6.4), the peer's `router_id`
-  (8 bytes, learned from Router-Id TLVs), and a `published` snapshot
-  of what the runtime has already pushed to Loc-RIB. The `diff()`
-  method is the bridge to Loc-RIB: every Hello / IHU / Update TLV
-  mutates the route table, and `diff()` computes the
-  installed / withdrawn delta against `published` so the router only
-  emits one `RouterEvent` per actual route change.
+- **`BabelRuntime`** — one Babel adjacency: the neighbor table, the route table, a streaming `BabelCodec`, the current `next_hop` learned from NextHop TLVs (RFC 8966 §4.6.4), the peer's `router_id` (8 bytes, learned from Router-Id TLVs), and a `published` snapshot of what the runtime has already pushed to Loc-RIB. The `diff()` method is the bridge to Loc-RIB: every Hello / IHU / Update TLV mutates the route table, and `diff()` computes the installed / withdrawn delta against `published` so the router only emits one `RouterEvent` per actual route change.
 
-* **`RuntimeDelta`** — `{ installed: Vec<Route>, withdrawn:
-  Vec<RouteKey> }`, the universal return shape of one protocol-runtime
-  step. `apply_runtime_delta` installs the delta directly into Loc-RIB
-  *without* going through the Adj-RIB-In pipeline (OSPF and Babel are
-  trusted sources — their routes are protocol-direct Loc-RIB
-  contributions, kept in `direct_rib` so a BGP re-ranking of a shared
-  key never evicts them).
+- **`RuntimeDelta`** — `{ installed: Vec<Route>, withdrawn: Vec<RouteKey> }`, the universal return shape of one protocol-runtime step. `apply_runtime_delta` installs the delta directly into Loc-RIB _without_ going through the Adj-RIB-In pipeline (OSPF and Babel are trusted sources — their routes are protocol-direct Loc-RIB contributions, kept in `direct_rib` so a BGP re-ranking of a shared key never evicts them).
 
-The Babel runtime state is entirely session-scoped — there is no
-top-level `babel_*` field on `DefaultRouter`. The OSPF surface, by
-contrast, is area-scoped and therefore top-level (see the table below).
+The Babel runtime state is entirely session-scoped — there is no top-level `babel_*` field on `DefaultRouter`. The OSPF surface, by contrast, is area-scoped and therefore top-level (see the table below).
 
 ### Loc-RIB data structures
 
-Loc-RIB itself lives in `lr-rib::loc_rib::LocRib`, but four sibling
-maps in `DefaultRouter` carry the Loc-RIB *contributions* that the
-decision process must consult alongside `adj_rib_in`:
+Loc-RIB itself lives in `lr-rib::loc_rib::LocRib`, but four sibling maps in `DefaultRouter` carry the Loc-RIB _contributions_ that the decision process must consult alongside `adj_rib_in`:
 
-1. **`originated: BTreeMap<RouteKey, Route>`** — locally originated
-   routes (BIRD `protocol direct`, FRR `network` statements). Kept so
-   `unoriginate` can remove them and so a config reload can diff old
-   vs new.
-2. **`static_routes: BTreeMap<RouteKey, Route>`** — operator-configured
-   static routes (BIRD `protocol static`, FRR `ip route`). Same
-   reload-diff contract as `originated`.
-3. **`direct_rib: BTreeMap<RouteKey, Route>`** — protocol-direct
-   contributions from OSPF / Babel runtimes (rc.3 shared RIB). These
-   never enter BGP advertisements — cross-protocol export stays
-   opt-in through `pipes` (FRR `redistribute` / BIRD `pipe`).
-4. **`redistributed_bgp: BTreeMap<RouteKey, Route>`** — routes this
-   router has redistributed into BGP through a pipe. The re-originated
-   copy keeps the source route's peer so the export split horizon
-   (RFC 4271 §9.1.3 Phase 3) never re-advertises it to the session it
-   came from; the copy competes with the peer's Adj-RIB-In paths for
-   the Loc-RIB slot through the decision process.
+1. **`originated: BTreeMap<RouteKey, Route>`** — locally originated routes (BIRD `protocol direct`, FRR `network` statements). Kept so `unoriginate` can remove them and so a config reload can diff old vs new.
+2. **`static_routes: BTreeMap<RouteKey, Route>`** — operator-configured static routes (BIRD `protocol static`, FRR `ip route`). Same reload-diff contract as `originated`.
+3. **`direct_rib: BTreeMap<RouteKey, Route>`** — protocol-direct contributions from OSPF / Babel runtimes (rc.3 shared RIB). These never enter BGP advertisements — cross-protocol export stays opt-in through `pipes` (FRR `redistribute` / BIRD `pipe`).
+4. **`redistributed_bgp: BTreeMap<RouteKey, Route>`** — routes this router has redistributed into BGP through a pipe. The re-originated copy keeps the source route's peer so the export split horizon (RFC 4271 §9.1.3 Phase 3) never re-advertises it to the session it came from; the copy competes with the peer's Adj-RIB-In paths for the Loc-RIB slot through the decision process.
 
-`reselect(key)` is the function that merges these four sources
-(`adj_rib_in` + `originated` + `direct_rib`; the redistributed BGP
-copy is already in `adj_rib_in`-compatible form via the pipe arm of
-`redistribute_route`) and picks the Loc-RIB best for one prefix:
+`reselect(key)` is the function that merges these four sources (`adj_rib_in` + `originated` + `direct_rib`; the redistributed BGP copy is already in `adj_rib_in`-compatible form via the pipe arm of `redistribute_route`) and picks the Loc-RIB best for one prefix:
 
-1. Collect every candidate for `key` from `adj_rib_in`, `originated`
-   and `direct_rib`.
-2. If every candidate is BGP, run `BestPath::rank` (RFC 4271 §9.1.2
-   decision process) and take `add_path_max_paths` of them (RFC 7911);
-   otherwise run `RouteSelector::select` (admin-distance + metric
-   comparator for non-BGP protocols).
-3. Hand the ranking to `apply_selection`, which installs the new set
-   into `loc_rib`, emits `RouteInstalled` / `RouteWithdrawn` events,
-   recurses into `redistribute_route` (so a new best propagates
-   through pipes) and into `export_selection` (so the ranking reaches
-   every BGP session).
+1. Collect every candidate for `key` from `adj_rib_in`, `originated` and `direct_rib`.
+2. If every candidate is BGP, run `BestPath::rank` (RFC 4271 §9.1.2 decision process) and take `add_path_max_paths` of them (RFC 7911); otherwise run `RouteSelector::select` (admin-distance + metric comparator for non-BGP protocols).
+3. Hand the ranking to `apply_selection`, which installs the new set into `loc_rib`, emits `RouteInstalled` / `RouteWithdrawn` events, recurses into `redistribute_route` (so a new best propagates through pipes) and into `export_selection` (so the ranking reaches every BGP session).
 
 ### Export hook ordering
 
-`export_selection(key, ranked)` walks every established BGP session
-and computes a per-session (advertise, withdraw) delta. The ordering
-matters — every later stage only sees routes that survived the
-earlier ones:
+`export_selection(key, ranked)` walks every established BGP session and computes a per-session (advertise, withdraw) delta. The ordering matters — every later stage only sees routes that survived the earlier ones:
 
-1. **iBGP split-horizon / RR / OTC** (RFC 4271 §9.1.3 Phase 3 +
-   RFC 4456 + RFC 9234 §5): a path learned from a session is never
-   re-advertised to that same session (`route.origin.peer == session`
-   skip); the role / RR / RS topology gates which sessions a path may
-   reach at all.
-2. **Protocol gate**: `direct_rib` (OSPF / Babel) routes never enter
-   BGP advertisements — cross-protocol export stays opt-in through
-   `pipes`. Only BGP routes are eligible for the BGP Adj-RIB-Out.
-3. **RFC 8212 §3**: an external session with no explicit export policy
-   must not carry routes in its Adj-RIB-Out — the desired set stays
-   empty so the diff against Adj-RIB-Out withdraws anything the
-   session still advertises.
-4. **Export hook chain** (`HookChain::run_export_to`): the surviving
-   candidates are passed through every registered `ExportHook`, which
-   may drop, modify or set attributes on each route.
-5. **Add-Path vs single-path** (RFC 7911): Add-Path TX peers receive
-   each path under a transmit identifier of `rank slot + 1`;
-   single-path peers receive only the best path.
-6. **Diff against Adj-RIB-Out**: the desired set is diffed against the
-   session's `adj_rib_out` view; paths that fell out of the ranking (or
-   are no longer exported) become withdrawals, new / changed paths
-   become UPDATEs.
+1. **iBGP split-horizon / RR / OTC** (RFC 4271 §9.1.3 Phase 3 + RFC 4456 + RFC 9234 §5): a path learned from a session is never re-advertised to that same session (`route.origin.peer == session` skip); the role / RR / RS topology gates which sessions a path may reach at all.
+2. **Protocol gate**: `direct_rib` (OSPF / Babel) routes never enter BGP advertisements — cross-protocol export stays opt-in through `pipes`. Only BGP routes are eligible for the BGP Adj-RIB-Out.
+3. **RFC 8212 §3**: an external session with no explicit export policy must not carry routes in its Adj-RIB-Out — the desired set stays empty so the diff against Adj-RIB-Out withdraws anything the session still advertises.
+4. **Export hook chain** (`HookChain::run_export_to`): the surviving candidates are passed through every registered `ExportHook`, which may drop, modify or set attributes on each route.
+5. **Add-Path vs single-path** (RFC 7911): Add-Path TX peers receive each path under a transmit identifier of `rank slot + 1`; single-path peers receive only the best path.
+6. **Diff against Adj-RIB-Out**: the desired set is diffed against the session's `adj_rib_out` view; paths that fell out of the ranking (or are no longer exported) become withdrawals, new / changed paths become UPDATEs.
 
-Because the hook chain borrows `&self` immutably while session
-enumeration requires `&mut self`, the export pipeline runs in two
-phases: collect (policy-approved work per session) → transmit. This
-is why `export_work_for` is a `&self` method and `export_selection`
-restores the hook chain after the collect pass.
+Because the hook chain borrows `&self` immutably while session enumeration requires `&mut self`, the export pipeline runs in two phases: collect (policy-approved work per session) → transmit. This is why `export_work_for` is a `&self` method and `export_selection` restores the hook chain after the collect pass.
 
 ### MRAI and the per-prefix advertisement queue
 
-The MRAI timer (RFC 4271 §9.2.1.1) is *per-destination*, not
-per-session — `MraiState.last_sent` and `MraiState.pending` are keyed
-by `RouteKey`, so unrelated routes are never delayed by a busy peer.
-A pending set supersedes any older pending one, so route churn
-collapses to the final state at MRAI expiry. Withdrawals bypass MRAI
-entirely and are transmitted immediately (RFC 4271 §9.2.2).
+The MRAI timer (RFC 4271 §9.2.1.1) is _per-destination_, not per-session — `MraiState.last_sent` and `MraiState.pending` are keyed by `RouteKey`, so unrelated routes are never delayed by a busy peer. A pending set supersedes any older pending one, so route churn collapses to the final state at MRAI expiry. Withdrawals bypass MRAI entirely and are transmitted immediately (RFC 4271 §9.2.2).
 
 ### Redistribution tracking
 
-`redistribute_route(route)` is invoked from `apply_selection` after
-every Loc-RIB best change. The function:
+`redistribute_route(route)` is invoked from `apply_selection` after every Loc-RIB best change. The function:
 
-1. **Terminates the feedback loop**: if a stored copy already exists
-   with identical protocol / origin / preference / attributes /
-   next_hop, the function returns immediately. This is the
-   `MetricPolicy::Add(N)` fixpoint — under additive metric policies
-   the produced copy never equals the stored one and the recursion
-   would only stop when the stack overflows without this guard.
-2. **Collects matching pipes**: a pipe matches when `pipe.source ==
-   route.protocol` and `pipe.matches(prefix)`. OSPF pipes call
-   `ospf_redistribute`; BGP pipes re-originate the route as a BGP
-   path and run the decision process to install it.
-3. **Re-originates the BGP copy** with `origin.proto = 2` (locally
-   re-originated), keeping the source route's `origin.peer` so the
-   export split horizon never re-advertises it to the session it came
-   from.
-4. **Runs the decision process** rather than a wholesale `install_set`:
-   the best path by admin distance / BGP decision wins the Loc-RIB
-   slot, and a beaten peer path stays in Adj-RIB-In to be restored
-   when the winner disappears (RFC 4271 §9.1.2).
+1. **Terminates the feedback loop**: if a stored copy already exists with identical protocol / origin / preference / attributes / next_hop, the function returns immediately. This is the `MetricPolicy::Add(N)` fixpoint — under additive metric policies the produced copy never equals the stored one and the recursion would only stop when the stack overflows without this guard.
+2. **Collects matching pipes**: a pipe matches when `pipe.source == route.protocol` and `pipe.matches(prefix)`. OSPF pipes call `ospf_redistribute`; BGP pipes re-originate the route as a BGP path and run the decision process to install it.
+3. **Re-originates the BGP copy** with `origin.proto = 2` (locally re-originated), keeping the source route's `origin.peer` so the export split horizon never re-advertises it to the session it came from.
+4. **Runs the decision process** rather than a wholesale `install_set`: the best path by admin distance / BGP decision wins the Loc-RIB slot, and a beaten peer path stays in Adj-RIB-In to be restored when the winner disappears (RFC 4271 §9.1.2).
 
-When the source route disappears, `unredistribute_route(key)` drops
-the copy and `reselect(key)` runs again, restoring the next-best
-candidate.
+When the source route disappears, `unredistribute_route(key)` drops the copy and `reselect(key)` runs again, restoring the next-best candidate.
 
 ### OSPF top-level state map
 
-The OSPF surface in `DefaultRouter` is the largest cross-protocol
-block because OSPF is area-scoped, not session-scoped:
+The OSPF surface in `DefaultRouter` is the largest cross-protocol block because OSPF is area-scoped, not session-scoped:
 
-| Field | Purpose |
-| ----- | ------- |
-| `ospf_areas: BTreeMap<u32, OspfAreaState>` | per-area LSDB + type policy + `topology_version` |
-| `ospf_published: BTreeMap<RouteKey, Route>` | routes currently published to Loc-RIB — diffed on every recompute |
-| `ospf_externals: BTreeMap<u32, ExternalDestination>` | redistributed IPv4 destinations (RFC 2328 §12.4.3) keyed by LS ID |
-| `ospf_v3_externals: BTreeMap<Prefix, V3ExternalDestination>` | redistributed IPv6 destinations (RFC 5340 §4.4.3.6) |
-| `ospf_v3_external_lsids: BTreeMap<Prefix, u32>` | stable 0x4005 LS IDs per external prefix |
-| `ospf_v3_summary_lsids: BTreeMap<u32, BTreeMap<Prefix, u32>>` | stable 0x2003 inter-area-prefix LS IDs per (area, prefix) |
-| `ospf_translations: BTreeSet<(u32, u32, u32)>` | type-7 → type-5 translations this router maintains as an elected NSSA border router (RFC 3101 §3.2) |
-| `ospf_vlinks: BTreeMap<(u32, u32), OspfVirtualLink>` | configured virtual links (RFC 2328 §15) keyed by (transit area, endpoint router ID) |
+| Field                                                         | Purpose                                                                                                          |
+| ------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| `ospf_areas: BTreeMap<u32, OspfAreaState>`                    | per-area LSDB + type policy + `topology_version`                                                                 |
+| `ospf_published: BTreeMap<RouteKey, Route>`                   | routes currently published to Loc-RIB — diffed on every recompute                                                |
+| `ospf_externals: BTreeMap<u32, ExternalDestination>`          | redistributed IPv4 destinations (RFC 2328 §12.4.3) keyed by LS ID                                                |
+| `ospf_v3_externals: BTreeMap<Prefix, V3ExternalDestination>`  | redistributed IPv6 destinations (RFC 5340 §4.4.3.6)                                                              |
+| `ospf_v3_external_lsids: BTreeMap<Prefix, u32>`               | stable 0x4005 LS IDs per external prefix                                                                         |
+| `ospf_v3_summary_lsids: BTreeMap<u32, BTreeMap<Prefix, u32>>` | stable 0x2003 inter-area-prefix LS IDs per (area, prefix)                                                        |
+| `ospf_translations: BTreeSet<(u32, u32, u32)>`                | type-7 → type-5 translations this router maintains as an elected NSSA border router (RFC 3101 §3.2)              |
+| `ospf_vlinks: BTreeMap<(u32, u32), OspfVirtualLink>`          | configured virtual links (RFC 2328 §15) keyed by (transit area, endpoint router ID)                              |
 | `ospf_grace_seen: BTreeMap<(u32, u32), (u32, u16, u16, u16)>` | last seen Grace-LSA instance per (area, advertising router) — dedup so retransmissions emit one `OspfGraceEvent` |
-| `ospf_grace_events: Vec<OspfGraceEvent>` | received Grace-LSA instances awaiting the embedder's helper-mode policy |
+| `ospf_grace_events: Vec<OspfGraceEvent>`                      | received Grace-LSA instances awaiting the embedder's helper-mode policy                                          |
 
-The stable-LS-ID maps (`ospf_v3_external_lsids`,
-`ospf_v3_summary_lsids`) exist because the OSPFv3 LS ID carries no
-addressing semantics (RFC 5340 §4.4.3.4 / §4.4.3.6), so the ABR /
-ASBR must keep a stable prefix → LS ID mapping across re-origination
-— FRR reuses the previous instance's LS ID, and so does lr.
+The stable-LS-ID maps (`ospf_v3_external_lsids`, `ospf_v3_summary_lsids`) exist because the OSPFv3 LS ID carries no addressing semantics (RFC 5340 §4.4.3.4 / §4.4.3.6), so the ABR / ASBR must keep a stable prefix → LS ID mapping across re-origination — FRR reuses the previous instance's LS ID, and so does lr.
 
-The Grace-LSA dedup map keys on the RFC 2328 §13 instance identity
-tuple `(sequence, age, checksum, length)`, not on sequence alone: a
-flush (MaxAge, empty body) and a fresh announcement can share a
-sequence number at second boundaries of the wallclock-derived
-lineage and are different LSAs.
+The Grace-LSA dedup map keys on the RFC 2328 §13 instance identity tuple `(sequence, age, checksum, length)`, not on sequence alone: a flush (MaxAge, empty body) and a fresh announcement can share a sequence number at second boundaries of the wallclock-derived lineage and are different LSAs.
 
 ## Extension points
 
@@ -366,13 +210,9 @@ A `PeerTopology` carries the relationship of the local speaker to the peer:
 - `role`: `Ebgp` / `Ibgp` / `ConfederationExternal` / `ConfederationInternal`
 - `rr_client`: true if this peer is a route-reflector client (RFC 4456)
 - `rs_client`: true if this peer is a route-server client (RFC 7947)
-- `otc`: RFC 9234 role (`Provider` / `Customer` / `Peer` / `RouteServer` /
-  `RsClient`)
+- `otc`: RFC 9234 role (`Provider` / `Customer` / `Peer` / `RouteServer` / `RsClient`)
 
-The topology drives AS_PATH mutation, NEXT_HOP rewriting, and reachability
-checks (`can_advertise()` enforces iBGP full-mesh + RR rules + OTC
-valley-free: a route carrying OTC may only be advertised to Customers and
-RS-clients, per RFC 9234 §5 egress rule 2).
+The topology drives AS_PATH mutation, NEXT_HOP rewriting, and reachability checks (`can_advertise()` enforces iBGP full-mesh + RR rules + OTC valley-free: a route carrying OTC may only be advertised to Customers and RS-clients, per RFC 9234 §5 egress rule 2).
 
 ## Best-path comparator
 
@@ -391,19 +231,11 @@ RS-clients, per RFC 9234 §5 egress rule 2).
 11. Shortest CLUSTER_LIST (RFC 4456).
 12. Lowest peer IP / peer-id (last resort).
 
-Multipath (`multipath()`) collects all routes that tie on steps 1–11 (the
-final peer-id tiebreaker is by definition different for different peers).
-`multipath_relax=true` allows mixing neighbors.
+Multipath (`multipath()`) collects all routes that tie on steps 1–11 (the final peer-id tiebreaker is by definition different for different peers). `multipath_relax=true` allows mixing neighbors.
 
 ## Filter DSL
 
-`lr-policy::filter` is a self-contained BIRD-style filter language.
-The daemon references a filter by name from a peer's
-`import_filter` / `export_filter` table, the FFI exposes
-`lr_filter_compile` / `lr_filter_evaluate`, and embedders can call
-`lr_policy::filter::compile` directly. The subsystem is split into six
-files in `crates/lr-policy/src/filter/`, with a typed AST as the
-contract between the parser and the evaluators:
+`lr-policy::filter` is a self-contained BIRD-style filter language. The daemon references a filter by name from a peer's `import_filter` / `export_filter` table, the FFI exposes `lr_filter_compile` / `lr_filter_evaluate`, and embedders can call `lr_policy::filter::compile` directly. The subsystem is split into six files in `crates/lr-policy/src/filter/`, with a typed AST as the contract between the parser and the evaluators:
 
 ```
    source text
@@ -433,260 +265,106 @@ contract between the parser and the evaluators:
 
 ### AST
 
-The AST is `Filter { name, body: FilterBody, functions: Vec<FunctionDecl>, line_index }`
-where `FilterBody { stmts: Vec<Stmt> }`. `Stmt` carries the imperative
-side (`If` / `Case` / `Let` / `Assign` / `AssignRouteField` /
-`AppendRouteField` / `Expr` / `Block` / `Return` / `Accept` / `Reject`);
-`Expr` carries the functional side (`Lit` / `Var` / `RouteField` /
-`Call` / `Defined` / `Method` / `Binary` / `Unary` / `Set` /
-`PrefixSet`). Every node owns its byte `Span`; structural equality is
-span-blind (hand-written `PartialEq` ignores spans) so peephole golden
-tables and proptest oracles don't shift when the source is reformatted.
-`RouteFieldKind` enumerates the settable (`bgp.local_pref` / `med` /
-`next_hop` / `communities` / `ext_communities` / `large_communities`)
-and read-only (`net` / `proto` / `source` / `bgp.as_path` /
-`bgp.origin` / `roa.state`) attributes; the parser rejects assignment
-to a non-settable field at compile time.
+The AST is `Filter { name, body: FilterBody, functions: Vec<FunctionDecl>, line_index }` where `FilterBody { stmts: Vec<Stmt> }`. `Stmt` carries the imperative side (`If` / `Case` / `Let` / `Assign` / `AssignRouteField` / `AppendRouteField` / `Expr` / `Block` / `Return` / `Accept` / `Reject`); `Expr` carries the functional side (`Lit` / `Var` / `RouteField` / `Call` / `Defined` / `Method` / `Binary` / `Unary` / `Set` / `PrefixSet`). Every node owns its byte `Span`; structural equality is span-blind (hand-written `PartialEq` ignores spans) so peephole golden tables and proptest oracles don't shift when the source is reformatted. `RouteFieldKind` enumerates the settable (`bgp.local_pref` / `med` / `next_hop` / `communities` / `ext_communities` / `large_communities`) and read-only (`net` / `proto` / `source` / `bgp.as_path` / `bgp.origin` / `roa.state`) attributes; the parser rejects assignment to a non-settable field at compile time.
 
 ### Pratt parser
 
-`parse_binary(min_prec)` is the precedence-climbing loop: it peeks
-the next operator (`TokenKind::Plus` → `BinaryOp::Add`, …, including
-`Tilde`/`BangTilde` for `~`/`!~` membership), checks the operator's
-`precedence()` against `min_prec`, advances, recurses with the
-right-associative fixpoint (`prec` for right-assoc, `prec + 1`
-otherwise), then folds the result into an `Expr::Binary` node. Unary
-(`!x`, `-x`) and postfix (`.method(...)`) sit above the binary loop;
-primaries (`Lit`, `Var`, `RouteField`, `(` expr `)`, set literals,
-prefix-set literals) sit at the bottom. The parser runs a `validate_calls`
-pass after the body so every `Expr::Call` name resolves to either a
-user-declared function or a known built-in (`len`, `bgp.first_as`,
-`bgp.contains`, …) — the bytecode compiler relies on this totality
-to resolve user calls to indices (GitHub #19 P2).
+`parse_binary(min_prec)` is the precedence-climbing loop: it peeks the next operator (`TokenKind::Plus` → `BinaryOp::Add`, …, including `Tilde`/`BangTilde` for `~`/`!~` membership), checks the operator's `precedence()` against `min_prec`, advances, recurses with the right-associative fixpoint (`prec` for right-assoc, `prec + 1` otherwise), then folds the result into an `Expr::Binary` node. Unary (`!x`, `-x`) and postfix (`.method(...)`) sit above the binary loop; primaries (`Lit`, `Var`, `RouteField`, `(` expr `)`, set literals, prefix-set literals) sit at the bottom. The parser runs a `validate_calls` pass after the body so every `Expr::Call` name resolves to either a user-declared function or a known built-in (`len`, `bgp.first_as`, `bgp.contains`, …) — the bytecode compiler relies on this totality to resolve user calls to indices (GitHub #19 P2).
 
 ### Tree-walking evaluator (the oracle)
 
-`eval::Evaluator<'a, C: FilterContext + ?Sized>` holds the scope
-stack (`Vec<Scope>` of `BTreeMap<String, Value>`), the user functions,
-and a call-depth counter (capped at `MAX_CALL_DEPTH = 64` so runaway
-recursion surfaces as `CallDepthExceeded` instead of a thread-stack
-overflow). The evaluator walks the AST statement-by-statement; the
-first `accept` / `reject` short-circuits the whole filter
-(`ControlFlow::Accept` / `Reject(reason)`), and `return` exits the
-enclosing user function (the DSL's `accept` inside a function
-terminates the *whole filter*, BIRD parity). `EvalResult::Fallthrough`
-is the no-terminal-hit case the daemon falls back to (the
-`[[peer]] import_filter` with no `accept`/`reject` matching a route
-leaves it for the next route-map entry).
+`eval::Evaluator<'a, C: FilterContext + ?Sized>` holds the scope stack (`Vec<Scope>` of `BTreeMap<String, Value>`), the user functions, and a call-depth counter (capped at `MAX_CALL_DEPTH = 64` so runaway recursion surfaces as `CallDepthExceeded` instead of a thread-stack overflow). The evaluator walks the AST statement-by-statement; the first `accept` / `reject` short-circuits the whole filter (`ControlFlow::Accept` / `Reject(reason)`), and `return` exits the enclosing user function (the DSL's `accept` inside a function terminates the _whole filter_, BIRD parity). `EvalResult::Fallthrough` is the no-terminal-hit case the daemon falls back to (the `[[peer]] import_filter` with no `accept`/`reject` matching a route leaves it for the next route-map entry).
 
 ### FilterContext trait
 
-The evaluator never touches a `Route` directly — it goes through the
-`FilterContext` trait, an interface of typed accessors
-(`bgp_local_pref(&Route) -> Option<u32>`,
-`bgp_communities(&Route) -> Vec<(Asn, u16)>`, `roa_state(&Route) -> RoaStateLit`,
-…) plus mutators (`set_bgp_local_pref(&mut Route, u32)`,
-`bgp_as_path_prepend(&mut Route, Asn)`, …). This has three payoffs:
+The evaluator never touches a `Route` directly — it goes through the `FilterContext` trait, an interface of typed accessors (`bgp_local_pref(&Route) -> Option<u32>`, `bgp_communities(&Route) -> Vec<(Asn, u16)>`, `roa_state(&Route) -> RoaStateLit`, …) plus mutators (`set_bgp_local_pref(&mut Route, u32)`, `bgp_as_path_prepend(&mut Route, Asn)`, …). This has three payoffs:
 
-1. The DSL never collapses an absent attribute to its default
-   (`Option<u32>` preserves "unset" vs "set to zero" — BIRD's
-   `defined()` semantics depend on it; the `Defined` AST node is
-   specifically an unevaluated probe that goes through the typed
-   presence check, not a value read).
-2. The daemon's `DaemonFilterContext` and the FFI's C-callback
-   context (`lr_filter_context_t`, 19 optional function pointers,
-   NULL = the built-in route-backed default) share the same evaluator,
-   so a C embedder's `bgp.local_pref` reads the same path the daemon
-   does.
-3. The in-place integer fast paths (`Attributes::get_u32_be` /
-   `get_u8`, GitHub #19 P3) live behind the trait, so the evaluator
-   reads LOCAL_PREF / MED / ORIGIN without cloning the `Vec<u8>`
-   attribute payload.
+1. The DSL never collapses an absent attribute to its default (`Option<u32>` preserves "unset" vs "set to zero" — BIRD's `defined()` semantics depend on it; the `Defined` AST node is specifically an unevaluated probe that goes through the typed presence check, not a value read).
+2. The daemon's `DaemonFilterContext` and the FFI's C-callback context (`lr_filter_context_t`, 19 optional function pointers, NULL = the built-in route-backed default) share the same evaluator, so a C embedder's `bgp.local_pref` reads the same path the daemon does.
+3. The in-place integer fast paths (`Attributes::get_u32_be` / `get_u8`, GitHub #19 P3) live behind the trait, so the evaluator reads LOCAL_PREF / MED / ORIGIN without cloning the `Vec<u8>` attribute payload.
 
 ### Bytecode VM
 
-`bytecode::compile` lowers the whole AST to a flat `Vec<Instr>` plus
-a per-function `Vec<Instr>` for each user function; the daemon's
-`daemon_policy::build_filters` precompiles every `[[filter]]` at
-startup so import/export hot loops run the VM. The instruction set
-is small and flat (`Push` / `LoadVar` / `LoadField` / `StoreVar` /
-`AssignVar` / `StoreTmp` / `LoadTmp` / `Bin` / `Not` / `Neg` /
-`JumpIfFalse` / `JumpIfTrue` / `Jump` / `Truthy` / `Match` /
-`BranchFieldIntCmp` / `Defined` / `Call` / `CallFn` / `Method` /
-`AssignField` / `AppendField` / `Pop` / `PushScope` / `PopScope` /
-`Accept` / `Reject` / `Return` / `EvalTree`) — `EvalTree(Expr)` is
-the tree-walking fallback for dynamic subtrees (e.g. `defined()` on
-an arbitrary expression), so the VM and the interpreter cannot diverge
-semantically. A 27-source × 4-route equivalence table pins verdict
-+ attribute-state equality across both engines (`vm_matches_interpreter_on_policy_table`
-plus the bench-shaped `vm_matches_interpreter_on_bench_shapes`).
+`bytecode::compile` lowers the whole AST to a flat `Vec<Instr>` plus a per-function `Vec<Instr>` for each user function; the daemon's `daemon_policy::build_filters` precompiles every `[[filter]]` at startup so import/export hot loops run the VM. The instruction set is small and flat (`Push` / `LoadVar` / `LoadField` / `StoreVar` / `AssignVar` / `StoreTmp` / `LoadTmp` / `Bin` / `Not` / `Neg` / `JumpIfFalse` / `JumpIfTrue` / `Jump` / `Truthy` / `Match` / `BranchFieldIntCmp` / `Defined` / `Call` / `CallFn` / `Method` / `AssignField` / `AppendField` / `Pop` / `PushScope` / `PopScope` / `Accept` / `Reject` / `Return` / `EvalTree`) — `EvalTree(Expr)` is the tree-walking fallback for dynamic subtrees (e.g. `defined()` on an arbitrary expression), so the VM and the interpreter cannot diverge semantically. A 27-source × 4-route equivalence table pins verdict - attribute-state equality across both engines (`vm_matches_interpreter_on_policy_table` plus the bench-shaped `vm_matches_interpreter_on_bench_shapes`).
 
-`peephole::optimize_with_spans` runs three passes inside `compile`:
-constant propagation + literal folding (tracks `let` constants,
-folds `Push; Push; Bin` triples and `Push; Not/Neg` pairs, refuses
-div-by-zero / overflow / bad-shift), dead-branch elimination
-(`Push(Bool(c)); JumpIfFalse/JumpIfTrue` → drop or `Jump`, only when
-the conditional is not a jump target — preserves `&&`/`||`
-short-circuit semantics), and jump threading (`Jump(X) → Jump(Y)`
-chains). GitHub #19 P6 adds a fourth fused pass that collapses the
-canonical `LoadField(int); Push(Int(c)); Bin(op); JumpIf*(t)` pattern
-into one `BranchFieldIntCmp` instruction (zero stack traffic) for the
-four int-typed fields and six comparison ops.
+`peephole::optimize_with_spans` runs three passes inside `compile`: constant propagation + literal folding (tracks `let` constants, folds `Push; Push; Bin` triples and `Push; Not/Neg` pairs, refuses div-by-zero / overflow / bad-shift), dead-branch elimination (`Push(Bool(c)); JumpIfFalse/JumpIfTrue` → drop or `Jump`, only when the conditional is not a jump target — preserves `&&`/`||` short-circuit semantics), and jump threading (`Jump(X) → Jump(Y)` chains). GitHub #19 P6 adds a fourth fused pass that collapses the canonical `LoadField(int); Push(Int(c)); Bin(op); JumpIf*(t)` pattern into one `BranchFieldIntCmp` instruction (zero stack traffic) for the four int-typed fields and six comparison ops.
 
 ### Comparison to BIRD `f_line`
 
-BIRD compiles its filter AST to an `f_line` (a flat instruction
-array with embedded constant pools) and runs it through `f_run`. lr's
-design is structurally similar — flat `Vec<Instr>`, per-function
-instruction arrays, a small constant pool embedded in the `Push` /
-`Match` operands, the same `accept` / `reject` short-circuit
-semantics — with two deliberate differences:
+BIRD compiles its filter AST to an `f_line` (a flat instruction array with embedded constant pools) and runs it through `f_run`. lr's design is structurally similar — flat `Vec<Instr>`, per-function instruction arrays, a small constant pool embedded in the `Push` / `Match` operands, the same `accept` / `reject` short-circuit semantics — with two deliberate differences:
 
-- lr keeps the tree-walking interpreter as the semantic oracle and
-  uses `EvalTree` as the dynamic-subtree fallback. BIRD removed its
-  tree-walker when `f_line` landed; lr keeps it so the bytecode VM
-  has a differential oracle for the equivalence table.
-- lr does not intern strings or attributes inside the VM. Names
-  (`LoadVar` / `AssignVar` / `Call` / `Method`) are still `String`
-  clones. The P1 attempt at side-table interning (compact
-  `Instr { op, a: u32, b: u32 }` + `consts` / `matches` / `trees`
-  side tables) measured a 2–10 % regression from the indirection
-  and was reverted; the current `Instr` is a fat enum (64 B) but the
-  fetch loop is branch-predicted and cache-line-aligned, which is
-  where the hot loop wins.
+- lr keeps the tree-walking interpreter as the semantic oracle and uses `EvalTree` as the dynamic-subtree fallback. BIRD removed its tree-walker when `f_line` landed; lr keeps it so the bytecode VM has a differential oracle for the equivalence table.
+- lr does not intern strings or attributes inside the VM. Names (`LoadVar` / `AssignVar` / `Call` / `Method`) are still `String` clones. The P1 attempt at side-table interning (compact `Instr { op, a: u32, b: u32 }` + `consts` / `matches` / `trees` side tables) measured a 2–10 % regression from the indirection and was reverted; the current `Instr` is a fat enum (64 B) but the fetch loop is branch-predicted and cache-line-aligned, which is where the hot loop wins.
 
 ## Performance characteristics
 
 ### ROA validation (RFC 6811)
 
-`lr-bgp::roa::RoaTable::validate` walks a path-compressed (Patricia)
-prefix trie (ROADMAP-v3 D8.4). The covering ROAs of a route are exactly
-the trie nodes on the root-to-route bit path, so a query costs
-`O(prefix_len)` (bounded by 32 / 128 bit visits) whatever the table
-size. Entries stay in a canonical sorted `Vec<RoaEntry>` (dumps,
-equality, snapshot determinism) with the trie as a pure lookup index
-built once at construction.
+`lr-bgp::roa::RoaTable::validate` walks a path-compressed (Patricia) prefix trie (ROADMAP-v3 D8.4). The covering ROAs of a route are exactly the trie nodes on the root-to-route bit path, so a query costs `O(prefix_len)` (bounded by 32 / 128 bit visits) whatever the table size. Entries stay in a canonical sorted `Vec<RoaEntry>` (dumps, equality, snapshot determinism) with the trie as a pure lookup index built once at construction.
 
-Criterion (`crates/lr-bgp/benches/roa_validate.rs`, sample-size 20,
-x86_64 Linux):
+Criterion (`crates/lr-bgp/benches/roa_validate.rs`, sample-size 20, x86_64 Linux):
 
 | Probe                  | 1k entries | 10k entries | 100k entries |
 | ---------------------- | ---------- | ----------- | ------------ |
 | uncovered (`NotFound`) | ~5.1 ns    | ~5.1 ns     | ~5.8 ns      |
 | covered (`Valid`)      | ~75 ns     | ~119 ns     | ~182 ns      |
 
-Both shapes are flat across the sizes operators actually deploy (1k
-single-AS, 10k IXP route-server, 100k regional cache). The replaced
-linear scan visited every entry per query and grew linearly with the
-table — the trie removes that ceiling entirely.
+Both shapes are flat across the sizes operators actually deploy (1k single-AS, 10k IXP route-server, 100k regional cache). The replaced linear scan visited every entry per query and grew linearly with the table — the trie removes that ceiling entirely.
 
 ### Filter DSL evaluation
 
-Policy filters run the D3.7 stack-machine bytecode (see the
-[Filter DSL](#filter-dsl) chapter for the AST, parser, evaluator and
-peephole design). Filters compile once at startup and each route
-evaluation is a flat opcode loop with no AST re-walking and no
-per-route allocation on the match path
-(`crates/lr-policy/src/filter/bytecode.rs`). Criterion harnesses:
-`crates/lr-policy/benches/filter_eval.rs` (seven shapes under both
-engines) and `crates/lr-policy/benches/import_pipeline.rs` (the
-daemon per-UPDATE cost at 100 / 1k / 10k routes).
+Policy filters run the D3.7 stack-machine bytecode (see the [Filter DSL](#filter-dsl) chapter for the AST, parser, evaluator and peephole design). Filters compile once at startup and each route evaluation is a flat opcode loop with no AST re-walking and no per-route allocation on the match path (`crates/lr-policy/src/filter/bytecode.rs`). Criterion harnesses: `crates/lr-policy/benches/filter_eval.rs` (seven shapes under both engines) and `crates/lr-policy/benches/import_pipeline.rs` (the daemon per-UPDATE cost at 100 / 1k / 10k routes).
 
 ### Daemon thread model and lock strategy
 
-The `lr` daemon runs one thread per BGP peer session, one API-socket
-thread, BFD / BMP / RTR threads, per-protocol OSPF/Babel loops and a
-periodic ticker. All of them share the routing state through
-`Arc<RwLock<DefaultRouter>>` (ROADMAP-v3 D8.1):
+The `lr` daemon runs one thread per BGP peer session, one API-socket thread, BFD / BMP / RTR threads, per-protocol OSPF/Babel loops and a periodic ticker. All of them share the routing state through `Arc<RwLock<DefaultRouter>>` (ROADMAP-v3 D8.1):
 
-* **Read lock** — API dumps and status (`rib_paths_snapshot`,
-  `session_summaries`, `rib_len`), Babel RTT probes, OSPF/LSDB status
-  views. Readers run concurrently: a `show routes` no longer blocks
-  behind (or blocks) a peer import.
-* **Write lock** — session setup, `feed_input`, event polling,
-  best-path reselection, redistribution, Babel GC, config reload.
+- **Read lock** — API dumps and status (`rib_paths_snapshot`, `session_summaries`, `rib_len`), Babel RTT probes, OSPF/LSDB status views. Readers run concurrently: a `show routes` no longer blocks behind (or blocks) a peer import.
+- **Write lock** — session setup, `feed_input`, event polling, best-path reselection, redistribution, Babel GC, config reload.
 
-`DefaultRouter` contains no interior mutability, so `&self` methods
-are genuinely read-only and the borrow checker polices the
-read/write classification of every call site. Hook traits carry
-`Send + Sync` for the same reason (`lr-policy::hooks`).
+`DefaultRouter` contains no interior mutability, so `&self` methods are genuinely read-only and the borrow checker polices the read/write classification of every call site. Hook traits carry `Send + Sync` for the same reason (`lr-policy::hooks`).
 
-The daemon event plane is still thread-per-socket with non-blocking
-poll loops — see ROADMAP-v3 D8.3 for the planned `mio` event-loop
-migration.
+The daemon event plane is still thread-per-socket with non-blocking poll loops — see ROADMAP-v3 D8.3 for the planned `mio` event-loop migration.
 
 ### Scalability ceiling and next steps
 
-With one `RwLock` there is still at most one writer at a time; a full
-BGP table (800k+ routes) arriving over several peers serializes on
-import. The planned next stages (ROADMAP-v3 D8.2 / D15) are per-AFI
-Loc-RIB sharding (independent `RwLock<LocRib>` per family so v4 and
-v6 imports run in parallel), a lock-free event bus, sharded
-Adj-RIB-In, and import-throughput benchmarks at 100k / 500k / 1M
-routes.
+With one `RwLock` there is still at most one writer at a time; a full BGP table (800k+ routes) arriving over several peers serializes on import. The planned next stages (ROADMAP-v3 D8.2 / D15) are per-AFI Loc-RIB sharding (independent `RwLock<LocRib>` per family so v4 and v6 imports run in parallel), a lock-free event bus, sharded Adj-RIB-In, and import-throughput benchmarks at 100k / 500k / 1M routes.
 
 ## OS routing table reference
 
 `lr-osroute` provides:
 
 - **Trait**: `OsRouteTable` — `add_route()`, `delete_route()`, `list_routes()`.
-- **Reference impl**: `linux::RtNetlink` — speaks raw rtnetlink over
-  `AF_NETLINK` sockets. Builds `RTM_NEWROUTE` / `RTM_DELROUTE` messages with
-  `RTA_DST` / `RTA_GATEWAY` / `RTA_OIF` / `RTA_PRIORITY` attributes.
+- **Reference impl**: `linux::RtNetlink` — speaks raw rtnetlink over `AF_NETLINK` sockets. Builds `RTM_NEWROUTE` / `RTM_DELROUTE` messages with `RTA_DST` / `RTA_GATEWAY` / `RTA_OIF` / `RTA_PRIORITY` attributes.
 - **Stub**: `StubRouteTable` — for platforms without rtnetlink or for tests.
 
-The crate is **opt-in** because it performs FFI and requires privileges.
-Embedders running inside a sandbox can omit it entirely.
+The crate is **opt-in** because it performs FFI and requires privileges. Embedders running inside a sandbox can omit it entirely.
 
 ## BFD integration
 
-`lr-bfd` is fully independent — it doesn't depend on `lr-bgp` or any other
-protocol crate. It implements the RFC 5880 §6.8 state machine and timing
-exactly (peer-multiplier detection time, negotiated transmit interval with
-jitter, Poll/Final parameter confirmation). The sockets live in
-`lr-osroute::bfd_transport` — one shared receive socket per (address,
-mode) on the well-known port (3784 single-hop per RFC 5881, 4784 multihop
-per RFC 5883) with the single-hop TTL 255 filter, plus one transmit
-socket per session with an RFC 5881 §4 ephemeral source port.
+`lr-bfd` is fully independent — it doesn't depend on `lr-bgp` or any other protocol crate. It implements the RFC 5880 §6.8 state machine and timing exactly (peer-multiplier detection time, negotiated transmit interval with jitter, Poll/Final parameter confirmation). The sockets live in `lr-osroute::bfd_transport` — one shared receive socket per (address, mode) on the well-known port (3784 single-hop per RFC 5881, 4784 multihop per RFC 5883) with the single-hop TTL 255 filter, plus one transmit socket per session with an RFC 5881 §4 ephemeral source port.
 
-The daemon wires the two (`daemon_bfd.rs`): one BFD session per
-`bfd = true` peer; a BFD Up→Down transition tears the BGP session down
-(CEASE NOTIFICATION + route purge) without waiting for the hold timer
-(typical sub-second detection vs. 90s for BGP-only keepalives), and the
-connector holds off reconnecting while BFD is down.
+The daemon wires the two (`daemon_bfd.rs`): one BFD session per `bfd = true` peer; a BFD Up→Down transition tears the BGP session down (CEASE NOTIFICATION + route purge) without waiting for the hold timer (typical sub-second detection vs. 90s for BGP-only keepalives), and the connector holds off reconnecting while BFD is down.
 
 ## Damping integration
 
-`lr-damping` implements RFC 2439 route flap damping. It is _opt-in_ and
-off by default: **RFC 7196 documents that RFD with the RFC 2439 default
-parameters penalizes well-connected networks** (each alternate path
-explored during convergence re-triggers the penalty), which is why most
-operators disable it on Internet-facing eBGP. The `lr-damping`
-configuration knobs cover the RFC 7196 conservative settings. Use it
-for OSPF / Babel where there is no AS_PATH loop detection to absorb
-transient flaps, or as a defensive-safety mechanism during incidents.
+`lr-damping` implements RFC 2439 route flap damping. It is _opt-in_ and off by default: **RFC 7196 documents that RFD with the RFC 2439 default parameters penalizes well-connected networks** (each alternate path explored during convergence re-triggers the penalty), which is why most operators disable it on Internet-facing eBGP. The `lr-damping` configuration knobs cover the RFC 7196 conservative settings. Use it for OSPF / Babel where there is no AS_PATH loop detection to absorb transient flaps, or as a defensive-safety mechanism during incidents.
 
 ## FFI and bindings
 
 - `lr-ffi` exposes a C ABI. `cbindgen` generates `include/lr_ffi.h`.
 - `bindings/lr-go` — cgo wrapper with `runtime.SetFinalizer` cleanup.
 - `bindings/lr-python` — cffi loader with `Router` context manager.
-- `include/librouting.hpp` — header-only C++ wrapper (RAII, throwing
-  wrappers).
+- `include/librouting.hpp` — header-only C++ wrapper (RAII, throwing wrappers).
 
-The C ABI surface is intentionally minimal: opaque handle (`lr_router_t`),
-`lr_router_*` lifecycle functions, `lr_bytes_t` for byte buffers,
-thread-local `lr_last_error()` for error strings.
+The C ABI surface is intentionally minimal: opaque handle (`lr_router_t`), `lr_router_*` lifecycle functions, `lr_bytes_t` for byte buffers, thread-local `lr_last_error()` for error strings.
 
 ## Feature flags
 
-Each crate exposes `default` features that are sensible for typical
-embedders. Notable toggles:
+Each crate exposes `default` features that are sensible for typical embedders. Notable toggles:
 
 - `lr-core` — `std` (default) / `no_std` (for embedded analyzers).
-- `lr-bgp` — `asn4` / `mp_bgp` / `addpath` / `graceful_restart` /
-  `enhanced_rr` / `extended_communities` / `long_lived` / `labeled_unicast` /
-  `exchange-plane` (off by default; the LRXP private capability prototype).
+- `lr-bgp` — `asn4` / `mp_bgp` / `addpath` / `graceful_restart` / `enhanced_rr` / `extended_communities` / `long_lived` / `labeled_unicast` / `exchange-plane` (off by default; the LRXP private capability prototype).
 - `lr-ospf` — `v2` / `v3` / `nssa` / `te` / `hmac_sha` / `graceful_restart`.
 - `lr-bfd` — `std` / `no_std`.
 - `lr-ldp` — `std` / `no_std`.
@@ -695,10 +373,8 @@ embedders. Notable toggles:
 
 - Unit tests live alongside the source (`#[cfg(test)]` modules).
 - End-to-end tests live in `crates/lr-tests/tests/` — 16 files:
-  - `tcp_smoke.rs` — two librouting BGP peers exchange OPEN+KEEPALIVE over
-    real TCP.
-  - `route_propagation.rs` — originate → Adj-RIB-In → Loc-RIB →
-    Adj-RIB-Out → withdrawal reversal, over the full pipeline.
+  - `tcp_smoke.rs` — two librouting BGP peers exchange OPEN+KEEPALIVE over real TCP.
+  - `route_propagation.rs` — originate → Adj-RIB-In → Loc-RIB → Adj-RIB-Out → withdrawal reversal, over the full pipeline.
   - `protocol_runtimes.rs` — OSPF and Babel delta integration into Loc-RIB.
   - `add_path.rs` — RFC 7911 multi-path propagation.
   - `bgp_session_modes.rs` — the 8 dual-stack / MP-BGP / ENH session modes.
@@ -708,57 +384,21 @@ embedders. Notable toggles:
   - `route_aggregation.rs` — RFC 4271 §9.2.2.2 aggregate lifecycle.
   - `bmp_monitoring.rs` — RFC 7854 Peer Up/Down + Route Monitoring.
   - `ospf_broadcast.rs` — RFC 2328 §10.4 adjacency gating on broadcast segments.
-  - `ospf_multi_area.rs`, `ospf_external.rs`, `ospf_stub_nssa.rs`,
-    `ospf_virtual_link.rs` — OSPF area/ABR/NSSA/§15 coverage.
+  - `ospf_multi_area.rs`, `ospf_external.rs`, `ospf_stub_nssa.rs`, `ospf_virtual_link.rs` — OSPF area/ABR/NSSA/§15 coverage.
   - `tutorial_snippets.rs` — compile-and-run anchors for `docs/tutorial.md`.
-- Daemon-level integration tests in `crates/lr-cli/tests/` (20 files)
-  spawn the real `lr-daemon` binary (runtime API, signals, reload,
-  privilege drop, multi-peer fan-out, RFC 8212 policy, FRR parity knobs,
-  exchange-plane prototype, BFD fast-fail, filter diagnostics,
-  graceful-shutdown receive, metrics endpoint, config `check` /
-  `to-dsl`, `lrctl` proxy surface).
-- Per-crate integration suites: `crates/lr-bgp/tests/` (5 files,
-  incl. RFC 4271 Appendix A vectors and the codec-reset regression),
-  `crates/lr-ldp/tests/` (2 files, the LDP session-FSM and
-  transit-LSR e2e suites, ~5 KLOC), `crates/lr-router/tests/`
-  (2 files, Babel announcement + multihop), `crates/lr-policy/tests/`
-  (3 files: filter corpus + proptest + grammar corpus),
-  `crates/lr-osroute/tests/` (2 files, the OSPFv3-transport + SRv6
-  kernel-gated suites).
-- Interop scripts against the BIRD and FRR reference routers live in
-  `tests/interop/` — 54 scripts covering BGP / OSPF / Babel / LDP /
-  BFD / BMP / RPKI-RTR / TCP-AO / Add-Path / route-server / E-LSA /
-  End.X / SRv6 / graceful-shutdown / RFC 8212 / filter DSL / damping /
-  aggregation / multi-protocol / redistribute / MPLS-LSP / MRT /
-  labelled-unicast. They run in CI on ubuntu runners with the
-  reference daemons installed via apt; they skip gracefully when
-  absent.
-- Total: ~1,900 nextest cases run on every push across 50
-  integration test files in `crates/*/tests/` plus per-crate unit
-  tests, doc-tests across every public API, and 54 interop scripts.
-  Run `cargo nextest list --workspace --all-features` for the live
-  count.
+- Daemon-level integration tests in `crates/lr-cli/tests/` (20 files) spawn the real `lr-daemon` binary (runtime API, signals, reload, privilege drop, multi-peer fan-out, RFC 8212 policy, FRR parity knobs, exchange-plane prototype, BFD fast-fail, filter diagnostics, graceful-shutdown receive, metrics endpoint, config `check` / `to-dsl`, `lrctl` proxy surface).
+- Per-crate integration suites: `crates/lr-bgp/tests/` (5 files, incl. RFC 4271 Appendix A vectors and the codec-reset regression), `crates/lr-ldp/tests/` (2 files, the LDP session-FSM and transit-LSR e2e suites, ~5 KLOC), `crates/lr-router/tests/` (2 files, Babel announcement + multihop), `crates/lr-policy/tests/` (3 files: filter corpus + proptest + grammar corpus), `crates/lr-osroute/tests/` (2 files, the OSPFv3-transport + SRv6 kernel-gated suites).
+- Interop scripts against the BIRD and FRR reference routers live in `tests/interop/` — 54 scripts covering BGP / OSPF / Babel / LDP / BFD / BMP / RPKI-RTR / TCP-AO / Add-Path / route-server / E-LSA / End.X / SRv6 / graceful-shutdown / RFC 8212 / filter DSL / damping / aggregation / multi-protocol / redistribute / MPLS-LSP / MRT / labelled-unicast. They run in CI on ubuntu runners with the reference daemons installed via apt; they skip gracefully when absent.
+- Total: ~1,900 nextest cases run on every push across 50 integration test files in `crates/*/tests/` plus per-crate unit tests, doc-tests across every public API, and 54 interop scripts. Run `cargo nextest list --workspace --all-features` for the live count.
 
 ## CI/CD
 
 `.github/workflows/`:
 
-- `ci.yml` — fmt + clippy + nextest + doc-tests + C/C++ harness +
-  Python bindings + Go bindings + 5 in-process interop labs
-  (`two_daemon.sh`, `addpath.sh`, `filter_dsl_bird.sh`,
-  `babel_multi_nic.sh`, `babel_multihop.sh`) + MSRV 1.88 + cross
-  builds (`aarch64-unknown-linux-gnu`,
-  `x86_64-pc-windows-gnu`, `x86_64-apple-darwin`) + native macOS /
-  Windows runners + coverage (`cargo-tarpaulin`).
-- `nightly.yml` — `miri` (UB audit on the FFI unsafe surface),
-  `supply-chain` (`cargo audit` + `cargo deny`), `vm-kernel-gated`
-  (QEMU VM with `CAP_NET_ADMIN` for TCP-AO / MPLS / SRv6), `fuzz`
-  (the three `cargo-fuzz` targets: `bgp_decode`, `filter_parser`,
-  `roa_validate`), `bench-smoke` (criterion smoke run).
-- `docker.yml` — multi-stage Dockerfile build verification
-  (ROADMAP-v3 D12.3) on push / PR / nightly.
-- `release.yml` — tag-driven cross-compiled binaries + `cargo publish`
-  + GitHub Release archives.
+- `ci.yml` — fmt + clippy + nextest + doc-tests + C/C++ harness + Python bindings + Go bindings + 5 in-process interop labs (`two_daemon.sh`, `addpath.sh`, `filter_dsl_bird.sh`, `babel_multi_nic.sh`, `babel_multihop.sh`) + MSRV 1.88 + cross builds (`aarch64-unknown-linux-gnu`, `x86_64-pc-windows-gnu`, `x86_64-apple-darwin`) + native macOS / Windows runners + coverage (`cargo-tarpaulin`).
+- `nightly.yml` — `miri` (UB audit on the FFI unsafe surface), `supply-chain` (`cargo audit` + `cargo deny`), `vm-kernel-gated` (QEMU VM with `CAP_NET_ADMIN` for TCP-AO / MPLS / SRv6), `fuzz` (the three `cargo-fuzz` targets: `bgp_decode`, `filter_parser`, `roa_validate`), `bench-smoke` (criterion smoke run).
+- `docker.yml` — multi-stage Dockerfile build verification (ROADMAP-v3 D12.3) on push / PR / nightly.
+- `release.yml` — tag-driven cross-compiled binaries + `cargo publish` - GitHub Release archives.
 
 ## License
 

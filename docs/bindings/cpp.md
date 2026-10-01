@@ -1,11 +1,6 @@
 # C++ binding guide
 
-The C++ surface (`include/librouting.hpp`) is a header-only RAII
-wrapper over the C ABI: `librouting::Router` owns the native router
-via `std::unique_ptr` with a custom deleter, `librouting::Bytes`
-owns returned buffers, and errors throw `librouting::Error`. Inline
-helpers cover the common calls; anything the wrapper does not cover
-yet is one `r.get()` away from the plain C ABI.
+The C++ surface (`include/librouting.hpp`) is a header-only RAII wrapper over the C ABI: `librouting::Router` owns the native router via `std::unique_ptr` with a custom deleter, `librouting::Bytes` owns returned buffers, and errors throw `librouting::Error`. Inline helpers cover the common calls; anything the wrapper does not cover yet is one `r.get()` away from the plain C ABI.
 
 Build the shared library once:
 
@@ -13,8 +8,7 @@ Build the shared library once:
 cargo build --release -p lr-ffi
 ```
 
-A complete program — create a router, add an eBGP session, originate
-a prefix, drain the wire bytes:
+A complete program — create a router, add an eBGP session, originate a prefix, drain the wire bytes:
 
 ```cpp
 // lr_quickstart.cpp — build with:
@@ -68,30 +62,10 @@ int main() {
 }
 ```
 
-The header compiles as `extern "C" { #include "lr_ffi.h" }` — no
-link-time dependency beyond `liblr_ffi` itself, and no generated
-sources to track.
+The header compiles as `extern "C" { #include "lr_ffi.h" }` — no link-time dependency beyond `liblr_ffi` itself, and no generated sources to track.
 
-API map: `add_bgp_session_ext` exposes the RFC 4724/9494 knobs
-(`graceful_restart`, `gr_restart_time`, `long_lived_gr`,
-`llgr_stale_time`, `llgr_max_stale_time`); `set_mp_families` /
-`set_extended_next_hop` (RFC 5549) gate the multi-protocol families
-before `start_session`; the RFC 8212 posture, `allowas-in`, soft
-reconfiguration, RFC 8277 labelled origination and the Loc-RIB dump
-are available through the C ABI directly
-(`lr_router_set_ebgp_requires_policy`,
-`lr_router_set_local_as_tolerance`,
-`lr_router_set_soft_reconfig_inbound`,
-`lr_router_originate_labeled_v4/v6`, `lr_router_rib_dump`) — each
-throwing nothing and returning `int32_t` codes, so wrap them in a
-helper that converts to `librouting::Error` when the wrapper grows
-one.
+API map: `add_bgp_session_ext` exposes the RFC 4724/9494 knobs (`graceful_restart`, `gr_restart_time`, `long_lived_gr`, `llgr_stale_time`, `llgr_max_stale_time`); `set_mp_families` / `set_extended_next_hop` (RFC 5549) gate the multi-protocol families before `start_session`; the RFC 8212 posture, `allowas-in`, soft reconfiguration, RFC 8277 labelled origination and the Loc-RIB dump are available through the C ABI directly (`lr_router_set_ebgp_requires_policy`, `lr_router_set_local_as_tolerance`, `lr_router_set_soft_reconfig_inbound`, `lr_router_originate_labeled_v4/v6`, `lr_router_rib_dump`) — each throwing nothing and returning `int32_t` codes, so wrap them in a helper that converts to `librouting::Error` when the wrapper grows one.
 
 ## CI coverage
 
-`tests/ffi/harness.cpp` exercises the wrapper end-to-end (RAII
-lifecycle, exception safety, OPEN/KEEPALIVE round trip with LLGR
-capability check, `set_extended_next_hop`/`set_mp_families`/
-`set_local_address` setters, error-path throws). The CI job
-`rust-tests` builds it with `c++ -std=c++17` against `liblr_ffi.so`
-after the Rust workspace tests; failures fail the build.
+`tests/ffi/harness.cpp` exercises the wrapper end-to-end (RAII lifecycle, exception safety, OPEN/KEEPALIVE round trip with LLGR capability check, `set_extended_next_hop`/`set_mp_families`/ `set_local_address` setters, error-path throws). The CI job `rust-tests` builds it with `c++ -std=c++17` against `liblr_ffi.so` after the Rust workspace tests; failures fail the build.

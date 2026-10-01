@@ -1,13 +1,11 @@
 # Example: OS route table integration (Linux rtnetlink)
 
-This example installs a Loc-RIB route into the Linux kernel FIB. After
-the route is installed, the kernel forwards traffic to the next hop
-without further user-space intervention.
+This example installs a Loc-RIB route into the Linux kernel FIB. After the route is installed, the kernel forwards traffic to the next hop without further user-space intervention.
 
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-osroute = "1.0.0-rc.4"
+// lr-osroute = "1.0.0-rc.5"
 
 use lr_osroute::{OsRouteTable, RtNetlink};
 use lr_core::addr::{Prefix, IpAddr};
@@ -40,9 +38,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 ## Notes
 
-- **Privileges**: installing routes requires `CAP_NET_ADMIN` (Linux). Run
-  as root or grant the capability.
-- **Persistence**: routes installed via rtnetlink do **not** survive
-  reboot. Use a config file + a supervisor to re-install on boot.
-- **Validation**: the `SafetyNet` in `lr-policy` should run *before*
-  installing into the kernel to prevent installing martian prefixes.
+- **Privileges**: installing routes requires `CAP_NET_ADMIN` (Linux). Run as root or grant the capability.
+- **Persistence**: routes installed via rtnetlink do **not** survive reboot. Use a config file + a supervisor to re-install on boot.
+- **Validation**: the `SafetyNet` in `lr-policy` should run _before_ installing into the kernel to prevent installing martian prefixes.
