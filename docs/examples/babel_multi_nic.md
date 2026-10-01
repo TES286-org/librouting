@@ -1,94 +1,107 @@
-# Babel multi-NIC with glob patterns
+# Babel per-interface parameters
 
-This example demonstrates the `babel { interface … }` configuration for per-interface Babel parameters (RFC 8966 §A.2) with shell-like glob pattern matching. The daemon enumerates the system interfaces via `getifaddrs(3)`, matches each name against the patterns in file order, and uses the first match's parameters for the single Babel session.
+Babel computes link cost per interface, so the same daemon can treat a
+wired port, a wireless port and a tunnel differently. This page
+configures that with glob patterns and shows how to confirm which
+interface got which parameters.
 
 ## Configuration
 
 ```lr
-# Top-level protocol selection.
 protocol babel;
 
 babel {
     port 6696;
 
-    # Wired interfaces: low rxcost, fast hello interval.
+    # Every eth* interface: wired cost model, fast Hellos.
     interface "eth*" {
         type "wired";
         rxcost 96;
         hello_interval_ms 4s;
     }
 
-    # Wireless interface: high rxcost, slow hello interval.
+    # The wireless port is expensive and quiet.
     interface "wlan0" {
         type "wireless";
         rxcost 256;
     }
 
-    # Tunnel interface: RTT-based cost for latency-sensitive routes.
+    # A tunnel adds an RTT-based penalty on top of rxcost.
     interface "tun0" {
         type "tunnel";
         rxcost 192;
         rtt_cost 100;
-        rtt_min 10ms;          # 10 000 us
-        rtt_max 120ms;         # 120 000 us
-    }
-
-    # Loopback: inert, high cost (never used for Babel adjacency).
-    interface "lo" {
-        type "wired";
-        rxcost 65535;
+        rtt_min 10ms;      # 10000 us
+        rtt_max 120ms;     # 120000 us
     }
 }
 ```
 
-## How it works
+Each glob is matched in file order and the **first match wins per
+interface**. The daemon enumerates the system interfaces, resolves one
+Babel session for each matched interface, and skips the ones whose
+sockets cannot bind.
 
-1. At startup, `run_babel_daemon()` calls `lr_osroute::ospf_transport::list_interfaces()` to enumerate every system interface with its IPv4 and IPv6 addresses.
-2. For each `babel { interface … }` block, the daemon matches the `name` glob pattern against the enumerated interfaces using `daemon_config::glob_match()` (BIRD's `lib/patmatch.c` semantics: `*` matches any sequence, `?` any single character, `\` escapes).
-3. The first matching pattern wins — its parameters apply to the single Babel session.
-4. When `--local-address` is unset, the daemon picks the first matched interface's primary IPv4 (or IPv6 if no IPv4) as the bind source.
+## Glob syntax
 
-## Glob pattern syntax
+The matcher follows BIRD's `lib/patmatch.c`: `*` is any sequence, `?` is
+any single character, `\` escapes the next character.
 
-| Pattern | Matches                                  |
-| ------- | ---------------------------------------- |
-| `eth*`  | `eth0`, `eth1`, `ethernet-extra-long`    |
-| `eth?`  | `eth0`, `eth1` (not `eth` or `eth01`)    |
-| `*0`    | `eth0`, `wlan0` (any name ending in `0`) |
-| `eth\*` | `eth*` literally (the `*` is escaped)    |
-| `lo`    | `lo` exactly                             |
+| Pattern | Matches |
+| ------- | ------- |
+| `eth*` | `eth0`, `eth1`, `ethernet-extra-long` |
+| `eth?` | `eth0`, `eth1` (not `eth` or `eth01`) |
+| `*0` | `eth0`, `wlan0` |
+| `eth\*` | the literal name `eth*` |
 
-## Available keys
+## Keys
 
-| Key                  | Type   | Default         | Description                          |
-| -------------------- | ------ | --------------- | ------------------------------------ |
-| `name`               | string | (required)      | Interface name or glob pattern       |
-| `type` / `kind`      | string | `"wired"`       | `wired` \| `wireless` \| `tunnel`    |
-| `hello_interval_ms`  | int    | 4000 (wired)    | Hello interval in ms (RFC 8966 §3.1) |
-| `update_interval_ms` | int    | 4× hello        | Multicast update interval            |
-| `rxcost`             | int    | 96 (wired)      | Receive cost (§3.5.2)                |
-| `rtt_cost`           | int    | 0               | RTT-based cost (§A.2.4, off when 0)  |
-| `rtt_min_us`         | int    | 10000           | Lower RTT bound in microseconds      |
-| `rtt_max_us`         | int    | 120000          | Upper RTT bound in microseconds      |
-| `next_hop_ipv4`      | string | (auto)          | Per-interface IPv4 next-hop          |
-| `next_hop_ipv6`      | string | (auto)          | Per-interface IPv6 next-hop          |
-| `extended_next_hop`  | bool   | false           | RFC 5549 extended next-hop           |
-| `check_link`         | bool   | true            | Withdraw on interface down           |
-| `port`               | int    | `[babel] port`  | Override the global Babel port       |
-| `group`              | string | `[babel] group` | Override the global multicast group  |
+| Key | Type | Default | Meaning |
+| --- | ---- | ------- | ------- |
+| `name` | string | required | Interface name or glob, the block identity |
+| `type` / `kind` | string | `"wired"` | `wired`, `wireless` or `tunnel` |
+| `hello_interval_ms` | duration | 1000 ms | Hello interval (RFC 8966 §3.1) |
+| `update_interval_ms` | duration | 3× hello | Multicast update interval |
+| `rxcost` | int | 96 | Receive cost advertised (§3.5.2) |
+| `rtt_cost` | int | 96 on `tunnel`, else 0 | RTT penalty (§A.2.4) |
+| `rtt_min` | duration | 10 ms | Lower RTT bound |
+| `rtt_max` | duration | 120 ms | Upper RTT bound |
+| `next_hop_ipv4` | string | interface address | Advertised IPv4 next hop |
+| `next_hop_ipv6` | string | link-local | Advertised IPv6 next hop |
+| `extended_next_hop` | bool | false | RFC 5549 next hop |
+| `check_link` | bool | true | Withdraw on interface down |
+| `port` | int | global `port` | Override the Babel port |
+| `group` | string | global group | Override the multicast group |
 
-## Interop
+`rtt_min` and `rtt_max` take a duration suffix and are stored in
+microseconds; a bare number is microseconds. The older spellings
+`rtt_min_us` and `rtt_max_us` are accepted for the same keys. A
+`rtt_min` that is not below `rtt_max` is a startup error.
 
-The `tests/interop/babel_multi_nic.sh` test runs in a user+network namespace (`unshare -Urn`), creates a veth pair (`veth0`/`veth1`), configures two `[[babel.interface]]` patterns (`veth*` and `lo`), and verifies the daemon:
+## Verify
 
-1. Logs `babel N interface pattern(s) configured; enumerating M   system interface(s)`.
-2. Matches `veth*` against `veth0` and `veth1`.
-3. Matches `lo` against the loopback.
-4. Picks the first matched interface's address as the bind source.
+Startup logs every pattern and every session:
 
-## References
+```text
+daemon: babel 3 interface pattern(s) configured; enumerating 6 system interface(s)
+daemon: babel interface pattern 'eth*' matched 2 interface(s): eth0, eth1
+daemon: babel interface eth0 session 1 — v6 hello 4000ms update 12000ms rxcost 96 router-id 10.0.0.1 check-link
+```
+
+A pattern that matches nothing logs
+`daemon: babel interface pattern '...' matched 0 interfaces`. If no
+pattern matches any interface at all, the daemon exits with
+`no system interface matched any [[babel.interface]] pattern`.
+
+To watch reachability per session:
+
+```sh
+lrctl --socket /run/lr-daemon.api routes show 2001:db8::/32
+```
+
+## Reference
 
 - RFC 8966 — The Babel Routing Protocol (§A.2 link cost models)
-- RFC 8967 — Babel MAC authentication (per-interface keys)
-- BIRD `proto/babel/config.Y` — interface directive grammar
-- BIRD `lib/patmatch.c` — shell-like pattern matching
+- RFC 8967 — MAC authentication for Babel (per-interface keys)
+- [`babel_source_specific.md`](babel_source_specific.md) — RFC 9079
+  routes over the same sessions

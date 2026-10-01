@@ -1,10 +1,10 @@
-# Example: OSPFv3 SRv6 (RFC 9513) — locator distribution and dataplane
+# OSPFv3 SRv6 locator distribution
 
-SRv6 is the IPv6 dataplane for Segment Routing: a 128-bit SID encodes a behavior (End, End.X, End.DX6, etc.), and the SRH (Segment Routing Header, RFC 8754) carries an ordered list of SIDs that a packet traverses. The control plane that distributes SIDs in an OSPFv3 domain is RFC 9513.
-
-The reference daemon runs this end-to-end: an OSPFv3 router configured with `[[ospf.srv6_locator]]` tables originates the SRv6 Capabilities TLV (on the RI LSA) and the SRv6 Locator LSA, peers receive and install the locators as IPv6 forwarding entries (`--ospf-srv6-receive`), and the kernel dataplane on Linux mirrors them into `seg6` / `seg6local` routes.
-
-This example shows the library-level pieces an embedder composes.
+RFC 9513 distributes SRv6 locators in an OSPFv3 domain: a router
+originates a Locator LSA carrying its locator and End SID, and its peers
+project those into a per-node SID database and install them as IPv6
+forwarding entries. This page configures the originator and the
+receiver, then verifies both SIDs.
 
 ## The locator model
 
@@ -13,183 +13,192 @@ This example shows the library-level pieces an embedder composes.
     ─────────  ──────  ─────
        │        │       │
        │        │       └─ per-behavior arguments (usually 0)
-       │        └─ the behavior's function (End, End.X, End.DX6, …)
-       └─ routable prefix (BGP/IGP-reachable), distributed by RFC 9513
+       │        └─ the behavior function (End, End.X, End.DX6, ...)
+       └─ routable prefix, distributed by RFC 9513
 ```
 
-A locator is an IPv6 prefix (RFC 8754 §3.1). The `End` SID on a node is by convention `<locator>::` (the locator itself), and the `End.X` SID (per-adjacency, RFC 9513 §9) is `<locator>::<adjacency- specific-funct>`. The control plane distributes the locators; the SIDs are derived from the locators by composition.
+The End SID is the locator itself; an End.X SID (RFC 9513 §9) is a
+per-adjacency SID inside the locator.
 
-## Origination (the SRv6 node)
+## Configuration
+
+Originator:
+
+```lr
+protocol ospf;
+
+ospf {
+    version "v3";
+    srv6_o_flag true;        # advertise the RFC 9259 O-flag
+    srv6_max_sl 16;          # Node MSD: SRH Max Segments Left (type 41)
+    srv6_max_end_pop 16;     # MSD type 42
+    srv6_max_h_encaps 16;    # MSD type 44
+    srv6_max_end_d 16;       # MSD type 45
+
+    srv6-locator "2001:db8:a:1::/48" {
+        algorithm 0;         # 0 = SPF, the default
+        metric 0;
+        behavior 1;          # RFC 8986 §4.1 End
+    }
+
+    interface "eth0" {
+        area 0;
+        # RFC 9513 §9.1: the adjacency SID. Must fall inside a locator.
+        srv6_end_x "2001:db8:a:1::100";
+    }
+
+    interface "eth1" {
+        area 0;
+        network_type "broadcast";
+        # RFC 9513 §9.2: base prefix for the per-neighbor LAN End.X
+        # SIDs; the neighbor Router-ID fills the low 32 bits, so the
+        # prefix length is at most /96.
+        srv6_end_x_lan "2001:db8:a:2:ffff::/96";
+    }
+}
+```
+
+`sid` overrides the End SID (default: the locator with host bits
+zeroed). The four `block_len`, `node_len`, `function_len` and
+`argument_len` keys add the §10 SID Structure sub-TLV, and are
+all-or-none.
+
+Receiver:
+
+```lr
+protocol ospf;
+
+ospf {
+    version "v3";
+    srv6_receive true;       # off by default — fail closed
+}
+```
+
+Both sides need `--install-kernel-routes` for the kernel mirror. The
+equivalent CLI:
+
+```sh
+lr-daemon --protocol ospf --ospf-version v3 --router-id 10.0.0.1 \
+    --ospf-interface eth0 --ospf-area 0 \
+    --ospf-srv6-locator 2001:db8:a:1::/48 \
+    --ospf-srv6-o-flag --ospf-srv6-receive \
+    --install-kernel-routes
+```
+
+`--ospf-srv6-locator` takes the prefix only; the other locator keys and
+the Node MSD values are configuration-file keys.
+
+## Originating the LSAs
+
+The RI LSA carries the SRv6 Capabilities TLV, the SR-Algorithm TLV and
+the Node MSD TLV; the Locator LSA carries one Locator TLV per locator,
+each with its End SID:
 
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-srv6 = "0.1"
-// lr-ospf = "1.0.0-rc.5"
-// lr-core = "1.0.0-rc.5"
+// lr-ospf = "<version>"
+// lr-srv6 = "<version>"
 
-use lr_core::addr::Prefix;
 use lr_ospf::lsa::srv6::{
-    originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv,
-    Srv6LocatorTlv, Srv6SidStructure, SRV6_CAP_O_FLAG,
+    originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, NodeMsd,
+    Srv6EndSidSubTlv, Srv6LocatorTlv, SRV6_CAP_O_FLAG,
 };
-use lr_srv6::{Behavior, Sid};
+use lr_srv6::Behavior;
 
-/// A node's SRv6 configuration (the daemon's `[ospf]` section +
-/// `[[ospf.srv6_locator]]` tables maps to this shape).
-struct NodeSrv6Config {
-    /// Locator prefix, e.g. fc00:dead:beef::/48.
-    locator_prefix: [u8; 16],
-    locator_len: u8,
-    /// SR-Algorithm (0 = SPF, the default).
-    algorithm: u8,
-    /// End SID (defaults to the locator itself).
-    end_sid: [u8; 16],
-    /// End behavior (defaults to End — RFC 8986 §4.2 opcode 5).
-    end_behavior: u16,
-    /// Node MSDs (Max Segments Left = type 41, Max End.Pop = 42, …).
-    msds: Vec<(u8, u8)>, // (msd_type, value)
-    router_id: u32,
-}
+fn main() {
+    let router_id = 0x0a00_0001; // 10.0.0.1
+    let locator: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x0a, 0x00, 0x01,
+        0, 0, 0, 0, 0, 0, 0, 0,
+    ];
 
-fn originate_node_lsas(cfg: &NodeSrv6Config) {
-    // The RI LSA carries the SRv6 Capabilities TLV (O-flag, RFC 9513
-    // §3 — advertises "I can do SRv6"), the SR-Algorithm TLV and
-    // the Node MSD TLV.
-    let capabilities = SRV6_CAP_O_FLAG; // bit 1 = O-flag
-    let msds: &[lr_ospf::lsa::srv6::NodeMsd] = &cfg.msds; // NodeMsd = (u8, u8)
-    let _ri_lsa = originate_v3_srv6_ri_lsa(
-        cfg.router_id,
-        capabilities,
-        &[cfg.algorithm],
+    // Node MSDs: (msd_type, value) — RFC 9352 §4 types 41/42/44/45.
+    let msds: Vec<NodeMsd> = vec![(41, 16), (42, 16), (44, 16), (45, 16)];
+    let ri = originate_v3_srv6_ri_lsa(
+        router_id,
+        SRV6_CAP_O_FLAG,
+        &[0],   // SR-Algorithm: 0 = SPF
         &msds,
-        None, // first origination; subsequent: Some(prev_seq)
+        None,   // first origination
     )
     .expect("RI LSA originates");
 
-    // The Locator LSA carries one Locator TLV per configured locator,
-    // each with an End SID sub-TLV (RFC 9513 §8) and the SID Structure
-    // sub-TLV (§10 — the LOC:FUNCT:ARGS bit-lengths the receiver uses
-    // to compose adjacency-SID SIDs from the locator).
     let locator_tlv = Srv6LocatorTlv {
-        route_type: 1, // intra-area
-        algorithm: cfg.algorithm,
-        locator_len: cfg.locator_len,
+        route_type: 1,        // intra-area
+        algorithm: 0,
+        locator_len: 48,
         options: 0,
         metric: 0,
-        prefix: cfg.locator_prefix,
+        prefix: locator,
         end_sids: vec![Srv6EndSidSubTlv {
             flags: 0,
-            behavior: cfg.end_behavior,
-            sid: cfg.end_sid,
-            structure: Some(Srv6SidStructure {
-                // LOC:FUNCT:ARGS bit-lengths (RFC 8986 §3.2). For
-                // fc00:dead:beef::/48 + a 16-bit function field:
-                // lb_len=32 (block), ln_len=16 (node) → locator=48,
-                // func_len=16, arg_len=0.
-                lb_len: 32,
-                ln_len: 16,
-                func_len: 16,
-                arg_len: 0,
-            }),
+            behavior: Behavior::End as u16,
+            sid: locator,     // the End SID defaults to the locator
+            structure: None,  // add Srv6SidStructure for the §10 sub-TLV
         }],
         fwd_addr: None,
         route_tag: None,
     };
-    let _locator_lsa = originate_v3_srv6_locator_lsa(
-        cfg.router_id,
-        0, // Link State ID — caller-chosen
+    let locator_lsa = originate_v3_srv6_locator_lsa(
+        router_id,
+        0,            // Link State ID — caller-chosen
         &[locator_tlv],
-        None, // first origination
+        None,
     )
     .expect("Locator LSA originates");
-    // The daemon floods these LSAs per-area in the same LSU as the
-    // topology LSAs (Router-LSA etc.); peers extract the locator
-    // and install it in their srv6db projection.
-}
 
-fn main() {
-    let cfg = NodeSrv6Config {
-        locator_prefix: [0xfd, 0x00, 0xde, 0xad, 0xbe, 0xef, 0, 0,
-                          0, 0, 0, 0, 0, 0, 0, 0],
-        locator_len: 48,
-        algorithm: 0,
-        end_sid: [0xfd, 0x00, 0xde, 0xad, 0xbe, 0xef, 0, 0,
-                   0, 0, 0, 0, 0, 0, 0, 0], // == locator
-        end_behavior: Behavior::End as u16, // RFC 8986 §4.1 opcode 1
-        msds: vec![(41, 16), (42, 16), (44, 16), (45, 16)],
-        router_id: 0x0a000001, // 10.0.0.1
-    };
-    originate_node_lsas(&cfg);
+    assert!(!ri.body.is_empty());
+    assert!(!locator_lsa.body.is_empty());
 }
 ```
 
-## Reception (the SRv6-capable peer)
+Flood both LSAs per area in the same LSU as the topology LSAs. Pass the
+current instance's `header.ls_sequence_number` as `prev_seq` on every
+later refresh; `None` restarts the sequence space.
 
-The `lr_ospf::srv6db` module is the per-node LSDB projection. The peer's SPF run attaches locator routes (§5: metric = the advertising router's SPF distance, link-local first hop). The `DefaultRouter::set_ospf_srv6_receive` flag (off by default, fail-closed) installs supported-algorithm (0/SPF) locators as IPv6 forwarding entries with §5's IAP-beats-locator preference.
+## Reception
 
-```rust
-use lr_router::DefaultRouter;
-use lr_ospf::srv6db;
+`DefaultRouter::set_ospf_srv6_receive(true)` turns on the projection: the
+SPF run attaches locator routes with the advertising router's distance as
+the metric (RFC 9513 §5), and supported-algorithm (SPF) locators become
+IPv6 forwarding entries. The flag is off by default, so an embedder that
+does not set it keeps the fail-closed behaviour.
 
-// Inside the embedder's poll loop, after the LSDB has been
-// updated from a received LSU:
-let mut router = DefaultRouter::new();
-// Enable SRv6 reception (fail-closed — must be set explicitly).
-router.set_ospf_srv6_receive(true);
+`DefaultRouter::ospf_srv6_databases()` returns the per-area
+`lr_ospf::srv6db::Srv6Database`, which holds each node's capabilities,
+algorithms, MSDs, locators, End SIDs and adjacency End.X SIDs.
 
-// After SPF runs and the srv6db is populated:
-let db = router.ospf_srv6_databases();
-for node in db.nodes() {
-    println!("node {} capabilities:", node.router_id);
-    println!("  O-flag: {}", node.capabilities.o_flag);
-    println!("  algorithms: {:?}", node.algorithms);
-    for msd in &node.msds {
-        println!("  MSD {:?}: {}", msd.kind, msd.value);
-    }
-    for loc in &node.locators {
-        println!("  locator {} algorithm {} metric {}",
-                 loc.prefix, loc.algorithm, loc.metric);
-        for sid in &loc.end_sids {
-            println!("    End SID {} behavior {:?}", sid.sid, sid.behavior);
-        }
-    }
-}
+## Verify
+
+The daemon's status view lists each projected adjacency SID:
+
+```sh
+lrctl --socket /run/lr-daemon.api status | grep srv6-endx
 ```
-
-## CLI flags
-
-```bash
-# Originator: advertise the locator and End SID.
-lr-daemon --protocol ospf --ospf-version v3 \
-    --router-id 10.0.0.1 \
-    --ospf-interface eth0 --ospf-area 0 \
-    --ospf-srv6-locator fc00:dead:beef::/48 \
-    --ospf-srv6-receive \
-    --ospf-srv6-o-flag \
-    --ospf-srv6-max-sl 16 \
-    --install-kernel-routes
-
-# Receiver: install the originator's locator as an IPv6 route.
-lr-daemon --protocol ospf --ospf-version v3 \
-    --router-id 10.0.0.2 \
-    --ospf-interface eth0 --ospf-area 0 \
-    --ospf-srv6-receive \
-    --install-kernel-routes
-```
-
-## The interop lab
-
-The 3-node lab `tests/interop/ospf6_frr_srv6.sh` exercises this end-to-end:
 
 ```text
-   lr1 (originator)  ←→  FRR 10.3 ospf6d (relay)  ←→  lr2 (receiver)
+srv6-endx 2001:db8:a:1::100 area=0 router=0a000002 behavior=5 alg=0 neighbor=0a000001
 ```
 
-`ospf6d` has no SRv6 support, but per RFC 5340 §4.2.1 it stores and re-floods the U-bit-set unknown E-LSAs (the SRv6 RI + Locator LSAs). `lr2` installs `lr1`'s locator through the FRR relay as an `Ospfv3` route with a link-local next hop.
+`behavior=5` is End.X (RFC 8986 §4.2); a LAN End.X line carries a
+trailing `lan` plus the neighbor Router-ID that filled the low 32 bits
+(§9.2). To confirm the receiver installed a learned locator:
 
-## What's missing (the roadmap)
+```sh
+lrctl --socket /run/lr-daemon.api routes show 2001:db8:a:1::/48
+```
 
-The current slice (RFC 9513 slices 1-3) covers Node SIDs only. The adjacency SIDs — End.X and LAN End.X (RFC 9513 §9) — ride on the RFC 8362 E-Router-Link TLV, which is the next planned slice. See [`docs/ROADMAP.md`](../ROADMAP.md) §"Phase 3 — plan" item 2 for the design and the interop gate.
+The route carries `proto=Ospfv3` and a link-local next hop, and the
+receiver logs `route installed 2001:db8:a:1::/64` as it goes in.
 
-The `BGP SR Policy` (RFC 9256 / 9430) slice is the consumer side: receive candidate/dynamic SR policies as VPN routes, resolve them to `lr-srv6` segment lists, and steer matching Loc-RIB entries into `seg6` encap routes in the kernel mirror (the BGP-LU LSP-mirror slice's shape, extended to SRv6 policies). See [`docs/ROADMAP.md`](../ROADMAP.md) §"Phase 3 — plan" item 4.
+The 3-node interop lab `tests/interop/ospf6_frr_srv6.sh` runs this
+through a real FRR `ospf6d` relay: `ospf6d` has no SRv6 support, but per
+RFC 5340 §4.2.1 it stores and re-floods U-bit-set unknown E-LSAs.
+
+## Reference
+
+- RFC 9513 — OSPFv3 Extensions for SRv6 (locator TLV, End and End.X SIDs)
+- RFC 8986 §4.1, §4.2 — End and End.X behaviors
+- RFC 8754 — IPv6 Segment Routing Header
+- [`../INTEROP.md`](../INTEROP.md) — the SRv6 labs

@@ -1,56 +1,52 @@
-# BIRD-like filter DSL + ROA validation
+# Filter DSL and ROA validation
 
-This example demonstrates the BIRD-like filter DSL (`filter` blocks in the native `.lr` config) combined with RFC 6811 prefix-origin validation (ROA). The filter language targets a subset of BIRD's filter grammar, providing conditionals, variables, arithmetic, prefix-set membership, and route attribute mutation — enough for production import/export policy.
+This page wires a BIRD-style `filter` block to a peer and turns on
+RFC 6811 prefix-origin validation, so a received route is dropped when
+its origin AS is not authorized. Read it if you are writing import
+policy for the daemon.
+
+The filter language itself is specified in
+[`../filter_dsl_grammar.md`](../filter_dsl_grammar.md); this page only
+shows how the daemon loads and attaches filters.
 
 ## Configuration
 
 ```lr
+protocol bgp;
+
 bgp {
     local_as 64512;
     peer_as 64513;
     router_id "10.0.0.1";
-    listen_addr "127.0.0.1:1179";
+    peer_addr "192.0.2.2:179";
     local_address "127.0.0.1";
     hold_time 9s;
     ebgp_policy "accept-all";
 
-    # RFC 6811 prefix-origin validation: when on, every received BGP
-    # UPDATE is validated against the `roa` blocks at import time.
-    # Invalid routes are rejected before the user-supplied import hook
-    # chain runs.
+    # Every received UPDATE is validated against the `roa` blocks
+    # before the user import hook chain runs.
     roa_validate true;
     roa_invalid_action "reject";   # "reject" | "warn" | "accept"
 }
 
-# ROA: 198.51.100.0/24 is authorized for AS 64513 (the peer's AS).
-# A route for 198.51.100.0/24 from AS 64513 → Valid.
+# 198.51.100.0/24 is authorized for our peer, AS 64513.
 roa {
     prefix "198.51.100.0/24";
     asn 64513;
 }
 
-# ROA: 203.0.113.0/24 is authorized for AS 65000 only.
-# A route for 203.0.113.0/24 from AS 64513 → Invalid (wrong origin).
+# 203.0.113.0/24 is authorized for AS 65000 only, so a route for it
+# from AS 64513 validates as invalid.
 roa {
     prefix "203.0.113.0/24";
     asn 65000;
+    max_length 24;
 }
 
-# A BIRD-like filter body, embedded verbatim between braces — no
-# string escaping. The filter language supports:
-#   - if/then/else with block statements
-#   - let bindings and arithmetic
-#   - prefix-set membership: net ~ [ prefix{ge,le}, ... ]
-#   - route attribute access: bgp.local_pref, bgp.med, bgp.as_path,
-#     bgp.communities, bgp.next_hop, proto, roa.state
-#   - assignment: bgp.local_pref = 200
-#   - append: bgp.communities += [ 64512:100 ]
-#   - method calls: bgp.as_path.prepend(65001)
-#   - accept / reject (with optional reason)
-#   - case/switch
-#   - function calls: len(bgp.as_path), first(bgp.as_path), ...
+# The body sits between the braces verbatim: no string escaping, and a
+# `}` inside a comment or a string does not close the block.
 filter "customer-in" {
-    if roa.state == "invalid" then { reject; }
+    if roa.state == "invalid" then { reject with "roa-invalid"; }
     if net ~ 198.51.100.0/24 then {
         bgp.local_pref = 200;
         bgp.communities += [ 64512:100 ];
@@ -59,93 +55,74 @@ filter "customer-in" {
     accept;
 }
 
-# A second filter using prefix-set ranges and arithmetic.
-filter "transit-in" {
-    let p = 100;
-    let q = p * 2;
-    if bgp.local_pref < q && net ~ [ 10.0.0.0/8{16,24} ] then {
-        bgp.local_pref = q;
-        accept;
-    }
-    reject;
-}
-
 peer "customer" {
     remote "192.0.2.2:179";
+    peer_as 64513;
     import_filter "customer-in";
 }
 ```
 
-## How it works
+`max_length` defaults to the prefix length (exact match). A value below
+the prefix length or above 32 (v4) / 128 (v6) is a startup error.
 
-1. At startup, `daemon_policy::build_roa_table()` compiles the `roa` blocks into an `lr_bgp::RoaTable`.
-2. When `roa_validate true;` is set in the bgp block, the daemon installs a built-in import hook whose body is `if roa.state == "invalid" then { reject; } accept;` — implemented as a tiny DSL filter so the same code path runs as user-supplied filters.
-3. `daemon_policy::build_filters()` compiles each `filter` body via `lr_policy::filter::compile()`, surfacing parse errors at startup (fail-closed).
-4. When a peer has `import_filter "name"`, the daemon attaches a `FilterImportHook` that runs the compiled filter on every received route before it enters Adj-RIB-In.
+## What the daemon does
 
-## DSL grammar
+1. `daemon_policy::build_roa_table` compiles the `roa` blocks into an
+   `lr_bgp::RoaTable`.
+2. With `roa_validate true` and a non-empty table, the daemon installs a
+   built-in import hook whose body is
+   `if roa.state == "invalid" then { reject; } accept;`. It is compiled
+   as a DSL filter, so it runs on the same path as your filters and is
+   registered under the name `__roa_validate`.
+3. `daemon_policy::build_filters` compiles each `filter` body with
+   `lr_policy::filter::compile`. A parse error fails startup — filters
+   never silently pass traffic.
+4. A peer with `import_filter "name"` gets a `FilterImportHook` that runs
+   the compiled filter on every received route before Adj-RIB-In.
+
+Unknown filter names fail at startup, as do duplicate filter names.
+
+## Verify
+
+Startup reports both halves:
 
 ```text
-filter   := name? '{' stmts '}' | stmts
-stmts    := stmt*
-stmt     := 'if' expr 'then' stmt ('else' stmt)?
-         | 'case' expr '{' arm+ '}'
-         | 'let' ident '=' expr ';'
-         | 'accept' ';'
-         | 'reject' ('with' expr)? ';'
-         | lvalue '=' expr ';'
-         | lvalue '+=' expr ';'
-         | expr ';'
-         | '{' stmts '}'
-arm      := (expr (',' expr)*)? '=>' stmts
-         | 'default' '=>' stmts
-lvalue   := ident | route_field
-expr     := or_expr
-or_expr  := and_expr ('||' and_expr)*
-and_expr := eq_expr ('&&' eq_expr)*
-eq_expr  := cmp_expr (('==' | '!=') cmp_expr)*
-cmp_expr := bit_or_expr (('<' | '<=' | '>' | '>=' | '~') bit_or_expr)*
-bit_or   := bit_xor ('|' bit_xor)*
-bit_xor  := bit_and ('^' bit_and)*
-bit_and  := shift ('&' shift)*
-shift    := add (('<<' | '>>') add)*
-add      := mul (('+' | '-') mul)*
-mul      := unary (('*' | '/' | '%') unary)*
-unary    := ('!' | '-') unary | postfix
-postfix  := primary ('.' ident ('(' args ')')?)*
-primary  := literal | ident | route_field | ident '(' args ')'
-         | '[' set_items ']' | '(' expr ')'
-route_field := 'net' | 'proto' | 'source'
-             | 'bgp' '.' ident
-             | 'roa' '.' 'state'
+  roa:         2 entries, validate=true (action: reject)
+  filters:     1 compiled, 1 import / 0 export bindings
 ```
 
-## Route attributes
+Then confirm the verdicts on live routes. `proto` renders as a
+BIRD-style lowercase name, so match it as `"bgp"`, `"ospf"`, `"ospf3"`,
+`"babel"`, `"static"`, `"direct"` or `"unknown"`:
 
-| Field             | Type      | Settable | Description                         |
-| ----------------- | --------- | -------- | ----------------------------------- |
-| `net`             | prefix    | no       | The route's prefix                  |
-| `proto`           | string    | no       | Protocol kind (`"Bgp"`, `"Ospfv2"`) |
-| `source`          | int       | no       | Route source (proto id)             |
-| `bgp.local_pref`  | int       | yes      | BGP LOCAL_PREF (RFC 4271 §5.1.5)    |
-| `bgp.med`         | int       | yes      | BGP MULTI_EXIT_DISC                 |
-| `bgp.next_hop`    | ip        | yes      | BGP NEXT_HOP                        |
-| `bgp.as_path`     | as-path   | no       | BGP AS_PATH (use `.prepend()`)      |
-| `bgp.communities` | comm-set  | +=       | BGP COMMUNITIES (RFC 1997)          |
-| `bgp.origin`      | int       | no       | BGP ORIGIN (0=IGP, 1=EGP, 2=INC)    |
-| `roa.state`       | roa-state | no       | RFC 6811 validation outcome         |
+```sh
+lrctl --socket /run/lr-daemon.api routes show 203.0.113.0/24
+lrctl filter compile 'if proto == "bgp" then accept; reject;'
+```
 
-## Interop
+The `routes show` output lists only routes that survived the import
+chain, so a rejected ROA-invalid prefix is absent. `lrctl filter compile`
+validates a body without touching a running daemon.
 
-The `tests/interop/filter_dsl_bird.sh` test runs the full filter DSL + ROA validation pipeline against a real BIRD 2 router. It verifies that:
+## Test a filter before deploying it
 
-1. A route authorized by a ROA (`Valid`) is accepted by the filter.
-2. A route not authorized (`Invalid`) is rejected by the built-in ROA validation hook before the user filter sees it.
-3. The daemon prints `filters: N compiled, M import / K export   bindings` and `roa: N entries, validate=true` on startup.
+Filter bodies are the unit under test, and `roa.state` is read-only:
 
-## References
+```text
+if net ~ [ 10.0.0.0/8{16,24} ] then { bgp.local_pref = 200; accept; }
+if bgp.local_pref < 200 then reject with "low-pref";
+accept;
+```
 
-- RFC 6482 — Route Origin Authorization (ROA) structure
-- RFC 6811 — BGP Prefix Origin Validation (§2 validation algorithm)
-- BIRD `filter/config.Y` — filter grammar reference
-- BIRD `filter/data.h` — Value types reference
+Compile it with `lrctl filter compile '<body>'`. Working examples for
+every construct — prefix-set ranges, `case`, community mutation,
+user-defined functions — live in
+[`../filter_dsl_grammar.md`](../filter_dsl_grammar.md) §7.
+
+## Reference
+
+- RFC 6482 — A Profile for Route Origin Authorizations
+- RFC 6811 §2 — prefix-origin validation
+- RFC 1997 — BGP Communities Attribute
+- [`../filter_dsl_grammar.md`](../filter_dsl_grammar.md) — the grammar and
+  the route-field reference

@@ -1,75 +1,150 @@
-# Example: BFD integration for sub-second BGP failure detection
+# BFD-driven fast failure detection
 
-Without BFD, BGP peers take `hold_time` (default 90s) to detect a forwarding failure. BFD brings detection down to milliseconds — useful at IXes or for high-availability CE/PE links.
+BGP notices a dead peer only when the hold timer expires — 90 s at the
+default `hold_time 90s` — and it never notices a broken forwarding path
+while the TCP session stays alive. BFD closes both gaps. This page
+configures the daemon's BFD fast-fail and shows the library session an
+embedder drives directly.
 
-The reference daemon already wires this end-to-end: `lr-daemon --bfd` (one BFD session per peer, UDP 3784 per RFC 5881 / 4784 per RFC 5883, tearing the BGP session down the moment BFD goes Down). This example shows the library-level pieces an embedder composes.
+## Timing
+
+Detection time is the peer's detection multiplier times
+`max(required_min_rx_interval, the peer's desired_min_tx_interval)`
+(RFC 5880 §6.8.4). With `detect_mult 3` and 50 ms intervals that is
+150 ms, roughly 600× faster than a 90 s BGP hold timer. The daemon's
+defaults are `bfd_min_tx_ms 100`, `bfd_min_rx_ms 100` and
+`bfd_multiplier 3`, so detection is about 300 ms out of the box.
+
+While the session is not Up the transmit interval is floored at one
+second (RFC 5880 §6.8.3). Interval changes while Up are confirmed with a
+Poll/Final sequence (§6.5).
+
+## Configuration
+
+```lr
+protocol bgp;
+
+bgp {
+    local_as 64512;
+    peer_as 64513;
+    router_id "10.0.0.1";
+    peer_addr "192.0.2.2:179";
+    local_address "192.0.2.1";
+
+    bfd true;                # one BFD session per peer that enables it
+    bfd_multihop false;      # RFC 5883 multihop: UDP 4784, no TTL check
+    bfd_min_tx_ms 100ms;     # DesiredMinTxInterval
+    bfd_min_rx_ms 100ms;     # RequiredMinRxInterval
+    bfd_multiplier 3;        # missed packets before Down
+}
+```
+
+A peer block can override any of these:
+
+```lr
+peer "core-1" {
+    remote "192.0.2.2:179";
+    peer_as 64513;
+    bfd true;
+    bfd_multihop true;
+}
+```
+
+The same knobs on the command line, for the legacy single-peer form:
+
+```sh
+lr-daemon --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
+    --peer 192.0.2.2:179 --local-address 192.0.2.1 \
+    --bfd --bfd-min-tx-ms 100 --bfd-min-rx-ms 100 --bfd-multiplier 3
+```
+
+BFD needs a `local_address`: the session sockets bind it. Single-hop BFD
+uses UDP 3784 (RFC 5881); multihop uses 4784 (RFC 5883).
+
+## What the daemon does
+
+1. Logs `daemon: bfd: listening on <addr> (single-hop)` once per address
+   family and mode, then one session per peer.
+2. Logs every state change as
+   `daemon: bfd: peer <label>: Down -> Up (<diag>)`.
+3. On `BfdSessionEvent::Timeout` logs
+   `daemon: bfd: peer <label>: detection time expired`, closes the
+   transport, and purges the routes that session contributed
+   (RFC 4271 §8.2.2), instead of waiting out the hold timer.
+4. Holds off reconnecting while BFD is down (after it has been up at
+   least once), so a dead path is not connect-stormed.
+
+## Verify
+
+Startup confirms the timing that was actually configured:
+
+```text
+daemon: bfd: 1 session(s), min tx 100 ms, min rx 100 ms, multiplier 3
+daemon: bfd: listening on 192.0.2.1:3784 (single-hop)
+```
+
+Then watch a live session:
+
+```sh
+lrctl --socket /run/lr-daemon.api sessions
+sudo tcpdump -i eth0 -n 'udp port 3784'
+```
+
+`lrctl sessions` shows `state=Established`. Break the path under the
+session — drop the peer's traffic at the firewall, or freeze the daemon
+with `SIGSTOP` and keep its TCP socket open — and the session drops
+within about `detect_mult × interval`, not 90 s. BFD Control packets at
+the negotiated interval confirm the session is live in the capture.
+
+## Driving the session yourself
+
+`BfdSession` is I/O free, like the protocol engines:
 
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-bgp = "1.0.0-rc.5"
-// lr-bfd = "1.0.0-rc.5"
-// lr-core = "1.0.0-rc.5"
+// lr-bfd = "<version>"
+// lr-core = "<version>"
 
-use lr_bgp::{BgpPeer, BgpEvent, PeerConfig};
-use lr_bfd::{BfdConfig, BfdSession, SessionRole};
-use lr_core::addr::{Asn, RouterId};
+use lr_bfd::{BfdConfig, BfdSession, BfdSessionEvent, SessionRole};
 use lr_core::time::Instant;
 
 fn main() {
-    // 1. Start a BGP session.
-    let mut bgp = BgpPeer::new(PeerConfig::new(
-        Asn(64512), Asn(64513), RouterId::from_v4([10,0,0,1]),
-    ));
-    bgp.step(BgpEvent::ManualStart);
-    bgp.step(BgpEvent::TransportOpen);
-
-    // 2. Start a BFD session with aggressive timing. The role is
-    // Active: single-hop BFD (RFC 5881 §3) requires both sides to
-    // initiate with Your Discriminator 0.
     let cfg = BfdConfig {
         detect_mult: 3,
-        desired_min_tx_interval: 50_000,  // 50ms
-        required_min_rx_interval: 50_000, // 50ms
+        desired_min_tx_interval: 50_000,  // 50 ms
+        required_min_rx_interval: 50_000, // 50 ms
+        // Single-hop BFD (RFC 5881 §3) requires both sides to be Active.
         role: SessionRole::Active,
         ..Default::default()
     };
     let mut bfd = BfdSession::new(cfg, 0x11111111);
-    let _evs = bfd.start(Instant(0));
+    let _ = bfd.start(Instant::from_millis(0));
 
-    // 3. Pump both. BGP keepalives go over TCP; BFD Control packets
-    // go over UDP 3784 (single-hop; 4784 for multihop per RFC 5883).
-    // lr_osroute::bfd_transport provides the socket model: one
-    // shared receive socket on the well-known port plus one transmit
-    // socket per session with an RFC 5881 §4 ephemeral source port.
-    // Received datagrams are fed with the current time so the
-    // detection timer anchors to packet arrival:
-    //
-    //   let evs = bfd.feed_bytes(now, &datagram);
-    //   let out = bfd.drain_outgoing(); // -> tx socket, peer:3784
-    //
-    // The wiring is left to the embedder; here we just show the data flow.
-    let _bgp_bytes = bgp.drain_outgoing();
-    let _bfd_bytes = bfd.drain_outgoing();
+    // Per pump round: tick, send drain_outgoing(), and feed every
+    // received datagram with the arrival time so the detection timer
+    // anchors to packet arrival.
+    let now = Instant::from_millis(10);
+    let events = bfd.tick(now);
+    let _out = bfd.drain_outgoing();
+    // let events = bfd.feed_bytes(now, &datagram);
 
-    // 4. Periodically call `bfd.tick(now)` and dispatch events. When
-    // `BfdSessionEvent::Timeout` fires (the detection time expired)
-    // the session is already Down — tear down TCP, which triggers
-    // BGP's TransportClose event. That is the whole fast-fail trick.
+    if events.iter().any(|e| matches!(e, BfdSessionEvent::Timeout)) {
+        // Detection time expired: the session is already Down.
+    }
 }
 ```
 
-## Detection time
+`BfdSessionEvent::Timeout` means the detection time expired and the
+session is already Down. Tear down the transport that rides on it; for
+BGP that is the TCP connection, which raises `BgpEvent::TransportClose`.
+`lr_osroute::bfd_transport` provides the socket model: one shared receive
+socket on the well-known port plus one transmit socket per session with
+an ephemeral source port (RFC 5881 §4).
 
-Detection time = the _peer's_ `detect_mult` × `max(required_min_rx_interval, peer's desired_min_tx_interval)` (RFC 5880 §6.8.4 — the multiplier is the remote system's, not a negotiated minimum). With `detect_mult=3` and 50ms intervals, detection time is 150ms — three orders of magnitude faster than BGP-only keepalives.
+## Reference
 
-While the session is not Up, the transmit interval is floored at one second (RFC 5880 §6.8.3); interval changes while Up are confirmed with a Poll/Final sequence (§6.5).
-
-## What the daemon does
-
-`lr-daemon --bfd --bfd-min-tx-ms 100 --bfd-min-rx-ms 100 --bfd-multiplier 3` (or per-peer `bfd = true` in the TOML config, with `bfd_multihop = true` for RFC 5883 sessions) runs one BFD session per peer and:
-
-- tears the BGP session down (CEASE NOTIFICATION, route purge per RFC 4271 §8.2.2) the moment BFD goes Down;
-- holds off reconnecting while BFD is down (after it has been up at least once), so a dead path is not connect-stormed.
-
-`tests/interop/bfd_bird.sh` verifies both the single-hop and multihop modes against BIRD 2 (`protocol bfd` + `bfd on`), including the fast-fail: with the BIRD side frozen mid-session (TCP still open), the BGP session comes down within ~0.5s at 100ms × 3 timing while the hold timer would have waited 60s.
+- RFC 5880 — Bidirectional Forwarding Detection
+- RFC 5881 §3, §4 — single-hop BFD
+- RFC 5883 — BFD for multihop paths
+- [`../INTEROP.md`](../INTEROP.md) — the BIRD BFD lab

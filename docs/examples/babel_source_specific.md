@@ -1,62 +1,66 @@
-# Example: Babel source-specific routing (RFC 9079)
+# Babel source-specific routing
 
-Babel's route table keys on more than the destination: RFC 9079 adds an optional _source_ prefix, so the same destination can carry different routes for different traffic sources. The classic use is a dual-connected edge network that must pin intra-company traffic to the internal path while everything else follows the default:
+RFC 9079 adds an optional source prefix to a Babel route, so the same
+destination can carry one path for traffic from one source prefix and a
+different path for the rest. This page keys a route table on
+`(destination, source)` and shows what the daemon does with those routes.
 
+## The problem it solves
+
+```text
+                        +---------+
+   src 2001:db8:1::/48  | uplink  |  default route
+        ~~~~~~~~~~~~~~> +---------+
+                        |  host   |
+   src 10.0.0.0/8       +---------+
+        ~~~~~~~~~~~~~~> |   vpn   |  10.0.0.0/8 internal path
+                        +---------+
 ```
-                      +---------+
-   src 2001:db8:1::/48 |  uplink |  default route
-        ~~~~~~~~~~~~~> +---------+
-                      |  host   |
-   src 10.0.0.0/8     +---------+
-        ~~~~~~~~~~~~~> |  vpn    |  10.0.0.0/8 internal path
-                       +---------+
-```
 
-Both routes point at the same destination prefix; the source prefix is what separates them.
+Both routes point at the same destination prefix; only the source
+prefix separates them.
 
 ## The data model
 
-`lr-babel` keys every route on `(destination, source, router-id)` — the source is optional, so ordinary RFC 8966 routes are the `None`-source special case and the two classes never collide:
+`RouteKey` carries `destination`, an optional `source`, and the
+`router_id` that originated the route. An ordinary RFC 8966 route is the
+`source: None` case, so the two classes never collide:
 
 ```rust
 // Cargo.toml:
 // [dependencies]
-// lr-babel = "1.0.0-rc.5"
+// lr-babel = "<version>"
+// lr-core = "<version>"
 
-use lr_babel::route::{BabelRoute, BabelRouteTable, RouteKey};
-use lr_babel::source::SourcePrefix;
+use lr_babel::{BabelRoute, BabelRouteTable, RouteKey, SourcePrefix};
 use lr_core::addr::{IpAddr, Prefix};
 
 fn main() {
     let mut table = BabelRouteTable::new();
     let dst = Prefix::new_v4([10, 0, 0, 0], 8);
 
-    // The plain (RFC 8966) route: source = None.
-    let plain_key = RouteKey {
-        destination: dst,
-        source: None,
-        router_id: [1; 8],
-    };
-
-    // The source-specific variant (RFC 9079): same destination,
-    // different traffic class. The wire carries the source prefix as
-    // the Source Prefix sub-TLV (type 128) on the Update.
-    let vpn_key = RouteKey {
-        destination: dst,
-        source: Some(SourcePrefix::new(Prefix::new_v4([10, 8, 0, 0], 14))),
-        router_id: [2; 8],
-    };
-
+    // Plain RFC 8966 route: source = None, metric 200.
     table.insert(BabelRoute {
-        key: plain_key,
+        key: RouteKey {
+            destination: dst,
+            source: None,
+            router_id: [1; 8],
+        },
         seqno: 1,
         metric: 200,
         next_hop: IpAddr::V4([192, 0, 2, 1]),
         feasible: true,
         installed: false,
     });
+
+    // RFC 9079 variant: same destination, internal source prefix,
+    // better metric.
     table.insert(BabelRoute {
-        key: vpn_key,
+        key: RouteKey {
+            destination: dst,
+            source: Some(SourcePrefix::new(Prefix::new_v4([10, 8, 0, 0], 14))),
+            router_id: [2; 8],
+        },
         seqno: 1,
         metric: 100,
         next_hop: IpAddr::V4([198, 51, 100, 1]),
@@ -64,18 +68,38 @@ fn main() {
         installed: false,
     });
 
-    // Feasibility and best-route selection treat the two entries as
-    // distinct routes: each (destination, source) pair picks its own
-    // winner, so the VPN path serves VPN-sourced traffic at metric 100
-    // while everything else rides the uplink.
+    // Feasibility and best-path selection are per (destination, source)
+    // pair, so the VPN path serves VPN-sourced traffic and the uplink
+    // path serves everything else.
     assert_eq!(table.len(), 2);
 }
 ```
 
-## Wire form and daemon support
+## On the wire and in the daemon
 
-On the wire the source prefix rides as the Source Prefix sub-TLV (type 128, RFC 9079 §4) inside Babel Update TLVs — the codec in `lr-babel::tlv` parses and emits it, and `lr-babel::route` tracks feasibility per `(destination, source)` tuple exactly as above. The daemon's Babel transport carries the same table: source-specific entries land in the Loc-RIB alongside plain routes and are visible in the runtime API (`routes`) with their prefix.
+The source prefix travels as the Source Prefix sub-TLV
+(`lr_babel::TlvType::SourcePrefixSubTlv`, type 128, RFC 9079 §4) inside
+an Update TLV. `lr-babel`'s codec parses and emits it; the daemon
+re-advertises the sub-TLV on every session and keeps both classes of
+route in the Loc-RIB, so they show up in the runtime API:
+
+```sh
+lrctl --socket /run/lr-daemon.api routes show 10.0.0.0/8
+```
 
 ## Kernel caveat
 
-Installing a source-specific route into the Linux FIB means `ip route add <dst> from <source> ...` — a policy-route shape the plain `RTM_NEWROUTE` mirror does not emit today. Source-specific routes therefore participate in the Loc-RIB and best-path selection, while the kernel mirror is the same future-work item noted in `STATUS.md` for the Babel daemon row; embedders with policy-routing needs program those entries through their own FIB layer (the OS integration point in `docs/OS-INTEGRATION.md` is the seam).
+The Linux FIB needs a source-qualified route — `ip route add <dst> from
+<source> ...` — and `lr_osroute` installs plain `RTM_NEWROUTE` entries
+only. Source-specific routes therefore take part in the Loc-RIB and in
+best-path selection, but the kernel mirror does not program them. An
+embedder that needs them programs those entries through its own FIB
+layer; see [`os_integration.md`](os_integration.md) for the trait to
+implement.
+
+## Reference
+
+- RFC 9079 — Source-Specific Routing in Babel
+- RFC 8966 §3.2.5 — route expiry
+- [`babel_multi_nic.md`](babel_multi_nic.md) — the per-interface
+  parameters these routes are learned over
