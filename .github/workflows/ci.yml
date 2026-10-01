@@ -54,6 +54,13 @@ jobs:
       - name: interop doc lint
         timeout-minutes: 2
         run: tests/lint_interop_doc.sh
+      # docs/STYLE.md is the documentation contract: 80-column prose, no
+      # tabs or trailing whitespace, resolvable relative links, exactly
+      # one H1, and no hard-coded release stamp outside the changelog.
+      # Same tooling budget as the guard above — bash, awk, grep, sed.
+      - name: docs lint
+        timeout-minutes: 2
+        run: tests/lint_docs.sh
 
   # ABI freeze gate (docs/RELEASE-PLAN.md §2.8 condition 3): between
   # the current pre-1.0 tag and any later commit on main, the C ABI
