@@ -1,76 +1,113 @@
-# librouting documentation index
+# librouting documentation
 
-Start here. The documentation set is organized by audience: embedders writing Rust, operators running the daemon, and contributors extending the protocol crates.
+Start here. The documentation set is organised by what you are
+trying to do, not by who you are — most readers wear several hats.
 
-The project is at **1.0.0-rc.5**. The public Rust API (Tier 1) and the C ABI (Tier 2) are frozen for the 1.0 cut — see [`RELEASE-PLAN.md`](RELEASE-PLAN.md) §2.8 for the remaining freeze criteria. See [`../AGENTS.md`](../AGENTS.md) for the AI-agent / contributor quick-start guide.
+The workspace version lives in `Cargo.toml`
+(`[workspace.package] version`); that file is the source of truth.
+The public Rust API and the C ABI are frozen for the 1.0 cut — see
+[`RELEASE-PLAN.md`](RELEASE-PLAN.md) §2.8 for the remaining freeze
+criteria. For the AI-agent / contributor quick-start, see
+[`../AGENTS.md`](../AGENTS.md).
 
-## Orientation
+## Getting started
 
-| Document                             | Audience                | Contents                                                                                                                                                     |
-| ------------------------------------ | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| [`../README.md`](../README.md)       | everyone                | Project overview, crate map, quick-start daemon example                                                                                                      |
-| [`../AGENTS.md`](../AGENTS.md)       | AI agents, contributors | Project state + workflow constraints (build/test commands, conventions, recovery)                                                                            |
-| [`tutorial.md`](tutorial.md)         | newcomers               | Book-style tutorial: wire decode → two FSMs → the router pipeline                                                                                            |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md) | contributors, embedders | Layering, RIB pipeline diagram, extension points, testing layout                                                                                             |
-| [`STATUS.md`](STATUS.md)             | everyone                | Implemented-vs-missing gap analysis + roadmap state summary                                                                                                  |
-| [`ROADMAP.md`](ROADMAP.md)           | contributors            | Roadmap v2 workstream landing log: design decisions, evidence                                                                                                |
-| [`ROADMAP-v3.md`](ROADMAP-v3.md)     | contributors            | Roadmap v3 — 15 maturity directions (Babel multi-session, RPKI-RTR, Filter DSL parity, FFI, fuzz/bench, supply-chain, perf, docs, BGP-LS, E-LSA, `lrctl`, …) |
-| [`RFC_MAP.md`](RFC_MAP.md)           | contributors            | RFC-by-RFC coverage table with crate paths                                                                                                                   |
-| [`RELEASE-PLAN.md`](RELEASE-PLAN.md) | maintainers, embedders  | Semver policy, 1.0 freeze criteria, release flow, post-1.0 governance                                                                                        |
+| Document                                 | What it covers                                          |
+| ---------------------------------------- | ------------------------------------------------------- |
+| [`../README.md`](../README.md)           | Project overview, quick start, crate map                |
+| [`tutorial.md`](tutorial.md)             | Book-style walk: wire → two FSMs → the router pipeline  |
+| [`../AGENTS.md`](../AGENTS.md)           | Project state, build/test commands, conventions         |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md) | PR checklist, commit message format, test layers       |
 
-## Embedding the library
+## Embedding the library (Rust)
 
-| Document                                         | Contents                                                                                                                                                  |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| [`API.md`](API.md)                               | Public API tour, layer by layer, with code snippets                                                                                                       |
-| [`ARCHITECTURE.md`](ARCHITECTURE.md)             | Layering, RIB pipeline, extension points                                                                                                                  |
-| [`filter_dsl_grammar.md`](filter_dsl_grammar.md) | Formal EBNF grammar for the BIRD-like filter DSL — every example pinned by `crates/lr-policy/tests/grammar_corpus.rs`                                     |
-| [`config_dsl_grammar.md`](config_dsl_grammar.md) | Grammar for the native `.lr` configuration DSL — blocks, values, unit suffixes, includes                                                                  |
-| [`ffi_design.md`](ffi_design.md)                 | FFI design: panic barrier contract, `lr_bytes_t` ownership model, cbindgen pipeline, opaque-handle pattern, why OSPF/Babel/LDP are not yet exposed        |
-| [`bindings/`](bindings/)                         | Per-language guides with complete, verified programs (Go / Python / C / C++)                                                                              |
-| [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/` (analyzer, RR, BFD, OS integration)                                                                         |
-| [`examples/`](examples/)                         | Per-scenario walkthroughs: route reflector, confederation, route server, BFD, OS integration, LDP, BGP-LU, OSPFv3 SRv6, Babel multi-NIC, filter DSL + ROA |
+| Document                                         | What it covers                                          |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| [`API.md`](API.md)                               | Public API tour, layer by layer, with code snippets     |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)             | Layering, RIB pipeline, extension points                |
+| [`filter_dsl_grammar.md`](filter_dsl_grammar.md) | Formal grammar for the BIRD-like filter DSL              |
+| [`config_dsl_grammar.md`](config_dsl_grammar.md) | Grammar for the native `.lr` configuration DSL           |
+| [`examples/`](examples/)                         | Per-scenario walkthroughs (RR, confederation, RS, BFD …) |
+
+## Embedding (C / C++ / Go / Python)
+
+| Document                                         | What it covers                                          |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| [`bindings/`](bindings/)                         | Per-language guides with complete, verified programs    |
+| [`ffi_design.md`](ffi_design.md)                 | FFI design: panic barrier, `lr_bytes_t`, cbindgen, handles |
+| [`scaffolding/README.md`](scaffolding/README.md) | Generating starter projects from `templates/`           |
 
 ## Running the daemon
 
-| Document                                     | Contents                                                                                                                       |
-| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `templates/daemon.lr`                        | Fully commented reference configuration, native DSL (every key explained); `templates/daemon.toml` is the deprecated TOML twin |
-| [`lr-cli.md`](lr-cli.md)                     | CLI user guide — every `lr`, `lr-daemon` and `lrctl` subcommand, flag and example                                              |
-| [`lr-cli-internals.md`](lr-cli-internals.md) | CLI internals — module layout, run paths, extension patterns                                                                   |
-| [`RUNBOOK.md`](RUNBOOK.md)                   | Operations runbook: lifecycle, runtime API, troubleshooting FAQ                                                                |
-| [`COMPAT.md`](COMPAT.md)                     | Running BIRD 2 / FRR configs natively: dialects, defaults, `lr:` extensions                                                    |
-| [`PARITY.md`](PARITY.md)                     | Behaviour knobs vs. BIRD 2 / FRR 10: RFC latitude, defaults, mapping                                                           |
-| [`INTEROP.md`](INTEROP.md)                   | Interop lab against BIRD / FRR: what is verified, how to run locally                                                           |
+| Document                                     | What it covers                                          |
+| -------------------------------------------- | ------------------------------------------------------- |
+| `templates/daemon.lr`                        | Fully commented reference config (native DSL)            |
+| `templates/daemon.toml`                      | Deprecated TOML twin (supported through 1.x)              |
+| [`lr-cli.md`](lr-cli.md)                     | CLI user guide — `lr`, `lr-daemon`, `lrctl` subcommands  |
+| [`RUNBOOK.md`](RUNBOOK.md)                   | Operations runbook: lifecycle, runtime API, troubleshooting |
+| [`COMPAT.md`](COMPAT.md)                     | Running BIRD 2 / FRR 10 configs natively                 |
+| [`PARITY.md`](PARITY.md)                     | Behaviour knobs vs BIRD 2 / FRR 10                        |
+
+## Protocol coverage
+
+| Document                                 | What it covers                                          |
+| ---------------------------------------- | ------------------------------------------------------- |
+| [`STATUS.md`](STATUS.md)                 | Implemented-vs-missing gap analysis                      |
+| [`RFC_MAP.md`](RFC_MAP.md)               | RFC-by-RFC coverage table with crate paths               |
+| [`INTEROP.md`](INTEROP.md)               | Interop lab against BIRD / FRR: what is verified         |
 
 ## Platform porting
 
-| Document                                 | Contents                                                                                                        |
-| ---------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
-| [`OS-INTEGRATION.md`](OS-INTEGRATION.md) | Kernel route-table backends (Linux rtnetlink, BSD route(4), Windows IP Helper), layout tables, porting a new OS |
+| Document                                 | What it covers                                          |
+| ---------------------------------------- | ------------------------------------------------------- |
+| [`OS-INTEGRATION.md`](OS-INTEGRATION.md) | Kernel backends (Linux / BSD / Windows), porting guide   |
+
+## Internals
+
+| Document                                                 | What it covers                                          |
+| -------------------------------------------------------- | ------------------------------------------------------- |
+| [`lr-cli-internals.md`](lr-cli-internals.md)             | CLI internals: module layout, run paths, extension patterns |
+| [`ARCHITECTURE.md`](ARCHITECTURE.md)                     | Layering, RIB pipeline, extension points                |
+| [`ffi_design.md`](ffi_design.md)                         | FFI design + panic-barrier contract                     |
+
+## Releases and roadmap
+
+| Document                                 | What it covers                                          |
+| ---------------------------------------- | ------------------------------------------------------- |
+| [`RELEASE-PLAN.md`](RELEASE-PLAN.md)     | Semver policy, 1.0 freeze criteria, release flow        |
+| [`ROADMAP.md`](ROADMAP.md)               | Roadmap v2 workstream landing log (audit trail)         |
+| [`ROADMAP-v3.md`](ROADMAP-v3.md)         | Roadmap v3 — 15 maturity directions (forward-looking)    |
 
 ## Research
 
-| Document                                                   | Contents                                                                                                                          |
-| ---------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| [`research/BGP-DEFECTS.md`](research/BGP-DEFECTS.md)       | BGP's protocol-inherent defects: mechanisms, primary evidence, standard mitigations, lr status                                    |
-| [`research/EXCHANGE-PLANE.md`](research/EXCHANGE-PLANE.md) | Capability-negotiated private exchange plane design: feasibility hints, policy intent, provenance proofs                          |
-| [`research/E-LSA-DESIGN.md`](research/E-LSA-DESIGN.md)     | RFC 8362 Extended-LSA implementation plan: function codes, TLV framing, SPF integration, End.X SID sub-TLV, three-slice breakdown |
+| Document                                                   | What it covers                                          |
+| ---------------------------------------------------------- | ------------------------------------------------------- |
+| [`research/BGP-DEFECTS.md`](research/BGP-DEFECTS.md)       | BGP's protocol-inherent defects and mitigations         |
+| [`research/EXCHANGE-PLANE.md`](research/EXCHANGE-PLANE.md) | Capability-negotiated private exchange plane design      |
+| [`research/E-LSA-DESIGN.md`](research/E-LSA-DESIGN.md)     | RFC 8362 Extended-LSA implementation plan                |
+
+## Repo-level docs
+
+| Document                                         | What it covers                                          |
+| ------------------------------------------------ | ------------------------------------------------------- |
+| [`../AGENTS.md`](../AGENTS.md)                   | AI-agent + contributor quick-start                     |
+| [`../CONTRIBUTING.md`](../CONTRIBUTING.md)       | PR checklist, commit format, test layers                |
+| [`../SECURITY.md`](../SECURITY.md)               | Vulnerability reporting, embargo, threat model          |
+| [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Contributor Covenant 2.0                                 |
+| [`../CHANGELOG.md`](../CHANGELOG.md)             | Consumer-facing version history (Keep a Changelog)       |
+| [`../deny.toml`](../deny.toml)                   | `cargo-deny` config — advisories, licenses, bans        |
 
 ## Standing rules
 
-1. Every landed feature updates `STATUS.md` (capability tables) and `RFC_MAP.md` in the same series of commits; the workstream narrative lands in `ROADMAP.md` / `ROADMAP-v3.md` (enforced at review).
-2. `API.md` gains a section whenever a new public API surface appears.
-3. Documents are English-only; keep lines under ~80 characters.
-4. Version references in `Cargo.toml` snippets must match the workspace version in `Cargo.toml` (currently `1.0.0-rc.5`).
-
-## Contributor and security docs (repo root)
-
-| Document                                         | Contents                                                                                      |
-| ------------------------------------------------ | --------------------------------------------------------------------------------------------- |
-| [`../AGENTS.md`](../AGENTS.md)                   | AI-agent + contributor quick-start: project state, build/test commands, conventions, recovery |
-| [`../CONTRIBUTING.md`](../CONTRIBUTING.md)       | PR checklist, commit message format, test layers, RFC pinning procedure                       |
-| [`../SECURITY.md`](../SECURITY.md)               | Vulnerability reporting, 90-day embargo, threat model                                         |
-| [`../CODE_OF_CONDUCT.md`](../CODE_OF_CONDUCT.md) | Contributor Covenant 2.0                                                                      |
-| [`../CHANGELOG.md`](../CHANGELOG.md)             | Consumer-facing version history (Keep a Changelog format)                                     |
-| [`../deny.toml`](../deny.toml)                   | `cargo-deny` config — advisories, licenses, bans, sources                                     |
+1. Every landed feature updates [`STATUS.md`](STATUS.md) (capability
+   tables) and [`RFC_MAP.md`](RFC_MAP.md) in the same series of
+   commits; the workstream narrative lands in [`ROADMAP.md`](ROADMAP.md)
+   or [`ROADMAP-v3.md`](ROADMAP-v3.md) (enforced at review).
+2. [`API.md`](API.md) gains a section whenever a new public API surface
+   appears.
+3. Documents are English-only; wrap long lines around 80 characters.
+4. Do not stamp a hard-coded version into prose — point to
+   `Cargo.toml` instead. Hard-coded version stamps go stale the
+   moment the next release lands.
+5. Do not maintain a list of open GitHub issues in a doc — the issues
+   page is the canonical list.
