@@ -108,13 +108,18 @@ A single PR (the "1.0 cut" PR) must:
 
 ### 2.8. Current status against these criteria
 
-As of HEAD (`v1.0.0-rc.5`), the picture is:
+The current workspace version is in `Cargo.toml`
+(`[workspace.package] version`). The criteria below reference "the
+latest `-rc`" — that is whatever the current `1.0.0-rc.*` happens to
+be. Specific commit hashes, dates, and per-release audit entries live
+in [`CHANGELOG.md`](../CHANGELOG.md) and the `git log`; this section
+captures only the criteria and the current state.
 
 - ✅ 2.1 — RFC coverage at parity for everything in scope; only BGPsec is ❌ and is documented out of scope.
 - ✅ 2.2 — Cross-vendor interop in CI (BIRD 2 + FRR 10) for BGP, OSPFv2/v3, Babel, LDP, BFD, BMP, MRT, parity.
 - ✅ 2.3 — Wire-level parity harness (`lr parity-replay` + `tests/interop/parity.sh`) green on `main`.
-- ✅ 2.4 — Cross-platform CI green on Linux (Ubuntu 22.04 + 24.04), macOS (Apple Silicon, macos-14) and Windows (2022). The matrix went red on 2026-09-27/29 during the production-hardening wave (a real interop defect, a macOS loopback binding in a new test and an under-sized lab window) and was returned to green at commit `bd4de66`; every job is green on the rc.5 cut commit.
-- ✅ 2.5 — `lr_abi_version()` exists (`ABI_VERSION = 2` as of rc.5). The 1 → 2 bump (commit `1c8b59d`) is purely additive — four new `lr_router_*_static_*` symbols; no existing symbol changed signature or semantics, so existing embedders are unaffected. The 1.0 cut PR confirms no further bump is needed.
+- ✅ 2.4 — Cross-platform CI green on Linux (Ubuntu 22.04 + 24.04), macOS (Apple Silicon, macos-14) and Windows (2022). Per-release audit: see `git log` for the latest `-rc` cut commit and the CI run on it.
+- ✅ 2.5 — `lr_abi_version()` exists. The ABI has only grown additively within the `1.0.0-rc.*` window — no existing symbol changed signature or semantics, so existing embedders are unaffected. The 1.0 cut PR confirms no further bump is needed.
 - ✅ 2.6 — Documentation set is complete.
 - 🟡 2.7 — The 1.0 cut PR is the next release-event. The criteria it must satisfy are enumerated below.
 
@@ -122,22 +127,32 @@ As of HEAD (`v1.0.0-rc.5`), the picture is:
 
 A `1.0.0` tag is appropriate once **all** of the following are true on `main`:
 
-1. **No open `release-blocker` issues.** Every GitHub issue labelled `release-blocker` is closed or re-labelled. Issues #19 (DSL performance) and #20 (publish to package managers) are `enhancement`, not blockers — they do not gate the freeze.
-2. **One full week of clean CI on all three platforms** (Linux, macOS, Windows) on the commit that will be tagged. The rc.4 release is the start of this week; if CI stays green through 2026-09-26 on `main`, the 1.0 cut can proceed.
-3. **No breaking-change commits since the last `-rc`.** The public Rust API (Tier 1) and the C ABI (Tier 2) must be byte-identical to rc.4. If a breaking change is needed, it ships as rc.5 and the clock restarts.
-4. **The `release.yml` workflow produces all 6 assets** (4 archives - 2 standalone headers) on the rc.4 tag without manual intervention — this is verified by the rc.4 release itself.
-5. **The community validation window.** At least one downstream embedder (or the maintainer's own integration test) confirms the rc.4 artifacts link + run against a real BIRD / FRR peer. The `tests/interop/` suite is the in-repo proxy; an external report is the community signal.
+1. **No open `release-blocker` issues.** Every GitHub issue labelled `release-blocker` is closed or re-labelled. Issues that are `enhancement` (e.g. publish-to-package-managers) are not blockers — they do not gate the freeze.
+2. **One full week of clean CI on all three platforms** (Linux, macOS, Windows) on the commit that will be tagged. The latest `-rc` is the start of this week; if CI stays green through one calendar week on `main`, the 1.0 cut can proceed.
+3. **No breaking-change commits since the latest `-rc`.** The public Rust API (Tier 1) and the C ABI (Tier 2) must be byte-identical to the latest `-rc`. If a breaking change is needed, it ships as a new `-rc` and the clock restarts.
+4. **The `release.yml` workflow produces all 6 assets** (4 archives + 2 standalone headers) on the latest `-rc` tag without manual intervention — this is verified by the `-rc` release itself.
+5. **The community validation window.** At least one downstream embedder (or the maintainer's own integration test) confirms the latest `-rc` artifacts link + run against a real BIRD / FRR peer. The `tests/interop/` suite is the in-repo proxy; an external report is the community signal.
 
 If all five are true, the 1.0 cut PR:
 
 1. Updates `Cargo.toml` to `version = "1.0.0"` (workspace).
-2. Confirms `ABI_VERSION` is still 1 (or bumps it with a `BREAKING CHANGE:` entry).
+2. Confirms `ABI_VERSION` is unchanged from the latest `-rc` (or bumps it with a `BREAKING CHANGE:` entry).
 3. Regenerates `include/lr_ffi.h` and `include/librouting.hpp`.
 4. Runs `cargo fmt`, `cargo clippy --all-targets --all-features -- -D warnings`, `cargo test --workspace --all-features` on Linux, macOS and Windows.
 5. Writes the 1.0 release notes enumerating the protocol coverage surface, the interop verification, and the deliberately-out-of-scope items.
 6. Tags `v1.0.0` and pushes; `release.yml` builds the final artifacts.
 
-**Target window**: a `1.0.0` cut is appropriate once rc.5 has been on `main` for one full week of clean CI on Linux + macOS + Windows (rc.5 cuts 2026-09-30; target: 2026-10-07) and no `release-blocker` issue is open. The rc.4 window (target 2026-09-26) was invalidated on purpose: the production-hardening wave that landed 2026-09-26 → 09-29 changed Babel wire behaviour (for the better — babeld/BIRD parity), touched the kernel mirror and grew the C ABI additively, so the frozen-surface promise of 1.0.0 is re-anchored on rc.5. The next Phase 3 items (BGP-LS, BGP SR Policy, D8.2 RIB sharding, D15 multi-threaded RIB) are **post-1.0 work** — they extend the surface but do not block the freeze, because the surface they extend is already at parity with BIRD and FRR for the protocols they touch.
+**Target window**: a `1.0.0` cut is appropriate once the latest `-rc`
+has been on `main` for one full week of clean CI on Linux + macOS +
+Windows and no `release-blocker` issue is open. If a production
+hardening wave lands during the wait (real interop defects, ABI
+additions, kernel-mirror fixes), the window is re-anchored on the
+new `-rc` that captures the wave — the frozen-surface promise of
+1.0.0 is more important than the calendar. The post-1.0 roadmap
+items (BGP-LS, BGP SR Policy, D8.2 RIB sharding, D15 multi-threaded
+RIB) are **post-1.0 work** — they extend the surface but do not
+block the freeze, because the surface they extend is already at
+parity with BIRD and FRR for the protocols they touch.
 
 ---
 
