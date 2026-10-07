@@ -30,6 +30,8 @@
 use std::env;
 use std::process::ExitCode;
 
+mod pipe_name;
+
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// The default API socket path — matches `templates/daemon.toml`'s
@@ -272,9 +274,9 @@ fn filter(rest: &[String]) -> ExitCode {
 }
 
 // ---------------------------------------------------------------------------
-// Transport — Unix domain socket client. On non-Unix targets the whole
-// module refuses with a clear error, mirroring `api.rs`'s stance that a
-// pretend API surface is worse than none.
+// Transport — Unix domain socket client on Unix; Windows named-pipe client
+// on Windows. Both expose the same `round_trip` shape so the proxy layer
+// above stays platform-agnostic.
 // ---------------------------------------------------------------------------
 
 #[cfg(unix)]
@@ -333,10 +335,252 @@ mod transport {
     }
 }
 
-#[cfg(not(unix))]
+// ---------------------------------------------------------------------------
+// Windows named-pipe client — the counterpart of `api_imp_windows.rs`'s
+// server. `lr-daemon` already listens on `\\.\pipe\<name>`; without this
+// transport `lrctl` could not talk to it (issue #43: the runtime API was
+// inconsistent across the CLI binaries — the daemon listened, the client
+// refused). The shape mirrors the Unix transport: write the command, then
+// read with a deadline + idle-silence terminator.
+//
+// `PIPE_NOWAIT` (the legacy non-blocking mode from LAN Manager 2.0) is
+// the same knob the server already uses for its idle read loop; we keep
+// the two ends symmetric rather than reaching for overlapped I/O, which
+// would not buy anything for a single-shot request/response client.
+// ---------------------------------------------------------------------------
+
+#[cfg(windows)]
+mod transport {
+    use std::io::{Read, Write};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    };
+    use windows_sys::Win32::Storage::FileSystem::{
+        CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
+    };
+    use windows_sys::Win32::System::Pipes::{SetNamedPipeHandleState, NAMED_PIPE_MODE};
+
+    /// Windows system error codes returned by `GetLastError` that the
+    /// read loop needs to interpret. Named so the `Read` impl below
+    /// does not carry magic numbers.
+    ///
+    /// `ERROR_BROKEN_PIPE` (109): the server closed its end — EOF.
+    /// `ERROR_NO_DATA` (232): a non-blocking read found no bytes — the
+    /// pipe equivalent of Unix `EWOULDBLOCK`.
+    /// `ERROR_PIPE_BUSY` (231): all pipe instances are in use; the
+    /// client retries (see `connect_with_retry`).
+    const ERROR_BROKEN_PIPE: u32 = 109;
+    const ERROR_NO_DATA: u32 = 232;
+    const ERROR_PIPE_BUSY: u32 = 231;
+
+    /// Connect to the daemon's named pipe, send one command, collect
+    /// the reply until a short idle silence, return the body as a
+    /// `String`. Mirrors the Unix transport's `round_trip` shape so
+    /// `proxy` stays platform-agnostic.
+    pub fn round_trip(socket: &str, cmd: &str) -> Result<String, String> {
+        let pipe_name = crate::pipe_name::normalize_pipe_name(socket);
+        let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
+        let handle = connect_with_retry(&name_wide, &pipe_name)?;
+        let mut stream = NamedPipeClientStream::new(handle);
+
+        // Send the command + trailing newline — the server reads one
+        // line per command.
+        let mut buf = cmd.as_bytes().to_vec();
+        if !cmd.ends_with('\n') {
+            buf.push(b'\n');
+        }
+        stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
+        stream.flush().map_err(|e| format!("flush: {e}"))?;
+
+        // Non-blocking read with an idle-silence terminator (same shape
+        // as the Unix transport): keep reading until the pipe has no
+        // data AND we already have some bytes, OR the 5 s deadline
+        // expires. The daemon's response ends with a `\n`-terminated
+        // last line, so a no-data-with-bytes means the daemon has
+        // finished writing for now.
+        stream
+            .set_nonblocking(true)
+            .map_err(|e| format!("nonblocking: {e}"))?;
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut out = Vec::new();
+        let mut chunk = [0u8; 4096];
+        loop {
+            match stream.read(&mut chunk) {
+                Ok(0) => break, // EOF — daemon closed after `shutdown`
+                Ok(n) => out.extend_from_slice(&chunk[..n]),
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock
+                        || e.kind() == std::io::ErrorKind::TimedOut =>
+                {
+                    if !out.is_empty() || Instant::now() >= deadline {
+                        break;
+                    }
+                    thread::sleep(Duration::from_millis(20));
+                }
+                Err(e) => return Err(format!("read: {e}")),
+            }
+        }
+        // Restore blocking mode before drop so a final flush is not
+        // cut short by a WouldBlock — belt and braces, the pipe is
+        // about to close anyway.
+        let _ = stream.set_nonblocking(false);
+        String::from_utf8(out).map_err(|e| format!("non-utf8 reply: {e}"))
+    }
+
+    /// Open an existing named pipe via `CreateFileW`. The server hands
+    /// out instances one at a time from its accept loop; a client that
+    /// connects between instances gets `ERROR_PIPE_BUSY` and retries
+    /// (Windows docs recommend `WaitNamedPipe`, but a bounded sleep is
+    /// simpler and adequate for the 1-Hz accept cadence).
+    fn connect_with_retry(name_wide: &[u16], pipe_name: &str) -> Result<isize, String> {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let handle = unsafe {
+                CreateFileW(
+                    name_wide.as_ptr(),
+                    GENERIC_READ | GENERIC_WRITE,
+                    0,
+                    std::ptr::null(),
+                    OPEN_EXISTING,
+                    FILE_ATTRIBUTE_NORMAL,
+                    0 as HANDLE,
+                ) as isize
+            };
+            if handle != INVALID_HANDLE_VALUE as isize {
+                return Ok(handle);
+            }
+            let err = unsafe { GetLastError() };
+            if err == ERROR_PIPE_BUSY {
+                if Instant::now() >= deadline {
+                    return Err(format!(
+                        "connect {pipe_name}: pipe busy (timed out waiting for server)"
+                    ));
+                }
+                thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            return Err(format!(
+                "connect {pipe_name}: CreateFileW failed (error {err})"
+            ));
+        }
+    }
+
+    /// One end of an established named-pipe client connection. `Read`
+    /// and `Write` delegate to `ReadFile`/`WriteFile` on the
+    /// underlying handle. The handle is closed when the stream is
+    /// dropped. Mirrors `api_imp_windows.rs::NamedPipeStream` on the
+    /// server side.
+    struct NamedPipeClientStream {
+        handle: isize,
+    }
+
+    // Named-pipe handles are safe to move between threads — the kernel
+    // serializes access. We never share one across threads though;
+    // `round_trip` is synchronous.
+    unsafe impl Send for NamedPipeClientStream {}
+
+    impl NamedPipeClientStream {
+        fn new(handle: isize) -> Self {
+            Self { handle }
+        }
+
+        /// Switch the pipe between blocking (`PIPE_WAIT`) and
+        /// non-blocking (`PIPE_NOWAIT`) mode. The client uses
+        /// non-blocking mode for the idle-silence read loop, mirroring
+        /// the server's `set_nonblocking`.
+        fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
+            let mode: NAMED_PIPE_MODE = if on {
+                windows_sys::Win32::System::Pipes::PIPE_NOWAIT
+            } else {
+                windows_sys::Win32::System::Pipes::PIPE_WAIT
+            };
+            let rc = unsafe { SetNamedPipeHandleState(self.handle as HANDLE, &mode, &0, &0) };
+            if rc == 0 {
+                Err(std::io::Error::last_os_error())
+            } else {
+                Ok(())
+            }
+        }
+    }
+
+    impl Read for NamedPipeClientStream {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let mut bytes_read: u32 = 0;
+            let rc = unsafe {
+                ReadFile(
+                    self.handle as HANDLE,
+                    buf.as_mut_ptr(),
+                    buf.len() as u32,
+                    &mut bytes_read,
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc == 0 {
+                let err = unsafe { GetLastError() };
+                // ERROR_BROKEN_PIPE: the server closed its end — EOF.
+                if err == ERROR_BROKEN_PIPE {
+                    return Ok(0);
+                }
+                // ERROR_NO_DATA: non-blocking read with no bytes
+                // available — the pipe equivalent of EWOULDBLOCK.
+                if err == ERROR_NO_DATA {
+                    return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+                }
+                return Err(std::io::Error::from_raw_os_error(err as i32));
+            }
+            Ok(bytes_read as usize)
+        }
+    }
+
+    impl Write for NamedPipeClientStream {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            let mut bytes_written: u32 = 0;
+            let rc = unsafe {
+                WriteFile(
+                    self.handle as HANDLE,
+                    buf.as_ptr(),
+                    buf.len() as u32,
+                    &mut bytes_written,
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc == 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(bytes_written as usize)
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            // Named pipes transmit on write; the server's BufWriter
+            // flushes per response. FlushFileBuffers would block until
+            // the server drains, which we do not want here.
+            Ok(())
+        }
+    }
+
+    impl Drop for NamedPipeClientStream {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.handle as HANDLE);
+            }
+        }
+    }
+}
+
+// Fallback for platforms with neither Unix domain sockets nor Windows
+// named pipes — the original stance that a pretend API is worse than a
+// clear refusal. Every platform the project targets (Linux, macOS, the
+// BSDs, Windows) is covered above; this is the theoretical remainder.
+#[cfg(not(any(unix, windows)))]
 mod transport {
     pub fn round_trip(_socket: &str, _cmd: &str) -> Result<String, String> {
-        Err("runtime API requires Unix domain sockets (not supported here)".to_string())
+        Err(
+            "runtime API requires Unix domain sockets or Windows named pipes (not supported here)"
+                .to_string(),
+        )
     }
 }
 

@@ -184,10 +184,13 @@ impl Drop for NamedPipeStream {
 // ---------------------------------------------------------------------------
 
 /// Bind the named pipe and spawn the serving thread. `path` is the
-/// full pipe name (`\\.\pipe\lr-daemon`); the operator configures
-/// it via the same `api_socket` key as on Unix.
+/// pipe name the operator configures via `api_socket` / `--api-socket`;
+/// [`crate::pipe_name::normalize_pipe_name`] maps the Unix-style
+/// default (`/run/lr-daemon.api`) to a valid `\\.\pipe\<name>` so the
+/// same config works on every platform.
 pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
-    let name_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let pipe_name = crate::pipe_name::normalize_pipe_name(path);
+    let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     let info = Arc::new(ctx.info);
     let router = Arc::clone(&ctx.router);
@@ -195,7 +198,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
     let started = std::time::Instant::now();
-    let path_owned = path.to_string();
+    let path_owned = pipe_name.clone();
 
     // Pre-create the first pipe instance so a bind failure shows up
     // at startup, not on the first client connect.
@@ -214,7 +217,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     if probe == INVALID_HANDLE_VALUE as isize {
         let err = unsafe { GetLastError() };
         return Err(format!(
-            "bind {path}: CreateNamedPipeW failed (error {err})"
+            "bind {pipe_name}: CreateNamedPipeW failed (error {err})"
         ));
     }
 

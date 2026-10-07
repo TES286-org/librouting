@@ -107,6 +107,7 @@ mod daemon_ospf3;
 mod daemon_policy;
 mod daemon_rpki;
 mod metrics;
+mod pipe_name;
 mod privdrop;
 mod signal;
 mod translate;
