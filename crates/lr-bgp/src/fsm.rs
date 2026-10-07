@@ -1340,6 +1340,29 @@ impl BgpPeer {
             ));
         }
 
+        // RFC 5065 §5: AS_CONFED_SEQUENCE / AS_CONFED_SET segments are
+        // valid only between members of the same confederation. A peer
+        // that is not a member of the local confederation (including the
+        // no-confederation case) MUST NOT send them; receiving them is a
+        // malformed AS_PATH. Consistent with the malformed-NLRI posture
+        // above, the routes are rejected rather than tearing the session
+        // down — the safety net surfaces the rejection so the operator
+        // sees the misbehaving peer.
+        let confed_peer = self
+            .cfg
+            .confederation
+            .as_ref()
+            .map(|c| c.contains(self.cfg.peer_as.0))
+            .unwrap_or(false);
+        let mut attrs_ok = attrs_ok;
+        if !confed_peer && canonical_path.has_confed() {
+            attrs_ok = false;
+            actions.push(BgpAction::Emit(lr_core::event::Event::Log(format!(
+                "bgp: peer {}: AS_PATH carries AS_CONFED_* segments from a non-confederation peer (RFC 5065 §5); routes rejected",
+                self.cfg.peer_as
+            ))));
+        }
+
         let announce = |prefix: lr_core::addr::Prefix,
                         family: NlriFamily,
                         path_id: u32,
@@ -1498,6 +1521,23 @@ mod tests {
         let cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
         let cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
         (BgpPeer::new(cfg1), BgpPeer::new(cfg2))
+    }
+
+    /// Drive a peer pair through the OPEN/KEEPALIVE handshake to Established.
+    fn establish(a: &mut BgpPeer, b: &mut BgpPeer) {
+        a.step(BgpEvent::ManualStart);
+        a.step(BgpEvent::TransportOpen);
+        b.step(BgpEvent::ManualStart);
+        b.step(BgpEvent::TransportOpen);
+        let a_open = a.drain_outgoing();
+        let b_open = b.drain_outgoing();
+        a.feed_bytes(&b_open).unwrap();
+        b.feed_bytes(&a_open).unwrap();
+        let a_ka = a.drain_outgoing();
+        let b_ka = b.drain_outgoing();
+        a.feed_bytes(&b_ka).unwrap();
+        b.feed_bytes(&a_ka).unwrap();
+        assert!(a.is_established() && b.is_established());
     }
 
     #[test]
@@ -2674,5 +2714,110 @@ mod tests {
             actions.first(),
             Some(BgpAction::WithdrawRoute { path_id: 1, .. })
         ));
+    }
+
+    /// RFC 5065 §5: an AS_PATH carrying AS_CONFED_* segments is valid only
+    /// between members of the same confederation. A peer that is not a
+    /// member (including the no-confederation case) has its routes
+    /// rejected — no `InstallRoute` is emitted — rather than the malformed
+    /// AS_PATH being installed as if it were a normal eBGP advertisement.
+    #[test]
+    fn rejects_confed_segments_from_non_confederation_peer() {
+        use crate::message::BgpMessage;
+        use crate::path::{AsPath, AsPathSegment, AsPathType, PathAttrFlags, PathAttribute};
+        let (mut a, mut b) = make_peer_pair();
+        establish(&mut a, &mut b);
+        // Build an AS_PATH whose first segment is AS_CONFED_SEQUENCE — the
+        // shape a confederation member would send to a peer it believes is
+        // inside the confederation. Neither a nor b has a confederation
+        // configured, so b MUST treat it as malformed.
+        let mut path = AsPath::new();
+        path.segments.push(AsPathSegment {
+            kind: AsPathType::ConfedSequence,
+            ases: vec![Asn(65001)],
+        });
+        path.segments.push(AsPathSegment {
+            kind: AsPathType::Sequence,
+            ases: vec![Asn(64500)],
+        });
+        let mut u = Update::new();
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            path.encode_4(),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![192, 0, 2, 1],
+        ));
+        u.nlri.push(Nlri::plain(lr_core::addr::Prefix::new_v4(
+            [203, 0, 113, 0],
+            24,
+        )));
+        let actions = b.step(BgpEvent::Message(BgpMessage::Update(u)));
+        assert!(
+            !actions
+                .iter()
+                .any(|x| matches!(x, BgpAction::InstallRoute(_))),
+            "a non-confederation peer must not install routes from an AS_PATH with AS_CONFED_*"
+        );
+    }
+
+    /// RFC 5065 §5 (positive direction): a confederation member MAY send
+    /// AS_CONFED_* to a peer in the same confederation, and the receiver
+    /// installs the route. This guards against the validator over-reaching
+    /// and rejecting legitimate confederation-internal traffic.
+    #[test]
+    fn accepts_confed_segments_from_confederation_peer() {
+        use crate::path::{AsPath, AsPathSegment, AsPathType, PathAttrFlags, PathAttribute};
+        use crate::role::ConfederationConfig;
+        let mut cfg1 = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg1.confederation = Some(ConfederationConfig::new(vec![64512, 64513, 64514]));
+        let mut cfg2 = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]));
+        cfg2.confederation = Some(ConfederationConfig::new(vec![64512, 64513, 64514]));
+        let (mut a, mut b) = (BgpPeer::new(cfg1), BgpPeer::new(cfg2));
+        establish(&mut a, &mut b);
+        let mut path = AsPath::new();
+        path.segments.push(AsPathSegment {
+            kind: AsPathType::ConfedSequence,
+            ases: vec![Asn(64512)],
+        });
+        path.segments.push(AsPathSegment {
+            kind: AsPathType::Sequence,
+            ases: vec![Asn(64500)],
+        });
+        let mut u = Update::new();
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::Origin,
+            vec![0],
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            path.encode_4(),
+        ));
+        u.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::NextHop,
+            vec![192, 0, 2, 1],
+        ));
+        u.nlri.push(Nlri::plain(lr_core::addr::Prefix::new_v4(
+            [203, 0, 113, 0],
+            24,
+        )));
+        let actions = b.step(BgpEvent::Message(BgpMessage::Update(u)));
+        assert!(
+            actions
+                .iter()
+                .any(|x| matches!(x, BgpAction::InstallRoute(_))),
+            "a confederation peer must install routes from a same-confederation AS_CONFED_* path"
+        );
     }
 }

@@ -46,15 +46,17 @@ pub enum PeerRole {
     /// learned from iBGP are not re-advertised to other iBGP peers unless the
     /// local speaker is a route reflector (RFC 4456 §9).
     Ibgp,
-    /// Confederation-external eBGP (RFC 6793): the peer sits in another
+    /// Confederation-external eBGP (RFC 5065): the peer sits in another
     /// Member-AS of the same confederation.
     ///
-    /// RFC 5065 §4.1(b) has the local AS prepended as an
-    /// AS_CONFED_SEQUENCE segment, and §4.1(c)(1) has AS_CONFED_* segments
-    /// removed when the route is advertised to a peer outside the
-    /// confederation. Neither is implemented: this role currently prepends
-    /// into an AS_SEQUENCE, and no egress path strips AS_CONFED_* segments.
-    /// NEXT_HOP rewriting behaves like eBGP.
+    /// RFC 5065 §4.1(b): the local AS is prepended as an
+    /// `AS_CONFED_SEQUENCE` segment on egress. RFC 5065 §4.1(c)(1): when
+    /// the route is advertised to a peer outside the confederation the
+    /// `AS_CONFED_*` segments are stripped and the confederation identifier
+    /// (RFC 5065 §4) is prepended as a plain `AS_SEQUENCE`. RFC 5065 §5:
+    /// an `AS_PATH` carrying `AS_CONFED_*` from a peer that is not a
+    /// member of the local confederation is rejected as malformed on
+    /// ingress. NEXT_HOP rewriting behaves like eBGP.
     ConfederationExternal,
     /// Confederation-internal iBGP (RFC 6793). Behaves like iBGP but confed
     /// peers may exchange routes learned from other confed members.
@@ -191,6 +193,7 @@ mod tests {
     fn role_classification_confed() {
         let confed = ConfederationConfig {
             members: vec![64512, 64513, 64514],
+            confederation_id: None,
         };
         assert_eq!(
             PeerRole::from_asns(Asn(64512), Asn(64513), Some(&confed)),

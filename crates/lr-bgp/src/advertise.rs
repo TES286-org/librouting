@@ -28,6 +28,7 @@ use crate::path::{
     PathAttributes,
 };
 use crate::role::otc::Otc;
+use crate::role::PeerRole;
 
 use lr_core::addr::Prefix;
 use lr_core::nlri::NlriFamily;
@@ -89,9 +90,39 @@ impl BgpPeer {
         self.attach_exchange_plane(&mut attrs, route);
 
         // --- AS_PATH ---
+        // RFC 5065 §4.1 governs confederation egress:
+        //  (b) to a peer in another Member-AS (ConfederationExternal) the
+        //      local AS is prepended as an AS_CONFED_SEQUENCE;
+        //  (c)(1) to a peer outside the confederation every AS_CONFED_*
+        //      segment is stripped first, and the confederation identifier
+        //      (RFC 5065 §4) — not the private Member-AS — is prepended as
+        //      an AS_SEQUENCE.
+        // A route-server client keeps the AS_PATH untouched (RFC 7947 §2.1).
         let mut as_path = attrs.as_path().unwrap_or_default();
         if topo.role.prepends_as_path() && !topo.rs_client {
-            as_path.prepend(self.cfg.local_as);
+            match topo.role {
+                PeerRole::ConfederationExternal => {
+                    // §4.1(b): record the local sub-AS in a confed segment
+                    // that is invisible outside the confederation.
+                    as_path.prepend_confed(self.cfg.local_as);
+                }
+                PeerRole::Ebgp => {
+                    if let Some(confed) = &self.cfg.confederation {
+                        // §4.1(c)(1): confederation-private segments must
+                        // not leak past the confederation boundary.
+                        as_path.strip_confed();
+                        // §4: announce the confederation identifier.
+                        let external = confed.external_as().unwrap_or(self.cfg.local_as.0);
+                        as_path.prepend(lr_core::addr::Asn(external));
+                    } else {
+                        as_path.prepend(self.cfg.local_as);
+                    }
+                }
+                // Ibgp / ConfederationInternal never prepend (the
+                // `prepends_as_path` guard above is false for them, but
+                // exhaustiveness keeps the match future-proof).
+                _ => {}
+            }
         }
         attrs.remove(AttrType::AsPath);
         attrs.remove(AttrType::As4Path);
@@ -450,6 +481,7 @@ mod tests {
     use crate::fsm::{BgpEvent, BgpPeer};
     use crate::path::AsPath;
     use crate::peer::PeerConfig;
+    use crate::role::ConfederationConfig;
     use lr_core::addr::{Asn, IpAddr, RouterId};
     use lr_core::codec::Decoder;
     use lr_core::rib::{Preference, Protocol, RouteKey, RouteOrigin};
@@ -853,5 +885,98 @@ mod tests {
             }
             _ => panic!("expected UPDATE"),
         }
+    }
+
+    /// Decode the first UPDATE in `bytes` and return its AS_PATH segments.
+    fn decode_update_as_path(bytes: &[u8]) -> Vec<crate::path::as_path::AsPathSegment> {
+        let mut dec = crate::codec::BgpCodec::new().with_asn4(true);
+        let mut r = lr_core::buf::ReadBuf::new(bytes);
+        loop {
+            match dec.decode(&mut r) {
+                Ok(Some(BgpMessage::Update(u))) => {
+                    return u.attributes.as_path_wire(true).unwrap_or_default().segments;
+                }
+                Ok(Some(_)) => continue,
+                Ok(None) => panic!("no UPDATE in drained bytes"),
+                Err(e) => panic!("decode error: {e:?}"),
+            }
+        }
+    }
+
+    /// RFC 5065 §4.1(b): advertising to a peer in another Member-AS of the
+    /// same confederation prepends the local AS into an
+    /// AS_CONFED_SEQUENCE. The segment is invisible to the default path
+    /// length so best-path comparison is unaffected.
+    #[test]
+    fn confederation_external_prepends_confed_sequence() {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.confederation = Some(ConfederationConfig::new(vec![64512, 64513, 64514]));
+        let mut peer = established_peer(cfg);
+        let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
+        assert!(peer.advertise(&route));
+        let segs = decode_update_as_path(&peer.drain_outgoing());
+        assert_eq!(
+            segs[0].kind,
+            crate::path::as_path::AsPathType::ConfedSequence
+        );
+        assert_eq!(segs[0].ases, vec![Asn(64512)]);
+        assert_eq!(segs[1].kind, crate::path::as_path::AsPathType::Sequence);
+        assert_eq!(segs[1].ases, vec![Asn(64500)]);
+    }
+
+    /// RFC 5065 §4.1(c)(1) + §4: advertising to a true eBGP peer (outside
+    /// the confederation) strips every AS_CONFED_* segment and prepends the
+    /// confederation identifier — not the private Member-AS — as a plain
+    /// AS_SEQUENCE.
+    #[test]
+    fn confederation_external_egress_strips_confed_and_uses_confed_id() {
+        let mut cfg = PeerConfig::new(Asn(64512), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        cfg.confederation = Some(ConfederationConfig::with_id(vec![64512, 64513, 64514], 100));
+        let mut peer = established_peer(cfg);
+        // The route carries an AS_CONFED_SEQUENCE from a confederation-internal hop.
+        let mut route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
+        let mut attrs: PathAttributes = route.attributes.clone().into();
+        let mut confed_path = AsPath::new();
+        confed_path.prepend_confed(Asn(64513));
+        let mut path = AsPath::from_sequence([Asn(64500)]);
+        path.segments.splice(0..0, confed_path.segments);
+        attrs.remove(AttrType::AsPath);
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_transitive(true),
+            AttrType::AsPath,
+            path.encode_4(),
+        ));
+        route.attributes = attrs.into();
+        assert!(peer.advertise(&route));
+        let segs = decode_update_as_path(&peer.drain_outgoing());
+        // No confederation-private segment survives egress.
+        assert!(
+            !segs.iter().any(|s| matches!(
+                s.kind,
+                crate::path::as_path::AsPathType::ConfedSequence
+                    | crate::path::as_path::AsPathType::ConfedSet
+            )),
+            "AS_CONFED_* must be stripped before the confederation boundary"
+        );
+        // A single AS_SEQUENCE remains: the confederation identifier (100)
+        // prepended in front of the original [64500] — not the private
+        // Member-AS 64512.
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].kind, crate::path::as_path::AsPathType::Sequence);
+        assert_eq!(segs[0].ases, vec![Asn(100), Asn(64500)]);
+    }
+
+    /// A speaker not in a confederation keeps the plain eBGP prepend: no
+    /// confederation identifier is invented and no segment is stripped.
+    #[test]
+    fn non_confederation_speaker_prepends_local_as() {
+        let cfg = PeerConfig::new(Asn(64512), Asn(200), RouterId::from_v4([10, 0, 0, 1]));
+        let mut peer = established_peer(cfg);
+        let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
+        assert!(peer.advertise(&route));
+        let segs = decode_update_as_path(&peer.drain_outgoing());
+        assert_eq!(segs.len(), 1);
+        assert_eq!(segs[0].kind, crate::path::as_path::AsPathType::Sequence);
+        assert_eq!(segs[0].ases, vec![Asn(64512), Asn(64500)]);
     }
 }

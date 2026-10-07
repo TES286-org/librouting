@@ -1,10 +1,10 @@
-//! Confederation configuration (RFC 6793).
+//! Confederation configuration (RFC 5065).
 //!
 //! A confederation is a set of ASNs treated as one AS externally but acting
 //! as a sub-AS internally. Routes are exchanged between confederation
 //! members using the AS_CONFED_SEQUENCE / AS_CONFED_SET segment types, and
-//! the local AS is announced as the confederation's "external" AS to peers
-//! outside the confederation.
+//! the local speaker announces the confederation identifier (not its private
+//! Member-AS) to peers outside the confederation (RFC 5065 §4).
 //!
 //! Wire-level segment types live in [`crate::path::as_path::AsPathType`] as
 //! `ConfedSequence` and `ConfedSet`. This module only describes the
@@ -17,11 +17,29 @@ pub struct ConfederationConfig {
     /// itself is one of these; its own sub-AS is supplied separately on the
     /// [`crate::peer::PeerConfig`] as `local_as`.
     pub members: Vec<u32>,
+    /// The confederation identifier (RFC 5065 §4): the single ASN the
+    /// confederation presents to peers that are not members. RFC 5065 §4
+    /// requires a member to use this identifier in every transaction with a
+    /// non-member peer — including the AS_SEQUENCE prepended on egress. When
+    /// `None`, the first member is used as the identifier for backward
+    /// compatibility, matching BIRD's `confederation member` default.
+    pub confederation_id: Option<u32>,
 }
 
 impl ConfederationConfig {
     pub fn new(members: Vec<u32>) -> Self {
-        Self { members }
+        Self {
+            members,
+            confederation_id: None,
+        }
+    }
+
+    /// Build a config with an explicit confederation identifier (RFC 5065 §4).
+    pub fn with_id(members: Vec<u32>, confederation_id: u32) -> Self {
+        Self {
+            members,
+            confederation_id: Some(confederation_id),
+        }
     }
 
     /// True if `asn` is a confederation member.
@@ -29,14 +47,12 @@ impl ConfederationConfig {
         self.members.contains(&asn)
     }
 
-    /// External AS announced to non-confed peers. Per RFC 3065 §5, this is
-    /// the confederation identifier (an ASN reserved at IANA for the
-    /// confederation as a whole).
-    ///
-    /// For simplicity we treat the first member as the external AS; in
-    /// practice the confederation identifier is configured explicitly.
+    /// The ASN to announce to peers outside the confederation (RFC 5065 §4).
+    /// The explicit `confederation_id` wins when set; otherwise the first
+    /// member is used (BIRD-compatible default).
     pub fn external_as(&self) -> Option<u32> {
-        self.members.first().copied()
+        self.confederation_id
+            .or_else(|| self.members.first().copied())
     }
 }
 
@@ -49,6 +65,16 @@ mod tests {
         let c = ConfederationConfig::new(vec![64512, 64513, 64514]);
         assert!(c.contains(64513));
         assert!(!c.contains(65500));
+        // No explicit identifier: the first member is the external AS.
         assert_eq!(c.external_as(), Some(64512));
+    }
+
+    /// RFC 5065 §4: the confederation identifier is the ASN a member
+    /// announces to non-members, distinct from any Member-AS.
+    #[test]
+    fn explicit_confederation_id_wins() {
+        let c = ConfederationConfig::with_id(vec![64512, 64513, 64514], 200);
+        assert_eq!(c.external_as(), Some(200));
+        assert!(c.contains(64513));
     }
 }

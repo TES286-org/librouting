@@ -122,6 +122,55 @@ impl AsPath {
         );
     }
 
+    /// Prepend `as` as an `AS_CONFED_SEQUENCE` segment (RFC 5065 §4.1(b)):
+    /// used when advertising to a peer in another Member-AS of the same
+    /// confederation. The local AS is recorded in a confederation segment so
+    /// it is invisible to peers outside the confederation after the
+    /// confederation identifier is substituted on egress (see
+    /// [`AsPath::strip_confed`]).
+    ///
+    /// An existing leftmost `AS_CONFED_SEQUENCE` is extended in place so the
+    /// path keeps one confed segment (mirrors the `prepend` rule for
+    /// `AS_SEQUENCE`); otherwise a fresh segment is inserted at the head.
+    pub fn prepend_confed(&mut self, as_: Asn) {
+        for seg in &mut self.segments {
+            if seg.kind == AsPathType::ConfedSequence {
+                seg.ases.insert(0, as_);
+                return;
+            }
+        }
+        self.segments.insert(
+            0,
+            AsPathSegment {
+                kind: AsPathType::ConfedSequence,
+                ases: vec![as_],
+            },
+        );
+    }
+
+    /// Remove every `AS_CONFED_SEQUENCE` / `AS_CONFED_SET` segment in place
+    /// (RFC 5065 §4.1(c)(1)). A speaker advertising to a peer outside its
+    /// confederation MUST strip the confederation-private segments: leaving
+    /// them on the wire is a malformed-AS_PATH error that resets the session
+    /// (RFC 4271 §6.3, RFC 5065 §5). Returns `true` if any segment was
+    /// removed so the caller can decide whether to re-encode.
+    pub fn strip_confed(&mut self) -> bool {
+        let before = self.segments.len();
+        self.segments
+            .retain(|s| !matches!(s.kind, AsPathType::ConfedSequence | AsPathType::ConfedSet));
+        self.segments.len() != before
+    }
+
+    /// True if the path carries any confederation-private segment
+    /// (`AS_CONFED_SEQUENCE` / `AS_CONFED_SET`). Used by the ingress
+    /// validator: a peer that is not a member of the local confederation
+    /// MUST NOT send these (RFC 5065 §5).
+    pub fn has_confed(&self) -> bool {
+        self.segments
+            .iter()
+            .any(|s| matches!(s.kind, AsPathType::ConfedSequence | AsPathType::ConfedSet))
+    }
+
     /// Decode 2-byte-AS AS_PATH.
     pub fn decode(b: &[u8]) -> Option<Self> {
         Self::decode_inner(b, false)
@@ -440,5 +489,88 @@ mod tests {
             }],
         };
         assert_eq!(reconcile_as4(&wire, None), wire);
+    }
+
+    /// RFC 5065 §4.1(b): advertising to a confederation-external peer
+    /// (another Member-AS) prepends the local AS into an
+    /// AS_CONFED_SEQUENCE, extending the leftmost one when it exists.
+    #[test]
+    fn prepend_confed_extends_or_creates_segment() {
+        // Fresh path: a new confed segment is inserted at the head.
+        let mut p = AsPath::from_sequence([Asn(100), Asn(200)]);
+        p.prepend_confed(Asn(65001));
+        assert_eq!(p.segments[0].kind, AsPathType::ConfedSequence);
+        assert_eq!(p.segments[0].ases, vec![Asn(65001)]);
+        assert_eq!(p.segments[1].kind, AsPathType::Sequence);
+
+        // An existing leftmost AS_CONFED_SEQUENCE is extended in place.
+        let mut p = AsPath {
+            segments: vec![
+                AsPathSegment {
+                    kind: AsPathType::ConfedSequence,
+                    ases: vec![Asn(65010)],
+                },
+                AsPathSegment {
+                    kind: AsPathType::Sequence,
+                    ases: vec![Asn(100)],
+                },
+            ],
+        };
+        p.prepend_confed(Asn(65001));
+        assert_eq!(p.segments[0].kind, AsPathType::ConfedSequence);
+        assert_eq!(p.segments[0].ases, vec![Asn(65001), Asn(65010)]);
+        assert_eq!(p.segments.len(), 2, "no new segment is inserted");
+        // The confed segment stays invisible to path-length comparison.
+        assert_eq!(p.length(), 1);
+    }
+
+    /// RFC 5065 §4.1(c)(1): AS_CONFED_SEQUENCE / AS_CONFED_SET segments
+    /// are removed before a route leaves the confederation. The plain
+    /// AS_SEQUENCE / AS_SET segments survive untouched.
+    #[test]
+    fn strip_confed_removes_only_private_segments() {
+        let mut p = AsPath {
+            segments: vec![
+                AsPathSegment {
+                    kind: AsPathType::ConfedSequence,
+                    ases: vec![Asn(65001), Asn(65002)],
+                },
+                AsPathSegment {
+                    kind: AsPathType::Sequence,
+                    ases: vec![Asn(100), Asn(200)],
+                },
+                AsPathSegment {
+                    kind: AsPathType::ConfedSet,
+                    ases: vec![Asn(65003)],
+                },
+            ],
+        };
+        assert!(p.strip_confed());
+        assert_eq!(
+            p.segments,
+            vec![AsPathSegment {
+                kind: AsPathType::Sequence,
+                ases: vec![Asn(100), Asn(200)],
+            }]
+        );
+        // Stripping an already-clean path is a no-op reported as false.
+        assert!(!p.strip_confed());
+        assert!(!p.has_confed());
+    }
+
+    /// `has_confed` detects both confederation segment kinds so the
+    /// ingress validator can flag a peer that is not a confederation
+    /// member sending AS_CONFED_* (RFC 5065 §5).
+    #[test]
+    fn has_confed_detects_private_segments() {
+        let plain = AsPath::from_sequence([Asn(100)]);
+        assert!(!plain.has_confed());
+        let with_confed = AsPath {
+            segments: vec![AsPathSegment {
+                kind: AsPathType::ConfedSet,
+                ases: vec![Asn(65001)],
+            }],
+        };
+        assert!(with_confed.has_confed());
     }
 }
