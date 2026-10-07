@@ -888,7 +888,9 @@ pub(crate) struct DaemonConfig {
     pub ospf_hello_interval: u16,
     /// OSPF dead interval default (seconds; RFC 2328 default 4× hello).
     pub ospf_dead_interval: u32,
-    /// Default area for interfaces without one (`--ospf-area`; 0).
+    /// Default area for interfaces without one. Set by `--ospf-area` or the
+    /// `[ospf] area = N` config key (the file-side counterpart of the flag);
+    /// defaults to 0 (the backbone).
     pub ospf_area: u32,
     /// `[[ospf.area]]` tables — non-backbone areas must be declared.
     pub ospf_areas: Vec<OspfAreaSpec>,
@@ -3337,6 +3339,15 @@ fn apply_ospf_key(
                     .parse()
                     .map_err(|_| format!("bad dead_interval '{value}'"))?;
             }
+            // Default area for interfaces without an explicit one. Mirrors
+            // `--ospf-area` so the daemon can be fully configured from a
+            // file instead of only the command line (issue #41 §5).
+            "area" => {
+                let area: u32 = value
+                    .parse()
+                    .map_err(|_| format!("bad area '{value}' (expected a 32-bit area id)"))?;
+                cfg.ospf_area = area;
+            }
             "graceful_restart" => {
                 cfg.ospf_graceful_restart = parse_bool(value);
             }
@@ -5417,6 +5428,31 @@ mod tests {
         parse_toml_subset("[[ospf.interface]]\nname = \"eth0\"\n", &mut cfg).unwrap();
         cfg.finalize().unwrap();
         assert_eq!(cfg.ospf_interfaces[0].area, Some(0));
+    }
+
+    /// `[ospf] area = N` is the config-file counterpart of `--ospf-area`:
+    /// the default area an interface without an explicit one falls back
+    /// to (issue #41 §5). It feeds `cfg.ospf_area`, the same field the
+    /// CLI flag writes, so the two frontends cannot drift.
+    #[test]
+    fn ospf_section_area_key_sets_default_area() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.protocol = "ospf".to_string();
+        parse_toml_subset(
+            "[ospf]\narea = 1\n\n\
+             [[ospf.area]]\nid = 1\n\n\
+             [[ospf.interface]]\nname = \"eth0\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.ospf_area, 1, "the [ospf] area key feeds the default");
+        assert_eq!(
+            cfg.ospf_interfaces[0].area,
+            Some(1),
+            "an interface without an explicit area picks the [ospf] default"
+        );
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
     }
 
     #[test]
