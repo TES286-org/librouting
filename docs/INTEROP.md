@@ -95,6 +95,7 @@ portable ones.
 | `babel_auth.sh` | two lr babel speakers in one netns | RFC 8967 MAC and PC transport auth: the same key establishes, a restart re-keys with a fresh Index, a wrong key is rejected |
 | `babel_dualstack_bird.sh` | lr and BIRD across two user namespaces | the production dual-stack shape: v4 and v6 routes over one link with BIRD as peer |
 | `babel_multihop.sh` | three speakers in three namespaces | multi-session transit: routes transit the middle speaker, the dead segment's routes withdraw end to end (§3.5.5 retraction plus check link), the link returning reconverges |
+| `babel_manual_check_link.sh` | two manual-path lr speakers in two namespaces | issue #39: the manual single-socket path polls its own interface carrier (BIRD `check link` parity) — a carrier loss withdraws the learned route within 3 s, not the 30 s §3.2.5 hold floor; reconvergence on carrier return |
 | `babel_infeasible_no_displace.sh` | lr speakers over a tunnel shape | regression: an infeasible update never displaces a feasible route |
 | `babel_reinstall_churn.sh` | two lr speakers | regression: a byte-identical re-install does not re-emit `RouteInstalled` or re-touch the kernel mirror |
 | `babel_withdraw_reason.sh` | lr and BIRD | a wildcard retraction (§4.6.9) logs its real reason instead of the best-path-displacement fallback |

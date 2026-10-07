@@ -27,10 +27,12 @@
 #      from its RIB and retracts them on veth1b (RFC 8966 §3.5.5);
 #      C's copy vanishes immediately (the infinity-metric retraction),
 #      A's copy of C's prefix dies through the route hold timer
-#      (RFC 8966 §3.2.5 — the manual single-interface daemon has no
-#      `check link` and must not flap on a brief neighbour blip, so it
-#      expires the unrefreshed route after the hold time) — the chain
-#      is broken end to end.
+#      (RFC 8966 §3.2.5) — only veth0b went down, so A's own
+#      check-link poll (on veth0a, which is still up) does not fire;
+#      A's copy expires because M stopped re-advertising it, not
+#      because A lost its local carrier. The chain is broken end to
+#      end. (The manual path gained check-link in issue #39 — see
+#      `babel_manual_check_link.sh` for the local-carrier-loss case.)
 #   6. `ip link set veth0b up`: routes return on both ends.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
