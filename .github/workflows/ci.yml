@@ -716,6 +716,12 @@ jobs:
       - name: Babel multi-session transit + check link (RFC 8966, lr ↔ lr)
         timeout-minutes: 10
         run: ./tests/interop/babel_multihop.sh
+      - name: Babel manual-path check link (RFC 8966 §A.2, BIRD parity, issue #39)
+        # The manual single-socket path polls its own interface carrier
+        # (BIRD `check link` parity) — a carrier loss withdraws the
+        # learned route within 3 s, not the 30 s §3.2.5 hold floor.
+        timeout-minutes: 10
+        run: ./tests/interop/babel_manual_check_link.sh
       - name: Babel v6-only tunnel + extended_next_hop + blackhole (RFC 5549, lr ↔ BIRD, pcap)
         timeout-minutes: 10
         run: ./tests/interop/babel_v6only_extended.sh
