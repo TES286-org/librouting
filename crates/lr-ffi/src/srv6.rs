@@ -21,7 +21,7 @@ use crate::handle::lr_bytes_t;
 /// Returns 0 on success, negative on error:
 /// - `-1`: null pointer or `len` not a multiple of 16.
 /// - `-4`: panic.
-/// - `-5`: SRH encode error (set via `lr_last_error`).
+/// - `LR_ERR_CODEC` (-5): SRH encode error (set via `lr_last_error`).
 #[no_mangle]
 pub extern "C" fn lr_srv6_encode_srh(data: *const u8, len: usize, out: *mut lr_bytes_t) -> i32 {
     guarded(
@@ -70,7 +70,7 @@ pub extern "C" fn lr_srv6_encode_srh(data: *const u8, len: usize, out: *mut lr_b
 /// - `-1`: null pointer.
 /// - `-3`: input too short.
 /// - `-4`: panic.
-/// - `-5`: SRH decode error (set via `lr_last_error`).
+/// - `LR_ERR_CODEC` (-5): SRH decode error (set via `lr_last_error`).
 #[no_mangle]
 pub extern "C" fn lr_srv6_decode_srh(data: *const u8, len: usize, out: *mut lr_bytes_t) -> i32 {
     guarded(

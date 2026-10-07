@@ -44,7 +44,7 @@ use lr_policy::{PolicySet, RouteMap};
 use std::ffi::CStr;
 
 // ---- Well-known BGP path attribute tags + flags (RFC 4271 §4.2,
-// RFC 1997 §4, RFC 4360 §2, RFC 8097 §2) — mirrors lr_policy::bgp. ----
+// RFC 1997 §4, RFC 4360 §2, RFC 8092 §2) — mirrors lr_policy::bgp. ----
 
 const TAG_ORIGIN: u8 = 1;
 const FLAGS_ORIGIN: u8 = 0x40; // well-known mandatory
@@ -586,7 +586,7 @@ pub unsafe extern "C" fn lr_route_as_path(route: lr_route_t, out: *mut u32, cap:
 }
 
 /// Append one standard community (RFC 1997 §4). The ASN must fit 16
-/// bits — 4-octet-AS communities ride LARGE_COMMUNITIES (RFC 8097).
+/// bits — 4-octet-AS communities ride LARGE_COMMUNITIES (RFC 8092).
 /// 0 ok, -1 null, -3 ASN > 0xFFFF.
 ///
 /// # Safety
@@ -669,7 +669,7 @@ pub unsafe extern "C" fn lr_route_communities(route: lr_route_t, out: *mut u64, 
     )
 }
 
-/// Append one large community (RFC 8097).
+/// Append one large community (RFC 8092).
 ///
 /// # Safety
 /// `route` must be a live handle.

@@ -13,6 +13,50 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.0.0-rc.6] — pre-1.0 conformance cleanup
+
+The sixth release candidate closes the pre-1.0 freeze gaps catalogued in
+issue #41: the BGP confederation AS_PATH handling that RFC 5065 mandates,
+the `MaxPrefixAction::Restart` cooldown the daemon documented but never
+enforced, the `[ospf] area` config-file counterpart of `--ospf-area`, and
+the C-ABI error-code surface that overloaded `-5` between a dead
+`AbiMismatch` and the SRv6 codec.
+
+**Breaking changes (pre-1.0 minor bumps, allowed within the rc window):**
+
+- **BGP confederation AS_PATH (RFC 5065).** Egress now prepends the local
+  sub-AS as an `AS_CONFED_SEQUENCE` to a confederation-external peer
+  (§4.1(b)), strips `AS_CONFED_*` segments and substitutes the confederation
+  identifier (§4 / §4.1(c)(1)) before the confederation boundary, and the
+  ingress path rejects an `AS_PATH` carrying `AS_CONFED_*` from a peer that
+  is not a member of the local confederation (§5). `ConfederationConfig`
+  gains an explicit `confederation_id` field.
+- **`MaxPrefixAction::Restart` cooldown.** `PeerConfig` gains
+  `maximum_prefix_restart_time` (seconds); a `Restart` that trips arms a
+  re-establishment gate the outbound connector respects
+  (`RouterInstance::session_restart_cooldown_remaining`). `0` preserves the
+  historical `Teardown`-equivalent behaviour. Plumbed through the daemon
+  (`--max-prefix-restart-time`, `[bgp]` / `[[peer]]` keys) and the FFI
+  `SessionConfig` builder.
+- **FFI error codes.** `LrError::AbiMismatch` (`lr_core::FfiError::AbiMismatch`)
+  is repurposed as `Codec` (`-5`); the SRv6 codec entry points return it by
+  name and the C header gains `#define LR_ERR_CODEC (-5)`. `lr_abi_version()`
+  is documented as the only ABI-compatibility surface. The numeric value is
+  unchanged, so the documented C-ABI behaviour of the SRv6 functions is
+  identical.
+
+**Additive (non-breaking):**
+
+- `[ospf] area = N` is the config-file counterpart of `--ospf-area`
+  (issue #41 §5). Both write `cfg.ospf_area` through the shared
+  `apply_ospf_key` dispatch.
+- Corrected `RFC 8097` → `RFC 8092` (Large Communities) citations in the
+  FFI policy-objects doc comments copied into `include/lr_ffi.h`.
+
+The C ABI surface grows additively (`LR_ERR_CODEC` macro, accessor doc
+comment); `lr_abi_version()` stays at `2` (no symbol/signature change).
+The `abi-freeze` baseline tag moves to `v1.0.0-rc.6`.
+
 ## [1.0.0-rc.5] — production interop hardening + static-route ABI
 
 The fifth release candidate is the production-hardening wave: almost

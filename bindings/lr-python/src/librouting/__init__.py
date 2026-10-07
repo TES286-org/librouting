@@ -140,4 +140,4 @@ __all__ = [
 # The single source of truth for the package version: pyproject.toml reads
 # this value (`dynamic = ["version"]`). Keep it equal to the workspace
 # version in Cargo.toml; tests/test_librouting.py fails if they diverge.
-__version__ = "1.0.0-rc.5"
+__version__ = "1.0.0-rc.6"

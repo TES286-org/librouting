@@ -16,7 +16,7 @@
 //!
 //! ```text
 //! $ lrctl status
-//! version 1.0.0-rc.5
+//! version 1.0.0-rc.6
 //! local-as 64512
 //! ...
 //! $ lrctl sessions

@@ -14,14 +14,15 @@
  * a C consumer. Pointer-returning entry points signal failure with NULL
  * and set the thread-local message from lr_last_error() instead.
  *
- * -5 is intentionally absent: it is not a general error code. The SRv6
- * codec entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it
- * for their own codec failures, as documented on those functions. */
+ * LR_ERR_CODEC (-5) is NOT a general error code: only the SRv6 codec
+ * entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it for
+ * their own encode/decode failures, as documented on those functions. */
 #define LR_ERR_OK 0
 #define LR_ERR_NULL (-1)
 #define LR_ERR_INVALID_HANDLE (-2)
 #define LR_ERR_BAD_UTF8 (-3)
 #define LR_ERR_PANIC (-4)
+#define LR_ERR_CODEC (-5)
 #define LR_ERR_OTHER (-6)
 
 /* Wire protocol ids for lr_router_add_redistribution_pipe (LrProtocol). */
@@ -957,7 +958,7 @@ int64_t lr_route_as_path(lr_route_t route, uint32_t *out, uintptr_t cap);
 
 /**
  * Append one standard community (RFC 1997 §4). The ASN must fit 16
- * bits — 4-octet-AS communities ride LARGE_COMMUNITIES (RFC 8097).
+ * bits — 4-octet-AS communities ride LARGE_COMMUNITIES (RFC 8092).
  * 0 ok, -1 null, -3 ASN > 0xFFFF.
  *
  * # Safety
@@ -984,7 +985,7 @@ int32_t lr_route_set_communities(lr_route_t route, const uint64_t *items, uintpt
 int64_t lr_route_communities(lr_route_t route, uint64_t *out, uintptr_t cap);
 
 /**
- * Append one large community (RFC 8097).
+ * Append one large community (RFC 8092).
  *
  * # Safety
  * `route` must be a live handle.
@@ -1920,7 +1921,7 @@ int32_t lr_router_add_babel_session(lr_router_t r,
  * Returns 0 on success, negative on error:
  * - `-1`: null pointer or `len` not a multiple of 16.
  * - `-4`: panic.
- * - `-5`: SRH encode error (set via `lr_last_error`).
+ * - `LR_ERR_CODEC` (-5): SRH encode error (set via `lr_last_error`).
  */
 int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 
@@ -1936,7 +1937,7 @@ int32_t lr_srv6_encode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t
  * - `-1`: null pointer.
  * - `-3`: input too short.
  * - `-4`: panic.
- * - `-5`: SRH decode error (set via `lr_last_error`).
+ * - `LR_ERR_CODEC` (-5): SRH decode error (set via `lr_last_error`).
  */
 int32_t lr_srv6_decode_srh(const uint8_t *data, uintptr_t len, struct lr_bytes_t *out);
 

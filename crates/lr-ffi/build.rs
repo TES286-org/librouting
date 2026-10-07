@@ -37,14 +37,15 @@ fn main() {
  * a C consumer. Pointer-returning entry points signal failure with NULL
  * and set the thread-local message from lr_last_error() instead.
  *
- * -5 is intentionally absent: it is not a general error code. The SRv6
- * codec entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it
- * for their own codec failures, as documented on those functions. */
+ * LR_ERR_CODEC (-5) is NOT a general error code: only the SRv6 codec
+ * entry points (lr_srv6_encode_srh / lr_srv6_decode_srh) return it for
+ * their own encode/decode failures, as documented on those functions. */
 #define LR_ERR_OK 0
 #define LR_ERR_NULL (-1)
 #define LR_ERR_INVALID_HANDLE (-2)
 #define LR_ERR_BAD_UTF8 (-3)
 #define LR_ERR_PANIC (-4)
+#define LR_ERR_CODEC (-5)
 #define LR_ERR_OTHER (-6)
 
 /* Wire protocol ids for lr_router_add_redistribution_pipe (LrProtocol). */
