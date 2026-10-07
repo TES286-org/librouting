@@ -36,8 +36,8 @@ use windows_sys::Win32::Storage::FileSystem::{
     FlushFileBuffers, ReadFile, WriteFile, PIPE_ACCESS_DUPLEX,
 };
 use windows_sys::Win32::System::Pipes::{
-    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, SetNamedPipeHandleState,
-    NAMED_PIPE_MODE, PIPE_NOWAIT, PIPE_TYPE_BYTE, PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
+    ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, PeekNamedPipe, PIPE_TYPE_BYTE,
+    PIPE_UNLIMITED_INSTANCES, PIPE_WAIT,
 };
 use windows_sys::Win32::System::Threading::GetCurrentProcess;
 
@@ -101,23 +101,54 @@ impl NamedPipeStream {
         }
     }
 
-    /// Switch the pipe between blocking and non-blocking mode. The
-    /// server uses non-blocking mode briefly between idle reads so
-    /// the daemon's `running` flag is polled at least once every
-    /// 250 ms (matching the Unix side's `set_read_timeout` cadence).
-    fn set_nonblocking(&self, on: bool) -> io::Result<()> {
-        let mode: NAMED_PIPE_MODE = if on { PIPE_NOWAIT } else { PIPE_WAIT };
-        let rc = unsafe { SetNamedPipeHandleState(self.handle as HANDLE, &mode, &0, &0) };
-        if rc == 0 {
-            Err(io::Error::last_os_error())
-        } else {
-            Ok(())
-        }
+    /// Switch the pipe between blocking and non-blocking mode.
+    ///
+    /// Kept as a no-op stub for structural parity with the Unix
+    /// side's `set_nonblocking` call sites, but the non-blocking
+    /// behaviour now lives in the `Read` impl: it probes the pipe
+    /// with `PeekNamedPipe` and returns `WouldBlock` when no bytes
+    /// are buffered. The legacy `PIPE_NOWAIT` mode it used to set
+    /// fails with `ERROR_PIPE_BUSY` on some pipe handles, so the mode
+    /// switch is no longer the mechanism — the `Read` impl is.
+    #[allow(dead_code)]
+    fn set_nonblocking(&self, _on: bool) -> io::Result<()> {
+        Ok(())
     }
 }
 
 impl Read for NamedPipeStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        // Probe the pipe's input buffer without blocking — the modern
+        // alternative to the legacy `PIPE_NOWAIT` mode (which fails
+        // with `ERROR_PIPE_BUSY` on some pipe handles).
+        // `PeekNamedPipe` returns immediately with the number of bytes
+        // the next `ReadFile` would yield; 0 means the read would
+        // block, which surfaces as `WouldBlock` so the caller's
+        // idle-rounds loop can poll on its own cadence.
+        let mut available: u32 = 0;
+        let rc = unsafe {
+            PeekNamedPipe(
+                self.handle as HANDLE,
+                std::ptr::null_mut(),
+                0,
+                std::ptr::null_mut(),
+                &mut available,
+                std::ptr::null_mut(),
+            )
+        };
+        if rc == 0 {
+            let err = io::Error::last_os_error();
+            // ERROR_BROKEN_PIPE is EOF on a named pipe.
+            if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
+                return Ok(0);
+            }
+            return Err(err);
+        }
+        if available == 0 {
+            return Err(io::Error::from(io::ErrorKind::WouldBlock));
+        }
+        // Data is buffered — `ReadFile` returns immediately with up
+        // to `buf.len()` of it.
         let mut bytes_read: u32 = 0;
         let rc = unsafe {
             ReadFile(
@@ -130,7 +161,6 @@ impl Read for NamedPipeStream {
         };
         if rc == 0 {
             let err = io::Error::last_os_error();
-            // ERROR_BROKEN_PIPE is EOF on a named pipe.
             if err.raw_os_error() == Some(ERROR_BROKEN_PIPE as i32) {
                 return Ok(0);
             }
@@ -184,10 +214,13 @@ impl Drop for NamedPipeStream {
 // ---------------------------------------------------------------------------
 
 /// Bind the named pipe and spawn the serving thread. `path` is the
-/// full pipe name (`\\.\pipe\lr-daemon`); the operator configures
-/// it via the same `api_socket` key as on Unix.
+/// pipe name the operator configures via `api_socket` / `--api-socket`;
+/// [`crate::pipe_name::normalize_pipe_name`] maps the Unix-style
+/// default (`/run/lr-daemon.api`) to a valid `\\.\pipe\<name>` so the
+/// same config works on every platform.
 pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
-    let name_wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let pipe_name = crate::pipe_name::normalize_pipe_name(path);
+    let name_wide: Vec<u16> = pipe_name.encode_utf16().chain(std::iter::once(0)).collect();
 
     let info = Arc::new(ctx.info);
     let router = Arc::clone(&ctx.router);
@@ -195,7 +228,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
     let started = std::time::Instant::now();
-    let path_owned = path.to_string();
+    let path_owned = pipe_name.clone();
 
     // Pre-create the first pipe instance so a bind failure shows up
     // at startup, not on the first client connect.
@@ -214,7 +247,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     if probe == INVALID_HANDLE_VALUE as isize {
         let err = unsafe { GetLastError() };
         return Err(format!(
-            "bind {path}: CreateNamedPipeW failed (error {err})"
+            "bind {pipe_name}: CreateNamedPipeW failed (error {err})"
         ));
     }
 
@@ -352,20 +385,21 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
     loop {
         line.clear();
         // Tolerate idle clients without blocking shutdown forever:
-        // briefly flip the read handle to non-blocking, poll, then
-        // flip back. Cap the command length so a slow-drip client
-        // cannot grow the line unboundedly.
+        // the `Read` impl returns `WouldBlock` when `PeekNamedPipe`
+        // sees no bytes, so `read_line` surfaces it here. Cap the
+        // command length so a slow-drip client cannot grow the line
+        // unboundedly. (The legacy `PIPE_NOWAIT` mode switch that
+        // used to bracket this loop is gone — `PeekNamedPipe` is the
+        // modern non-blocking probe and does not need a mode flip.)
         const MAX_CMD: usize = 4096;
         let mut idle_rounds = 0;
         let mut n = 0usize;
         loop {
-            let _ = reader.get_mut().set_nonblocking(true);
             match reader.read_line(&mut line) {
                 Ok(0) => break, // EOF
                 Ok(read) => {
                     n += read;
                     if line.ends_with('\n') || n >= MAX_CMD {
-                        let _ = reader.get_mut().set_nonblocking(false);
                         break;
                     }
                 }
@@ -373,7 +407,6 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                     if e.kind() == std::io::ErrorKind::WouldBlock
                         || e.kind() == std::io::ErrorKind::TimedOut =>
                 {
-                    let _ = reader.get_mut().set_nonblocking(false);
                     idle_rounds += 1;
                     if idle_rounds > 40 || !deps.running.load(Ordering::Relaxed) {
                         return; // ~10 s idle timeout or shutdown
