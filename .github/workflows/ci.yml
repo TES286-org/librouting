@@ -413,8 +413,11 @@ jobs:
   # Windows lr-vs-lr interop. The scripts that don't query the runtime
   # API socket (two_daemon, labeled_unicast, bgp_kernel_install) run
   # end-to-end on windows-2022 via Git Bash. The two that do (addpath,
-  # bmp) need a Windows transport for lrctl or a Windows-aware Python
-  # client; they stay on the Linux interop job until that lands.
+  # bmp) use a Python AF_UNIX client to query the API socket; the
+  # `lrctl` binary now has a Windows named-pipe transport (issue #43),
+  # but those scripts' Python helper still opens a Unix socket directly,
+  # so they stay on the Linux interop job until the helper learns named
+  # pipes or is rewritten on top of `lrctl`.
   #
   # bgp_kernel_install.sh additionally exercises the Windows IP-Helper
   # backend end-to-end: the GitHub Windows runner shell is already
