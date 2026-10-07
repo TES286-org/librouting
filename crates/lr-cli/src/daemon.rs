@@ -3722,7 +3722,10 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         return ExitCode::from(2);
     }
     // The manual single-socket path keeps its exact historical log line.
-    let manual = ifaces.len() == 1 && ifaces[0].name.is_empty();
+    // The `manual` marker (set by `babel_iface_manual`) distinguishes it
+    // from the per-interface spec path even when the device resolved and
+    // `name` is populated (issue #39).
+    let manual = ifaces.len() == 1 && ifaces[0].manual;
     if manual {
         let t = &ifaces[0].transports[0];
         let uc_bind = match t.local {
@@ -4461,8 +4464,16 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
 /// transport on 224.0.0.111 for IPv4-only peers); both feed the same
 /// Babel session, share one router-id and one authentication state.
 struct BabelIface {
-    /// Kernel interface name; empty for the manual single-socket path.
+    /// Kernel interface name; empty for the manual single-socket path
+    /// when the device did not resolve from the local address.
     name: String,
+    /// True when built by `babel_iface_manual` (the single-socket path
+    /// without a `[[babel.interface]]` block). The startup logger uses
+    /// this instead of `name.is_empty()` to keep the manual-path log
+    /// line even when the device resolved and `name` is populated
+    /// (issue #39: the manual path now polls the link state when the
+    /// device resolves, matching BIRD `check link` parity).
+    manual: bool,
     /// The per-family transports (v6 first, then v4).
     transports: Vec<BabelTransport>,
     /// Per-interface port override (`[[babel.interface]] port`).
@@ -4647,9 +4658,55 @@ fn resolve_babel_interfaces(cfg: &DaemonConfig) -> Result<Vec<BabelIface>, Strin
     Ok(out)
 }
 
+/// Resolve the link-state polling parameters for the manual
+/// single-socket path from the local address (issue #39: BIRD
+/// `check link` parity).
+///
+/// The manual path has no `[[babel.interface]]` block to name a
+/// device, but the device *is* resolvable out of the local address
+/// — the constructor already resolves it to pin the transport
+/// socket (`babel_transport_new`). When it resolves, the per-second
+/// check-link poll in `run_babel_daemon` matches by `iface.name`
+/// and fires; the egress-pinning registry is seeded with the real
+/// `if_index` so multi-adapter hosts do not let the kernel pick
+/// egress. When it does not resolve (a loopback test, an address
+/// that left the system), the historical fallback applies: empty
+/// name, no poll, `if_index` 0 — the daemon keeps running but
+/// learns about carrier loss only through the RFC 8966 §3.2.5
+/// route hold timer (30 s).
+///
+/// Returns `(name, check_link, if_index)`:
+/// - `(name, true, if_index)` when the device resolved and its
+///   kernel index is available.
+/// - `(name, true, 0)` when the device resolved but `ifindex_of`
+///   returned `None` — the poll still fires (the name matches), only
+///   the egress-pinning registry stays unseeded.
+/// - `("", false, 0)` when the device did not resolve (the safe
+///   fallback that preserves the pre-#39 behaviour).
+///
+/// BIRD defaults `check link` to on (BIRD docs, Babel protocol
+/// section); babeld watches interface state. `babel_iface_from_spec`
+/// (the spec path) defaults `check_link: true` too — this helper
+/// brings the manual path in line with both.
+fn manual_iface_link_state(local: std::net::IpAddr) -> (String, bool, u32) {
+    let Some(sys) = lr_osroute::ospf_transport::list_interfaces().ok() else {
+        return (String::new(), false, 0);
+    };
+    let Some(entry) = sys.iter().find(|i| {
+        (local.is_ipv4() && i.v4.iter().any(|a| a == &local))
+            || (local.is_ipv6() && i.v6.iter().any(|a| std::net::IpAddr::V6(*a) == local))
+    }) else {
+        return (String::new(), false, 0);
+    };
+    let name = entry.name.clone();
+    let if_index = lr_osroute::ospf_transport::ifindex_of(&name).unwrap_or(0);
+    (name, true, if_index)
+}
+
 /// Build the manual-path interface: one transport on the given local
 /// address, global parameters, unscoped keys. Keeps the historical
-/// single-session daemon bit-for-bit.
+/// single-session daemon bit-for-bit, except the link-state poll now
+/// fires when the device resolves from the local address (issue #39).
 fn babel_iface_manual(
     cfg: &DaemonConfig,
     local_str: &str,
@@ -4684,26 +4741,19 @@ fn babel_iface_manual(
         std::net::IpAddr::V4(_) => (Some(local), None),
         std::net::IpAddr::V6(_) => (None, Some(local)),
     };
-    // Pin the sockets to the address's device when it can be resolved —
-    // same-host multi-segment labs cross-talk otherwise (see
-    // `babel_transport_new`).
-    let device = lr_osroute::ospf_transport::list_interfaces()
-        .ok()
-        .and_then(|sys| {
-            sys.iter()
-                .find(|i| {
-                    (local.is_ipv4() && i.v4.iter().any(|a| a == &local))
-                        || (local.is_ipv6()
-                            && i.v6.iter().any(|a| std::net::IpAddr::V6(*a) == local))
-                })
-                .map(|i| i.name.clone())
-        });
-    let transport =
-        babel_transport_new(local, scope_id, cfg.babel_port, None, "", device.as_deref())?;
+    // Resolve the device for transport pinning and link-state polling.
+    // When the device resolves, `name` lets the per-second check-link
+    // poll match this interface and `if_index` seeds the egress-pinning
+    // registry; when it does not, the historical fallback (empty name,
+    // no poll, if_index 0) keeps the daemon running (issue #39).
+    let (name, check_link, if_index) = manual_iface_link_state(local);
+    let device: Option<&str> = if name.is_empty() { None } else { Some(&name) };
+    let transport = babel_transport_new(local, scope_id, cfg.babel_port, None, "", device)?;
     let (auth, auth_debug_line) =
         build_babel_auth_interface_for(cfg, &cfg.babel_keys.iter().collect::<Vec<_>>(), "");
     Ok(BabelIface {
-        name: String::new(),
+        name,
+        manual: true,
         transports: vec![transport],
         port: cfg.babel_port,
         hello_interval_ms: 1_000,  // the historical cadence
@@ -4712,14 +4762,12 @@ fn babel_iface_manual(
         rtt_cost: 0,               // off on manual interfaces
         rtt_min_us: 10_000,        // §A.2.4 defaults
         rtt_max_us: 120_000,
-        check_link: false, // no interface name to poll
+        check_link,
         next_hop_v4: nh_v4,
         next_hop_v6: nh_v6,
         extended_next_hop: false,
         session: SessionHandle(0), // assigned right after add_session
-        // The manual path has no interface name to resolve; the pinning
-        // registry stays unseeded and the kernel picks egress itself.
-        if_index: 0,
+        if_index,
         auth,
         auth_debug_line,
         router_id: babel_router_id_for(local, boot, babel_router_id_from_config(cfg)),
@@ -4918,6 +4966,7 @@ fn babel_iface_from_spec(
     let if_index = lr_osroute::ospf_transport::ifindex_of(&entry.name).unwrap_or(0);
     Ok(BabelIface {
         name: entry.name.clone(),
+        manual: false,
         transports,
         port,
         hello_interval_ms: hello,
@@ -6606,6 +6655,109 @@ mod babel_router_id_tests {
         let iface = babel_iface_manual(&cfg, "127.0.0.1", boot()).unwrap();
         assert_eq!(iface.router_id, [127, 0, 0, 1, 0x55, 0x66, 0x77, 0x88]);
     }
+
+    /// The manual-path interface built from a loopback address (which
+    /// resolves to `lo`/`lo0` on every Unix) carries the `manual`
+    /// marker and now resolves `check_link: true` from the device —
+    /// issue #39's BIRD `check link` parity. The startup logger relies
+    /// on `manual` (not `name.is_empty()`) to keep the single-socket
+    /// log line, so the two assertions together pin both halves of the
+    /// fix.
+    #[test]
+    fn babel_iface_manual_sets_manual_marker_and_check_link() {
+        let mut cfg = DaemonConfig::with_defaults();
+        cfg.babel_port = 0; // ephemeral — port collisions across tests
+        let iface = babel_iface_manual(&cfg, "127.0.0.1", boot()).unwrap();
+        assert!(iface.manual, "manual-path interface must carry manual=true");
+        assert!(
+            !iface.name.is_empty(),
+            "loopback must resolve to a named interface (got {:?})",
+            iface.name
+        );
+        assert!(
+            iface.check_link,
+            "manual path with a resolved device must poll the link (check_link=true)"
+        );
+        assert!(
+            iface.if_index > 0,
+            "loopback must resolve to a non-zero kernel index (got {})",
+            iface.if_index
+        );
+    }
+}
+
+#[cfg(test)]
+mod manual_iface_link_state_tests {
+    use super::manual_iface_link_state;
+    use std::net::IpAddr;
+
+    /// A loopback address resolves to the system loopback interface
+    /// on every platform the project targets — the resolved outcome.
+    /// The name is platform-dependent (`lo` on Linux, `lo0` on
+    /// macOS/BSDs) so the assertion is on the shape, not the string.
+    #[test]
+    fn loopback_address_resolves() {
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let (name, check_link, if_index) = manual_iface_link_state(local);
+        assert!(
+            !name.is_empty(),
+            "loopback must resolve to a named interface"
+        );
+        assert!(
+            check_link,
+            "a resolved device must enable the check-link poll"
+        );
+        assert!(
+            if_index > 0,
+            "loopback must resolve to a non-zero kernel index (got {if_index})"
+        );
+    }
+
+    /// An address in TEST-NET-2 (RFC 5737) is guaranteed not to be on
+    /// any system interface — the unresolved outcome, which must keep
+    /// the historical fallback shape so the manual-path daemon still
+    /// runs without a device to poll.
+    #[test]
+    fn unassigned_address_yields_historical_fallback() {
+        let local: IpAddr = "198.51.100.250".parse().unwrap();
+        let (name, check_link, if_index) = manual_iface_link_state(local);
+        assert!(
+            name.is_empty(),
+            "an unassigned address must not resolve to a name (got {name:?})"
+        );
+        assert!(
+            !check_link,
+            "an unassigned address must not enable the check-link poll"
+        );
+        assert_eq!(if_index, 0, "an unassigned address must not seed if_index");
+    }
+
+    /// A v6 loopback (`::1`) resolves the same way on every platform —
+    /// the resolved outcome for the v6 transport path. Guards against
+    /// a v4-only implementation of the matcher.
+    #[test]
+    fn ipv6_loopback_resolves() {
+        let local: IpAddr = "::1".parse().unwrap();
+        let (name, check_link, if_index) = manual_iface_link_state(local);
+        assert!(!name.is_empty(), "::1 must resolve to a named interface");
+        assert!(
+            check_link,
+            "a resolved v6 device must enable the check-link poll"
+        );
+        assert!(if_index > 0, "::1 must resolve to a non-zero kernel index");
+    }
+
+    /// The helper is pure with respect to its inputs — calling it twice
+    /// with the same address yields the same triple. This is a
+    /// belt-and-braces guard against an accidental mutation of the
+    /// system interface list (the helper takes it by value).
+    #[test]
+    fn repeated_calls_are_stable() {
+        let local: IpAddr = "127.0.0.1".parse().unwrap();
+        let first = manual_iface_link_state(local);
+        let second = manual_iface_link_state(local);
+        assert_eq!(first, second);
+    }
 }
 
 #[cfg(test)]
@@ -7045,6 +7197,7 @@ mod babel_retraction_tests {
         let uc = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
         BabelIface {
             name: "lo0".into(),
+            manual: false,
             transports: vec![BabelTransport {
                 local: std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1)),
                 scope_id: 0,
