@@ -117,6 +117,12 @@ pub struct PeerConfig {
     /// the hard limit is reached. 0 disables the early warning. Defaults
     /// to 75 (BIRD/FRR convention).
     pub maximum_prefix_threshold: u8,
+    /// Cooldown (seconds) applied only when [`MaxPrefixAction::Restart`]
+    /// fires: after tearing the session down the router refuses to
+    /// re-establish it until the cooldown elapses, matching FRR's
+    /// `bgp maximum-prefix restart <secs>` and BIRD's `restart time`.
+    /// `0` disables the cooldown so `Restart` behaves like [`Self::Teardown`].
+    pub maximum_prefix_restart_time: u32,
 }
 
 /// Action taken when a peer exceeds its configured maximum-prefix limit.
@@ -130,12 +136,13 @@ pub enum MaxPrefixAction {
     /// subcode 1 "Maximum Number of Prefixes Reached" (RFC 4486 §3).
     /// The routes the peer already installed are purged (RFC 4271 §8.2.2).
     Teardown,
-    /// Tear down and refuse to re-establish for a cooldown period.
-    ///
-    /// The cooldown is not implemented: the router currently treats
-    /// `Restart` exactly as [`Self::Teardown`], and no daemon key
-    /// configures a cooldown. The variant is accepted so that the
-    /// configuration surface does not have to change when it lands.
+    /// Tear down the session and refuse to re-establish it for the
+    /// configured cooldown ([`PeerConfig::maximum_prefix_restart_time`]).
+    /// A cooldown of `0` makes `Restart` behave like [`Self::Teardown`].
+    /// The teardown itself is the same CEASE NOTIFICATION (subcode 1)
+    /// and route purge as `Teardown`; the cooldown gates re-establishment
+    /// at the connector, so the peer cannot re-learn a route that would
+    /// immediately re-trip the limit.
     Restart,
 }
 
@@ -183,6 +190,7 @@ impl PeerConfig {
             maximum_prefix: None,
             maximum_prefix_action: MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            maximum_prefix_restart_time: 0,
         }
     }
 

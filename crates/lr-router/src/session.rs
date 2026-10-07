@@ -236,6 +236,9 @@ pub struct SessionConfig {
     pub maximum_prefix_action: lr_bgp::MaxPrefixAction,
     /// Early-warning threshold percentage (0..=100). 0 disables.
     pub maximum_prefix_threshold: u8,
+    /// Re-establishment cooldown (seconds) for the `Restart` action.
+    /// `0` keeps `Restart` equivalent to `Teardown`.
+    pub maximum_prefix_restart_time: u32,
     /// RFC 4271 §6.8 connection-collision group: BGP sessions sharing a
     /// group number are collision candidates. When an OPEN advances one
     /// of them out of OpenSent, the router examines the group siblings
@@ -299,6 +302,7 @@ impl SessionConfig {
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            maximum_prefix_restart_time: 0,
             collision_group: None,
             locally_initiated: false,
         }
@@ -405,6 +409,16 @@ impl SessionConfig {
         self
     }
 
+    /// Set the re-establishment cooldown (seconds) for the `Restart`
+    /// max-prefix action (FRR `bgp maximum-prefix restart <secs>`,
+    /// BIRD `restart time`). Takes effect only when
+    /// [`with_maximum_prefix`] is also set with [`MaxPrefixAction::Restart`];
+    /// `0` keeps `Restart` equivalent to `Teardown`.
+    pub fn with_maximum_prefix_restart_time(mut self, secs: u32) -> Self {
+        self.maximum_prefix_restart_time = secs;
+        self
+    }
+
     /// Set the OSPF interface MTU (RFC 2328 §10.6).
     pub fn with_ospf_mtu(mut self, mtu: u16) -> Self {
         self.ospf_mtu = mtu;
@@ -469,6 +483,7 @@ impl SessionConfig {
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            maximum_prefix_restart_time: 0,
             collision_group: None,
             locally_initiated: false,
         }
@@ -519,6 +534,7 @@ impl SessionConfig {
             maximum_prefix: None,
             maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
             maximum_prefix_threshold: 75,
+            maximum_prefix_restart_time: 0,
             collision_group: None,
             locally_initiated: false,
         }

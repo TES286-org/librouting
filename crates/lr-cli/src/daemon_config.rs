@@ -91,6 +91,9 @@ pub(crate) struct PeerSpec {
     pub max_prefixes: Option<u32>,
     pub max_prefix_action: Option<String>,
     pub max_prefix_threshold: Option<u8>,
+    /// Re-establishment cooldown (seconds) for the `restart` action.
+    /// `None` inherits the global setting.
+    pub max_prefix_restart_time: Option<u32>,
     /// BFD fast-fail for this peer (`bfd = true`, RFC 5880/5881).
     /// `None` inherits the global setting.
     pub bfd: Option<bool>,
@@ -687,6 +690,9 @@ pub(crate) struct DaemonConfig {
     pub max_prefix_action: String,
     /// Early-warning threshold percentage (0..=100). 0 disables.
     pub max_prefix_threshold: u8,
+    /// Re-establishment cooldown (seconds) for the `restart` action.
+    /// `0` keeps `restart` equivalent to `teardown`.
+    pub max_prefix_restart_time: u32,
     /// BFD fast-fail enabled for peers that do not override
     /// (`--bfd` / `[bgp] bfd`). Sessions run on the RFC 5881 ports and
     /// a BFD Down tears the BGP session immediately instead of
@@ -1082,6 +1088,7 @@ impl DaemonConfig {
             add_path_max_paths: 6,
             max_prefix_action: "warn".to_string(),
             max_prefix_threshold: 75,
+            max_prefix_restart_time: 0,
             bfd_min_tx_ms: 100,
             bfd_min_rx_ms: 100,
             bfd_multiplier: 3,
@@ -2116,6 +2123,9 @@ fn merge_spec(over: &mut PeerSpec, base: &PeerSpec) {
     if over.max_prefix_threshold.is_none() {
         over.max_prefix_threshold = base.max_prefix_threshold;
     }
+    if over.max_prefix_restart_time.is_none() {
+        over.max_prefix_restart_time = base.max_prefix_restart_time;
+    }
     if over.bfd.is_none() {
         over.bfd = base.bfd;
     }
@@ -2550,6 +2560,9 @@ pub(crate) fn apply_config_key(
         }
         "bgp.max_prefix_threshold" => {
             cfg.max_prefix_threshold = value.parse().unwrap_or(75);
+        }
+        "bgp.max_prefix_restart_time" => {
+            cfg.max_prefix_restart_time = value.parse().unwrap_or(0);
         }
         "bgp.mp_families" => cfg.mp_families = parse_str_array(value),
         "bgp.bfd" => cfg.bfd_enabled = parse_bool(value),
@@ -4004,6 +4017,10 @@ fn apply_peer_key(peer: &mut PeerSpec, key: &str, value: &str) -> Result<bool, S
         "max_prefix_threshold" => {
             peer.max_prefix_threshold = Some(value.parse().map_err(|_| "bad max_prefix_threshold")?)
         }
+        "max_prefix_restart_time" => {
+            peer.max_prefix_restart_time =
+                Some(value.parse().map_err(|_| "bad max_prefix_restart_time")?)
+        }
         "bfd" => peer.bfd = Some(parse_bool(value)),
         "bfd_multihop" => peer.bfd_multihop = Some(parse_bool(value)),
         "import" => peer.import = Some(value.to_string()),
@@ -4305,6 +4322,10 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--max-prefix-threshold" if i + 1 < args.len() => {
                 cfg.max_prefix_threshold = args[i + 1].parse().unwrap_or(75);
+                i += 2;
+            }
+            "--max-prefix-restart-time" if i + 1 < args.len() => {
+                cfg.max_prefix_restart_time = args[i + 1].parse().unwrap_or(0);
                 i += 2;
             }
             "--bfd" => {
@@ -4910,6 +4931,37 @@ mod tests {
         assert_eq!(cfg.llgr_stale_time, 3600);
         assert_eq!(cfg.llgr_max_stale_time, 7200);
         assert!(cfg.install_kernel);
+    }
+
+    /// `max_prefix_restart_time` parses at the `[bgp]` global scope and the
+    /// `[[peer]]` per-peer scope, and a peer without it inherits the global
+    /// value (FRR `bgp maximum-prefix restart <secs>` / BIRD `restart time`).
+    #[test]
+    fn max_prefix_restart_time_parses_and_inherits() {
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[bgp]\nlocal_as = 65000\npeer_as = 65001\nrouter_id = \"10.0.0.1\"\n\
+             max_prefix_restart_time = 30\n\n\
+             [[peer]]\nremote = \"192.0.2.2:179\"\nmax_prefix_restart_time = 60\n\n\
+             [[peer]]\nremote = \"192.0.2.3:179\"\n",
+            &mut cfg,
+        )
+        .unwrap();
+        cfg.finalize().unwrap();
+        assert_eq!(cfg.max_prefix_restart_time, 30, "global [bgp] key");
+        assert_eq!(
+            cfg.peers[0].max_prefix_restart_time,
+            Some(60),
+            "per-peer override"
+        );
+        // The peer without an explicit value leaves the slot `None`; the
+        // daemon builder resolves it against the global default at session
+        // build time (`p.max_prefix_restart_time.unwrap_or(g.…)`), the same
+        // contract as `max_prefix_threshold`.
+        assert_eq!(
+            cfg.peers[1].max_prefix_restart_time, None,
+            "unset per-peer slot stays None until the daemon builder resolves it"
+        );
     }
 
     #[test]

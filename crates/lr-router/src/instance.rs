@@ -132,6 +132,17 @@ pub trait RouterInstance {
         None
     }
 
+    /// Remaining milliseconds of the max-prefix `Restart` cooldown for a
+    /// session, or `None` when no cooldown is in effect (the session never
+    /// tripped `Restart`, or the configured cooldown has elapsed). The
+    /// daemon's outbound connector reads this before dialing so a peer that
+    /// exceeded its prefix limit cannot re-establish until the configured
+    /// cooldown elapses (FRR `bgp maximum-prefix restart <secs>`, BIRD
+    /// `restart time`). Driven by the router clock advanced in [`tick`].
+    fn session_restart_cooldown_remaining(&self, _h: SessionHandle) -> Option<u64> {
+        None
+    }
+
     /// Consume the §6.8 collision-loss latch of a session: `true` when
     /// the session lost an RFC 4271 §6.8 collision — its own resolver
     /// closed it, or a Cease / Connection Collision Resolution
@@ -1705,6 +1716,13 @@ struct MaxPrefixState {
     /// instead of scanning the whole Adj-RIB-In (which made table
     /// convergence O(R²)).
     count: u32,
+    /// When [`lr_bgp::MaxPrefixAction::Restart`] tore the session down,
+    /// the router time (ms) after which the connector may re-establish.
+    /// `None` (or a value <= `now_ms`) means "no cooldown in effect".
+    /// Survives the teardown so the connector can read it; a fresh
+    /// exceedance overwrites it, and once `now_ms` passes it the gate
+    /// re-opens.
+    restart_cooldown_until: Option<u64>,
 }
 
 impl Default for DefaultRouter {
@@ -3183,7 +3201,7 @@ impl DefaultRouter {
     /// Prefixes Reached", RFC 4486 §3/§4).
     fn check_max_prefix(&mut self, session: u64) {
         // Read the config without borrowing self mutably.
-        let (limit, action, threshold_pct) = match self.sessions.get(&session) {
+        let (limit, action, threshold_pct, restart_time) = match self.sessions.get(&session) {
             Some(SessionState::Bgp { peer, .. }) => {
                 let cfg = peer.config();
                 match cfg.maximum_prefix {
@@ -3191,6 +3209,7 @@ impl DefaultRouter {
                         limit,
                         cfg.maximum_prefix_action,
                         cfg.maximum_prefix_threshold,
+                        cfg.maximum_prefix_restart_time,
                     ),
                     None => return, // no limit configured
                 }
@@ -3239,6 +3258,18 @@ impl DefaultRouter {
                         )));
                     }
                     lr_bgp::MaxPrefixAction::Teardown | lr_bgp::MaxPrefixAction::Restart => {
+                        // A Restart with a non-zero cooldown arms the
+                        // re-establishment gate the connector reads before
+                        // it dials again (FRR `bgp maximum-prefix restart
+                        // <secs>` / BIRD `restart time`). A zero cooldown
+                        // keeps the historical behaviour: Restart tears
+                        // down exactly like Teardown.
+                        if matches!(action, lr_bgp::MaxPrefixAction::Restart) && restart_time > 0 {
+                            if let Some(st) = self.max_prefix_state.get_mut(&session) {
+                                st.restart_cooldown_until =
+                                    Some(self.now_ms.saturating_add(restart_time as u64 * 1000));
+                            }
+                        }
                         self.pending_events.push(RouterEvent::Log(format!(
                             "max-prefix: session {} exceeded limit ({count}/{limit}), action={}",
                             session,
@@ -4634,6 +4665,7 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.maximum_prefix = cfg.maximum_prefix;
                 p_cfg.maximum_prefix_action = cfg.maximum_prefix_action;
                 p_cfg.maximum_prefix_threshold = cfg.maximum_prefix_threshold;
+                p_cfg.maximum_prefix_restart_time = cfg.maximum_prefix_restart_time;
                 let peer = BgpPeer::new(p_cfg);
                 if let Some(group) = cfg.collision_group {
                     self.collision_meta
@@ -5288,6 +5320,20 @@ impl RouterInstance for DefaultRouter {
             Some(SessionState::Bgp { peer, .. }) => Some(peer.state().name()),
             _ => None,
         }
+    }
+
+    fn session_restart_cooldown_remaining(&self, h: SessionHandle) -> Option<u64> {
+        let until = self
+            .max_prefix_state
+            .get(&h.0)
+            .and_then(|s| s.restart_cooldown_until)?;
+        // `now_ms` is advanced by the daemon's ticker; a cooldown whose
+        // deadline has passed is "no cooldown" so the connector dials at
+        // once. Saturating subtract guards against a clock that jumped.
+        if until <= self.now_ms {
+            return None;
+        }
+        Some(until - self.now_ms)
     }
 
     fn take_collision_lost(&mut self, h: SessionHandle) -> bool {
@@ -10679,6 +10725,110 @@ mod tests {
         assert_eq!(
             sub, 1,
             "RFC 4486 §3 subcode 1 = Maximum Number of Prefixes Reached"
+        );
+    }
+
+    /// RFC 4486 §3 + FRR `bgp maximum-prefix restart <secs>`: when the
+    /// `Restart` action trips, the session tears down with the CEASE
+    /// NOTIFICATION and the router arms a re-establishment cooldown the
+    /// connector reads before it dials again. `Teardown` arms no such
+    /// cooldown, so `Restart` and `Teardown` are now genuinely distinct.
+    #[test]
+    fn max_prefix_restart_arms_cooldown() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let ha = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_maximum_prefix(1, lr_bgp::MaxPrefixAction::Restart)
+                    .with_maximum_prefix_restart_time(30),
+            )
+            .unwrap();
+        let hb = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        establish(&mut a, ha, &mut b, hb);
+        let _ = a.drain_output(ha);
+        // Advance the router clock so the cooldown deadline is meaningful.
+        // now=10s; the cooldown (30s) lands at t=40s.
+        a.tick(lr_core::time::Instant(10_000));
+        // Two routes cross the limit of one → Restart fires.
+        for prefix in [
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Prefix::new_v4([198, 51, 100, 0], 24),
+        ] {
+            b.originate(prefix, Some(IpAddr::V4([192, 0, 2, 10])));
+            let adv = b.drain_output(hb);
+            assert!(!adv.is_empty());
+            a.feed_input(ha, &adv).unwrap();
+        }
+        let out = a.drain_output(ha);
+        let (code, sub) = find_notification(&out).expect("CEASE NOTIFICATION queued");
+        assert_eq!(code, 6, "CEASE error code");
+        assert_eq!(sub, 1, "Maximum Number of Prefixes Reached");
+        // The cooldown is armed: ~30s remain at t=10s.
+        let remaining = a
+            .session_restart_cooldown_remaining(ha)
+            .expect("cooldown armed after Restart");
+        assert!(
+            (29_000..=30_000).contains(&remaining),
+            "cooldown ~30s right after the trip, got {remaining}"
+        );
+        // The cooldown is keyed on the router clock; advancing past the
+        // deadline re-opens the gate.
+        a.tick(lr_core::time::Instant(40_001));
+        assert_eq!(
+            a.session_restart_cooldown_remaining(ha),
+            None,
+            "the cooldown elapses with the router clock"
+        );
+    }
+
+    /// `Teardown` must NOT arm a cooldown — only `Restart` does. This
+    /// guards the `matches!` gate in `check_max_prefix` against regressing
+    /// into the old shared arm that treated both identically.
+    #[test]
+    fn max_prefix_teardown_arms_no_cooldown() {
+        let mut a = DefaultRouter::new();
+        let mut b = DefaultRouter::new();
+        let ha = a
+            .add_session(
+                SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0)
+                    .with_maximum_prefix(1, lr_bgp::MaxPrefixAction::Teardown)
+                    .with_maximum_prefix_restart_time(30),
+            )
+            .unwrap();
+        let hb = b
+            .add_session(
+                SessionConfig::bgp(Asn(64513), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                    .with_mrai_ms(0)
+                    .with_graceful_restart(0),
+            )
+            .unwrap();
+        establish(&mut a, ha, &mut b, hb);
+        let _ = a.drain_output(ha);
+        a.tick(lr_core::time::Instant(10_000));
+        for prefix in [
+            Prefix::new_v4([203, 0, 113, 0], 24),
+            Prefix::new_v4([198, 51, 100, 0], 24),
+        ] {
+            b.originate(prefix, Some(IpAddr::V4([192, 0, 2, 10])));
+            let adv = b.drain_output(hb);
+            a.feed_input(ha, &adv).unwrap();
+        }
+        let _ = a.drain_output(ha);
+        assert_eq!(
+            a.session_restart_cooldown_remaining(ha),
+            None,
+            "Teardown must not arm a Restart cooldown even with a non-zero restart_time"
         );
     }
 

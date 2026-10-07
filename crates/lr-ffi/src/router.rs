@@ -170,6 +170,7 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
                 maximum_prefix: None,
                 maximum_prefix_action: lr_bgp::MaxPrefixAction::Warn,
                 maximum_prefix_threshold: 75,
+                maximum_prefix_restart_time: 0,
                 // RFC 4271 §6.8: FFI sessions are single-transport; the
                 // collision group is reserved for embedders that run
                 // both transports of a bidirectional peer (the daemon).

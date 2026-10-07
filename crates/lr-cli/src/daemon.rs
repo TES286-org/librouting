@@ -176,6 +176,8 @@ fn print_usage() {
          --max-prefixes N         Per-peer maximum-prefix limit\n  \
          --max-prefix-action A    warn (default) | teardown | restart\n  \
          --max-prefix-threshold P Early-warning percentage (default 75)\n  \
+         --max-prefix-restart-time S  cooldown before re-establishing after\n  \
+         restart (default 0 = behave like teardown)\n  \
          --ebgp-policy MODE       rfc8212 (default) | accept-all — default\n  \
          eBGP route behavior for peers without import/export\n  \
          route-maps (RFC 8212: deny-in/deny-out vs legacy accept)\n  \
@@ -1740,8 +1742,10 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         };
         sc = sc
             .with_maximum_prefix(limit, action)
-            .with_maximum_prefix_threshold(
-                p.max_prefix_threshold.unwrap_or(g.max_prefix_threshold),
+            .with_maximum_prefix_threshold(p.max_prefix_threshold.unwrap_or(g.max_prefix_threshold))
+            .with_maximum_prefix_restart_time(
+                p.max_prefix_restart_time
+                    .unwrap_or(g.max_prefix_restart_time),
             );
     }
     // RFC 4724 graceful restart + RFC 9494 long-lived graceful restart.
@@ -2582,6 +2586,25 @@ fn spawn_connector(
                         sleep_interruptible(&rt, Duration::from_millis(500));
                         continue;
                     }
+                }
+                // Max-prefix Restart cooldown (FRR `bgp maximum-prefix
+                // restart <secs>` / BIRD `restart time`): a peer that
+                // tripped the hard limit tore the session down and armed a
+                // re-establishment gate. Stay passive until the cooldown
+                // elapses so the peer cannot re-learn a route that would
+                // immediately re-trip the limit. A cooldown of 0 (the
+                // default) makes Restart behave like Teardown and this
+                // branch is a no-op.
+                if let Some(remaining) = rt
+                    .router
+                    .read()
+                    .unwrap()
+                    .session_restart_cooldown_remaining(handle)
+                {
+                    // Poll at a sub-second cadence so shutdown and a
+                    // router-clock tick both land promptly.
+                    sleep_interruptible(&rt, Duration::from_millis(remaining.min(500)));
+                    continue;
                 }
                 let sockaddr = match resolve(&remote) {
                     Some(a) => a,
