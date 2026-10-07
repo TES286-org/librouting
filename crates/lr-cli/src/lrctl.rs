@@ -361,19 +361,16 @@ mod transport {
     use windows_sys::Win32::Storage::FileSystem::{
         CreateFileW, ReadFile, WriteFile, FILE_ATTRIBUTE_NORMAL, OPEN_EXISTING,
     };
-    use windows_sys::Win32::System::Pipes::{SetNamedPipeHandleState, NAMED_PIPE_MODE};
+    use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
     /// Windows system error codes returned by `GetLastError` that the
     /// read loop needs to interpret. Named so the `Read` impl below
     /// does not carry magic numbers.
     ///
     /// `ERROR_BROKEN_PIPE` (109): the server closed its end — EOF.
-    /// `ERROR_NO_DATA` (232): a non-blocking read found no bytes — the
-    /// pipe equivalent of Unix `EWOULDBLOCK`.
     /// `ERROR_PIPE_BUSY` (231): all pipe instances are in use; the
     /// client retries (see `connect_with_retry`).
     const ERROR_BROKEN_PIPE: u32 = 109;
-    const ERROR_NO_DATA: u32 = 232;
     const ERROR_PIPE_BUSY: u32 = 231;
 
     /// Connect to the daemon's named pipe, send one command, collect
@@ -395,15 +392,14 @@ mod transport {
         stream.write_all(&buf).map_err(|e| format!("write: {e}"))?;
         stream.flush().map_err(|e| format!("flush: {e}"))?;
 
-        // Non-blocking read with an idle-silence terminator (same shape
-        // as the Unix transport): keep reading until the pipe has no
-        // data AND we already have some bytes, OR the 5 s deadline
-        // expires. The daemon's response ends with a `\n`-terminated
-        // last line, so a no-data-with-bytes means the daemon has
-        // finished writing for now.
-        stream
-            .set_nonblocking(true)
-            .map_err(|e| format!("nonblocking: {e}"))?;
+        // Read with an idle-silence terminator (same shape as the Unix
+        // transport): keep reading until the pipe has no data AND we
+        // already have some bytes, OR the 5 s deadline expires. The
+        // daemon's response ends with a `\n`-terminated last line, so a
+        // no-data-with-bytes means the daemon has finished writing for
+        // now. `Read` returns `WouldBlock` when `PeekNamedPipe` sees
+        // no bytes — no `PIPE_NOWAIT` mode switch needed (that legacy
+        // mode fails with `ERROR_PIPE_BUSY` on some pipe handles).
         let deadline = Instant::now() + Duration::from_secs(5);
         let mut out = Vec::new();
         let mut chunk = [0u8; 4096];
@@ -423,10 +419,6 @@ mod transport {
                 Err(e) => return Err(format!("read: {e}")),
             }
         }
-        // Restore blocking mode before drop so a final flush is not
-        // cut short by a WouldBlock — belt and braces, the pipe is
-        // about to close anyway.
-        let _ = stream.set_nonblocking(false);
         String::from_utf8(out).map_err(|e| format!("non-utf8 reply: {e}"))
     }
 
@@ -486,28 +478,44 @@ mod transport {
         fn new(handle: isize) -> Self {
             Self { handle }
         }
-
-        /// Switch the pipe between blocking (`PIPE_WAIT`) and
-        /// non-blocking (`PIPE_NOWAIT`) mode. The client uses
-        /// non-blocking mode for the idle-silence read loop, mirroring
-        /// the server's `set_nonblocking`.
-        fn set_nonblocking(&self, on: bool) -> std::io::Result<()> {
-            let mode: NAMED_PIPE_MODE = if on {
-                windows_sys::Win32::System::Pipes::PIPE_NOWAIT
-            } else {
-                windows_sys::Win32::System::Pipes::PIPE_WAIT
-            };
-            let rc = unsafe { SetNamedPipeHandleState(self.handle as HANDLE, &mode, &0, &0) };
-            if rc == 0 {
-                Err(std::io::Error::last_os_error())
-            } else {
-                Ok(())
-            }
-        }
     }
 
     impl Read for NamedPipeClientStream {
         fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            // Probe the pipe's input buffer without blocking — the
+            // modern alternative to the legacy `PIPE_NOWAIT` mode
+            // (which fails with `ERROR_PIPE_BUSY` on some handles).
+            // `PeekNamedPipe` returns immediately with the number of
+            // bytes the next `ReadFile` would yield; 0 means the read
+            // would block, which surfaces as `WouldBlock` so the
+            // caller's idle-silence read loop can poll on its own
+            // cadence.
+            let mut available: u32 = 0;
+            let rc = unsafe {
+                PeekNamedPipe(
+                    self.handle as HANDLE,
+                    std::ptr::null_mut(),
+                    0,
+                    std::ptr::null_mut(),
+                    &mut available,
+                    std::ptr::null_mut(),
+                )
+            };
+            if rc == 0 {
+                let err = unsafe { GetLastError() };
+                // ERROR_BROKEN_PIPE: the server closed its end — EOF.
+                if err == ERROR_BROKEN_PIPE {
+                    return Ok(0);
+                }
+                return Err(std::io::Error::from_raw_os_error(err as i32));
+            }
+            if available == 0 {
+                return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
+            }
+            // Data is buffered — `ReadFile` returns immediately with
+            // up to `buf.len()` of it (capped at `available` by the
+            // kernel, but the cap does not matter: any non-zero read
+            // advances the loop).
             let mut bytes_read: u32 = 0;
             let rc = unsafe {
                 ReadFile(
@@ -520,14 +528,8 @@ mod transport {
             };
             if rc == 0 {
                 let err = unsafe { GetLastError() };
-                // ERROR_BROKEN_PIPE: the server closed its end — EOF.
                 if err == ERROR_BROKEN_PIPE {
                     return Ok(0);
-                }
-                // ERROR_NO_DATA: non-blocking read with no bytes
-                // available — the pipe equivalent of EWOULDBLOCK.
-                if err == ERROR_NO_DATA {
-                    return Err(std::io::Error::from(std::io::ErrorKind::WouldBlock));
                 }
                 return Err(std::io::Error::from_raw_os_error(err as i32));
             }
