@@ -20,12 +20,12 @@ The workspace version is `[workspace.package] version` in
 [`Cargo.toml`](Cargo.toml). That file is the only place a version is
 written down.
 
-The project is pre-1.0 and in its release freeze: the public Rust API and
-the C ABI are frozen, so a breaking change ships as a new release
-candidate and restarts the freeze clock. The `abi-freeze` CI job
-enforces the C half mechanically — the headers may only grow relative to
-the baseline tag. [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md) §2 has
-the freeze criteria and §4.4 lists the out-of-scope items.
+The project is at 1.0 and in its stability window: the public Rust API and
+the C ABI are frozen, so a breaking change ships as a major-version bump
+(see [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md) §4). The `abi-freeze`
+CI job enforces the C half mechanically — the headers may only grow
+relative to the baseline tag. [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md)
+§4 has the post-1.0 governance rules and §4.4 lists the out-of-scope items.
 
 Coverage is at parity with BIRD 2 and FRR 10 for everything in scope.
 [`docs/STATUS.md`](docs/STATUS.md) is the gap analysis and

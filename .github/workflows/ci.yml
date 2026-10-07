@@ -77,7 +77,7 @@ jobs:
     timeout-minutes: 5
     env:
       # Bump at every release cut (the new tag becomes the baseline).
-      ABI_BASELINE_TAG: v1.0.0-rc.6
+      ABI_BASELINE_TAG: v1.0.0
     steps:
       - uses: actions/checkout@v7
         with:

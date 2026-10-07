@@ -473,7 +473,7 @@ checksum = "f9f8bd3e56ce4dfc153cf470fffbfa98c7620958b312ca5c3a4b8d5181fd13c6"
 
 [[package]]
 name = "lr-babel"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "blake2",
  "bytes",
@@ -486,7 +486,7 @@ dependencies = [
 
 [[package]]
 name = "lr-bfd"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "bitflags",
  "lr-core",
@@ -494,7 +494,7 @@ dependencies = [
 
 [[package]]
 name = "lr-bgp"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "criterion",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "lr-bmp"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-bgp",
  "lr-core",
@@ -517,7 +517,7 @@ dependencies = [
 
 [[package]]
 name = "lr-cli"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-babel",
  "lr-bfd",
@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "lr-core"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -552,14 +552,14 @@ dependencies = [
 
 [[package]]
 name = "lr-damping"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-core",
 ]
 
 [[package]]
 name = "lr-ffi"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "cbindgen",
  "lr-babel",
@@ -576,21 +576,21 @@ dependencies = [
 
 [[package]]
 name = "lr-ldp"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-core",
 ]
 
 [[package]]
 name = "lr-mpls"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-core",
 ]
 
 [[package]]
 name = "lr-mrt"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-bgp",
  "lr-core",
@@ -598,7 +598,7 @@ dependencies = [
 
 [[package]]
 name = "lr-ospf"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "bytes",
  "hmac",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "lr-osroute"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-core",
  "lr-mpls",
@@ -623,7 +623,7 @@ dependencies = [
 
 [[package]]
 name = "lr-policy"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "lr-bgp",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "lr-rib"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "criterion",
  "lr-core",
@@ -645,7 +645,7 @@ dependencies = [
 
 [[package]]
 name = "lr-router"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-babel",
  "lr-bgp",
@@ -660,14 +660,14 @@ dependencies = [
 
 [[package]]
 name = "lr-srv6"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-core",
 ]
 
 [[package]]
 name = "lr-tests"
-version = "1.0.0-rc.6"
+version = "1.0.0"
 dependencies = [
  "lr-babel",
  "lr-bgp",

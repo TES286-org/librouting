@@ -13,6 +13,41 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.0.0] — first stable release
+
+librouting 1.0.0 is the first stable release. The public Rust API (Tier 1)
+and the C ABI (Tier 2) enter their stability window: a breaking change to
+either is a major-version bump, per [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md)
+§1 and §4.1. The daemon flag and config surface (Tier 3) follows the
+documented deprecation policy.
+
+**Protocol coverage at parity with BIRD 2 and FRR 10** for everything in
+scope — see [`docs/STATUS.md`](docs/STATUS.md) for the per-capability matrix
+and [`docs/RFC_MAP.md`](docs/RFC_MAP.md) for the RFC-by-RFC table. BGP
+(RFC 4271 + the extension family), OSPFv2/v3, Babel, LDP, BFD, BMP, MRT,
+route flap damping, MPLS, SRv6, the RIB pipeline, the filter DSL, and the
+OS integration backends (Linux / BSD / Windows) are all `yes`-status with
+a test exercising them.
+
+**Cross-vendor interop verified in CI** against BIRD 2 and FRR 10 in both
+directions, plus the `lr parity-replay` wire-level harness — the
+[`docs/INTEROP.md`](docs/INTEROP.md) matrix is the live `tests/interop/`
+listing.
+
+**Cross-platform CI green** on Linux, macOS (Apple Silicon + Intel
+cross-build) and Windows (MSVC + GNU cross-build), at the MSRV (Rust
+1.88).
+
+**1.0.0 vs rc.6:** no header or symbol change. `lr_abi_version()` stays at
+`2`; the abi-freeze baseline tag moves to `v1.0.0`. The only delta from
+rc.6 is the version string (workspace + every crate + the Python
+`__version__` + the `lrctl` header comment).
+
+Out-of-scope items (BGPsec, NBMA and point-to-multipoint OSPF interface
+types, OSPFv3 virtual links) are enumerated in
+[`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md) §4.4; open work is in
+[`docs/ROADMAP.md`](docs/ROADMAP.md).
+
 ## [1.0.0-rc.6] — pre-1.0 conformance cleanup
 
 The sixth release candidate closes the pre-1.0 freeze gaps catalogued in
