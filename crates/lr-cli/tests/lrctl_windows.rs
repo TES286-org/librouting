@@ -28,12 +28,7 @@ fn unique_pipe(tag: &str) -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::SeqCst);
-    format!(
-        r"\\.\pipe\lr-ctl-test-{}-{}-{}",
-        std::process::id(),
-        tag,
-        n
-    )
+    format!(r"\\.\pipe\lr-ctl-test-{}-{}-{}", std::process::id(), tag, n)
 }
 
 /// A spawned `lr-daemon` with its log file path so the test can wait
@@ -45,10 +40,8 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(args: &[&str], tag: &str) -> Self {
-        let log = std::env::temp_dir().join(format!(
-            "lrctl-win-test-{tag}-{}.log",
-            std::process::id()
-        ));
+        let log =
+            std::env::temp_dir().join(format!("lrctl-win-test-{tag}-{}.log", std::process::id()));
         let log_file = std::fs::File::create(&log).expect("create log file");
         let child = Command::new(DAEMON)
             .args(args)
@@ -164,7 +157,10 @@ fn lrctl_status_round_trips_over_named_pipe() {
     assert!(ok, "lrctl status failed: stderr={stderr}");
     assert!(stdout.contains("version "), "status stdout: {stdout}");
     assert!(stdout.contains("local-as 64512"), "status stdout: {stdout}");
-    assert!(stdout.contains("router-id 10.0.0.1"), "status stdout: {stdout}");
+    assert!(
+        stdout.contains("router-id 10.0.0.1"),
+        "status stdout: {stdout}"
+    );
     assert!(stdout.contains("rib-entries 1"), "status stdout: {stdout}");
 
     // Clean up via `lrctl shutdown` — exercises the shutdown path too.
@@ -199,8 +195,14 @@ fn lrctl_sessions_lists_configured_session() {
     let (ok, stdout, stderr) = lrctl(&["--socket", &pipe, "sessions"]);
     assert!(ok, "lrctl sessions failed: stderr={stderr}");
     assert!(stdout.contains("kind=bgp"), "sessions stdout: {stdout}");
-    assert!(stdout.contains("local-as=64512"), "sessions stdout: {stdout}");
-    assert!(stdout.contains("peer-as=64513"), "sessions stdout: {stdout}");
+    assert!(
+        stdout.contains("local-as=64512"),
+        "sessions stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("peer-as=64513"),
+        "sessions stdout: {stdout}"
+    );
 
     lrctl(&["--socket", &pipe, "shutdown"]);
     let _ = d.wait_exit();
