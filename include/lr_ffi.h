@@ -676,6 +676,11 @@ const char *lr_last_error(void);
 
 /**
  * ABI version packed as u32. Compare to `lr_core::ABI_VERSION`.
+ *
+ * This is the **only** ABI-compatibility surface: the library performs no
+ * runtime ABI-mismatch detection, so an embedder that wants to guard
+ * against a header/library skew compares the value returned here against
+ * the `LR_ABI_VERSION` the header it was compiled against advertises.
  */
 uint32_t lr_abi_version(void);
 

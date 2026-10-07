@@ -310,7 +310,9 @@ pub enum FfiError {
     InvalidHandle,
     BadUtf8,
     PanicCaught,
-    AbiMismatch,
+    /// SRv6 codec (SRH) encode/decode failure — mirrors `LrError::Codec`
+    /// on the C ABI surface.
+    Codec,
 }
 
 impl fmt::Display for FfiError {
@@ -320,7 +322,7 @@ impl fmt::Display for FfiError {
             Self::InvalidHandle => "invalid handle",
             Self::BadUtf8 => "bad UTF-8",
             Self::PanicCaught => "panic caught in FFI",
-            Self::AbiMismatch => "ABI version mismatch",
+            Self::Codec => "SRv6 codec error",
         };
         f.write_str(s)
     }

@@ -10,7 +10,7 @@
 
 use lr_srv6::{Sid, Srh};
 
-use crate::error::{set_last_error, LR_ERR_PANIC};
+use crate::error::{set_last_error, LrError, LR_ERR_PANIC};
 use crate::guarded;
 use crate::handle::lr_bytes_t;
 
@@ -46,12 +46,12 @@ pub extern "C" fn lr_srv6_encode_srh(data: *const u8, len: usize, out: *mut lr_b
                     }
                     Err(e) => {
                         set_last_error(e.to_string());
-                        -5
+                        LrError::Codec as i32
                     }
                 },
                 Err(e) => {
                     set_last_error(e.to_string());
-                    -5
+                    LrError::Codec as i32
                 }
             }
         },

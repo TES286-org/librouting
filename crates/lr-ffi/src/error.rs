@@ -3,6 +3,14 @@
 use std::cell::RefCell;
 
 /// Error code returned by FFI functions. 0 = success, negative = error.
+///
+/// `Codec` (`-5`) is the value the SRv6 codec entry points return for
+/// their own encode/decode failures — it is intentionally **not** a
+/// general-purpose error code, and no entry point outside the SRv6 codec
+/// returns it. Consumers that want a single ABI-compatibility check use
+/// [`lr_abi_version`](crate::error::lr_abi_version) instead: the library
+/// performs no runtime ABI mismatch detection, so `AbiMismatch` is not a
+/// distinct code.
 #[repr(i32)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LrError {
@@ -11,7 +19,9 @@ pub enum LrError {
     InvalidHandle = -2,
     BadUtf8 = -3,
     Panic = -4,
-    AbiMismatch = -5,
+    /// SRv6 codec (SRH) encode/decode failure. Returned only by
+    /// `lr_srv6_encode_srh` / `lr_srv6_decode_srh`.
+    Codec = -5,
     Other = -6,
 }
 
@@ -54,6 +64,11 @@ pub extern "C" fn lr_last_error() -> *const std::os::raw::c_char {
 }
 
 /// ABI version packed as u32. Compare to `lr_core::ABI_VERSION`.
+///
+/// This is the **only** ABI-compatibility surface: the library performs no
+/// runtime ABI-mismatch detection, so an embedder that wants to guard
+/// against a header/library skew compares the value returned here against
+/// the `LR_ABI_VERSION` the header it was compiled against advertises.
 #[no_mangle]
 pub extern "C" fn lr_abi_version() -> u32 {
     lr_core::ABI_VERSION
