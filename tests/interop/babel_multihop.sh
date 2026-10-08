@@ -182,8 +182,8 @@ echo "== phase 1: multi-session transit through M =="
 if ! wait_for 60 \
     "a.log:route installed 10.99.3.0/24" \
     "c.log:route installed 10.99.1.0/24" \
-    "m.log:babel interface veth0b session" \
-    "m.log:babel interface veth1b session" \
+    "m.log:interface veth0b session" \
+    "m.log:interface veth1b session" \
     "m.log:route installed 10.99.3.0/24" \
     "m.log:route installed 10.99.1.0/24"; then
     echo "FAIL: transit did not converge"
