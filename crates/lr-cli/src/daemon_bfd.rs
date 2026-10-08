@@ -20,6 +20,7 @@
 //! Your Discriminator, falling back to the source address for
 //! discovery packets (RFC 5883 §4.1 single-session-per-address-pair).
 
+use crate::Component;
 use std::collections::HashMap;
 use std::net::{IpAddr, SocketAddr};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -100,8 +101,9 @@ pub(crate) fn spawn_supervisor(
         if need_rx {
             let rx = BfdRxSocket::bind(Some(spec.local_ip), spec.mode)
                 .map_err(|e| format!("bfd bind {}: {}", spec.local_ip, e))?;
-            println!(
-                "daemon: bfd: listening on {} ({})",
+            log_info!(
+                Component::Bfd,
+                "listening on {} ({})",
                 rx.local_addr()
                     .map(|a| a.to_string())
                     .unwrap_or_else(|_| "?".into()),
@@ -161,7 +163,7 @@ pub(crate) fn spawn_supervisor(
                         Ok(Some(x)) => x,
                         Ok(None) => break,
                         Err(e) => {
-                            eprintln!("daemon: bfd: recv error: {}", e);
+                            log_error!(Component::Bfd, "bfd: recv error: {}", e);
                             break;
                         }
                     };
@@ -195,7 +197,7 @@ pub(crate) fn spawn_supervisor(
             }
             thread::sleep(Duration::from_millis(POLL_MS));
         }
-        println!("daemon: bfd supervisor stopped");
+        log_info!(Component::Bfd, "bfd supervisor stopped");
     });
     Ok(flags_out)
 }
@@ -205,22 +207,36 @@ fn apply_events(p: &mut BfdPeer, evs: Vec<BfdSessionEvent>) {
     for ev in &evs {
         match ev {
             BfdSessionEvent::StateChanged { from, to, diag } => {
-                println!(
-                    "daemon: bfd: peer {}: {} -> {} ({})",
-                    p.label, from, to, diag
+                log_info!(
+                    Component::Bfd,
+                    "peer {}: {} -> {} ({})",
+                    p.label,
+                    from,
+                    to,
+                    diag
                 );
             }
             BfdSessionEvent::Timeout => {
-                println!("daemon: bfd: peer {}: detection time expired", p.label);
+                log_info!(
+                    Component::Bfd,
+                    "bfd: peer {}: detection time expired",
+                    p.label
+                );
             }
             BfdSessionEvent::AuthFailed => {
-                eprintln!(
-                    "daemon: bfd: peer {}: auth failed; packet discarded",
+                log_warn!(
+                    Component::Bfd,
+                    "peer {}: auth failed; packet discarded",
                     p.label
                 );
             }
             BfdSessionEvent::PeerDiagnostic(d) => {
-                println!("daemon: bfd: peer {}: peer diagnostic: {}", p.label, d);
+                log_info!(
+                    Component::Bfd,
+                    "bfd: peer {}: peer diagnostic: {}",
+                    p.label,
+                    d
+                );
             }
             BfdSessionEvent::OutboundQueued => {}
         }
@@ -245,6 +261,6 @@ fn flush_peer(p: &mut BfdPeer) {
     }
     let dst = SocketAddr::new(p.peer_ip, p.mode.port());
     if let Err(e) = p.tx.send_to(&out, dst) {
-        eprintln!("daemon: bfd: peer {}: send failed: {}", p.label, e);
+        log_error!(Component::Bfd, "bfd: peer {}: send failed: {}", p.label, e);
     }
 }

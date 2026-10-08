@@ -155,8 +155,8 @@ fn bfd_fast_fail_beats_hold_time() {
 
     // BFD sessions come up on both sides... (any transition to Up —
     // the FSM may go Down -> Up directly per RFC 5880 §6.8.6).
-    wait_log_all(&a.log, &["bfd: peer", "-> Up"]);
-    wait_log_all(&b.log, &["bfd: peer", "-> Up"]);
+    wait_log_all(&a.log, &["[bfd]", "-> Up"]);
+    wait_log_all(&b.log, &["[bfd]", "-> Up"]);
     // ...and BGP establishes with the route propagated to B.
     wait_log_all(&a.log, &["session #1 → Established"]);
     wait_log_all(

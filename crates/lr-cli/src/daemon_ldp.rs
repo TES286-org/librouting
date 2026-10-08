@@ -48,6 +48,7 @@
 //! Kernel MPLS installation of learned bindings is future work (the
 //! BGP-LU dataplane mirror covers that role today).
 
+use crate::Component;
 use std::collections::{BTreeSet, HashMap};
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream, UdpSocket};
@@ -214,19 +215,20 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         let addrs = match interface_v4_addrs(&name) {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("daemon: ldp interface {}: {}", name, e);
+                log_warn!(Component::Daemon, "ldp interface {}: {}", name, e);
                 return ExitCode::from(1);
             }
         };
         if addrs.is_empty() {
-            eprintln!("daemon: ldp interface {}: no IPv4 address", name);
+            log_warn!(Component::Daemon, "ldp interface {}: no IPv4 address", name);
             return ExitCode::from(1);
         }
         let ifindex = ifindex_of(&name).unwrap_or_default();
         let v6_addrs = interface_v6_addrs(&name).unwrap_or_default();
         let v6_globals = v6_addrs.iter().filter(|a| a.is_global_unicast()).count();
-        println!(
-            "daemon: ldp interface {} — discovery on {} ({} address(es), IPv6: {} global, {} link-local)",
+        log_info!(
+            Component::Ldp,
+            "ldp interface {} — discovery on {} ({} address(es), IPv6: {} global, {} link-local)",
             name,
             std::net::Ipv4Addr::from(ALL_ROUTERS_V4),
             addrs.len(),
@@ -249,7 +251,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         Some(t) => match IpAddr::from_str(t) {
             Ok(a) => a,
             Err(_) => {
-                eprintln!("daemon: invalid ldp transport address: {}", t);
+                log_error!(Component::Daemon, "invalid ldp transport address: {}", t);
                 return ExitCode::from(2);
             }
         },
@@ -259,7 +261,10 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 None => {
                     // Targeted-only deployments must name the transport
                     // address explicitly.
-                    eprintln!("daemon: --protocol ldp without interfaces needs --ldp-transport");
+                    log_warn!(
+                        Component::Daemon,
+                        "--protocol ldp without interfaces needs --ldp-transport"
+                    );
                     return ExitCode::from(2);
                 }
             }
@@ -270,10 +275,12 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let (udp_tx, udp_rx) = match bind_ldp_udp(port, &interfaces) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!(
-                "daemon: ldp UDP bind :{} failed: {} (port < 1024 needs root \
+            log_error!(
+                Component::Ldp,
+                "ldp UDP bind :{} failed: {} (port < 1024 needs root \
                  or a user/network namespace; use --ldp-port to override)",
-                port, e
+                port,
+                e
             );
             return ExitCode::from(1);
         }
@@ -281,9 +288,11 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let (udp_tx_v6, udp_rx_v6) = match bind_ldp_udp_v6(port, &interfaces) {
         Ok(u) => u,
         Err(e) => {
-            eprintln!(
-                "daemon: ldp IPv6 UDP bind :{} failed: {} (continuing IPv4-only)",
-                port, e
+            log_error!(
+                Component::Ldp,
+                "ldp IPv6 UDP bind :{} failed: {} (continuing IPv4-only)",
+                port,
+                e
             );
             (None, None)
         }
@@ -309,18 +318,33 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                     Ok(()) => match s.listen(128) {
                         Ok(()) => TcpListener::from(s),
                         Err(e) => {
-                            eprintln!("daemon: ldp TCP listen [::]:{} failed: {}", port, e);
+                            log_error!(
+                                Component::Daemon,
+                                "ldp TCP listen [::]:{} failed: {}",
+                                port,
+                                e
+                            );
                             return ExitCode::from(1);
                         }
                     },
                     Err(e) => {
-                        eprintln!("daemon: ldp TCP bind [::]:{} failed: {}", port, e);
+                        log_error!(
+                            Component::Daemon,
+                            "ldp TCP bind [::]:{} failed: {}",
+                            port,
+                            e
+                        );
                         return ExitCode::from(1);
                     }
                 }
             }
             Err(e) => {
-                eprintln!("daemon: ldp TCP socket [::]:{} failed: {}", port, e);
+                log_error!(
+                    Component::Daemon,
+                    "ldp TCP socket [::]:{} failed: {}",
+                    port,
+                    e
+                );
                 return ExitCode::from(1);
             }
         }
@@ -331,13 +355,13 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         ))) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("daemon: ldp TCP bind :{} failed: {}", port, e);
+                log_error!(Component::Daemon, "ldp TCP bind :{} failed: {}", port, e);
                 return ExitCode::from(1);
             }
         }
     };
     if let Err(e) = listener.set_nonblocking(true) {
-        eprintln!("daemon: ldp listener nonblocking: {}", e);
+        log_error!(Component::Daemon, "ldp listener nonblocking: {}", e);
         return ExitCode::from(1);
     }
 
@@ -351,13 +375,18 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         match Prefix::from_str(p) {
             Ok(prefix) => binds.push((prefix, GenericLabel(bind.label))),
             Err(e) => {
-                eprintln!("daemon: ldp bind {}: {}", p, e);
+                log_warn!(Component::Daemon, "ldp bind {}: {}", p, e);
                 return ExitCode::from(1);
             }
         }
     }
     for (prefix, label) in &binds {
-        println!("daemon: ldp binding {} label {}", prefix, label.0);
+        log_info!(
+            Component::Daemon,
+            "ldp binding {} label {}",
+            prefix,
+            label.0
+        );
     }
 
     // ---- Engine. ----
@@ -394,7 +423,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         let Some(spec) = peer.address.as_deref() else {
             continue; // finalize() already rejected this
         };
-        let bad = || format!("daemon: invalid ldp targeted peer '{spec}'");
+        let bad = || format!("invalid ldp targeted peer '{spec}'");
         let Some((addr_part, port_part)) = crate::daemon_config::parse_targeted_spec(spec) else {
             eprintln!("{}", bad());
             return ExitCode::from(2);
@@ -403,7 +432,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         if let Some(port) = port_part {
             peer_ports.insert(addr_part, port);
         }
-        println!("daemon: ldp targeted peer {}", peer.label());
+        log_info!(Component::Bgp, "ldp targeted peer {}", peer.label());
     }
     engine_cfg.targeted_peers = targeted_addrs;
 
@@ -413,7 +442,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         Some(t) => match parse_addr(t) {
             Some(a) => Some(a),
             None => {
-                eprintln!("daemon: invalid ldp transport-v6 address: {}", t);
+                log_error!(Component::Daemon, "invalid ldp transport-v6 address: {}", t);
                 return ExitCode::from(2);
             }
         },
@@ -424,7 +453,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
             .map(|a| IpAddr::V6(a.addr.octets())),
     };
     if let Some(v6) = v6_transport {
-        println!("daemon: ldp IPv6 transport {}", v6);
+        log_info!(Component::Daemon, "ldp IPv6 transport {}", v6);
     }
     engine_cfg.transport_addr_v6 = v6_transport;
     engine_cfg.prefer_ipv6 = cfg.ldp_prefer_ipv6;
@@ -461,7 +490,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     // Privileged work is done (both sockets bound): honor the privilege
     // drop before the loop touches any network input.
     if let Err(e) = crate::do_privdrop(cfg) {
-        eprintln!("daemon: {}", e);
+        log_warn!(Component::Daemon, "{}", e);
         return ExitCode::from(1);
     }
 
@@ -504,15 +533,19 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         session_labels: Arc::new(Mutex::new(HashMap::new())),
     });
     if let Err(sig) = crate::signal::init() {
-        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        log_error!(
+            Component::Daemon,
+            "cannot install signal handlers (signal {})",
+            sig
+        );
         return ExitCode::from(1);
     }
     if let Err(e) = crate::spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
+        log_warn!(Component::Daemon, "{}", e);
         return ExitCode::from(1);
     }
     if let Err(e) = crate::spawn_metrics(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
+        log_warn!(Component::Daemon, "{}", e);
         return ExitCode::from(1);
     }
 
@@ -520,12 +553,16 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let mpls = if cfg.ldp_install_kernel {
         match lr_osroute::mpls_route::MplsNetlink::connect() {
             Ok(t) => {
-                println!("daemon: mpls route table connected — installing LDP LSPs");
+                log_info!(
+                    Component::Osroute,
+                    "mpls route table connected — installing LDP LSPs"
+                );
                 Some(t)
             }
             Err(e) => {
-                eprintln!(
-                    "daemon: mpls route table unavailable ({}); LSP install disabled",
+                log_warn!(
+                    Component::Osroute,
+                    "mpls route table unavailable ({}); LSP install disabled",
                     e
                 );
                 None
@@ -576,8 +613,9 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
 
     // ---- Main loop. ----
     let start = std::time::Instant::now();
-    println!(
-        "daemon: ldp main loop started (transport {}, {} interface(s), {} targeted peer(s), \
+    log_info!(
+        Component::Ldp,
+        "ldp main loop started (transport {}, {} interface(s), {} targeted peer(s), \
          transit allocation {})",
         transport,
         daemon.interfaces.len(),
@@ -603,7 +641,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     // deliver the queued bytes before the sockets go away.
     let now = Instant::from_millis(start.elapsed().as_millis() as u64);
     daemon.shutdown(now);
-    println!("daemon: ldp shutdown complete");
+    log_info!(Component::Daemon, "ldp shutdown complete");
     ExitCode::SUCCESS
 }
 
@@ -626,10 +664,13 @@ fn bind_ldp_udp(port: u16, interfaces: &[LdpInterface]) -> std::io::Result<(Sock
         // accept link discovery on each subnet.
         for addr in &iface.addrs {
             if let Err(e) = sock.join_multicast_v4(&group, addr) {
-                eprintln!(
-                    "daemon: ldp multicast join {} on {}: {} (link discovery \
+                log_warn!(
+                    Component::Ldp,
+                    "ldp multicast join {} on {}: {} (link discovery \
                      may not receive Hellos on this interface)",
-                    group, iface.name, e
+                    group,
+                    iface.name,
+                    e
                 );
             }
         }
@@ -652,8 +693,9 @@ fn bind_ldp_udp(port: u16, interfaces: &[LdpInterface]) -> std::io::Result<(Sock
 /// matching an FRR deployment without `[no] gtsm`.
 fn set_v6_session_hops(sock: &Socket) {
     if let Err(e) = sock.set_unicast_hops_v6(255) {
-        eprintln!(
-            "daemon: ldp IPv6 session hop limit 255 failed: {} (interop with \
+        log_error!(
+            Component::Ldp,
+            "ldp IPv6 session hop limit 255 failed: {} (interop with \
              GTSM-enforcing peers may need an explicit gtsm disable)",
             e
         );
@@ -687,10 +729,12 @@ fn bind_ldp_udp_v6(
             continue;
         }
         if let Err(e) = sock.join_multicast_v6(&group, iface.ifindex) {
-            eprintln!(
-                "daemon: ldp IPv6 multicast join ff02::2 on {}: {} (link discovery \
+            log_warn!(
+                Component::Ldp,
+                "ldp IPv6 multicast join ff02::2 on {}: {} (link discovery \
                  may not receive Hellos on this interface)",
-                iface.name, e
+                iface.name,
+                e
             );
         }
     }
@@ -738,7 +782,7 @@ impl LdpDaemon {
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
                 Err(e) => {
-                    eprintln!("daemon: ldp udp recv: {}", e);
+                    log_warn!(Component::Daemon, "ldp udp recv: {}", e);
                     break;
                 }
             }
@@ -763,8 +807,9 @@ impl LdpDaemon {
                         _ => false,
                     };
                     if link_local && hop_limit.is_some_and(|h| h != 255) {
-                        eprintln!(
-                            "daemon: ldp dropped IPv6 Hello from {} (hop limit {:?} != 255, RFC 7552 §5.1)",
+                        log_warn!(
+                            Component::Ldp,
+                            "ldp dropped IPv6 Hello from {} (hop limit {:?} != 255, RFC 7552 §5.1)",
                             from.ip(),
                             hop_limit
                         );
@@ -775,7 +820,7 @@ impl LdpDaemon {
                 Ok(None) => break,
                 Err(BfdTransportError::Os { errno: 11, .. }) => break, // EAGAIN
                 Err(e) => {
-                    eprintln!("daemon: ldp udp6 recv: {}", e);
+                    log_warn!(Component::Daemon, "ldp udp6 recv: {}", e);
                     break;
                 }
             }

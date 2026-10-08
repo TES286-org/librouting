@@ -46,6 +46,7 @@
 //! behind the per-interface `network_type = "broadcast"` switch; p2p
 //! remains the default so existing labs are unaffected.
 
+use crate::Component;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::process::ExitCode;
@@ -356,15 +357,17 @@ pub(super) fn run_ospf_daemon(
     host: Option<EngineHost>,
 ) -> ExitCode {
     if cfg.user.is_some() || cfg.group.is_some() {
-        eprintln!(
-            "daemon: --user/--group are not supported with --protocol ospf yet \
+        log_error!(
+            Component::Ospf,
+            "--user/--group are not supported with --protocol ospf yet \
              (raw sockets are opened before the drop would happen)"
         );
         return ExitCode::from(2);
     }
     if cfg.ospf_interfaces.is_empty() {
-        eprintln!(
-            "daemon: --protocol ospf needs at least one interface \
+        log_error!(
+            Component::Ospf,
+            "--protocol ospf needs at least one interface \
              (--ospf-interface NAME or [[ospf.interface]] tables)"
         );
         return ExitCode::from(2);
@@ -375,8 +378,9 @@ pub(super) fn run_ospf_daemon(
         match resolve_interface(cfg, spec) {
             Ok(mut iface) => {
                 iface.router_id = rid.as_u32();
-                println!(
-                    "daemon: ospf interface {} area {} — {} address(es), cost {}, \
+                log_info!(
+                    Component::Ospf,
+                    "ospf interface {} area {} — {} address(es), cost {}, \
                      hello {}s dead {}s, {} (priority {}, state {})",
                     iface.name,
                     area_label(iface.area),
@@ -394,7 +398,7 @@ pub(super) fn run_ospf_daemon(
                 interfaces.push(iface);
             }
             Err(e) => {
-                eprintln!("daemon: ospf interface {}: {}", spec.label(), e);
+                log_warn!(Component::Daemon, "ospf interface {}: {}", spec.label(), e);
                 return ExitCode::from(1);
             }
         }
@@ -518,8 +522,9 @@ pub(super) fn run_ospf_daemon(
                 );
                 match (deadline, period) {
                     (Some(deadline), Some(period)) if deadline > now_unix_ms => {
-                        println!(
-                            "daemon: ospf graceful restart recovery started \
+                        log_info!(
+                            Component::Ospf,
+                            "ospf graceful restart recovery started \
                              (grace period {period}s, resuming a restart)"
                         );
                         remaining = Some(deadline - now_unix_ms);
@@ -545,13 +550,17 @@ pub(super) fn run_ospf_daemon(
                         // Expired or malformed: remove so a later
                         // graceful shutdown rewrites it cleanly.
                         let _ = daemon.gr_state_file.as_deref().map(std::fs::remove_file);
-                        println!("daemon: ospf graceful restart state expired — fresh start");
+                        log_info!(
+                            Component::Daemon,
+                            "ospf graceful restart state expired — fresh start"
+                        );
                     }
                 }
             }
             _ => {
-                println!(
-                    "daemon: ospf graceful restart enabled (no prior grace state — fresh start)"
+                log_info!(
+                    Component::Ospf,
+                    "ospf graceful restart enabled (no prior grace state — fresh start)"
                 );
             }
         }
@@ -573,7 +582,12 @@ pub(super) fn run_ospf_daemon(
                     daemon.anchors.insert(area, h);
                 }
                 Err(e) => {
-                    eprintln!("daemon: ospf add_session area {}: {}", area_label(area), e);
+                    log_warn!(
+                        Component::Bgp,
+                        "ospf add_session area {}: {}",
+                        area_label(area),
+                        e
+                    );
                     return ExitCode::from(1);
                 }
             }
@@ -587,8 +601,9 @@ pub(super) fn run_ospf_daemon(
             }
             if let Some(kind) = area_kind(area_spec) {
                 if !router.ospf_set_area_type(area, kind) {
-                    eprintln!(
-                        "daemon: warning: could not set area {} type {:?}",
+                    log_warn!(
+                        Component::Ospf,
+                        "warning: could not set area {} type {:?}",
                         area_label(area),
                         area_spec.kind
                     );
@@ -601,7 +616,7 @@ pub(super) fn run_ospf_daemon(
         // LSAs in scope changes nothing.
         if cfg.ospf_sr_receive {
             router.set_ospf_sr_receive(true);
-            println!("daemon: ospf SR reception enabled (RFC 8665)");
+            log_info!(Component::Daemon, "ospf SR reception enabled (RFC 8665)");
         }
         // RFC 8660 LSP tail: with `install_kernel`, locally originated
         // prefix-SIDs get an AF_MPLS pop route (in-label → local
@@ -631,8 +646,9 @@ pub(super) fn run_ospf_daemon(
                         }
                     }
                 }
-                Err(e) => eprintln!(
-                    "daemon: mpls route table unavailable ({}); SR pop routes disabled",
+                Err(e) => log_warn!(
+                    Component::Ospf,
+                    "mpls route table unavailable ({}); SR pop routes disabled",
                     e
                 ),
             }
@@ -642,7 +658,11 @@ pub(super) fn run_ospf_daemon(
     // Signal installs are idempotent; the multi-protocol supervisor
     // already did them (and owns dispatch — see signal::set_supervised).
     if let Err(sig) = crate::signal::init() {
-        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        log_error!(
+            Component::Daemon,
+            "cannot install signal handlers (signal {})",
+            sig
+        );
         return ExitCode::from(1);
     }
     // The OSPF status view (graceful-restart snapshot + SR projection)
@@ -742,11 +762,11 @@ pub(super) fn run_ospf_daemon(
     match &host {
         None => {
             if let Err(e) = crate::spawn_api(cfg, &runtime) {
-                eprintln!("daemon: {}", e);
+                log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
             }
             if let Err(e) = crate::spawn_metrics(cfg, &runtime) {
-                eprintln!("daemon: {}", e);
+                log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
             }
             // The ticker drives tick() (LSA refresh + MaxAge aging) and mirrors
@@ -759,7 +779,7 @@ pub(super) fn run_ospf_daemon(
             // drop + API socket happen in between).
             let _ = h.report.send(EngineReport::Started);
             if h.gate.wait().is_err() {
-                println!("daemon: ospf engine startup aborted");
+                log_error!(Component::Daemon, "ospf engine startup aborted");
                 return ExitCode::SUCCESS;
             }
         }
@@ -784,8 +804,9 @@ pub(super) fn run_ospf_daemon(
     // ---- Main loop. ----
     let start = std::time::Instant::now();
     let mut recv_buf = [0u8; 65535];
-    println!(
-        "daemon: ospf main loop started ({} interface(s))",
+    log_info!(
+        Component::Ospf,
+        "ospf main loop started ({} interface(s))",
         daemon.interfaces.len()
     );
     while running.load(Ordering::Relaxed) {
@@ -811,8 +832,9 @@ pub(super) fn run_ospf_daemon(
     if cfg.ospf_graceful_restart {
         daemon.graceful_shutdown_flood(&mut recv_buf, &start);
         let period = lr_ospf::gr::clamp_grace_period(cfg.ospf_grace_period);
-        println!(
-            "daemon: ospf graceful shutdown complete (neighbours asked to retain LSAs for {period}s)"
+        log_info!(
+            Component::Ospf,
+            "ospf graceful shutdown complete (neighbours asked to retain LSAs for {period}s)"
         );
         return ExitCode::SUCCESS;
     }
@@ -832,7 +854,7 @@ pub(super) fn run_ospf_daemon(
         drop(router);
         daemon.handle_router_events(events);
     }
-    println!("daemon: ospf shutdown complete");
+    log_info!(Component::Daemon, "ospf shutdown complete");
     ExitCode::SUCCESS
 }
 
@@ -1048,7 +1070,7 @@ impl OspfDaemon {
                     }
                     Ok(None) => break,
                     Err(e) => {
-                        eprintln!("daemon: ospf recv {}: {}", iface.name, e);
+                        log_warn!(Component::Daemon, "ospf recv {}: {}", iface.name, e);
                         break;
                     }
                 }
@@ -1146,22 +1168,23 @@ impl OspfDaemon {
                             new_neighbors.push((ifindex, area, rid));
                         }
                         Err(e) => {
-                            eprintln!("daemon: ospf add_session: {}", e);
+                            log_warn!(Component::Bgp, "ospf add_session: {}", e);
                             continue;
                         }
                     }
                 }
                 let handle = self.neighbors[&key].handle;
                 if let Err(e) = router.feed_input(handle, &datagrams[idx].2) {
-                    eprintln!("daemon: ospf feed_input: {}", e);
+                    log_warn!(Component::Daemon, "ospf feed_input: {}", e);
                 }
             }
             let events = router.poll_events();
             self.handle_router_events(events);
         }
         for (ifindex, area, rid) in new_neighbors {
-            println!(
-                "daemon: ospf neighbor {} discovered (area {}, iface {})",
+            log_info!(
+                Component::Ospf,
+                "ospf neighbor {} discovered (area {}, iface {})",
                 fmt_rid(rid),
                 area_label(area),
                 self.iface_name(ifindex)
@@ -1271,12 +1294,13 @@ impl OspfDaemon {
             }
             match router.set_ospf_dr_state(n.handle, dr, bdr) {
                 Ok(_) => {}
-                Err(e) => eprintln!("daemon: ospf dr state: {}", e),
+                Err(e) => log_error!(Component::Ospf, "ospf dr state: {}", e),
             }
         }
         if changed || role_changed {
-            println!(
-                "daemon: ospf iface {} elected DR {} / BDR {} — we are {}",
+            log_info!(
+                Component::Ospf,
+                "ospf iface {} elected DR {} / BDR {} — we are {}",
                 iface.name,
                 fmt_rid(dr),
                 fmt_rid(bdr),
@@ -1310,8 +1334,9 @@ impl OspfDaemon {
             }
         }
         for (area, rid) in newly_full {
-            println!(
-                "daemon: ospf neighbor {} Full (area {})",
+            log_info!(
+                Component::Ospf,
+                "ospf neighbor {} Full (area {})",
                 fmt_rid(rid),
                 area_label(area)
             );
@@ -1331,8 +1356,9 @@ impl OspfDaemon {
         let due = now_ms + REORIGINATE_DELAY_MS;
         let prev = self.pending_reorig.insert(area, due);
         if prev.is_none() {
-            println!(
-                "daemon: ospf area {} Router-LSA re-origination scheduled",
+            log_info!(
+                Component::Ospf,
+                "ospf area {} Router-LSA re-origination scheduled",
                 area_label(area)
             );
         }
@@ -1434,8 +1460,9 @@ impl OspfDaemon {
             }
             if let Some(n) = self.neighbors.remove(&(area, rid)) {
                 router.close_session(n.handle);
-                println!(
-                    "daemon: ospf neighbor {} dead (area {}) — session closed",
+                log_info!(
+                    Component::Ospf,
+                    "ospf neighbor {} dead (area {}) — session closed",
                     fmt_rid(rid),
                     area_label(area)
                 );
@@ -1520,14 +1547,14 @@ impl OspfDaemon {
             let mut bytes = match build_hello(rid, area, &wire, neighbors) {
                 Ok(b) => b,
                 Err(e) => {
-                    eprintln!("daemon: ospf hello encode: {}", e);
+                    log_warn!(Component::Daemon, "ospf hello encode: {}", e);
                     continue;
                 }
             };
             finalize_v2_packet(&mut bytes);
             Self::dbg_send_trace(&bytes);
             if let Err(e) = iface.transport.send_multicast(&bytes) {
-                eprintln!("daemon: ospf hello send {}: {}", iface.name, e);
+                log_warn!(Component::Daemon, "ospf hello send {}: {}", iface.name, e);
             }
         }
     }
@@ -1606,12 +1633,12 @@ impl OspfDaemon {
                             .transport
                             .send_unicast(std::net::Ipv4Addr::from(ip), &bytes)
                         {
-                            eprintln!("daemon: ospf send {} unicast: {}", iface.name, e);
+                            log_warn!(Component::Daemon, "ospf send {} unicast: {}", iface.name, e);
                         }
                     }
                     None => {
                         if let Err(e) = iface.transport.send_multicast(&bytes) {
-                            eprintln!("daemon: ospf send {}: {}", iface.name, e);
+                            log_warn!(Component::Daemon, "ospf send {}: {}", iface.name, e);
                         }
                     }
                 }
@@ -1774,8 +1801,9 @@ impl OspfDaemon {
                                 iface.net_lsa_active = true;
                                 network_lsas.push(lsa);
                             }
-                            None => eprintln!(
-                                "daemon: ospf network-LSA sequence space exhausted on {}",
+                            None => log_error!(
+                                Component::Ospf,
+                                "ospf network-LSA sequence space exhausted on {}",
                                 iface.name
                             ),
                         }
@@ -1820,8 +1848,9 @@ impl OspfDaemon {
         // FRR) refuse to compute §16.4 routes from our type-5 LSAs.
         let flags = router.ospf_router_lsa_flags(area);
         let Some(lsa) = originate_router_lsa(self.router_id.as_u32(), flags, &links, prev) else {
-            eprintln!(
-                "daemon: ospf router-LSA sequence space exhausted for area {}",
+            log_error!(
+                Component::Ospf,
+                "ospf router-LSA sequence space exhausted for area {}",
                 area_label(area)
             );
             return;
@@ -1837,10 +1866,10 @@ impl OspfDaemon {
             Ok(mut bytes) => {
                 finalize_v2_packet(&mut bytes);
                 if let Err(e) = router.feed_input(anchor, &bytes) {
-                    eprintln!("daemon: ospf self-origination feed: {}", e);
+                    log_warn!(Component::Daemon, "ospf self-origination feed: {}", e);
                 }
             }
-            Err(e) => eprintln!("daemon: ospf router-LSA encode: {}", e),
+            Err(e) => log_error!(Component::Ospf, "ospf router-LSA encode: {}", e),
         }
     }
 
@@ -1948,10 +1977,10 @@ impl OspfDaemon {
             Ok(mut bytes) => {
                 finalize_v2_packet(&mut bytes);
                 if let Err(e) = router.feed_input(anchor, &bytes) {
-                    eprintln!("daemon: ospf sr self-origination feed: {}", e);
+                    log_warn!(Component::Daemon, "ospf sr self-origination feed: {}", e);
                 }
             }
-            Err(e) => eprintln!("daemon: ospf sr LSA encode: {}", e),
+            Err(e) => log_error!(Component::Ospf, "ospf sr LSA encode: {}", e),
         }
     }
 
@@ -2148,8 +2177,9 @@ impl OspfDaemon {
                         }
                     }
                 }
-                Err(e) => eprintln!(
-                    "daemon: mpls route table unavailable ({}); adjacency pops disabled",
+                Err(e) => log_warn!(
+                    Component::Ospf,
+                    "mpls route table unavailable ({}); adjacency pops disabled",
                     e
                 ),
             }
@@ -2162,10 +2192,14 @@ impl OspfDaemon {
             Ok(mut bytes) => {
                 finalize_v2_packet(&mut bytes);
                 if let Err(e) = router.feed_input(anchor, &bytes) {
-                    eprintln!("daemon: ospf sr link self-origination feed: {}", e);
+                    log_warn!(
+                        Component::Daemon,
+                        "ospf sr link self-origination feed: {}",
+                        e
+                    );
                 }
             }
-            Err(e) => eprintln!("daemon: ospf sr link LSA encode: {}", e),
+            Err(e) => log_error!(Component::Ospf, "ospf sr link LSA encode: {}", e),
         }
         let _ = now_ms;
     }
@@ -2235,8 +2269,9 @@ impl OspfDaemon {
             .unwrap_or(advertising_router);
         let Some(n) = self.neighbors.get_mut(&(area, rid)) else {
             if !ev.purged {
-                println!(
-                    "daemon: ospf grace-LSA from {} (area {}): no session, not helping \
+                log_info!(
+                    Component::Ospf,
+                    "ospf grace-LSA from {} (area {}): no session, not helping \
                      (RFC 3623 3.1 (1) — neighbour not Full)",
                     fmt_rid(advertising_router),
                     area_label(area)
@@ -2246,8 +2281,9 @@ impl OspfDaemon {
         };
         if ev.purged {
             if let Some(exit) = n.helper.on_flush() {
-                println!(
-                    "daemon: ospf neighbor {} (area {}): helper mode exited — {}",
+                log_info!(
+                    Component::Ospf,
+                    "ospf neighbor {} (area {}): helper mode exited — {}",
                     fmt_rid(rid),
                     area_label(area),
                     exit.reason()
@@ -2275,8 +2311,9 @@ impl OspfDaemon {
         let transition = n.helper.on_grace_lsa(check);
         match transition {
             lr_ospf::gr::HelperTransition::Entered { .. } => {
-                println!(
-                    "daemon: ospf neighbor {} (area {}): helper mode entered (grace {}s, \
+                log_info!(
+                    Component::Ospf,
+                    "ospf neighbor {} (area {}): helper mode entered (grace {}s, \
                      reason {}) — adjacency and LSAs retained",
                     fmt_rid(rid),
                     area_label(area),
@@ -2291,8 +2328,9 @@ impl OspfDaemon {
             }
             lr_ospf::gr::HelperTransition::Refreshed { .. } => {}
             lr_ospf::gr::HelperTransition::Refused(why) => {
-                println!(
-                    "daemon: ospf neighbor {} (area {}): not helping — {}",
+                log_info!(
+                    Component::Ospf,
+                    "ospf neighbor {} (area {}): not helping — {}",
                     fmt_rid(rid),
                     area_label(area),
                     why.reason()
@@ -2344,8 +2382,9 @@ impl OspfDaemon {
                 let router_arc = Arc::clone(&self.router);
                 let mut router = router_arc.write().unwrap();
                 router.close_session(n.handle);
-                println!(
-                    "daemon: ospf neighbor {} dead (area {}) — session closed",
+                log_info!(
+                    Component::Ospf,
+                    "ospf neighbor {} dead (area {}) — session closed",
                     fmt_rid(rid),
                     area_label(area)
                 );
@@ -2485,8 +2524,9 @@ impl OspfDaemon {
             }
         }
         for (area, rid, exit) in helper_exits {
-            println!(
-                "daemon: ospf neighbor {} (area {}): helper mode exited — {}",
+            log_info!(
+                Component::Ospf,
+                "ospf neighbor {} (area {}): helper mode exited — {}",
                 fmt_rid(rid),
                 area_label(area),
                 exit.reason()
@@ -2505,8 +2545,9 @@ impl OspfDaemon {
     /// Router-/Network-LSAs from current state.
     fn exit_gr_recovery(&mut self, outcome: lr_ospf::gr::RestartOutcome, now_ms: u64) {
         let areas: Vec<u32> = self.gr_recovery.keys().copied().collect();
-        println!(
-            "daemon: ospf graceful restart recovery ended — {}",
+        log_info!(
+            Component::Ospf,
+            "ospf graceful restart recovery ended — {}",
             outcome.reason()
         );
         self.gr_recovery.clear();
@@ -2589,7 +2630,12 @@ impl OspfDaemon {
                 Ok(mut bytes) => {
                     finalize_v2_packet(&mut bytes);
                     if let Err(e) = iface.transport.send_multicast(&bytes) {
-                        eprintln!("daemon: ospf grace-LSA send {}: {}", iface.name, e);
+                        log_warn!(
+                            Component::Daemon,
+                            "ospf grace-LSA send {}: {}",
+                            iface.name,
+                            e
+                        );
                     }
                     // RFC 2328 §13.5 direct flooding: every
                     // bidirectional neighbour on this interface also
@@ -2606,11 +2652,11 @@ impl OspfDaemon {
                     for ip in heard {
                         let dst = core::net::Ipv4Addr::from(ip);
                         if let Err(e) = iface.transport.send_unicast(dst, &bytes) {
-                            eprintln!("daemon: ospf grace-LSA unicast {}: {}", dst, e);
+                            log_warn!(Component::Daemon, "ospf grace-LSA unicast {}: {}", dst, e);
                         }
                     }
                 }
-                Err(e) => eprintln!("daemon: ospf grace-LSA encode: {}", e),
+                Err(e) => log_error!(Component::Ospf, "ospf grace-LSA encode: {}", e),
             }
         }
         self.gr_seq_floor = floor;
@@ -2657,7 +2703,7 @@ impl OspfDaemon {
         if let Some(state) = &self.gr_state_file {
             let line = format!("{deadline_unix_ms} {period} {}\n", self.gr_seq_floor);
             if let Err(e) = std::fs::write(state, line) {
-                eprintln!("daemon: ospf grace state write {state}: {e}");
+                log_warn!(Component::Daemon, "ospf grace state write {state}: {e}");
             }
         }
     }
@@ -2836,11 +2882,12 @@ fn link_slot(ifindex: u32) -> u32 {
 pub(crate) fn log_event(ev: &RouterEvent) {
     match ev {
         RouterEvent::PeerStateChange { session, state } => {
-            println!("daemon: session #{} → {}", session.0, state);
+            log_info!(Component::Bgp, "session #{} → {}", session.0, state);
         }
         RouterEvent::RouteInstalled(r) => {
-            println!(
-                "daemon: route installed {} via {}",
+            log_info!(
+                Component::Rib,
+                "route installed {} via {}",
                 r.key.prefix,
                 r.next_hop
                     .map(|n| n.to_string())
@@ -2848,11 +2895,11 @@ pub(crate) fn log_event(ev: &RouterEvent) {
             );
         }
         RouterEvent::RouteWithdrawn(k) => {
-            println!("daemon: route withdrawn {}", k.prefix);
+            log_info!(Component::Rib, "route withdrawn {}", k.prefix);
         }
-        RouterEvent::Log(msg) => println!("daemon: {}", msg),
+        RouterEvent::Log(msg) => log_info!(Component::Router, "{msg}"),
         RouterEvent::ProtocolError { session, message } => {
-            eprintln!("daemon: session #{} error: {}", session.0, message)
+            log_error!(Component::Bgp, "session #{} error: {}", session.0, message)
         }
         _ => {}
     }

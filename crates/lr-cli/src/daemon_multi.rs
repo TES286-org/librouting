@@ -51,6 +51,7 @@
 //! running flag and returns the failing engine's exit code) — a
 //! half-configured daemon never serves traffic.
 
+use crate::Component;
 use std::collections::HashMap;
 use std::process::ExitCode;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -212,7 +213,11 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     // dispatch becomes a no-op (see dispatch_signals), so connector
     // threads and session pumps can never steal the shutdown signal.
     if let Err(sig) = crate::signal::init() {
-        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        log_error!(
+            Component::Daemon,
+            "cannot install signal handlers (signal {})",
+            sig
+        );
         return ExitCode::from(1);
     }
     crate::signal::set_supervised(true);
@@ -313,7 +318,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
                 started: false,
             }),
             Err(e) => {
-                eprintln!("daemon: cannot spawn the {} engine: {}", name, e);
+                log_error!(Component::Daemon, "cannot spawn the {} engine: {}", name, e);
                 shutdown_after_failure(&runtime, engines, ticker);
                 return ExitCode::from(1);
             }
@@ -359,7 +364,11 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             // Startup failure: take the engine out and read its code.
             let engine = engines.swap_remove(index);
             let code = join_engine(engine.handle);
-            eprintln!("daemon: {} engine failed during startup", engine.name);
+            log_error!(
+                Component::Daemon,
+                "{} engine failed during startup",
+                engine.name
+            );
             failure = Some(code);
             break;
         }
@@ -380,7 +389,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             join_engine(engine.handle);
         }
         join_ticker(ticker);
-        println!("daemon: multi-protocol startup aborted");
+        log_error!(Component::Daemon, "multi-protocol startup aborted");
         return code;
     }
 
@@ -388,24 +397,24 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     // touching any network input, then create the management socket as
     // the reduced user, then let the engines run.
     if let Err(e) = crate::do_privdrop(cfg) {
-        eprintln!("daemon: {}", e);
+        log_warn!(Component::Daemon, "{}", e);
         abort_all(&runtime, engines, ticker);
         return ExitCode::from(1);
     }
     if let Err(e) = crate::spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
+        log_warn!(Component::Daemon, "{}", e);
         abort_all(&runtime, engines, ticker);
         return ExitCode::from(1);
     }
     if let Err(e) = crate::spawn_metrics(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
+        log_warn!(Component::Daemon, "{}", e);
         abort_all(&runtime, engines, ticker);
         return ExitCode::from(1);
     }
     for engine in &engines {
         engine.gate.release();
     }
-    println!("daemon: {} engine(s) running", engines.len());
+    log_info!(Component::Daemon, "{} engine(s) running", engines.len());
 
     // ---- Supervise: dispatch signals, watch for engine deaths. ----
     // Any engine exiting while the daemon should be running is fatal —
@@ -420,8 +429,9 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             if engines[index].handle.is_finished() {
                 let engine = engines.swap_remove(index);
                 let code = join_engine(engine.handle);
-                eprintln!(
-                    "daemon: {} engine exited — stopping the remaining engines",
+                log_error!(
+                    Component::Daemon,
+                    "{} engine exited — stopping the remaining engines",
                     engine.name
                 );
                 engine_failure = Some(if code == ExitCode::SUCCESS {
@@ -453,7 +463,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
         join_engine(engine.handle);
     }
     join_ticker(ticker);
-    println!("daemon: multi-protocol shutdown complete");
+    log_info!(Component::Daemon, "multi-protocol shutdown complete");
     engine_failure.unwrap_or(ExitCode::SUCCESS)
 }
 
@@ -492,7 +502,7 @@ fn join_engine(handle: JoinHandle<ExitCode>) -> ExitCode {
     match handle.join() {
         Ok(code) => code,
         Err(_) => {
-            eprintln!("daemon: engine thread panicked");
+            log_warn!(Component::Daemon, "engine thread panicked");
             ExitCode::from(1)
         }
     }
@@ -501,6 +511,6 @@ fn join_engine(handle: JoinHandle<ExitCode>) -> ExitCode {
 /// Join the shared ticker thread (unit payload; a panic is logged).
 fn join_ticker(handle: JoinHandle<()>) {
     if handle.join().is_err() {
-        eprintln!("daemon: ticker thread panicked");
+        log_warn!(Component::Daemon, "ticker thread panicked");
     }
 }
