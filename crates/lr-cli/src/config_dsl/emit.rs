@@ -333,6 +333,61 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
+    // --- safety ---------------------------------------------------------------
+    // Emitted only when at least one field is set.
+    if !cfg.safety.is_empty() {
+        e.open(0, "safety", None);
+        if let Some(v) = cfg.safety.enabled {
+            e.kv(1, "enabled", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_as_loop {
+            e.kv(1, "reject_as_loop", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_invalid_next_hop {
+            e.kv(1, "reject_invalid_next_hop", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_empty_as_path_ebgp {
+            e.kv(1, "reject_empty_as_path_ebgp", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_invalid_origin {
+            e.kv(1, "reject_invalid_origin", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_excessive_as_loop {
+            e.kv(1, "reject_excessive_as_loop", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.max_as_path_loops {
+            e.kv(1, "max_as_path_loops", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_oversized_as_path {
+            e.kv(1, "reject_oversized_as_path", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.max_as_path_length {
+            e.kv(1, "max_as_path_length", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_martian_prefix {
+            e.kv(1, "reject_martian_prefix", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_martian_v4 {
+            e.kv(1, "reject_martian_v4", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_martian_v6 {
+            e.kv(1, "reject_martian_v6", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.reject_oversized_local_pref {
+            e.kv(1, "reject_oversized_local_pref", &v.to_string());
+        }
+        if let Some(v) = cfg.safety.max_local_pref {
+            e.kv(1, "max_local_pref", &v.to_string());
+        }
+        for ex in &cfg.safety.as_loop_exceptions {
+            e.kv(1, "as_loop_exception", &fmt_string(ex));
+        }
+        for ex in &cfg.safety.martian_exceptions {
+            e.kv(1, "martian_exception", &fmt_string(ex));
+        }
+        e.close(0);
+    }
+
     Ok(e.out)
 }
 

@@ -1084,6 +1084,10 @@ pub(crate) struct DaemonConfig {
     /// merge into the same struct. The daemon installs it once at
     /// startup through `daemon_logger::init_logger`.
     pub logging: LogConfigSpec,
+    /// `[safety]` — granular safety-net overrides (issue #46). Parsed
+    /// from TOML `[safety]` and the DSL `safety { ... }` block. The
+    /// daemon applies it to the router's `SafetyNet` at startup.
+    pub safety: SafetyConfigSpec,
 }
 
 /// Operator-facing logging configuration. Mirrors the runtime
@@ -1163,6 +1167,124 @@ impl LogConfigSpec {
     }
 }
 
+/// Operator-facing safety-net configuration (issue #46). Mirrors the
+/// runtime `lr_policy::SafetyConfig` but owns strings (not enums) so
+/// the TOML and DSL frontends can build it without pulling the policy
+/// types into the config crate. [`SafetyConfigSpec::finalise`]
+/// converts it to the runtime form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct SafetyConfigSpec {
+    /// Global kill switch. `None` = leave the default (`true`).
+    pub enabled: Option<bool>,
+    /// Per-rule toggles. `None` = leave the default.
+    pub reject_as_loop: Option<bool>,
+    pub reject_invalid_next_hop: Option<bool>,
+    pub reject_empty_as_path_ebgp: Option<bool>,
+    pub reject_invalid_origin: Option<bool>,
+    pub reject_excessive_as_loop: Option<bool>,
+    pub max_as_path_loops: Option<u8>,
+    pub reject_oversized_as_path: Option<bool>,
+    pub max_as_path_length: Option<usize>,
+    pub reject_martian_prefix: Option<bool>,
+    pub reject_martian_v4: Option<bool>,
+    pub reject_martian_v6: Option<bool>,
+    pub reject_oversized_local_pref: Option<bool>,
+    pub max_local_pref: Option<u32>,
+    /// ASNs exempt from the AS_PATH loop check, as decimal strings.
+    /// Parsed into `Asn` at finalise time so a typo fails at startup.
+    pub as_loop_exceptions: Vec<String>,
+    /// Prefixes that bypass the martian check, as CIDR strings.
+    /// Parsed into `Prefix` at finalise time.
+    pub martian_exceptions: Vec<String>,
+}
+
+impl SafetyConfigSpec {
+    /// True when no safety key was set. The daemon uses this to
+    /// decide whether to install a default `SafetyNet` or the
+    /// operator-supplied one.
+    pub fn is_empty(&self) -> bool {
+        self.enabled.is_none()
+            && self.reject_as_loop.is_none()
+            && self.reject_invalid_next_hop.is_none()
+            && self.reject_empty_as_path_ebgp.is_none()
+            && self.reject_invalid_origin.is_none()
+            && self.reject_excessive_as_loop.is_none()
+            && self.max_as_path_loops.is_none()
+            && self.reject_oversized_as_path.is_none()
+            && self.max_as_path_length.is_none()
+            && self.reject_martian_prefix.is_none()
+            && self.reject_martian_v4.is_none()
+            && self.reject_martian_v6.is_none()
+            && self.reject_oversized_local_pref.is_none()
+            && self.max_local_pref.is_none()
+            && self.as_loop_exceptions.is_empty()
+            && self.martian_exceptions.is_empty()
+    }
+
+    /// Convert to a runtime `lr_policy::SafetyConfig`, starting from
+    /// the default and applying every set field. Bad ASNs and prefixes
+    /// are reported as errors so a typo fails at startup.
+    pub fn finalise(&self) -> Result<lr_policy::SafetyConfig, String> {
+        use lr_core::addr::{Asn, Prefix};
+        let mut cfg = lr_policy::SafetyConfig::default();
+        if let Some(v) = self.enabled {
+            cfg.enabled = v;
+        }
+        if let Some(v) = self.reject_as_loop {
+            cfg.reject_as_loop = v;
+        }
+        if let Some(v) = self.reject_invalid_next_hop {
+            cfg.reject_invalid_next_hop = v;
+        }
+        if let Some(v) = self.reject_empty_as_path_ebgp {
+            cfg.reject_empty_as_path_ebgp = v;
+        }
+        if let Some(v) = self.reject_invalid_origin {
+            cfg.reject_invalid_origin = v;
+        }
+        if let Some(v) = self.reject_excessive_as_loop {
+            cfg.reject_excessive_as_loop = v;
+        }
+        if let Some(v) = self.max_as_path_loops {
+            cfg.max_as_path_loops = v;
+        }
+        if let Some(v) = self.reject_oversized_as_path {
+            cfg.reject_oversized_as_path = v;
+        }
+        if let Some(v) = self.max_as_path_length {
+            cfg.max_as_path_length = v;
+        }
+        if let Some(v) = self.reject_martian_prefix {
+            cfg.reject_martian_prefix = v;
+        }
+        if let Some(v) = self.reject_martian_v4 {
+            cfg.reject_martian_v4 = v;
+        }
+        if let Some(v) = self.reject_martian_v6 {
+            cfg.reject_martian_v6 = v;
+        }
+        if let Some(v) = self.reject_oversized_local_pref {
+            cfg.reject_oversized_local_pref = v;
+        }
+        if let Some(v) = self.max_local_pref {
+            cfg.max_local_pref = v;
+        }
+        for s in &self.as_loop_exceptions {
+            let asn: Asn = s.parse().map_err(|_| {
+                format!("bad safety as_loop_exceptions entry '{s}' (expected an AS number)")
+            })?;
+            cfg.as_loop_exceptions.push(asn);
+        }
+        for s in &self.martian_exceptions {
+            let p: Prefix = s.parse().map_err(|_| {
+                format!("bad safety martian_exceptions entry '{s}' (expected a CIDR prefix)")
+            })?;
+            cfg.martian_exceptions.push(p);
+        }
+        Ok(cfg)
+    }
+}
+
 impl DaemonConfig {
     /// Field defaults that differ from `Default::default()`.
     pub fn with_defaults() -> Self {
@@ -1233,6 +1355,7 @@ impl DaemonConfig {
             ldp_link_hold: 15,
             ldp_targeted_hold: 45,
             logging: LogConfigSpec::default(),
+            safety: SafetyConfigSpec::default(),
             ..Default::default()
         }
     }
@@ -2465,6 +2588,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "damping"
                 && section != "bgp.rpki"
                 && section != "logging"
+                && section != "safety"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -2608,6 +2732,14 @@ pub(crate) fn apply_config_key(
     // the same checks a second time so a CLI-only invocation that
     // bypasses the file parser still fails loudly on a bad value.
     if apply_logging_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // `[safety]` — fail-closed like every other protocol surface:
+    // a typo'd AS number or CIDR would silently change which routes
+    // the safety net admits, so it is a hard error.
+    if apply_safety_key(cfg, section, key, value)
         .map_err(|e| format!("line {}: {}", lineno + 1, e))?
     {
         return Ok(());
@@ -4127,6 +4259,131 @@ fn apply_logging_key(
     Ok(true)
 }
 
+/// Apply one `[safety]` key (issue #46). Recognised keys: the boolean
+/// per-rule toggles (`reject_as_loop`, `reject_invalid_next_hop`,
+/// `reject_empty_as_path_ebgp`, `reject_invalid_origin`,
+/// `reject_excessive_as_loop`, `reject_oversized_as_path`,
+/// `reject_martian_prefix`, `reject_martian_v4`, `reject_martian_v6`,
+/// `reject_oversized_local_pref`, `enabled`), the numeric limits
+/// (`max_as_path_loops`, `max_as_path_length`, `max_local_pref`), and
+/// the exception arrays (`as_loop_exceptions`, `martian_exceptions`).
+///
+/// Fail-closed: a typo'd key, AS number or CIDR is a hard error.
+fn apply_safety_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "safety" {
+        return Ok(false);
+    }
+    // Helper closures keep the match arms short and the error messages
+    // uniform. `bool_field` parses a TOML bool; `int_field` parses a
+    // decimal integer.
+    let bool_field = |v: &str, name: &str| -> Result<bool, String> {
+        parse_bool(v)
+            .then_some(v.parse::<bool>().unwrap_or_default())
+            .ok_or_else(|| format!("bad {name} '{v}' (true|false)"))
+    };
+    // `parse_bool` already returns a `bool`, but the helper above
+    // keeps the error path uniform. Simpler: just call parse_bool and
+    // validate it is one of the recognised forms.
+    let parse_safety_bool = |v: &str, name: &str| -> Result<bool, String> {
+        if v == "true" || v == "false" {
+            Ok(parse_bool(v))
+        } else {
+            Err(format!("bad {name} '{v}' (true|false)"))
+        }
+    };
+    match key {
+        "enabled" => cfg.safety.enabled = Some(parse_safety_bool(value, "enabled")?),
+        "reject_as_loop" => {
+            cfg.safety.reject_as_loop = Some(parse_safety_bool(value, "reject_as_loop")?)
+        }
+        "reject_invalid_next_hop" => {
+            cfg.safety.reject_invalid_next_hop =
+                Some(parse_safety_bool(value, "reject_invalid_next_hop")?)
+        }
+        "reject_empty_as_path_ebgp" => {
+            cfg.safety.reject_empty_as_path_ebgp =
+                Some(parse_safety_bool(value, "reject_empty_as_path_ebgp")?)
+        }
+        "reject_invalid_origin" => {
+            cfg.safety.reject_invalid_origin =
+                Some(parse_safety_bool(value, "reject_invalid_origin")?)
+        }
+        "reject_excessive_as_loop" => {
+            cfg.safety.reject_excessive_as_loop =
+                Some(parse_safety_bool(value, "reject_excessive_as_loop")?)
+        }
+        "max_as_path_loops" => {
+            cfg.safety.max_as_path_loops = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad max_as_path_loops '{value}' (0..=255)"))?,
+            );
+        }
+        "reject_oversized_as_path" => {
+            cfg.safety.reject_oversized_as_path =
+                Some(parse_safety_bool(value, "reject_oversized_as_path")?)
+        }
+        "max_as_path_length" => {
+            cfg.safety.max_as_path_length =
+                Some(value.parse().map_err(|_| {
+                    format!("bad max_as_path_length '{value}' (non-negative integer)")
+                })?);
+        }
+        "reject_martian_prefix" => {
+            cfg.safety.reject_martian_prefix =
+                Some(parse_safety_bool(value, "reject_martian_prefix")?)
+        }
+        "reject_martian_v4" => {
+            cfg.safety.reject_martian_v4 = Some(parse_safety_bool(value, "reject_martian_v4")?)
+        }
+        "reject_martian_v6" => {
+            cfg.safety.reject_martian_v6 = Some(parse_safety_bool(value, "reject_martian_v6")?)
+        }
+        "reject_oversized_local_pref" => {
+            cfg.safety.reject_oversized_local_pref =
+                Some(parse_safety_bool(value, "reject_oversized_local_pref")?)
+        }
+        "max_local_pref" => {
+            cfg.safety.max_local_pref = Some(
+                value
+                    .parse()
+                    .map_err(|_| format!("bad max_local_pref '{value}' (0..=4294967295)"))?,
+            );
+        }
+        "as_loop_exceptions" => {
+            // Array of ASN strings: ["65000", "65001"]. Each entry
+            // is validated at finalise time so a typo surfaces there
+            // with the offending value.
+            cfg.safety.as_loop_exceptions.extend(parse_str_array(value));
+        }
+        "as_loop_exception" => {
+            // Single-entry convenience: `as_loop_exception = "65000"`.
+            cfg.safety.as_loop_exceptions.push(value.to_string());
+        }
+        "martian_exceptions" => {
+            cfg.safety.martian_exceptions.extend(parse_str_array(value));
+        }
+        "martian_exception" => {
+            cfg.safety.martian_exceptions.push(value.to_string());
+        }
+        _ => {
+            return Err(format!(
+                "unknown [safety] key '{key}' (typo protection; safety config fails closed)"
+            ))
+        }
+    }
+    // Silence the unused warning for `bool_field` — kept as
+    // documentation of the alternative parsing shape; will be removed
+    // if no caller picks it up in a follow-up.
+    let _ = bool_field;
+    Ok(true)
+}
+
 /// Apply one `key = value` pair to the current `[[peer]]` entry.
 /// Returns `Ok(false)` when the key is not part of the schema so the
 /// caller can surface an unknown-key warning.
@@ -5333,6 +5590,81 @@ mod tests {
         let mut cfg = DaemonConfig::with_defaults();
         let err = parse_toml_subset("[logging]\nverbosity = 5\n", &mut cfg).unwrap_err();
         assert!(err.contains("unknown [logging] key"), "{err}");
+    }
+
+    #[test]
+    fn safety_section_parses_keys() {
+        // The `[safety]` section is a recognised first-class block
+        // (issue #46). Its keys land in `cfg.safety`, not in the
+        // warnings vector.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[safety]\n\
+             enabled = true\n\
+             reject_as_loop = false\n\
+             max_as_path_loops = 5\n\
+             reject_martian_v4 = false\n\
+             as_loop_exceptions = [\"65000\", \"65001\"]\n\
+             martian_exceptions = [\"169.254.0.0/16\"]\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(cfg.safety.enabled, Some(true));
+        assert_eq!(cfg.safety.reject_as_loop, Some(false));
+        assert_eq!(cfg.safety.max_as_path_loops, Some(5));
+        assert_eq!(cfg.safety.reject_martian_v4, Some(false));
+        assert_eq!(cfg.safety.as_loop_exceptions, vec!["65000", "65001"]);
+        assert_eq!(cfg.safety.martian_exceptions, vec!["169.254.0.0/16"]);
+        // Finalise converts to the runtime form without errors.
+        let rt = cfg.safety.finalise().unwrap();
+        assert!(rt.enabled);
+        assert!(!rt.reject_as_loop);
+        assert_eq!(rt.max_as_path_loops, 5);
+        assert!(!rt.reject_martian_v4);
+        assert!(rt.reject_martian_v6); // untouched — still the default
+        assert_eq!(rt.as_loop_exceptions.len(), 2);
+        assert_eq!(rt.as_loop_exceptions[0].0, 65000);
+        assert_eq!(rt.martian_exceptions.len(), 1);
+    }
+
+    #[test]
+    fn safety_section_fail_closed_on_typo() {
+        // An unknown key in [safety] fails closed.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[safety]\nverbosity = 5\n", &mut cfg).unwrap_err();
+        assert!(err.contains("unknown [safety] key"), "{err}");
+
+        // A bad boolean fails.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[safety]\nenabled = maybe\n", &mut cfg).unwrap_err();
+        assert!(err.contains("bad enabled"), "{err}");
+
+        // A non-numeric max_as_path_loops fails.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err =
+            parse_toml_subset("[safety]\nmax_as_path_loops = \"lots\"\n", &mut cfg).unwrap_err();
+        assert!(err.contains("bad max_as_path_loops"), "{err}");
+
+        // Finalise rejects a bad ASN in as_loop_exceptions.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[safety]\nas_loop_exceptions = [\"not-a-number\"]\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.safety.finalise().unwrap_err();
+        assert!(err.contains("bad safety as_loop_exceptions"), "{err}");
+
+        // Finalise rejects a bad CIDR in martian_exceptions.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[safety]\nmartian_exceptions = [\"not-a-prefix\"]\n",
+            &mut cfg,
+        )
+        .unwrap();
+        let err = cfg.safety.finalise().unwrap_err();
+        assert!(err.contains("bad safety martian_exceptions"), "{err}");
     }
 
     #[test]

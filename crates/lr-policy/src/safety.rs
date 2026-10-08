@@ -13,9 +13,18 @@
 use lr_core::addr::{Asn, IpAddr};
 use lr_core::rib::Route;
 
-/// Knobs that toggle individual safety checks. All default to `true`.
+/// Knobs that toggle individual safety checks. All default to `true`
+/// unless noted. The granular controls (`enabled`, `as_loop_exceptions`,
+/// `martian_exceptions`, `reject_martian_v4`, `reject_martian_v6`)
+/// implement the partial-deactivation and per-rule-exception surfaces
+/// asked for in issue #46: an operator can turn the whole net off, can
+/// exempt specific ASes from the loop check, and can exempt specific
+/// prefixes from the martian check or split the martian check by AFI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SafetyConfig {
+    /// Global kill switch. When `false`, [`SafetyNet::check`] returns
+    /// `Ok(())` without running any rule. Default: `true`.
+    pub enabled: bool,
     /// Reject routes whose AS_PATH contains the local AS (RFC 4271 §9.1.2.15).
     pub reject_as_loop: bool,
     /// Reject routes whose NEXT_HOP is unspecified, loopback, or the local
@@ -42,11 +51,31 @@ pub struct SafetyConfig {
     /// enormous LOCAL_PREF.
     pub reject_oversized_local_pref: bool,
     pub max_local_pref: u32,
+    /// ASNs exempt from the AS_PATH loop checks (`reject_as_loop` and
+    /// `reject_excessive_as_loop`). An AS in this list does not count
+    /// as the local AS for either check, so an operator can admit a
+    /// transit AS that legitimately re-appears during a migration or
+    /// confederation merge. Default: empty.
+    pub as_loop_exceptions: Vec<Asn>,
+    /// Prefixes that bypass the martian check. A route is exempt when
+    /// its prefix is exactly contained in any entry — so listing
+    /// `169.254.0.0/16` admits that prefix without admitting
+    /// `169.254.1.0/24`. Use this instead of disabling the whole
+    /// martian check. Default: empty.
+    pub martian_exceptions: Vec<lr_core::addr::Prefix>,
+    /// Per-AFI martian toggle. When `reject_martian_prefix` is `true`,
+    /// `reject_martian_v4` controls the IPv4 martian list and
+    /// `reject_martian_v6` controls the IPv6 list. An operator who
+    /// wants to disable the v4 check without disabling v6 sets
+    /// `reject_martian_v4 = false`. Default: both `true`.
+    pub reject_martian_v4: bool,
+    pub reject_martian_v6: bool,
 }
 
 impl Default for SafetyConfig {
     fn default() -> Self {
         Self {
+            enabled: true,
             reject_as_loop: true,
             reject_invalid_next_hop: true,
             reject_empty_as_path_ebgp: false,
@@ -58,6 +87,10 @@ impl Default for SafetyConfig {
             reject_martian_prefix: true,
             reject_oversized_local_pref: false,
             max_local_pref: u32::MAX,
+            as_loop_exceptions: Vec::new(),
+            martian_exceptions: Vec::new(),
+            reject_martian_v4: true,
+            reject_martian_v6: true,
         }
     }
 }
@@ -165,9 +198,21 @@ impl SafetyNet {
     /// Run all enabled checks on the route. Returns `Ok(())` if the route
     /// passes all checks, or `Err(violation)` otherwise.
     pub fn check(&self, route: &Route, is_ebgp: bool) -> Result<(), SafetyViolation> {
+        // Global kill switch (issue #46): lets an operator disable the
+        // whole net without flipping every individual toggle.
+        if !self.cfg.enabled {
+            return Ok(());
+        }
         let key = format!("{}", route.key.prefix);
-        // Martian prefix check.
-        if self.cfg.reject_martian_prefix && self.is_martian(&route.key.prefix) {
+        // Martian prefix check. The per-AFI toggles
+        // (`reject_martian_v4` / `reject_martian_v6`) let an operator
+        // disable one AFI without disabling the other, and
+        // `martian_exceptions` lets a specific prefix through without
+        // disabling the check for the rest of the AFI.
+        if self.cfg.reject_martian_prefix
+            && !self.is_martian_exempt(&route.key.prefix)
+            && self.is_martian(&route.key.prefix)
+        {
             return Err(SafetyViolation::MartianPrefix {
                 route_key: key,
                 reason: "prefix is in the martian list",
@@ -185,23 +230,22 @@ impl SafetyNet {
             if self.cfg.reject_empty_as_path_ebgp && is_ebgp && as_path_len == 0 {
                 return Err(SafetyViolation::EmptyAsPathEbgp { route_key: key });
             }
-            if self.cfg.reject_as_loop {
-                let count = self.local_as_count(route);
-                if count > 0 {
-                    return Err(SafetyViolation::AsLoop {
-                        route_key: key,
-                        local_as: self.local_as,
-                    });
-                }
+            // Count local-AS occurrences minus the exempt ASes. An AS
+            // in `as_loop_exceptions` does not count as the local AS,
+            // so an operator can admit a transit AS that legitimately
+            // re-appears during a migration or confederation merge.
+            let local_count = self.local_as_count(route);
+            if self.cfg.reject_as_loop && local_count > 0 {
+                return Err(SafetyViolation::AsLoop {
+                    route_key: key,
+                    local_as: self.local_as,
+                });
             }
-            if self.cfg.reject_excessive_as_loop {
-                let count = self.local_as_count(route);
-                if count > self.cfg.max_as_path_loops {
-                    return Err(SafetyViolation::ExcessiveAsLoop {
-                        route_key: key,
-                        count,
-                    });
-                }
+            if self.cfg.reject_excessive_as_loop && local_count > self.cfg.max_as_path_loops {
+                return Err(SafetyViolation::ExcessiveAsLoop {
+                    route_key: key,
+                    count: local_count,
+                });
             }
         }
         // NEXT_HOP checks.
@@ -221,11 +265,30 @@ impl SafetyNet {
         Ok(())
     }
 
-    /// True if the prefix is a martian (a network that should never appear in
-    /// the global routing table).
+    /// True if `prefix` is in the `martian_exceptions` list. A route
+    /// whose prefix is exactly contained in an exception entry bypasses
+    /// the martian check. "Exactly contained" means the route prefix is
+    /// equal to or a subnet of the exception — so listing
+    /// `169.254.0.0/16` admits `169.254.0.0/16` and
+    /// `169.254.1.0/24` alike, but listing `169.254.1.0/24` does not
+    /// admit `169.254.0.0/16`.
+    fn is_martian_exempt(&self, prefix: &lr_core::addr::Prefix) -> bool {
+        self.cfg
+            .martian_exceptions
+            .iter()
+            .any(|ex| prefix_contains(ex, prefix))
+    }
+
+    /// True if the prefix is a martian (a network that should never
+    /// appear in the global routing table). Honours the per-AFI
+    /// toggles: when `reject_martian_v4` is `false`, no IPv4 prefix is
+    /// a martian; when `reject_martian_v6` is `false`, no IPv6 prefix
+    /// is. The caller (`check`) still gates on `reject_martian_prefix`
+    /// and `martian_exceptions`, so this function only answers the
+    /// per-AFI question.
     fn is_martian(&self, p: &lr_core::addr::Prefix) -> bool {
         match p.addr {
-            IpAddr::V4(b) => {
+            IpAddr::V4(b) if self.cfg.reject_martian_v4 => {
                 let pl = p.prefix_len;
                 // 0.0.0.0/8 (unspecified)
                 (b[0] == 0 && pl >= 8)
@@ -238,7 +301,7 @@ impl SafetyNet {
                 // 240.0.0.0/4 (reserved)
                 || (b[0] & 0xf0 == 0xf0 && pl >= 4)
             }
-            IpAddr::V6(b) => {
+            IpAddr::V6(b) if self.cfg.reject_martian_v6 => {
                 let pl = p.prefix_len;
                 // ::/128 (unspecified) or ::1/128 (loopback)
                 (b == [0; 16] && pl >= 128)
@@ -250,6 +313,8 @@ impl SafetyNet {
                 // ff00::/8 (multicast)
                 || (b[0] == 0xff && pl >= 8)
             }
+            // Per-AFI toggle off: this prefix is not a martian.
+            _ => false,
         }
     }
 
@@ -295,8 +360,9 @@ impl SafetyNet {
         Some(len)
     }
 
-    /// Count how many times `local_as` appears in the AS_PATH. Used by both
-    /// the strict and excessive loop checks.
+    /// Count how many times `local_as` appears in the AS_PATH, minus
+    /// the ASes in `as_loop_exceptions`. Used by both the strict and
+    /// excessive loop checks.
     ///
     /// Reads the AS_PATH via the `AsPath::decode_4` helper first
     /// (FSM-normalized form — the post-OPEN codec always rewrites
@@ -308,6 +374,11 @@ impl SafetyNet {
     /// when AS4_PATH (tag 17) was absent — which is the common case
     /// after the FSM rewrites the attribute bag — silently
     /// undercounting local AS occurrences and breaking `reject_as_loop`.
+    ///
+    /// ASes listed in `as_loop_exceptions` do not count toward the
+    /// local-AS total, so an operator can exempt a transit AS that
+    /// legitimately re-appears during a migration or confederation
+    /// merge (issue #46).
     #[cfg(feature = "bgp")]
     fn local_as_count(&self, route: &Route) -> u8 {
         let attr = match route.attributes.get(lr_core::attr::AttrTag(17)) {
@@ -329,7 +400,7 @@ impl SafetyNet {
         let mut count = 0u8;
         for seg in &path.segments {
             for as_ in &seg.ases {
-                if as_.0 == self.local_as.0 {
+                if as_.0 == self.local_as.0 && !self.is_as_loop_exception(as_.0) {
                     count = count.saturating_add(1);
                 }
             }
@@ -337,11 +408,21 @@ impl SafetyNet {
         count
     }
 
+    /// True when `asn` is in `as_loop_exceptions`. Helper for
+    /// [`Self::local_as_count`]; kept separate so the non-BGP fallback
+    /// can share the exemption logic.
+    fn is_as_loop_exception(&self, asn: u32) -> bool {
+        self.cfg.as_loop_exceptions.iter().any(|ex| ex.0 == asn)
+    }
+
     /// Fallback AS_PATH counter when the `bgp` feature is disabled
     /// (no `lr-bgp` dependency). The manual walker parses the AS_PATH
     /// segment-by-segment, preferring AS4_PATH (tag 17, always 4-byte)
     /// and falling back to AS_PATH (tag 2, 2-byte in the legacy form).
     /// Without the FSM normalization step the tag-2 width is correct.
+    ///
+    /// ASes listed in `as_loop_exceptions` do not count toward the
+    /// local-AS total (issue #46).
     #[cfg(not(feature = "bgp"))]
     fn local_as_count(&self, route: &Route) -> u8 {
         let attr = route.attributes.get(lr_core::attr::AttrTag(17));
@@ -368,7 +449,7 @@ impl SafetyNet {
                 } else {
                     u16::from_be_bytes([v[i], v[i + 1]]) as u32
                 };
-                if as_ == self.local_as.0 {
+                if as_ == self.local_as.0 && !self.is_as_loop_exception(as_) {
                     count = count.saturating_add(1);
                 }
                 i += width;
@@ -376,6 +457,47 @@ impl SafetyNet {
         }
         count
     }
+}
+
+/// True when `inner` is contained in `outer` — equal to or a subnet of.
+/// Used by the martian-exception check: a route prefix is exempt when
+/// it is contained in any exception entry. Compares the shared prefix
+/// bytes up to `outer.prefix_len`; the route prefix must be at least as
+/// specific (its `prefix_len` >= `outer.prefix_len`).
+fn prefix_contains(outer: &lr_core::addr::Prefix, inner: &lr_core::addr::Prefix) -> bool {
+    if inner.prefix_len < outer.prefix_len {
+        return false;
+    }
+    // Compare the leading `outer.prefix_len` bits. The addresses are
+    // stored as fixed-size byte arrays; the bit comparison walks
+    // whole bytes first, then the trailing partial byte. The two
+    // address families have different array widths, so the comparison
+    // is split into two arms.
+    let outer_bits = outer.prefix_len as usize;
+    let full_bytes = outer_bits / 8;
+    let rem_bits = outer_bits % 8;
+    match (outer.addr, inner.addr) {
+        (IpAddr::V4(oa), IpAddr::V4(ia)) => prefix_bytes_contain(&oa, &ia, full_bytes, rem_bits),
+        (IpAddr::V6(oa), IpAddr::V6(ia)) => prefix_bytes_contain(&oa, &ia, full_bytes, rem_bits),
+        // Different address families: not contained.
+        _ => false,
+    }
+}
+
+/// Shared byte-array comparison used by [`prefix_contains`]. Returns
+/// true when the leading `full_bytes` bytes match exactly and the
+/// high `rem_bits` bits of the next byte match.
+fn prefix_bytes_contain(outer: &[u8], inner: &[u8], full_bytes: usize, rem_bits: usize) -> bool {
+    if outer.get(..full_bytes) != inner.get(..full_bytes) {
+        return false;
+    }
+    if rem_bits == 0 {
+        return true;
+    }
+    // The high `rem_bits` bits of the next byte must match. Mask
+    // both bytes with `0xff << (8 - rem_bits)` and compare.
+    let mask = 0xffu8 << (8 - rem_bits);
+    (outer[full_bytes] & mask) == (inner[full_bytes] & mask)
 }
 
 #[cfg(test)]
@@ -508,5 +630,218 @@ mod tests {
         let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
         let route = make_route(prefix, as_path_2byte(&[200, 100, 300]));
         assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn global_kill_switch_admits_everything() {
+        // `enabled = false` short-circuits the whole net, so a route
+        // that would normally fail every check passes.
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                enabled: false,
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let prefix = Prefix::new_v4([127, 0, 0, 0], 8); // martian
+        let route = make_route(prefix, as_path_2byte(&[200, 100, 300])); // AS loop
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn as_loop_exception_admits_exempt_asn() {
+        // The local AS appears in the path, but is listed in
+        // `as_loop_exceptions`, so the loop check admits it.
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                as_loop_exceptions: vec![Asn(100)],
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let route = make_route(prefix, as_path_2byte(&[200, 100, 300]));
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn as_loop_exception_does_not_exempt_other_asns() {
+        // Exempting AS 200 does not exempt the local AS 100.
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                as_loop_exceptions: vec![Asn(200)],
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let prefix = Prefix::new_v4([8, 0, 0, 0], 8);
+        let route = make_route(prefix, as_path_2byte(&[200, 100, 300]));
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::AsLoop { .. })
+        ));
+    }
+
+    #[test]
+    fn martian_exception_admits_listed_prefix() {
+        // 169.254.0.0/16 is a martian, but is listed in
+        // `martian_exceptions`, so the check admits it.
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                martian_exceptions: vec![Prefix::new_v4([169, 254, 0, 0], 16)],
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let prefix = Prefix::new_v4([169, 254, 0, 0], 16);
+        let route = make_route(prefix, as_path_2byte(&[200]));
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn martian_exception_admits_subnet_of_listed_prefix() {
+        // 169.254.1.0/24 is contained in the listed 169.254.0.0/16, so
+        // the exception covers it too.
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                martian_exceptions: vec![Prefix::new_v4([169, 254, 0, 0], 16)],
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let prefix = Prefix::new_v4([169, 254, 1, 0], 24);
+        let route = make_route(prefix, as_path_2byte(&[200]));
+        assert!(safety.check(&route, true).is_ok());
+    }
+
+    #[test]
+    fn martian_exception_does_not_admit_supernet() {
+        // 169.254.0.0/15 is NOT contained in the listed 169.254.0.0/16,
+        // so the exception does not cover it. (169.254.0.0/15 is not a
+        // martian by the default list, so the route passes anyway —
+        // the test asserts that the exception is not what admitted it.)
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                martian_exceptions: vec![Prefix::new_v4([169, 254, 0, 0], 16)],
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        // 127.0.0.0/8 is a martian and NOT in the exception list.
+        let prefix = Prefix::new_v4([127, 0, 0, 0], 8);
+        let route = make_route(prefix, as_path_2byte(&[200]));
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::MartianPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn per_afi_martian_toggle_disables_v4_only() {
+        // `reject_martian_v4 = false` admits a v4 martian while the v6
+        // martian check stays armed.
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                reject_martian_v4: false,
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let v4_martian = Prefix::new_v4([127, 0, 0, 0], 8);
+        let route = make_route(v4_martian, as_path_2byte(&[200]));
+        assert!(safety.check(&route, true).is_ok());
+
+        // v6 martian still rejected.
+        let mut b = [0u8; 16];
+        b[0] = 0xfe;
+        b[1] = 0x80;
+        let v6_martian = Prefix::new_v6(b, 10);
+        let route = make_route(v6_martian, as_path_2byte(&[200]));
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::MartianPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn per_afi_martian_toggle_disables_v6_only() {
+        let safety = SafetyNet {
+            cfg: SafetyConfig {
+                reject_martian_v6: false,
+                ..Default::default()
+            },
+            local_as: Asn(100),
+            local_addrs: Vec::new(),
+        };
+        let mut b = [0u8; 16];
+        b[0] = 0xfe;
+        b[1] = 0x80;
+        let v6_martian = Prefix::new_v6(b, 10);
+        let route = make_route(v6_martian, as_path_2byte(&[200]));
+        assert!(safety.check(&route, true).is_ok());
+
+        // v4 martian still rejected.
+        let v4_martian = Prefix::new_v4([127, 0, 0, 0], 8);
+        let route = make_route(v4_martian, as_path_2byte(&[200]));
+        assert!(matches!(
+            safety.check(&route, true),
+            Err(SafetyViolation::MartianPrefix { .. })
+        ));
+    }
+
+    #[test]
+    fn prefix_contains_handles_exact_subnets_and_mismatches() {
+        // Exact match.
+        assert!(prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 8),
+            &Prefix::new_v4([10, 0, 0, 0], 8),
+        ));
+        // Subnet.
+        assert!(prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 8),
+            &Prefix::new_v4([10, 1, 2, 3], 32),
+        ));
+        // Supernet (not contained): inner prefix_len < outer.
+        assert!(!prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 24),
+            &Prefix::new_v4([10, 0, 0, 0], 8),
+        ));
+        // Different network.
+        assert!(!prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 8),
+            &Prefix::new_v4([192, 0, 2, 0], 24),
+        ));
+        // Partial-byte boundary: 10.0.0.0/9 contains 10.127.0.0/16
+        // (the /9 keeps the 9th bit at 0, so the second byte is 0..=127).
+        assert!(prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 9),
+            &Prefix::new_v4([10, 127, 0, 0], 16),
+        ));
+        // Partial-byte boundary: 10.0.0.0/9 does NOT contain 10.128.0.0/16
+        // (the 9th bit is 1 in 10.128.0.0).
+        assert!(!prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 9),
+            &Prefix::new_v4([10, 128, 0, 0], 16),
+        ));
+        // Partial-byte boundary: 10.0.0.0/9 does NOT contain 11.0.0.0/8.
+        assert!(!prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 9),
+            &Prefix::new_v4([11, 0, 0, 0], 8),
+        ));
+        // Different address families.
+        assert!(!prefix_contains(
+            &Prefix::new_v4([10, 0, 0, 0], 8),
+            &Prefix::new_v6(
+                [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+                128
+            ),
+        ));
     }
 }

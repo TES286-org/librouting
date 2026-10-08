@@ -644,6 +644,37 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         None => Arc::new(RwLock::new(DefaultRouter::new())),
     };
 
+    // Apply the operator's `[safety]` overrides (issue #46) before
+    // any session is added. The supervisor-created router (multi-
+    // protocol mode) gets the same application through
+    // `daemon_multi::run_multi_daemon`, so both paths share the
+    // safety posture. The local-AS for the safety net is the BGP
+    // local AS — the value the AS_PATH loop check counts against.
+    if !cfg.safety.is_empty() {
+        let safety_cfg = match cfg.safety.finalise() {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("error: {e}");
+                return ExitCode::from(2);
+            }
+        };
+        let mut net = lr_policy::safety::SafetyNet::new(lr_core::addr::Asn(cfg.local_as));
+        net.cfg = safety_cfg;
+        // Carry the local addresses so the NEXT_HOP check can reject
+        // routes whose next hop is the local router.
+        if let Some(la) = &cfg.local_address {
+            if let Ok(addr) = la.parse::<lr_core::addr::IpAddr>() {
+                net = net.with_local_addr(addr);
+            }
+        }
+        if let Some(la6) = &cfg.local_address_v6 {
+            if let Ok(addr) = la6.parse::<lr_core::addr::IpAddr>() {
+                net = net.with_local_addr(addr);
+            }
+        }
+        router.write().unwrap().set_safety_net(net);
+    }
+
     // ---- [[redistribute]] / [[aggregate]] (ROADMAP-v3 D4.1/D4.2). ----
     // Cross-protocol pipes and BGP aggregates attach to the shared
     // router. The supervisor applies them once on the shared router

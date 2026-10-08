@@ -69,6 +69,7 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("", "bgp") => Some(single("bgp")),
         ("bgp", "rpki") => Some(single("bgp.rpki")),
         ("", "logging") => Some(single("logging")),
+        ("", "safety") => Some(single("safety")),
         ("", "ospf") => Some(single("ospf")),
         ("ospf", "area") => Some(array("ospf.area", Some("id"))),
         ("ospf", "interface") => Some(array("ospf.interface", Some("name"))),
