@@ -110,7 +110,7 @@ DAEMONS="$DAEMONS $B"
 # churn we are measuring is at the event layer, not the kernel
 # layer.
 for _ in $(seq 1 100); do
-    if grep -q "daemon: route installed 10.99.3.0/24" "$OUT/b.log" 2>/dev/null; then
+    if grep -q "route installed 10.99.3.0/24" "$OUT/b.log" 2>/dev/null; then
         break
     fi
     sleep 0.1
@@ -129,7 +129,7 @@ cleanup || true
 # Count the `daemon: route installed 10.99.3.0/24` log lines.
 # With the fix: exactly 1 (the initial install).
 # Pre-fix: >= 2 (re-installed on every Babel UPDATE re-advertisement).
-COUNT=$(grep -c "^daemon: route installed 10.99.3.0/24" "$OUT/b.log" || true)
+COUNT=$(grep -c "route installed 10.99.3.0/24" "$OUT/b.log" || true)
 echo "install count: $COUNT"
 
 if [ "$COUNT" -lt 1 ]; then

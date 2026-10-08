@@ -176,7 +176,7 @@ nsenter -t "$R1" -n "$BIN" \
 LR_PID=$!
 
 echo "== waiting for the combination to come up =="
-wait_log "$OUT/r1.log" "daemon: 2 engine(s) running"
+wait_log "$OUT/r1.log" "2 engine(s) running"
 wait_log "$OUT/r1.log" "ospf neighbor 2.2.2.2 Full (area"
 echo "   OSPF adjacency: Full (lr side)"
 

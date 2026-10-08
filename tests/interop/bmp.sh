@@ -97,13 +97,13 @@ echo "== starting the route originator B (AS64513, connects to A) =="
 B_PID=$!
 
 echo "== waiting for the BMP stream =="
-wait_log "$OUT/a.log" "bmp mirroring to 127.0.0.1:$PORT"
-wait_log "$OUT/a.log" "bmp station 127.0.0.1:$PORT connected"
-wait_log "$OUT/collector.log" "bmp station connected"
-wait_log "$OUT/collector.log" "bmp peer up"
+wait_log "$OUT/a.log" "mirroring to 127.0.0.1:$PORT"
+wait_log "$OUT/a.log" "station 127.0.0.1:$PORT connected"
+wait_log "$OUT/collector.log" "station connected"
+wait_log "$OUT/collector.log" "peer up"
 
 echo "== waiting for the monitored route in the collector =="
-wait_log "$OUT/collector.log" "bmp route 203.0.113.0/24"
+wait_log "$OUT/collector.log" "route 203.0.113.0/24"
 
 echo "== verifying the collector's Loc-RIB via the runtime API =="
 api_cmd "$OUT/collector.api" "routes" >"$OUT/routes.api"

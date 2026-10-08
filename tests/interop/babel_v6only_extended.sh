@@ -220,7 +220,7 @@ trap "kill $LR_PID 2>/dev/null || true; kill $BIRD_PID 2>/dev/null || true; kill
 
 # Wait for lr's babel interface to come up.
 for i in $(seq 1 30); do
-    if grep -q "babel interface veth0a session" "$OUT/lr.log"; then break; fi
+    if grep -q "interface veth0a session" "$OUT/lr.log"; then break; fi
     sleep 0.5
 done
 

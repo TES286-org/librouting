@@ -77,15 +77,18 @@ echo "== lr-daemon log =="
 cat "$OUT/lr.log"
 
 # Verify the daemon enumerated interfaces and matched patterns.
-if ! grep -qF "babel 2 interface pattern(s) configured" "$OUT/lr.log"; then
+# The categorised logger prints `[babel] <message>` (the component tag
+# replaces the old `daemon: babel ` prefix), so grep for the message
+# text the operator wrote.
+if ! grep -qF "2 interface pattern(s) configured" "$OUT/lr.log"; then
     echo "FAIL: daemon did not log babel interface pattern count"
     exit 1
 fi
-if ! grep -qE "babel interface pattern 'veth\*' matched 2 interface\(s\): veth0, veth1" "$OUT/lr.log"; then
+if ! grep -qE "interface pattern 'veth\*' matched 2 interface\(s\): veth0, veth1" "$OUT/lr.log"; then
     echo "FAIL: daemon did not match veth* against veth0 and veth1"
     exit 1
 fi
-if ! grep -qE "babel interface pattern 'lo' matched 1 interface\(s\): lo" "$OUT/lr.log"; then
+if ! grep -qE "interface pattern 'lo' matched 1 interface\(s\): lo" "$OUT/lr.log"; then
     echo "FAIL: daemon did not match 'lo' against the loopback"
     exit 1
 fi
@@ -93,7 +96,7 @@ fi
 # ROADMAP-v3 D1: every matched interface gets its own Babel session with
 # the first matching pattern's parameters (BIRD first-match semantics).
 for iface in lo veth0 veth1; do
-    if ! grep -qE "babel interface $iface session [0-9]+ — " "$OUT/lr.log"; then
+    if ! grep -qE "interface $iface session [0-9]+ — " "$OUT/lr.log"; then
         echo "FAIL: daemon did not start a per-interface session for $iface"
         exit 1
     fi
@@ -101,12 +104,12 @@ done
 # veth* parameters apply to both veths (hello 4000 ms from the spec);
 # lo takes its own rxcost (256).
 for iface in veth0 veth1; do
-    if ! grep -qE "babel interface $iface session [0-9]+ — v4 hello 4000ms update 12000ms rxcost 96 router-id [0-9a-f:]+" "$OUT/lr.log"; then
+    if ! grep -qE "interface $iface session [0-9]+ — v4 hello 4000ms update 12000ms rxcost 96 router-id [0-9a-f:]+" "$OUT/lr.log"; then
         echo "FAIL: $iface does not carry the veth* pattern parameters (hello 4000ms / rxcost 96)"
         exit 1
     fi
 done
-if ! grep -qE "babel interface lo session [0-9]+ — v6 hello 1000ms update 3000ms rxcost 256 router-id [0-9a-f:]+" "$OUT/lr.log"; then
+if ! grep -qE "interface lo session [0-9]+ — v6 hello 1000ms update 3000ms rxcost 256 router-id [0-9a-f:]+" "$OUT/lr.log"; then
     echo "FAIL: lo does not carry its own rxcost (256)"
     exit 1
 fi

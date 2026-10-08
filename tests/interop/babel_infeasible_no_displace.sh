@@ -115,12 +115,12 @@ send_frame "$OUT/teach.bin" "teach seqno=100 metric=192"
 
 # Wait for the route to be installed.
 for _ in $(seq 1 100); do
-    if grep -q "daemon: route installed 10.99.4.0/24" "$OUT/daemon.log" 2>/dev/null; then
+    if grep -q "route installed 10.99.4.0/24" "$OUT/daemon.log" 2>/dev/null; then
         break
     fi
     sleep 0.1
 done
-if ! grep -q "daemon: route installed 10.99.4.0/24" "$OUT/daemon.log"; then
+if ! grep -q "route installed 10.99.4.0/24" "$OUT/daemon.log"; then
     echo "FAIL: route was not installed after the teach frame"
     echo "--- daemon log ---"; cat "$OUT/daemon.log" || true
     exit 1
@@ -142,7 +142,7 @@ sleep 1
 
 # --- 3. Assertions ---
 # (a) The route must NOT have been withdrawn.
-if grep -q "daemon: route withdrawn 10.99.4.0/24" "$OUT/daemon.log"; then
+if grep -q "route withdrawn 10.99.4.0/24" "$OUT/daemon.log"; then
     echo "FAIL: the infeasible update displaced the feasible route (RFC 8966 §3.5.2 violation)"
     echo "--- babel withdraw lines ---"
     grep "babel withdraw" "$OUT/daemon.log" || true
