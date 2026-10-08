@@ -46,7 +46,7 @@ unshare -Urn true 2>/dev/null || {
 }
 
 FRRDIR=""
-for cand in /usr/lib/frr /home/z/opt/frr/root/usr/lib/frr; do
+for cand in /usr/lib/frr $HOME/opt/frr/root/usr/lib/frr; do
     if [ -x "$cand/ospf6d" ] && [ -x "$cand/zebra" ]; then
         FRRDIR="$cand"
         break

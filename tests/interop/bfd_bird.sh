@@ -49,9 +49,9 @@ command -v nsenter >/dev/null 2>&1 || { echo "SKIP: nsenter (util-linux) not ins
 BIRD=${BIRD:-bird}
 BIRDC=${BIRDC:-birdc}
 if ! command -v "$BIRD" >/dev/null 2>&1; then
-    if [ -x /home/z/opt/bird/root/usr/sbin/bird ]; then
-        BIRD=/home/z/opt/bird/root/usr/sbin/bird
-        BIRDC=/home/z/opt/bird/root/usr/sbin/birdc
+    if [ -x $HOME/opt/bird/root/usr/sbin/bird ]; then
+        BIRD=$HOME/opt/bird/root/usr/sbin/bird
+        BIRDC=$HOME/opt/bird/root/usr/sbin/birdc
     else
         echo "SKIP: bird/birdc not found"
         exit 0

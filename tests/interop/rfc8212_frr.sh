@@ -48,7 +48,7 @@ if [ ! -x "$BIN" ]; then
 fi
 BGPD=${BGPD:-bgpd}
 if ! command -v "$BGPD" >/dev/null 2>&1; then
-    for cand in /home/z/opt/frr/root/usr/lib/frr/bgpd /usr/lib/frr/bgpd; do
+    for cand in $HOME/opt/frr/root/usr/lib/frr/bgpd /usr/lib/frr/bgpd; do
         if [ -x "$cand" ]; then BGPD="$cand"; break; fi
     done
 fi
@@ -56,7 +56,7 @@ command -v "$BGPD" >/dev/null 2>&1 || { echo "SKIP: bgpd not found"; exit 0; }
 
 # Resolve the shared-library path for an extracted (non-installed) bgpd.
 case "$BGPD" in
-    /home/z/opt/*) FRRROOT=${BGPD%/usr/lib/frr/bgpd}
+    $HOME/opt/*) FRRROOT=${BGPD%/usr/lib/frr/bgpd}
         export LD_LIBRARY_PATH="$FRRROOT/usr/lib/x86_64-linux-gnu/frr:$FRRROOT/usr/lib/x86_64-linux-gnu:$FRRROOT/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
         ;;
 esac

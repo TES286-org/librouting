@@ -25,9 +25,9 @@ fi
 # environment uses when there is no root to install from).
 YANGLINT=${YANGLINT:-yanglint}
 if ! command -v "$YANGLINT" >/dev/null 2>&1; then
-    if [ -x /home/z/opt/libyang/root/usr/bin/yanglint ]; then
-        YANGLINT=/home/z/opt/libyang/root/usr/bin/yanglint
-        export LD_LIBRARY_PATH="/home/z/opt/libyang/root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+    if [ -x $HOME/opt/libyang/root/usr/bin/yanglint ]; then
+        YANGLINT=$HOME/opt/libyang/root/usr/bin/yanglint
+        export LD_LIBRARY_PATH="$HOME/opt/libyang/root/usr/lib/x86_64-linux-gnu${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
     else
         echo "SKIP: yanglint not found"
         exit 0

@@ -34,11 +34,11 @@ fi
 
 BIRD=$(command -v bird || true)
 BIRDC=$(command -v birdc || true)
-if [ -z "$BIRD" ] && [ -x /home/z/opt/bird/root/usr/sbin/bird ]; then
+if [ -z "$BIRD" ] && [ -x $HOME/opt/bird/root/usr/sbin/bird ]; then
     # extracted (non-installed) BIRD — same convention as the other
     # interop scripts for environments without root
-    BIRD=/home/z/opt/bird/root/usr/sbin/bird
-    BIRDC=/home/z/opt/bird/root/usr/sbin/birdc
+    BIRD=$HOME/opt/bird/root/usr/sbin/bird
+    BIRDC=$HOME/opt/bird/root/usr/sbin/birdc
 fi
 if [ -z "$BIRD" ] || [ -z "$BIRDC" ]; then
     echo "SKIP: bird/birdc not installed"

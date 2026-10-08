@@ -40,7 +40,7 @@ unshare -Urn true 2>/dev/null || {
 
 # Locate the FRR binaries: system install first, extracted tree second.
 FRRDIR=""
-for cand in /usr/lib/frr /home/z/opt/frr/root/usr/lib/frr; do
+for cand in /usr/lib/frr $HOME/opt/frr/root/usr/lib/frr; do
     if [ -x "$cand/ldpd" ] && [ -x "$cand/zebra" ]; then
         FRRDIR="$cand"
         break

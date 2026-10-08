@@ -35,16 +35,16 @@ rm -rf "$OUT"; mkdir -p "$OUT"
 BIRD=${BIRD:-bird}
 BIRDC=${BIRDC:-birdc}
 if ! command -v "$BIRD" >/dev/null 2>&1; then
-    if [ -x /home/z/opt/bird/root/usr/sbin/bird ]; then
-        BIRD=/home/z/opt/bird/root/usr/sbin/bird
-        BIRDC=/home/z/opt/bird/root/usr/sbin/birdc
+    if [ -x $HOME/opt/bird/root/usr/sbin/bird ]; then
+        BIRD=$HOME/opt/bird/root/usr/sbin/bird
+        BIRDC=$HOME/opt/bird/root/usr/sbin/birdc
     else
         BIRD=""
     fi
 fi
 BGPD=${BGPD:-bgpd}
 if ! command -v "$BGPD" >/dev/null 2>&1; then
-    for cand in /home/z/opt/frr/root/usr/lib/frr/bgpd /usr/lib/frr/bgpd; do
+    for cand in $HOME/opt/frr/root/usr/lib/frr/bgpd /usr/lib/frr/bgpd; do
         if [ -x "$cand" ]; then BGPD="$cand"; break; fi
     done
     [ -x "$BGPD" ] || BGPD=""
@@ -225,7 +225,7 @@ else
     echo "== phase 4: FRR bgpd with 'neighbor ... password' (MD5) =="
     mkdir -p "$OUT/p4" "$OUT/p4/vty"
     case "$BGPD" in
-        /home/z/opt/*) FRRROOT=${BGPD%/usr/lib/frr/bgpd}
+        $HOME/opt/*) FRRROOT=${BGPD%/usr/lib/frr/bgpd}
             export LD_LIBRARY_PATH="$FRRROOT/usr/lib/x86_64-linux-gnu/frr:$FRRROOT/usr/lib/x86_64-linux-gnu:$FRRROOT/usr/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
             ;;
     esac
