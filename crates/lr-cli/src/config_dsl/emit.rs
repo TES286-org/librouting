@@ -310,6 +310,29 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
+    // --- logging ---------------------------------------------------------------
+    // Emitted only when at least one field is set, so a default
+    // daemon config round-trips to an empty file.
+    if !cfg.logging.is_empty() {
+        e.open(0, "logging", None);
+        if !cfg.logging.level.is_empty() {
+            e.kv(1, "level", &fmt_string(&cfg.logging.level));
+        }
+        if !cfg.logging.format.is_empty() {
+            e.kv(1, "format", &fmt_string(&cfg.logging.format));
+        }
+        if !cfg.logging.color.is_empty() {
+            e.kv(1, "color", &fmt_string(&cfg.logging.color));
+        }
+        if let Some(path) = &cfg.logging.file {
+            e.kv(1, "file", &fmt_string(path));
+        }
+        for target in &cfg.logging.targets {
+            e.kv(1, "target", &fmt_string(target));
+        }
+        e.close(0);
+    }
+
     Ok(e.out)
 }
 

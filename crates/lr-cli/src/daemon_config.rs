@@ -1077,6 +1077,90 @@ pub(crate) struct DaemonConfig {
     pub route_maps: Vec<RouteMapSpec>,
     /// `[peer-template.<name>]` tables — reusable `[[peer]]` defaults.
     pub peer_templates: std::collections::BTreeMap<String, PeerSpec>,
+    /// `[logging]` — severity, format, color, file and per-component
+    /// level overrides. Parsed from TOML `[logging]` and the DSL
+    /// `logging { ... }` block; CLI flags `--log-level`,
+    /// `--log-target`, `--log-format`, `--log-file`, `--log-color`
+    /// merge into the same struct. The daemon installs it once at
+    /// startup through `daemon_logger::init_logger`.
+    pub logging: LogConfigSpec,
+}
+
+/// Operator-facing logging configuration. Mirrors the runtime
+/// `daemon_logger::LogConfig` but owns strings (not enums / paths) so
+/// the TOML and DSL frontends can build it without pulling the
+/// logger types into the config crate. [`LogConfigSpec::finalise`]
+/// converts it to the runtime form.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct LogConfigSpec {
+    /// Default minimum severity: `error` | `warn` | `info` | `debug` |
+    /// `trace`. Empty string means "use the logger default" (info).
+    pub level: String,
+    /// Output format: `plain` (default) | `json`.
+    pub format: String,
+    /// ANSI colour policy: `auto` | `on` | `off` (default).
+    pub color: String,
+    /// Optional file path mirrored in addition to the console.
+    pub file: Option<String>,
+    /// Per-component level overrides, as `name=level` directives.
+    /// Wildcard `*=level` sets the default. Stored in declaration
+    /// order so the operator sees overrides in the order they were
+    /// written.
+    pub targets: Vec<String>,
+}
+
+impl LogConfigSpec {
+    /// True when no logging key was set. The daemon uses this to
+    /// decide whether to install the default config or the
+    /// operator-supplied one.
+    pub fn is_empty(&self) -> bool {
+        self.level.is_empty()
+            && self.format.is_empty()
+            && self.color.is_empty()
+            && self.file.is_none()
+            && self.targets.is_empty()
+    }
+
+    /// Convert to the runtime [`daemon_logger::LogConfig`]. Unknown
+    /// levels, formats and components are reported as errors so a
+    /// typo fails at startup, not silently.
+    pub fn finalise(&self) -> Result<crate::daemon_logger::LogConfig, String> {
+        use crate::daemon_logger::{ColorMode, Component, LogConfig, LogFormat, Severity};
+        let mut cfg = LogConfig::default();
+        if !self.level.is_empty() {
+            cfg.default_level = Severity::from_str(&self.level).ok_or_else(|| {
+                format!(
+                    "bad logging level '{}' (expected error|warn|info|debug|trace)",
+                    self.level
+                )
+            })?;
+        }
+        if !self.format.is_empty() {
+            cfg.format = LogFormat::from_str(&self.format).ok_or_else(|| {
+                format!("bad logging format '{}' (expected plain|json)", self.format)
+            })?;
+        }
+        if !self.color.is_empty() {
+            cfg.color = ColorMode::from_str(&self.color).ok_or_else(|| {
+                format!("bad logging color '{}' (expected auto|on|off)", self.color)
+            })?;
+        }
+        if let Some(path) = &self.file {
+            cfg.file = Some(std::path::PathBuf::from(path));
+        }
+        for directive in &self.targets {
+            cfg.apply_target_directive(directive).map_err(|e| {
+                // Surface the bad directive in the error so the
+                // operator can find it in the config file.
+                format!("bad logging target '{directive}': {e}")
+            })?;
+        }
+        // Sanity: keep the import used even when the field list is
+        // empty (the `Component` enum documents the recognised names
+        // and is referenced by error messages elsewhere).
+        let _ = Component::all();
+        Ok(cfg)
+    }
 }
 
 impl DaemonConfig {
@@ -1148,6 +1232,7 @@ impl DaemonConfig {
             ldp_keepalive_time: 15,
             ldp_link_hold: 15,
             ldp_targeted_hold: 45,
+            logging: LogConfigSpec::default(),
             ..Default::default()
         }
     }
@@ -2379,6 +2464,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "ldp"
                 && section != "damping"
                 && section != "bgp.rpki"
+                && section != "logging"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -2514,6 +2600,16 @@ pub(crate) fn apply_config_key(
     // hold time or a mis-spelled bind silently changes discovery
     // or label origination.
     if apply_ldp_key(cfg, section, key, value).map_err(|e| format!("line {}: {}", lineno + 1, e))? {
+        return Ok(());
+    }
+    // `[logging]` — fail-closed: a typo'd level or component name
+    // would silently change which records reach the operator, so it
+    // is a hard error. The finalise step (runtime conversion) runs
+    // the same checks a second time so a CLI-only invocation that
+    // bypasses the file parser still fails loudly on a bad value.
+    if apply_logging_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
         return Ok(());
     }
     let full = if section.is_empty() {
@@ -3961,6 +4057,76 @@ fn apply_ldp_key(
     Ok(true)
 }
 
+/// Apply one `[logging]` key. Recognised keys: `level`, `format`,
+/// `color`, `file`, `targets` (an array of `name=level` directives).
+/// Returns `Ok(false)` for keys outside the `[logging]` section so
+/// the shared dispatch can try the next handler.
+///
+/// Fail-closed: a typo'd level or component name is a hard error so
+/// the operator sees it at startup, not after a session drops without
+/// a trace. The runtime conversion (`LogConfigSpec::finalise`) runs
+/// the same validation a second time, so a CLI-only invocation that
+/// bypasses the file parser still fails loudly.
+fn apply_logging_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "logging" {
+        return Ok(false);
+    }
+    match key {
+        "level" => {
+            // Validate here so a typo surfaces at parse time, not at
+            // finalise. The runtime conversion re-checks.
+            if crate::daemon_logger::Severity::from_str(value).is_none() {
+                return Err(format!(
+                    "bad logging level '{value}' (expected error|warn|info|debug|trace)"
+                ));
+            }
+            cfg.logging.level = value.to_string();
+        }
+        "format" => {
+            if crate::daemon_logger::LogFormat::from_str(value).is_none() {
+                return Err(format!(
+                    "bad logging format '{value}' (expected plain|json)"
+                ));
+            }
+            cfg.logging.format = value.to_string();
+        }
+        "color" => {
+            if crate::daemon_logger::ColorMode::from_str(value).is_none() {
+                return Err(format!(
+                    "bad logging color '{value}' (expected auto|on|off)"
+                ));
+            }
+            cfg.logging.color = value.to_string();
+        }
+        "file" => cfg.logging.file = Some(value.to_string()),
+        "targets" => {
+            // `targets` is a TOML array of strings: split on commas,
+            // strip whitespace, drop empties. Each directive is
+            // validated at finalise time so a typo in one element
+            // surfaces with its full context.
+            let parsed = parse_str_array(value);
+            cfg.logging.targets.extend(parsed);
+        }
+        "target" => {
+            // Single directive convenience: `target = "bgp=debug"`.
+            // Useful when an operator wants one override without the
+            // array syntax.
+            cfg.logging.targets.push(value.to_string());
+        }
+        _ => {
+            return Err(format!(
+                "unknown [logging] key '{key}' (typo protection; logging config fails closed)"
+            ))
+        }
+    }
+    Ok(true)
+}
+
 /// Apply one `key = value` pair to the current `[[peer]]` entry.
 /// Returns `Ok(false)` when the key is not part of the schema so the
 /// caller can surface an unknown-key warning.
@@ -4617,6 +4783,52 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 cfg.metrics_addr = Some(args[i + 1].clone());
                 i += 2;
             }
+            // Logging configuration (issue #46). The CLI flags merge
+            // into the same `LogConfigSpec` the `[logging]` TOML
+            // section populates; CLI wins by overwriting the field,
+            // matching the precedence of every other CLI/TOML pair.
+            // Per-component overrides accumulate across `--log-target`
+            // repeats and merge with `[logging].targets` from the file
+            // (file first, CLI appended, last-write-wins for the same
+            // component).
+            "--log-level" if i + 1 < args.len() => {
+                let v = &args[i + 1];
+                if crate::daemon_logger::Severity::from_str(v).is_none() {
+                    eprintln!(
+                        "bad --log-level '{}' (expected error|warn|info|debug|trace)",
+                        v
+                    );
+                    return Err(ExitCode::from(2));
+                }
+                cfg.logging.level = v.clone();
+                i += 2;
+            }
+            "--log-target" if i + 1 < args.len() => {
+                cfg.logging.targets.push(args[i + 1].clone());
+                i += 2;
+            }
+            "--log-format" if i + 1 < args.len() => {
+                let v = &args[i + 1];
+                if crate::daemon_logger::LogFormat::from_str(v).is_none() {
+                    eprintln!("bad --log-format '{}' (expected plain|json)", v);
+                    return Err(ExitCode::from(2));
+                }
+                cfg.logging.format = v.clone();
+                i += 2;
+            }
+            "--log-color" if i + 1 < args.len() => {
+                let v = &args[i + 1];
+                if crate::daemon_logger::ColorMode::from_str(v).is_none() {
+                    eprintln!("bad --log-color '{}' (expected auto|on|off)", v);
+                    return Err(ExitCode::from(2));
+                }
+                cfg.logging.color = v.clone();
+                i += 2;
+            }
+            "--log-file" if i + 1 < args.len() => {
+                cfg.logging.file = Some(args[i + 1].clone());
+                i += 2;
+            }
             "-h" | "--help" => {
                 return Err(ExitCode::SUCCESS);
             }
@@ -5063,7 +5275,7 @@ mod tests {
     fn unknown_table_headers_warn() {
         let mut cfg = DaemonConfig::with_defaults();
         parse_toml_subset(
-            "[[vendor]]\nfoo = 1\n[logging]\nlevel = \"debug\"\n",
+            "[[vendor]]\nfoo = 1\n[mystery]\nlevel = \"debug\"\n",
             &mut cfg,
         )
         .unwrap();
@@ -5071,9 +5283,56 @@ mod tests {
         assert!(cfg.warnings[0].contains("unknown table [[vendor]]"));
         // Keys inside an unknown array table warn too.
         assert!(cfg.warnings[1].contains("unknown key 'unknown-array.vendor.foo'"));
-        assert!(cfg.warnings[2].contains("unknown section [logging]"));
+        assert!(cfg.warnings[2].contains("unknown section [mystery]"));
         // Keys inside an unknown section warn as unknown keys.
-        assert!(cfg.warnings[3].contains("unknown key 'logging.level'"));
+        assert!(cfg.warnings[3].contains("unknown key 'mystery.level'"));
+    }
+
+    #[test]
+    fn logging_section_parses_keys() {
+        // The `[logging]` section is a recognised first-class block:
+        // its keys land in `cfg.logging`, not in the warnings vector.
+        let mut cfg = DaemonConfig::with_defaults();
+        parse_toml_subset(
+            "[logging]\nlevel = \"debug\"\nformat = \"json\"\n\
+             color = \"on\"\nfile = \"/tmp/lr.log\"\n\
+             targets = [\"bgp=trace\", \"ospf=warn\"]\n",
+            &mut cfg,
+        )
+        .unwrap();
+        assert!(cfg.warnings.is_empty(), "{:?}", cfg.warnings);
+        assert_eq!(cfg.logging.level, "debug");
+        assert_eq!(cfg.logging.format, "json");
+        assert_eq!(cfg.logging.color, "on");
+        assert_eq!(cfg.logging.file.as_deref(), Some("/tmp/lr.log"));
+        assert_eq!(cfg.logging.targets, vec!["bgp=trace", "ospf=warn"]);
+        // Finalise converts to the runtime form without errors.
+        let rt = cfg.logging.finalise().unwrap();
+        assert_eq!(rt.default_level, crate::daemon_logger::Severity::Debug);
+        assert_eq!(rt.format, crate::daemon_logger::LogFormat::Json);
+        assert_eq!(rt.color, crate::daemon_logger::ColorMode::On);
+        assert_eq!(
+            rt.level_for(crate::daemon_logger::Component::Bgp),
+            crate::daemon_logger::Severity::Trace
+        );
+    }
+
+    #[test]
+    fn logging_section_fail_closed_on_typo() {
+        // A typo'd level is a hard error, not a warning.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[logging]\nlevel = \"verbose\"\n", &mut cfg).unwrap_err();
+        assert!(err.contains("bad logging level"), "{err}");
+
+        // A typo'd format is a hard error too.
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[logging]\nformat = \"xml\"\n", &mut cfg).unwrap_err();
+        assert!(err.contains("bad logging format"), "{err}");
+
+        // An unknown key in [logging] fails closed (typo protection).
+        let mut cfg = DaemonConfig::with_defaults();
+        let err = parse_toml_subset("[logging]\nverbosity = 5\n", &mut cfg).unwrap_err();
+        assert!(err.contains("unknown [logging] key"), "{err}");
     }
 
     #[test]

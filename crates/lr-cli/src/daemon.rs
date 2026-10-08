@@ -70,6 +70,75 @@ macro_rules! eprintln {
     };
 }
 
+// Categorised log macros — each record carries a [`Severity`] and a
+// [`Component`] so the operator can filter by `--log-target bgp=debug`
+// or `[logging.targets]` in the config. The macros route through
+// `daemon_logger::log_record`, which applies the live `LogConfig`
+// filter before formatting. Use these for diagnostic output (peer
+// state changes, route install events, codec warnings, config
+// diagnostics). Keep the raw `println!` / `eprintln!` macros above for
+// one-shot operational output that must always appear: the usage
+// banner, the startup summary, the `status` reply.
+macro_rules! log_error {
+    ($comp:expr, $($arg:tt)*) => {
+        $crate::daemon_logger::log_record(
+            $crate::daemon_logger::Severity::Error,
+            $comp,
+            format_args!($($arg)*),
+        )
+    };
+}
+macro_rules! log_warn {
+    ($comp:expr, $($arg:tt)*) => {
+        $crate::daemon_logger::log_record(
+            $crate::daemon_logger::Severity::Warn,
+            $comp,
+            format_args!($($arg)*),
+        )
+    };
+}
+macro_rules! log_info {
+    ($comp:expr, $($arg:tt)*) => {
+        $crate::daemon_logger::log_record(
+            $crate::daemon_logger::Severity::Info,
+            $comp,
+            format_args!($($arg)*),
+        )
+    };
+}
+/// `log_debug!` is reserved for verbose diagnostic output that an
+/// operator enables on demand (`--log-target bgp=debug`). Several
+/// daemon submodules do not yet route their verbose output through it;
+/// the macro is defined here so the migration can land one submodule
+/// at a time without re-declaring it.
+#[allow(unused_macros)]
+macro_rules! log_debug {
+    ($comp:expr, $($arg:tt)*) => {
+        $crate::daemon_logger::log_record(
+            $crate::daemon_logger::Severity::Debug,
+            $comp,
+            format_args!($($arg)*),
+        )
+    };
+}
+/// `log_trace!` carries packet-level detail reserved for protocol
+/// debugging. See `log_debug!` for the migration status.
+#[allow(unused_macros)]
+macro_rules! log_trace {
+    ($comp:expr, $($arg:tt)*) => {
+        $crate::daemon_logger::log_record(
+            $crate::daemon_logger::Severity::Trace,
+            $comp,
+            format_args!($($arg)*),
+        )
+    };
+}
+
+// Re-export the logger enums so submodules can write
+// `crate::Component::Bgp` instead of the full path.
+#[allow(unused_imports)]
+pub(crate) use daemon_logger::{ColorMode, Component, LogConfig, LogFormat, Severity};
+
 use std::io::{Read, Write};
 use std::net::{TcpStream, ToSocketAddrs};
 use std::process::ExitCode;
@@ -295,6 +364,22 @@ fn daemon_main() -> ExitCode {
         eprintln!("error: {}", e);
         return ExitCode::from(2);
     }
+    // Install the logger before any protocol work begins so every
+    // subsequent `log_*!` call honours the operator's level / format /
+    // destination choices. A failure to open the log file is fatal:
+    // the operator asked for that destination and silently losing it
+    // would hide the records they wanted to see.
+    let log_cfg = match cfg.logging.finalise() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = daemon_logger::init_logger(log_cfg) {
+        eprintln!("error: {e}");
+        return ExitCode::from(2);
+    }
     // rc.3: the protocol surface is a set. Fail closed on a typo'd or
     // degenerate value instead of silently running BGP (an all-comma
     // value names nothing).
@@ -398,9 +483,9 @@ fn daemon_main() -> ExitCode {
         return ExitCode::from(1);
     }
     if cfg.user.is_some() && cfg.install_kernel {
-        eprintln!(
-            "daemon: warning: --user with --install-kernel-routes: \
-             kernel installs may be denied after the privilege drop"
+        log_warn!(
+            Component::Daemon,
+            "--user with --install-kernel-routes: kernel installs may be denied after the privilege drop"
         );
     }
     run_bgp_daemon(&cfg, rid, None)
@@ -578,9 +663,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // dedicated sender thread (connect + reconnect + backoff).
     if let Some(target) = cfg.bmp_target.as_deref() {
         match spawn_bmp_sender(target, &router) {
-            Ok(()) => println!("daemon: bmp mirroring to {}", target),
+            Ok(()) => log_info!(Component::Bmp, "mirroring to {target}"),
             Err(e) => {
-                eprintln!("daemon: bmp target {}: {}", target, e);
+                log_error!(Component::Bmp, "target {target}: {e}");
                 return ExitCode::from(1);
             }
         }
