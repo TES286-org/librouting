@@ -177,7 +177,7 @@ export = "to-b"
         "exp-b",
     );
 
-    let log = wait_log_all(&b.log, &["daemon: route installed 203.0.113.0/24"]);
+    let log = wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
     // A's own startup must show the policy wiring.
     let a_log = std::fs::read_to_string(&a.log).unwrap_or_default();
     assert!(
@@ -188,7 +188,7 @@ export = "to-b"
     // Negative: the denied prefix never lands after convergence.
     let quiet = wait_quiet(&b.log);
     assert!(
-        !quiet.contains("daemon: route installed 198.51.100.0/24"),
+        !quiet.contains("route installed 198.51.100.0/24"),
         "denied prefix must not be installed; log: {quiet}"
     );
     let _ = log;
@@ -261,10 +261,10 @@ import = "from-a"
     );
     let b = Daemon::spawn(&["--config", cfg_b.to_str().unwrap()], "imp-b");
 
-    wait_log_all(&b.log, &["daemon: route installed 203.0.113.0/24"]);
+    wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
     let quiet = wait_quiet(&b.log);
     assert!(
-        !quiet.contains("daemon: route installed 198.51.100.0/24"),
+        !quiet.contains("route installed 198.51.100.0/24"),
         "denied prefix must not be installed; log: {quiet}"
     );
     std::fs::remove_file(&cfg_b).ok();
@@ -326,7 +326,7 @@ export = "mark"
         "set-b",
     );
 
-    wait_log_all(&b.log, &["daemon: route installed 203.0.113.0/24"]);
+    wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
     std::fs::remove_file(&cfg_a).ok();
 }
 
@@ -449,8 +449,8 @@ remote = "127.0.0.1:{port_c}"
     );
 
     // Both template peers establish and receive the exported prefix.
-    wait_log_all(&b.log, &["daemon: route installed 203.0.113.0/24"]);
-    wait_log_all(&c.log, &["daemon: route installed 203.0.113.0/24"]);
+    wait_log_all(&b.log, &["route installed 203.0.113.0/24"]);
+    wait_log_all(&c.log, &["route installed 203.0.113.0/24"]);
     // A's banner shows two policy bindings from ONE template.
     let a_log = std::fs::read_to_string(&_a.log).unwrap_or_default();
     assert!(

@@ -479,7 +479,11 @@ fn daemon_main() -> ExitCode {
     // without a SIGHUP handler the default disposition would terminate
     // the daemon on a hung-up terminal.
     if let Err(sig) = signal::init() {
-        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        log_error!(
+            Component::Daemon,
+            "cannot install signal handlers (signal {})",
+            sig
+        );
         return ExitCode::from(1);
     }
     if cfg.user.is_some() && cfg.install_kernel {
@@ -736,23 +740,25 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         r.best_path_config_mut().graceful_shutdown_least_preferred = cfg.graceful_shutdown;
         for spec in &cfg.peers {
             if cfg.explicit_peers && !spec.is_outbound() && !spec.is_inbound() {
-                eprintln!(
-                    "daemon: peer {}: 'remote' or 'address' is required",
+                log_error!(
+                    Component::Bgp,
+                    "peer {}: 'remote' or 'address' is required",
                     spec.label()
                 );
                 return ExitCode::from(2);
             }
             if cfg.effective_peer_as(spec) == 0 {
-                eprintln!(
-                    "daemon: peer {}: no peer AS configured (set peer_as or \
-                     the global --peer-as)",
+                log_error!(
+                    Component::Bgp,
+                    "peer {}: no peer AS configured (set peer_as or the global --peer-as)",
                     spec.label()
                 );
                 return ExitCode::from(2);
             }
             if spec.is_inbound() && cfg.listen_addr.is_none() {
-                eprintln!(
-                    "daemon: peer {}: inbound peers require --listen",
+                log_error!(
+                    Component::Bgp,
+                    "peer {}: inbound peers require --listen",
                     spec.label()
                 );
                 return ExitCode::from(2);
@@ -809,10 +815,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 && sc.local_address.is_none()
                 && spec.is_outbound()
             {
-                eprintln!(
-                    "daemon: peer {}: warning: no local_address; eBGP \
-                     egress will keep the received NEXT_HOP (peers often \
-                     reject these UPDATEs)",
+                log_warn!(
+                    Component::Bgp,
+                    "peer {}: no local_address; eBGP egress will keep the \
+                     received NEXT_HOP (peers often reject these UPDATEs)",
                     spec.label()
                 );
             }
@@ -823,9 +829,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         Some(c) => match r.add_session(c) {
                             Ok(h2) => Some(h2),
                             Err(e) => {
-                                eprintln!(
-                                    "daemon: peer {}: add_session (collision \
-                                     challenger) failed: {}",
+                                log_error!(
+                                    Component::Bgp,
+                                    "peer {}: add_session (collision challenger) failed: {}",
                                     spec.label(),
                                     e
                                 );
@@ -858,7 +864,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let has_export = spec.export.is_some() || spec.export_filter.is_some();
                     for hh in handles {
                         if let Err(e) = r.set_session_policy(hh, has_import, has_export) {
-                            eprintln!("daemon: peer {}: {}", spec.label(), e);
+                            log_error!(Component::Bgp, "peer {}: {}", spec.label(), e);
                             return ExitCode::from(1);
                         }
                         // W6.3 exchange-plane (feature `exchange-plane`):
@@ -869,7 +875,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         #[cfg(feature = "exchange-plane")]
                         if spec.exchange_plane.unwrap_or(cfg.exchange_plane) {
                             if let Err(e) = wire_exchange_plane(&mut r, hh, cfg, spec) {
-                                eprintln!("daemon: peer {}: {}", spec.label(), e);
+                                log_error!(Component::Bgp, "peer {}: {}", spec.label(), e);
                                 return ExitCode::from(2);
                             }
                         }
@@ -879,8 +885,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         let xp_requested = spec.exchange_plane.unwrap_or(cfg.exchange_plane)
                             || !cfg.exchange_plane_keys.is_empty();
                         if xp_requested {
-                            eprintln!(
-                                "daemon: peer {}: exchange_plane requested but this binary \
+                            log_error!(
+                                Component::Bgp,
+                                "peer {}: exchange_plane requested but this binary \
                                  was built without the exchange-plane feature",
                                 spec.label()
                             );
@@ -889,23 +896,26 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     }
                     if rfc8212 && cfg.effective_peer_as(spec) != cfg.local_as {
                         if !has_import {
-                            eprintln!(
-                                "daemon: peer {}: warning: no import route-map or filter; \
+                            log_warn!(
+                                Component::Bgp,
+                                "peer {}: no import route-map or filter; \
                                  discarding received routes (RFC 8212)",
                                 spec.label()
                             );
                         }
                         if !has_export {
-                            eprintln!(
-                                "daemon: peer {}: warning: no export route-map or filter; \
+                            log_warn!(
+                                Component::Bgp,
+                                "peer {}: no export route-map or filter; \
                                  announcing nothing (RFC 8212)",
                                 spec.label()
                             );
                         }
                     }
                     if let Some(h2) = handle_in {
-                        println!(
-                            "daemon: peer {}: bidirectional (remote{}); \
+                        log_info!(
+                            Component::Bgp,
+                            "peer {}: bidirectional (remote{}); \
                              collision resolution per RFC 4271 §6.8 on sessions \
                              #{} / #{}",
                             spec.label(),
@@ -932,7 +942,12 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     })
                 }
                 Err(e) => {
-                    eprintln!("daemon: peer {}: add_session failed: {}", spec.label(), e);
+                    log_error!(
+                        Component::Bgp,
+                        "peer {}: add_session failed: {}",
+                        spec.label(),
+                        e
+                    );
                     return ExitCode::from(1);
                 }
             }
@@ -1062,7 +1077,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 r.hooks_mut().import.push(Box::new(hook));
             }
             Err(e) => {
-                eprintln!("daemon: internal ROA filter compile error: {e}");
+                log_error!(Component::Rpki, "internal ROA filter compile error: {e}");
             }
         }
     }
@@ -1354,9 +1369,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let (p, family) = originate_family_for(p);
                     let nh = originate_next_hop(cfg, family);
                     r.originate_family(p, family, nh);
-                    println!("daemon: originating {}", p);
+                    log_info!(Component::Bgp, "originating {}", p);
                 }
-                Err(_) => eprintln!("daemon: invalid network '{}'", net),
+                Err(_) => log_error!(Component::Bgp, "invalid network '{}'", net),
             }
         }
         // RFC 8277 labelled networks: each entry is "<prefix> <labels>"
@@ -1373,9 +1388,14 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     };
                     let nh = originate_next_hop(cfg, family);
                     r.originate_labeled(p, family, labels, nh);
-                    println!("daemon: originating labelled {}", p);
+                    log_info!(Component::Bgp, "originating labelled {}", p);
                 }
-                Err(msg) => eprintln!("daemon: invalid labeled_network '{}': {}", entry, msg),
+                Err(msg) => log_error!(
+                    Component::Bgp,
+                    "invalid labeled_network '{}': {}",
+                    entry,
+                    msg
+                ),
             }
         }
     }
@@ -1402,16 +1422,18 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 continue;
             }
             let Some(peer_ip) = expected_peer_ip(&entry.spec) else {
-                eprintln!(
-                    "daemon: peer {}: bfd requires a resolvable peer address \
+                log_error!(
+                    Component::Bfd,
+                    "peer {}: bfd requires a resolvable peer address \
                      ('remote' host or 'address')",
                     entry.label()
                 );
                 return ExitCode::from(2);
             };
             let Some(local_ip) = peer_local_address(cfg, &entry.spec) else {
-                eprintln!(
-                    "daemon: peer {}: bfd requires a local address \
+                log_error!(
+                    Component::Bfd,
+                    "peer {}: bfd requires a local address \
                      (--local-address / local_address)",
                     entry.label()
                 );
@@ -1430,8 +1452,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             });
         }
         if !specs.is_empty() {
-            println!(
-                "daemon: bfd: {} session(s), min tx {} ms, min rx {} ms, multiplier {}",
+            log_info!(
+                Component::Bfd,
+                "{} session(s), min tx {} ms, min rx {} ms, multiplier {}",
                 specs.len(),
                 cfg.bfd_min_tx_ms,
                 cfg.bfd_min_rx_ms,
@@ -1446,7 +1469,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             ) {
                 Ok(f) => f,
                 Err(e) => {
-                    eprintln!("daemon: {}", e);
+                    log_error!(Component::Bfd, "{e}");
                     return ExitCode::from(1);
                 }
             };
@@ -1554,18 +1577,18 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         let sockaddr = match resolve(&listen_addr) {
             Some(a) => a,
             None => {
-                eprintln!("daemon: cannot resolve {}", listen_addr);
+                log_error!(Component::Daemon, "cannot resolve {listen_addr}");
                 return ExitCode::from(1);
             }
         };
         let l = match bind_tcp_reuse(sockaddr) {
             Ok(l) => l,
             Err(e) => {
-                eprintln!("daemon: bind {} failed: {}", listen_addr, e);
+                log_error!(Component::Daemon, "bind {listen_addr} failed: {e}");
                 return ExitCode::from(1);
             }
         };
-        println!("daemon: listening on {}", listen_addr);
+        log_info!(Component::Daemon, "listening on {listen_addr}");
         // Fail closed: if session authentication is configured but cannot
         // be armed on the listener (missing kernel support, bad key), stop
         // instead of accepting unauthenticated connections. All inbound
@@ -1574,16 +1597,20 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         let inbound_auth = match listener_auth(cfg, &entries) {
             Ok(a) => a,
             Err(e) => {
-                eprintln!("daemon: session auth arming failed: {}", e);
+                log_error!(Component::Daemon, "session auth arming failed: {e}");
                 return ExitCode::from(1);
             }
         };
         if let Err(e) = lr_osroute::tcp_auth::arm_listener(&l, &inbound_auth) {
-            eprintln!("daemon: session auth arming failed: {}", e);
+            log_error!(Component::Daemon, "session auth arming failed: {e}");
             return ExitCode::from(1);
         }
         if !inbound_auth.is_none() {
-            println!("daemon: session auth armed ({})", inbound_auth.describe());
+            log_info!(
+                Component::Daemon,
+                "session auth armed ({})",
+                inbound_auth.describe()
+            );
         }
         // RFC 5082 GTSM: arm the listener with the min-TTL filter. Fail
         // closed when the kernel does not support IP_MINTTL — running
@@ -1592,13 +1619,13 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         let inbound_gtsm = listener_gtsm(cfg, &entries);
         if !inbound_gtsm.is_disabled() {
             if let Err(e) = lr_osroute::gtsm::arm_listener_gtsm(&l, &inbound_gtsm) {
-                eprintln!("daemon: GTSM arming failed: {}", e);
+                log_error!(Component::Daemon, "GTSM arming failed: {e}");
                 return ExitCode::from(1);
             }
-            println!("daemon: GTSM armed ({})", inbound_gtsm);
+            log_info!(Component::Daemon, "GTSM armed ({inbound_gtsm})");
         }
         if let Err(e) = l.set_nonblocking(true) {
-            eprintln!("daemon: cannot set listener non-blocking: {}", e);
+            log_error!(Component::Daemon, "cannot set listener non-blocking: {e}");
             return ExitCode::from(1);
         }
         listener = Some(l);
@@ -1613,15 +1640,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     match host {
         None => {
             if let Err(e) = do_privdrop(cfg) {
-                eprintln!("daemon: {}", e);
+                log_error!(Component::Daemon, "{e}");
                 return ExitCode::from(1);
             }
             if let Err(e) = spawn_api(cfg, &runtime) {
-                eprintln!("daemon: {}", e);
+                log_error!(Component::Api, "{e}");
                 return ExitCode::from(1);
             }
             if let Err(e) = spawn_metrics(cfg, &runtime) {
-                eprintln!("daemon: {}", e);
+                log_error!(Component::Metrics, "{e}");
                 return ExitCode::from(1);
             }
         }
@@ -1630,7 +1657,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             if h.gate.wait().is_err() {
                 // A sibling engine failed startup; the supervisor
                 // already reported it and returns that engine's code.
-                println!("daemon: bgp engine startup aborted");
+                log_error!(Component::Bgp, "bgp engine startup aborted");
                 return ExitCode::SUCCESS;
             }
         }
@@ -1674,15 +1701,15 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             match listener.accept() {
                 Ok((s, peer_sockaddr)) => {
                     let peer = peer_sockaddr.to_string();
-                    println!("daemon: inbound connection from {}", peer);
+                    log_info!(Component::Bgp, "inbound connection from {peer}");
                     let _ = s.set_nodelay(true);
                     let entry = if strict_inbound {
                         match match_inbound_peer(&entries, peer_sockaddr.ip()) {
                             Ok(e) => e,
                             Err(reason) => {
-                                eprintln!(
-                                    "daemon: inbound connection from {} rejected: {}",
-                                    peer, reason
+                                log_warn!(
+                                    Component::Bgp,
+                                    "inbound connection from {peer} rejected: {reason}"
                                 );
                                 continue;
                             }
@@ -1709,8 +1736,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     // challenger immediately per §6.8.
                     let is_bidirectional = entry.handle_in.is_some();
                     if !is_bidirectional && entry.busy.swap(true, Ordering::Relaxed) {
-                        eprintln!(
-                            "daemon: peer {} already has an active session; \
+                        log_warn!(
+                            Component::Bgp,
+                            "peer {} already has an active session; \
                              dropping inbound connection from {}",
                             entry.label(),
                             peer
@@ -1727,7 +1755,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         .name(format!("lr-session-{}", handle.0))
                         .spawn(move || {
                             if let Err(e) = run_peer_session(rt, s, handle, bfd) {
-                                eprintln!("daemon: session #{} ended: {}", handle.0, e);
+                                log_error!(Component::Bgp, "session #{} ended: {}", handle.0, e);
                             }
                             // Only clear the inbound guard for
                             // non-bidirectional peers (bidirectional
@@ -1754,7 +1782,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     poll_idle = (poll_idle * 2).min(Duration::from_millis(100));
                 }
                 Err(e) => {
-                    eprintln!("daemon: accept failed: {}", e);
+                    log_error!(Component::Bgp, "accept failed: {e}");
                     thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -1763,7 +1791,10 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         // Connectors own the I/O; the main thread just supervises.
         wait_for_shutdown(&runtime);
     } else {
-        println!("daemon: no --peer/--listen given; idling (tick loop only)");
+        log_info!(
+            Component::Daemon,
+            "no --peer/--listen given; idling (tick loop only)"
+        );
         wait_for_shutdown(&runtime);
     }
 
@@ -1773,7 +1804,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     while live_sessions.load(Ordering::Relaxed) > 0 && WallClock::now() < deadline {
         thread::sleep(Duration::from_millis(50));
     }
-    println!("daemon: shutdown complete");
+    log_info!(Component::Daemon, "shutdown complete");
     ExitCode::SUCCESS
 }
 
@@ -1808,8 +1839,9 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
             "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
             "ipv4-labeled-unicast" => families.push(NlriFamily::IPV4_LABELED_UNICAST),
             "ipv6-labeled-unicast" => families.push(NlriFamily::IPV6_LABELED_UNICAST),
-            other => eprintln!(
-                "daemon: peer {}: unknown mp_family '{}' (skipped)",
+            other => log_warn!(
+                Component::Bgp,
+                "peer {}: unknown mp_family '{}' (skipped)",
                 p.label(),
                 other
             ),
@@ -1906,8 +1938,9 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
                 }
             }
         } else {
-            eprintln!(
-                "daemon: peer {}: invalid local_address_v6 '{}'",
+            log_error!(
+                Component::Bgp,
+                "peer {}: invalid local_address_v6 '{}'",
                 p.label(),
                 v6
             );
@@ -2345,8 +2378,9 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
             // configured `local` as the source.
         }
         lr_osroute::source_check::SourceCheck::NoRoute => {
-            eprintln!(
-                "daemon: peer {}: warning: no kernel route to {} — the \
+            log_warn!(
+                Component::Bgp,
+                "peer {}: no kernel route to {} — the \
                  outbound TCP will fail with ENETUNREACH unless a route \
                  appears (e.g. via Babel) before the first dial",
                 entry.label(),
@@ -2362,12 +2396,11 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
             // overrides the default on Linux/macOS). This is
             // informational — no warning needed unless the bind also
             // fails (which the non-Windows diagnostic cannot test).
-            // Log at info level (not warning) so the operator sees the
-            // kernel's default choice without being alarmed.
-            println!(
-                "daemon: peer {}: info: kernel default source for {} is \
+            log_info!(
+                Component::Bgp,
+                "peer {}: kernel default source for {} is \
                  {} (if {}) — the daemon binds to {} which overrides this; \
-                 verify the actual source via the 'connected from' log line",
+                 verify the actual source via the 'outbound TCP established' log line",
                 entry.label(),
                 remote,
                 kernel_choice.source,
@@ -2383,8 +2416,9 @@ fn diagnose_source_address(cfg: &DaemonConfig, entry: &PeerEntry) {
             // fallback uses `kernel_default.source` — the peer will see
             // a different source and reject the session. THIS is the
             // real problem the operator must fix.
-            eprintln!(
-                "daemon: peer {}: warning: bind() to local_address {} \
+            log_warn!(
+                Component::Bgp,
+                "peer {}: bind() to local_address {} \
                  fails on Windows — the daemon will fall back to the \
                  kernel's default source {} (if {}) for {}. The peer's \
                  neighbor match will fail. Either assign {} to the \
@@ -2458,8 +2492,9 @@ fn connect_secure(
             // lab configs); fall back to the kernel's source choice
             // exactly as before the bind existed.
             Err(e) if e.kind() == std::io::ErrorKind::AddrNotAvailable => {
-                eprintln!(
-                    "daemon: warning: local address {} not assigned to any interface; \
+                log_warn!(
+                    Component::Bgp,
+                    "local address {} not assigned to any interface; \
                      falling back to kernel-chosen source",
                     local.ip()
                 );
@@ -2726,7 +2761,7 @@ fn spawn_connector(
                 let sockaddr = match resolve(&remote) {
                     Some(a) => a,
                     None => {
-                        eprintln!("daemon: peer {}: cannot resolve {}", label, remote);
+                        log_error!(Component::Bgp, "peer {label}: cannot resolve {remote}");
                         return;
                     }
                 };
@@ -2747,9 +2782,9 @@ fn spawn_connector(
                 // adapts to Babel's route install/withdraw cadence in
                 // real time.
                 if !route_reaches(&sockaddr) {
-                    println!(
-                        "daemon: peer {}: waiting for a kernel route to {} (covered by blackhole or no route yet)",
-                        label, remote
+                    log_info!(
+                        Component::Bgp,
+                        "peer {label}: waiting for a kernel route to {remote} (covered by blackhole or no route yet)"
                     );
                     // Short poll — don't consume the full backoff
                     // (which would be 30 s on the ladder). Poll every
@@ -2773,9 +2808,9 @@ fn spawn_connector(
                         // daemon's own interface address.
                         let actual_local = stream.local_addr().ok();
                         if let Some(la) = &actual_local {
-                            println!(
-                                "daemon: peer {}: outbound TCP established {} -> {}",
-                                label, la, sockaddr
+                            log_info!(
+                                Component::Bgp,
+                                "peer {label}: outbound TCP established {la} -> {sockaddr}"
                             );
                         }
                         // Self-connect guard: if the kernel routed the
@@ -2813,23 +2848,23 @@ fn spawn_connector(
                             if is_canonical_loopback(&la.ip())
                                 && !is_canonical_loopback(&sockaddr.ip())
                             {
-                                eprintln!(
-                                    "daemon: peer {}: ABORTED self-connect from {} — \
+                                log_error!(
+                                    Component::Bgp,
+                                    "peer {label}: ABORTED self-connect from {la} — \
                                      the outbound SYN was delivered to this daemon's own \
                                      listener via loopback (the destination is likely \
                                      covered by a blackhole route the daemon installed). \
                                      Waiting for the Babel /32 route to override the \
-                                     blackhole before the next dial.",
-                                    label, la
+                                     blackhole before the next dial."
                                 );
                                 drop(stream);
                                 // Treat as a non-collision failure: grow
                                 // the backoff ladder so the next dial waits
                                 // for Babel to converge.
                                 backoff_ms = (backoff_ms * 2).min(30_000);
-                                eprintln!(
-                                    "daemon: peer {}: reconnecting in {}ms",
-                                    label, backoff_ms
+                                log_debug!(
+                                    Component::Bgp,
+                                    "peer {label}: reconnecting in {backoff_ms}ms"
                                 );
                                 sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
                                 continue;
@@ -2844,7 +2879,7 @@ fn spawn_connector(
                                 collision_lost = true;
                                 lost_once.store(true, Ordering::Relaxed);
                             }
-                            eprintln!("daemon: peer {}: session ended: {}", label, e);
+                            log_error!(Component::Bgp, "peer {label}: session ended: {e}");
                         }
                         if !rt.running.load(Ordering::Relaxed) {
                             break;
@@ -2873,9 +2908,9 @@ fn spawn_connector(
                             log_error!(Component::Bgp, "peer {label}: {e}");
                             return;
                         }
-                        eprintln!(
-                            "daemon: peer {}: connect failed ({}); retrying in {}ms",
-                            label, e, backoff_ms
+                        log_warn!(
+                            Component::Bgp,
+                            "peer {label}: connect failed ({e}); retrying in {backoff_ms}ms"
                         );
                         sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
                         backoff_ms = (backoff_ms * 2).min(30_000);
@@ -3233,7 +3268,10 @@ impl KernelMirror {
         if install_kernel {
             match lr_osroute::SystemRouteTable::connect() {
                 Ok(t) => {
-                    println!("daemon: os route table connected — installing kernel routes");
+                    log_info!(
+                        Component::Osroute,
+                        "os route table connected — installing kernel routes"
+                    );
                     let mut t = t;
                     // Snapshot the kernel-owned (connected) prefixes the
                     // mirror must never replace — see `connected`.
@@ -3245,17 +3283,17 @@ impl KernelMirror {
                                 }
                             }
                         }
-                        Err(e) => eprintln!(
-                            "daemon: initial FIB scan failed ({}); connected-route protection off",
-                            e
+                        Err(e) => log_warn!(
+                            Component::Osroute,
+                            "initial FIB scan failed ({e}); connected-route protection off"
                         ),
                     }
                     ip_table = Some(Box::new(t)
                         as Box<dyn lr_osroute::OsRouteTable<Error = lr_osroute::OsRouteError>>);
                 }
-                Err(e) => eprintln!(
-                    "daemon: os route table unavailable ({}); kernel install disabled",
-                    e
+                Err(e) => log_warn!(
+                    Component::Osroute,
+                    "os route table unavailable ({e}); kernel install disabled"
                 ),
             }
             // Also seed `connected` with the host's own interface
@@ -3282,20 +3320,23 @@ impl KernelMirror {
                         }
                     }
                 }
-                Err(e) => eprintln!(
-                    "daemon: interface enumeration failed ({}); own-IP blackhole skip disabled",
-                    e
+                Err(e) => log_warn!(
+                    Component::Osroute,
+                    "interface enumeration failed ({e}); own-IP blackhole skip disabled"
                 ),
             }
             #[cfg(target_os = "linux")]
             match lr_osroute::mpls_route::MplsNetlink::connect() {
                 Ok(t) => {
-                    println!("daemon: mpls route table connected — installing BGP-LU LSPs");
+                    log_info!(
+                        Component::Osroute,
+                        "mpls route table connected — installing BGP-LU LSPs"
+                    );
                     mpls = Some(t);
                 }
-                Err(e) => eprintln!(
-                    "daemon: mpls route table unavailable ({}); LSP install disabled",
-                    e
+                Err(e) => log_warn!(
+                    Component::Osroute,
+                    "mpls route table unavailable ({e}); LSP install disabled"
                 ),
             }
         }
@@ -3547,26 +3588,30 @@ impl KernelMirror {
 /// wire-parity harness will build that).
 fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let Some(listen) = cfg.listen_addr.as_deref() else {
-        eprintln!("daemon: --protocol bmp requires --listen ADDR:PORT");
+        log_error!(Component::Bmp, "--protocol bmp requires --listen ADDR:PORT");
         return ExitCode::from(2);
     };
     let addr = match resolve(listen) {
         Some(a) => a,
         None => {
-            eprintln!("daemon: invalid --listen address: {}", listen);
+            log_error!(Component::Bmp, "invalid --listen address: {}", listen);
             return ExitCode::from(2);
         }
     };
     let listener = match bind_tcp_reuse(addr) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("daemon: bmp bind {} failed: {}", addr, e);
+            log_error!(Component::Bmp, "bind {} failed: {}", addr, e);
             return ExitCode::from(1);
         }
     };
-    println!("daemon: bmp collector listening on {}", addr);
+    log_info!(Component::Bmp, "collector listening on {}", addr);
     if let Err(sig) = signal::init() {
-        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        log_error!(
+            Component::Daemon,
+            "cannot install signal handlers (signal {})",
+            sig
+        );
         return ExitCode::from(1);
     }
     let running = Arc::new(AtomicBool::new(true));
@@ -3581,11 +3626,11 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         session_labels: Arc::new(Mutex::new(HashMap::new())),
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
+        log_error!(Component::Api, "{e}");
         return ExitCode::from(1);
     }
     if let Err(e) = spawn_metrics(cfg, &runtime) {
-        eprintln!("daemon: {}", e);
+        log_error!(Component::Metrics, "{e}");
         return ExitCode::from(1);
     }
     let _ = rid;
@@ -3616,7 +3661,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     listener
         .set_nonblocking(true)
         .map_err(|e| {
-            eprintln!("daemon: bmp listener nonblocking: {}", e);
+            log_error!(Component::Bmp, "listener nonblocking: {e}");
             ExitCode::from(1)
         })
         .unwrap();
@@ -3624,7 +3669,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         dispatch_signals(&runtime);
         match listener.accept() {
             Ok((stream, peer)) => {
-                println!("daemon: bmp station connected from {}", peer);
+                log_info!(Component::Bmp, "station connected from {}", peer);
                 let router = Arc::clone(&router);
                 let running = Arc::clone(&running);
                 thread::Builder::new()
@@ -3639,12 +3684,12 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
                 thread::sleep(Duration::from_millis(100));
             }
             Err(e) => {
-                eprintln!("daemon: bmp accept: {}", e);
+                log_error!(Component::Bmp, "accept: {e}");
                 thread::sleep(Duration::from_millis(100));
             }
         }
     }
-    println!("daemon: bmp collector shutdown complete");
+    log_info!(Component::Bmp, "collector shutdown complete");
     ExitCode::SUCCESS
 }
 
@@ -3675,7 +3720,7 @@ fn serve_bmp_station(
                 continue;
             }
             Err(e) => {
-                eprintln!("daemon: bmp station read: {}", e);
+                log_error!(Component::Bmp, "station read: {e}");
                 break;
             }
         };
@@ -3687,14 +3732,14 @@ fn serve_bmp_station(
                 Ok(Some(m)) => m,
                 Ok(None) => break,
                 Err(e) => {
-                    eprintln!("daemon: bmp decode: {}", e);
+                    log_error!(Component::Bmp, "decode: {e}");
                     break;
                 }
             };
             handle_bmp_message(&message, &mut bgp, router, &mut installed);
         }
     }
-    println!("daemon: bmp station disconnected");
+    log_info!(Component::Bmp, "station disconnected");
 }
 
 /// Apply one decoded BMP message.
@@ -3725,7 +3770,7 @@ fn handle_bmp_message(
                 }
                 Ok(None) => return,
                 Err(e) => {
-                    eprintln!("daemon: bmp monitored update decode: {}", e);
+                    log_error!(Component::Bmp, "monitored update decode: {e}");
                     return;
                 }
             };
@@ -3744,8 +3789,9 @@ fn handle_bmp_message(
                     update.attributes.clone().into(),
                 );
                 installed.insert(n.prefix, key);
-                println!(
-                    "daemon: bmp route {} via {} ({})",
+                log_info!(
+                    Component::Bmp,
+                    "route {} via {} ({})",
                     n.prefix,
                     next_hop
                         .map(|nh| nh.to_string())
@@ -3755,16 +3801,16 @@ fn handle_bmp_message(
             }
         }
         BmpMsgType::PeerUp => {
-            println!("daemon: bmp peer up ({})", peer_desc);
+            log_info!(Component::Bmp, "peer up ({peer_desc})");
         }
         BmpMsgType::PeerDown => {
-            println!("daemon: bmp peer down ({})", peer_desc);
+            log_info!(Component::Bmp, "peer down ({peer_desc})");
         }
         BmpMsgType::Initiation => {
-            println!("daemon: bmp station initiated ({})", peer_desc);
+            log_info!(Component::Bmp, "station initiated ({peer_desc})");
         }
         BmpMsgType::Termination => {
-            println!("daemon: bmp station terminating ({})", peer_desc);
+            log_info!(Component::Bmp, "station terminating ({peer_desc})");
         }
         _ => {}
     }
@@ -3828,13 +3874,14 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     let ifaces: Vec<BabelIface> = match resolve_babel_interfaces(cfg) {
         Ok(v) => v,
         Err(e) => {
-            eprintln!("daemon: babel {e}");
+            log_warn!(Component::Babel, "babel {e}");
             return ExitCode::from(2);
         }
     };
     if ifaces.is_empty() {
-        eprintln!(
-            "daemon: --protocol babel requires --local-address (IPv6 link-local or IPv4) or a [[babel.interface]] block matching a system interface"
+        log_error!(
+            Component::Babel,
+            "--protocol babel requires --local-address (IPv6 link-local or IPv4) or a [[babel.interface]] block matching a system interface"
         );
         return ExitCode::from(2);
     }
@@ -3851,7 +3898,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 std::net::SocketAddr::V6(std::net::SocketAddrV6::new(v6, t.port, 0, t.scope_id))
             }
         };
-        println!("daemon: babel listening on {} (group {})", uc_bind, t.group);
+        log_info!(
+            Component::Babel,
+            "babel listening on {} (group {})",
+            uc_bind,
+            t.group
+        );
     }
 
     // Set up the router. Embedded: the supervisor's shared router
@@ -3885,7 +3937,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     h
                 }
                 Err(e) => {
-                    eprintln!("daemon: babel add_session failed: {}", e);
+                    log_error!(Component::Babel, "babel add_session failed: {}", e);
                     return ExitCode::from(1);
                 }
             }
@@ -3912,11 +3964,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             iface.rtt_cost,
         );
         if !iface.auth_debug_line.is_empty() {
-            println!("daemon: {}", iface.auth_debug_line);
+            log_info!(Component::Daemon, "{}", iface.auth_debug_line);
         }
         if !manual {
-            println!(
-                "daemon: babel interface {} session {} — {} hello {}ms update {}ms rxcost {} router-id {}{}{}",
+            log_info!(
+                Component::Babel,
+                "interface {} session {} — {} hello {}ms update {}ms rxcost {} router-id {}{}{}",
                 iface.name,
                 h.0,
                 match iface.transports[0].local {
@@ -3949,8 +4002,9 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 })
                 .collect::<Vec<_>>()
                 .join(", ");
-            println!(
-                "daemon: babel interface {} transports: {}{}",
+            log_info!(
+                Component::Babel,
+                "interface {} transports: {}{}",
                 iface.name,
                 summary,
                 if iface.extended_next_hop {
@@ -3972,9 +4026,9 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     let nh = originate_next_hop(cfg, family)
                         .or(Some(lr_ip(ifaces[0].transports[0].local)));
                     let _key = r.originate_family(p, family, nh);
-                    println!("daemon: originating {}", p);
+                    log_info!(Component::Daemon, "originating {}", p);
                 }
-                Err(_) => eprintln!("daemon: invalid network '{}'", net),
+                Err(_) => log_error!(Component::Bgp, "invalid network '{}'", net),
             }
         }
     }
@@ -4000,7 +4054,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         match daemon_policy::build_babel_filter(cfg, &cfg.babel_export_filter, &roa_store) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("daemon: babel export filter: {e}");
+                log_warn!(Component::Babel, "babel export filter: {e}");
                 return ExitCode::from(2);
             }
         };
@@ -4008,7 +4062,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         match daemon_policy::build_babel_filter(cfg, &cfg.babel_import_filter, &roa_store) {
             Ok(f) => f,
             Err(e) => {
-                eprintln!("daemon: babel import filter: {e}");
+                log_warn!(Component::Babel, "babel import filter: {e}");
                 return ExitCode::from(2);
             }
         };
@@ -4027,17 +4081,29 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             .hooks_mut()
             .import
             .push(Box::new(hook));
-        println!("daemon: babel import filter '{}' attached", f.name);
+        log_info!(
+            Component::Babel,
+            "babel import filter '{}' attached",
+            f.name
+        );
     }
     if let Some(f) = &babel_export_filter {
-        println!("daemon: babel export filter '{}' attached", f.name);
+        log_info!(
+            Component::Babel,
+            "babel export filter '{}' attached",
+            f.name
+        );
     }
 
     // Signal handling (idempotent — the multi-protocol supervisor
     // already installed the handlers; re-registering the same static
     // handler is harmless).
     if let Err(sig) = signal::init() {
-        eprintln!("daemon: cannot install signal handlers (signal {})", sig);
+        log_error!(
+            Component::Daemon,
+            "cannot install signal handlers (signal {})",
+            sig
+        );
         return ExitCode::from(1);
     }
 
@@ -4076,11 +4142,11 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     let ticker = match &host {
         None => {
             if let Err(e) = spawn_api(cfg, &runtime) {
-                eprintln!("daemon: {}", e);
+                log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
             }
             if let Err(e) = spawn_metrics(cfg, &runtime) {
-                eprintln!("daemon: {}", e);
+                log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
             }
 
@@ -4098,7 +4164,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             // release (privilege drop + API socket happen in between).
             let _ = h.report.send(EngineReport::Started);
             if h.gate.wait().is_err() {
-                println!("daemon: babel engine startup aborted");
+                log_error!(Component::Babel, "babel engine startup aborted");
                 return ExitCode::SUCCESS;
             }
             None
@@ -4163,13 +4229,15 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     if up != iface.link_up {
                         iface.link_up = up;
                         if up {
-                            println!(
-                                "daemon: babel interface {} link up — resuming announcements",
+                            log_info!(
+                                Component::Babel,
+                                "interface {} link up — resuming announcements",
                                 iface.name
                             );
                         } else {
-                            println!(
-                                "daemon: babel interface {} link down — withdrawing its routes (check link)",
+                            log_warn!(
+                                Component::Babel,
+                                "interface {} link down — withdrawing its routes (check link)",
                                 iface.name
                             );
                             let mut r = router.write().unwrap();
@@ -4253,7 +4321,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         match auth.authenticate_packet(&announce, ph) {
                             Ok(signed) => signed,
                             Err(e) => {
-                                eprintln!("daemon: babel authenticate failed: {}", e);
+                                log_error!(Component::Babel, "babel authenticate failed: {}", e);
                                 continue;
                             }
                         }
@@ -4264,7 +4332,12 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                     // Routine during a link flap (ENETUNREACH until the
                     // 1 s check-link poll gates the interface): one line
                     // per failed announcement at most.
-                    eprintln!("daemon: babel send on {} failed: {}", iface.name, e);
+                    log_error!(
+                        Component::Babel,
+                        "babel send on {} failed: {}",
+                        iface.name,
+                        e
+                    );
                 }
             }
         }
@@ -4453,8 +4526,9 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                                     std::sync::atomic::AtomicU64::new(0);
                                 let n = RECV_ERRORS.fetch_add(1, Ordering::Relaxed);
                                 if n.is_multiple_of(100) {
-                                    eprintln!(
-                                        "daemon: babel recv on {} ({}): {}",
+                                    log_error!(
+                                        Component::Babel,
+                                        "recv on {} ({}): {}",
                                         iface.name,
                                         if is_multicast { "mc" } else { "uc" },
                                         e
@@ -4507,14 +4581,18 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 };
                 iface.last_sig = String::new(); // the announcement changes
                 iface.last_announce_ms = 0;
-                println!(
-                    "daemon: babel seqno request on {} — seqno {} → {}",
-                    iface.name, cur, iface.seqno
+                log_info!(
+                    Component::Babel,
+                    "seqno request on {} — seqno {} → {}",
+                    iface.name,
+                    cur,
+                    iface.seqno
                 );
             } else if route_req {
                 iface.last_announce_ms = 0;
-                println!(
-                    "daemon: babel route request on {} — announcing now",
+                log_info!(
+                    Component::Babel,
+                    "route request on {} — announcing now",
                     iface.name
                 );
             }
@@ -4543,7 +4621,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                         match auth.authenticate_packet(&out, ph) {
                             Ok(signed) => signed,
                             Err(e) => {
-                                eprintln!("daemon: babel authenticate failed: {}", e);
+                                log_error!(Component::Babel, "babel authenticate failed: {}", e);
                                 continue;
                             }
                         }
@@ -4560,15 +4638,16 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
         }
     }
     if dropped > 0 {
-        println!(
-            "daemon: babel dropped {} unauthenticated/replayed datagrams",
+        log_warn!(
+            Component::Babel,
+            "dropped {} unauthenticated/replayed datagrams",
             dropped
         );
     }
     if let Some(ticker) = ticker {
         let _ = ticker.join();
     }
-    println!("daemon: babel shutdown complete");
+    log_info!(Component::Babel, "babel shutdown complete");
     ExitCode::SUCCESS
 }
 
@@ -4727,8 +4806,9 @@ fn resolve_babel_interfaces(cfg: &DaemonConfig) -> Result<Vec<BabelIface>, Strin
             ));
         }
     };
-    println!(
-        "daemon: babel {} interface pattern(s) configured; enumerating {} system interface(s)",
+    log_info!(
+        Component::Babel,
+        "{} interface pattern(s) configured; enumerating {} system interface(s)",
         cfg.babel_interfaces.len(),
         sys.len()
     );
@@ -4742,10 +4822,14 @@ fn resolve_babel_interfaces(cfg: &DaemonConfig) -> Result<Vec<BabelIface>, Strin
             .map(|i| i.name.as_str())
             .collect();
         if matched.is_empty() {
-            println!("daemon: babel interface pattern '{pat}' matched 0 interfaces");
+            log_info!(
+                Component::Babel,
+                "babel interface pattern '{pat}' matched 0 interfaces"
+            );
         } else {
-            println!(
-                "daemon: babel interface pattern '{pat}' matched {} interface(s): {}",
+            log_info!(
+                Component::Babel,
+                "interface pattern '{pat}' matched {} interface(s): {}",
                 matched.len(),
                 matched.join(", ")
             );
@@ -4766,7 +4850,7 @@ fn resolve_babel_interfaces(cfg: &DaemonConfig) -> Result<Vec<BabelIface>, Strin
         };
         match babel_iface_from_spec(cfg, spec, entry, boot_bytes) {
             Ok(iface) => out.push(iface),
-            Err(e) => eprintln!("daemon: babel interface {} skipped: {e}", entry.name),
+            Err(e) => log_warn!(Component::Babel, "interface {} skipped: {e}", entry.name),
         }
     }
     if out.is_empty() {
@@ -5003,15 +5087,17 @@ fn babel_iface_from_spec(
     // explicitly or disable it intentionally.
     let extended_next_hop = if extended_next_hop_requested {
         if !has_v4_transport {
-            println!(
-                "daemon: babel interface {} extended_next_hop on (v4-over-v6)",
+            log_info!(
+                Component::Babel,
+                "interface {} extended_next_hop on (v4-over-v6)",
                 entry.name
             );
         }
         true
     } else if has_v6_transport && !has_v4_transport && is_tunnel {
-        println!(
-            "daemon: babel interface {} no IPv4 transport — auto-enabling extended_next_hop \
+        log_warn!(
+            Component::Babel,
+            "interface {} no IPv4 transport — auto-enabling extended_next_hop \
              (RFC 5549) so IPv4 routes can ride the v6 next hop. Set 'extended_next_hop true' \
              explicitly to silence this, or 'extended_next_hop false' to disable the \
              auto-inference.",
@@ -5023,8 +5109,9 @@ fn babel_iface_from_spec(
         // make the consequence visible. Without extended_next_hop the
         // IPv4 routes in the RIB will be silently dropped at announce
         // time.
-        println!(
-            "daemon: babel interface {} no IPv4 transport and extended_next_hop is off — \
+        log_warn!(
+            Component::Babel,
+            "interface {} no IPv4 transport and extended_next_hop is off — \
              IPv4 routes will not be announced on this interface. Set 'extended_next_hop true' \
              to enable RFC 5549 v4-over-v6 next hops.",
             entry.name
@@ -5068,8 +5155,9 @@ fn babel_iface_from_spec(
         })
         .collect();
     if !cfg.babel_keys.is_empty() && keys.is_empty() {
-        println!(
-            "daemon: babel interface {} runs unauthenticated (no key matches)",
+        log_warn!(
+            Component::Babel,
+            "interface {} runs unauthenticated (no key matches)",
             entry.name
         );
     }
@@ -5182,7 +5270,7 @@ fn babel_transport_new(
     if let Some(dev) = device {
         if let Ok(sock) = uc.try_clone() {
             if let Err(e) = socket2::Socket::from(sock).bind_device(Some(dev.as_bytes())) {
-                eprintln!("daemon: babel {label} cannot bind to device: {e}");
+                log_error!(Component::Babel, "babel {label} cannot bind to device: {e}");
             }
         }
     }
@@ -5227,7 +5315,7 @@ fn babel_transport_new(
             #[cfg(target_os = "linux")]
             if let Some(dev) = device {
                 if let Err(e) = sock.bind_device(Some(dev.as_bytes())) {
-                    eprintln!("daemon: babel {label} cannot bind to device: {e}");
+                    log_error!(Component::Babel, "babel {label} cannot bind to device: {e}");
                 }
             }
             let s = std::net::UdpSocket::from(sock);
@@ -5239,7 +5327,10 @@ fn babel_transport_new(
                 _ => false,
             };
             if !joined {
-                eprintln!("daemon: babel multicast join failed on {label} (group {group})");
+                log_error!(
+                    Component::Babel,
+                    "babel multicast join failed on {label} (group {group})"
+                );
                 // Non-fatal: unicast traffic still works.
             }
             Some(s)
@@ -5274,7 +5365,10 @@ fn build_babel_auth_interface_for(
     let mut mac_keys: Vec<lr_babel::BabelMacKey> = Vec::new();
     for spec in keys {
         let Some(secret) = &spec.secret else {
-            eprintln!("daemon: [[babel.key]] without 'secret' on {label} (fail closed)");
+            log_error!(
+                Component::Babel,
+                "[[babel.key]] without 'secret' on {label} (fail closed)"
+            );
             return (None, String::new());
         };
         let algorithm = spec
@@ -5325,7 +5419,10 @@ fn build_babel_auth_interface_for(
     match lr_babel::BabelAuthInterface::new(acfg, index.to_vec(), 0, Box::new(nonce)) {
         Ok(iface) => (Some(iface), debug),
         Err(e) => {
-            eprintln!("daemon: babel auth config rejected on {label}: {e} (fail closed)");
+            log_error!(
+                Component::Babel,
+                "babel auth config rejected on {label}: {e} (fail closed)"
+            );
             (None, String::new())
         }
     }
@@ -5852,7 +5949,7 @@ fn spawn_bmp_sender(target: &str, router: &Arc<RwLock<DefaultRouter>>) -> Result
             loop {
                 match std::net::TcpStream::connect_timeout(&addr, Duration::from_secs(2)) {
                     Ok(mut stream) => {
-                        println!("daemon: bmp station {} connected", addr);
+                        log_info!(Component::Bmp, "bmp station {} connected", addr);
                         backoff_ms = 500; // a good connect resets the timer
                         let mut station_alive = true;
                         while let Ok(bytes) = rx.recv() {
@@ -6183,13 +6280,16 @@ fn dispatch_pending_signals(rt: &Runtime) {
     while let Some(sig) = signal::take_pending() {
         match sig {
             signal::SIGTERM | signal::SIGINT => {
-                println!("daemon: signal {} received — shutting down", sig);
+                log_info!(Component::Daemon, "signal {} received — shutting down", sig);
                 rt.running.store(false, Ordering::Relaxed);
             }
             signal::SIGHUP => {
-                println!("daemon: SIGHUP received — reloading configuration");
+                log_info!(
+                    Component::Daemon,
+                    "SIGHUP received — reloading configuration"
+                );
                 for line in (rt.reload)() {
-                    println!("daemon: {}", line);
+                    log_info!(Component::Daemon, "{}", line);
                 }
             }
             _ => {}
@@ -6214,7 +6314,11 @@ fn sleep_interruptible(rt: &Runtime, total: Duration) {
 fn do_privdrop(cfg: &DaemonConfig) -> Result<(), String> {
     if let Some(user) = &cfg.user {
         privdrop::drop_privileges(user, cfg.group.as_deref())?;
-        println!("daemon: privileges dropped ({})", privdrop::identity());
+        log_warn!(
+            Component::Daemon,
+            "privileges dropped ({})",
+            privdrop::identity()
+        );
     }
     Ok(())
 }
@@ -6246,7 +6350,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
         }),
     };
     api::spawn(path, ctx)
-        .map(|p| println!("daemon: runtime API on {}", p))
+        .map(|p| log_info!(Component::Api, "runtime API on {}", p))
         .map_err(|e| format!("runtime API: {e}"))
 }
 
@@ -6285,7 +6389,7 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
         }),
     };
     metrics::spawn(addr, ctx)
-        .map(|a| println!("daemon: metrics endpoint on http://{a}/metrics"))
+        .map(|a| log_info!(Component::Metrics, "metrics endpoint on http://{a}/metrics"))
         .map_err(|e| format!("metrics endpoint: {e}"))
 }
 
@@ -6512,11 +6616,12 @@ fn reload_config(
 fn log_event(ev: &RouterEvent) {
     match ev {
         RouterEvent::PeerStateChange { session, state } => {
-            println!("daemon: session #{} → {}", session.0, state);
+            log_info!(Component::Bgp, "session #{} → {}", session.0, state);
         }
         RouterEvent::RouteInstalled(r) => {
-            println!(
-                "daemon: route installed {} via {}",
+            log_info!(
+                Component::Rib,
+                "route installed {} via {}",
                 r.key.prefix,
                 r.next_hop
                     .map(|n| n.to_string())
@@ -6524,18 +6629,18 @@ fn log_event(ev: &RouterEvent) {
             );
         }
         RouterEvent::RouteWithdrawn(k) => {
-            println!("daemon: route withdrawn {}", k.prefix);
+            log_info!(Component::Rib, "route withdrawn {}", k.prefix);
         }
-        RouterEvent::Log(msg) => println!("daemon: {}", msg),
+        RouterEvent::Log(msg) => log_info!(Component::Router, "{msg}"),
         RouterEvent::ProtocolError { session, message } => {
-            eprintln!("daemon: session #{} error: {}", session.0, message)
+            log_error!(Component::Bgp, "session #{} error: {}", session.0, message)
         }
         _ => {}
     }
 }
 
 fn wait_for_shutdown(rt: &Runtime) {
-    println!("daemon: waiting for SIGTERM / SIGINT");
+    log_info!(Component::Daemon, "waiting for SIGTERM / SIGINT");
     while rt.running.load(Ordering::Relaxed) {
         thread::sleep(Duration::from_millis(100));
         dispatch_signals(rt);

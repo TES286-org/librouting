@@ -252,7 +252,7 @@ fn multi_protocol_bgp_babel_share_one_process() {
         &[
             "protocols:   bgp,babel (one shared Loc-RIB)",
             "babel listening on 127.0.0.2:18696",
-            "daemon: 2 engine(s) running",
+            "2 engine(s) running",
             // The session handle numbering between engines is racy
             // (both engines add their session to the shared router at
             // startup); only the BGP engine's session can establish.
@@ -296,7 +296,7 @@ fn multi_protocol_bgp_babel_share_one_process() {
         "the babel engine must report shutdown: {text}"
     );
     assert!(
-        text.contains("daemon: multi-protocol shutdown complete"),
+        text.contains("multi-protocol shutdown complete"),
         "the supervisor must report shutdown: {text}"
     );
     let _ = std::fs::remove_file(&socket);
@@ -417,8 +417,8 @@ fn multi_protocol_toml_array_selects_the_combination() {
         &[
             "protocols:   bgp,babel (one shared Loc-RIB)",
             "babel listening on 127.0.0.1:18697",
-            "daemon: 2 engine(s) running",
-            "daemon: no --peer/--listen given; idling (tick loop only)",
+            "2 engine(s) running",
+            "no --peer/--listen given; idling (tick loop only)",
         ],
     );
     d.signal(SIGTERM);
