@@ -33,6 +33,8 @@ use lr_bgp::rtr::client::ClientStep;
 use lr_bgp::rtr::{self, RtrPdu};
 use lr_bgp::{RoaStore, RtrClient};
 
+use crate::Component;
+
 /// Connected-socket read timeout: bounds how long one `read` blocks
 /// before the loop falls through to `poll()` — the refresh and expiry
 /// timers must run even when the cache goes quiet.
@@ -265,7 +267,11 @@ impl RpkiLoop {
     }
 
     fn run(&mut self) {
-        println!("rpki: client thread started (cache {})", self.cache);
+        log_info!(
+            Component::Rpki,
+            " client thread started (cache {})",
+            self.cache
+        );
         loop {
             if !self.running.load(Ordering::Relaxed) {
                 break;
@@ -297,7 +303,7 @@ impl RpkiLoop {
                 thread::sleep(Duration::from_millis(IDLE_SLEEP_MS));
             }
         }
-        println!("rpki: client thread stopping");
+        log_info!(Component::Rpki, " client thread stopping");
         self.refresh_status();
     }
 
@@ -330,7 +336,12 @@ impl RpkiLoop {
     ) {
         let cache_changed = cache != self.cache;
         if cache_changed {
-            println!("rpki: cache changed {} -> {}", self.cache, cache);
+            log_info!(
+                Component::Rpki,
+                " cache changed {} -> {}",
+                self.cache,
+                cache
+            );
             self.cache = cache;
             // The old cache's session/serial are meaningless against a
             // new one (§8.2): reset to a cold-start client carrying
@@ -341,9 +352,12 @@ impl RpkiLoop {
                 .set_intervals(refresh_interval, retry_interval, expire_interval);
             self.store.clear_rtr();
         } else {
-            println!(
-                "rpki: reconnecting to {} for a refresh (intervals {}/{}s)",
-                self.cache, refresh_interval, retry_interval
+            log_info!(
+                Component::Rpki,
+                " reconnecting to {} for a refresh (intervals {}/{}s)",
+                self.cache,
+                refresh_interval,
+                retry_interval
             );
             // Same cache: the remembered session survives, but the
             // reloaded intervals govern until the next End of Data.
@@ -368,7 +382,7 @@ impl RpkiLoop {
     fn connect(&mut self) -> bool {
         match self.try_connect() {
             Ok(stream) => {
-                println!("rpki: connected to {}", self.cache);
+                log_info!(Component::Rpki, " connected to {}", self.cache);
                 let _ = stream.set_read_timeout(Some(Duration::from_millis(READ_TIMEOUT_MS)));
                 let _ = stream.set_nodelay(true);
                 self.stream = Some(stream);
@@ -379,8 +393,9 @@ impl RpkiLoop {
                 true
             }
             Err(e) => {
-                println!(
-                    "rpki: connect to {} failed: {} (retry in {}s)",
+                log_error!(
+                    Component::Rpki,
+                    " connect to {} failed: {} (retry in {}s)",
                     self.cache,
                     e,
                     self.client.intervals().1
@@ -438,7 +453,11 @@ impl RpkiLoop {
             };
             match stream.read(&mut chunk) {
                 Ok(0) => {
-                    println!("rpki: cache {} closed the connection", self.cache);
+                    log_info!(
+                        Component::Rpki,
+                        " cache {} closed the connection",
+                        self.cache
+                    );
                     self.disconnect();
                     self.sleep_backoff();
                     return false;
@@ -461,7 +480,7 @@ impl RpkiLoop {
                     return true;
                 }
                 Err(e) => {
-                    println!("rpki: read from {} failed: {}", self.cache, e);
+                    log_error!(Component::Rpki, " read from {} failed: {}", self.cache, e);
                     self.disconnect();
                     self.sleep_backoff();
                     return false;
@@ -490,7 +509,7 @@ impl RpkiLoop {
                     // A malformed PDU means a broken or malicious
                     // cache: reset the session and re-sync from
                     // scratch after the retry backoff.
-                    println!("rpki: malformed PDU from {}: {}", self.cache, e);
+                    log_info!(Component::Rpki, " malformed PDU from {}: {}", self.cache, e);
                     self.reset_client();
                     self.disconnect();
                     return false;
@@ -505,15 +524,16 @@ impl RpkiLoop {
     /// dropped (the caller sleeps the retry backoff).
     fn apply_step(&mut self, step: &ClientStep, pdu: Option<&RtrPdu>) -> bool {
         for log in &step.logs {
-            println!("rpki: {log}");
+            log_info!(Component::Rpki, " {log}");
         }
         if !step.roa_deltas.is_empty() {
             self.store.apply_rtr_deltas(&step.roa_deltas);
         }
         if step.synced {
             self.last_sync = Some(Instant::now());
-            println!(
-                "rpki: sync complete (session 0x{:04x} serial {} roas {})",
+            log_info!(
+                Component::Rpki,
+                " sync complete (session 0x{:04x} serial {} roas {})",
                 self.client.session_id().unwrap_or(0),
                 self.client.serial().unwrap_or(0),
                 self.store.len()
@@ -532,8 +552,9 @@ impl RpkiLoop {
             // used. Withdraw the cache-sourced records and reset the
             // session — the next sync starts from scratch. The last
             // sync age now refers to withdrawn data: stop ageing it.
-            println!(
-                "rpki: data expired ({}s without a sync) — withdrawing cache ROAs",
+            log_info!(
+                Component::Rpki,
+                " data expired ({}s without a sync) — withdrawing cache ROAs",
                 self.client.intervals().2
             );
             self.last_sync = None;
@@ -544,8 +565,8 @@ impl RpkiLoop {
         }
         if step.drop {
             match pdu {
-                Some(p) => println!("rpki: client dropped the session after {p:?}"),
-                None => println!("rpki: client dropped the session"),
+                Some(p) => log_warn!(Component::Rpki, " client dropped the session after {p:?}"),
+                None => log_warn!(Component::Rpki, " client dropped the session"),
             }
             self.disconnect();
             return false;
@@ -573,7 +594,7 @@ impl RpkiLoop {
         match stream.write_all(bytes).and_then(|()| stream.flush()) {
             Ok(()) => true,
             Err(e) => {
-                println!("rpki: write to {} failed: {}", self.cache, e);
+                log_error!(Component::Rpki, " write to {} failed: {}", self.cache, e);
                 self.disconnect();
                 false
             }

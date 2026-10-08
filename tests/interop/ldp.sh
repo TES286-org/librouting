@@ -224,12 +224,12 @@ if [ "$MPLS" -ne 1 ]; then
     echo "SKIP: phase 3 (dataplane) — load mpls_router to exercise it"
 else
     echo "== asserting the mirrored LSP state in both daemons =="
-    if ! grep -qF "ldp: in-label 24000 -> pop (local delivery) for 203.0.113.0/24" "$OUT/r1.log"; then
+    if ! grep -qF "in-label 24000 -> pop (local delivery) for 203.0.113.0/24" "$OUT/r1.log"; then
         echo "FAIL: r1 did not install the pop LSP:"
         cat "$OUT/r1.log"
         exit 1
     fi
-    if ! grep -qF "ldp: 203.0.113.0/24 encap mpls [24000] via 10.99.1.1" "$OUT/r2.log"; then
+    if ! grep -qF "203.0.113.0/24 encap mpls [24000] via 10.99.1.1" "$OUT/r2.log"; then
         echo "FAIL: r2 did not install the encap LSP:"
         cat "$OUT/r2.log"
         exit 1
@@ -247,7 +247,7 @@ else
         exit 1
     fi
     # The mirror side of the same adjacency: r1 pushes 16 toward r2.
-    if ! grep -qF "ldp: 198.51.100.0/24 encap mpls [16] via 10.99.1.2" "$OUT/r1.log"; then
+    if ! grep -qF "198.51.100.0/24 encap mpls [16] via 10.99.1.2" "$OUT/r1.log"; then
         echo "FAIL: r1 did not install the encap LSP for r2's binding:"
         cat "$OUT/r1.log"
         exit 1

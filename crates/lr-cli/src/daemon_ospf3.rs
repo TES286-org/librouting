@@ -325,7 +325,8 @@ fn dbg_send_trace(bytes: &[u8]) {
         if len < lr_ospf::packet::OspfHeader::LEN_V3 || off + len > bytes.len() {
             break;
         }
-        eprintln!(
+        log_debug!(
+            Component::Ospfv3,
             "dbg-send kind={} len={} rid={:08x}",
             bytes[off + 1],
             len,
@@ -668,7 +669,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
         None => {
             let router = Arc::new(RwLock::new(DefaultRouter::new()));
             if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
-                eprintln!("error: {}", e);
+                log_error!(Component::Ospfv3, "error: {e}");
                 return ExitCode::from(2);
             }
             router
@@ -1305,7 +1306,8 @@ impl Ospf3Daemon {
                             continue;
                         }
                         if ospf_debug_enabled() {
-                            eprintln!(
+                            log_debug!(
+                                Component::Ospfv3,
                                 "dbg-recv kind={} len={} rid={:08x} src={}",
                                 ospf.get(1).copied().unwrap_or(0),
                                 u16::from_be_bytes([ospf[2], ospf[3]]),

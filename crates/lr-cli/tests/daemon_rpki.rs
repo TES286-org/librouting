@@ -320,7 +320,7 @@ fn rpki_sync_populates_the_roa_store() {
         ],
         "sync",
     );
-    d.wait_log("rpki: sync complete", "first RTR sync");
+    d.wait_log("sync complete", "first RTR sync");
 
     // The API status line reports the live store: two cache ROAs plus
     // one static [[roa]] entry, the session/serial from End of Data,
@@ -375,8 +375,8 @@ fn rpki_client_reconnects_and_resyncs() {
     .unwrap();
 
     let d = Daemon::spawn(&["--config", config.to_str().unwrap()], "reconn");
-    let first = d.wait_log("rpki: sync complete", "first RTR sync");
-    assert_eq!(first.matches("rpki: sync complete").count(), 1);
+    let first = d.wait_log("sync complete", "first RTR sync");
+    assert_eq!(first.matches("sync complete").count(), 1);
 
     // The client reconnects and completes a second sync (Serial
     // Query with the remembered session, answered with an empty
@@ -384,9 +384,9 @@ fn rpki_client_reconnects_and_resyncs() {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let text = std::fs::read_to_string(&d.log).unwrap_or_default();
-        if text.matches("rpki: sync complete").count() >= 2
-            && text.contains("rpki: connected to")
-            && text.matches("rpki: connected to").count() >= 2
+        if text.matches("sync complete").count() >= 2
+            && text.contains("connected to")
+            && text.matches("connected to").count() >= 2
         {
             break;
         }
@@ -430,7 +430,7 @@ fn rpki_reload_repoints_the_cache_and_roa_table() {
         ],
         "reload",
     );
-    d.wait_log("rpki: sync complete", "sync from cache A");
+    d.wait_log("sync complete", "sync from cache A");
 
     // Rewrite the config: new cache address + one more static ROA.
     std::fs::write(
@@ -448,7 +448,7 @@ fn rpki_reload_repoints_the_cache_and_roa_table() {
     d.signal(SIGHUP);
 
     // The reload re-points the client and re-applies the static table.
-    d.wait_log("rpki: cache changed", "cache re-point");
+    d.wait_log("cache changed", "cache re-point");
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let status = api_ask(&socket, "status");

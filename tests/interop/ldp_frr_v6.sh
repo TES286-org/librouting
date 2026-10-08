@@ -274,7 +274,7 @@ echo "   FRR sees lr as a neighbor; discovery detail:"
 grep -iE "fd00:99::1|10.99.1.1" "$OUT/ldpd.discovery" | head -4 || true
 
 echo "== phase 2: lr learns FRR's IPv4 implicit-null binding =="
-wait_log "$OUT/r1.log" "ldp: mapping learned 10.99.1.0/24" 30
+wait_log "$OUT/r1.log" "mapping learned 10.99.1.0/24" 30
 echo "   learned: 10.99.1.0/24 (implicit null)"
 
 echo "== phase 3: FRR learns lr's 203.0.113.0/24 = 24000 binding =="
@@ -303,7 +303,7 @@ echo "   learned: 203.0.113.0/24 = 24000 (FRR vty)"
 echo "== phase 4: IPv6 FEC exchange (fd00:99::/64) =="
 v6_ok=1
 for i in $(seq 1 60); do
-    if grep -qF "ldp: mapping learned fd00:99::/64" "$OUT/r1.log"; then
+    if grep -qF "mapping learned fd00:99::/64" "$OUT/r1.log"; then
         v6_ok=0
         break
     fi

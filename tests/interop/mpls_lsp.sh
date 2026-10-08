@@ -189,10 +189,10 @@ if [ "$MPLS" -ne 1 ]; then
 fi
 
 echo "== asserting the mirrored LSP state in both daemons =="
-if ! grep -qF "lsp: in-label 100 -> pop (local delivery) for 198.51.100.0/24" "$OUT/r1.log"; then
+if ! grep -qF "in-label 100 -> pop (local delivery) for 198.51.100.0/24" "$OUT/r1.log"; then
     echo "FAIL: r1 did not install the pop LSP"; exit 1
 fi
-if ! grep -qF "lsp: 198.51.100.0/24 encap mpls [100] via 10.99.1.1" "$OUT/r2.log"; then
+if ! grep -qF "198.51.100.0/24 encap mpls [100] via 10.99.1.1" "$OUT/r2.log"; then
     echo "FAIL: r2 did not install the encap LSP"; exit 1
 fi
 

@@ -580,8 +580,9 @@ fn apply_cross_protocol_config(
             .metric
             .map(|m| format!(" metric={m}"))
             .unwrap_or_default();
-        println!(
-            "  redistribute: {} -> {}{}",
+        log_info!(
+            Component::Router,
+            "redistribute: {} -> {}{}",
             source_proto.bird_name(),
             target_proto.bird_name(),
             metric_note
@@ -596,7 +597,11 @@ fn apply_cross_protocol_config(
         let prefix: Prefix = text
             .parse()
             .map_err(|_| format!("[[aggregate]] bad prefix '{text}'"))?;
-        println!("  aggregate:    {} (rfc4271 §9.2.2.2)", prefix);
+        log_info!(
+            Component::Bgp,
+            "aggregate:    {} (rfc4271 §9.2.2.2)",
+            prefix
+        );
         r.add_aggregate(prefix);
     }
     // Static routes — BIRD `protocol static`, FRR `ip route`. Installed
@@ -625,7 +630,13 @@ fn apply_cross_protocol_config(
             Some(nh) => format!(" via {}", nh),
             None => " blackhole".to_string(),
         };
-        println!("  static:      {}{} metric={}", prefix, nh_label, metric);
+        log_info!(
+            Component::Router,
+            "static:      {}{} metric={}",
+            prefix,
+            nh_label,
+            metric
+        );
     }
     Ok((
         cfg.redistributes.len(),
@@ -658,7 +669,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
         let safety_cfg = match cfg.safety.finalise() {
             Ok(c) => c,
             Err(e) => {
-                eprintln!("error: {e}");
+                log_error!(Component::Bgp, "error: {e}");
                 return ExitCode::from(2);
             }
         };
@@ -687,7 +698,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     if host.is_none() {
         let mut r = router.write().unwrap();
         if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
-            eprintln!("error: {}", e);
+            log_error!(Component::Bgp, "error: {e}");
             return ExitCode::from(2);
         }
     }
@@ -766,7 +777,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             let auth = match build_peer_tcp_auth(cfg, spec) {
                 Ok(a) => a,
                 Err(e) => {
-                    eprintln!("error: peer {}: {}", spec.label(), e);
+                    log_error!(Component::Bgp, "error: peer {}: {}", spec.label(), e);
                     return ExitCode::from(2);
                 }
             };
@@ -1006,8 +1017,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             r.hooks_mut().import.push(Box::new(hooks.clone()));
             r.hooks_mut().export.push(Box::new(hooks));
         }
-        println!(
-            "  policy:      {} route-maps, {} import / {} export bindings",
+        log_info!(
+            Component::Policy,
+            "policy:      {} route-maps, {} import / {} export bindings",
             cfg.route_maps.len(),
             bound_imports,
             bound_exports
@@ -1027,16 +1039,18 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     };
     let roa_store = std::sync::Arc::new(lr_bgp::RoaStore::from_table(roa_table));
     if !roa_store.is_empty() {
-        println!(
-            "  roa:         {} entries, validate={} (action: {})",
+        log_info!(
+            Component::Rpki,
+            "roa:         {} entries, validate={} (action: {})",
             roa_store.len(),
             cfg.roa_validate,
             cfg.roa_invalid_action
         );
     }
     if let Some(cache) = &cfg.rpki.cache {
-        println!(
-            "  rpki:        cache {} (refresh {}s, retry {}s, expire {}s)",
+        log_info!(
+            Component::Rpki,
+            "rpki:        cache {} (refresh {}s, retry {}s, expire {}s)",
             cache,
             cfg.rpki
                 .refresh_interval
@@ -1144,8 +1158,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 bound_export_filters += 1;
             }
         }
-        println!(
-            "  filters:     {} compiled, {} import / {} export bindings",
+        log_info!(
+            Component::Policy,
+            "filters:     {} compiled, {} import / {} export bindings",
             filters.len(),
             bound_import_filters,
             bound_export_filters
@@ -1190,16 +1205,21 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 .push(Box::new(lr_policy::hooks::GracefulShutdownImportHook::new()));
             drop(r);
             if exempt_count > 0 {
-                println!(
-                    "  rfc8326:      graceful-shutdown hooks installed (export + import; \
+                log_info!(
+                    Component::Bgp,
+                    "rfc8326:      graceful-shutdown hooks installed (export + import; \
                      {exempt_count} exempt session(s))"
                 );
             } else {
-                println!("  rfc8326:      graceful-shutdown hooks installed (export + import)");
+                log_info!(
+                    Component::Bgp,
+                    "rfc8326:      graceful-shutdown hooks installed (export + import)"
+                );
             }
         } else {
-            println!(
-                "  rfc8326:      graceful-shutdown disabled ([bgp] graceful_shutdown = false)"
+            log_info!(
+                Component::Bgp,
+                "rfc8326:      graceful-shutdown disabled ([bgp] graceful_shutdown = false)"
             );
         }
     }
@@ -1272,7 +1292,8 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                         // is now false). Until then, the prefix
                         // stays out of Adj-RIB-In. Log the
                         // reactivation so the operator can correlate.
-                        eprintln!(
+                        log_info!(
+                            Component::Policy,
                             "damping: prefix {} reactivated (FoM decayed below reuse threshold)",
                             prefix
                         );
@@ -1280,8 +1301,9 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                 }
             })
             .expect("spawn damping decay thread");
-        println!(
-            "  rfc2439:      route flap damping enabled (suppress={}, reuse={}, decay={}s)",
+        log_info!(
+            Component::Policy,
+            "rfc2439:      route flap damping enabled (suppress={}, reuse={}, decay={}s)",
             cfg.damping.config.suppress_threshold,
             cfg.damping.config.reuse_threshold,
             cfg.damping.config.decay_interval_s,
@@ -3384,16 +3406,20 @@ impl KernelMirror {
                                 );
                                 match mpls.add_route(&lsp) {
                                     Ok(()) => {
-                                        println!(
+                                        log_info!(
+                                            Component::Osroute,
                                             "lsp: in-label {} -> pop (local delivery) for {}",
-                                            label.value, r.key.prefix
+                                            label.value,
+                                            r.key.prefix
                                         );
                                         self.tails.insert(r.key.prefix, label);
                                         mirrored = true;
                                     }
-                                    Err(e) => eprintln!(
+                                    Err(e) => log_error!(
+                                        Component::Osroute,
                                         "lsp: pop install for {} failed: {}",
-                                        r.key.prefix, e
+                                        r.key.prefix,
+                                        e
                                     ),
                                 }
                             }
@@ -3410,7 +3436,8 @@ impl KernelMirror {
                             if let (Some(mpls), Some(nh)) = (self.mpls.as_mut(), r.next_hop) {
                                 match mpls.add_encap_route(&r.key.prefix, &stack, nh, 0) {
                                     Ok(()) => {
-                                        println!(
+                                        log_info!(
+                                            Component::Osroute,
                                             "lsp: {} encap mpls [{}] via {}",
                                             r.key.prefix,
                                             stack
@@ -3423,10 +3450,12 @@ impl KernelMirror {
                                         );
                                         mirrored = true;
                                     }
-                                    Err(e) => eprintln!(
+                                    Err(e) => log_error!(
+                                        Component::Osroute,
                                         "lsp: encap install for {} failed ({}); \
                                          falling back to plain",
-                                        r.key.prefix, e
+                                        r.key.prefix,
+                                        e
                                     ),
                                 }
                             }
@@ -3488,20 +3517,24 @@ impl KernelMirror {
                             // parallel kernel blackhole would be both
                             // redundant and harmful.
                             if self.connected.contains(&r.key.prefix) {
-                                println!(
+                                log_info!(
+                                    Component::Osroute,
                                     "mirror: skipping blackhole install for {} — \
                                      kernel connected route covers it (own address)",
                                     r.key.prefix
                                 );
                             } else if let Some(table) = self.ip_table.as_mut() {
                                 match table.add_blackhole_route(r.key.prefix) {
-                                    Ok(()) => println!(
+                                    Ok(()) => log_info!(
+                                        Component::Osroute,
                                         "mirror: blackhole route installed {} (kernel discard)",
                                         r.key.prefix
                                     ),
-                                    Err(e) => eprintln!(
+                                    Err(e) => log_error!(
+                                        Component::Osroute,
                                         "mirror: blackhole route install failed for {}: {}",
-                                        r.key.prefix, e
+                                        r.key.prefix,
+                                        e
                                     ),
                                 }
                             }
@@ -3519,22 +3552,28 @@ impl KernelMirror {
                             // must not replace the on-link row — see
                             // `KernelMirror::connected`.
                             if self.connected.contains(&r.key.prefix) {
-                                println!(
+                                log_info!(
+                                    Component::Osroute,
                                     "mirror: keeping kernel connected route {} over learned route via {}",
                                     r.key.prefix, nh
                                 );
                             } else if let Some(table) = self.ip_table.as_mut() {
                                 match table.add_route_tagged(r.key.prefix, nh, oif, r.protocol) {
-                                    Ok(()) => println!(
+                                    Ok(()) => log_info!(
+                                        Component::Osroute,
                                         "mirror: route installed {} via {} oif {} ({})",
                                         r.key.prefix,
                                         nh,
                                         oif,
                                         r.protocol.bird_name()
                                     ),
-                                    Err(e) => eprintln!(
+                                    Err(e) => log_error!(
+                                        Component::Osroute,
                                         "mirror: route install failed for {} via {} oif {}: {}",
-                                        r.key.prefix, nh, oif, e
+                                        r.key.prefix,
+                                        nh,
+                                        oif,
+                                        e
                                     ),
                                 }
                             }
@@ -3551,18 +3590,27 @@ impl KernelMirror {
                     if let Some(label) = self.tails.remove(&k.prefix) {
                         if let Some(mpls) = self.mpls.as_mut() {
                             if let Err(e) = mpls.delete_route(label) {
-                                eprintln!(
+                                log_error!(
+                                    Component::Osroute,
                                     "lsp: pop removal for label {} failed: {}",
-                                    label.value, e
+                                    label.value,
+                                    e
                                 );
                             }
                         }
                     }
                     if let Some(table) = self.ip_table.as_mut() {
                         match table.delete_route(k.prefix) {
-                            Ok(()) => println!("mirror: route removed {}", k.prefix),
+                            Ok(()) => {
+                                log_info!(Component::Osroute, "mirror: route removed {}", k.prefix)
+                            }
                             Err(e) => {
-                                eprintln!("mirror: route removal failed for {}: {}", k.prefix, e)
+                                log_error!(
+                                    Component::Osroute,
+                                    "mirror: route removal failed for {}: {}",
+                                    k.prefix,
+                                    e
+                                )
                             }
                         }
                     }
@@ -3922,7 +3970,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
     if host.is_none() {
         let mut r = router.write().unwrap();
         if let Err(e) = apply_cross_protocol_config(cfg, &mut r) {
-            eprintln!("error: {}", e);
+            log_error!(Component::Bgp, "error: {e}");
             return ExitCode::from(2);
         }
     }

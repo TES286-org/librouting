@@ -465,10 +465,7 @@ fn static_blackhole_for_own_listener_ip_skips_kernel_install() {
     // Daemon A MUST log the skip — the static blackhole for its own
     // listener IP is detected as redundant with the kernel's connected
     // (local) route, and no parallel blackhole row is installed.
-    wait_log_all(
-        &a.log,
-        &["mirror: skipping blackhole install for 127.0.0.1/32"],
-    );
+    wait_log_all(&a.log, &["skipping blackhole install for 127.0.0.1/32"]);
     // The static route still enters the Loc-RIB (BGP export works).
     wait_log_all(&a.log, &["static:      127.0.0.1/32 blackhole"]);
 

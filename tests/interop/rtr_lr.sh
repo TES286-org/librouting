@@ -75,7 +75,7 @@ DAEMON_PID=$!
 
 # Wait for the daemon's RTR thread to complete the first sync.
 deadline=$((SECONDS + 20))
-while ! grep -q "rpki: sync complete" "$LOG" 2>/dev/null; do
+while ! grep -q "sync complete" "$LOG" 2>/dev/null; do
     if [ $SECONDS -ge $deadline ]; then
         echo "FAIL: no RTR sync within 20 s"; tail -20 "$LOG"; exit 1
     fi

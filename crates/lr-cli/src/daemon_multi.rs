@@ -229,7 +229,7 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
     // (still empty) Loc-RIB and fire on every later selection; the
     // embedded engines must not re-apply on the shared router.
     if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
-        eprintln!("error: {}", e);
+        log_error!(Component::Daemon, "error: {e}");
         return ExitCode::from(2);
     }
     let running = Arc::new(AtomicBool::new(true));

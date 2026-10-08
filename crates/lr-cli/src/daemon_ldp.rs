@@ -425,7 +425,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         };
         let bad = || format!("invalid ldp targeted peer '{spec}'");
         let Some((addr_part, port_part)) = crate::daemon_config::parse_targeted_spec(spec) else {
-            eprintln!("{}", bad());
+            log_error!(Component::Ldp, "{}", bad());
             return ExitCode::from(2);
         };
         targeted_addrs.push(addr_part);
@@ -830,7 +830,7 @@ impl LdpDaemon {
     /// Accept passive connections, read active ones, detect closures.
     fn pump_tcp(&mut self, now: Instant) {
         while let Ok((stream, peer)) = self.listener.accept() {
-            println!("ldp: accepted connection from {}", peer);
+            log_info!(Component::Ldp, "accepted connection from {}", peer);
             let _ = stream.set_nonblocking(true);
             // RFC 7552 §9: session TCPs over IPv6 send with the GTSM
             // hop limit (accepted sockets do not inherit the
@@ -996,9 +996,13 @@ impl LdpDaemon {
         for ev in events {
             match ev {
                 EngineEvent::AdjacencyUp(a) => {
-                    println!(
-                        "ldp: adjacency up peer {} kind {:?} source {} hold {:?}",
-                        a.peer_id, a.kind, a.source, a.hold_time
+                    log_info!(
+                        Component::Ldp,
+                        "adjacency up peer {} kind {:?} source {} hold {:?}",
+                        a.peer_id,
+                        a.kind,
+                        a.source,
+                        a.hold_time
                     );
                     if a.kind == lr_ldp::discovery::DiscoveryKind::Link {
                         self.peers_dataplane.insert(a.peer_id, a.source);
@@ -1008,22 +1012,34 @@ impl LdpDaemon {
                         .store(self.engine.adjacencies().len(), Ordering::Relaxed);
                 }
                 EngineEvent::AdjacencyDown { peer_id, kind, .. } => {
-                    println!("ldp: adjacency down peer {} kind {:?}", peer_id, kind);
+                    log_info!(
+                        Component::Ldp,
+                        "adjacency down peer {} kind {:?}",
+                        peer_id,
+                        kind
+                    );
                     self.counters
                         .adjacencies
                         .store(self.engine.adjacencies().len(), Ordering::Relaxed);
                 }
                 EngineEvent::TargetedHelloRequested { source, .. } => {
-                    println!("ldp: targeted hello requested from {} — responding", source);
+                    log_info!(
+                        Component::Ldp,
+                        "targeted hello requested from {} — responding",
+                        source
+                    );
                 }
                 EngineEvent::HelloDiscarded {
                     peer_id,
                     source,
                     reason,
                 } => {
-                    println!(
-                        "ldp: discarded Hello from {} (peer {}): {}",
-                        source, peer_id, reason
+                    log_warn!(
+                        Component::Ldp,
+                        "discarded Hello from {} (peer {}): {}",
+                        source,
+                        peer_id,
+                        reason
                     );
                 }
                 EngineEvent::EstablishTransport {
@@ -1036,9 +1052,12 @@ impl LdpDaemon {
                 EngineEvent::SessionUp {
                     peer_id, params, ..
                 } => {
-                    println!(
-                        "ldp: session up peer {} keepalive {}s max-pdu {}",
-                        peer_id, params.keepalive_time, params.max_pdu_len
+                    log_info!(
+                        Component::Ldp,
+                        "session up peer {} keepalive {}s max-pdu {}",
+                        peer_id,
+                        params.keepalive_time,
+                        params.max_pdu_len
                     );
                     self.peers_up.insert(peer_id);
                     self.counters
@@ -1056,8 +1075,9 @@ impl LdpDaemon {
                     reason,
                     graceful,
                 } => {
-                    println!(
-                        "ldp: session down peer {} ({}){}",
+                    log_info!(
+                        Component::Ldp,
+                        "session down peer {} ({}){}",
                         peer_id,
                         down_reason_label(reason),
                         if graceful {
@@ -1111,9 +1131,12 @@ impl LdpDaemon {
                     prefix,
                     label,
                 } => {
-                    println!(
-                        "ldp: mapping learned {} label {} from {}",
-                        prefix, label.0, peer_id
+                    log_info!(
+                        Component::Ldp,
+                        "mapping learned {} label {} from {}",
+                        prefix,
+                        label.0,
+                        peer_id
                     );
                     self.counters
                         .mappings_learned
@@ -1127,7 +1150,12 @@ impl LdpDaemon {
                 }
                 EngineEvent::MappingWithdrawn { peer_id, prefixes } => {
                     for prefix in &prefixes {
-                        println!("ldp: mapping withdrawn {} from {}", prefix, peer_id);
+                        log_info!(
+                            Component::Ldp,
+                            "mapping withdrawn {} from {}",
+                            prefix,
+                            peer_id
+                        );
                     }
                     self.counters
                         .mappings_withdrawn
@@ -1140,17 +1168,24 @@ impl LdpDaemon {
                     let _ = peer_id;
                 }
                 EngineEvent::MappingReleased { peer_id, prefix } => {
-                    println!("ldp: mapping released {} by {}", prefix, peer_id);
+                    log_info!(Component::Ldp, "mapping released {} by {}", prefix, peer_id);
                 }
                 EngineEvent::AddressReceived { peer_id, addresses } => {
                     let addrs: Vec<String> =
                         addresses.addresses.iter().map(|a| a.to_string()).collect();
-                    println!("ldp: addresses from {}: {}", peer_id, addrs.join(","));
+                    log_info!(
+                        Component::Ldp,
+                        "addresses from {}: {}",
+                        peer_id,
+                        addrs.join(",")
+                    );
                 }
                 EngineEvent::NotificationReceived { peer_id, status } => {
-                    println!(
-                        "ldp: notification from {} status 0x{:08x}",
-                        peer_id, status.code.0
+                    log_info!(
+                        Component::Ldp,
+                        "notification from {} status 0x{:08x}",
+                        peer_id,
+                        status.code.0
                     );
                 }
                 EngineEvent::LoopDetected {
@@ -1158,10 +1193,13 @@ impl LdpDaemon {
                     prefix,
                     reason,
                 } => {
-                    println!(
-                        "ldp: LOOP DETECTED from {} for {} ({}); message rejected, \
+                    log_error!(
+                        Component::Ldp,
+                        "LOOP DETECTED from {} for {} ({}); message rejected, \
                          Loop Detected signaled",
-                        peer_id, prefix, reason
+                        peer_id,
+                        prefix,
+                        reason
                     );
                 }
                 EngineEvent::TransitSwapChanged {
@@ -1170,9 +1208,13 @@ impl LdpDaemon {
                     next_hop,
                     out_label,
                 } => {
-                    println!(
-                        "ldp: transit swap for {} in-label {} via {} out-label {}",
-                        prefix, in_label.0, next_hop, out_label.0
+                    log_info!(
+                        Component::Ldp,
+                        "transit swap for {} in-label {} via {} out-label {}",
+                        prefix,
+                        in_label.0,
+                        next_hop,
+                        out_label.0
                     );
                     self.counters
                         .transit_labels
@@ -1198,10 +1240,12 @@ impl LdpDaemon {
                     let _ = (&prefix, &in_label, &out_label, &next_hop);
                 }
                 EngineEvent::TransitSwapRemoved { prefix, in_label } => {
-                    println!(
-                        "ldp: transit swap for {} removed (in-label {} released, \
+                    log_info!(
+                        Component::Ldp,
+                        "transit swap for {} removed (in-label {} released, \
                          upstream withdrawn)",
-                        prefix, in_label.0
+                        prefix,
+                        in_label.0
                     );
                     self.counters
                         .transit_labels
@@ -1215,15 +1259,17 @@ impl LdpDaemon {
                     let _ = (&prefix, &in_label);
                 }
                 EngineEvent::TransitLabelExhausted { prefix } => {
-                    eprintln!(
-                        "ldp: transit label range exhausted — {} gets no LSP \
+                    log_error!(
+                        Component::Ldp,
+                        "transit label range exhausted — {} gets no LSP \
                          (widen [ldp] label_min/label_max)",
                         prefix
                     );
                 }
                 EngineEvent::UnknownMessage { peer_id, message } => {
-                    println!(
-                        "ldp: unknown message type 0x{:04x} from {} (ignored, U=1)",
+                    log_info!(
+                        Component::Ldp,
+                        "unknown message type 0x{:04x} from {} (ignored, U=1)",
                         message.msg_type & 0x7fff,
                         peer_id
                     );
@@ -1261,17 +1307,32 @@ impl LdpDaemon {
                     self.next_conn += 1;
                     self.conns.insert(conn, s);
                     self.engine.on_connected(now, conn, peer_id);
-                    println!("ldp: connected to {} for peer {}", std_addr, peer_id);
+                    log_info!(
+                        Component::Ldp,
+                        "connected to {} for peer {}",
+                        std_addr,
+                        peer_id
+                    );
                     return;
                 }
                 let conn = self.next_conn;
                 self.next_conn += 1;
                 self.conns.insert(conn, stream);
                 self.engine.on_connected(now, conn, peer_id);
-                println!("ldp: connected to {} for peer {}", std_addr, peer_id);
+                log_info!(
+                    Component::Ldp,
+                    "connected to {} for peer {}",
+                    std_addr,
+                    peer_id
+                );
             }
             Err(e) => {
-                println!("ldp: connect to {} failed: {} (will retry)", std_addr, e);
+                log_error!(
+                    Component::Ldp,
+                    "connect to {} failed: {} (will retry)",
+                    std_addr,
+                    e
+                );
                 self.engine.on_connect_failed(peer_id);
             }
         }
@@ -1338,13 +1399,15 @@ impl LdpDaemon {
             lr_osroute::mpls_route::MplsRoute::pop_local(lr_mpls::Label::new(label.0), LO_IF_INDEX);
         match mpls.add_route(&lsp) {
             Ok(()) => {
-                println!(
-                    "ldp: in-label {} -> pop (local delivery) for {}",
-                    label.0, prefix
+                log_info!(
+                    Component::Ldp,
+                    "in-label {} -> pop (local delivery) for {}",
+                    label.0,
+                    prefix
                 );
                 self.tails.insert(*prefix, label);
             }
-            Err(e) => eprintln!("ldp: pop install for {} failed: {}", prefix, e),
+            Err(e) => log_error!(Component::Ldp, "pop install for {} failed: {}", prefix, e),
         }
     }
 
@@ -1353,7 +1416,7 @@ impl LdpDaemon {
         if let Some(label) = self.tails.remove(prefix) {
             if let Some(mpls) = self.mpls.as_mut() {
                 if let Err(e) = mpls.delete_route(lr_mpls::Label::new(label.0)) {
-                    eprintln!("ldp: pop delete for {} failed: {}", prefix, e);
+                    log_error!(Component::Ldp, "pop delete for {} failed: {}", prefix, e);
                 }
             }
         }
@@ -1412,10 +1475,16 @@ impl LdpDaemon {
         let stack = lr_mpls::LabelStack::from_values([label.0]);
         match mpls.add_encap_route(&prefix, &stack, nh, 0) {
             Ok(()) => {
-                println!("ldp: {} encap mpls [{}] via {}", prefix, label.0, nh);
+                log_info!(
+                    Component::Ldp,
+                    "{} encap mpls [{}] via {}",
+                    prefix,
+                    label.0,
+                    nh
+                );
                 self.heads.insert(prefix, (label, nh));
             }
-            Err(e) => eprintln!("ldp: encap install for {} failed: {}", prefix, e),
+            Err(e) => log_error!(Component::Ldp, "encap install for {} failed: {}", prefix, e),
         }
     }
 
@@ -1424,7 +1493,7 @@ impl LdpDaemon {
         if self.heads.remove(prefix).is_some() {
             if let Some(mpls) = self.mpls.as_mut() {
                 if let Err(e) = mpls.delete_encap_route(prefix) {
-                    eprintln!("ldp: encap delete for {} failed: {}", prefix, e);
+                    log_error!(Component::Ldp, "encap delete for {} failed: {}", prefix, e);
                 }
             }
         }
@@ -1457,11 +1526,14 @@ impl LdpDaemon {
         // labeled frame elsewhere would blackhole it.
         if let Some(gw) = gateway {
             if gw != nh {
-                eprintln!(
-                    "ldp: transit swap for {} via routed peer {} (gateway {}) — \
+                log_warn!(
+                    Component::Ldp,
+                    "transit swap for {} via routed peer {} (gateway {}) — \
                      no install (an LDP binding is only valid toward the \
                      advertising LSR)",
-                    prefix, nh, gw
+                    prefix,
+                    nh,
+                    gw
                 );
                 return;
             }
@@ -1475,13 +1547,18 @@ impl LdpDaemon {
         );
         match mpls.add_route(&route) {
             Ok(()) => {
-                println!(
-                    "ldp: swap in-label {} -> [{}] via {} dev #{} for {}",
-                    in_label.0, out_label.0, nh, if_index, prefix
+                log_info!(
+                    Component::Ldp,
+                    "swap in-label {} -> [{}] via {} dev #{} for {}",
+                    in_label.0,
+                    out_label.0,
+                    nh,
+                    if_index,
+                    prefix
                 );
                 self.swaps.insert(prefix, (in_label, nh));
             }
-            Err(e) => eprintln!("ldp: swap install for {} failed: {}", prefix, e),
+            Err(e) => log_error!(Component::Ldp, "swap install for {} failed: {}", prefix, e),
         }
     }
 
@@ -1490,7 +1567,7 @@ impl LdpDaemon {
         if let Some((in_label, _)) = self.swaps.remove(prefix) {
             if let Some(mpls) = self.mpls.as_mut() {
                 if let Err(e) = mpls.delete_route(lr_mpls::Label::new(in_label.0)) {
-                    eprintln!("ldp: swap delete for {} failed: {}", prefix, e);
+                    log_error!(Component::Ldp, "swap delete for {} failed: {}", prefix, e);
                 }
             }
         }
@@ -1508,7 +1585,7 @@ impl LdpDaemon {
             Some(mpls) => match mpls.resolve_nexthop(nh) {
                 Ok(info) => Some((info.if_index, info.gateway)),
                 Err(e) => {
-                    eprintln!("ldp: no route toward LDP peer {}: {}", nh, e);
+                    log_error!(Component::Ldp, "no route toward LDP peer {}: {}", nh, e);
                     None
                 }
             },

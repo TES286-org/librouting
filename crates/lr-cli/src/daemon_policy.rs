@@ -12,6 +12,7 @@
 use core::str::FromStr;
 use std::process::ExitCode;
 
+use crate::Component;
 use lr_core::addr::Prefix;
 use lr_policy::action::SetAction;
 use lr_policy::as_path_filter::AsPathFilter;
@@ -690,7 +691,7 @@ pub(crate) fn build_roa_table(cfg: &DaemonConfig) -> Result<lr_bgp::RoaTable, St
 /// Convenience wrapper used by `main` to fail with exit code 2 on
 /// policy configuration errors.
 pub(crate) fn policy_error(msg: String) -> ExitCode {
-    eprintln!("error: {}", msg);
+    log_error!(Component::Policy, "error: {msg}");
     ExitCode::from(2)
 }
 

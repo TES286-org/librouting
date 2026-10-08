@@ -412,7 +412,7 @@ pub(super) fn run_ospf_daemon(
         None => {
             let router = Arc::new(RwLock::new(DefaultRouter::new()));
             if let Err(e) = crate::apply_cross_protocol_config(cfg, &mut router.write().unwrap()) {
-                eprintln!("error: {}", e);
+                log_error!(Component::Ospf, "error: {e}");
                 return ExitCode::from(2);
             }
             router
@@ -631,13 +631,15 @@ pub(super) fn run_ospf_daemon(
                         let lsp =
                             lr_osroute::mpls_route::MplsRoute::pop_local(label, crate::LO_IF_INDEX);
                         match mpls.add_route(&lsp) {
-                            Ok(()) => println!(
+                            Ok(()) => log_info!(
+                                Component::Ospf,
                                 "lsp: in-label {} -> pop (local delivery) for {}/{} (prefix-SID)",
                                 label.value,
                                 std::net::Ipv4Addr::from(sid.prefix),
                                 sid.prefix_len
                             ),
-                            Err(e) => eprintln!(
+                            Err(e) => log_error!(
+                                Component::Ospf,
                                 "lsp: pop install for {}/{} failed: {}",
                                 std::net::Ipv4Addr::from(sid.prefix),
                                 sid.prefix_len,
@@ -1033,7 +1035,8 @@ impl OspfDaemon {
                         // sees a bare packet.
                         if let Some(ospf) = strip_ipv4_header(&recv_buf[..n]) {
                             if ospf_debug_enabled() {
-                                eprintln!(
+                                log_debug!(
+                                    Component::Ospf,
                                     "dbg-recv kind={} len={} rid={:08x}",
                                     ospf.get(1).copied().unwrap_or(0),
                                     u16::from_be_bytes([ospf[2], ospf[3]]),
@@ -1082,7 +1085,7 @@ impl OspfDaemon {
         for (idx, (ifindex, iface_area, bytes)) in datagrams.iter().enumerate() {
             let Some((rid, area, len)) = demux_header(bytes) else {
                 if ospf_debug_enabled() {
-                    eprintln!("dbg-drop demux");
+                    log_debug!(Component::Ospf, "dbg-drop demux");
                 }
                 continue;
             };
@@ -1094,7 +1097,8 @@ impl OspfDaemon {
             }
             if !v2_packet_checksum_ok(&bytes[..len as usize]) {
                 if ospf_debug_enabled() {
-                    eprintln!(
+                    log_debug!(
+                        Component::Ospf,
                         "dbg-drop checksum kind={} len={}",
                         bytes.get(1).copied().unwrap_or(0),
                         len
@@ -1492,7 +1496,8 @@ impl OspfDaemon {
             if off + len > bytes.len() {
                 break;
             }
-            eprintln!(
+            log_debug!(
+                Component::Ospf,
                 "dbg-send kind={} len={} rid={:08x}",
                 bytes[off + 1],
                 len,
@@ -2140,7 +2145,7 @@ impl OspfDaemon {
                     for key in &stale {
                         if let Some(label) = self.sr_link_pops.remove(key) {
                             if let Err(e) = mpls.delete_route(lr_mpls::Label::new_value(label)) {
-                                eprintln!("lsp: adj pop delete for {label}: {e}");
+                                log_error!(Component::Ospf, "lsp: adj pop delete for {label}: {e}");
                             }
                         }
                     }
@@ -2165,7 +2170,8 @@ impl OspfDaemon {
                         match mpls.add_route(&route) {
                             Ok(()) => {
                                 self.sr_link_pops.insert(*key, *label);
-                                println!(
+                                log_info!(
+                                    Component::Ospf,
                                     "lsp: in-label {} -> pop via {} (adjacency {}/{})",
                                     label,
                                     std::net::Ipv4Addr::from(nh),
@@ -2173,7 +2179,9 @@ impl OspfDaemon {
                                     fmt_rid(*neigh)
                                 );
                             }
-                            Err(e) => eprintln!("lsp: adj pop install for {label}: {e}"),
+                            Err(e) => {
+                                log_error!(Component::Ospf, "lsp: adj pop install for {label}: {e}")
+                            }
                         }
                     }
                 }
