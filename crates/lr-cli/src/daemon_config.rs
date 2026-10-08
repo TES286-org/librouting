@@ -460,6 +460,37 @@ pub(crate) struct FilterSpec {
     pub description: Option<String>,
 }
 
+/// A reusable function declaration shared across every filter
+/// (`[[filter_function]]` in TOML, `filter-function` in the DSL).
+///
+/// The daemon prepends every shared function's source to each filter
+/// body before compilation, so a function declared here is callable
+/// from any filter (and from any other shared function). This is the
+/// BIRD top-level `function` analogue; the per-filter `function`
+/// declaration stays available for filter-private helpers.
+///
+/// Issue #46 asks for "filters to reference functions, enabling the
+/// definition of reusable logic that can be invoked by various filters
+/// or functions." This struct is the config carrier; `build_filters`
+/// in `daemon_policy.rs` does the prepending.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct FilterFunctionSpec {
+    /// Function name — must be unique across the shared-function
+    /// table and must not shadow a built-in (`len`, `bgp.first_as`,
+    /// …). The filter parser fails closed on a collision.
+    pub name: Option<String>,
+    /// Formal parameter names, in positional order.
+    pub params: Vec<String>,
+    /// Optional `-> type` annotation. Documentation only; the DSL
+    /// is dynamically typed so it is never enforced.
+    pub return_type: Option<String>,
+    /// DSL body — the function's statement list, without the
+    /// surrounding `function name(...) { ... }` wrapper. The daemon
+    /// reconstructs the wrapper at prepend time so the operator
+    /// writes the body in the same shape they would inline.
+    pub body: Option<String>,
+}
+
 /// `[damping]` table — RFC 2439 route flap damping (ROADMAP-v3 D4.3).
 ///
 /// Off by default. When `enabled = true`, the daemon installs an
@@ -858,6 +889,12 @@ pub(crate) struct DaemonConfig {
     /// evaluated against every route through the existing policy
     /// hook chain.
     pub filters: Vec<FilterSpec>,
+    /// `[[filter_function]]` tables — reusable function declarations
+    /// prepended to every filter body before compilation (issue #46).
+    /// A function declared here is callable from any filter (and from
+    /// any other shared function); the per-filter `function` keyword
+    /// stays available for filter-private helpers.
+    pub filter_functions: Vec<FilterFunctionSpec>,
 
     /// `[damping]` table — RFC 2439 route flap damping (ROADMAP-v3
     /// D4.3). Off by default; when `enabled = true` the daemon
@@ -2535,6 +2572,10 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                     cfg.filters.push(FilterSpec::default());
                     section = "filter".to_string();
                 }
+                "filter_function" => {
+                    cfg.filter_functions.push(FilterFunctionSpec::default());
+                    section = "filter_function".to_string();
+                }
                 "redistribute" => {
                     cfg.redistributes.push(RedistributeSpec::default());
                     section = "redistribute".to_string();
@@ -2682,6 +2723,13 @@ pub(crate) fn apply_config_key(
         return Ok(());
     }
     if apply_filter_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // `[[filter_function]]` — reusable functions prepended to every
+    // filter body (issue #46). Same fail-closed posture as `[[filter]]`.
+    if apply_filter_function_key(cfg, section, key, value)
         .map_err(|e| format!("line {}: {}", lineno + 1, e))?
     {
         return Ok(());
@@ -3303,6 +3351,41 @@ fn apply_filter_key(
         _ => {
             return Err(format!(
                 "unknown [[filter]] key '{key}' (typo protection; filter config fails closed)"
+            ))
+        }
+    }
+    Ok(true)
+}
+
+/// Apply one `[[filter_function]]` key (issue #46). Recognised keys:
+/// `name`, `params` (an array of parameter-name strings), `return_type`
+/// (an optional type annotation), and `body` (the function's DSL
+/// statement list, without the surrounding `function name(...) { … }`
+/// wrapper — the daemon reconstructs the wrapper at prepend time).
+///
+/// Fail-closed: a typo'd key is a hard error.
+fn apply_filter_function_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "filter_function" {
+        return Ok(false);
+    }
+    let Some(func) = cfg.filter_functions.last_mut() else {
+        return Err("key outside a [[filter_function]] table".into());
+    };
+    match key {
+        "name" => func.name = Some(value.to_string()),
+        "params" => func.params = parse_str_array(value),
+        // Single-param convenience: `param = "lp"` adds one param.
+        "param" => func.params.push(value.to_string()),
+        "return_type" => func.return_type = Some(value.to_string()),
+        "body" => func.body = Some(unescape_toml_string(value)),
+        _ => {
+            return Err(format!(
+                "unknown [[filter_function]] key '{key}' (typo protection; filter function config fails closed)"
             ))
         }
     }

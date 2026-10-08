@@ -204,6 +204,28 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.filter_block(filter.name.as_deref().map(fmt_string).as_deref(), body);
     }
 
+    // --- filter functions (issue #46) -------------------------------------
+    // Shared functions are emitted as `filter-function "name" { … }`
+    // blocks. The body is a quoted string (with `\"` and `\\` escapes)
+    // matching the TOML form, so the DSL parser's string lexer reads
+    // it back identically. Params are emitted as repeated `param "x";`
+    // lines so the round-trip does not depend on array syntax.
+    for func in &cfg.filter_functions {
+        let name = func.name.as_deref().unwrap_or("");
+        e.out.push_str(&format!("filter-function \"{name}\" {{\n"));
+        for p in &func.params {
+            e.out.push_str(&format!("    param {};\n", fmt_string(p)));
+        }
+        if let Some(t) = &func.return_type {
+            e.out
+                .push_str(&format!("    return_type {};\n", fmt_string(t)));
+        }
+        if let Some(body) = &func.body {
+            e.out.push_str(&format!("    body {};\n", fmt_string(body)));
+        }
+        e.out.push_str("}\n");
+    }
+
     // --- roa / redistribute / aggregate ------------------------------------
     for roa in &cfg.roas {
         e.open(0, "roa", None);

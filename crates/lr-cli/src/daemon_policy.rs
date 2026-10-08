@@ -274,6 +274,13 @@ pub(crate) fn bind_peer_policies(
 /// and return them keyed by name. Returns a startup error on the
 /// first filter that fails to parse or has a duplicate name.
 pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter)>, String> {
+    // Build the shared-function preamble once (issue #46). Each
+    // declared function becomes a `function name(params) { body }`
+    // declaration; the preamble is prepended to every filter body
+    // before compilation so the functions are callable from any
+    // filter and from any other shared function. The DSL parser
+    // fails closed on a duplicate name or a shadow of a built-in.
+    let shared_preamble = render_filter_function_preamble(&cfg.filter_functions)?;
     let mut out = Vec::with_capacity(cfg.filters.len());
     let mut seen = std::collections::BTreeSet::new();
     for spec in &cfg.filters {
@@ -281,18 +288,66 @@ pub(crate) fn build_filters(cfg: &DaemonConfig) -> Result<Vec<(String, DslFilter
         if !seen.insert(name.to_string()) {
             return Err(format!("filter '{name}' declared twice"));
         }
+        // Prepend the shared functions so the filter body can call
+        // them. The preamble carries no statements, so a filter with
+        // no body of its own still compiles (it falls through).
         let body = spec.body.as_deref().unwrap_or("");
-        let filter = dsl::compile(name, body).map_err(|e| {
+        let full = if shared_preamble.is_empty() {
+            body.to_string()
+        } else {
+            format!("{shared_preamble}\n{body}")
+        };
+        let filter = dsl::compile(name, &full).map_err(|e| {
             // Issue #18 Phase 0: render the positioned diagnostic with
             // a source snippet — the body IS the source, so spans are
             // directly displayable to the operator.
             format!(
                 "filter '{name}': {}\n{}",
                 e,
-                dsl::render_snippet(body, e.span, &e.kind.to_string())
+                dsl::render_snippet(&full, e.span, &e.kind.to_string())
             )
         })?;
         out.push((name.to_string(), filter));
+    }
+    Ok(out)
+}
+
+/// Render the shared-function declarations as a DSL preamble string.
+/// Each `[[filter_function]]` becomes `function name(params) { body }`
+/// on its own line; the declarations are emitted in config order so a
+/// later function can call an earlier one. The body is the operator's
+/// DSL source verbatim — the parser validates it.
+///
+/// Returns `Ok(String::new())` when no shared functions are declared,
+/// so `build_filters` can skip the prepend work entirely on a config
+/// without `[[filter_function]]` tables.
+fn render_filter_function_preamble(
+    funcs: &[crate::daemon_config::FilterFunctionSpec],
+) -> Result<String, String> {
+    if funcs.is_empty() {
+        return Ok(String::new());
+    }
+    // Detect duplicate names early — the DSL parser would also catch
+    // them, but the error message there points at the second
+    // declaration's line in the synthetic preamble, not at the
+    // operator's config file. Surface the duplicate here instead.
+    let mut seen = std::collections::BTreeSet::new();
+    let mut out = String::new();
+    for func in funcs {
+        let name = func.name.as_deref().unwrap_or("");
+        if name.is_empty() {
+            return Err("a [[filter_function]] is missing its 'name'".to_string());
+        }
+        if !seen.insert(name.to_string()) {
+            return Err(format!("filter function '{name}' declared twice"));
+        }
+        let params = func.params.join(", ");
+        let ret = match &func.return_type {
+            Some(t) => format!(" -> {t}"),
+            None => String::new(),
+        };
+        let body = func.body.as_deref().unwrap_or("");
+        out.push_str(&format!("function {name}({params}){ret} {{\n{body}\n}}\n"));
     }
     Ok(out)
 }
@@ -920,5 +975,80 @@ mod tests {
 
         route.key.prefix = lr_core::addr::Prefix::new_v4([192, 0, 2, 0], 24);
         assert!(!f.accepts(&route), "192.0.2.0/24 does not match → reject");
+    }
+
+    #[test]
+    fn shared_filter_function_is_callable_from_filter() {
+        // A `[[filter_function]]` is prepended to every filter body,
+        // so a filter can call it by name (issue #46).
+        let cfg = parse(
+            "[[filter_function]]\n\
+             name = \"tag_customer\"\n\
+             params = [\"lp\"]\n\
+             body = \"bgp.local_pref = lp; return true;\"\n\
+             [[filter]]\n\
+             name = \"in\"\n\
+             body = \"tag_customer(200); accept;\"\n",
+        );
+        let filters = build_filters(&cfg).expect("filter must compile");
+        assert_eq!(filters.len(), 1);
+        assert_eq!(filters[0].0, "in");
+        // The shared function lands in the compiled filter's function table.
+        assert_eq!(filters[0].1.functions.len(), 1);
+        assert_eq!(filters[0].1.functions[0].name, "tag_customer");
+    }
+
+    #[test]
+    fn shared_filter_function_detects_duplicate_names() {
+        // Two `[[filter_function]]` blocks with the same name fail at
+        // preamble render time, before the DSL parser sees them.
+        let cfg = parse(
+            "[[filter_function]]\n\
+             name = \"dup\"\n\
+             body = \"return true;\"\n\
+             [[filter_function]]\n\
+             name = \"dup\"\n\
+             body = \"return false;\"\n\
+             [[filter]]\n\
+             name = \"in\"\n\
+             body = \"accept;\"\n",
+        );
+        let err = build_filters(&cfg).unwrap_err();
+        assert!(
+            err.contains("filter function 'dup' declared twice"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn shared_filter_function_can_call_another_shared_function() {
+        // A later shared function can call an earlier one (the preamble
+        // is emitted in config order).
+        let cfg = parse(
+            "[[filter_function]]\n\
+             name = \"base\"\n\
+             body = \"return true;\"\n\
+             [[filter_function]]\n\
+             name = \"wrapper\"\n\
+             body = \"return base();\"\n\
+             [[filter]]\n\
+             name = \"in\"\n\
+             body = \"if wrapper() then accept; reject;\"\n",
+        );
+        let filters = build_filters(&cfg).expect("filter must compile");
+        assert_eq!(filters[0].1.functions.len(), 2);
+    }
+
+    #[test]
+    fn shared_filter_function_missing_name_fails() {
+        let cfg = parse(
+            "[[filter_function]]\n\
+             body = \"return true;\"\n\
+             [[filter]]\n\
+             name = \"in\"\n\
+             body = \"accept;\"\n",
+        );
+        let err = build_filters(&cfg).unwrap_err();
+        assert!(err.contains("missing its 'name'"), "{err}");
     }
 }

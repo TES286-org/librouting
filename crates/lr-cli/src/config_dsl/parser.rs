@@ -99,6 +99,11 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
             section: "filter",
             entry: Entry::Filter,
         }),
+        // `filter-function` — reusable functions prepended to every
+        // filter body (issue #46). Same array-table shape as `[[filter]]`
+        // but without the verbatim-body carve-out: the body is a normal
+        // string key.
+        ("", "filter-function") => Some(array("filter_function", Some("name"))),
         ("", "roa") => Some(array("roa", None)),
         ("", "redistribute") => Some(array("redistribute", None)),
         ("", "aggregate") => Some(array("aggregate", None)),
