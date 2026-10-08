@@ -136,6 +136,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Route maps, prefix lists, AS-path filters, community lists | yes | `lr-policy::route_map`, `lr-policy::prefix_list`, `lr-policy::as_path_filter`, `lr-policy::community_list` |
 | Import, selection and export hooks | yes | `lr-policy::hooks` |
 | Safety net: AS loops, next-hop sanity, martians | yes | `lr-policy::safety` |
+| Safety net granular overrides: global kill switch, per-AFI martian, per-rule exceptions | yes | `lr-policy::safety::SafetyConfig` |
 | Policy chains and verdicts | yes | `lr-policy::policy` |
 | Named policy sets and per-route actions | yes | `lr-policy::set`, `lr-policy::action` |
 | BGP attribute access from policy | yes | `lr-policy::bgp` |
@@ -143,6 +144,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Filter DSL bytecode compiler and stack VM | yes | `lr-policy::filter::bytecode` |
 | Filter DSL peephole optimisation | yes | `lr-policy::filter::peephole` |
 | Source spans and positioned diagnostics | yes | `lr-policy::filter::span` |
+| Cross-filter reusable function definitions | yes | `lr-cli::daemon_policy::build_filters` |
 
 ## OS integration and data plane — `lr-osroute`, `lr-mpls`, `lr-srv6`
 
@@ -173,6 +175,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | C++ header-only RAII wrapper | yes | `include/librouting.hpp` |
 | Go and Python bindings | yes | `bindings/lr-go`, `bindings/lr-python` |
 | Daemon for BGP, OSPFv2, OSPFv3, Babel, LDP, BMP and combinations | yes | `crates/lr-cli/src/daemon.rs`, `daemon_multi.rs` |
+| Categorised logging: severity, components, per-component levels, plain/JSON format, file mirror | yes | `crates/lr-cli/src/daemon_logger.rs` |
 | Runtime API socket and `lrctl` client | yes | `crates/lr-cli/src/api.rs`, `crates/lr-cli/src/lrctl.rs` |
 | Prometheus exposition on `/metrics` | yes | `crates/lr-cli/src/metrics.rs` |
 | Config: native `.lr` DSL, TOML, BIRD and FRR dialects | yes | `crates/lr-cli/src/daemon_config.rs`, `crates/lr-cli/src/compat.rs`, `crates/lr-cli/src/translate.rs` |

@@ -549,3 +549,77 @@ route-map "to-customer" {
 #     upper_limit 10000;         # penalty ceiling
 #     decay_interval_s 5;        # decay tick (seconds)
 # }
+
+# ---------------------------------------------------------------------
+# Logging (issue #46)
+# ---------------------------------------------------------------------
+# Categorised diagnostic output: every record carries a severity
+# (error | warn | info | debug | trace) and a component (bgp | ospf |
+# ospf3 | babel | ldp | bfd | bmp | rib | policy | router | daemon |
+# api | metrics | config | rpki | osroute | interop). The operator
+# controls what lands where:
+#
+# logging {
+#     level "info";                  # default severity
+#     format "plain";                # plain | json
+#     color "auto";                  # auto | on | off
+#     file "/var/log/lr-daemon.log"; # optional mirror
+#     target "bgp=debug";            # per-component override
+#     target "ospf=warn";            # repeatable
+#     target "*=info";               # wildcard sets the default
+# }
+#
+# CLI equivalents: --log-level, --log-target, --log-format,
+# --log-color, --log-file.
+
+# ---------------------------------------------------------------------
+# Safety net (issue #46)
+# ---------------------------------------------------------------------
+# Protocol-level invariants the router enforces before a route
+# reaches the Loc-RIB. Every rule defaults to on; the granular
+# controls let an operator turn the whole net off, exempt specific
+# ASes from the loop check, exempt specific prefixes from the
+# martian check, or split the martian check by address family:
+#
+# safety {
+#     enabled true;                  # global kill switch
+#     reject_as_loop true;
+#     reject_invalid_next_hop true;
+#     reject_empty_as_path_ebgp false;
+#     reject_invalid_origin true;
+#     reject_excessive_as_loop true;
+#     max_as_path_loops 3;
+#     reject_oversized_as_path true;
+#     max_as_path_length 64;
+#     reject_martian_prefix true;
+#     reject_martian_v4 true;        # per-AFI martian toggle
+#     reject_martian_v6 true;
+#     reject_oversized_local_pref false;
+#     max_local_pref 4294967295;
+#     as_loop_exception "65000";     # ASN exempt from loop check
+#     martian_exception "169.254.0.0/16"; # prefix exempt from martian
+# }
+#
+# A route is exempt from the martian check when its prefix is
+# contained in any `martian_exception` entry, so listing
+# `169.254.0.0/16` admits that prefix and its subnets without
+# disabling the check for the rest of the AFI.
+
+# ---------------------------------------------------------------------
+# Reusable filter functions (issue #46)
+# ---------------------------------------------------------------------
+# Functions declared here are prepended to every filter body before
+# compilation, so any filter (and any other shared function) can
+# call them by name. This is the BIRD top-level `function` analogue;
+# the per-filter `function` keyword stays for filter-private helpers.
+#
+# filter-function "tag_customer" {
+#     param "lp";
+#     return_type "bool";
+#     body "bgp.local_pref = lp; return true;";
+# }
+#
+# filter "in" {
+#     if net ~ [10.0.0.0/8+] then tag_customer(200);
+#     accept;
+# }

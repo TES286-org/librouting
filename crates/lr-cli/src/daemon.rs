@@ -2758,7 +2758,7 @@ fn spawn_connector(
                     sleep_interruptible(&rt, Duration::from_millis(1_000));
                     continue;
                 }
-                println!("daemon: peer {}: connecting to {} ...", label, remote);
+                log_info!(Component::Bgp, "peer {label}: connecting to {remote} ...");
                 match connect_secure(sockaddr, local, &auth, &gtsm) {
                     Ok(stream) => {
                         let _ = stream.set_nodelay(true);
@@ -2865,12 +2865,12 @@ fn spawn_connector(
                         } else {
                             backoff_ms = (backoff_ms * 2).min(30_000);
                         }
-                        eprintln!("daemon: peer {}: reconnecting in {}ms", label, backoff_ms);
+                        log_debug!(Component::Bgp, "peer {label}: reconnecting in {backoff_ms}ms");
                         sleep_interruptible(&rt, Duration::from_millis(backoff_ms));
                     }
                     Err((e, fatal)) => {
                         if fatal {
-                            eprintln!("daemon: peer {}: {}", label, e);
+                            log_error!(Component::Bgp, "peer {label}: {e}");
                             return;
                         }
                         eprintln!(
