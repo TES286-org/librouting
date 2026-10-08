@@ -13,6 +13,71 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.1.0] — configuration and logging overhaul
+
+librouting 1.1.0 ships the configuration and logging surface asked for
+in [issue #46](https://github.com/TES286-org/librouting/issues/46):
+categorised diagnostic logging, granular safety-net overrides, and
+cross-filter reusable function definitions. All three are additive —
+no public Rust API or C ABI symbol changed shape — so the bump is
+minor per [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md) §1.
+
+### New features
+
+**Categorised logging** (`feat(cli)`). The daemon's diagnostic output
+now carries a severity (`error | warn | info | debug | trace`) and a
+component (`bgp | ospf | ospfv3 | babel | ldp | bfd | bmp | rib |
+policy | router | daemon | api | metrics | config | rpki | osroute |
+interop`). The operator controls what lands where through the new
+`[logging]` config section (TOML and DSL) and the `--log-level`,
+`--log-target`, `--log-format`, `--log-color`, `--log-file` CLI flags.
+Plain and JSON output formats are supported; the file destination
+mirrors the console. The filter test is `severity <=
+level_for(component)`, so a per-component override (`bgp=debug`) wins
+over the global default. Every diagnostic `println!`/`eprintln!` call
+in the daemon runtime has been migrated to the categorised `log_*!`
+macros; the raw `println!`/`eprintln!` macros remain for operational
+output (usage banner, startup summary, `status` reply) and
+pre-logger-init error paths.
+
+**Granular safety-net overrides** (`feat(policy)`). The
+`lr_policy::SafetyConfig` struct gains four new fields (all
+default-preserving):
+- `enabled: bool` — global kill switch.
+- `as_loop_exceptions: Vec<Asn>` — ASNs exempt from the AS_PATH loop
+  checks.
+- `martian_exceptions: Vec<Prefix>` — prefixes that bypass the martian
+  check (a route is exempt when its prefix is contained in any entry).
+- `reject_martian_v4: bool` / `reject_martian_v6: bool` — per-AFI
+  martian toggle.
+The daemon applies the operator's `[safety]` config section to the
+router's `SafetyNet` at startup.
+
+**Cross-filter reusable function definitions** (`feat(policy)`). A new
+`[[filter_function]]` config table (TOML) / `filter-function` block
+(DSL) declares functions callable from every filter and from every
+other shared function — the BIRD top-level `function` analogue. The
+daemon prepends the shared functions to each filter body before
+compilation, so the existing per-filter `function` keyword and the
+DSL parser's duplicate-name / shadow detection handle the validation.
+
+### Fixes
+
+- `fix(babel)`: enable `check-link` on the manual single-socket path
+  (carrier-based withdrawal now works on the non-per-interface
+  transport).
+- `fix(tests)`: update interop script assertions for the categorised
+  log format (7 scripts touched).
+
+### Compatibility
+
+**No breaking changes.** The C ABI (`lr_abi_version()`) stays at `2`;
+the `abi-freeze` CI job confirms the header is additive-only relative
+to the `v1.0.0` baseline. The new `SafetyConfig` fields are additive
+(defaults preserve the prior behaviour). The new `[logging]`,
+`[safety]`, and `[[filter_function]]` config sections are opt-in — a
+1.0.0 config file loads and runs identically under 1.1.0.
+
 ## [1.0.0] — first stable release
 
 librouting 1.0.0 is the first stable release. The public Rust API (Tier 1)
