@@ -875,24 +875,28 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             h.status.register(Arc::clone(&status_lines));
             Arc::clone(&h.runtime)
         }
-        None => Arc::new(crate::Runtime {
-            reload: Arc::new(|| {
-                vec![
-                    "ospf3: configuration reload is not supported yet; shutdown still works"
-                        .to_string(),
-                ]
-            }),
-            router: Arc::clone(&daemon.router),
-            running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
-            status_lines: Arc::clone(&status_lines),
-            roa_len: None,
-            filter_metrics: Mutex::new(None),
-            session_labels: Arc::new(Mutex::new(HashMap::new())),
-            // OSPFv3 standalone — same posture as v2 standalone:
-            // `shutdown` works (immediate exit), `shutdown drain`
-            // honestly reports "drain not configured".
-            shutdown: None,
-        }),
+        None => {
+            // Issue #53 daemon-wide drain: install the drain gate on
+            // the router's import chain BEFORE the Runtime takes
+            // ownership of the Arc. Mirrors the OSPFv2 path: the
+            // queue is the [[static.route]] table.
+            let shutdown = crate::build_shutdown(cfg, &daemon.router);
+            Arc::new(crate::Runtime {
+                reload: Arc::new(|| {
+                    vec![
+                        "ospf3: configuration reload is not supported yet; shutdown still works"
+                            .to_string(),
+                    ]
+                }),
+                router: Arc::clone(&daemon.router),
+                running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
+                status_lines: Arc::clone(&status_lines),
+                roa_len: None,
+                filter_metrics: Mutex::new(None),
+                session_labels: Arc::new(Mutex::new(HashMap::new())),
+                shutdown,
+            })
+        }
     };
     let running = Arc::clone(&runtime.running);
     match &host {

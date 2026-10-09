@@ -498,6 +498,11 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
     let router = Arc::new(RwLock::new(DefaultRouter::new()));
     let counters = Arc::new(LdpCounters::new());
     let running = Arc::new(AtomicBool::new(true));
+    // Issue #53 daemon-wide drain: install the drain gate on the
+    // router's import chain BEFORE the Runtime takes ownership of
+    // the Arc. The LDP daemon's queue is its [[static.route]] +
+    // LDP label bindings (the latter via the FEC mapping table).
+    let shutdown = crate::build_shutdown(cfg, &router);
     let runtime = Arc::new(crate::Runtime {
         reload: Arc::new(|| {
             vec!["ldp: configuration reload is not supported yet; shutdown still works".to_string()]
@@ -531,10 +536,7 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         roa_len: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
-        // LDP standalone: `shutdown` works (immediate exit); drain is
-        // not wired (no BGP-originated queue to walk). The router
-        // exists, so a follow-up could install the hook + controller.
-        shutdown: None,
+        shutdown,
     });
     if let Err(sig) = crate::signal::init() {
         log_error!(

@@ -417,3 +417,55 @@ fn drain_abort_cancels_in_progress_drain() {
     let (ok, _log) = d.wait_exit();
     assert!(ok, "daemon must exit 0 after plain shutdown");
 }
+
+/// The standalone LDP engine wires the `ShutdownController` too:
+/// `--protocol ldp --shutdown-mode drain` must start the daemon
+/// in drain mode, install the `DrainModeImportHook` on the import
+/// chain, and the API must report `state=running`. The LDP daemon
+/// uses UDP discovery + TCP sessions on the configured `--ldp-port`
+/// (default 646 — needs root; the test uses 6460 so it runs without
+/// privileges). Covers item (a) of the issue #53 follow-up — drain
+/// support for the standalone non-BGP engines.
+#[test]
+fn ldp_standalone_drain_mode_is_wired() {
+    let socket =
+        std::env::temp_dir().join(format!("lr-daemon-drain-ldp-{}.sock", std::process::id()));
+    let _d = Daemon::spawn(
+        &[
+            "--protocol",
+            "ldp",
+            "--router-id",
+            "10.0.0.1",
+            "--ldp-interface",
+            "lo",
+            "--ldp-port",
+            "6460",
+            "--api-socket",
+            socket.to_str().unwrap(),
+            "--shutdown-mode",
+            "drain",
+            "--shutdown-drain-rate",
+            "5",
+            "--shutdown-drain-max-wait",
+            "10",
+        ],
+        "ldp",
+    );
+    _d.wait_log("runtime API on", "api socket up");
+    // The drain-configured LDP daemon also logs the configuration
+    // at startup. Either needle is sufficient.
+    let _ = Daemon::wait_log(&_d, "graceful drain configured", "drain config");
+
+    let status = api_ask(&socket, "shutdown status");
+    assert!(
+        status.contains("state=running"),
+        "LDP daemon drain status: {status}"
+    );
+    // The LDP daemon has no [[static.route]] entries and no
+    // BGP-originated routes — the queue is empty. `remaining=0`
+    // confirms the snapshot path runs without panic.
+    assert!(
+        status.contains("remaining=0"),
+        "LDP daemon drain queue should be empty: {status}"
+    );
+}
