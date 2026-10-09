@@ -862,6 +862,28 @@ pub(crate) struct DaemonConfig {
     /// routes regardless of configuration).
     pub graceful_shutdown: bool,
 
+    /// Daemon-wide graceful drain (issue #53). Default `"immediate"` —
+    /// the historical behaviour: `shutdown` flips the `running` flag and
+    /// the daemon exits at the next poll. `"drain"` enters a rate-limited
+    /// drain first: stop accepting new routes, walk the Loc-RIB and pull
+    /// back withdrawals at `shutdown_drain_rate_per_sec`, then exit when
+    /// the queue is empty or `shutdown_drain_max_wait_secs` elapses.
+    pub shutdown_mode: String,
+    /// Withdrawals per second the drain worker emits. Higher values
+    /// finish faster but stress the peer's MinRouteUpdateInterval and
+    /// the import pipeline downstream; a value of `0` is rejected at
+    /// `finalize()` (a drain that never makes progress would never
+    /// terminate). Default `50` — well under any common peer's
+    /// MinRouteUpdateInterval (RFC 4271 §9.2.1.1, default 0 on most
+    /// vendors) yet fast enough to drain a 10k-route table inside the
+    /// 200 s default `max_wait`.
+    pub shutdown_drain_rate_per_sec: u32,
+    /// Hard ceiling on drain wall-clock time. If the queue is not empty
+    /// by the deadline the drain worker exits anyway and the daemon
+    /// tears down with an unsatisfied-drain log line — better a noisy
+    /// exit than a wedged process. Default `600` s.
+    pub shutdown_drain_max_wait_secs: u32,
+
     /// `[[roa]]` tables — Route Origin Authorizations (RFC 6482)
     /// loaded into the router-wide [`lr_bgp::RoaTable`] at startup.
     /// When `roa_validate` is on, every received BGP UPDATE is
@@ -1354,6 +1376,9 @@ impl DaemonConfig {
             exchange_plane: false,
             exchange_plane_keys: Vec::new(),
             graceful_shutdown: true,
+            shutdown_mode: "immediate".to_string(),
+            shutdown_drain_rate_per_sec: 50,
+            shutdown_drain_max_wait_secs: 600,
             roas: Vec::new(),
             roa_validate: false,
             roa_invalid_action: "reject".to_string(),
@@ -1481,6 +1506,39 @@ impl DaemonConfig {
         self.finalize_static_routes()?;
         self.finalize_redistribution()?;
         self.finalize_aggregates()?;
+        self.finalize_shutdown()?;
+        Ok(())
+    }
+
+    /// Validate the `[shutdown]` block. `mode = "immediate"` (the
+    /// default) and `mode = "drain"` are the only accepted values; the
+    /// drain rate must be non-zero (a drain that never makes progress
+    /// would never terminate) and the maximum wait must be non-zero
+    /// (an unbounded drain would hang the daemon on a misconfigured
+    /// peer). The TOML parser already rejects a bad `mode` string at
+    /// parse time; this catches the `--shutdown-mode drain
+    /// --shutdown-drain-rate 0` shape the CLI permits.
+    fn finalize_shutdown(&mut self) -> Result<(), String> {
+        if !matches!(self.shutdown_mode.as_str(), "immediate" | "drain") {
+            return Err(format!(
+                "bad shutdown.mode '{}' (expected \"immediate\" | \"drain\")",
+                self.shutdown_mode
+            ));
+        }
+        if self.shutdown_mode == "drain" && self.shutdown_drain_rate_per_sec == 0 {
+            return Err(
+                "shutdown.drain_rate_per_sec must be > 0 in drain mode \
+                 (a zero rate would never complete)"
+                    .to_string(),
+            );
+        }
+        if self.shutdown_mode == "drain" && self.shutdown_drain_max_wait_secs == 0 {
+            return Err(
+                "shutdown.drain_max_wait_secs must be > 0 in drain mode \
+                 (an unbounded drain would hang the daemon on a wedged peer)"
+                    .to_string(),
+            );
+        }
         Ok(())
     }
 
@@ -2630,6 +2688,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "bgp.rpki"
                 && section != "logging"
                 && section != "safety"
+                && section != "shutdown"
                 && !section.starts_with("unknown-array.")
             {
                 cfg.warnings.push(format!(
@@ -2936,6 +2995,30 @@ pub(crate) fn apply_config_key(
         "networks" | "bgp.networks" => cfg.networks = parse_str_array(value),
         "labeled_networks" | "bgp.labeled_networks" => {
             cfg.labeled_networks = parse_str_array(value)
+        }
+        // Daemon-wide graceful drain (issue #53). `[shutdown]` block
+        // with three keys: `mode = "immediate"` (default, historical)
+        // or `mode = "drain"` (new — stop accepting new routes,
+        // withdraw the Loc-RIB's locally-originated routes at
+        // `drain_rate_per_sec`, then exit when the queue is empty or
+        // `drain_max_wait_secs` elapses). The dispatcher builds the
+        // full `section.key` form, so `[shutdown]` + `mode = "drain"`
+        // arrives here as `"shutdown.mode"`.
+        "shutdown.mode" => {
+            if !matches!(value, "immediate" | "drain") {
+                return Err(format!(
+                    "line {}: bad shutdown.mode '{}' (expected \"immediate\" | \"drain\")",
+                    lineno + 1,
+                    value
+                ));
+            }
+            cfg.shutdown_mode = value.to_string();
+        }
+        "shutdown.drain_rate_per_sec" => {
+            cfg.shutdown_drain_rate_per_sec = value.parse().unwrap_or(0);
+        }
+        "shutdown.drain_max_wait_secs" => {
+            cfg.shutdown_drain_max_wait_secs = value.parse().unwrap_or(0);
         }
         _ => {
             cfg.warnings.push(format!(
@@ -5121,6 +5204,38 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--metrics-addr" if i + 1 < args.len() => {
                 cfg.metrics_addr = Some(args[i + 1].clone());
+                i += 2;
+            }
+            // Issue #53: daemon-wide graceful drain. `--shutdown-mode
+            // drain` opts into the new posture (stop accepting new
+            // routes, withdraw the Loc-RIB at `--shutdown-drain-rate`
+            // per second, exit when empty or
+            // `--shutdown-drain-max-wait` seconds elapse). The
+            // default `immediate` keeps the historical `shutdown`
+            // behaviour (flip the running flag, exit at the next
+            // poll). The TOML equivalents are `[shutdown] mode`,
+            // `[shutdown] drain_rate_per_sec`, `[shutdown]
+            // drain_max_wait_secs`.
+            "--shutdown-mode" if i + 1 < args.len() => {
+                let v = &args[i + 1];
+                if !matches!(v.as_str(), "immediate" | "drain") {
+                    eprintln!(
+                        "bad --shutdown-mode '{}' (expected \"immediate\" | \"drain\")",
+                        v
+                    );
+                    return Err(ExitCode::from(2));
+                }
+                cfg.shutdown_mode = v.clone();
+                i += 2;
+            }
+            "--shutdown-drain-rate" if i + 1 < args.len() => {
+                cfg.shutdown_drain_rate_per_sec =
+                    args[i + 1].parse().unwrap_or(50);
+                i += 2;
+            }
+            "--shutdown-drain-max-wait" if i + 1 < args.len() => {
+                cfg.shutdown_drain_max_wait_secs =
+                    args[i + 1].parse().unwrap_or(600);
                 i += 2;
             }
             // Logging configuration (issue #46). The CLI flags merge

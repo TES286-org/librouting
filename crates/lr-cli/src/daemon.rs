@@ -313,6 +313,15 @@ fn print_usage() {
          --group NAME             Privilege-drop group\n  \
          --api-socket PATH        Unix-socket runtime API\n  \
          --metrics-addr ADDR      Prometheus /metrics HTTP endpoint (e.g. 127.0.0.1:9119)\n  \
+         --shutdown-mode MODE     immediate (default) | drain — issue #53.\n  \
+                                  drain stops accepting new routes, withdraws\n  \
+                                  the Loc-RIB at --shutdown-drain-rate/sec,\n  \
+                                  exits when empty or after\n  \
+                                  --shutdown-drain-max-wait secs. The runtime\n  \
+                                  API `shutdown drain` triggers the same path\n  \
+                                  on a live daemon.\n  \
+         --shutdown-drain-rate N  Withdrawals per second the drain emits (50)\n  \
+         --shutdown-drain-max-wait S  Drain hard ceiling in seconds (600)\n  \
          Multi-peer configuration uses [[peer]] tables in the TOML config\n  \
          (see templates/daemon.toml): per-peer remote/address, peer_as,\n  \
          auth, GTSM, maximum-prefix, Add-Path and family settings,\n  \
