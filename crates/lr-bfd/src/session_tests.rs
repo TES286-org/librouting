@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn cfg_100ms() -> BfdConfig {

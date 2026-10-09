@@ -1,4 +1,3 @@
-
 use super::*;
 
 /// A `MplsNetlink` with no live socket — enough to exercise

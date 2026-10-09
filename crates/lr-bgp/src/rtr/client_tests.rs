@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::rtr::pdu::{decode, encode_vec, RtrPdu, RTR_VERSION_0, RTR_VERSION_1, RTR_VERSION_2};
 use lr_core::addr::{Asn, Prefix};

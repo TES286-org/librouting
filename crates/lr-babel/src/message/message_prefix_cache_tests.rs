@@ -1,4 +1,3 @@
-
 use super::*;
 
 fn update(ae: u8, plen: u8, flags: u8, omitted: u8, prefix: &[u8]) -> Update {
