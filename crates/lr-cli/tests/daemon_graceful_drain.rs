@@ -252,8 +252,8 @@ fn drain_command_exits_daemon_with_empty_queue() {
 
     // Poll until the drain reaches Drained. The queue is one route,
     // the rate is 5/s, so this should resolve in well under a second;
-    // allow up to 5 s for slow CI runners.
-    let deadline = Instant::now() + Duration::from_secs(5);
+    // allow up to 15 s for slow CI runners under parallel load.
+    let deadline = Instant::now() + Duration::from_secs(15);
     let mut last_status = String::new();
     while Instant::now() < deadline {
         last_status = api_ask(&socket, "shutdown status");

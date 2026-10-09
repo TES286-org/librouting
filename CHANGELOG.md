@@ -15,6 +15,46 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased]
 
+### Added
+
+**Daemon-wide graceful drain shutdown** (`feat`, [issue #53](https://github.com/TES286-org/librouting/issues/53)).
+A new shutdown mode that minimises the network-wide update rate
+during a maintenance exit: stop accepting new routes, withdraw the
+locally-originated routes at a rate-limited pace, then exit when the
+queue is empty or the deadline elapses. Configured through a new
+`[shutdown]` block (`mode = "immediate"` (default, historical) or
+`mode = "drain"`, `drain_rate_per_sec = 50`, `drain_max_wait_secs =
+600`) or the equivalent `--shutdown-mode`, `--shutdown-drain-rate`,
+`--shutdown-drain-max-wait` CLI flags. Triggered on a live daemon
+through `lrctl shutdown drain` (or the runtime API `shutdown drain`
+command); `lrctl shutdown status` polls the lifecycle
+(`running | draining | drained`).
+
+The drain is implemented as a state machine (`ShutdownController` in
+`crates/lr-cli/src/shutdown.rs`) running on its own thread. A new
+`DrainModeImportHook` (`crates/lr-policy/src/hooks.rs`) is installed
+at the front of the import chain so every inbound UPDATE is dropped
+while the drain is in progress — the "stop accepting new routes"
+step. The worker then walks the Loc-RIB's static, originated and
+aggregate routes, calling the existing `RouterInstance` withdrawal
+APIs at the configured rate, then tears down every session with
+`shutdown_session` (RFC 4486 §4.1 Administrative Shutdown) before
+flipping `running` to false. Three new methods on `RouterInstance`
+expose the queue snapshots the worker needs:
+`originated_keys()`, `aggregate_prefixes()` (alongside the existing
+`static_routes()`). The C ABI surface is unchanged — the new
+methods are Rust-only and the drain controller lives in `lr-cli`
+(daemon-level concern, not router-instance level).
+
+The mechanism is orthogonal to the existing RFC 8326 community-based
+graceful-shutdown hooks (which de-preference per-peer LOCAL_PREF on
+tagged routes): RFC 8326 governs one session's maintenance posture;
+the drain governs the whole daemon's exit posture. Three e2e tests
+in `crates/lr-cli/tests/daemon_graceful_drain.rs` exercise the
+running → draining → drained transition through the real
+`lr-daemon` binary, plus the immediate-mode refusal when the daemon
+is not configured for drain.
+
 ## [1.1.1] — patch: metrics portability fix and source-file modularisation
 
 librouting 1.1.1 is a patch release: a bug fix that makes the metrics

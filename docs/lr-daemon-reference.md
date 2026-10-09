@@ -249,6 +249,34 @@ Requesting the exchange plane on a binary built without the feature is a
 startup error, exit 2. See
 [research/EXCHANGE-PLANE.md](research/EXCHANGE-PLANE.md).
 
+### Shutdown (issue #53)
+
+| Flag | Config equivalent | Notes |
+| --- | --- | --- |
+| `--shutdown-mode MODE` | `[shutdown] mode` | `immediate` (default) \| `drain` |
+| `--shutdown-drain-rate N` | `[shutdown] drain_rate_per_sec` | Withdrawals per second in drain mode (default 50) |
+| `--shutdown-drain-max-wait S` | `[shutdown] drain_max_wait_secs` | Drain hard ceiling in seconds (default 600) |
+
+The `drain` mode minimises the network-wide update rate during a
+maintenance exit: stop accepting new routes (a `DrainModeImportHook`
+at the front of the import chain drops every inbound UPDATE while
+the drain is in progress), walk the Loc-RIB's locally-originated
+routes (statics + BGP-originated + aggregates) at the configured
+rate, then exit when the queue is empty or the deadline elapses.
+The existing RFC 8326 community-based graceful-shutdown hooks are
+orthogonal: they govern one peer's per-session maintenance posture,
+the drain governs the whole daemon's exit posture.
+
+A drain is triggered on a live daemon through `lrctl shutdown drain`
+(or the runtime API `shutdown drain` line command); `lrctl shutdown
+status` polls the lifecycle (`running | draining | drained`).
+Immediate mode (the default) refuses `shutdown drain` with a clear
+"drain not configured" diagnostic so the operator cannot
+accidentally trigger a no-op. `finalize` rejects a zero drain rate
+or zero max-wait in drain mode (a drain that cannot make progress
+would never terminate, and an unbounded drain would hang the
+daemon on a wedged peer).
+
 ## Configuration keys
 
 A key with no table above it is top-level. Array tables (`[[name]]`)
@@ -706,6 +734,21 @@ target)` pair may appear once.
 | --- | --- | --- |
 | `prefix` | string | Required CIDR; once per config |
 
+### `[shutdown]`
+
+| Key | Type | Default | Notes |
+| --- | --- | --- | --- |
+| `mode` | `"immediate"` \| `"drain"` | `"immediate"` | The new `drain` mode stops accepting new routes, walks the Loc-RIB at `drain_rate_per_sec`, then exits when empty or after `drain_max_wait_secs` |
+| `drain_rate_per_sec` | u32 | `50` | Must be `> 0` in drain mode |
+| `drain_max_wait_secs` | u32 | `600` | Must be `> 0` in drain mode |
+
+`[shutdown]` keys live in their own table; the dotted form
+(`shutdown.mode = "drain"` at the top level) also parses. The block
+is fail-closed — a typo'd value or an unsupported `mode` string
+stops the daemon at config load with a clear error message. See
+the [Shutdown (issue #53)](#shutdown-issue-53) flag table for the
+CLI equivalents and the operational semantics.
+
 ## Unknown keys: warnings versus errors
 
 The parser is fail-closed on structure and, mostly, on keys. The
@@ -719,7 +762,7 @@ tolerance is narrow:
 | `[ospf]`, `[[ospf.*]]` | Hard error |
 | `[babel]`, `[[babel.*]]` | Hard error |
 | `[ldp]`, `[[ldp.*]]` | Hard error |
-| `[damping]`, `[bgp.rpki]` | Hard error |
+| `[damping]`, `[bgp.rpki]`, `[shutdown]` | Hard error |
 | `[[roa]]`, `[[filter]]`, `[[prefix-list]]`, `[[as-path-list]]`, `[[community-list]]`, `[[route-map]]`, `[[static.route]]`, `[[redistribute]]`, `[[aggregate]]` | Hard error |
 | An unknown `[[table]]` or `[section]` name | `config warning: line N: unknown table/section … (ignored)` |
 
