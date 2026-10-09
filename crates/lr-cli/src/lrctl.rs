@@ -397,10 +397,17 @@ mod transport {
     /// read loop needs to interpret. Named so the `Read` impl below
     /// does not carry magic numbers.
     ///
-    /// `ERROR_BROKEN_PIPE` (109): the server closed its end — EOF.
+    /// `ERROR_BROKEN_PIPE` (109): the server closed its end cleanly — EOF.
+    /// `ERROR_NO_DATA` (232): the pipe is in a closing state — also
+    /// EOF. Windows returns this variant transiently when the server
+    /// has called `CloseHandle` on its end of the pipe but the kernel
+    /// has not yet torn down the client's view. Treating it as EOF
+    /// (rather than a hard error) lets the client observe the
+    /// `shutdown` reply the daemon flushed just before closing.
     /// `ERROR_PIPE_BUSY` (231): all pipe instances are in use; the
     /// client retries (see `connect_with_retry`).
     const ERROR_BROKEN_PIPE: u32 = 109;
+    const ERROR_NO_DATA: u32 = 232;
     const ERROR_PIPE_BUSY: u32 = 231;
 
     /// Connect to the daemon's named pipe, send one command, collect
@@ -533,8 +540,9 @@ mod transport {
             };
             if rc == 0 {
                 let err = unsafe { GetLastError() };
-                // ERROR_BROKEN_PIPE: the server closed its end — EOF.
-                if err == ERROR_BROKEN_PIPE {
+                // ERROR_BROKEN_PIPE / ERROR_NO_DATA: the server closed
+                // (or is closing) its end — EOF.
+                if err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA {
                     return Ok(0);
                 }
                 return Err(std::io::Error::from_raw_os_error(err as i32));
@@ -558,7 +566,7 @@ mod transport {
             };
             if rc == 0 {
                 let err = unsafe { GetLastError() };
-                if err == ERROR_BROKEN_PIPE {
+                if err == ERROR_BROKEN_PIPE || err == ERROR_NO_DATA {
                     return Ok(0);
                 }
                 return Err(std::io::Error::from_raw_os_error(err as i32));
