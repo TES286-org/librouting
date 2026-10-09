@@ -8,8 +8,14 @@
 //! `daemon_runtime.rs` uses for the API-socket round-trip tests;
 //! the difference is the client side is plain `std::net::TcpStream`
 //! (no Unix domain socket), since Prometheus scrapes over TCP.
+//!
+//! The metrics module binds a plain TCP listener (issue #47), so the
+//! suite is gated on the daemon binary being available — Unix and
+//! Windows. The kernel-gated tests in `crates/lr-osroute/tests/`
+//! stay Linux-only at the file level; this suite has no such
+//! platform dependency.
 
-#![cfg(unix)]
+#![cfg(any(unix, windows))]
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::TcpStream;
