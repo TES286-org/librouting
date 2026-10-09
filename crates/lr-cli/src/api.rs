@@ -330,6 +330,7 @@ mod imp {
                          shutdown           graceful shutdown (immediate)\n  \
                          shutdown drain     issue #53 graceful drain (rate-limited)\n  \
                          shutdown status    drain lifecycle (running | draining | drained)\n  \
+                         shutdown abort     cancel a drain in progress (best-effort)\n  \
                          help      this text\n  \
                          quit      close this connection"
                     );
@@ -503,11 +504,34 @@ mod imp {
                                 remaining
                             );
                         }
+                        "abort" => {
+                            let Some(ctrl) = deps.shutdown else {
+                                let _ = writeln!(out, "drain not configured (immediate mode)");
+                                let _ = out.flush();
+                                continue;
+                            };
+                            // Abort is best-effort: the worker notices
+                            // on its next iteration and exits without
+                            // further work. Report the before-abort
+                            // state — that's what an operator
+                            // inspecting the log wants to see, since
+                            // after the call the state is always
+                            // `running`.
+                            let before = ctrl.state();
+                            ctrl.abort();
+                            let _ = writeln!(
+                                out,
+                                "drain aborted (was {}, now running); \
+                                 {} routes still queued",
+                                before.as_str(),
+                                ctrl.routes_remaining(deps.router)
+                            );
+                        }
                         other => {
                             let _ = writeln!(
                                 out,
                                 "error: unknown shutdown sub-command '{other}' \
-                                 (try 'drain' or 'status')"
+                                 (try 'drain', 'status' or 'abort')"
                             );
                         }
                     }

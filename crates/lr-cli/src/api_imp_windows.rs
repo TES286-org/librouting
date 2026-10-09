@@ -227,6 +227,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let running = Arc::clone(&ctx.running);
     let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
+    let shutdown = ctx.shutdown;
     let started = std::time::Instant::now();
     let path_owned = pipe_name.clone();
 
@@ -260,6 +261,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 let running = Arc::clone(&running);
                 let reload = Arc::clone(&reload);
                 let status_lines = Arc::clone(&status_lines);
+                let shutdown = Arc::clone(&shutdown);
                 let path_owned = path_owned.clone();
                 thread::Builder::new()
                     .name("lr-api-conn".into())
@@ -270,6 +272,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                             running: &running,
                             reload: &reload,
                             status_lines: &status_lines,
+                            shutdown: shutdown.as_ref(),
                             started,
                             socket_path: Some(&path_owned),
                         };
@@ -360,6 +363,11 @@ struct ConnDeps<'a> {
     running: &'a Arc<AtomicBool>,
     reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
     status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Daemon-wide graceful drain controller (issue #53). `None`
+    /// when the daemon was started in immediate mode — the API
+    /// refuses `shutdown drain` with a clear "not configured"
+    /// diagnostic instead of silently accepting.
+    shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
     started: std::time::Instant,
     /// `shutdown` does not need to remove a socket file on Windows
     /// (named pipes are kernel-namespace objects that vanish when
@@ -472,7 +480,10 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                      routes    Loc-RIB dump (one route per line)\n  \
                      mrt PATH  write the Loc-RIB as an MRT dump (RFC 6396)\n  \
                      reload    re-apply configuration (SIGHUP equivalent)\n  \
-                     shutdown  graceful shutdown\n  \
+                     shutdown           graceful shutdown (immediate)\n  \
+                     shutdown drain     issue #53 graceful drain (rate-limited)\n  \
+                     shutdown status    drain lifecycle (running | draining | drained)\n  \
+                     shutdown abort     cancel a drain in progress (best-effort)\n  \
                      help      this text\n  \
                      quit      close this connection"
                 );
@@ -551,10 +562,96 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 }
             }
             "shutdown" => {
+                // `shutdown` is the immediate path: flip `running`
+                // to false and return. The daemon's main loop notices
+                // on its next poll and exits. The `shutdown drain` and
+                // `shutdown status` sub-commands are stripped off the
+                // command line first (see the prefix match arm below).
                 deps.running.store(false, Ordering::Relaxed);
                 let _ = writeln!(out, "shutting down");
                 let _ = out.flush();
                 return;
+            }
+            other if other.starts_with("shutdown ") => {
+                // Issue #53 daemon-wide graceful drain sub-commands.
+                // Mirrors the Unix serve_connection dispatch verbatim
+                // so a `lrctl shutdown drain` on Windows hits the same
+                // code path as on Unix.
+                let sub = other["shutdown ".len()..].trim();
+                match sub {
+                    "drain" => {
+                        let Some(ctrl) = deps.shutdown else {
+                            let _ = writeln!(
+                                out,
+                                "error: drain not configured \
+                                 (set [shutdown] mode = \"drain\" \
+                                 and restart, or use plain `shutdown` \
+                                 for immediate exit)"
+                            );
+                            let _ = out.flush();
+                            continue;
+                        };
+                        let started = Arc::clone(ctrl)
+                            .begin_drain(Arc::clone(deps.router), Arc::clone(deps.running));
+                        if started {
+                            let _ = writeln!(
+                                out,
+                                "drain started (state=draining); \
+                                 use `shutdown status` to poll"
+                            );
+                        } else {
+                            let _ = writeln!(
+                                out,
+                                "drain already in progress \
+                                 (state={})",
+                                ctrl.state().as_str()
+                            );
+                        }
+                    }
+                    "status" => {
+                        let Some(ctrl) = deps.shutdown else {
+                            let _ = writeln!(out, "drain not configured (immediate mode)");
+                            let _ = out.flush();
+                            continue;
+                        };
+                        let remaining = ctrl.routes_remaining(deps.router);
+                        let _ = writeln!(
+                            out,
+                            "state={} remaining={}",
+                            ctrl.state().as_str(),
+                            remaining
+                        );
+                    }
+                    "abort" => {
+                        let Some(ctrl) = deps.shutdown else {
+                            let _ = writeln!(out, "drain not configured (immediate mode)");
+                            let _ = out.flush();
+                            continue;
+                        };
+                        // Abort is best-effort: the worker notices on
+                        // its next iteration and exits without further
+                        // work. Returns the state at the time of the
+                        // abort (Running after the call, but the
+                        // before-abort state is what an operator
+                        // inspecting the log wants to see).
+                        let before = ctrl.state();
+                        ctrl.abort();
+                        let _ = writeln!(
+                            out,
+                            "drain aborted (was {}, now running); \
+                             {} routes still queued",
+                            before.as_str(),
+                            ctrl.routes_remaining(deps.router)
+                        );
+                    }
+                    other => {
+                        let _ = writeln!(
+                            out,
+                            "error: unknown shutdown sub-command '{other}' \
+                             (try 'drain', 'status' or 'abort')"
+                        );
+                    }
+                }
             }
             other => {
                 let _ = writeln!(out, "error: unknown command '{other}' (try 'help')");

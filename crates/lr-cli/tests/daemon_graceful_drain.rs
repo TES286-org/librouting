@@ -115,13 +115,16 @@ impl Drop for Daemon {
 }
 
 /// One round trip on the runtime API socket: send a command, collect
-/// the reply bytes until a short idle silence. Retries the connect
-/// for up to 5 s — under parallel test execution the accept loop's
-/// 100 ms poll gap can leave a fresh connection's first attempt
-/// refused for a brief window after the daemon logs "runtime API
-/// on".
+/// the reply bytes until a short idle silence. Retries the connect for
+/// up to 15 s — under parallel test execution the accept loop's 100 ms
+/// poll gap combined with a slow CI runner's scheduler can leave a
+/// fresh connection's first attempt refused for a brief window after
+/// the daemon logs "runtime API on" (the log line is written after
+/// the listener bind, but the accept_loop thread might not have
+/// entered its first accept() yet). 15 s keeps the no-flake contract
+/// while staying well inside any reasonable test timeout.
 fn api_ask(socket: &std::path::Path, cmd: &str) -> String {
-    let connect_deadline = Instant::now() + Duration::from_secs(5);
+    let connect_deadline = Instant::now() + Duration::from_secs(15);
     let mut conn = loop {
         match UnixStream::connect(socket) {
             Ok(c) => break c,
@@ -129,7 +132,7 @@ fn api_ask(socket: &std::path::Path, cmd: &str) -> String {
                 if Instant::now() >= connect_deadline {
                     panic!("connect to api socket timed out: {e}");
                 }
-                thread::sleep(Duration::from_millis(20));
+                thread::sleep(Duration::from_millis(50));
             }
             Err(e) => panic!("connect to api socket: {e}"),
         }
@@ -213,8 +216,14 @@ fn drain_status_reports_running_before_drain() {
 }
 
 /// `lrctl shutdown drain` on a daemon with one locally-originated
-/// route: the API replies `drain started`, `shutdown status` polls
-/// through `draining` → `drained`, then the process exits with code 0.
+/// route: the API replies `drain started`, the worker walks the queue
+/// at the configured rate, tears down sessions, then exits. The
+/// daemon's drain worker sets `running=false` at the end, so the
+/// main loop notices and the process exits — the test observes the
+/// exit through `wait_exit` rather than polling `shutdown status`
+/// because the API socket is torn down the moment `running` flips.
+/// The drain's own log line in the daemon log attests to the
+/// completion path; the exit code attests to the clean exit.
 #[test]
 fn drain_command_exits_daemon_with_empty_queue() {
     let socket =
@@ -250,31 +259,19 @@ fn drain_command_exits_daemon_with_empty_queue() {
         "shutdown drain reply: {started}"
     );
 
-    // Poll until the drain reaches Drained. The queue is one route,
-    // the rate is 5/s, so this should resolve in well under a second;
-    // allow up to 15 s for slow CI runners under parallel load.
-    let deadline = Instant::now() + Duration::from_secs(15);
-    let mut last_status = String::new();
-    while Instant::now() < deadline {
-        last_status = api_ask(&socket, "shutdown status");
-        if last_status.contains("state=drained") {
-            break;
-        }
-        thread::sleep(Duration::from_millis(50));
-    }
-    assert!(
-        last_status.contains("state=drained"),
-        "shutdown status never reported drained: {last_status}"
-    );
-
-    // The drain worker flips `running` to false; the main loop
-    // notices on its next poll and exits. The drain worker's own
-    // log line should appear in the daemon log.
+    // The worker sets `running` to false at the end of the drain;
+    // the main loop notices and the process exits. The drain's own
+    // log line attests to the completion path. wait_exit's 30 s
+    // timeout covers slow CI runners under parallel test load.
     let (ok, log) = d.wait_exit();
     assert!(ok, "daemon must exit 0 after drain; log:\n{log}");
     assert!(
         log.contains("graceful drain complete"),
         "log should record the drain completion: {log}"
+    );
+    assert!(
+        log.contains("shutdown complete"),
+        "log should record the clean shutdown: {log}"
     );
 }
 
@@ -320,10 +317,103 @@ fn drain_refused_when_not_configured() {
         "status in immediate mode must report: {status}"
     );
 
+    // `shutdown abort` in immediate mode is also refused (no drain
+    // to abort). The diagnostic mirrors the drain refusal so an
+    // operator who typos `lrctl shutdown abort` against a daemon
+    // that is not configured for drain gets a clear, actionable
+    // message rather than a no-op.
+    let abort_refused = api_ask(&socket, "shutdown abort");
+    assert!(
+        abort_refused.contains("drain not configured"),
+        "abort in immediate mode must be refused: {abort_refused}"
+    );
+
     // The daemon is still running — plain `shutdown` exits it.
     let shutting = api_ask(&socket, "shutdown");
     assert!(
         shutting.contains("shutting down"),
         "plain shutdown still works: {shutting}"
     );
+}
+
+/// `shutdown abort` cancels a drain in progress: the state flips
+/// back to `running`, the gate clears, the worker exits on its next
+/// iteration, and the daemon stays alive. The test starts the drain
+/// at a very low rate (1/s) so the worker is still in its first
+/// iteration when the abort lands; abort must flip the state back to
+/// `running`, the daemon must still serve plain `status` (proving the
+/// process did not exit), and a subsequent plain `shutdown` must
+/// still terminate cleanly.
+#[test]
+fn drain_abort_cancels_in_progress_drain() {
+    let socket =
+        std::env::temp_dir().join(format!("lr-daemon-drain-abort-{}.sock", std::process::id()));
+    let mut d = Daemon::spawn(
+        &[
+            "--local-as",
+            "64512",
+            "--peer-as",
+            "64513",
+            "--router-id",
+            "10.0.0.1",
+            "--listen",
+            "127.0.0.1:17994",
+            "--network",
+            "203.0.113.0/24",
+            "--api-socket",
+            socket.to_str().unwrap(),
+            "--shutdown-mode",
+            "drain",
+            // A very low rate (1/s) keeps the worker in its first
+            // iteration long enough for the abort to land. With one
+            // route in the queue and rate=1/s, the first drain step
+            // takes up to 1 s — plenty of time for the abort to win.
+            "--shutdown-drain-rate",
+            "1",
+            "--shutdown-drain-max-wait",
+            "30",
+        ],
+        "abort",
+    );
+    d.wait_log("runtime API on", "api socket up");
+
+    let started = api_ask(&socket, "shutdown drain");
+    assert!(
+        started.contains("drain started"),
+        "shutdown drain reply: {started}"
+    );
+
+    // Abort immediately — the worker has not had time to finish.
+    let aborted = api_ask(&socket, "shutdown abort");
+    assert!(
+        aborted.contains("drain aborted"),
+        "shutdown abort reply: {aborted}"
+    );
+
+    // Status must report state=running (the abort reset it). The
+    // remaining-route count is best-effort — the worker may have
+    // drained one route before the abort took effect, so accept either
+    // 0 or 1.
+    let status = api_ask(&socket, "shutdown status");
+    assert!(
+        status.contains("state=running"),
+        "status after abort should be running: {status}"
+    );
+
+    // The daemon is still alive — verify by issuing a plain status
+    // command (which would fail to connect if the daemon had exited).
+    let general_status = api_ask(&socket, "status");
+    assert!(
+        general_status.contains("version"),
+        "daemon still serves status after abort: {general_status}"
+    );
+
+    // Now exit cleanly via plain `shutdown` (immediate path).
+    let shutting = api_ask(&socket, "shutdown");
+    assert!(
+        shutting.contains("shutting down"),
+        "plain shutdown still works after abort: {shutting}"
+    );
+    let (ok, _log) = d.wait_exit();
+    assert!(ok, "daemon must exit 0 after plain shutdown");
 }

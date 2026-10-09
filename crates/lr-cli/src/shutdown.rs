@@ -273,13 +273,11 @@ impl ShutdownController {
     /// state change on its next iteration and exits without
     /// touching the queue further.
     ///
-    /// Intended for the embedder that wants to cancel a drain
-    /// started via [`begin_drain`](Self::begin_drain) (the daemon
-    /// has no `lrctl shutdown abort` today, but the building block
-    /// is here). The daemon itself does not call this today; the
-    /// `#[allow(dead_code)]` keeps the public surface honest for
-    /// library embedders and future CLI surface.
-    #[allow(dead_code)]
+    /// Best-effort: a worker that has already started an iteration
+    /// may complete one more drain step before noticing. Mirrors the
+    /// POSIX signal contract (a SIGTERM during a syscall does not
+    /// interrupt the syscall itself, only the next loop iteration).
+    /// The runtime API exposes this through `shutdown abort`.
     pub fn abort(&self) {
         self.gate.store(false, Ordering::Relaxed);
         self.state.store(STATE_RUNNING, Ordering::Relaxed);

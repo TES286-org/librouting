@@ -140,6 +140,7 @@ fn print_usage() {
     println!("                        new routes, withdraw Loc-RIB at the configured");
     println!("                        rate, exit when empty)");
     println!("    shutdown status     Drain lifecycle (running | draining | drained)");
+    println!("    shutdown abort      Cancel a drain in progress (best-effort)");
     println!();
     println!("CLIENT-SIDE COMMANDS (no daemon required):");
     println!("    filter compile <body>  Validate a filter DSL body");
@@ -215,11 +216,12 @@ fn routes(socket: &str, rest: &[String]) -> ExitCode {
     }
 }
 
-/// `lrctl shutdown [drain|status]` — issue #53 daemon-wide graceful
-/// drain. The bare `lrctl shutdown` (no args) preserves the historical
-/// behaviour: proxy the `shutdown` command and exit immediately. The
-/// two sub-commands map 1:1 to the runtime API's `shutdown drain` and
-/// `shutdown status` keywords, with the same on-the-wire framing (the
+/// `lrctl shutdown [drain|status|abort|now]` — issue #53 daemon-wide
+/// graceful drain. The bare `lrctl shutdown` (no args) preserves the
+/// historical behaviour: proxy the `shutdown` command and exit
+/// immediately. The sub-commands map 1:1 to the runtime API's
+/// `shutdown drain`, `shutdown status`, `shutdown abort` and plain
+/// `shutdown` keywords, with the same on-the-wire framing (the
 /// daemon's line protocol already parses them).
 fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
     if rest.is_empty() {
@@ -229,10 +231,11 @@ fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
     match rest[0].as_str() {
         "drain" => proxy(socket, "shutdown drain"),
         "status" => proxy(socket, "shutdown status"),
+        "abort" => proxy(socket, "shutdown abort"),
         "now" => proxy(socket, "shutdown"),
         other => {
             eprintln!("error: unknown shutdown subcommand '{other}'");
-            eprintln!("usage: lrctl shutdown [drain | status | now]");
+            eprintln!("usage: lrctl shutdown [drain | status | abort | now]");
             ExitCode::from(2)
         }
     }
