@@ -13,6 +13,26 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [Unreleased]
+
+### Fixed
+
+**Metrics endpoint works on every supported target** (`fix(cli)`,
+[issue #47](https://github.com/TES286-org/librouting/issues/47)). The
+Prometheus `/metrics` HTTP server is a plain `std::net::TcpListener`
+responder, so it never needed the `#[cfg(unix)]` guard that wrapped its
+implementation — and the misleading "metrics endpoint requires Unix
+domain socket support" error it returned on Windows was a bug, not an
+intentional stance. The guard and the refusal module are gone; the
+server now compiles and serves identically on Linux, the BSDs, macOS
+and Windows. The daemon's process model (signals, privilege drop,
+named-pipe API transport) keeps its own per-platform guards; the
+metrics endpoint does not. The `daemon_metrics.rs` integration suite
+loses its `#![cfg(unix)]` filter for the same reason — its tests use
+only `std::net::TcpStream` and `Command`, both portable — and a new
+in-crate test exercises `spawn` directly so a target without the
+daemon binary still gets the regression signal.
+
 ## [1.1.0] — configuration and logging overhaul
 
 librouting 1.1.0 ships the configuration and logging surface asked for
