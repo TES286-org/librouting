@@ -306,6 +306,12 @@ fn fmt_bytes(value: Option<u64>) -> String {
 /// Parse the `VmRSS:\t   1234 kB` form out of `/proc/self/status`.
 /// Returns `None` when the field does not parse as a number (the
 /// kernel format is stable, but defensive parsing is cheap).
+///
+/// Linux-only: lives behind the same `#[cfg(target_os = "linux")]`
+/// gate as the only caller ([`process_memory`]) so non-Linux builds
+/// (macOS, Windows) do not see the function and the `dead_code` lint
+/// stays clean under `-D warnings`.
+#[cfg(target_os = "linux")]
 fn parse_kb(rest: &str) -> Option<u64> {
     rest.split_whitespace().next()?.parse::<u64>().ok()
 }
