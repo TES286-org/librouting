@@ -1551,41 +1551,48 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             *h.runtime.session_labels.lock().unwrap() = session_label_map;
             Arc::clone(&h.runtime)
         }
-        None => Arc::new(Runtime {
-            reload: Arc::new({
-                let router = Arc::clone(&router);
-                let current_networks = Arc::clone(&current_networks);
-                let config_path = cfg.config_path.clone();
-                let config_dialect = cfg.config_dialect.clone();
-                let roa_store = Arc::clone(&roa_store);
-                let rpki = rpki.clone();
-                move || {
-                    reload_config(
-                        config_path.as_deref(),
-                        config_dialect.as_deref(),
-                        &router,
-                        &current_networks,
-                        Some(&roa_store),
-                        rpki.as_ref(),
-                    )
-                }
-            }),
-            router,
-            running: Arc::clone(&running),
-            status_lines: Arc::new({
-                let rpki = rpki.clone();
-                move || match &rpki {
-                    Some(h) => vec![h.status_line()],
-                    None => Vec::new(),
-                }
-            }),
-            roa_len: Some(Arc::new({
-                let roa_store = Arc::clone(&roa_store);
-                move || roa_store.len()
-            })),
-            filter_metrics: Mutex::new(filter_registry.map(Arc::new)),
-            session_labels: Arc::new(Mutex::new(session_label_map)),
-        }),
+        None => {
+            // Issue #53 daemon-wide drain: install the drain gate on the
+            // router's import chain BEFORE the Runtime takes ownership
+            // of the Arc. Returns None in immediate mode.
+            let shutdown = build_shutdown(cfg, &router);
+            Arc::new(Runtime {
+                reload: Arc::new({
+                    let router = Arc::clone(&router);
+                    let current_networks = Arc::clone(&current_networks);
+                    let config_path = cfg.config_path.clone();
+                    let config_dialect = cfg.config_dialect.clone();
+                    let roa_store = Arc::clone(&roa_store);
+                    let rpki = rpki.clone();
+                    move || {
+                        reload_config(
+                            config_path.as_deref(),
+                            config_dialect.as_deref(),
+                            &router,
+                            &current_networks,
+                            Some(&roa_store),
+                            rpki.as_ref(),
+                        )
+                    }
+                }),
+                router,
+                running: Arc::clone(&running),
+                status_lines: Arc::new({
+                    let rpki = rpki.clone();
+                    move || match &rpki {
+                        Some(h) => vec![h.status_line()],
+                        None => Vec::new(),
+                    }
+                }),
+                roa_len: Some(Arc::new({
+                    let roa_store = Arc::clone(&roa_store);
+                    move || roa_store.len()
+                })),
+                filter_metrics: Mutex::new(filter_registry.map(Arc::new)),
+                session_labels: Arc::new(Mutex::new(session_label_map)),
+                shutdown,
+            })
+        }
     };
 
     // --- Ticker thread: pump the router clock every 50 ms. It is the
@@ -3682,6 +3689,11 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         roa_len: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
+        // BMP is a passive receiver; the drain posture does not apply
+        // (no Loc-RIB to walk, no sessions to tear down beyond the
+        // listener). `None` keeps the API's `shutdown drain` honest
+        // ("drain not configured") instead of pretending to drain.
+        shutdown: None,
     });
     if let Err(e) = spawn_api(cfg, &runtime) {
         log_error!(Component::Api, "{e}");
@@ -4194,6 +4206,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             roa_len: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
+            shutdown: build_shutdown(cfg, &router),
         }),
     };
     let running = Arc::clone(&runtime.running);
@@ -6290,6 +6303,13 @@ struct Runtime {
     /// Protocol-specific extra `status` lines for the runtime API
     /// (e.g. LDP counters). Empty for the BGP/Babel/OSPF/BMP modes.
     status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Daemon-wide graceful drain controller (issue #53). Constructed
+    /// by the daemon startup path whenever the `[shutdown]` block is
+    /// configured (or `--shutdown-mode` is on the CLI). `None` for
+    /// the historical immediate-shutdown posture so the API refuses
+    /// `shutdown drain` with a clear "not configured" diagnostic
+    /// instead of silently accepting it.
+    shutdown: Option<Arc<shutdown::ShutdownController>>,
     /// Optional ROA store length reader (ROADMAP-v3 D12.2 metrics).
     /// `None` when the daemon is not running BGP ROA validation
     /// (e.g. OSPF-only, Babel-only, or a BGP daemon with
@@ -6406,10 +6426,57 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             let rt = Arc::clone(rt);
             move || (rt.status_lines)()
         }),
+        shutdown: rt.shutdown.clone(),
     };
     api::spawn(path, ctx)
         .map(|p| log_info!(Component::Api, "runtime API on {}", p))
         .map_err(|e| format!("runtime API: {e}"))
+}
+
+/// Build a [`shutdown::ShutdownController`] from the operator's
+/// `[shutdown]` configuration (issue #53) and install the
+/// [`DrainModeImportHook`] on the router's import chain. Returns
+/// `None` when the daemon is in immediate-shutdown mode (the default)
+/// so the API's `shutdown drain` honestly reports "drain not
+/// configured" instead of pretending to drain.
+///
+/// The hook is installed at the *front* of the import chain so a
+/// draining daemon drops every inbound UPDATE before any other hook
+/// or the safety net sees it — fail-closed at the front, exactly
+/// like the issue's "stop accepting new routes" step.
+///
+/// [`DrainModeImportHook`]: lr_policy::DrainModeImportHook
+fn build_shutdown(
+    cfg: &DaemonConfig,
+    router: &Arc<RwLock<DefaultRouter>>,
+) -> Option<Arc<shutdown::ShutdownController>> {
+    if cfg.shutdown_mode != "drain" {
+        return None;
+    }
+    let ctrl = Arc::new(shutdown::ShutdownController::new(
+        cfg.shutdown_drain_rate_per_sec,
+        Duration::from_secs(cfg.shutdown_drain_max_wait_secs as u64),
+    ));
+    {
+        let mut w = router.write().unwrap();
+        // Prepend so the gate wins over every later hook (safety net,
+        // RFC 8326 receive, damping, user filters). `Vec::insert(0, _)`
+        // is O(n) on the existing import hook list, but the list is
+        // tiny (one entry per hook kind) and this runs once at
+        // startup — the cost is irrelevant.
+        w.hooks_mut().import.insert(
+            0,
+            Box::new(lr_policy::DrainModeImportHook::new(ctrl.drain_gate())),
+        );
+    }
+    log_info!(
+        Component::Daemon,
+        "graceful drain configured (rate={}/s, max_wait={}s); \
+         use `lrctl shutdown drain` to trigger",
+        cfg.shutdown_drain_rate_per_sec,
+        cfg.shutdown_drain_max_wait_secs
+    );
+    Some(ctrl)
 }
 
 /// Start the Prometheus `/metrics` HTTP endpoint when

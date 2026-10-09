@@ -531,6 +531,10 @@ pub(super) fn run_ldp_daemon(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         roa_len: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
+        // LDP standalone: `shutdown` works (immediate exit); drain is
+        // not wired (no BGP-originated queue to walk). The router
+        // exists, so a follow-up could install the hook + controller.
+        shutdown: None,
     });
     if let Err(sig) = crate::signal::init() {
         log_error!(

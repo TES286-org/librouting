@@ -79,7 +79,7 @@ fn main() -> ExitCode {
         }
         "routes" => routes(&socket, rest),
         "reload" => proxy(&socket, "reload"),
-        "shutdown" => proxy(&socket, "shutdown"),
+        "shutdown" => shutdown(&socket, rest),
         "filter" => filter(rest),
         other => {
             eprintln!("error: unknown command '{other}'");
@@ -135,7 +135,11 @@ fn print_usage() {
     println!("    routes show [prefix]  Loc-RIB dump, optionally filtered by prefix");
     println!("    routes dump <path>  Write the Loc-RIB as an MRT dump (RFC 6396)");
     println!("    reload              Re-apply configuration (SIGHUP equivalent)");
-    println!("    shutdown            Graceful shutdown");
+    println!("    shutdown            Graceful shutdown (immediate)");
+    println!("    shutdown drain      Issue #53: rate-limited drain (stop accepting");
+    println!("                        new routes, withdraw Loc-RIB at the configured");
+    println!("                        rate, exit when empty)");
+    println!("    shutdown status     Drain lifecycle (running | draining | drained)");
     println!();
     println!("CLIENT-SIDE COMMANDS (no daemon required):");
     println!("    filter compile <body>  Validate a filter DSL body");
@@ -206,6 +210,29 @@ fn routes(socket: &str, rest: &[String]) -> ExitCode {
         }
         other => {
             eprintln!("error: unknown routes subcommand '{other}'");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `lrctl shutdown [drain|status]` — issue #53 daemon-wide graceful
+/// drain. The bare `lrctl shutdown` (no args) preserves the historical
+/// behaviour: proxy the `shutdown` command and exit immediately. The
+/// two sub-commands map 1:1 to the runtime API's `shutdown drain` and
+/// `shutdown status` keywords, with the same on-the-wire framing (the
+/// daemon's line protocol already parses them).
+fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        // `lrctl shutdown` (no subcommand) — immediate.
+        return proxy(socket, "shutdown");
+    }
+    match rest[0].as_str() {
+        "drain" => proxy(socket, "shutdown drain"),
+        "status" => proxy(socket, "shutdown status"),
+        "now" => proxy(socket, "shutdown"),
+        other => {
+            eprintln!("error: unknown shutdown subcommand '{other}'");
+            eprintln!("usage: lrctl shutdown [drain | status | now]");
             ExitCode::from(2)
         }
     }

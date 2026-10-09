@@ -61,6 +61,13 @@ pub struct ApiContext {
     /// Protocol-specific extra `status` lines (e.g. LDP adjacency /
     /// session / binding counters). Returns the lines verbatim.
     pub status_lines: Box<dyn Fn() -> Vec<String> + Send + Sync>,
+    /// Daemon-wide graceful drain controller (issue #53). Wired by
+    /// the daemon startup path; the API's `shutdown drain` and
+    /// `shutdown status` commands delegate to it. `None` when the
+    /// daemon does not expose drain (a library embedder wiring
+    /// [`ApiContext`] by hand can leave this out and the API simply
+    /// refuses `shutdown drain`).
+    pub shutdown: Option<Arc<crate::shutdown::ShutdownController>>,
 }
 
 #[cfg(unix)]
@@ -121,6 +128,7 @@ mod imp {
         let running = Arc::clone(&ctx.running);
         let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
+        let shutdown = ctx.shutdown;
         let started = std::time::Instant::now();
 
         thread::Builder::new()
@@ -134,6 +142,7 @@ mod imp {
                     let running = Arc::clone(&running);
                     let reload = Arc::clone(&reload);
                     let status_lines = Arc::clone(&status_lines);
+                    let shutdown = shutdown.clone();
                     let path_owned = path_owned.clone();
                     thread::Builder::new()
                         .name("lr-api-conn".into())
@@ -146,6 +155,7 @@ mod imp {
                                 running: &running,
                                 reload: &reload,
                                 status_lines: &status_lines,
+                                shutdown: shutdown.as_ref(),
                                 started,
                                 socket_path: Some(&path_owned),
                             };
@@ -186,6 +196,12 @@ mod imp {
         running: &'a Arc<AtomicBool>,
         reload: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
         status_lines: &'a Arc<dyn Fn() -> Vec<String> + Send + Sync>,
+        /// Daemon-wide graceful drain controller (issue #53). `None`
+        /// when the daemon was started without a `[shutdown]` block
+        /// (immediate mode); the API simply refuses `shutdown drain`
+        /// in that case so the operator gets a clear "not configured"
+        /// diagnostic instead of silent acceptance.
+        shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
         started: std::time::Instant,
         /// The `shutdown` command removes the socket file itself so the
         /// cleanup does not race the process exit.
@@ -311,7 +327,9 @@ mod imp {
                          routes    Loc-RIB dump (one route per line)\n  \
                          mrt PATH  write the Loc-RIB as an MRT dump (RFC 6396)\n  \
                          reload    re-apply configuration (SIGHUP equivalent)\n  \
-                         shutdown  graceful shutdown\n  \
+                         shutdown           graceful shutdown (immediate)\n  \
+                         shutdown drain     issue #53 graceful drain (rate-limited)\n  \
+                         shutdown status    drain lifecycle (running | draining | drained)\n  \
                          help      this text\n  \
                          quit      close this connection"
                     );
@@ -418,6 +436,13 @@ mod imp {
                     }
                 }
                 "shutdown" => {
+                    // `shutdown` is the immediate path: flip `running`
+                    // to false, remove the socket file, return. The
+                    // daemon's main loop notices on its next poll and
+                    // exits. The `shutdown drain` and
+                    // `shutdown status` sub-commands are stripped off
+                    // the command line first (see the prefix matches
+                    // above the `match cmd` block).
                     deps.running.store(false, Ordering::Relaxed);
                     let _ = writeln!(out, "shutting down");
                     let _ = out.flush();
@@ -425,6 +450,65 @@ mod imp {
                         let _ = std::fs::remove_file(path);
                     }
                     return;
+                }
+                other if other.starts_with("shutdown ") => {
+                    // Issue #53 daemon-wide graceful drain sub-commands.
+                    // Strip the `shutdown ` prefix and dispatch the
+                    // remainder: `drain` enters the drain state machine;
+                    // `status` queries the lifecycle without changing
+                    // it. Any other sub-command is an error so a
+                    // typo'd `shutdown drain2` is loud, not silent.
+                    let sub = other["shutdown ".len()..].trim();
+                    match sub {
+                        "drain" => {
+                            let Some(ctrl) = deps.shutdown else {
+                                let _ = writeln!(
+                                    out,
+                                    "error: drain not configured \
+                                     (set [shutdown] mode = \"drain\" \
+                                     and restart, or use plain `shutdown` \
+                                     for immediate exit)"
+                                );
+                                continue;
+                            };
+                            let started = Arc::clone(ctrl)
+                                .begin_drain(Arc::clone(deps.router), Arc::clone(deps.running));
+                            if started {
+                                let _ = writeln!(
+                                    out,
+                                    "drain started (state=draining); \
+                                     use `shutdown status` to poll"
+                                );
+                            } else {
+                                let _ = writeln!(
+                                    out,
+                                    "drain already in progress \
+                                     (state={})",
+                                    ctrl.state().as_str()
+                                );
+                            }
+                        }
+                        "status" => {
+                            let Some(ctrl) = deps.shutdown else {
+                                let _ = writeln!(out, "drain not configured (immediate mode)");
+                                continue;
+                            };
+                            let remaining = ctrl.routes_remaining(deps.router);
+                            let _ = writeln!(
+                                out,
+                                "state={} remaining={}",
+                                ctrl.state().as_str(),
+                                remaining
+                            );
+                        }
+                        other => {
+                            let _ = writeln!(
+                                out,
+                                "error: unknown shutdown sub-command '{other}' \
+                                 (try 'drain' or 'status')"
+                            );
+                        }
+                    }
                 }
                 other => {
                     let _ = writeln!(out, "error: unknown command '{other}' (try 'help')");
@@ -453,6 +537,7 @@ mod imp {
                 running,
                 reload: Box::new(|| vec!["reloaded".into()]),
                 status_lines: Box::new(Vec::new),
+                shutdown: None,
             }
         }
 

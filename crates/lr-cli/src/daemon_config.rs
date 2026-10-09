@@ -1518,7 +1518,14 @@ impl DaemonConfig {
     /// peer). The TOML parser already rejects a bad `mode` string at
     /// parse time; this catches the `--shutdown-mode drain
     /// --shutdown-drain-rate 0` shape the CLI permits.
+    /// The empty string is treated as `"immediate"` — a `DaemonConfig`
+    /// constructed via `Default::default()` (rather than
+    /// [`with_defaults`](Self::with_defaults)) has the field unset, and
+    /// the most useful behaviour is to default it rather than fail.
     fn finalize_shutdown(&mut self) -> Result<(), String> {
+        if self.shutdown_mode.is_empty() {
+            self.shutdown_mode = "immediate".to_string();
+        }
         if !matches!(self.shutdown_mode.as_str(), "immediate" | "drain") {
             return Err(format!(
                 "bad shutdown.mode '{}' (expected \"immediate\" | \"drain\")",
@@ -1526,18 +1533,14 @@ impl DaemonConfig {
             ));
         }
         if self.shutdown_mode == "drain" && self.shutdown_drain_rate_per_sec == 0 {
-            return Err(
-                "shutdown.drain_rate_per_sec must be > 0 in drain mode \
+            return Err("shutdown.drain_rate_per_sec must be > 0 in drain mode \
                  (a zero rate would never complete)"
-                    .to_string(),
-            );
+                .to_string());
         }
         if self.shutdown_mode == "drain" && self.shutdown_drain_max_wait_secs == 0 {
-            return Err(
-                "shutdown.drain_max_wait_secs must be > 0 in drain mode \
+            return Err("shutdown.drain_max_wait_secs must be > 0 in drain mode \
                  (an unbounded drain would hang the daemon on a wedged peer)"
-                    .to_string(),
-            );
+                .to_string());
         }
         Ok(())
     }
@@ -5229,13 +5232,11 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
                 i += 2;
             }
             "--shutdown-drain-rate" if i + 1 < args.len() => {
-                cfg.shutdown_drain_rate_per_sec =
-                    args[i + 1].parse().unwrap_or(50);
+                cfg.shutdown_drain_rate_per_sec = args[i + 1].parse().unwrap_or(50);
                 i += 2;
             }
             "--shutdown-drain-max-wait" if i + 1 < args.len() => {
-                cfg.shutdown_drain_max_wait_secs =
-                    args[i + 1].parse().unwrap_or(600);
+                cfg.shutdown_drain_max_wait_secs = args[i + 1].parse().unwrap_or(600);
                 i += 2;
             }
             // Logging configuration (issue #46). The CLI flags merge

@@ -888,6 +888,10 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
             roa_len: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
+            // OSPFv3 standalone — same posture as v2 standalone:
+            // `shutdown` works (immediate exit), `shutdown drain`
+            // honestly reports "drain not configured".
+            shutdown: None,
         }),
     };
     let running = Arc::clone(&runtime.running);

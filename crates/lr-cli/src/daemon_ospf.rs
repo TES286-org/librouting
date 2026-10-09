@@ -758,6 +758,12 @@ pub(super) fn run_ospf_daemon(
             roa_len: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
+            // OSPF standalone does not wire the daemon-wide drain
+            // worker today; the router exists but the BGP-originated
+            // queue the worker walks is empty in this mode. Plain
+            // `shutdown` (immediate) keeps working; `shutdown drain`
+            // honestly reports "drain not configured".
+            shutdown: None,
         }),
     };
     let running = Arc::clone(&runtime.running);

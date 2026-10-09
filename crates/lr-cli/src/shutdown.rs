@@ -276,7 +276,10 @@ impl ShutdownController {
     /// Intended for the embedder that wants to cancel a drain
     /// started via [`begin_drain`](Self::begin_drain) (the daemon
     /// has no `lrctl shutdown abort` today, but the building block
-    /// is here).
+    /// is here). The daemon itself does not call this today; the
+    /// `#[allow(dead_code)]` keeps the public surface honest for
+    /// library embedders and future CLI surface.
+    #[allow(dead_code)]
     pub fn abort(&self) {
         self.gate.store(false, Ordering::Relaxed);
         self.state.store(STATE_RUNNING, Ordering::Relaxed);
