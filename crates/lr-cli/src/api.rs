@@ -332,6 +332,21 @@ mod imp {
                 }
                 continue;
             }
+            // `show roa` — the runtime API half of `lrctl roa list`
+            // (ROADMAP "lrctl roa list", issue #52 follow-up). Rendered
+            // by the shared `roa_view` module so the Unix and Windows
+            // paths stay byte-identical. Lives ahead of the `show …`
+            // family below so it wins for `show roa` specifically —
+            // the family's dispatcher does not (yet) recognise `roa`
+            // as a sub-command.
+            if cmd == "show roa" {
+                let body = crate::roa_view::render(deps.roa_store);
+                let _ = out.write_all(body.as_bytes());
+                if out.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
             // Issue #52 BIRD-style `show …` family. Delegated to the
             // shared `show` module so the Unix and Windows surfaces
             // render identically. `show` (no sub) maps to `show status`,
@@ -366,6 +381,7 @@ mod imp {
                          show session <handle>  deep dive for one session\n  \
                          show routes count     Loc-RIB grouped by protocol\n  \
                          show memory           process RSS and virtual size\n  \
+                         show roa  ROA table dump (BIRD `show roa` parity)\n  \
                          reload    re-apply configuration (SIGHUP equivalent)\n  \
                          shutdown           graceful shutdown (immediate)\n  \
                          shutdown drain     issue #53 graceful drain (rate-limited)\n  \
