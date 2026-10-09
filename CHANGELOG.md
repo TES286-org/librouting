@@ -15,6 +15,15 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased]
 
+## [1.1.1] — patch: metrics portability fix and source-file modularisation
+
+librouting 1.1.1 is a patch release: a bug fix that makes the metrics
+endpoint work on Windows ([issue #47](https://github.com/TES286-org/librouting/issues/47))
+and a no-API-change refactor that splits the workspace's largest source
+files into per-protocol submodules ([issue #48](https://github.com/TES286-org/librouting/issues/48)).
+No public Rust API or C ABI symbol changed shape, so the bump is patch
+per [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md) §1.
+
 ### Changed
 
 **Source-file modularisation** (`refactor`, [issue #48](https://github.com/TES286-org/librouting/issues/48)).
@@ -28,9 +37,13 @@ hierarchy and every public path — the crate re-exports, the C ABI
 header, the FFI surface — are unchanged. A file that needs to be read
 for its production logic can now be read without scrolling past four
 thousand lines of assertions first. Forty-six source files were split
-this way; every one of the 2 047 workspace tests still passes, and
-`cargo fmt`, `cargo clippy -- -D warnings`, the C/C++/Go/Python
-binding tests, and the documentation linters are clean.
+this way; the largest production file, `instance/mod.rs`, was further
+broken into `instance/ospf.rs`, `instance/babel.rs` and
+`instance/ospf_ops.rs` using Rust's inherent-impl-in-any-module rule —
+no field visibility changes needed. Every one of the 2 047 workspace
+tests still passes, and `cargo fmt`, `cargo clippy -- -D warnings`, the
+C/C++/Go/Python binding tests, and the documentation linters are
+clean.
 
 ### Fixed
 
