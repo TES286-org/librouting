@@ -15,6 +15,23 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased]
 
+### Changed
+
+**Source-file modularisation** (`refactor`, [issue #48](https://github.com/TES286-org/librouting/issues/48)).
+The largest source files in the workspace had grown to the point where
+their inline test modules dwarfed the production code — `instance.rs`
+was 12 951 lines with 4 600 of tests, `daemon.rs` was 7 621 lines with
+924 of tests, and the same pattern repeated across every protocol
+crate. The test modules are now sibling files (`<name>_tests.rs`)
+included via `#[cfg(test)] #[path = "..."] mod NAME;`, so the module
+hierarchy and every public path — the crate re-exports, the C ABI
+header, the FFI surface — are unchanged. A file that needs to be read
+for its production logic can now be read without scrolling past four
+thousand lines of assertions first. Forty-six source files were split
+this way; every one of the 2 047 workspace tests still passes, and
+`cargo fmt`, `cargo clippy -- -D warnings`, the C/C++/Go/Python
+binding tests, and the documentation linters are clean.
+
 ### Fixed
 
 **Metrics endpoint works on every supported target** (`fix(cli)`,
