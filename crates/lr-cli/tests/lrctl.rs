@@ -456,6 +456,12 @@ fn lrctl_help_lists_subcommands() {
         "reload",
         "shutdown",
         "filter compile",
+        // Issue #52 BIRD-style `show` family.
+        "show status",
+        "show sessions [detail]",
+        "show session <handle>",
+        "show routes count",
+        "show memory",
     ] {
         assert!(
             stdout.contains(needle),
@@ -491,4 +497,271 @@ fn lrctl_version_prints_version() {
     let (ok, stdout, _stderr) = lrctl(&["version"]);
     assert!(ok);
     assert!(stdout.contains("lrctl "), "version stdout: {stdout}");
+}
+
+// ---------------------------------------------------------------------------
+// Issue #52 — BIRD-style `lrctl show …` family.
+//
+// One e2e test per subcommand. Each spawns a real `lr-daemon` on a
+// loopback port with `--api-socket`, then runs the real `lrctl`
+// binary as a subprocess and asserts the stdout. Same shape as the
+// `lrctl_status_proxies_daemon_reply` family above; kept in their own
+// block so a regression in one does not mask the others.
+// ---------------------------------------------------------------------------
+
+/// Helper: spawn a daemon configured the way the `show …` tests need
+/// (one BGP session + one originated prefix). Each test passes its
+/// own `port` so parallel `cargo test` execution does not collide
+/// on the listen socket (the existing tests above use distinct ports
+/// 18091..18095 for the same reason).
+fn spawn_show_daemon(tag: &str, port: &str) -> (std::path::PathBuf, Daemon) {
+    let socket =
+        std::env::temp_dir().join(format!("lrctl-test-show-{tag}-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let listen = format!("127.0.0.1:{port}");
+    let d = Daemon::spawn(
+        &[
+            "--local-as",
+            "64512",
+            "--peer-as",
+            "64513",
+            "--router-id",
+            "10.0.0.1",
+            "--listen",
+            &listen,
+            "--network",
+            "203.0.113.0/24",
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        tag,
+    );
+    d.wait_log("runtime API on", "api socket up");
+    (socket, d)
+}
+
+#[test]
+fn lrctl_show_status_renders_extended_summary() {
+    let (socket, d) = spawn_show_daemon("status", "18101");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "show", "status"]);
+    assert!(ok, "lrctl show status failed: stderr={stderr}");
+    assert!(stdout.contains("version "), "show status stdout: {stdout}");
+    assert!(
+        stdout.contains("local-as 64512"),
+        "show status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("sessions 1 established 0"),
+        "show status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("rib-entries 1"),
+        "show status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("kind=bgp total=1 established=0"),
+        "show status stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("memory rss-bytes="),
+        "show status stdout: {stdout}"
+    );
+
+    // `lrctl show` with no sub maps to `show status` (BIRD shortcut).
+    let (ok, stdout, _stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "show"]);
+    assert!(ok, "lrctl show (bare) failed");
+    assert!(stdout.contains("sessions 1 established 0"));
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_show_sessions_extends_legacy_output() {
+    let (socket, d) = spawn_show_daemon("sessions", "18102");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "show", "sessions"]);
+    assert!(ok, "lrctl show sessions failed: stderr={stderr}");
+    // Legacy fields preserved.
+    assert!(
+        stdout.contains("kind=bgp"),
+        "show sessions stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("local-as=64512"),
+        "show sessions stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("peer-as=64513"),
+        "show sessions stdout: {stdout}"
+    );
+    // New issue #52 fields present.
+    assert!(
+        stdout.contains("transitions="),
+        "show sessions stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("uptime-ms="),
+        "show sessions stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("last-error="),
+        "show sessions stdout: {stdout}"
+    );
+
+    // Detail block: multi-line, appended under the session line.
+    let (ok, stdout, _stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "sessions",
+        "detail",
+    ]);
+    assert!(ok, "lrctl show sessions detail failed");
+    assert!(
+        stdout.contains("stats: established-at-ms="),
+        "show sessions detail stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("last-error: kind="),
+        "show sessions detail stdout: {stdout}"
+    );
+
+    // `show sessions list` is rejected — `list` belongs to the
+    // legacy `sessions` command, not the new `show` family.
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "sessions",
+        "list",
+    ]);
+    assert!(!ok, "show sessions list should fail");
+    assert!(
+        stderr.contains("usage: lrctl show sessions [detail]"),
+        "show sessions list stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_show_session_handle_renders_deep_dive() {
+    let (socket, d) = spawn_show_daemon("session", "18103");
+    let (ok, stdout, stderr) =
+        lrctl(&["--socket", socket.to_str().unwrap(), "show", "session", "1"]);
+    assert!(ok, "lrctl show session 1 failed: stderr={stderr}");
+    assert!(stdout.contains("handle 1"), "show session stdout: {stdout}");
+    assert!(stdout.contains("kind bgp"), "show session stdout: {stdout}");
+    assert!(
+        stdout.contains("negotiated-hold-time"),
+        "show session stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("stats: established-at-ms="),
+        "show session stdout: {stdout}"
+    );
+
+    // Unknown handle: the daemon returns an error line, but the
+    // transport itself succeeded — `lrctl` exits 1 because the
+    // daemon's reply starts with `error:`.
+    let (ok, stdout, _stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "session",
+        "999",
+    ]);
+    assert!(!ok, "lrctl show session 999 should exit non-zero");
+    assert!(
+        stdout.contains("error: no session with handle 999"),
+        "show session 999 stdout: {stdout}"
+    );
+
+    // Non-numeric handle: client-side rejection, exit 2.
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "session",
+        "not-a-number",
+    ]);
+    assert!(!ok, "non-numeric handle should fail");
+    assert!(
+        stderr.contains("invalid session handle"),
+        "non-numeric stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_show_routes_count_groups_by_protocol() {
+    let (socket, d) = spawn_show_daemon("routes-count", "18104");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "show",
+        "routes",
+        "count",
+    ]);
+    assert!(ok, "lrctl show routes count failed: stderr={stderr}");
+    assert!(
+        stdout.contains("total 1"),
+        "show routes count stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("proto="),
+        "show routes count stdout: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_show_memory_renders_rss_and_vsize() {
+    let (socket, d) = spawn_show_daemon("memory", "18105");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "show", "memory"]);
+    assert!(ok, "lrctl show memory failed: stderr={stderr}");
+    assert!(
+        stdout.contains("uptime-secs "),
+        "show memory stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("rss-bytes "),
+        "show memory stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("vsize-bytes "),
+        "show memory stdout: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_show_unknown_subcommand_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("unknown", "18106");
+    // The client validates the sub-command locally (matches the
+    // existing `routes dump`/`shutdown <bogus>` family that returns
+    // exit 2 with a usage hint on stderr, without round-tripping to
+    // the daemon). The daemon's own `show bogus` reply (which would
+    // surface `error: unknown show sub-command 'bogus'`) is covered
+    // by the api.rs unit test instead.
+    let (ok, _stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "show", "bogus"]);
+    assert!(!ok, "lrctl show bogus should exit non-zero");
+    assert!(
+        stderr.contains("error: unknown show subcommand 'bogus'"),
+        "show bogus stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("usage: lrctl show"),
+        "show bogus stderr should print usage: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
 }

@@ -95,6 +95,11 @@ daemon: runtime API on /run/lr-daemon.api
 | `sessions` | One line per session |
 | `routes` | One line per Loc-RIB path |
 | `mrt PATH` | `mrt-dump <path> records=<n>` |
+| `show status` | Extended summary (per-protocol session counts, memory) |
+| `show sessions [detail]` | Per-session stats (transitions, uptime, last error) |
+| `show session <handle>` | Deep dive for one session |
+| `show routes count` | Loc-RIB grouped by protocol |
+| `show memory` | Process RSS and virtual size |
 | `reload` | The reload lines above |
 | `shutdown` | `shutting down` |
 | `help` | The command list |
@@ -148,6 +153,20 @@ file and answers `mrt-dump <path> records=<n>`; a write failure answers
 `mrt-dump failed: <error>`. `mrt` with no path answers
 `usage: mrt <path>`.
 
+The `show …` family is the BIRD-style operational surface (issue #52):
+`show status` extends the legacy `status` reply with per-protocol
+session breakdown (`kind=<proto> total=<n> established=<n>`) and a
+`memory rss-bytes=… vsize-bytes=…` line; `show sessions [detail]`
+extends each session line with `transitions=`, `uptime-ms=`,
+`last-error=` and `last-error-at-ms=` (the optional `detail` keyword
+appends a multi-line block per session, mirroring BIRD `show protocols
+all`); `show session <handle>` is the single-session deep dive;
+`show routes count` groups the Loc-RIB by `Route::protocol` (BIRD
+`show route count` / FRR `show ip route summary` parity); `show memory`
+prints `uptime-secs`, `rss-bytes` and `vsize-bytes`. `lrctl` proxies
+each sub-command verbatim — `lrctl show` (no sub) maps to `show status`,
+matching BIRD's shortcut.
+
 An unknown command answers
 `error: unknown command '<x>' (try 'help')`, and a command line longer
 than 4096 bytes answers `error: command too long`. A connection that
@@ -157,7 +176,9 @@ sends nothing is closed after roughly ten seconds of idleness.
 
 [`lrctl`](lr-cli.md) is the supported client. It proxies the same
 commands — `lrctl status`, `lrctl sessions`, `lrctl routes show
-[prefix]`, `lrctl routes dump <path>`, `lrctl reload`, `lrctl shutdown`
+[prefix]`, `lrctl routes dump <path>`, `lrctl show status`, `lrctl show
+sessions [detail]`, `lrctl show session <handle>`, `lrctl show routes
+count`, `lrctl show memory`, `lrctl reload`, `lrctl shutdown`
 — and adds the client-side `lrctl filter compile <body>`, which needs no
 daemon. `lrctl` exits 1 when the reply carries an `error:` line, so a
 script can branch on the daemon's own verdict.
