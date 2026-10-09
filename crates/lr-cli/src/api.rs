@@ -469,6 +469,7 @@ mod imp {
                                      and restart, or use plain `shutdown` \
                                      for immediate exit)"
                                 );
+                                let _ = out.flush();
                                 continue;
                             };
                             let started = Arc::clone(ctrl)
@@ -491,6 +492,7 @@ mod imp {
                         "status" => {
                             let Some(ctrl) = deps.shutdown else {
                                 let _ = writeln!(out, "drain not configured (immediate mode)");
+                                let _ = out.flush();
                                 continue;
                             };
                             let remaining = ctrl.routes_remaining(deps.router);

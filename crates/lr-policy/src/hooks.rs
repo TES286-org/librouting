@@ -1064,7 +1064,7 @@ mod tests {
         // built — used by the shutdown controller to flip the gate
         // from another thread without holding the router lock.
         assert!(
-            std::sync::Arc::ptr_eq(&hook.gate(), &gate),
+            std::sync::Arc::ptr_eq(hook.gate(), &gate),
             "gate() must return the same Arc"
         );
     }
