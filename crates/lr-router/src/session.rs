@@ -541,6 +541,118 @@ impl SessionConfig {
     }
 }
 
+/// Operational statistics tracked by the router core for one session
+/// (issue #52 — More Comprehensive Internal State Export).
+///
+/// Complements [`SessionSummary`] with monotonic counters and
+/// timestamps that the BIRD-style `show session <handle>` surface
+/// renders. The BGP message counters (`open`/`update`/`notification`/
+/// `keepalive`/`route_refresh`, by direction) already live on
+/// [`lr_bgp::PeerMessageStats`] and are surfaced separately; this
+/// struct carries the per-session *operational* state that no
+/// lower-layer type exposes uniformly across BGP / OSPF / Babel.
+///
+/// All timestamps are millisecond ticks of the router's logical clock
+/// (`DefaultRouter::now_ms`), so they advance only while the router
+/// is being driven. Zero means "never observed".
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SessionStats {
+    /// Logical time (ms since router epoch) of the most recent
+    /// transition into the protocol's fully-established state
+    /// (BGP `Established`, OSPF `Full`, Babel `Up`). Zero before the
+    /// first establishment.
+    pub established_at_ms: u64,
+    /// Logical time of the most recent state transition (any
+    /// direction). Zero before the first transition.
+    pub last_transition_at_ms: u64,
+    /// Total number of state transitions since session creation
+    /// (monotonic — never reset, even across BGP session
+    /// re-establishment, matching FRR `NeighborCaps`/BIRD `state
+    /// changes` parity).
+    pub state_transitions: u64,
+    /// Most recent error cause, encoded as a small enum so the
+    /// value stays `Copy` and the wire format stable. Zero means
+    /// "no error observed since the last reset".
+    pub last_error: SessionErrorKind,
+    /// Logical time of the most recent error. Zero when no error
+    /// has been observed.
+    pub last_error_at_ms: u64,
+}
+
+/// Coarse classification of the most recent error that ended a
+/// session, exposed as a small numeric tag so `SessionStats` stays
+/// `Copy` and the wire format stays stable across releases.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[repr(u8)]
+pub enum SessionErrorKind {
+    /// No error observed since the last session reset (the default).
+    #[default]
+    None = 0,
+    /// RFC 4271 §6.6 NOTIFICATION received from the peer.
+    NotificationReceived = 1,
+    /// The transport closed without an explicit NOTIFICATION
+    /// (TCP reset, EOF, connect timeout).
+    TransportClosed = 2,
+    /// RFC 4271 §6.5 hold-timer expiry.
+    HoldTimerExpired = 3,
+    /// A wire codec error made the peer unrecoverable.
+    ParseError = 4,
+    /// The session was closed by operator action (`ManualStop`,
+    /// `lrctl shutdown`, max-prefix teardown).
+    Manual = 5,
+    /// Anything not enumerated above — the FSM reports a Close
+    /// without further classification.
+    Other = 6,
+}
+
+impl SessionErrorKind {
+    /// Stable wire name for the BIRD-style `show` output. The string
+    /// is part of the operator-visible protocol — do not rename it
+    /// without bumping the major version.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::NotificationReceived => "notification-received",
+            Self::TransportClosed => "transport-closed",
+            Self::HoldTimerExpired => "hold-timer-expired",
+            Self::ParseError => "parse-error",
+            Self::Manual => "manual",
+            Self::Other => "other",
+        }
+    }
+}
+
+impl SessionStats {
+    /// Record a state transition at the given logical time. The
+    /// caller passes the new established-state so the
+    /// `established_at_ms` field latches only on the up-transition.
+    pub fn record_transition(&mut self, now_ms: u64, established: bool) {
+        self.last_transition_at_ms = now_ms;
+        self.state_transitions = self.state_transitions.saturating_add(1);
+        if established {
+            self.established_at_ms = now_ms;
+        }
+    }
+
+    /// Record an error cause at the given logical time. Idempotent
+    /// across consecutive calls with the same kind — only the
+    /// timestamp advances.
+    pub fn record_error(&mut self, kind: SessionErrorKind, now_ms: u64) {
+        self.last_error = kind;
+        self.last_error_at_ms = now_ms;
+    }
+
+    /// Uptime (ms since the most recent establishment). Zero when
+    /// the session has never established.
+    pub fn uptime_ms(&self, now_ms: u64) -> u64 {
+        if self.established_at_ms == 0 {
+            0
+        } else {
+            now_ms.saturating_sub(self.established_at_ms)
+        }
+    }
+}
+
 /// Operational summary of one session — the introspection view behind
 /// management surfaces (`lr-daemon` runtime API, FFI dumps, bindings).
 ///
@@ -574,6 +686,9 @@ pub struct SessionSummary {
     /// UPDATE messages sent to the peer (BGP only; 0 for OSPF/Babel).
     /// Monotonic across session re-establishment.
     pub updates_sent: u64,
+    /// Per-session operational statistics (issue #52): uptime,
+    /// transition count, last error kind + time.
+    pub stats: SessionStats,
 }
 
 /// One session.
@@ -594,5 +709,95 @@ impl Session {
             established: false,
             outbound: Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod session_stats_tests {
+    use super::*;
+
+    #[test]
+    fn record_transition_latches_established_at_only_on_up() {
+        let mut s = SessionStats::default();
+        // First transition DOWN: timestamp advances, established_at_ms stays 0.
+        s.record_transition(1_000, false);
+        assert_eq!(s.last_transition_at_ms, 1_000);
+        assert_eq!(s.state_transitions, 1);
+        assert_eq!(s.established_at_ms, 0);
+
+        // First UP transition: established_at_ms latches.
+        s.record_transition(2_000, true);
+        assert_eq!(s.established_at_ms, 2_000);
+        assert_eq!(s.state_transitions, 2);
+        assert_eq!(s.last_transition_at_ms, 2_000);
+
+        // Subsequent DOWN: established_at_ms unchanged.
+        s.record_transition(3_000, false);
+        assert_eq!(s.established_at_ms, 2_000);
+        assert_eq!(s.state_transitions, 3);
+        assert_eq!(s.last_transition_at_ms, 3_000);
+
+        // Re-establish: established_at_ms advances to the new timestamp.
+        s.record_transition(5_000, true);
+        assert_eq!(s.established_at_ms, 5_000);
+        assert_eq!(s.state_transitions, 4);
+    }
+
+    #[test]
+    fn record_error_advances_timestamp_and_kind() {
+        let mut s = SessionStats::default();
+        s.record_error(SessionErrorKind::HoldTimerExpired, 1_000);
+        assert_eq!(s.last_error, SessionErrorKind::HoldTimerExpired);
+        assert_eq!(s.last_error_at_ms, 1_000);
+
+        // A second, different error overwrites the kind and timestamp.
+        s.record_error(SessionErrorKind::NotificationReceived, 2_000);
+        assert_eq!(s.last_error, SessionErrorKind::NotificationReceived);
+        assert_eq!(s.last_error_at_ms, 2_000);
+    }
+
+    #[test]
+    fn uptime_ms_is_zero_before_first_establishment() {
+        let mut s = SessionStats::default();
+        assert_eq!(s.uptime_ms(10_000), 0);
+
+        s.record_transition(5_000, true);
+        assert_eq!(s.uptime_ms(8_000), 3_000);
+        // Saturates when `now` predates `established_at_ms` (should not
+        // happen in practice, but the helper must not underflow).
+        assert_eq!(s.uptime_ms(0), 0);
+    }
+
+    #[test]
+    fn error_kind_as_str_is_stable() {
+        // The strings are part of the operator-visible runtime API;
+        // renaming one is a breaking change. Pin them.
+        let cases = [
+            (SessionErrorKind::None, "none"),
+            (
+                SessionErrorKind::NotificationReceived,
+                "notification-received",
+            ),
+            (SessionErrorKind::TransportClosed, "transport-closed"),
+            (SessionErrorKind::HoldTimerExpired, "hold-timer-expired"),
+            (SessionErrorKind::ParseError, "parse-error"),
+            (SessionErrorKind::Manual, "manual"),
+            (SessionErrorKind::Other, "other"),
+        ];
+        for (kind, name) in cases {
+            assert_eq!(kind.as_str(), name);
+        }
+    }
+
+    #[test]
+    fn state_transitions_saturate_at_u64_max() {
+        // Defensive: a router that has run an absurd number of
+        // transitions must not panic on overflow.
+        let mut s = SessionStats {
+            state_transitions: u64::MAX,
+            ..SessionStats::default()
+        };
+        s.record_transition(0, false);
+        assert_eq!(s.state_transitions, u64::MAX);
     }
 }
