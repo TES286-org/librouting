@@ -71,14 +71,18 @@ use lr_ospf::nssa::{
     flush_nssa_lsa, is_elected_translator, nssa_routes, originate_nssa_default_lsa,
     originate_nssa_lsa, NssaCalcOpts, NssaDefault, N_P_BIT,
 };
-use lr_ospf::packet::{
-    LsUpdateBody, OspfBody, OspfHeader, OspfPacket, OspfPacketType, OspfVersion,
-};
+use lr_ospf::packet::{OspfBody, OspfPacket};
 use lr_ospf::spf;
 use lr_policy::hooks::{HookChain, HookVerdict};
 use lr_policy::safety::{SafetyNet, SafetyViolation};
 use lr_rib::selection::RouteSelector;
 use lr_rib::{AdjRibIn, AdjRibOut, LocRib, RibMux};
+
+mod babel;
+mod ospf;
+
+use babel::*;
+use ospf::*;
 
 /// The router trait — embedders can plug a mock implementation.
 pub trait RouterInstance {
@@ -373,235 +377,6 @@ impl SessionState {
     }
 }
 
-/// OSPF protocol runtime for one adjacency: neighbor FSM + per-session
-/// decode state.
-///
-/// The LSDB is *per area* (shared by every session attached to the same
-/// area — LSAs flooded within an area belong to the area, not to the
-/// adjacency that happened to deliver them). See [`OspfAreaState`].
-///
-/// This is a simplified but functional driver: Hellos advance the
-/// neighbor FSM and LS-Updates are handed to the area LSDB. Full
-/// DBD/LSR exchange sequencing is the embedder's job to extend (the FSM
-/// states are all exposed).
-struct OspfRuntime {
-    router_id: u32,
-    area_id: u32,
-    neighbor: OspfNeighbor,
-    /// Protocol origin tag used when installing routes.
-    protocol: Protocol,
-    /// Per-session streaming decoder (carryover must never leak between
-    /// different peers' transports).
-    codec: lr_ospf::codec::OspfCodec,
-    /// RFC 2328 §7.2 database synchronization driver: DBD negotiation,
-    /// header exchange and LS-Request loading up to Full.
-    exchange: lr_ospf::exchange::DbExchange,
-    /// Interface MTU (kept so the exchange can be rebuilt fresh when a
-    /// §10.4 demotion resets the adjacency).
-    iface_mtu: u16,
-    /// Interface network type (RFC 2328 §9.4) — drives the §10.4
-    /// adjacency decision.
-    network_type: crate::session::OspfNetworkType,
-    /// This router's own segment identity (§10.4): the IPv4 interface
-    /// address for v2 sessions (§A.3.2 — the Hello DR/BDR wire form),
-    /// the Router ID for v3 sessions (RFC 5340 §4.1.2). `0` = not
-    /// supplied — treated as DR-Other.
-    our_ip: u32,
-    /// The neighbor's segment identity (the v2 interface address / the
-    /// v3 Router ID).
-    neighbor_ip: u32,
-    /// Elected Designated Router in the segment identity — IP
-    /// interface address per §A.3.2 on v2, Router ID on v3 (RFC 5340
-    /// §4.1.2). 0 = none / still Waiting. Pushed by the embedder after
-    /// every election round via `DefaultRouter::set_ospf_dr_state`.
-    dr: u32,
-    /// Elected Backup Designated Router (segment identity, as above).
-    bdr: u32,
-}
-
-/// One configured virtual link (RFC 2328 §15): a backbone adjacency
-/// between two area border routers, riding through `transit_area`.
-#[derive(Debug, Clone, Copy)]
-struct OspfVirtualLink {
-    /// The backbone session materialized while the link is up. Its
-    /// transport is the embedder's responsibility (tunnel the drained
-    /// bytes through the transit area to the peer's virtual session).
-    session: Option<SessionHandle>,
-}
-
-/// Per-area OSPF state shared by every session attached to that area.
-struct OspfAreaState {
-    lsdb: Lsdb,
-    /// Protocol version the area runs (v2 and v3 cannot mix in one area).
-    protocol: Protocol,
-    /// Area type policy — stub/NSSA gating of LSA flooding and the
-    /// border-router default injection (RFC 2328 §3.6, RFC 3101).
-    kind: OspfAreaType,
-    /// Monotonic counter bumped on every *content* change of a
-    /// topology LSA (types 1-5, 7 — RFC 3623 §3.2 (3); periodic
-    /// refreshes, where only age/sequence move, do not bump). Embedders
-    /// poll it via [`DefaultRouter::ospf_area_topology_version`] to
-    /// terminate graceful-restart helper mode on topology changes.
-    topology_version: u64,
-}
-
-/// Whether an area of type `kind` accepts `lsa` (RFC 2328 §3.6, RFC 3101):
-/// stub and NSSA areas refuse type-5 AS-external and type-4 summary-ASBR
-/// LSAs; `no_summary` areas refuse every type-3 summary except the
-/// default; type-7 LSAs only exist inside NSSAs. The OSPFv3 shapes of
-/// the same classes (0x4005 AS-external, 0x2004 inter-area-router,
-/// 0x2003 inter-area-prefix — RFC 5340 §A.4.5/§A.4.6/§A.4.7) are
-/// filtered identically, and so are their RFC 8362 Extended forms
-/// (0xC025 E-AS-external, 0xA024 E-inter-area-router, 0xA023
-/// E-inter-area-prefix, 0xA027 E-Type-7); v2 and v3 types are
-/// distinct 16-bit values so one match covers both.
-fn ospf_area_accepts(kind: &OspfAreaType, lsa: &Lsa) -> bool {
-    match lsa.header.ls_type {
-        t if t == LsaTypeV2::AsExternalLsa as u16
-            || t == LsaTypeV2::SummaryAsbrLsa as u16
-            || t == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
-            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
-            || t == lr_ospf::lsa::LS_TYPE_E_AS_EXTERNAL
-            || t == lr_ospf::lsa::LS_TYPE_E_INTER_ROUTER =>
-        {
-            !kind.is_stubby()
-        }
-        t if t == LsaTypeV2::NssaExternalLsa as u16 || t == lr_ospf::lsa::LS_TYPE_E_TYPE_7 => {
-            kind.is_nssa()
-        }
-        t if t == LsaTypeV2::SummaryIpLsa as u16
-            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX
-            || t == lr_ospf::lsa::LS_TYPE_E_INTER_PREFIX =>
-        {
-            if !kind.no_summary() {
-                true
-            } else if t == LsaTypeV2::SummaryIpLsa as u16 {
-                // v2: the default summary's LS ID is 0.0.0.0.
-                lsa.header.link_state_id == 0
-            } else if t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX {
-                // v3 (RFC 5340 §4.4.3.4): the LS ID has no addressing
-                // semantics — the default is a zero-length prefix in
-                // the body.
-                lr_ospf::lsa::decode_v3_inter_area_prefix_body(&lsa.body)
-                    .is_some_and(|b| b.prefix_len == 0)
-            } else {
-                // The E-Inter-Area-Prefix form (RFC 8362 §4.3): the
-                // default is the zero-length prefix in the TLV.
-                lr_ospf::lsa::EInterAreaPrefixLsaBody::decode(&lsa.body)
-                    .is_some_and(|b| b.0.prefix.prefix_len == 0)
-            }
-        }
-        _ => true,
-    }
-}
-
-/// Is this LSA a Grace-LSA (RFC 3623 §2.1 / RFC 5187 §2.1)? The OSPFv2
-/// form is a type-9 (link-local opaque) LSA with Opaque Type 3 in the
-/// LS ID's top octet (RFC 5250 §3.1); the OSPFv3 form is the dedicated
-/// link-scoped LS type 0x000b (LSA function code 11 — no opaque-type
-/// packing exists in v3).
-fn is_grace_lsa(lsa: &Lsa) -> bool {
-    lsa.header.ls_type == lr_ospf::lsa::grace::LS_TYPE_GRACE_V3
-        || (lsa.header.ls_type == lr_ospf::lsa::grace::grace_lsa_type()
-            && (lsa.header.link_state_id >> 24) as u8 == lr_ospf::lsa::grace::OPAQUE_TYPE_GRACE)
-}
-
-/// Whether an installed LSA instance is a *content* topology change
-/// for graceful-restart purposes (RFC 3623 §3.2 (3) — "the contents of
-/// the LSA have changed; this includes LSAs with no previous instance
-/// and the flushing of LSAs, but excludes periodic LSA refreshes").
-/// `outcome` is the install result and `prev` the replaced instance
-/// (None on `New`). Only topology LSAs count: v2 types 1-5, 7 and the
-/// v3 router/network/inter-area/external/NSSA shapes (0x2001-0x2009).
-fn lsa_topology_changed(
-    prev: Option<&Lsa>,
-    new: &Lsa,
-    outcome: lr_ospf::lsdb::InstallOutcome,
-) -> bool {
-    use lr_ospf::lsdb::InstallOutcome;
-    let is_topology = matches!(
-        new.header.ls_type,
-        t if t == LsaTypeV2::RouterLsa as u16
-            || t == LsaTypeV2::NetworkLsa as u16
-            || t == LsaTypeV2::SummaryIpLsa as u16
-            || t == LsaTypeV2::SummaryAsbrLsa as u16
-            || t == LsaTypeV2::AsExternalLsa as u16
-            || t == LsaTypeV2::NssaExternalLsa as u16
-            || t == lr_ospf::lsa::v3::LS_TYPE_ROUTER
-            || t == lr_ospf::lsa::v3::LS_TYPE_NETWORK
-            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_PREFIX
-            || t == lr_ospf::lsa::v3::LS_TYPE_INTER_ROUTER
-            || t == lr_ospf::lsa::v3::LS_TYPE_AS_EXTERNAL
-            || t == lr_ospf::lsa::v3::LS_TYPE_INTRA_PREFIX
-            || t == lr_ospf::lsa::LS_TYPE_E_ROUTER
-            || t == lr_ospf::lsa::LS_TYPE_E_NETWORK
-            || t == lr_ospf::lsa::LS_TYPE_E_INTER_PREFIX
-            || t == lr_ospf::lsa::LS_TYPE_E_INTER_ROUTER
-            || t == lr_ospf::lsa::LS_TYPE_E_AS_EXTERNAL
-            || t == lr_ospf::lsa::LS_TYPE_E_INTRA_PREFIX
-    );
-    if !is_topology {
-        return false;
-    }
-    match outcome {
-        InstallOutcome::New | InstallOutcome::Purged => true,
-        // Replaced: a periodic refresh (RFC 2328 §14.1) bumps the
-        // sequence and resets the age with identical body — the
-        // contents did not change. Anything else (different body, or
-        // an age jump with equal body from a re-originator) did.
-        InstallOutcome::Replaced => match prev {
-            None => true,
-            Some(p) => p.body != new.body || p.header.length != new.header.length,
-        },
-        InstallOutcome::Ignored => false,
-    }
-}
-
-/// One entry of an area's computed route table: the metric plus how the
-/// route was derived. Inter-area entries remember the advertising border
-/// router — ABR summary origination must never re-advertise a route whose
-/// only justification is the router's own (possibly stale) summary.
-/// External entries (RFC 2328 §16.4) keep the ASBR and metric type so the
-/// merged table can apply the §11 preference order.
-#[derive(Debug, Clone, Copy)]
-struct OspfTableEntry {
-    metric: u64,
-    kind: OspfKind,
-    /// RFC 8665 §5 label the route resolves to (SPF-algorithm Prefix-SID
-    /// of its originator), when SR reception is enabled and the mapping
-    /// is usable. Intra-area and inter-area routes only — external paths
-    /// forward to the ASBR / forwarding address, not the originator.
-    label: Option<u32>,
-    /// The resolved first hop toward the label's originator — the
-    /// gateway the RFC 8660 encap route points at. Always `Some` when
-    /// `label` is.
-    label_nh: Option<IpAddr>,
-    /// The route's own next hop, where the SPF resolved one (OSPFv3
-    /// intra-area routes carry their neighbor's link-local; v2 routes
-    /// resolve on-link and publish None).
-    next_hop: Option<IpAddr>,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum OspfKind {
-    Intra,
-    Inter {
-        /// Advertising border router of the summary-LSA.
-        border_router: u32,
-    },
-    External {
-        metric_type: ExternalMetricType,
-        /// Advertising ASBR of the type-5 LSA.
-        asbr: u32,
-        /// Forwarding address from the external LSA: the v2 u32 form
-        /// (RFC 2328 §A.4.5, 0 = the ASBR) or the v3 global IPv6 form
-        /// (RFC 5340 §A.4.7, F bit) — `None` means the ASBR itself.
-        forwarding_addr: Option<IpAddr>,
-        /// Internal cost to the ASBR — type-2 tie-breaker (§16.4 (6)).
-        internal_cost: u64,
-    },
-}
-
 impl OspfTableEntry {
     fn intra(metric: u64, next_hop: Option<IpAddr>) -> Self {
         Self {
@@ -877,14 +652,6 @@ impl OspfRuntime {
     }
 }
 
-/// One OSPF protocol step's output (the router-facing twin of
-/// `lr_ospf::exchange::ExchangeStep`).
-#[derive(Default)]
-struct OspfStep {
-    lsas: Vec<Lsa>,
-    outbound: Vec<OspfPacket>,
-}
-
 impl From<lr_ospf::exchange::ExchangeStep> for OspfStep {
     fn from(step: lr_ospf::exchange::ExchangeStep) -> Self {
         Self {
@@ -892,120 +659,6 @@ impl From<lr_ospf::exchange::ExchangeStep> for OspfStep {
             outbound: step.outbound,
         }
     }
-}
-
-/// Babel protocol runtime for one adjacency: neighbor table + route table.
-struct BabelRuntime {
-    neighbor: BabelNeighbor,
-    routes: BabelRouteTable,
-    /// Per-session streaming decoder (carryover must never leak between
-    /// different peers' transports).
-    codec: BabelCodec,
-    /// Reception-side link-cost ramp (RFC 8966 §A.2.4): the RTT penalty
-    /// bounds applied on top of the IHU-learned txcost when an Update's
-    /// advertised metric is folded into the local route metric. Set by
-    /// the embedder through [`RouterApi::set_babel_link_cost_params`];
-    /// `rtt_cost` 0 (babeld's default) keeps the feature off.
-    rtt_min_us: u32,
-    rtt_max_us: u32,
-    rtt_cost: u16,
-    /// Current IPv4 next hop (learned from AE 1 NextHop TLVs,
-    /// RFC 8966 §4.6.4).
-    next_hop_v4: Option<IpAddr>,
-    /// Current IPv6 next hop (AE 2 / AE 3 NextHop TLVs; the AE 4
-    /// IPv4-via-IPv6 encoding resolves against this one).
-    next_hop_v6: Option<IpAddr>,
-    /// Router-id of the peer (learned from Router-Id TLVs).
-    router_id: [u8; 8],
-    /// Our own router-id, when the embedder pinned one
-    /// ([`RouterApi::set_babel_own_router_id`]). Updates echoing it back
-    /// (a peer re-advertising our own claims) are ignored — BIRD's
-    /// `babel_handle_update` guard, and the cheap half of RFC 8966's
-    /// loop prevention.
-    own_router_id: Option<[u8; 8]>,
-    /// A Route Request (RFC 8966 §3.2.6) arrived — the embedder should
-    /// trigger an immediate announcement. Set by any request (wildcard
-    /// or specific); drained through
-    /// [`RouterApi::babel_take_route_request`].
-    route_request: bool,
-    /// A Seqno Request (RFC 8966 §3.2.6.2) for *our own* router-id
-    /// arrived — a peer holds a higher seqno than our fresh boot value
-    /// (the classic restart-staleness recovery). Carries the seqno the
-    /// peer asked for; the embedder bumps its announcement seqno to at
-    /// least that value and re-announces; drained through
-    /// [`RouterApi::babel_take_own_seqno_request`].
-    own_seqno_request: Option<u16>,
-    /// Routes previously published to Loc-RIB — used to compute deltas.
-    published: BTreeMap<RouteKey, Route>,
-    /// Structured record of the withdrawal that happened during this
-    /// frame's `apply_update` calls, consumed by `handle_frame`'s
-    /// trailing `self.diff()` so the delta can be annotated with a
-    /// precise, operator-actionable reason BEFORE it surfaces as a
-    /// `RouterEvent::Log`. Replaces the previous single `String`:
-    /// the string was overwritten on every per-prefix retraction TLV,
-    /// so a 29-route retraction frame logged only the LAST prefix;
-    /// and the wildcard-retraction branch (AE 0, metric 0xFFFF) never
-    /// set it at all, so the misleading fallback "babel best-path
-    /// displacement" fired — the production-report symptom where an
-    /// operator with one upstream saw "best-path displacement" and
-    /// (correctly) concluded the message was wrong.
-    last_withdraw: LastWithdraw,
-}
-
-/// What kind of withdrawal happened in one Babel frame, set
-/// incrementally by `apply_update` and rendered into a reason string
-/// by `handle_frame` after `diff()` produces the delta.
-///
-/// The count of routes affected comes from `delta.withdrawn.len()` at
-/// render time — not tracked here — so a frame that retracts a prefix
-/// not in `published` (a no-op retraction) does not inflate the
-/// logged count.
-#[derive(Default)]
-struct LastWithdraw {
-    kind: WithdrawKind,
-    /// For a single per-prefix retraction, the prefix that was
-    /// retracted — rendered into the reason so the operator can
-    /// `grep` for the exact prefix. `None` for wildcard retractions
-    /// (no single prefix to name) and for multi-prefix frames (the
-    /// count is what matters, not one prefix).
-    first_prefix: Option<lr_core::addr::Prefix>,
-}
-
-#[derive(Default, PartialEq, Eq)]
-enum WithdrawKind {
-    /// No retraction TLV seen this frame — any `delta.withdrawn`
-    /// entries came from `diff()`'s best-path displacement (a better
-    /// route pushed the previous best out of the feasible set). The
-    /// fallback "best-path displacement" message is correct here.
-    #[default]
-    None,
-    /// One or more per-prefix retractions (metric=infinity, AE ≠ 0).
-    /// The first prefix is recorded for the single-prefix message;
-    /// multi-prefix frames get a count-annotated message.
-    PerPrefix,
-    /// A wildcard retraction (AE 0, metric 0xFFFF — RFC 8966 §4.6.9):
-    /// the peer asked us to drop every route it taught us. Distinct
-    /// from `PerPrefix` so the operator sees "wildcard retraction"
-    /// (an explicit peer-side event) rather than the misleading
-    /// "best-path displacement" (a local-decision event).
-    Wildcard,
-}
-
-/// Result of one protocol-runtime step: routes to install into / withdraw
-/// from Loc-RIB. The `withdraw_reason` is a human-readable string carried
-/// on the first withdrawal's `RouterEvent::Log` so the operator can see
-/// WHY a Babel route disappeared (expiry, explicit retraction, link-down,
-/// or best-path displacement) — essential for diagnosing the
-/// install/withdraw cycle in the Windows production report.
-#[derive(Default)]
-struct RuntimeDelta {
-    installed: Vec<Route>,
-    withdrawn: Vec<RouteKey>,
-    /// Human-readable reason for the withdrawals (empty when the delta
-    /// carries installs only). Surfaced as a `RouterEvent::Log` line
-    /// in `apply_runtime_delta` so the operator can correlate the
-    /// withdrawal with its cause.
-    withdraw_reason: String,
 }
 
 impl BabelRuntime {
@@ -8326,30 +7979,6 @@ impl DefaultRouter {
             self.ospf_sync_externals();
         }
         changed
-    }
-}
-
-/// Build one LS-Update packet for an area.
-fn ospf_ls_update(protocol: Protocol, router_id: u32, area_id: u32, lsas: Vec<Lsa>) -> OspfPacket {
-    OspfPacket {
-        header: OspfHeader {
-            version: if protocol == Protocol::Ospfv3 {
-                OspfVersion::V3 as u8
-            } else {
-                OspfVersion::V2 as u8
-            },
-            kind: OspfPacketType::LinkStateUpdate as u8,
-            length: 0,
-            router_id,
-            area_id,
-            checksum: 0,
-            au_type_or_instance: 0,
-            auth_data: 0,
-        },
-        body: OspfBody::LsUpdate(LsUpdateBody {
-            lsa_count: lsas.len() as u32,
-            lsas,
-        }),
     }
 }
 
