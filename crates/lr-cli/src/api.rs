@@ -68,6 +68,15 @@ pub struct ApiContext {
     /// [`ApiContext`] by hand can leave this out and the API simply
     /// refuses `shutdown drain`).
     pub shutdown: Option<Arc<crate::shutdown::ShutdownController>>,
+    /// Live ROA store (issue #52 follow-up — `lrctl roa list` /
+    /// `show roa`). The BGP daemon populates this with the same
+    /// `Arc<RoaStore>` the metrics endpoint already reads through
+    /// [`crate::metrics::MetricsContext::roa_len`]; the RTR client
+    /// thread swaps snapshots under it. `None` for daemon modes that
+    /// have no ROA store (OSPF-only, Babel-only, BMP) — `show roa`
+    /// then reports `roa-total 0` rather than a misleading "no
+    /// data".
+    pub roa_store: Option<Arc<lr_bgp::RoaStore>>,
 }
 
 #[cfg(unix)]
@@ -129,6 +138,7 @@ mod imp {
         let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
         let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
         let shutdown = ctx.shutdown;
+        let roa_store = ctx.roa_store;
         let started = std::time::Instant::now();
 
         thread::Builder::new()
@@ -143,6 +153,7 @@ mod imp {
                     let reload = Arc::clone(&reload);
                     let status_lines = Arc::clone(&status_lines);
                     let shutdown = shutdown.clone();
+                    let roa_store = roa_store.clone();
                     let path_owned = path_owned.clone();
                     thread::Builder::new()
                         .name("lr-api-conn".into())
@@ -156,6 +167,7 @@ mod imp {
                                 reload: &reload,
                                 status_lines: &status_lines,
                                 shutdown: shutdown.as_ref(),
+                                roa_store: roa_store.as_ref(),
                                 started,
                                 socket_path: Some(&path_owned),
                             };
@@ -202,6 +214,10 @@ mod imp {
         /// in that case so the operator gets a clear "not configured"
         /// diagnostic instead of silent acceptance.
         shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
+        /// Live ROA store for `show roa` (issue #52 follow-up). `None`
+        /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
+        /// renderer then reports `roa-total 0` instead of refusing.
+        roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
         started: std::time::Instant,
         /// The `shutdown` command removes the socket file itself so the
         /// cleanup does not race the process exit.
@@ -588,6 +604,7 @@ mod imp {
                 reload: Box::new(|| vec!["reloaded".into()]),
                 status_lines: Box::new(Vec::new),
                 shutdown: None,
+                roa_store: None,
             }
         }
 

@@ -228,6 +228,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
     let shutdown = ctx.shutdown;
+    let roa_store = ctx.roa_store;
     let started = std::time::Instant::now();
     let path_owned = pipe_name.clone();
 
@@ -262,6 +263,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 let reload = Arc::clone(&reload);
                 let status_lines = Arc::clone(&status_lines);
                 let shutdown = shutdown.clone();
+                let roa_store = roa_store.clone();
                 let path_owned = path_owned.clone();
                 thread::Builder::new()
                     .name("lr-api-conn".into())
@@ -273,6 +275,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                             reload: &reload,
                             status_lines: &status_lines,
                             shutdown: shutdown.as_ref(),
+                            roa_store: roa_store.as_ref(),
                             started,
                             socket_path: Some(&path_owned),
                         };
@@ -368,6 +371,10 @@ struct ConnDeps<'a> {
     /// refuses `shutdown drain` with a clear "not configured"
     /// diagnostic instead of silently accepting.
     shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
+    /// Live ROA store for `show roa` (issue #52 follow-up). `None`
+    /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
+    /// renderer then reports `roa-total 0` instead of refusing.
+    roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
     started: std::time::Instant,
     /// `shutdown` does not need to remove a socket file on Windows
     /// (named pipes are kernel-namespace objects that vanish when

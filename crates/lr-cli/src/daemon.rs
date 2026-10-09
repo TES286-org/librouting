@@ -1589,6 +1589,7 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
                     let roa_store = Arc::clone(&roa_store);
                     move || roa_store.len()
                 })),
+                roa_store: Some(Arc::clone(&roa_store)),
                 filter_metrics: Mutex::new(filter_registry.map(Arc::new)),
                 session_labels: Arc::new(Mutex::new(session_label_map)),
                 shutdown,
@@ -3688,6 +3689,7 @@ fn run_bmp_collector(cfg: &DaemonConfig, rid: RouterId) -> ExitCode {
         running: Arc::clone(&running),
         status_lines: Arc::new(Vec::new),
         roa_len: None,
+        roa_store: None,
         filter_metrics: Mutex::new(None),
         session_labels: Arc::new(Mutex::new(HashMap::new())),
         // BMP is a passive receiver; the drain posture does not apply
@@ -4205,6 +4207,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
             running: Arc::new(AtomicBool::new(true)),
             status_lines: Arc::new(Vec::new),
             roa_len: None,
+            roa_store: None,
             filter_metrics: Mutex::new(None),
             session_labels: Arc::new(Mutex::new(HashMap::new())),
             shutdown: build_shutdown(cfg, &router),
@@ -6319,6 +6322,14 @@ struct Runtime {
     /// absent the metric is omitted (rather than emitting a
     /// misleading zero).
     roa_len: Option<Arc<dyn Fn() -> usize + Send + Sync>>,
+    /// Live ROA store (issue #52 follow-up — `lrctl roa list` /
+    /// runtime API `show roa`). The BGP daemon populates this with
+    /// the same `Arc<RoaStore>` the RTR client thread and the import
+    /// filters share; `None` for daemon modes without one. Kept
+    /// separately from `roa_len` (which is a closure over the store)
+    /// because the renderer needs to enumerate the entries, not just
+    /// count them.
+    roa_store: Option<Arc<lr_bgp::RoaStore>>,
     /// Filter-eval latency histograms (ROADMAP-v3 D12.4), shared
     /// between the import/export filter hooks (which record into
     /// them per route) and the metrics endpoint (which renders
@@ -6428,6 +6439,7 @@ fn spawn_api(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             move || (rt.status_lines)()
         }),
         shutdown: rt.shutdown.clone(),
+        roa_store: rt.roa_store.clone(),
     };
     api::spawn(path, ctx)
         .map(|p| log_info!(Component::Api, "runtime API on {}", p))
