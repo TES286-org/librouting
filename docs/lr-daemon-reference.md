@@ -269,13 +269,22 @@ the drain governs the whole daemon's exit posture.
 
 A drain is triggered on a live daemon through `lrctl shutdown drain`
 (or the runtime API `shutdown drain` line command); `lrctl shutdown
-status` polls the lifecycle (`running | draining | drained`).
-Immediate mode (the default) refuses `shutdown drain` with a clear
-"drain not configured" diagnostic so the operator cannot
-accidentally trigger a no-op. `finalize` rejects a zero drain rate
-or zero max-wait in drain mode (a drain that cannot make progress
-would never terminate, and an unbounded drain would hang the
-daemon on a wedged peer).
+status` polls the lifecycle (`running | draining | drained`);
+`lrctl shutdown abort` cancels a drain in progress (best-effort —
+the worker notices on its next iteration, mirroring the POSIX signal
+contract; the state flips back to `running`, the gate clears, the
+daemon stays alive). Immediate mode (the default) refuses `shutdown
+drain` and `shutdown abort` with a clear "drain not configured"
+diagnostic so the operator cannot accidentally trigger a no-op.
+`finalize` rejects a zero drain rate or zero max-wait in drain mode
+(a drain that cannot make progress would never terminate, and an
+unbounded drain would hang the daemon on a wedged peer).
+
+The drain is wired into every daemon mode: BGP standalone, the
+multi-protocol supervisor, and the standalone OSPF / OSPFv3 / LDP
+engines. The runtime API dispatch is identical on Unix and Windows
+(named pipes mirror the Unix domain socket path verbatim), so
+`lrctl shutdown drain|status|abort` works on both platforms.
 
 ## Configuration keys
 

@@ -428,6 +428,17 @@ fn drain_abort_cancels_in_progress_drain() {
 /// support for the standalone non-BGP engines.
 #[test]
 fn ldp_standalone_drain_mode_is_wired() {
+    // The loopback interface name differs by platform: `lo` on
+    // Linux, `lo0` on macOS and the BSDs. The test does not need a
+    // working LDP adjacency — it only needs the daemon to come up
+    // far enough to bind the API socket and install the drain
+    // controller. Picking the right loopback name per-platform
+    // lets the test run on every native CI leg without privileges.
+    let lo = if cfg!(target_os = "macos") || cfg!(target_os = "freebsd") {
+        "lo0"
+    } else {
+        "lo"
+    };
     let socket =
         std::env::temp_dir().join(format!("lr-daemon-drain-ldp-{}.sock", std::process::id()));
     let _d = Daemon::spawn(
@@ -437,7 +448,7 @@ fn ldp_standalone_drain_mode_is_wired() {
             "--router-id",
             "10.0.0.1",
             "--ldp-interface",
-            "lo",
+            lo,
             "--ldp-port",
             "6460",
             "--api-socket",

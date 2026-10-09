@@ -261,7 +261,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 let running = Arc::clone(&running);
                 let reload = Arc::clone(&reload);
                 let status_lines = Arc::clone(&status_lines);
-                let shutdown = Arc::clone(&shutdown);
+                let shutdown = shutdown.clone();
                 let path_owned = path_owned.clone();
                 thread::Builder::new()
                     .name("lr-api-conn".into())

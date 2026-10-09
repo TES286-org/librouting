@@ -28,7 +28,9 @@ queue is empty or the deadline elapses. Configured through a new
 `--shutdown-drain-max-wait` CLI flags. Triggered on a live daemon
 through `lrctl shutdown drain` (or the runtime API `shutdown drain`
 command); `lrctl shutdown status` polls the lifecycle
-(`running | draining | drained`).
+(`running | draining | drained`); `lrctl shutdown abort` cancels a
+drain in progress (best-effort — the worker notices on its next
+iteration, mirroring the POSIX signal contract).
 
 The drain is implemented as a state machine (`ShutdownController` in
 `crates/lr-cli/src/shutdown.rs`) running on its own thread. A new
@@ -46,14 +48,19 @@ expose the queue snapshots the worker needs:
 methods are Rust-only and the drain controller lives in `lr-cli`
 (daemon-level concern, not router-instance level).
 
-The mechanism is orthogonal to the existing RFC 8326 community-based
+The drain is wired into every daemon mode: BGP standalone, the
+multi-protocol supervisor, and the standalone OSPF / OSPFv3 / LDP
+engines. The runtime API dispatch is identical on Unix and Windows
+(named pipes mirror the Unix domain socket path verbatim), so
+`lrctl shutdown drain|status|abort` works on both platforms. The
+mechanism is orthogonal to the existing RFC 8326 community-based
 graceful-shutdown hooks (which de-preference per-peer LOCAL_PREF on
 tagged routes): RFC 8326 governs one session's maintenance posture;
-the drain governs the whole daemon's exit posture. Three e2e tests
-in `crates/lr-cli/tests/daemon_graceful_drain.rs` exercise the
+the drain governs the whole daemon's exit posture. Five e2e tests in
+`crates/lr-cli/tests/daemon_graceful_drain.rs` exercise the
 running → draining → drained transition through the real
-`lr-daemon` binary, plus the immediate-mode refusal when the daemon
-is not configured for drain.
+`lr-daemon` binary, the immediate-mode refusal, the abort path,
+and the standalone LDP engine's drain mode.
 
 ## [1.1.1] — patch: metrics portability fix and source-file modularisation
 
