@@ -1573,6 +1573,26 @@ impl DefaultRouter {
         &self.static_routes
     }
 
+    /// The keys of every route the daemon originated locally
+    /// (`originate` / `originate_family` / `originate_with_attributes`
+    /// / `originate_labeled`), in stable [`RouteKey`] order. Intended
+    /// for the daemon-wide graceful drain (issue #53): the worker
+    /// snapshot this returns is the work queue the drain walks at the
+    /// configured rate. The returned `Vec` owns the keys so the caller
+    /// can drop the router read lock before calling [`Self::unoriginate`].
+    pub fn originated_keys(&self) -> Vec<RouteKey> {
+        self.originated.keys().cloned().collect()
+    }
+
+    /// The prefixes of every registered BGP route aggregate (RFC
+    /// 4271 §9.2.2.2), in stable prefix order. Mirrors
+    /// [`Self::originated_keys`] for the drain worker: the snapshot
+    /// is the queue; the caller drops the lock before calling
+    /// [`Self::remove_aggregate`].
+    pub fn aggregate_prefixes(&self) -> Vec<lr_core::addr::Prefix> {
+        self.aggregates.iter().copied().collect()
+    }
+
     /// Register a BGP route aggregate (RFC 4271 §9.2.2.2). When the
     /// Loc-RIB contains at least one route more specific than `prefix`,
     /// the aggregate is originated with a zeroed AS_PATH,

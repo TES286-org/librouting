@@ -178,6 +178,7 @@ mod daemon_rpki;
 mod metrics;
 mod pipe_name;
 mod privdrop;
+mod shutdown;
 mod signal;
 mod translate;
 mod translate_bird_filter;
