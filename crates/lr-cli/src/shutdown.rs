@@ -346,7 +346,18 @@ impl ShutdownController {
         // Clear the gate so any in-flight imports finish cleanly.
         // Done after the session teardown so a late import during the
         // teardown window is dropped, not admitted.
+        //
+        // Order matters: flip `running` to false BEFORE publishing
+        // `state = Drained`. The `running` flag is what the daemon's
+        // main loop polls to exit; once `Drained` is visible a poller
+        // (test, embedder, signal handler) reasonably expects the
+        // process to be on its way out. Setting `Drained` first and
+        // `running` later opens a race where a poller observes the
+        // Drained state but `running` is still true — which under
+        // ptrace-based coverage tools (tarpaulin) can stall the worker
+        // thread long enough for the race to manifest in the unit test.
         self.gate.store(false, Ordering::Relaxed);
+        running.store(false, Ordering::Relaxed);
         self.state.store(STATE_DRAINED, Ordering::Relaxed);
 
         let drained = queue.is_empty();
@@ -366,7 +377,6 @@ impl ShutdownController {
                 ),
             );
         }
-        running.store(false, Ordering::Relaxed);
     }
 }
 
