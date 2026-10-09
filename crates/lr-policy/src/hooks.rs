@@ -412,6 +412,64 @@ impl ImportHook for DampingImportHook {
     }
 }
 
+/// Daemon-wide graceful drain (issue #53).
+///
+/// When the daemon is draining — stopping acceptance of new routes
+/// while it gradually withdraws the routes it originated — every
+/// inbound UPDATE must be dropped before it reaches Adj-RIB-In. The
+/// hook is a thin wrapper around a shared `Arc<AtomicBool>` so the
+/// shutdown controller (in `lr-cli`) can flip the gate on entry and
+/// flip it back off after the daemon has either completed the drain
+/// or aborted it.
+///
+/// The hook is *informational* in the pipeline sense (it does not
+/// inspect or mutate the route) but *blocking* in the verdict sense
+/// (`Drop` short-circuits the rest of the import chain — a route
+/// dropped here never enters Adj-RIB-In, never reaches the safety
+/// net, never participates in selection). This is intentional: the
+/// drain posture is "this router is going away, do not let it pick
+/// up new state", and the cheapest correct way to express that is
+/// to fail-closed at the front of the chain.
+///
+/// Unlike [`GracefulShutdownImportHook`] (RFC 8326 §4.1), which
+/// *de-preferences* tagged routes, this hook *drops all routes*
+/// unconditionally while the gate is set. The two are orthogonal:
+/// RFC 8326 governs per-peer LOCAL_PREF zeroing for a session in
+/// graceful-shutdown maintenance; the drain gate governs the whole
+/// router's shutdown posture.
+pub struct DrainModeImportHook {
+    gate: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl DrainModeImportHook {
+    /// Construct a hook wired to a shared gate flag. The flag starts
+    /// `false` (accepting); the shutdown controller flips it to
+    /// `true` while the drain is in progress.
+    pub fn new(gate: std::sync::Arc<std::sync::atomic::AtomicBool>) -> Self {
+        Self { gate }
+    }
+
+    /// Borrow the shared gate so the controller can flip it from
+    /// another thread without holding the router lock.
+    pub fn gate(&self) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
+        &self.gate
+    }
+}
+
+impl ImportHook for DrainModeImportHook {
+    fn name(&self) -> &str {
+        "drain-mode"
+    }
+
+    fn on_import(&self, _route: &mut Route) -> HookVerdict {
+        if self.gate.load(std::sync::atomic::Ordering::Relaxed) {
+            HookVerdict::Drop
+        } else {
+            HookVerdict::Keep
+        }
+    }
+}
+
 /// A collection of hooks + safety net configuration. Aggregated by the
 /// router instance and invoked at the appropriate pipeline stages.
 #[derive(Default)]
@@ -974,5 +1032,54 @@ mod tests {
         );
         hook.on_withdraw(&key, 0);
         assert_eq!(table.lock().unwrap().entries().count(), 1);
+    }
+
+    #[test]
+    fn drain_mode_hook_passes_when_gate_is_clear() {
+        // Default state: gate false → accept every import.
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook = DrainModeImportHook::new(std::sync::Arc::clone(&gate));
+        let mut r = route([203, 0, 113, 0], 24, 1);
+        assert!(
+            matches!(hook.on_import(&mut r), HookVerdict::Keep),
+            "clear gate must let routes through"
+        );
+        assert_eq!(hook.name(), "drain-mode");
+    }
+
+    #[test]
+    fn drain_mode_hook_drops_when_gate_is_set() {
+        // Drain in progress: gate true → drop every import, regardless
+        // of the route's attributes. The route is not mutated — there
+        // is nothing to mutate, the gate is purely informational on
+        // the route itself.
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let hook = DrainModeImportHook::new(std::sync::Arc::clone(&gate));
+        let mut r = route([198, 51, 100, 0], 24, 1);
+        assert!(
+            matches!(hook.on_import(&mut r), HookVerdict::Drop),
+            "set gate must drop every import"
+        );
+        // The hook's gate() accessor returns the same Arc the caller
+        // built — used by the shutdown controller to flip the gate
+        // from another thread without holding the router lock.
+        assert!(
+            std::sync::Arc::ptr_eq(&hook.gate(), &gate),
+            "gate() must return the same Arc"
+        );
+    }
+
+    #[test]
+    fn drain_mode_hook_reflects_runtime_gate_flips() {
+        // The gate is shared: flipping it from another thread must
+        // change the verdict the hook returns on the next import.
+        let gate = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let hook = DrainModeImportHook::new(std::sync::Arc::clone(&gate));
+        let mut r = route([203, 0, 113, 0], 24, 1);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
+        gate.store(true, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Drop));
+        gate.store(false, std::sync::atomic::Ordering::Relaxed);
+        assert!(matches!(hook.on_import(&mut r), HookVerdict::Keep));
     }
 }

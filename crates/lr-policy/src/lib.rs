@@ -28,7 +28,9 @@ pub mod route_map;
 pub mod safety;
 pub mod set;
 
-pub use hooks::{ExportHook, HookChain, HookVerdict, ImportHook, SelectionHook};
+pub use hooks::{
+    DrainModeImportHook, ExportHook, HookChain, HookVerdict, ImportHook, SelectionHook,
+};
 pub use policy::{Policy, PolicyChain, PolicyVerdict};
 pub use route_map::{RouteMap, RouteMapEntry};
 pub use safety::{SafetyConfig, SafetyNet, SafetyViolation};
