@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::fsm::{BgpEvent, BgpPeer};
 use crate::path::AsPath;

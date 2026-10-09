@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::capabilities::Capability;
 use crate::path::{AsPath, AttrType, Med, Origin, OriginKind, PathAttrFlags, PathAttribute};
