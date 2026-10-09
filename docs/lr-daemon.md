@@ -331,7 +331,12 @@ on Windows with `runtime API requires Unix domain sockets (not supported
 here)`, so a Windows daemon is driven directly over the pipe.
 
 The command surface is small: `status`, `sessions`, `routes`,
-`mrt PATH`, `reload`, `shutdown`, `help` and `quit`. [RUNBOOK.md](RUNBOOK.md)
+`mrt PATH`, `reload`, `shutdown`, `help` and `quit`. The `show …` family
+mirrors the BIRD console: `show status` (extended summary with per-protocol
+session counts and memory), `show sessions [detail]` (per-session stats —
+transitions, uptime, last error), `show session <handle>` (deep dive for
+one session), `show routes count` (Loc-RIB grouped by protocol) and
+`show memory` (process RSS and virtual size). [RUNBOOK.md](RUNBOOK.md)
 documents each command's exact reply string.
 
 `--metrics-addr ADDR` starts the Prometheus endpoint, which has its own
