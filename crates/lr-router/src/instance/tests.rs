@@ -1,8 +1,9 @@
 use super::*;
 use crate::redistribution::RedistributionPipe;
 use lr_core::addr::Asn;
+use lr_core::addr::RouterId;
 use lr_core::fsm::TimerSpec;
-use lr_ospf::packet::LsUpdateBody;
+use lr_ospf::packet::{LsUpdateBody, OspfBody};
 
 /// Test helper: encode one LS-Update carrying `lsas` as if received
 /// from a peer in `area`. The v2 packet checksum is finalized the way

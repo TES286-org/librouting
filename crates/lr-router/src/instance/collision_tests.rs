@@ -1,4 +1,5 @@
 use super::*;
+use lr_core::addr::RouterId;
 
 // ===== RFC 4271 §6.8 connection collision resolution =====
 
