@@ -9,14 +9,23 @@
 //! No HTTP dependency is pulled in: the request line is parsed by
 //! hand (the only methods the daemon answers are `GET /metrics` and
 //! `GET /` — every other request gets a `404`). This mirrors the
-//! project's stance on `api.rs` (hand-rolled Unix-socket server, no
-//! `tokio` / `hyper` dependency) and keeps the release-archive binary
-//! surface unchanged.
+//! project's stance on `api.rs` (hand-rolled server, no `tokio` /
+//! `hyper` dependency) and keeps the release-archive binary surface
+//! unchanged.
 //!
 //! The thread model matches `api.rs`'s: one thread polls a
 //! `set_nonblocking(true)` `TcpListener` with a 100 ms sleep, and
 //! each accepted connection is served on its own short-lived thread
 //! so a slow client cannot hold the metrics endpoint hostage.
+//!
+//! Unlike `api.rs` (which switches transport per platform — Unix
+//! domain socket on Unix, named pipe on Windows), the metrics
+//! endpoint binds a plain TCP listener. `std::net::TcpListener` is
+//! available on every target the workspace supports, so the metrics
+//! module compiles and serves identically on Linux, the BSDs,
+//! macOS and Windows. The daemon's process model (signals,
+//! privilege drop, named-pipe API transport) carries its own
+//! platform guards; the metrics endpoint does not.
 //!
 //! # Exposed metrics
 //!
@@ -102,11 +111,8 @@ impl DurationHistogram {
 
     /// Total observations recorded.
     ///
-    /// Unix-only in production (the exporter's render path); the
-    /// non-Unix daemon has no metrics endpoint, so the method is
-    /// allowed dead there rather than fighting `--all-targets`
-    /// clippy (the unit tests use it on every platform).
-    #[cfg_attr(not(unix), allow(dead_code))]
+    /// Read by the exporter's render path on every platform; the
+    /// unit tests exercise the same call.
     pub fn count(&self) -> u64 {
         self.count.load(std::sync::atomic::Ordering::Relaxed)
     }
@@ -115,7 +121,6 @@ impl DurationHistogram {
     /// count) under one label set. `labels` is a pre-rendered
     /// `{k="v",…}` fragment (possibly empty); the `le` label is
     /// appended per bucket line.
-    #[cfg_attr(not(unix), allow(dead_code))]
     fn render(&self, out: &mut String, metric: &str, labels: &str) {
         use std::fmt::Write as _;
         // The label-set shape differs between "no labels" (`{le=…}`)
@@ -154,7 +159,6 @@ impl Default for DurationHistogram {
 /// precision (9 decimals). All histogram bounds are multiples of
 /// 50 ns, so the 9-decimal form is exact for them; the running sum
 /// is likewise exact to the nanosecond.
-#[cfg_attr(not(unix), allow(dead_code))]
 fn format_secs(ns: u64) -> String {
     format!("{:.9}", ns as f64 / 1e9)
 }
@@ -168,7 +172,6 @@ pub enum FilterDirection {
 }
 
 impl FilterDirection {
-    #[cfg_attr(not(unix), allow(dead_code))]
     fn label(self) -> &'static str {
         match self {
             Self::Import => "import",
@@ -210,7 +213,6 @@ impl FilterMetricsRegistry {
 
     /// True when no series registered (the metric block is omitted
     /// from the exposition).
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
@@ -218,7 +220,6 @@ impl FilterMetricsRegistry {
     /// Render the full histogram block: HELP/TYPE headers plus the
     /// per-series bucket/sum/count lines, series in registration
     /// order (deterministic across scrapes).
-    #[cfg_attr(not(unix), allow(dead_code))]
     pub fn render(&self, out: &mut String) {
         use std::fmt::Write as _;
         if self.is_empty() {
@@ -255,10 +256,8 @@ impl Default for FilterMetricsRegistry {
 /// `lr_roa_entries` metric is omitted (rather than emitting a
 /// misleading zero).
 ///
-/// The fields are only read by the Unix server below; on other
-/// targets the type exists so callers compile unchanged (`spawn`
-/// refuses there).
-#[cfg_attr(not(unix), expect(dead_code))]
+/// The exporter binds a plain TCP listener (see [`spawn`]); the
+/// context is platform-independent data.
 pub struct MetricsContext {
     pub info: MetricsInfo,
     pub router: Arc<RwLock<DefaultRouter>>,
@@ -283,17 +282,12 @@ pub struct MetricsContext {
 }
 
 /// Static daemon facts served by `lr_info`.
-///
-/// See [`MetricsContext`] for why some fields are unread on non-Unix
-/// targets.
-#[cfg_attr(not(unix), expect(dead_code))]
 pub struct MetricsInfo {
     pub version: String,
     pub local_as: u32,
     pub router_id: String,
 }
 
-#[cfg(unix)]
 mod imp {
     use super::*;
     use std::fmt::Write as _;
@@ -649,25 +643,13 @@ mod imp {
     }
 }
 
-#[cfg(not(unix))]
-mod imp {
-    use super::*;
-
-    /// On non-Unix targets the metrics endpoint is refused with a
-    /// clear error — same stance as `api.rs`. The exposition format
-    /// is portable, but the daemon's process model (signals,
-    /// privilege drop) is not, so the whole daemon binary refuses to
-    /// start there in the first place.
-    pub fn spawn(_addr: &str, _ctx: MetricsContext) -> Result<String, String> {
-        Err("metrics endpoint requires Unix domain socket support (not supported here)".to_string())
-    }
-}
-
 pub use imp::spawn;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use lr_router::RouterInstance;
+    use std::time::Duration;
 
     /// Every bucket line is cumulative and monotone, the `+Inf`
     /// bucket equals `_count`, and `_sum` is the exact total.
@@ -804,5 +786,250 @@ mod tests {
             j.join().unwrap();
         }
         assert_eq!(h.count(), 4 * 1000);
+    }
+
+    // -------------------------------------------------------
+    // Portable end-to-end coverage of `spawn` (issue #47).
+    // The metrics module binds a plain `TcpListener`, which is
+    // available on every Rust target the workspace supports, so the
+    // server must start and serve on all of them. The daemon-level
+    // tests in `tests/daemon_metrics.rs` cover the integration with
+    // the daemon binary; this in-crate test exercises the `spawn` /
+    // `serve_connection` path directly so a target without the
+    // daemon binary (or one whose `daemon_*` integration suite is
+    // `#![cfg(unix)]`) still gets the regression signal.
+    // -------------------------------------------------------
+
+    /// Build a minimal but realistic `MetricsContext` for tests:
+    /// one Idle BGP session, one originated prefix, no ROA store,
+    /// no filter histograms, an `?` session-label fallback.
+    fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> MetricsContext {
+        MetricsContext {
+            info: MetricsInfo {
+                version: "test".into(),
+                local_as: 64512,
+                router_id: "10.0.0.1".into(),
+            },
+            router,
+            running,
+            roa_len: None,
+            filter_metrics: None,
+            session_label: Box::new(|_| "?".to_string()),
+        }
+    }
+
+    /// Pick a free TCP port on loopback by binding to `:0`, reading
+    /// the assigned port, then dropping the listener. Same shape as
+    /// `tests/daemon_metrics.rs::free_port` — duplicated here so the
+    /// in-crate test does not depend on an integration test helper.
+    fn free_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        // The kernel's ephemeral allocator is the source of truth, but
+        // a brief sleep dodges an immediate-rebind race on macOS.
+        std::thread::sleep(Duration::from_millis(10));
+        port
+    }
+
+    /// One HTTP round-trip: send `GET <path> HTTP/1.0`, return the
+    /// raw response bytes. A 5 s deadline mirrors the daemon-level
+    /// integration tests.
+    fn http_get(addr: &str, path: &str) -> String {
+        use std::io::{Read, Write};
+        let mut conn = std::net::TcpStream::connect(addr).expect("connect to metrics endpoint");
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        conn.set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        write!(
+            conn,
+            "GET {path} HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+        )
+        .unwrap();
+        conn.flush().unwrap();
+        let mut buf = Vec::new();
+        conn.read_to_end(&mut buf).expect("read response");
+        String::from_utf8_lossy(&buf).into_owned()
+    }
+
+    /// `spawn` returns the bound address and serves `GET /metrics`
+    /// with the full Prometheus exposition on every platform.
+    #[test]
+    fn spawn_serves_metrics_on_tcp() {
+        let port = free_port();
+        let addr = format!("127.0.0.1:{port}");
+
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        {
+            let mut r = router.write().unwrap();
+            r.add_session(lr_router::SessionConfig::bgp(
+                lr_core::addr::Asn(64512),
+                lr_core::addr::Asn(64513),
+                lr_core::addr::RouterId::from_v4([10, 0, 0, 1]),
+            ))
+            .unwrap();
+            r.originate(
+                lr_core::addr::Prefix::new_v4([203, 0, 113, 0], 24),
+                Some(lr_core::addr::IpAddr::V4([192, 0, 2, 1])),
+            );
+        }
+        let running = Arc::new(AtomicBool::new(true));
+        let bound = spawn(&addr, test_ctx(Arc::clone(&router), Arc::clone(&running)))
+            .expect("metrics server spawns on every platform");
+        assert_eq!(bound, addr, "spawn returns the bound address");
+
+        // Give the accept thread a moment to come up. The 100 ms
+        // poll cadence in `accept_loop` means the very first scrape
+        // can race the bind on a loaded runner.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let resp = loop {
+            let r = http_get(&addr, "/metrics");
+            if r.starts_with("HTTP/1.0 200") || std::time::Instant::now() >= deadline {
+                break r;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        };
+        assert!(
+            resp.starts_with("HTTP/1.0 200"),
+            "scrape /metrics should return HTTP 200; response:\n{resp}"
+        );
+        // The exposition version marker is part of the Content-Type
+        // header (Prometheus 0.0.4).
+        assert!(
+            resp.contains("version=0.0.4"),
+            "Content-Type should declare version=0.0.4; response:\n{resp}"
+        );
+        // Body must carry the identity gauge (with the configured
+        // local_as / router_id), the uptime gauge, and at least one
+        // session / RIB counter line.
+        let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(
+            body.contains("lr_info{version=\"test\",local_as=\"64512\",router_id=\"10.0.0.1\"} 1"),
+            "lr_info line missing or wrong; body:\n{body}"
+        );
+        assert!(
+            body.contains("# TYPE lr_uptime_seconds gauge"),
+            "uptime TYPE missing; body:\n{body}"
+        );
+        assert!(
+            body.contains("lr_sessions_total{kind=\"bgp\",state=\"Idle\"} 1"),
+            "Idle BGP session missing; body:\n{body}"
+        );
+        assert!(
+            body.contains("lr_rib_entries 1"),
+            "originated prefix missing from Loc-RIB counter; body:\n{body}"
+        );
+
+        // A second scrape returns the same shape (counters do not go
+        // backwards, headers do not churn).
+        let resp2 = http_get(&addr, "/metrics");
+        assert!(
+            resp2.starts_with("HTTP/1.0 200"),
+            "second scrape should also succeed"
+        );
+
+        // Cleanly shut the metrics thread down via the running flag
+        // so the test process can exit. `accept_loop` polls the flag
+        // at its 100 ms cadence, so a brief wait is enough.
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        while std::time::Instant::now() < deadline {
+            // Once the listener is gone, fresh connects fail — the
+            // thread has torn down. No need to assert on this; the
+            // next test line just needs the thread to be done.
+            if std::net::TcpStream::connect(&addr).is_err() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    }
+
+    /// `GET /` returns the pointer to `/metrics`, and any other path
+    /// (including non-GET methods) returns `404 Not Found`.
+    #[test]
+    fn spawn_serves_root_pointer_and_404() {
+        let port = free_port();
+        let addr = format!("127.0.0.1:{port}");
+
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let _ = spawn(&addr, test_ctx(router, Arc::clone(&running)))
+            .expect("metrics server spawns on every platform");
+
+        // Wait for the listener to come up.
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if http_get(&addr, "/").starts_with("HTTP/1.0 200")
+                || std::time::Instant::now() >= deadline
+            {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+
+        let root = http_get(&addr, "/");
+        assert!(
+            root.starts_with("HTTP/1.0 200"),
+            "root should be 200; response:\n{root}"
+        );
+        let body = root.split("\r\n\r\n").nth(1).unwrap_or("");
+        assert!(
+            body.contains("/metrics"),
+            "root body should point to /metrics; body:\n{body}"
+        );
+
+        let not_found = http_get(&addr, "/nonexistent");
+        assert!(
+            not_found.starts_with("HTTP/1.0 404"),
+            "unknown path should 404; response:\n{not_found}"
+        );
+
+        // A non-GET method also returns 404.
+        let mut conn = std::net::TcpStream::connect(&addr).expect("connect");
+        conn.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        conn.set_write_timeout(Some(Duration::from_secs(5)))
+            .unwrap();
+        use std::io::Write;
+        write!(conn, "POST /metrics HTTP/1.0\r\nHost: x\r\n\r\n").unwrap();
+        conn.flush().unwrap();
+        let mut buf = Vec::new();
+        use std::io::Read;
+        conn.read_to_end(&mut buf).unwrap();
+        let post_resp = String::from_utf8_lossy(&buf).into_owned();
+        assert!(
+            post_resp.starts_with("HTTP/1.0 404"),
+            "non-GET should 404; response:\n{post_resp}"
+        );
+
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// `spawn` returns a clear, descriptive error when the address
+    /// is already bound — no platform-specific "Unix domain socket"
+    /// wording (issue #47: the prior refusal mentioned Unix sockets
+    /// even though the implementation uses TCP).
+    #[test]
+    fn spawn_bind_failure_does_not_mention_unix_sockets() {
+        // Occupy a port with a listener the spawn call cannot reuse.
+        let squatter = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = squatter.local_addr().unwrap().to_string();
+
+        let router = Arc::new(RwLock::new(DefaultRouter::new()));
+        let running = Arc::new(AtomicBool::new(true));
+        let err = spawn(&addr, test_ctx(router, running))
+            .expect_err("bind should fail when the port is already in use");
+        assert!(
+            err.contains("bind"),
+            "error should mention the bind failure; got: {err}"
+        );
+        // The prior implementation returned "metrics endpoint requires
+        // Unix domain socket support (not supported here)" on non-Unix
+        // — that wording is gone, and a bind failure must not regress
+        // to it.
+        assert!(
+            !err.contains("Unix domain socket"),
+            "bind failure must not mention Unix domain sockets; got: {err}"
+        );
+        drop(squatter);
     }
 }
