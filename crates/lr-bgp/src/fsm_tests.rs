@@ -1,4 +1,3 @@
-
 use super::*;
 use crate::message::update::Nlri;
 use crate::path::AsPath;
