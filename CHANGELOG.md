@@ -50,7 +50,9 @@ console operators expect from BIRD/FRR:
 `show status` (BIRD shortcut). Both Unix and Windows
 `serve_connection` paths render identically.
 
-**ROA table listing** (`feat`, ROADMAP "lrctl roa list", [issue #52](https://github.com/TES286-org/librouting/issues/52) follow-up).
+**ROA table listing** (`feat`, ROADMAP "lrctl roa list",
+[issue #52](https://github.com/TES286-org/librouting/issues/52)
+follow-up).
 `lrctl roa list` and `lrctl roa count` dump the merged ROA table
 (static `[[roa]]` config layer + live RFC 8210 RTR cache, deduplicated)
 with per-entry provenance (`source static` / `source rtr` / `source both`).
@@ -59,7 +61,9 @@ expose per-entry layer membership; the renderer lives in
 `crates/lr-cli/src/roa_view.rs` and is shared by the Unix and Windows
 API paths.
 
-**Write-side fine-grained session operations** (`feat`, [issue #52](https://github.com/TES286-org/librouting/issues/52) follow-up).
+**Write-side fine-grained session operations** (`feat`,
+[issue #52](https://github.com/TES286-org/librouting/issues/52)
+follow-up).
 `lrctl session <handle> soft-in` (FRR `clear ip bgp * soft in`) and
 `lrctl session <handle> refresh-in [family]` (RFC 2918 route-refresh)
 expose the router core's `soft_reconfig_inbound(h)` and
