@@ -316,6 +316,25 @@ mod imp {
                 }
                 continue;
             }
+            // Issue #52 BIRD-style `show …` family. Delegated to the
+            // shared `show` module so the Unix and Windows surfaces
+            // render identically. `show` (no sub) maps to `show status`,
+            // matching BIRD's `show` shortcut.
+            if cmd == "show" || cmd.starts_with("show ") {
+                let cx = crate::show::ShowCtx {
+                    info: deps.info,
+                    router: deps.router,
+                    status_lines: deps.status_lines,
+                    started: deps.started,
+                };
+                if let Some(body) = crate::show::dispatch(cmd, &cx) {
+                    let _ = out.write_all(body.as_bytes());
+                    if out.flush().is_err() {
+                        return;
+                    }
+                    continue;
+                }
+            }
             match cmd {
                 "quit" => return,
                 "help" => {
@@ -326,6 +345,11 @@ mod imp {
                          sessions  one line per configured session\n  \
                          routes    Loc-RIB dump (one route per line)\n  \
                          mrt PATH  write the Loc-RIB as an MRT dump (RFC 6396)\n  \
+                         show status            extended summary (per-protocol counts, memory)\n  \
+                         show sessions [detail] per-session stats (transitions, uptime, last error)\n  \
+                         show session <handle>  deep dive for one session\n  \
+                         show routes count     Loc-RIB grouped by protocol\n  \
+                         show memory           process RSS and virtual size\n  \
                          reload    re-apply configuration (SIGHUP equivalent)\n  \
                          shutdown           graceful shutdown (immediate)\n  \
                          shutdown drain     issue #53 graceful drain (rate-limited)\n  \
@@ -642,11 +666,74 @@ mod imp {
             let routes = ask(&mut probe, "routes");
             assert!(routes.contains("203.0.113.0/24"), "routes: {routes}");
 
+            // Issue #52 BIRD-style `show` family — covered end-to-end
+            // over the same Unix socket the daemon ships in production.
+            let show_status = ask(&mut probe, "show status");
+            assert!(
+                show_status.contains("sessions 1 established 0"),
+                "show status: {show_status}"
+            );
+            assert!(show_status.contains("kind=bgp total=1 established=0"));
+            assert!(show_status.contains("memory rss-bytes="));
+
+            let show_sessions = ask(&mut probe, "show sessions");
+            assert!(
+                show_sessions.contains("kind=bgp"),
+                "show sessions: {show_sessions}"
+            );
+            assert!(show_sessions.contains("transitions="));
+            assert!(show_sessions.contains("uptime-ms="));
+            assert!(show_sessions.contains("last-error="));
+
+            let show_sessions_detail = ask(&mut probe, "show sessions detail");
+            assert!(
+                show_sessions_detail.contains("stats: established-at-ms="),
+                "show sessions detail: {show_sessions_detail}"
+            );
+
+            let show_session_handle = ask(&mut probe, "show session 1");
+            assert!(
+                show_session_handle.contains("handle 1"),
+                "show session 1: {show_session_handle}"
+            );
+            assert!(show_session_handle.contains("kind bgp"));
+            assert!(show_session_handle.contains("negotiated-hold-time"));
+
+            let show_session_unknown = ask(&mut probe, "show session 999");
+            assert!(
+                show_session_unknown.contains("error: no session with handle 999"),
+                "show session unknown: {show_session_unknown}"
+            );
+
+            let show_routes_count = ask(&mut probe, "show routes count");
+            assert!(
+                show_routes_count.contains("total 1"),
+                "show routes count: {show_routes_count}"
+            );
+            assert!(show_routes_count.contains("proto="));
+
+            let show_memory = ask(&mut probe, "show memory");
+            assert!(
+                show_memory.contains("uptime-secs "),
+                "show memory: {show_memory}"
+            );
+            assert!(show_memory.contains("rss-bytes "));
+            assert!(show_memory.contains("vsize-bytes "));
+
+            let show_unknown = ask(&mut probe, "show bogus");
+            assert!(
+                show_unknown.contains("error: unknown show sub-command 'bogus'"),
+                "show bogus: {show_unknown}"
+            );
+
             let unknown = ask(&mut probe, "bogus");
             assert!(unknown.contains("error: unknown command"));
 
             let help = ask(&mut probe, "help");
             assert!(help.contains("shutdown"));
+            assert!(help.contains("show status"));
+            assert!(help.contains("show session <handle>"));
+            assert!(help.contains("show routes count"));
 
             // Shutdown flips the daemon's running flag.
             let shutting = ask(&mut probe, "shutdown");

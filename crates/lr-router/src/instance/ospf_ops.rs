@@ -16,7 +16,7 @@ impl DefaultRouter {
             return;
         }
         for (handle, state) in self.sessions.iter_mut() {
-            let SessionState::Ospf { runtime, conn } = state else {
+            let SessionState::Ospf { runtime, conn, .. } = state else {
                 continue;
             };
             if runtime.area_id != area_id || exclude == Some(*handle) {

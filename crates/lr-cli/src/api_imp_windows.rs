@@ -469,6 +469,25 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             }
             continue;
         }
+        // Issue #52 BIRD-style `show …` family. Delegated to the
+        // shared `show` module so the Unix and Windows surfaces
+        // render identically. `show` (no sub) maps to `show status`,
+        // matching BIRD's `show` shortcut.
+        if cmd == "show" || cmd.starts_with("show ") {
+            let cx = crate::show::ShowCtx {
+                info: deps.info,
+                router: deps.router,
+                status_lines: deps.status_lines,
+                started: deps.started,
+            };
+            if let Some(body) = crate::show::dispatch(cmd, &cx) {
+                let _ = out.write_all(body.as_bytes());
+                if out.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
+        }
         match cmd {
             "quit" => return,
             "help" => {
@@ -479,6 +498,11 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                      sessions  one line per configured session\n  \
                      routes    Loc-RIB dump (one route per line)\n  \
                      mrt PATH  write the Loc-RIB as an MRT dump (RFC 6396)\n  \
+                     show status            extended summary (per-protocol counts, memory)\n  \
+                     show sessions [detail] per-session stats (transitions, uptime, last error)\n  \
+                     show session <handle>  deep dive for one session\n  \
+                     show routes count     Loc-RIB grouped by protocol\n  \
+                     show memory           process RSS and virtual size\n  \
                      reload    re-apply configuration (SIGHUP equivalent)\n  \
                      shutdown           graceful shutdown (immediate)\n  \
                      shutdown drain     issue #53 graceful drain (rate-limited)\n  \

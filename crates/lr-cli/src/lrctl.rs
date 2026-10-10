@@ -78,6 +78,7 @@ fn main() -> ExitCode {
             proxy(&socket, "sessions")
         }
         "routes" => routes(&socket, rest),
+        "show" => show(&socket, rest),
         "reload" => proxy(&socket, "reload"),
         "shutdown" => shutdown(&socket, rest),
         "filter" => filter(rest),
@@ -134,6 +135,11 @@ fn print_usage() {
     println!("    sessions [list]     One line per configured session");
     println!("    routes show [prefix]  Loc-RIB dump, optionally filtered by prefix");
     println!("    routes dump <path>  Write the Loc-RIB as an MRT dump (RFC 6396)");
+    println!("    show status         Extended summary (per-protocol session counts, memory)");
+    println!("    show sessions [detail]  Per-session stats (transitions, uptime, last error)");
+    println!("    show session <handle>  Deep dive for one session");
+    println!("    show routes count   Loc-RIB grouped by protocol");
+    println!("    show memory         Process RSS and virtual size");
     println!("    reload              Re-apply configuration (SIGHUP equivalent)");
     println!("    shutdown            Graceful shutdown (immediate)");
     println!("    shutdown drain      Issue #53: rate-limited drain (stop accepting");
@@ -236,6 +242,73 @@ fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
         other => {
             eprintln!("error: unknown shutdown subcommand '{other}'");
             eprintln!("usage: lrctl shutdown [drain | status | abort | now]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `lrctl show <subsystem>` — issue #52 BIRD-style operational
+/// visibility. Each sub-command is a thin proxy to the daemon's
+/// matching `show …` runtime API command, so the wire framing stays
+/// in one place (the daemon's `serve_connection`). The client only
+/// validates the argument shape so a typo is loud locally rather
+/// than round-tripped as `error: unknown show sub-command`.
+///
+/// `lrctl show` (no sub) maps to `show status`, mirroring BIRD's
+/// `show` shortcut.
+fn show(socket: &str, rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        return proxy(socket, "show status");
+    }
+    match rest[0].as_str() {
+        "status" => proxy(socket, "show status"),
+        "sessions" => {
+            // `show sessions detail` and `show sessions` map to
+            // distinct daemon commands (the daemon's renderer chooses
+            // the per-session block shape based on the trailing
+            // keyword). `list` is rejected to keep the surface
+            // unambiguous — `sessions list` belongs to the legacy
+            // `lrctl sessions` command.
+            if rest.len() == 1 {
+                proxy(socket, "show sessions")
+            } else if rest.len() == 2 && rest[1] == "detail" {
+                proxy(socket, "show sessions detail")
+            } else {
+                eprintln!("usage: lrctl show sessions [detail]");
+                ExitCode::from(2)
+            }
+        }
+        "session" => {
+            if rest.len() != 2 {
+                eprintln!("usage: lrctl show session <handle>");
+                return ExitCode::from(2);
+            }
+            // The daemon validates the handle and reports
+            // `error: no session with handle <N>` for unknown ones,
+            // so the client does not duplicate the lookup — it just
+            // forwards the (syntax-validated) numeric token.
+            match rest[1].parse::<u64>() {
+                Ok(h) => proxy(socket, &format!("show session {h}")),
+                Err(_) => {
+                    eprintln!("error: invalid session handle '{}'", rest[1]);
+                    eprintln!("usage: lrctl show session <handle>");
+                    ExitCode::from(2)
+                }
+            }
+        }
+        "routes" => {
+            if rest.len() != 2 || rest[1] != "count" {
+                eprintln!("usage: lrctl show routes count");
+                return ExitCode::from(2);
+            }
+            proxy(socket, "show routes count")
+        }
+        "memory" => proxy(socket, "show memory"),
+        other => {
+            eprintln!("error: unknown show subcommand '{other}'");
+            eprintln!(
+                "usage: lrctl show [status | sessions [detail] | session <handle> | routes count | memory]"
+            );
             ExitCode::from(2)
         }
     }

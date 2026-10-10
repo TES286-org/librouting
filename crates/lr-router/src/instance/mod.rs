@@ -37,7 +37,10 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::connection::{Connection, MemoryConn};
 use crate::event::{OspfGraceEvent, RouterEvent};
-use crate::session::{OspfAreaType, SessionConfig, SessionHandle, SessionKind, SessionSummary};
+use crate::session::{
+    OspfAreaType, SessionConfig, SessionErrorKind, SessionHandle, SessionKind, SessionStats,
+    SessionSummary,
+};
 
 use lr_core::addr::{Asn, IpAddr, Prefix};
 
@@ -310,14 +313,29 @@ enum SessionState {
         /// path gates on this instead of the live `established` flag
         /// (which the FSM clears the moment the session drops).
         was_established: bool,
+        /// Operational statistics (issue #52): uptime, state
+        /// transitions, last error kind + time. Owned here, alongside
+        /// the FSM, so the router can update them at the dispatch
+        /// sites that already detect transitions and errors.
+        stats: SessionStats,
     },
     Ospf {
         runtime: OspfRuntime,
         conn: MemoryConn,
+        /// Operational statistics (issue #52) — same shape as the BGP
+        /// variant. OSPF does not have a NOTIFICATION mechanism, so
+        /// `last_error` records the `Kill`/`SeqMismatch`/`BadLsa`
+        /// causes as `Other` for now; the field is here for parity so
+        /// `show session <handle>` renders the same shape across
+        /// protocols.
+        stats: SessionStats,
     },
     Babel {
         runtime: BabelRuntime,
         conn: MemoryConn,
+        /// Operational statistics (issue #52) — same shape as the BGP
+        /// variant.
+        stats: SessionStats,
     },
 }
 
@@ -1733,9 +1751,12 @@ impl DefaultRouter {
                     .count();
                 match state {
                     SessionState::Bgp {
-                        peer, established, ..
+                        peer,
+                        established,
+                        stats,
+                        ..
                     } => {
-                        let stats = peer.message_stats();
+                        let s = peer.message_stats();
                         SessionSummary {
                             handle: SessionHandle(*id),
                             kind: "bgp",
@@ -1746,11 +1767,12 @@ impl DefaultRouter {
                             peer_bgp_id: peer.peer_bgp_id(),
                             negotiated_hold_time: peer.negotiated_hold_time(),
                             adj_rib_in_len,
-                            updates_received: stats.update_received,
-                            updates_sent: stats.update_sent,
+                            updates_received: s.update_received,
+                            updates_sent: s.update_sent,
+                            stats: *stats,
                         }
                     }
-                    SessionState::Ospf { runtime, .. } => SessionSummary {
+                    SessionState::Ospf { runtime, stats, .. } => SessionSummary {
                         handle: SessionHandle(*id),
                         kind: "ospf",
                         local_as: Asn(0),
@@ -1762,8 +1784,13 @@ impl DefaultRouter {
                         adj_rib_in_len,
                         updates_received: 0,
                         updates_sent: 0,
+                        stats: *stats,
                     },
-                    SessionState::Babel { runtime, .. } => {
+                    SessionState::Babel {
+                        runtime,
+                        stats: session_stats,
+                        ..
+                    } => {
                         let heard = !runtime.neighbor.hello_history.is_empty();
                         SessionSummary {
                             handle: SessionHandle(*id),
@@ -1777,6 +1804,7 @@ impl DefaultRouter {
                             adj_rib_in_len,
                             updates_received: 0,
                             updates_sent: 0,
+                            stats: *session_stats,
                         }
                     }
                 }
@@ -2821,13 +2849,20 @@ impl DefaultRouter {
         let mut transition_up = false;
         let mut transition_down = false;
         if let Some(SessionState::Bgp {
-            peer, established, ..
+            peer,
+            established,
+            stats,
+            ..
         }) = self.sessions.get_mut(&session)
         {
             let now_est = peer.is_established();
             if now_est && !*established {
                 *established = true;
                 transition_up = true;
+                // Issue #52: latch the established timestamp and bump
+                // the monotonic transition counter. `now_ms` is the
+                // logical clock the embedder drives via `tick()`.
+                stats.record_transition(self.now_ms, true);
                 self.pending_events.push(RouterEvent::PeerStateChange {
                     session: SessionHandle(session),
                     state: "Established",
@@ -2835,6 +2870,7 @@ impl DefaultRouter {
             } else if !now_est && *established {
                 *established = false;
                 transition_down = true;
+                stats.record_transition(self.now_ms, false);
                 self.pending_events.push(RouterEvent::PeerStateChange {
                     session: SessionHandle(session),
                     state: "Idle",
@@ -2894,6 +2930,30 @@ impl DefaultRouter {
                     // transport. When the transport also closes later,
                     // the teardown re-runs idempotently (nothing left
                     // to purge).
+                    //
+                    // Issue #52: latch the close reason into the
+                    // session stats. `peer.received_notification()`
+                    // is the most precise signal here — it is set
+                    // before the FSM emits Close on a NOTIFICATION
+                    // and cleared on `reset()`, so it cleanly
+                    // distinguishes the NOTIFICATION path from the
+                    // hold-timer / transport-close / ManualStop paths.
+                    let cause = match self.sessions.get(&session) {
+                        Some(SessionState::Bgp { peer, .. }) if peer.notification_received() => {
+                            SessionErrorKind::NotificationReceived
+                        }
+                        // `administrative_close` is set by
+                        // `shutdown_session` before the FSM emits a
+                        // Close with a Cease NOTIFICATION — distinguish
+                        // it from a peer-initiated NOTIFICATION.
+                        _ if self.administrative_close.contains(&session) => {
+                            SessionErrorKind::Manual
+                        }
+                        _ => SessionErrorKind::Other,
+                    };
+                    if let Some(SessionState::Bgp { stats, .. }) = self.sessions.get_mut(&session) {
+                        stats.record_error(cause, self.now_ms);
+                    }
                     self.teardown_bgp_session(session);
                 }
                 BgpAction::None => {}
@@ -3597,6 +3657,7 @@ impl RouterInstance for DefaultRouter {
                         conn: MemoryConn::new(),
                         established: false,
                         was_established: false,
+                        stats: SessionStats::default(),
                     },
                 );
                 self.mrai.insert(
@@ -3671,6 +3732,7 @@ impl RouterInstance for DefaultRouter {
                     SessionState::Ospf {
                         runtime,
                         conn: MemoryConn::new(),
+                        stats: SessionStats::default(),
                     },
                 );
                 // Areas attached after a redistribution call catch up on
@@ -3696,6 +3758,7 @@ impl RouterInstance for DefaultRouter {
                     SessionState::Babel {
                         runtime,
                         conn: MemoryConn::new(),
+                        stats: SessionStats::default(),
                     },
                 );
             }
@@ -3854,6 +3917,7 @@ impl RouterInstance for DefaultRouter {
                     conn,
                     established,
                     was_established,
+                    ..
                 } => {
                     conn.push_input(bytes);
                     let input = conn.take_input();
@@ -3884,7 +3948,7 @@ impl RouterInstance for DefaultRouter {
                         post_state,
                     }
                 }
-                SessionState::Ospf { runtime, conn } => {
+                SessionState::Ospf { runtime, conn, .. } => {
                     conn.push_input(bytes);
                     let input = conn.take_input();
                     if input.is_empty() {
@@ -3918,7 +3982,7 @@ impl RouterInstance for DefaultRouter {
                     }
                     Pending::OspfLsas { lsas }
                 }
-                SessionState::Babel { runtime, conn } => {
+                SessionState::Babel { runtime, conn, .. } => {
                     conn.push_input(bytes);
                     let input = conn.take_input();
                     if input.is_empty() {
@@ -4141,7 +4205,7 @@ impl RouterInstance for DefaultRouter {
         // RxmtInterval): poll every session's driver and queue what it
         // wants repeated.
         for state in self.sessions.values_mut() {
-            let SessionState::Ospf { runtime, conn } = state else {
+            let SessionState::Ospf { runtime, conn, .. } = state else {
                 continue;
             };
             for p in runtime.exchange.poll(self.now_ms) {
@@ -5513,7 +5577,7 @@ impl DefaultRouter {
                 .sessions
                 .get_mut(&h.0)
                 .ok_or_else(|| format!("no session {}", h.0))?;
-            let SessionState::Ospf { runtime, conn } = state else {
+            let SessionState::Ospf { runtime, conn, .. } = state else {
                 return Err(format!("session {} is not an OSPF session", h.0));
             };
             if runtime.dr == dr && runtime.bdr == bdr {
@@ -5742,6 +5806,7 @@ impl DefaultRouter {
                         SessionState::Ospf {
                             runtime,
                             conn: MemoryConn::new(),
+                            stats: SessionStats::default(),
                         },
                     );
                     if let Some(v) = self.ospf_vlinks.get_mut(&key) {
