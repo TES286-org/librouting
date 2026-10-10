@@ -813,6 +813,7 @@ mod imp {
             assert!(show_sessions.contains("transitions="));
             assert!(show_sessions.contains("uptime-ms="));
             assert!(show_sessions.contains("last-error="));
+            assert!(show_sessions.contains("last-keepalive-rx-ms="));
 
             let show_sessions_detail = ask(&mut probe, "show sessions detail");
             assert!(

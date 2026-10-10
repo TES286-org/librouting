@@ -619,6 +619,10 @@ fn lrctl_show_sessions_extends_legacy_output() {
         stdout.contains("last-error="),
         "show sessions stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("last-keepalive-rx-ms="),
+        "show sessions stdout: {stdout}"
+    );
 
     // Detail block: multi-line, appended under the session line.
     let (ok, stdout, _stderr) = lrctl(&[
@@ -635,6 +639,10 @@ fn lrctl_show_sessions_extends_legacy_output() {
     );
     assert!(
         stdout.contains("last-error: kind="),
+        "show sessions detail stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("last-keepalive-rx-ms="),
         "show sessions detail stdout: {stdout}"
     );
 
@@ -671,6 +679,10 @@ fn lrctl_show_session_handle_renders_deep_dive() {
     );
     assert!(
         stdout.contains("stats: established-at-ms="),
+        "show session stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("last-keepalive-rx-ms="),
         "show session stdout: {stdout}"
     );
 

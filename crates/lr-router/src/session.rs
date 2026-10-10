@@ -577,6 +577,20 @@ pub struct SessionStats {
     /// Logical time of the most recent error. Zero when no error
     /// has been observed.
     pub last_error_at_ms: u64,
+    /// Logical time of the most recent KEEPALIVE received from the
+    /// peer (BGP only; zero for OSPF/Babel which do not use
+    /// KEEPALIVE). Updated by the router core's `feed_input_at`
+    /// path when the `PeerMessageStats::keepalive_received` counter
+    /// advances — the router observes the counter delta rather
+    /// than threading a timestamp through the FSM's `feed_bytes`,
+    /// so the FSM's public API stays unchanged.
+    ///
+    /// This is the "peer response speed" health metric issue #52
+    /// asks for: a recent `last_keepalive_received_ms` means the
+    /// peer is alive and responsive; a stale value (relative to
+    /// `now_ms` and the negotiated hold time) means the session is
+    /// heading for a hold-timer expiry.
+    pub last_keepalive_received_ms: u64,
 }
 
 /// Coarse classification of the most recent error that ended a
