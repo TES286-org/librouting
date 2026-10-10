@@ -100,6 +100,7 @@ daemon: runtime API on /run/lr-daemon.api
 | `show session <handle>` | Deep dive for one session |
 | `show routes count` | Loc-RIB grouped by protocol |
 | `show memory` | Process RSS and virtual size |
+| `show roa` | ROA table dump (BIRD `show roa` parity) |
 | `reload` | The reload lines above |
 | `shutdown` | `shutting down` |
 | `help` | The command list |
@@ -178,10 +179,25 @@ sends nothing is closed after roughly ten seconds of idleness.
 commands — `lrctl status`, `lrctl sessions`, `lrctl routes show
 [prefix]`, `lrctl routes dump <path>`, `lrctl show status`, `lrctl show
 sessions [detail]`, `lrctl show session <handle>`, `lrctl show routes
-count`, `lrctl show memory`, `lrctl reload`, `lrctl shutdown`
-— and adds the client-side `lrctl filter compile <body>`, which needs no
-daemon. `lrctl` exits 1 when the reply carries an `error:` line, so a
-script can branch on the daemon's own verdict.
+count`, `lrctl show memory`, `lrctl roa list`, `lrctl roa count`,
+`lrctl reload`, `lrctl shutdown` — and adds the client-side
+`lrctl filter compile <body>`, which needs no daemon. `lrctl` exits 1
+when the reply carries an `error:` line, so a script can branch on the
+daemon's own verdict.
+
+`lrctl roa list` dumps the merged ROA table (the static `[[roa]]` layer
+plus the live RTR cache, deduplicated) with one line per entry:
+
+```text
+roa-total 2 static 2 rtr 0
+198.51.100.0/24 max-length 26 as 64513 source static
+203.0.113.0/24 max-length 24 as 64512 source static
+```
+
+The summary line (`roa-total N static S rtr R`) is always present, even
+when the daemon has no ROA store (OSPF/Babel/BMP report
+`roa-total 0 static 0 rtr 0`). `lrctl roa count` prints just the
+summary line — convenient for scripted polling.
 
 ### Who can connect
 

@@ -103,14 +103,14 @@ and list references. Done when an editor shows the daemon's own diagnostic
 for a broken file before the daemon starts, and the grammar parses
 `templates/daemon.lr`.
 
-**`lrctl roa list`.** Deferred. The ROA store exists and the metrics
-endpoint reads it, but the runtime API context does not carry it
-(`crates/lr-cli/src/api.rs`, `spawn_api` in `crates/lr-cli/src/daemon.rs`),
-so the subcommand has nothing to list. The work is to thread the store
-reference into the API context, as the metrics context already does, and
-render the merged entries with their provenance. Done when the subcommand
-prints the static and RTR-sourced entries under a running daemon, covered by
-a test.
+**`lrctl roa list`.** Done. The runtime API exposes `show roa` over the
+Unix socket / Windows named pipe; `lrctl roa list` and `lrctl roa count`
+proxy it. The renderer lives in `crates/lr-cli/src/roa_view.rs` and
+walks the live `Arc<RoaStore>` snapshot (the same one the metrics
+endpoint already reads), reporting per-layer counts plus one line per
+entry. Per-entry provenance is coarse for now (`static` / `rtr` /
+`merged`) — the store does not yet expose per-layer membership, which
+is the natural next slice.
 
 ## Deployment
 

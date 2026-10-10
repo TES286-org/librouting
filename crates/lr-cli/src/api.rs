@@ -767,6 +767,7 @@ mod imp {
             assert!(help.contains("show status"));
             assert!(help.contains("show session <handle>"));
             assert!(help.contains("show routes count"));
+            assert!(help.contains("show roa"));
 
             // Shutdown flips the daemon's running flag.
             let shutting = ask(&mut probe, "shutdown");
@@ -780,6 +781,143 @@ mod imp {
                 "shutdown must stop the daemon"
             );
 
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// `show roa` against a daemon with no ROA store (the OSPF/
+        /// Babel/BMP case) reports the empty summary line and no
+        /// per-entry lines. Pins the wire shape across daemon modes.
+        #[test]
+        fn api_show_roa_with_no_store_reports_zero_summary() {
+            let dir = std::env::temp_dir().join(format!(
+                "lr-api-test-roa-none-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("daemon.api");
+            let path_str = path.to_str().unwrap().to_string();
+
+            let router = Arc::new(RwLock::new(DefaultRouter::new()));
+            let running = Arc::new(AtomicBool::new(true));
+            spawn(
+                &path_str,
+                test_ctx(Arc::clone(&router), Arc::clone(&running)),
+            )
+            .expect("api server spawns");
+
+            let mut conn = UnixStream::connect(&path_str).expect("connect");
+            let ask = |conn: &mut UnixStream, cmd: &str| -> String {
+                conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
+                conn.flush().unwrap();
+                use std::io::ErrorKind;
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut buf = Vec::new();
+                conn.set_nonblocking(true).unwrap();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    match conn.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                            if !buf.is_empty() || std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                conn.set_nonblocking(false).unwrap();
+                String::from_utf8_lossy(&buf).into_owned()
+            };
+
+            let body = ask(&mut conn, "show roa");
+            assert!(body.contains("roa-total 0 static 0 rtr 0"), "body: {body}");
+            // No per-entry lines.
+            assert!(!body.contains("max-length"), "body: {body}");
+
+            let _ = ask(&mut conn, "shutdown");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+
+        /// `show roa` against a daemon with a populated ROA store
+        /// reports the summary line plus one line per entry in the
+        /// store's canonical (sorted) order. Covers the static layer
+        /// (the common case — the test ctx seeds no RTR cache).
+        #[test]
+        fn api_show_roa_lists_static_entries() {
+            let dir = std::env::temp_dir().join(format!(
+                "lr-api-test-roa-static-{}-{}",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            std::fs::create_dir_all(&dir).unwrap();
+            let path = dir.join("daemon.api");
+            let path_str = path.to_str().unwrap().to_string();
+
+            let router = Arc::new(RwLock::new(DefaultRouter::new()));
+            let running = Arc::new(AtomicBool::new(true));
+            // Seed a ROA store with two entries (one IPv4 exact, one
+            // IPv4 with max_length). The store is the same shape the
+            // daemon builds from `[[roa]]` tables.
+            let mut b = lr_bgp::roa::RoaTableBuilder::new();
+            b.add("203.0.113.0/24", None, 64512).unwrap();
+            b.add("198.51.100.0/24", Some(26), 64513).unwrap();
+            let roa_store = Arc::new(lr_bgp::RoaStore::from_table(b.build()));
+
+            let mut ctx = test_ctx(Arc::clone(&router), Arc::clone(&running));
+            ctx.roa_store = Some(Arc::clone(&roa_store));
+            spawn(&path_str, ctx).expect("api server spawns");
+
+            let mut conn = UnixStream::connect(&path_str).expect("connect");
+            let ask = |conn: &mut UnixStream, cmd: &str| -> String {
+                conn.write_all(format!("{cmd}\n").as_bytes()).unwrap();
+                conn.flush().unwrap();
+                use std::io::ErrorKind;
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut buf = Vec::new();
+                conn.set_nonblocking(true).unwrap();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    match conn.read(&mut chunk) {
+                        Ok(0) => break,
+                        Ok(n) => buf.extend_from_slice(&chunk[..n]),
+                        Err(ref e) if e.kind() == ErrorKind::WouldBlock => {
+                            if !buf.is_empty() || std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            thread::sleep(Duration::from_millis(20));
+                        }
+                        Err(_) => break,
+                    }
+                }
+                conn.set_nonblocking(false).unwrap();
+                String::from_utf8_lossy(&buf).into_owned()
+            };
+
+            let body = ask(&mut conn, "show roa");
+            // Summary line: 2 entries, all static, no RTR.
+            assert!(body.contains("roa-total 2 static 2 rtr 0"), "body: {body}");
+            // Per-entry lines, sorted (198.x before 203.x).
+            let lines: Vec<&str> = body.lines().filter(|l| l.contains("max-length")).collect();
+            assert_eq!(lines.len(), 2, "body: {body}");
+            assert!(
+                lines[0].starts_with("198.51.100.0/24 max-length 26 as 64513 source static"),
+                "lines: {lines:?}"
+            );
+            assert!(
+                lines[1].starts_with("203.0.113.0/24 max-length 24 as 64512 source static"),
+                "lines: {lines:?}"
+            );
+
+            let _ = ask(&mut conn, "shutdown");
             let _ = std::fs::remove_dir_all(&dir);
         }
     }
