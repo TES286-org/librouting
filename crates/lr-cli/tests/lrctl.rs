@@ -42,9 +42,15 @@ impl Daemon {
         Self { child, log }
     }
 
-    /// Block until the daemon's log contains `needle` (5 s deadline).
+    /// Block until the daemon's log contains `needle`. The deadline
+    /// is generous (60 s) to tolerate tarpaulin's per-process
+    /// instrumentation overhead, which can slow daemon startup
+    /// well past the 15 s that was enough under plain `cargo test`.
+    /// A real failure still surfaces — the deadline is bounded, and
+    /// the panic message includes the full daemon log so the cause
+    /// (bind failure, parse error, etc.) is visible.
     fn wait_log(&self, needle: &str, what: &str) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             if let Ok(text) = std::fs::read_to_string(&self.log) {
                 if text.contains(needle) {
@@ -54,7 +60,7 @@ impl Daemon {
             thread::sleep(Duration::from_millis(100));
         }
         let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        panic!("daemon did not report '{what}' within 15 s; log:\n{text}");
+        panic!("daemon did not report '{what}' within 60 s; log:\n{text}");
     }
 
     /// Block until the process exits; return (exit_ok, log_text).
