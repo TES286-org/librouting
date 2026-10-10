@@ -335,9 +335,16 @@ The command surface is small: `status`, `sessions`, `routes`,
 mirrors the BIRD console: `show status` (extended summary with per-protocol
 session counts and memory), `show sessions [detail]` (per-session stats —
 transitions, uptime, last error), `show session <handle>` (deep dive for
-one session), `show routes count` (Loc-RIB grouped by protocol) and
-`show memory` (process RSS and virtual size). [RUNBOOK.md](RUNBOOK.md)
+one session), `show routes count` (Loc-RIB grouped by protocol),
+`show memory` (process RSS and virtual size) and `show roa` (ROA table
+dump, BIRD `show roa` parity). [RUNBOOK.md](RUNBOOK.md)
 documents each command's exact reply string.
+
+`show roa` dumps the merged ROA table (the static `[[roa]]` layer plus
+the live RTR cache, deduplicated) with one line per entry. The BGP
+daemon populates the store at startup from `[[roa]]` config tables and
+keeps it current via the RPKI-RTR client (RFC 8210); other daemon modes
+(OSPF/Babel/BMP/LDP) report `roa-total 0` since they have no ROA store.
 
 `--metrics-addr ADDR` starts the Prometheus endpoint, which has its own
 exposure story; see [RUNBOOK.md](RUNBOOK.md#prometheus-metrics-endpoint).

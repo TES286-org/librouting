@@ -892,6 +892,7 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                 running: Arc::new(std::sync::atomic::AtomicBool::new(true)),
                 status_lines: Arc::clone(&status_lines),
                 roa_len: None,
+                roa_store: None,
                 filter_metrics: Mutex::new(None),
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 shutdown,

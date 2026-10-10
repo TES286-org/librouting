@@ -453,6 +453,8 @@ fn lrctl_help_lists_subcommands() {
         "sessions",
         "routes show",
         "routes dump",
+        "roa list",
+        "roa count",
         "reload",
         "shutdown",
         "filter compile",
@@ -500,6 +502,7 @@ fn lrctl_version_prints_version() {
 }
 
 // ---------------------------------------------------------------------------
+
 // Issue #52 — BIRD-style `lrctl show …` family.
 //
 // One e2e test per subcommand. Each spawns a real `lr-daemon` on a
@@ -764,4 +767,172 @@ fn lrctl_show_unknown_subcommand_exits_nonzero() {
 
     lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
     let _ = d.wait_exit();
+}
+
+// `lrctl roa list` / `lrctl roa count` — ROADMAP "lrctl roa list", issue #52
+// follow-up. The e2e tests load a TOML config with two `[[roa]]` entries
+// so the daemon's ROA store is populated at startup, then exercise the
+// client sub-commands against the running daemon.
+// ---------------------------------------------------------------------------
+
+/// Build a minimal TOML config file with two `[[roa]]` entries: one
+/// IPv4 exact-match and one IPv4 with `max_length`. Returns the path
+/// the daemon can be pointed at with `--config`.
+fn write_roa_config(dir: &std::path::Path) -> std::path::PathBuf {
+    let cfg = dir.join("daemon.toml");
+    std::fs::write(
+        &cfg,
+        r#"# Minimal test config: two [[roa]] entries, no peers.
+# The daemon does not need a BGP listener to populate the ROA store —
+# `build_roa_table` runs unconditionally at startup (so the filter DSL's
+# `roa.state` accessor works even when `roa_validate = false`).
+[bgp]
+local_as = 64512
+peer_as  = 64513
+router_id = "10.0.0.1"
+
+[[roa]]
+prefix = "203.0.113.0/24"
+asn = 64512
+# max_length defaults to 24 (exact match).
+
+[[roa]]
+prefix = "198.51.100.0/24"
+asn = 64513
+max_length = 26
+"#,
+    )
+    .expect("write test config");
+    cfg
+}
+
+#[test]
+fn lrctl_roa_list_dumps_entries() {
+    // Use a short, unique-enough dir name: macOS caps a Unix domain
+    // socket path at SUN_LEN (104 bytes), and the OS temp dir on the
+    // macOS runner is itself ~50 chars, so a long suffix trips the
+    // limit (the existing tests above use the same `process::id()`
+    // only). Each test gets its own port so parallel runs do not
+    // collide on the listener socket.
+    let dir = std::env::temp_dir().join(format!("lrctl-test-roa-list-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg_path = write_roa_config(&dir);
+    let socket = dir.join("daemon.api");
+    let _ = std::fs::remove_file(&socket);
+    let d = Daemon::spawn(
+        &[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:18121",
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "roa-list",
+    );
+    d.wait_log("runtime API on", "api socket up");
+
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "roa", "list"]);
+    assert!(ok, "lrctl roa list failed: stderr={stderr}");
+    // Summary line: 2 entries, all static, no RTR.
+    assert!(
+        stdout.contains("roa-total 2 static 2 rtr 0"),
+        "roa list stdout: {stdout}"
+    );
+    // Per-entry lines, sorted (198.x before 203.x — the store's
+    // canonical order, not the config file's order).
+    let lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("max-length"))
+        .collect();
+    assert_eq!(lines.len(), 2, "roa list stdout: {stdout}");
+    assert!(
+        lines[0].starts_with("198.51.100.0/24 max-length 26 as 64513 source static"),
+        "roa list lines: {lines:?}"
+    );
+    assert!(
+        lines[1].starts_with("203.0.113.0/24 max-length 24 as 64512 source static"),
+        "roa list lines: {lines:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lrctl_roa_count_prints_summary_only() {
+    let dir = std::env::temp_dir().join(format!("lrctl-test-roa-count-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg_path = write_roa_config(&dir);
+    let socket = dir.join("daemon.api");
+    let _ = std::fs::remove_file(&socket);
+    let d = Daemon::spawn(
+        &[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:18122",
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "roa-count",
+    );
+    d.wait_log("runtime API on", "api socket up");
+
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "roa", "count"]);
+    assert!(ok, "lrctl roa count failed: stderr={stderr}");
+    // `roa count` strips per-entry lines: stdout is exactly the
+    // summary line.
+    let lines: Vec<&str> = stdout.lines().collect();
+    assert_eq!(lines.len(), 1, "roa count should print one line: {stdout}");
+    assert!(
+        lines[0].starts_with("roa-total 2 static 2 rtr 0"),
+        "roa count line: {lines:?}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn lrctl_roa_unknown_subcommand_exits_nonzero() {
+    let dir = std::env::temp_dir().join(format!("lrctl-test-roa-bogus-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let cfg_path = write_roa_config(&dir);
+    let socket = dir.join("daemon.api");
+    let _ = std::fs::remove_file(&socket);
+    let d = Daemon::spawn(
+        &[
+            "--config",
+            cfg_path.to_str().unwrap(),
+            "--listen",
+            "127.0.0.1:18123",
+            "--api-socket",
+            socket.to_str().unwrap(),
+        ],
+        "roa-bogus",
+    );
+    d.wait_log("runtime API on", "api socket up");
+
+    // `lrctl roa bogus` — client-side rejection, exit 2.
+    let (ok, _stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "roa", "bogus"]);
+    assert!(!ok, "lrctl roa bogus should exit non-zero");
+    assert!(
+        stderr.contains("error: unknown roa subcommand 'bogus'"),
+        "roa bogus stderr: {stderr}"
+    );
+
+    // `lrctl roa` (no sub) — same rejection.
+    let (ok, _stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "roa"]);
+    assert!(!ok, "lrctl roa (no sub) should exit non-zero");
+    assert!(
+        stderr.contains("usage: lrctl roa <list | count>"),
+        "roa (no sub) stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+    let _ = std::fs::remove_dir_all(&dir);
 }

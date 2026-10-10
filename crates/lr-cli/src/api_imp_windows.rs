@@ -228,6 +228,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
     let reload: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.reload);
     let status_lines: Arc<dyn Fn() -> Vec<String> + Send + Sync> = Arc::from(ctx.status_lines);
     let shutdown = ctx.shutdown;
+    let roa_store = ctx.roa_store;
     let started = std::time::Instant::now();
     let path_owned = pipe_name.clone();
 
@@ -262,6 +263,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                 let reload = Arc::clone(&reload);
                 let status_lines = Arc::clone(&status_lines);
                 let shutdown = shutdown.clone();
+                let roa_store = roa_store.clone();
                 let path_owned = path_owned.clone();
                 thread::Builder::new()
                     .name("lr-api-conn".into())
@@ -273,6 +275,7 @@ pub fn spawn(path: &str, ctx: ApiContext) -> Result<String, String> {
                             reload: &reload,
                             status_lines: &status_lines,
                             shutdown: shutdown.as_ref(),
+                            roa_store: roa_store.as_ref(),
                             started,
                             socket_path: Some(&path_owned),
                         };
@@ -368,6 +371,10 @@ struct ConnDeps<'a> {
     /// refuses `shutdown drain` with a clear "not configured"
     /// diagnostic instead of silently accepting.
     shutdown: Option<&'a Arc<crate::shutdown::ShutdownController>>,
+    /// Live ROA store for `show roa` (issue #52 follow-up). `None`
+    /// on daemon modes without a ROA store (OSPF/Babel/BMP) — the
+    /// renderer then reports `roa-total 0` instead of refusing.
+    roa_store: Option<&'a Arc<lr_bgp::RoaStore>>,
     started: std::time::Instant,
     /// `shutdown` does not need to remove a socket file on Windows
     /// (named pipes are kernel-namespace objects that vanish when
@@ -469,6 +476,21 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
             }
             continue;
         }
+        // `show roa` — the runtime API half of `lrctl roa list`
+        // (ROADMAP "lrctl roa list", issue #52 follow-up). Rendered
+        // by the shared `roa_view` module so the Unix and Windows
+        // paths stay byte-identical. Lives ahead of the `show …`
+        // family below so it wins for `show roa` specifically —
+        // the family's dispatcher does not (yet) recognise `roa`
+        // as a sub-command.
+        if cmd == "show roa" {
+            let body = crate::roa_view::render(deps.roa_store);
+            let _ = out.write_all(body.as_bytes());
+            if out.flush().is_err() {
+                return;
+            }
+            continue;
+        }
         // Issue #52 BIRD-style `show …` family. Delegated to the
         // shared `show` module so the Unix and Windows surfaces
         // render identically. `show` (no sub) maps to `show status`,
@@ -503,6 +525,7 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                      show session <handle>  deep dive for one session\n  \
                      show routes count     Loc-RIB grouped by protocol\n  \
                      show memory           process RSS and virtual size\n  \
+                     show roa  ROA table dump (BIRD `show roa` parity)\n  \
                      reload    re-apply configuration (SIGHUP equivalent)\n  \
                      shutdown           graceful shutdown (immediate)\n  \
                      shutdown drain     issue #53 graceful drain (rate-limited)\n  \

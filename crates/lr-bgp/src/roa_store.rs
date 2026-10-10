@@ -156,6 +156,33 @@ impl RoaStore {
         self.read().rtr_entries.len()
     }
 
+    /// Per-entry layer membership for one ROA entry. Used by the
+    /// `show roa` renderer (issue #52 follow-up) to report which layer
+    /// an entry came from — `static` (config `[[roa]]` table), `rtr`
+    /// (RFC 8210 cache), or `both` (present in both layers, deduplicated
+    /// into one in the merged snapshot).
+    ///
+    /// Performance: two `HashSet::contains` calls under a read lock.
+    /// The lock is held only for the duration of the lookups; the
+    /// `RoaEntry` is `Copy` so no allocation is needed.
+    pub fn provenance_of(&self, entry: &RoaEntry) -> RoaProvenance {
+        let inner = self.read();
+        let in_static = inner.static_entries.contains(entry);
+        let in_rtr = inner.rtr_entries.contains(entry);
+        match (in_static, in_rtr) {
+            (true, true) => RoaProvenance::Both,
+            (true, false) => RoaProvenance::Static,
+            (false, true) => RoaProvenance::Rtr,
+            // An entry not in either layer should not happen — the
+            // merged snapshot is the union of the two layers, so
+            // every entry in `snapshot.entries()` is in at least one.
+            // Report `Static` as a defensive fallback (the entry came
+            // from somewhere; the operator can investigate via the
+            // per-layer counts in the summary line).
+            (false, false) => RoaProvenance::Static,
+        }
+    }
+
     /// Read-lock helper with the same poison recovery as `load` —
     /// diagnostics counters share the reader path so they never
     /// contend with each other (the write path runs once per sync).
@@ -174,6 +201,40 @@ impl RoaStore {
         match self.inner.write() {
             Ok(g) => g,
             Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+}
+
+/// Per-entry ROA provenance — which layer an entry came from. Returned
+/// by [`RoaStore::provenance_of`]; rendered by the `show roa` runtime
+/// API command (issue #52 follow-up).
+///
+/// The variants are ordered by the priority the operator assigns when
+/// investigating an entry: `Static` first (the layer they can edit),
+/// `Rtr` second (the live cache), `Both` last (the dedup case where the
+/// entry is in both layers — the operator needs to know the static
+/// layer "wins" conceptually because it survives an RTR cache reset).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum RoaProvenance {
+    /// The entry is in the static `[[roa]]` config layer only.
+    Static,
+    /// The entry is in the RTR cache layer only (RFC 8210).
+    Rtr,
+    /// The entry is in both layers — deduplicated into one in the
+    /// merged snapshot. The static layer survives an RTR cache reset,
+    /// so it is the "primary" source for operator purposes.
+    Both,
+}
+
+impl RoaProvenance {
+    /// Stable wire name for the `show roa` output. The string is part
+    /// of the operator-visible protocol — do not rename it without
+    /// bumping the major version.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Static => "static",
+            Self::Rtr => "rtr",
+            Self::Both => "both",
         }
     }
 }
@@ -395,5 +456,39 @@ mod tests {
             r.join().expect("reader thread");
         }
         assert!(store.is_empty());
+    }
+
+    #[test]
+    fn provenance_of_reports_per_entry_layer() {
+        // Static-only entry.
+        let store = RoaStore::new();
+        let s = entry(p4([203, 0, 113, 0], 24), 24, 64512);
+        store.replace_static([s]);
+        assert_eq!(store.provenance_of(&s), RoaProvenance::Static);
+
+        // RTR-only entry.
+        let store = RoaStore::new();
+        let r = entry(p4([198, 51, 100, 0], 24), 24, 64513);
+        store.apply_rtr_deltas(&[delta(true, r)]);
+        assert_eq!(store.provenance_of(&r), RoaProvenance::Rtr);
+
+        // Both layers — dedup case.
+        let store = RoaStore::new();
+        let b = entry(p4([203, 0, 113, 0], 24), 24, 64512);
+        store.replace_static([b]);
+        store.apply_rtr_deltas(&[delta(true, b)]);
+        assert_eq!(store.provenance_of(&b), RoaProvenance::Both);
+
+        // Entry not in either layer — defensive fallback to Static.
+        let store = RoaStore::new();
+        let orphan = entry(p4([192, 0, 2, 0], 24), 24, 64514);
+        assert_eq!(store.provenance_of(&orphan), RoaProvenance::Static);
+    }
+
+    #[test]
+    fn provenance_as_str_is_stable() {
+        assert_eq!(RoaProvenance::Static.as_str(), "static");
+        assert_eq!(RoaProvenance::Rtr.as_str(), "rtr");
+        assert_eq!(RoaProvenance::Both.as_str(), "both");
     }
 }

@@ -764,6 +764,7 @@ pub(super) fn run_ospf_daemon(
                 running: Arc::new(AtomicBool::new(true)),
                 status_lines: Arc::clone(&status_lines),
                 roa_len: None,
+                roa_store: None,
                 filter_metrics: Mutex::new(None),
                 session_labels: Arc::new(Mutex::new(HashMap::new())),
                 shutdown,

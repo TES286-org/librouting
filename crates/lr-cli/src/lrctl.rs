@@ -78,6 +78,7 @@ fn main() -> ExitCode {
             proxy(&socket, "sessions")
         }
         "routes" => routes(&socket, rest),
+        "roa" => roa(&socket, rest),
         "show" => show(&socket, rest),
         "reload" => proxy(&socket, "reload"),
         "shutdown" => shutdown(&socket, rest),
@@ -140,6 +141,8 @@ fn print_usage() {
     println!("    show session <handle>  Deep dive for one session");
     println!("    show routes count   Loc-RIB grouped by protocol");
     println!("    show memory         Process RSS and virtual size");
+    println!("    roa list            ROA table dump (BIRD `show roa` parity)");
+    println!("    roa count          ROA table summary line only");
     println!("    reload              Re-apply configuration (SIGHUP equivalent)");
     println!("    shutdown            Graceful shutdown (immediate)");
     println!("    shutdown drain      Issue #53: rate-limited drain (stop accepting");
@@ -217,6 +220,43 @@ fn routes(socket: &str, rest: &[String]) -> ExitCode {
         }
         other => {
             eprintln!("error: unknown routes subcommand '{other}'");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `lrctl roa <list|count>` — ROADMAP "lrctl roa list", issue #52
+/// follow-up. Both sub-commands are thin proxies to the daemon's
+/// `show roa` runtime API command. The client only validates the
+/// argument shape so a typo is loud locally rather than round-tripped.
+///
+/// `roa list` proxies the full `show roa` output (summary line + one
+/// line per entry, BIRD `show roa` parity). `roa count` extracts just
+/// the summary line — `roa-total N static S rtr R` — so a script can
+/// poll the table size without parsing the entry list.
+fn roa(socket: &str, rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!("usage: lrctl roa <list | count>");
+        return ExitCode::from(2);
+    }
+    match rest[0].as_str() {
+        "list" => proxy(socket, "show roa"),
+        "count" => {
+            // The daemon's `show roa` reply starts with the summary
+            // line; `roa count` strips the per-entry lines so a
+            // script gets just `roa-total N static S rtr R`.
+            match proxy_raw(socket, "show roa") {
+                Ok(body) => {
+                    let summary = body.lines().next().unwrap_or("");
+                    println!("{summary}");
+                    ExitCode::SUCCESS
+                }
+                Err(code) => code,
+            }
+        }
+        other => {
+            eprintln!("error: unknown roa subcommand '{other}'");
+            eprintln!("usage: lrctl roa <list | count>");
             ExitCode::from(2)
         }
     }
