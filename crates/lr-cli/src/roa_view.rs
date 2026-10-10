@@ -16,12 +16,14 @@
 //! mode. Per-entry lines follow, sorted by `(prefix, max_length, asn)`
 //! (the canonical order the store already enforces).
 //!
-//! Provenance is rendered as `source static` (config `[[roa]]` table)
-//! or `source rtr` (RFC 8210 cache). An entry present in both layers
-//! is rendered once with the static provenance — the layer the operator
-//! can edit, matching BIRD's `static` priority for ROAs configured
-//! locally. The merged snapshot already deduplicates; this renderer
-//! walks the two layer sets to recover the per-entry provenance.
+//! Provenance is rendered per-entry via [`lr_bgp::RoaStore::provenance_of`]:
+//! `source static` (config `[[roa]]` table only), `source rtr`
+//! (RFC 8210 cache only), or `source both` (present in both layers —
+//! the dedup case; the static layer survives an RTR cache reset, so
+//! it is the "primary" source for operator purposes). An entry not
+//! in either layer should not happen (the merged snapshot is the
+//! union of the two); the renderer reports `static` as a defensive
+//! fallback in that impossible case.
 //!
 //! # Performance
 //!
@@ -69,45 +71,17 @@ fn render_summary(total: usize, static_count: usize, rtr_count: usize) -> String
 }
 
 /// Walk the merged snapshot and emit one line per entry. Provenance
-/// is recovered by looking the entry up in each layer set; the static
-/// layer wins when the entry is present in both, matching BIRD's
-/// priority for locally configured ROAs.
+/// is recovered per-entry via [`RoaStore::provenance_of`], so each
+/// line reports the exact layer membership (`static`, `rtr`, or
+/// `both`) rather than a coarse table-wide value.
 fn render_entries(out: &mut String, snapshot: &Arc<RoaTable>, store: &RoaStore) {
-    let provenance = layer_provenance(store);
     for entry in snapshot.entries() {
+        let source = store.provenance_of(entry).as_str();
         let _ = writeln!(
             out,
             "{} max-length {} as {} source {}",
-            entry.prefix, entry.max_length, entry.asn.0, provenance
+            entry.prefix, entry.max_length, entry.asn.0, source
         );
-    }
-}
-
-/// Coarse per-entry provenance. `RoaStore` does not yet expose
-/// per-layer membership (the public API carries only the layer
-/// counts), so this renderer reports a single value for the whole
-/// table:
-///
-/// - `"static"` when the RTR layer is empty (every entry came from
-///   the config — the common OSPF/Babel/BMP case is `None` anyway).
-/// - `"rtr"` when the static layer is empty (every entry came from
-///   the RFC 8210 cache).
-/// - `"merged"` when both layers are non-empty (the entry could be
-///   in either or both — the operator needs the per-layer membership
-///   to disambiguate, which is a separate, larger slice tracked as a
-///   follow-up).
-///
-/// The per-entry provenance is the limitation called out in the
-/// module docs. The summary line still reports the accurate
-/// `static N rtr M` counts so the operator can see the layer
-/// composition.
-fn layer_provenance(store: &RoaStore) -> &'static str {
-    if store.rtr_len() == 0 {
-        "static"
-    } else if store.static_len() == 0 {
-        "rtr"
-    } else {
-        "merged"
     }
 }
 
@@ -191,9 +165,11 @@ mod tests {
         let body = render(Some(&store));
         // Same entry in both layers: total is 1 (dedup), static 1, rtr 1.
         assert!(body.contains("roa-total 1 static 1 rtr 1"), "body: {body}");
-        // The entry is rendered once. Both layers non-empty → "merged".
+        // The entry is rendered once. Per-entry provenance reports
+        // "both" because the entry is in the static layer and the
+        // RTR layer.
         assert!(
-            body.contains("203.0.113.0/24 max-length 24 as 64512 source merged"),
+            body.contains("203.0.113.0/24 max-length 24 as 64512 source both"),
             "body: {body}"
         );
         // Exactly one entry line.

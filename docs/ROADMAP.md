@@ -108,9 +108,8 @@ Unix socket / Windows named pipe; `lrctl roa list` and `lrctl roa count`
 proxy it. The renderer lives in `crates/lr-cli/src/roa_view.rs` and
 walks the live `Arc<RoaStore>` snapshot (the same one the metrics
 endpoint already reads), reporting per-layer counts plus one line per
-entry. Per-entry provenance is coarse for now (`static` / `rtr` /
-`merged`) — the store does not yet expose per-layer membership, which
-is the natural next slice.
+entry. Per-entry provenance is exact (`static` / `rtr` / `both`) via
+`RoaStore::provenance_of`, which queries each layer's `HashSet`.
 
 ## Deployment
 
