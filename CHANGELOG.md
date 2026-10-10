@@ -13,9 +13,60 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased]
+## [1.2.0] — minor: operational visibility, ROA listing, session operations
+
+librouting 1.2.0 is a minor release: new public Rust API surface and
+new runtime API / `lrctl` commands for operational visibility (issue
+#52), ROA table listing (ROADMAP "lrctl roa list"), and fine-grained
+session operations (issue #52 follow-up). The C ABI surface is
+unchanged — the new types and methods are Rust-only; the `--api-socket`
+line protocol additions are additive (new commands, no changes to
+existing ones).
 
 ### Added
+
+**BIRD-style operational visibility** (`feat`, [issue #52](https://github.com/TES286-org/librouting/issues/52)).
+A new `SessionStats` struct carried on every `SessionState` variant
+(BGP / OSPF / Babel), surfaced through `SessionSummary.stats`:
+`established_at_ms`, `last_transition_at_ms`, `state_transitions`
+(monotonic), `last_error` kind + timestamp, and
+`last_keepalive_received_ms` (the "peer response speed" health metric).
+A new `SessionErrorKind` enum (`None` / `NotificationReceived` /
+`TransportClosed` / `HoldTimerExpired` / `ParseError` / `Manual` /
+`Other`) classifies the most recent close cause.
+
+The runtime API gains a BIRD-style `show …` family that mirrors the
+console operators expect from BIRD/FRR:
+
+  show status               extended summary (per-protocol session
+                            counts, memory RSS/vsize)
+  show sessions [detail]    per-session stats (transitions=, uptime-ms=,
+                            last-error=, last-keepalive-rx-ms=, ...)
+  show session <handle>     deep dive for one session
+  show routes count         Loc-RIB grouped by protocol
+  show memory               process RSS and virtual size
+
+`lrctl` proxies each sub-command; `lrctl show` (no sub) maps to
+`show status` (BIRD shortcut). Both Unix and Windows
+`serve_connection` paths render identically.
+
+**ROA table listing** (`feat`, ROADMAP "lrctl roa list", [issue #52](https://github.com/TES286-org/librouting/issues/52) follow-up).
+`lrctl roa list` and `lrctl roa count` dump the merged ROA table
+(static `[[roa]]` config layer + live RFC 8210 RTR cache, deduplicated)
+with per-entry provenance (`source static` / `source rtr` / `source both`).
+A new `RoaProvenance` enum and `RoaStore::provenance_of(&entry)` method
+expose per-entry layer membership; the renderer lives in
+`crates/lr-cli/src/roa_view.rs` and is shared by the Unix and Windows
+API paths.
+
+**Write-side fine-grained session operations** (`feat`, [issue #52](https://github.com/TES286-org/librouting/issues/52) follow-up).
+`lrctl session <handle> soft-in` (FRR `clear ip bgp * soft in`) and
+`lrctl session <handle> refresh-in [family]` (RFC 2918 route-refresh)
+expose the router core's `soft_reconfig_inbound(h)` and
+`request_route_refresh(h, family)` through the runtime API. Recognised
+family names: `ipv4-unicast`, `ipv6-unicast`, `ipv4-multicast`,
+`ipv4-mpls-vpn`, `ipv6-mpls-vpn`, `ipv4-labeled-unicast`,
+`ipv6-labeled-unicast`.
 
 **Daemon-wide graceful drain shutdown** (`feat`, [issue #53](https://github.com/TES286-org/librouting/issues/53)).
 A new shutdown mode that minimises the network-wide update rate
@@ -61,6 +112,18 @@ the drain governs the whole daemon's exit posture. Five e2e tests in
 running → draining → drained transition through the real
 `lr-daemon` binary, the immediate-mode refusal, the abort path,
 and the standalone LDP engine's drain mode.
+
+### Fixed
+
+- **Cross-platform drain fix** (`fix`, [issue #53](https://github.com/TES286-org/librouting/issues/53)):
+  Windows `Option<Arc>` clone, macOS `lo0` loopback interface name,
+  Windows named-pipe `ERROR_NO_DATA` treated as EOF, drain-worker
+  race closed by flipping `running=false` before `state=Drained`.
+- **macOS/Windows dead-code fix** (`fix`, [issue #52](https://github.com/TES286-org/librouting/issues/52)):
+  `parse_kb` gated on `target_os="linux"` to clear `dead_code` lint
+  on macOS and Windows under `RUSTFLAGS=-D warnings`.
+- **macOS socket path length** (`fix`): shortened `show roa` test
+  temp dirs to fit macOS `SUN_LEN` (104 bytes).
 
 ## [1.1.1] — patch: metrics portability fix and source-file modularisation
 

@@ -6,28 +6,25 @@ overridden via the `LIBROUTING_LIB` environment variable; otherwise we look
 in the workspace's `target/release` directory.
 """
 
-from .router import (
-    METRIC_ADD,
-    METRIC_FIXED,
-    METRIC_INHERIT,
-    PROTO_BABEL,
-    PROTO_BGP,
-    PROTO_CONNECTED,
-    PROTO_OSPF,
-    PROTO_OSPF3,
-    PROTO_STATIC,
-    Damping,
-    LrError,
-    Router,
-    abi_version,
-    last_error,
-    mpls_platform_labels,
+from .codec import (
+    decode_babel,
+    decode_bgp,
+    decode_ospf_v2,
+    decode_srv6_srh,
+    encode_keepalive,
+    encode_notification,
+    encode_open,
+    encode_srv6_srh,
+    encode_update_announce_v4,
+    encode_update_withdraw_v4,
 )
-from .roa import ROA_INVALID, ROA_NOT_FOUND, ROA_VALID, RoaStore
 from .policy import (
     EVAL_DENY,
     EVAL_FALLTHROUGH,
     EVAL_PERMIT,
+    FILTER_ACCEPT,
+    FILTER_FALLTHROUGH,
+    FILTER_REJECT,
     MATCH_AS_PATH_IN,
     MATCH_COMMUNITY_IN,
     MATCH_NEXT_HOP_IN,
@@ -45,31 +42,32 @@ from .policy import (
     VERDICT_PERMIT,
     AsPathFilter,
     CommunityEntry,
+    CompiledFilter,
     Match,
     PrefixList,
     Resolver,
     Route,
     RouteMap,
     Set,
-)
-from .policy import (
-    FILTER_ACCEPT,
-    FILTER_FALLTHROUGH,
-    FILTER_REJECT,
-    CompiledFilter,
     compile_filter,
 )
-from .codec import (
-    encode_keepalive,
-    encode_open,
-    encode_notification,
-    encode_update_withdraw_v4,
-    encode_update_announce_v4,
-    decode_bgp,
-    decode_ospf_v2,
-    decode_babel,
-    encode_srv6_srh,
-    decode_srv6_srh,
+from .roa import ROA_INVALID, ROA_NOT_FOUND, ROA_VALID, RoaStore
+from .router import (
+    METRIC_ADD,
+    METRIC_FIXED,
+    METRIC_INHERIT,
+    PROTO_BABEL,
+    PROTO_BGP,
+    PROTO_CONNECTED,
+    PROTO_OSPF,
+    PROTO_OSPF3,
+    PROTO_STATIC,
+    Damping,
+    LrError,
+    Router,
+    abi_version,
+    last_error,
+    mpls_platform_labels,
 )
 
 __all__ = [
@@ -140,4 +138,4 @@ __all__ = [
 # The single source of truth for the package version: pyproject.toml reads
 # this value (`dynamic = ["version"]`). Keep it equal to the workspace
 # version in Cargo.toml; tests/test_librouting.py fails if they diverge.
-__version__ = "1.1.1"
+__version__ = "1.2.0"
