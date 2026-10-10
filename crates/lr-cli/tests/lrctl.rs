@@ -808,14 +808,13 @@ max_length = 26
 
 #[test]
 fn lrctl_roa_list_dumps_entries() {
-    let dir = std::env::temp_dir().join(format!(
-        "lrctl-test-roa-list-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    // Use a short, unique-enough dir name: macOS caps a Unix domain
+    // socket path at SUN_LEN (104 bytes), and the OS temp dir on the
+    // macOS runner is itself ~50 chars, so a long suffix trips the
+    // limit (the existing tests above use the same `process::id()`
+    // only). Each test gets its own port so parallel runs do not
+    // collide on the listener socket.
+    let dir = std::env::temp_dir().join(format!("lrctl-test-roa-list-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg_path = write_roa_config(&dir);
     let socket = dir.join("daemon.api");
@@ -863,14 +862,7 @@ fn lrctl_roa_list_dumps_entries() {
 
 #[test]
 fn lrctl_roa_count_prints_summary_only() {
-    let dir = std::env::temp_dir().join(format!(
-        "lrctl-test-roa-count-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = std::env::temp_dir().join(format!("lrctl-test-roa-count-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg_path = write_roa_config(&dir);
     let socket = dir.join("daemon.api");
@@ -906,14 +898,7 @@ fn lrctl_roa_count_prints_summary_only() {
 
 #[test]
 fn lrctl_roa_unknown_subcommand_exits_nonzero() {
-    let dir = std::env::temp_dir().join(format!(
-        "lrctl-test-roa-bogus-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ));
+    let dir = std::env::temp_dir().join(format!("lrctl-test-roa-bogus-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     let cfg_path = write_roa_config(&dir);
     let socket = dir.join("daemon.api");

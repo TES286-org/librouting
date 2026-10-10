@@ -789,14 +789,8 @@ mod imp {
         /// per-entry lines. Pins the wire shape across daemon modes.
         #[test]
         fn api_show_roa_with_no_store_reports_zero_summary() {
-            let dir = std::env::temp_dir().join(format!(
-                "lr-api-test-roa-none-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("lr-api-test-roa-none-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("daemon.api");
             let path_str = path.to_str().unwrap().to_string();
@@ -850,14 +844,8 @@ mod imp {
         /// (the common case — the test ctx seeds no RTR cache).
         #[test]
         fn api_show_roa_lists_static_entries() {
-            let dir = std::env::temp_dir().join(format!(
-                "lr-api-test-roa-static-{}-{}",
-                std::process::id(),
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .unwrap()
-                    .as_nanos()
-            ));
+            let dir =
+                std::env::temp_dir().join(format!("lr-api-test-roa-static-{}", std::process::id()));
             std::fs::create_dir_all(&dir).unwrap();
             let path = dir.join("daemon.api");
             let path_str = path.to_str().unwrap().to_string();
