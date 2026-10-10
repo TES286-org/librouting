@@ -79,6 +79,7 @@ fn main() -> ExitCode {
         }
         "routes" => routes(&socket, rest),
         "roa" => roa(&socket, rest),
+        "session" => session(&socket, rest),
         "show" => show(&socket, rest),
         "reload" => proxy(&socket, "reload"),
         "shutdown" => shutdown(&socket, rest),
@@ -143,6 +144,10 @@ fn print_usage() {
     println!("    show memory         Process RSS and virtual size");
     println!("    roa list            ROA table dump (BIRD `show roa` parity)");
     println!("    roa count          ROA table summary line only");
+    println!(
+        "    session <handle> soft-in     Re-evaluate import policy (FRR `clear ip bgp * soft in`)"
+    );
+    println!("    session <handle> refresh-in [family]  RFC 2918 route-refresh request");
     println!("    reload              Re-apply configuration (SIGHUP equivalent)");
     println!("    shutdown            Graceful shutdown (immediate)");
     println!("    shutdown drain      Issue #53: rate-limited drain (stop accepting");
@@ -349,6 +354,69 @@ fn show(socket: &str, rest: &[String]) -> ExitCode {
             eprintln!(
                 "usage: lrctl show [status | sessions [detail] | session <handle> | routes count | memory]"
             );
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `lrctl session <handle> <op> [args]` — write-side fine-grained
+/// operations on one session (issue #52 follow-up: "the lrctl
+/// controller must support fine-grained operations on the running
+/// daemon"). Both sub-commands are thin proxies to the daemon's
+/// `session <handle> <op>` runtime API command; the client validates
+/// the argument shape locally so a typo is loud rather than
+/// round-tripped.
+///
+/// - `session <handle> soft-in` — re-evaluate the import policy
+///   against the pre-policy Adj-RIB-In (FRR `clear ip bgp * soft in`).
+/// - `session <handle> refresh-in [family]` — send an RFC 2918
+///   ROUTE-REFRESH request to the peer for the given family
+///   (default `ipv4-unicast`).
+fn session(socket: &str, rest: &[String]) -> ExitCode {
+    if rest.is_empty() {
+        eprintln!("usage: lrctl session <handle> <soft-in | refresh-in [family]>");
+        return ExitCode::from(2);
+    }
+    // `rest[0]` is the handle; `rest[1]` is the op; `rest[2..]` is
+    // op-specific. Validate the handle is numeric so the daemon
+    // does not bounce it back with the same error.
+    let handle_str = &rest[0];
+    if handle_str.parse::<u64>().is_err() {
+        eprintln!("error: invalid session handle '{handle_str}'");
+        eprintln!("usage: lrctl session <handle> <soft-in | refresh-in [family]>");
+        return ExitCode::from(2);
+    }
+    if rest.len() < 2 {
+        eprintln!(
+            "error: session {handle_str} requires an op (try 'soft-in' or 'refresh-in [family]')"
+        );
+        return ExitCode::from(2);
+    }
+    let op = rest[1].as_str();
+    match op {
+        "soft-in" => {
+            // No extra args expected.
+            if rest.len() != 2 {
+                eprintln!("usage: lrctl session {handle_str} soft-in");
+                return ExitCode::from(2);
+            }
+            proxy(socket, &format!("session {handle_str} soft-in"))
+        }
+        "refresh-in" => {
+            // Optional family argument (default ipv4-unicast).
+            let family = if rest.len() == 2 {
+                "ipv4-unicast"
+            } else if rest.len() == 3 {
+                rest[2].as_str()
+            } else {
+                eprintln!("usage: lrctl session {handle_str} refresh-in [family]");
+                return ExitCode::from(2);
+            };
+            proxy(socket, &format!("session {handle_str} refresh-in {family}"))
+        }
+        other => {
+            eprintln!("error: unknown session op '{other}'");
+            eprintln!("usage: lrctl session <handle> <soft-in | refresh-in [family]>");
             ExitCode::from(2)
         }
     }

@@ -510,6 +510,18 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                 continue;
             }
         }
+        // `session <handle> <op>` — write-side fine-grained
+        // operations on one session (issue #52 follow-up). Mirrors
+        // the Unix `handle_session_op` verbatim so the two
+        // transports stay byte-identical.
+        if let Some(rest) = cmd.strip_prefix("session ") {
+            let reply = handle_session_op(rest, deps);
+            let _ = out.write_all(reply.as_bytes());
+            if out.flush().is_err() {
+                return;
+            }
+            continue;
+        }
         match cmd {
             "quit" => return,
             "help" => {
@@ -526,6 +538,8 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
                      show routes count     Loc-RIB grouped by protocol\n  \
                      show memory           process RSS and virtual size\n  \
                      show roa  ROA table dump (BIRD `show roa` parity)\n  \
+                     session <handle> soft-in     re-evaluate import policy (FRR `clear ip bgp * soft in`)\n  \
+                     session <handle> refresh-in [family]  RFC 2918 route-refresh request\n  \
                      reload    re-apply configuration (SIGHUP equivalent)\n  \
                      shutdown           graceful shutdown (immediate)\n  \
                      shutdown drain     issue #53 graceful drain (rate-limited)\n  \
@@ -707,5 +721,80 @@ fn serve_connection(stream: NamedPipeStream, deps: &ConnDeps<'_>) {
         if out.flush().is_err() {
             return;
         }
+    }
+}
+
+/// Dispatch `session <handle> <op>` — write-side fine-grained
+/// operations on one session (issue #52 follow-up). Mirrors the Unix
+/// `handle_session_op` verbatim so the two transports stay
+/// byte-identical.
+///
+/// Supported ops:
+/// - `soft-in` — re-evaluate the import policy against the
+///   pre-policy Adj-RIB-In for this session (FRR `clear ip bgp *
+///   soft in`). Requires `soft_reconfig_inbound` to have been
+///   enabled on the session before it started.
+/// - `refresh-in [family]` — send an RFC 2918 ROUTE-REFRESH
+///   request to the peer for the given family (default
+///   `ipv4-unicast`). Requires the session to be established and
+///   the route-refresh capability to have been negotiated.
+///
+/// Returns the reply string (already newline-terminated). The
+/// caller writes it verbatim and flushes.
+fn handle_session_op(rest: &str, deps: &ConnDeps<'_>) -> String {
+    // Parse `<handle> <op> [args...]`. The handle is a u64; the
+    // op is the next token; the rest is op-specific.
+    let mut tokens = rest.split_whitespace();
+    let Some(handle_str) = tokens.next() else {
+        return "error: session requires <handle> <op>\n".to_string();
+    };
+    let Ok(handle) = handle_str.parse::<u64>() else {
+        return format!("error: invalid session handle '{handle_str}'\n");
+    };
+    let Some(op) = tokens.next() else {
+        return format!(
+            "error: session {handle} requires an op (try 'soft-in' or 'refresh-in [family]')\n"
+        );
+    };
+    match op {
+        "soft-in" => {
+            // FRR `clear ip bgp * soft in`: re-evaluate the
+            // import policy against the pre-policy Adj-RIB-In.
+            // The router core returns Ok(count) on success,
+            // Err(msg) when the session is not BGP or the
+            // pre-policy RIB was not retained.
+            let result = {
+                let mut w = deps.router.write().unwrap();
+                w.soft_reconfig_inbound(lr_router::SessionHandle(handle))
+            };
+            match result {
+                Ok(count) => format!("session {handle} soft-in ok re-evaluated={count}\n"),
+                Err(msg) => format!("error: session {handle} soft-in failed: {msg}\n"),
+            }
+        }
+        "refresh-in" => {
+            // RFC 2918 route-refresh request. Parse the optional
+            // family argument (default ipv4-unicast).
+            let family_str = tokens.next().unwrap_or("ipv4-unicast");
+            let Some(family) = super::parse_nlri_family(family_str) else {
+                return format!(
+                    "error: session {handle} refresh-in: unknown family '{family_str}'\n"
+                );
+            };
+            let requested = {
+                let mut w = deps.router.write().unwrap();
+                w.request_route_refresh(lr_router::SessionHandle(handle), family)
+            };
+            if requested {
+                format!("session {handle} refresh-in ok family={family_str}\n")
+            } else {
+                format!(
+                    "error: session {handle} refresh-in failed: not established, RFC 2918 not negotiated, or session not BGP\n"
+                )
+            }
+        }
+        other => format!(
+            "error: session {handle}: unknown op '{other}' (try 'soft-in' or 'refresh-in [family]')\n"
+        ),
     }
 }

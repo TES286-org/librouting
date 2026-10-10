@@ -337,7 +337,11 @@ session counts and memory), `show sessions [detail]` (per-session stats —
 transitions, uptime, last error), `show session <handle>` (deep dive for
 one session), `show routes count` (Loc-RIB grouped by protocol),
 `show memory` (process RSS and virtual size) and `show roa` (ROA table
-dump, BIRD `show roa` parity). [RUNBOOK.md](RUNBOOK.md)
+dump, BIRD `show roa` parity). The
+`session <handle> <op>` family is the write-side complement:
+`session <handle> soft-in` re-evaluates the import policy (FRR
+`clear ip bgp * soft in`) and `session <handle> refresh-in [family]`
+sends an RFC 2918 route-refresh request. [RUNBOOK.md](RUNBOOK.md)
 documents each command's exact reply string.
 
 `show roa` dumps the merged ROA table (the static `[[roa]]` layer plus
