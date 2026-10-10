@@ -3917,6 +3917,7 @@ impl RouterInstance for DefaultRouter {
                     conn,
                     established,
                     was_established,
+                    stats,
                     ..
                 } => {
                     conn.push_input(bytes);
@@ -3925,7 +3926,18 @@ impl RouterInstance for DefaultRouter {
                         return Ok(());
                     }
                     let prev_state = peer.state();
+                    // Capture the keepalive-received counter before
+                    // the feed so we can detect a KEEPALIVE arrival
+                    // and latch the timestamp (issue #52 follow-up:
+                    // "peer response speed" health metric). The FSM
+                    // does not take a timestamp, so we observe the
+                    // counter delta — non-breaking.
+                    let keepalive_rx_before = peer.message_stats().keepalive_received;
                     let actions = peer.feed_bytes(&input).map_err(|e| e.to_string())?;
+                    let keepalive_rx_after = peer.message_stats().keepalive_received;
+                    if keepalive_rx_after > keepalive_rx_before {
+                        stats.last_keepalive_received_ms = now_ms;
+                    }
                     let was_established_before = *established;
                     *established = peer.is_established();
                     if *established {

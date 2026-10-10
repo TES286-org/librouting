@@ -42,9 +42,15 @@ impl Daemon {
         Self { child, log }
     }
 
-    /// Block until the daemon's log contains `needle` (5 s deadline).
+    /// Block until the daemon's log contains `needle`. The deadline
+    /// is generous (60 s) to tolerate tarpaulin's per-process
+    /// instrumentation overhead, which can slow daemon startup
+    /// well past the 15 s that was enough under plain `cargo test`.
+    /// A real failure still surfaces — the deadline is bounded, and
+    /// the panic message includes the full daemon log so the cause
+    /// (bind failure, parse error, etc.) is visible.
     fn wait_log(&self, needle: &str, what: &str) {
-        let deadline = Instant::now() + Duration::from_secs(15);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while Instant::now() < deadline {
             if let Ok(text) = std::fs::read_to_string(&self.log) {
                 if text.contains(needle) {
@@ -54,7 +60,7 @@ impl Daemon {
             thread::sleep(Duration::from_millis(100));
         }
         let text = std::fs::read_to_string(&self.log).unwrap_or_default();
-        panic!("daemon did not report '{what}' within 15 s; log:\n{text}");
+        panic!("daemon did not report '{what}' within 60 s; log:\n{text}");
     }
 
     /// Block until the process exits; return (exit_ok, log_text).
@@ -464,6 +470,9 @@ fn lrctl_help_lists_subcommands() {
         "show session <handle>",
         "show routes count",
         "show memory",
+        // Issue #52 follow-up: write-side `session` ops.
+        "session <handle> soft-in",
+        "session <handle> refresh-in",
     ] {
         assert!(
             stdout.contains(needle),
@@ -610,6 +619,10 @@ fn lrctl_show_sessions_extends_legacy_output() {
         stdout.contains("last-error="),
         "show sessions stdout: {stdout}"
     );
+    assert!(
+        stdout.contains("last-keepalive-rx-ms="),
+        "show sessions stdout: {stdout}"
+    );
 
     // Detail block: multi-line, appended under the session line.
     let (ok, stdout, _stderr) = lrctl(&[
@@ -626,6 +639,10 @@ fn lrctl_show_sessions_extends_legacy_output() {
     );
     assert!(
         stdout.contains("last-error: kind="),
+        "show sessions detail stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("last-keepalive-rx-ms="),
         "show sessions detail stdout: {stdout}"
     );
 
@@ -662,6 +679,10 @@ fn lrctl_show_session_handle_renders_deep_dive() {
     );
     assert!(
         stdout.contains("stats: established-at-ms="),
+        "show session stdout: {stdout}"
+    );
+    assert!(
+        stdout.contains("last-keepalive-rx-ms="),
         "show session stdout: {stdout}"
     );
 
@@ -935,4 +956,167 @@ fn lrctl_roa_unknown_subcommand_exits_nonzero() {
     lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
     let _ = d.wait_exit();
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+// `lrctl session <handle> soft-in` / `refresh-in` — issue #52 follow-up:
+// write-side fine-grained operations on the running daemon. The e2e
+// tests exercise the client surface against a real `lr-daemon` with one
+// Idle BGP session — the session never connects, so `soft-in` reports
+// `re-evaluated=0` and `refresh-in` reports an error (RFC 2918 needs
+// an Established session).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn lrctl_session_soft_in_reports_zero_for_idle_session() {
+    let (socket, d) = spawn_show_daemon("soft-in", "18111");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "session",
+        "1",
+        "soft-in",
+    ]);
+    assert!(ok, "lrctl session 1 soft-in failed: stderr={stderr}");
+    assert!(
+        stdout.contains("session 1 soft-in ok re-evaluated=0"),
+        "session 1 soft-in stdout: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_session_refresh_in_fails_for_idle_session() {
+    let (socket, d) = spawn_show_daemon("refresh-in", "18112");
+    let (ok, stdout, _stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "session",
+        "1",
+        "refresh-in",
+    ]);
+    // The daemon returns an error line; `lrctl` exits 1 because the
+    // reply starts with `error:`.
+    assert!(
+        !ok,
+        "lrctl session 1 refresh-in should exit non-zero (idle session)"
+    );
+    assert!(
+        stdout.contains("error: session 1 refresh-in failed"),
+        "session 1 refresh-in stdout: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_session_refresh_in_with_explicit_family() {
+    let (socket, d) = spawn_show_daemon("refresh-in-v6", "18113");
+    // Explicit family — still fails because the session is Idle,
+    // but the family parse succeeds (the daemon does not report
+    // "unknown family").
+    let (ok, stdout, _stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "session",
+        "1",
+        "refresh-in",
+        "ipv6-unicast",
+    ]);
+    assert!(
+        !ok,
+        "lrctl session 1 refresh-in ipv6-unicast should exit non-zero"
+    );
+    assert!(
+        stdout.contains("error: session 1 refresh-in failed"),
+        "session 1 refresh-in ipv6-unicast stdout: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_session_refresh_in_unknown_family_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("refresh-in-bad", "18114");
+    // Unknown family — the daemon bounces it. `lrctl` exits 1
+    // because the reply starts with `error:`.
+    let (ok, stdout, _stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "session",
+        "1",
+        "refresh-in",
+        "bogus",
+    ]);
+    assert!(!ok, "lrctl session 1 refresh-in bogus should exit non-zero");
+    assert!(
+        stdout.contains("error: session 1 refresh-in: unknown family 'bogus'"),
+        "session 1 refresh-in bogus stdout: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_session_unknown_op_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("bad-op", "18115");
+    // Unknown op — client-side rejection, exit 2.
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "session",
+        "1",
+        "bogus",
+    ]);
+    assert!(!ok, "lrctl session 1 bogus should exit non-zero");
+    assert!(
+        stderr.contains("error: unknown session op 'bogus'"),
+        "session 1 bogus stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_session_non_numeric_handle_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("bad-handle", "18116");
+    // Non-numeric handle — client-side rejection, exit 2.
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "session",
+        "not-a-number",
+        "soft-in",
+    ]);
+    assert!(
+        !ok,
+        "lrctl session not-a-number soft-in should exit non-zero"
+    );
+    assert!(
+        stderr.contains("error: invalid session handle 'not-a-number'"),
+        "non-numeric handle stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_session_missing_op_exits_nonzero() {
+    let (socket, d) = spawn_show_daemon("no-op", "18117");
+    // `lrctl session 1` (no op) — client-side rejection, exit 2.
+    let (ok, _stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "session", "1"]);
+    assert!(!ok, "lrctl session 1 (no op) should exit non-zero");
+    assert!(
+        stderr.contains("error: session 1 requires an op"),
+        "session no op stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
 }

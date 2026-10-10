@@ -146,7 +146,8 @@ fn render_show_sessions(ctx: &ShowCtx<'_>, detail: bool) -> String {
              hold-time={hold} adj-rib-in={ar} \
              updates-rx={urx} updates-tx={utx} \
              transitions={tr} uptime-ms={up} \
-             last-error={err} last-error-at-ms={err_at}",
+             last-error={err} last-error-at-ms={err_at} \
+             last-keepalive-rx-ms={ka_rx}",
             handle = s.handle.0,
             kind = s.kind,
             la = s.local_as.0,
@@ -165,6 +166,7 @@ fn render_show_sessions(ctx: &ShowCtx<'_>, detail: bool) -> String {
             up = s.stats.established_at_ms,
             err = s.stats.last_error.as_str(),
             err_at = s.stats.last_error_at_ms,
+            ka_rx = s.stats.last_keepalive_received_ms,
         );
         if detail {
             render_session_detail(&mut out, s);
@@ -244,6 +246,11 @@ fn render_session_detail(out: &mut String, s: &SessionSummary) {
         "  last-error: kind={} at-ms={}",
         s.stats.last_error.as_str(),
         s.stats.last_error_at_ms,
+    );
+    let _ = writeln!(
+        out,
+        "  last-keepalive-rx-ms={}",
+        s.stats.last_keepalive_received_ms,
     );
 }
 
@@ -422,6 +429,7 @@ mod tests {
         assert!(body.contains("uptime-ms="), "body: {body}");
         assert!(body.contains("last-error="), "body: {body}");
         assert!(body.contains("last-error-at-ms="), "body: {body}");
+        assert!(body.contains("last-keepalive-rx-ms="), "body: {body}");
     }
 
     #[test]
@@ -439,6 +447,7 @@ mod tests {
         let body = dispatch("show sessions detail", &cx).expect("show sessions detail matched");
         assert!(body.contains("stats: established-at-ms="), "body: {body}");
         assert!(body.contains("last-error: kind="), "body: {body}");
+        assert!(body.contains("last-keepalive-rx-ms="), "body: {body}");
     }
 
     #[test]
@@ -458,6 +467,7 @@ mod tests {
         assert!(body.contains("kind bgp"), "body: {body}");
         assert!(body.contains("negotiated-hold-time"), "body: {body}");
         assert!(body.contains("stats: established-at-ms="), "body: {body}");
+        assert!(body.contains("last-keepalive-rx-ms="), "body: {body}");
     }
 
     #[test]

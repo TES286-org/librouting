@@ -366,6 +366,22 @@ mod imp {
                     continue;
                 }
             }
+            // `session <handle> <op>` — write-side fine-grained
+            // operations on one session (issue #52 follow-up: "the
+            // lrctl controller must support fine-grained operations
+            // on the running daemon"). The router core already
+            // implements `soft_reconfig_inbound(h)` (FRR `clear ip
+            // bgp * soft in`) and `request_route_refresh(h, family)`
+            // (RFC 2918); this command exposes them through the
+            // runtime API.
+            if let Some(rest) = cmd.strip_prefix("session ") {
+                let reply = handle_session_op(rest, deps);
+                let _ = out.write_all(reply.as_bytes());
+                if out.flush().is_err() {
+                    return;
+                }
+                continue;
+            }
             match cmd {
                 "quit" => return,
                 "help" => {
@@ -382,6 +398,8 @@ mod imp {
                          show routes count     Loc-RIB grouped by protocol\n  \
                          show memory           process RSS and virtual size\n  \
                          show roa  ROA table dump (BIRD `show roa` parity)\n  \
+                         session <handle> soft-in     re-evaluate import policy (FRR `clear ip bgp * soft in`)\n  \
+                         session <handle> refresh-in [family]  RFC 2918 route-refresh request\n  \
                          reload    re-apply configuration (SIGHUP equivalent)\n  \
                          shutdown           graceful shutdown (immediate)\n  \
                          shutdown drain     issue #53 graceful drain (rate-limited)\n  \
@@ -602,6 +620,84 @@ mod imp {
         }
     }
 
+    /// Dispatch `session <handle> <op>` — write-side fine-grained
+    /// operations on one session (issue #52 follow-up).
+    ///
+    /// Supported ops:
+    /// - `soft-in` — re-evaluate the import policy against the
+    ///   pre-policy Adj-RIB-In for this session (FRR `clear ip bgp *
+    ///   soft in`). Requires `soft_reconfig_inbound` to have been
+    ///   enabled on the session before it started.
+    /// - `refresh-in [family]` — send an RFC 2918 ROUTE-REFRESH
+    ///   request to the peer for the given family (default
+    ///   `ipv4-unicast`). Requires the session to be established and
+    ///   the route-refresh capability to have been negotiated.
+    ///
+    /// Returns the reply string (already newline-terminated). The
+    /// caller writes it verbatim and flushes.
+    fn handle_session_op(rest: &str, deps: &ConnDeps<'_>) -> String {
+        // Parse `<handle> <op> [args...]`. The handle is a u64; the
+        // op is the next token; the rest is op-specific.
+        let mut tokens = rest.split_whitespace();
+        let Some(handle_str) = tokens.next() else {
+            return "error: session requires <handle> <op>\n".to_string();
+        };
+        let Ok(handle) = handle_str.parse::<u64>() else {
+            return format!("error: invalid session handle '{handle_str}'\n");
+        };
+        let Some(op) = tokens.next() else {
+            return format!(
+                "error: session {handle} requires an op (try 'soft-in' or 'refresh-in [family]')\n"
+            );
+        };
+        match op {
+            "soft-in" => {
+                // FRR `clear ip bgp * soft in`: re-evaluate the
+                // import policy against the pre-policy Adj-RIB-In.
+                // The router core returns Ok(count) on success,
+                // Err(msg) when the session is not BGP or the
+                // pre-policy RIB was not retained.
+                let result = {
+                    let mut w = deps.router.write().unwrap();
+                    w.soft_reconfig_inbound(lr_router::SessionHandle(handle))
+                };
+                match result {
+                    Ok(count) => format!(
+                        "session {handle} soft-in ok re-evaluated={count}\n"
+                    ),
+                    Err(msg) => format!("error: session {handle} soft-in failed: {msg}\n"),
+                }
+            }
+            "refresh-in" => {
+                // RFC 2918 route-refresh request. Parse the optional
+                // family argument (default ipv4-unicast).
+                let family_str = tokens.next().unwrap_or("ipv4-unicast");
+                let Some(family) = super::parse_nlri_family(family_str) else {
+                    return format!(
+                        "error: session {handle} refresh-in: unknown family '{family_str}'\n"
+                    );
+                };
+                let requested = {
+                    let mut w = deps.router.write().unwrap();
+                    w.request_route_refresh(lr_router::SessionHandle(handle), family)
+                };
+                if requested {
+                    format!(
+                        "session {handle} refresh-in ok family={}\n",
+                        family_str
+                    )
+                } else {
+                    format!(
+                        "error: session {handle} refresh-in failed: not established, RFC 2918 not negotiated, or session not BGP\n"
+                    )
+                }
+            }
+            other => format!(
+                "error: session {handle}: unknown op '{other}' (try 'soft-in' or 'refresh-in [family]')\n"
+            ),
+        }
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -717,6 +813,7 @@ mod imp {
             assert!(show_sessions.contains("transitions="));
             assert!(show_sessions.contains("uptime-ms="));
             assert!(show_sessions.contains("last-error="));
+            assert!(show_sessions.contains("last-keepalive-rx-ms="));
 
             let show_sessions_detail = ask(&mut probe, "show sessions detail");
             assert!(
@@ -759,6 +856,89 @@ mod imp {
                 "show bogus: {show_unknown}"
             );
 
+            // Issue #52 follow-up: write-side `session <handle> <op>`
+            // commands. The test session is a BGP peer that never
+            // connected (state=Idle), so:
+            //  - `soft-in` returns `re-evaluated=0` (the pre-policy
+            //    Adj-RIB-In is empty — `soft_reconfig_inbound` is
+            //    always callable but returns 0 when there are no
+            //    routes to re-evaluate; it does not require the
+            //    session to be established).
+            //  - `refresh-in` returns an error because the session
+            //    is not Established (RFC 2918 needs an established
+            //    transport).
+            let session_soft_in = ask(&mut probe, "session 1 soft-in");
+            assert!(
+                session_soft_in.contains("session 1 soft-in ok re-evaluated=0"),
+                "session 1 soft-in: {session_soft_in}"
+            );
+
+            let session_refresh_in = ask(&mut probe, "session 1 refresh-in");
+            assert!(
+                session_refresh_in.contains("error: session 1 refresh-in failed"),
+                "session 1 refresh-in (idle): {session_refresh_in}"
+            );
+
+            // `session 1 refresh-in ipv6-unicast` — explicit family,
+            // still fails because the session is Idle.
+            let session_refresh_in_v6 = ask(&mut probe, "session 1 refresh-in ipv6-unicast");
+            assert!(
+                session_refresh_in_v6.contains("error: session 1 refresh-in failed"),
+                "session 1 refresh-in ipv6-unicast: {session_refresh_in_v6}"
+            );
+
+            // `session 1 refresh-in bogus` — unknown family.
+            let session_refresh_in_bad = ask(&mut probe, "session 1 refresh-in bogus");
+            assert!(
+                session_refresh_in_bad
+                    .contains("error: session 1 refresh-in: unknown family 'bogus'"),
+                "session 1 refresh-in bogus: {session_refresh_in_bad}"
+            );
+
+            // Unknown session handle — `soft_reconfig_inbound`
+            // returns `Ok(0)` for a non-existent session (it just
+            // finds no routes to re-evaluate), so the reply is the
+            // success shape with `re-evaluated=0`. This is the same
+            // behavior FRR's `clear ip bgp <nonexistent> soft in`
+            // exhibits — a no-op rather than an error.
+            let session_unknown_soft_in = ask(&mut probe, "session 999 soft-in");
+            assert!(
+                session_unknown_soft_in.contains("session 999 soft-in ok re-evaluated=0"),
+                "session 999 soft-in: {session_unknown_soft_in}"
+            );
+
+            // Non-numeric handle — client-side parse error.
+            let session_bad_handle = ask(&mut probe, "session not-a-number soft-in");
+            assert!(
+                session_bad_handle.contains("error: invalid session handle 'not-a-number'"),
+                "session bad handle: {session_bad_handle}"
+            );
+
+            // Unknown op.
+            let session_bad_op = ask(&mut probe, "session 1 bogus");
+            assert!(
+                session_bad_op.contains("error: session 1: unknown op 'bogus'"),
+                "session bad op: {session_bad_op}"
+            );
+
+            // `session` (bare, no args) — does not match the
+            // `session ` prefix, so it falls through to the unknown
+            // command arm. This matches the daemon's dispatch shape:
+            // the `session ` prefix handler only fires when there's
+            // a trailing argument.
+            let session_bare = ask(&mut probe, "session");
+            assert!(
+                session_bare.contains("error: unknown command 'session'"),
+                "session bare: {session_bare}"
+            );
+
+            // `session 1` with no op.
+            let session_no_op = ask(&mut probe, "session 1");
+            assert!(
+                session_no_op.contains("error: session 1 requires an op"),
+                "session no op: {session_no_op}"
+            );
+
             let unknown = ask(&mut probe, "bogus");
             assert!(unknown.contains("error: unknown command"));
 
@@ -768,6 +948,8 @@ mod imp {
             assert!(help.contains("show session <handle>"));
             assert!(help.contains("show routes count"));
             assert!(help.contains("show roa"));
+            assert!(help.contains("session <handle> soft-in"));
+            assert!(help.contains("session <handle> refresh-in"));
 
             // Shutdown flips the daemon's running flag.
             let shutting = ask(&mut probe, "shutdown");
@@ -908,6 +1090,34 @@ mod imp {
             let _ = ask(&mut conn, "shutdown");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+}
+
+/// Parse a `NlriFamily` name from the runtime API command line.
+/// Recognised names mirror the `NlriFamily` constants in
+/// `lr-core::nlri`:
+///
+/// - `ipv4-unicast` (default when omitted)
+/// - `ipv6-unicast`
+/// - `ipv4-multicast`
+/// - `ipv4-mpls-vpn`
+/// - `ipv6-mpls-vpn`
+/// - `ipv4-labeled-unicast` (RFC 8277)
+/// - `ipv6-labeled-unicast` (RFC 8277)
+///
+/// Returns `None` for an unrecognised name. The caller surfaces the
+/// error to the operator verbatim.
+pub(crate) fn parse_nlri_family(name: &str) -> Option<lr_core::nlri::NlriFamily> {
+    use lr_core::nlri::NlriFamily;
+    match name {
+        "ipv4-unicast" => Some(NlriFamily::IPV4_UNICAST),
+        "ipv6-unicast" => Some(NlriFamily::IPV6_UNICAST),
+        "ipv4-multicast" => Some(NlriFamily::IPV4_MULTICAST),
+        "ipv4-mpls-vpn" => Some(NlriFamily::IPV4_MPLS_VPN),
+        "ipv6-mpls-vpn" => Some(NlriFamily::IPV6_MPLS_VPN),
+        "ipv4-labeled-unicast" => Some(NlriFamily::IPV4_LABELED_UNICAST),
+        "ipv6-labeled-unicast" => Some(NlriFamily::IPV6_LABELED_UNICAST),
+        _ => None,
     }
 }
 

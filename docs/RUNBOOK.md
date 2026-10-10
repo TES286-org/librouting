@@ -101,6 +101,8 @@ daemon: runtime API on /run/lr-daemon.api
 | `show routes count` | Loc-RIB grouped by protocol |
 | `show memory` | Process RSS and virtual size |
 | `show roa` | ROA table dump (BIRD `show roa` parity) |
+| `session <handle> soft-in` | `session <handle> soft-in ok re-evaluated=<n>` |
+| `session <handle> refresh-in [family]` | `session <handle> refresh-in ok family=<f>` |
 | `reload` | The reload lines above |
 | `shutdown` | `shutting down` |
 | `help` | The command list |
@@ -168,6 +170,25 @@ prints `uptime-secs`, `rss-bytes` and `vsize-bytes`. `lrctl` proxies
 each sub-command verbatim — `lrctl show` (no sub) maps to `show status`,
 matching BIRD's shortcut.
 
+The `session <handle> <op>` family (issue #52 follow-up) is the
+write-side complement to `show session <handle>`:
+
+- `session <handle> soft-in` — re-evaluate the import policy against
+  the pre-policy Adj-RIB-In for this session (FRR `clear ip bgp * soft
+  in`). Returns `session <handle> soft-in ok re-evaluated=<n>` where
+  `<n>` is the number of routes re-evaluated. Requires
+  `soft_reconfig_inbound` to have been enabled on the session before it
+  started; otherwise returns `re-evaluated=0` (a no-op rather than an
+  error, matching FRR's behaviour).
+- `session <handle> refresh-in [family]` — send an RFC 2918
+  ROUTE-REFRESH request to the peer for the given family (default
+  `ipv4-unicast`). Returns
+  `session <handle> refresh-in ok family=<f>` on success, or an error
+  when the session is not Established, RFC 2918 was not negotiated, or
+  the session is not BGP. Recognised family names: `ipv4-unicast`,
+  `ipv6-unicast`, `ipv4-multicast`, `ipv4-mpls-vpn`, `ipv6-mpls-vpn`,
+  `ipv4-labeled-unicast`, `ipv6-labeled-unicast`.
+
 An unknown command answers
 `error: unknown command '<x>' (try 'help')`, and a command line longer
 than 4096 bytes answers `error: command too long`. A connection that
@@ -180,7 +201,8 @@ commands — `lrctl status`, `lrctl sessions`, `lrctl routes show
 [prefix]`, `lrctl routes dump <path>`, `lrctl show status`, `lrctl show
 sessions [detail]`, `lrctl show session <handle>`, `lrctl show routes
 count`, `lrctl show memory`, `lrctl roa list`, `lrctl roa count`,
-`lrctl reload`, `lrctl shutdown` — and adds the client-side
+`lrctl session <handle> soft-in`, `lrctl session <handle> refresh-in
+[family]`, `lrctl reload`, `lrctl shutdown` — and adds the client-side
 `lrctl filter compile <body>`, which needs no daemon. `lrctl` exits 1
 when the reply carries an `error:` line, so a script can branch on the
 daemon's own verdict.
