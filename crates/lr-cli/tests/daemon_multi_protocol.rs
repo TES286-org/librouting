@@ -37,9 +37,18 @@ struct Daemon {
 
 impl Daemon {
     fn spawn(args: &[&str], tag: &str) -> Self {
-        let log =
-            std::env::temp_dir().join(format!("lr-daemon-multi-{tag}-{}.log", std::process::id()));
-        let log_file = std::fs::File::create(&log).expect("create log file");
+        static LOG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let seq = LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let log = std::env::temp_dir().join(format!(
+            "lr-daemon-multi-{tag}-{}-{seq}.log",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_file(&log);
+        let log_file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&log)
+            .expect("create log file");
         let child = Command::new(BIN)
             .args(args)
             .stdout(Stdio::from(log_file.try_clone().expect("clone stdout")))

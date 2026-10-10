@@ -24,8 +24,18 @@ fn run_daemon_with_config(tag: &str, toml: &str) -> (Option<i32>, String) {
     let path =
         std::env::temp_dir().join(format!("lr-filter-diag-{tag}-{}.toml", std::process::id()));
     std::fs::write(&path, toml).expect("write config");
-    let log = std::env::temp_dir().join(format!("lr-filter-diag-{tag}-{}.log", std::process::id()));
-    let log_file = std::fs::File::create(&log).expect("create log file");
+    static LOG_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let seq = LOG_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let log = std::env::temp_dir().join(format!(
+        "lr-filter-diag-{tag}-{}-{seq}.log",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_file(&log);
+    let log_file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&log)
+        .expect("create log file");
     let mut child = Command::new(DAEMON)
         // Base identity flags: the CLI validates these before any
         // config-file content is examined.
