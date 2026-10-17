@@ -72,7 +72,7 @@ env:
 jobs:
   build:
     name: docker build
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7

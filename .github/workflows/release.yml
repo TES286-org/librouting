@@ -26,7 +26,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-22.04
+          - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             archive: librouting-linux-x86_64.tar.gz
             lib: liblr_ffi.so
@@ -39,21 +39,21 @@ jobs:
           # both arches natively, so x86_64-apple-darwin builds fine
           # there. See the cross-macos-intel job in ci.yml for the
           # same pattern.
-          - os: macos-14
+          - os: macos-latest
             target: x86_64-apple-darwin
             archive: librouting-macos-x86_64.tar.gz
             lib: liblr_ffi.dylib
             lr_bin: lr
             lrd_bin: lr-daemon
             lrctl_bin: lrctl
-          - os: macos-14
+          - os: macos-latest
             target: aarch64-apple-darwin
             archive: librouting-macos-aarch64.tar.gz
             lib: liblr_ffi.dylib
             lr_bin: lr
             lrd_bin: lr-daemon
             lrctl_bin: lrctl
-          - os: windows-2022
+          - os: windows-latest
             target: x86_64-pc-windows-msvc
             archive: librouting-windows-x86_64.zip
             lib: lr_ffi.dll
@@ -123,7 +123,7 @@ jobs:
   publish-release:
     name: Publish GitHub Release
     needs: build-native
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - name: Download all build artifacts

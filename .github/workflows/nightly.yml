@@ -11,7 +11,7 @@ env:
 jobs:
   miri:
     name: Miri (UB check for unsafe FFI)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -44,7 +44,7 @@ jobs:
   # the report, then either bump, replace, or update `deny.toml`.
   supply-chain:
     name: Supply-chain (cargo audit + cargo deny)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -83,7 +83,7 @@ jobs:
   # the same path restricted environments use.
   vm-kernel-gated:
     name: VM harness (kernel-gated interop, QEMU)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -130,7 +130,7 @@ jobs:
   #   cargo +nightly fuzz run bgp_decode -- -max_total_time=3600
   fuzz:
     name: Fuzz (cargo-fuzz, 5 min per target)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@nightly
@@ -177,7 +177,7 @@ jobs:
   # bench by >10% should be visible in the nightly artifact.
   bench-smoke:
     name: Bench smoke (criterion, 5 min total)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable

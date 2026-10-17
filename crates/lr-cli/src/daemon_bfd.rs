@@ -163,7 +163,7 @@ pub(crate) fn spawn_supervisor(
                         Ok(Some(x)) => x,
                         Ok(None) => break,
                         Err(e) => {
-                            log_error!(Component::Bfd, "bfd: recv error: {}", e);
+                            log_error!(Component::Bfd, "recv error: {}", e);
                             break;
                         }
                     };
@@ -219,7 +219,7 @@ fn apply_events(p: &mut BfdPeer, evs: Vec<BfdSessionEvent>) {
             BfdSessionEvent::Timeout => {
                 log_info!(
                     Component::Bfd,
-                    "bfd: peer {}: detection time expired",
+                    "peer {}: detection time expired",
                     p.label
                 );
             }
@@ -233,7 +233,7 @@ fn apply_events(p: &mut BfdPeer, evs: Vec<BfdSessionEvent>) {
             BfdSessionEvent::PeerDiagnostic(d) => {
                 log_info!(
                     Component::Bfd,
-                    "bfd: peer {}: peer diagnostic: {}",
+                    "peer {}: peer diagnostic: {}",
                     p.label,
                     d
                 );
@@ -261,6 +261,6 @@ fn flush_peer(p: &mut BfdPeer) {
     }
     let dst = SocketAddr::new(p.peer_ip, p.mode.port());
     if let Err(e) = p.tx.send_to(&out, dst) {
-        log_error!(Component::Bfd, "bfd: peer {}: send failed: {}", p.label, e);
+        log_error!(Component::Bfd, "peer {}: send failed: {}", p.label, e);
     }
 }

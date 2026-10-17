@@ -30,7 +30,7 @@ jobs:
   # ~25-min sequential test job.
   lint:
     name: Lint (fmt + clippy)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v7
@@ -73,7 +73,7 @@ jobs:
   # it is bumped only by the release commit that cuts the next tag.
   abi-freeze:
     name: ABI freeze (additive-only vs baseline tag)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 5
     env:
       # Bump at every release cut (the new tag becomes the baseline).
@@ -114,7 +114,7 @@ jobs:
   # of stalling the whole `cargo test` invocation.
   unit-tests:
     name: Unit + integration tests
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -156,7 +156,7 @@ jobs:
   # sequential within the job because they share the release artifact.
   ffi-bindings:
     name: FFI + bindings (C/C++/Python/Go)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -213,7 +213,7 @@ jobs:
 
   msrv:
     name: MSRV (1.88)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -229,7 +229,7 @@ jobs:
 
   coverage:
     name: Coverage
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -259,7 +259,7 @@ jobs:
 
   cross:
     name: Cross-build (${{ matrix.target }})
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
@@ -301,7 +301,7 @@ jobs:
   # ABI is the same — so a build check is sufficient coverage).
   cross-macos-intel:
     name: Cross-build (x86_64-apple-darwin, from macos-14)
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -353,8 +353,8 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - macos-14   # Apple Silicon (Intel macOS retired by GitHub Actions)
-          - windows-2022
+          - macos-latest   # Apple Silicon (Intel macOS retired by GitHub Actions)
+          - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -443,7 +443,7 @@ jobs:
   # daemon_runtime / daemon_multi_peer tests.
   windows-interop:
     name: Windows interop (lr ↔ lr)
-    runs-on: windows-2022
+    runs-on: windows-latest
     # Ceiling arithmetic: cold-cache build 25 + three interop script
     # steps (10-min ceilings each, sub-minute observed) + setup ≈ 57
     # worst case; the typical warm run finishes in ~3.
@@ -518,7 +518,7 @@ jobs:
   # the plain control-plane path without sudo.
   macos-interop:
     name: macOS interop (lr ↔ lr, BSD route socket)
-    runs-on: macos-14
+    runs-on: macos-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -567,7 +567,7 @@ jobs:
   # failure here now means a real interop regression, not runner flake.
   windows-bird-interop:
     name: Windows BIRD interop (lr ↔ BIRD-in-WSL2)
-    runs-on: windows-2022
+    runs-on: windows-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
@@ -596,7 +596,7 @@ jobs:
   # job also works on forked runners without the packages.
   interop:
     name: Interop (BIRD + FRR)
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     timeout-minutes: 90
     steps:
       - uses: actions/checkout@v7
@@ -897,8 +897,8 @@ jobs:
   # script itself skips gracefully when the option is missing, so this
   # job also doubles as a rolling check on newer kernels/packages.
   interop-auth:
-    name: Interop auth (TCP-AO, ubuntu-24.04)
-    runs-on: ubuntu-24.04
+    name: Interop auth (TCP-AO, ubuntu)
+    runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
