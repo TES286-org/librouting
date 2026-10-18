@@ -229,11 +229,14 @@ fn metrics_endpoint_serves_prometheus_exposition() {
         );
     }
 
-    // Identity gauge carries the daemon's local_as and router_id.
-    // The version string tracks the workspace version in Cargo.toml.
+    // Identity gauge carries the daemon's local_as, peer_as,
+    // router_id and config_path. The version string tracks the
+    // workspace version in Cargo.toml. The peer_as and config_path
+    // labels were added in 1.3.0 — pin them so a future rename
+    // breaks loudly.
     assert!(
         body.contains(&format!(
-            "lr_info{{version=\"{}\",local_as=\"64512\",router_id=\"10.0.0.1\"}} 1",
+            "lr_info{{version=\"{}\",local_as=\"64512\",peer_as=\"64513\",router_id=\"10.0.0.1\",config_path=\"(none)\"}} 1",
             env!("CARGO_PKG_VERSION")
         )),
         "lr_info line missing or wrong; body:\n{body}"
@@ -441,7 +444,23 @@ fn metrics_exposition_is_stable_across_scrapes() {
 
     let strip_uptime = |resp: &str| -> String {
         resp.lines()
-            .filter(|l| !l.starts_with("lr_uptime_seconds") && !l.contains("lr_uptime_seconds"))
+            .filter(|l| {
+                // Strip the daemon uptime (ticks by the second)
+                // and the process-memory gauges (RSS in particular
+                // fluctuates as the allocator mmap-sbrk-munmaps
+                // between scrapes — the values are not stable, and
+                // the stability test is about the exposition shape,
+                // not the instantaneous memory footprint). The
+                // `Content-Length:` HTTP header is stripped too
+                // because it depends on the body length, which in
+                // turn depends on the (volatile) byte count of the
+                // RSS / VmSize values.
+                !l.starts_with("lr_uptime_seconds")
+                    && !l.contains("lr_uptime_seconds")
+                    && !l.starts_with("lr_process_resident_bytes")
+                    && !l.starts_with("lr_process_virtual_bytes")
+                    && !l.starts_with("Content-Length:")
+            })
             .collect::<Vec<_>>()
             .join("\n")
     };

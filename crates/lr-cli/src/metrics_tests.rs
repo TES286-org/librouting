@@ -160,6 +160,8 @@ fn test_ctx(router: Arc<RwLock<DefaultRouter>>, running: Arc<AtomicBool>) -> Met
             version: "test".into(),
             local_as: 64512,
             router_id: "10.0.0.1".into(),
+            config_path: "(none)".into(),
+            peer_as: 64513,
         },
         router,
         running,
@@ -251,11 +253,16 @@ fn spawn_serves_metrics_on_tcp() {
         "Content-Type should declare version=0.0.4; response:\n{resp}"
     );
     // Body must carry the identity gauge (with the configured
-    // local_as / router_id), the uptime gauge, and at least one
-    // session / RIB counter line.
+    // local_as / peer_as / router_id / config_path), the uptime
+    // gauge, and at least one session / RIB counter line. The
+    // enrichment work in 1.3.0 added the `peer_as` and
+    // `config_path` labels to `lr_info` — the test pins them so
+    // a future rename of either does not silently break a scraper.
     let body = resp.split("\r\n\r\n").nth(1).unwrap_or("");
     assert!(
-        body.contains("lr_info{version=\"test\",local_as=\"64512\",router_id=\"10.0.0.1\"} 1"),
+        body.contains(
+            "lr_info{version=\"test\",local_as=\"64512\",peer_as=\"64513\",router_id=\"10.0.0.1\",config_path=\"(none)\"} 1"
+        ),
         "lr_info line missing or wrong; body:\n{body}"
     );
     assert!(
@@ -269,6 +276,69 @@ fn spawn_serves_metrics_on_tcp() {
     assert!(
         body.contains("lr_rib_entries 1"),
         "originated prefix missing from Loc-RIB counter; body:\n{body}"
+    );
+    // Per-session metrics — the enrichment work added a per-session
+    // up-gauge, transitions counter, adj-rib-in gauge, negotiated
+    // hold-time gauge, last-keepalive gauge, and last-error gauge
+    // (one series per error kind, with 1 on the current kind).
+    assert!(
+        body.contains("lr_session_up{kind=\"bgp\",session=\"1\",peer=\"?\"} 0"),
+        "lr_session_up missing; body:\n{body}"
+    );
+    assert!(
+        body.contains(
+            "lr_session_last_error{kind=\"bgp\",session=\"1\",peer=\"?\",error_kind=\"none\"} 1"
+        ),
+        "lr_session_last_error current kind missing; body:\n{body}"
+    );
+    assert!(
+        body.contains(
+            "lr_session_last_error{kind=\"bgp\",session=\"1\",peer=\"?\",error_kind=\"transport-closed\"} 0"
+        ),
+        "lr_session_last_error non-current kind missing; body:\n{body}"
+    );
+    // Comprehensive BGP message counter — every PDU type, both
+    // directions. The test pins one of each so a future schema
+    // change breaks loudly.
+    assert!(
+        body.contains(
+            "lr_bgp_messages_total{session=\"1\",peer=\"?\",type=\"open\",direction=\"received\"} 0"
+        ),
+        "lr_bgp_messages_total open/received missing; body:\n{body}"
+    );
+    assert!(
+        body.contains(
+            "lr_bgp_messages_total{session=\"1\",peer=\"?\",type=\"route_refresh\",direction=\"sent\"} 0"
+        ),
+        "lr_bgp_messages_total route_refresh/sent missing; body:\n{body}"
+    );
+    // Loc-RIB by-protocol gauge (mirrors `show routes count`).
+    assert!(
+        body.contains("lr_rib_entries_by_protocol{protocol=\"bgp\"} 1"),
+        "lr_rib_entries_by_protocol missing; body:\n{body}"
+    );
+    // Operator-side configuration gauges.
+    assert!(
+        body.contains("lr_aggregates_count 0"),
+        "lr_aggregates_count missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_static_routes_count 0"),
+        "lr_static_routes_count missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("lr_originated_routes_count 1"),
+        "lr_originated_routes_count missing; body:\n{body}"
+    );
+    // Process memory gauges (Linux-only non-zero; on non-Linux the
+    // HELP/TYPE lines still appear but the value line is omitted).
+    assert!(
+        body.contains("# TYPE lr_process_resident_bytes gauge"),
+        "lr_process_resident_bytes TYPE missing; body:\n{body}"
+    );
+    assert!(
+        body.contains("# TYPE lr_process_virtual_bytes gauge"),
+        "lr_process_virtual_bytes TYPE missing; body:\n{body}"
     );
 
     // A second scrape returns the same shape (counters do not go

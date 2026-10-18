@@ -1756,7 +1756,7 @@ impl DefaultRouter {
                         stats,
                         ..
                     } => {
-                        let s = peer.message_stats();
+                        let s = *peer.message_stats();
                         SessionSummary {
                             handle: SessionHandle(*id),
                             kind: "bgp",
@@ -1769,6 +1769,7 @@ impl DefaultRouter {
                             adj_rib_in_len,
                             updates_received: s.update_received,
                             updates_sent: s.update_sent,
+                            message_stats: s,
                             stats: *stats,
                         }
                     }
@@ -1784,6 +1785,7 @@ impl DefaultRouter {
                         adj_rib_in_len,
                         updates_received: 0,
                         updates_sent: 0,
+                        message_stats: lr_bgp::PeerMessageStats::default(),
                         stats: *stats,
                     },
                     SessionState::Babel {
@@ -1804,6 +1806,7 @@ impl DefaultRouter {
                             adj_rib_in_len,
                             updates_received: 0,
                             updates_sent: 0,
+                            message_stats: lr_bgp::PeerMessageStats::default(),
                             stats: *session_stats,
                         }
                     }
