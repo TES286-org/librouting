@@ -30,7 +30,10 @@
 use std::env;
 use std::process::ExitCode;
 
+mod lrctl_json;
 mod pipe_name;
+
+use lrctl_json::{JArray, JObject, JValue};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -51,6 +54,14 @@ fn main() -> ExitCode {
     // wins (matches the daemon's flag parsing).
     let (socket, cmd_args) = extract_socket_flag(&args[1..]);
     let socket = socket.unwrap_or_else(|| DEFAULT_SOCKET.to_string());
+    // Pull the `--json` / `--json=FORMAT` flag (or its short
+    // equivalent `-j`) out of the arg list. Like `--socket`, it
+    // may appear anywhere in the args after the command. The flag
+    // is *consumed* here so sub-command handlers see the same
+    // reduced `rest` they always did — the JSON wrapping is
+    // applied centrally in `proxy_raw`/`proxy` rather than per
+    // sub-command.
+    let (json, cmd_args) = extract_json_flag(&cmd_args);
     if cmd_args.is_empty() {
         print_usage();
         return ExitCode::from(1);
@@ -66,7 +77,7 @@ fn main() -> ExitCode {
             print_usage();
             ExitCode::SUCCESS
         }
-        "status" => proxy(&socket, "status"),
+        "status" => proxy_with_json(&socket, "status", json, parse_status_body),
         "sessions" => {
             // `sessions` and `sessions list` both map to the daemon's
             // `sessions` command — the daemon has no list/detail
@@ -75,12 +86,34 @@ fn main() -> ExitCode {
                 eprintln!("usage: lrctl sessions [list]");
                 return ExitCode::from(2);
             }
-            proxy(&socket, "sessions")
+            proxy_with_json(&socket, "sessions", json, parse_sessions_body)
         }
-        "routes" => routes(&socket, rest),
-        "roa" => roa(&socket, rest),
+        // BIRD-style alias: `neighbor` / `neighbors` is the
+        // operator's muscle-memory word for "show me the peers". The
+        // daemon's wire keyword stays `sessions`; the alias just
+        // routes there. `neighbor <handle>` is a thin alias for
+        // `show session <handle>` so the BIRD `show protocols all
+        // <name>` operator gets the deep dive from the same verb.
+        "neighbor" | "neighbors" => neighbor(&socket, rest, json),
+        // `ping` round-trips the API socket with the cheapest
+        // command the daemon answers (`help`): success means the
+        // daemon is up, the API socket is reachable, and the
+        // round-trip latency is a proxy for "the daemon's event
+        // loop is not wedged". BIRD has no direct equivalent;
+        // FRR's `vtysh -c 'show version'` is the closest analogue.
+        "ping" => ping(&socket, json),
+        // `metrics` connects to the daemon's HTTP /metrics
+        // endpoint and proxies the scrape to stdout. The address
+        // defaults to the daemon's documented default
+        // (127.0.0.1:9119) and is overridable with
+        // `--metrics-addr ADDR` (kept distinct from `--socket`
+        // because the metrics endpoint is TCP, not the Unix API
+        // socket).
+        "metrics" => metrics(&socket, rest),
+        "routes" => routes(&socket, rest, json),
+        "roa" => roa(&socket, rest, json),
         "session" => session(&socket, rest),
-        "show" => show(&socket, rest),
+        "show" => show(&socket, rest, json),
         "reload" => proxy(&socket, "reload"),
         "shutdown" => shutdown(&socket, rest),
         "filter" => filter(rest),
@@ -90,6 +123,56 @@ fn main() -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// Pull a `--json` / `--json=FORMAT` / `-j` flag out of the arg list.
+/// Returns the JSON mode (None / Some(Json)) and the remaining args
+/// in their original order. The flag may appear anywhere — same
+/// rule as `--socket`.
+///
+/// `--json` with no argument defaults to a compact JSON object. The
+/// optional `=pretty` form (e.g. `--json=pretty`) pretty-prints with
+/// a 2-space indent. Other forms are rejected so a typo is loud
+/// rather than silently defaulting.
+fn extract_json_flag(args: &[String]) -> (Option<JsonFormat>, Vec<String>) {
+    let mut json: Option<JsonFormat> = None;
+    let mut rest = Vec::with_capacity(args.len());
+    let mut i = 0;
+    while i < args.len() {
+        let a = &args[i];
+        if a == "--json" || a == "-j" {
+            if json.is_none() {
+                json = Some(JsonFormat::Compact);
+            }
+            i += 1;
+            continue;
+        } else if let Some(v) = a.strip_prefix("--json=") {
+            if json.is_none() {
+                json = match v {
+                    "compact" | "" => Some(JsonFormat::Compact),
+                    "pretty" => Some(JsonFormat::Pretty),
+                    other => {
+                        eprintln!(
+                            "error: --json={other} is not a valid format (try --json or --json=pretty)"
+                        );
+                        std::process::exit(2);
+                    }
+                };
+            }
+            i += 1;
+            continue;
+        }
+        rest.push(a.clone());
+        i += 1;
+    }
+    (json, rest)
+}
+
+/// Output format selected by `--json` / `--json=pretty`.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum JsonFormat {
+    Compact,
+    Pretty,
 }
 
 /// Pull a `--socket PATH` / `--socket=PATH` flag out of the arg list.
@@ -125,17 +208,27 @@ fn print_usage() {
     println!("lrctl {} — librouting operational CLI", VERSION);
     println!();
     println!("USAGE:");
-    println!("    lrctl [--socket PATH] <command> [args]");
+    println!("    lrctl [--socket PATH] [--json[=pretty]] <command> [args]");
     println!();
     println!(
         "The default socket is {} (matches templates/daemon.toml).",
         DEFAULT_SOCKET
     );
     println!();
+    println!("GLOBAL FLAGS:");
+    println!("    --socket PATH       API socket path (default: {DEFAULT_SOCKET})");
+    println!("    --json              Emit machine-readable JSON for supported commands");
+    println!("    --json=pretty       Pretty-printed JSON (2-space indent)");
+    println!("    -j                  Alias for --json");
+    println!();
     println!("DAEMON COMMANDS (proxy the runtime API):");
     println!("    status              Daemon summary (version, identity, uptime, counters)");
     println!("    sessions [list]     One line per configured session");
+    println!("    neighbor [handle]   BIRD-style alias for sessions / show session");
+    println!("    ping                Round-trip the API socket (health check)");
+    println!("    metrics [--metrics-addr ADDR]  Scrape the daemon's /metrics HTTP endpoint");
     println!("    routes show [prefix]  Loc-RIB dump, optionally filtered by prefix");
+    println!("    routes count        Loc-RIB grouped by protocol (alias for show routes count)");
     println!("    routes dump <path>  Write the Loc-RIB as an MRT dump (RFC 6396)");
     println!("    show status         Extended summary (per-protocol session counts, memory)");
     println!("    show sessions [detail]  Per-session stats (transitions, uptime, last error)");
@@ -162,13 +255,20 @@ fn print_usage() {
     println!("OTHER:");
     println!("    version             Print lrctl version");
     println!("    help                Show this message");
+    println!();
+    println!("JSON OUTPUT (--json):");
+    println!(
+        "    status, sessions, ping, neighbor, show status/sessions/session/routes count/memory"
+    );
+    println!("    emit a JSON value to stdout instead of the line-oriented form. The shape is");
+    println!("    documented in docs/bindings/lrctl-json.md. Other commands ignore --json.");
 }
 
-/// `lrctl routes <show|dump> ...` — split out because `show` and
-/// `dump` have different argument shapes.
-fn routes(socket: &str, rest: &[String]) -> ExitCode {
+/// `lrctl routes <show|count|dump> ...` — split out because the
+/// sub-commands have different argument shapes.
+fn routes(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
     if rest.is_empty() {
-        eprintln!("usage: lrctl routes <show [prefix] | dump <path>>");
+        eprintln!("usage: lrctl routes <show [prefix] | count | dump <path>>");
         return ExitCode::from(2);
     }
     match rest[0].as_str() {
@@ -212,6 +312,12 @@ fn routes(socket: &str, rest: &[String]) -> ExitCode {
                 }
             }
         }
+        // `routes count` is a BIRD-style alias for `show routes
+        // count`. The daemon's wire command stays `show routes
+        // count`; the alias just routes there. The `--json` flag
+        // is honoured: the daemon's `total N / proto=P routes=M`
+        // body is parsed into `{"total": N, "by_protocol": [{"protocol": P, "routes": M}, ...]}`.
+        "count" => proxy_with_json(socket, "show routes count", json, parse_routes_count_body),
         "dump" => {
             if rest.len() < 2 {
                 eprintln!("usage: lrctl routes dump <path>");
@@ -239,7 +345,7 @@ fn routes(socket: &str, rest: &[String]) -> ExitCode {
 /// line per entry, BIRD `show roa` parity). `roa count` extracts just
 /// the summary line — `roa-total N static S rtr R` — so a script can
 /// poll the table size without parsing the entry list.
-fn roa(socket: &str, rest: &[String]) -> ExitCode {
+fn roa(socket: &str, rest: &[String], _json: Option<JsonFormat>) -> ExitCode {
     if rest.is_empty() {
         eprintln!("usage: lrctl roa <list | count>");
         return ExitCode::from(2);
@@ -301,12 +407,21 @@ fn shutdown(socket: &str, rest: &[String]) -> ExitCode {
 ///
 /// `lrctl show` (no sub) maps to `show status`, mirroring BIRD's
 /// `show` shortcut.
-fn show(socket: &str, rest: &[String]) -> ExitCode {
+///
+/// `--json` is honoured for `status`, `sessions`, `routes count` and
+/// `memory`. For `session <handle>` the JSON view falls back to the
+/// raw body — the per-session block is multi-line key=value with
+/// nested `stats:` / `last-error:` / `messages:` lines that do not
+/// round-trip cleanly into a flat object, so the line-oriented form
+/// is preserved verbatim under `--json` (an operator trading off
+/// fidelity for JSON-parsability can use the `sessions` JSON view
+/// plus a client-side handle filter instead).
+fn show(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
     if rest.is_empty() {
-        return proxy(socket, "show status");
+        return proxy_with_json(socket, "show status", json, parse_show_status_body);
     }
     match rest[0].as_str() {
-        "status" => proxy(socket, "show status"),
+        "status" => proxy_with_json(socket, "show status", json, parse_show_status_body),
         "sessions" => {
             // `show sessions detail` and `show sessions` map to
             // distinct daemon commands (the daemon's renderer chooses
@@ -315,8 +430,13 @@ fn show(socket: &str, rest: &[String]) -> ExitCode {
             // unambiguous — `sessions list` belongs to the legacy
             // `lrctl sessions` command.
             if rest.len() == 1 {
-                proxy(socket, "show sessions")
+                proxy_with_json(socket, "show sessions", json, parse_sessions_body)
             } else if rest.len() == 2 && rest[1] == "detail" {
+                // `show sessions detail` carries the multi-line
+                // per-session block — the JSON view falls back to
+                // the raw body for the same reason as `show session
+                // <handle>` (see above). The plain `show sessions`
+                // one-line form round-trips cleanly.
                 proxy(socket, "show sessions detail")
             } else {
                 eprintln!("usage: lrctl show sessions [detail]");
@@ -346,9 +466,9 @@ fn show(socket: &str, rest: &[String]) -> ExitCode {
                 eprintln!("usage: lrctl show routes count");
                 return ExitCode::from(2);
             }
-            proxy(socket, "show routes count")
+            proxy_with_json(socket, "show routes count", json, parse_routes_count_body)
         }
-        "memory" => proxy(socket, "show memory"),
+        "memory" => proxy_with_json(socket, "show memory", json, parse_show_memory_body),
         other => {
             eprintln!("error: unknown show subcommand '{other}'");
             eprintln!(
@@ -358,6 +478,194 @@ fn show(socket: &str, rest: &[String]) -> ExitCode {
         }
     }
 }
+
+/// `lrctl neighbor [handle]` — BIRD-style alias. With no argument,
+/// maps to `sessions` (the daemon's `sessions` wire keyword). With a
+/// numeric handle, maps to `show session <handle>` for the deep
+/// dive. The `--json` flag is honoured for the no-argument form (the
+/// handle form falls back to the raw `show session` body — see
+/// `show`'s doc comment for why).
+fn neighbor(socket: &str, rest: &[String], json: Option<JsonFormat>) -> ExitCode {
+    if rest.is_empty() {
+        return proxy_with_json(socket, "sessions", json, parse_sessions_body);
+    }
+    // `neighbor <handle>` — alias for `show session <handle>`.
+    match rest[0].parse::<u64>() {
+        Ok(h) => proxy(socket, &format!("show session {h}")),
+        Err(_) => {
+            eprintln!("error: invalid session handle '{}'", rest[0]);
+            eprintln!("usage: lrctl neighbor [handle]");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// `lrctl ping` — round-trip the API socket with the cheapest
+/// command the daemon answers (`help`). The reply is discarded; the
+/// exit code carries the result. The wall-clock latency is measured
+/// around the round-trip and printed as `ok Nms` (or `{"ok": true,
+/// "round_trip_ms": N}` under `--json`) so a health-check loop has a
+/// single number to alert on.
+///
+/// The daemon's `help` command is the cheapest always-succeeding
+/// reply: it does not touch the router state, it just emits the
+/// command list. `status` would also work, but `help` is faster
+/// (no router read-lock) and is the canonical "is anyone home"
+/// probe in the BIRD / vtysh lineage.
+fn ping(socket: &str, json: Option<JsonFormat>) -> ExitCode {
+    let start = std::time::Instant::now();
+    match transport::round_trip(socket, "help") {
+        Ok(body) => {
+            let ms = start.elapsed().as_millis();
+            // A `help` reply starts with "commands:". Anything else
+            // means the daemon is in an unexpected state — surface it
+            // as a non-zero exit so a health-check loop sees it.
+            let is_help = body.starts_with("commands:") || body.contains("commands:");
+            if !is_help {
+                return emit_ping_result(json, false, ms, Some(&body));
+            }
+            emit_ping_result(json, true, ms, None)
+        }
+        Err(e) => {
+            let ms = start.elapsed().as_millis();
+            emit_ping_result(json, false, ms, Some(&e))
+        }
+    }
+}
+
+/// Format the `ping` result for stdout according to the JSON flag.
+/// Returns the exit code (SUCCESS when ok=true, FAILURE otherwise).
+fn emit_ping_result(
+    json: Option<JsonFormat>,
+    ok: bool,
+    ms: u128,
+    detail: Option<&str>,
+) -> ExitCode {
+    match json {
+        Some(fmt) => {
+            let mut o = JObject::new();
+            o.push_bool("ok", ok).push_uint("round_trip_ms", ms as u64);
+            if let Some(d) = detail {
+                o.push_str("detail", d);
+            }
+            let v = JValue::Object(o);
+            print_json(&v, fmt);
+        }
+        None => match detail {
+            Some(d) => println!("fail {ms}ms: {d}"),
+            None => println!("ok {ms}ms"),
+        },
+    }
+    if ok {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::from(1)
+    }
+}
+
+/// `lrctl metrics [--metrics-addr ADDR]` — scrape the daemon's
+/// HTTP /metrics endpoint and proxy the body to stdout. The address
+/// defaults to `127.0.0.1:9119` (the daemon's documented default);
+/// `--metrics-addr ADDR` overrides it. `--socket` is unused here —
+/// the metrics endpoint is TCP, not the Unix API socket.
+///
+/// The body is the full Prometheus text exposition, returned
+/// verbatim. A 5 s connect+read deadline matches the daemon-side
+/// `set_read_timeout(500ms)` per connection — a hung daemon
+/// surfaces as a transport error rather than a hang.
+fn metrics(_socket: &str, rest: &[String]) -> ExitCode {
+    let mut addr = DEFAULT_METRICS_ADDR.to_string();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = &rest[i];
+        if a == "--metrics-addr" {
+            if i + 1 >= rest.len() {
+                eprintln!("error: --metrics-addr requires an argument");
+                return ExitCode::from(2);
+            }
+            addr = rest[i + 1].clone();
+            i += 2;
+            continue;
+        }
+        if let Some(v) = a.strip_prefix("--metrics-addr=") {
+            addr = v.to_string();
+            i += 1;
+            continue;
+        }
+        eprintln!("error: unexpected argument '{a}'");
+        eprintln!("usage: lrctl metrics [--metrics-addr ADDR]");
+        return ExitCode::from(2);
+    }
+    // A plain TCP `GET /metrics HTTP/1.0` — the daemon's metrics
+    // module answers this exact shape (`serve_connection`).
+    use std::io::{Read, Write};
+    use std::net::TcpStream;
+    use std::time::{Duration, Instant};
+    let mut conn = match TcpStream::connect(&addr) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("lrctl: connect {addr}: {e}");
+            return ExitCode::from(1);
+        }
+    };
+    let _ = conn.set_read_timeout(Some(Duration::from_secs(5)));
+    let _ = conn.set_write_timeout(Some(Duration::from_secs(5)));
+    if let Err(e) = write!(
+        conn,
+        "GET /metrics HTTP/1.0\r\nHost: {addr}\r\nConnection: close\r\n\r\n"
+    ) {
+        eprintln!("lrctl: write: {e}");
+        return ExitCode::from(1);
+    }
+    let _ = conn.flush();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut out = Vec::new();
+    let mut chunk = [0u8; 4096];
+    loop {
+        match conn.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::WouldBlock
+                    || e.kind() == std::io::ErrorKind::TimedOut =>
+            {
+                if !out.is_empty() || Instant::now() >= deadline {
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => {
+                eprintln!("lrctl: read: {e}");
+                return ExitCode::from(1);
+            }
+        }
+    }
+    let body = String::from_utf8_lossy(&out);
+    // The HTTP/1.0 response is `HTTP/1.0 200 OK\r\n<headers>\r\n\r\n<body>`.
+    // Surface the status line so the operator sees a non-200 scrape
+    // (the daemon returns 404 on unknown paths, 200 on /metrics).
+    let (status_line, body_part) = match body.find("\r\n\r\n") {
+        Some(idx) => {
+            let head = &body[..idx];
+            let bdy = &body[idx + 4..];
+            (head.lines().next().unwrap_or(""), bdy)
+        }
+        None => ("", body.as_ref()),
+    };
+    if !status_line.contains(" 200 ") {
+        eprintln!("lrctl: {status_line}");
+        // Still print the body so the operator sees the error reply.
+        print!("{body_part}");
+        return ExitCode::from(1);
+    }
+    print!("{body_part}");
+    ExitCode::SUCCESS
+}
+
+/// The default metrics HTTP address (matches the daemon's documented
+/// default). Kept here rather than read from the daemon so the CLI
+/// works on a stock install without consulting the daemon's config.
+const DEFAULT_METRICS_ADDR: &str = "127.0.0.1:9119";
 
 /// `lrctl session <handle> <op> [args]` — write-side fine-grained
 /// operations on one session (issue #52 follow-up: "the lrctl
@@ -846,4 +1154,297 @@ fn proxy_raw(socket: &str, cmd: &str) -> Result<String, ExitCode> {
             Err(ExitCode::from(1))
         }
     }
+}
+
+/// Like [`proxy`] but with an optional JSON view. When `json` is
+/// `Some`, the daemon's reply is passed through `parser` to produce
+/// a [`JValue`], then serialized in the requested format (compact or
+/// pretty). When `json` is `None`, the daemon's reply is printed
+/// verbatim — the same as `proxy`.
+///
+/// A transport failure or a daemon `error:` line is a non-zero exit
+/// in both modes; the JSON view is only applied to success replies.
+/// Under `--json`, a daemon error surfaces as
+/// `{"ok":false,"error":"…"}` so a JSON-consuming script sees the
+/// same shape across success and failure (and does not have to
+/// special-case a non-JSON line).
+fn proxy_with_json(
+    socket: &str,
+    cmd: &str,
+    json: Option<JsonFormat>,
+    parser: fn(&str) -> JValue,
+) -> ExitCode {
+    match transport::round_trip(socket, cmd) {
+        Ok(body) => {
+            let is_error = body.lines().any(|l| l.starts_with("error:"));
+            if is_error {
+                match json {
+                    Some(fmt) => {
+                        let mut o = JObject::new();
+                        o.push_bool("ok", false);
+                        // The first `error:` line carries the reason;
+                        // later lines are typically context. Joining
+                        // the first error line keeps the JSON shape
+                        // flat for the common case.
+                        let reason = body
+                            .lines()
+                            .find(|l| l.starts_with("error:"))
+                            .map(|l| l.trim_start_matches("error:").trim())
+                            .unwrap_or("");
+                        o.push_str("error", reason);
+                        let v = JValue::Object(o);
+                        print_json(&v, fmt);
+                    }
+                    None => {
+                        print!("{body}");
+                        if !body.ends_with('\n') {
+                            println!();
+                        }
+                    }
+                }
+                return ExitCode::from(1);
+            }
+            match json {
+                Some(fmt) => {
+                    let v = parser(&body);
+                    print_json(&v, fmt);
+                }
+                None => {
+                    print!("{body}");
+                    if !body.ends_with('\n') {
+                        println!();
+                    }
+                }
+            }
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            match json {
+                Some(fmt) => {
+                    let mut o = JObject::new();
+                    o.push_bool("ok", false).push_str("error", &e);
+                    let v = JValue::Object(o);
+                    print_json(&v, fmt);
+                }
+                None => eprintln!("lrctl: {e}"),
+            }
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// Serialise a [`JValue`] to stdout in the requested format, with a
+/// trailing newline so shell pipelines see clean output. Lives here
+/// (not on `JValue` itself) so the serializer module does not pull
+/// `std::io::Write` for a single helper.
+fn print_json(v: &JValue, fmt: JsonFormat) {
+    let s = match fmt {
+        JsonFormat::Compact => v.to_json(),
+        JsonFormat::Pretty => v.to_pretty(),
+    };
+    println!("{s}");
+}
+
+// ---------------------------------------------------------------------------
+// JSON parsers — one per daemon command. Each parser takes the raw
+// line-oriented daemon reply and produces a [`JValue`] that captures
+// the same information. The shapes are documented in
+// docs/bindings/lrctl-json.md.
+// ---------------------------------------------------------------------------
+
+/// Parse the daemon's `status` reply (`key value\n` lines) into a
+/// JSON object. The keys are normalised to `snake_case` (the daemon
+/// uses `local-as`, the JSON shape uses `local_as`) so a JSON
+/// consumer does not have to deal with hyphens-as-key-characters.
+fn parse_status_body(body: &str) -> JValue {
+    let mut o = JObject::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // The status body is `key value` (one space). The first
+        // space splits the key from the value; the value keeps its
+        // own internal spacing.
+        let Some((key, value)) = line.split_once(' ') else {
+            continue;
+        };
+        let key = key.replace('-', "_");
+        push_typed(&mut o, &key, value);
+    }
+    JValue::Object(o)
+}
+
+/// Parse the daemon's `show status` reply. Same shape as `status`
+/// plus a `kind=` summary block and a `memory` line — but the
+/// `kind=KIND total=N established=M` lines are nested under a
+/// `by_protocol` array, and the `memory rss-bytes=N vsize-bytes=M`
+/// line is nested under a `memory` object.
+fn parse_show_status_body(body: &str) -> JValue {
+    let mut o = JObject::new();
+    let mut by_protocol = JArray::new();
+    let mut memory = JObject::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        // Indented `  kind=… total=… established=…` line → push to
+        // `by_protocol`. The leading spaces were stripped above; the
+        // distinguishing token is `kind=`.
+        if let Some(rest) = line.strip_prefix("kind=") {
+            // rest = "bgp total=1 established=0"
+            let mut entry = JObject::new();
+            let mut tokens = rest.split_whitespace();
+            if let Some(kind) = tokens.next() {
+                entry.push_str("kind", kind);
+            }
+            for tok in tokens {
+                if let Some((k, v)) = tok.split_once('=') {
+                    push_typed(&mut entry, &k.replace('-', "_"), v);
+                }
+            }
+            by_protocol.push(JValue::Object(entry));
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("memory ") {
+            // rest = "rss-bytes=N vsize-bytes=M"
+            for tok in rest.split_whitespace() {
+                if let Some((k, v)) = tok.split_once('=') {
+                    push_typed(&mut memory, &k.replace('-', "_"), v);
+                }
+            }
+            continue;
+        }
+        // Fallback: a `key value` line, like the plain `status`
+        // command.
+        if let Some((key, value)) = line.split_once(' ') {
+            let key = key.replace('-', "_");
+            push_typed(&mut o, &key, value);
+        }
+    }
+    if !by_protocol.is_empty() {
+        o.push("by_protocol", JValue::Array(by_protocol));
+    }
+    if !memory.is_empty() {
+        o.push("memory", JValue::Object(memory));
+    }
+    JValue::Object(o)
+}
+
+/// Parse the daemon's `sessions` reply (one `#N key=value key=value …`
+/// line per session) into a JSON array of objects. Each `key=value`
+/// pair becomes a field on the per-session object. Keys are
+/// normalised to `snake_case`.
+fn parse_sessions_body(body: &str) -> JValue {
+    let mut a = JArray::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        // A session line starts with `#N ` where N is the numeric
+        // handle. The leading `#` is NOT a comment marker (unlike
+        // the daemon's `# route installed …` lines, which are
+        // routing-log lines and not part of `sessions`). The
+        // distinguishing rule: `#` immediately followed by a digit
+        // is a session line; `#` followed by anything else is a
+        // comment line.
+        let line = match line
+            .strip_prefix('#')
+            .filter(|rest| rest.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        {
+            Some(rest) => rest,
+            None => continue,
+        };
+        let mut entry = JObject::new();
+        let mut tokens = line.split_whitespace();
+        if let Some(handle) = tokens.next() {
+            entry.push_str("handle", handle);
+        }
+        for tok in tokens {
+            if let Some((k, v)) = tok.split_once('=') {
+                push_typed(&mut entry, &k.replace('-', "_"), v);
+            }
+        }
+        a.push(JValue::Object(entry));
+    }
+    JValue::Array(a)
+}
+
+/// Parse the daemon's `show routes count` reply (`total N\n  proto=P
+/// routes=M` lines) into a JSON object with `total` and `by_protocol`
+/// fields.
+fn parse_routes_count_body(body: &str) -> JValue {
+    let mut o = JObject::new();
+    let mut by_protocol = JArray::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("total ") {
+            push_typed(&mut o, "total", rest);
+            continue;
+        }
+        if let Some(rest) = line.strip_prefix("proto=") {
+            // rest = "bgp routes=N"
+            let mut entry = JObject::new();
+            let mut tokens = rest.split_whitespace();
+            if let Some(proto) = tokens.next() {
+                entry.push_str("protocol", proto);
+            }
+            for tok in tokens {
+                if let Some((k, v)) = tok.split_once('=') {
+                    push_typed(&mut entry, &k.replace('-', "_"), v);
+                }
+            }
+            by_protocol.push(JValue::Object(entry));
+            continue;
+        }
+    }
+    if !by_protocol.is_empty() {
+        o.push("by_protocol", JValue::Array(by_protocol));
+    }
+    JValue::Object(o)
+}
+
+/// Parse the daemon's `show memory` reply (`uptime-secs N\nrss-bytes
+/// N\nvsize-bytes N` lines) into a JSON object. Same key-normalisation
+/// as `parse_status_body`.
+fn parse_show_memory_body(body: &str) -> JValue {
+    let mut o = JObject::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once(' ') {
+            push_typed(&mut o, &k.replace('-', "_"), v);
+        }
+    }
+    JValue::Object(o)
+}
+
+/// Push a typed `JValue` for `key`/`value` onto `o`. Numeric values
+/// parse to `UInt` (so an AS number like `64512` renders as a JSON
+/// number, not a string); `true`/`false` parse to `Bool`; the
+/// sentinel `unknown` (BIRD parity for "no value available")
+/// becomes a JSON `null` so a consumer can distinguish "no value"
+/// from the string `"unknown"`. Anything else stays a `Str`.
+fn push_typed(o: &mut JObject, key: &str, value: &str) {
+    let v = if value == "unknown" {
+        JValue::Null
+    } else if value == "true" {
+        JValue::Bool(true)
+    } else if value == "false" {
+        JValue::Bool(false)
+    } else if let Ok(n) = value.parse::<u64>() {
+        JValue::UInt(n)
+    } else if let Ok(n) = value.parse::<i64>() {
+        JValue::Int(n)
+    } else {
+        JValue::Str(value.to_string())
+    };
+    o.push(key, v);
 }

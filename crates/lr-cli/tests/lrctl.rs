@@ -797,6 +797,350 @@ fn lrctl_show_unknown_subcommand_exits_nonzero() {
     let _ = d.wait_exit();
 }
 
+// `lrctl ping` — round-trip health check. The daemon is up; `ping`
+// must exit 0 with `ok Nms` (or a JSON object under --json).
+// ---------------------------------------------------------------------------
+#[test]
+fn lrctl_ping_returns_ok_when_daemon_is_up() {
+    let (socket, d) = spawn_show_daemon("ping", "18110");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "ping"]);
+    assert!(
+        ok,
+        "lrctl ping should exit 0 when daemon is up: stderr={stderr}"
+    );
+    assert!(
+        stdout.starts_with("ok "),
+        "ping stdout should start with 'ok ': {stdout}"
+    );
+    assert!(
+        stdout.ends_with("ms\n"),
+        "ping stdout should end with 'ms\\n': {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_ping_json_emits_object_with_round_trip_ms() {
+    let (socket, d) = spawn_show_daemon("ping-json", "18111");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "--json", "ping"]);
+    assert!(ok, "lrctl --json ping should exit 0: stderr={stderr}");
+    // The JSON shape is `{"ok":true,"round_trip_ms":N}`. Parse just
+    // enough to assert the keys are present.
+    assert!(
+        stdout.contains("\"ok\":true"),
+        "ping JSON should have ok:true: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"round_trip_ms\":"),
+        "ping JSON should have round_trip_ms: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_ping_fails_when_daemon_is_down() {
+    // No daemon spawned — connect should fail.
+    let socket =
+        std::env::temp_dir().join(format!("lrctl-test-ping-down-{}.sock", std::process::id()));
+    let _ = std::fs::remove_file(&socket);
+    let (ok, stdout, _stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "ping"]);
+    assert!(!ok, "lrctl ping against no daemon should exit non-zero");
+    assert!(
+        stdout.starts_with("fail "),
+        "ping stdout against no daemon should start with 'fail ': {stdout}"
+    );
+}
+
+// `lrctl neighbor` — BIRD-style alias for `sessions`/`show session`.
+// ---------------------------------------------------------------------------
+#[test]
+fn lrctl_neighbor_lists_sessions() {
+    let (socket, d) = spawn_show_daemon("neighbor", "18112");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "neighbor"]);
+    assert!(ok, "lrctl neighbor should exit 0: stderr={stderr}");
+    // The alias must produce the same shape as `lrctl sessions`:
+    // one line per session, starting with `#1`.
+    assert!(
+        stdout.contains("#1 kind=bgp"),
+        "neighbor stdout should list session #1: {stdout}"
+    );
+    assert!(
+        stdout.contains("local-as=64512"),
+        "neighbor stdout should carry the configured local-as: {stdout}"
+    );
+
+    // `neighbor 1` is an alias for `show session 1`.
+    let (ok, stdout, _stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "neighbor", "1"]);
+    assert!(ok, "lrctl neighbor 1 should exit 0");
+    assert!(
+        stdout.contains("handle 1"),
+        "neighbor 1 stdout should show handle 1: {stdout}"
+    );
+    assert!(
+        stdout.contains("kind bgp"),
+        "neighbor 1 stdout should show kind=bgp: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_neighbor_rejects_non_numeric_handle() {
+    let (socket, d) = spawn_show_daemon("neighbor-bad", "18113");
+    let (ok, _stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "neighbor",
+        "not-a-number",
+    ]);
+    assert!(!ok, "lrctl neighbor <non-numeric> should exit non-zero");
+    assert!(
+        stderr.contains("error: invalid session handle"),
+        "neighbor non-numeric stderr: {stderr}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+// `lrctl routes count` — alias for `show routes count`.
+// ---------------------------------------------------------------------------
+#[test]
+fn lrctl_routes_count_alias_matches_show_routes_count() {
+    let (socket, d) = spawn_show_daemon("routes-count-alias", "18114");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "routes", "count"]);
+    assert!(ok, "lrctl routes count should exit 0: stderr={stderr}");
+    assert!(
+        stdout.contains("total 1"),
+        "routes count stdout should report total 1: {stdout}"
+    );
+    assert!(
+        stdout.contains("proto="),
+        "routes count stdout should list per-protocol lines: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+// `lrctl --json status` / `--json sessions` / `--json show status` —
+// machine-readable JSON output for the line-oriented commands.
+// ---------------------------------------------------------------------------
+#[test]
+fn lrctl_json_status_emits_compact_object() {
+    let (socket, d) = spawn_show_daemon("json-status", "18115");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "--json", "status"]);
+    assert!(ok, "lrctl --json status should exit 0: stderr={stderr}");
+    // The body must be a single-line JSON object starting with `{`.
+    let line = stdout.lines().next().unwrap_or("").trim();
+    assert!(line.starts_with('{'), "json status stdout: {stdout}");
+    assert!(line.ends_with('}'), "json status stdout: {stdout}");
+    // Keys are normalised to snake_case (the daemon's `local-as`
+    // becomes `local_as`).
+    assert!(
+        line.contains("\"local_as\":64512"),
+        "json status should carry local_as as integer: {stdout}"
+    );
+    assert!(
+        line.contains("\"peer_as\":64513"),
+        "json status should carry peer_as as integer: {stdout}"
+    );
+    assert!(
+        line.contains("\"router_id\":\"10.0.0.1\""),
+        "json status should carry router_id as string: {stdout}"
+    );
+    assert!(
+        line.contains("\"uptime_secs\":"),
+        "json status should carry uptime_secs as integer: {stdout}"
+    );
+    assert!(
+        line.contains("\"sessions\":"),
+        "json status should carry sessions count: {stdout}"
+    );
+    assert!(
+        line.contains("\"rib_entries\":"),
+        "json status should carry rib_entries count: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_json_sessions_emits_array_of_objects() {
+    let (socket, d) = spawn_show_daemon("json-sessions", "18116");
+    let (ok, stdout, stderr) = lrctl(&["--socket", socket.to_str().unwrap(), "--json", "sessions"]);
+    assert!(ok, "lrctl --json sessions should exit 0: stderr={stderr}");
+    let line = stdout.lines().next().unwrap_or("").trim();
+    assert!(
+        line.starts_with('['),
+        "json sessions stdout should be a JSON array: {stdout}"
+    );
+    assert!(line.ends_with(']'), "json sessions stdout: {stdout}");
+    // The first array element is the session object with its handle.
+    assert!(
+        line.contains("\"handle\":\"1\""),
+        "json sessions should carry the handle: {stdout}"
+    );
+    assert!(
+        line.contains("\"kind\":\"bgp\""),
+        "json sessions should carry the kind: {stdout}"
+    );
+    assert!(
+        line.contains("\"local_as\":64512"),
+        "json sessions should carry local_as as integer: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_json_show_status_includes_by_protocol_and_memory() {
+    let (socket, d) = spawn_show_daemon("json-show-status", "18117");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--json",
+        "show",
+        "status",
+    ]);
+    assert!(
+        ok,
+        "lrctl --json show status should exit 0: stderr={stderr}"
+    );
+    // The JSON shape nests `by_protocol` (one entry per protocol
+    // kind) and a `memory` object.
+    assert!(
+        stdout.contains("\"by_protocol\":["),
+        "json show status should carry a by_protocol array: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"kind\":\"bgp\""),
+        "json show status by_protocol should include the bgp kind: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"total\":"),
+        "json show status by_protocol entry should carry a total: {stdout}"
+    );
+    assert!(
+        stdout.contains("\"memory\":{"),
+        "json show status should carry a memory object: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_json_pretty_indents_two_spaces() {
+    let (socket, d) = spawn_show_daemon("json-pretty", "18118");
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "--json=pretty",
+        "status",
+    ]);
+    assert!(
+        ok,
+        "lrctl --json=pretty status should exit 0: stderr={stderr}"
+    );
+    // Pretty-printed JSON contains newlines + 2-space indent; the
+    // compact form does not.
+    assert!(
+        stdout.contains("\n  \""),
+        "pretty JSON should contain newline + 2-space indent: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
+#[test]
+fn lrctl_json_rejects_unknown_format() {
+    // `--json=bogus` should exit 2 with a usage hint — the parser
+    // is strict so a typo is loud.
+    let (ok, _stdout, stderr) = lrctl(&["--json=bogus", "status"]);
+    assert!(!ok, "lrctl --json=bogus should exit non-zero");
+    assert!(
+        stderr.contains("error: --json=bogus"),
+        "--json=bogus stderr should explain the bad format: {stderr}"
+    );
+}
+
+// `lrctl metrics` — scrape the daemon's HTTP /metrics endpoint. The
+// daemon needs to be started with `--metrics-addr ADDR` for the test
+// (the default `spawn_show_daemon` helper does not configure it).
+// ---------------------------------------------------------------------------
+#[test]
+fn lrctl_metrics_proxies_prometheus_exposition() {
+    // Pick a free TCP port for the metrics endpoint.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind :0");
+    let metrics_port = listener.local_addr().unwrap().port();
+    drop(listener);
+    std::thread::sleep(Duration::from_millis(10));
+
+    let socket = std::env::temp_dir().join(format!(
+        "lrctl-test-metrics-{}-{}.sock",
+        std::process::id(),
+        metrics_port,
+    ));
+    let _ = std::fs::remove_file(&socket);
+    let listen_port = 18200u16 + (metrics_port & 0xff);
+    let d = Daemon::spawn(
+        &[
+            "--local-as",
+            "64512",
+            "--peer-as",
+            "64513",
+            "--router-id",
+            "10.0.0.1",
+            "--listen",
+            &format!("127.0.0.1:{listen_port}"),
+            "--network",
+            "203.0.113.0/24",
+            "--api-socket",
+            socket.to_str().unwrap(),
+            "--metrics-addr",
+            &format!("127.0.0.1:{metrics_port}"),
+        ],
+        "metrics-cmd",
+    );
+    d.wait_log("metrics endpoint on", "metrics endpoint up");
+
+    let (ok, stdout, stderr) = lrctl(&[
+        "--socket",
+        socket.to_str().unwrap(),
+        "metrics",
+        "--metrics-addr",
+        &format!("127.0.0.1:{metrics_port}"),
+    ]);
+    assert!(ok, "lrctl metrics should exit 0: stderr={stderr}");
+    // The body is the Prometheus exposition format — at minimum,
+    // the lr_info gauge and the lr_uptime_seconds gauge must be
+    // present.
+    assert!(
+        stdout.contains("# TYPE lr_info gauge"),
+        "metrics stdout should carry lr_info: {stdout}"
+    );
+    assert!(
+        stdout.contains("lr_info{"),
+        "metrics stdout should carry lr_info value: {stdout}"
+    );
+    assert!(
+        stdout.contains("# TYPE lr_uptime_seconds gauge"),
+        "metrics stdout should carry lr_uptime_seconds: {stdout}"
+    );
+
+    lrctl(&["--socket", socket.to_str().unwrap(), "shutdown"]);
+    let _ = d.wait_exit();
+}
+
 // `lrctl roa list` / `lrctl roa count` — ROADMAP "lrctl roa list", issue #52
 // follow-up. The e2e tests load a TOML config with two `[[roa]]` entries
 // so the daemon's ROA store is populated at startup, then exercise the
