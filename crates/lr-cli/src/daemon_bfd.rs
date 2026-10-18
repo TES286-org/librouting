@@ -217,11 +217,7 @@ fn apply_events(p: &mut BfdPeer, evs: Vec<BfdSessionEvent>) {
                 );
             }
             BfdSessionEvent::Timeout => {
-                log_info!(
-                    Component::Bfd,
-                    "peer {}: detection time expired",
-                    p.label
-                );
+                log_info!(Component::Bfd, "peer {}: detection time expired", p.label);
             }
             BfdSessionEvent::AuthFailed => {
                 log_warn!(
@@ -231,12 +227,7 @@ fn apply_events(p: &mut BfdPeer, evs: Vec<BfdSessionEvent>) {
                 );
             }
             BfdSessionEvent::PeerDiagnostic(d) => {
-                log_info!(
-                    Component::Bfd,
-                    "peer {}: peer diagnostic: {}",
-                    p.label,
-                    d
-                );
+                log_info!(Component::Bfd, "peer {}: peer diagnostic: {}", p.label, d);
             }
             BfdSessionEvent::OutboundQueued => {}
         }
