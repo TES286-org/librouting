@@ -2,19 +2,28 @@
 # BIRD-in-WSL2 interop test: lr-daemon on the Windows host exchanges
 # BGP with BIRD 2 running inside WSL2's pre-installed Ubuntu 22.04.
 # Verifies cross-OS BGP interoperability — lr-daemon's TCP stack on
-# Windows talking to BIRD's TCP stack on Linux via WSL2's automatic
-# localhost forwarding.
+# Windows talking to BIRD's TCP stack on Linux via the WSL2 vETH
+# gateway.
 #
 # Architecture:
-#   lr-daemon.exe (Windows host, AS64512, listener 127.0.0.1:$LR_PORT)
-#        ↑↓ TCP via WSL2's localhost forwarding
-#   BIRD 2 (WSL2 Ubuntu, AS64513, connector to 127.0.0.1:$LR_PORT)
+#   lr-daemon.exe (Windows host, AS64512, listener 0.0.0.0:$LR_PORT)
+#        ↑↓ TCP via the WSL2 NAT vETH gateway
+#   BIRD 2 (WSL2 Ubuntu, AS64513, connector to <gateway-ip>:$LR_PORT)
 #
-# WSL2's automatic localhost forwarding makes any service bound to
-# 0.0.0.0 inside WSL2 reachable from the Windows host at 127.0.0.1
-# (and vice versa — WSL2 can reach Windows host services at 127.0.0.1).
-# So BIRD inside WSL2 connecting to 127.0.0.1:$LR_PORT reaches the
-# lr-daemon.exe listener on the Windows host directly.
+# WSL2 NAT networking: the Linux side sees a default route via the
+# host's WSL-side vEthernet address. `ip route show default` from
+# inside WSL2 prints that gateway IP — Windows host's WSL NIC. BIRD
+# connecting to that IP reaches lr-daemon bound to 0.0.0.0 on the
+# Windows host directly.
+#
+# Earlier revisions relied on WSL2's `LocalhostForwarding`, which
+# advertises services bound to 0.0.0.0 inside WSL2 on the Windows
+# host's 127.0.0.1 (and the reverse). That mechanism was unreliable
+# on Windows Server 2025 runners (the new `windows-latest` label
+# resolves to `windows-2025-vs2026`): BIRD connecting to 127.0.0.1
+# from inside WSL2 hit its own loopback, never the host's listener,
+# and died with ECONNREFUSED. The vETH-gateway path is reliable on
+# every WSL2 generation and works on mirrored-mode networking too.
 #
 # The script also runs on Linux (the regular `bird` package path),
 # falling back to the host-installed BIRD binary when no WSL2 is
@@ -58,41 +67,6 @@ BIN=$(./tests/interop/_lr_daemon.sh 2>/dev/null) || {
 LR_PORT=${LR_PORT:-17997}
 OUT=/tmp/lr_bird_wsl
 rm -rf "$OUT"; mkdir -p "$OUT"
-
-# BIRD config — shared between the WSL2 and host-installed paths.
-# BIRD connects to 127.0.0.1:$LR_PORT (which works on Linux direct
-# and inside WSL2 via the localhost-forwarding).
-cat >"$OUT/bird.conf" <<EOF
-# BIRD 2 configuration for the librouting WSL2 interop test.
-log stderr all;
-router id 10.0.0.2;
-
-protocol device {}
-
-protocol static static_routes {
-    ipv4;
-    route 198.51.100.0/24 blackhole;
-}
-
-filter export_to_lr {
-    if proto = "static_routes" then accept;
-    reject;
-}
-
-protocol bgp lr {
-    local as 64513;
-    neighbor 127.0.0.1 port $LR_PORT as 64512;
-    multihop 2;       # eBGP over loopback
-    ipv4 {
-        import all;
-        export filter export_to_lr;
-        # BIRD refuses to export a next hop equal to the neighbor
-        # address (both ends are 127.0.0.1 here), so pin a distinct
-        # one.
-        next hop address 192.0.2.10;
-    };
-}
-EOF
 
 # Detect a usable BIRD runtime. The first match wins:
 #   1. WSL2 + Ubuntu (Windows GitHub Actions runner — WSL2 is enabled
@@ -163,6 +137,82 @@ if [ -z "$BIRD_RUNTIME" ]; then
     exit 0
 fi
 
+# BIRD needs to connect to lr-daemon. The destination IP and the
+# lr-daemon listen address depend on the runtime:
+#   * host (Linux)  — both sides are on the same loopback, so 127.0.0.1
+#     on both ends. lr-daemon binds 127.0.0.1.
+#   * wsl (Windows) — BIRD inside WSL2 cannot reach the Windows host's
+#     127.0.0.1; WSL2 NAT networking routes via the host's WSL-side
+#     vEthernet address. Compute that gateway IP from inside WSL2
+#     with `ip route show default`, and bind lr-daemon to 0.0.0.0 so
+#     the WSL gateway connection lands on the listener.
+#
+# `LR_NEIGHBOR_IP`  is the address BIRD dials.
+# `LR_LISTEN_ADDR`  is the address lr-daemon binds (`--listen` and
+#   `--local-address`). 0.0.0.0 means "all interfaces".
+LR_NEIGHBOR_IP=127.0.0.1
+LR_LISTEN_ADDR=127.0.0.1
+if [ "$BIRD_RUNTIME" = wsl ]; then
+    # The WSL2 host gateway IP is the default route's next hop from
+    # inside the namespace. `ip route show default` is the most
+    # portable source — it works whether the distro uses
+    # systemd-resolved, /etc/resolv.conf auto-generation, or the
+    # hand-rolled ubuntu-base layout.
+    LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c \
+        "ip route show default 2>/dev/null | awk '/^default/ {print \$3; exit}'" \
+        2>/dev/null | tr -d '\r\n')
+    if [ -z "$LR_NEIGHBOR_IP" ]; then
+        # Fall back to /etc/resolv.conf's nameserver — the WSL2 init
+        # writes the host gateway IP there too. ubuntu-base may not
+        # have a populated resolv.conf until networking is up, so this
+        # is a true last-resort.
+        LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c \
+            "awk '/^nameserver/ {print \$2; exit}' /etc/resolv.conf 2>/dev/null" \
+            2>/dev/null | tr -d '\r\n')
+    fi
+    if [ -z "$LR_NEIGHBOR_IP" ]; then
+        echo "SKIP: could not determine WSL2 host gateway IP"
+        exit 0
+    fi
+    LR_LISTEN_ADDR=0.0.0.0
+    echo "== WSL2 host gateway IP: $LR_NEIGHBOR_IP (lr-daemon will bind $LR_LISTEN_ADDR)"
+fi
+
+# BIRD config — emitted after the runtime+gateway detection so the
+# `neighbor` line uses the WSL2 host gateway IP on Windows and
+# 127.0.0.1 on Linux host. `multihop 2` is kept so the eBGP session
+# tolerates the cross-namespace next hop.
+cat >"$OUT/bird.conf" <<EOF
+# BIRD 2 configuration for the librouting WSL2 interop test.
+log stderr all;
+router id 10.0.0.2;
+
+protocol device {}
+
+protocol static static_routes {
+    ipv4;
+    route 198.51.100.0/24 blackhole;
+}
+
+filter export_to_lr {
+    if proto = "static_routes" then accept;
+    reject;
+}
+
+protocol bgp lr {
+    local as 64513;
+    neighbor $LR_NEIGHBOR_IP port $LR_PORT as 64512;
+    multihop 2;       # eBGP over loopback / cross-netns
+    ipv4 {
+        import all;
+        export filter export_to_lr;
+        # BIRD refuses to export a next hop equal to the neighbor
+        # address, so pin a distinct one.
+        next hop address 192.0.2.10;
+    };
+}
+EOF
+
 # Wrap the BIRD CLI invocation so the rest of the script is
 # runtime-agnostic. `bird_run` starts BIRD in the background; the
 # caller stores the resulting process handle in $BIRD_HANDLE for the
@@ -227,15 +277,15 @@ bird_shutdown() {
     fi
 }
 
-echo "== starting BIRD ($BIRD_RUNTIME) → connects to lr-daemon at 127.0.0.1:$LR_PORT =="
+echo "== starting BIRD ($BIRD_RUNTIME) → connects to lr-daemon at $LR_NEIGHBOR_IP:$LR_PORT =="
 bird_run "$OUT/bird.conf"
 trap 'bird_shutdown; kill $LR_PID 2>/dev/null || true' EXIT
 sleep 1
 
-echo "== starting lr-daemon (host, AS64512, listener 127.0.0.1:$LR_PORT) =="
+echo "== starting lr-daemon (host, AS64512, listener $LR_LISTEN_ADDR:$LR_PORT) =="
 "$BIN" --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
     --ebgp-policy accept-all \
-    --listen 127.0.0.1:$LR_PORT --local-address 127.0.0.1 \
+    --listen $LR_LISTEN_ADDR:$LR_PORT --local-address $LR_LISTEN_ADDR \
     --network 203.0.113.0/24 \
     >"$OUT/lr.log" 2>&1 &
 LR_PID=$!
