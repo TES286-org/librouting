@@ -13,15 +13,37 @@ defines it; the code wins over any sentence here.
 
 ## Protocol coverage
 
-**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Not started.
-The daemon does not export IGP topology to a controller. The work is the
-MP-BGP Link-State address family: Node, Link and Prefix NLRI with their
-descriptor TLVs, the attribute TLVs, and a projection from the OSPF LSDBs
-and the SRv6 database onto those shapes in `lr-bgp`. The projection belongs
-beside the codec, and the daemon publishes it on a BGP session as a new
-family. Done when a third-party collector builds the same graph from our
-session that the OSPF daemon holds, and republishing is incremental rather
-than a full resend.
+**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Partial —
+the wire codec has landed, the projection and daemon wiring have not.
+
+`lr-bgp::path::bgp_ls` parses and serialises the Node, Link, IPv4
+Prefix and IPv6 Prefix NLRI shapes from RFC 7752 §3.3, the Local
+Node Descriptor / Remote Node Descriptor / Link Descriptor / Prefix
+Descriptor TLVs (§3.2), and the Node Descriptor sub-TLVs (§3.2.1.4:
+AS, BGP-LS Identifier, OSPF Area-ID, IGP Router-ID). Unknown TLVs and
+sub-TLVs are preserved verbatim so the codec round-trips byte-for-byte
+on any well-formed input — the cargo-fuzz target `bgp_ls_decode` ran
+62M iterations without crashes. The SRv6 SID NLRI (RFC 9514 §3,
+NLRI Type 6) is parsed at the framing level only — its inner SRv6
+descriptor sub-TLVs need a follow-up.
+
+What remains to flip the STATUS row from `partial` to `yes`:
+
+- A projection from the OSPFv2 / OSPFv3 LSDBs onto the Node / Link /
+  Prefix NLRI set, plus a walk of the SRv6 database onto the RFC 9552
+  SRv6 SID NLRI. The projection is a pure function on the LSDB; it
+  belongs in `lr-router` beside `instance::ospf`.
+- Daemon wiring: a `--bgp-ls` flag (and a `[bgp_ls]` block in the
+  native DSL) that registers the BGP-LS family on a session and runs
+  the projection's incremental republish on LSDB changes.
+- An interop lab (`tests/interop/bgpls_bird.sh`) that starts an
+  OSPF-only `lr-daemon` plus a BIRD peer configured for BGP-LS, and
+  verifies the BIRD peer builds the same IGP graph from our session
+  that the lr-daemon holds in its OSPF LSDB.
+
+Done when a third-party collector builds the same graph from our
+session that the OSPF daemon holds, and republishing is incremental
+rather than a full resend.
 
 **BGP SR Policy (RFC 9256) with the SRv6 binding (RFC 9430).** Not started.
 Nothing consumes SR policy. The work is the SR Policy address family and the
