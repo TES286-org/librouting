@@ -27,6 +27,20 @@ impl NlriFamily {
     /// RFC 8277 §3: IPv6 labelled unicast (AFI=2, SAFI=4). NLRI carries an
     /// MPLS label stack immediately before the IP prefix.
     pub const IPV6_LABELED_UNICAST: Self = Self { afi: 2, safi: 4 };
+    /// RFC 7752 §3.1: BGP-LS (AFI=16388, SAFI=71). NLRI carries a Link-State
+    /// NLRI (Node, Link or IPv4/IPv6 Topology Prefix) for the BGP-LS
+    /// address family. See `lr-bgp::path::bgp_ls`.
+    pub const BGP_LS: Self = Self {
+        afi: 16388,
+        safi: 71,
+    };
+    /// RFC 7752 §3.3 Figure 6: BGP-LS VPN (AFI=16388, SAFI=72). Same NLRI
+    /// shape as [`BGP_LS`](Self::BGP_LS) but prefixed by an 8-byte Route
+    /// Distinguisher.
+    pub const BGP_LS_VPN: Self = Self {
+        afi: 16388,
+        safi: 72,
+    };
 
     pub fn is_ipv4(&self) -> bool {
         self.afi == 1
@@ -40,6 +54,20 @@ impl NlriFamily {
     /// families carries an MPLS label stack before the IP prefix.
     pub fn is_labeled_unicast(&self) -> bool {
         self.safi == 4 && (self.afi == 1 || self.afi == 2)
+    }
+
+    /// True for RFC 7752 BGP-LS families (AFI=16388, SAFI 71 or 72). NLRI
+    /// in these families carries a Link-State NLRI (Node, Link, IPv4/IPv6
+    /// Topology Prefix, or SRv6 SID per RFC 9514 §3).
+    pub fn is_bgp_ls(&self) -> bool {
+        self.afi == 16388 && (self.safi == 71 || self.safi == 72)
+    }
+
+    /// True for RFC 7752 §3.3 Figure 6 BGP-LS VPN family (SAFI=72). The
+    /// NLRI is prefixed by an 8-byte Route Distinguisher; everything else
+    /// is identical to plain BGP-LS.
+    pub fn is_bgp_ls_vpn(&self) -> bool {
+        self.afi == 16388 && self.safi == 72
     }
 
     pub fn from_addr(addr: &IpAddr) -> Self {
