@@ -165,9 +165,21 @@ if [ "$BIRD_RUNTIME" = wsl ]; then
     # `awk` and `tr` are available on Git Bash for Windows, so the
     # client-side pipe is portable across Windows hosts and Linux
     # hosts alike.
+    #
+    # The `|| true` guards are load-bearing: this script runs under
+    # `set -euo pipefail`, and `ip route show default` returns
+    # non-zero when the ubuntu-base rootfs has no default route yet
+    # (networking still coming up) or when `iproute2` is not
+    # installed. With `pipefail`, that non-zero ripples through the
+    # `awk | tr` pipe and the `LR_NEIGHBOR_IP=$(...)` assignment,
+    # which `set -e` then turns into a hard script exit (exit 127
+    # in the 2026-10-19 CI run). The fallback then never gets a
+    # chance to run. `|| true` on the assignment statement lets
+    # `set -e` skip it; the empty-output check on the next line
+    # drives the fallback.
     LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- ip route show default 2>/dev/null \
         | awk '/^default/ {print $3; exit}' \
-        | tr -d '\r\n')
+        | tr -d '\r\n') || true
     if [ -z "$LR_NEIGHBOR_IP" ]; then
         # Fall back to /etc/resolv.conf's nameserver — the WSL2
         # init writes the host gateway IP there too. ubuntu-base
@@ -175,7 +187,7 @@ if [ "$BIRD_RUNTIME" = wsl ]; then
         # up, so this is a true last-resort.
         LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- cat /etc/resolv.conf 2>/dev/null \
             | awk '/^nameserver/ {print $2; exit}' \
-            | tr -d '\r\n')
+            | tr -d '\r\n') || true
     fi
     if [ -z "$LR_NEIGHBOR_IP" ]; then
         echo "SKIP: could not determine WSL2 host gateway IP"
