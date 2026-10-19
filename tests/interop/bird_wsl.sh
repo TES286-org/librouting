@@ -109,18 +109,26 @@ if command -v wsl >/dev/null 2>&1; then
         fi
     fi
     if wsl -l -q 2>/dev/null | tr -d '\0' | grep -qi "^$WSL_DISTRO$"; then
-        # Install bird2 and wslu inside the imported distro. The
-        # default user for `wsl --import` is root, so no sudo needed.
+        # Install bird2, wslu and iproute2 inside the imported distro.
+        # The default user for `wsl --import` is root, so no sudo needed.
         # `wslu` provides `wslpath` — the Windows ↔ WSL2 path
         # translator — which the ubuntu-base image does not ship by
         # default. Without it, the script cannot translate the host's
         # /tmp path of bird.conf to the /mnt/c/... form BIRD inside
-        # WSL2 needs. Check BOTH binaries so a half-installed state
-        # (bird present but wslu missing) triggers a re-install.
-        echo "== ensuring bird2 + wslu are installed inside WSL2 =="
+        # WSL2 needs. `iproute2` ships the `ip` binary the gateway
+        # detection block below needs to read the default route's
+        # next hop — the ubuntu-base image does not ship it either,
+        # and without it the script falls back to /etc/resolv.conf's
+        # `nameserver` entry, which on Windows Server 2025's WSL2
+        # NAT mode is the DNS forwarder (10.255.255.254), NOT the
+        # host gateway IP — BIRD then connects to the DNS
+        # forwarder (or nothing) and dies with ECONNREFUSED.
+        # Check all three binaries so a half-installed state (bird
+        # present but wslu or ip missing) triggers a re-install.
+        echo "== ensuring bird2 + wslu + iproute2 are installed inside WSL2 =="
         wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c \
-            "command -v bird >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1 || \
-            (apt-get update -qq && apt-get install -y -qq bird2 wslu)" \
+            "command -v bird >/dev/null 2>&1 && command -v wslpath >/dev/null 2>&1 && command -v ip >/dev/null 2>&1 || \
+            (apt-get update -qq && apt-get install -y -qq bird2 wslu iproute2)" \
             >/dev/null 2>&1 || true
         # Confirm bird is now available; if apt-get failed (no network,
         # package mirror issue), fall through to the host-installed path.
