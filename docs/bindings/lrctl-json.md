@@ -32,9 +32,13 @@ parity for "no value available") becomes a JSON `null`.
 
 ### `lrctl --json status`
 
+The `version` field carries the workspace version from
+`[workspace.package] version` in `Cargo.toml` — shown here as
+`<version>` so the example does not go stale on the next release.
+
 ```json
 {
-  "version": "1.2.0",
+  "version": "<version>",
   "local_as": 64512,
   "peer_as": 64513,
   "router_id": "10.0.0.1",
@@ -73,7 +77,7 @@ per protocol kind present in the daemon's session table) and a
 
 ```json
 {
-  "version": "1.2.0",
+  "version": "<version>",
   "local_as": 64512,
   "peer_as": 64513,
   "router_id": "10.0.0.1",

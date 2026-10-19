@@ -154,21 +154,28 @@ LR_NEIGHBOR_IP=127.0.0.1
 LR_LISTEN_ADDR=127.0.0.1
 if [ "$BIRD_RUNTIME" = wsl ]; then
     # The WSL2 host gateway IP is the default route's next hop from
-    # inside the namespace. `ip route show default` is the most
-    # portable source — it works whether the distro uses
-    # systemd-resolved, /etc/resolv.conf auto-generation, or the
-    # hand-rolled ubuntu-base layout.
-    LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c \
-        "ip route show default 2>/dev/null | awk '/^default/ {print \$3; exit}'" \
-        2>/dev/null | tr -d '\r\n')
+    # inside the namespace. We avoid `wsl ... -- bash -c 'awk ...'`
+    # (nested shell quoting through wsl.exe is fragile — Windows
+    # Server 2025's wsl.exe mangled the inner `awk '{print $2}'`
+    # program into something that printed the whole `nameserver
+    # 10.255.255.254` line, killing BIRD with a config syntax
+    # error). Instead we run a single flat command inside WSL
+    # (`ip route show default` or `cat /etc/resolv.conf`) and parse
+    # the captured stdout client-side with the local bash. Both
+    # `awk` and `tr` are available on Git Bash for Windows, so the
+    # client-side pipe is portable across Windows hosts and Linux
+    # hosts alike.
+    LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- ip route show default 2>/dev/null \
+        | awk '/^default/ {print $3; exit}' \
+        | tr -d '\r\n')
     if [ -z "$LR_NEIGHBOR_IP" ]; then
-        # Fall back to /etc/resolv.conf's nameserver — the WSL2 init
-        # writes the host gateway IP there too. ubuntu-base may not
-        # have a populated resolv.conf until networking is up, so this
-        # is a true last-resort.
-        LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- bash -c \
-            "awk '/^nameserver/ {print \$2; exit}' /etc/resolv.conf 2>/dev/null" \
-            2>/dev/null | tr -d '\r\n')
+        # Fall back to /etc/resolv.conf's nameserver — the WSL2
+        # init writes the host gateway IP there too. ubuntu-base
+        # may not have a populated resolv.conf until networking is
+        # up, so this is a true last-resort.
+        LR_NEIGHBOR_IP=$(wsl_no_pathconv -d "$WSL_DISTRO" -- cat /etc/resolv.conf 2>/dev/null \
+            | awk '/^nameserver/ {print $2; exit}' \
+            | tr -d '\r\n')
     fi
     if [ -z "$LR_NEIGHBOR_IP" ]; then
         echo "SKIP: could not determine WSL2 host gateway IP"
