@@ -9,6 +9,8 @@
 //! - Value (length bytes).
 
 pub mod as_path;
+#[cfg(feature = "bgp_ls")]
+pub mod bgp_ls;
 pub mod communities;
 #[cfg(feature = "labeled_unicast")]
 pub mod labeled_nlri;

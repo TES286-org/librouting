@@ -18,7 +18,7 @@ description = "BGP-4 protocol codec, peer FSM, path attributes and extensions"
 bench = false
 
 [features]
-default = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast"]
+default = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast", "bgp_ls"]
 asn4 = []
 mp_bgp = []
 addpath = []
@@ -27,6 +27,10 @@ enhanced_rr = []
 extended_communities = []
 long_lived = []
 labeled_unicast = ["dep:lr-mpls"]
+# RFC 7752 BGP-LS Link-State NLRI codec (AFI=16388 / SAFI=71). The codec
+# is pure-Rust and depends on lr-core only; gated behind a feature so
+# embedders not using BGP-LS pay nothing.
+bgp_ls = []
 # W6.3 exchange-plane prototype (docs/research/EXCHANGE-PLANE.md) — off
 # by default; the wire format uses experimental code points until an
 # RFC 7120 early allocation settles them.
