@@ -53,7 +53,10 @@ fn node_nlri_roundtrip() {
     // First sub-TLV: AS = 512, length 4, value 64512.
     assert_eq!(u16::from_be_bytes([buf[17], buf[18]]), 512);
     assert_eq!(u16::from_be_bytes([buf[19], buf[20]]), 4);
-    assert_eq!(u32::from_be_bytes([buf[21], buf[22], buf[23], buf[24]]), 64512);
+    assert_eq!(
+        u32::from_be_bytes([buf[21], buf[22], buf[23], buf[24]]),
+        64512
+    );
     let (decoded, consumed) = BgpLsNlri::decode(false, &buf[..n]).expect("decode");
     assert_eq!(consumed, n);
     assert_eq!(decoded, nlri);
@@ -151,12 +154,10 @@ fn ipv6_prefix_nlri_roundtrip() {
         NodeDescriptorSubTlv::IgpRouterId(vec![1, 2, 3, 4]),
     ]);
     // 2001:db8::/32 → prefix_len=32, prefix_bytes = 2001:0db8.
-    let prefix = PrefixDescriptor::new(vec![
-        PrefixDescriptorSubTlv::IpReachabilityInfo {
-            prefix_len: 32,
-            prefix_bytes: vec![0x20, 0x01, 0x0d, 0xb8],
-        },
-    ]);
+    let prefix = PrefixDescriptor::new(vec![PrefixDescriptorSubTlv::IpReachabilityInfo {
+        prefix_len: 32,
+        prefix_bytes: vec![0x20, 0x01, 0x0d, 0xb8],
+    }]);
     let nlri = BgpLsNlri {
         route_distinguisher: None,
         variant: BgpLsNlriVariant::Ipv6Prefix(PrefixNlri {
@@ -291,6 +292,27 @@ fn truncated_value_rejected() {
 }
 
 #[test]
+fn vpn_total_len_below_rd_size_rejected() {
+    // Regression for a fuzz-found crash: a VPN NLRI (SAFI=72) with a
+    // Total NLRI Length smaller than the 8-byte Route Distinguisher
+    // must be rejected, not slice-into-negative-range. The original
+    // bug was that `b[12..9]` underflowed because the buffer was
+    // long enough to satisfy the length check but the VPN branch
+    // advanced `i` past `value_end`.
+    //
+    // Byte 0 = 1 (is_vpn=true). NLRI Type = 0x05b1 = 1457 (unknown,
+    // so the variant path is `Unknown`). Total NLRI Length = 5, which
+    // is < 8 — invalid for VPN.
+    let bad = &[
+        0x01, // is_vpn = true
+        0x05, 0xb1, // NLRI Type = 1457 (unknown)
+        0x00, 0x05, // Total NLRI Length = 5
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xff, 0xff,
+    ];
+    assert!(BgpLsNlri::decode(true, &bad[1..]).is_none());
+}
+
+#[test]
 fn bad_descriptor_length_rejected() {
     // NLRI Type = 1 (Node), Total Length = 10. Value: Protocol-ID (1) +
     // Identifier (8) + Local Node Descriptor TLV header claims 4 bytes
@@ -309,8 +331,9 @@ fn bad_descriptor_length_rejected() {
         0x03, // Protocol-ID = OSPFv2
         0, 0, 0, 0, 0, 0, 0, 0, // Identifier = 0
         0x01, 0x00, // Outer TLV Type = 256 (Local Node Descriptor)
-        0x00, 0x04, // Outer TLV Length = 4 (claims 4 bytes)
-        // Only 0 bytes of value follow.
+        0x00,
+        0x04, // Outer TLV Length = 4 (claims 4 bytes)
+              // Only 0 bytes of value follow.
     ];
     assert!(BgpLsNlri::decode(false, &bad).is_none());
 }

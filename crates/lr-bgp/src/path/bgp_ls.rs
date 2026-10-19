@@ -466,18 +466,10 @@ impl LinkDescriptorSubTlv {
                 }
                 .encode(out)
             }
-            Self::Ipv4InterfaceAddress(b) => {
-                encode_fixed(out, tlv_type::IPV4_INTERFACE_ADDRESS, b)
-            }
-            Self::Ipv4NeighborAddress(b) => {
-                encode_fixed(out, tlv_type::IPV4_NEIGHBOR_ADDRESS, b)
-            }
-            Self::Ipv6InterfaceAddress(b) => {
-                encode_fixed(out, tlv_type::IPV6_INTERFACE_ADDRESS, b)
-            }
-            Self::Ipv6NeighborAddress(b) => {
-                encode_fixed(out, tlv_type::IPV6_NEIGHBOR_ADDRESS, b)
-            }
+            Self::Ipv4InterfaceAddress(b) => encode_fixed(out, tlv_type::IPV4_INTERFACE_ADDRESS, b),
+            Self::Ipv4NeighborAddress(b) => encode_fixed(out, tlv_type::IPV4_NEIGHBOR_ADDRESS, b),
+            Self::Ipv6InterfaceAddress(b) => encode_fixed(out, tlv_type::IPV6_INTERFACE_ADDRESS, b),
+            Self::Ipv6NeighborAddress(b) => encode_fixed(out, tlv_type::IPV6_NEIGHBOR_ADDRESS, b),
             Self::MultiTopologyId(v) => Tlv {
                 ty: tlv_type::MULTI_TOPOLOGY_ID,
                 value: v.clone(),
@@ -489,18 +481,8 @@ impl LinkDescriptorSubTlv {
     pub fn decode(t: Tlv) -> Self {
         match t.ty {
             tlv_type::LINK_LOCAL_REMOTE_ID if t.value.len() == 8 => {
-                let local = u32::from_be_bytes([
-                    t.value[0],
-                    t.value[1],
-                    t.value[2],
-                    t.value[3],
-                ]);
-                let remote = u32::from_be_bytes([
-                    t.value[4],
-                    t.value[5],
-                    t.value[6],
-                    t.value[7],
-                ]);
+                let local = u32::from_be_bytes([t.value[0], t.value[1], t.value[2], t.value[3]]);
+                let remote = u32::from_be_bytes([t.value[4], t.value[5], t.value[6], t.value[7]]);
                 Self::LinkLocalRemoteId { local, remote }
             }
             tlv_type::IPV4_INTERFACE_ADDRESS if t.value.len() == 4 => {
@@ -540,7 +522,10 @@ pub enum PrefixDescriptorSubTlv {
     /// followed by the most-significant octets of the prefix.
     /// Stored raw so the codec does not impose the AFI; the projection
     /// reads the prefix with the family it has in hand.
-    IpReachabilityInfo { prefix_len: u8, prefix_bytes: Vec<u8> },
+    IpReachabilityInfo {
+        prefix_len: u8,
+        prefix_bytes: Vec<u8>,
+    },
     /// Any other sub-TLV, preserved verbatim.
     Unknown(Tlv),
 }
@@ -660,7 +645,10 @@ impl NodeDescriptor {
     /// Wire length of the descriptor's value (i.e. the sum of the
     /// sub-TLV wire lengths, without the outer wrapper TLV header).
     pub fn value_len(&self) -> usize {
-        self.sub_tlvs.iter().map(NodeDescriptorSubTlv::wire_len).sum()
+        self.sub_tlvs
+            .iter()
+            .map(NodeDescriptorSubTlv::wire_len)
+            .sum()
     }
     pub fn encode_value(&self, out: &mut WriteBuf<'_>) -> Result<usize, EncodeError> {
         let start = out.position();
@@ -690,7 +678,10 @@ impl LinkDescriptor {
     }
     /// Wire length of the descriptor (sum of sub-TLV wire lengths).
     pub fn value_len(&self) -> usize {
-        self.sub_tlvs.iter().map(LinkDescriptorSubTlv::wire_len).sum()
+        self.sub_tlvs
+            .iter()
+            .map(LinkDescriptorSubTlv::wire_len)
+            .sum()
     }
     pub fn encode_into(&self, out: &mut WriteBuf<'_>) -> Result<usize, EncodeError> {
         let start = out.position();
@@ -720,7 +711,10 @@ impl PrefixDescriptor {
     }
     /// Wire length of the descriptor (sum of sub-TLV wire lengths).
     pub fn value_len(&self) -> usize {
-        self.sub_tlvs.iter().map(PrefixDescriptorSubTlv::wire_len).sum()
+        self.sub_tlvs
+            .iter()
+            .map(PrefixDescriptorSubTlv::wire_len)
+            .sum()
     }
     pub fn encode_into(&self, out: &mut WriteBuf<'_>) -> Result<usize, EncodeError> {
         let start = out.position();
@@ -732,7 +726,10 @@ impl PrefixDescriptor {
     pub fn decode_from(b: &[u8]) -> Result<Self, ParseError> {
         let tlvs = decode_tlv_stream(b)?;
         Ok(Self {
-            sub_tlvs: tlvs.into_iter().map(PrefixDescriptorSubTlv::decode).collect(),
+            sub_tlvs: tlvs
+                .into_iter()
+                .map(PrefixDescriptorSubTlv::decode)
+                .collect(),
         })
     }
 }
@@ -879,11 +876,7 @@ impl BgpLsNlri {
                 out.put_u8(n.protocol_id.to_u8());
                 out.put_u64_be(n.identifier);
                 encode_wrapped_descriptor(out, tlv_type::LOCAL_NODE_DESCRIPTOR, &n.local_node)?;
-                encode_wrapped_descriptor(
-                    out,
-                    tlv_type::REMOTE_NODE_DESCRIPTOR,
-                    &n.remote_node,
-                )?;
+                encode_wrapped_descriptor(out, tlv_type::REMOTE_NODE_DESCRIPTOR, &n.remote_node)?;
                 // Link Descriptor: bare TLV stream, no wrapper.
                 n.link.encode_into(out)?;
             }
@@ -906,7 +899,9 @@ impl BgpLsNlri {
     ///
     /// Returns the parsed NLRI and the number of bytes consumed.
     /// Returns `None` on any framing error (truncation, length
-    /// mismatch, descriptor TLV missing).
+    /// mismatch, descriptor TLV missing, or a `Total NLRI Length`
+    /// too small to hold the Route Distinguisher when `is_vpn` is
+    /// true).
     pub fn decode(is_vpn: bool, b: &[u8]) -> Option<(Self, usize)> {
         if b.len() < 4 {
             return None;
@@ -918,7 +913,10 @@ impl BgpLsNlri {
         }
         let mut i = 4;
         let route_distinguisher = if is_vpn {
-            if b.len() < 4 + 8 {
+            // RFC 7752 §3.3 Figure 6: the VPN NLRI value begins with
+            // an 8-byte Route Distinguisher, included in the Total
+            // NLRI Length. A `total_len` smaller than 8 is malformed.
+            if total_len < 8 {
                 return None;
             }
             let mut rd = [0u8; 8];
@@ -979,8 +977,12 @@ fn decode_variant(nlri_type_raw: u16, value: &[u8]) -> Option<BgpLsNlriVariant> 
     match nlri_type {
         BgpLsNlriType::Node => decode_node_nlri_value(value).map(BgpLsNlriVariant::Node),
         BgpLsNlriType::Link => decode_link_nlri_value(value).map(BgpLsNlriVariant::Link),
-        BgpLsNlriType::Ipv4Prefix => decode_prefix_nlri_value(value).map(BgpLsNlriVariant::Ipv4Prefix),
-        BgpLsNlriType::Ipv6Prefix => decode_prefix_nlri_value(value).map(BgpLsNlriVariant::Ipv6Prefix),
+        BgpLsNlriType::Ipv4Prefix => {
+            decode_prefix_nlri_value(value).map(BgpLsNlriVariant::Ipv4Prefix)
+        }
+        BgpLsNlriType::Ipv6Prefix => {
+            decode_prefix_nlri_value(value).map(BgpLsNlriVariant::Ipv6Prefix)
+        }
         _ => Some(BgpLsNlriVariant::Unknown {
             nlri_type,
             bytes: value.to_vec(),
@@ -1003,56 +1005,52 @@ fn decode_node_nlri_value(value: &[u8]) -> Option<NodeNlri> {
     let (protocol_id, identifier) = read_proto_id_and_id(value)?;
     let body = &value[9..];
     let tlvs = decode_tlv_stream(body).ok()?;
-    let mut local_node_sub: Vec<NodeDescriptorSubTlv> = Vec::new();
-    for t in tlvs {
-        match t.ty {
-            tlv_type::LOCAL_NODE_DESCRIPTOR => {
-                let nd = NodeDescriptor::decode_value(&t.value).ok()?;
-                local_node_sub.extend(nd.sub_tlvs);
-            }
-            // Unknown outer TLV — preserved via the descriptor's
-            // `Unknown` variant so a re-encode round-trips.
-            _ => local_node_sub.push(NodeDescriptorSubTlv::Unknown(t)),
-        }
+    // RFC 7752 §3.3 Figure 7: the Node NLRI value is
+    // `Protocol-ID | Identifier | Local Node Descriptors`. Singular.
+    // Strict structural enforcement: exactly one outer TLV, of type
+    // LOCAL_NODE_DESCRIPTOR. Anything else is malformed — reject so
+    // the encode↔decode round-trip is byte-exact for any input the
+    // codec accepts.
+    if tlvs.len() != 1 || tlvs[0].ty != tlv_type::LOCAL_NODE_DESCRIPTOR {
+        return None;
     }
+    let local_node = NodeDescriptor::decode_value(&tlvs[0].value).ok()?;
     Some(NodeNlri {
         protocol_id,
         identifier,
-        local_node: NodeDescriptor::new(local_node_sub),
+        local_node,
     })
 }
 
 fn decode_link_nlri_value(value: &[u8]) -> Option<LinkNlri> {
     let (protocol_id, identifier) = read_proto_id_and_id(value)?;
     let body = &value[9..];
-    // Walk the TLV stream and partition it into Local Node Descriptor,
-    // Remote Node Descriptor and Link Descriptor by outer TLV type.
-    // Local Node Descriptor (256) and Remote Node Descriptor (257) are
-    // wrapper TLVs; the remaining TLVs are bare Link Descriptor
-    // sub-TLVs (258..=263).
-    let mut local_sub: Vec<NodeDescriptorSubTlv> = Vec::new();
-    let mut remote_sub: Vec<NodeDescriptorSubTlv> = Vec::new();
-    let mut link_sub: Vec<LinkDescriptorSubTlv> = Vec::new();
     let tlvs = decode_tlv_stream(body).ok()?;
-    for t in tlvs {
-        match t.ty {
-            tlv_type::LOCAL_NODE_DESCRIPTOR => {
-                let nd = NodeDescriptor::decode_value(&t.value).ok()?;
-                local_sub.extend(nd.sub_tlvs);
-            }
-            tlv_type::REMOTE_NODE_DESCRIPTOR => {
-                let nd = NodeDescriptor::decode_value(&t.value).ok()?;
-                remote_sub.extend(nd.sub_tlvs);
-            }
-            // Bare Link Descriptor sub-TLV.
-            _ => link_sub.push(LinkDescriptorSubTlv::decode(t)),
-        }
+    // RFC 7752 §3.3 Figure 8: the Link NLRI value is
+    // `Protocol-ID | Identifier | Local Node Descriptor | Remote
+    // Node Descriptor | Link Descriptors`. The first two outer TLVs
+    // are the wrappers (256, 257); the rest are bare Link Descriptor
+    // sub-TLVs (258-263, plus any unknown outer TLV preserved via the
+    // descriptor's `Unknown` variant). Strict ordering: a bare
+    // sub-TLV appearing before LOCAL+REMOTE is malformed.
+    if tlvs.len() < 2
+        || tlvs[0].ty != tlv_type::LOCAL_NODE_DESCRIPTOR
+        || tlvs[1].ty != tlv_type::REMOTE_NODE_DESCRIPTOR
+    {
+        return None;
     }
+    let local_node = NodeDescriptor::decode_value(&tlvs[0].value).ok()?;
+    let remote_node = NodeDescriptor::decode_value(&tlvs[1].value).ok()?;
+    let link_sub: Vec<LinkDescriptorSubTlv> = tlvs[2..]
+        .iter()
+        .cloned()
+        .map(LinkDescriptorSubTlv::decode)
+        .collect();
     Some(LinkNlri {
         protocol_id,
         identifier,
-        local_node: NodeDescriptor::new(local_sub),
-        remote_node: NodeDescriptor::new(remote_sub),
+        local_node,
+        remote_node,
         link: LinkDescriptor::new(link_sub),
     })
 }
@@ -1061,22 +1059,26 @@ fn decode_prefix_nlri_value(value: &[u8]) -> Option<PrefixNlri> {
     let (protocol_id, identifier) = read_proto_id_and_id(value)?;
     let body = &value[9..];
     let tlvs = decode_tlv_stream(body).ok()?;
-    let mut local_sub: Vec<NodeDescriptorSubTlv> = Vec::new();
-    let mut prefix_sub: Vec<PrefixDescriptorSubTlv> = Vec::new();
-    for t in tlvs {
-        match t.ty {
-            tlv_type::LOCAL_NODE_DESCRIPTOR => {
-                let nd = NodeDescriptor::decode_value(&t.value).ok()?;
-                local_sub.extend(nd.sub_tlvs);
-            }
-            // Bare Prefix Descriptor sub-TLV.
-            _ => prefix_sub.push(PrefixDescriptorSubTlv::decode(t)),
-        }
+    // RFC 7752 §3.3 Figure 9: the Prefix NLRI value is
+    // `Protocol-ID | Identifier | Local Node Descriptor | Prefix
+    // Descriptors`. The first outer TLV is the LOCAL_NODE_DESCRIPTOR
+    // wrapper; the rest are bare Prefix Descriptor sub-TLVs (263-265
+    // plus any unknown outer TLV preserved via the descriptor's
+    // `Unknown` variant). Strict ordering: a bare sub-TLV appearing
+    // before LOCAL is malformed.
+    if tlvs.is_empty() || tlvs[0].ty != tlv_type::LOCAL_NODE_DESCRIPTOR {
+        return None;
     }
+    let local_node = NodeDescriptor::decode_value(&tlvs[0].value).ok()?;
+    let prefix_sub: Vec<PrefixDescriptorSubTlv> = tlvs[1..]
+        .iter()
+        .cloned()
+        .map(PrefixDescriptorSubTlv::decode)
+        .collect();
     Some(PrefixNlri {
         protocol_id,
         identifier,
-        local_node: NodeDescriptor::new(local_sub),
+        local_node,
         prefix: PrefixDescriptor::new(prefix_sub),
     })
 }
