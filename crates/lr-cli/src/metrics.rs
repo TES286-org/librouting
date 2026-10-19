@@ -31,14 +31,27 @@
 //!
 //! | Metric                       | Type    | Labels                          | Source                                   |
 //! | ---------------------------- | ------- | ------------------------------- | ---------------------------------------- |
-//! | `lr_info`                    | gauge=1 | `version`, `local_as`, `router_id` | daemon identity (for join queries)  |
+//! | `lr_info`                    | gauge=1 | `version`, `local_as`, `peer_as`, `router_id`, `config_path` | daemon identity (for join queries)  |
 //! | `lr_uptime_seconds`          | gauge   | —                               | `Instant::elapsed()` since `spawn`       |
 //! | `lr_sessions_total`          | gauge   | `kind`, `state`                 | `session_summaries()` count per (kind, state) |
 //! | `lr_established_sessions`    | gauge   | `kind`                          | `session_summaries().established` count |
+//! | `lr_session_up`              | gauge=0/1 | `kind`, `session`, `peer`     | per-session established flag            |
+//! | `lr_session_state_transitions_total` | counter | `kind`, `session`, `peer` | `SessionStats::state_transitions`     |
+//! | `lr_session_adj_rib_in_entries` | gauge | `kind`, `session`, `peer`      | per-session `adj_rib_in_len`             |
+//! | `lr_session_negotiated_hold_time_seconds` | gauge | `kind`, `session`, `peer` | per-session negotiated hold time     |
+//! | `lr_session_last_keepalive_received_ms` | gauge | `kind`, `session`, `peer` | per-session `SessionStats::last_keepalive_received_ms` (BGP only) |
+//! | `lr_session_last_error`     | gauge=1 | `kind`, `session`, `peer`, `error_kind` | per-session last error kind (one series holds 1, the rest 0) |
 //! | `lr_rib_entries`             | gauge   | —                               | `rib_len()`                              |
+//! | `lr_rib_entries_by_protocol` | gauge  | `protocol`                      | `rib_snapshot()` grouped by `Route::protocol` |
 //! | `lr_adj_rib_in_entries`      | gauge   | `kind`                          | sum of `adj_rib_in_len` per kind         |
-//! | `lr_bgp_updates_total`       | counter | `session`, `peer`, `direction`  | `SessionSummary::updates_received/sent` per BGP session |
+//! | `lr_aggregates_count`        | gauge   | —                               | `aggregate_prefixes().len()`              |
+//! | `lr_static_routes_count`     | gauge   | —                               | `static_routes().len()`                   |
+//! | `lr_originated_routes_count` | gauge   | —                               | `originated_keys().len()`                 |
+//! | `lr_bgp_updates_total`      | counter | `session`, `peer`, `direction`  | `SessionSummary::updates_received/sent` per BGP session (legacy; see `lr_bgp_messages_total{type="update"}` for the comprehensive view) |
+//! | `lr_bgp_messages_total`     | counter | `session`, `peer`, `type`, `direction` | `SessionSummary::message_stats` per BGP session (open/update/notification/keepalive/route_refresh) |
 //! | `lr_roa_entries`             | gauge   | —                               | `RoaStore::len()` (when present)        |
+//! | `lr_process_resident_bytes` | gauge   | —                               | `/proc/self/status` VmRSS (Linux only) |
+//! | `lr_process_virtual_bytes`  | gauge   | —                               | `/proc/self/status` VmSize (Linux only) |
 //! | `lr_filter_eval_duration_seconds` | histogram | `direction`, `filter`      | `FilterMetricsRegistry` (when present)  |
 //!
 //! The exporter is **opt-in** (default off, like `api_socket`):
@@ -286,6 +299,15 @@ pub struct MetricsInfo {
     pub version: String,
     pub local_as: u32,
     pub router_id: String,
+    /// Config file path (or the string `(none)` when the daemon
+    /// was started without one). Surfaced as a label on `lr_info`
+    /// so a scraper can join the daemon's runtime identity to its
+    /// config source.
+    pub config_path: String,
+    /// Configured peer AS (BGP only; `0` when not configured).
+    /// Surfaced as a label on `lr_info` so a scraper can tell
+    /// single-peer daemons apart from multi-peer ones at a glance.
+    pub peer_as: u32,
 }
 
 mod imp {
@@ -309,6 +331,63 @@ mod imp {
         filter_metrics: Option<Arc<FilterMetricsRegistry>>,
         session_label: Arc<dyn Fn(u64) -> String + Send + Sync>,
         started: std::time::Instant,
+    }
+
+    /// One scrape's worth of router state, snapshotted under a single
+    /// read-lock acquisition. Carries everything the renderer needs so
+    /// the lock is held for microseconds (no I/O while it's held).
+    ///
+    /// `rib_by_protocol` is a sorted `(protocol, count)` list (sorted
+    /// by name for stable diffs). The other fields are scalar counts
+    /// or owned `Vec`s that can be cheaply cloned out of the locked
+    /// router.
+    struct RenderSnapshot {
+        uptime: u64,
+        summaries: Vec<lr_router::SessionSummary>,
+        rib_len: usize,
+        rib_by_protocol: Vec<(&'static str, u64)>,
+        aggregates_count: u64,
+        static_routes_count: u64,
+        originated_count: u64,
+    }
+
+    impl RenderSnapshot {
+        fn collect(r: &DefaultRouter, started: std::time::Instant) -> Self {
+            use lr_router::RouterInstance as _;
+            let summaries = r.session_summaries();
+            let rib_len = r.rib_len();
+            // Group Loc-RIB best paths by `Route::protocol`'s
+            // BIRD-style name (the same one `show routes count`
+            // uses — kept in lockstep via the shared
+            // `bird_name()` accessor so the two surfaces never
+            // drift).
+            let mut by_proto: std::collections::BTreeMap<&'static str, u64> =
+                std::collections::BTreeMap::new();
+            for route in r.rib_snapshot() {
+                let name = route.protocol.bird_name();
+                *by_proto.entry(name).or_insert(0) += 1;
+            }
+            let rib_by_protocol = by_proto.into_iter().collect();
+            // `aggregate_prefixes`, `static_routes` and
+            // `originated_keys` are all `pub` on `DefaultRouter`
+            // (the `RouterInstance` trait only carries the
+            // runtime-Loc-RIB accessors, but the configuration
+            // helpers are intrinsic to the concrete type — they
+            // walk the daemon's `static_routes` / `aggregates`
+            // / `originated` tables, not the Loc-RIB).
+            let aggregates_count = r.aggregate_prefixes().len() as u64;
+            let static_routes_count = r.static_routes().len() as u64;
+            let originated_count = r.originated_keys().len() as u64;
+            Self {
+                uptime: started.elapsed().as_secs(),
+                summaries,
+                rib_len,
+                rib_by_protocol,
+                aggregates_count,
+                static_routes_count,
+                originated_count,
+            }
+        }
     }
 
     /// Bind the metrics TCP listener and spawn the serving thread.
@@ -450,29 +529,36 @@ mod imp {
             session_label,
             started,
         } = state;
-        let (uptime, summaries, rib_len) = match router.read() {
-            Ok(r) => (
-                started.elapsed().as_secs(),
-                r.session_summaries(),
-                r.rib_len(),
-            ),
+        // Snapshot everything we need from the router under one
+        // read-lock acquisition. The lock is held for microseconds
+        // (no I/O while it's held — same contract as `api.rs`'s
+        // `status` handler). Per-session labels are looked up after
+        // the lock release; the closure is `Send + Sync` and does
+        // not need the router lock.
+        let snap = match router.read() {
+            Ok(r) => RenderSnapshot::collect(&r, *started),
             Err(_) => {
                 // Router lock poisoned — emit a minimal body so the
                 // scrape does not hang. Prometheus treats `up=0` as
                 // the "target is down" signal; we still emit `lr_info`
-                // so the operator can identify the daemon.
+                // and `lr_uptime_seconds` so the operator can identify
+                // the daemon and see how long the metrics thread has
+                // been running (a proxy for "the daemon restarted
+                // recently").
                 return format!(
-                    "# lr_info\nlr_info{{version=\"{ver}\",local_as=\"{la}\",router_id=\"{rid}\"}} 1\n\
+                    "# lr_info\nlr_info{{version=\"{ver}\",local_as=\"{la}\",peer_as=\"{pa}\",router_id=\"{rid}\",config_path=\"{cfg}\"}} 1\n\
                      # lr_uptime_seconds\nlr_uptime_seconds {up}\n",
                     ver = escape_label(&info.version),
                     la = info.local_as,
+                    pa = info.peer_as,
                     rid = escape_label(&info.router_id),
+                    cfg = escape_label(&info.config_path),
                     up = started.elapsed().as_secs(),
                 );
             }
         };
 
-        let mut out = String::with_capacity(2048);
+        let mut out = String::with_capacity(4096);
 
         // lr_info — identity gauge (always 1). Useful for `sum by
         // (version)` queries that join against the daemon's release.
@@ -480,17 +566,19 @@ mod imp {
         writeln!(out, "# TYPE lr_info gauge").ok();
         writeln!(
             out,
-            "lr_info{{version=\"{ver}\",local_as=\"{la}\",router_id=\"{rid}\"}} 1",
+            "lr_info{{version=\"{ver}\",local_as=\"{la}\",peer_as=\"{pa}\",router_id=\"{rid}\",config_path=\"{cfg}\"}} 1",
             ver = escape_label(&info.version),
             la = info.local_as,
+            pa = info.peer_as,
             rid = escape_label(&info.router_id),
+            cfg = escape_label(&info.config_path),
         )
         .ok();
 
         // lr_uptime_seconds — daemon uptime since metrics thread spawn.
         writeln!(out, "# HELP lr_uptime_seconds Daemon uptime in seconds.").ok();
         writeln!(out, "# TYPE lr_uptime_seconds gauge").ok();
-        writeln!(out, "lr_uptime_seconds {uptime}").ok();
+        writeln!(out, "lr_uptime_seconds {}", snap.uptime).ok();
 
         // lr_sessions_total — count per (kind, state). Gauges because
         // the value can go down (session teardown).
@@ -509,7 +597,7 @@ mod imp {
             std::collections::BTreeMap::new();
         let mut by_kind_adj_rib: std::collections::BTreeMap<&'static str, u64> =
             std::collections::BTreeMap::new();
-        for s in &summaries {
+        for s in &snap.summaries {
             *by_kind_state.entry((s.kind, s.state)).or_default() += 1;
             if s.established {
                 *by_kind_established.entry(s.kind).or_default() += 1;
@@ -556,19 +644,122 @@ mod imp {
             writeln!(out, "lr_adj_rib_in_entries{{kind=\"{kind}\"}} {n}").ok();
         }
 
-        // lr_bgp_updates_total — per-session BGP UPDATE counters
-        // (FRR "Message statistics" parity). Counters, not gauges:
-        // they are monotonic for the daemon's lifetime (per-neighbor,
-        // surviving session flaps). The `peer` label carries the
-        // configured name/address when the daemon knows it, so an
-        // operator can alert per neighbor; the `session` label keeps
-        // series unique (bidirectional peers have two sessions per
-        // neighbor for RFC 4271 §6.8 collision resolution).
-        let bgp_sessions: Vec<_> = summaries.iter().filter(|s| s.kind == "bgp").collect();
+        // Per-session gauges — `lr_session_up`, transitions counter,
+        // per-session Adj-RIB-In, negotiated hold time, last
+        // keepalive, last error. These give an operator per-neighbor
+        // visibility that the kind-aggregate above cannot (a single
+        // flapping peer looks like a steady-state aggregate). The
+        // `session` label is the numeric handle (stable across
+        // restarts when the daemon's config is stable); `peer` is the
+        // configured name/address when the daemon knows it.
+        writeln!(
+            out,
+            "# HELP lr_session_up 1 when the session is in its fully-established state, 0 otherwise."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_session_up gauge").ok();
+        writeln!(
+            out,
+            "# HELP lr_session_state_transitions_total Number of FSM state transitions for this session since creation (monotonic)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_session_state_transitions_total counter").ok();
+        writeln!(
+            out,
+            "# HELP lr_session_adj_rib_in_entries Routes currently held in this session's Adj-RIB-In."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_session_adj_rib_in_entries gauge").ok();
+        writeln!(
+            out,
+            "# HELP lr_session_negotiated_hold_time_seconds BGP hold time negotiated on the current connection (0 for non-BGP)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_session_negotiated_hold_time_seconds gauge").ok();
+        writeln!(
+            out,
+            "# HELP lr_session_last_keepalive_received_ms Logical-clock ms of the most recent KEEPALIVE received from the peer (BGP only; 0 for non-BGP or never-received)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_session_last_keepalive_received_ms gauge").ok();
+        writeln!(
+            out,
+            "# HELP lr_session_last_error 1 for the (kind, session, peer, error_kind) tuple matching this session's most recent error, 0 for every other error_kind of the same session. Stays 0 across the board when no error has been observed."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_session_last_error gauge").ok();
+        // The full error-kind enumeration — emitted as a 0 for every
+        // kind the session is NOT currently in, so a scrape can join
+        // on `error_kind` and see every session's current or absent
+        // classification. Picking 0 for "no error" + 1 for the current
+        // kind gives the cheapest join for alerting.
+        const ERROR_KINDS: &[&str] = &[
+            "none",
+            "notification-received",
+            "transport-closed",
+            "hold-timer-expired",
+            "parse-error",
+            "manual",
+            "other",
+        ];
+        for s in &snap.summaries {
+            let peer = session_label(s.handle.0);
+            let peer_e = escape_label(&peer);
+            let kind = s.kind;
+            let h = s.handle.0;
+            let up = if s.established { 1 } else { 0 };
+            writeln!(
+                out,
+                "lr_session_up{{kind=\"{kind}\",session=\"{h}\",peer=\"{peer_e}\"}} {up}",
+            )
+            .ok();
+            writeln!(
+                out,
+                "lr_session_state_transitions_total{{kind=\"{kind}\",session=\"{h}\",peer=\"{peer_e}\"}} {tr}",
+                tr = s.stats.state_transitions,
+            )
+            .ok();
+            writeln!(
+                out,
+                "lr_session_adj_rib_in_entries{{kind=\"{kind}\",session=\"{h}\",peer=\"{peer_e}\"}} {ar}",
+                ar = s.adj_rib_in_len,
+            )
+            .ok();
+            writeln!(
+                out,
+                "lr_session_negotiated_hold_time_seconds{{kind=\"{kind}\",session=\"{h}\",peer=\"{peer_e}\"}} {hold}",
+                hold = s.negotiated_hold_time,
+            )
+            .ok();
+            writeln!(
+                out,
+                "lr_session_last_keepalive_received_ms{{kind=\"{kind}\",session=\"{h}\",peer=\"{peer_e}\"}} {ka}",
+                ka = s.stats.last_keepalive_received_ms,
+            )
+            .ok();
+            let current_err = s.stats.last_error.as_str();
+            for kind_str in ERROR_KINDS {
+                let v = if *kind_str == current_err { 1 } else { 0 };
+                writeln!(
+                    out,
+                    "lr_session_last_error{{kind=\"{kind}\",session=\"{h}\",peer=\"{peer_e}\",error_kind=\"{kind_str}\"}} {v}",
+                )
+                .ok();
+            }
+        }
+
+        // lr_bgp_updates_total — legacy per-session BGP UPDATE
+        // counter (FRR "Message statistics" parity). Counters, not
+        // gauges: they are monotonic for the daemon's lifetime
+        // (per-neighbor, surviving session flaps). Kept for
+        // backward compatibility with existing dashboards; the
+        // comprehensive view is `lr_bgp_messages_total{type="update"}`
+        // below.
+        let bgp_sessions: Vec<_> = snap.summaries.iter().filter(|s| s.kind == "bgp").collect();
         if !bgp_sessions.is_empty() {
             writeln!(
                 out,
-                "# HELP lr_bgp_updates_total BGP UPDATE messages exchanged per session, by direction. Monotonic across session re-establishment."
+                "# HELP lr_bgp_updates_total BGP UPDATE messages exchanged per session, by direction. Monotonic across session re-establishment. Deprecated: prefer lr_bgp_messages_total{{type=\"update\"}}."
             )
             .ok();
             writeln!(out, "# TYPE lr_bgp_updates_total counter").ok();
@@ -591,6 +782,80 @@ mod imp {
                 )
                 .ok();
             }
+
+            // lr_bgp_messages_total — comprehensive per-PDU counter
+            // (BIRD `show protocols all` parity). 5 PDU types × 2
+            // directions × N sessions. Each series is monotonic
+            // across session re-establishment (the underlying
+            // PeerMessageStats survives a session flap). Counters
+            // because the value is monotonic for the daemon's lifetime.
+            writeln!(
+                out,
+                "# HELP lr_bgp_messages_total BGP messages exchanged per session, by message type and direction. Monotonic across session re-establishment."
+            )
+            .ok();
+            writeln!(out, "# TYPE lr_bgp_messages_total counter").ok();
+            // Order matters for stable diffs: type outer, direction
+            // inner — matches how a human reads the BIRD output.
+            // `MessageKind` carries the label and the two accessor
+            // closures in one place so the loop below does not
+            // carry three parallel arrays. `lr_bgp::PeerMessageStats`
+            // is `Copy`, so the closures take it by reference (no
+            // clone needed to read the counters).
+            struct MessageKind {
+                label: &'static str,
+                rx: fn(&lr_bgp::PeerMessageStats) -> u64,
+                tx: fn(&lr_bgp::PeerMessageStats) -> u64,
+            }
+            const TYPES: &[MessageKind] = &[
+                MessageKind {
+                    label: "open",
+                    rx: |m| m.open_received,
+                    tx: |m| m.open_sent,
+                },
+                MessageKind {
+                    label: "update",
+                    rx: |m| m.update_received,
+                    tx: |m| m.update_sent,
+                },
+                MessageKind {
+                    label: "notification",
+                    rx: |m| m.notification_received,
+                    tx: |m| m.notification_sent,
+                },
+                MessageKind {
+                    label: "keepalive",
+                    rx: |m| m.keepalive_received,
+                    tx: |m| m.keepalive_sent,
+                },
+                MessageKind {
+                    label: "route_refresh",
+                    rx: |m| m.route_refresh_received,
+                    tx: |m| m.route_refresh_sent,
+                },
+            ];
+            for s in &bgp_sessions {
+                let peer = session_label(s.handle.0);
+                let peer_e = escape_label(&peer);
+                let h = s.handle.0;
+                let m = &s.message_stats;
+                for kind in TYPES {
+                    writeln!(
+                        out,
+                        "lr_bgp_messages_total{{session=\"{h}\",peer=\"{peer_e}\",type=\"{label}\",direction=\"received\"}} {rx}",
+                        label = kind.label,
+                        rx = (kind.rx)(m),
+                    )
+                    .ok();
+                    writeln!(
+                        out,
+                        "lr_bgp_messages_total{{session=\"{h}\",peer=\"{peer_e}\",type=\"{label}\",direction=\"sent\"}} {tx}",
+                        label = kind.label,
+                        tx = (kind.tx)(m),
+                    )
+                    .ok();
+                }
+            }
         }
 
         // lr_rib_entries — the Loc-RIB size.
@@ -600,7 +865,55 @@ mod imp {
         )
         .ok();
         writeln!(out, "# TYPE lr_rib_entries gauge").ok();
-        writeln!(out, "lr_rib_entries {rib_len}").ok();
+        writeln!(out, "lr_rib_entries {}", snap.rib_len).ok();
+
+        // lr_rib_entries_by_protocol — per-protocol breakdown of the
+        // Loc-RIB best paths. BIRD `show route count` parity. Gauges
+        // because a route's protocol membership can change as
+        // sessions flap.
+        if !snap.rib_by_protocol.is_empty() {
+            writeln!(
+                out,
+                "# HELP lr_rib_entries_by_protocol Loc-RIB best-path count grouped by Route::protocol (BIRD show route count parity)."
+            )
+            .ok();
+            writeln!(out, "# TYPE lr_rib_entries_by_protocol gauge").ok();
+            for (proto, n) in &snap.rib_by_protocol {
+                writeln!(
+                    out,
+                    "lr_rib_entries_by_protocol{{protocol=\"{proto}\"}} {n}"
+                )
+                .ok();
+            }
+        }
+
+        // lr_aggregates_count / lr_static_routes_count /
+        // lr_originated_routes_count — operator-side configuration
+        // gauges so a scrape can answer "is the daemon still
+        // originating its aggregates?" at a glance.
+        writeln!(
+            out,
+            "# HELP lr_aggregates_count Number of aggregate prefixes the daemon is configured to originate."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_aggregates_count gauge").ok();
+        writeln!(out, "lr_aggregates_count {}", snap.aggregates_count).ok();
+
+        writeln!(
+            out,
+            "# HELP lr_static_routes_count Number of static routes the daemon has installed into the Loc-RIB."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_static_routes_count gauge").ok();
+        writeln!(out, "lr_static_routes_count {}", snap.static_routes_count).ok();
+
+        writeln!(
+            out,
+            "# HELP lr_originated_routes_count Number of prefixes the daemon is originating into the Loc-RIB (network statements + aggregates)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_originated_routes_count gauge").ok();
+        writeln!(out, "lr_originated_routes_count {}", snap.originated_count).ok();
 
         // lr_roa_entries — the ROA store size (when a store is
         // configured). Omitted entirely when no store is present so
@@ -613,6 +926,33 @@ mod imp {
             .ok();
             writeln!(out, "# TYPE lr_roa_entries gauge").ok();
             writeln!(out, "lr_roa_entries {}", roa_len()).ok();
+        }
+
+        // lr_process_resident_bytes / lr_process_virtual_bytes —
+        // the daemon's memory usage. Linux-only (matches BIRD's
+        // `show memory` stance on platforms without a discoverable
+        // value). Emitted even when both fields are None so the
+        // metric is always present in the exposition (a misleading
+        // zero is the lesser evil than a missing series an alert
+        // keys on — but on Linux the value is the real RSS/VmSize).
+        let mem = crate::sysinfo::process_memory();
+        writeln!(
+            out,
+            "# HELP lr_process_resident_bytes Daemon resident set size (Linux: VmRSS)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_process_resident_bytes gauge").ok();
+        if let Some(rss) = mem.rss_bytes {
+            writeln!(out, "lr_process_resident_bytes {rss}").ok();
+        }
+        writeln!(
+            out,
+            "# HELP lr_process_virtual_bytes Daemon virtual memory size (Linux: VmSize)."
+        )
+        .ok();
+        writeln!(out, "# TYPE lr_process_virtual_bytes gauge").ok();
+        if let Some(vsz) = mem.vsize_bytes {
+            writeln!(out, "lr_process_virtual_bytes {vsz}").ok();
         }
 
         // lr_filter_eval_duration_seconds — the per-filter DSL

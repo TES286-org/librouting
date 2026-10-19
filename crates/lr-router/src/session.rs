@@ -700,6 +700,18 @@ pub struct SessionSummary {
     /// UPDATE messages sent to the peer (BGP only; 0 for OSPF/Babel).
     /// Monotonic across session re-establishment.
     pub updates_sent: u64,
+    /// Full per-message BGP counters (open/update/notification/
+    /// keepalive/route_refresh, by direction). Zero for non-BGP
+    /// sessions (OSPF/Babel do not have BGP's PDU taxonomy). The
+    /// `updates_received` / `updates_sent` fields above are
+    /// convenience copies of `message_stats.update_received` /
+    /// `message_stats.update_sent`, retained so existing callers
+    /// that read only those two do not have to be updated.
+    ///
+    /// Added in 1.3.0 so the metrics exporter and `show sessions
+    /// detail` can surface the full per-PDU breakdown (BIRD `show
+    /// protocols all <name>` parity) without a second router query.
+    pub message_stats: lr_bgp::PeerMessageStats,
     /// Per-session operational statistics (issue #52): uptime,
     /// transition count, last error kind + time.
     pub stats: SessionStats,

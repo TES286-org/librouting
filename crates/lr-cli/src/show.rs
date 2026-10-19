@@ -100,7 +100,7 @@ fn render_show_status(ctx: &ShowCtx<'_>) -> String {
             })
             .or_insert((1, e));
     }
-    let mem = process_memory();
+    let mem = crate::sysinfo::process_memory();
 
     let mut out = String::with_capacity(512);
     let _ = writeln!(out, "version {}", ctx.info.version);
@@ -121,8 +121,8 @@ fn render_show_status(ctx: &ShowCtx<'_>) -> String {
     let _ = writeln!(
         out,
         "memory rss-bytes={} vsize-bytes={}",
-        fmt_bytes(mem.rss_bytes),
-        fmt_bytes(mem.vsize_bytes)
+        crate::sysinfo::fmt_bytes(mem.rss_bytes),
+        crate::sysinfo::fmt_bytes(mem.vsize_bytes)
     );
     for line in (ctx.status_lines)() {
         let _ = writeln!(out, "{line}");
@@ -224,11 +224,19 @@ fn render_show_routes_count(ctx: &ShowCtx<'_>) -> String {
 /// on platforms without a discoverable value (matches BIRD's
 /// `show memory` "not available" stance).
 fn render_show_memory(ctx: &ShowCtx<'_>) -> String {
-    let mem = process_memory();
+    let mem = crate::sysinfo::process_memory();
     let mut out = String::with_capacity(96);
     let _ = writeln!(out, "uptime-secs {}", ctx.started.elapsed().as_secs());
-    let _ = writeln!(out, "rss-bytes {}", fmt_bytes(mem.rss_bytes));
-    let _ = writeln!(out, "vsize-bytes {}", fmt_bytes(mem.vsize_bytes));
+    let _ = writeln!(
+        out,
+        "rss-bytes {}",
+        crate::sysinfo::fmt_bytes(mem.rss_bytes)
+    );
+    let _ = writeln!(
+        out,
+        "vsize-bytes {}",
+        crate::sysinfo::fmt_bytes(mem.vsize_bytes)
+    );
     out
 }
 
@@ -252,17 +260,41 @@ fn render_session_detail(out: &mut String, s: &SessionSummary) {
         "  last-keepalive-rx-ms={}",
         s.stats.last_keepalive_received_ms,
     );
+    // Full per-PDU BGP message breakdown (BIRD `show protocols all
+    // <name>` parity). OSPF and Babel sessions carry a zeroed
+    // PeerMessageStats — the line still prints so the surface stays
+    // uniform across protocol kinds (an operator grepping for
+    // `messages:` does not have to special-case non-BGP rows).
+    let m = &s.message_stats;
+    let _ = writeln!(
+        out,
+        "  messages: open rx={} tx={} update rx={} tx={} \
+         notification rx={} tx={} keepalive rx={} tx={} \
+         route-refresh rx={} tx={}",
+        m.open_received,
+        m.open_sent,
+        m.update_received,
+        m.update_sent,
+        m.notification_received,
+        m.notification_sent,
+        m.keepalive_received,
+        m.keepalive_sent,
+        m.route_refresh_received,
+        m.route_refresh_sent,
+    );
 }
 
 /// Process memory snapshot. On Linux, reads `/proc/self/status` for
 /// `VmRSS` and `VmSize` (the same fields `top` and `ps` report). On
 /// other platforms, both fields are `None` — BIRD's `show memory` does
 /// the same on platforms without a discoverable value.
+#[allow(dead_code)]
 struct ProcessMemory {
     rss_bytes: Option<u64>,
     vsize_bytes: Option<u64>,
 }
 
+#[allow(dead_code)]
 impl ProcessMemory {
     fn unknown() -> Self {
         Self {
@@ -272,55 +304,20 @@ impl ProcessMemory {
     }
 }
 
+#[allow(dead_code)]
 fn process_memory() -> ProcessMemory {
-    #[cfg(target_os = "linux")]
-    {
-        if let Ok(text) = std::fs::read_to_string("/proc/self/status") {
-            let mut rss_kb: Option<u64> = None;
-            let mut vsize_kb: Option<u64> = None;
-            for line in text.lines() {
-                if let Some(rest) = line.strip_prefix("VmRSS:") {
-                    rss_kb = parse_kb(rest);
-                } else if let Some(rest) = line.strip_prefix("VmSize:") {
-                    vsize_kb = parse_kb(rest);
-                }
-                if rss_kb.is_some() && vsize_kb.is_some() {
-                    break;
-                }
-            }
-            return ProcessMemory {
-                rss_bytes: rss_kb.map(|kb| kb * 1024),
-                vsize_bytes: vsize_kb.map(|kb| kb * 1024),
-            };
-        }
-        ProcessMemory::unknown()
-    }
-    #[cfg(not(target_os = "linux"))]
-    {
-        ProcessMemory::unknown()
+    let m = crate::sysinfo::process_memory();
+    ProcessMemory {
+        rss_bytes: m.rss_bytes,
+        vsize_bytes: m.vsize_bytes,
     }
 }
 
 /// Format a memory byte count: `None` → the string `unknown` (BIRD
 /// parity for "no value available"); `Some(n)` → the integer.
+#[allow(dead_code)]
 fn fmt_bytes(value: Option<u64>) -> String {
-    match value {
-        Some(n) => n.to_string(),
-        None => "unknown".to_string(),
-    }
-}
-
-/// Parse the `VmRSS:\t   1234 kB` form out of `/proc/self/status`.
-/// Returns `None` when the field does not parse as a number (the
-/// kernel format is stable, but defensive parsing is cheap).
-///
-/// Linux-only: lives behind the same `#[cfg(target_os = "linux")]`
-/// gate as the only caller ([`process_memory`]) so non-Linux builds
-/// (macOS, Windows) do not see the function and the `dead_code` lint
-/// stays clean under `-D warnings`.
-#[cfg(target_os = "linux")]
-fn parse_kb(rest: &str) -> Option<u64> {
-    rest.split_whitespace().next()?.parse::<u64>().ok()
+    crate::sysinfo::fmt_bytes(value)
 }
 
 #[cfg(test)]

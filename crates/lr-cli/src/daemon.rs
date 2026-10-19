@@ -182,6 +182,7 @@ mod roa_view;
 mod show;
 mod shutdown;
 mod signal;
+mod sysinfo;
 mod translate;
 mod translate_bird_filter;
 mod yang;
@@ -6507,6 +6508,11 @@ fn spawn_metrics(cfg: &DaemonConfig, rt: &Arc<Runtime>) -> Result<(), String> {
             version: env!("CARGO_PKG_VERSION").to_string(),
             local_as: cfg.local_as,
             router_id: cfg.router_id.clone(),
+            config_path: cfg
+                .config_path
+                .clone()
+                .unwrap_or_else(|| "(none)".to_string()),
+            peer_as: cfg.peer_as,
         },
         router: Arc::clone(&rt.router),
         running: Arc::clone(&rt.running),

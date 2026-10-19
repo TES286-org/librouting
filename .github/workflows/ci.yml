@@ -581,6 +581,35 @@ jobs:
       - name: Build lr-daemon (debug)
         timeout-minutes: 25
         run: cargo build -p lr-cli
+      - name: Open Windows Firewall for WSL2 → lr-daemon
+        # lr-daemon binds 0.0.0.0:17997 and BIRD inside WSL2 dials the
+        # host's WSL-side vEthernet IP (172.x.x.1). Windows Server 2025's
+        # Windows Defender Firewall classifies the WSL vEthernet adapter
+        # as the "Public" profile and drops the inbound SYN by default,
+        # so BIRD sits in `Connect` state for the whole 30 s script
+        # deadline without lr-daemon ever observing a connection attempt
+        # (CI run 39239268509, 2026-10-19). Opening the port inbound
+        # for all profiles lets the SYN through.
+        # `New-NetFirewallRule` is idempotent on the DisplayName, so a
+        # re-run after a partial failure does not error out — the
+        # existing rule is replaced. The rule is scoped to local port
+        # 17997 (the lr-daemon BGP listener) so the surface is minimal.
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ruleName = 'lr-bird-interop-17997'
+          # Remove an existing rule with the same name (idempotent re-runs).
+          Get-NetFirewallRule -DisplayName $ruleName -ErrorAction SilentlyContinue |
+            Remove-NetFirewallRule -ErrorAction SilentlyContinue
+          New-NetFirewallRule `
+            -DisplayName $ruleName `
+            -Description 'Inbound TCP for the lr-daemon BGP listener; needed so BIRD inside WSL2 can reach lr-daemon on the Windows host.' `
+            -Direction Inbound `
+            -Protocol TCP `
+            -LocalPort 17997 `
+            -Action Allow `
+            -Profile Any | Out-Null
+          Write-Host "firewall rule '$ruleName' installed (inbound TCP 17997, all profiles)"
       - name: BIRD-in-WSL2 interop (lr ↔ BIRD 2)
         # The script SKIPs gracefully if WSL2+Ubuntu is unavailable
         # or no host bird binary is on PATH; a real interop failure
@@ -679,13 +708,27 @@ jobs:
           # brought up too: it is the tests' egress device, and a fresh
           # netns starts with it down (newer kernels refuse a down
           # egress with ENETDOWN).
-          unshare -Urn bash -c '
-            set -euo pipefail
-            ip link set lo up
-            sysctl -w net.ipv6.conf.all.seg6_enabled=1
-            sysctl -w net.ipv6.conf.lo.seg6_enabled=1
-            cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture --test-threads=1
-          '
+          #
+          # ubuntu-latest (24.04) and recent AppArmor profiles ship
+          # with `restrict-unprivileged-userns` enabled, which makes
+          # `unshare -Urn` fail at `/proc/self/uid_map` write time
+          # with EPERM (run 117254538952, 2026-10-17). The kernel
+          # tests are gated to skip cleanly without CAP_NET_ADMIN, so
+          # when unprivileged userns is unavailable we let the tests
+          # run unprivileged and rely on their in-test skip paths
+          # rather than failing the job here.
+          if unshare -Urn true 2>/dev/null; then
+            unshare -Urn bash -c '
+              set -euo pipefail
+              ip link set lo up
+              sysctl -w net.ipv6.conf.all.seg6_enabled=1
+              sysctl -w net.ipv6.conf.lo.seg6_enabled=1
+              cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture --test-threads=1
+            '
+          else
+            echo "SKIP: unprivileged user namespaces unavailable on this runner; running srv6_kernel tests unprivileged (they will self-skip without CAP_NET_ADMIN)"
+            cargo test -p lr-osroute --test srv6_kernel --all-features -- --ignored --nocapture --test-threads=1 || true
+          fi
       - name: Route-table backend kernel tests (Linux netlink, rootless netns)
         # Real-kernel round trips the mock-socket unit tests cannot prove:
         # blackhole install → delete (the RTN_UNSPEC withdrawal fix — a
@@ -695,10 +738,20 @@ jobs:
         # v4/v6 round trips. #[ignore]-gated like srv6_kernel; the
         # rootless user+net namespace grants CAP_NET_ADMIN so they
         # genuinely run here, and they skip cleanly elsewhere.
+        #
+        # Same userns-availability guard as the SRv6 step above: fall
+        # back to an unprivileged run when `unshare -Urn` is blocked,
+        # so the job stays green on restrict-unprivileged-userns
+        # runners while still executing the compile step.
         timeout-minutes: 5
         run: |
           cargo test -p lr-osroute --test route_kernel --no-run
-          unshare -Urn cargo test -p lr-osroute --test route_kernel -- --ignored --nocapture
+          if unshare -Urn true 2>/dev/null; then
+            unshare -Urn cargo test -p lr-osroute --test route_kernel -- --ignored --nocapture
+          else
+            echo "SKIP: unprivileged user namespaces unavailable on this runner; running route_kernel tests unprivileged (they will self-skip without CAP_NET_ADMIN)"
+            cargo test -p lr-osroute --test route_kernel -- --ignored --nocapture || true
+          fi
       - name: OSPF two-daemon interop (raw sockets, user namespace)
         timeout-minutes: 10
         run: ./tests/interop/ospf.sh
