@@ -1117,6 +1117,459 @@ fn srv6_e_router_lsa_constant_matches_codec() {
 }
 
 // ---------------------------------------------------------------------------
+// OSPFv3 SRv6 End.X / LAN End.X projection with attribute (RFC 9513 §9
+// → RFC 9514 §6 NLRI + §7-§8 attribute)
+// ---------------------------------------------------------------------------
+
+use lr_bgp::path::bgp_ls_attr::{
+    self, BgpLsAttrTlv, Srv6EndpointBehavior, Srv6SidStructure as BgpLsSrv6SidStructure,
+};
+use lr_ospf::lsa::srv6::{Srv6EndXSidSubTlv, Srv6LanEndXSidSubTlv};
+
+/// Build an E-Router-LSA for `router_id` carrying one p2p Router-Link
+/// TLV whose sub-TLV region is `sub_tlvs`. Used by the End.X
+/// projection tests to install End.X / LAN End.X sub-TLVs in one
+/// place.
+fn install_e_router_with_sub_tlvs(db: &mut Lsdb, router_id: u32, sub_tlvs: Vec<u8>) {
+    install(
+        db,
+        originate_v3_e_router_lsa(
+            router_id,
+            0x04,
+            0x13,
+            vec![ERouterLinkTlv {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 10,
+                interface_id: 5,
+                neighbor_interface_id: 3,
+                neighbor_router_id: 0x0a00_0002,
+                sub_tlvs,
+            }],
+            None,
+        )
+        .unwrap(),
+    );
+}
+
+/// Build the bytes for one End.X sub-TLV (§9.1 p2p form).
+fn end_x_sub_tlv(
+    sid: [u8; 16],
+    behavior: u16,
+    structure: Option<lr_ospf::lsa::srv6::Srv6SidStructure>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    Srv6EndXSidSubTlv {
+        flags: 0,
+        behavior,
+        algorithm: 0,
+        weight: 0,
+        sid,
+        structure,
+    }
+    .encode(&mut out);
+    out
+}
+
+/// Build the bytes for one LAN End.X sub-TLV (§9.2 broadcast form).
+fn lan_end_x_sub_tlv(
+    sid: [u8; 16],
+    behavior: u16,
+    neighbor_router_id: u32,
+    structure: Option<lr_ospf::lsa::srv6::Srv6SidStructure>,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    Srv6LanEndXSidSubTlv {
+        flags: 0,
+        behavior,
+        algorithm: 0,
+        weight: 0,
+        neighbor_router_id,
+        sid,
+        structure,
+    }
+    .encode(&mut out);
+    out
+}
+
+/// Assert `pair`'s NLRI is an SRv6 SID NLRI carrying `sid` and the
+/// Local Node Descriptor is `router_id` (4-byte IGP Router-ID). Used
+/// by the End.X projection tests so they don't repeat the NLRI shape
+/// assertion per test.
+fn assert_end_x_nlri_shape(
+    pair: &(BgpLsNlri, lr_bgp::path::bgp_ls_attr::BgpLsAttr),
+    router_id: u32,
+    sid: [u8; 16],
+) {
+    let BgpLsNlriVariant::Srv6Sid(n) = &pair.0.variant else {
+        panic!("expected Srv6Sid NLRI, got {:?}", pair.0.variant);
+    };
+    assert_eq!(n.protocol_id, ProtocolId::Ospfv3);
+    assert_eq!(n.identifier, 0);
+    assert_eq!(
+        n.local_node.igp_router_id(),
+        Some(&router_id.to_be_bytes()[..])
+    );
+    assert_eq!(n.srv6_sid.sid(), Some(sid));
+    let tys: Vec<u16> = n.srv6_sid.sub_tlvs.iter().map(|s| s.ty()).collect();
+    assert_eq!(tys, vec![518, 263], "518 first (SID), 263 second (MT-ID 0)");
+}
+
+#[test]
+fn srv6_end_x_projects_to_one_nlri_with_behavior_attribute() {
+    // RFC 9514 §7.1: the SRv6 Endpoint Behavior TLV is mandatory in
+    // the BGP-LS Attribute of every SRv6 SID NLRI. The End.X projection
+    // pairs the SRv6 SID NLRI with the §7 attribute carrying the
+    // End.X behavior (RFC 8986 §5.1 code point 5).
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x50);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[], 1)]);
+    install_e_router_with_sub_tlvs(&mut db, rid, end_x_sub_tlv(sid, 5, None));
+
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert_eq!(out.len(), 1, "one End.X SID → one (NLRI, attr) pair");
+    assert_end_x_nlri_shape(&out[0], rid, sid);
+
+    let attr = &out[0].1;
+    let endpoint = attr
+        .find(bgp_ls_attr::tlv_type::SRV6_ENDPOINT_BEHAVIOR)
+        .expect("§7.1 SRv6 Endpoint Behavior TLV mandatory");
+    let BgpLsAttrTlv::Srv6EndpointBehavior {
+        behavior,
+        flags,
+        algorithm,
+    } = endpoint
+    else {
+        panic!("expected Srv6EndpointBehavior TLV, got {endpoint:?}");
+    };
+    assert_eq!(*behavior, Srv6EndpointBehavior::EndX, "End.X behavior = 5");
+    assert_eq!(*flags, 0);
+    assert_eq!(*algorithm, 0);
+    // No structure sub-TLV in this test → no §8 SRv6 SID Structure TLV.
+    assert!(
+        attr.find(bgp_ls_attr::tlv_type::SRV6_SID_STRUCTURE)
+            .is_none(),
+        "§8 SRv6 SID Structure TLV absent when the OSPFv3 §10 sub-TLV is absent"
+    );
+}
+
+#[test]
+fn srv6_end_x_with_structure_projects_sid_structure_tlv() {
+    // RFC 9514 §8: when the OSPFv3 End.X sub-TLV carries the §10 SID
+    // Structure sub-TLV, the projection attaches the §8 SRv6 SID
+    // Structure TLV to the BGP-LS Attribute with the four length
+    // fields passed through verbatim.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x51);
+    let structure = lr_ospf::lsa::srv6::Srv6SidStructure {
+        lb_len: 48,
+        ln_len: 16,
+        func_len: 16,
+        arg_len: 0,
+    };
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[], 1)]);
+    install_e_router_with_sub_tlvs(&mut db, rid, end_x_sub_tlv(sid, 5, Some(structure)));
+
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert_eq!(out.len(), 1);
+    let attr = &out[0].1;
+    let s = attr
+        .find(bgp_ls_attr::tlv_type::SRV6_SID_STRUCTURE)
+        .expect("§8 SRv6 SID Structure TLV present when §10 sub-TLV is");
+    let BgpLsAttrTlv::Srv6SidStructure(s) = s else {
+        panic!("expected Srv6SidStructure TLV, got {s:?}");
+    };
+    assert_eq!(s.locator_block_len, 48);
+    assert_eq!(s.locator_node_len, 16);
+    assert_eq!(s.function_len, 16);
+    assert_eq!(s.argument_len, 0);
+    assert!(s.is_valid(), "§8 sum-of-lengths ≤ 128");
+}
+
+#[test]
+fn srv6_end_x_outside_locator_does_not_project() {
+    // RFC 9513 §9: an End.X SID not subsumed by a locator the same
+    // router advertised with the matching algorithm is ignored by
+    // the Srv6Database before the projection sees it.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[], 1)]);
+    let outside = srv6_sid_outside_locator(0x52);
+    install_e_router_with_sub_tlvs(&mut db, rid, end_x_sub_tlv(outside, 5, None));
+
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert!(
+        out.is_empty(),
+        "End.X SIDs outside the locator are filtered"
+    );
+}
+
+#[test]
+fn srv6_end_x_and_lan_end_x_each_emit_their_own_pair() {
+    // RFC 9513 §9: the same SID value may serve several links and a
+    // link may carry several SIDs (load-balancing). The projection
+    // emits one pair per End.X / LAN End.X sub-TLV instance; the NLRI
+    // carries the SID value, the attribute carries the behavior — the
+    // neighbor association is implicit through the IGP graph the
+    // controller builds from the Link NLRIs.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid_a = srv6_sid_in_locator(0x60);
+    let sid_b = srv6_sid_in_locator(0x61);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[], 1)]);
+    let mut sub_tlvs = Vec::new();
+    sub_tlvs.extend(end_x_sub_tlv(sid_a, 5, None));
+    sub_tlvs.extend(lan_end_x_sub_tlv(sid_b, 5, 0x0a00_0003, None));
+    install_e_router_with_sub_tlvs(&mut db, rid, sub_tlvs);
+
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert_eq!(out.len(), 2, "one End.X + one LAN End.X → two pairs");
+    let mut sids: Vec<[u8; 16]> = out
+        .iter()
+        .map(|(n, _)| {
+            let BgpLsNlriVariant::Srv6Sid(s) = &n.variant else {
+                unreachable!()
+            };
+            s.srv6_sid.sid().unwrap()
+        })
+        .collect();
+    sids.sort();
+    assert_eq!(sids, vec![sid_a, sid_b]);
+    // Each pair carries the §7 attribute with End.X behavior.
+    for (_n, a) in &out {
+        let e = a
+            .find(bgp_ls_attr::tlv_type::SRV6_ENDPOINT_BEHAVIOR)
+            .expect("§7.1 mandatory");
+        let BgpLsAttrTlv::Srv6EndpointBehavior { behavior, .. } = e else {
+            unreachable!()
+        };
+        assert_eq!(*behavior, Srv6EndpointBehavior::EndX);
+    }
+}
+
+#[test]
+fn srv6_end_x_unknown_behavior_round_trips_through_attribute() {
+    // RFC 9514 §7.1: the behavior value is a 16-bit code point. The
+    // codec carries the raw value so unknown behaviors round-trip
+    // byte-for-byte — the projection surfaces them through
+    // `Srv6EndpointBehavior::Unknown(u16)` so a controller that
+    // recognises a newer code point still learns the behavior.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x70);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[], 1)]);
+    install_e_router_with_sub_tlvs(&mut db, rid, end_x_sub_tlv(sid, 0xBEEF, None));
+
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert_eq!(out.len(), 1);
+    let e = out[0]
+        .1
+        .find(bgp_ls_attr::tlv_type::SRV6_ENDPOINT_BEHAVIOR)
+        .expect("§7.1 mandatory");
+    let BgpLsAttrTlv::Srv6EndpointBehavior { behavior, .. } = e else {
+        unreachable!()
+    };
+    assert_eq!(*behavior, Srv6EndpointBehavior::Unknown(0xBEEF));
+}
+
+#[test]
+fn srv6_end_x_empty_lsdb_emits_no_pairs() {
+    let out = project_v3_srv6_end_x_nlris(&Lsdb::new(), &CTX_V3);
+    assert!(out.is_empty(), "no SRv6 LSAs → no End.X pairs");
+}
+
+#[test]
+fn srv6_end_x_locator_only_emits_no_pairs() {
+    // A router advertising only a Locator LSA (End SIDs) and no
+    // E-Router-LSA → no End.X SIDs → no pairs.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x80);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert!(
+        out.is_empty(),
+        "End SIDs in the Locator LSA do not project to End.X pairs"
+    );
+}
+
+#[test]
+fn srv6_end_x_multiple_routers_each_emit_their_own_pairs() {
+    let mut db = Lsdb::new();
+    let rid_a = 0x0a00_0001;
+    let rid_b = 0x0a00_0002;
+    let sid_a = srv6_sid_in_locator(0x90);
+    let sid_b = srv6_sid_in_locator(0x91);
+    install_srv6_router(&mut db, rid_a, true, &[srv6_locator_tlv(&[], 1)]);
+    install_srv6_router(&mut db, rid_b, true, &[srv6_locator_tlv(&[], 1)]);
+    install_e_router_with_sub_tlvs(&mut db, rid_a, end_x_sub_tlv(sid_a, 5, None));
+    install_e_router_with_sub_tlvs(&mut db, rid_b, end_x_sub_tlv(sid_b, 5, None));
+
+    let out = project_v3_srv6_end_x_nlris(&db, &CTX_V3);
+    assert_eq!(out.len(), 2, "two routers → two pairs");
+    let mut igps: Vec<Vec<u8>> = out
+        .iter()
+        .map(|(n, _)| {
+            let BgpLsNlriVariant::Srv6Sid(s) = &n.variant else {
+                unreachable!()
+            };
+            s.local_node.igp_router_id().unwrap().to_vec()
+        })
+        .collect();
+    igps.sort();
+    assert_eq!(
+        igps,
+        vec![rid_a.to_be_bytes().to_vec(), rid_b.to_be_bytes().to_vec()]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// diff_bgpls_with_attrs
+// ---------------------------------------------------------------------------
+
+/// Build one `(BgpLsNlri, BgpLsAttr)` pair with a 16-byte SID derived
+/// from `sid_low` and an attribute carrying just the §7.1 SRv6
+/// Endpoint Behavior TLV with `behavior`. Used by the
+/// `diff_bgpls_with_attrs` tests so they don't repeat the projection
+/// harness — the diff function operates on the pair shape, not on
+/// how it was produced.
+fn end_x_pair(
+    router_id: u32,
+    sid_low: u8,
+    behavior: Srv6EndpointBehavior,
+) -> (BgpLsNlri, lr_bgp::path::bgp_ls_attr::BgpLsAttr) {
+    let sid = srv6_sid_in_locator(sid_low);
+    let local_node = lr_bgp::path::bgp_ls::NodeDescriptor::new(vec![
+        lr_bgp::path::bgp_ls::NodeDescriptorSubTlv::As(CTX_V3.as_number),
+        lr_bgp::path::bgp_ls::NodeDescriptorSubTlv::BgpLsId(CTX_V3.bgp_ls_id),
+        lr_bgp::path::bgp_ls::NodeDescriptorSubTlv::OspfAreaId(CTX_V3.area_id),
+        lr_bgp::path::bgp_ls::NodeDescriptorSubTlv::IgpRouterId(router_id.to_be_bytes().to_vec()),
+    ]);
+    let nlri = BgpLsNlri {
+        route_distinguisher: None,
+        variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+            protocol_id: ProtocolId::Ospfv3,
+            identifier: 0,
+            local_node,
+            srv6_sid: Srv6SidDescriptor::new(vec![
+                Srv6SidDescriptorSubTlv::Srv6SidInformation(sid),
+                Srv6SidDescriptorSubTlv::MultiTopologyId(0u16.to_be_bytes().to_vec()),
+            ]),
+        }),
+    };
+    let attr =
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr::new(vec![BgpLsAttrTlv::Srv6EndpointBehavior {
+            behavior,
+            flags: 0,
+            algorithm: 0,
+        }]);
+    (nlri, attr)
+}
+
+#[test]
+fn diff_attrs_empty_to_one_adds_everything() {
+    let one = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndX);
+    let curr = [one.clone()];
+    let d = diff_bgpls_with_attrs(&[], &curr);
+    assert_eq!(d.added.len(), 1);
+    assert_eq!(d.added[0], one);
+    assert!(d.removed.is_empty());
+    assert!(d.updated.is_empty());
+    assert_eq!(d.unchanged, 0);
+}
+
+#[test]
+fn diff_attrs_one_to_empty_removes_everything() {
+    let one = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndX);
+    let prev = [one.clone()];
+    let d = diff_bgpls_with_attrs(&prev, &[]);
+    assert!(d.added.is_empty());
+    assert_eq!(d.removed.len(), 1);
+    assert_eq!(d.removed[0], one.0);
+    assert!(d.updated.is_empty());
+    assert_eq!(d.unchanged, 0);
+}
+
+#[test]
+fn diff_attrs_identical_projections_returns_only_unchanged() {
+    let one = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndX);
+    let prev = [one.clone()];
+    let curr = [one];
+    let d = diff_bgpls_with_attrs(&prev, &curr);
+    assert!(d.added.is_empty());
+    assert!(d.removed.is_empty());
+    assert!(d.updated.is_empty());
+    assert_eq!(d.unchanged, 1);
+}
+
+#[test]
+fn diff_attrs_added_and_removed_when_nlri_set_changes() {
+    let a = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndX);
+    let b = end_x_pair(0x0a00_0002, 0x02, Srv6EndpointBehavior::EndX);
+    let prev = [a.clone()];
+    let curr = [b.clone()];
+    let d = diff_bgpls_with_attrs(&prev, &curr);
+    assert_eq!(d.added.len(), 1);
+    assert_eq!(d.added[0], b);
+    assert_eq!(d.removed.len(), 1);
+    assert_eq!(d.removed[0], a.0);
+    assert!(d.updated.is_empty());
+    assert_eq!(d.unchanged, 0);
+}
+
+#[test]
+fn diff_attrs_attribute_change_is_an_update_not_a_remove_add() {
+    // RFC 4271 §9.2.1.2: when the NLRI is unchanged and only the
+    // attribute changes, BGP re-advertises the route with the new
+    // attribute (no withdraw). The diff function surfaces this as
+    // `updated`, not as a remove+add.
+    let prev = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndX);
+    let curr = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndXWithPsp);
+    let prev_arr = [prev];
+    let curr_arr = [curr.clone()];
+    let d = diff_bgpls_with_attrs(&prev_arr, &curr_arr);
+    assert!(d.added.is_empty());
+    assert!(d.removed.is_empty());
+    assert_eq!(d.updated.len(), 1);
+    assert_eq!(d.updated[0], curr);
+    assert_eq!(d.unchanged, 0);
+}
+
+#[test]
+fn diff_attrs_structure_change_is_an_update() {
+    // Adding the §8 SRv6 SID Structure TLV changes the attribute
+    // bytes — the NLRI (just the SID) is unchanged. The diff
+    // surfaces this as `updated` (re-advertise with new attribute).
+    let (n, _prev_attr) = end_x_pair(0x0a00_0001, 0x01, Srv6EndpointBehavior::EndX);
+    let prev_attr =
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr::new(vec![BgpLsAttrTlv::Srv6EndpointBehavior {
+            behavior: Srv6EndpointBehavior::EndX,
+            flags: 0,
+            algorithm: 0,
+        }]);
+    let curr_attr = lr_bgp::path::bgp_ls_attr::BgpLsAttr::new(vec![
+        BgpLsAttrTlv::Srv6EndpointBehavior {
+            behavior: Srv6EndpointBehavior::EndX,
+            flags: 0,
+            algorithm: 0,
+        },
+        BgpLsAttrTlv::Srv6SidStructure(BgpLsSrv6SidStructure {
+            locator_block_len: 48,
+            locator_node_len: 16,
+            function_len: 16,
+            argument_len: 0,
+        }),
+    ]);
+    let d = diff_bgpls_with_attrs(&[(n.clone(), prev_attr)], &[(n, curr_attr.clone())]);
+    assert!(d.added.is_empty());
+    assert!(d.removed.is_empty());
+    assert_eq!(d.updated.len(), 1);
+    assert_eq!(d.updated[0].1, curr_attr);
+    assert_eq!(d.unchanged, 0);
+}
+
+// ---------------------------------------------------------------------------
 // diff_bgpls
 // ---------------------------------------------------------------------------
 

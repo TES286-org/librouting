@@ -1,4 +1,7 @@
-//! OSPF LSDB → BGP-LS projection (RFC 7752 §3 + RFC 9514 §6 SRv6 follow-up).
+//! OSPF LSDB → BGP-LS projection (RFC 7752 §3 + RFC 9514 §6-§8
+//! SRv6 follow-up, including the End.X / LAN End.X projection that
+//! attaches the §7 SRv6 Endpoint Behavior TLV to a projected SRv6
+//! SID NLRI).
 //!
 //! Layer 2 of [issue #60]'s work breakdown. A pure function on the
 //! area LSDB that produces the set of BGP-LS NLRI a controller needs
@@ -90,11 +93,14 @@
 //! SRv6 database (RFC 9513 reception in [`lr_ospf::srv6db`]) is part
 //! of the OSPFv3 path: [`project_v3`] builds a [`Srv6Database`] from
 //! the same area LSDB and emits one SRv6 SID NLRI per End SID the
-//! database holds. End.X / LAN End.X SIDs are not projected — the
-//! behavior that distinguishes them from End SIDs lives in the
-//! BGP-LS Attribute surface (RFC 9514 §7 SRv6 Endpoint Behavior),
-//! which is out of scope for the codec layer; project them once the
-//! attribute surface lands.
+//! database holds. End.X / LAN End.X SIDs are projected separately by
+//! [`project_v3_srv6_end_x_nlris`] because they carry a BGP-LS
+//! Attribute (RFC 7752 §3.3) — the §7 SRv6 Endpoint Behavior TLV
+//! (RFC 9514 §7.1) that distinguishes an End.X SID from an End SID
+//! lives in the attribute surface, not in the NLRI. The plain NLRI
+//! projection in [`project_area_lsdb_to_bgpls`] emits End SIDs only;
+//! the End.X projection returns `(BgpLsNlri, BgpLsAttr)` pairs that
+//! the daemon driver pushes through `advertise_bgpls_with_attr`.
 //!
 //! [issue #60]: https://github.com/TES286-org/librouting/issues/60
 
@@ -104,6 +110,9 @@ use lr_bgp::path::bgp_ls::{
     BgpLsNlri, BgpLsNlriVariant, LinkDescriptor, LinkDescriptorSubTlv, LinkNlri, NodeDescriptor,
     NodeDescriptorSubTlv, NodeNlri, OspfRouteType, PrefixDescriptor, PrefixDescriptorSubTlv,
     PrefixNlri, ProtocolId, Srv6SidDescriptor, Srv6SidDescriptorSubTlv, Srv6SidNlri,
+};
+use lr_bgp::path::bgp_ls_attr::{
+    BgpLsAttr, BgpLsAttrTlv, Srv6EndpointBehavior, Srv6SidStructure as BgpLsSrv6SidStructure,
 };
 use lr_core::buf::WriteBuf;
 use lr_core::rib::Protocol;
@@ -956,10 +965,12 @@ fn push_v3_ipv6_prefix_nlri(
 /// are not projected here. The SRv6 SID NLRI carries only the 16-byte
 /// SID value — the RFC 8986 endpoint behavior that distinguishes an
 /// End SID from an End.X SID lives in the BGP-LS Attribute surface
-/// (RFC 9514 §7 SRv6 Endpoint Behavior), which is out of scope for
-/// the codec layer. Projecting End.X without the behavior attribute
-/// loses the adjacency association a controller needs; emit End.X
-/// once the attribute surface lands.
+/// (RFC 9514 §7 SRv6 Endpoint Behavior). Projecting End.X without
+/// the behavior attribute loses the adjacency association a
+/// controller needs. [`project_v3_srv6_end_x_nlris`] is the
+/// sibling function that emits the End.X NLRIs paired with the §7
+/// attribute; the daemon driver pushes those pairs through
+/// `advertise_bgpls_with_attr`.
 ///
 /// # Incremental republish
 ///
@@ -998,6 +1009,217 @@ fn project_v3_srv6_sid_nlris(lsdb: &Lsdb, ctx: &OspfAreaBgplsContext, out: &mut 
             });
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// OSPFv3 SRv6 End.X / LAN End.X projection with attribute (RFC 9513 §9
+// → RFC 9514 §6 NLRI + §7 attribute)
+// ---------------------------------------------------------------------------
+
+/// Project the OSPFv3 SRv6 End.X / LAN End.X SID database (RFC 9513
+/// §9) onto RFC 9514 §6 SRv6 SID NLRIs paired with the BGP-LS
+/// Attribute (RFC 7752 §3.3 + RFC 9514 §7-§8) that carries the SRv6
+/// Endpoint Behavior TLV a controller needs to distinguish an End.X
+/// SID from an End SID.
+///
+/// Returns one `(BgpLsNlri, BgpLsAttr)` pair per End.X / LAN End.X SID
+/// in the database. Each pair carries:
+///
+/// - `nlri` — an SRv6 SID NLRI (RFC 9514 §6) with the Local Node
+///   Descriptor set to the advertising router's 4-byte IGP Router-ID,
+///   the SRv6 SID Descriptor stream carrying the mandatory SRv6 SID
+///   Information TLV (§6.1, type 518, the 16-byte SID value) and a
+///   Multi-Topology ID TLV (type 263, value 0) for consistency with
+///   the End SID projection.
+/// - `attr` — a BGP-LS Attribute carrying:
+///   - the mandatory SRv6 Endpoint Behavior TLV (RFC 9514 §7.1, type
+///     1250) with the behavior, flags and algorithm from the OSPFv3
+///     End.X sub-TLV (RFC 9513 §9.1/§9.2);
+///   - the optional SRv6 SID Structure TLV (RFC 9514 §8, type 1252)
+///     when the OSPFv3 End.X sub-TLV carried the §10 SID Structure
+///     sub-TLV — the four length fields pass through verbatim.
+///
+/// The Srv6Database applies the RFC 9513 §9 locator containment gate
+/// (an End.X SID not subsumed by a locator the same router advertised
+/// with the matching algorithm is ignored), so the projection sees a
+/// clean per-router End.X SID set in wire order. Multiple instances
+/// survive — the same SID may serve several links and a link may
+/// carry several SIDs (§9 load-balancing).
+///
+/// # Wire shape
+///
+/// The NLRI shape is identical to the End SID projection — RFC 9514
+/// §6 carries the 16-byte SID value; the endpoint behavior lives in
+/// the BGP-LS Attribute (§7.1), not in the NLRI. A controller that
+/// receives the NLRI without the attribute sees a SID with no
+/// behavior; one that receives both knows the adjacency-steering
+/// End.X behavior and can install a cross-connect accordingly.
+///
+/// # Incremental republish
+///
+/// [`diff_bgpls_with_attrs`] handles the End.X NLRIs transparently
+/// — the codec's strict structural enforcement on both the NLRI and
+/// the attribute makes the encoded bytes a stable identity for set
+/// membership, so a daemon running the projection once per LSDB
+/// change uses the `added`, `removed` and `updated` sets to drive
+/// incremental MP-BGP UPDATE messages via
+/// `BgpPeer::advertise_bgpls_with_attr` (added, updated) and
+/// `BgpPeer::withdraw_bgpls` (removed).
+///
+/// [issue #60]: https://github.com/TES286-org/librouting/issues/60
+pub fn project_v3_srv6_end_x_nlris(
+    lsdb: &Lsdb,
+    ctx: &OspfAreaBgplsContext,
+) -> Vec<(BgpLsNlri, BgpLsAttr)> {
+    let db = Srv6Database::from_lsdb(lsdb);
+    let mut out = Vec::new();
+    for (&router_id, node) in &db.nodes {
+        // The Local Node Descriptor carries the advertising router's
+        // 4-byte IGP Router-ID (the OSPFv3 Router ID). The LAN End.X
+        // neighbor Router-ID lives in the OSPF link-state (it is
+        // already projected onto the Link NLRI for the same adjacency)
+        // and the BGP-LS Attribute (§7.2 SRv6 BGP PeerNode SID TLV is
+        // EPE-only — not used by an IGP-originated End.X). The NLRI's
+        // identity is the SID value alone.
+        let local_node = v3_router_node_descriptor(router_id, ctx);
+        for x in &node.end_x_sids {
+            let nlri = BgpLsNlri {
+                route_distinguisher: None,
+                variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+                    protocol_id: ctx.bgpls_protocol_id(),
+                    identifier: 0,
+                    local_node: local_node.clone(),
+                    srv6_sid: Srv6SidDescriptor::new(vec![
+                        Srv6SidDescriptorSubTlv::Srv6SidInformation(x.sid),
+                        // MT-ID 0 for consistency with the End SID
+                        // and prefix-NLRI projections.
+                        Srv6SidDescriptorSubTlv::MultiTopologyId(0u16.to_be_bytes().to_vec()),
+                    ]),
+                }),
+            };
+            let mut tlvs = Vec::with_capacity(2);
+            // RFC 9514 §7.1: SRv6 Endpoint Behavior TLV is mandatory
+            // in the BGP-LS Attribute of every SRv6 SID NLRI. The
+            // behavior value comes straight from the OSPFv3 End.X
+            // sub-TLV (RFC 9513 §9.1/§9.2 carry the RFC 8986 §10.2
+            // code point); the codec carries the raw 16-bit value so
+            // unknown behaviors round-trip byte-for-byte.
+            tlvs.push(BgpLsAttrTlv::Srv6EndpointBehavior {
+                behavior: Srv6EndpointBehavior::from_u16(x.behavior),
+                flags: x.flags,
+                algorithm: x.algorithm,
+            });
+            // RFC 9514 §8: SRv6 SID Structure TLV is optional. The
+            // OSPFv3 §10 sub-TLV (RFC 9513 §10) carries the same
+            // four length fields; pass through verbatim when present.
+            if let Some(s) = &x.structure {
+                tlvs.push(BgpLsAttrTlv::Srv6SidStructure(BgpLsSrv6SidStructure {
+                    locator_block_len: s.lb_len,
+                    locator_node_len: s.ln_len,
+                    function_len: s.func_len,
+                    argument_len: s.arg_len,
+                }));
+            }
+            let attr = BgpLsAttr::new(tlvs);
+            out.push((nlri, attr));
+        }
+    }
+    out
+}
+
+/// Result of comparing two `(BgpLsNlri, BgpLsAttr)` projections for
+/// incremental republish of NLRIs that carry a BGP-LS Attribute
+/// (RFC 7752 §3.3).
+///
+/// `added` rides MP_REACH_NLRI + BGP-LS Attribute via
+/// `BgpPeer::advertise_bgpls_with_attr`; `removed` rides
+/// MP_UNREACH_NLRI via `BgpPeer::withdraw_bgpls`; `updated` rides
+/// MP_REACH_NLRI + BGP-LS Attribute (the new attribute value
+/// re-advertises the NLRI's link-state metadata without a withdraw —
+/// BGP permits attribute updates without MP_UNREACH_NLRI per RFC 4271
+/// §9.2.1.2). `unchanged` is a count (the NLRI + attribute pair is
+/// carried for accounting only and is not re-advertised).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct BgplsAttrDiff {
+    pub added: Vec<(BgpLsNlri, BgpLsAttr)>,
+    pub removed: Vec<BgpLsNlri>,
+    pub updated: Vec<(BgpLsNlri, BgpLsAttr)>,
+    pub unchanged: usize,
+}
+
+/// Diff two `(BgpLsNlri, BgpLsAttr)` projections by canonical wire
+/// form (RFC 7752 §3.3 NLRI identity + RFC 7752 §3.3 attribute
+/// comparison).
+///
+/// Indexes both projections by the encoded NLRI bytes — the NLRI is
+/// the route identity, the attribute is the metadata. The codec's
+/// byte-for-byte round-trip property (the NLRI codec preserves
+/// unknown sub-TLVs verbatim; the attribute codec preserves unknown
+/// TLVs verbatim) makes the encoded form a stable identity for set
+/// membership. Two pairs with equal NLRI bytes and equal attribute
+/// values are `unchanged`; equal NLRI bytes and differing attribute
+/// values are `updated`; NLRI bytes only in `prev` are `removed`;
+/// NLRI bytes only in `curr` are `added`.
+///
+/// A duplicate NLRI in either projection collapses to its last
+/// occurrence — mirrors the dedup the plain-NLRI
+/// [`diff_bgpls`] applies. The projection never emits duplicates
+/// in practice (a SID maps to exactly one NLRI), so the dedup is
+/// defensive.
+pub fn diff_bgpls_with_attrs(
+    prev: &[(BgpLsNlri, BgpLsAttr)],
+    curr: &[(BgpLsNlri, BgpLsAttr)],
+) -> BgplsAttrDiff {
+    let prev_map = index_pairs_by_nlri(prev);
+    let curr_map = index_pairs_by_nlri(curr);
+    let mut added = Vec::new();
+    let mut removed = Vec::new();
+    let mut updated = Vec::new();
+    let mut unchanged = 0usize;
+    // Walk prev first so removed stays in prev order, then walk curr
+    // for added and updated — keeps both lists deterministic for a
+    // test.
+    for (k, (n, a)) in &prev_map {
+        match curr_map.get(k) {
+            Some((cn, ca)) if a == ca => {
+                unchanged += 1;
+                let _ = cn;
+            }
+            Some((cn, ca)) => {
+                // NLRI present in both, attribute changed → re-
+                // advertise with the new attribute (no withdraw).
+                updated.push((cn.clone(), ca.clone()));
+            }
+            None => {
+                removed.push(n.clone());
+            }
+        }
+    }
+    for (k, (n, a)) in &curr_map {
+        if !prev_map.contains_key(k) {
+            added.push((n.clone(), a.clone()));
+        }
+    }
+    BgplsAttrDiff {
+        added,
+        removed,
+        updated,
+        unchanged,
+    }
+}
+
+/// Index `(BgpLsNlri, BgpLsAttr)` pairs by the canonical wire bytes
+/// of the NLRI. The NLRI is the route identity (the attribute is
+/// metadata); the codec's round-trip property makes the encoded
+/// NLRI bytes a stable identity for set membership.
+fn index_pairs_by_nlri(
+    pairs: &[(BgpLsNlri, BgpLsAttr)],
+) -> BTreeMap<Vec<u8>, (BgpLsNlri, BgpLsAttr)> {
+    let mut m = BTreeMap::new();
+    for (n, a) in pairs {
+        m.insert(nlri_wire_bytes(n), (n.clone(), a.clone()));
+    }
+    m
 }
 
 #[cfg(test)]
