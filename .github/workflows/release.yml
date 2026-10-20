@@ -60,7 +60,32 @@ jobs:
             lr_bin: lr.exe
             lrd_bin: lr-daemon.exe
             lrctl_bin: lrctl.exe
+          # Linux RISC-V (riscv64gc): native build on real RISC-V hardware
+          # via the RISE Project's ubuntu-24.04-riscv runner (issue #65,
+          # https://riscv-runners.riseproject.dev/). A native build is
+          # preferred over a cross-build for release artifacts because the
+          # RISC-V target has no cross-validated release-link path in this
+          # repo yet — the riscv-native CI job proves the native build
+          # works end-to-end on every push. If the RISE GitHub App is not
+          # installed on the repository, this matrix entry fails the
+          # release workflow with "no runner found"; install the App
+          # (https://github.com/apps/rise-risc-v-runners) before tagging.
+          - os: ubuntu-24.04-riscv
+            target: riscv64gc-unknown-linux-gnu
+            archive: librouting-linux-riscv64gc.tar.gz
+            lib: liblr_ffi.so
+            lr_bin: lr
+            lrd_bin: lr-daemon
+            lrctl_bin: lrctl
     runs-on: ${{ matrix.os }}
+    # 120 min ceiling: the RISC-V native release build (LTO +
+    # codegen-units=1 + opt-level=3) is the slowest entry — RISC-V
+    # hardware is roughly 3-5x slower than x86_64 for compute-heavy
+    # compilation, and the existing x86_64/macOS/Windows entries
+    # finish in ~15-20 min each. 120 min gives the RISC-V entry ~6x
+    # slack over the x86_64 baseline; the faster entries are
+    # unaffected by a higher ceiling.
+    timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -149,10 +174,10 @@ jobs:
           body: |
             ## librouting ${{ github.ref_name }}
 
-            Pre-built `lr-ffi` shared libraries for Linux, macOS (Intel
-            and Apple Silicon) and Windows, the public C and C++ headers
-            (`lr_ffi.h`, `librouting.hpp`), and the `lr`, `lr-daemon` and
-            `lrctl` CLI binaries.
+            Pre-built `lr-ffi` shared libraries for Linux (x86_64 and
+            RISC-V), macOS (Intel and Apple Silicon) and Windows, the
+            public C and C++ headers (`lr_ffi.h`, `librouting.hpp`),
+            and the `lr`, `lr-daemon` and `lrctl` CLI binaries.
 
             Each platform archive contains:
             - `liblr_ffi.{so,dylib,dll}` — the C ABI shared library
