@@ -26,7 +26,7 @@ libfuzzer-sys = "0.4"
 # regression catches bugs in the *current* code, not a published
 # snapshot.
 lr-core = { path = "../crates/lr-core" }
-lr-bgp = { path = "../crates/lr-bgp", features = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast"] }
+lr-bgp = { path = "../crates/lr-bgp", features = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast", "bgp_ls"] }
 lr-policy = { path = "../crates/lr-policy" }
 
 # Each `[[bin]]` below is one cargo-fuzz target. cargo-fuzz runs them
@@ -35,6 +35,12 @@ lr-policy = { path = "../crates/lr-policy" }
 [[bin]]
 name = "bgp_decode"
 path = "fuzz_targets/bgp_decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bgp_ls_decode"
+path = "fuzz_targets/bgp_ls_decode.rs"
 test = false
 doc = false
 

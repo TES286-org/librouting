@@ -13,6 +13,52 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [Unreleased] — BGP-LS NLRI codec (RFC 7752 §3.2-§3.3)
+
+Partial progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
+the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
+SAFI=71, plus the VPN variant SAFI=72). The OSPF-LSDB → BGP-LS
+projection, the daemon wiring and the interop lab against BIRD are
+follow-ups; this entry ships only Layer 1.
+
+### Added
+
+**BGP-LS NLRI codec** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
+A new `lr-bgp::path::bgp_ls` module (feature-gated as
+`lr-bgp/bgp_ls`, on by default) parses and serialises the four
+RFC 7752 §3.3 NLRI shapes — Node (Type 1), Link (Type 2), IPv4
+Topology Prefix (Type 3), IPv6 Topology Prefix (Type 4) — plus
+the Local/Remote Node Descriptor wrapper TLVs (256/257), the bare
+Link Descriptor TLV stream (258-263), the bare Prefix Descriptor TLV
+stream (263-265), and the Node Descriptor sub-TLVs (§3.2.1.4:
+Autonomous System 512, BGP-LS Identifier 513, OSPF Area-ID 514,
+IGP Router-ID 515).
+
+The codec carries the SRv6 SID NLRI (RFC 9514 §3, NLRI Type 6) at
+the framing level only — its inner SRv6 descriptor sub-TLVs
+(SRv6 SID Information 518, SRv6 Endpoint Behavior, SRv6 SID
+Structure) are preserved verbatim as `Unknown` and deferred to a
+follow-up. The new `NlriFamily::BGP_LS` and `NlriFamily::BGP_LS_VPN`
+constants in `lr-core::nlri` carry the AFI/SAFI pair.
+
+Round-trip safety: the codec enforces strict RFC 7752 §3.3 figure
+structure on decode — Node NLRI has exactly one outer TLV
+(LOCAL_NODE_DESCRIPTOR); Link NLRI has LOCAL_NODE_DESCRIPTOR +
+REMOTE_NODE_DESCRIPTOR followed by bare Link Descriptor sub-TLVs;
+Prefix NLRI has LOCAL_NODE_DESCRIPTOR followed by bare Prefix
+Descriptor sub-TLVs. Unknown sub-TLVs are preserved verbatim, so
+any well-formed NLRI round-trips byte-for-byte. The
+`cargo +nightly fuzz run bgp_ls_decode` target (mirroring
+`bgp_decode.rs`) asserts the round-trip property on any input that
+decodes successfully; it ran 62 million iterations without crashes
+on the seed corpus committed under `fuzz/seeds/bgp_ls_decode/`.
+
+Public Rust API surface (Tier 1) is additive only — no existing
+signature changes. The C ABI (Tier 2) is unchanged; the new types
+are Rust-only. The daemon flag and config surface (Tier 3) are
+unchanged — BGP-LS projection and daemon wiring are tracked as
+follow-ups in [issue #60](https://github.com/TES286-org/librouting/issues/60).
+
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 
 librouting 1.2.0 is a minor release: new public Rust API surface and
