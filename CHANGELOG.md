@@ -352,6 +352,39 @@ when describing the Linux UAPI surface; both now mention riscv64
 explicitly. No code change — the constants were already correct on
 riscv64.
 
+### Added (release artifacts)
+
+**RISC-V release archive** (`release`, [issue #65](https://github.com/TES286-org/librouting/issues/65)).
+The release workflow in `.github/workflows/release.yml` ships a
+fifth platform archive — `librouting-linux-riscv64gc.tar.gz` — built
+natively on the RISE Project's `ubuntu-24.04-riscv` runner. The
+archive carries the same shape as the other Linux entry:
+`liblr_ffi.so`, `liblr_ffi.a` (where emitted), `lr`, `lr-daemon`,
+`lrctl`, and the `include/lr_ffi.h` + `include/librouting.hpp`
+pair. A native build is preferred over a cross-build for release
+artifacts because the riscv64 target has no cross-validated
+release-link path in this repo yet — the `riscv-native` CI job
+proves the native build works end-to-end on every push, so the
+release path rides on the same guarantee.
+
+The `build-native` job now carries an explicit `timeout-minutes: 120`
+ceiling. The RISC-V native release build (LTO + codegen-units=1 +
+opt-level=3) is the slowest matrix entry — RISC-V hardware is
+roughly 3-5x slower than x86_64 for compute-heavy compilation, and
+the existing x86_64/macOS/Windows entries finish in ~15-20 min
+each. 120 min gives the RISC-V entry ~6x slack over the x86_64
+baseline; the faster entries are unaffected by a higher ceiling.
+
+If the RISE GitHub App is not installed on the repository, this
+matrix entry fails the release workflow with "no runner found";
+install the App (<https://github.com/apps/rise-risc-v-runners>)
+before tagging. The release body in `release.yml` now enumerates
+"Linux (x86_64 and RISC-V), macOS (Intel and Apple Silicon) and
+Windows" to match the new matrix.
+
+`docs/RELEASE-PLAN.md` §3.2 (Build matrix) is updated to record
+the RISC-V entry and its App-installation requirement.
+
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 
 librouting 1.2.0 is a minor release: new public Rust API surface and

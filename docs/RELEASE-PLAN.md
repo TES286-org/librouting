@@ -220,11 +220,16 @@ git push origin vX.Y.Z
 
 The tag push triggers `.github/workflows/release.yml`:
 
-1. **Build matrix** — Linux x86_64, macOS Intel, macOS Apple Silicon, Windows
-   x86_64. Each builds the workspace in release mode and stages the platform's
-   shared library, the static archive (where the toolchain emits one), the C and
-   C++ headers, and the `lr`, `lr-daemon` and `lrctl` binaries into a tarball
-   (or `.zip` on Windows).
+1. **Build matrix** — Linux x86_64, Linux RISC-V (`riscv64gc`, native
+   build on the RISE Project's `ubuntu-24.04-riscv` runner, issue #65),
+   macOS Intel, macOS Apple Silicon, Windows x86_64. Each builds the
+   workspace in release mode and stages the platform's shared library,
+   the static archive (where the toolchain emits one), the C and C++
+   headers, and the `lr`, `lr-daemon` and `lrctl` binaries into a
+   tarball (or `.zip` on Windows). The RISC-V entry requires the RISE
+   RISC-V Runners GitHub App to be installed on the repository; without
+   it, the entry fails with "no runner found" and the cut proceeds only
+   after the App is installed or the entry is removed.
 2. **Publish job** — downloads every build artifact, flattens them with the
    standalone headers, and creates a **draft** GitHub Release with
    auto-generated release notes and a body linking back to this document.
