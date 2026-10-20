@@ -4183,3 +4183,114 @@ fn apply_runtime_delta_withdrawal_after_identical_reinstall() {
         "withdrawal must fire after an identical re-install"
     );
 }
+
+// ---------------------------------------------------------------------------
+// BGP-LS projection republish driver (issue #60 daemon wiring).
+//
+// `bgpls_republish` ties three pieces together: the OSPF LSDB →
+// BGP-LS projection (already tested in `lsdb_to_bgpls_tests`), the
+// `diff_bgpls` helper (also tested there), and the new
+// `BgpPeer::advertise_bgpls` / `withdraw_bgpls` egress (tested in
+// `lr-bgp/src/advertise_tests.rs`). The integration test below
+// verifies the wiring: install a Router-LSA into the area LSDB,
+// republish, and check that the BGP session's outbound buffer holds
+// an UPDATE carrying the projected Node NLRI.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bgpls_republish_pushes_node_nlri_to_bgp_ls_session() {
+    use lr_core::nlri::NlriFamily;
+    use lr_ospf::origination::{originate_router_lsa, RouterLsaFlags, RouterLsaLink};
+
+    let mut r = DefaultRouter::new();
+    // Create the BGP-LS BGP session. The session is established
+    // against a dummy partner peer we step through OPEN/KEEPALIVE.
+    let bgp_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::IPV4_UNICAST, NlriFamily::BGP_LS]),
+        )
+        .unwrap();
+    r.start_session(bgp_h).unwrap();
+    // The partner peer must mirror the BGP-LS family so MP-BGP
+    // capability negotiation succeeds on both sides.
+    let mut partner_cfg =
+        lr_bgp::PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 9, 9, 9]));
+    partner_cfg.mp_families = vec![NlriFamily::IPV4_UNICAST, NlriFamily::BGP_LS];
+    let mut partner = lr_bgp::BgpPeer::new(partner_cfg);
+    partner.step(lr_bgp::BgpEvent::ManualStart);
+    partner.step(lr_bgp::BgpEvent::TransportOpen);
+    let partner_open = partner.drain_outgoing();
+    r.feed_input(bgp_h, &partner_open).unwrap();
+    let our_open = r.drain_output(bgp_h);
+    let _ = partner.feed_bytes(&our_open);
+    let partner_keepalive = partner.drain_outgoing();
+    r.feed_input(bgp_h, &partner_keepalive).unwrap();
+    let _our_keepalive = r.drain_output(bgp_h);
+    // The session should be Established now.
+    {
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&bgp_h.0).unwrap() else {
+            panic!("expected BGP session");
+        };
+        assert!(peer.is_established(), "BGP-LS session must be Established");
+    }
+    // Add an OSPF area 0. The router exposes no public API to create
+    // an area without an OSPF session; tests live in the same module
+    // so we can construct the state directly.
+    use crate::instance::{OspfAreaState, OspfAreaType};
+    use lr_ospf::lsdb::Lsdb;
+    r.ospf_areas.entry(0u32).or_insert(OspfAreaState {
+        lsdb: Lsdb::new(),
+        protocol: Protocol::Ospfv2,
+        kind: OspfAreaType::Normal,
+        topology_version: 0,
+    });
+    // Install a Router-LSA advertising a single transit link. The
+    // projection walks the LSDB and emits one Node NLRI per Router-LSA.
+    let router_id: u32 = 0x0a000001; // 10.0.0.1
+    let lsa = originate_router_lsa(
+        router_id,
+        RouterLsaFlags::default(),
+        &[RouterLsaLink::Transit {
+            dr_addr: 0xc0a80001, // 192.168.0.1
+            local_addr: 0xc0a80002,
+            metric: 10,
+        }],
+        None,
+    )
+    .expect("originate_router_lsa");
+    let area = r.ospf_areas.get_mut(&0u32).unwrap();
+    area.lsdb.install(lsa, 0);
+    area.topology_version += 1;
+    // Republish. The driver computes the projection and pushes
+    // MP_REACH_NLRI to every BGP-LS session.
+    let mut prev: Vec<lr_bgp::path::bgp_ls::BgpLsNlri> = Vec::new();
+    let diff = r.bgpls_republish(0, 64512, 0x01020304, &mut prev);
+    assert!(
+        !diff.added.is_empty(),
+        "first republish must add the projected NLRIs"
+    );
+    assert!(diff.removed.is_empty());
+    // The session's outbound buffer should hold the UPDATE bytes.
+    let out = r.drain_output(bgp_h);
+    assert!(!out.is_empty(), "republish must push UPDATE to the session");
+    // Second republish with no LSDB change: empty diff, no UPDATE.
+    let mut prev2 = prev.clone();
+    let diff2 = r.bgpls_republish(0, 64512, 0x01020304, &mut prev2);
+    assert!(diff2.added.is_empty() && diff2.removed.is_empty());
+    let out2 = r.drain_output(bgp_h);
+    assert!(out2.is_empty(), "no LSDB change → no UPDATE");
+}
+
+/// `bgpls_republish` is a no-op when the area is unknown (the daemon
+/// may poll every area it holds; a missing area is normal during
+/// shutdown or startup).
+#[test]
+fn bgpls_republish_unknown_area_is_noop() {
+    let mut r = DefaultRouter::new();
+    let mut prev: Vec<lr_bgp::path::bgp_ls::BgpLsNlri> = Vec::new();
+    let diff = r.bgpls_republish(999, 64512, 1, &mut prev);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert!(diff.unchanged.is_empty());
+}
