@@ -70,6 +70,11 @@ fn block_def(parent: &str, name: &str) -> Option<BlockDef> {
         ("bgp", "rpki") => Some(single("bgp.rpki")),
         ("", "logging") => Some(single("logging")),
         ("", "safety") => Some(single("safety")),
+        // RFC 7752 BGP-LS speaker block (issue #60 daemon wiring). A
+        // single section — keys merge in file order like `[safety]` /
+        // `[logging]`. The CLI mirror is `--bgp-ls` + `--bgp-ls-as` /
+        // `--bgp-ls-id` / `--bgp-ls-area`.
+        ("", "bgp-ls") => Some(single("bgp_ls")),
         ("", "ospf") => Some(single("ospf")),
         ("ospf", "area") => Some(array("ospf.area", Some("id"))),
         ("ospf", "interface") => Some(array("ospf.interface", Some("name"))),

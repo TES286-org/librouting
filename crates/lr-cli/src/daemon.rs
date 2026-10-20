@@ -1391,6 +1391,31 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
             }
         );
     }
+    {
+        // RFC 7752 BGP-LS posture (issue #60 daemon wiring). The
+        // banner mirrors the exchange-plane line: shows the master
+        // toggle, the speaker identity (AS, BGP-LS ID) and the area
+        // subset (or "(all)" when the operator left `areas` empty).
+        if cfg.bgp_ls.enabled {
+            let as_n = cfg.bgp_ls.effective_as_number(cfg.local_as);
+            let areas = if cfg.bgp_ls.areas.is_empty() {
+                "(all)".to_string()
+            } else {
+                cfg.bgp_ls
+                    .areas
+                    .iter()
+                    .map(|a| a.to_string())
+                    .collect::<Vec<_>>()
+                    .join(",")
+            };
+            println!(
+                "  bgp-ls:       on (AS={} BGP-LS-ID={} areas={})",
+                as_n, cfg.bgp_ls.bgp_ls_id, areas
+            );
+        } else {
+            println!("  bgp-ls:       off");
+        }
+    }
     println!("  platform:    {}", lr_osroute::PLATFORM_NAME);
 
     // Locally originated networks. The string list is kept around so
@@ -1606,7 +1631,17 @@ fn run_bgp_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHost>) -
     // Embedded: the supervisor already spawned one shared ticker (and
     // fed it our live-session counter via the host).
     if host.is_none() {
-        spawn_ticker(&runtime, cfg.install_kernel, Arc::clone(&live_sessions));
+        let bgp_ls_driver = if cfg.bgp_ls.enabled {
+            Some(BgplsDriver::new(&cfg.bgp_ls, cfg.local_as))
+        } else {
+            None
+        };
+        spawn_ticker(
+            &runtime,
+            cfg.install_kernel,
+            Arc::clone(&live_sessions),
+            bgp_ls_driver,
+        );
     }
 
     // ---- Listener (inbound), if configured. ----
@@ -1882,6 +1917,14 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
             "ipv6-unicast" => families.push(NlriFamily::IPV6_UNICAST),
             "ipv4-labeled-unicast" => families.push(NlriFamily::IPV4_LABELED_UNICAST),
             "ipv6-labeled-unicast" => families.push(NlriFamily::IPV6_LABELED_UNICAST),
+            // RFC 7752 BGP-LS Link-State family (issue #60 daemon wiring).
+            // When the operator opts in via `--bgp-ls` / `[bgp_ls]` /
+            // `--mp-family bgp-ls`, advertise the AFI=16388 / SAFI=71
+            // family on this session. The projection driver (running in
+            // the ticker thread) sends incremental UPDATEs as the OSPF
+            // LSDB moves; the family advertisement alone is what makes
+            // the session a BGP-LS speaker.
+            "bgp-ls" => families.push(NlriFamily::BGP_LS),
             other => log_warn!(
                 Component::Bgp,
                 "peer {}: unknown mp_family '{}' (skipped)",
@@ -1895,6 +1938,20 @@ fn build_session_config(g: &DaemonConfig, p: &PeerSpec, rid: RouterId) -> Sessio
         // requirement). Insert at the front so explicit families
         // listed by the operator stay in their original order.
         families.insert(0, NlriFamily::IPV4_UNICAST);
+    }
+    // RFC 7752 BGP-LS (issue #60 daemon wiring). When the daemon's
+    // `[bgp_ls] enabled = true` flag is set, every BGP session
+    // additionally advertises the BGP-LS family in OPEN — the
+    // projection driver (running in the ticker thread) then pushes
+    // incremental UPDATEs to each session that negotiated the
+    // family. A peer can opt out per-peer via `--mp-family bgp-ls`
+    // only when the global is off; an explicit family list
+    // (peer.mp_families = Some(...)) does NOT inherit the global
+    // BGP-LS toggle, mirroring how `default_ipv4_unicast` interacts
+    // with the explicit list — the operator who set an explicit
+    // peer family list is declaring the entire set.
+    if g.bgp_ls.enabled && p.mp_families.is_none() && !families.contains(&NlriFamily::BGP_LS) {
+        families.push(NlriFamily::BGP_LS);
     }
     // Always override — even when families is empty, this clears the
     // SessionConfig::bgp() default `[IPV4_UNICAST]` so a
@@ -3095,6 +3152,96 @@ fn pump_session(
     Ok(())
 }
 
+/// BGP-LS projection driver (issue #60 daemon wiring). Owned by the
+/// ticker thread; one pass per 50 ms tick polls each configured OSPF
+/// area's `topology_version` against the cached value and, on change,
+/// runs [`DefaultRouter::bgpls_republish`] to push an incremental
+/// MP_REACH / MP_UNREACH UPDATE to every BGP-LS session.
+///
+/// `areas` is the configured subset (an empty list means "every area
+/// the router holds"); `as_number` and `bgp_ls_id` are the BGP-LS
+/// speaker identity from the `[bgp_ls]` config block. The per-area
+/// cache holds the last `topology_version` seen and the last
+/// projected NLRI set so the next pass computes a true diff against
+/// the new projection (not a full resend).
+pub(crate) struct BgplsDriver {
+    as_number: u32,
+    bgp_ls_id: u32,
+    areas: Vec<u32>,
+    cache: HashMap<u32, BgplsAreaCache>,
+}
+
+/// Per-area BGP-LS driver cache. `version` is the last seen
+/// `topology_version`; `nlris` is the last projected NLRI set so
+/// [`DefaultRouter::bgpls_republish`] computes the delta against it.
+struct BgplsAreaCache {
+    version: u64,
+    nlris: Vec<lr_bgp::path::bgp_ls::BgpLsNlri>,
+}
+
+impl BgplsDriver {
+    /// Build a driver from the daemon's `[bgp_ls]` config. The daemon
+    /// passes the `effective_as_number` (resolving the `0`-inherit
+    /// sentinel against `local_as` before constructing).
+    pub(crate) fn new(cfg: &crate::daemon_config::BgpLsSpec, local_as: u32) -> Self {
+        Self {
+            as_number: cfg.effective_as_number(local_as),
+            bgp_ls_id: cfg.bgp_ls_id,
+            areas: cfg.areas.clone(),
+            cache: HashMap::new(),
+        }
+    }
+
+    /// One driver pass. Walks the configured area set (or every area
+    /// the router holds when `areas` is empty), compares each area's
+    /// `topology_version` against the cached value, and runs
+    /// `bgpls_republish` on change.
+    fn tick(&mut self, router: &mut DefaultRouter) {
+        // Snapshot the area set under the write lock we already hold.
+        // An empty configured list means "every area the router holds"
+        // — a router that learns areas dynamically does not need them
+        // listed up front.
+        let areas: Vec<u32> = if self.areas.is_empty() {
+            router.ospf_area_ids().to_vec()
+        } else {
+            self.areas.clone()
+        };
+        for area_id in areas {
+            let version = router.ospf_area_topology_version(area_id).unwrap_or(0);
+            let known = self
+                .cache
+                .get(&area_id)
+                .map(|c| c.version)
+                .unwrap_or(u64::MAX);
+            if known == version {
+                continue;
+            }
+            // First time we see this area: seed the cache with the
+            // current projection so the first change is a delta, not
+            // the full set. The version is set to the current
+            // `topology_version`, so a subsequent bump triggers a real
+            // republish.
+            let entry = self.cache.entry(area_id).or_insert_with(|| BgplsAreaCache {
+                version,
+                nlris: Vec::new(),
+            });
+            let diff =
+                router.bgpls_republish(area_id, self.as_number, self.bgp_ls_id, &mut entry.nlris);
+            entry.version = version;
+            if !diff.added.is_empty() || !diff.removed.is_empty() {
+                log_info!(
+                    Component::Bgp,
+                    "bgp-ls republish area {}: +{} -{} ~{}",
+                    area_id,
+                    diff.added.len(),
+                    diff.removed.len(),
+                    diff.unchanged.len()
+                );
+            }
+        }
+    }
+}
+
 /// The ticker thread: sole consumer of router events. Drives the router
 /// clock every 50 ms, logs every event, and (when enabled) mirrors the
 /// Loc-RIB into the kernel FIB. Keeping event consumption on one thread
@@ -3102,16 +3249,25 @@ fn pump_session(
 /// During shutdown it keeps draining until the live session threads
 /// have flushed their close NOTIFICATIONs, so withdrawal events (and
 /// their kernel route deletions) are not lost.
-fn spawn_ticker(
+///
+/// When `bgp_ls_driver` is `Some`, the ticker additionally polls each
+/// configured OSPF area's `topology_version` once per pass and runs the
+/// BGP-LS projection's incremental republish driver on change. The
+/// driver state (per-area `topology_version` cache and the last
+/// projected NLRI set) lives inside the [`BgplsDriver`] — the ticker
+/// owns it for the lifetime of the daemon.
+pub(crate) fn spawn_ticker(
     rt: &Arc<Runtime>,
     install_kernel: bool,
     live: Arc<AtomicUsize>,
+    bgp_ls_driver: Option<BgplsDriver>,
 ) -> thread::JoinHandle<()> {
     let rt = Arc::clone(rt);
     thread::Builder::new()
         .name("lr-ticker".into())
         .spawn(move || {
             let mut mirror = KernelMirror::new(install_kernel);
+            let mut bgp_ls_driver = bgp_ls_driver;
             let start = WallClock::now();
             loop {
                 let shutting_down = !rt.running.load(Ordering::Relaxed);
@@ -3127,6 +3283,17 @@ fn spawn_ticker(
                         log_event(ev);
                     }
                     mirror.apply(&events);
+                    // RFC 7752 BGP-LS projection driver (issue #60
+                    // daemon wiring). After the router's tick has
+                    // applied OSPF LSDB changes (the topology_version
+                    // bump happens inside `tick` for timer-driven
+                    // refresh and inside `feed_input` for network
+                    // input), poll each configured area and republish
+                    // the diff. Skip when no driver is configured (the
+                    // common case: a BGP-only or Babel-only daemon).
+                    if let Some(driver) = bgp_ls_driver.as_mut() {
+                        driver.tick(&mut r);
+                    }
                 }
                 if shutting_down {
                     // Bounded shutdown cadence: the main thread exits the
@@ -4234,6 +4401,7 @@ fn run_babel_daemon(cfg: &DaemonConfig, host: Option<EngineHost>) -> ExitCode {
                 &runtime,
                 cfg.install_kernel,
                 Arc::new(AtomicUsize::new(0)),
+                None,
             ))
         }
         Some(h) => {

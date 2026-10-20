@@ -410,6 +410,32 @@ pub(crate) fn to_dsl(cfg: &DaemonConfig) -> Result<String, String> {
         e.close(0);
     }
 
+    // --- bgp-ls (issue #60 daemon wiring) ------------------------------------
+    // Emitted only when `enabled` is set OR the operator configured any
+    // of the speaker identity / area subset — matches the `safety`
+    // block's "emit when set" posture so a daemon that explicitly
+    // disabled BGP-LS still shows the `enabled = false` line (mirrors
+    // `safety.enabled = false`).
+    if cfg.bgp_ls.enabled
+        || cfg.bgp_ls.as_number != 0
+        || cfg.bgp_ls.bgp_ls_id != 0
+        || !cfg.bgp_ls.areas.is_empty()
+    {
+        e.open(0, "bgp-ls", None);
+        e.kv(1, "enabled", &cfg.bgp_ls.enabled.to_string());
+        if cfg.bgp_ls.as_number != 0 {
+            e.kv(1, "as_number", &cfg.bgp_ls.as_number.to_string());
+        }
+        if cfg.bgp_ls.bgp_ls_id != 0 {
+            e.kv(1, "bgp_ls_id", &cfg.bgp_ls.bgp_ls_id.to_string());
+        }
+        if !cfg.bgp_ls.areas.is_empty() {
+            let areas: Vec<String> = cfg.bgp_ls.areas.iter().map(|a| a.to_string()).collect();
+            e.kv(1, "areas", &format!("[{}]", areas.join(", ")));
+        }
+        e.close(0);
+    }
+
     Ok(e.out)
 }
 
