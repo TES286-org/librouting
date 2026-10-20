@@ -167,8 +167,9 @@ mod imp {
     use core::ffi::c_void;
     use std::os::fd::{AsRawFd, FromRawFd};
 
-    // Socket constants (Linux x86_64 / aarch64 — same values everywhere
-    // Linux runs BGP). Kept private; the public API is portable.
+    // Socket constants (Linux — same values on x86_64, aarch64 and
+    // riscv64; the UAPI does not vary by architecture). Kept private;
+    // the public API is portable.
     const AF_INET: u16 = 2;
     const AF_INET6: u16 = 10;
     const SOL_SOCKET: i32 = 1;
