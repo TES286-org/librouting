@@ -344,6 +344,20 @@ jobs:
   # per-arch clippy pass catches any future arch-conditional code
   # that the x86_64-only lint job would miss. fmt is NOT re-run —
   # rustfmt is deterministic and platform-independent.
+  #
+  # Interop labs: the full BIRD/FRR interop suite is too heavy for
+  # the RISC-V runner (RISC-V hardware is roughly 3-5x slower than
+  # x86_64, and installing bird2 + frr from apt adds minutes of
+  # package setup alone). Instead, two lr-vs-lr loopback labs run
+  # as architecture smoke tests — they verify the daemon binary
+  # actually exchanges BGP routes end-to-end on riscv64, not just
+  # that it compiles. These are the same two scripts the Windows
+  # and macOS interop jobs already run, so the coverage shape is
+  # consistent across the non-x86_64 platforms:
+  #   - two_daemon.sh: BGP OPEN/KEEPALIVE/UPDATE + withdrawal
+  #   - labeled_unicast.sh: RFC 8277 labelled-unicast (MP-BGP)
+  # Both are pure TCP on 127.0.0.1, need no privileges, no external
+  # daemons, and finish in ~30 s each on x86_64 (~1-2 min on RISC-V).
   riscv-native:
     name: Native RISC-V (ubuntu-24.04-riscv)
     runs-on: ubuntu-24.04-riscv
@@ -371,6 +385,8 @@ jobs:
         timeout-minutes: 30
         run: cargo clippy --workspace --all-features --all-targets -- -D warnings
       - name: cargo build (workspace)
+        # Builds the lr-daemon binary the interop steps below reuse
+        # (target/debug/lr-daemon, resolved by tests/interop/_lr_daemon.sh).
         timeout-minutes: 30
         run: cargo build --workspace --all-features
       - name: cargo nextest (workspace, unit + integration)
@@ -384,6 +400,21 @@ jobs:
         # path is cargo test --doc.
         timeout-minutes: 10
         run: cargo test --doc --workspace --all-features
+      - name: Two-daemon TCP interop (lr ↔ lr)
+        # Architecture smoke test #1: two lr-daemons on loopback TCP,
+        # BGP OPEN/KEEPALIVE/UPDATE exchange, route install + withdrawal
+        # on session loss. Pure userspace, no privileges, no external
+        # daemons. Same script the windows-interop and macos-interop
+        # jobs run — keeps the non-x86_64 coverage shape consistent.
+        timeout-minutes: 5
+        run: ./tests/interop/two_daemon.sh
+      - name: RFC 8277 labelled-unicast interop (lr ↔ lr)
+        # Architecture smoke test #2: MP-BGP labelled-unicast (AFI=1,
+        # SAFI=4) route exchange between two lr-daemons. Exercises the
+        # MPLS label-stack path end-to-end. Same script the windows-
+        # interop and macos-interop jobs run.
+        timeout-minutes: 5
+        run: ./tests/interop/labeled_unicast.sh
 
   # Native build + test on the non-Linux primary platforms. The
   # workspace is already target-aware: lr-osroute carries a Windows
