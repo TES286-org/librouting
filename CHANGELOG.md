@@ -85,9 +85,25 @@ E-Intra-Area-Prefix, E-Inter-Area-Prefix, E-AS-External) with the
 same field semantics. The projection looks the DR Router ID up in
 the Network-LSA table to build the transit-link remote pseudonode,
 and skips a transit-link Link NLRI when the Network-LSA is not in
-the LSDB yet (the next projection run sees it). The SRv6 SID NLRI
-(RFC 9514 §6) projection from the OSPFv3 SRv6 database is a
-follow-up.
+the LSDB yet (the next projection run sees it).
+
+OSPFv3 also projects the SRv6 SID NLRI (RFC 9514 §6) from the
+OSPFv3 SRv6 database (`lr-ospf::srv6db`, RFC 9513 reception). The
+projection builds a `Srv6Database` from the same area LSDB and
+emits one SRv6 SID NLRI per End SID the database holds — the Local
+Node Descriptor is the advertising router's 4-byte IGP Router-ID,
+and the SRv6 SID Descriptor stream carries the mandatory SRv6 SID
+Information TLV (§6.1, type 518, 16-byte SID) plus a Multi-Topology
+ID TLV (RFC 7752 §3.2.1.5, type 263, value 0). End.X / LAN End.X
+SIDs are not projected: the RFC 8986 endpoint behavior that
+distinguishes them from End SIDs lives in the BGP-LS Attribute
+surface (RFC 9514 §7), which is out of scope for the NLRI codec;
+the End.X projection is a follow-up once the attribute surface
+lands. `diff_bgpls` handles the SRv6 SID NLRIs transparently —
+the codec's strict structural enforcement on the SRv6 SID
+Descriptor stream makes the encoded bytes a stable identity for
+set membership, so the incremental-republish primitive covers
+SRv6 SIDs the same way it covers Node / Link / Prefix NLRIs.
 
 [`diff_bgpls`] computes the added / removed / unchanged NLRI sets
 between two projections by canonical wire form (RFC 7752 §3.3:
@@ -96,9 +112,13 @@ once per LSDB change uses `added` for MP_REACH_NLRI and `removed`
 for MP_UNREACH_NLRI — the incremental-republish primitive the
 ROADMAP "done" criterion calls for.
 
-Twenty-five unit tests cover the per-LSA projection (Node / Link /
-IPv4 Prefix / IPv6 Prefix), the OSPFv2 + v3 paths, the E-LSA shapes,
-the AS-External area-ID-zero rule, and the diff helper. Each test
+Thirty-nine unit tests cover the per-LSA projection (Node / Link /
+IPv4 Prefix / IPv6 Prefix), the OSPFv2 + v3 paths, the E-LSA
+shapes, the AS-External area-ID-zero rule, the SRv6 End-SID
+projection (single SID, multiple SIDs, multiple locators, multiple
+routers, locator-only node, §8 containment gate, §11 behavior
+gate, OSPFv2 guard, E-Router-LSA coexistence), the SRv6 SID diff
+helper, and the diff helper for the topology NLRIs. Each test
 also asserts every emitted NLRI round-trips byte-for-byte through
 the codec.
 

@@ -41,17 +41,24 @@ with IPv4 Interface/Neighbor Address TLVs, and IPv4 Topology Prefix
 NLRIs (stub links = `IntraArea`, type-3 Summary-LSAs = `InterArea`,
 type-5 AS-External-LSAs = `External1` / `External2` with the OSPF
 Area-ID sub-TLV set to 0 per RFC 7752 §3.2.1.4). OSPFv3 emits the
-IPv6 equivalents and handles RFC 8362 Extended LSAs. The projection
-is a pure function on the LSDB; `DefaultRouter::ospf_area_bgpls_nlris`
+IPv6 equivalents and handles RFC 8362 Extended LSAs, and additionally
+walks the OSPFv3 SRv6 database (`lr-ospf::srv6db`, RFC 9513
+reception) to emit one RFC 9514 §6 SRv6 SID NLRI per End SID the
+database holds — the Local Node Descriptor is the advertising
+router's 4-byte IGP Router-ID, and the SRv6 SID Descriptor stream
+carries the mandatory SRv6 SID Information TLV (§6.1, type 518,
+16-byte SID) plus a Multi-Topology ID TLV (type 263, value 0) for
+consistency with the prefix-NLRI projection. End.X / LAN End.X SIDs
+are not projected: the RFC 8986 endpoint behavior that distinguishes
+them from End SIDs lives in the BGP-LS Attribute surface (RFC 9514
+§7), which is out of scope for the NLRI codec. The projection is a
+pure function on the LSDB; `DefaultRouter::ospf_area_bgpls_nlris`
 wraps it with the router's per-area context. `diff_bgpls` returns
 the added / removed / unchanged NLRI sets so a daemon can drive
 incremental MP-BGP UPDATE messages by canonical wire form.
 
 What remains to flip the STATUS row from `partial` to `yes`:
 
-- A walk of the SRv6 database (`lr-ospf::srv6db`) onto the RFC 9552
-  SRv6 SID NLRI. The codec is fully modelled; the projection does
-  not emit the SRv6 SID NLRI yet.
 - Daemon wiring: a `--bgp-ls` flag (and a `[bgp_ls]` block in the
   native DSL) that registers the BGP-LS family on a session and runs
   the projection's incremental republish on LSDB changes.

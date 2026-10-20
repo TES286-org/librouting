@@ -56,8 +56,8 @@ files of the `lr-cli` binary crate, which is not a library.
 | Per-peer configuration: hold time, families, max-prefix, GTSM | yes | `lr-bgp::peer` |
 | RPKI-RTR PDU codec and client (RFC 8210) | yes | `lr-bgp::rtr::pdu`, `lr-bgp::rtr::client` |
 | ROA table and origin validation (RFC 6811) | yes | `lr-bgp::roa`, `lr-bgp::roa_store` |
-| BGP-LS Node/Link/Prefix/SRv6 SID NLRI codec (RFC 7752, RFC 9514) | partial | `lr-bgp::path::bgp_ls` |
-| OSPF LSDB → BGP-LS projection (RFC 7752 §3) | partial | `lr-router::instance::lsdb_to_bgpls` |
+| BGP-LS Node/Link/Prefix/SRv6 SID NLRI codec (RFC 7752, RFC 9514) | yes | `lr-bgp::path::bgp_ls` |
+| OSPF LSDB → BGP-LS projection (RFC 7752 §3 + RFC 9514 §6 SRv6 SID NLRI) | partial | `lr-router::instance::lsdb_to_bgpls` |
 
 ## OSPF — `lr-ospf`
 
