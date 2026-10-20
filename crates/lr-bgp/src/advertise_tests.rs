@@ -493,3 +493,155 @@ fn non_confederation_speaker_prepends_local_as() {
     assert_eq!(segs[0].kind, crate::path::as_path::AsPathType::Sequence);
     assert_eq!(segs[0].ases, vec![Asn(64512), Asn(64500)]);
 }
+
+// ---------------------------------------------------------------------------
+// BGP-LS egress (issue #60 daemon wiring) — RFC 7752 §3.
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "bgp_ls")]
+fn bgpls_established_peer() -> BgpPeer {
+    use lr_core::nlri::NlriFamily;
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.mp_families = vec![NlriFamily::BGP_LS];
+    let mut p = BgpPeer::new(cfg.clone());
+    // The dummy partner must mirror the BGP-LS family so negotiation
+    // of the MP-BGP capability succeeds on both sides.
+    let mut dummy_cfg = PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 9, 9, 9]));
+    dummy_cfg.mp_families = vec![NlriFamily::BGP_LS];
+    let mut dummy = BgpPeer::new(dummy_cfg);
+    p.step(BgpEvent::ManualStart);
+    p.step(BgpEvent::TransportOpen);
+    dummy.step(BgpEvent::ManualStart);
+    dummy.step(BgpEvent::TransportOpen);
+    let p_open = p.drain_outgoing();
+    let d_open = dummy.drain_outgoing();
+    let _ = p.feed_bytes(&d_open);
+    let _ = dummy.feed_bytes(&p_open);
+    let p_ka = p.drain_outgoing();
+    let d_ka = dummy.drain_outgoing();
+    let _ = p.feed_bytes(&d_ka);
+    let _ = dummy.feed_bytes(&p_ka);
+    assert!(p.is_established());
+    p
+}
+
+#[cfg(feature = "bgp_ls")]
+fn sample_bgpls_node_nlri() -> crate::path::bgp_ls::BgpLsNlri {
+    use crate::path::bgp_ls::{
+        BgpLsNlri, BgpLsNlriVariant, NodeDescriptor, NodeDescriptorSubTlv, NodeNlri, ProtocolId,
+    };
+    let local = NodeDescriptor::new(vec![
+        NodeDescriptorSubTlv::As(64512),
+        NodeDescriptorSubTlv::BgpLsId(1),
+        NodeDescriptorSubTlv::OspfAreaId(0),
+        NodeDescriptorSubTlv::IgpRouterId(vec![10, 0, 0, 1]),
+    ]);
+    BgpLsNlri {
+        route_distinguisher: None,
+        variant: BgpLsNlriVariant::Node(NodeNlri {
+            protocol_id: ProtocolId::Ospfv2,
+            identifier: 0,
+            local_node: local,
+        }),
+    }
+}
+
+/// `advertise_bgpls` emits an UPDATE with MP_REACH_NLRI carrying the
+/// NLRI bytes verbatim. The peer's outbound buffer holds the message
+/// ready for delivery.
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_emits_mp_reach_update() {
+    let mut peer = bgpls_established_peer();
+    let nlri = sample_bgpls_node_nlri();
+    assert!(peer.advertise_bgpls(std::slice::from_ref(&nlri)));
+    let bytes = peer.drain_outgoing();
+    // 19-byte BGP header + 4-byte UPDATE length fields + at least
+    // one path-attribute (MP_REACH_NLRI).
+    assert!(bytes.len() > 19 + 4, "got bytes: {}", bytes.len());
+    // Decode the UPDATE and verify the MP_REACH_NLRI attribute is present.
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = dec.decode(&mut r).unwrap().unwrap();
+    match msg {
+        BgpMessage::Update(u) => {
+            let mp = u
+                .attributes
+                .get(AttrType::MpReachNlri)
+                .expect("MP_REACH_NLRI present");
+            // MP_REACH_NLRI body shape: AFI(2) | SAFI(1) | NH-LEN(1) |
+            // reserved(1) | NLRI-stream.
+            assert_eq!(mp.value[0..2], [0x40, 0x04], "AFI=16388"); // 16388 = 0x4004
+            assert_eq!(mp.value[2], 71, "SAFI=71"); // BGP-LS SAFI
+            assert_eq!(mp.value[3], 0, "NH-LEN = 0 for BGP-LS");
+            assert_eq!(mp.value[4], 0, "reserved = 0");
+            // The NLRI stream starts at offset 5; verify it decodes
+            // back into a Node NLRI matching the input.
+            let decoded = crate::path::bgp_ls::BgpLsNlri::decode(false, &mp.value[5..]);
+            let (got, consumed) = decoded.expect("NLRI decodes");
+            assert_eq!(consumed, mp.value[5..].len(), "no trailing bytes");
+            assert!(matches!(
+                got.variant,
+                crate::path::bgp_ls::BgpLsNlriVariant::Node(_)
+            ));
+        }
+        _ => panic!("expected UPDATE"),
+    }
+}
+
+/// `withdraw_bgpls` emits an UPDATE with MP_UNREACH_NLRI.
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn withdraw_bgpls_emits_mp_unreach_update() {
+    let mut peer = bgpls_established_peer();
+    let nlri = sample_bgpls_node_nlri();
+    assert!(peer.withdraw_bgpls(std::slice::from_ref(&nlri)));
+    let bytes = peer.drain_outgoing();
+    assert!(bytes.len() > 19 + 4, "got bytes: {}", bytes.len());
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = dec.decode(&mut r).unwrap().unwrap();
+    match msg {
+        BgpMessage::Update(u) => {
+            let mp = u
+                .attributes
+                .get(AttrType::MpUnreachNlri)
+                .expect("MP_UNREACH_NLRI present");
+            // MP_UNREACH_NLRI body shape: AFI(2) | SAFI(1) | NLRI-stream.
+            assert_eq!(mp.value[0..2], [0x40, 0x04], "AFI=16388");
+            assert_eq!(mp.value[2], 71, "SAFI=71");
+            let decoded = crate::path::bgp_ls::BgpLsNlri::decode(false, &mp.value[3..]);
+            let (got, consumed) = decoded.expect("NLRI decodes");
+            assert_eq!(consumed, mp.value[3..].len());
+            assert!(matches!(
+                got.variant,
+                crate::path::bgp_ls::BgpLsNlriVariant::Node(_)
+            ));
+        }
+        _ => panic!("expected UPDATE"),
+    }
+}
+
+/// `advertise_bgpls` is a no-op for a peer without BGP-LS in its
+/// `mp_families` (defensive: a misconfigured session sends nothing
+/// rather than a malformed MP_REACH that the peer would reject).
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_skips_peer_without_ls_family() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.mp_families = vec![NlriFamily::IPV4_UNICAST];
+    let mut peer = established_peer(cfg);
+    let nlri = sample_bgpls_node_nlri();
+    assert!(!peer.advertise_bgpls(&[nlri]));
+    assert!(peer.drain_outgoing().is_empty());
+}
+
+/// `advertise_bgpls` with an empty slice is a no-op (the daemon calls
+/// it after every diff that turns out to be all-unchanged).
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_empty_is_noop() {
+    let mut peer = bgpls_established_peer();
+    assert!(!peer.advertise_bgpls(&[]));
+    assert!(peer.drain_outgoing().is_empty());
+}

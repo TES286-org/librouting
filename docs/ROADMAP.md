@@ -13,9 +13,13 @@ defines it; the code wins over any sentence here.
 
 ## Protocol coverage
 
-**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Partial —
-the wire codec and the OSPF LSDB → BGP-LS projection have landed;
-the daemon wiring and the interop lab have not.
+**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Done —
+the wire codec, the OSPF LSDB → BGP-LS projection, the daemon
+wiring (`--bgp-ls` flag + `[bgp_ls]` config block + incremental
+republish driver), and the BIRD interop lab have all landed. The
+STATUS rows for the codec, projection, egress, republish driver
+and daemon config are all `yes`; the `bgpls_bird.sh` lab is the
+"done" gate from this section.
 
 `lr-bgp::path::bgp_ls` parses and serialises the Node, Link, IPv4
 Prefix and IPv6 Prefix NLRI shapes from RFC 7752 §3.3, the Local
@@ -57,19 +61,34 @@ wraps it with the router's per-area context. `diff_bgpls` returns
 the added / removed / unchanged NLRI sets so a daemon can drive
 incremental MP-BGP UPDATE messages by canonical wire form.
 
-What remains to flip the STATUS row from `partial` to `yes`:
+`lr-bgp::advertise::BgpPeer::advertise_bgpls` and
+`withdraw_bgpls` are the egress primitives: opaque BGP-LS NLRI
+bytes ride MP_REACH_NLRI / MP_UNREACH_NLRI attributes built
+directly from `BgpLsNlri::encode` (the existing IP-prefix
+`MpReach`/`MpUnreach` encoders assume AFI=1/2 — BGP-LS needs the
+opaque path). The next-hop field is set to zero (BGP-LS does not
+define a next-hop; matches BIRD's `bgp_ls` channel and FRR's
+`bgp_bgp_ls.c`).
 
-- Daemon wiring: a `--bgp-ls` flag (and a `[bgp_ls]` block in the
-  native DSL) that registers the BGP-LS family on a session and runs
-  the projection's incremental republish on LSDB changes.
-- An interop lab (`tests/interop/bgpls_bird.sh`) that starts an
-  OSPF-only `lr-daemon` plus a BIRD peer configured for BGP-LS, and
-  verifies the BIRD peer builds the same IGP graph from our session
-  that the lr-daemon holds in its OSPF LSDB.
+`lr-router::instance::DefaultRouter::bgpls_republish` is the
+republish driver: projects the area LSDB, computes the diff against
+the caller's previous projection, walks every BGP-LS session and
+pushes the added NLRIs via `advertise_bgpls`, the removed via
+`withdraw_bgpls`. The daemon's ticker thread drives it once per
+50 ms tick: `BgplsDriver` (in `lr-cli::daemon`) polls each
+configured OSPF area's `topology_version` and calls
+`bgpls_republish` on change. The daemon flag is `--bgp-ls` and the
+config block is `[bgp_ls]` (with `enabled`, `as_number`,
+`bgp_ls_id`, `areas`); both forms fail closed (typo protection).
 
-Done when a third-party collector builds the same graph from our
-session that the OSPF daemon holds, and republishing is incremental
-rather than a full resend.
+The interop lab `tests/interop/bgpls_bird.sh` starts an
+OSPF+BGP lr-daemon with `--bgp-ls` against a BIRD 2.17+ peer
+configured for the BGP-LS address family. BIRD 2.17+ has the
+`bgp_ls` channel (older BIRD SKIPs cleanly); the lab verifies the
+BIRD peer builds a Node NLRI for the lr-daemon's router-id from
+our BGP-LS session — the same IGP graph the OSPF daemon holds in
+its LSDB. The lab runs inside `unshare -Urn` for CAP_NET_RAW, like
+the other OSPF interop labs.
 
 **BGP SR Policy (RFC 9256) with the SRv6 binding (RFC 9430).** Not started.
 Nothing consumes SR policy. The work is the SR Policy address family and the

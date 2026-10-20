@@ -5457,6 +5457,15 @@ impl DefaultRouter {
         self.ospf_areas.get(&area_id).map(|a| a.topology_version)
     }
 
+    /// Snapshot of every OSPF area ID the router currently holds
+    /// (issue #60 daemon wiring). The BGP-LS driver polls this when
+    /// `[bgp_ls] areas = []` (the "every area" default) so a router
+    /// that learns areas dynamically does not need them listed up
+    /// front. The order is ascending (BTreeMap iteration).
+    pub fn ospf_area_ids(&self) -> Vec<u32> {
+        self.ospf_areas.keys().copied().collect()
+    }
+
     /// Read one LSA out of an area's LSDB by its exact key
     /// (type, link-state ID, advertising router). The
     /// graceful-restart restarting router uses this to fetch its own
@@ -5513,6 +5522,83 @@ impl DefaultRouter {
             protocol: area.protocol,
         };
         Some(lsdb_to_bgpls::project_area_lsdb_to_bgpls(&area.lsdb, &ctx))
+    }
+
+    /// Incremental BGP-LS republish for one OSPF area (issue #60
+    /// daemon wiring). Projects the area LSDB through
+    /// [`ospf_area_bgpls_nlris`](Self::ospf_area_bgpls_nlris), diffs
+    /// against `prev` via [`lsdb_to_bgpls::diff_bgpls`], and pushes
+    /// UPDATEs to every BGP session that negotiated the BGP-LS family
+    /// in OPEN — `added` NLRIs ride an MP_REACH_NLRI attribute via
+    /// [`BgpPeer::advertise_bgpls`](lr_bgp::BgpPeer::advertise_bgpls),
+    /// `removed` NLRIs ride an MP_UNREACH_NLRI attribute via
+    /// [`BgpPeer::withdraw_bgpls`](lr_bgp::BgpPeer::withdraw_bgpls).
+    ///
+    /// The caller passes the previous projection as `prev` and
+    /// receives the new projection through `*prev = curr` so the next
+    /// republish call sees the new baseline — mirrors the
+    /// `gr_topology` poll pattern in `daemon_ospf.rs`.
+    ///
+    /// Returns the [`lsdb_to_bgpls::BgplsDiff`] so the caller can
+    /// account for the added / removed / unchanged counts (the daemon
+    /// logs them). Returns an empty diff (no `added`, no `removed`)
+    /// when the area is unknown, the projection is unchanged, or no
+    /// BGP-LS session is up — in those cases no UPDATEs are sent.
+    ///
+    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
+    pub fn bgpls_republish(
+        &mut self,
+        area_id: u32,
+        as_number: u32,
+        bgp_ls_id: u32,
+        prev: &mut Vec<lr_bgp::path::bgp_ls::BgpLsNlri>,
+    ) -> lsdb_to_bgpls::BgplsDiff {
+        // Compute the current projection. Unknown area → no-op with
+        // an empty diff (the daemon may be polling every area it
+        // holds; a missing area is normal during shutdown).
+        let curr = match self.ospf_area_bgpls_nlris(area_id, as_number, bgp_ls_id) {
+            Some(n) => n,
+            None => return lsdb_to_bgpls::BgplsDiff::default(),
+        };
+        let diff = lsdb_to_bgpls::diff_bgpls(prev, &curr);
+        // Update the caller's baseline before sending so a transient
+        // failure in `advertise_bgpls` doesn't double-send on retry —
+        // the next republish call computes the diff against the new
+        // baseline and emits only the delta since the last successful
+        // send.
+        *prev = curr;
+        if diff.added.is_empty() && diff.removed.is_empty() {
+            return diff;
+        }
+        // Walk every BGP session; for each Established session with
+        // BGP-LS in its `mp_families`, push the added/removed NLRIs.
+        // Sessions without BGP-LS see nothing — matches the per-peer
+        // family gating the FSM already enforces on the receive side.
+        for state in self.sessions.values_mut() {
+            let SessionState::Bgp { peer, conn, .. } = state else {
+                continue;
+            };
+            if !peer.is_established() {
+                continue;
+            }
+            if !peer.config().mp_families.iter().any(|f| f.is_bgp_ls()) {
+                continue;
+            }
+            let mut sent_any = false;
+            if !diff.added.is_empty() && peer.advertise_bgpls(&diff.added) {
+                sent_any = true;
+            }
+            if !diff.removed.is_empty() && peer.withdraw_bgpls(&diff.removed) {
+                sent_any = true;
+            }
+            if sent_any {
+                let bytes = peer.drain_outgoing();
+                if !bytes.is_empty() {
+                    conn.put_output(&bytes);
+                }
+            }
+        }
+        diff
     }
 
     /// Surface one received Grace-LSA as an [`OspfGraceEvent`] (the

@@ -461,6 +461,65 @@ impl BgpPeer {
         self.send_msg(&BgpMessage::Update(update));
     }
 
+    /// Advertise BGP-LS NLRIs to this peer (RFC 7752 §3, issue #60
+    /// daemon wiring). The BGP-LS address family (AFI=16388, SAFI=71)
+    /// carries opaque NLRI bytes — not the IP-prefix NLRIs the standard
+    /// `advertise()` path consumes — so this method bypasses the
+    /// `Route`/`RouteKey` model and assembles the MP_REACH_NLRI
+    /// attribute bytes directly from each `BgpLsNlri::encode()`.
+    ///
+    /// No `AS_PATH` / `NEXT_HOP` rewrite applies: BGP-LS is a
+    /// topology-distribution family, not a routing family, so the
+    /// UPDATE carries an empty `AS_PATH`, no `NEXT_HOP` attribute and
+    /// the MP_REACH_NLRI next-hop field set to 0.0.0.0 (the BGP-LS
+    /// specification does not define a next-hop; this matches BIRD's
+    /// `bgp_ls` channel implementation and FRR's `bgp_bgp_ls.c`).
+    ///
+    /// Returns `false` (and sends nothing) when the session is not
+    /// established or did not negotiate the BGP-LS family in OPEN.
+    #[cfg(feature = "bgp_ls")]
+    pub fn advertise_bgpls(&mut self, added: &[crate::path::bgp_ls::BgpLsNlri]) -> bool {
+        if !self.is_established() || added.is_empty() {
+            return false;
+        }
+        if !self.cfg.mp_families.contains(&NlriFamily::BGP_LS) {
+            return false;
+        }
+        let body = encode_bgpls_mp_reach(added);
+        let mut update = Update::new();
+        update.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::MpReachNlri,
+            body,
+        ));
+        self.send_msg(&BgpMessage::Update(update));
+        true
+    }
+
+    /// Withdraw BGP-LS NLRIs from this peer (RFC 7752 §3, issue #60
+    /// daemon wiring). Mirror of [`advertise_bgpls`] for the
+    /// MP_UNREACH_NLRI path. Returns `false` (and sends nothing) when
+    /// the session is not established or did not negotiate the BGP-LS
+    /// family in OPEN.
+    #[cfg(feature = "bgp_ls")]
+    pub fn withdraw_bgpls(&mut self, removed: &[crate::path::bgp_ls::BgpLsNlri]) -> bool {
+        if !self.is_established() || removed.is_empty() {
+            return false;
+        }
+        if !self.cfg.mp_families.contains(&NlriFamily::BGP_LS) {
+            return false;
+        }
+        let body = encode_bgpls_mp_unreach(removed);
+        let mut update = Update::new();
+        update.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::MpUnreachNlri,
+            body,
+        ));
+        self.send_msg(&BgpMessage::Update(update));
+        true
+    }
+
     fn next_hop_attr(ip: lr_core::addr::IpAddr) -> PathAttribute {
         use crate::path::NextHop;
         let nh = match ip {
@@ -473,6 +532,73 @@ impl BgpPeer {
             nh.encode(),
         )
     }
+}
+
+/// Encode the MP_REACH_NLRI attribute body for a BGP-LS NLRI set
+/// (RFC 4760 §3 + RFC 7752 §3.3). The body shape is:
+///
+/// ```text
+///   AFI(2) | SAFI(1) | NH-LEN(1) | NH(0 for BGP-LS) | reserved(1)
+///   | NLRI-stream (each NLRI: 4-byte header + value)
+/// ```
+///
+/// BGP-LS does not define a next-hop — RFC 7752 §3.3 leaves the
+/// next-hop field empty. The encoder emits a zero-length next-hop,
+/// matching BIRD's `bgp_ls` channel and FRR's `bgp_bgp_ls.c`.
+///
+/// Each NLRI is encoded via `BgpLsNlri::encode` into a per-NLRI
+/// buffer of exactly `wire_len()` bytes (the codec round-trips
+/// byte-for-byte — see the `bgp_ls_decode` fuzz target); a single
+/// malformed NLRI is skipped rather than failing the whole UPDATE.
+#[cfg(feature = "bgp_ls")]
+fn encode_bgpls_mp_reach(nlris: &[crate::path::bgp_ls::BgpLsNlri]) -> Vec<u8> {
+    use lr_core::buf::WriteBuf;
+    let mut body: Vec<u8> =
+        Vec::with_capacity(8 + nlris.iter().map(|n| n.wire_len()).sum::<usize>());
+    body.extend_from_slice(&NlriFamily::BGP_LS.afi.to_be_bytes());
+    body.push(NlriFamily::BGP_LS.safi);
+    body.push(0); // NH length = 0 (no next-hop for BGP-LS)
+                  // No NH bytes.
+    body.push(0); // reserved
+    for nlri in nlris {
+        let mut buf = vec![0u8; nlri.wire_len()];
+        let mut w = WriteBuf::new(&mut buf);
+        if nlri.encode(&mut w).is_err() {
+            continue;
+        }
+        let n = w.position();
+        body.extend_from_slice(&buf[..n]);
+    }
+    body
+}
+
+/// Encode the MP_UNREACH_NLRI attribute body for a BGP-LS NLRI set
+/// (RFC 4760 §4 + RFC 7752 §3.3). The body shape is:
+///
+/// ```text
+///   AFI(2) | SAFI(1) | NLRI-stream (each NLRI: 4-byte header + value)
+/// ```
+///
+/// Like [`encode_bgpls_mp_reach`], each NLRI is encoded via
+/// `BgpLsNlri::encode` into a per-NLRI buffer of exactly `wire_len()`
+/// bytes; a single malformed NLRI is skipped.
+#[cfg(feature = "bgp_ls")]
+fn encode_bgpls_mp_unreach(nlris: &[crate::path::bgp_ls::BgpLsNlri]) -> Vec<u8> {
+    use lr_core::buf::WriteBuf;
+    let mut body: Vec<u8> =
+        Vec::with_capacity(3 + nlris.iter().map(|n| n.wire_len()).sum::<usize>());
+    body.extend_from_slice(&NlriFamily::BGP_LS.afi.to_be_bytes());
+    body.push(NlriFamily::BGP_LS.safi);
+    for nlri in nlris {
+        let mut buf = vec![0u8; nlri.wire_len()];
+        let mut w = WriteBuf::new(&mut buf);
+        if nlri.encode(&mut w).is_err() {
+            continue;
+        }
+        let n = w.position();
+        body.extend_from_slice(&buf[..n]);
+    }
+    body
 }
 
 #[cfg(test)]

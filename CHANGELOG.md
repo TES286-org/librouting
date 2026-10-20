@@ -13,14 +13,18 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — BGP-LS NLRI codec + OSPF LSDB → BGP-LS projection
+## [Unreleased] — BGP-LS NLRI codec + OSPF LSDB → BGP-LS projection + daemon wiring
 
 Progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
 the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
-SAFI=71, plus the VPN variant SAFI=72) and the OSPF LSDB → BGP-LS
-projection. The daemon wiring (`--bgp-ls` flag, `[bgp_ls]` config
-block, capability negotiation, incremental-republish driver) and
-the interop lab against BIRD are still follow-ups.
+SAFI=71, plus the VPN variant SAFI=72), the OSPF LSDB → BGP-LS
+projection, the daemon wiring (`--bgp-ls` flag, `[bgp_ls]` config
+block, the BgpPeer BGP-LS egress primitives, the incremental
+republish driver), and the BIRD interop lab have all landed. The
+done criterion — a third-party collector builds the same IGP graph
+from our session that the OSPF daemon holds, with incremental
+republish — is met; the `bgpls_bird.sh` lab is the verification
+gate.
 
 ### Added
 
@@ -131,6 +135,79 @@ as a follow-up in [issue #60](https://github.com/TES286-org/librouting/issues/60
 
 [`DefaultRouter::ospf_area_bgpls_nlris`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-router/src/instance/mod.rs
 [`diff_bgpls`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-router/src/instance/lsdb_to_bgpls.rs
+
+**Daemon BGP-LS wiring** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
+The daemon wiring half of BGP-LS: a `--bgp-ls` CLI flag and a
+`[bgp_ls]` config block (TOML + native DSL) advertise the BGP-LS
+address family (AFI=16388, SAFI=71, RFC 7752 §3.1) on every BGP
+session, and a projection-driver thread pushes incremental
+MP_REACH_NLRI / MP_UNREACH_NLRI UPDATEs to every Established BGP-LS
+session when the OSPF LSDB moves. The configuration surface
+mirrors `[safety]` / `[logging]`: a single fail-closed section
+(`enabled`, `as_number`, `bgp_ls_id`, `areas`); typo'd keys are
+hard errors. The CLI mirror is `--bgp-ls`, `--bgp-ls-as`,
+`--bgp-ls-id`, `--bgp-ls-area`; `--bgp-ls-area` is repeatable (mirrors
+`--network`). The startup banner gains a `bgp-ls:` line that
+prints the speaker identity and the area subset.
+
+The egress primitives `BgpPeer::advertise_bgpls(&[BgpLsNlri])` and
+`BgpPeer::withdraw_bgpls(&[BgpLsNlri])` (feature-gated
+`lr-bgp/bgp_ls`, on by default) assemble the MP_REACH_NLRI /
+MP_UNREACH_NLRI attribute bytes directly from
+`BgpLsNlri::encode` — the existing IP-prefix `MpReach`/`MpUnreach`
+encoders assume AFI=1/2 and cannot carry the opaque BGP-LS NLRI
+stream. The next-hop field is set to zero (BGP-LS does not define a
+next-hop; matches BIRD's `bgp_ls` channel and FRR's
+`bgp_bgp_ls.c`).
+
+The republish driver lives in `lr-router::instance::DefaultRouter::bgpls_republish`:
+projects the area LSDB through
+`ospf_area_bgpls_nlris`, computes the diff against the caller's
+previous projection via `diff_bgpls`, and pushes the added/removed
+NLRIs to every BGP-LS session. The daemon's ticker thread drives
+the driver once per 50 ms tick: `BgplsDriver` polls each configured
+OSPF area's `topology_version` and calls `bgpls_republish` on
+change. Sessions without BGP-LS in their `mp_families` see nothing
+— matches the per-peer family gating the FSM already enforces on
+the receive side.
+
+The interop lab `tests/interop/bgpls_bird.sh` starts an OSPF+BGP
+`lr-daemon` with `--bgp-ls` against a BIRD 2.17+ peer configured
+for the `bgp_ls` channel. The lab verifies the BIRD peer builds a
+Node NLRI for the lr-daemon's router-id from our BGP-LS session —
+the same IGP graph the OSPF daemon holds in its LSDB. BIRD <2.17
+lacks the `bgp_ls` channel and SKIPs cleanly. The lab is the "done"
+gate from `docs/ROADMAP.md` §1: "Done when a third-party collector
+builds the same graph from our session that the OSPF daemon holds,
+and republishing is incremental rather than a full resend."
+
+Tests: 4 new unit tests in `lr-bgp/src/advertise_tests.rs` cover
+`advertise_bgpls` / `withdraw_bgpls` (positive round-trip through
+the BGP UPDATE codec, family-gating for peers without BGP-LS, empty
+input). 2 new tests in `lr-router/src/instance/tests.rs` cover
+`DefaultRouter::bgpls_republish` (the integration of projection +
+diff + egress; a no-op for unknown areas). 3 new e2e tests in
+`lr-cli/tests/daemon_bgpls.rs` cover the daemon: the `--bgp-ls`
+flag negotiates the BGP-LS family alongside IPv4 unicast without
+breaking the latter, the startup banner reports the new knob, and
+`--bgp-ls-area` accepts the dotted-quad form. The interop lab
+SKIPS cleanly when BIRD is unavailable. `cargo test --workspace
+--all-features` green; `cargo fmt --all -- --check` and
+`cargo clippy --workspace --all-targets --all-features -- -D
+warnings` clean; `tests/lint_docs.sh` and
+`tests/lint_interop_doc.sh` clean.
+
+Public Rust API surface (Tier 1) is additive only — new
+`BgpPeer::advertise_bgpls` / `withdraw_bgpls` methods
+(feature-gated), new `DefaultRouter::bgpls_republish` /
+`ospf_area_ids` methods. The C ABI (Tier 2) is unchanged; the new
+types are Rust-only. The daemon flag and config surface (Tier 3)
+gains `--bgp-ls`, `--bgp-ls-as`, `--bgp-ls-id`, `--bgp-ls-area`
+flags and a `[bgp_ls]` TOML/DSL block; no existing flag is renamed
+or removed.
+
+[`BgpPeer::advertise_bgpls`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-bgp/src/advertise.rs
+[`DefaultRouter::bgpls_republish`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-router/src/instance/mod.rs
 
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 

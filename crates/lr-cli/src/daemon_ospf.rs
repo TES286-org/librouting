@@ -783,8 +783,17 @@ pub(super) fn run_ospf_daemon(
                 return ExitCode::from(1);
             }
             // The ticker drives tick() (LSA refresh + MaxAge aging) and mirrors
-            // Loc-RIB events into the kernel FIB when asked to.
-            crate::spawn_ticker(&runtime, cfg.install_kernel, Arc::new(AtomicUsize::new(0)));
+            // Loc-RIB events into the kernel FIB when asked to. The BGP-LS
+            // driver is not active on an OSPF-only daemon (no BGP session
+            // to push to); the multi-protocol supervisor spawns the ticker
+            // with the driver when both `bgp` and `ospf` are in the protocol
+            // set.
+            crate::spawn_ticker(
+                &runtime,
+                cfg.install_kernel,
+                Arc::new(AtomicUsize::new(0)),
+                None,
+            );
         }
         Some(h) => {
             // Embedded: every interface's raw socket is bound; report

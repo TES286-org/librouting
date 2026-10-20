@@ -132,6 +132,12 @@ portable ones.
 | `ospf6_gr_frr.sh` | restarting lr-daemon and an FRR ospf6d helper | ospf6d enters helper mode on lr's Grace-LSAs, retains the adjacency and route across the dead interval, and exits on lr's flush |
 | `ospf6_frr_srv6.sh` | lr originator, FRR ospf6d relay, lr receiver | RFC 9513 through a daemon with no SRv6 of its own: ospf6d stores and re-floods lr's Router Information and Locator LSAs, and the far end projects the SIDs |
 
+## BGP-LS (RFC 7752)
+
+| Script | Peers | What it proves |
+| --- | --- | --- |
+| `bgpls_bird.sh` | lr-daemon `--protocol bgp,ospf --bgp-ls` against BIRD 2.17+ | RFC 7752 export: the daemon advertises the BGP-LS family (AFI=16388, SAFI=71) on its BGP session and runs the OSPF LSDB → BGP-LS projection's incremental republish on LSDB changes; BIRD builds the same IGP graph from our session (Node NLRI for the local router-id) that the lr-daemon holds in its OSPF LSDB. Requires BIRD 2.17+ for the `bgp_ls` channel; older BIRD SKIPs cleanly. |
+
 ## Compatibility surface and route policy
 
 | Script | Peers | What it proves |

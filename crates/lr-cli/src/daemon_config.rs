@@ -608,6 +608,50 @@ pub(crate) struct LdpBindSpec {
     pub label: u32,
 }
 
+/// `[bgp_ls]` configuration block (issue #60 daemon-wiring). When
+/// `enabled`, the daemon advertises the BGP-LS address family
+/// (AFI=16388, SAFI=71, RFC 7752 §3.1) on every BGP session and runs
+/// the OSPF LSDB → BGP-LS projection's incremental republish driver
+/// on LSDB changes.
+///
+/// `as_number` and `bgp_ls_id` form the BGP-LS speaker identity (RFC
+/// 7752 §3.2.1.4 AS sub-TLV 512 + BGP-LS Identifier sub-TLV 513) —
+/// both are required for the projection NLRIs to be unambiguous
+/// across speakers. `as_number` defaults to the daemon's `local_as`
+/// and `bgp_ls_id` defaults to 0 (the simplest legal value).
+///
+/// `areas` selects which OSPF area IDs to project. An empty list
+/// (the default) means "every area the router holds" — a router that
+/// learns areas dynamically (e.g. via OSPF adjacency) does not need
+/// them listed up front. An explicit list is for routers that want
+/// to publish a subset.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct BgpLsSpec {
+    /// Master switch. Off by default — a daemon without `[bgp_ls]`
+    /// stays byte-identical to a pre-BGP-LS one.
+    pub enabled: bool,
+    /// BGP-LS speaker AS number (RFC 7752 §3.2.1.4 sub-TLV 512).
+    /// `0` = inherit the daemon's `local_as` at runtime.
+    pub as_number: u32,
+    /// BGP-LS Identifier (RFC 7752 §3.2.1.4 sub-TLV 513). Defaults
+    /// to `0`.
+    pub bgp_ls_id: u32,
+    /// OSPF area IDs to project. Empty = all areas the router holds.
+    pub areas: Vec<u32>,
+}
+
+impl BgpLsSpec {
+    /// Resolve `as_number` against the daemon's `local_as` when the
+    /// operator left it at the inherit sentinel (`0`).
+    pub(crate) fn effective_as_number(&self, local_as: u32) -> u32 {
+        if self.as_number == 0 {
+            local_as
+        } else {
+            self.as_number
+        }
+    }
+}
+
 /// Parse an OSPF area ID: dotted quad (`"0.0.0.1"`) or integer
 /// (`"1"`). Both BIRD and FRR accept the two spellings.
 pub(crate) fn parse_area_id(value: &str) -> Option<u32> {
@@ -1147,6 +1191,13 @@ pub(crate) struct DaemonConfig {
     /// from TOML `[safety]` and the DSL `safety { ... }` block. The
     /// daemon applies it to the router's `SafetyNet` at startup.
     pub safety: SafetyConfigSpec,
+    /// `[bgp_ls]` — BGP-LS speaker configuration (issue #60 daemon
+    /// wiring). Parsed from TOML `[bgp_ls]` and the DSL
+    /// `bgp-ls { ... }` block. When `enabled`, the daemon advertises
+    /// the BGP-LS address family (AFI=16388, SAFI=71) on every BGP
+    /// session and runs the OSPF LSDB → BGP-LS projection's
+    /// incremental republish driver on LSDB changes.
+    pub bgp_ls: BgpLsSpec,
 }
 
 /// Operator-facing logging configuration. Mirrors the runtime
@@ -2689,6 +2740,7 @@ pub(crate) fn parse_toml_subset(text: &str, cfg: &mut DaemonConfig) -> Result<()
                 && section != "ldp"
                 && section != "damping"
                 && section != "bgp.rpki"
+                && section != "bgp_ls"
                 && section != "logging"
                 && section != "safety"
                 && section != "shutdown"
@@ -2850,6 +2902,14 @@ pub(crate) fn apply_config_key(
     // a typo'd AS number or CIDR would silently change which routes
     // the safety net admits, so it is a hard error.
     if apply_safety_key(cfg, section, key, value)
+        .map_err(|e| format!("line {}: {}", lineno + 1, e))?
+    {
+        return Ok(());
+    }
+    // `[bgp_ls]` — fail-closed like every other protocol surface:
+    // a typo'd AS number or area ID would silently change which NLRIs
+    // the projection emits, so it is a hard error.
+    if apply_bgp_ls_key(cfg, section, key, value)
         .map_err(|e| format!("line {}: {}", lineno + 1, e))?
     {
         return Ok(());
@@ -4553,6 +4613,65 @@ fn apply_safety_key(
     Ok(true)
 }
 
+/// Apply one `key = value` pair under `[bgp_ls]` — fail-closed
+/// (typo protection). Returns `Ok(false)` when the section is not
+/// `bgp_ls` so the caller can keep walking the dispatch chain.
+fn apply_bgp_ls_key(
+    cfg: &mut DaemonConfig,
+    section: &str,
+    key: &str,
+    value: &str,
+) -> Result<bool, String> {
+    if section != "bgp_ls" {
+        return Ok(false);
+    }
+    let parse_safety_bool = |v: &str, name: &str| -> Result<bool, String> {
+        if v == "true" || v == "false" {
+            Ok(parse_bool(v))
+        } else {
+            Err(format!("bad {name} '{v}' (true|false)"))
+        }
+    };
+    match key {
+        "enabled" => cfg.bgp_ls.enabled = parse_safety_bool(value, "enabled")?,
+        "as_number" => {
+            cfg.bgp_ls.as_number = value
+                .parse()
+                .map_err(|_| format!("bad as_number '{value}' (0..=u32::MAX)"))?;
+        }
+        "bgp_ls_id" => {
+            cfg.bgp_ls.bgp_ls_id = value
+                .parse()
+                .map_err(|_| format!("bad bgp_ls_id '{value}' (0..=u32::MAX)"))?;
+        }
+        "areas" => {
+            // Array of area IDs (decimal or dotted quad). Each entry
+            // is validated through `parse_area_id` so a typo surfaces
+            // here, not at daemon start.
+            let mut out = Vec::new();
+            for s in parse_str_array(value) {
+                let id = parse_area_id(&s)
+                    .ok_or_else(|| format!("bad area '{s}' (decimal or dotted-quad)"))?;
+                out.push(id);
+            }
+            cfg.bgp_ls.areas = out;
+        }
+        "area" => {
+            // Single-entry convenience: `area = 0` (mirrors the OSPF
+            // `area` key's singular form).
+            let id = parse_area_id(value)
+                .ok_or_else(|| format!("bad area '{value}' (decimal or dotted-quad)"))?;
+            cfg.bgp_ls.areas.push(id);
+        }
+        _ => {
+            return Err(format!(
+                "unknown [bgp_ls] key '{key}' (typo protection; bgp_ls config fails closed)"
+            ))
+        }
+    }
+    Ok(true)
+}
+
 /// Apply one `key = value` pair to the current `[[peer]]` entry.
 /// Returns `Ok(false)` when the key is not part of the schema so the
 /// caller can surface an unknown-key warning.
@@ -4866,6 +4985,52 @@ pub(crate) fn parse_args() -> Result<DaemonConfig, ExitCode> {
             }
             "--exchange-plane-key" if i + 1 < args.len() => {
                 cfg.exchange_plane_keys.push(args[i + 1].clone());
+                i += 2;
+            }
+            // BGP-LS speaker (RFC 7752, issue #60 daemon wiring). The
+            // master switch advertises the BGP-LS family on every BGP
+            // session; `--bgp-ls-as`, `--bgp-ls-id`, `--bgp-ls-area`
+            // configure the speaker identity and the area subset.
+            // Repeated `--bgp-ls-area` flags append (mirrors `--network`).
+            "--bgp-ls" => {
+                cfg.bgp_ls.enabled = true;
+                i += 1;
+            }
+            "--no-bgp-ls" => {
+                cfg.bgp_ls.enabled = false;
+                i += 1;
+            }
+            "--bgp-ls-as" if i + 1 < args.len() => {
+                match args[i + 1].parse::<u32>() {
+                    Ok(v) => cfg.bgp_ls.as_number = v,
+                    Err(_) => {
+                        eprintln!("bad --bgp-ls-as '{}' (expected integer)", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--bgp-ls-id" if i + 1 < args.len() => {
+                match args[i + 1].parse::<u32>() {
+                    Ok(v) => cfg.bgp_ls.bgp_ls_id = v,
+                    Err(_) => {
+                        eprintln!("bad --bgp-ls-id '{}' (expected integer)", args[i + 1]);
+                        return Err(ExitCode::from(2));
+                    }
+                }
+                i += 2;
+            }
+            "--bgp-ls-area" if i + 1 < args.len() => {
+                match parse_area_id(&args[i + 1]) {
+                    Some(id) => cfg.bgp_ls.areas.push(id),
+                    None => {
+                        eprintln!(
+                            "bad --bgp-ls-area '{}' (decimal or dotted-quad)",
+                            args[i + 1]
+                        );
+                        return Err(ExitCode::from(2));
+                    }
+                }
                 i += 2;
             }
             "--install-kernel-routes" => {

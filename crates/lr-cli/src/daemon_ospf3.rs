@@ -910,10 +910,15 @@ pub fn run_ospf3_daemon(cfg: &DaemonConfig, rid: RouterId, host: Option<EngineHo
                 log_warn!(Component::Daemon, "{}", e);
                 return ExitCode::from(1);
             }
+            // The BGP-LS driver is not active on an OSPFv3-only daemon
+            // (no BGP session to push to); the multi-protocol supervisor
+            // spawns the ticker with the driver when both `bgp` and
+            // `ospf` are in the protocol set.
             crate::spawn_ticker(
                 &runtime,
                 cfg.install_kernel,
                 Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                None,
             );
         }
         Some(h) => {

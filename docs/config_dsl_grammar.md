@@ -119,6 +119,7 @@ lowers to:
 | `ldp { targeted ADDR { } }`     | `address`          | `[[ldp.targeted]]`        |
 | `ldp { bind P { } }`            | `prefix`           | `[[ldp.bind]]`            |
 | `damping { }`                   | —                  | `[damping]`               |
+| `bgp-ls { }`                    | —                  | `[bgp_ls]`                |
 | `peer NAME { }`                 | `name`             | `[[peer]]`                |
 | `peer-template NAME { }`        | template name      | `[peer-template.NAME]`    |
 | `prefix-list NAME { }`          | `name`             | `[[prefix-list]]`         |
@@ -138,7 +139,7 @@ lowers to:
   TOML spelling (`hello_interval_ms`, `origin_as`, `match_prefix`, …).
   This is what makes one shared dispatch possible.
 - Every block may appear more than once. A single-section block
-  (`bgp`, `ospf`, `babel`, `ldp`, `damping`, `bgp.rpki`) merges its keys
+  (`bgp`, `ospf`, `babel`, `ldp`, `damping`, `bgp.rpki`, `bgp-ls`) merges its keys
   in file order, exactly like repeated TOML tables; an array block
   (`peer`, `roa`, `route-map`, …) appends a new entry each time, so two
   `route-map "x"` blocks are two entries of one map.
