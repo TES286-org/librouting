@@ -99,8 +99,18 @@ The CI matrix in `.github/workflows/ci.yml` must cover:
   covers the Intel path).
 - **Windows** (x86_64, MSVC toolchain) — `cargo build --workspace`,
   `cargo test --workspace`, `cargo clippy -D warnings`.
+- **RISC-V** (`riscv64gc`, Linux) — covered two ways: the `cross` matrix
+  job cross-builds `riscv64gc-unknown-linux-gnu` on every push (always
+  available, no third-party runner required), and the `riscv-native`
+  job runs `cargo nextest`, doctests and per-arch clippy on real
+  RISC-V hardware via the RISE Project's `ubuntu-24.04-riscv` runner
+  (issue #65). The cross-build is release-blocking; the native job is
+  release-blocking only when the RISE GitHub App is installed on the
+  repository — otherwise GitHub marks it "no runner found" and the
+  cut proceeds.
 
-All three must be green on `main` at the cut commit.
+All four must be green on `main` at the cut commit (the RISC-V native
+job is exempt when the RISE App is not installed).
 
 ### 2.5. ABI version pinned
 

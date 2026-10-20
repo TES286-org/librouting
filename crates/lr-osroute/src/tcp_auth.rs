@@ -364,7 +364,7 @@ mod imp {
     /// The `set_current`/`set_rnext` bitfield occupies a `u32` with
     /// `set_current` at bit 0 and `set_rnext` at bit 1; this manual layout
     /// matches the GCC ABI on the little-endian targets librouting ships
-    /// for (x86_64, aarch64).
+    /// for (x86_64, aarch64, riscv64).
     #[repr(C, align(8))]
     struct TcpAoAdd {
         addr: SockaddrStorage, // peer's address for the key

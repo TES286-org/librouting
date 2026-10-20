@@ -303,6 +303,55 @@ The End.X / LAN End.X SID *projection* update (attaching the
 the codec is the foundation, the projection update touches the
 `lsdb_to_bgpls` module and is tracked separately.
 
+### Changed (CI)
+
+**RISC-V CI matrix** (`ci`, [issue #65](https://github.com/TES286-org/librouting/issues/65)).
+The CI workflow in `.github/workflows/ci.yml` now covers the RISC-V
+architecture in two ways. The existing `cross` matrix job gains
+`riscv64gc-unknown-linux-gnu` alongside `aarch64-unknown-linux-gnu`
+and `x86_64-pc-windows-gnu`: the apt install step pulls in
+`gcc-riscv64-linux-gnu` + `libc6-dev-riscv64-cross`, the
+per-target linker env block gains
+`CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER=riscv64-linux-gnu-gcc`,
+and `cargo build --workspace --target riscv64gc-unknown-linux-gnu
+--all-features` runs on every push. This is the safety net: even on
+a fork where the RISE GitHub App is not installed, the cross-build
+still produces an riscv64 linkable artifact on a plain `ubuntu-latest`
+runner.
+
+A new `riscv-native` job runs on `ubuntu-24.04-riscv` — the RISE
+Project's Scaleway EM-RV1 pool, free for OSS,
+<https://riscv-runners.riseproject.dev/>. It mirrors the existing
+`unit-tests` job: `cargo clippy --workspace --all-features
+--all-targets -- -D warnings`, `cargo build --workspace --all-features`,
+`cargo nextest run --workspace --all-features`, `cargo test --doc
+--workspace --all-features`. clippy runs per-arch for the same reason
+the `cross-platform` matrix runs it per-OS: arch-conditional code only
+compiles on its own architecture, so a per-arch lint pass catches
+future regressions the x86_64-only `lint` job would miss. fmt is NOT
+re-run; rustfmt is deterministic and platform-independent, and the
+`lint` job already gates it on every push.
+
+The workspace is target-OS-aware, not target-arch-aware: `lr-osroute`
+selects its Linux rtnetlink backend under `target_os = "linux"`, and
+the socket constants, struct layouts and syscall numbers are identical
+across x86_64, aarch64 and riscv64 (verified locally by `cargo build
+-p lr-osroute --target riscv64gc-unknown-linux-gnu --all-features`).
+The kernel-gated `#[ignore]`d tests (`route_kernel`, `srv6_kernel`)
+self-skip when they lack `CAP_NET_ADMIN`, so the same `nextest`
+command runs unchanged on riscv64.
+
+If the RISE App is not installed on the repository, GitHub marks the
+`riscv-native` job "no runner found" after the timeout — it never
+blocks merge. The `cross` matrix entry covers the gap until the App
+is installed.
+
+A side-effect: the doc comments in `lr-osroute::gtsm` and
+`lr-osroute::tcp_auth` previously enumerated only x86_64 and aarch64
+when describing the Linux UAPI surface; both now mention riscv64
+explicitly. No code change — the constants were already correct on
+riscv64.
+
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 
 librouting 1.2.0 is a minor release: new public Rust API surface and

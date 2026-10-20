@@ -267,6 +267,7 @@ jobs:
         target:
           - aarch64-unknown-linux-gnu
           - x86_64-pc-windows-gnu
+          - riscv64gc-unknown-linux-gnu
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -284,13 +285,16 @@ jobs:
             gcc-aarch64-linux-gnu \
             libc6-dev-arm64-cross \
             libgcc-11-dev-arm64-cross \
-            gcc-mingw-w64-x86-64
+            gcc-mingw-w64-x86-64 \
+            gcc-riscv64-linux-gnu \
+            libc6-dev-riscv64-cross
       - name: cargo build (${{ matrix.target }})
         timeout-minutes: 20
         run: cargo build --workspace --target ${{ matrix.target }} --all-features
         env:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
           CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: x86_64-w64-mingw32-gcc
+          CARGO_TARGET_RISCV64GC_UNKNOWN_LINUX_GNU_LINKER: riscv64-linux-gnu-gcc
 
   # Intel macOS coverage now that the macos-13 (Intel) native job is
   # retired (see cross-platform job). The macos-14 (Apple Silicon)
@@ -315,6 +319,71 @@ jobs:
       - name: cargo build (x86_64-apple-darwin)
         timeout-minutes: 20
         run: cargo build --workspace --target x86_64-apple-darwin --all-features
+
+  # Native RISC-V build + test on real hardware. RISE Project provides
+  # free ephemeral RISC-V GitHub Actions runners (issue #65,
+  # https://riscv-runners.riseproject.dev/). The `ubuntu-24.04-riscv`
+  # label is routed to a Scaleway EM-RV1 node by the RISE RISC-V
+  # Runners GitHub App — install the App on the org/repo or the job
+  # silently skips (GitHub marks it "no runner found" after the
+  # timeout, never blocks merge).
+  #
+  # The workspace is target-OS-aware (lr-osroute selects its Linux
+  # rtnetlink backend under target_os = "linux"), not target-arch-
+  # aware: the socket constants, struct layouts and syscall numbers
+  # are identical across every Linux architecture librouting targets
+  # (x86_64, aarch64, riscv64). The kernel-gated #[ignore]d tests
+  # (route_kernel, srv6_kernel, windows_route_table) self-skip when
+  # they lack CAP_NET_ADMIN or the right kernel feature, so this job
+  # runs the same `cargo nextest` + doctest pair as the Linux x86_64
+  # `unit-tests` job without any per-arch gating.
+  #
+  # clippy is run here (and not just on the lint job) for the same
+  # reason the cross-platform matrix runs it per-OS: the Linux
+  # backend compiles on riscv64 exactly as it does on x86_64, but a
+  # per-arch clippy pass catches any future arch-conditional code
+  # that the x86_64-only lint job would miss. fmt is NOT re-run —
+  # rustfmt is deterministic and platform-independent.
+  riscv-native:
+    name: Native RISC-V (ubuntu-24.04-riscv)
+    runs-on: ubuntu-24.04-riscv
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "riscv-native"
+      - name: Install cargo-nextest
+        # Same rationale as the unit-tests job: nextest isolates each
+        # test in its own process so a hung test is killed within the
+        # slow-timeout window instead of stalling the whole invocation.
+        timeout-minutes: 5
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - name: cargo clippy
+        # Per-arch clippy — see job-level comment. Same -D warnings
+        # gate as the lint job.
+        timeout-minutes: 30
+        run: cargo clippy --workspace --all-features --all-targets -- -D warnings
+      - name: cargo build (workspace)
+        timeout-minutes: 30
+        run: cargo build --workspace --all-features
+      - name: cargo nextest (workspace, unit + integration)
+        # Mirrors the unit-tests job. nextest + .config/nextest.toml's
+        # slow-timeout (5 min of no stdout) bounds any single hung test
+        # to ≤5 min instead of stalling the whole suite.
+        timeout-minutes: 30
+        run: cargo nextest run --workspace --all-features
+      - name: cargo test --doc (workspace)
+        # nextest's doctest support is still unstable; the stable
+        # path is cargo test --doc.
+        timeout-minutes: 10
+        run: cargo test --doc --workspace --all-features
 
   # Native build + test on the non-Linux primary platforms. The
   # workspace is already target-aware: lr-osroute carries a Windows
