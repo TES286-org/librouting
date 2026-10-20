@@ -14,7 +14,8 @@ defines it; the code wins over any sentence here.
 ## Protocol coverage
 
 **BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Partial —
-the wire codec has landed, the projection and daemon wiring have not.
+the wire codec and the OSPF LSDB → BGP-LS projection have landed;
+the daemon wiring and the interop lab have not.
 
 `lr-bgp::path::bgp_ls` parses and serialises the Node, Link, IPv4
 Prefix and IPv6 Prefix NLRI shapes from RFC 7752 §3.3, the Local
@@ -33,12 +34,24 @@ NLRI (RFC 9514 §7 SRv6 Endpoint Behavior, §8 SRv6 SID Structure)
 are out of scope for the NLRI codec — they live in a separate
 attribute surface.
 
+`lr-router::instance::lsdb_to_bgpls` projects one OSPF area's LSDB
+onto the Node / Link / Prefix NLRI set: OSPFv2 emits Node NLRIs
+(Router-LSA, Network-LSA pseudonode), Link NLRIs (transit + P2P)
+with IPv4 Interface/Neighbor Address TLVs, and IPv4 Topology Prefix
+NLRIs (stub links = `IntraArea`, type-3 Summary-LSAs = `InterArea`,
+type-5 AS-External-LSAs = `External1` / `External2` with the OSPF
+Area-ID sub-TLV set to 0 per RFC 7752 §3.2.1.4). OSPFv3 emits the
+IPv6 equivalents and handles RFC 8362 Extended LSAs. The projection
+is a pure function on the LSDB; `DefaultRouter::ospf_area_bgpls_nlris`
+wraps it with the router's per-area context. `diff_bgpls` returns
+the added / removed / unchanged NLRI sets so a daemon can drive
+incremental MP-BGP UPDATE messages by canonical wire form.
+
 What remains to flip the STATUS row from `partial` to `yes`:
 
-- A projection from the OSPFv2 / OSPFv3 LSDBs onto the Node / Link /
-  Prefix NLRI set, plus a walk of the SRv6 database onto the RFC 9552
-  SRv6 SID NLRI. The projection is a pure function on the LSDB; it
-  belongs in `lr-router` beside `instance::ospf`.
+- A walk of the SRv6 database (`lr-ospf::srv6db`) onto the RFC 9552
+  SRv6 SID NLRI. The codec is fully modelled; the projection does
+  not emit the SRv6 SID NLRI yet.
 - Daemon wiring: a `--bgp-ls` flag (and a `[bgp_ls]` block in the
   native DSL) that registers the BGP-LS family on a session and runs
   the projection's incremental republish on LSDB changes.

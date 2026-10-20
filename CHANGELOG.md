@@ -13,13 +13,14 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — BGP-LS NLRI codec (RFC 7752 §3.2-§3.3, RFC 9514 §6)
+## [Unreleased] — BGP-LS NLRI codec + OSPF LSDB → BGP-LS projection
 
-Partial progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
+Progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
 the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
-SAFI=71, plus the VPN variant SAFI=72). The OSPF-LSDB → BGP-LS
-projection, the daemon wiring and the interop lab against BIRD are
-follow-ups; this entry ships only Layer 1.
+SAFI=71, plus the VPN variant SAFI=72) and the OSPF LSDB → BGP-LS
+projection. The daemon wiring (`--bgp-ls` flag, `[bgp_ls]` config
+block, capability negotiation, incremental-republish driver) and
+the interop lab against BIRD are still follow-ups.
 
 ### Added
 
@@ -63,11 +64,53 @@ The BGP-LS Attribute TLVs that ride alongside the SRv6 SID NLRI
 in a separate attribute surface and are out of scope for this
 codec entry.
 
-Public Rust API surface (Tier 1) is additive only — no existing
-signature changes. The C ABI (Tier 2) is unchanged; the new types
-are Rust-only. The daemon flag and config surface (Tier 3) are
-unchanged — BGP-LS projection and daemon wiring are tracked as
-follow-ups in [issue #60](https://github.com/TES286-org/librouting/issues/60).
+**OSPF LSDB → BGP-LS projection** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
+A new `lr-router::instance::lsdb_to_bgpls` module (Layer 2 of the
+issue's work breakdown) projects one OSPF area's LSDB onto the
+BGP-LS NLRI set a controller needs to rebuild the IGP graph the
+OSPF daemon holds. Pure function on the LSDB; does not touch the
+daemon loop or transports. A new public accessor
+[`DefaultRouter::ospf_area_bgpls_nlris`] wraps the projection with
+the router's per-area context (AS number, BGP-LS ID, area ID,
+protocol).
+
+OSPFv2 emits Node NLRIs (Router-LSA, Network-LSA pseudonode), Link
+NLRIs (transit + P2P links) with IPv4 Interface/Neighbor Address
+TLVs, and IPv4 Topology Prefix NLRIs (stub links = `IntraArea`,
+type-3 Summary-LSAs = `InterArea`, type-5 AS-External-LSAs =
+`External1` / `External2` with the OSPF Area-ID sub-TLV set to 0
+per RFC 7752 §3.2.1.4). OSPFv3 emits the IPv6 equivalents, plus
+handles RFC 8362 Extended LSAs (E-Router, E-Network,
+E-Intra-Area-Prefix, E-Inter-Area-Prefix, E-AS-External) with the
+same field semantics. The projection looks the DR Router ID up in
+the Network-LSA table to build the transit-link remote pseudonode,
+and skips a transit-link Link NLRI when the Network-LSA is not in
+the LSDB yet (the next projection run sees it). The SRv6 SID NLRI
+(RFC 9514 §6) projection from the OSPFv3 SRv6 database is a
+follow-up.
+
+[`diff_bgpls`] computes the added / removed / unchanged NLRI sets
+between two projections by canonical wire form (RFC 7752 §3.3:
+NLRI comparison is byte-for-byte). A daemon running the projection
+once per LSDB change uses `added` for MP_REACH_NLRI and `removed`
+for MP_UNREACH_NLRI — the incremental-republish primitive the
+ROADMAP "done" criterion calls for.
+
+Twenty-five unit tests cover the per-LSA projection (Node / Link /
+IPv4 Prefix / IPv6 Prefix), the OSPFv2 + v3 paths, the E-LSA shapes,
+the AS-External area-ID-zero rule, and the diff helper. Each test
+also asserts every emitted NLRI round-trips byte-for-byte through
+the codec.
+
+Public Rust API surface (Tier 1) is additive only — the new
+`lsdb_to_bgpls` module and the new `DefaultRouter::ospf_area_bgpls_nlris`
+method; no existing signature changes. The C ABI (Tier 2) is
+unchanged; the new types are Rust-only. The daemon flag and config
+surface (Tier 3) are unchanged — BGP-LS daemon wiring is tracked
+as a follow-up in [issue #60](https://github.com/TES286-org/librouting/issues/60).
+
+[`DefaultRouter::ospf_area_bgpls_nlris`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-router/src/instance/mod.rs
+[`diff_bgpls`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-router/src/instance/lsdb_to_bgpls.rs
 
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 

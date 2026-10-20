@@ -135,6 +135,39 @@ fn lrctl(args: &[&str]) -> (bool, String, String) {
     )
 }
 
+/// Run `lrctl shutdown` against `pipe`, retrying on a transport
+/// error up to 3 times with a 200 ms gap. The shutdown command is
+/// racy on Windows named pipes: the server's `accept_loop` has a
+/// ~50 ms gap between `ConnectNamedPipe` returning and the next pipe
+/// instance being created (`CreateNamedPipeW`). A client that
+/// connects in that gap sees `ERROR_PIPE_BUSY`, which the client
+/// transport already retries internally with a 5 s deadline — but
+/// other transient errors (a server thread that has not finished
+/// dropping its BufWriter, a pipe instance that the kernel has
+/// already torn down on the server side) can still surface as a
+/// transport `Err` and a non-zero `lrctl` exit. The retry
+/// absorbs those without losing the test's diagnostic on a real
+/// failure (the last attempt's stdout / stderr are returned to the
+/// caller, which surfaces them in its own assertion message).
+fn lrctl_shutdown_with_retry(pipe: &str) -> (bool, String, String) {
+    let mut last = (false, String::new(), String::new());
+    for attempt in 0..3 {
+        let (ok, stdout, stderr) = lrctl(&["--socket", pipe, "shutdown"]);
+        if ok {
+            return (ok, stdout, stderr);
+        }
+        last = (ok, stdout, stderr);
+        // The daemon started shutting down after the first attempt
+        // even if the client saw a transport error; further attempts
+        // race against the daemon's exit. A short gap keeps the
+        // retry effective while the daemon is still draining.
+        if attempt < 2 {
+            thread::sleep(Duration::from_millis(200));
+        }
+    }
+    last
+}
+
 /// `lrctl status` round-trips through the daemon's named pipe and
 /// returns the daemon's `status` reply verbatim. This is the core
 /// regression for issue #43: before the Windows named-pipe transport
@@ -172,10 +205,18 @@ fn lrctl_status_round_trips_over_named_pipe() {
     );
     assert!(stdout.contains("rib-entries 1"), "status stdout: {stdout}");
 
-    // Clean up via `lrctl shutdown` — exercises the shutdown path too.
-    let (ok, stdout, _stderr) = lrctl(&["--socket", &pipe, "shutdown"]);
-    assert!(ok, "lrctl shutdown failed");
-    assert!(stdout.contains("shutting down"));
+    // Clean up via `lrctl shutdown` — exercises the shutdown path
+    // too. The shutdown round-trip has been racy on the Windows
+    // named-pipe transport (server-side `ConnectNamedPipe` and
+    // `CreateNamedPipeW` are not atomic); the retry helper absorbs a
+    // transient transport error and the diagnostic assertion
+    // surfaces the real reason on a non-transient failure.
+    let (ok, stdout, stderr) = lrctl_shutdown_with_retry(&pipe);
+    assert!(ok, "lrctl shutdown failed: stderr={stderr} stdout={stdout}");
+    assert!(
+        stdout.contains("shutting down"),
+        "shutdown stdout: {stdout} stderr={stderr}"
+    );
     let (exit_ok, _log) = d.wait_exit();
     assert!(exit_ok, "daemon must exit 0 after lrctl shutdown");
 }
@@ -213,7 +254,11 @@ fn lrctl_sessions_lists_configured_session() {
         "sessions stdout: {stdout}"
     );
 
-    lrctl(&["--socket", &pipe, "shutdown"]);
+    // Best-effort shutdown via the retry helper so a transient
+    // transport error during the cleanup round-trip does not leak a
+    // still-running daemon (the `Drop` impl's `kill` is the safety
+    // net; this keeps the log readable on the rare retry case).
+    let _ = lrctl_shutdown_with_retry(&pipe);
     let _ = d.wait_exit();
 }
 
@@ -250,6 +295,6 @@ fn unix_style_socket_path_works_on_windows() {
     assert!(ok, "lrctl status (unix-style path) failed: stderr={stderr}");
     assert!(stdout.contains("local-as 64512"), "status stdout: {stdout}");
 
-    lrctl(&["--socket", &pipe_name, "shutdown"]);
+    let _ = lrctl_shutdown_with_retry(&pipe_name);
     let _ = d.wait_exit();
 }

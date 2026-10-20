@@ -83,6 +83,11 @@ mod babel;
 mod ospf;
 mod ospf_ops;
 
+/// OSPF LSDB → BGP-LS projection (RFC 7752 §3 + RFC 9514 §6 follow-up):
+/// pure function on the area LSDB that emits the BGP-LS NLRI a
+/// controller needs to rebuild the IGP graph. Layer 2 of issue #60.
+pub mod lsdb_to_bgpls;
+
 use babel::*;
 use ospf::*;
 
@@ -5468,6 +5473,44 @@ impl DefaultRouter {
                 advertising_router: adv,
             })
             .map(|e| e.lsa.clone())
+    }
+
+    /// Project one OSPF area's LSDB onto the BGP-LS NLRI set
+    /// (RFC 7752 §3 + RFC 9514 §6 SRv6 follow-up). Pure function on
+    /// the area's LSDB; does not touch the daemon loop. Layer 2 of
+    /// issue #60 — the daemon-wiring half (capability negotiation
+    /// and incremental republish driver) and the interop lab against
+    /// BIRD are follow-ups.
+    ///
+    /// `as_number` and `bgp_ls_id` come from the daemon's BGP-LS
+    /// speaker configuration; `area_id` is the OSPF area being
+    /// projected and `protocol` selects the v2 / v3 LSA-type match
+    /// arms. The projection emits one Node NLRI per Router-LSA /
+    /// Network-LSA, one Link NLRI per transit / P2P link in a
+    /// Router-LSA, and one IPv4 / IPv6 Topology Prefix NLRI per
+    /// Summary-LSA / AS-External-LSA / stub link / Intra-Area-Prefix
+    /// LSA. See [`lsdb_to_bgpls`] for the per-LSA mapping and
+    /// [`lsdb_to_bgpls::diff_bgpls`] for the incremental-republish
+    /// helper.
+    ///
+    /// `None` for unknown areas. An empty `Vec` for a known area
+    /// with an empty LSDB.
+    ///
+    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
+    pub fn ospf_area_bgpls_nlris(
+        &self,
+        area_id: u32,
+        as_number: u32,
+        bgp_ls_id: u32,
+    ) -> Option<Vec<lr_bgp::path::bgp_ls::BgpLsNlri>> {
+        let area = self.ospf_areas.get(&area_id)?;
+        let ctx = lsdb_to_bgpls::OspfAreaBgplsContext {
+            as_number,
+            bgp_ls_id,
+            area_id,
+            protocol: area.protocol,
+        };
+        Some(lsdb_to_bgpls::project_area_lsdb_to_bgpls(&area.lsdb, &ctx))
     }
 
     /// Surface one received Grace-LSA as an [`OspfGraceEvent`] (the
