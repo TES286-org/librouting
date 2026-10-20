@@ -86,11 +86,15 @@
 //!
 //! # Scope
 //!
-//! The SRv6 SID NLRI (RFC 9514 §6) projection from the OSPFv3 SRv6
-//! database is a follow-up — it needs the SRv6 End SID + Locator
-//! state from [`lr_ospf::srv6db`], which the projection module
-//! does not pull in here. The codec itself is fully modelled (see
-//! `lr-bgp::path::bgp_ls`).
+//! The SRv6 SID NLRI (RFC 9514 §6) projection from the OSPFv3
+//! SRv6 database (RFC 9513 reception in [`lr_ospf::srv6db`]) is part
+//! of the OSPFv3 path: [`project_v3`] builds a [`Srv6Database`] from
+//! the same area LSDB and emits one SRv6 SID NLRI per End SID the
+//! database holds. End.X / LAN End.X SIDs are not projected — the
+//! behavior that distinguishes them from End SIDs lives in the
+//! BGP-LS Attribute surface (RFC 9514 §7 SRv6 Endpoint Behavior),
+//! which is out of scope for the codec layer; project them once the
+//! attribute surface lands.
 //!
 //! [issue #60]: https://github.com/TES286-org/librouting/issues/60
 
@@ -99,7 +103,7 @@ use std::collections::BTreeMap;
 use lr_bgp::path::bgp_ls::{
     BgpLsNlri, BgpLsNlriVariant, LinkDescriptor, LinkDescriptorSubTlv, LinkNlri, NodeDescriptor,
     NodeDescriptorSubTlv, NodeNlri, OspfRouteType, PrefixDescriptor, PrefixDescriptorSubTlv,
-    PrefixNlri, ProtocolId,
+    PrefixNlri, ProtocolId, Srv6SidDescriptor, Srv6SidDescriptorSubTlv, Srv6SidNlri,
 };
 use lr_core::buf::WriteBuf;
 use lr_core::rib::Protocol;
@@ -118,6 +122,7 @@ use lr_ospf::lsa::{
     LS_TYPE_NETWORK, LS_TYPE_ROUTER,
 };
 use lr_ospf::lsdb::Lsdb;
+use lr_ospf::srv6db::Srv6Database;
 
 /// Per-area context the projection needs from the daemon. The four
 /// fields are exactly the Local Node Descriptor sub-TLVs every Node
@@ -160,7 +165,7 @@ impl OspfAreaBgplsContext {
 }
 
 /// Project one OSPF area's LSDB onto the BGP-LS NLRI set (RFC 7752
-/// §3 + RFC 9514 §6 SRv6 SID NLRI is out of scope here).
+/// §3 + RFC 9514 §6 SRv6 SID NLRI for OSPFv3).
 ///
 /// Pure function. Walks the LSDB once in `LsaKey` ascending order
 /// (the LSDB's `BTreeMap` iteration order). The result is suitable
@@ -535,6 +540,14 @@ fn project_v3(lsdb: &Lsdb, ctx: &OspfAreaBgplsContext, out: &mut Vec<BgpLsNlri>)
             _ => {}
         }
     }
+
+    // RFC 9514 §6 SRv6 SID NLRIs. A second pass over the same area
+    // LSDB through the SRv6 database (RFC 9513 reception) — the LSA
+    // walk above does not touch the SRv6 LSA families (Router
+    // Information 0xA00C and SRv6 Locator 0xA02A), so the SRv6
+    // projection is its own concern. The OSPFv2 match arm does not
+    // call this — SRv6 is OSPFv3-only per RFC 9513.
+    project_v3_srv6_sid_nlris(lsdb, ctx, out);
 }
 
 /// Build the Local Node Descriptor for one OSPFv3 router: 4-byte
@@ -902,6 +915,89 @@ fn push_v3_ipv6_prefix_nlri(
             prefix: prefix_desc,
         }),
     });
+}
+
+// ---------------------------------------------------------------------------
+// OSPFv3 SRv6 SID NLRI projection (RFC 9513 → RFC 9514 §6)
+// ---------------------------------------------------------------------------
+
+/// Project the OSPFv3 SRv6 database onto RFC 9514 §6 SRv6 SID NLRIs.
+///
+/// Builds a [`Srv6Database`] from the same area LSDB the LSA-driven
+/// pass walks, then emits one [`BgpLsNlriVariant::Srv6Sid`] per End
+/// SID the database holds. The [`Srv6Database`] applies the RFC 9513
+/// §2/§7.1 preference and the §5/§8/§11 gates (route type, locator
+/// length, metric, End-SID containment, behavior validity), so the
+/// projection receives a clean per-router End-SID set in wire order
+/// with duplicates removed (first wins per locator).
+///
+/// # NLRI shape
+///
+/// Each emitted NLRI carries:
+///
+/// - `protocol_id` — `Ospfv3` (RFC 7752 §3.3 Table 2).
+/// - `identifier` — `0` for every NLRI the projection emits (RFC
+///   7752 §3.3 leaves it opaque; the daemon-wiring follow-up may
+///   pin it to a per-area monotonic counter to disambiguate
+///   re-advertisements — that lives in the daemon, not here).
+/// - `local_node` — the advertising router's 4-byte IGP Router-ID
+///   (the OSPFv3 Router ID, RFC 7752 §3.2.1.4 "OSPF
+///   non-pseudonode"). SRv6 End SIDs are per-router, not per-
+///   pseudonode, so the projection reuses [`v3_router_node_descriptor`].
+/// - `srv6_sid` — the SRv6 SID Descriptor TLV stream: the mandatory
+///   SRv6 SID Information TLV (RFC 9514 §6.1, type 518, the 16-byte
+///   SID value), followed by a Multi-Topology ID TLV (RFC 7752
+///   §3.2.1.5, type 263, value 0) for consistency with the prefix-
+///   NLRI projection's MT-ID convention.
+///
+/// # End.X scope
+///
+/// End.X / LAN End.X SIDs ([`lr_ospf::srv6db::Srv6Node::end_x_sids`])
+/// are not projected here. The SRv6 SID NLRI carries only the 16-byte
+/// SID value — the RFC 8986 endpoint behavior that distinguishes an
+/// End SID from an End.X SID lives in the BGP-LS Attribute surface
+/// (RFC 9514 §7 SRv6 Endpoint Behavior), which is out of scope for
+/// the codec layer. Projecting End.X without the behavior attribute
+/// loses the adjacency association a controller needs; emit End.X
+/// once the attribute surface lands.
+///
+/// # Incremental republish
+///
+/// [`diff_bgpls`] handles the SRv6 SID NLRIs transparently — the
+/// codec's strict structural enforcement on the SRv6 SID Descriptor
+/// stream (exactly one TLV 518 with a 16-byte value) makes the
+/// encoded bytes a stable identity for set membership, so a daemon
+/// running the projection once per LSDB change uses the `added` and
+/// `removed` sets to drive incremental MP-BGP UPDATE messages for
+/// SRv6 SIDs the same way it does for Node/Link/Prefix NLRIs.
+fn project_v3_srv6_sid_nlris(lsdb: &Lsdb, ctx: &OspfAreaBgplsContext, out: &mut Vec<BgpLsNlri>) {
+    let db = Srv6Database::from_lsdb(lsdb);
+    for (&router_id, node) in &db.nodes {
+        // SRv6 End SIDs are per-router, not per-pseudonode — the
+        // 4-byte IGP Router-ID form is correct even when the same
+        // router also originated Network-LSAs (the pseudonode has
+        // no SIDs of its own).
+        let local_node = v3_router_node_descriptor(router_id, ctx);
+        for (_locator, end_sid) in node.end_sids() {
+            let srv6_sid = Srv6SidDescriptor::new(vec![
+                Srv6SidDescriptorSubTlv::Srv6SidInformation(end_sid.sid),
+                // MT-ID 0 for consistency with the prefix-NLRI
+                // projection; the codec passes MT-IDs through verbatim
+                // so a future multi-topology deployment can override
+                // without touching the projection.
+                Srv6SidDescriptorSubTlv::MultiTopologyId(0u16.to_be_bytes().to_vec()),
+            ]);
+            out.push(BgpLsNlri {
+                route_distinguisher: None,
+                variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+                    protocol_id: ctx.bgpls_protocol_id(),
+                    identifier: 0,
+                    local_node: local_node.clone(),
+                    srv6_sid,
+                }),
+            });
+        }
+    }
 }
 
 #[cfg(test)]

@@ -5476,20 +5476,22 @@ impl DefaultRouter {
     }
 
     /// Project one OSPF area's LSDB onto the BGP-LS NLRI set
-    /// (RFC 7752 §3 + RFC 9514 §6 SRv6 follow-up). Pure function on
-    /// the area's LSDB; does not touch the daemon loop. Layer 2 of
-    /// issue #60 — the daemon-wiring half (capability negotiation
-    /// and incremental republish driver) and the interop lab against
-    /// BIRD are follow-ups.
+    /// (RFC 7752 §3 + RFC 9514 §6 SRv6 SID NLRI for OSPFv3). Pure
+    /// function on the area's LSDB; does not touch the daemon loop.
+    /// Layer 2 of issue #60 — the daemon-wiring half (capability
+    /// negotiation and incremental republish driver) and the interop
+    /// lab against BIRD are follow-ups.
     ///
     /// `as_number` and `bgp_ls_id` come from the daemon's BGP-LS
     /// speaker configuration; `area_id` is the OSPF area being
     /// projected and `protocol` selects the v2 / v3 LSA-type match
     /// arms. The projection emits one Node NLRI per Router-LSA /
     /// Network-LSA, one Link NLRI per transit / P2P link in a
-    /// Router-LSA, and one IPv4 / IPv6 Topology Prefix NLRI per
+    /// Router-LSA, one IPv4 / IPv6 Topology Prefix NLRI per
     /// Summary-LSA / AS-External-LSA / stub link / Intra-Area-Prefix
-    /// LSA. See [`lsdb_to_bgpls`] for the per-LSA mapping and
+    /// LSA, and (for OSPFv3) one RFC 9514 §6 SRv6 SID NLRI per End
+    /// SID the SRv6 database holds. See [`lsdb_to_bgpls`] for the
+    /// per-LSA and per-SID mapping and
     /// [`lsdb_to_bgpls::diff_bgpls`] for the incremental-republish
     /// helper.
     ///
