@@ -13,7 +13,7 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — BGP-LS NLRI codec (RFC 7752 §3.2-§3.3)
+## [Unreleased] — BGP-LS NLRI codec (RFC 7752 §3.2-§3.3, RFC 9514 §6)
 
 Partial progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
 the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
@@ -32,26 +32,36 @@ the Local/Remote Node Descriptor wrapper TLVs (256/257), the bare
 Link Descriptor TLV stream (258-263), the bare Prefix Descriptor TLV
 stream (263-265), and the Node Descriptor sub-TLVs (§3.2.1.4:
 Autonomous System 512, BGP-LS Identifier 513, OSPF Area-ID 514,
-IGP Router-ID 515).
-
-The codec carries the SRv6 SID NLRI (RFC 9514 §3, NLRI Type 6) at
-the framing level only — its inner SRv6 descriptor sub-TLVs
-(SRv6 SID Information 518, SRv6 Endpoint Behavior, SRv6 SID
-Structure) are preserved verbatim as `Unknown` and deferred to a
-follow-up. The new `NlriFamily::BGP_LS` and `NlriFamily::BGP_LS_VPN`
-constants in `lr-core::nlri` carry the AFI/SAFI pair.
+IGP Router-ID 515). The codec also models the SRv6 SID NLRI
+(RFC 9514 §6, NLRI Type 6) in full at the NLRI level: the inner
+SRv6 SID Descriptor TLV stream carries the mandatory SRv6 SID
+Information TLV (§6.1, type 518, 16-byte SID) and any optional
+Multi-Topology ID TLV (§3.2.1.5, type 263). The new
+`NlriFamily::BGP_LS` and `NlriFamily::BGP_LS_VPN` constants in
+`lr-core::nlri` carry the AFI/SAFI pair.
 
 Round-trip safety: the codec enforces strict RFC 7752 §3.3 figure
 structure on decode — Node NLRI has exactly one outer TLV
 (LOCAL_NODE_DESCRIPTOR); Link NLRI has LOCAL_NODE_DESCRIPTOR +
 REMOTE_NODE_DESCRIPTOR followed by bare Link Descriptor sub-TLVs;
 Prefix NLRI has LOCAL_NODE_DESCRIPTOR followed by bare Prefix
-Descriptor sub-TLVs. Unknown sub-TLVs are preserved verbatim, so
-any well-formed NLRI round-trips byte-for-byte. The
-`cargo +nightly fuzz run bgp_ls_decode` target (mirroring
-`bgp_decode.rs`) asserts the round-trip property on any input that
-decodes successfully; it ran 62 million iterations without crashes
-on the seed corpus committed under `fuzz/seeds/bgp_ls_decode/`.
+Descriptor sub-TLVs; SRv6 SID NLRI has LOCAL_NODE_DESCRIPTOR
+followed by a bare SRv6 SID Descriptor stream that MUST contain
+exactly one SRv6 SID Information TLV (§6.1). A TLV 518 with any
+length other than 16 — the only length RFC 9514 §6.1 permits —
+falls through to `Unknown` and is rejected at the NLRI level by
+the "exactly one 518" structural check. Unknown sub-TLVs are
+preserved verbatim, so any well-formed NLRI round-trips
+byte-for-byte. The `cargo +nightly fuzz run bgp_ls_decode` target
+(mirroring `bgp_decode.rs`) asserts the round-trip property on any
+input that decodes successfully; it ran 62 million iterations
+without crashes on the seed corpus committed under
+`fuzz/seeds/bgp_ls_decode/`.
+
+The BGP-LS Attribute TLVs that ride alongside the SRv6 SID NLRI
+(RFC 9514 §7 SRv6 Endpoint Behavior, §8 SRv6 SID Structure) live
+in a separate attribute surface and are out of scope for this
+codec entry.
 
 Public Rust API surface (Tier 1) is additive only — no existing
 signature changes. The C ABI (Tier 2) is unchanged; the new types

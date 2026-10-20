@@ -23,9 +23,15 @@ Descriptor TLVs (§3.2), and the Node Descriptor sub-TLVs (§3.2.1.4:
 AS, BGP-LS Identifier, OSPF Area-ID, IGP Router-ID). Unknown TLVs and
 sub-TLVs are preserved verbatim so the codec round-trips byte-for-byte
 on any well-formed input — the cargo-fuzz target `bgp_ls_decode` ran
-62M iterations without crashes. The SRv6 SID NLRI (RFC 9514 §3,
-NLRI Type 6) is parsed at the framing level only — its inner SRv6
-descriptor sub-TLVs need a follow-up.
+62M iterations without crashes. The SRv6 SID NLRI (RFC 9514 §6,
+NLRI Type 6) is modelled in full at the NLRI level: the inner SRv6
+SID Descriptor TLV stream carries the mandatory SRv6 SID Information
+TLV (§6.1, type 518, 16-byte SID) and any optional Multi-Topology
+ID TLV (§3.2.1.5, type 263), with strict structural enforcement on
+decode. The BGP-LS Attribute TLVs that ride alongside the SRv6 SID
+NLRI (RFC 9514 §7 SRv6 Endpoint Behavior, §8 SRv6 SID Structure)
+are out of scope for the NLRI codec — they live in a separate
+attribute surface.
 
 What remains to flip the STATUS row from `partial` to `yes`:
 

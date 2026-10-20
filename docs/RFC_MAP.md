@@ -30,7 +30,7 @@ scope.
 | 6793 | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` | four-octet AS, AS4_PATH reconstruction |
 | 6811 | `lr-bgp::roa`, `lr-bgp::roa_store` | prefix-origin validation |
 | 7313 | `lr-bgp::extensions::enhanced_rr` | BoRR and EoRR demarcation |
-| 7752 | `lr-bgp::path::bgp_ls`, `lr-core::nlri` | BGP-LS Link-State AFI/SAFI, Node/Link/Prefix NLRI codec, descriptor TLVs (SRv6 SID NLRI inner TLVs not yet modelled) |
+| 7752 | `lr-bgp::path::bgp_ls`, `lr-core::nlri` | BGP-LS Link-State AFI/SAFI, Node/Link/Prefix NLRI codec, descriptor TLVs, SRv6 SID NLRI (RFC 9514 §6 with TLV 518) |
 | 7854 | `lr-bmp` | BMP message codec and sink |
 | 7911 | `lr-bgp::extensions::addpath` | path-identifier framing and negotiation |
 | 7947 | `lr-bgp::role::route_server` | transparent route-server egress |
@@ -43,7 +43,7 @@ scope.
 | 9072 | `lr-bgp::path` | extended-length path-attribute flag |
 | 9234 | `lr-bgp::role::otc` | OTC attribute and role negotiation |
 | 9494 | `lr-bgp::extensions::long_lived` | LLGR capability, LLGR_STALE, NO_LLGR |
-| 9514 | `lr-bgp::path::bgp_ls` | SRv6 SID NLRI Type 6 framing (descriptor TLVs deferred) |
+| 9514 | `lr-bgp::path::bgp_ls` | SRv6 SID NLRI Type 6 (§6) with the SRv6 SID Information TLV (§6.1, type 518); BGP-LS Attribute TLVs (§7 Endpoint Behavior, §8 SID Structure) out of scope |
 
 ## OSPF
 
