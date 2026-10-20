@@ -5601,6 +5601,121 @@ impl DefaultRouter {
         diff
     }
 
+    /// Incremental BGP-LS republish for the OSPFv3 SRv6 End.X / LAN
+    /// End.X SID NLRIs of one area (issue #60 follow-up — End.X
+    /// projection with attribute). The End.X projection pairs each
+    /// SRv6 SID NLRI with the BGP-LS Attribute (RFC 7752 §3.3) that
+    /// carries the mandatory §7 SRv6 Endpoint Behavior TLV (RFC 9514
+    /// §7.1) and the optional §8 SRv6 SID Structure TLV — the
+    /// attribute is the channel a controller learns the End.X
+    /// behavior on, since the NLRI shape is identical to the plain
+    /// End SID NLRI (both carry the 16-byte SID value).
+    ///
+    /// Projects the area LSDB through
+    /// [`lsdb_to_bgpls::project_v3_srv6_end_x_nlris`], diffs against
+    /// `prev` via [`lsdb_to_bgpls::diff_bgpls_with_attrs`], and pushes
+    /// UPDATEs to every BGP session that negotiated the BGP-LS family
+    /// in OPEN — `added` pairs ride an MP_REACH_NLRI + BGP-LS Attribute
+    /// via
+    /// [`BgpPeer::advertise_bgpls_with_attr`](lr_bgp::BgpPeer::advertise_bgpls_with_attr)
+    /// (one UPDATE per pair, since each End.X NLRI has its own
+    /// attribute); `removed` NLRIs ride a single MP_UNREACH_NLRI via
+    /// [`BgpPeer::withdraw_bgpls`](lr_bgp::BgpPeer::withdraw_bgpls);
+    /// `updated` pairs ride an MP_REACH_NLRI + BGP-LS Attribute (the
+    /// new attribute value re-advertises the NLRI's link-state
+    /// metadata without a withdraw — BGP permits attribute updates
+    /// without MP_UNREACH_NLRI per RFC 4271 §9.2.1.2).
+    ///
+    /// The caller passes the previous projection as `prev` and
+    /// receives the new projection through `*prev = curr` so the next
+    /// republish call sees the new baseline.
+    ///
+    /// Returns the [`lsdb_to_bgpls::BgplsAttrDiff`] so the caller can
+    /// account for the added / removed / updated / unchanged counts.
+    /// Returns an empty diff (no `added`, no `removed`, no `updated`)
+    /// when the area is unknown, the projection is unchanged, or no
+    /// BGP-LS session is up — in those cases no UPDATEs are sent.
+    ///
+    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
+    pub fn bgpls_republish_end_x(
+        &mut self,
+        area_id: u32,
+        as_number: u32,
+        bgp_ls_id: u32,
+        prev: &mut Vec<(
+            lr_bgp::path::bgp_ls::BgpLsNlri,
+            lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+        )>,
+    ) -> lsdb_to_bgpls::BgplsAttrDiff {
+        // Compute the current projection. Unknown area or a non-v3
+        // protocol (the End.X projection is OSPFv3-only) → no-op.
+        let area = match self.ospf_areas.get(&area_id) {
+            Some(a) if a.protocol == Protocol::Ospfv3 => a,
+            _ => {
+                return lsdb_to_bgpls::BgplsAttrDiff::default();
+            }
+        };
+        let ctx = lsdb_to_bgpls::OspfAreaBgplsContext {
+            as_number,
+            bgp_ls_id,
+            area_id,
+            protocol: area.protocol,
+        };
+        let curr = lsdb_to_bgpls::project_v3_srv6_end_x_nlris(&area.lsdb, &ctx);
+        let diff = lsdb_to_bgpls::diff_bgpls_with_attrs(prev, &curr);
+        // Update the caller's baseline before sending so a transient
+        // failure doesn't double-send on retry.
+        *prev = curr;
+        if diff.added.is_empty() && diff.removed.is_empty() && diff.updated.is_empty() {
+            return diff;
+        }
+        // Walk every BGP session; for each Established session with
+        // BGP-LS in its `mp_families`, push the added/removed/updated
+        // End.X NLRIs.
+        for state in self.sessions.values_mut() {
+            let SessionState::Bgp { peer, conn, .. } = state else {
+                continue;
+            };
+            if !peer.is_established() {
+                continue;
+            }
+            if !peer.config().mp_families.iter().any(|f| f.is_bgp_ls()) {
+                continue;
+            }
+            let mut sent_any = false;
+            // RFC 9514 §7.1: the SRv6 Endpoint Behavior TLV is
+            // mandatory in the BGP-LS Attribute of every SRv6 SID NLRI.
+            // The BGP-LS Attribute does not key on individual NLRIs
+            // (RFC 7752 §3.3) — a single UPDATE carries one attribute
+            // for the NLRI set it carries — so the End.X driver emits
+            // one UPDATE per End.X NLRI: each End.X SID's behavior may
+            // differ (End.X vs End.X with PSP/USP, etc.) and the
+            // attribute must match. This matches BIRD's `bgp_ls`
+            // channel and FRR's `bgp_bgp_ls.c` per-NLRI attribute
+            // model for SRv6 SIDs.
+            for (nlri, attr) in &diff.added {
+                if peer.advertise_bgpls_with_attr(std::slice::from_ref(nlri), attr) {
+                    sent_any = true;
+                }
+            }
+            for (nlri, attr) in &diff.updated {
+                if peer.advertise_bgpls_with_attr(std::slice::from_ref(nlri), attr) {
+                    sent_any = true;
+                }
+            }
+            if !diff.removed.is_empty() && peer.withdraw_bgpls(&diff.removed) {
+                sent_any = true;
+            }
+            if sent_any {
+                let bytes = peer.drain_outgoing();
+                if !bytes.is_empty() {
+                    conn.put_output(&bytes);
+                }
+            }
+        }
+        diff
+    }
+
     /// Surface one received Grace-LSA as an [`OspfGraceEvent`] (the
     /// RFC 3623 §3.1 / RFC 5187 §2 helper trigger, drained through
     /// [`Self::drain_ospf_grace_events`]). Deduplicated by sequence

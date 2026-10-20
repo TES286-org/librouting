@@ -4294,3 +4294,195 @@ fn bgpls_republish_unknown_area_is_noop() {
     assert!(diff.removed.is_empty());
     assert!(diff.unchanged.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// BGP-LS End.X projection republish driver (issue #60 follow-up).
+//
+// `bgpls_republish_end_x` ties the OSPFv3 SRv6 End.X / LAN End.X
+// projection (tested in `lsdb_to_bgpls_tests`), the
+// `diff_bgpls_with_attrs` helper (also tested there), and the
+// `BgpPeer::advertise_bgpls_with_attr` / `withdraw_bgpls` egress
+// (tested in `lr-bgp/src/advertise_tests.rs`) together. The
+// integration test below verifies the wiring: install a Locator LSA
+// and an E-Router-LSA carrying an End.X sub-TLV into an OSPFv3 area,
+// republish, and check that the BGP session's outbound buffer holds
+// an UPDATE carrying the projected SRv6 SID NLRI with its BGP-LS
+// Attribute.
+// ---------------------------------------------------------------------------
+
+/// `bgpls_republish_end_x` pushes an End.X NLRI paired with its §7
+/// SRv6 Endpoint Behavior attribute to every BGP-LS session, and is
+/// a no-op when there is no change.
+#[test]
+fn bgpls_republish_end_x_pushes_end_x_nlri_with_attribute_to_bgp_ls_session() {
+    use lr_core::nlri::NlriFamily;
+    use lr_ospf::lsa::srv6::{
+        originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndXSidSubTlv, Srv6LocatorTlv,
+        SRV6_CAP_O_FLAG,
+    };
+    use lr_ospf::lsa::{originate_v3_e_router_lsa, ERouterLinkTlv, LS_TYPE_E_ROUTER};
+    use lr_ospf::lsdb::Lsdb;
+
+    let mut r = DefaultRouter::new();
+    // Create the BGP-LS BGP session. The session is established
+    // against a dummy partner peer we step through OPEN/KEEPALIVE.
+    let bgp_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::IPV4_UNICAST, NlriFamily::BGP_LS]),
+        )
+        .unwrap();
+    r.start_session(bgp_h).unwrap();
+    let mut partner_cfg =
+        lr_bgp::PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 9, 9, 9]));
+    partner_cfg.mp_families = vec![NlriFamily::IPV4_UNICAST, NlriFamily::BGP_LS];
+    let mut partner = lr_bgp::BgpPeer::new(partner_cfg);
+    partner.step(lr_bgp::BgpEvent::ManualStart);
+    partner.step(lr_bgp::BgpEvent::TransportOpen);
+    let partner_open = partner.drain_outgoing();
+    r.feed_input(bgp_h, &partner_open).unwrap();
+    let our_open = r.drain_output(bgp_h);
+    let _ = partner.feed_bytes(&our_open);
+    let partner_keepalive = partner.drain_outgoing();
+    r.feed_input(bgp_h, &partner_keepalive).unwrap();
+    let _our_keepalive = r.drain_output(bgp_h);
+    {
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&bgp_h.0).unwrap() else {
+            panic!("expected BGP session");
+        };
+        assert!(peer.is_established(), "BGP-LS session must be Established");
+    }
+    // Add an OSPFv3 area 0 carrying an SRv6-capable router.
+    use crate::instance::{OspfAreaState, OspfAreaType};
+    r.ospf_areas.entry(0u32).or_insert(OspfAreaState {
+        lsdb: Lsdb::new(),
+        protocol: Protocol::Ospfv3,
+        kind: OspfAreaType::Normal,
+        topology_version: 0,
+    });
+    let rid: u32 = 0x0a00_0001;
+    // RI LSA with SRv6 Capabilities (§2).
+    let ri_lsa = originate_v3_srv6_ri_lsa(rid, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap();
+    // Locator LSA with one /48 locator 2001:db8:1::/48 — no End SIDs
+    // here (the End.X projection does not touch End SIDs).
+    let mut prefix_bytes = [0u8; 16];
+    prefix_bytes[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    let tlv = Srv6LocatorTlv {
+        route_type: lr_ospf::lsa::srv6::locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: 48,
+        options: 0,
+        metric: 0,
+        prefix: prefix_bytes,
+        end_sids: vec![],
+        fwd_addr: None,
+        route_tag: None,
+    };
+    let locator_lsa =
+        originate_v3_srv6_locator_lsa(rid, 0, std::slice::from_ref(&tlv), None).unwrap();
+    // E-Router-LSA with one p2p link carrying an End.X sub-TLV. The
+    // SID 2001:db8:1::50 sits inside the /48 locator.
+    let mut end_x_sid = [0u8; 16];
+    end_x_sid[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01]);
+    end_x_sid[15] = 0x50;
+    let mut sub_tlvs = Vec::new();
+    Srv6EndXSidSubTlv {
+        flags: 0,
+        behavior: 5, // End.X (RFC 8986 §5.1)
+        algorithm: 0,
+        weight: 0,
+        sid: end_x_sid,
+        structure: None,
+    }
+    .encode(&mut sub_tlvs);
+    let e_router_lsa = originate_v3_e_router_lsa(
+        rid,
+        0x04,
+        0x13,
+        vec![ERouterLinkTlv {
+            link_type: 1, // p2p
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: 0x0a00_0002,
+            sub_tlvs,
+        }],
+        None,
+    )
+    .unwrap();
+    // Sanity: the LSA type constant the test relies on matches the
+    // codec's constant. (Mirror of the existing `srv6_e_router_lsa_
+    // constant_matches_codec` test in the projection unit tests.)
+    assert_eq!(LS_TYPE_E_ROUTER, 0xA021);
+
+    let area = r.ospf_areas.get_mut(&0u32).unwrap();
+    area.lsdb.install(ri_lsa, 0);
+    area.lsdb.install(locator_lsa, 0);
+    area.lsdb.install(e_router_lsa, 0);
+    area.topology_version += 1;
+
+    // Republish. The driver projects the End.X SID NLRI paired with
+    // the §7 SRv6 Endpoint Behavior attribute, diffs against the
+    // empty baseline, and pushes one UPDATE per added pair through
+    // `advertise_bgpls_with_attr`.
+    let mut prev: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )> = Vec::new();
+    let diff = r.bgpls_republish_end_x(0, 64512, 0x01020304, &mut prev);
+    assert_eq!(diff.added.len(), 1, "one End.X SID → one added pair");
+    assert!(diff.removed.is_empty());
+    assert!(diff.updated.is_empty());
+    // The session's outbound buffer should hold the UPDATE bytes.
+    let out = r.drain_output(bgp_h);
+    assert!(
+        !out.is_empty(),
+        "republish_end_x must push UPDATE to the session"
+    );
+    // Second republish with no LSDB change: empty diff, no UPDATE.
+    let mut prev2 = prev.clone();
+    let diff2 = r.bgpls_republish_end_x(0, 64512, 0x01020304, &mut prev2);
+    assert!(
+        diff2.added.is_empty() && diff2.removed.is_empty() && diff2.updated.is_empty(),
+        "no LSDB change → empty diff"
+    );
+    let out2 = r.drain_output(bgp_h);
+    assert!(out2.is_empty(), "no LSDB change → no UPDATE");
+}
+
+/// `bgpls_republish_end_x` is a no-op for an OSPFv2 area (the End.X
+/// projection is OSPFv3-only — the Srv6Database is empty for v2).
+#[test]
+fn bgpls_republish_end_x_v2_area_is_noop() {
+    let mut r = DefaultRouter::new();
+    use crate::instance::{OspfAreaState, OspfAreaType};
+    use lr_ospf::lsdb::Lsdb;
+    r.ospf_areas.entry(0u32).or_insert(OspfAreaState {
+        lsdb: Lsdb::new(),
+        protocol: Protocol::Ospfv2,
+        kind: OspfAreaType::Normal,
+        topology_version: 0,
+    });
+    let mut prev: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )> = Vec::new();
+    let diff = r.bgpls_republish_end_x(0, 64512, 1, &mut prev);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert!(diff.updated.is_empty());
+}
+
+/// `bgpls_republish_end_x` is a no-op when the area is unknown.
+#[test]
+fn bgpls_republish_end_x_unknown_area_is_noop() {
+    let mut r = DefaultRouter::new();
+    let mut prev: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )> = Vec::new();
+    let diff = r.bgpls_republish_end_x(999, 64512, 1, &mut prev);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert!(diff.updated.is_empty());
+}
