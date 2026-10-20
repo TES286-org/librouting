@@ -688,14 +688,9 @@ impl BgpLsAttrTlv {
                 let reserved = u16::from_be_bytes([t.value[2], t.value[3]]);
                 Self::Srv6Capabilities { flags, reserved }
             }
-            tlv_type::ADMIN_GROUP if t.value.len() == 4 => {
-                Self::AdminGroup(u32::from_be_bytes([
-                    t.value[0],
-                    t.value[1],
-                    t.value[2],
-                    t.value[3],
-                ]))
-            }
+            tlv_type::ADMIN_GROUP if t.value.len() == 4 => Self::AdminGroup(u32::from_be_bytes([
+                t.value[0], t.value[1], t.value[2], t.value[3],
+            ])),
             tlv_type::MAX_LINK_BANDWIDTH if t.value.len() == 4 => {
                 let mut a = [0u8; 4];
                 a.copy_from_slice(&t.value);
@@ -713,10 +708,7 @@ impl BgpLsAttrTlv {
             }
             tlv_type::TE_DEFAULT_METRIC if t.value.len() == 4 => {
                 Self::TeDefaultMetric(u32::from_be_bytes([
-                    t.value[0],
-                    t.value[1],
-                    t.value[2],
-                    t.value[3],
+                    t.value[0], t.value[1], t.value[2], t.value[3],
                 ]))
             }
             tlv_type::LINK_PROTECTION_TYPE => Self::LinkProtectionType(t.value),
@@ -798,10 +790,7 @@ impl BgpLsAttrTlv {
             tlv_type::IGP_ROUTE_TAG => Self::IgpRouteTag(t.value),
             tlv_type::PREFIX_METRIC if t.value.len() == 4 => {
                 Self::PrefixMetric(u32::from_be_bytes([
-                    t.value[0],
-                    t.value[1],
-                    t.value[2],
-                    t.value[3],
+                    t.value[0], t.value[1], t.value[2], t.value[3],
                 ]))
             }
             tlv_type::FORWARDING_ADDRESS_PREFIX => Self::ForwardingAddressPrefix(t.value),
@@ -813,12 +802,7 @@ impl BgpLsAttrTlv {
                 // 1 + 1 + 2 + 4 = 8 minimum; rest is sub-TLVs.
                 let flags = t.value[0];
                 let algorithm = t.value[1];
-                let metric = u32::from_be_bytes([
-                    t.value[4],
-                    t.value[5],
-                    t.value[6],
-                    t.value[7],
-                ]);
+                let metric = u32::from_be_bytes([t.value[4], t.value[5], t.value[6], t.value[7]]);
                 let sub_tlvs = t.value[8..].to_vec();
                 Self::Srv6Locator {
                     flags,
@@ -829,10 +813,7 @@ impl BgpLsAttrTlv {
             }
             tlv_type::SRV6_ENDPOINT_BEHAVIOR if t.value.len() == 4 => {
                 let behavior =
-                    Srv6EndpointBehavior::from_u16(u16::from_be_bytes([
-                        t.value[0],
-                        t.value[1],
-                    ]));
+                    Srv6EndpointBehavior::from_u16(u16::from_be_bytes([t.value[0], t.value[1]]));
                 let flags = t.value[2];
                 let algorithm = t.value[3];
                 Self::Srv6EndpointBehavior {
@@ -844,18 +825,9 @@ impl BgpLsAttrTlv {
             tlv_type::SRV6_BGP_PEER_NODE_SID if t.value.len() == 12 => {
                 let flags = t.value[0];
                 let weight = t.value[1];
-                let peer_as = u32::from_be_bytes([
-                    t.value[4],
-                    t.value[5],
-                    t.value[6],
-                    t.value[7],
-                ]);
-                let peer_bgp_id = u32::from_be_bytes([
-                    t.value[8],
-                    t.value[9],
-                    t.value[10],
-                    t.value[11],
-                ]);
+                let peer_as = u32::from_be_bytes([t.value[4], t.value[5], t.value[6], t.value[7]]);
+                let peer_bgp_id =
+                    u32::from_be_bytes([t.value[8], t.value[9], t.value[10], t.value[11]]);
                 Self::Srv6BgpPeerNodeSid {
                     flags,
                     weight,

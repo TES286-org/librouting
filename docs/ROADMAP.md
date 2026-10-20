@@ -16,10 +16,11 @@ defines it; the code wins over any sentence here.
 **BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Done —
 the wire codec, the OSPF LSDB → BGP-LS projection, the daemon
 wiring (`--bgp-ls` flag + `[bgp_ls]` config block + incremental
-republish driver), and the BIRD interop lab have all landed. The
-STATUS rows for the codec, projection, egress, republish driver
-and daemon config are all `yes`; the `bgpls_bird.sh` lab is the
-"done" gate from this section.
+republish driver), the BIRD interop lab, and the BGP-LS
+Attribute TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) have all
+landed. The STATUS rows for the codec, projection, egress,
+republish driver and daemon config are all `yes`; the
+`bgpls_bird.sh` lab is the "done" gate from this section.
 
 `lr-bgp::path::bgp_ls` parses and serialises the Node, Link, IPv4
 Prefix and IPv6 Prefix NLRI shapes from RFC 7752 §3.3, the Local
@@ -33,10 +34,31 @@ NLRI Type 6) is modelled in full at the NLRI level: the inner SRv6
 SID Descriptor TLV stream carries the mandatory SRv6 SID Information
 TLV (§6.1, type 518, 16-byte SID) and any optional Multi-Topology
 ID TLV (§3.2.1.5, type 263), with strict structural enforcement on
-decode. The BGP-LS Attribute TLVs that ride alongside the SRv6 SID
-NLRI (RFC 9514 §7 SRv6 Endpoint Behavior, §8 SRv6 SID Structure)
-are out of scope for the NLRI codec — they live in a separate
-attribute surface.
+decode.
+
+`lr-bgp::path::bgp_ls_attr` parses and serialises the BGP-LS
+Attribute (path attribute type 29, RFC 7752 §3.3) — the TLV
+stream that rides alongside a BGP-LS NLRI carrying the
+link-state metadata a controller needs. The codec models the
+RFC 9514 §7-§8 SRv6 SID Attribute TLVs the projection will
+attach to a projected SRv6 SID NLRI — the SRv6 Endpoint Behavior
+TLV (§7.1, type 1250), the SRv6 BGP PeerNode SID TLV (§7.2,
+type 1251), and the SRv6 SID Structure TLV (§8, type 1252) —
+plus the RFC 9514 §3.1 SRv6 Capabilities TLV, the §4.1/§4.2
+SRv6 End.X / LAN End.X SID TLVs, and the §5.1 SRv6 Locator TLV,
+and a representative subset of the RFC 7752 §3.3.1-§3.3.3
+Node/Link/Prefix Attribute TLVs (Node Flag Bits, Opaque Node,
+Node Name, IS-IS Area Identifier, IPv4/IPv6 Router-ID, Admin
+Group, Max Link / Max Reservable / Unreserved Bandwidth, TE
+Default Metric, MPLS Metric, Shared Risk Link Group, IGP
+Metric, IGP Flags, IGP Route Tag, Prefix Metric, Forwarding
+Address Prefix, Opaque Prefix Attribute, Prefix Attribute
+Flags). Unknown TLVs are preserved verbatim so any well-formed
+attribute round-trips byte-for-byte. The cargo-fuzz target
+`bgp_ls_attr_decode` covers the same contract. The End.X / LAN
+End.X SID *projection* update (attaching the §7 attribute to
+a projected End.X NLRI through `BgpPeer::advertise_bgpls_with_attr`)
+is the next follow-up.
 
 `lr-router::instance::lsdb_to_bgpls` projects one OSPF area's LSDB
 onto the Node / Link / Prefix NLRI set: OSPFv2 emits Node NLRIs
@@ -53,10 +75,12 @@ router's 4-byte IGP Router-ID, and the SRv6 SID Descriptor stream
 carries the mandatory SRv6 SID Information TLV (§6.1, type 518,
 16-byte SID) plus a Multi-Topology ID TLV (type 263, value 0) for
 consistency with the prefix-NLRI projection. End.X / LAN End.X SIDs
-are not projected: the RFC 8986 endpoint behavior that distinguishes
-them from End SIDs lives in the BGP-LS Attribute surface (RFC 9514
-§7), which is out of scope for the NLRI codec. The projection is a
-pure function on the LSDB; `DefaultRouter::ospf_area_bgpls_nlris`
+are not projected yet: the RFC 8986 endpoint behavior that
+distinguishes them from End SIDs lives in the BGP-LS Attribute
+surface (RFC 9514 §7), which now has a codec but the projection
+update that emits an End.X NLRI alongside its SRv6 Endpoint
+Behavior attribute is a follow-up. The projection is a pure
+function on the LSDB; `DefaultRouter::ospf_area_bgpls_nlris`
 wraps it with the router's per-area context. `diff_bgpls` returns
 the added / removed / unchanged NLRI sets so a daemon can drive
 incremental MP-BGP UPDATE messages by canonical wire form.
@@ -68,7 +92,11 @@ directly from `BgpLsNlri::encode` (the existing IP-prefix
 `MpReach`/`MpUnreach` encoders assume AFI=1/2 — BGP-LS needs the
 opaque path). The next-hop field is set to zero (BGP-LS does not
 define a next-hop; matches BIRD's `bgp_ls` channel and FRR's
-`bgp_bgp_ls.c`).
+`bgp_bgp_ls.c`). `BgpPeer::advertise_bgpls_with_attr` attaches a
+BGP-LS Attribute (type 29, optional + non-transitive) alongside
+the MP_REACH_NLRI so the receiver learns the link-state
+metadata — the path the End.X projection follow-up will use to
+attach the §7 SRv6 Endpoint Behavior TLV.
 
 `lr-router::instance::DefaultRouter::bgpls_republish` is the
 republish driver: projects the area LSDB, computes the diff against

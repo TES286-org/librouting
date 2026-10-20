@@ -366,9 +366,7 @@ fn ipv4_router_id_local_round_trip() {
 #[test]
 fn ipv6_router_id_local_round_trip() {
     // RFC 6119 §4.1 via RFC 7752 §3.3.1.4: type 1029, length 16.
-    let addr = [
-        0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
-    ];
+    let addr = [0xfe, 0x80, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
     let t = BgpLsAttrTlv::Ipv6RouterIdLocal(addr);
     let wire = encode_tlv(&t);
     assert_eq!(wire.len(), 20);
@@ -574,7 +572,10 @@ fn endpoint_behavior_iana_code_points() {
     assert_eq!(Srv6EndpointBehavior::EndDx4.to_u16(), 17);
     assert_eq!(Srv6EndpointBehavior::EndDt6.to_u16(), 18);
     assert_eq!(Srv6EndpointBehavior::EndDt4.to_u16(), 19);
-    assert_eq!(Srv6EndpointBehavior::from_u16(5), Srv6EndpointBehavior::EndX);
+    assert_eq!(
+        Srv6EndpointBehavior::from_u16(5),
+        Srv6EndpointBehavior::EndX
+    );
     assert_eq!(
         Srv6EndpointBehavior::from_u16(9999),
         Srv6EndpointBehavior::Unknown(9999)

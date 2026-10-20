@@ -13,14 +13,15 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — BGP-LS NLRI codec + OSPF LSDB → BGP-LS projection + daemon wiring
+## [Unreleased] — BGP-LS Attribute TLV codec + earlier BGP-LS work
 
 Progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
 the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
 SAFI=71, plus the VPN variant SAFI=72), the OSPF LSDB → BGP-LS
 projection, the daemon wiring (`--bgp-ls` flag, `[bgp_ls]` config
 block, the BgpPeer BGP-LS egress primitives, the incremental
-republish driver), and the BIRD interop lab have all landed. The
+republish driver), the BIRD interop lab, and the BGP-LS Attribute
+TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) have all landed. The
 done criterion — a third-party collector builds the same IGP graph
 from our session that the OSPF daemon holds, with incremental
 republish — is met; the `bgpls_bird.sh` lab is the verification
@@ -208,6 +209,99 @@ or removed.
 
 [`BgpPeer::advertise_bgpls`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-bgp/src/advertise.rs
 [`DefaultRouter::bgpls_republish`]: https://github.com/TES286-org/librouting/blob/main/crates/lr-router/src/instance/mod.rs
+
+**BGP-LS Attribute TLV codec** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
+A new `lr-bgp::path::bgp_ls_attr` module (feature-gated as
+`lr-bgp/bgp_ls`, on by default) parses and serialises the BGP-LS
+Attribute (RFC 7752 §3.3, BGP path attribute type 29 per the IANA
+"BGP Path Attributes" sub-registry). The attribute value is a TLV
+stream sharing the same 4-byte TLV framing as the BGP-LS NLRI codec
+(RFC 7752 §3.1: 16-bit Type, 16-bit Length, variable Value). It is
+the explicit follow-up the previous comment on issue #60 calls out:
+the codec surface the End.X / LAN End.X projection update will
+attach the SRv6 Endpoint Behavior TLV to a projected End.X SID
+NLRI.
+
+TLVs modelled:
+
+- RFC 7752 §3.3.1 Node Attribute TLVs: Node Flag Bits (1024),
+  Opaque Node Attribute (1025), Node Name (1026), IS-IS Area
+  Identifier (1027), IPv4/IPv6 Router-ID of Local Node (1028/1029).
+- RFC 9514 §3.1: SRv6 Capabilities TLV (1038, 4-byte value).
+- RFC 7752 §3.3.2 Link Attribute TLVs (selected): Admin Group
+  (1088), Max Link Bandwidth (1089), Max Reservable Bandwidth
+  (1090), Unreserved Bandwidth (1091), TE Default Metric (1092),
+  Link Protection Type (1093), MPLS Metric (1094), Shared Risk
+  Link Group (1095), IGP Metric (1114).
+- RFC 9514 §4.1/§4.2: SRv6 End.X SID TLV (1106), IS-IS SRv6 LAN
+  End.X SID TLV (1107), OSPFv3 SRv6 LAN End.X SID TLV (1108) —
+  variable-length with optional sub-TLVs preserved verbatim.
+- RFC 7752 §3.3.3 Prefix Attribute TLVs (selected): IGP Flags
+  (1150), IGP Route Tag (1151), Prefix Metric (1152), Forwarding
+  Address Prefix (1153), Opaque Prefix Attribute (1154), Prefix
+  Attribute Flags (1155).
+- RFC 9514 §5.1: SRv6 Locator TLV (1162, variable length).
+- RFC 9514 §7.1: SRv6 Endpoint Behavior TLV (1250, 4-byte value —
+  2-byte endpoint behavior + 1-byte flags + 1-byte algorithm).
+- RFC 9514 §7.2: SRv6 BGP PeerNode SID TLV (1251, 12-byte value).
+- RFC 9514 §8: SRv6 SID Structure TLV (1252, 4-byte value — four
+  1-byte length fields, sum <= 128 enforced on decode per RFC
+  9514 §8).
+
+Unknown TLVs are preserved verbatim via `BgpLsAttrTlv::Unknown` so
+any well-formed attribute round-trips byte-for-byte — the same
+contract the NLRI codec in `path::bgp_ls` enforces. A
+wrong-length well-known TLV falls through to `Unknown` rather
+than silently dropping bytes. `Srv6EndpointBehavior` surfaces
+the RFC 8986 §10.2 IANA "SRv6 Endpoint Behaviors" values the
+projection needs to distinguish End from End.X / End.T /
+End.DX* (and the `Unknown(u16)` variant preserves unrecognised
+code points).
+
+A new `BgpPeer::advertise_bgpls_with_attr(added, attr)` method
+attaches the BGP-LS Attribute (path attribute type 29, optional
++ non-transitive per RFC 7752 §3.3) alongside the MP_REACH_NLRI in
+the same UPDATE so the receiver learns the link-state metadata
+for each NLRI. This is the path the End.X projection follow-up
+will use to attach the RFC 9514 §7 SRv6 Endpoint Behavior TLV to
+a projected End.X NLRI.
+
+A new cargo-fuzz target `bgp_ls_attr_decode` mirrors
+`bgp_ls_decode`: the target feeds arbitrary bytes to
+`BgpLsAttr::decode` and asserts the re-encoded bytes match the
+input slice for any input the codec accepts. The seed corpus
+under `fuzz/seeds/bgp_ls_attr_decode/` covers every modelled TLV
+variant plus the malformed-length and overflow paths that fall
+through to the `Unknown` passthrough. A unit-test smoke pass
+asserts the seed corpus round-trips through the codec
+byte-for-byte in the regular `cargo test --workspace` gate so a
+regression on the seed corpus shows up without a cargo-fuzz run.
+
+Tests: 32 unit tests in `path::bgp_ls_attr::tests` cover every
+variant's wire bytes, the round-trip property through
+`BgpLsAttr::encode`/`decode`, the RFC 9514 §8 sum-of-lengths
+boundary, the unknown-TLV and wrong-length passthrough paths, the
+helper accessors, and the SRv6 Endpoint Behavior IANA code points.
+4 new egress tests in `advertise_tests.rs` cover
+`advertise_bgpls_with_attr` (positive round-trip through the BGP
+UPDATE codec, family gating for peers without BGP-LS, empty-NLRI
+no-op, empty-attribute no-op). `cargo test -p lr-bgp --all-features`
+-> 336/336 pass.
+
+Public Rust API surface (Tier 1) is additive only — new
+`path::bgp_ls_attr` module, new `AttrType::BgpLsAttribute` enum
+variant, new `BgpPeer::advertise_bgpls_with_attr` method. The
+existing `AttrType::TrafficEngineering = 24` is left untouched
+for API stability (the value predates this change and has no
+callers; the BGP-LS Attribute type code per RFC 7752 §13 is 29,
+not 24). The C ABI (Tier 2) is unchanged; the new types are
+Rust-only. The daemon / config surface (Tier 3) is unchanged.
+
+The End.X / LAN End.X SID *projection* update (attaching the
+§7 SRv6 Endpoint Behavior TLV to a projected End.X NLRI through
+`BgpPeer::advertise_bgpls_with_attr`) is the next follow-up —
+the codec is the foundation, the projection update touches the
+`lsdb_to_bgpls` module and is tracked separately.
 
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 

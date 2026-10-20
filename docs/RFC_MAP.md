@@ -30,7 +30,7 @@ scope.
 | 6793 | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` | four-octet AS, AS4_PATH reconstruction |
 | 6811 | `lr-bgp::roa`, `lr-bgp::roa_store` | prefix-origin validation |
 | 7313 | `lr-bgp::extensions::enhanced_rr` | BoRR and EoRR demarcation |
-| 7752 | `lr-bgp::path::bgp_ls`, `lr-bgp::advertise`, `lr-core::nlri`, `lr-router::instance::lsdb_to_bgpls`, `lr-router::instance::DefaultRouter::bgpls_republish`, `lr-cli::daemon::BgplsDriver`, `lr-cli::daemon_config::BgpLsSpec` | BGP-LS Link-State AFI/SAFI, Node/Link/Prefix NLRI codec, descriptor TLVs, SRv6 SID NLRI (RFC 9514 §6 with TLV 518), OSPF LSDB → BGP-LS projection (RFC 7752 §3, incl. RFC 9514 §6 SRv6 SID NLRI for OSPFv3), opaque BGP-LS NLRI egress on `BgpPeer`, incremental republish driver, daemon `--bgp-ls` flag and `[bgp_ls]` config block |
+| 7752 | `lr-bgp::path::bgp_ls`, `lr-bgp::path::bgp_ls_attr`, `lr-bgp::advertise`, `lr-core::nlri`, `lr-router::instance::lsdb_to_bgpls`, `lr-router::instance::DefaultRouter::bgpls_republish`, `lr-cli::daemon::BgplsDriver`, `lr-cli::daemon_config::BgpLsSpec` | BGP-LS Link-State AFI/SAFI, Node/Link/Prefix NLRI codec, descriptor TLVs, BGP-LS Attribute (§3.3) TLV codec including the Node/Link/Prefix Attribute TLVs (§3.3.1-§3.3.3), SRv6 SID NLRI (RFC 9514 §6 with TLV 518), OSPF LSDB → BGP-LS projection (RFC 7752 §3, incl. RFC 9514 §6 SRv6 SID NLRI for OSPFv3), opaque BGP-LS NLRI egress on `BgpPeer`, BGP-LS Attribute egress (`BgpPeer::advertise_bgpls_with_attr`), incremental republish driver, daemon `--bgp-ls` flag and `[bgp_ls]` config block |
 | 7854 | `lr-bmp` | BMP message codec and sink |
 | 7911 | `lr-bgp::extensions::addpath` | path-identifier framing and negotiation |
 | 7947 | `lr-bgp::role::route_server` | transparent route-server egress |
@@ -43,7 +43,7 @@ scope.
 | 9072 | `lr-bgp::path` | extended-length path-attribute flag |
 | 9234 | `lr-bgp::role::otc` | OTC attribute and role negotiation |
 | 9494 | `lr-bgp::extensions::long_lived` | LLGR capability, LLGR_STALE, NO_LLGR |
-| 9514 | `lr-bgp::path::bgp_ls`, `lr-router::instance::lsdb_to_bgpls` | SRv6 SID NLRI Type 6 (§6) with the SRv6 SID Information TLV (§6.1, type 518); OSPFv3 SRv6 database (`lr-ospf::srv6db`, RFC 9513 reception) projected onto SRv6 SID NLRIs (one End SID per NLRI); BGP-LS Attribute TLVs (§7 Endpoint Behavior, §8 SID Structure) and End.X / LAN End.X SID projection out of scope |
+| 9514 | `lr-bgp::path::bgp_ls`, `lr-bgp::path::bgp_ls_attr`, `lr-router::instance::lsdb_to_bgpls` | SRv6 SID NLRI Type 6 (§6) with the SRv6 SID Information TLV (§6.1, type 518); OSPFv3 SRv6 database (`lr-ospf::srv6db`, RFC 9513 reception) projected onto SRv6 SID NLRIs (one End SID per NLRI); BGP-LS Attribute TLVs (§7 SRv6 Endpoint Behavior type 1250, §7.2 SRv6 BGP PeerNode SID type 1251, §8 SRv6 SID Structure type 1252) codec in `path::bgp_ls_attr`; §3.1 SRv6 Capabilities (type 1038), §4.1 SRv6 End.X SID (type 1106), §4.2 IS-IS/OSPFv3 SRv6 LAN End.X SID (types 1107/1108), §5.1 SRv6 Locator (type 1162) modelled. End.X / LAN End.X SID *projection* (attaching the §7 attribute to a projected End.X NLRI) out of scope — the codec is the foundation, the projection update is a follow-up. |
 
 ## OSPF
 
