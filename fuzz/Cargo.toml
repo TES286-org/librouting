@@ -45,6 +45,12 @@ test = false
 doc = false
 
 [[bin]]
+name = "bgp_ls_attr_decode"
+path = "fuzz_targets/bgp_ls_attr_decode.rs"
+test = false
+doc = false
+
+[[bin]]
 name = "filter_parser"
 path = "fuzz_targets/filter_parser.rs"
 test = false

@@ -645,3 +645,119 @@ fn advertise_bgpls_empty_is_noop() {
     assert!(!peer.advertise_bgpls(&[]));
     assert!(peer.drain_outgoing().is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// BGP-LS Attribute egress (RFC 7752 §3.3 + RFC 9514 §7-§8, issue #60).
+// ---------------------------------------------------------------------------
+
+/// `advertise_bgpls_with_attr` emits an UPDATE that carries the BGP-LS
+/// Attribute (path attribute type 29) alongside MP_REACH_NLRI. The
+/// attribute's TLV stream round-trips through the codec — the bytes
+/// the peer sees match what the projection built.
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_with_attr_emits_attribute() {
+    use crate::path::bgp_ls_attr::{
+        BgpLsAttr, BgpLsAttrTlv, Srv6EndpointBehavior, Srv6SidStructure,
+    };
+
+    let mut peer = bgpls_established_peer();
+    let nlri = sample_bgpls_node_nlri();
+
+    // RFC 9514 §7.1 mandates the SRv6 Endpoint Behavior TLV inside
+    // the BGP-LS Attribute for an SRv6 SID NLRI. The test attaches
+    // one to a Node NLRI (the simplest path through the egress
+    // code) and verifies the attribute bytes round-trip.
+    let attr = BgpLsAttr::new(vec![
+        BgpLsAttrTlv::NodeFlagBits(0x07),
+        BgpLsAttrTlv::Srv6EndpointBehavior {
+            behavior: Srv6EndpointBehavior::End,
+            flags: 0,
+            algorithm: 0,
+        },
+        BgpLsAttrTlv::Srv6SidStructure(Srv6SidStructure {
+            locator_block_len: 32,
+            locator_node_len: 16,
+            function_len: 16,
+            argument_len: 0,
+        }),
+    ]);
+
+    assert!(peer.advertise_bgpls_with_attr(std::slice::from_ref(&nlri), &attr));
+    let bytes = peer.drain_outgoing();
+    assert!(bytes.len() > 19 + 4, "got bytes: {}", bytes.len());
+
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    let msg = dec.decode(&mut r).unwrap().unwrap();
+    match msg {
+        BgpMessage::Update(u) => {
+            // MP_REACH_NLRI present.
+            assert!(
+                u.attributes.get(AttrType::MpReachNlri).is_some(),
+                "MP_REACH_NLRI present"
+            );
+            // BGP-LS Attribute (type 29) present.
+            let attr_pa = u
+                .attributes
+                .get(AttrType::BgpLsAttribute)
+                .expect("BGP-LS Attribute (type 29) present");
+            assert_eq!(attr_pa.attr_type, AttrType::BgpLsAttribute);
+            assert!(attr_pa.flags.optional(), "BGP-LS Attribute is optional");
+            assert!(
+                !attr_pa.flags.transitive(),
+                "BGP-LS Attribute is non-transitive (RFC 7752 §3.3)"
+            );
+            // The attribute value is a TLV stream that round-trips
+            // back into the same `BgpLsAttr`.
+            let decoded = crate::path::bgp_ls_attr::BgpLsAttr::decode(&attr_pa.value)
+                .expect("BGP-LS Attribute value decodes");
+            assert_eq!(decoded, attr);
+        }
+        _ => panic!("expected UPDATE"),
+    }
+}
+
+/// `advertise_bgpls_with_attr` is a no-op when the BGP-LS family is
+/// not negotiated — defensive: a misconfigured session sends nothing.
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_with_attr_skips_peer_without_ls_family() {
+    use crate::path::bgp_ls_attr::{BgpLsAttr, BgpLsAttrTlv};
+
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.mp_families = vec![NlriFamily::IPV4_UNICAST];
+    let mut peer = established_peer(cfg);
+    let nlri = sample_bgpls_node_nlri();
+    let attr = BgpLsAttr::new(vec![BgpLsAttrTlv::NodeFlagBits(0x01)]);
+    assert!(!peer.advertise_bgpls_with_attr(&[nlri], &attr));
+    assert!(peer.drain_outgoing().is_empty());
+}
+
+/// `advertise_bgpls_with_attr` with an empty NLRI set is a no-op.
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_with_attr_empty_nlris_is_noop() {
+    use crate::path::bgp_ls_attr::{BgpLsAttr, BgpLsAttrTlv};
+
+    let mut peer = bgpls_established_peer();
+    let attr = BgpLsAttr::new(vec![BgpLsAttrTlv::NodeFlagBits(0x01)]);
+    assert!(!peer.advertise_bgpls_with_attr(&[], &attr));
+    assert!(peer.drain_outgoing().is_empty());
+}
+
+/// `advertise_bgpls_with_attr` with an empty attribute is a no-op
+/// (the caller signals "no metadata for this NLRI set" by passing an
+/// empty `BgpLsAttr`; the egress path then falls back to
+/// `advertise_bgpls`).
+#[cfg(feature = "bgp_ls")]
+#[test]
+fn advertise_bgpls_with_attr_empty_attr_is_noop() {
+    use crate::path::bgp_ls_attr::BgpLsAttr;
+
+    let mut peer = bgpls_established_peer();
+    let nlri = sample_bgpls_node_nlri();
+    let attr = BgpLsAttr::default();
+    assert!(!peer.advertise_bgpls_with_attr(&[nlri], &attr));
+    assert!(peer.drain_outgoing().is_empty());
+}

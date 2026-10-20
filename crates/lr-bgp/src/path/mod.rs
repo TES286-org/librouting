@@ -11,6 +11,8 @@
 pub mod as_path;
 #[cfg(feature = "bgp_ls")]
 pub mod bgp_ls;
+#[cfg(feature = "bgp_ls")]
+pub mod bgp_ls_attr;
 pub mod communities;
 #[cfg(feature = "labeled_unicast")]
 pub mod labeled_nlri;
@@ -103,6 +105,13 @@ pub enum AttrType {
     LargeCommunities = 32,
     /// RFC 9234: OTC (Only To Customer) — 4-byte unsigned integer.
     Otc = 35,
+    /// RFC 7752 §3.3 — BGP-LS Attribute. The attribute value is a
+    /// TLV stream carrying link-state metadata for an accompanying
+    /// BGP-LS NLRI (Node / Link / Prefix / SRv6 SID). Mandatory on
+    /// the SRv6 SID NLRI per RFC 9514 §7.1 (the SRv6 Endpoint
+    /// Behavior TLV must be present inside it). The TLV codec lives
+    /// in [`crate::path::bgp_ls_attr`] (feature `bgp_ls`).
+    BgpLsAttribute = 29,
     /// librouting-private MPLS label stack (RFC 8277). This tag is *never*
     /// transmitted on the wire — RFC 8277 carries the label stack inside
     /// the NLRI, not as a path attribute. The value holds the 4-octet-per-
@@ -155,6 +164,7 @@ impl AttrType {
             22 => Self::PmsiTunnel,
             23 => Self::TunnelEncap,
             24 => Self::TrafficEngineering,
+            29 => Self::BgpLsAttribute,
             32 => Self::LargeCommunities,
             35 => Self::Otc,
             254 => Self::LrExchangePlaneRecords,
@@ -183,6 +193,7 @@ impl AttrType {
             Self::PmsiTunnel => 22,
             Self::TunnelEncap => 23,
             Self::TrafficEngineering => 24,
+            Self::BgpLsAttribute => 29,
             Self::LargeCommunities => 32,
             Self::Otc => 35,
             Self::LrExchangePlaneRecords => 254,
