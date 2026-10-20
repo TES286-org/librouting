@@ -771,6 +771,352 @@ fn v3_as_external_lsa_type2_emits_external2_route_type() {
 }
 
 // ---------------------------------------------------------------------------
+// OSPFv3 SRv6 SID NLRI projection (RFC 9513 reception → RFC 9514 §6)
+// ---------------------------------------------------------------------------
+
+use lr_ospf::lsa::srv6::{
+    self, originate_v3_srv6_locator_lsa, originate_v3_srv6_ri_lsa, Srv6EndSidSubTlv,
+    Srv6LocatorTlv, SRV6_CAP_O_FLAG,
+};
+use lr_ospf::lsa::{originate_v3_e_router_lsa, ERouterLinkTlv, LS_TYPE_E_ROUTER};
+
+/// A /48 SRv6 locator 2001:db8:1::/48 used by the SRv6 projection
+/// tests. The SIDs allocated from it are 2001:db8:0001::* (top 48
+/// bits match the locator).
+const SRV6_LOCATOR_PREFIX: [u8; 16] = [
+    0x20, 0x01, 0x0d, 0xb8, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const SRV6_LOCATOR_LEN: u8 = 48;
+
+/// A 16-byte SRv6 End SID that lives inside the test locator.
+/// Locator bits 0..48 = 2001:db8:0001; the trailing 80 bits are the
+/// function + argument.
+fn srv6_sid_in_locator(low: u8) -> [u8; 16] {
+    let mut s = [0u8; 16];
+    s[..6].copy_from_slice(&SRV6_LOCATOR_PREFIX[..6]);
+    s[15] = low;
+    s
+}
+
+/// A 16-byte SRv6 End SID that lives OUTSIDE the test locator —
+/// its top 48 bits disagree. The §8 containment gate drops it.
+fn srv6_sid_outside_locator(low: u8) -> [u8; 16] {
+    let mut s = [0u8; 16];
+    // Different top 48 bits: 2001:db8:0009:: instead of 0001::
+    s[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x09]);
+    s[15] = low;
+    s
+}
+
+/// Build a SRv6 Locator TLV carrying `sids` (with End behavior = 1
+/// — End SID per RFC 8986 §4.1, valid per RFC 9513 §11 Table 1).
+fn srv6_locator_tlv(sids: &[[u8; 16]], behavior: u16) -> Srv6LocatorTlv {
+    Srv6LocatorTlv {
+        route_type: srv6::locator_route_type::INTRA_AREA,
+        algorithm: 0,
+        locator_len: SRV6_LOCATOR_LEN,
+        options: 0,
+        metric: 0,
+        prefix: SRV6_LOCATOR_PREFIX,
+        end_sids: sids
+            .iter()
+            .map(|s| Srv6EndSidSubTlv {
+                flags: 0,
+                behavior,
+                sid: *s,
+                structure: None,
+            })
+            .collect(),
+        fwd_addr: None,
+        route_tag: None,
+    }
+}
+
+/// Build an SRv6-capable router: an RI LSA carrying the SRv6
+/// Capabilities TLV (§2) plus a Locator LSA carrying `tlvs`.
+fn install_srv6_router(db: &mut Lsdb, router_id: u32, ri: bool, locators: &[Srv6LocatorTlv]) {
+    if ri {
+        install(
+            db,
+            originate_v3_srv6_ri_lsa(router_id, SRV6_CAP_O_FLAG, &[0], &[], None).unwrap(),
+        );
+    }
+    for (i, tlv) in locators.iter().enumerate() {
+        install(
+            db,
+            originate_v3_srv6_locator_lsa(router_id, i as u32, std::slice::from_ref(tlv), None)
+                .unwrap(),
+        );
+    }
+}
+
+#[test]
+fn srv6_end_sid_projects_to_one_nlri_with_local_node_and_518() {
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x01);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        1,
+        "one End SID → one SRv6 SID NLRI"
+    );
+    let n = first_variant(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_)));
+    let BgpLsNlriVariant::Srv6Sid(sid_n) = &n.variant else {
+        unreachable!()
+    };
+    assert_eq!(sid_n.protocol_id, ProtocolId::Ospfv3);
+    assert_eq!(sid_n.identifier, 0);
+    // Local Node Descriptor: AS + BGP-LS ID + OSPF Area-ID + 4-byte
+    // IGP Router-ID (the OSPFv3 non-pseudonode form, RFC 7752
+    // §3.2.1.4). The OSPFv3 SRv6 End SID lives per-router, not per-
+    // pseudonode.
+    assert_eq!(sid_n.local_node.as_number(), Some(64512));
+    assert_eq!(sid_n.local_node.bgp_ls_id(), Some(0x100));
+    assert_eq!(sid_n.local_node.ospf_area_id(), Some(0));
+    assert_eq!(
+        sid_n.local_node.igp_router_id(),
+        Some(&[0x0a, 0x00, 0x00, 0x01][..])
+    );
+    // SRv6 SID Descriptor stream: exactly one TLV 518 (the 16-byte
+    // SID) plus one TLV 263 (MT-ID = 0).
+    assert_eq!(sid_n.srv6_sid.sid(), Some(sid));
+    let tys: Vec<u16> = sid_n.srv6_sid.sub_tlvs.iter().map(|s| s.ty()).collect();
+    assert_eq!(tys, vec![518, 263], "518 first, 263 second");
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_outside_locator_sid_does_not_project() {
+    // §8: a SID outside the covering locator is dropped by the
+    // Srv6Database before the projection sees it. The locator
+    // still projects nothing — its End SID list is empty.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let outside = srv6_sid_outside_locator(0x02);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[outside], 1)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        0,
+        "SIDs outside the locator are filtered before projection"
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_invalid_behavior_does_not_project() {
+    // §11: behaviors outside the End-SID set (e.g. End.X = 5) are
+    // dropped. The locator still projects nothing.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x03);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid], 5)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        0,
+        "behaviors outside the End-SID set (§11) are filtered"
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_multiple_end_sids_each_emit_their_own_nlri() {
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid_a = srv6_sid_in_locator(0x10);
+    let sid_b = srv6_sid_in_locator(0x20);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid_a, sid_b], 1)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        2,
+        "two End SIDs → two NLRIs"
+    );
+    // Both NLRIs share the same Local Node Descriptor (the same
+    // advertising router); only the SRv6 SID Information TLV value
+    // differs.
+    let mut sids = Vec::new();
+    for n in &out {
+        if let BgpLsNlriVariant::Srv6Sid(sid_n) = &n.variant {
+            sids.push(sid_n.srv6_sid.sid().unwrap());
+        }
+    }
+    sids.sort();
+    assert_eq!(sids, vec![sid_a, sid_b]);
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_multiple_locators_each_emit_their_own_nlris() {
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid_a = srv6_sid_in_locator(0x10);
+    let sid_b = srv6_sid_in_locator(0x20);
+    // Two separate locator LSAs (different link_state_id) each
+    // carrying one End SID. The SRv6 database dedupes by prefix —
+    // the locators share the same prefix, so only the first wins.
+    // Use distinct prefixes so both locators survive.
+    let loc_a = srv6_locator_tlv(&[sid_a], 1);
+    let mut loc_b = srv6_locator_tlv(&[sid_b], 1);
+    loc_b.prefix = [
+        0x20, 0x01, 0x0d, 0xb8, 0x00, 0x02, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+    ];
+    // Re-home sid_b under the second locator's prefix.
+    let mut sid_b_homed = sid_b;
+    sid_b_homed[..6].copy_from_slice(&loc_b.prefix[..6]);
+    loc_b.end_sids[0].sid = sid_b_homed;
+    install_srv6_router(&mut db, rid, true, &[loc_a, loc_b]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        2,
+        "two locators with one End SID each → two NLRIs"
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_locator_only_node_still_projects() {
+    // A node with no RI LSA still projects its End SIDs — the
+    // Srv6Database admits a node with locators even when its
+    // capabilities are None (the §7 LSA floods the locator without
+    // the §2 capability gate).
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x30);
+    install_srv6_router(&mut db, rid, false, &[srv6_locator_tlv(&[sid], 1)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        1,
+        "a node without an RI LSA still emits its End SIDs"
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_ospfv2_context_does_not_emit_srv6_nlris() {
+    // SRv6 is OSPFv3-only per RFC 9513; the OSPFv2 path must not call
+    // the SRv6 projection. Install a Locator LSA into an LSDB and
+    // project with an OSPFv2 context — the SRv6 SID NLRI count must
+    // stay 0 (the LSA is silently ignored by the v2 LSA match arm).
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x40);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V2);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        0,
+        "OSPFv2 path does not project SRv6 NLRIs"
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_multiple_routers_each_emit_their_own_nlris() {
+    // Two routers each with one End SID. The projection emits two
+    // NLRIs, one per router, distinguished by the Local Node
+    // Descriptor's IGP Router-ID.
+    let mut db = Lsdb::new();
+    let rid_a = 0x0a00_0001;
+    let rid_b = 0x0a00_0002;
+    let sid_a = srv6_sid_in_locator(0x10);
+    let sid_b = srv6_sid_in_locator(0x20);
+    install_srv6_router(&mut db, rid_a, true, &[srv6_locator_tlv(&[sid_a], 1)]);
+    install_srv6_router(&mut db, rid_b, true, &[srv6_locator_tlv(&[sid_b], 1)]);
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        2,
+        "two routers → two NLRIs"
+    );
+    let mut igps = Vec::new();
+    for n in &out {
+        if let BgpLsNlriVariant::Srv6Sid(sid_n) = &n.variant {
+            igps.push(sid_n.local_node.igp_router_id().unwrap().to_vec());
+        }
+    }
+    igps.sort();
+    assert_eq!(
+        igps,
+        vec![vec![0x0a, 0x00, 0x00, 0x01], vec![0x0a, 0x00, 0x00, 0x02],]
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_locator_with_e_router_lsa_does_not_double_project_sid() {
+    // A router advertising both an E-Router-LSA (which the
+    // Srv6Database consumes for End.X SIDs) and a Locator LSA (for
+    // End SIDs). The projection must emit the End SID once; the
+    // E-Router-LSA's End.X SIDs (which require the §7 attribute
+    // surface to be useful) are not projected.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x50);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+    // Install an E-Router-LSA so the Srv6Database sees the router
+    // as a potential End.X source. The projection still emits only
+    // the End SID.
+    install(
+        &mut db,
+        originate_v3_e_router_lsa(
+            rid,
+            0,
+            0,
+            vec![ERouterLinkTlv {
+                link_type: LINK_TYPE_POINTTOPOINT,
+                metric: 1,
+                interface_id: 1,
+                neighbor_interface_id: 2,
+                neighbor_router_id: 0x0a00_0002,
+                sub_tlvs: vec![],
+            }],
+            None,
+        )
+        .unwrap(),
+    );
+
+    let out = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        1,
+        "End.X SIDs are not projected without the §7 attribute surface"
+    );
+    assert_all_round_trip(&out);
+}
+
+#[test]
+fn srv6_empty_lsdb_emits_no_srv6_nlris() {
+    let out = project_area_lsdb_to_bgpls(&Lsdb::new(), &CTX_V3);
+    assert_eq!(
+        count_variants(&out, |v| matches!(v, BgpLsNlriVariant::Srv6Sid(_))),
+        0,
+        "no SRv6 LSAs → no SRv6 NLRIs"
+    );
+}
+
+/// Sanity: the LSA type constant used by the SRv6 projection's
+/// E-Router-LSA test matches the codec's constant — keeps the test
+/// honest if the codec renames the constant.
+#[test]
+fn srv6_e_router_lsa_constant_matches_codec() {
+    assert_eq!(LS_TYPE_E_ROUTER, 0xA021);
+}
+
+// ---------------------------------------------------------------------------
 // diff_bgpls
 // ---------------------------------------------------------------------------
 
@@ -922,6 +1268,80 @@ fn diff_adds_new_router_when_router_lsa_appears() {
     );
     assert!(d.removed.is_empty(), "no LSA was removed");
     assert_eq!(d.unchanged.len(), 2, "the existing router's NLRIs stay");
+}
+
+#[test]
+fn diff_srv6_sid_appears_in_added_when_locator_lsa_arrives() {
+    // Two projections of the same OSPFv3 area: the first has no
+    // SRv6 LSAs; the second has one router with one End SID. The
+    // diff adds the SRv6 SID NLRI; nothing is removed.
+    let db_a = Lsdb::new();
+    let prev = project_area_lsdb_to_bgpls(&db_a, &CTX_V3);
+
+    let mut db_b = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x10);
+    install_srv6_router(&mut db_b, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+    let curr = project_area_lsdb_to_bgpls(&db_b, &CTX_V3);
+
+    let d = diff_bgpls(&prev, &curr);
+    assert_eq!(
+        d.added.len(),
+        1,
+        "one SRv6 SID NLRI is added when the locator LSA arrives"
+    );
+    assert!(d.removed.is_empty());
+    assert!(d.unchanged.is_empty());
+    // The added NLRI carries the End SID we installed.
+    let added_sid = match &d.added[0].variant {
+        BgpLsNlriVariant::Srv6Sid(sid_n) => sid_n.srv6_sid.sid(),
+        _ => unreachable!(),
+    };
+    assert_eq!(added_sid, Some(sid));
+}
+
+#[test]
+fn diff_srv6_sid_moves_to_removed_when_locator_lsa_disappears() {
+    // First projection: one router with one End SID. Second
+    // projection: the LSDB is empty. The diff removes the SRv6 SID
+    // NLRI; nothing is added.
+    let mut db_a = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x10);
+    install_srv6_router(&mut db_a, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+    let prev = project_area_lsdb_to_bgpls(&db_a, &CTX_V3);
+
+    let db_b = Lsdb::new();
+    let curr = project_area_lsdb_to_bgpls(&db_b, &CTX_V3);
+
+    let d = diff_bgpls(&prev, &curr);
+    assert!(d.added.is_empty());
+    assert_eq!(
+        d.removed.len(),
+        1,
+        "the SRv6 SID NLRI is removed when the locator LSA disappears"
+    );
+    assert!(d.unchanged.is_empty());
+}
+
+#[test]
+fn diff_srv6_sid_unchanged_when_projection_repeats() {
+    // Two identical projections of the same LSDB: the SRv6 SID
+    // NLRI stays unchanged.
+    let mut db = Lsdb::new();
+    let rid = 0x0a00_0001;
+    let sid = srv6_sid_in_locator(0x10);
+    install_srv6_router(&mut db, rid, true, &[srv6_locator_tlv(&[sid], 1)]);
+    let nlris = project_area_lsdb_to_bgpls(&db, &CTX_V3);
+
+    let d = diff_bgpls(&nlris, &nlris);
+    assert!(d.added.is_empty());
+    assert!(d.removed.is_empty());
+    assert_eq!(
+        d.unchanged.len(),
+        nlris.len(),
+        "identical projections keep every NLRI unchanged"
+    );
 }
 
 // ---------------------------------------------------------------------------
