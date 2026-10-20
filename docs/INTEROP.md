@@ -13,7 +13,7 @@ longer exists. The CI `lint` job runs it.
 
 ## Where the labs run
 
-Five CI jobs run lab scripts:
+Six CI jobs run lab scripts:
 
 | Job | Runner | Labs |
 | --- | --- | --- |
@@ -22,6 +22,16 @@ Five CI jobs run lab scripts:
 | `windows-interop` | Windows | `two_daemon.sh`, `labeled_unicast.sh`, `bgp_kernel_install.sh` |
 | `macos-interop` | macOS | `two_daemon.sh`, `labeled_unicast.sh`, `bgp_kernel_install.sh` |
 | `windows-bird-interop` | Windows | `bird_wsl.sh` |
+| `riscv-native` | Ubuntu 24.04 on RISC-V (`ubuntu-24.04-riscv`, RISE Project) | `two_daemon.sh`, `labeled_unicast.sh` |
+
+The `riscv-native` job runs the same two lr-vs-lr loopback labs as
+the Windows and macOS interop jobs — a deliberately small subset,
+because RISC-V hardware is roughly 3-5x slower than x86_64 and the
+full BIRD/FRR suite would add minutes of package setup plus the
+labs' own runtime. The two labs are enough to verify the daemon
+binary actually exchanges BGP routes end-to-end on `riscv64gc`, not
+just that it compiles. The heavier labs (BIRD, FRR, kernel-route
+install, network namespaces) stay on the `interop` job.
 
 The nightly `vm-kernel-gated` job boots
 [`tests/vm/run_vm.sh`](../tests/vm/run_vm.sh) — a minimal initramfs QEMU

@@ -385,6 +385,41 @@ Windows" to match the new matrix.
 `docs/RELEASE-PLAN.md` §3.2 (Build matrix) is updated to record
 the RISC-V entry and its App-installation requirement.
 
+### Changed (CI)
+
+**RISC-V interop smoke tests** (`ci`, [issue #65](https://github.com/TES286-org/librouting/issues/65)).
+The `riscv-native` CI job now runs two lr-vs-lr loopback interop
+labs as architecture smoke tests, in addition to the existing
+clippy / build / nextest / doctest quartet:
+
+- `tests/interop/two_daemon.sh` — two lr-daemons on loopback TCP,
+  BGP OPEN/KEEPALIVE/UPDATE exchange, route install + withdrawal
+  on session loss.
+- `tests/interop/labeled_unicast.sh` — RFC 8277 labelled-unicast
+  (AFI=1, SAFI=4) route exchange between two lr-daemons, exercising
+  the MPLS label-stack path end-to-end.
+
+These are the same two scripts the `windows-interop` and
+`macos-interop` jobs already run, so the non-x86_64 coverage shape
+stays consistent. Both are pure TCP on `127.0.0.1`, need no
+privileges and no external daemons — the only system dependency is
+`bash`, which Ubuntu 24.04 RISC-V ships by default. Each finishes
+in ~30 s on x86_64 (~1-2 min on RISC-V hardware).
+
+The full BIRD/FRR interop suite is deliberately NOT run on the
+RISC-V runner: RISC-V hardware is roughly 3-5x slower than x86_64
+for compute-heavy work, and installing `bird2` + `frr` from apt
+adds minutes of package setup alone. The heavier labs (BIRD, FRR,
+kernel-route install, network namespaces) stay on the `interop`
+job. The two smoke labs are enough to verify the daemon binary
+actually exchanges BGP routes end-to-end on `riscv64gc`, not just
+that it compiles — closing the gap between "the build is green"
+and "the daemon works on this architecture."
+
+`docs/INTEROP.md` (Where the labs run) gains a `riscv-native` row
+and the surrounding paragraph is updated to explain the
+deliberately small subset.
+
 ## [1.2.0] — minor: operational visibility, ROA listing, session operations
 
 librouting 1.2.0 is a minor release: new public Rust API surface and
