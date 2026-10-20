@@ -7,6 +7,21 @@
 
 use super::*;
 
+/// Encode a descriptor's sub-TLV stream into an owned `Vec<u8>` so the
+/// malformed-input tests below can build a wire buffer by hand without
+/// re-running the full NLRI encode path. Used only inside the SRv6 SID
+/// negative tests; positive round-trips go through `BgpLsNlri::encode`.
+fn encode_descriptor_value<F>(f: F) -> Vec<u8>
+where
+    F: FnOnce(&mut WriteBuf<'_>) -> Result<usize, EncodeError>,
+{
+    let mut v = vec![0u8; 64];
+    let mut w = WriteBuf::new(&mut v);
+    let n = f(&mut w).expect("encode descriptor");
+    v.truncate(n);
+    v
+}
+
 /// Build a Node NLRI matching RFC 7752 §3.3 Figure 7 with an OSPFv2
 /// Local Node Descriptor carrying AS, BGP-LS ID, OSPF Area-ID and IGP
 /// Router-ID.
@@ -258,23 +273,320 @@ fn unknown_nlri_type_passthrough() {
 }
 
 #[test]
-fn srv6_sid_nlri_type_falls_through_to_unknown() {
-    // NLRI Type 6 (RFC 9514 §3, SRv6 SID NLRI) is not yet modelled
-    // beyond framing — the codec preserves the value bytes verbatim.
+fn srv6_sid_nlri_roundtrip() {
+    // RFC 9514 §6 Figure 5: an SRv6 SID NLRI carries a Local Node
+    // Descriptor wrapper followed by the bare SRv6 SID Descriptor TLV
+    // stream. The stream MUST contain exactly one SRv6 SID Information
+    // TLV (§6.1, type 518, 16-byte SID). The codec now models the full
+    // NLRI shape; round-trip must be byte-exact.
+    let local = NodeDescriptor::new(vec![
+        NodeDescriptorSubTlv::As(64512),
+        NodeDescriptorSubTlv::BgpLsId(0x0102_0304),
+        NodeDescriptorSubTlv::OspfAreaId(0x0000_0001),
+        NodeDescriptorSubTlv::IgpRouterId(vec![192, 0, 2, 1]),
+    ]);
+    let srv6_sid = Srv6SidDescriptor::new(vec![Srv6SidDescriptorSubTlv::Srv6SidInformation([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x00, 0x01,
+    ])]);
     let nlri = BgpLsNlri {
         route_distinguisher: None,
-        variant: BgpLsNlriVariant::Unknown {
-            nlri_type: BgpLsNlriType::Srv6Sid,
-            bytes: vec![0x06, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01],
-        },
+        variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+            protocol_id: ProtocolId::Ospfv3,
+            identifier: 0,
+            local_node: local,
+            srv6_sid,
+        }),
     };
     let mut buf = vec![0u8; 256];
     let mut w = WriteBuf::new(&mut buf);
     let n = nlri.encode(&mut w).expect("encode");
+    // NLRI header (4) + Protocol-ID (1) + Identifier (8) +
+    // Local Node Descriptor wrapper TLV (4 + 32) + SRv6 SID Information
+    // TLV (4 + 16) = 4 + 1 + 8 + 36 + 20 = 69.
+    assert_eq!(n, 69);
+    // NLRI Type = 6 (SRv6 SID).
     assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 6);
+    // Total NLRI Length = 65 (69 - 4).
+    assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 65);
+    // Protocol-ID = 6 (OSPFv3).
+    assert_eq!(buf[4], 6);
+    // Local Node Descriptor wrapper at offset 13 (after the 4-byte
+    // NLRI header + 1-byte Protocol-ID + 8-byte Identifier).
+    assert_eq!(u16::from_be_bytes([buf[13], buf[14]]), 256);
+    // SRv6 SID Information TLV at the offset right after the wrapper.
+    let wrapper_end = 13 + 4 + 32;
+    assert_eq!(
+        u16::from_be_bytes([buf[wrapper_end], buf[wrapper_end + 1]]),
+        518
+    );
+    assert_eq!(
+        u16::from_be_bytes([buf[wrapper_end + 2], buf[wrapper_end + 3]]),
+        16
+    );
     let (decoded, consumed) = BgpLsNlri::decode(false, &buf[..n]).expect("decode");
     assert_eq!(consumed, n);
     assert_eq!(decoded, nlri);
+}
+
+#[test]
+fn srv6_sid_nlri_with_mt_id_roundtrip() {
+    // RFC 9514 §6: the SRv6 SID Descriptor stream MAY also carry a
+    // Multi-Topology ID TLV (type 263, RFC 7752 §3.2.1.5). The codec
+    // passes MT-IDs through verbatim — the topology context lives in
+    // the projection, not the codec.
+    let local = NodeDescriptor::new(vec![
+        NodeDescriptorSubTlv::As(64512),
+        NodeDescriptorSubTlv::IgpRouterId(vec![1, 2, 3, 4]),
+    ]);
+    let srv6_sid = Srv6SidDescriptor::new(vec![
+        Srv6SidDescriptorSubTlv::Srv6SidInformation([
+            0xfc, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+        ]),
+        Srv6SidDescriptorSubTlv::MultiTopologyId(vec![0x00, 0x01, 0x00, 0x02]),
+    ]);
+    let nlri = BgpLsNlri {
+        route_distinguisher: None,
+        variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+            protocol_id: ProtocolId::Ospfv3,
+            identifier: 0,
+            local_node: local,
+            srv6_sid,
+        }),
+    };
+    let mut buf = vec![0u8; 256];
+    let mut w = WriteBuf::new(&mut buf);
+    let n = nlri.encode(&mut w).expect("encode");
+    let (decoded, consumed) = BgpLsNlri::decode(false, &buf[..n]).expect("decode");
+    assert_eq!(consumed, n);
+    assert_eq!(decoded, nlri);
+    // Accessor: the SRv6 SID carried in the mandatory 518 TLV.
+    let decoded_sid = match decoded.variant {
+        BgpLsNlriVariant::Srv6Sid(n) => n.srv6_sid,
+        _ => unreachable!(),
+    };
+    assert_eq!(
+        decoded_sid.sid(),
+        Some([0xfc, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01])
+    );
+}
+
+#[test]
+fn srv6_sid_nlri_with_unknown_subtlv_preserved() {
+    // A SRv6 SID Descriptor stream carrying an unknown TLV (type 999,
+    // value [0xaa, 0xbb]) alongside the mandatory 518. Round-trip
+    // must preserve the unknown TLV byte-for-byte so a future revision
+    // of the codec can still recognise the NLRI.
+    let local = NodeDescriptor::new(vec![NodeDescriptorSubTlv::As(64512)]);
+    let srv6_sid = Srv6SidDescriptor::new(vec![
+        Srv6SidDescriptorSubTlv::Srv6SidInformation([0xfe; 16]),
+        Srv6SidDescriptorSubTlv::Unknown(Tlv {
+            ty: 999,
+            value: vec![0xaa, 0xbb],
+        }),
+    ]);
+    let nlri = BgpLsNlri {
+        route_distinguisher: None,
+        variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+            protocol_id: ProtocolId::Direct,
+            identifier: 0,
+            local_node: local,
+            srv6_sid,
+        }),
+    };
+    let mut buf = vec![0u8; 256];
+    let mut w = WriteBuf::new(&mut buf);
+    let n = nlri.encode(&mut w).expect("encode");
+    let (decoded, consumed) = BgpLsNlri::decode(false, &buf[..n]).expect("decode");
+    assert_eq!(consumed, n);
+    assert_eq!(decoded, nlri);
+    // Confirm the unknown sub-TLV is preserved.
+    let decoded_sid = match decoded.variant {
+        BgpLsNlriVariant::Srv6Sid(n) => n.srv6_sid,
+        _ => unreachable!(),
+    };
+    assert!(decoded_sid.sub_tlvs.iter().any(|s| matches!(
+        s,
+        Srv6SidDescriptorSubTlv::Unknown(Tlv { ty: 999, value } )
+            if value == &vec![0xaa, 0xbb]
+    )));
+}
+
+#[test]
+fn srv6_sid_nlri_vpn_roundtrip() {
+    // The SRv6 SID NLRI rides the same VPN SAFI (72) framing as the
+    // other BGP-LS NLRIs: an 8-byte Route Distinguisher prepended to
+    // the NLRI value, included in the Total NLRI Length.
+    let local = NodeDescriptor::new(vec![NodeDescriptorSubTlv::As(64512)]);
+    let srv6_sid = Srv6SidDescriptor::new(vec![Srv6SidDescriptorSubTlv::Srv6SidInformation([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+    ])]);
+    let nlri = BgpLsNlri {
+        route_distinguisher: Some([0, 0, 0, 1, 0, 0, 0, 0]),
+        variant: BgpLsNlriVariant::Srv6Sid(Srv6SidNlri {
+            protocol_id: ProtocolId::Ospfv3,
+            identifier: 0,
+            local_node: local,
+            srv6_sid,
+        }),
+    };
+    let mut buf = vec![0u8; 256];
+    let mut w = WriteBuf::new(&mut buf);
+    let n = nlri.encode(&mut w).expect("encode");
+    // Verify the RD lands right after the NLRI header.
+    assert_eq!(&buf[4..12], &[0, 0, 0, 1, 0, 0, 0, 0]);
+    let (decoded, consumed) = BgpLsNlri::decode(true, &buf[..n]).expect("decode");
+    assert_eq!(consumed, n);
+    assert_eq!(decoded, nlri);
+}
+
+#[test]
+fn srv6_sid_nlri_missing_local_node_rejected() {
+    // The first outer TLV must be the LOCAL_NODE_DESCRIPTOR wrapper
+    // (256). Anything else is malformed and must be rejected so the
+    // encode↔decode round-trip is byte-exact for any input the codec
+    // accepts.
+    let bad = &[
+        0x00, 0x06, // NLRI Type = 6 (SRv6 SID)
+        0x00, 0x18, // Total NLRI Length = 24
+        0x06, // Protocol-ID = OSPFv3
+        0, 0, 0, 0, 0, 0, 0, 0, // Identifier = 0
+        0x02, 0x06, // Outer TLV Type = 518 (SRv6 SID Information,
+        // not LOCAL_NODE_DESCRIPTOR)
+        0x00, 0x10, // Length = 16
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1,
+    ];
+    assert!(BgpLsNlri::decode(false, bad).is_none());
+}
+
+#[test]
+fn srv6_sid_nlri_missing_sid_information_rejected() {
+    // RFC 9514 §6: "This field MUST contain a single SRv6 SID
+    // Information TLV (Section 6.1)". A stream with only an MT-ID TLV
+    // and no 518 is malformed.
+    let local = NodeDescriptor::new(vec![NodeDescriptorSubTlv::As(64512)]);
+    let local_bytes = encode_descriptor_value(|w| local.encode_value(w));
+    let mut body = vec![0u8; 128];
+    let body_len = {
+        let mut w = WriteBuf::new(&mut body);
+        w.put_u8(ProtocolId::Ospfv3.to_u8()).unwrap();
+        w.put_u64_be(0).unwrap();
+        // LOCAL_NODE_DESCRIPTOR wrapper.
+        w.put_u16_be(tlv_type::LOCAL_NODE_DESCRIPTOR).unwrap();
+        w.put_u16_be(local_bytes.len() as u16).unwrap();
+        w.put_bytes(&local_bytes).unwrap();
+        // MT-ID TLV (263) but no SRv6 SID Information TLV (518).
+        let mt_tlv = Tlv {
+            ty: tlv_type::MULTI_TOPOLOGY_ID,
+            value: vec![0x00, 0x01],
+        };
+        mt_tlv.encode(&mut w).unwrap();
+        w.position()
+    };
+    body.truncate(body_len);
+    let mut buf = vec![0u8; 4 + body_len];
+    let mut w2 = WriteBuf::new(&mut buf);
+    w2.put_u16_be(BgpLsNlriType::SRV6_SID).unwrap();
+    w2.put_u16_be(body.len() as u16).unwrap();
+    w2.put_bytes(&body).unwrap();
+    assert!(BgpLsNlri::decode(false, &buf).is_none());
+}
+
+#[test]
+fn srv6_sid_nlri_two_sid_information_rejected() {
+    // RFC 9514 §6 mandates *exactly one* SRv6 SID Information TLV.
+    // Two 518s (each 16 bytes) is malformed.
+    let local = NodeDescriptor::new(vec![NodeDescriptorSubTlv::As(64512)]);
+    let local_bytes = encode_descriptor_value(|w| local.encode_value(w));
+    let mut body = vec![0u8; 128];
+    let body_len = {
+        let mut w = WriteBuf::new(&mut body);
+        w.put_u8(ProtocolId::Ospfv3.to_u8()).unwrap();
+        w.put_u64_be(0).unwrap();
+        w.put_u16_be(tlv_type::LOCAL_NODE_DESCRIPTOR).unwrap();
+        w.put_u16_be(local_bytes.len() as u16).unwrap();
+        w.put_bytes(&local_bytes).unwrap();
+        // First 518.
+        let info1 = Tlv {
+            ty: tlv_type::SRV6_SID_INFORMATION,
+            value: vec![0x20; 16],
+        };
+        info1.encode(&mut w).unwrap();
+        // Second 518 — duplicates the mandatory TLV.
+        let info2 = Tlv {
+            ty: tlv_type::SRV6_SID_INFORMATION,
+            value: vec![0x21; 16],
+        };
+        info2.encode(&mut w).unwrap();
+        w.position()
+    };
+    body.truncate(body_len);
+    let mut buf = vec![0u8; 4 + body_len];
+    let mut w2 = WriteBuf::new(&mut buf);
+    w2.put_u16_be(BgpLsNlriType::SRV6_SID).unwrap();
+    w2.put_u16_be(body.len() as u16).unwrap();
+    w2.put_bytes(&body).unwrap();
+    assert!(BgpLsNlri::decode(false, &buf).is_none());
+}
+
+#[test]
+fn srv6_sid_nlri_malformed_518_length_rejected() {
+    // RFC 9514 §6.1 fixes the SRv6 SID Information TLV length at 16
+    // (a single 128-bit SRv6 SID). A TLV 518 with any other length
+    // is malformed — it falls through to `Unknown` in the descriptor
+    // stream, so the "exactly one 518" structural check fails.
+    let local = NodeDescriptor::new(vec![NodeDescriptorSubTlv::As(64512)]);
+    let local_bytes = encode_descriptor_value(|w| local.encode_value(w));
+    let mut body = vec![0u8; 64];
+    let body_len = {
+        let mut w = WriteBuf::new(&mut body);
+        w.put_u8(ProtocolId::Ospfv3.to_u8()).unwrap();
+        w.put_u64_be(0).unwrap();
+        w.put_u16_be(tlv_type::LOCAL_NODE_DESCRIPTOR).unwrap();
+        w.put_u16_be(local_bytes.len() as u16).unwrap();
+        w.put_bytes(&local_bytes).unwrap();
+        // 518 with a 4-byte value — wrong length per RFC 9514 §6.1.
+        let bad_info = Tlv {
+            ty: tlv_type::SRV6_SID_INFORMATION,
+            value: vec![0xde, 0xad, 0xbe, 0xef],
+        };
+        bad_info.encode(&mut w).unwrap();
+        w.position()
+    };
+    body.truncate(body_len);
+    let mut buf = vec![0u8; 4 + body_len];
+    let mut w2 = WriteBuf::new(&mut buf);
+    w2.put_u16_be(BgpLsNlriType::SRV6_SID).unwrap();
+    w2.put_u16_be(body.len() as u16).unwrap();
+    w2.put_bytes(&body).unwrap();
+    assert!(BgpLsNlri::decode(false, &buf).is_none());
+}
+
+#[test]
+fn srv6_sid_descriptor_subtlv_round_trip() {
+    // Each variant of Srv6SidDescriptorSubTlv must round-trip on its
+    // own (well-formed 518, MT-ID, unknown passthrough). Verifies the
+    // per-sub-TLV encode/decode paths in isolation.
+    let cases = vec![
+        Srv6SidDescriptorSubTlv::Srv6SidInformation([0xab; 16]),
+        Srv6SidDescriptorSubTlv::MultiTopologyId(vec![0x00, 0x01]),
+        Srv6SidDescriptorSubTlv::Unknown(Tlv {
+            ty: 9999,
+            value: vec![0xca, 0xfe],
+        }),
+    ];
+    for s in cases {
+        let mut buf = vec![0u8; 64];
+        let mut w = WriteBuf::new(&mut buf);
+        let n = s.encode_into(&mut w).expect("encode");
+        let tlv = {
+            let mut r = ReadBuf::new(&buf[..n]);
+            Tlv::decode(&mut r).expect("decode raw")
+        };
+        let s2 = Srv6SidDescriptorSubTlv::decode(tlv);
+        assert_eq!(s.wire_len(), s2.wire_len());
+        assert_eq!(s.ty(), s2.ty());
+        assert_eq!(s, s2);
+    }
 }
 
 #[test]

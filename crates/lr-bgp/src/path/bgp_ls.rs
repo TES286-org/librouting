@@ -70,10 +70,16 @@
 //! This is the codec half of issue #60's work breakdown. The OSPF LSDB
 //! → BGP-LS projection (RFC 7752 §3 with SR-MPLS / SRv6 descriptors)
 //! and the daemon wiring (`--bgp-ls` flag, capability negotiation) are
-//! separate follow-ups. The SRv6 SID NLRI (RFC 9514 §3, NLRI Type 6) is
-//! parsed at the framing level only — its inner sub-TLVs (`SRv6 SID
-//! Information`, `SRv6 Endpoint Behavior`, `SRv6 SID Structure`) need
-//! a follow-up.
+//! separate follow-ups. The SRv6 SID NLRI (RFC 9514 §6, NLRI Type 6) is
+//! modelled in full at the NLRI level: the inner SRv6 SID Descriptor
+//! TLV stream is parsed into a typed [`Srv6SidDescriptor`] carrying the
+//! mandatory SRv6 SID Information TLV (§6.1, type 518, 16-byte SID) and
+//! any optional Multi-Topology ID TLV (RFC 7752 §3.2.1.5, type 263).
+//!
+//! The BGP-LS *Attribute* TLVs that ride alongside the SRv6 SID NLRI
+//! (RFC 9514 §7 SRv6 Endpoint Behavior, §8 SRv6 SID Structure) are a
+//! separate codec surface — they live in the BGP-LS Attribute, not in
+//! the NLRI — and are out of scope for this module.
 
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::error::{EncodeError, ParseError};
@@ -102,8 +108,10 @@ pub enum BgpLsNlriType {
     Ipv4Prefix,
     /// RFC 7752 §3.3 Table 1: IPv6 Topology Prefix NLRI.
     Ipv6Prefix,
-    /// RFC 9514 §3: SRv6 SID NLRI. The codec parses the framing; the
-    /// inner SRv6 descriptor sub-TLVs are deferred to a follow-up.
+    /// RFC 9514 §6: SRv6 SID NLRI. The codec parses the full NLRI
+    /// shape: Protocol-ID, Identifier, the Local Node Descriptor
+    /// wrapper TLV (256), and the inner SRv6 SID Descriptor TLV stream
+    /// (§6.1 TLV 518 plus optional TLV 263). See [`Srv6SidNlri`].
     Srv6Sid,
     /// Unknown NLRI type — captured as the raw 16-bit code so the NLRI
     /// can still be re-encoded byte-for-byte.
@@ -225,6 +233,13 @@ pub mod tlv_type {
     pub const BGP_LS_IDENTIFIER: u16 = 513;
     pub const OSPF_AREA_ID: u16 = 514;
     pub const IGP_ROUTER_ID: u16 = 515;
+
+    // SRv6 SID Descriptor TLVs (RFC 9514 §6.1 + §6 bare-stream TLVs)
+    // — appear inside the SRv6 SID NLRI's "SRv6 SID Descriptors"
+    // portion as a bare TLV stream (no wrapper), after the Local Node
+    // Descriptor wrapper. Type 518 is mandatory; type 263 re-uses the
+    // multi-topology ID code point from RFC 7752 §3.2.1.5.
+    pub const SRV6_SID_INFORMATION: u16 = 518;
 }
 
 /// OSPF Route Type values, per RFC 7752 §3.2.3.1 (Table following the
@@ -734,6 +749,128 @@ impl PrefixDescriptor {
     }
 }
 
+/// A SRv6 SID Descriptor sub-TLV, per RFC 9514 §6.1 + §6 bare-stream
+/// TLVs.
+///
+/// Inside an SRv6 SID NLRI, the "SRv6 SID Descriptors" portion is a
+/// bare TLV stream (no outer wrapper) sitting at the same level as
+/// the Local Node Descriptor wrapper. Per RFC 9514 §6, it MUST
+/// contain a single SRv6 SID Information TLV (§6.1, type 518, 16-byte
+/// value) and MAY carry the Multi-Topology Identifier TLV (RFC 7752
+/// §3.2.1.5, type 263). Unknown TLVs are preserved verbatim, so any
+/// well-formed SRv6 SID NLRI round-trips byte-for-byte.
+///
+/// The `Srv6SidInformation` variant is only constructed when the
+/// on-wire TLV 518 has a 16-byte value (the only length RFC 9514
+/// §6.1 permits). A TLV 518 with any other length falls through to
+/// [`Srv6SidDescriptorSubTlv::Unknown`]; the NLRI-level decoder then
+/// rejects the whole NLRI because the strict structural check counts
+/// only well-formed 518s.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Srv6SidDescriptorSubTlv {
+    /// TLV 518 (RFC 9514 §6.1). 16-byte SRv6 SID. The only length
+    /// the RFC permits; a TLV 518 with any other length is malformed
+    /// and is preserved as [`Self::Unknown`] for round-trip safety,
+    /// then rejected by the NLRI-level decoder.
+    Srv6SidInformation([u8; 16]),
+    /// TLV 263. Multi-Topology Identifier (RFC 7752 §3.2.1.5).
+    /// Carried raw — the codec does not unpack the 2-byte MT-IDs
+    /// because the topology context lives in the projection.
+    MultiTopologyId(Vec<u8>),
+    /// Any other sub-TLV, preserved verbatim for byte-exact round-trip.
+    Unknown(Tlv),
+}
+
+impl Srv6SidDescriptorSubTlv {
+    /// Wire length of one SRv6 SID Descriptor sub-TLV (4-byte header +
+    /// value).
+    pub fn wire_len(&self) -> usize {
+        match self {
+            Self::Srv6SidInformation(_) => 4 + 16,
+            Self::MultiTopologyId(v) => 4 + v.len(),
+            Self::Unknown(t) => t.wire_len(),
+        }
+    }
+    pub fn ty(&self) -> u16 {
+        match self {
+            Self::Srv6SidInformation(_) => tlv_type::SRV6_SID_INFORMATION,
+            Self::MultiTopologyId(_) => tlv_type::MULTI_TOPOLOGY_ID,
+            Self::Unknown(t) => t.ty,
+        }
+    }
+    pub fn encode_into(&self, out: &mut WriteBuf<'_>) -> Result<usize, EncodeError> {
+        match self {
+            Self::Srv6SidInformation(b) => encode_fixed(out, tlv_type::SRV6_SID_INFORMATION, b),
+            Self::MultiTopologyId(v) => Tlv {
+                ty: tlv_type::MULTI_TOPOLOGY_ID,
+                value: v.clone(),
+            }
+            .encode(out),
+            Self::Unknown(t) => t.encode(out),
+        }
+    }
+    pub fn decode(t: Tlv) -> Self {
+        match t.ty {
+            tlv_type::SRV6_SID_INFORMATION if t.value.len() == 16 => {
+                let mut a = [0u8; 16];
+                a.copy_from_slice(&t.value);
+                Self::Srv6SidInformation(a)
+            }
+            tlv_type::MULTI_TOPOLOGY_ID => Self::MultiTopologyId(t.value),
+            _ => Self::Unknown(t),
+        }
+    }
+}
+
+/// A SRv6 SID Descriptor (RFC 9514 §6) — the bare-TLV stream that
+/// follows the Local Node Descriptor wrapper inside an SRv6 SID NLRI.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Srv6SidDescriptor {
+    pub sub_tlvs: Vec<Srv6SidDescriptorSubTlv>,
+}
+
+impl Srv6SidDescriptor {
+    pub fn new(sub_tlvs: Vec<Srv6SidDescriptorSubTlv>) -> Self {
+        Self { sub_tlvs }
+    }
+    /// Helper: the 16-byte SRv6 SID carried in the mandatory SRv6 SID
+    /// Information TLV (TLV 518, RFC 9514 §6.1), or `None` when the
+    /// descriptor stream does not carry one. The NLRI-level decoder
+    /// rejects such a stream as malformed (RFC 9514 §6: "MUST contain
+    /// a single SRv6 SID Information TLV"), but the constructor
+    /// permits it so a caller can build the descriptor piece by piece
+    /// and add the SID last.
+    pub fn sid(&self) -> Option<[u8; 16]> {
+        self.sub_tlvs.iter().find_map(|s| match s {
+            Srv6SidDescriptorSubTlv::Srv6SidInformation(b) => Some(*b),
+            _ => None,
+        })
+    }
+    /// Wire length of the descriptor (sum of sub-TLV wire lengths).
+    pub fn value_len(&self) -> usize {
+        self.sub_tlvs
+            .iter()
+            .map(Srv6SidDescriptorSubTlv::wire_len)
+            .sum()
+    }
+    pub fn encode_into(&self, out: &mut WriteBuf<'_>) -> Result<usize, EncodeError> {
+        let start = out.position();
+        for s in &self.sub_tlvs {
+            s.encode_into(out)?;
+        }
+        Ok(out.position() - start)
+    }
+    pub fn decode_from(b: &[u8]) -> Result<Self, ParseError> {
+        let tlvs = decode_tlv_stream(b)?;
+        Ok(Self {
+            sub_tlvs: tlvs
+                .into_iter()
+                .map(Srv6SidDescriptorSubTlv::decode)
+                .collect(),
+        })
+    }
+}
+
 /// A BGP-LS Node NLRI (RFC 7752 §3.3, NLRI Type 1).
 ///
 /// Shape on the wire:
@@ -776,6 +913,27 @@ pub struct PrefixNlri {
     pub prefix: PrefixDescriptor,
 }
 
+/// A BGP-LS SRv6 SID NLRI (RFC 9514 §6, NLRI Type 6).
+///
+/// Shape on the wire (RFC 9514 §6 Figure 5):
+/// ```text
+/// Protocol-ID (1) | Identifier (8) | Local Node Descriptor TLV (256) |
+/// SRv6 SID Descriptor TLV stream (TLV 518 + optional TLV 263 + unknown)
+/// ```
+///
+/// The SRv6 SID Descriptor stream is a bare TLV stream (no outer
+/// wrapper), matching the shape of the Link Descriptor and Prefix
+/// Descriptor streams in RFC 7752 §3.3. Per RFC 9514 §6, it MUST
+/// contain exactly one SRv6 SID Information TLV (§6.1, type 518,
+/// 16-byte value); the NLRI-level decoder enforces that on parse.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct Srv6SidNlri {
+    pub protocol_id: ProtocolId,
+    pub identifier: u64,
+    pub local_node: NodeDescriptor,
+    pub srv6_sid: Srv6SidDescriptor,
+}
+
 /// An 8-byte Route Distinguisher (RFC 4364 §4.2) prepended to the
 /// NLRI value when the family is BGP-LS VPN (SAFI=72).
 pub type RouteDistinguisher = [u8; 8];
@@ -785,8 +943,9 @@ pub type RouteDistinguisher = [u8; 8];
 /// when the surrounding family is BGP-LS VPN (SAFI=72).
 ///
 /// `Unknown` preserves the raw NLRI bytes for any NLRI Type the codec
-/// does not model (currently anything other than 1, 2, 3, 4) so a
-/// future extension can re-encode without loss.
+/// does not model (currently NLRI Type 5 plus any future IANA
+/// assignment; NLRI Type 6 is modelled by [`Srv6Sid`]) so a future
+/// extension can re-encode without loss.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct BgpLsNlri {
     pub route_distinguisher: Option<RouteDistinguisher>,
@@ -799,10 +958,13 @@ pub enum BgpLsNlriVariant {
     Link(LinkNlri),
     Ipv4Prefix(PrefixNlri),
     Ipv6Prefix(PrefixNlri),
-    /// Any NLRI Type the codec does not model (currently NLRI Type 6,
-    /// the SRv6 SID NLRI from RFC 9514 §3, plus any future assignment).
-    /// The bytes are the NLRI value, i.e. everything after the 4-byte
-    /// NLRI header and (if present) the 8-byte Route Distinguisher.
+    /// RFC 9514 §6, NLRI Type 6. See [`Srv6SidNlri`].
+    Srv6Sid(Srv6SidNlri),
+    /// Any NLRI Type the codec does not model (currently NLRI Type 5
+    /// plus any future IANA assignment; NLRI Type 6 is modelled by
+    /// [`Srv6Sid`](Self::Srv6Sid)). The bytes are the NLRI value,
+    /// i.e. everything after the 4-byte NLRI header and (if present)
+    /// the 8-byte Route Distinguisher.
     Unknown {
         nlri_type: BgpLsNlriType,
         bytes: Vec<u8>,
@@ -823,6 +985,9 @@ impl BgpLsNlri {
             }
             BgpLsNlriVariant::Ipv4Prefix(n) | BgpLsNlriVariant::Ipv6Prefix(n) => {
                 9 + wrapped_descriptor_len(&n.local_node) + n.prefix.value_len()
+            }
+            BgpLsNlriVariant::Srv6Sid(n) => {
+                9 + wrapped_descriptor_len(&n.local_node) + n.srv6_sid.value_len()
             }
             BgpLsNlriVariant::Unknown { bytes, .. } => bytes.len(),
         }
@@ -852,6 +1017,7 @@ impl BgpLsNlri {
             BgpLsNlriVariant::Link(_) => BgpLsNlriType::Link,
             BgpLsNlriVariant::Ipv4Prefix(_) => BgpLsNlriType::Ipv4Prefix,
             BgpLsNlriVariant::Ipv6Prefix(_) => BgpLsNlriType::Ipv6Prefix,
+            BgpLsNlriVariant::Srv6Sid(_) => BgpLsNlriType::Srv6Sid,
             BgpLsNlriVariant::Unknown { nlri_type, .. } => *nlri_type,
         };
         out.put_u16_be(nlri_type.to_u16());
@@ -886,6 +1052,15 @@ impl BgpLsNlri {
                 encode_wrapped_descriptor(out, tlv_type::LOCAL_NODE_DESCRIPTOR, &n.local_node)?;
                 // Prefix Descriptor: bare TLV stream, no wrapper.
                 n.prefix.encode_into(out)?;
+            }
+            BgpLsNlriVariant::Srv6Sid(n) => {
+                out.put_u8(n.protocol_id.to_u8());
+                out.put_u64_be(n.identifier);
+                encode_wrapped_descriptor(out, tlv_type::LOCAL_NODE_DESCRIPTOR, &n.local_node)?;
+                // SRv6 SID Descriptor: bare TLV stream, no wrapper
+                // (RFC 9514 §6 — the SRv6 SID Descriptors portion sits
+                // at the same level as the Local Node Descriptor wrapper).
+                n.srv6_sid.encode_into(out)?;
             }
             BgpLsNlriVariant::Unknown { bytes, .. } => {
                 out.put_bytes(bytes);
@@ -983,6 +1158,7 @@ fn decode_variant(nlri_type_raw: u16, value: &[u8]) -> Option<BgpLsNlriVariant> 
         BgpLsNlriType::Ipv6Prefix => {
             decode_prefix_nlri_value(value).map(BgpLsNlriVariant::Ipv6Prefix)
         }
+        BgpLsNlriType::Srv6Sid => decode_srv6_sid_nlri_value(value).map(BgpLsNlriVariant::Srv6Sid),
         _ => Some(BgpLsNlriVariant::Unknown {
             nlri_type,
             bytes: value.to_vec(),
@@ -1080,6 +1256,49 @@ fn decode_prefix_nlri_value(value: &[u8]) -> Option<PrefixNlri> {
         identifier,
         local_node,
         prefix: PrefixDescriptor::new(prefix_sub),
+    })
+}
+
+fn decode_srv6_sid_nlri_value(value: &[u8]) -> Option<Srv6SidNlri> {
+    let (protocol_id, identifier) = read_proto_id_and_id(value)?;
+    let body = &value[9..];
+    let tlvs = decode_tlv_stream(body).ok()?;
+    // RFC 9514 §6 Figure 5: the SRv6 SID NLRI value is
+    // `Protocol-ID | Identifier | Local Node Descriptor | SRv6 SID
+    // Descriptors`. The first outer TLV is the LOCAL_NODE_DESCRIPTOR
+    // wrapper; the rest is the bare SRv6 SID Descriptor TLV stream
+    // (type 518 plus optional 263 plus any unknown outer TLV preserved
+    // via the descriptor's `Unknown` variant). Strict ordering: a bare
+    // SRv6 SID Descriptor sub-TLV appearing before LOCAL is malformed.
+    if tlvs.is_empty() || tlvs[0].ty != tlv_type::LOCAL_NODE_DESCRIPTOR {
+        return None;
+    }
+    let local_node = NodeDescriptor::decode_value(&tlvs[0].value).ok()?;
+    let srv6_sid_sub: Vec<Srv6SidDescriptorSubTlv> = tlvs[1..]
+        .iter()
+        .cloned()
+        .map(Srv6SidDescriptorSubTlv::decode)
+        .collect();
+    // RFC 9514 §6: "This field MUST contain a single SRv6 SID
+    // Information TLV (Section 6.1)". Exactly one TLV 518 with a
+    // 16-byte value (the only length the RFC permits, §6.1) — any
+    // 518 with a non-16 length falls through to `Unknown` in the
+    // descriptor stream, so the count of `Srv6SidInformation` variants
+    // is what enforces the MUST clause. Zero or more than one is
+    // malformed — reject so the encode↔decode round-trip is
+    // byte-exact for any input the codec accepts.
+    let sid_count = srv6_sid_sub
+        .iter()
+        .filter(|s| matches!(s, Srv6SidDescriptorSubTlv::Srv6SidInformation(_)))
+        .count();
+    if sid_count != 1 {
+        return None;
+    }
+    Some(Srv6SidNlri {
+        protocol_id,
+        identifier,
+        local_node,
+        srv6_sid: Srv6SidDescriptor::new(srv6_sid_sub),
     })
 }
 
