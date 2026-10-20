@@ -139,6 +139,21 @@ reads without taking the writer's lock.
 
 ## Compatibility
 
+**RISC-V targeted compatibility improvements.** The CI matrix covers
+the RISC-V architecture in two ways as of [issue #65](https://github.com/TES286-org/librouting/issues/65):
+the `cross` matrix job cross-builds `riscv64gc-unknown-linux-gnu` on
+every push, and a native `riscv-native` job runs `cargo nextest`,
+doctests and per-arch clippy on real RISC-V hardware via the RISE
+Project's `ubuntu-24.04-riscv` runner. The workspace is target-OS-
+aware rather than target-arch-aware, so the Linux rtnetlink backend,
+the GTSM/TCP-AO socket constants and every protocol codec compile and
+run on riscv64 unchanged. What remains is to act on what the CI
+surfaces: if a kernel-gated test regresses on riscv64 (a `setsockopt`
+constant that does vary by arch, a struct layout quirk), file the
+finding against this entry and fix the per-arch path. Done when the
+`riscv-native` job has been green on `main` for a release window
+without an arch-specific patch landing.
+
 **Per-protocol route attributes and an external conversion corpus.**
 `lr-daemon translate bird|frr` and the native compat loader handle the BGP
 subset; attributes that belong to another protocol are dropped with an
