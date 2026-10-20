@@ -623,3 +623,30 @@ route-map "to-customer" {
 #     if net ~ [10.0.0.0/8+] then tag_customer(200);
 #     accept;
 # }
+
+# ---------------------------------------------------------------------
+# BGP-LS speaker (issue #60 daemon wiring, RFC 7752)
+# ---------------------------------------------------------------------
+# When `enabled`, the daemon advertises the BGP-LS address family
+# (AFI=16388, SAFI=71) on every BGP session and runs the OSPF LSDB →
+# BGP-LS projection's incremental republish driver on LSDB changes.
+# `as_number` and `bgp_ls_id` form the BGP-LS speaker identity (RFC
+# 7752 §3.2.1.4 sub-TLVs 512 + 513); `as_number = 0` (the default)
+# inherits the daemon's `local_as`. `areas = []` (the default) means
+# "every area the router holds" — a router that learns areas
+# dynamically does not need them listed up front. An explicit list
+# is for routers that want to publish a subset.
+#
+# The CLI mirror is `--bgp-ls`, `--bgp-ls-as`, `--bgp-ls-id`,
+# `--bgp-ls-area` (repeatable). Both forms fail closed (typo
+# protection). The interop lab `tests/interop/bgpls_bird.sh` starts
+# an OSPF+BGP `lr-daemon` with `--bgp-ls` against a BIRD 2.17+ peer
+# configured for the `bgp_ls` channel — the "done" gate from
+# `docs/ROADMAP.md` §1.
+#
+# bgp-ls {
+#     enabled true;
+#     as_number 64512;       # 0 = inherit local_as
+#     bgp_ls_id 1;
+#     areas [0];              # empty = every area
+# }

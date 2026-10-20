@@ -30,7 +30,7 @@ scope.
 | 6793 | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` | four-octet AS, AS4_PATH reconstruction |
 | 6811 | `lr-bgp::roa`, `lr-bgp::roa_store` | prefix-origin validation |
 | 7313 | `lr-bgp::extensions::enhanced_rr` | BoRR and EoRR demarcation |
-| 7752 | `lr-bgp::path::bgp_ls`, `lr-core::nlri`, `lr-router::instance::lsdb_to_bgpls` | BGP-LS Link-State AFI/SAFI, Node/Link/Prefix NLRI codec, descriptor TLVs, SRv6 SID NLRI (RFC 9514 §6 with TLV 518), OSPF LSDB → BGP-LS projection (RFC 7752 §3, incl. RFC 9514 §6 SRv6 SID NLRI for OSPFv3) |
+| 7752 | `lr-bgp::path::bgp_ls`, `lr-bgp::advertise`, `lr-core::nlri`, `lr-router::instance::lsdb_to_bgpls`, `lr-router::instance::DefaultRouter::bgpls_republish`, `lr-cli::daemon::BgplsDriver`, `lr-cli::daemon_config::BgpLsSpec` | BGP-LS Link-State AFI/SAFI, Node/Link/Prefix NLRI codec, descriptor TLVs, SRv6 SID NLRI (RFC 9514 §6 with TLV 518), OSPF LSDB → BGP-LS projection (RFC 7752 §3, incl. RFC 9514 §6 SRv6 SID NLRI for OSPFv3), opaque BGP-LS NLRI egress on `BgpPeer`, incremental republish driver, daemon `--bgp-ls` flag and `[bgp_ls]` config block |
 | 7854 | `lr-bmp` | BMP message codec and sink |
 | 7911 | `lr-bgp::extensions::addpath` | path-identifier framing and negotiation |
 | 7947 | `lr-bgp::role::route_server` | transparent route-server egress |
