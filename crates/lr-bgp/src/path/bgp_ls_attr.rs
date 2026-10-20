@@ -965,3 +965,7 @@ impl BgpLsAttr {
 #[cfg(test)]
 #[path = "bgp_ls_attr_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "bgp_ls_attr_seed_tests.rs"]
+mod seed_tests;

@@ -520,6 +520,54 @@ impl BgpPeer {
         true
     }
 
+    /// Advertise BGP-LS NLRIs with a BGP-LS Attribute (RFC 7752 §3.3 +
+    /// RFC 9514 §7-§8). Like [`advertise_bgpls`] but the UPDATE also
+    /// carries the BGP-LS Attribute (path attribute type 29) so the
+    /// receiver learns the link-state metadata for each NLRI — e.g.
+    /// the SRv6 Endpoint Behavior TLV that must accompany a
+    /// projected SRv6 SID NLRI per RFC 9514 §7.1.
+    ///
+    /// The attribute is optional + non-transitive (RFC 7752 §3.3).
+    /// A single `attr` value is attached to every NLRI in `added`
+    /// — the BGP-LS Attribute does not key on individual NLRIs but
+    /// applies to the NLRI set in the same UPDATE. Callers that
+    /// need per-NLRI attributes must split the call across multiple
+    /// UPDATEs. Returns `false` (and sends nothing) when the session
+    /// is not established, did not negotiate the BGP-LS family, the
+    /// NLRI set is empty, or the attribute value is empty.
+    #[cfg(feature = "bgp_ls")]
+    pub fn advertise_bgpls_with_attr(
+        &mut self,
+        added: &[crate::path::bgp_ls::BgpLsNlri],
+        attr: &crate::path::bgp_ls_attr::BgpLsAttr,
+    ) -> bool {
+        if !self.is_established() || added.is_empty() || attr.is_empty() {
+            return false;
+        }
+        if !self.cfg.mp_families.contains(&NlriFamily::BGP_LS) {
+            return false;
+        }
+        let body = encode_bgpls_mp_reach(added);
+        let attr_value = match attr.encode() {
+            Ok(v) => v,
+            Err(_) => return false,
+        };
+        let mut update = Update::new();
+        update.attributes.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::MpReachNlri,
+            body,
+        ));
+        update.attributes.insert(PathAttribute::new(
+            // RFC 7752 §3.3: optional + non-transitive.
+            PathAttrFlags::new().set_optional(true),
+            AttrType::BgpLsAttribute,
+            attr_value,
+        ));
+        self.send_msg(&BgpMessage::Update(update));
+        true
+    }
+
     fn next_hop_attr(ip: lr_core::addr::IpAddr) -> PathAttribute {
         use crate::path::NextHop;
         let nh = match ip {
