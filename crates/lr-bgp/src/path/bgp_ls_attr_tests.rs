@@ -624,3 +624,220 @@ fn link_protection_type_passthrough() {
     assert_eq!(&wire[4..], &v[..]);
     assert_eq!(decode_tlv(&wire), t);
 }
+
+// ===== Egress Peer Engineering Attribute TLV tests (RFC 9086 §5) =====
+//
+// RFC 9086 §5 defines three BGP-LS Attribute TLVs that share a single
+// wire shape — PeerNode SID (1101), PeerAdj SID (1102) and PeerSet SID
+// (1103). The shape is:
+//
+//   1 byte  Flags    (V | L | B | P | 4 reserved bits)
+//   1 byte  Weight
+//   2 bytes Reserved (MUST be 0 on originate, ignored on receive)
+//   3 bytes SID/Label      (V flag set, length=7)
+//   4 bytes SRGB Index      (V flag clear, length=8)
+//
+// The tests below pin every form the codec accepts (label vs index,
+// each of the three TLV types, every flag bit, non-zero reserved
+// preserved verbatim), plus the fall-through paths that drop a
+// malformed value to `Unknown` so the stream still round-trips.
+
+#[test]
+fn peering_sid_flags_bit_layout() {
+    // RFC 9086 §5: V (bit 7), L (bit 6), B (bit 5), P (bit 4).
+    // High four bits are reserved.
+    let f = BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::B);
+    assert!(f.v());
+    assert!(!f.l());
+    assert!(f.b());
+    assert!(!f.p());
+    assert_eq!(f.raw(), BgpPeeringSidFlags::V | BgpPeeringSidFlags::B);
+    // Reserved bits round-trip verbatim.
+    let rsv = BgpPeeringSidFlags::from_raw(0x0F);
+    assert!(!rsv.v());
+    assert!(!rsv.l());
+    assert!(!rsv.b());
+    assert!(!rsv.p());
+    assert_eq!(rsv.raw(), 0x0F);
+}
+
+#[test]
+fn peer_node_sid_label_form_round_trip() {
+    // RFC 9086 §5: label form — V flag set, length 7. The 20 right-
+    // most bits of the 24-bit label field carry the MPLS label
+    // value; the high 4 bits MUST be zero on originate.
+    let sid = BgpPeeringSid {
+        flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+        weight: 5,
+        reserved: 0,
+        sid: BgpPeeringSidValue::Label([0x00, 0x10, 0x01]),
+    };
+    assert_eq!(sid.value_len(), 7);
+    let t = BgpLsAttrTlv::PeerNodeSid(sid);
+    assert_eq!(t.ty(), 1101);
+    assert_eq!(t.value_len(), 7);
+    let wire = encode_tlv(&t);
+    // 4-byte TLV header + 7-byte value = 11 bytes total.
+    assert_eq!(wire.len(), 11);
+    assert_eq!(u16::from_be_bytes([wire[0], wire[1]]), 1101);
+    assert_eq!(u16::from_be_bytes([wire[2], wire[3]]), 7);
+    // Flags byte: V (0x80) | L (0x40) = 0xC0.
+    assert_eq!(wire[4], 0xC0);
+    assert_eq!(wire[5], 5); // weight
+    assert_eq!(u16::from_be_bytes([wire[6], wire[7]]), 0); // reserved
+    assert_eq!(&wire[8..11], &[0x00, 0x10, 0x01]); // label
+    assert_eq!(decode_tlv(&wire), t);
+}
+
+#[test]
+fn peer_adj_sid_index_form_round_trip() {
+    // RFC 9086 §5: index form — V flag clear, length 8. The 4-byte
+    // index defines an offset into the SRGB advertised by the
+    // originating router.
+    let sid = BgpPeeringSid {
+        flags: BgpPeeringSidFlags::from_raw(0),
+        weight: 0,
+        reserved: 0,
+        sid: BgpPeeringSidValue::Index(0x0001_0203),
+    };
+    assert_eq!(sid.value_len(), 8);
+    let t = BgpLsAttrTlv::PeerAdjSid(sid);
+    assert_eq!(t.ty(), 1102);
+    assert_eq!(t.value_len(), 8);
+    let wire = encode_tlv(&t);
+    assert_eq!(wire.len(), 12);
+    assert_eq!(u16::from_be_bytes([wire[0], wire[1]]), 1102);
+    assert_eq!(u16::from_be_bytes([wire[2], wire[3]]), 8);
+    assert_eq!(wire[4], 0); // flags — V flag clear
+    assert_eq!(wire[5], 0); // weight
+    assert_eq!(u16::from_be_bytes([wire[6], wire[7]]), 0); // reserved
+    assert_eq!(
+        u32::from_be_bytes([wire[8], wire[9], wire[10], wire[11]]),
+        0x0001_0203
+    );
+    assert_eq!(decode_tlv(&wire), t);
+}
+
+#[test]
+fn peer_set_sid_label_form_round_trip() {
+    // RFC 9086 §5.3: PeerSet SID, label form. Same shape as
+    // PeerNode SID — the only difference is the TLV type code.
+    let sid = BgpPeeringSid {
+        flags: BgpPeeringSidFlags::from_raw(
+            BgpPeeringSidFlags::V | BgpPeeringSidFlags::L | BgpPeeringSidFlags::P,
+        ),
+        weight: 200,
+        reserved: 0,
+        sid: BgpPeeringSidValue::Label([0xFF, 0xFF, 0xFF]),
+    };
+    assert_eq!(sid.value_len(), 7);
+    let t = BgpLsAttrTlv::PeerSetSid(sid);
+    assert_eq!(t.ty(), 1103);
+    assert_eq!(t.value_len(), 7);
+    let wire = encode_tlv(&t);
+    assert_eq!(wire.len(), 11);
+    assert_eq!(u16::from_be_bytes([wire[0], wire[1]]), 1103);
+    assert_eq!(u16::from_be_bytes([wire[2], wire[3]]), 7);
+    // V (0x80) | L (0x40) | P (0x10) = 0xD0.
+    assert_eq!(wire[4], 0xD0);
+    assert_eq!(wire[5], 200);
+    assert_eq!(&wire[8..11], &[0xFF, 0xFF, 0xFF]);
+    assert_eq!(decode_tlv(&wire), t);
+}
+
+#[test]
+fn peering_sid_preserves_non_zero_reserved() {
+    // RFC 9086 §5: the 2-byte reserved field MUST be zero on
+    // originate, ignored on receive. The codec preserves the raw
+    // bytes so a re-encode round-trips byte-for-byte even when an
+    // originator violates that constraint — the fuzz target's
+    // round-trip assertion would otherwise panic on a non-zero
+    // reserved value.
+    let sid = BgpPeeringSid {
+        flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+        weight: 0,
+        reserved: 0xABCD,
+        sid: BgpPeeringSidValue::Label([0x00, 0x00, 0x10]),
+    };
+    let t = BgpLsAttrTlv::PeerNodeSid(sid);
+    let wire = encode_tlv(&t);
+    assert_eq!(u16::from_be_bytes([wire[6], wire[7]]), 0xABCD);
+    assert_eq!(decode_tlv(&wire), t);
+}
+
+#[test]
+fn peering_sid_wrong_length_falls_through_to_unknown() {
+    // RFC 9086 §5: valid value lengths are 7 (label form) and 8
+    // (index form). Any other length must fall through to Unknown
+    // so the stream still round-trips byte-for-byte.
+    for len in [0usize, 1, 2, 3, 4, 5, 6, 9, 10, 16].iter() {
+        let raw = Tlv {
+            ty: tlv_type::PEER_NODE_SID,
+            value: vec![0u8; *len],
+        };
+        let decoded = BgpLsAttrTlv::decode(raw.clone());
+        assert_eq!(
+            decoded,
+            BgpLsAttrTlv::Unknown(raw),
+            "length {len} should fall through to Unknown"
+        );
+    }
+}
+
+#[test]
+fn peering_sid_inconsistent_v_flag_falls_through_to_unknown() {
+    // RFC 9086 §5: length 7 requires V flag set (label form); length
+    // 8 requires V flag clear (index form). An inconsistent
+    // combination is malformed — preserve bytes verbatim.
+    let mut label_form = vec![0u8; 7]; // length 7 → label form expected
+    label_form[0] = 0; // V flag clear, length 7 → inconsistent
+    let raw = Tlv {
+        ty: tlv_type::PEER_NODE_SID,
+        value: label_form.clone(),
+    };
+    assert_eq!(
+        BgpLsAttrTlv::decode(raw.clone()),
+        BgpLsAttrTlv::Unknown(raw)
+    );
+
+    let mut index_form = vec![0u8; 8]; // length 8 → index form expected
+    index_form[0] = BgpPeeringSidFlags::V; // V flag set, length 8 → inconsistent
+    let raw = Tlv {
+        ty: tlv_type::PEER_ADJ_SID,
+        value: index_form.clone(),
+    };
+    assert_eq!(
+        BgpLsAttrTlv::decode(raw.clone()),
+        BgpLsAttrTlv::Unknown(raw)
+    );
+}
+
+#[test]
+fn attribute_with_peer_node_and_peer_adj_round_trips() {
+    // Both EPE TLVs in the same BGP-LS Attribute — common in EPE
+    // deployments where one Link NLRI carries a PeerNode SID and a
+    // PeerAdj SID alongside each other.
+    let attr = BgpLsAttr::new(vec![
+        BgpLsAttrTlv::PeerNodeSid(BgpPeeringSid {
+            flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+            weight: 1,
+            reserved: 0,
+            sid: BgpPeeringSidValue::Label([0x00, 0x00, 0x21]),
+        }),
+        BgpLsAttrTlv::PeerAdjSid(BgpPeeringSid {
+            flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+            weight: 1,
+            reserved: 0,
+            sid: BgpPeeringSidValue::Label([0x00, 0x00, 0x22]),
+        }),
+        BgpLsAttrTlv::PeerSetSid(BgpPeeringSid {
+            flags: BgpPeeringSidFlags::from_raw(BgpPeeringSidFlags::V | BgpPeeringSidFlags::L),
+            weight: 1,
+            reserved: 0,
+            sid: BgpPeeringSidValue::Label([0x00, 0x00, 0x23]),
+        }),
+    ]);
+    let bytes = attr.encode().expect("encode");
+    let decoded = BgpLsAttr::decode(&bytes).expect("decode");
+    assert_eq!(decoded, attr);
+}

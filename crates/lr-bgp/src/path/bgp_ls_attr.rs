@@ -117,6 +117,23 @@ pub mod tlv_type {
     /// OSPFv3 SRv6 LAN End.X SID TLV (RFC 9514 §4.2). Variable.
     pub const OSPFV3_SRV6_LAN_END_X_SID: u16 = 1108;
 
+    // RFC 9086 §5 — SR-MPLS Egress Peer Engineering Attribute TLVs.
+    /// PeerNode SID TLV (RFC 9086 §5.1). Variable-length value (7 or
+    /// 8 bytes); shared wire shape with [`PEER_ADJ_SID`] and
+    /// [`PEER_SET_SID`]. Carried in the BGP-LS Attribute of a
+    /// BGP-LS Link NLRI whose Protocol-ID is `Bgp` (Egress Peer
+    /// Engineering). Identifies the segment that steers traffic to
+    /// a specific BGP peer node.
+    pub const PEER_NODE_SID: u16 = 1101;
+    /// PeerAdj SID TLV (RFC 9086 §5.2). Same wire shape as
+    /// [`PEER_NODE_SID`]. Identifies the segment that steers
+    /// traffic over a specific local interface toward a BGP peer.
+    pub const PEER_ADJ_SID: u16 = 1102;
+    /// PeerSet SID TLV (RFC 9086 §5.3). Same wire shape as
+    /// [`PEER_NODE_SID`]. Identifies the segment that load-balances
+    /// across a set of BGP peer nodes.
+    pub const PEER_SET_SID: u16 = 1103;
+
     // RFC 7752 §3.3.3 — Prefix Attribute TLVs (selected).
     /// IGP Flags (RFC 7752 §3.3.3.1). 1-byte value.
     pub const IGP_FLAGS: u16 = 1150;
@@ -277,6 +294,195 @@ impl Srv6SidStructure {
     pub const WIRE_LEN: usize = 4;
 }
 
+/// BGP Peering SID flags (RFC 9086 §5). The 1-byte flags field
+/// inside a PeerNode SID / PeerAdj SID / PeerSet SID TLV. Only the
+/// low four bits are defined; the high four bits are reserved and
+/// MUST be zero on originate, ignored on receive — the codec
+/// preserves the raw byte so a re-encode round-trips byte-for-byte.
+///
+/// ```text
+///  0 1 2 3 4 5 6 7
+/// +-+-+-+-+-+-+-+-+
+/// |V|L|B|P| Rsvd  |
+/// +-+-+-+-+-+-+-+-+
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub struct BgpPeeringSidFlags(pub u8);
+
+impl BgpPeeringSidFlags {
+    /// V (value) flag bit. Set: the SID carries a 3-byte local MPLS
+    /// label. Clear: the SID carries a 4-byte SRGB index.
+    pub const V: u8 = 0x80;
+    /// L (local) flag bit. Set: the value/index has local
+    /// significance.
+    pub const L: u8 = 0x40;
+    /// B (backup) flag bit. Set: the SID refers to a path eligible
+    /// for protection using fast reroute.
+    pub const B: u8 = 0x20;
+    /// P (persistent) flag bit. Set: the SID is persistently
+    /// allocated — its value is consistent across router restart and
+    /// session/interface flap.
+    pub const P: u8 = 0x10;
+
+    /// Construct from a raw byte. Does not mask reserved bits — the
+    /// full byte is preserved so the round-trip is byte-exact.
+    pub const fn from_raw(b: u8) -> Self {
+        Self(b)
+    }
+    /// Raw byte representation, including any reserved bits.
+    pub const fn raw(self) -> u8 {
+        self.0
+    }
+    /// V flag set?
+    pub const fn v(self) -> bool {
+        self.0 & Self::V != 0
+    }
+    /// L flag set?
+    pub const fn l(self) -> bool {
+        self.0 & Self::L != 0
+    }
+    /// B flag set?
+    pub const fn b(self) -> bool {
+        self.0 & Self::B != 0
+    }
+    /// P flag set?
+    pub const fn p(self) -> bool {
+        self.0 & Self::P != 0
+    }
+}
+
+/// The variable-length SID/Index/Label field carried inside a BGP
+/// Peering SID TLV (RFC 9086 §5). Two wire forms:
+/// - 3-byte local MPLS label (`V` flag set, value length 7). The
+///   20 right-most bits carry the label value; the high 4 bits of
+///   the 24-bit field MUST be zero on originate and are ignored on
+///   receive — the codec preserves all 24 bits verbatim.
+/// - 4-byte SRGB index (`V` flag clear, value length 8). The index
+///   defines an offset into the SRGB advertised by the originating
+///   router via the SR Capabilities TLV (RFC 9085 §2.1.2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum BgpPeeringSidValue {
+    /// 3-byte local MPLS label (V flag set). All 24 bits are
+    /// preserved verbatim so the round-trip is byte-exact even when
+    /// the high 4 bits are non-zero.
+    Label([u8; 3]),
+    /// 4-byte SRGB index (V flag clear).
+    Index(u32),
+}
+
+impl BgpPeeringSidValue {
+    /// Wire length of the value (3 for label form, 4 for index form).
+    pub const fn wire_len(&self) -> usize {
+        match self {
+            Self::Label(_) => 3,
+            Self::Index(_) => 4,
+        }
+    }
+}
+
+/// A BGP Peering SID (RFC 9086 §5). The three BGP-LS Attribute TLVs
+/// 1101 (PeerNode SID), 1102 (PeerAdj SID) and 1103 (PeerSet SID)
+/// share this wire format. The codec preserves every byte — flags,
+/// weight, the 2-byte reserved field, and the SID/Index/Label — so
+/// a re-encode round-trips byte-for-byte on any well-formed input,
+/// matching the contract the rest of the BGP-LS Attribute codec
+/// enforces.
+///
+/// # Wire shape (RFC 9086 §5)
+///
+/// ```text
+///  0                   1                   2                   3
+///  0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1 2 3 4 5 6 7 8 9 0 1
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// | Flags         | Weight        |          Reserved            |
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// //                SID/Label/Index (variable)                 //
+/// +-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+/// ```
+///
+/// Total value length is 7 (label form: 1 + 1 + 2 + 3) or 8 (index
+/// form: 1 + 1 + 2 + 4). A value length other than 7 or 8, or a V
+/// flag inconsistent with the value length, falls through to
+/// [`BgpLsAttrTlv::Unknown`] so the stream still round-trips.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct BgpPeeringSid {
+    /// 1-byte flags field. See [`BgpPeeringSidFlags`].
+    pub flags: BgpPeeringSidFlags,
+    /// 1-byte weight. Used for load-balancing across peering SIDs.
+    pub weight: u8,
+    /// 2-byte reserved field. RFC 9086 §5: MUST be zero on
+    /// originate, ignored on receive. The codec preserves the raw
+    /// bytes so a re-encode round-trips byte-for-byte.
+    pub reserved: u16,
+    /// Variable-length SID/Index/Label field. 3 bytes for label form
+    /// (`V` flag set), 4 bytes for index form (`V` flag clear).
+    pub sid: BgpPeeringSidValue,
+}
+
+impl BgpPeeringSid {
+    /// Wire length of the TLV value (excluding the 4-byte TLV
+    /// header): 1 (flags) + 1 (weight) + 2 (reserved) + sid length.
+    pub const fn value_len(&self) -> usize {
+        1 + 1 + 2 + self.sid.wire_len()
+    }
+    /// Encode the value (after the 4-byte TLV header) into `out`.
+    pub fn encode_value(&self, out: &mut WriteBuf<'_>) -> Result<(), EncodeError> {
+        out.put_u8(self.flags.raw());
+        out.put_u8(self.weight);
+        out.put_u16_be(self.reserved);
+        match self.sid {
+            BgpPeeringSidValue::Label(b) => {
+                out.put_bytes(&b);
+            }
+            BgpPeeringSidValue::Index(v) => {
+                out.put_u32_be(v);
+            }
+        }
+        Ok(())
+    }
+    /// Decode a value (after the 4-byte TLV header) of known length.
+    /// Returns `None` when the value length or V-flag combination is
+    /// inconsistent with RFC 9086 §5 — the caller turns that into
+    /// `BgpLsAttrTlv::Unknown(t)` so the stream still round-trips.
+    pub fn decode_value(value: &[u8]) -> Option<Self> {
+        // 1 (flags) + 1 (weight) + 2 (reserved) = 4-byte fixed
+        // prefix, plus the variable SID/Index/Label field.
+        if value.len() < 4 {
+            return None;
+        }
+        let flags = BgpPeeringSidFlags::from_raw(value[0]);
+        let weight = value[1];
+        let reserved = u16::from_be_bytes([value[2], value[3]]);
+        let sid_bytes = &value[4..];
+        let sid = match (value.len(), flags.v()) {
+            // Length 7 → label form, V flag MUST be set.
+            (7, true) => {
+                let mut b = [0u8; 3];
+                b.copy_from_slice(sid_bytes);
+                BgpPeeringSidValue::Label(b)
+            }
+            // Length 8 → index form, V flag MUST be clear.
+            (8, false) => {
+                let v =
+                    u32::from_be_bytes([sid_bytes[0], sid_bytes[1], sid_bytes[2], sid_bytes[3]]);
+                BgpPeeringSidValue::Index(v)
+            }
+            // Any other length or flag/length combination is
+            // inconsistent with RFC 9086 §5. Return None so the
+            // caller falls through to Unknown passthrough — the
+            // bytes are preserved verbatim and the round-trip is
+            // byte-exact.
+            _ => return None,
+        };
+        Some(Self {
+            flags,
+            weight,
+            reserved,
+            sid,
+        })
+    }
+}
+
 /// One BGP-LS Attribute TLV (RFC 7752 §3.3 + RFC 9514 §7-§8).
 ///
 /// Each variant maps to a TLV that the codec models explicitly. Any
@@ -362,6 +568,22 @@ pub enum BgpLsAttrTlv {
         sid: [u8; 16],
         sub_tlvs: Vec<u8>,
     },
+
+    // ===== Egress Peer Engineering Attribute TLVs (RFC 9086 §5) =====
+    /// TLV 1101 (RFC 9086 §5.1). PeerNode SID TLV — shared wire
+    /// shape with [`Self::PeerAdjSid`] and [`Self::PeerSetSid`].
+    /// Carried in the BGP-LS Attribute of a BGP-LS Link NLRI whose
+    /// Protocol-ID is `Bgp` (Egress Peer Engineering). Identifies
+    /// the segment that steers traffic to a specific BGP peer node.
+    PeerNodeSid(BgpPeeringSid),
+    /// TLV 1102 (RFC 9086 §5.2). PeerAdj SID TLV — same wire shape
+    /// as [`Self::PeerNodeSid`]. Identifies the segment that steers
+    /// traffic over a specific local interface toward a BGP peer.
+    PeerAdjSid(BgpPeeringSid),
+    /// TLV 1103 (RFC 9086 §5.3). PeerSet SID TLV — same wire shape
+    /// as [`Self::PeerNodeSid`]. Identifies the segment that
+    /// load-balances across a set of BGP peer nodes.
+    PeerSetSid(BgpPeeringSid),
 
     // ===== Prefix Attribute TLVs (RFC 7752 §3.3.3, selected) =====
     /// TLV 1150 (RFC 7752 §3.3.3.1). 1-byte IGP flags.
@@ -450,6 +672,9 @@ impl BgpLsAttrTlv {
                     tlv_type::OSPFV3_SRV6_LAN_END_X_SID
                 }
             }
+            Self::PeerNodeSid(_) => tlv_type::PEER_NODE_SID,
+            Self::PeerAdjSid(_) => tlv_type::PEER_ADJ_SID,
+            Self::PeerSetSid(_) => tlv_type::PEER_SET_SID,
             Self::IgpFlags(_) => tlv_type::IGP_FLAGS,
             Self::IgpRouteTag(_) => tlv_type::IGP_ROUTE_TAG,
             Self::PrefixMetric(_) => tlv_type::PREFIX_METRIC,
@@ -491,6 +716,7 @@ impl BgpLsAttrTlv {
                 sub_tlvs,
                 ..
             } => 2 + 1 + 1 + 1 + 1 + neighbor_id.len() + 16 + sub_tlvs.len(),
+            Self::PeerNodeSid(s) | Self::PeerAdjSid(s) | Self::PeerSetSid(s) => s.value_len(),
             Self::IgpFlags(_) => 1,
             Self::IgpRouteTag(v) => v.len(),
             Self::PrefixMetric(_) => 4,
@@ -607,6 +833,9 @@ impl BgpLsAttrTlv {
                 out.put_bytes(neighbor_id);
                 out.put_bytes(sid);
                 out.put_bytes(sub_tlvs);
+            }
+            Self::PeerNodeSid(s) | Self::PeerAdjSid(s) | Self::PeerSetSid(s) => {
+                s.encode_value(out)?;
             }
             Self::IgpFlags(b) => {
                 out.put_u8(*b);
@@ -786,6 +1015,26 @@ impl BgpLsAttrTlv {
                     sub_tlvs,
                 }
             }
+            // RFC 9086 §5: PeerNode SID (1101), PeerAdj SID (1102),
+            // PeerSet SID (1103) share the same wire shape — 1-byte
+            // flags + 1-byte weight + 2-byte reserved + variable
+            // SID/Index/Label (3 or 4 bytes). The total value length
+            // is 7 (label form, V flag set) or 8 (index form, V flag
+            // clear). `BgpPeeringSid::decode_value` returns `None`
+            // for any inconsistent form so the TLV falls through to
+            // `Unknown` and round-trips byte-for-byte.
+            tlv_type::PEER_NODE_SID => match BgpPeeringSid::decode_value(&t.value) {
+                Some(sid) => Self::PeerNodeSid(sid),
+                None => Self::Unknown(t),
+            },
+            tlv_type::PEER_ADJ_SID => match BgpPeeringSid::decode_value(&t.value) {
+                Some(sid) => Self::PeerAdjSid(sid),
+                None => Self::Unknown(t),
+            },
+            tlv_type::PEER_SET_SID => match BgpPeeringSid::decode_value(&t.value) {
+                Some(sid) => Self::PeerSetSid(sid),
+                None => Self::Unknown(t),
+            },
             tlv_type::IGP_FLAGS if t.value.len() == 1 => Self::IgpFlags(t.value[0]),
             tlv_type::IGP_ROUTE_TAG => Self::IgpRouteTag(t.value),
             tlv_type::PREFIX_METRIC if t.value.len() == 4 => {
