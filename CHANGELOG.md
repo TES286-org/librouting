@@ -13,7 +13,63 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — BFD Keyed MD5 / Keyed SHA1 authentication
+## [Unreleased] — CycloneDX SBOM per release
+
+The supply-chain follow-ups ROADMAP entry named three gaps: a
+CycloneDX SBOM per release, `cosign` signatures over the release
+archives, and a static-analysis scan of the Rust sources. The
+SBOM half lands in this change: the `generate-sbom` job in
+`.github/workflows/release.yml` runs on every `v*` tag push and
+attaches a CycloneDX 1.5 JSON SBOM per shipped binary target to
+the GitHub release, alongside a combined archive.
+
+### Added
+
+**Per-binary SBOM generation** (`ci`, ROADMAP "Supply-chain
+follow-ups"). A new `generate-sbom` job in
+`.github/workflows/release.yml` runs `cargo cyclonedx --describe
+binaries --all-features --spec-version 1.5` on every release tag
+push and emits one CycloneDX 1.5 JSON SBOM per shipped binary
+target:
+
+- `librouting-lr-<tag>.cdx.json` — the `lr` inspection CLI
+  (transitive closure of `lr-cli`'s `lr` bin target).
+- `librouting-lr-daemon-<tag>.cdx.json` — the `lr-daemon`
+  reference daemon (`lr-cli`'s `lr-daemon` bin target).
+- `librouting-lrctl-<tag>.cdx.json` — the `lrctl` operational
+  CLI (`lr-cli`'s `lrctl` bin target).
+- `librouting-lr-ffi-<tag>.cdx.json` — the `lr-ffi` C ABI
+  library (the `cdylib`/`staticlib`/`rlib` triple).
+- `librouting-sbom-<tag>.tar.gz` — every per-binary SBOM in one
+  archive.
+
+`--describe binaries` is the right granularity: each binary's
+dependency closure is distinct, and a consumer embedding via the
+C ABI or running a CLI binary can pull the SBOM that names exactly
+the transitive crate set they ship. `--all-features` mirrors the
+release build matrix — every feature-flagged dependency the
+release binaries ship with is in the SBOM. The job stages the
+SBOMs into clean `librouting-<binary>-<tag>.cdx.json` filenames
+and runs an inline JSON validation pass (`bomFormat`,
+`serialNumber`, `metadata.component` must all be present) before
+upload, so a malformed SBOM fails the release early instead of
+shipping silently to consumers. The `publish-release` job now
+`needs: [build-native, generate-sbom]` and flattens the SBOM
+artifacts into the draft GitHub Release alongside the platform
+archives and the standalone headers.
+
+`.gitignore` adds `*.cdx.json` and `*.cdx.xml` so a developer
+running `cargo cyclonedx` locally for a pre-release audit cannot
+accidentally commit the output. The release workflow owns the
+canonical SBOM artifacts; the local output is a working file.
+
+### Stability
+
+No Rust API change. No C ABI change. No daemon flag or config
+surface change. The SBOM is purely a release-pipeline artifact;
+the library and the daemon binaries are untouched.
+
+## [Unreleased — prior] — BFD Keyed MD5 / Keyed SHA1 authentication
 
 The BFD auth surface completes: the four keyed-hash authentication
 types from RFC 5880 §4.3 / §4.4 — Keyed MD5 (type 2), Meticulous Keyed

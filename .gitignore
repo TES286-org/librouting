@@ -26,4 +26,12 @@ fuzz/artifacts
 fuzz/coverage
 fuzz/corpus
 
+# CycloneDX SBOM files produced by `cargo cyclonedx`. The release
+# workflow (`generate-sbom` job in `.github/workflows/release.yml`)
+# regenerates these per release tag and attaches them to the GitHub
+# release; a developer running `cargo cyclonedx` locally for a
+# pre-release audit should not accidentally commit the output.
+*.cdx.json
+*.cdx.xml
+
 worklog.md
