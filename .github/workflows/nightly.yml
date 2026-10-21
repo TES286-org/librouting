@@ -204,3 +204,132 @@ jobs:
           if-no-files-found: ignore
           retention-days: 30
 
+  # Public API surface + semver check — ROADMAP "Supply-chain
+  # follow-ups".
+  #
+  # The third gap in the ROADMAP entry is a static-analysis scan of
+  # the Rust sources. The two tools that match the project's
+  # stability contract (Tier 1: the public Rust API is frozen at
+  # 1.0, so any breaking change ships as a new minor) are
+  # `cargo public-api` and `cargo semver-checks`:
+  #
+  #   * `cargo public-api` (cargo-public-api) walks the rustdoc
+  #     JSON of every workspace crate and lists or diffs the
+  #     public items. The nightly job diffs the current tree
+  #     against the latest published tag (`v*`), so any addition
+  #     or removal of a public item since the last release is
+  #     surfaced in the nightly artifact for triage.
+  #   * `cargo semver-checks` (cargo-semver-checks) runs the
+  #     `rustdoc-json`-based semver lints against the same baseline
+  #     and fails the job if any check finds a violation. This is
+  #     the gate the pre-1.0 freeze criteria in
+  #     `docs/RELEASE-PLAN.md` §1 already imply: a breaking change
+  #     is a minor bump, and `cargo semver-checks` catches the
+  #     accidental kind.
+  #
+  # Both tools use the nightly toolchain for `rustdoc --output-format
+  # json`, so this job pulls `nightly` from `rustup`. The
+  # toolchain install is the only step that costs time the stable
+  # jobs do not.
+  api-surface:
+    name: API surface (cargo public-api + semver-checks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # `cargo public-api diff v1.2.0..HEAD` does an in-tree
+          # `git checkout` of the baseline tag, so the checkout
+          # must carry enough history to reach the latest tag.
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install nightly toolchain
+        # `cargo public-api` uses `rustdoc --output-format json`,
+        # which is still nightly-only. `cargo semver-checks` can
+        # use either stable or nightly for rustdoc JSON, but using
+        # nightly for both keeps the toolchain story consistent
+        # within this job.
+        run: rustup toolchain install nightly --profile minimal
+      - name: Cache cargo registry + target
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "api-surface"
+      - name: Install cargo-public-api and cargo-semver-checks
+        # Both tools are `cargo install --locked` so a future
+        # release that needs a newer Rust than the toolchain pin
+        # fails loudly at install time, not silently on first
+        # run. The `|| true` fallback without `--locked` keeps
+        # the install working if a transitive lockfile bump slips
+        # past the maintainers.
+        run: |
+          cargo install cargo-public-api --locked || cargo install cargo-public-api
+          cargo install cargo-semver-checks --locked || cargo install cargo-semver-checks
+      - name: Resolve the latest tag
+        # The latest `v*` tag is the semver baseline. The output
+        # is shared with both `cargo public-api diff` and
+        # `cargo semver-checks --baseline-rev`.
+        id: latest-tag
+        run: |
+          set -euo pipefail
+          TAG=$(git tag --list 'v*' --sort=-v:refname | head -1)
+          if [ -z "$TAG" ]; then
+            echo "no v* tag found; skipping API diff (first release not yet cut)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Latest tag: $TAG"
+            echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - name: cargo public-api diff (latest tag → HEAD)
+        # Per-crate diff against the latest tag. The output is the
+        # triage surface: an Added/Changed/Removed breakdown per
+        # crate, captured to a single text artifact for review.
+        # `--simplified` omits blanket-impls and auto-trait-impls
+        # so the diff shows the items the project authored, not
+        # the Send/Sync/Unpin noise the compiler emits on every
+        # struct.
+        #
+        # Only library crates are diffable — `cargo public-api`
+        # walks `rustdoc --output-format json` of a `[lib]` target,
+        # which binary-only crates (e.g. `lr-cli`) lack. The
+        # `targets` field on each `cargo metadata` package
+        # identifies the lib target by kind `lib` (or `proc-macro`).
+        if: steps.latest-tag.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.latest-tag.outputs.tag }}"
+          mkdir -p api-surface
+          for crate in $(cargo metadata --no-deps --format-version 1 \
+            | python3 -c "import json,sys; d=json.load(sys.stdin); \
+              out=[]; \
+              [out.append(p['name']) for p in d['packages'] \
+                if any(t.get('kind', []) == ['lib'] or 'lib' in t.get('kind', []) \
+                       for t in p.get('targets', []))]; \
+              print('\n'.join(out))"); do
+            echo "=== $crate: $TAG..HEAD ==="
+            cargo +nightly public-api -p "$crate" diff "${TAG}..HEAD" \
+              --simplified --color=never \
+              > "api-surface/${crate}.public-api.diff" 2>&1 || true
+            cat "api-surface/${crate}.public-api.diff"
+          done
+      - name: cargo semver-checks (workspace, baseline = latest tag)
+        # The semver gate: every workspace crate is checked
+        # against the latest tag's published rustdoc. A failing
+        # check means a breaking change slipped past review; the
+        # job fails so the finding is triaged before the next
+        # release cut. `--all-features` mirrors the build matrix
+        # so feature-flagged public items are in scope.
+        if: steps.latest-tag.outputs.skip != 'true'
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.latest-tag.outputs.tag }}"
+          cargo semver-checks --workspace --all-features \
+            --baseline-rev "$TAG"
+      - name: Upload API surface diff
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: api-surface-diff
+          path: api-surface/
+          if-no-files-found: ignore
+          retention-days: 30
+
