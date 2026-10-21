@@ -375,6 +375,68 @@ lr-router --all-features` → 171/171 pass. `cargo fmt --all --
 --check` and `cargo clippy --workspace --all-targets --all-features
 -- -D warnings` clean.
 
+**Egress Peer Engineering codec (RFC 9086)** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
+The BGP-LS Attribute codec in `lr-bgp::path::bgp_ls_attr` now models
+the three SR-MPLS BGP Peering SID TLVs from RFC 9086 §5 — PeerNode SID
+(type 1101), PeerAdj SID (type 1102) and PeerSet SID (type 1103). All
+three share a single `BgpPeeringSid` shape: a 1-byte flags field
+(`BgpPeeringSidFlags` with the V/L/B/P bit constants from RFC 9086 §5
+plus a `from_raw` / `raw` accessor pair that preserves reserved bits
+for byte-exact round-trip), a 1-byte weight, a 2-byte reserved field
+(preserved verbatim so a re-encode round-trips even when an
+originator violates the "MUST be zero on originate" constraint), and
+a variable `BgpPeeringSidValue::Label([u8; 3])` / `Index(u32)` that
+carries either a 3-byte local MPLS label (V flag set, length 7) or a
+4-byte SRGB index (V flag clear, length 8). The codec accepts only
+the RFC 9086 §5 length/V-flag combinations; an inconsistent
+combination (length 7 with V flag clear, length 8 with V flag set,
+or any other length) falls through to `BgpLsAttrTlv::Unknown` so the
+stream still round-trips byte-for-byte.
+
+The matching Node Descriptor sub-TLVs from RFC 9086 §3.1 / §3.2 are
+modelled in `lr-bgp::path::bgp_ls::NodeDescriptorSubTlv`:
+`BgpRouterId(u32)` (TLV 516, the BGP Identifier from RFC 6286 §4) and
+`BgpConfederationMember(u32)` (TLV 517, the Member-AS Number from
+RFC 5065 §4). Both carry the 4-byte unsigned integer shape the base
+RFC 7752 fixed-width descriptors use; both are surfaced on
+`NodeDescriptor` via the `bgp_router_id()` and
+`bgp_confederation_member()` accessors, alongside the existing
+`as_number()`, `bgp_ls_id()`, `ospf_area_id()` and `igp_router_id()`
+accessors. A BGP-LS Link NLRI whose Protocol-ID is `Bgp` (RFC 9086
+§3, the new BGP-LS Protocol-ID for EPE) now round-trips byte-for-byte
+end-to-end.
+
+Tests: 13 new unit tests (5 in `bgp_ls_tests.rs` covering the Node
+Descriptor sub-TLVs in isolation and inside a full BGP-LS Link NLRI;
+8 in `bgp_ls_attr_tests.rs` covering each Peering SID form, flag bit,
+non-zero reserved preservation, the inconsistent-V-flag fall-through,
+the wrong-length fall-through, and a BGP-LS Attribute with all three
+EPE TLVs at once). 6 new fuzz seed corpus entries under
+`fuzz/seeds/bgp_ls_attr_decode/` — `peer_node_sid_label.bin`,
+`peer_adj_sid_index.bin`, `peer_set_sid_label.bin`,
+`peer_node_sid_inconsistent_v.bin`, `peer_adj_sid_wrong_length.bin`,
+`peering_sid_nonzero_reserved.bin` — extend the smoke
+`seed_corpus_round_trips` test (the `cargo +nightly fuzz run
+bgp_ls_attr_decode` target inherits the new seeds automatically).
+`cargo test -p lr-bgp --all-features` → 370/370 pass.
+
+Stability: additive only — no breaking changes. The new types are
+Rust-only; the C ABI (`lr-ffi`) is unchanged. Daemon / config
+surface is unchanged — this PR lands the *codec* the daemon-side
+EPE projection will call; the projection itself (walking the
+daemon's BGP peer sessions and emitting BGP-LS Link NLRIs with the
+PeerNode/PeerAdj/PeerSet SID attributes attached) is the natural
+follow-up and is tracked under the "Egress Peer Engineering
+(RFC 9086)" entry in `docs/ROADMAP.md`.
+
+First-hand references used: RFC 9086 §3.1 / §3.2 (Node Descriptor
+sub-TLVs), §5 (BGP Peering SID TLV shape), §5.1 / §5.2 / §5.3
+(per-TLV semantics); RFC 6286 §4 (BGP Identifier), RFC 5065 §4
+(Member-AS Number), RFC 8402 (BGP Peering Segments — PeerNode,
+PeerAdj, PeerSet definitions); the IANA BGP-LS NLRI Types and
+BGP-LS NLRI/Attribute TLVs registries (Protocol-ID 7 = BGP, TLV
+516/517/1101/1102/1103).
+
 ### Changed (CI)
 
 **RISC-V CI matrix** (`ci`, [issue #65](https://github.com/TES286-org/librouting/issues/65)).

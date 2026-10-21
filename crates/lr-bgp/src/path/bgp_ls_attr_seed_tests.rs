@@ -24,6 +24,56 @@ mod seeds {
             "srv6_sid_structure.bin",
             &[0x04, 0xE4, 0x00, 0x04, 0x20, 0x10, 0x10, 0x00],
         ),
+        // RFC 9086 §5 Egress Peer Engineering seeds. Each seed is one
+        // TLV in the BGP-LS Attribute value stream. The codec accepts
+        // length 7 (label form, V flag set) and length 8 (index form,
+        // V flag clear); any other length or V-flag/length
+        // combination falls through to Unknown — the round-trip is
+        // byte-exact in all cases (Unknown preserves the raw Tlv).
+        (
+            "peer_node_sid_label.bin",
+            &[
+                0x04, 0x4D, 0x00, 0x07, 0xC0, 0x05, 0x00, 0x00, 0x00, 0x10, 0x01,
+            ],
+        ),
+        (
+            "peer_adj_sid_index.bin",
+            &[
+                0x04, 0x4E, 0x00, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03,
+            ],
+        ),
+        (
+            "peer_set_sid_label.bin",
+            &[
+                0x04, 0x4F, 0x00, 0x07, 0xD0, 0xC8, 0x00, 0x00, 0xFF, 0xFF, 0xFF,
+            ],
+        ),
+        // Length 7 but V flag clear — inconsistent with RFC 9086 §5.
+        // The codec falls through to Unknown; the round-trip is
+        // byte-exact.
+        (
+            "peer_node_sid_inconsistent_v.bin",
+            &[
+                0x04, 0x4D, 0x00, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x10, 0x01,
+            ],
+        ),
+        // Length 9 — RFC 9086 §5 only permits 7 or 8. Falls through
+        // to Unknown; the round-trip is byte-exact.
+        (
+            "peer_adj_sid_wrong_length.bin",
+            &[
+                0x04, 0x4E, 0x00, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+            ],
+        ),
+        // Non-zero reserved field. RFC 9086 §5 says it MUST be zero
+        // on originate and ignored on receive — the codec preserves
+        // the raw bytes so the round-trip is byte-exact.
+        (
+            "peering_sid_nonzero_reserved.bin",
+            &[
+                0x04, 0x4D, 0x00, 0x07, 0xC0, 0x05, 0xAB, 0xCD, 0x00, 0x10, 0x01,
+            ],
+        ),
     ];
 
     #[test]

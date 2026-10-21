@@ -150,12 +150,35 @@ mirror (`lr-osroute::seg6_route`). A policy that will not resolve installs
 nothing. Done when a controller's policy steers traffic through an lr
 daemon, and withdrawal removes both the route and the kernel entry.
 
-**Egress Peer Engineering (RFC 9085).** Partial.
-The BGP-LS codec above is the prerequisite. What remains is the EPE-specific
-NLRI and attributes: peer node and peer adjacency segments with their SIDs,
-advertised so a controller can steer across a chosen inter-AS link or toward
-a chosen peer. Done when a controller learns those segments from lr and the
-data plane can push traffic onto them.
+**Egress Peer Engineering (RFC 9086).** Partial.
+The BGP-LS codec above is the prerequisite, and the codec half of this
+work has now landed: the BGP-LS Attribute codec in
+`lr-bgp::path::bgp_ls_attr` models the three SR-MPLS BGP Peering SID
+TLVs from RFC 9086 §5 — PeerNode SID (type 1101), PeerAdj SID (type
+1102), PeerSet SID (type 1103) — sharing a single `BgpPeeringSid`
+shape (V/L/B/P flag bits, weight, reserved, and a variable
+SID/Index/Label that carries either a 3-byte local MPLS label with
+the V flag set or a 4-byte SRGB index with the V flag clear). The
+matching Node Descriptor sub-TLVs from RFC 9086 §3.1 / §3.2 — BGP
+Router-ID (TLV 516) and Member-AS Number (TLV 517) — are modelled in
+`lr-bgp::path::bgp_ls::NodeDescriptorSubTlv` so a BGP-LS Link NLRI
+whose Protocol-ID is `Bgp` can round-trip byte-for-byte. The codec
+preserves every byte (including the 2-byte reserved field on the
+Peering SID) so the round-trip is byte-exact even when an originator
+violates the "MUST be zero on originate" constraint; an inconsistent
+V-flag/length combination falls through to `Unknown` and still
+round-trips.
+
+What remains is the daemon-side EPE projection: walking the daemon's
+BGP peer sessions, emitting one BGP-LS Link NLRI per session (carrying
+the BGP Router-ID and Member-AS sub-TLVs in the Local / Remote Node
+Descriptors), and attaching the PeerNode SID (and optionally PeerAdj
+SID, PeerSet SID) BGP-LS Attribute TLVs to the projected NLRI. The
+projection is the peer of the OSPF LSDB → BGP-LS projection in
+`lr-router::instance::lsdb_to_bgpls`; the daemon ticker integration
+is the peer of `BgplsDriver` in `lr-cli::daemon`. Done when a
+controller learns those segments from lr and the data plane can push
+traffic onto them.
 
 ## Scaling
 
