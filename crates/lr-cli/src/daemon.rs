@@ -3153,15 +3153,27 @@ fn pump_session(
 }
 
 /// BGP-LS projection driver (issue #60 daemon wiring + End.X
-/// follow-up). Owned by the ticker thread; one pass per 50 ms tick
-/// polls each configured OSPF area's `topology_version` against the
-/// cached value and, on change, runs [`DefaultRouter::bgpls_republish`]
-/// to push an incremental MP_REACH / MP_UNREACH UPDATE of the plain
-/// NLRIs (Node / Link / Prefix + SRv6 End SID) to every BGP-LS session,
-/// and [`DefaultRouter::bgpls_republish_end_x`] to push the End.X /
+/// follow-up, plus the Egress Peer Engineering follow-up that
+/// projects the daemon's BGP peer sessions). Owned by the ticker
+/// thread; one pass per 50 ms tick polls each configured OSPF area's
+/// `topology_version` against the cached value and, on change, runs
+/// [`DefaultRouter::bgpls_republish`] to push an incremental
+/// MP_REACH / MP_UNREACH UPDATE of the plain NLRIs (Node / Link /
+/// Prefix + SRv6 End SID) to every BGP-LS session, and
+/// [`DefaultRouter::bgpls_republish_end_x`] to push the End.X /
 /// LAN End.X NLRIs paired with their BGP-LS Attribute (RFC 9514 §7
 /// SRv6 Endpoint Behavior) — one UPDATE per End.X NLRI since each
 /// carries its own attribute.
+///
+/// After the area walk, the driver also polls the daemon's BGP
+/// session identity hash ([`DefaultRouter::bgp_session_identity_hash`])
+/// and, on change, runs [`DefaultRouter::bgpls_republish_epe`] to
+/// push an incremental MP_REACH / MP_UNREACH UPDATE of the EPE Link
+/// NLRI set (RFC 9086 §3 + §5 — one NLRI per Established BGP peer
+/// session, paired with a BGP-LS Attribute carrying the PeerNode
+/// SID) to every BGP-LS session. The EPE projection is router-wide
+/// (not per-area) so it lives at the driver level, not in the
+/// per-area cache.
 ///
 /// `areas` is the configured subset (an empty list means "every area
 /// the router holds"); `as_number` and `bgp_ls_id` are the BGP-LS
@@ -3169,12 +3181,25 @@ fn pump_session(
 /// cache holds the last `topology_version` seen and the last projected
 /// NLRI set (plain NLRIs and End.X pairs separately) so the next pass
 /// computes a true diff against the new projection (not a full
-/// resend).
+/// resend). The driver-level `epe_pairs` cache and `epe_session_hash`
+/// mirror that for the EPE projection.
 pub(crate) struct BgplsDriver {
     as_number: u32,
     bgp_ls_id: u32,
     areas: Vec<u32>,
     cache: HashMap<u32, BgplsAreaCache>,
+    /// Last projected EPE `(BgpLsNlri, BgpLsAttr)` pair set, so
+    /// [`DefaultRouter::bgpls_republish_epe`] computes a true diff
+    /// against it. Router-wide — the EPE projection is not per-area.
+    epe_pairs: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )>,
+    /// Last seen [`DefaultRouter::bgp_session_identity_hash`] value.
+    /// The tick step re-projects the EPE NLRI set only when this
+    /// changes — saves a per-tick full projection when the BGP
+    /// session table is stable.
+    epe_session_hash: u64,
 }
 
 /// Per-area BGP-LS driver cache. `version` is the last seen
@@ -3205,6 +3230,8 @@ impl BgplsDriver {
             bgp_ls_id: cfg.bgp_ls_id,
             areas: cfg.areas.clone(),
             cache: HashMap::new(),
+            epe_pairs: Vec::new(),
+            epe_session_hash: 0,
         }
     }
 
@@ -3212,7 +3239,10 @@ impl BgplsDriver {
     /// the router holds when `areas` is empty), compares each area's
     /// `topology_version` against the cached value, and runs
     /// `bgpls_republish` (plain NLRIs) and `bgpls_republish_end_x`
-    /// (End.X NLRIs with attribute) on change.
+    /// (End.X NLRIs with attribute) on change. After the area walk,
+    /// polls the daemon's BGP session identity hash and runs
+    /// `bgpls_republish_epe` (EPE Link NLRIs with PeerNode SID
+    /// attribute) when it changes.
     fn tick(&mut self, router: &mut DefaultRouter) {
         // Snapshot the area set under the write lock we already hold.
         // An empty configured list means "every area the router holds"
@@ -3276,6 +3306,32 @@ impl BgplsDriver {
                     x_diff.unchanged,
                 );
             }
+        }
+        // EPE projection: poll the daemon's BGP session identity
+        // hash and re-project on change. The EPE projection is
+        // router-wide (one NLRI per Established BGP peer session),
+        // so it does not fit in the per-area cache. The hash gate
+        // keeps the per-tick cost negligible when the BGP session
+        // table is stable.
+        let session_hash = router.bgp_session_identity_hash();
+        if session_hash == self.epe_session_hash {
+            return;
+        }
+        let epe_diff =
+            router.bgpls_republish_epe(self.as_number, self.bgp_ls_id, &mut self.epe_pairs);
+        self.epe_session_hash = session_hash;
+        if !epe_diff.added.is_empty()
+            || !epe_diff.removed.is_empty()
+            || !epe_diff.updated.is_empty()
+        {
+            log_info!(
+                Component::Bgp,
+                "bgp-ls epe republish: +{} -{} ^{} ~{}",
+                epe_diff.added.len(),
+                epe_diff.removed.len(),
+                epe_diff.updated.len(),
+                epe_diff.unchanged,
+            );
         }
     }
 }
