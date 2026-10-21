@@ -145,9 +145,99 @@ jobs:
           path: ${{ matrix.archive }}
           retention-days: 7
 
+  # CycloneDX SBOM generation — ROADMAP "Supply-chain follow-ups".
+  #
+  # One SBOM per top-level binary target the release ships: `lr`,
+  # `lr-daemon`, `lrctl` (the three CLI binaries under `lr-cli`) and
+  # `lr_ffi` (the C ABI cdylib/staticlib/rlib triple under `lr-ffi`).
+  # `cargo cyclonedx --describe binaries` is the right granularity:
+  # each binary's dependency closure is distinct, and a consumer
+  # embedding via the C ABI or running a CLI binary can pull the
+  # SBOM that names exactly the transitive crate set they ship.
+  #
+  # The output files are renamed to carry the release tag, so a
+  # consumer can pair the SBOM with the matching archive without
+  # parsing the JSON `metadata.component.version` field.
+  generate-sbom:
+    name: Generate CycloneDX SBOM
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Cache cargo registry + cargo-cyclonedx install
+        uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: "release-sbom"
+      - name: Install cargo-cyclonedx
+        # `--locked` so a future cargo-cyclonedx release does not
+        # break CI by depending on a newer Rust feature than the
+        # toolchain pin. The fallback without `--locked` keeps the
+        # install working if a transitive lockfile bump slips past
+        # the cargo-cyclonedx maintainers.
+        run: cargo install cargo-cyclonedx --locked || cargo install cargo-cyclonedx
+      - name: Generate SBOM per binary target
+        # `--all-features` mirrors the build matrix: every
+        # feature-flagged dependency the release binaries ship with
+        # is in the SBOM. `--spec-version 1.5` is the latest
+        # CycloneDX spec cargo-cyclonedx emits; `--describe
+        # binaries` produces one SBOM per `bin`/`cdylib`/`staticlib`
+        # target and skips `rlib`-only crates (which are not
+        # directly shippable).
+        run: |
+          cargo cyclonedx \
+            --format json \
+            --describe binaries \
+            --all-features \
+            --spec-version 1.5
+      - name: Stage and rename SBOMs
+        run: |
+          set -euo pipefail
+          mkdir -p sbom
+          TAG="${GITHUB_REF_NAME}"
+          cp crates/lr-cli/lr_bin.cdx.json \
+            "sbom/librouting-lr-${TAG}.cdx.json"
+          cp crates/lr-cli/lr-daemon_bin.cdx.json \
+            "sbom/librouting-lr-daemon-${TAG}.cdx.json"
+          cp crates/lr-cli/lrctl_bin.cdx.json \
+            "sbom/librouting-lrctl-${TAG}.cdx.json"
+          cp crates/lr-ffi/lr_ffi_cdylib-staticlib-rlib.cdx.json \
+            "sbom/librouting-lr-ffi-${TAG}.cdx.json"
+          # A single archive carrying every per-binary SBOM, so a
+          # consumer can pull one asset instead of four.
+          tar czf "librouting-sbom-${TAG}.tar.gz" -C sbom .
+          # Validate every SBOM is well-formed JSON and carries the
+          # CycloneDX marker before upload. A malformed file here
+          # fails the release early instead of shipping a corrupt
+          # SBOM to consumers.
+          for f in sbom/*.cdx.json; do
+            python3 -c "
+          import json, sys
+          with open('$f') as fp:
+              d = json.load(fp)
+          assert d.get('bomFormat') == 'CycloneDX', \
+              'bomFormat must be CycloneDX in $f'
+          assert 'serialNumber' in d, \
+              'missing serialNumber in $f'
+          assert 'metadata' in d and 'component' in d['metadata'], \
+              'missing metadata.component in $f'
+          print('ok: $f', d.get('specVersion'), d['metadata']['component'].get('name'))
+          "
+          done
+          ls -l sbom/ "librouting-sbom-${TAG}.tar.gz"
+      - name: Upload SBOM archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: librouting-sbom
+          path: |
+            librouting-sbom-${{ github.ref_name }}.tar.gz
+            sbom/*.cdx.json
+          retention-days: 7
+
   publish-release:
     name: Publish GitHub Release
-    needs: build-native
+    needs:
+      - build-native
+      - generate-sbom
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -161,6 +251,9 @@ jobs:
           set -euo pipefail
           mkdir -p flattened
           find release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \) -exec cp {} flattened/ \;
+          # Per-binary CycloneDX SBOMs and the combined SBOM archive.
+          find release-assets/librouting-sbom -type f -name '*.cdx.json' -exec cp {} flattened/ \;
+          find release-assets/librouting-sbom -type f -name 'librouting-sbom-*.tar.gz' -exec cp {} flattened/ \;
           cp include/lr_ffi.h flattened/
           cp include/librouting.hpp flattened/
           ls -l flattened/
@@ -177,13 +270,21 @@ jobs:
             Pre-built `lr-ffi` shared libraries for Linux (x86_64 and
             RISC-V), macOS (Intel and Apple Silicon) and Windows, the
             public C and C++ headers (`lr_ffi.h`, `librouting.hpp`),
-            and the `lr`, `lr-daemon` and `lrctl` CLI binaries.
+            the `lr`, `lr-daemon` and `lrctl` CLI binaries, and a
+            CycloneDX SBOM per binary target.
 
             Each platform archive contains:
             - `liblr_ffi.{so,dylib,dll}` — the C ABI shared library
             - `liblr_ffi.a` (where emitted) — the static archive
             - `lr` / `lr-daemon` / `lrctl` (or `.exe` on Windows) — the CLI tools
             - `include/lr_ffi.h` + `include/librouting.hpp` — the headers
+
+            SBOMs (CycloneDX 1.5, JSON, one per binary target):
+            - `librouting-lr-${{ github.ref_name }}.cdx.json` — the `lr` inspection CLI
+            - `librouting-lr-daemon-${{ github.ref_name }}.cdx.json` — the `lr-daemon` reference daemon
+            - `librouting-lrctl-${{ github.ref_name }}.cdx.json` — the `lrctl` operational CLI
+            - `librouting-lr-ffi-${{ github.ref_name }}.cdx.json` — the `lr-ffi` C ABI library
+            - `librouting-sbom-${{ github.ref_name }}.tar.gz` — every per-binary SBOM in one archive
 
             See `docs/RELEASE-PLAN.md` for the semver policy, the
             API-freeze criteria, and the post-1.0 governance rules.
