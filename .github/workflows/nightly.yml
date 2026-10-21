@@ -267,6 +267,16 @@ jobs:
         # The latest `v*` tag is the semver baseline. The output
         # is shared with both `cargo public-api diff` and
         # `cargo semver-checks --baseline-rev`.
+        #
+        # If the workspace version in Cargo.toml is AHEAD of the
+        # latest tag (a release-cut branch — the version has been
+        # bumped but the new tag has not been pushed yet), the
+        # semver-checks gate is skipped too. The new tag will start
+        # pointing at the bumped version's commit once it lands; at
+        # that point the gate becomes blocking again. Skipping the
+        # gate during the release-cut window avoids a chicken-and-
+        # egg where the gate would always fail between the version
+        # bump and the tag push.
         id: latest-tag
         run: |
           set -euo pipefail
@@ -274,10 +284,24 @@ jobs:
           if [ -z "$TAG" ]; then
             echo "no v* tag found; skipping API diff (first release not yet cut)"
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=no_tag" >> "$GITHUB_OUTPUT"
           else
             echo "Latest tag: $TAG"
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            # Compare the workspace version in Cargo.toml to the
+            # tag. If the workspace version is ahead, this is a
+            # release-cut branch — the version bump is the very
+            # change that clears any pre-existing semver debt.
+            WORKSPACE=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+            TAG_VER=${TAG#v}
+            if [ "$WORKSPACE" != "$TAG_VER" ] && \
+               printf '%s\n%s\n' "$TAG_VER" "$WORKSPACE" | sort -V -C; then
+              echo "release-cut in flight: workspace $WORKSPACE is ahead of $TAG; skipping semver gate"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "skip_reason=release_cut" >> "$GITHUB_OUTPUT"
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - name: cargo public-api diff (latest tag → HEAD)
         # Per-crate diff against the latest tag. The output is the
@@ -328,6 +352,12 @@ jobs:
         # the rolling snapshot a maintainer diffs against the
         # previous night's run to spot drift that landed through
         # several PRs that individually did not break semver.
+        #
+        # The gate is skipped on a release-cut branch (the
+        # workspace version in Cargo.toml is ahead of the latest
+        # tag — the version bump IS the change that clears the
+        # debt). See the `Resolve the latest tag` step above for
+        # the skip-condition logic.
         if: steps.latest-tag.outputs.skip != 'true'
         run: |
           set -euo pipefail
