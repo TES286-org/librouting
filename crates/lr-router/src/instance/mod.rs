@@ -88,6 +88,14 @@ mod ospf_ops;
 /// controller needs to rebuild the IGP graph. Layer 2 of issue #60.
 pub mod lsdb_to_bgpls;
 
+/// BGP peer sessions → BGP-LS Egress Peer Engineering Link NLRI
+/// projection (RFC 9086 §3 + §5). The peer of `lsdb_to_bgpls` for
+/// the daemon's BGP peer sessions: a pure function on a snapshot of
+/// the session table that produces the BGP-LS Link NLRI set an
+/// EPE-aware controller learns to steer traffic to the daemon's BGP
+/// peer sessions. Issue #60 follow-up.
+pub mod epe;
+
 use babel::*;
 use ospf::*;
 
@@ -5714,6 +5722,267 @@ impl DefaultRouter {
             }
         }
         diff
+    }
+
+    /// Incremental BGP-LS Egress Peer Engineering (RFC 9086) republish
+    /// for the daemon's BGP peer sessions (issue #60 EPE follow-up —
+    /// the daemon-side projection the codec PR #68 explicitly defers).
+    /// Snapshots the live BGP peer sessions, projects each Established
+    /// session onto a BGP-LS Link NLRI (RFC 7752 §3.3 NLRI Type 2,
+    /// Protocol-ID = `Bgp`) paired with a BGP-LS Attribute carrying
+    /// the PeerNode SID (RFC 9086 §5.1, mandatory) and any optional
+    /// PeerAdj / PeerSet SIDs the caller supplied, diffs against
+    /// `prev` via [`lsdb_to_bgpls::diff_bgpls_with_attrs`], and pushes
+    /// UPDATEs to every BGP session that negotiated the BGP-LS family.
+    ///
+    /// The projection walks `self.sessions` — the same map the FSM
+    /// updates — and selects every Established BGP session with a
+    /// learned peer BGP-ID and peer AS. Each session becomes one
+    /// [`epe::EpePeerSession`] input the projection runs on. The
+    /// session's local AS, local BGP-ID, peer AS, peer BGP-ID, and
+    /// local interface address (when known) are pulled directly from
+    /// the per-session [`lr_bgp::PeerConfig`]; the BGP-LS ID is the
+    /// daemon's `[bgp_ls]` speaker identity. The PeerNode SID is a
+    /// deterministic per-session placeholder (V flag clear, 4-byte
+    /// SRGB index derived from the session handle) — operator-
+    /// configurable SID values are a follow-up that does not change
+    /// the projection shape.
+    ///
+    /// `added` pairs ride MP_REACH_NLRI + BGP-LS Attribute via
+    /// [`BgpPeer::advertise_bgpls_with_attr`](lr_bgp::BgpPeer::advertise_bgpls_with_attr)
+    /// (one UPDATE per pair, since each EPE NLRI carries its own
+    /// attribute — same model the End.X projection uses); `removed`
+    /// NLRIs ride a single MP_UNREACH_NLRI via
+    /// [`BgpPeer::withdraw_bgpls`](lr_bgp::BgpPeer::withdraw_bgpls);
+    /// `updated` pairs ride MP_REACH_NLRI + BGP-LS Attribute (the
+    /// new attribute value re-advertises the NLRI's link-state
+    /// metadata without a withdraw — RFC 4271 §9.2.1.2 permits
+    /// attribute updates without MP_UNREACH_NLRI).
+    ///
+    /// The caller passes the previous projection as `prev` and
+    /// receives the new projection through `*prev = curr` so the next
+    /// republish call sees the new baseline — mirrors the
+    /// `bgpls_republish_end_x` pattern.
+    ///
+    /// Returns the [`lsdb_to_bgpls::BgplsAttrDiff`] so the caller can
+    /// account for the added / removed / updated / unchanged counts.
+    /// Returns an empty diff (no `added`, no `removed`, no `updated`)
+    /// when no BGP-LS session is up — in that case no UPDATEs are
+    /// sent (the projection is still computed and `*prev` is still
+    /// updated, so a BGP-LS session that comes up later triggers a
+    /// full resend on its first tick).
+    ///
+    /// [issue #60]: https://github.com/TES286-org/librouting/issues/60
+    pub fn bgpls_republish_epe(
+        &mut self,
+        as_number: u32,
+        bgp_ls_id: u32,
+        prev: &mut Vec<(
+            lr_bgp::path::bgp_ls::BgpLsNlri,
+            lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+        )>,
+    ) -> lsdb_to_bgpls::BgplsAttrDiff {
+        // Snapshot the session set. The projection does not consult
+        // the router again — a Vec<EpePeerSession> is a stable input
+        // even if `advertise_bgpls_with_attr` mutates session state
+        // mid-walk.
+        let sessions = self.epe_peer_sessions_snapshot(as_number, bgp_ls_id);
+        let curr = epe::project_epe_peer_sessions(&sessions);
+        let diff = lsdb_to_bgpls::diff_bgpls_with_attrs(prev, &curr);
+        // Update the caller's baseline before sending so a transient
+        // failure doesn't double-send on retry — same reason the End.X
+        // driver does the same.
+        *prev = curr;
+        if diff.added.is_empty() && diff.removed.is_empty() && diff.updated.is_empty() {
+            return diff;
+        }
+        // Walk every BGP session; for each Established session with
+        // BGP-LS in its `mp_families`, push the added/removed/updated
+        // EPE NLRIs. Sessions without BGP-LS see nothing — same per-
+        // peer family gating the plain projection uses.
+        for state in self.sessions.values_mut() {
+            let SessionState::Bgp { peer, conn, .. } = state else {
+                continue;
+            };
+            if !peer.is_established() {
+                continue;
+            }
+            if !peer.config().mp_families.iter().any(|f| f.is_bgp_ls()) {
+                continue;
+            }
+            let mut sent_any = false;
+            // RFC 7752 §3.3: the BGP-LS Attribute does not key on
+            // individual NLRIs in one UPDATE — emit one UPDATE per
+            // EPE NLRI so each carries its own PeerNode SID / flags /
+            // weight. Same model the End.X driver uses for SRv6
+            // End.X SIDs.
+            for (nlri, attr) in &diff.added {
+                if peer.advertise_bgpls_with_attr(std::slice::from_ref(nlri), attr) {
+                    sent_any = true;
+                }
+            }
+            for (nlri, attr) in &diff.updated {
+                if peer.advertise_bgpls_with_attr(std::slice::from_ref(nlri), attr) {
+                    sent_any = true;
+                }
+            }
+            if !diff.removed.is_empty() && peer.withdraw_bgpls(&diff.removed) {
+                sent_any = true;
+            }
+            if sent_any {
+                let bytes = peer.drain_outgoing();
+                if !bytes.is_empty() {
+                    conn.put_output(&bytes);
+                }
+            }
+        }
+        diff
+    }
+
+    /// Snapshot the live BGP peer sessions into EPE projection inputs.
+    /// Returns one [`epe::EpePeerSession`] per Established BGP session
+    /// with a learned peer BGP-ID and peer AS, in `BTreeMap` key
+    /// order (the session-table iteration order — deterministic for
+    /// tests).
+    ///
+    /// The PeerNode SID is a deterministic per-session placeholder:
+    /// `V = 0` (SRGB index form), `L = 0`, `B = 0`, `P = 0`, weight 0,
+    /// reserved 0, SRGB index = `session_handle as u32`. This gives
+    /// the controller a stable identity per session that a follow-up
+    /// can bind to real operator-configured labels without changing
+    /// the projection shape. The placeholder is chosen over `V = 1`
+    /// (label form) because lr does not yet own an SR-MPLS label
+    /// allocation surface, so emitting a label would imply a
+    /// forwarding-plane contract the daemon does not yet honour.
+    fn epe_peer_sessions_snapshot(
+        &self,
+        as_number: u32,
+        bgp_ls_id: u32,
+    ) -> Vec<epe::EpePeerSession> {
+        use lr_bgp::path::bgp_ls_attr::{BgpPeeringSid, BgpPeeringSidFlags, BgpPeeringSidValue};
+        let mut out = Vec::new();
+        for (&handle, state) in &self.sessions {
+            let SessionState::Bgp { peer, .. } = state else {
+                continue;
+            };
+            if !peer.is_established() {
+                continue;
+            }
+            // A session that has not yet completed OPEN (no peer
+            // BGP-ID / peer AS learned) cannot be projected — RFC
+            // 9086 §3.1 names the BGP Router-ID as the Local / Remote
+            // Node Descriptor's identity sub-TLV.
+            let Some(peer_bgp_id) = peer.peer_bgp_id() else {
+                continue;
+            };
+            let Some(peer_as) = peer.peer_as() else {
+                continue;
+            };
+            let cfg = peer.config();
+            let local_as = cfg.local_as.as_u32();
+            let local_bgp_id = cfg.local_bgp_id.as_u32();
+            // Local interface address, when known, rides the Link
+            // Descriptor's IPv4/IPv6 Interface Address sub-TLV.
+            let (local_v4, local_v6) = match cfg.local_address {
+                Some(lr_core::addr::IpAddr::V4(b)) => (Some(b), None),
+                Some(lr_core::addr::IpAddr::V6(b)) => (None, Some(b)),
+                None => (None, None),
+            };
+            // Peer confederation membership is not negotiated in
+            // OPEN; the operator's per-peer config would carry it in
+            // a follow-up. The local speaker's confederation member
+            // AS is `cfg.confederation_member` (RFC 5065 §4) — true
+            // when the local speaker is itself inside a
+            // confederation.
+            let local_confederation_member = if cfg.confederation_member {
+                Some(local_as)
+            } else {
+                None
+            };
+            // PeerNode SID placeholder: V flag clear (index form),
+            // SRGB index = the session handle. Stable across
+            // projection runs for the same live session; changes
+            // only if the daemon tears the session down and brings
+            // up a fresh one with a new handle.
+            let peer_node_sid = BgpPeeringSid {
+                flags: BgpPeeringSidFlags::from_raw(0),
+                weight: 0,
+                reserved: 0,
+                sid: BgpPeeringSidValue::Index(handle as u32),
+            };
+            out.push(epe::EpePeerSession {
+                local_as,
+                local_bgp_id,
+                bgp_ls_id,
+                peer_as: peer_as.as_u32(),
+                peer_bgp_id: peer_bgp_id.as_u32(),
+                local_confederation_member,
+                peer_confederation_member: None,
+                local_address_v4: local_v4,
+                local_address_v6: local_v6,
+                remote_address_v4: None,
+                remote_address_v6: None,
+                peer_node_sid,
+                peer_adj_sid: None,
+                peer_set_sid: None,
+            });
+            // `as_number` (the daemon's BGP-LS speaker AS) overrides
+            // the per-session local_as when the daemon's [bgp_ls]
+            // block declares a different speaker AS than the BGP
+            // session's local AS. This matches the OSPF projection,
+            // which takes `as_number` from the [bgp_ls] config rather
+            // than from any individual BGP session.
+            let last = out.last_mut().unwrap();
+            last.local_as = as_number;
+        }
+        out
+    }
+
+    /// A cheap, deterministic hash of the currently-established BGP
+    /// session identities. The daemon ticker (see
+    /// [`BgplsDriver`](../../lr_cli/daemon/struct.BgplsDriver.html))
+    /// polls this once per tick and re-projects the EPE NLRI set
+    /// only when it changes — saves a per-tick full projection when
+    /// the session table is stable.
+    ///
+    /// The hash folds in every BGP session's `(handle, established,
+    /// peer_bgp_id, peer_as)` tuple, in `BTreeMap` iteration order.
+    /// A change in any of those four values bumps the hash; a
+    /// session whose `peer_bgp_id` is not yet known contributes
+    /// `(handle, false, 0, 0)` so the hash still changes the moment
+    /// OPEN completes.
+    pub fn bgp_session_identity_hash(&self) -> u64 {
+        let mut h: u64 = 0xcbf29ce484222325; // FNV-1a 64-bit offset basis
+        for (&handle, state) in &self.sessions {
+            // Skip non-BGP sessions entirely — an OSPF adjacency churn
+            // must not spuriously re-project the EPE NLRI set.
+            let SessionState::Bgp {
+                peer, established, ..
+            } = state
+            else {
+                continue;
+            };
+            let peer_bgp_id = peer.peer_bgp_id().map(|r| r.as_u32()).unwrap_or(0);
+            let peer_as = peer.peer_as().map(|a| a.as_u32()).unwrap_or(0);
+            // FNV-1a: xor the byte then multiply by the prime.
+            for b in handle.to_be_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in (*established as u8).to_be_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in peer_bgp_id.to_be_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+            for b in peer_as.to_be_bytes() {
+                h ^= b as u64;
+                h = h.wrapping_mul(0x100000001b3);
+            }
+        }
+        h
     }
 
     /// Surface one received Grace-LSA as an [`OspfGraceEvent`] (the
