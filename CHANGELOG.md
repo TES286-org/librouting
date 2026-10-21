@@ -13,7 +13,76 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — CycloneDX SBOM per release
+## [Unreleased] — Cosign keyless artifact signing
+
+The supply-chain follow-ups ROADMAP entry's cosign half lands in
+this change: every release artifact (platform archives, CycloneDX
+SBOMs, standalone headers) is now signed with cosign keyless
+signing via GitHub Actions OIDC, anchored at the Sigstore Fulcio
+certificate authority and recorded in the Rekor transparency log.
+A consumer can verify any artifact against the public Sigstore
+root without a project-held key.
+
+### Added
+
+**Per-artifact keyless signing** (`ci`, ROADMAP "Supply-chain
+follow-ups"). A new `sign-artifacts` job in
+`.github/workflows/release.yml` runs on every `v*` tag push,
+between the `generate-sbom` and `publish-release` jobs. The job:
+
+- Requests an OIDC token from GitHub Actions (gated on
+  `permissions.id-token: write`), which cosign exchanges at
+  Fulcio for a short-lived signing certificate. No long-lived
+  signing key lives in repository secrets.
+- Installs cosign via `sigstore/cosign-installer@v3` (major-pinned
+  action; the cosign CLI itself is allowed to move forward inside
+  the v2 line).
+- Downloads every platform archive from `build-native` and every
+  SBOM from `generate-sbom`, plus the standalone headers from the
+  repo, into a single staging tree.
+- Signs each file with `cosign sign-blob --yes --bundle <out>.bundle
+  <file>`. The `--bundle` flag produces a single DSSE-format file
+  (cosign 2.x's recommended shape) that carries the signature,
+  the Fulcio certificate, and the Rekor transparency log entry
+  together — a consumer needs only the bundle + the artifact +
+  cosign to verify, no separate `.sig` / `.pem` pair to keep in
+  sync.
+- Immediately runs `cosign verify-blob --bundle <out>.bundle
+  --certificate-identity-regexp
+  'https://github.com/TES286-org/librouting/.github/workflows/release.yml@refs/tags/.*'
+  --certificate-oidc-issuer https://token.actions.githubusercontent.com
+  <file>` against the workflow's own OIDC identity. The inline
+  verify catches any signing or transparency-log issue before the
+  bundle is uploaded — a broken bundle never reaches the GitHub
+  Release.
+- Uploads the bundle set as the `librouting-signatures` artifact
+  for the `publish-release` job to flatten into the draft GitHub
+  Release.
+
+The `publish-release` job now `needs: [build-native,
+generate-sbom, sign-artifacts]` and flattens every `*.bundle` into
+the draft GitHub Release alongside the platform archives, the
+SBOMs and the standalone headers. The release body enumerates the
+signature shape and the `cosign verify-blob` invocation a
+consumer runs to verify an artifact, including the
+`--certificate-identity-regexp` covering any `v*` tag the
+workflow is triggered on, so a consumer pairs `<file>` with
+`<file>.bundle` once and reuses the same command across releases.
+
+### Stability
+
+No Rust API change. No C ABI change. No daemon flag or config
+surface change. The signatures are purely a release-pipeline
+artifact; the library and the daemon binaries are untouched.
+
+### Out of scope
+
+- A static-analysis scan of the Rust sources — the third gap in
+  the ROADMAP "Supply-chain follow-ups" entry. The SBOM and
+  signing halves landed in PR #71 and this PR; the scan lands
+  in a separate PR.
+
+## [Unreleased — prior] — CycloneDX SBOM per release
 
 The supply-chain follow-ups ROADMAP entry named three gaps: a
 CycloneDX SBOM per release, `cosign` signatures over the release

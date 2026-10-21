@@ -270,8 +270,21 @@ sees the exact dependency set shipped. The workflow stages the
 SBOMs into clean `librouting-<binary>-<tag>.cdx.json` filenames
 and runs an inline JSON validation pass before upload, so a
 malformed SBOM fails the release early instead of shipping
-silently. Two gaps remain: `cosign` signatures over the release
-archives (the SBOM is generated but not yet signed), and a
+silently. Cosign keyless signing has landed alongside the SBOM:
+the `sign-artifacts` job in `release.yml` signs every release
+artifact (platform archives, SBOMs, standalone headers) with
+cosign keyless signing via GitHub Actions OIDC, anchored at the
+Sigstore Fulcio certificate authority and recorded in the Rekor
+transparency log. Each artifact gets a single DSSE `.bundle`
+file (cosign 2.x's recommended shape — the signature, the
+Fulcio certificate and the Rekor entry in one file), and the
+job runs an inline `cosign verify-blob` pass against the
+workflow's own OIDC identity before upload, so a broken bundle
+never reaches the GitHub Release. A consumer verifies with
+`cosign verify-blob --bundle <file>.bundle
+--certificate-identity-regexp 'https://github.com/TES286-org/librouting/.github/workflows/release.yml@refs/tags/.*'
+--certificate-oidc-issuer https://token.actions.githubusercontent.com <file>`;
+no project-held key is needed. One gap remains: a
 static-analysis scan of the Rust sources. Done when a release
 publishes a signed SBOM beside its archives, a consumer can
 verify an artifact against the signing identity, and the scan
