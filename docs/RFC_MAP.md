@@ -79,7 +79,7 @@ scope.
 
 | RFC | crate::module | what it implements |
 | --- | --- | --- |
-| 5880 | `lr-bfd::packet`, `lr-bfd::session` | packet codec and session FSM |
+| 5880 | `lr-bfd::packet`, `lr-bfd::session`, `lr-bfd::auth`, `lr-bfd::keyed_auth` | packet codec, session FSM, Simple Password auth (§4.2 / §6.7.2), Keyed MD5 / Keyed SHA1 / Meticulous Keyed MD5 / Meticulous Keyed SHA1 auth (§4.3 / §4.4 / §6.7.3 / §6.7.4) with anti-replay |
 | 5881 | `lr-osroute::bfd_transport` | single-hop sockets and the TTL receive check |
 | 5883 | `lr-osroute::bfd_transport` | multihop sessions on UDP 4784 |
 

@@ -13,7 +13,128 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — BGP-LS Attribute TLV codec + earlier BGP-LS work
+## [Unreleased] — BFD Keyed MD5 / Keyed SHA1 authentication
+
+The BFD auth surface completes: the four keyed-hash authentication
+types from RFC 5880 §4.3 / §4.4 — Keyed MD5 (type 2), Meticulous Keyed
+MD5 (type 3), Keyed SHA1 (type 4), Meticulous Keyed SHA1 (type 5) —
+now compute and verify their digests in-process behind the
+`keyed-auth` feature (on by default), bringing the BFD auth STATUS
+row from `partial` to `yes`. The previous release left the keyed-hash
+section layouts modelled in the wire codec but framed the digest
+computation as "embedder-supplied"; the embedder no longer has to
+roll its own MD5/SHA1 path.
+
+### Added
+
+**Keyed-hash auth module** (`feat`, addresses the `partial` BFD auth
+row in [`docs/STATUS.md`](docs/STATUS.md)). A new
+`lr-bfd::keyed_auth` module owns the digest computation, the
+per-session sequence-number state (`bfd.XmitAuthSeq`,
+`bfd.RcvAuthSeq`, `bfd.AuthSeqKnown`) and the anti-replay check the
+RFC requires on the receive side:
+
+- `BfdKeyedAuth::new(key_id, algorithm, secret)` constructs the
+  per-session auth state. The secret length is checked against the
+  algorithm's maximum (16 bytes for MD5, 20 for SHA1, RFC 5880 §6.7.3
+  / §6.7.4) and rejected with `None` if it is empty or too long.
+- `BfdSession::set_keyed_auth(Some(ka))` installs the keyed-hash
+  auth; `BfdSession::set_keyed_auth(None)` clears it. Additive over
+  the existing `BfdConfig::auth_key` (Simple Password): the keyed
+  auth takes precedence when both are configured (RFC 5880 §6.7 — a
+  packet carries one auth type per packet).
+- `BfdSession::keyed_auth()` exposes the installed state; a new
+  `BfdSession::config()` accessor exposes the live `BfdConfig`.
+- `BfdKeyedAuth::sign_packet(&mut packet_bytes)` signs an encoded
+  outbound packet in place — the last `digest_len` bytes (the
+  shared key in the digest field) are replaced with the MD5/SHA1
+  digest over the full packet.
+- `BfdKeyedAuth::verify_inbound(received_bytes, &section,
+  detect_mult)` verifies an inbound packet: it rebuilds the pre-hash
+  packet by overwriting the trailing digest with the shared key,
+  recomputes the hash, and compares against the received digest;
+  on a match the receive sequence state advances and the
+  anti-replay window is enforced. Returns `false` (without mutating
+  state) on any type/key-id/length mismatch, sequence outside the
+  `[last, last + 3*DetectMult]` (non-Meticulous) or `[last+1,
+  last + 3*DetectMult]` (Meticulous) circular range, or digest
+  mismatch.
+
+The session wires the new module into `check_auth` (raw packet bytes
+now plumbed through `feed_bytes` → `on_packet` → `check_auth` so the
+hash can be recomputed over the full wire form) and `enqueue_packet`
+(signs in place after `BfdCodec::encode` produces the key-bearing
+packet). The codec itself is unchanged.
+
+### Performance note
+
+The MD5 path uses the `md5` crate's standalone `compute` function
+(no hasher state object); the SHA-1 path uses the `sha1` crate's
+`Sha1::digest` through the `Digest` trait. Both are `no_std`-friendly
+with `default-features = false`, so the `keyed-auth` feature does
+not pull `std` in. The auth section wire framing in `lr-bfd::auth`
+is unchanged; only the digest computation is new.
+
+### Tests
+
+8 new unit tests in `keyed_auth.rs` cover the algorithm constants,
+the constructor length bounds, MD5 / Meticulous SHA1 sign-and-verify
+round-trips, wrong-key-id rejection, wrong-secret rejection, the
+circular anti-replay range arithmetic (including the wrap-through-0
+case), and the anti-replay window bounded by `Detect Mult`.
+
+9 new session integration tests in `session_tests.rs` cover the
+full session path: signed outbound carries the digest (not the key),
+two sessions reach Up together under Keyed MD5 and under Meticulous
+Keyed SHA1, tampered digest is rejected with `AuthFailed` without
+advancing the FSM, wrong secret / wrong key ID / missing section are
+all rejected, clearing the keyed auth reverts to no-auth, and the
+keyed auth accessor exposes the installed state.
+
+A new `bfd_auth` cargo-fuzz target under `fuzz/fuzz_targets/`
+exercises the codec + `verify_inbound` path against arbitrary input
+(seeds committed under `fuzz/seeds/bfd_auth/`); the nightly
+workflow runs it for 5 minutes alongside the existing three
+targets. Initial 18M-iteration smoke run produced no panics.
+
+### Stability
+
+Additive only — no breaking changes.
+
+- **Public Rust API (Tier 1)**: new `keyed_auth::BfdKeyedAuth` struct,
+  new `keyed_auth::KeyedAuthAlgorithm` enum, new
+  `BfdSession::set_keyed_auth` method, new `BfdSession::keyed_auth`
+  accessor, new `BfdSession::config` accessor, new public methods on
+  `BfdKeyedAuth` (`auth_section_for_tx`, `advance_xmit_seq`,
+  `sign_packet`, `verify_inbound`, and the read accessors
+  `key_id` / `algorithm` / `xmit_seq` / `rcv_auth_seq_known` /
+  `rcv_auth_seq`). No existing signature changes.
+- **C ABI (Tier 2)**: unchanged — the new types are Rust-only; the
+  `lr-ffi` C header regenerates byte-identical to the prior release.
+- **Daemon / config surface (Tier 3)**: unchanged — keyed-hash auth
+  is installed programmatically through `BfdSession::set_keyed_auth`.
+  Daemon CLI / TOML surfaces that surface it to operators are an
+  additive follow-up that does not change the wire path.
+
+### First-hand references used
+
+- RFC 5880 §4.3 (Keyed MD5 / Meticulous Keyed MD5 section format,
+  Auth Len 24, 16-byte digest).
+- RFC 5880 §4.4 (Keyed SHA1 / Meticulous Keyed SHA1 section format,
+  Auth Len 28, 20-byte digest).
+- RFC 5880 §6.7.3 (transmit: shared key placed in Auth Key/Digest
+  field, MD5 computed over the full packet, digest replaces the
+  key; receive: replace digest with key, recompute, compare;
+  anti-replay window `[last, last + 3*DetectMult]` for non-Meticulous,
+  `[last+1, last + 3*DetectMult]` for Meticulous, circular 32-bit
+  space).
+- RFC 5880 §6.7.4 (Keyed SHA1 / Meticulous Keyed SHA1: same
+  procedure, SHA1 instead of MD5, 20-byte digest, Auth Len 28).
+- BIRD `proto/bfd/bfd.c` — keyed-MD5 / keyed-SHA1 sign and verify
+  paths, sequence advancement on every packet for both Meticulous
+  and non-Meticulous.
+
+## [Unreleased — prior] — BGP-LS Attribute TLV codec + earlier BGP-LS work
 
 Progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
 the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
