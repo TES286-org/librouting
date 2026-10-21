@@ -239,12 +239,27 @@ The tag push triggers `.github/workflows/release.yml`:
    `metadata.component` must all be present), and also bundles every
    per-binary SBOM into `librouting-sbom-<tag>.tar.gz`. The SBOM is
    the "what was in this release" record the supply-chain follow-ups
-   ROADMAP entry names; `cosign` signatures over the SBOM and the
-   archives remain open.
-3. **Publish job** — downloads every build artifact and the SBOM
-   bundle, flattens them with the standalone headers, and creates a
-   **draft** GitHub Release with auto-generated release notes and a
-   body linking back to this document.
+   ROADMAP entry names.
+3. **Cosign keyless signing** — signs every release artifact
+   (platform archives, SBOMs, standalone headers) with cosign
+   keyless signing via GitHub Actions OIDC. The signing identity
+   is the workflow's own OIDC token, anchored at the Sigstore
+   Fulcio certificate authority and recorded in the Rekor
+   transparency log. Each artifact gets a single DSSE `.bundle`
+   file (cosign 2.x's recommended shape: signature + Fulcio
+   certificate + Rekor entry in one file). The job runs an inline
+   `cosign verify-blob` pass against the workflow's own OIDC
+   identity before upload, so a broken bundle never reaches the
+   GitHub Release. A consumer verifies with `cosign verify-blob
+   --bundle <file>.bundle --certificate-identity-regexp
+   'https://github.com/TES286-org/librouting/.github/workflows/release.yml@refs/tags/.*'
+   --certificate-oidc-issuer https://token.actions.githubusercontent.com
+   <file>`; no project-held key is needed.
+4. **Publish job** — downloads every build artifact, the SBOM
+   bundle, and the signature bundles, flattens them with the
+   standalone headers, and creates a **draft** GitHub Release with
+   auto-generated release notes and a body linking back to this
+   document.
 
 The release stays **draft** until the maintainer reviews the notes, fills in the
 **Breaking changes** / **New features** / **Fixes** sections from the commit
