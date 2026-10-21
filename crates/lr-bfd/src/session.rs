@@ -42,6 +42,7 @@ use lr_core::time::Instant;
 use lr_core::timer::TimerQueue;
 
 use crate::auth::{AuthSection, AuthType};
+use crate::keyed_auth::BfdKeyedAuth;
 use crate::packet::{BfdCodec, BfdPacket, Diagnostic, PacketFlags, State};
 
 /// Session role: Active side probes with `your_disc=0`; Passive side
@@ -75,8 +76,11 @@ pub struct BfdConfig {
     pub role: SessionRole,
     /// Optional Simple Password authentication key (RFC 5880 §4.2).
     /// When set, outbound packets carry the auth section and inbound
-    /// packets must carry a matching one. The keyed-hash types are
-    /// framing-only (the embedder computes digests).
+    /// packets must carry a matching one. Keyed-hash authentication
+    /// (RFC 5880 §4.3 / §4.4) is installed separately through
+    /// [`BfdSession::set_keyed_auth`]; when both are configured the
+    /// keyed-hash auth takes precedence on the wire (the auth type
+    /// field selects one mechanism per packet, RFC 5880 §6.7).
     pub auth_key: Option<crate::auth::AuthKey>,
 }
 
@@ -174,6 +178,13 @@ pub struct BfdSession {
     /// xorshift32 state for tx jitter (deterministic per session).
     rng: u32,
     started: bool,
+    /// RFC 5880 §4.3 / §4.4 keyed-hash authentication state (Keyed MD5,
+    /// Meticulous Keyed MD5, Keyed SHA1, Meticulous Keyed SHA1).
+    /// Installed via [`BfdSession::set_keyed_auth`]; takes precedence
+    /// over `cfg.auth_key` (Simple Password) when present. `None`
+    /// without the `keyed-auth` feature — the field still exists so
+    /// session construction is feature-invariant.
+    keyed_auth: Option<BfdKeyedAuth>,
 }
 
 impl BfdSession {
@@ -208,6 +219,7 @@ impl BfdSession {
             last_tx_ms: 0,
             rng: my_disc.wrapping_mul(2_654_435_761) | 1,
             started: false,
+            keyed_auth: None,
         }
     }
 
@@ -266,9 +278,17 @@ impl BfdSession {
     pub fn feed_bytes(&mut self, now: Instant, bytes: &[u8]) -> Vec<BfdSessionEvent> {
         let mut events = Vec::new();
         let mut r = ReadBuf::new(bytes);
-        while let Ok(Some(pkt)) = self.codec.decode(&mut r) {
-            let mut evs = self.on_packet(now, pkt);
-            events.append(&mut evs);
+        loop {
+            let start = r.position();
+            match self.codec.decode(&mut r) {
+                Ok(Some(pkt)) => {
+                    let end = r.position();
+                    let raw = &bytes[start..end];
+                    let mut evs = self.on_packet(now, raw, pkt);
+                    events.append(&mut evs);
+                }
+                Ok(None) | Err(_) => break,
+            }
         }
         events
     }
@@ -334,6 +354,47 @@ impl BfdSession {
         self.timers.cancel_all();
         self.tx_armed = false;
         core::mem::take(&mut self.pending_events)
+    }
+
+    /// Install or clear keyed-hash authentication on this session
+    /// (RFC 5880 §4.3 / §4.4). When `Some(ka)` is installed, every
+    /// subsequent outbound control packet carries the keyed-hash auth
+    /// section with the shared key in the digest field, signed by the
+    /// computed MD5/SHA1 digest; every inbound packet is verified
+    /// against the configured key and the anti-replay window. Passing
+    /// `None` clears the keyed-hash auth and reverts to whatever
+    /// Simple Password (if any) is configured on
+    /// [`BfdConfig::auth_key`].
+    ///
+    /// The keyed-hash auth takes precedence over the Simple Password
+    /// on the wire when both are configured — the auth section carries
+    /// a single auth type per packet (RFC 5880 §6.7). The precedence
+    /// matters only at install time; on receive the session accepts
+    /// whichever auth type matches the active configuration.
+    ///
+    /// Sequence-number state (`bfd.XmitAuthSeq`, `bfd.RcvAuthSeq`,
+    /// `bfd.AuthSeqKnown`) is reset when a new `BfdKeyedAuth` is
+    /// installed — installing a new key rotates the auth material, so
+    /// the anti-replay window from the previous key must not carry
+    /// over (RFC 5880 §6.7.3 / §6.7.4 implicit on key rollover).
+    pub fn set_keyed_auth(&mut self, ka: Option<BfdKeyedAuth>) {
+        self.keyed_auth = ka;
+    }
+
+    /// The installed keyed-hash auth state, if any. Returns `None`
+    /// when the session has no keyed-hash auth installed (Simple
+    /// Password auth is exposed through [`BfdConfig::auth_key`] via
+    /// [`BfdSession::config`]).
+    pub fn keyed_auth(&self) -> Option<&BfdKeyedAuth> {
+        self.keyed_auth.as_ref()
+    }
+
+    /// Reference to the live [`BfdConfig`] the session was constructed
+    /// with. The Simple Password auth key, when present, lives on
+    /// `cfg.auth_key`; keyed-hash auth lives on the session itself via
+    /// [`BfdSession::set_keyed_auth`].
+    pub fn config(&self) -> &BfdConfig {
+        &self.cfg
     }
 
     /// Change timer parameters at runtime (§6.8.3). While the session
@@ -428,7 +489,12 @@ impl BfdSession {
         true
     }
 
-    fn on_packet(&mut self, now: Instant, pkt: BfdPacket) -> Vec<BfdSessionEvent> {
+    fn on_packet(
+        &mut self,
+        now: Instant,
+        raw_bytes: &[u8],
+        pkt: BfdPacket,
+    ) -> Vec<BfdSessionEvent> {
         // --- §6.8.6 MUST-discard rules, in order. ---
         // (Version and Length-field checks live in the codec.)
         if pkt.detect_mult == 0 {
@@ -458,8 +524,11 @@ impl BfdSession {
             return Vec::new();
         }
         // Authentication (§6.7): the A bit must match our config and,
-        // when set, the section must validate.
-        if !self.check_auth(&pkt) {
+        // when set, the section must validate. The keyed-hash types
+        // (RFC 5880 §4.3 / §4.4) need the raw packet bytes to
+        // recompute the digest; the Simple Password type compares the
+        // parsed section only.
+        if !self.check_auth(raw_bytes, &pkt) {
             return core::mem::take(&mut self.pending_events);
         }
 
@@ -571,10 +640,49 @@ impl BfdSession {
 
     /// §6.7 A-bit / section validation. Returns false (and queues an
     /// `AuthFailed` event) when the packet must be discarded.
-    fn check_auth(&mut self, pkt: &BfdPacket) -> bool {
+    ///
+    /// The auth-type selection mirrors RFC 5880 §6.7: a BFD Control
+    /// packet carries exactly one auth section, so the receiver
+    /// matches it against whichever auth surface is installed. The
+    /// keyed-hash auth (RFC 5880 §4.3 / §4.4) takes precedence when
+    /// installed via [`BfdSession::set_keyed_auth`]; otherwise the
+    /// Simple Password auth from [`BfdConfig::auth_key`] is matched
+    /// (RFC 5880 §6.7.2). When neither is configured, any auth section
+    /// on the wire is rejected (the §6.7 contract: A-bit and config
+    /// must agree).
+    fn check_auth(&mut self, raw_bytes: &[u8], pkt: &BfdPacket) -> bool {
         let mismatch = |events: &mut Vec<BfdSessionEvent>| {
             events.push(BfdSessionEvent::AuthFailed);
         };
+        // Keyed-hash auth takes precedence when installed.
+        if let Some(ka) = self.keyed_auth.as_mut() {
+            let Some(section) = pkt.auth.as_ref() else {
+                mismatch(&mut self.pending_events);
+                return false;
+            };
+            // §6.7.3 / §6.7.4: discard when the auth type does not
+            // match the configured keyed-hash type.
+            if section.auth_type != ka.algorithm().auth_type() {
+                mismatch(&mut self.pending_events);
+                return false;
+            }
+            // §6.7.3 / §6.7.4: discard when the Auth Key ID does not
+            // match the configured key.
+            if section.key_id != ka.key_id() {
+                mismatch(&mut self.pending_events);
+                return false;
+            }
+            // Anti-replay + digest verification in one call. The
+            // detect multiplier is the session's configured value
+            // (the RFC bounds the window by *the local* Detect Mult).
+            let detect_mult = self.cfg.detect_mult;
+            if !ka.verify_inbound(raw_bytes, section, detect_mult) {
+                mismatch(&mut self.pending_events);
+                return false;
+            }
+            return true;
+        }
+        // Simple Password auth (RFC 5880 §6.7.2).
         match (&self.cfg.auth_key, &pkt.auth) {
             (None, None) => true,
             (None, Some(_)) => {
@@ -630,10 +738,22 @@ impl BfdSession {
         if final_bit {
             flags |= PacketFlags::FINAL;
         }
-        let auth = self.cfg.auth_key.as_ref().map(|k| {
+        // RFC 5880 §6.7: the auth section carries one auth type per
+        // packet. The keyed-hash auth (§4.3 / §4.4) takes precedence
+        // over Simple Password (§4.2) when installed; the encode path
+        // produces the auth section with the shared key in the digest
+        // field, then `sign_packet` overwrites the key with the
+        // computed MD5/SHA1 digest in place.
+        let keyed = self.keyed_auth.is_some();
+        let auth = if let Some(ka) = self.keyed_auth.as_ref() {
             flags |= PacketFlags::AUTH;
-            AuthSection::simple_password(k.data.clone(), k.key_id)
-        });
+            Some(ka.auth_section_for_tx())
+        } else {
+            self.cfg.auth_key.as_ref().map(|k| {
+                flags |= PacketFlags::AUTH;
+                AuthSection::simple_password(k.data.clone(), k.key_id)
+            })
+        };
         let p = BfdPacket {
             diag: self.local_diag,
             state: self.state,
@@ -647,10 +767,16 @@ impl BfdSession {
             auth,
         };
         self.last_tx_ms = now.0;
-        let mut buf = [0u8; 64];
+        let mut buf = [0u8; 96];
         let mut w = WriteBuf::new(&mut buf);
         if self.codec.encode(&p, &mut w).is_ok() {
             let n = w.position();
+            if keyed {
+                if let Some(ka) = self.keyed_auth.as_mut() {
+                    ka.sign_packet(&mut buf[..n]);
+                    ka.advance_xmit_seq();
+                }
+            }
             self.out_buf.extend_from_slice(&buf[..n]);
         }
     }

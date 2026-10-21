@@ -84,18 +84,66 @@ from the RFC 5881 §4 range.
 | `required_min_rx_interval` | 1 000 000 µs | What we can receive at |
 | `required_min_echo_interval` | 0 | 0 disables the echo function |
 | `role` | `SessionRole::Active` | Passive waits for the peer's first packet (§6.1) |
-| `auth_key` | none | RFC 5880 §4.2 authentication section |
+| `auth_key` | none | RFC 5880 §4.2 Simple Password authentication section |
 
 `SessionRole::Active` sends with `your_disc = 0` until a packet carrying
 our discriminator arrives. Single-hop BFD requires both sides to be
 Active.
+
+## Authentication
+
+`BfdConfig::auth_key` installs RFC 5880 §4.2 Simple Password auth: the
+session signs every outbound packet with the section and discards
+every inbound packet whose section does not match the configured key
+ID and password.
+
+For the keyed-hash types (RFC 5880 §4.3 / §4.4 — Keyed MD5, Meticulous
+Keyed MD5, Keyed SHA1, Meticulous Keyed SHA1), install a
+[`BfdKeyedAuth`](../../crates/lr-bfd/src/keyed_auth.rs) on the session
+after construction:
+
+```rust
+use lr_bfd::{
+    keyed_auth::{BfdKeyedAuth, KeyedAuthAlgorithm},
+    BfdConfig, BfdSession, SessionRole,
+};
+use lr_core::time::Instant;
+
+let cfg = BfdConfig {
+    detect_mult: 3,
+    desired_min_tx_interval: 100_000,
+    required_min_rx_interval: 100_000,
+    role: SessionRole::Active,
+    ..Default::default()
+};
+let mut session = BfdSession::new(cfg, 0x1111_1111);
+// Install Meticulous Keyed SHA1 with key ID 1 and a 16-byte secret.
+let auth = BfdKeyedAuth::new(1, KeyedAuthAlgorithm::MeticulousKeyedSha1,
+    b"shared-secret-16b".to_vec()).unwrap();
+session.set_keyed_auth(Some(auth));
+let _ = session.start(Instant(0));
+```
+
+The session then signs every outbound packet (the shared key is
+placed in the digest field, the hash is computed over the full
+packet, and the digest replaces the key before transmission) and
+verifies every inbound packet (the digest field is replaced with
+the shared key, the hash is recomputed and compared against the
+received digest). Anti-replay is enforced: the sequence number must
+lie within the circular `[last, last + 3*DetectMult]` range for the
+non-Meticulous types, or `[last+1, last + 3*DetectMult]` for the
+Meticulous types. `BfdSession::set_keyed_auth(None)` clears the
+keyed-hash auth and reverts to whatever Simple Password (if any) is
+configured on `BfdConfig::auth_key`.
 
 ## RFCs
 
 - RFC 5880 — the base protocol: session states (§6.1), Poll/Final (§6.5),
   timer negotiation and the transmit floor (§6.8.3), detection time
   (§6.8.4), the state machine and its MUST-discard rules (§6.8.6),
-  jitter (§6.8.7), authentication (§4.2).
+  jitter (§6.8.7), Simple Password authentication (§4.2 / §6.7.2),
+  Keyed MD5 / Meticulous Keyed MD5 authentication (§4.3 / §6.7.3),
+  Keyed SHA1 / Meticulous Keyed SHA1 authentication (§4.4 / §6.7.4).
 - RFC 5881 — single-hop BFD: the port and the requirement that both
   sides be Active (§3), the source-port range and TTL 255 (§4), the
   receive-side TTL check (§5).

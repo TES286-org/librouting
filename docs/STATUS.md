@@ -124,7 +124,8 @@ files of the `lr-cli` binary crate, which is not a library.
 | Capability | Status | Module |
 | --- | --- | --- |
 | BFD packet codec and session FSM (RFC 5880) | yes | `lr-bfd::packet`, `lr-bfd::session` |
-| BFD authentication sections | partial | `lr-bfd::auth` |
+| BFD Simple Password authentication (RFC 5880 §4.2 / §6.7.2) | yes | `lr-bfd::auth`, `lr-bfd::session::BfdConfig::auth_key` |
+| BFD Keyed MD5 / Meticulous Keyed MD5 / Keyed SHA1 / Meticulous Keyed SHA1 authentication (RFC 5880 §4.3 / §4.4 / §6.7.3 / §6.7.4) | yes | `lr-bfd::keyed_auth::BfdKeyedAuth`, `lr-bfd::session::BfdSession::set_keyed_auth` |
 | BMP codec, split feed, peer headers (RFC 7854) | yes | `lr-bmp` |
 | MRT TABLE_DUMP_V2 read and write, BGP4MP (RFC 6396) | yes | `lr-mrt` |
 | Route flap damping figure of merit (RFC 2439) | yes | `lr-damping` |

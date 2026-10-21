@@ -27,6 +27,7 @@ libfuzzer-sys = "0.4"
 # snapshot.
 lr-core = { path = "../crates/lr-core" }
 lr-bgp = { path = "../crates/lr-bgp", features = ["asn4", "mp_bgp", "addpath", "graceful_restart", "enhanced_rr", "extended_communities", "labeled_unicast", "bgp_ls"] }
+lr-bfd = { path = "../crates/lr-bfd", features = ["keyed-auth"] }
 lr-policy = { path = "../crates/lr-policy" }
 
 # Each `[[bin]]` below is one cargo-fuzz target. cargo-fuzz runs them
@@ -59,5 +60,11 @@ doc = false
 [[bin]]
 name = "roa_validate"
 path = "fuzz_targets/roa_validate.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "bfd_auth"
+path = "fuzz_targets/bfd_auth.rs"
 test = false
 doc = false

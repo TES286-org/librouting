@@ -20,9 +20,25 @@ categories = ["network-programming", "parser-implementations"]
 bench = false
 
 [features]
-default = ["std"]
+default = ["std", "keyed-auth"]
 std = ["lr-core/std"]
+# RFC 5880 §4.3 / §4.4 Keyed MD5 and Keyed SHA1 authentication
+# (transmit digest computation + receive digest verification +
+# anti-replay tracking). The wire framing for the auth section
+# itself is always available; this feature pulls in the `md5`,
+# `hmac` and `sha1` crypto dependencies the digest computation
+# needs. Off by default would leave the crate without the crypto
+# code; embedders that want the bare wire codec can disable it
+# with `--no-default-features`.
+keyed-auth = ["dep:md5", "dep:hmac", "dep:sha1"]
 
 [dependencies]
 lr-core = { workspace = true }
 bitflags.workspace = true
+# Crypto deps for RFC 5880 §4.3 / §4.4 keyed-hash authentication
+# (the `keyed-auth` feature). `md5` carries `default-features =
+# false` at the workspace level so the crate stays `no_std`-friendly
+# when this feature is on.
+md5 = { workspace = true, optional = true }
+hmac = { workspace = true, optional = true }
+sha1 = { workspace = true, optional = true }

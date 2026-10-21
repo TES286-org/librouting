@@ -1,5 +1,7 @@
 use super::*;
 
+use crate::keyed_auth::{BfdKeyedAuth, KeyedAuthAlgorithm};
+
 fn cfg_100ms() -> BfdConfig {
     BfdConfig {
         detect_mult: 3,
@@ -588,4 +590,232 @@ fn admin_down_discards_packets() {
     let p = make_packet(State::Down, 0x22222222, 0);
     assert!(s.feed_bytes(Instant(10), &encode_packet(&p)).is_empty());
     assert_eq!(s.remote_discriminator(), 0);
+}
+
+// ---- Keyed-hash authentication (RFC 5880 §4.3 / §4.4) ----
+//
+// The keyed-hash tests exercise the full session path: the outbound
+// packet carries the auth section with the digest computed in place,
+// the inbound packet is verified against the shared key, and the
+// anti-replay state advances through the session's own
+// `set_keyed_auth` install.
+
+fn keyed_md5_auth() -> BfdKeyedAuth {
+    BfdKeyedAuth::new(5, KeyedAuthAlgorithm::KeyedMd5, b"shared-secret".to_vec()).unwrap()
+}
+
+fn keyed_sha1_meticulous_auth() -> BfdKeyedAuth {
+    BfdKeyedAuth::new(
+        3,
+        KeyedAuthAlgorithm::MeticulousKeyedSha1,
+        b"another-secret".to_vec(),
+    )
+    .unwrap()
+}
+
+/// RFC 5880 §6.7.3 / §6.7.4: when keyed-hash auth is installed, the
+/// outbound packet carries the A bit and the auth section with the
+/// peer-derivable digest (the shared key is never on the wire). The
+/// digest on the wire is NOT the key.
+#[test]
+fn keyed_md5_signed_outbound_carries_digest_not_key() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = s.start(Instant(0));
+    let out = s.drain_outgoing();
+    let p = decode_first(&out);
+    assert!(p.flags.contains(PacketFlags::AUTH));
+    let section = p.auth.as_ref().unwrap();
+    assert_eq!(section.auth_type, AuthType::KeyedMd5);
+    assert_eq!(section.key_id, 5);
+    // 16-byte digest, not the 12-byte shared secret.
+    assert_eq!(section.data.len(), 16);
+    assert_ne!(&section.data[..], b"shared-secret");
+    // Auth Len = 24 (RFC 5880 §4.3).
+    assert_eq!(p.length(), 24 + 24);
+}
+
+/// Two sessions with mirrored keyed-hash auth reach Up together — the
+/// full BFD handshake (Down → Init → Up) runs under keyed MD5 with
+/// per-packet sequence advancement on both sides.
+#[test]
+fn two_sessions_reach_up_with_keyed_md5() {
+    let mut a = BfdSession::new(cfg_100ms(), 0x11111111);
+    let mut b = BfdSession::new(cfg_100ms(), 0x22222222);
+    a.set_keyed_auth(Some(keyed_md5_auth()));
+    b.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = a.start(Instant(0));
+    let _ = b.start(Instant(0));
+    let mut t = 0u64;
+    for _ in 0..10 {
+        let out_a = a.drain_outgoing();
+        if !out_a.is_empty() {
+            let _ = b.feed_bytes(Instant(t), &out_a);
+        }
+        let out_b = b.drain_outgoing();
+        if !out_b.is_empty() {
+            let _ = a.feed_bytes(Instant(t), &out_b);
+        }
+        if a.is_up() && b.is_up() {
+            break;
+        }
+        t += 5;
+        let _ = a.tick(Instant(t));
+        let _ = b.tick(Instant(t));
+    }
+    assert!(a.is_up(), "A stuck in {}", a.state());
+    assert!(b.is_up(), "B stuck in {}", b.state());
+}
+
+/// Meticulous Keyed SHA1 round-trip between two sessions: the strict
+/// anti-replay rule (seq > last) does not deadlock two conforming
+/// peers because each side's transmit sequence advances on every
+/// packet.
+#[test]
+fn two_sessions_reach_up_with_meticulous_sha1() {
+    let mut a = BfdSession::new(cfg_100ms(), 0x11111111);
+    let mut b = BfdSession::new(cfg_100ms(), 0x22222222);
+    a.set_keyed_auth(Some(keyed_sha1_meticulous_auth()));
+    b.set_keyed_auth(Some(keyed_sha1_meticulous_auth()));
+    let _ = a.start(Instant(0));
+    let _ = b.start(Instant(0));
+    let mut t = 0u64;
+    for _ in 0..10 {
+        let out_a = a.drain_outgoing();
+        if !out_a.is_empty() {
+            let _ = b.feed_bytes(Instant(t), &out_a);
+        }
+        let out_b = b.drain_outgoing();
+        if !out_b.is_empty() {
+            let _ = a.feed_bytes(Instant(t), &out_b);
+        }
+        if a.is_up() && b.is_up() {
+            break;
+        }
+        t += 5;
+        let _ = a.tick(Instant(t));
+        let _ = b.tick(Instant(t));
+    }
+    assert!(a.is_up(), "A stuck in {}", a.state());
+    assert!(b.is_up(), "B stuck in {}", b.state());
+}
+
+/// A packet whose digest has been tampered with is rejected with
+/// `AuthFailed` and does not advance the FSM (RFC 5880 §6.7.3 /
+/// §6.7.4: "the digest does not match ... MUST be discarded").
+#[test]
+fn keyed_md5_tampered_digest_rejected() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = s.start(Instant(0));
+    let _ = s.drain_outgoing();
+    // Build a peer packet signed with the matching key — the session
+    // would accept this. Then tamper with one digest byte.
+    let mut peer = BfdSession::new(cfg_100ms(), 0x22222222);
+    peer.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = peer.start(Instant(0));
+    let mut wire = peer.drain_outgoing();
+    // The last 16 bytes are the MD5 digest; flip one.
+    let last = wire.len() - 1;
+    wire[last] ^= 0xff;
+    let evs = s.feed_bytes(Instant(10), &wire);
+    assert!(evs.iter().any(|e| matches!(e, BfdSessionEvent::AuthFailed)));
+    assert_eq!(s.state(), State::Down);
+}
+
+/// A packet signed with the wrong shared key is rejected even when
+/// the auth type and key ID match (RFC 5880 §6.7.3 / §6.7.4: the
+/// receiver recomputes the digest with its own configured key).
+#[test]
+fn keyed_md5_wrong_secret_rejected() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = s.start(Instant(0));
+    let _ = s.drain_outgoing();
+    // Peer signs with a different secret but the same key ID.
+    let mut peer = BfdSession::new(cfg_100ms(), 0x22222222);
+    peer.set_keyed_auth(Some(
+        BfdKeyedAuth::new(
+            5,
+            KeyedAuthAlgorithm::KeyedMd5,
+            b"different-secret".to_vec(),
+        )
+        .unwrap(),
+    ));
+    let _ = peer.start(Instant(0));
+    let wire = peer.drain_outgoing();
+    let evs = s.feed_bytes(Instant(10), &wire);
+    assert!(evs.iter().any(|e| matches!(e, BfdSessionEvent::AuthFailed)));
+    assert_eq!(s.state(), State::Down);
+}
+
+/// A packet with the wrong key ID is rejected even when the digest
+/// would otherwise verify (RFC 5880 §6.7.3 / §6.7.4: "the Auth Key ID
+/// field does not match ... MUST be discarded").
+#[test]
+fn keyed_md5_wrong_key_id_rejected() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = s.start(Instant(0));
+    let _ = s.drain_outgoing();
+    let mut peer = BfdSession::new(cfg_100ms(), 0x22222222);
+    peer.set_keyed_auth(Some(
+        BfdKeyedAuth::new(9, KeyedAuthAlgorithm::KeyedMd5, b"shared-secret".to_vec()).unwrap(),
+    ));
+    let _ = peer.start(Instant(0));
+    let wire = peer.drain_outgoing();
+    let evs = s.feed_bytes(Instant(10), &wire);
+    assert!(evs.iter().any(|e| matches!(e, BfdSessionEvent::AuthFailed)));
+}
+
+/// A packet with no auth section while keyed-hash auth is installed
+/// is rejected (RFC 5880 §6.7.3 / §6.7.4: "does not contain an
+/// Authentication Section ... MUST be discarded").
+#[test]
+fn keyed_md5_missing_section_rejected() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = s.start(Instant(0));
+    let _ = s.drain_outgoing();
+    // A bare packet with no A bit and no auth section.
+    let p = make_packet(State::Down, 0x22222222, 0);
+    let evs = s.feed_bytes(Instant(10), &encode_packet(&p));
+    assert!(evs.iter().any(|e| matches!(e, BfdSessionEvent::AuthFailed)));
+}
+
+/// Clearing the keyed-hash auth via `set_keyed_auth(None)` reverts
+/// the session to its Simple Password (or unauthenticated) baseline:
+/// subsequent packets carry no keyed-hash section and packets that
+/// do carry one are rejected.
+#[test]
+fn clearing_keyed_auth_reverts_to_no_auth() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let _ = s.start(Instant(0));
+    // First packet carries the keyed-hash section.
+    let out1 = s.drain_outgoing();
+    let p1 = decode_first(&out1);
+    assert!(p1.flags.contains(PacketFlags::AUTH));
+    assert_eq!(p1.auth.as_ref().unwrap().auth_type, AuthType::KeyedMd5);
+    // Clear and send another: no A bit, no auth section.
+    s.set_keyed_auth(None);
+    s.enqueue_packet(Instant(1), false);
+    let out2 = s.drain_outgoing();
+    let p2 = decode_first(&out2);
+    assert!(!p2.flags.contains(PacketFlags::AUTH));
+    assert!(p2.auth.is_none());
+}
+
+/// The installed keyed-hash auth is exposed through
+/// `BfdSession::keyed_auth()`; the algorithm and key ID are
+/// readable so the daemon can log them.
+#[test]
+fn keyed_auth_accessor_returns_installed_state() {
+    let mut s = BfdSession::new(cfg_100ms(), 0x11111111);
+    assert!(s.keyed_auth().is_none());
+    s.set_keyed_auth(Some(keyed_md5_auth()));
+    let ka = s.keyed_auth().unwrap();
+    assert_eq!(ka.key_id(), 5);
+    assert_eq!(ka.algorithm(), KeyedAuthAlgorithm::KeyedMd5);
+    assert_eq!(ka.xmit_seq(), 0);
 }
