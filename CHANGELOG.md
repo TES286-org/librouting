@@ -142,6 +142,36 @@ library and the daemon binaries are untouched.
   Worth a follow-up if the project wants the PR to fail on
   every public-API change, not just breaking ones.
 
+### Pre-existing semver debt the scan surfaced
+
+The first run of `cargo semver-checks --workspace --all-features
+--baseline-rev v1.2.0` on this branch surfaced an existing
+finding: between `v1.2.0` and `HEAD`, the public Rust API gained
+breaking changes that were not paired with a version bump:
+
+- `lr-bgp::path::AttrType` gained a new variant
+  `AttrType::BgpLsAttribute` (RFC 7752 §3.3 BGP-LS Attribute,
+  commit `d472e66`), which is a breaking change for
+  downstream `match` exhaustiveness (the enum is not
+  `#[non_exhaustive]`).
+- The same enum's variant `AttrType::LrMplsLabelStack` moved
+  from position 21 to 22, which is a breaking change for
+  `PartialOrd`-derived ordering (the enum derives
+  `PartialOrd`).
+
+The project is at workspace version `1.2.0` (post-1.0), so per
+`docs/RELEASE-PLAN.md` §1 a breaking Rust API change is a
+**major** bump. The two findings together require a `2.0.0`
+release cut to clear.
+
+Until the version is bumped, the `cargo semver-checks` step in
+both `ci.yml` and `nightly.yml` runs with
+`continue-on-error: true` so the scan surfaces the finding
+without blocking every PR. Once the debt is cleared by a
+release cut, the `continue-on-error: true` line can be removed
+so the gate becomes blocking — that is the "Done when" state
+the ROADMAP entry names.
+
 ## [Unreleased — prior] — CycloneDX SBOM per release
 
 The supply-chain follow-ups ROADMAP entry named three gaps: a
