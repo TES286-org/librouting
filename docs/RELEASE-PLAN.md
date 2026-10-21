@@ -230,9 +230,21 @@ The tag push triggers `.github/workflows/release.yml`:
    RISC-V Runners GitHub App to be installed on the repository; without
    it, the entry fails with "no runner found" and the cut proceeds only
    after the App is installed or the entry is removed.
-2. **Publish job** — downloads every build artifact, flattens them with the
-   standalone headers, and creates a **draft** GitHub Release with
-   auto-generated release notes and a body linking back to this document.
+2. **SBOM generation** — runs `cargo cyclonedx --describe binaries
+   --all-features --spec-version 1.5` and emits one CycloneDX 1.5
+   JSON SBOM per shipped binary target (`lr`, `lr-daemon`, `lrctl`,
+   `lr-ffi`). The job stages the SBOMs into
+   `librouting-<binary>-<tag>.cdx.json` filenames, runs an inline
+   JSON validation pass (`bomFormat`, `serialNumber`,
+   `metadata.component` must all be present), and also bundles every
+   per-binary SBOM into `librouting-sbom-<tag>.tar.gz`. The SBOM is
+   the "what was in this release" record the supply-chain follow-ups
+   ROADMAP entry names; `cosign` signatures over the SBOM and the
+   archives remain open.
+3. **Publish job** — downloads every build artifact and the SBOM
+   bundle, flattens them with the standalone headers, and creates a
+   **draft** GitHub Release with auto-generated release notes and a
+   body linking back to this document.
 
 The release stays **draft** until the maintainer reviews the notes, fills in the
 **Breaking changes** / **New features** / **Fixes** sections from the commit

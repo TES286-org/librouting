@@ -257,11 +257,24 @@ dialect quirk adds a corpus case instead of a bespoke assertion.
 ## Tooling and supply chain
 
 **Supply-chain follow-ups.** `cargo audit` and `cargo deny check` run
-nightly (`.github/workflows/nightly.yml`, `deny.toml`). Three gaps remain: a
-CycloneDX SBOM per release, `cosign` signatures over the release archives
-(`.github/workflows/release.yml`), and a static-analysis scan of the Rust
-sources. Done when a release publishes a signed SBOM beside its archives, a
-consumer can verify an artifact against the signing identity, and the scan
+nightly (`.github/workflows/nightly.yml`, `deny.toml`). The
+CycloneDX SBOM per release has landed: the `generate-sbom` job in
+`.github/workflows/release.yml` runs `cargo cyclonedx --describe
+binaries --all-features --spec-version 1.5` on every `v*` tag push
+and attaches one CycloneDX 1.5 JSON SBOM per shipped binary target
+(`lr`, `lr-daemon`, `lrctl`, `lr-ffi`) plus a combined
+`librouting-sbom-<tag>.tar.gz` to the GitHub release. Each SBOM
+carries the binary's transitive crate closure under
+`--all-features`, so a consumer pairing an archive with its SBOM
+sees the exact dependency set shipped. The workflow stages the
+SBOMs into clean `librouting-<binary>-<tag>.cdx.json` filenames
+and runs an inline JSON validation pass before upload, so a
+malformed SBOM fails the release early instead of shipping
+silently. Two gaps remain: `cosign` signatures over the release
+archives (the SBOM is generated but not yet signed), and a
+static-analysis scan of the Rust sources. Done when a release
+publishes a signed SBOM beside its archives, a consumer can
+verify an artifact against the signing identity, and the scan
 runs on every change with its findings triaged.
 
 **IDE integration.** The `.lr` configuration DSL and the filter DSL have
