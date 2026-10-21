@@ -802,3 +802,132 @@ fn descriptor_accessors_return_the_right_subtlvs() {
     assert_eq!(local.ospf_area_id(), Some(0x0000_0001));
     assert_eq!(local.igp_router_id(), Some(&[1u8, 2, 3, 4][..]));
 }
+
+// ===== RFC 9086 §3 Egress Peer Engineering Node Descriptor sub-TLV tests =====
+//
+// RFC 9086 §3.1 / §3.2 define two new Node Descriptor sub-TLVs for
+// BGP-LS Link NLRIs that describe a BGP peering session (Protocol-ID
+// = Bgp). The codec carries them as `BgpRouterId` (TLV 516) and
+// `BgpConfederationMember` (TLV 517); both are 4-byte unsigned
+// integers, so they share the same wire shape as the base RFC 7752
+// fixed-width descriptors.
+
+#[test]
+fn bgp_router_id_subtlv_round_trip() {
+    // RFC 9086 §3.1: TLV 516, 4-byte BGP Router-ID (RFC 6286 §4).
+    let s = NodeDescriptorSubTlv::BgpRouterId(0x0102_0304);
+    assert_eq!(s.ty(), 516);
+    assert_eq!(s.wire_len(), 4 + 4);
+    let mut buf = vec![0u8; 16];
+    let mut w = WriteBuf::new(&mut buf);
+    let n = s.encode_into(&mut w).expect("encode");
+    assert_eq!(n, 8);
+    assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 516);
+    assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 4);
+    assert_eq!(
+        u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]),
+        0x0102_0304
+    );
+    let tlv = {
+        let mut r = ReadBuf::new(&buf[..n]);
+        Tlv::decode(&mut r).expect("decode raw")
+    };
+    assert_eq!(NodeDescriptorSubTlv::decode(tlv), s);
+}
+
+#[test]
+fn bgp_confederation_member_subtlv_round_trip() {
+    // RFC 9086 §3.2: TLV 517, 4-byte Member-AS Number (RFC 5065 §4).
+    let s = NodeDescriptorSubTlv::BgpConfederationMember(64512);
+    assert_eq!(s.ty(), 517);
+    assert_eq!(s.wire_len(), 4 + 4);
+    let mut buf = vec![0u8; 16];
+    let mut w = WriteBuf::new(&mut buf);
+    let n = s.encode_into(&mut w).expect("encode");
+    assert_eq!(n, 8);
+    assert_eq!(u16::from_be_bytes([buf[0], buf[1]]), 517);
+    assert_eq!(u16::from_be_bytes([buf[2], buf[3]]), 4);
+    assert_eq!(u32::from_be_bytes([buf[4], buf[5], buf[6], buf[7]]), 64512);
+    let tlv = {
+        let mut r = ReadBuf::new(&buf[..n]);
+        Tlv::decode(&mut r).expect("decode raw")
+    };
+    assert_eq!(NodeDescriptorSubTlv::decode(tlv), s);
+}
+
+#[test]
+fn bgp_router_id_wrong_length_falls_through_to_unknown() {
+    // A 3-byte TLV 516 value is malformed — fall through to Unknown
+    // so the stream still round-trips byte-for-byte.
+    let raw = Tlv {
+        ty: 516,
+        value: vec![0u8; 3],
+    };
+    assert_eq!(
+        NodeDescriptorSubTlv::decode(raw.clone()),
+        NodeDescriptorSubTlv::Unknown(raw)
+    );
+}
+
+#[test]
+fn bgp_confederation_member_wrong_length_falls_through_to_unknown() {
+    // A 5-byte TLV 517 value is malformed — fall through to Unknown.
+    let raw = Tlv {
+        ty: 517,
+        value: vec![0u8; 5],
+    };
+    assert_eq!(
+        NodeDescriptorSubTlv::decode(raw.clone()),
+        NodeDescriptorSubTlv::Unknown(raw)
+    );
+}
+
+#[test]
+fn bgp_epe_link_nlri_round_trip() {
+    // RFC 9086 §3 / §4: a BGP-LS Link NLRI describing a BGP peering
+    // session. Protocol-ID = 7 (BGP), and the Local / Remote Node
+    // Descriptors carry the BGP Router-ID (516) and Member-AS
+    // Number (517) sub-TLVs instead of the OSPF-specific sub-TLVs.
+    let local = NodeDescriptor::new(vec![
+        NodeDescriptorSubTlv::As(64512),
+        NodeDescriptorSubTlv::BgpLsId(0x0102_0304),
+        NodeDescriptorSubTlv::BgpRouterId(0x0a0b_0c0d),
+        NodeDescriptorSubTlv::BgpConfederationMember(65001),
+    ]);
+    let remote = NodeDescriptor::new(vec![
+        NodeDescriptorSubTlv::As(64513),
+        NodeDescriptorSubTlv::BgpLsId(0x0506_0708),
+        NodeDescriptorSubTlv::BgpRouterId(0x1112_1314),
+        NodeDescriptorSubTlv::BgpConfederationMember(65002),
+    ]);
+    let link = LinkDescriptor::new(vec![
+        LinkDescriptorSubTlv::Ipv4InterfaceAddress([192, 0, 2, 1]),
+        LinkDescriptorSubTlv::Ipv4NeighborAddress([192, 0, 2, 2]),
+    ]);
+    let nlri = BgpLsNlri {
+        route_distinguisher: None,
+        variant: BgpLsNlriVariant::Link(LinkNlri {
+            protocol_id: ProtocolId::Bgp,
+            identifier: 0,
+            local_node: local,
+            remote_node: remote,
+            link,
+        }),
+    };
+    let mut buf = vec![0u8; 512];
+    let mut w = WriteBuf::new(&mut buf);
+    let n = nlri.encode(&mut w).expect("encode");
+    let (decoded, consumed) = BgpLsNlri::decode(false, &buf[..n]).expect("decode");
+    assert_eq!(consumed, n);
+    assert_eq!(decoded, nlri);
+    // Accessors surface the EPE sub-TLVs alongside the base ones.
+    let l = match &decoded.variant {
+        BgpLsNlriVariant::Link(l) => l,
+        _ => unreachable!(),
+    };
+    assert_eq!(l.local_node.as_number(), Some(64512));
+    assert_eq!(l.local_node.bgp_router_id(), Some(0x0a0b_0c0d));
+    assert_eq!(l.local_node.bgp_confederation_member(), Some(65001));
+    assert_eq!(l.remote_node.bgp_router_id(), Some(0x1112_1314));
+    assert_eq!(l.remote_node.bgp_confederation_member(), Some(65002));
+}

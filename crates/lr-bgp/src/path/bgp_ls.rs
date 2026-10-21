@@ -233,6 +233,13 @@ pub mod tlv_type {
     pub const BGP_LS_IDENTIFIER: u16 = 513;
     pub const OSPF_AREA_ID: u16 = 514;
     pub const IGP_ROUTER_ID: u16 = 515;
+    // RFC 9086 §3.1 "BGP Router-ID" and §3.2 "Member-AS Number"
+    // Node Descriptor sub-TLVs — appear inside the Local Node
+    // Descriptor / Remote Node Descriptor of a BGP-LS Link NLRI that
+    // describes a BGP peering session (Protocol-ID = BGP, used for
+    // Egress Peer Engineering).
+    pub const BGP_ROUTER_ID: u16 = 516;
+    pub const BGP_CONFEDERATION_MEMBER: u16 = 517;
 
     // SRv6 SID Descriptor TLVs (RFC 9514 §6.1 + §6 bare-stream TLVs)
     // — appear inside the SRv6 SID NLRI's "SRv6 SID Descriptors"
@@ -361,6 +368,14 @@ pub fn encode_tlv_stream(tlvs: &[Tlv]) -> Result<Vec<u8>, EncodeError> {
 /// and preserves any other sub-TLV verbatim. `IgpRouterId` is left as
 /// raw bytes because its layout depends on the Protocol-ID — see
 /// RFC 7752 §3.2.1.4 "IGP Router-ID" for the per-protocol shapes.
+///
+/// Two additional sub-TLVs from RFC 9086 §3.1 / §3.2 are modelled for
+/// the BGP-LS Link NLRI that describes a BGP peering session
+/// (Protocol-ID = BGP, used for Egress Peer Engineering):
+/// `BgpRouterId` (TLV 516, 4-byte BGP Identifier per RFC 6286) and
+/// `BgpConfederationMember` (TLV 517, 4-byte Member-AS Number per
+/// RFC 5065). Both are 4-byte unsigned integers, so they share the
+/// same wire shape as the base RFC 7752 fixed-width descriptors.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum NodeDescriptorSubTlv {
     /// TLV 512. 4-byte AS number.
@@ -372,6 +387,17 @@ pub enum NodeDescriptorSubTlv {
     /// TLV 515. Variable-length IGP Router-ID. Stored raw — the
     /// interpretation depends on the NLRI's Protocol-ID.
     IgpRouterId(Vec<u8>),
+    /// TLV 516 (RFC 9086 §3.1). 4-byte BGP Router-ID (the BGP
+    /// Identifier from RFC 6286 §4). Carried inside the Local Node
+    /// Descriptor and Remote Node Descriptor of a BGP-LS Link NLRI
+    /// whose Protocol-ID is `Bgp` (Egress Peer Engineering).
+    BgpRouterId(u32),
+    /// TLV 517 (RFC 9086 §3.2). 4-byte Member-AS Number (RFC 5065
+    /// §4). Carried inside the Local Node Descriptor and Remote Node
+    /// Descriptor of a BGP-LS Link NLRI whose Protocol-ID is `Bgp`,
+    /// used to identify the confederation member a BGP peer belongs
+    /// to when EPE is enabled inside a BGP confederation.
+    BgpConfederationMember(u32),
     /// Any other sub-TLV, preserved verbatim for byte-exact round-trip.
     Unknown(Tlv),
 }
@@ -381,7 +407,11 @@ impl NodeDescriptorSubTlv {
     /// value).
     pub fn wire_len(&self) -> usize {
         match self {
-            Self::As(_) | Self::BgpLsId(_) | Self::OspfAreaId(_) => 4 + 4,
+            Self::As(_)
+            | Self::BgpLsId(_)
+            | Self::OspfAreaId(_)
+            | Self::BgpRouterId(_)
+            | Self::BgpConfederationMember(_) => 4 + 4,
             Self::IgpRouterId(v) => 4 + v.len(),
             Self::Unknown(t) => t.wire_len(),
         }
@@ -392,6 +422,8 @@ impl NodeDescriptorSubTlv {
             Self::BgpLsId(_) => tlv_type::BGP_LS_IDENTIFIER,
             Self::OspfAreaId(_) => tlv_type::OSPF_AREA_ID,
             Self::IgpRouterId(_) => tlv_type::IGP_ROUTER_ID,
+            Self::BgpRouterId(_) => tlv_type::BGP_ROUTER_ID,
+            Self::BgpConfederationMember(_) => tlv_type::BGP_CONFEDERATION_MEMBER,
             Self::Unknown(t) => t.ty,
         }
     }
@@ -405,6 +437,10 @@ impl NodeDescriptorSubTlv {
                 value: v.clone(),
             }
             .encode(out),
+            Self::BgpRouterId(v) => encode_fixed(out, tlv_type::BGP_ROUTER_ID, &v.to_be_bytes()),
+            Self::BgpConfederationMember(v) => {
+                encode_fixed(out, tlv_type::BGP_CONFEDERATION_MEMBER, &v.to_be_bytes())
+            }
             Self::Unknown(t) => t.encode(out),
         }
     }
@@ -423,6 +459,14 @@ impl NodeDescriptorSubTlv {
                 Self::OspfAreaId(v)
             }
             tlv_type::IGP_ROUTER_ID => Self::IgpRouterId(t.value),
+            tlv_type::BGP_ROUTER_ID if t.value.len() == 4 => {
+                let v = u32::from_be_bytes([t.value[0], t.value[1], t.value[2], t.value[3]]);
+                Self::BgpRouterId(v)
+            }
+            tlv_type::BGP_CONFEDERATION_MEMBER if t.value.len() == 4 => {
+                let v = u32::from_be_bytes([t.value[0], t.value[1], t.value[2], t.value[3]]);
+                Self::BgpConfederationMember(v)
+            }
             _ => Self::Unknown(t),
         }
     }
@@ -654,6 +698,27 @@ impl NodeDescriptor {
     pub fn igp_router_id(&self) -> Option<&[u8]> {
         self.sub_tlvs.iter().find_map(|s| match s {
             NodeDescriptorSubTlv::IgpRouterId(v) => Some(v.as_slice()),
+            _ => None,
+        })
+    }
+    /// Helper: the 4-byte BGP Router-ID sub-TLV value (RFC 9086
+    /// §3.1), or `None` when the descriptor does not carry one.
+    /// Present on the Local Node Descriptor and Remote Node
+    /// Descriptor of a BGP-LS Link NLRI whose Protocol-ID is `Bgp`
+    /// (Egress Peer Engineering).
+    pub fn bgp_router_id(&self) -> Option<u32> {
+        self.sub_tlvs.iter().find_map(|s| match s {
+            NodeDescriptorSubTlv::BgpRouterId(v) => Some(*v),
+            _ => None,
+        })
+    }
+    /// Helper: the 4-byte Member-AS Number sub-TLV value (RFC 9086
+    /// §3.2), or `None` when the descriptor does not carry one.
+    /// Identifies the confederation member a BGP peer belongs to
+    /// when EPE is enabled inside a BGP confederation.
+    pub fn bgp_confederation_member(&self) -> Option<u32> {
+        self.sub_tlvs.iter().find_map(|s| match s {
+            NodeDescriptorSubTlv::BgpConfederationMember(v) => Some(*v),
             _ => None,
         })
     }
