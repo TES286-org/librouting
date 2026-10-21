@@ -297,14 +297,12 @@ Added/Changed/Removed breakdown is uploaded as an
 criteria in `docs/RELEASE-PLAN.md` §1 already imply a breaking
 change ships as a minor bump; `cargo semver-checks` catches the
 accidental kind that slips past review. All three gaps in this
-ROADMAP entry are now closed. The `cargo semver-checks` step
-runs with `continue-on-error: true` until the pre-existing
-semver debt the scan surfaced (new variant in
-`lr-bgp::path::AttrType` added since the latest tag without a
-matching version bump — see the workspace version in
-`Cargo.toml`) is cleared by a release cut; once the debt is
-cleared the `continue-on-error: true` line is removed and the
-gate becomes blocking.
+ROADMAP entry are now closed. The `cargo semver-checks` gate
+became blocking at the release cut that cleared the pre-existing
+semver debt the scan first surfaced (a new variant in
+`lr-bgp::path::AttrType` added since the previous release
+without a matching version bump). The workspace version lives
+in `[workspace.package] version` in `Cargo.toml`.
 
 **IDE integration.** The `.lr` configuration DSL and the filter DSL have
 grammar references ([`config_dsl_grammar.md`](config_dsl_grammar.md),

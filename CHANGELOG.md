@@ -13,20 +13,34 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — Cosign keyless artifact signing
+## [1.3.0] — minor: supply-chain follow-ups, BFD auth, BGP-LS
 
-The supply-chain follow-ups ROADMAP entry's cosign half lands in
-this change: every release artifact (platform archives, CycloneDX
-SBOMs, standalone headers) is now signed with cosign keyless
-signing via GitHub Actions OIDC, anchored at the Sigstore Fulcio
-certificate authority and recorded in the Rekor transparency log.
-A consumer can verify any artifact against the public Sigstore
-root without a project-held key.
+librouting 1.3.0 is a minor release. Per `docs/RELEASE-PLAN.md`
+§1, the public Rust API gains new surface (BFD keyed-hash auth
+in `lr-bfd::keyed_auth`, the BGP-LS Attribute TLV codec in
+`lr-bgp::path::bgp_ls_attr`, BGP-LS Node Descriptor sub-TLVs in
+`lr-bgp::path::bgp_ls`); the new variant
+`lr-bgp::path::AttrType::BgpLsAttribute` (RFC 7752 §3.3) is a
+breaking change for downstream `match` exhaustiveness, which
+the new `api-surface` CI gate will catch going forward. The C
+ABI surface is unchanged (no new `lr_*` symbols, `ABI_VERSION`
+stays at 2). The release pipeline gains a CycloneDX SBOM per
+binary target, cosign keyless artifact signing, and a
+`cargo semver-checks` + `cargo public-api` API surface scan on
+every push, PR and nightly.
 
 ### Added
 
-**Per-artifact keyless signing** (`ci`, ROADMAP "Supply-chain
-follow-ups"). A new `sign-artifacts` job in
+**Cosign keyless artifact signing** (`ci`, ROADMAP "Supply-chain
+follow-ups"). The supply-chain follow-ups ROADMAP entry's cosign
+half: every release artifact (platform archives, CycloneDX
+SBOMs, standalone headers) is now signed with cosign keyless
+signing via GitHub Actions OIDC, anchored at the Sigstore Fulcio
+certificate authority and recorded in the Rekor transparency
+log. A consumer can verify any artifact against the public
+Sigstore root without a project-held key.
+
+A new `sign-artifacts` job in
 `.github/workflows/release.yml` runs on every `v*` tag push,
 between the `generate-sbom` and `publish-release` jobs. The job:
 
@@ -69,14 +83,13 @@ consumer runs to verify an artifact, including the
 workflow is triggered on, so a consumer pairs `<file>` with
 `<file>.bundle` once and reuses the same command across releases.
 
-## [Unreleased — prior] — Rust API surface scan (cargo public-api + semver-checks)
-
-The supply-chain follow-ups ROADMAP entry's static-analysis half
-lands in this change: the public Rust API surface is now scanned
-on every change. Two complementary tools cover the project's
-Tier 1 stability contract (the public Rust API is frozen at
-1.0, so any breaking change ships as a new minor — per
-`docs/RELEASE-PLAN.md` §1):
+**Rust API surface scan (cargo public-api + semver-checks)** (`ci`,
+ROADMAP "Supply-chain follow-ups"). The supply-chain follow-ups
+ROADMAP entry's static-analysis half: the public Rust API
+surface is now scanned on every change. Two complementary tools
+cover the project's Tier 1 stability contract (the public Rust
+API is frozen at 1.0, so any breaking change ships as a new
+minor — per `docs/RELEASE-PLAN.md` §1):
 
 - `cargo semver-checks` is the gate. It runs rustdoc-JSON-based
   semver lints against the latest published `v*` tag's rustdoc
@@ -88,10 +101,7 @@ Tier 1 stability contract (the public Rust API is frozen at
   Added/Changed/Removed breakdown per crate, uploaded as an
   `api-surface-diff` artifact for review.
 
-### Added
-
-**PR-level API surface gate** (`ci`, ROADMAP "Supply-chain
-follow-ups"). A new `api-surface` job in
+The PR-level `api-surface` job in
 `.github/workflows/ci.yml` runs on every push and every PR.
 The job:
 
@@ -172,20 +182,16 @@ release cut, the `continue-on-error: true` line can be removed
 so the gate becomes blocking — that is the "Done when" state
 the ROADMAP entry names.
 
-## [Unreleased — prior] — CycloneDX SBOM per release
-
-The supply-chain follow-ups ROADMAP entry named three gaps: a
-CycloneDX SBOM per release, `cosign` signatures over the release
-archives, and a static-analysis scan of the Rust sources. The
-SBOM half lands in this change: the `generate-sbom` job in
+**CycloneDX SBOM per release** (`ci`, ROADMAP "Supply-chain
+follow-ups"). The supply-chain follow-ups ROADMAP entry named
+three gaps: a CycloneDX SBOM per release, `cosign` signatures
+over the release archives, and a static-analysis scan of the
+Rust sources. The SBOM half: the `generate-sbom` job in
 `.github/workflows/release.yml` runs on every `v*` tag push and
 attaches a CycloneDX 1.5 JSON SBOM per shipped binary target to
 the GitHub release, alongside a combined archive.
 
-### Added
-
-**Per-binary SBOM generation** (`ci`, ROADMAP "Supply-chain
-follow-ups"). A new `generate-sbom` job in
+A new `generate-sbom` job in
 `.github/workflows/release.yml` runs `cargo cyclonedx --describe
 binaries --all-features --spec-version 1.5` on every release tag
 push and emits one CycloneDX 1.5 JSON SBOM per shipped binary
@@ -228,26 +234,22 @@ No Rust API change. No C ABI change. No daemon flag or config
 surface change. The SBOM is purely a release-pipeline artifact;
 the library and the daemon binaries are untouched.
 
-## [Unreleased — prior] — BFD Keyed MD5 / Keyed SHA1 authentication
-
-The BFD auth surface completes: the four keyed-hash authentication
-types from RFC 5880 §4.3 / §4.4 — Keyed MD5 (type 2), Meticulous Keyed
-MD5 (type 3), Keyed SHA1 (type 4), Meticulous Keyed SHA1 (type 5) —
+**BFD keyed-hash authentication** (`feat`, addresses the `partial`
+BFD auth row in [`docs/STATUS.md`](docs/STATUS.md)). The BFD auth
+surface completes: the four keyed-hash authentication types from
+RFC 5880 §4.3 / §4.4 — Keyed MD5 (type 2), Meticulous Keyed MD5
+(type 3), Keyed SHA1 (type 4), Meticulous Keyed SHA1 (type 5) —
 now compute and verify their digests in-process behind the
-`keyed-auth` feature (on by default), bringing the BFD auth STATUS
-row from `partial` to `yes`. The previous release left the keyed-hash
-section layouts modelled in the wire codec but framed the digest
-computation as "embedder-supplied"; the embedder no longer has to
-roll its own MD5/SHA1 path.
+`keyed-auth` feature (on by default), bringing the BFD auth
+STATUS row from `partial` to `yes`. The previous release left
+the keyed-hash section layouts modelled in the wire codec but
+framed the digest computation as "embedder-supplied"; the
+embedder no longer has to roll its own MD5/SHA1 path.
 
-### Added
-
-**Keyed-hash auth module** (`feat`, addresses the `partial` BFD auth
-row in [`docs/STATUS.md`](docs/STATUS.md)). A new
-`lr-bfd::keyed_auth` module owns the digest computation, the
-per-session sequence-number state (`bfd.XmitAuthSeq`,
-`bfd.RcvAuthSeq`, `bfd.AuthSeqKnown`) and the anti-replay check the
-RFC requires on the receive side:
+A new `lr-bfd::keyed_auth` module owns the digest computation,
+the per-session sequence-number state (`bfd.XmitAuthSeq`,
+`bfd.RcvAuthSeq`, `bfd.AuthSeqKnown`) and the anti-replay check
+the RFC requires on the receive side:
 
 - `BfdKeyedAuth::new(key_id, algorithm, secret)` constructs the
   per-session auth state. The secret length is checked against the
@@ -349,21 +351,18 @@ Additive only — no breaking changes.
   paths, sequence advancement on every packet for both Meticulous
   and non-Meticulous.
 
-## [Unreleased — prior] — BGP-LS Attribute TLV codec + earlier BGP-LS work
-
-Progress on [issue #60](https://github.com/TES286-org/librouting/issues/60):
-the wire codec for the BGP-LS Link-State AFI/SAFI pair (AFI=16388,
-SAFI=71, plus the VPN variant SAFI=72), the OSPF LSDB → BGP-LS
-projection, the daemon wiring (`--bgp-ls` flag, `[bgp_ls]` config
-block, the BgpPeer BGP-LS egress primitives, the incremental
-republish driver), the BIRD interop lab, and the BGP-LS Attribute
-TLV codec (RFC 7752 §3.3 + RFC 9514 §7-§8) have all landed. The
-done criterion — a third-party collector builds the same IGP graph
-from our session that the OSPF daemon holds, with incremental
-republish — is met; the `bgpls_bird.sh` lab is the verification
-gate.
-
-### Added
+**BGP-LS Attribute TLV codec + earlier BGP-LS work** (`feat`,
+[issue #60](https://github.com/TES286-org/librouting/issues/60)).
+Progress on issue #60: the wire codec for the BGP-LS Link-State
+AFI/SAFI pair (AFI=16388, SAFI=71, plus the VPN variant
+SAFI=72), the OSPF LSDB → BGP-LS projection, the daemon wiring
+(`--bgp-ls` flag, `[bgp_ls]` config block, the BgpPeer BGP-LS
+egress primitives, the incremental republish driver), the
+BIRD interop lab, and the BGP-LS Attribute TLV codec (RFC 7752
+§3.3 + RFC 9514 §7-§8) have all landed. The done criterion — a
+third-party collector builds the same IGP graph from our
+session that the OSPF daemon holds, with incremental republish
+— is met; the `bgpls_bird.sh` lab is the verification gate.
 
 **BGP-LS NLRI codec** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
 A new `lr-bgp::path::bgp_ls` module (feature-gated as

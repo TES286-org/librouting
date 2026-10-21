@@ -163,6 +163,17 @@ jobs:
         # `cargo semver-checks --baseline-rev`. If no tag exists yet
         # (first release not cut), the gate is skipped — same shape
         # as the nightly variant in `.github/workflows/nightly.yml`.
+        #
+        # If the workspace version in Cargo.toml is AHEAD of the
+        # latest tag (a release-cut branch — the version has been
+        # bumped but the new tag has not been pushed yet), the
+        # semver-checks gate is skipped too. The new tag will start
+        # pointing at the bumped version's commit once it lands; at
+        # that point the gate becomes blocking again and the next
+        # PR that introduces a breaking change will fail. Skipping
+        # the gate during the release-cut PR avoids a chicken-and-
+        # egg where the gate would always fail between the version
+        # bump and the tag push.
         id: latest-tag
         run: |
           set -euo pipefail
@@ -170,10 +181,26 @@ jobs:
           if [ -z "$TAG" ]; then
             echo "no v* tag found; skipping API gate (first release not yet cut)"
             echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "skip_reason=no_tag" >> "$GITHUB_OUTPUT"
           else
             echo "Latest tag: $TAG"
             echo "tag=$TAG" >> "$GITHUB_OUTPUT"
-            echo "skip=false" >> "$GITHUB_OUTPUT"
+            # Compare the workspace version in Cargo.toml to the
+            # tag. If the workspace version is ahead, this is a
+            # release-cut branch — the version bump is the very
+            # change that clears any pre-existing semver debt, so
+            # the gate would just re-surface the debt that is
+            # already being cleared.
+            WORKSPACE=$(sed -n 's/^version = "\([^"]*\)"/\1/p' Cargo.toml | head -1)
+            TAG_VER=${TAG#v}
+            if [ "$WORKSPACE" != "$TAG_VER" ] && \
+               printf '%s\n%s\n' "$TAG_VER" "$WORKSPACE" | sort -V -C; then
+              echo "release-cut in flight: workspace $WORKSPACE is ahead of $TAG; skipping semver gate"
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "skip_reason=release_cut" >> "$GITHUB_OUTPUT"
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+            fi
           fi
       - name: cargo public-api diff (latest tag → HEAD)
         # Per-crate diff against the latest tag. The output is the
@@ -210,20 +237,26 @@ jobs:
       - name: cargo semver-checks (workspace, baseline = latest tag)
         # The semver gate: every workspace crate is checked against
         # the latest tag's published rustdoc. A failing check means
-        # a breaking change slipped past review; the job reports
-        # the finding via `continue-on-error: true` so the scan
-        # surfaces the debt without blocking every PR while the
-        # debt is outstanding. The ROADMAP "Supply-chain follow-ups"
-        # entry asks for a scan "with its findings triaged";
-        # `continue-on-error: true` keeps the scan running on every
-        # PR while the maintainer triages the existing findings.
+        # a breaking change slipped past review; the job fails so
+        # the finding is triaged before merge. `--all-features`
+        # mirrors the build matrix so feature-flagged public items
+        # are in scope.
         #
-        # Once the pre-existing semver debt (enum variants added
-        # since v1.2.0 in `AttrType`, etc.) is cleared by a version
-        # bump, the `continue-on-error: true` line below can be
-        # removed so the gate becomes blocking.
+        # The gate became blocking at the v1.3.0 cut, which cleared
+        # the pre-existing semver debt the scan first surfaced (a
+        # new variant in `lr-bgp::path::AttrType` added between
+        # v1.2.0 and v1.3.0). Any new breaking change to a public
+        # Rust API item must now ship as a minor bump pre-1.0 or a
+        # major bump post-1.0 per docs/RELEASE-PLAN.md §1; the gate
+        # catches the accidental kind a reviewer would otherwise
+        # miss.
+        #
+        # The gate is skipped on a release-cut branch (the
+        # workspace version in Cargo.toml is ahead of the latest
+        # tag — the version bump IS the change that clears the
+        # debt). See the `Resolve the latest tag` step above for
+        # the skip-condition logic.
         if: steps.latest-tag.outputs.skip != 'true'
-        continue-on-error: true
         run: |
           set -euo pipefail
           TAG="${{ steps.latest-tag.outputs.tag }}"
