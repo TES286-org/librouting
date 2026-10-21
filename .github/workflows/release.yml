@@ -233,11 +233,95 @@ jobs:
             sbom/*.cdx.json
           retention-days: 7
 
+  # Cosign keyless signing — ROADMAP "Supply-chain follow-ups".
+  #
+  # Every release artifact (platform archives, SBOMs, standalone
+  # headers) is signed with cosign keyless signing via GitHub
+  # Actions OIDC. The signing identity is the workflow's own OIDC
+  # token, anchored at the Sigstore Fulcio certificate authority and
+  # recorded in the Rekor transparency log. A consumer can verify
+  # any artifact against the public Sigstore root without a
+  # project-held key.
+  #
+  # Each artifact gets a single `<name>.bundle` file in DSSE format
+  # (cosign 2.x's recommended shape): the bundle carries the
+  # signature, the Fulcio certificate and the Rekor transparency
+  # log entry, so a consumer needs only the bundle + the artifact
+  # + the cosign CLI to verify. No separate .sig / .pem pair to
+  # keep in sync.
+  sign-artifacts:
+    name: Sign artifacts (cosign keyless)
+    needs:
+      - build-native
+      - generate-sbom
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      # `id-token: write` is required for keyless signing — cosign
+      # requests an OIDC token from GitHub Actions and exchanges
+      # it for a Fulcio short-lived certificate. Without this
+      # permission the sign-blob step fails with "no OIDC token
+      # available".
+      id-token: write
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install cosign
+        # `sigstore/cosign-installer@v3` installs the latest stable
+        # cosign release; the action itself is pinned to a major
+        # version, so a backwards-incompatible cosign-installer
+        # change is a dependabot bump, not a silent break. The
+        # underlying cosign CLI is allowed to move forward inside
+        # the v2 line.
+        uses: sigstore/cosign-installer@v3
+      - name: Download all build artifacts
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: false
+      - name: Sign and self-verify artifacts
+        # Build the list of files to sign, sign each with a keyless
+        # cosign bundle, then immediately verify each signature
+        # against the workflow's own OIDC identity. The inline
+        # verify catches any signing or transparency-log issue
+        # before the bundle is uploaded — a broken bundle never
+        # reaches the GitHub Release.
+        run: |
+          set -euo pipefail
+          mkdir -p signatures
+          files=()
+          while IFS= read -r f; do files+=("$f"); done < <(
+            find release-assets -type f \( -name '*.tar.gz' -o -name '*.zip' \)
+          )
+          while IFS= read -r f; do files+=("$f"); done < <(
+            find release-assets/librouting-sbom -type f -name '*.cdx.json' 2>/dev/null
+          )
+          files+=("include/lr_ffi.h" "include/librouting.hpp")
+          echo "Will sign ${#files[@]} files"
+          for f in "${files[@]}"; do
+            name=$(basename "$f")
+            echo "=== Signing $name ==="
+            cosign sign-blob --yes --bundle "signatures/${name}.bundle" "$f"
+            echo "=== Verifying $name ==="
+            cosign verify-blob \
+              --bundle "signatures/${name}.bundle" \
+              --certificate-identity-regexp 'https://github.com/TES286-org/librouting/.github/workflows/release.yml@refs/tags/.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              "$f"
+          done
+          ls -l signatures/
+      - name: Upload signatures
+        uses: actions/upload-artifact@v7
+        with:
+          name: librouting-signatures
+          path: signatures/
+          retention-days: 7
+
   publish-release:
     name: Publish GitHub Release
     needs:
       - build-native
       - generate-sbom
+      - sign-artifacts
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -254,6 +338,8 @@ jobs:
           # Per-binary CycloneDX SBOMs and the combined SBOM archive.
           find release-assets/librouting-sbom -type f -name '*.cdx.json' -exec cp {} flattened/ \;
           find release-assets/librouting-sbom -type f -name 'librouting-sbom-*.tar.gz' -exec cp {} flattened/ \;
+          # cosign signature bundles (one per archive, SBOM and header).
+          find release-assets/librouting-signatures -type f -name '*.bundle' -exec cp {} flattened/ \;
           cp include/lr_ffi.h flattened/
           cp include/librouting.hpp flattened/
           ls -l flattened/
@@ -270,8 +356,9 @@ jobs:
             Pre-built `lr-ffi` shared libraries for Linux (x86_64 and
             RISC-V), macOS (Intel and Apple Silicon) and Windows, the
             public C and C++ headers (`lr_ffi.h`, `librouting.hpp`),
-            the `lr`, `lr-daemon` and `lrctl` CLI binaries, and a
-            CycloneDX SBOM per binary target.
+            the `lr`, `lr-daemon` and `lrctl` CLI binaries, a
+            CycloneDX SBOM per binary target, and a cosign keyless
+            signature bundle per artifact.
 
             Each platform archive contains:
             - `liblr_ffi.{so,dylib,dll}` — the C ABI shared library
@@ -285,6 +372,32 @@ jobs:
             - `librouting-lrctl-${{ github.ref_name }}.cdx.json` — the `lrctl` operational CLI
             - `librouting-lr-ffi-${{ github.ref_name }}.cdx.json` — the `lr-ffi` C ABI library
             - `librouting-sbom-${{ github.ref_name }}.tar.gz` — every per-binary SBOM in one archive
+
+            Signatures (cosign keyless, one `.bundle` per artifact):
+            - `librouting-<file>.bundle` — DSSE bundle (signature +
+              Fulcio certificate + Rekor transparency log entry)
+            - The bundle lives next to the artifact it signs; pair
+              `<artifact>` with `<artifact>.bundle` to verify.
+
+            ### Verifying an artifact
+
+            Verify any artifact against the public Sigstore root
+            without a project-held key:
+
+            ```sh
+            cosign verify-blob \
+              --bundle librouting-<file>.bundle \
+              --certificate-identity-regexp 'https://github.com/TES286-org/librouting/.github/workflows/release.yml@refs/tags/.*' \
+              --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+              librouting-<file>
+            ```
+
+            The signing identity is the GitHub Actions workflow that
+            produced the artifact, anchored at the Sigstore Fulcio
+            certificate authority and recorded in the Rekor
+            transparency log. See
+            [Sigstore's verification guide](https://docs.sigstore.dev/cosign/verify/)
+            for the full verification surface.
 
             See `docs/RELEASE-PLAN.md` for the semver policy, the
             API-freeze criteria, and the post-1.0 governance rules.
