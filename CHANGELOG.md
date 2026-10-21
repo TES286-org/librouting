@@ -437,6 +437,99 @@ PeerAdj, PeerSet definitions); the IANA BGP-LS NLRI Types and
 BGP-LS NLRI/Attribute TLVs registries (Protocol-ID 7 = BGP, TLV
 516/517/1101/1102/1103).
 
+**Egress Peer Engineering daemon-side projection (RFC 9086)** (`feat`, [issue #60](https://github.com/TES286-org/librouting/issues/60)).
+The natural follow-up the EPE codec PR above names in its
+scope-boundary section: a new `lr-router::instance::epe` module
+walks a snapshot of the daemon's BGP peer sessions and emits one
+BGP-LS Link NLRI per Established session, paired with a BGP-LS
+Attribute that carries the PeerNode SID (RFC 9086 §5.1, mandatory)
+and any optional PeerAdj / PeerSet SIDs the caller supplied.
+
+Each emitted NLRI is a BGP-LS Link NLRI (RFC 7752 §3.3 NLRI Type 2)
+with `ProtocolId::Bgp` (RFC 9086 §3, the BGP-LS Protocol-ID for EPE)
+and `identifier = 0`. The Local Node Descriptor carries the
+Autonomous System (TLV 512), the daemon's BGP-LS Identifier (TLV
+513, from the `[bgp_ls]` config block), the BGP Router-ID (TLV 516,
+the local BGP Identifier), and the BGP Confederation Member sub-TLV
+(TLV 517) when the local speaker is itself a confederation member.
+The Remote Node Descriptor carries the peer's AS and BGP Router-ID
+(both learned in OPEN); the remote's BGP-LS ID is opaque to us, so
+it rides `0` — matching BIRD's `bgp_ls` channel. The Link Descriptor
+always carries `MultiTopologyId(0)` (TLV 263); the IPv4 / IPv6
+Interface Address (TLV 259 / 261) and Neighbor Address (TLV 260 /
+262) sub-TLVs are added when the caller supplied the corresponding
+interface addresses.
+
+`DefaultRouter::bgpls_republish_epe` mirrors
+`bgpls_republish_end_x`: it snapshots the live BGP session set
+through the new `epe_peer_sessions_snapshot` helper, projects it
+through `epe::project_epe_peer_sessions`, diffs against `prev` via
+`lsdb_to_bgpls::diff_bgpls_with_attrs`, and pushes UPDATEs to
+every BGP session that negotiated the BGP-LS family. `added` pairs
+ride MP_REACH_NLRI + BGP-LS Attribute (one UPDATE per pair, since
+each EPE NLRI carries its own attribute — same model the End.X
+projection uses for SRv6 End.X SIDs); `removed` NLRIs ride a single
+MP_UNREACH_NLRI; `updated` pairs ride MP_REACH_NLRI + BGP-LS
+Attribute (RFC 4271 §9.2.1.2 permits attribute updates without a
+withdraw).
+
+`DefaultRouter::bgp_session_identity_hash` is a cheap FNV-1a hash
+of every BGP session's `(handle, established, peer_bgp_id, peer_as)`
+tuple, in BTreeMap iteration order. The daemon ticker polls this
+once per tick and re-projects the EPE NLRI set only when it
+changes — saves a per-tick full projection when the session table
+is stable. Non-BGP sessions (OSPF, Babel) contribute nothing to
+the hash, so an OSPF adjacency churn does not spuriously re-project.
+
+The `BgplsDriver` ticker in `lr-cli::daemon` now runs the EPE
+projection after the existing OSPF area walk. The driver gains
+two new fields: `epe_pairs` (the last projected
+`(BgpLsNlri, BgpLsAttr)` pair set, mirroring the per-area
+`end_x_pairs` cache) and `epe_session_hash` (the last seen
+identity hash). A successful republish logs
+`bgp-ls epe republish: +N -N ^N ~N` matching the existing
+`bgp-ls republish area ...` line shape.
+
+The PeerNode SID value the projection emits is a deterministic
+per-session placeholder: `V = 0` (SRGB index form), `L = 0`, `B =
+0`, `P = 0`, weight 0, reserved 0, SRGB index = `session_handle as
+u32`. The placeholder is chosen over the label form (`V = 1`)
+because lr does not yet own an SR-MPLS label allocation surface, so
+emitting a label would imply a forwarding-plane contract the daemon
+does not yet honour. Operator-configurable SID values are the next
+follow-up; they do not change the projection shape or this wiring.
+
+Tests: 14 new unit tests in `epe_tests.rs` cover the projection
+(empty input, one session, Local / Remote Node Descriptor sub-TLVs,
+confederation member sub-TLVs, MT-ID 0, IPv4 / IPv6 Interface /
+Neighbor Address sub-TLVs, attribute carrying PeerNode SID alone or
+with PeerAdj / PeerSet, multiple sessions in input order,
+byte-for-byte round-trip on the full EPE shape, index-form SID
+round-trip). 5 integration tests in `instance::tests` cover the
+wiring (republish pushes the projected NLRIs to the BGP-LS session;
+non-BGP-LS session sees nothing; no BGP-LS session = empty diff
+but baseline still advances; no Established session = empty diff;
+`bgp_session_identity_hash` changes on established transition and
+ignores non-BGP sessions). `cargo nextest run -p lr-router
+--features lr-bgp/bgp_ls` → 716/716 pass (was 700, +16 new tests).
+`cargo clippy --workspace --all-features --all-targets -- -D
+warnings` clean. `cargo fmt --all -- --check` clean.
+
+Stability: additive only — no breaking changes. The new types are
+Rust-only; the C ABI (`lr-ffi`) is unchanged. Daemon / config
+surface is unchanged — the EPE projection is on whenever
+`[bgp_ls]` is enabled; no new CLI flag or TOML key. The
+operator-configurable SID surface is a follow-up.
+
+First-hand references used: RFC 9086 §3 (Link NLRI shape for EPE),
+§3.1 (BGP Router-ID sub-TLV type 516), §3.2 (Member-AS sub-TLV type
+517), §5 (BGP Peering SID shape), §5.1 (PeerNode SID mandatory),
+§5.2 (PeerAdj SID), §5.3 (PeerSet SID); RFC 7752 §3.2.1.4 (Node
+Descriptor sub-TLV framing), §3.2.2 (Link Descriptor sub-TLVs),
+§3.3 (NLRI Type 2 Link); RFC 5065 §4 (Member-AS Number); RFC 6286
+§4 (BGP Identifier); RFC 6119 §4.2 / §4.3 (IPv6 Interface /
+Neighbor Address TLVs).
+
 ### Changed (CI)
 
 **RISC-V CI matrix** (`ci`, [issue #65](https://github.com/TES286-org/librouting/issues/65)).

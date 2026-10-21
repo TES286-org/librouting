@@ -169,16 +169,31 @@ violates the "MUST be zero on originate" constraint; an inconsistent
 V-flag/length combination falls through to `Unknown` and still
 round-trips.
 
-What remains is the daemon-side EPE projection: walking the daemon's
-BGP peer sessions, emitting one BGP-LS Link NLRI per session (carrying
-the BGP Router-ID and Member-AS sub-TLVs in the Local / Remote Node
-Descriptors), and attaching the PeerNode SID (and optionally PeerAdj
-SID, PeerSet SID) BGP-LS Attribute TLVs to the projected NLRI. The
-projection is the peer of the OSPF LSDB → BGP-LS projection in
-`lr-router::instance::lsdb_to_bgpls`; the daemon ticker integration
-is the peer of `BgplsDriver` in `lr-cli::daemon`. Done when a
-controller learns those segments from lr and the data plane can push
-traffic onto them.
+The daemon-side EPE projection has landed alongside the codec: a new
+`lr-router::instance::epe` module walks a snapshot of the daemon's
+BGP peer sessions and emits one BGP-LS Link NLRI per Established
+session, paired with a BGP-LS Attribute carrying the PeerNode SID
+(and any optional PeerAdj / PeerSet SIDs). `DefaultRouter::bgpls_republish_epe`
+mirrors `bgpls_republish_end_x` — projects the live session set,
+diffs against `prev` via `lsdb_to_bgpls::diff_bgpls_with_attrs`,
+and pushes UPDATEs to every BGP-LS session. The `BgplsDriver` ticker
+polls `DefaultRouter::bgp_session_identity_hash` and re-projects
+on change, so the per-tick cost is negligible when the session
+table is stable. The PeerNode SID value the projection emits is a
+deterministic per-session placeholder (V flag clear, 4-byte SRGB
+index derived from the session handle); operator-configurable SID
+values are the next follow-up and do not change the projection
+shape.
+
+What remains is the receiver-side (controller-mode) follow-up the
+codec PR's scope-boundary section also names: a controller-mode
+daemon receives EPE NLRIs from its BGP-LS peers and surfaces them
+through its Loc-RIB. That touches the daemon's Loc-RIB model
+(`RouteKey { prefix, family }` does not fit a BGP-LS NLRI) and is
+independent of this projection. Done when a controller learns those
+segments from lr, the data plane can push traffic onto them, and a
+controller-mode lr daemon can ingest the same NLRIs another daemon
+advertises.
 
 ## Scaling
 

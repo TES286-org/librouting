@@ -4486,3 +4486,264 @@ fn bgpls_republish_end_x_unknown_area_is_noop() {
     assert!(diff.removed.is_empty());
     assert!(diff.updated.is_empty());
 }
+
+// ---------------------------------------------------------------------------
+// BGP-LS Egress Peer Engineering projection (RFC 9086) — daemon wiring
+// (issue #60 EPE follow-up; the codec landed in PR #68, the projection
+// is the natural follow-up the codec PR's scope-boundary section names).
+//
+// `bgpls_republish_epe` ties the BGP peer session → BGP-LS Link NLRI
+// projection (tested in `epe_tests`) to the live session table, the
+// `diff_bgpls_with_attrs` helper, and the
+// `BgpPeer::advertise_bgpls_with_attr` / `withdraw_bgpls` egress. The
+// integration tests below verify the wiring: bring a BGP-LS BGP
+// session up alongside one or more peer sessions, republish, and
+// check that the BGP-LS session's outbound buffer holds an UPDATE
+// carrying the projected EPE Link NLRI with its PeerNode SID attribute.
+// ---------------------------------------------------------------------------
+
+/// `bgpls_republish_epe` pushes one EPE Link NLRI + PeerNode SID
+/// attribute pair per Established BGP peer session to every BGP-LS
+/// session, and is a no-op when there is no change to the session
+/// table.
+#[test]
+fn bgpls_republish_epe_pushes_link_nlri_with_peer_node_sid_to_bgp_ls_session() {
+    use lr_core::nlri::NlriFamily;
+
+    let mut r = DefaultRouter::new();
+    // The BGP-LS session — receives the projected EPE NLRIs.
+    let bgp_ls_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64550), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::BGP_LS]),
+        )
+        .unwrap();
+    r.start_session(bgp_ls_h).unwrap();
+    // Bring up a *peer* session whose identity the projection
+    // will surface as the Remote Node Descriptor.
+    let peer_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::IPV4_UNICAST]),
+        )
+        .unwrap();
+    r.start_session(peer_h).unwrap();
+    // Step both sessions through OPEN/KEEPALIVE so they reach
+    // Established. Use a shared partner peer shape for both.
+    let establish =
+        |r: &mut DefaultRouter, h: SessionHandle, peer_as: u32, peer_bgp_id: [u8; 4]| {
+            let mut partner_cfg =
+                lr_bgp::PeerConfig::new(Asn(peer_as), Asn(64512), RouterId::from_v4(peer_bgp_id));
+            // Mirror the session's MP-BGP families so OPEN succeeds.
+            let SessionState::Bgp { peer, .. } = r.sessions.get(&h.0).unwrap() else {
+                unreachable!();
+            };
+            partner_cfg.mp_families = peer.config().mp_families.clone();
+            let mut partner = lr_bgp::BgpPeer::new(partner_cfg);
+            partner.step(lr_bgp::BgpEvent::ManualStart);
+            partner.step(lr_bgp::BgpEvent::TransportOpen);
+            let partner_open = partner.drain_outgoing();
+            r.feed_input(h, &partner_open).unwrap();
+            let our_open = r.drain_output(h);
+            let _ = partner.feed_bytes(&our_open);
+            let partner_keepalive = partner.drain_outgoing();
+            r.feed_input(h, &partner_keepalive).unwrap();
+            let _our_keepalive = r.drain_output(h);
+        };
+    establish(&mut r, bgp_ls_h, 64550, [10, 9, 9, 50]);
+    establish(&mut r, peer_h, 64513, [10, 9, 9, 13]);
+    {
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&bgp_ls_h.0).unwrap() else {
+            panic!("expected BGP-LS session");
+        };
+        assert!(peer.is_established(), "BGP-LS session must be Established");
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&peer_h.0).unwrap() else {
+            panic!("expected peer session");
+        };
+        assert!(peer.is_established(), "peer session must be Established");
+    }
+    // Republish. The driver projects one EPE Link NLRI per
+    // Established BGP session — that includes the BGP-LS session
+    // itself (the controller learns about it too, matching BIRD and
+    // FRR). With two Established sessions, the diff carries two
+    // added pairs.
+    let mut prev: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )> = Vec::new();
+    let diff = r.bgpls_republish_epe(64512, 1, &mut prev);
+    assert_eq!(
+        diff.added.len(),
+        2,
+        "two Established sessions → two added EPE NLRI pairs"
+    );
+    assert!(diff.removed.is_empty());
+    assert!(diff.updated.is_empty());
+    // The BGP-LS session's outbound buffer should hold the UPDATE
+    // bytes. The peer session (IPv4 unicast only, no BGP-LS family)
+    // must see nothing.
+    let bgp_ls_out = r.drain_output(bgp_ls_h);
+    assert!(
+        !bgp_ls_out.is_empty(),
+        "republish_epe must push UPDATE to the BGP-LS session"
+    );
+    let peer_out = r.drain_output(peer_h);
+    assert!(
+        peer_out.is_empty(),
+        "non-BGP-LS session must not receive EPE NLRIs"
+    );
+    // Second republish with no session change: empty diff, no UPDATE.
+    let mut prev2 = prev.clone();
+    let diff2 = r.bgpls_republish_epe(64512, 1, &mut prev2);
+    assert!(
+        diff2.added.is_empty() && diff2.removed.is_empty() && diff2.updated.is_empty(),
+        "no session change → empty diff"
+    );
+    let out2 = r.drain_output(bgp_ls_h);
+    assert!(out2.is_empty(), "no session change → no UPDATE");
+}
+
+/// `bgpls_republish_epe` is a no-op (empty diff, no UPDATE) when no
+/// BGP-LS session is up. The projection is still computed and the
+/// baseline is still updated, so a BGP-LS session coming up later
+/// triggers a full resend on its first tick.
+#[test]
+fn bgpls_republish_epe_no_bgp_ls_session_is_noop_send() {
+    use lr_core::nlri::NlriFamily;
+
+    let mut r = DefaultRouter::new();
+    // One peer session with no BGP-LS family — the projection has
+    // input to project, but no BGP-LS session to push to.
+    let peer_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64513), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::IPV4_UNICAST]),
+        )
+        .unwrap();
+    r.start_session(peer_h).unwrap();
+    // Bring the peer session to Established.
+    let mut partner_cfg =
+        lr_bgp::PeerConfig::new(Asn(64513), Asn(64512), RouterId::from_v4([10, 9, 9, 13]));
+    partner_cfg.mp_families = vec![NlriFamily::IPV4_UNICAST];
+    let mut partner = lr_bgp::BgpPeer::new(partner_cfg);
+    partner.step(lr_bgp::BgpEvent::ManualStart);
+    partner.step(lr_bgp::BgpEvent::TransportOpen);
+    let partner_open = partner.drain_outgoing();
+    r.feed_input(peer_h, &partner_open).unwrap();
+    let our_open = r.drain_output(peer_h);
+    let _ = partner.feed_bytes(&our_open);
+    let partner_keepalive = partner.drain_outgoing();
+    r.feed_input(peer_h, &partner_keepalive).unwrap();
+    let _our_keepalive = r.drain_output(peer_h);
+    // Republish. The projection runs (prev becomes the one-pair
+    // projection) but the diff is empty *for sending* — no BGP-LS
+    // session is up. The diff.added is empty because the BGP-LS
+    // session set is empty and the helper still tracks added pairs
+    // by NLRI bytes (the diff does not gate on the session set).
+    let mut prev: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )> = Vec::new();
+    let diff = r.bgpls_republish_epe(64512, 1, &mut prev);
+    assert_eq!(
+        diff.added.len(),
+        1,
+        "one Established session → one added pair (no BGP-LS session to push to)"
+    );
+    // The peer session's outbound buffer is empty — no BGP-LS
+    // family means no EPE UPDATE.
+    let out = r.drain_output(peer_h);
+    assert!(
+        out.is_empty(),
+        "peer session without BGP-LS sees no EPE UPDATE"
+    );
+}
+
+/// `bgpls_republish_epe` is a no-op (empty diff) when no BGP peer
+/// session is Established. The projection's input set is empty.
+#[test]
+fn bgpls_republish_epe_no_established_sessions_is_empty_diff() {
+    use lr_core::nlri::NlriFamily;
+
+    let mut r = DefaultRouter::new();
+    // One BGP-LS session, but not Established yet — the projection
+    // has nothing to project.
+    let bgp_ls_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64550), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::BGP_LS]),
+        )
+        .unwrap();
+    r.start_session(bgp_ls_h).unwrap();
+    let mut prev: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )> = Vec::new();
+    let diff = r.bgpls_republish_epe(64512, 1, &mut prev);
+    assert!(diff.added.is_empty());
+    assert!(diff.removed.is_empty());
+    assert!(diff.updated.is_empty());
+}
+
+/// `bgp_session_identity_hash` is stable when no session changes,
+/// and changes when a session's `established` state or `peer_bgp_id`
+/// changes. The daemon ticker polls this hash to gate the per-tick
+/// EPE re-projection.
+#[test]
+fn bgp_session_identity_hash_changes_on_established_transition() {
+    use lr_core::nlri::NlriFamily;
+
+    let mut r = DefaultRouter::new();
+    let bgp_ls_h = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64550), RouterId::from_v4([10, 0, 0, 1]))
+                .with_mp_families(vec![NlriFamily::BGP_LS]),
+        )
+        .unwrap();
+    r.start_session(bgp_ls_h).unwrap();
+    let h_before = r.bgp_session_identity_hash();
+    // Bring the session to Established.
+    let mut partner_cfg =
+        lr_bgp::PeerConfig::new(Asn(64550), Asn(64512), RouterId::from_v4([10, 9, 9, 50]));
+    partner_cfg.mp_families = vec![NlriFamily::BGP_LS];
+    let mut partner = lr_bgp::BgpPeer::new(partner_cfg);
+    partner.step(lr_bgp::BgpEvent::ManualStart);
+    partner.step(lr_bgp::BgpEvent::TransportOpen);
+    let partner_open = partner.drain_outgoing();
+    r.feed_input(bgp_ls_h, &partner_open).unwrap();
+    let our_open = r.drain_output(bgp_ls_h);
+    let _ = partner.feed_bytes(&our_open);
+    let partner_keepalive = partner.drain_outgoing();
+    r.feed_input(bgp_ls_h, &partner_keepalive).unwrap();
+    let _our_keepalive = r.drain_output(bgp_ls_h);
+    let h_after = r.bgp_session_identity_hash();
+    assert_ne!(
+        h_before, h_after,
+        "hash must change when a session transitions to Established (peer_bgp_id learned)"
+    );
+    // Hash is stable across a second read with no further change.
+    let h_again = r.bgp_session_identity_hash();
+    assert_eq!(
+        h_after, h_again,
+        "hash must be stable with no session change"
+    );
+}
+
+/// `bgp_session_identity_hash` is independent of the OSPF and Babel
+/// session kinds — a router with only OSPF sessions has the same
+/// hash as an empty router. (Defensive: ensures the EPE ticker
+/// doesn't spuriously re-project when OSPF adjacencies churn.)
+#[test]
+fn bgp_session_identity_hash_ignores_non_bgp_sessions() {
+    let mut r = DefaultRouter::new();
+    let h_empty = r.bgp_session_identity_hash();
+    // An OSPF session contributes nothing to the hash.
+    let _ospf_h = r
+        .add_session(SessionConfig::ospfv2(RouterId::from_v4([10, 0, 0, 1]), 0))
+        .unwrap();
+    let h_with_ospf = r.bgp_session_identity_hash();
+    assert_eq!(
+        h_empty, h_with_ospf,
+        "OSPF session must not affect the BGP identity hash"
+    );
+}
