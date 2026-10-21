@@ -19,7 +19,8 @@
 //!   parameter changes confirmed via Poll/Final sequences (§6.5).
 //! - [`auth`] — Simple Password framing plus the keyed-hash section
 //!   layouts (RFC 5880 §4.2 - §4.4). Sessions support Simple Password
-//!   end-to-end; digests are embedder-supplied.
+//!   end-to-end; the keyed-hash digest computation lands behind the
+//!   `keyed-auth` feature (on by default) via [`keyed_auth`].
 //!
 //! ## Usage
 //!
@@ -41,9 +42,11 @@
 #![forbid(unsafe_code)]
 
 pub mod auth;
+pub mod keyed_auth;
 pub mod packet;
 pub mod session;
 
 pub use auth::{AuthKey, AuthSection, AuthType};
+pub use keyed_auth::{BfdKeyedAuth, KeyedAuthAlgorithm};
 pub use packet::{BfdCodec, BfdPacket, Diagnostic, PacketFlags, State};
 pub use session::{BfdConfig, BfdSession, BfdSessionEvent, SessionRole};
