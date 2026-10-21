@@ -117,10 +117,10 @@ jobs:
 
   # Fuzzing — ROADMAP-v3 D6.4.
   #
-  # Coverage-guided fuzzing of the three highest-risk input
-  # surfaces: BGP wire codec, filter DSL parser, ROA validation.
-  # Each target runs for 5 minutes against the seed corpus
-  # committed under `fuzz/seeds/<target>/`. The job is
+  # Coverage-guided fuzzing of the four highest-risk input
+  # surfaces: BGP wire codec, filter DSL parser, ROA validation and
+  # BFD keyed-hash auth. Each target runs for 5 minutes against the
+  # seed corpus committed under `fuzz/seeds/<target>/`. The job is
   # non-blocking: the crashing input is uploaded as a workflow
   # artifact and no issue is filed; the job does not fail the run — fuzzing is exploratory and a
   # nightly crash from a corner case should not gate the next
@@ -142,7 +142,7 @@ jobs:
         run: cargo +nightly install cargo-fuzz --locked || cargo +nightly install cargo-fuzz
       - name: Seed corpus from committed seeds
         run: |
-          for t in bgp_decode filter_parser roa_validate; do
+          for t in bgp_decode filter_parser roa_validate bfd_auth; do
             mkdir -p "fuzz/corpus/$t"
             cp "fuzz/seeds/$t/"* "fuzz/corpus/$t/" 2>/dev/null || true
           done
@@ -155,6 +155,9 @@ jobs:
       - name: Fuzz roa_validate (5 min)
         working-directory: fuzz
         run: cargo +nightly fuzz run roa_validate -- -max_total_time=300 -max_len=4096
+      - name: Fuzz bfd_auth (5 min)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run bfd_auth -- -max_total_time=300 -max_len=4096
       - name: Upload crash artifacts (if any)
         if: always()
         uses: actions/upload-artifact@v7
