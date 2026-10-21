@@ -303,6 +303,78 @@ The End.X / LAN End.X SID *projection* update (attaching the
 the codec is the foundation, the projection update touches the
 `lsdb_to_bgpls` module and is tracked separately.
 
+**OSPFv3 SRv6 End.X / LAN End.X projection with attribute** (`feat`,
+[issue #60](https://github.com/TES286-org/librouting/issues/60)).
+The follow-up the previous entry called out: a new
+`lr-router::instance::lsdb_to_bgpls::project_v3_srv6_end_x_nlris`
+function projects the OSPFv3 SRv6 End.X / LAN End.X SID database
+(RFC 9513 §9) onto RFC 9514 §6 SRv6 SID NLRIs paired with the
+BGP-LS Attribute (RFC 7752 §3.3 + RFC 9514 §7-§8) that carries
+the SRv6 Endpoint Behavior TLV a controller needs to distinguish
+an End.X SID from an End SID. The projection walks the same
+`Srv6Database::nodes` the End SID projection walks; for each
+`Srv6Node::end_x_sids` entry (RFC 9513 §9.1 p2p form and §9.2 LAN
+form, gated on §9 locator containment and §9.2 neighbor match),
+it emits one `(BgpLsNlri, BgpLsAttr)` pair. The NLRI shape is
+identical to the End SID projection — RFC 9514 §6 carries the
+16-byte SID value; the End.X behavior lives in the attribute, not
+in the NLRI. The attribute carries the mandatory RFC 9514 §7.1
+SRv6 Endpoint Behavior TLV (type 1250, with the behavior, flags
+and algorithm from the OSPFv3 End.X sub-TLV) and the optional §8
+SRv6 SID Structure TLV (type 1252, with the four length fields
+passed through verbatim when the OSPFv3 §10 sub-TLV provided the
+SID-structure split). Unknown behaviors round-trip through
+`Srv6EndpointBehavior::Unknown(u16)` so a controller that
+recognises a newer RFC 8986 §10.2 code point still learns the
+behavior.
+
+A new `diff_bgpls_with_attrs` helper computes the added / removed
+/ updated / unchanged pair sets between two projections. Indexes
+both projections by the encoded NLRI bytes — the NLRI is the route
+identity, the attribute is the metadata. Equal NLRI bytes with
+differing attribute bytes surface as `updated` (re-advertise with
+the new attribute — RFC 4271 §9.2.1.2 permits attribute updates
+without MP_UNREACH_NLRI).
+
+A new `DefaultRouter::bgpls_republish_end_x` method drives the
+incremental republish: projects the area LSDB through
+`project_v3_srv6_end_x_nlris`, diffs against the caller's previous
+projection, and pushes UPDATEs to every BGP session that
+negotiated the BGP-LS family — `added` and `updated` pairs ride
+an MP_REACH_NLRI + BGP-LS Attribute via
+`BgpPeer::advertise_bgpls_with_attr` (one UPDATE per pair since
+each End.X NLRI has its own attribute — RFC 7752 §3.3 does not
+key the BGP-LS Attribute on individual NLRIs in one UPDATE);
+`removed` NLRIs ride a single MP_UNREACH_NLRI via
+`BgpPeer::withdraw_bgpls`. The `BgplsDriver` in `lr-cli::daemon`
+calls both `bgpls_republish` and `bgpls_republish_end_x` per
+tick on every configured OSPF area; the per-area cache holds
+the plain NLRI baseline and the End.X pair baseline side by
+side so a topology bump that touches only one projection does
+not double-send the other.
+
+Additive only — no breaking changes.
+
+- **Public Rust API (Tier 1)**: new
+  `lsdb_to_bgpls::project_v3_srv6_end_x_nlris`,
+  `lsdb_to_bgpls::diff_bgpls_with_attrs`,
+  `lsdb_to_bgpls::BgplsAttrDiff`,
+  `DefaultRouter::bgpls_republish_end_x`. No existing signature
+  changes.
+- **C ABI (Tier 2)**: unchanged; the new types are Rust-only.
+- **Daemon / config surface (Tier 3)**: unchanged.
+
+18 new unit tests cover the projection (End.X and LAN End.X shapes,
+the §9 locator containment gate, the §7.1 behavior attribute, the
+§8 SID Structure TLV, unknown behavior round-trip, multiple routers)
+and the diff function (added / removed / unchanged / updated). 3
+new integration tests in `lr-router/src/instance/tests.rs` cover
+`bgpls_republish_end_x` (positive push to a BGP-LS session, no-op
+for an OSPFv2 area, no-op for an unknown area). `cargo test -p
+lr-router --all-features` → 171/171 pass. `cargo fmt --all --
+--check` and `cargo clippy --workspace --all-targets --all-features
+-- -D warnings` clean.
+
 ### Changed (CI)
 
 **RISC-V CI matrix** (`ci`, [issue #65](https://github.com/TES286-org/librouting/issues/65)).

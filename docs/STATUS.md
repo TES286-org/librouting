@@ -61,7 +61,9 @@ files of the `lr-cli` binary crate, which is not a library.
 | BGP-LS NLRI egress (`BgpPeer::advertise_bgpls` / `withdraw_bgpls`) | yes | `lr-bgp::advertise` |
 | BGP-LS Attribute egress (`BgpPeer::advertise_bgpls_with_attr`) | yes | `lr-bgp::advertise` |
 | OSPF LSDB → BGP-LS projection (RFC 7752 §3 + RFC 9514 §6 SRv6 SID NLRI) | yes | `lr-router::instance::lsdb_to_bgpls` |
+| OSPFv3 SRv6 End.X / LAN End.X projection with attribute (RFC 9513 §9 → RFC 9514 §6 NLRI + §7-§8 attribute) | yes | `lr-router::instance::lsdb_to_bgpls::project_v3_srv6_end_x_nlris` |
 | BGP-LS projection incremental republish driver | yes | `lr-router::instance::DefaultRouter::bgpls_republish` |
+| BGP-LS End.X projection incremental republish driver | yes | `lr-router::instance::DefaultRouter::bgpls_republish_end_x` |
 | Daemon `--bgp-ls` flag and `[bgp_ls]` config block | yes | `lr-cli::daemon_config::BgpLsSpec`, `lr-cli::daemon::BgplsDriver` |
 
 ## OSPF — `lr-ospf`

@@ -58,7 +58,7 @@ attribute round-trips byte-for-byte. The cargo-fuzz target
 `bgp_ls_attr_decode` covers the same contract. The End.X / LAN
 End.X SID *projection* update (attaching the §7 attribute to
 a projected End.X NLRI through `BgpPeer::advertise_bgpls_with_attr`)
-is the next follow-up.
+has landed.
 
 `lr-router::instance::lsdb_to_bgpls` projects one OSPF area's LSDB
 onto the Node / Link / Prefix NLRI set: OSPFv2 emits Node NLRIs
@@ -75,14 +75,28 @@ router's 4-byte IGP Router-ID, and the SRv6 SID Descriptor stream
 carries the mandatory SRv6 SID Information TLV (§6.1, type 518,
 16-byte SID) plus a Multi-Topology ID TLV (type 263, value 0) for
 consistency with the prefix-NLRI projection. End.X / LAN End.X SIDs
-are not projected yet: the RFC 8986 endpoint behavior that
-distinguishes them from End SIDs lives in the BGP-LS Attribute
-surface (RFC 9514 §7), which now has a codec but the projection
-update that emits an End.X NLRI alongside its SRv6 Endpoint
-Behavior attribute is a follow-up. The projection is a pure
-function on the LSDB; `DefaultRouter::ospf_area_bgpls_nlris`
-wraps it with the router's per-area context. `diff_bgpls` returns
-the added / removed / unchanged NLRI sets so a daemon can drive
+are projected by the sibling function
+`lsdb_to_bgpls::project_v3_srv6_end_x_nlris`: it walks the same
+Srv6Database's per-node `end_x_sids` set (RFC 9513 §9.1 p2p form
+and §9.2 LAN form, gated on §9 locator containment and §9.2 neighbor
+match) and emits one `(BgpLsNlri, BgpLsAttr)` pair per End.X SID.
+The NLRI shape is identical to the End SID projection (RFC 9514 §6
+carries the 16-byte SID value; the End.X behavior lives in the
+attribute, not in the NLRI); the attribute carries the mandatory
+RFC 9514 §7.1 SRv6 Endpoint Behavior TLV (type 1250) and the optional
+§8 SRv6 SID Structure TLV (type 1252) when the OSPFv3 §10 sub-TLV
+provided the SID-structure split. `diff_bgpls_with_attrs` returns
+the added / removed / updated / unchanged pair sets so the daemon
+drives incremental MP-BGP UPDATE messages per pair — one UPDATE
+per End.X NLRI since each carries its own attribute (RFC 7752 §3.3
+does not key the BGP-LS Attribute on individual NLRIs in one
+UPDATE). The projection is a pure function on the LSDB;
+`DefaultRouter::ospf_area_bgpls_nlris` wraps the plain NLRI projection
+with the router's per-area context; `DefaultRouter::bgpls_republish`
+drives the plain NLRI projection's incremental republish and
+`DefaultRouter::bgpls_republish_end_x` drives the End.X pair
+projection's incremental republish. `diff_bgpls` returns the
+added / removed / unchanged NLRI sets so a daemon can drive
 incremental MP-BGP UPDATE messages by canonical wire form.
 
 `lr-bgp::advertise::BgpPeer::advertise_bgpls` and
@@ -95,8 +109,8 @@ define a next-hop; matches BIRD's `bgp_ls` channel and FRR's
 `bgp_bgp_ls.c`). `BgpPeer::advertise_bgpls_with_attr` attaches a
 BGP-LS Attribute (type 29, optional + non-transitive) alongside
 the MP_REACH_NLRI so the receiver learns the link-state
-metadata — the path the End.X projection follow-up will use to
-attach the §7 SRv6 Endpoint Behavior TLV.
+metadata — the path the End.X projection uses to attach the
+§7 SRv6 Endpoint Behavior TLV to a projected End.X NLRI.
 
 `lr-router::instance::DefaultRouter::bgpls_republish` is the
 republish driver: projects the area LSDB, computes the diff against
@@ -108,6 +122,15 @@ configured OSPF area's `topology_version` and calls
 `bgpls_republish` on change. The daemon flag is `--bgp-ls` and the
 config block is `[bgp_ls]` (with `enabled`, `as_number`,
 `bgp_ls_id`, `areas`); both forms fail closed (typo protection).
+The same `BgplsDriver` also calls `bgpls_republish_end_x` per tick
+to push the End.X / LAN End.X projection's `added` pairs through
+`advertise_bgpls_with_attr`, `removed` NLRIs through `withdraw_bgpls`,
+and `updated` pairs (NLRI unchanged, attribute changed) through
+`advertise_bgpls_with_attr` again — RFC 4271 §9.2.1.2 permits
+attribute updates without MP_UNREACH_NLRI. The per-area cache
+holds the plain NLRI baseline and the End.X pair baseline side by
+side so a topology bump that touches only one projection does not
+double-send the other.
 
 The interop lab `tests/interop/bgpls_bird.sh` starts an
 OSPF+BGP lr-daemon with `--bgp-ls` against a BIRD 2.17+ peer

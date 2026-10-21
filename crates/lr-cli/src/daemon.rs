@@ -3152,18 +3152,24 @@ fn pump_session(
     Ok(())
 }
 
-/// BGP-LS projection driver (issue #60 daemon wiring). Owned by the
-/// ticker thread; one pass per 50 ms tick polls each configured OSPF
-/// area's `topology_version` against the cached value and, on change,
-/// runs [`DefaultRouter::bgpls_republish`] to push an incremental
-/// MP_REACH / MP_UNREACH UPDATE to every BGP-LS session.
+/// BGP-LS projection driver (issue #60 daemon wiring + End.X
+/// follow-up). Owned by the ticker thread; one pass per 50 ms tick
+/// polls each configured OSPF area's `topology_version` against the
+/// cached value and, on change, runs [`DefaultRouter::bgpls_republish`]
+/// to push an incremental MP_REACH / MP_UNREACH UPDATE of the plain
+/// NLRIs (Node / Link / Prefix + SRv6 End SID) to every BGP-LS session,
+/// and [`DefaultRouter::bgpls_republish_end_x`] to push the End.X /
+/// LAN End.X NLRIs paired with their BGP-LS Attribute (RFC 9514 §7
+/// SRv6 Endpoint Behavior) — one UPDATE per End.X NLRI since each
+/// carries its own attribute.
 ///
 /// `areas` is the configured subset (an empty list means "every area
 /// the router holds"); `as_number` and `bgp_ls_id` are the BGP-LS
 /// speaker identity from the `[bgp_ls]` config block. The per-area
-/// cache holds the last `topology_version` seen and the last
-/// projected NLRI set so the next pass computes a true diff against
-/// the new projection (not a full resend).
+/// cache holds the last `topology_version` seen and the last projected
+/// NLRI set (plain NLRIs and End.X pairs separately) so the next pass
+/// computes a true diff against the new projection (not a full
+/// resend).
 pub(crate) struct BgplsDriver {
     as_number: u32,
     bgp_ls_id: u32,
@@ -3172,11 +3178,21 @@ pub(crate) struct BgplsDriver {
 }
 
 /// Per-area BGP-LS driver cache. `version` is the last seen
-/// `topology_version`; `nlris` is the last projected NLRI set so
-/// [`DefaultRouter::bgpls_republish`] computes the delta against it.
+/// `topology_version`; `nlris` is the last projected plain NLRI set
+/// (Node / Link / Prefix + SRv6 End SID NLRIs) so
+/// [`DefaultRouter::bgpls_republish`] computes the delta against it;
+/// `end_x_pairs` is the last projected End.X `(BgpLsNlri, BgpLsAttr)`
+/// pair set so [`DefaultRouter::bgpls_republish_end_x`] computes its
+/// own delta against it. The two caches are independent — the plain
+/// NLRI projection does not touch the End.X database, and the End.X
+/// projection does not touch the LSA walk the plain projection runs.
 struct BgplsAreaCache {
     version: u64,
     nlris: Vec<lr_bgp::path::bgp_ls::BgpLsNlri>,
+    end_x_pairs: Vec<(
+        lr_bgp::path::bgp_ls::BgpLsNlri,
+        lr_bgp::path::bgp_ls_attr::BgpLsAttr,
+    )>,
 }
 
 impl BgplsDriver {
@@ -3195,7 +3211,8 @@ impl BgplsDriver {
     /// One driver pass. Walks the configured area set (or every area
     /// the router holds when `areas` is empty), compares each area's
     /// `topology_version` against the cached value, and runs
-    /// `bgpls_republish` on change.
+    /// `bgpls_republish` (plain NLRIs) and `bgpls_republish_end_x`
+    /// (End.X NLRIs with attribute) on change.
     fn tick(&mut self, router: &mut DefaultRouter) {
         // Snapshot the area set under the write lock we already hold.
         // An empty configured list means "every area the router holds"
@@ -3224,18 +3241,39 @@ impl BgplsDriver {
             let entry = self.cache.entry(area_id).or_insert_with(|| BgplsAreaCache {
                 version,
                 nlris: Vec::new(),
+                end_x_pairs: Vec::new(),
             });
             let diff =
                 router.bgpls_republish(area_id, self.as_number, self.bgp_ls_id, &mut entry.nlris);
+            // The End.X projection is a no-op for OSPFv2 areas (the
+            // Srv6Database is empty); running it unconditionally keeps
+            // the daemon loop simple and lets the End.X projection
+            // reuse the same topology_version bump the plain
+            // projection already gated on.
+            let x_diff = router.bgpls_republish_end_x(
+                area_id,
+                self.as_number,
+                self.bgp_ls_id,
+                &mut entry.end_x_pairs,
+            );
             entry.version = version;
-            if !diff.added.is_empty() || !diff.removed.is_empty() {
+            if !diff.added.is_empty()
+                || !diff.removed.is_empty()
+                || !x_diff.added.is_empty()
+                || !x_diff.removed.is_empty()
+                || !x_diff.updated.is_empty()
+            {
                 log_info!(
                     Component::Bgp,
-                    "bgp-ls republish area {}: +{} -{} ~{}",
+                    "bgp-ls republish area {}: +{} -{} ~{} | end.x +{} -{} ^{} ~{}",
                     area_id,
                     diff.added.len(),
                     diff.removed.len(),
-                    diff.unchanged.len()
+                    diff.unchanged.len(),
+                    x_diff.added.len(),
+                    x_diff.removed.len(),
+                    x_diff.updated.len(),
+                    x_diff.unchanged,
                 );
             }
         }
