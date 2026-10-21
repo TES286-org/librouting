@@ -69,18 +69,78 @@ consumer runs to verify an artifact, including the
 workflow is triggered on, so a consumer pairs `<file>` with
 `<file>.bundle` once and reuses the same command across releases.
 
+## [Unreleased — prior] — Rust API surface scan (cargo public-api + semver-checks)
+
+The supply-chain follow-ups ROADMAP entry's static-analysis half
+lands in this change: the public Rust API surface is now scanned
+on every change. Two complementary tools cover the project's
+Tier 1 stability contract (the public Rust API is frozen at
+1.0, so any breaking change ships as a new minor — per
+`docs/RELEASE-PLAN.md` §1):
+
+- `cargo semver-checks` is the gate. It runs rustdoc-JSON-based
+  semver lints against the latest published `v*` tag's rustdoc
+  and fails the job if any check finds a violation — the
+  accidental breaking change a reviewer would otherwise miss.
+- `cargo public-api` is the report. It walks `rustdoc
+  --output-format json` of every library crate, diffs the
+  current tree against the latest tag, and emits an
+  Added/Changed/Removed breakdown per crate, uploaded as an
+  `api-surface-diff` artifact for review.
+
+### Added
+
+**PR-level API surface gate** (`ci`, ROADMAP "Supply-chain
+follow-ups"). A new `api-surface` job in
+`.github/workflows/ci.yml` runs on every push and every PR.
+The job:
+
+- Installs the nightly toolchain (`cargo public-api` uses
+  `rustdoc --output-format json`, which is still nightly-only).
+- Installs `cargo-public-api` and `cargo-semver-checks` (both
+  `cargo install --locked`, with an `|| true` fallback so a
+  future release that slips a lockfile bump past the maintainers
+  does not break CI silently).
+- Resolves the latest `v*` tag (the semver baseline) via
+  `git tag --list 'v*' --sort=-v:refname | head -1`. If no tag
+  exists yet (first release not cut), the gate is skipped —
+  same shape as the nightly variant.
+- Runs `cargo +nightly public-api -p <crate> diff
+  <latest-tag>..HEAD --simplified --color=never` per library
+  crate, captured to `api-surface/<crate>.public-api.diff`.
+  The crate list is filtered by `cargo metadata --no-deps`
+  to packages whose `targets` include a `lib`-kind target;
+  binary-only crates (e.g. `lr-cli`) are skipped because
+  `cargo public-api` walks the `[lib]` target's rustdoc JSON,
+  which binary-only crates lack.
+- Runs `cargo semver-checks --workspace --all-features
+  --baseline-rev <latest-tag>`. `--all-features` mirrors the
+  build matrix so feature-flagged public items are in scope.
+- Uploads the per-crate diffs as the `api-surface-diff`
+  artifact (7-day retention on PR-level, 30-day on nightly).
+
+**Nightly API surface snapshot** (`ci`, same ROADMAP entry).
+A second `api-surface` job in
+`.github/workflows/nightly.yml` runs the same two-tool scan
+on the nightly cron (and on `workflow_dispatch`). The artifact
+retention is 30 days there so a maintainer can review the
+nightly drift history.
+
 ### Stability
 
 No Rust API change. No C ABI change. No daemon flag or config
-surface change. The signatures are purely a release-pipeline
-artifact; the library and the daemon binaries are untouched.
+surface change. The scan is purely a CI/CD artifact; the
+library and the daemon binaries are untouched.
 
 ### Out of scope
 
-- A static-analysis scan of the Rust sources — the third gap in
-  the ROADMAP "Supply-chain follow-ups" entry. The SBOM and
-  signing halves landed in PR #71 and this PR; the scan lands
-  in a separate PR.
+- A `cargo public-api --deny` gate that fails the PR on
+  additions or removals of public items. Today the diff is the
+  report; the gate is `cargo semver-checks`. A `--deny` gate
+  would catch additive changes that `cargo semver-checks`
+  permits (an addition is a semver-minor, not a violation).
+  Worth a follow-up if the project wants the PR to fail on
+  every public-API change, not just breaking ones.
 
 ## [Unreleased — prior] — CycloneDX SBOM per release
 
