@@ -12,8 +12,9 @@ input.
 Read this page to run a target or to add one.
 
 The targets are `bgp_decode` (`BgpCodec::decode_slice`), `filter_parser`
-(`lr_policy::filter::compile`) and `roa_validate` (`RoaTableBuilder::add`
-plus `RoaTable::validate`).
+(`lr_policy::filter::compile`), `roa_validate` (`RoaTableBuilder::add`
+plus `RoaTable::validate`) and `bfd_auth` (`BfdKeyedAuth::verify_inbound`
+plus the BFD Control packet codec).
 
 ## Layout
 
@@ -35,7 +36,7 @@ cargo +nightly install cargo-fuzz --locked
 
 # Seed fuzz/corpus/<target>/ from the committed inputs (one-time per
 # checkout): cargo-fuzz reads fuzz/corpus/<target>/ at run time.
-for t in bgp_decode filter_parser roa_validate; do
+for t in bgp_decode filter_parser roa_validate bfd_auth; do
   mkdir -p "fuzz/corpus/$t"
   cp "fuzz/seeds/$t/"* "fuzz/corpus/$t/"
 done
