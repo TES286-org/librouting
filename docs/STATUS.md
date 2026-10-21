@@ -65,6 +65,8 @@ files of the `lr-cli` binary crate, which is not a library.
 | BGP-LS projection incremental republish driver | yes | `lr-router::instance::DefaultRouter::bgpls_republish` |
 | BGP-LS End.X projection incremental republish driver | yes | `lr-router::instance::DefaultRouter::bgpls_republish_end_x` |
 | Daemon `--bgp-ls` flag and `[bgp_ls]` config block | yes | `lr-cli::daemon_config::BgpLsSpec`, `lr-cli::daemon::BgplsDriver` |
+| Egress Peer Engineering SR-MPLS BGP Peering SID TLVs (RFC 9086 §5) | yes | `lr-bgp::path::bgp_ls_attr::BgpLsAttrTlv::{PeerNodeSid, PeerAdjSid, PeerSetSid}` |
+| Egress Peer Engineering Node Descriptor sub-TLVs (RFC 9086 §3) | yes | `lr-bgp::path::bgp_ls::NodeDescriptorSubTlv::{BgpRouterId, BgpConfederationMember}` |
 
 ## OSPF — `lr-ospf`
 
