@@ -278,6 +278,7 @@ impl ClusterList {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn originator_id_roundtrips() {
@@ -347,5 +348,59 @@ mod tests {
             ips,
             vec![IpAddr::V4([10, 0, 0, 2]), IpAddr::V4([10, 0, 0, 1])]
         );
+    }
+
+    // CONTRIBUTING.md: a new wire codec needs a fuzz target or a
+    // proptest strategy. The bgp_decode fuzz target feeds arbitrary
+    // bytes to the BGP message codec (which stores raw attribute
+    // bytes in PathAttribute::value), but the typed accessors that
+    // call OriginatorId::decode / ClusterList::decode are not in its
+    // path. The proptest strategy below fills that gap: it generates
+    // arbitrary byte slices, runs them through the strict-width
+    // decoders, and asserts the round-trip contract holds for any
+    // input the decoder accepts.
+
+    proptest! {
+        #[test]
+        fn originator_id_decode_never_panics(
+            bytes in prop::collection::vec(0u8..=255, 0..=64)
+        ) {
+            // The decoder must either return Some (4-byte input) or
+            // None (any other width) — never panic.
+            let decoded = OriginatorId::decode(&bytes);
+            if let Some(id) = decoded {
+                // Round-trip contract: encode is the inverse of decode
+                // for every accepted input.
+                prop_assert_eq!(id.encode(), bytes.as_slice());
+                // The 4-byte input invariant.
+                prop_assert_eq!(bytes.len(), 4);
+            } else {
+                // Rejected inputs include every non-4-byte width.
+                prop_assert_ne!(bytes.len(), 4);
+            }
+        }
+
+        #[test]
+        fn cluster_list_decode_never_panics(
+            bytes in prop::collection::vec(0u8..=255, 0..=128)
+        ) {
+            let decoded = ClusterList::decode(&bytes);
+            if let Some(list) = decoded {
+                // Round-trip contract: encode is the inverse of decode
+                // for every accepted input.
+                prop_assert_eq!(list.encode(), bytes.as_slice());
+                // The multiple-of-4 invariant.
+                prop_assert_eq!(bytes.len() % 4, 0);
+                // iter_ips yields exactly len/4 addresses, all V4.
+                let ips: Vec<IpAddr> = list.iter_ips().collect();
+                prop_assert_eq!(ips.len(), bytes.len() / 4);
+                for ip in ips {
+                    prop_assert!(matches!(ip, IpAddr::V4(_)));
+                }
+            } else {
+                // Rejected inputs include every non-multiple-of-4 width.
+                prop_assert_ne!(bytes.len() % 4, 0);
+            }
+        }
     }
 }
