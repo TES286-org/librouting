@@ -391,9 +391,13 @@ protocol bgp uplink {
 
     #[test]
     fn non_bgp_protocols_surface_as_warnings() {
+        // OSPF and Babel are translated (their area/interface blocks
+        // carry over to [[ospf.*]] / [[babel.interface]]); a protocol
+        // the converter does not cover at all (RIP) is the one that
+        // surfaces as an "ignored" warning.
         let text = "router id 10.0.0.1\n\
-                    protocol ospf my_ospf {\n\
-                        area 0 { interface \"eth0\"; }\n\
+                    protocol rip my_rip {\n\
+                        interface \"eth0\";\n\
                     }\n\
                     protocol bgp p1 {\n\
                         local as 64512;\n\
@@ -404,7 +408,7 @@ protocol bgp uplink {
         assert!(cfg
             .warnings
             .iter()
-            .any(|w| w.starts_with("protocol ospf my_ospf: ignored")));
+            .any(|w| w.starts_with("protocol rip my_rip: ignored")));
     }
 
     #[test]
