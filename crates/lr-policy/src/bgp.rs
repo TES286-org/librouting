@@ -45,11 +45,13 @@ const FLAGS_LOCAL_PREF: u8 = 0x40; // well-known discretionary
 const FLAGS_COMMUNITIES: u8 = 0xC0; // optional transitive
 const FLAGS_EXT_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 4360 §3)
 const FLAGS_LARGE_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 8092 §2)
-// Flags for the read-only path attributes the filter DSL exposes
-// (ATOMIC_AGGREGATE = well-known discretionary, ORIGINATOR_ID and
-// CLUSTER_LIST = optional non-transitive per RFC 4456 §8) live in
-// `lr-bgp::path` and surface here only when the corresponding setters
-// land; the accessors below read by tag, not by flags.
+
+// The read-only path attributes the filter DSL exposes below
+// (ATOMIC_AGGREGATE = well-known discretionary per RFC 4271 §5.1.6,
+// ORIGINATOR_ID and CLUSTER_LIST = optional non-transitive per RFC
+// 4456 §8) live in `lr-bgp::path`; the accessors here read by tag,
+// not by flags, so no `FLAGS_*` constant is needed until the
+// corresponding setters land.
 
 fn attr_bytes(route: &Route, tag: u8) -> Option<&[u8]> {
     route
@@ -156,7 +158,10 @@ pub fn origin(route: &Route) -> Option<u8> {
 /// value decoding. Returns `false` for routes originated without the
 /// marker (the common case).
 pub fn atomic_aggregate(route: &Route) -> bool {
-    route.attributes.get(AttrTag::raw(TAG_ATOMIC_AGGREGATE)).is_some()
+    route
+        .attributes
+        .get(AttrTag::raw(TAG_ATOMIC_AGGREGATE))
+        .is_some()
 }
 
 /// The route's ORIGINATOR_ID (RFC 4456 §8) as an IPv4 `IpAddr`;
@@ -196,7 +201,10 @@ pub fn cluster_list(route: &Route) -> Vec<IpAddr> {
 /// "present but empty" — `cluster_list()` collapses both to an empty
 /// `Vec`.
 pub fn has_cluster_list(route: &Route) -> bool {
-    route.attributes.get(AttrTag::raw(TAG_CLUSTER_LIST)).is_some()
+    route
+        .attributes
+        .get(AttrTag::raw(TAG_CLUSTER_LIST))
+        .is_some()
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -460,11 +468,7 @@ mod tests {
     /// `atomic_aggregate()` reports presence, nothing more.
     #[test]
     fn atomic_aggregate_is_a_presence_marker() {
-        let r_with = route_with(vec![raw_attr(
-            TAG_ATOMIC_AGGREGATE,
-            0x40,
-            Vec::new(),
-        )]);
+        let r_with = route_with(vec![raw_attr(TAG_ATOMIC_AGGREGATE, 0x40, Vec::new())]);
         assert!(atomic_aggregate(&r_with));
         let r_without = route_with(vec![]);
         assert!(!atomic_aggregate(&r_without));
@@ -475,11 +479,7 @@ mod tests {
     /// and malformed cases.
     #[test]
     fn originator_id_decodes_as_v4_ipaddr() {
-        let r = route_with(vec![raw_attr(
-            TAG_ORIGINATOR_ID,
-            0x80,
-            vec![10, 0, 0, 1],
-        )]);
+        let r = route_with(vec![raw_attr(TAG_ORIGINATOR_ID, 0x80, vec![10, 0, 0, 1])]);
         assert_eq!(originator_id(&r), Some(IpAddr::V4([10, 0, 0, 1])));
         // Absent.
         let r_absent = route_with(vec![]);

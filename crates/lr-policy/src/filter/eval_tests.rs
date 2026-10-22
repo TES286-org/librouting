@@ -1691,3 +1691,217 @@ fn vm_error_inside_user_function_carries_function_span() {
     assert_eq!(b.span.slice(src), Some("missing"), "{b:?}");
     assert_eq!((b.line, b.col), (2, 3));
 }
+
+// ---- RFC 4271 §5.1.6 + RFC 4456 §8: new read-only BGP fields ----
+
+const TAG_ATOMIC_AGGREGATE: u8 = 6;
+const TAG_ORIGINATOR_ID: u8 = 9;
+const TAG_CLUSTER_LIST: u8 = 10;
+
+fn route_with_atomic_aggregate() -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_ATOMIC_AGGREGATE),
+        flags: 0x40,
+        value: Vec::new(),
+    });
+    r
+}
+
+fn route_with_originator_id(id: [u8; 4]) -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_ORIGINATOR_ID),
+        flags: 0x80,
+        value: id.to_vec(),
+    });
+    r
+}
+
+fn route_with_cluster_list(ids: &[[u8; 4]]) -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    if ids.is_empty() {
+        return r;
+    }
+    let mut v = Vec::with_capacity(ids.len() * 4);
+    for id in ids {
+        v.extend_from_slice(id);
+    }
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_CLUSTER_LIST),
+        flags: 0x80,
+        value: v,
+    });
+    r
+}
+
+#[test]
+fn bgp_atomic_aggregate_reads_as_bool_true_when_present() {
+    let mut r = route_with_atomic_aggregate();
+    assert_eq!(
+        run("if bgp.atomic_aggregate then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_atomic_aggregate_reads_as_bool_false_when_absent() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if bgp.atomic_aggregate then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_atomic_aggregate_is_defined_iff_present() {
+    let mut r_with = route_with_atomic_aggregate();
+    assert_eq!(
+        run(
+            "if defined(bgp.atomic_aggregate) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.atomic_aggregate) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_originator_id_reads_as_ip_when_present() {
+    let mut r = route_with_originator_id([10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if bgp.originator_id == 10.0.0.1 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_originator_id_mismatch_rejects() {
+    let mut r = route_with_originator_id([10, 0, 0, 2]);
+    assert_eq!(
+        run(
+            "if bgp.originator_id == 10.0.0.1 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_originator_id_is_defined_iff_present() {
+    let mut r_with = route_with_originator_id([10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if defined(bgp.originator_id) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.originator_id) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_cluster_list_membership_test() {
+    // CLUSTER_LIST = [10.0.0.2, 10.0.0.1] (reflection order:
+    // most-recently-prepended first).
+    let mut r = route_with_cluster_list(&[[10, 0, 0, 2], [10, 0, 0, 1]]);
+    assert_eq!(
+        run(
+            "if 10.0.0.1 ~ bgp.cluster_list then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    let mut r2 = route_with_cluster_list(&[[10, 0, 0, 2], [10, 0, 0, 1]]);
+    assert_eq!(
+        run(
+            "if 10.0.0.3 ~ bgp.cluster_list then accept; reject;",
+            &mut r2
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_cluster_list_is_defined_iff_present() {
+    // Present and non-empty.
+    let mut r_with = route_with_cluster_list(&[[10, 0, 0, 1]]);
+    assert_eq!(
+        run(
+            "if defined(bgp.cluster_list) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    // Absent.
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.cluster_list) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_cluster_list_empty_membership_is_false() {
+    // Absent CLUSTER_LIST reads as an empty Set; no IP matches.
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if 10.0.0.1 ~ bgp.cluster_list then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_atomic_aggregate_is_not_assignable() {
+    // The parser rejects writes to read-only fields. ATOMIC_AGGREGATE
+    // is a presence marker — there's no value to set.
+    let err = compile("test", "bgp.atomic_aggregate = true;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_originator_id_is_not_assignable() {
+    let err = compile("test", "bgp.originator_id = 10.0.0.1;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_cluster_list_is_not_assignable() {
+    let err = compile("test", "bgp.cluster_list = [10.0.0.1];").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}

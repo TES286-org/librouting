@@ -297,6 +297,16 @@ const RENAMES: &[(&str, &str)] = &[
     ("bgp_community", "bgp.communities"),
     ("bgp_ext_community", "bgp.ext_communities"),
     ("bgp_large_community", "bgp.large_communities"),
+    // RFC 4271 §5.1.6 + RFC 4456 §8 — read-only attributes the lr
+    // DSL now exposes (see RouteFieldKind::{BgpAtomicAggregate,
+    // BgpOriginatorId, BgpClusterList}). BIRD's filter language
+    // treats `bgp_atomic_aggregate` as a boolean, `bgp_originator_id`
+    // as an `ip`, and `bgp_cluster_list` as a `clist` of IPv4-typed
+    // entries; lr's DSL matches each shape exactly (Bool, Ip, Set of
+    // Ip), so the rename is faithful with no semantic shim needed.
+    ("bgp_atomic_aggregate", "bgp.atomic_aggregate"),
+    ("bgp_originator_id", "bgp.originator_id"),
+    ("bgp_cluster_list", "bgp.cluster_list"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),

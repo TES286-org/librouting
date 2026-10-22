@@ -249,14 +249,12 @@ impl ClusterList {
     /// Decode the wire form. Returns `None` when the length is not
     /// a multiple of 4 (RFC 4456 §8 fixes CLUSTER_ID at 4 bytes).
     pub fn decode(b: &[u8]) -> Option<Self> {
-        let mut v = Vec::with_capacity(b.len() / 4);
-        for chunk in b.chunks_exact(4) {
-            v.push(RouterId::from_v4([chunk[0], chunk[1], chunk[2], chunk[3]]));
-        }
-        // `chunks_exact` silently drops a partial tail; the wire form
-        // is a strict multiple of 4, so a partial chunk is malformed.
-        if b.len() % 4 != 0 {
+        if !b.len().is_multiple_of(4) {
             return None;
+        }
+        let mut v = Vec::with_capacity(b.len() / 4);
+        for chunk in b.as_chunks::<4>().0 {
+            v.push(RouterId::from_v4(*chunk));
         }
         Some(Self(v))
     }
@@ -345,6 +343,9 @@ mod tests {
         list.prepend(RouterId::from_v4([10, 0, 0, 1]));
         list.prepend(RouterId::from_v4([10, 0, 0, 2]));
         let ips: Vec<IpAddr> = list.iter_ips().collect();
-        assert_eq!(ips, vec![IpAddr::V4([10, 0, 0, 2]), IpAddr::V4([10, 0, 0, 1])]);
+        assert_eq!(
+            ips,
+            vec![IpAddr::V4([10, 0, 0, 2]), IpAddr::V4([10, 0, 0, 1])]
+        );
     }
 }
