@@ -508,6 +508,17 @@ lists fields accepting the append form.
 | `bgp.originator_id`     | `ip`                  |    no    |  no  | RFC 4456 §8; `false` when the route carries none.      |
 | `bgp.cluster_list`      | `set` of `ip`         |    no    |  no  | RFC 4456 §8 reflection path; empty when absent. `~` membership test. |
 | `bgp.otc`               | `int`                 |    no    |  no  | RFC 9234 §3.1; `0` when absent or set to zero. `defined(bgp.otc)` distinguishes the two. |
+| `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
+| `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
+| `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.hint.damp_fom` | `int`                |    no    |  no  | Issue #81 / LRXP §5.1; sender's route-flap figure of merit. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.hint.igp_cost` | `int`                |    no    |  no  | Issue #81 / LRXP §5.1; sender's IGP cost to next hop. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.policy.role`  | `int`                 |    no    |  no  | Issue #81 / LRXP §5.2; sender's RFC 9234 role claim. `255` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.policy.import_digest` | `string`       |    no    |  no  | Issue #81 / LRXP §5.2; import-filter digest (hex). Empty when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.policy.export_digest` | `string`       |    no    |  no  | Issue #81 / LRXP §5.2; export-filter digest (hex). Empty when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.origin.origin_as` | `int`              |    no    |  no  | Issue #81 / LRXP §5.3; origin AS the attestation authorises. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.origin.max_valid_len` | `int`          |    no    |  no  | Issue #81 / LRXP §5.3; max prefix length the origin authorises. `0` when absent. Feature `exchange-plane`. |
+| `bgp.lrxp.origin.expiry` | `int`                |    no    |  no  | Issue #81 / LRXP §5.3; absolute expiry timestamp. `0` when absent. Feature `exchange-plane`. |
 | `roa.state`             | `roa-state`           |    no    |  no  | RFC 6811 outcome: `valid` / `invalid` / `not-found`.   |
 
 `proto` reads a string, not a protocol object: compare it with
@@ -545,6 +556,54 @@ legal) reports `true` on `defined` and `0` on read, exactly as BIRD's
 attribute is read-only: the daemon's RFC 9234 role logic (`lr-bgp::role::otc`)
 sets OTC on ingress and gates it on egress, so a filter that mutates it would
 fight the role FSM.
+
+The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
+(issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated
+behind `exchange-plane` and only parse when the feature is on; a feature-less
+build rejects `bgp.lrxp.*` at parse time with `UnknownBgpField`. The surface
+has three shapes:
+
+- `bgp.lrxp.verified` (bool) and `bgp.lrxp.partial_transit` (bool) — the two
+  bare predicates. `verified` is `true` when the route carries a tag-checked
+  record set the ingress hook accepted; `partial_transit` is `true` when the
+  store is forwarding material that crossed a non-lr hop (design §7). Both
+  read as `false` when the route carries no LRXP attribute — the non-LRXP peer
+  fallback.
+- `bgp.lrxp.hint.{rank,damp_fom,igp_cost}` (int) — the scope-1 feasibility
+  hint (design §5.1). `rank` is the sender's best-path rank (1 = the path the
+  sender itself uses); `damp_fom` is the sender's route-flap figure of merit;
+  `igp_cost` is the sender's IGP cost to the next hop. All read as `0` when
+  the route carries no verified hint record.
+- `bgp.lrxp.policy.{role,import_digest,export_digest}` (int / string / string)
+  — the scope-1 policy intent (design §5.2). `role` is the sender's RFC 9234
+  role claim (advisory; `255` = unspecified when absent). The digests are
+  lowercase hex strings so two sessions can compare filter fingerprints with
+  `==`. `role` reads as `255`, the digests as empty strings when absent.
+- `bgp.lrxp.origin.{origin_as,max_valid_len,expiry}` (int) — the provenance
+  origin attestation (design §5.3). `origin_as` is the AS the attestation
+  authorises; `max_valid_len` is the ROA maxLength idea without the PKI;
+  `expiry` is the absolute timestamp after which the record expires. All read
+  as `0` when absent.
+
+The canonical issue #81 idiom is adjusting `local-pref` based on the sender's
+hint rank — a route whose sender reports it as rank > 1 is a poor repair
+candidate (design §5.1) and can be deprioritised:
+
+```filter
+if bgp.lrxp.hint.rank > 1 then { bgp.local_pref = 50; accept; }
+accept;
+```
+
+The fallback is built into the accessors: a route from a non-LRXP peer (no
+`LrExchangePlaneRecords` attribute) reads `rank` as `0`, the `rank > 1` test
+is false, the local-pref write does not fire — the filter no-ops on peers that
+do not run the plane, exactly as issue #81 requires. `defined(bgp.lrxp.*)`
+distinguishes "absent" from "set to the default value" the same way
+`defined(bgp.otc)` does: the bare predicates are defined iff the route
+carries an LRXP store of any kind; the per-record fields are defined iff the
+route carries a verified store AND the corresponding record class is present
+in it. The fields are read-only: the daemon's ingress hook owns the store;
+a filter that mutates them would fight the ingress path.
 
 ---
 

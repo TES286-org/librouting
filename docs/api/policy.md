@@ -160,8 +160,10 @@ on the same route representation — see
 worked ROA filter. The DSL exposes the RFC 6811 validation outcome as
 `roa.state`, the RFC 1997, RFC 4360 and RFC 8092 community sets, the
 RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
-(`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`), and
-the RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`).
+(`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`), the
+RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), and — behind
+the `exchange-plane` feature — the LRXP exchange-plane records the
+route carries (`bgp.lrxp.*`, issue #81).
 
 ## RFCs
 

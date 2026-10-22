@@ -310,11 +310,12 @@ the session's when provenance propagates.
 ## 10. Implementation status
 
 > **Status.** The codec, the negotiation, the replay tracker, the
-> UPDATE attach/detach hooks with per-hop re-signing, and the daemon
-> config, CLI and runtime-API wiring are all landed behind the
-> `exchange-plane` feature (off by default). The parity harness replays
-> a captured lr-to-BIRD stream into an identical Loc-RIB with the flag
-> off; `tests/interop/exchange_plane.sh` proves the fallback against a
+> UPDATE attach/detach hooks with per-hop re-signing, the daemon
+> config, CLI and runtime-API wiring, and the filter DSL surface
+> (issue #81) are all landed behind the `exchange-plane` feature (off
+> by default). The parity harness replays a captured lr-to-BIRD stream
+> into an identical Loc-RIB with the flag off;
+> `tests/interop/exchange_plane.sh` proves the fallback against a
 > plain BIRD 2 with the flag on; and the loopback end-to-end test in
 > `crates/lr-cli/tests/` demonstrates all three record classes. Config
 > keys: `[bgp] exchange_plane` and `exchange_plane_keys`, plus per-peer
@@ -324,7 +325,14 @@ the session's when provenance propagates.
   `capabilities.rs`, record codec in the new module; no-std, like the rest of
   lr-bgp). Router plumbing: records surface as `RouterEvent::Log` plus a typed
   accessor. The decision process is untouched — hints are observed, not acted
-  on.
+  on. Filter DSL surface (issue #81): `lr-policy::lrxp` is the accessor module
+  the filter DSL's `bgp.lrxp.*` fields read through; the scope-1 records
+  (`hint`, `policy`, `origin`) plus the two bare predicates (`verified`,
+  `partial_transit`) are exposed to the filter so an operator can adjust
+  `local-pref` / `MED` based on them. The fallback (a non-LRXP peer's route
+  reads every field as `0` / `false` / `""`) is built into the accessors, so
+  a filter that deprioritises high-rank routes no-ops on peers that do not
+  run the plane — the graceful degradation issue #81 requires.
 - **Feature flag**: `exchange-plane` (off by default; the codec is feature-gated
   so the release build carries none of it until enabled).
 - **Daemon config**: `[peer] exchange_plane = true` +

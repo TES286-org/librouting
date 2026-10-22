@@ -195,6 +195,60 @@ segments from lr, the data plane can push traffic onto them, and a
 controller-mode lr daemon can ingest the same NLRIs another daemon
 advertises.
 
+**LRXP exchange-plane filter DSL surface (issue #81).** Done — the
+scope-1 records a route carries under the private
+`LrExchangePlaneRecords` attribute are now exposed to the filter DSL
+so an operator can adjust `local-pref` / `MED` based on them. The
+surface lives behind the `exchange-plane` feature (off by default);
+`lr-policy` gains an `exchange-plane = ["bgp",
+"lr-bgp/exchange-plane"]` feature so the typed accessors can decode
+the private record store.
+
+`lr-policy::lrxp` is the accessor module — `verified`,
+`partial_transit`, `hint` / `hint_rank` / `hint_damp_fom` /
+`hint_igp_cost`, `policy` / `policy_role` /
+`policy_import_digest_hex` / `policy_export_digest_hex`, `origin` /
+`origin_as` / `origin_max_valid_len` / `origin_expiry`. All read by
+tag from `Route.attributes[LrExchangePlaneRecords]` via the
+`lr-bgp::extensions::exchange_plane` codec — one BTreeMap lookup +
+one TLV decode per route on the hot path. The peephole pass does
+not fuse `bgp.lrxp.*` int comparisons into `BranchFieldIntCmp` (the
+read is not a single `get_u32_be`), so the unfused `LoadField; Push;
+Bin; JumpIf*` sequence runs — acceptable for an advisory attribute
+that rides a minority of routes.
+
+`RouteFieldKind` gains twelve `Lrxp*` variants (always present on
+the enum so downstream `match` exhaustiveness is stable across
+feature configurations); the parser dispatch (`parse_lrxp_field`)
+and the eval dispatch (`field_present`, `read_route_field`) are
+`#[cfg(feature = "exchange-plane")]`-gated, with a `#[cfg(not)] _ =>`
+fallback so a feature-less build rejects `bgp.lrxp.*` at parse time
+with `UnknownBgpField` and the exhaustive matches stay compilable.
+The `FilterContext` trait gains twelve `lrxp_*` methods with default
+implementations that delegate to `lr_policy::lrxp`, so every
+existing embedder — daemon, FFI built-in, FFI callback-table,
+benches, test stubs — inherits the correct behaviour without code
+changes. No FFI ABI change: `lr_filter_context_t` is untouched.
+
+The fallback (issue #81 requirement: a filter that adjusts
+`local-pref` based on `bgp.lrxp.hint.rank` no-ops on a non-LRXP peer)
+is built into the accessors — a route with no
+`LrExchangePlaneRecords` attribute (the peer did not advertise the
+capability) reads every int field as `0`, every bool as `false`,
+every string as empty, so the canonical idiom `if
+bgp.lrxp.hint.rank > 1 then { bgp.local_pref = 50; }` evaluates its
+condition to false and the local-pref write does not fire. The
+session-level vs per-route discrepancy (issue #81 requirement) is
+resolved by reading the route's carried record set: policy-intent
+records are nominally per-session but re-attach to every NLRI the
+session advertises, so the per-route read is the correct granularity
+for a filter that adjusts `local-pref`. Hints and provenance are
+per-route by construction. Done when a filter can deprioritise a
+route based on its sender-reported rank, boost a route with a
+verified origin attestation, and no-op on peers that do not run the
+plane — all pinned by the `lrxp_tests` module in
+`crates/lr-policy/src/filter/eval_tests.rs`.
+
 ## Scaling
 
 **Async I/O.** The daemon runs a thread per socket, and its transports poll
