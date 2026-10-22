@@ -250,11 +250,20 @@ subset; BIRD `protocol babel` interface blocks (RFC 8966 §A.2) and BIRD
 now carry through to `[[babel.interface]]`, `[[ospf.area]]` and
 `[[ospf.interface]]` tables. FRR `router ospf` area policy and
 `interface IFNAME` `ip ospf …` directives translate the same way
-(`crates/lr-cli/src/translate.rs`). What remains is the rest of the
-per-protocol attribute surface — BIRD's route attributes that ride
-the per-route filter context, FRR's address-family state inside
-`router bgp`, and the OSPFv3 `ospfv3 …` interface directives under
-`router ospfv3` (noted as a follow-up rather than silently dropped).
+(`crates/lr-cli/src/translate.rs`). FRR `router ospfv3` area policy
+and the `ospfv3 …` interface directives (RFC 5340 §A.4, FRR `ospf6d`)
+have landed alongside the v2 path: `ospfv3 router-id A.B.C.D` maps
+onto `router_id`, `ospfv3 area N stub|nssa|default-cost M` routes
+through the same handler as the bare v2 `area N …` form,
+`ospfv3 cost|hello-interval|dead-interval|priority|network …|area N`
+inside an `interface IFNAME` block routes through the same
+`apply_frr_ospf_iface` helper as the v2 `ip ospf …` directives, and
+`ospfv3 instance-id N` / `ospfv3 authentication …` /
+`ospfv3 abr-type …` / `ospfv3 log-adjacency-changes` etc. are noted
+as unmapped with the v3 directive stem so the operator sees the
+version-specific gap. What remains is the rest of the per-protocol
+attribute surface — BIRD's route attributes that ride the per-route
+filter context, and FRR's address-family state inside `router bgp`.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF
