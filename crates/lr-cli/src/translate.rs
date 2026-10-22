@@ -2976,3 +2976,7 @@ fn fold_peer_list_directive(peer: &mut PeerOut, d: &LrDirective) -> Result<(), S
 #[cfg(test)]
 #[path = "translate_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "corpus_tests.rs"]
+mod corpus_tests;
