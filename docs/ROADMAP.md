@@ -261,9 +261,28 @@ inside an `interface IFNAME` block routes through the same
 `ospfv3 instance-id N` / `ospfv3 authentication …` /
 `ospfv3 abr-type …` / `ospfv3 log-adjacency-changes` etc. are noted
 as unmapped with the v3 directive stem so the operator sees the
-version-specific gap. What remains is the rest of the per-protocol
-attribute surface — BIRD's route attributes that ride the per-route
-filter context, and FRR's address-family state inside `router bgp`.
+version-specific gap. FRR `address-family` state inside `router bgp`
+has landed alongside the v3 path: `aggregate-address A.B.C.D/M
+[summary-only] [as-set] [route-map NAME]` (RFC 4271 §9.2.2.2) maps
+onto `[[aggregate]]` rows (the `summary-only`/`as-set`/`route-map`
+qualifiers carry unmapped notes — lr's `[[aggregate]]` models only
+the prefix today); `redistribute <proto> [metric M] [route-map
+NAME]` (inside `router bgp`/`router ospf`/`router ospfv3`) maps onto
+`[[redistribute]]` rows — `bgp`/`ospf`/`ospf3`/`babel` sources map
+(the daemon's injection surface), `connected`/`static`/`kernel`/
+`rip`/`isis` carry unmapped notes (lr models kernel/static routes
+via `networks`, not via a redistribute pipe), and `route-map NAME`
+is noted (lr's `[[redistribute]]` has no per-pipe filter hook). A
+pipe whose source engine is not `bgp` triggers a top-level
+`protocols = ["bgp", "<engine>", …]` emission so the generated
+config is loadable as-is (the daemon's `finalize` rejects a
+`[[redistribute]]` whose source engine it does not run). `no bgp
+ebgp-requires-policy` is consumed silently (the converter always
+emits `ebgp_policy = "accept-all"`, which is the same intent), and
+`network PREFIX route-map NAME` keeps the prefix while noting the
+route-map (lr's `networks` is a plain prefix list). What remains is
+the rest of the per-protocol attribute surface — BIRD's route
+attributes that ride the per-route filter context.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF

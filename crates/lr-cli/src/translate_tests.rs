@@ -1153,3 +1153,253 @@ protocol ospf my_ospf {
     assert_eq!(cfg.ospf_areas[0].kind.as_deref(), Some("nssa"));
     assert_eq!(cfg.ospf_areas[0].stub_metric, Some(10));
 }
+
+// ---- FRR address-family state: aggregate-address & redistribute ----
+
+#[test]
+fn frr_aggregate_address_maps_to_aggregate_table() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             bgp router-id 10.0.0.1\n\
+             address-family ipv4 unicast\n\
+              aggregate-address 192.0.2.0/24\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
+}
+
+#[test]
+fn frr_aggregate_address_summary_only_carries_unmapped_note() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              aggregate-address 192.0.2.0/24 summary-only\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
+    assert!(
+        toml.contains(
+            "# UNMAPPED: aggregate-address 192.0.2.0/24 — summary-only carried but lr's [[aggregate]] models only the prefix"
+        ),
+        "summary-only must surface as an UNMAPPED note"
+    );
+}
+
+#[test]
+fn frr_aggregate_address_as_set_and_route_map_notes() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              aggregate-address 192.0.2.0/24 as-set route-map RM-AGG\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.aggregates.len(), 1);
+    assert_eq!(cfg.aggregates[0].prefix.as_deref(), Some("192.0.2.0/24"));
+    assert!(
+        toml.contains("aggregate-address 192.0.2.0/24 — as-set, route-map carried"),
+        "as-set + route-map must surface as a single UNMAPPED note"
+    );
+    assert!(
+        toml.contains("route-map RM-AGG — lr's [[aggregate]] has no per-aggregate attribute hook"),
+        "route-map NAME must surface its own UNMAPPED note"
+    );
+}
+
+#[test]
+fn frr_aggregate_address_outside_router_bgp_is_dropped() {
+    // `aggregate-address` outside `router bgp` (e.g. at the top level)
+    // is a config error in FRR. The converter must not emit a
+    // [[aggregate]] row from such a line — silently dropping it
+    // matches the catch-all for other top-level noise.
+    let out = translate_frr("aggregate-address 192.0.2.0/24\n");
+    assert!(out.aggregates.is_empty());
+}
+
+#[test]
+fn frr_redistribute_ospf_into_bgp_emits_pipe_and_engines() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf metric 100\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    let rd = &cfg.redistributes[0];
+    assert_eq!(rd.source.as_deref(), Some("ospf"));
+    assert_eq!(rd.target.as_deref(), Some("bgp"));
+    assert_eq!(rd.metric, Some(100));
+    // The pipe needs the ospf engine running — the converter emits
+    // `protocols = ["bgp", "ospf"]` so finalize accepts the pipe.
+    assert!(
+        toml.contains("protocols = [\"bgp\", \"ospf\"]"),
+        "expected protocols line for the ospf engine, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_babel_into_bgp_emits_babel_engine() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute babel\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert_eq!(cfg.redistributes[0].source.as_deref(), Some("babel"));
+    assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
+    assert!(
+        toml.contains("protocols = [\"bgp\", \"babel\"]"),
+        "expected protocols line for the babel engine, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_bgp_into_bgp_no_extra_engine() {
+    // A bgp→bgp pipe (FRR's `redistribute bgp` inside `router bgp`)
+    // re-originates BGP routes as locally-originated — lr supports it
+    // without an extra engine, so no `protocols = [...]` line.
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute bgp\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert_eq!(cfg.redistributes[0].source.as_deref(), Some("bgp"));
+    assert_eq!(cfg.redistributes[0].target.as_deref(), Some("bgp"));
+    assert!(
+        !toml.contains("protocols = "),
+        "bgp→bgp pipe must not emit a protocols line"
+    );
+}
+
+#[test]
+fn frr_redistribute_connected_is_unmapped() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute connected\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert!(
+        cfg.redistributes.is_empty(),
+        "connected source must not produce a [[redistribute]] row"
+    );
+    assert!(
+        toml.contains("redistribute connected — lr models kernel/static routes via `networks`"),
+        "expected unmapped note for connected, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_route_map_is_unmapped() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              redistribute ospf route-map RM-REDIST\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert_eq!(cfg.redistributes[0].source.as_deref(), Some("ospf"));
+    assert!(
+        toml.contains("route-map RM-REDIST dropped"),
+        "expected route-map dropped note, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_redistribute_into_ospf_targets_ospf() {
+    let toml = render(translate_frr(
+        "router ospf\n\
+             redistribute bgp metric 50\n\
+             !\n",
+    ));
+    // OSPF target — round-trip with protocol=ospf (per corpus
+    // convention) but the converter still emits the bgp engine in
+    // the protocols list.
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.redistributes.len(), 1);
+    assert_eq!(cfg.redistributes[0].source.as_deref(), Some("bgp"));
+    assert_eq!(cfg.redistributes[0].target.as_deref(), Some("ospf"));
+    assert_eq!(cfg.redistributes[0].metric, Some(50));
+    // The pipe needs both bgp (source) and ospf (target) engines.
+    // The order is converter-internal; both names must appear.
+    assert!(
+        toml.contains("\"bgp\"") && toml.contains("\"ospf\""),
+        "expected protocols line listing both bgp and ospf engines, got:\n{toml}"
+    );
+}
+
+#[test]
+fn frr_no_redistribute_is_silently_consumed() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              no redistribute ospf\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert!(
+        cfg.redistributes.is_empty(),
+        "no redistribute must not produce a [[redistribute]] row"
+    );
+    assert!(
+        !toml.to_lowercase().contains("no redistribute"),
+        "no redistribute line must not appear in the rendered TOML"
+    );
+}
+
+#[test]
+fn frr_no_bgp_ebgp_requires_policy_is_silently_consumed() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             no bgp ebgp-requires-policy\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    // lr always emits `ebgp_policy = "accept-all"` (the converter's
+    // baseline), which is exactly what `no bgp ebgp-requires-policy`
+    // asks for. The FRR directive must not appear as an UNMAPPED
+    // note — that would be noise.
+    assert!(
+        !toml.to_lowercase().contains("ebgp-requires-policy"),
+        "no bgp ebgp-requires-policy must not appear in rendered TOML, got:\n{toml}"
+    );
+    assert_eq!(cfg.local_as, 64512, "router bgp N must still set local_as");
+}
+
+#[test]
+fn frr_network_with_route_map_keeps_prefix_noting_route_map() {
+    let toml = render(translate_frr(
+        "router bgp 64512\n\
+             address-family ipv4 unicast\n\
+              network 203.0.113.0/24 route-map RM-NET\n\
+             exit-address-family\n\
+             !\n",
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.networks, vec!["203.0.113.0/24".to_string()]);
+    assert!(
+        toml.contains("network 203.0.113.0/24 route-map RM-NET"),
+        "expected unmapped note for the route-map, got:\n{toml}"
+    );
+}

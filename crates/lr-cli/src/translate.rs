@@ -49,6 +49,27 @@
 //!   `default_ipv4_unicast = false` for an ipv6-only peer)
 //! - FRR `address-family ipv6 unicast` + `neighbor … activate` →
 //!   `mp_families += ipv6-unicast`
+//! - FRR `aggregate-address A.B.C.D/M [summary-only] [as-set]
+//!   [route-map NAME]` → `[[aggregate]]` rows (RFC 4271 §9.2.2.2);
+//!   `summary-only`/`as-set`/`route-map` carry unmapped notes — lr's
+//!   `[[aggregate]]` models only the prefix today.
+//! - FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
+//!   `router bgp`/`router ospf`/`router ospfv3`) → `[[redistribute]]`
+//!   rows. Only `bgp`/`ospf`/`ospf3`/`babel` sources map (the
+//!   daemon's injection surface); `connected`/`static`/`kernel`/`rip`/
+//!   `isis` carry unmapped notes (lr models kernel/static routes via
+//!   `networks`, not via a redistribute pipe). `route-map NAME` is
+//!   noted (lr's `[[redistribute]]` has no per-pipe filter hook).
+//!   A pipe whose source engine is not `bgp` triggers a top-level
+//!   `protocols = ["bgp", "<engine>", …]` emission so the generated
+//!   config is loadable as-is (the daemon's `finalize` rejects a
+//!   `[[redistribute]]` whose source engine it does not run).
+//! - FRR `no bgp ebgp-requires-policy` is consumed silently — the
+//!   converter always emits `ebgp_policy = "accept-all"`, which is
+//!   the same intent.
+//! - FRR `network PREFIX route-map NAME` → the prefix joins
+//!   `networks`; the route-map carries an unmapped note (lr's
+//!   `networks` is a plain prefix list, no per-route attribute hook).
 //!
 //! Policy semantics: BIRD and FRR natively accept every route a peer
 //! sends unless a filter says otherwise, which is lr's
@@ -81,7 +102,9 @@
 
 use std::process::ExitCode;
 
-use crate::daemon_config::{BabelInterfaceSpec, OspfAreaSpec, OspfIfSpec};
+use crate::daemon_config::{
+    AggregateSpec, BabelInterfaceSpec, OspfAreaSpec, OspfIfSpec, RedistributeSpec,
+};
 use crate::translate_bird_filter::{self, BirdFilterSource, FilterRow, RoaRow};
 
 /// One lr-specific `lr:` comment directive: `key` (normalised to
@@ -239,6 +262,23 @@ pub(super) struct ConfigOut {
     /// silent.
     ospf_areas: Vec<(OspfAreaSpec, Vec<String>)>,
     ospf_ifaces: Vec<(OspfIfSpec, Vec<String>)>,
+    /// FRR `aggregate-address A.B.C.D/M [summary-only]` (RFC 4271
+    /// §9.2.2.2) → `[[aggregate]]` rows. `summary-only`, `as-set` and
+    /// `route-map NAME` carry unmapped notes — lr's `[[aggregate]]`
+    /// only models the prefix today.
+    aggregates: Vec<AggregateSpec>,
+    /// FRR `redistribute <proto> [metric M] [route-map NAME]` (inside
+    /// `router bgp` + `address-family …`) → `[[redistribute]]` rows.
+    /// Only `bgp`, `ospf`, `babel` sources map (the daemon's
+    /// injection surface); `connected`, `static`, `kernel`, `rip`,
+    /// `isis` carry unmapped notes instead. `route-map NAME` is also
+    /// unmapped (lr's `[[redistribute]]` has no per-pipe filter hook).
+    redistributes: Vec<RedistributeSpec>,
+    /// Engine names a translated `[[redistribute]]` needs beyond
+    /// `bgp` (e.g. `["ospf"]` for `redistribute ospf` inside
+    /// `router bgp`). Drives the top-level `protocol = "bgp,ospf"`
+    /// emission at render so the generated config is loadable as-is.
+    redistribute_engines: Vec<String>,
     /// Whole-peer notes rendered near the header (peers dropped
     /// because they can never start, e.g. FRR stubs without a
     /// `remote-as`).
@@ -1624,6 +1664,13 @@ fn translate_frr(text: &str) -> ConfigOut {
     // true; routes the `ospfv3 …` router-level directives to the
     // OSPFv3-specific arms.
     let mut router_ospf_v3: bool = false;
+    // `true` while inside a `router bgp <as>` stanza (closed by a
+    // bare `!`, an `exit`, or any other `router`/`interface` line).
+    // Distinguishes `redistribute`/`aggregate-address` inside the BGP
+    // router context (target = bgp) from the same keyword inside
+    // `router ospf` (target = ospf) so the translated
+    // `[[redistribute]]` lands on the right target engine.
+    let mut in_router_bgp: bool = false;
     for raw in text.lines() {
         // FRR directive scan: `# lr: KEY [VALUE]` / `! lr: …` are
         // global; `# lr: neighbor ADDR KEY [VALUE]` scopes to that
@@ -1653,6 +1700,17 @@ fn translate_frr(text: &str) -> ConfigOut {
         // open interface/router-ospf/address-family context. A trailing
         // `!` after content (`ip ospf cost 10 !`) is rare and tolerated
         // by the per-line handlers below.
+        //
+        // FRR's vtysh output also uses `!` as a *visual separator*
+        // inside `router bgp` (between the peer lines and the
+        // `address-family` block, between AF blocks, etc.) — those `!`
+        // lines do NOT close the BGP stanza. Only `interface` blocks
+        // (and the OSPF `router ospf` stanza in older vtysh output)
+        // are actually closed by `!`. We therefore clear `iface_ctx`
+        // and the OSPF context on `!` (matching the vtysh convention
+        // for OSPF) but keep `in_router_bgp` set so a later
+        // `aggregate-address`/`redistribute` inside an AF block still
+        // resolves to the BGP target engine.
         if tokens == ["!"] {
             if iface_ctx.is_some() {
                 finish_frr_ospf_iface(&mut out, &iface_ctx);
@@ -1673,6 +1731,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                 in_router_ospf = false;
                 router_ospf_v3 = false;
                 af_ctx = None;
+                in_router_bgp = true;
                 out.local_as = tokens[2].parse().ok();
                 // FRR's documented default: `bgp enforce-first-as` is
                 // ON. The native run keeps the source implementation's
@@ -1691,6 +1750,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                 }
                 af_ctx = None;
                 in_router_ospf = true;
+                in_router_bgp = false;
                 router_ospf_v3 = tokens[1] == "ospfv3";
                 if router_ospf_v3 {
                     out.unmapped_global.push(
@@ -1714,6 +1774,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                     iface_ctx = None;
                 }
                 in_router_ospf = false;
+                in_router_bgp = false;
                 router_ospf_v3 = false;
                 af_ctx = None;
                 out.ignored_protocols.push(format!("router {}", tokens[1]));
@@ -1728,6 +1789,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                     finish_frr_ospf_iface(&mut out, &iface_ctx);
                 }
                 in_router_ospf = false;
+                in_router_bgp = false;
                 router_ospf_v3 = false;
                 af_ctx = None;
                 iface_ctx = Some(tokens[1].to_string());
@@ -1955,21 +2017,117 @@ fn translate_frr(text: &str) -> ConfigOut {
                 ));
             }
             "exit-address-family" => af_ctx = None,
-            "exit" if in_router_ospf || iface_ctx.is_some() => {
+            "exit" if in_router_ospf || in_router_bgp || iface_ctx.is_some() => {
                 // FRR `exit` closes the current section (an alternative
-                // to the bare `!` line some configs use).
+                // to the bare `!` line some configs use). A bare
+                // `exit` inside `router bgp` closes the BGP stanza;
+                // `exit-address-family` (handled above) closes only
+                // the AF nesting.
                 if iface_ctx.is_some() {
                     finish_frr_ospf_iface(&mut out, &iface_ctx);
                     iface_ctx = None;
                 }
                 in_router_ospf = false;
+                in_router_bgp = false;
                 router_ospf_v3 = false;
+                af_ctx = None;
             }
             "network" if tokens.len() >= 2 && tokens[1].contains('/') => {
                 // `network PREFIX` (router or address-family context)
-                // — locally originated, same as lr's `networks`.
+                // — locally originated, same as lr's `networks`. The
+                // optional `route-map NAME` qualifier (FRR's per-route
+                // attribute hook on origination) has no lr equivalent
+                // today — `[[networks]]` is a plain prefix list — so
+                // it is noted instead of silently dropped.
                 out.networks.push(tokens[1].to_string());
+                if let Some(idx) = tokens.iter().position(|t| *t == "route-map") {
+                    if let Some(name) = tokens.get(idx + 1) {
+                        out.unmapped_global.push(format!(
+                            "network {} route-map {} — lr's `networks` has no per-route attribute hook; route-map dropped",
+                            tokens[1], name
+                        ));
+                    }
+                }
             }
+            // `aggregate-address A.B.C.D/M [summary-only] [as-set]
+            // [route-map NAME]` (RFC 4271 §9.2.2.2, FRR `router bgp`
+            // + `address-family …`). lr's `[[aggregate]]` models only
+            // the prefix — the aggregate is originated with a zeroed
+            // AS_PATH plus ATOMIC_AGGREGATE and AGGREGATOR while any
+            // more-specific route is present. `summary-only` (suppress
+            // the specifics), `as-set` (include AS-SET in the
+            // aggregate's AS_PATH) and `route-map NAME` (per-aggregate
+            // attribute hook) carry unmapped notes — the lr schema has
+            // no knobs for them today.
+            "aggregate-address" if tokens.len() >= 2 && in_router_bgp => {
+                let prefix = tokens[1].to_string();
+                let mut notes: Vec<&str> = Vec::new();
+                let mut i = 2;
+                while i < tokens.len() {
+                    match tokens[i] {
+                        "summary-only" | "as-set" => {
+                            notes.push(tokens[i]);
+                            i += 1;
+                        }
+                        "route-map" => {
+                            if let Some(name) = tokens.get(i + 1) {
+                                notes.push("route-map");
+                                out.unmapped_global.push(format!(
+                                    "aggregate-address {prefix} route-map {name} — lr's [[aggregate]] has no per-aggregate attribute hook; route-map dropped"
+                                ));
+                                i += 2;
+                            } else {
+                                out.unmapped_global.push(format!(
+                                    "aggregate-address {prefix} route-map — missing name"
+                                ));
+                                i += 1;
+                            }
+                        }
+                        _ => i += 1,
+                    }
+                }
+                if !notes.is_empty() {
+                    out.unmapped_global.push(format!(
+                        "aggregate-address {prefix} — {} carried but lr's [[aggregate]] models only the prefix",
+                        notes.join(", ")
+                    ));
+                }
+                out.aggregates.push(AggregateSpec {
+                    prefix: Some(prefix),
+                });
+            }
+            // `redistribute <proto> [metric M] [route-map NAME]` —
+            // FRR's inter-protocol pipe into the active router
+            // context. Inside `router bgp` (with or without an
+            // `address-family` block) the target is bgp; inside
+            // `router ospf`/`ospfv3` the target is ospf/ospf3. Only
+            // bgp/ospf/ospf3/babel sources map (the daemon's injection
+            // surface); `connected`, `static`, `kernel`, `rip`,
+            // `isis` carry unmapped notes — lr models kernel/static
+            // routes via `networks`, not via a redistribute pipe.
+            "redistribute" if tokens.len() >= 2 => {
+                apply_frr_redistribute(
+                    &mut out,
+                    &tokens[1..],
+                    in_router_bgp,
+                    in_router_ospf,
+                    router_ospf_v3,
+                    line,
+                );
+            }
+            // `no redistribute <proto> …` — FRR's removal form. lr
+            // starts from an empty `[[redistribute]]` set, so the
+            // removal is a no-op; consume silently instead of noting.
+            "no" if tokens.len() >= 2 && tokens[1] == "redistribute" => {}
+            // `no bgp ebgp-requires-policy` — FRR 7.4+ defaults to
+            // `ebgp-requires-policy` on; turning it off is the same
+            // as lr's `ebgp_policy = "accept-all"` (which the
+            // converter always emits). Consume silently — emitting a
+            // note would be noise since the rendered config already
+            // matches the source's intent.
+            "no" if tokens.len() >= 3
+                && tokens[1] == "bgp"
+                && tokens[2] == "ebgp-requires-policy" => {}
             "neighbor" if tokens.len() >= 3 => {
                 apply_frr_neighbor(&mut out, &tokens[2..], tokens[1], false, af_ctx.as_deref());
             }
@@ -2420,6 +2578,138 @@ fn peer_for_or_create<'a>(out: &'a mut ConfigOut, addr: &str) -> Option<&'a mut 
         .find(|p| p.remote.as_deref() == Some(addr))
 }
 
+/// `redistribute <proto> [metric M] [route-map NAME]` — FRR's
+/// inter-protocol pipe. The target engine depends on the active
+/// router context: `bgp` inside `router bgp`, `ospf`/`ospf3` inside
+/// `router ospf`/`ospfv3`. Only `bgp`/`ospf`/`ospf3`/`babel` sources
+/// map onto lr's `[[redistribute]]` (the daemon's injection surface);
+/// `connected`/`static`/`kernel`/`rip`/`isis` carry unmapped notes
+/// since lr seeds kernel/static routes via `networks`, not via a
+/// redistribute pipe. `metric M` carries through; `route-map NAME` is
+/// noted (lr's `[[redistribute]]` has no per-pipe filter hook today).
+///
+/// `tokens` is the slice after the `redistribute` keyword (`PROTO
+/// [metric M] [route-map NAME]`); `line` is the original (trimmed)
+/// line for the unmapped note. The `in_router_*` flags describe the
+/// active stanza — exactly one is true at any call site (the caller's
+/// `if tokens.len() >= 2` guard ensures we never see a bare
+/// `redistribute` with no protocol).
+fn apply_frr_redistribute(
+    out: &mut ConfigOut,
+    tokens: &[&str],
+    in_router_bgp: bool,
+    in_router_ospf: bool,
+    router_ospf_v3: bool,
+    line: &str,
+) {
+    let proto = tokens[0];
+    // Resolve the target engine from the active router context. FRR
+    // lets `redistribute` appear at the router-bgp level (defaulting
+    // to IPv4 unicast) or inside an `address-family …` block; both
+    // map to the same target (`bgp`). Inside `router ospf` the target
+    // is `ospf`; inside `router ospfv3` it is `ospf3` (the daemon's
+    // spelling — the engine name stays `ospf` either way).
+    let target = if in_router_bgp {
+        Some("bgp")
+    } else if in_router_ospf {
+        if router_ospf_v3 {
+            Some("ospf3")
+        } else {
+            Some("ospf")
+        }
+    } else {
+        // `redistribute` outside a router stanza — likely a config
+        // error or a context the converter does not track (e.g. a
+        // vendor extension). Note and bail.
+        out.unmapped_global.push(format!(
+            "{line} — outside a router bgp/ospf context; not mapped"
+        ));
+        return;
+    };
+    // Map the source protocol onto lr's daemon naming. `connected`,
+    // `static`, `kernel` are kernel-table categories lr does not
+    // expose as a redistribute source; `rip`, `isis` are protocols
+    // the daemon does not run. Each lands an unmapped note so the
+    // operator sees the gap.
+    let source = match proto {
+        "bgp" => Some("bgp"),
+        "ospf" | "ospfv2" => Some("ospf"),
+        "ospf3" | "ospfv3" => Some("ospf3"),
+        "babel" => Some("babel"),
+        _ => {
+            out.unmapped_global.push(format!(
+                "{line} — lr models kernel/static routes via `networks`, not via a redistribute pipe; source '{proto}' not mapped"
+            ));
+            return;
+        }
+    };
+    let Some(source) = source else { return };
+    let Some(target) = target else { return };
+    // Walk the optional qualifiers: `metric M` and `route-map NAME`.
+    let mut metric: Option<u32> = None;
+    let mut i = 1;
+    while i < tokens.len() {
+        match tokens[i] {
+            "metric" => {
+                if let Some(v) = tokens.get(i + 1) {
+                    metric = v.parse().ok();
+                    if metric.is_none() {
+                        out.unmapped_global.push(format!(
+                            "{line} — bad metric '{v}' (expected u32); metric dropped"
+                        ));
+                    }
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            "route-map" => {
+                if let Some(name) = tokens.get(i + 1) {
+                    out.unmapped_global.push(format!(
+                        "{line} — lr's [[redistribute]] has no per-pipe filter hook; route-map {name} dropped"
+                    ));
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            // FRR also accepts `metric-type (1|2|external|type-1|...)`
+            // for OSPF targets and a few other knobs — none map onto
+            // lr's [[redistribute]] today. Skip the value token if
+            // the next token does not look like another keyword.
+            _ => i += 1,
+        }
+    }
+    // Track the extra engine the daemon needs to run so render can
+    // emit `protocol = "bgp,ospf"` (or `bgp,babel`). `bgp` is the
+    // converter's baseline; OSPF (any version) is one engine name;
+    // babel is another. The source engine is always the "extra" one
+    // relative to the target (a bgp→bgp pipe needs nothing extra).
+    let source_engine = match source {
+        "bgp" => None,
+        "ospf" | "ospf3" => Some("ospf"),
+        "babel" => Some("babel"),
+        _ => None,
+    };
+    let target_engine = match target {
+        "bgp" => None,
+        "ospf" | "ospf3" => Some("ospf"),
+        _ => None,
+    };
+    for eng in [source_engine, target_engine].into_iter().flatten() {
+        if !out.redistribute_engines.iter().any(|e| e == eng) {
+            out.redistribute_engines.push(eng.to_string());
+        }
+    }
+    out.redistributes.push(RedistributeSpec {
+        source: Some(source.to_string()),
+        target: Some(target.to_string()),
+        metric,
+        tag: None,
+        allow: Vec::new(),
+    });
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -2450,6 +2740,27 @@ fn render(out: ConfigOut) -> String {
             Ok((k, v)) => bgp_ext.push((k, v)),
             Err(note) => s.push_str(&format!("# UNMAPPED: {note}\n")),
         }
+    }
+    // A translated `[[redistribute]]` whose source engine is not bgp
+    // needs the daemon to run that engine too — otherwise `finalize`
+    // rejects the pipe with "the daemon does not run the <engine>
+    // engine". Emit `protocol = "bgp,ospf"` (or `bgp,babel`) so the
+    // generated config is loadable as-is. The list is de-duplicated
+    // and keeps `bgp` first so a BGP-only config stays at the
+    // converter's default.
+    if !out.redistribute_engines.is_empty() {
+        let mut engines: Vec<&str> = vec!["bgp"];
+        for eng in &out.redistribute_engines {
+            if eng != "bgp" && !engines.contains(&eng.as_str()) {
+                engines.push(eng.as_str());
+            }
+        }
+        let joined = engines
+            .iter()
+            .map(|e| format!("\"{e}\""))
+            .collect::<Vec<_>>()
+            .join(", ");
+        s.push_str(&format!("protocols = [{joined}]\n"));
     }
     s.push('\n');
     s.push_str("[bgp]\n");
@@ -2696,6 +3007,37 @@ fn render(out: ConfigOut) -> String {
             "# UNMAPPED: filter {name} not translated — {}\n",
             notes.join("; ")
         ));
+    }
+    // FRR `aggregate-address A.B.C.D/M` (RFC 4271 §9.2.2.2). The lr
+    // daemon originates the aggregate while any more-specific route
+    // is present and withdraws it when the last specific disappears.
+    // `summary-only`/`as-set`/`route-map` qualifiers were already
+    // noted as unmapped at parse time — only the prefix reaches the
+    // `[[aggregate]]` row.
+    for agg in &out.aggregates {
+        s.push_str("[[aggregate]]\n");
+        if let Some(p) = &agg.prefix {
+            s.push_str(&format!("prefix = {}\n", toml_str(p)));
+        }
+        s.push('\n');
+    }
+    // FRR `redistribute <proto> [metric M]` (inside `router bgp` /
+    // `router ospf`/`ospfv3`). The daemon's `[[redistribute]]`
+    // schema is `(source, target, metric, tag, allow)`; only the
+    // first three carry through from FRR today. `route-map NAME`
+    // was noted at parse time.
+    for rd in &out.redistributes {
+        s.push_str("[[redistribute]]\n");
+        if let Some(src) = &rd.source {
+            s.push_str(&format!("source = {}\n", toml_str(src)));
+        }
+        if let Some(tgt) = &rd.target {
+            s.push_str(&format!("target = {}\n", toml_str(tgt)));
+        }
+        if let Some(m) = rd.metric {
+            s.push_str(&format!("metric = {m}\n"));
+        }
+        s.push('\n');
     }
 
     for peer in &out.peers {
