@@ -255,14 +255,22 @@ per-protocol attribute surface — BIRD's route attributes that ride
 the per-route filter context, FRR's address-family state inside
 `router bgp`, and the OSPFv3 `ospfv3 …` interface directives under
 `router ospfv3` (noted as a follow-up rather than silently dropped).
-The corpus of real configurations from both daemons with the
-expected output beside them is the other half: a small set of
-representative BIRD and FRR configs covers the BGP/Babel/OSPF
-shapes the converter actually maps today, and a new dialect quirk
-adds a corpus case instead of a bespoke assertion. Done when a real
-configuration converts with no unmapped line that changes its
-behaviour, the corpus runs in the interop gate, and a new dialect
-quirk adds a corpus case instead of a bespoke assertion.
+The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
+every representative BIRD and FRR config with the exact
+`.expected.toml` the converter emits, covering the BGP/Babel/OSPF
+shapes the converter maps today. Two harnesses share the same data
+files — the in-crate `translate::corpus_tests` unit test
+(`crates/lr-cli/src/corpus_tests.rs`, drives the converter functions
+directly, runs on every platform in `cargo test`) and the
+`tests/interop/translate_corpus.sh` end-to-end gate (drives the real
+`lr-daemon translate` CLI binary, runs in the Linux interop CI job).
+Both honour `LR_CORPUS_UPDATE=1` to regenerate the golden files after
+an intentional converter change; every `.expected.toml` round-trips
+through the daemon loader so the "generated TOML is always loadable"
+contract is machine-checked. A new dialect quirk now adds a corpus
+case (input + expected) instead of a bespoke assertion. What remains
+is the per-protocol attribute surface named above; the corpus grows
+as each new shape lands.
 
 ## Tooling and supply chain
 

@@ -156,6 +156,7 @@ portable ones.
 | `compat_frr.sh` | lr-daemon loaded from a native `frr.conf`, and FRR bgpd | the FRR compat layer, same shape; see [`COMPAT.md`](COMPAT.md) |
 | `filter_dsl_bird.sh` | lr-daemon with `[[filter]]` tables and BIRD | BIRD-shaped filter bodies (prefix-set membership, arithmetic, attribute assignment, if/then/else) evaluate against real BIRD-advertised routes |
 | `damping_frr.sh` | lr `[damping]` and FRR bgpd as the flap generator | RFC 2439: FRR-driven flaps suppress at the threshold, decay reactivates, and a post-reuse flap re-installs (BIRD ships no RFD, so FRR is the reference) |
+| `translate_corpus.sh` | the `lr-daemon translate` CLI and the `tests/corpus/` golden files | the conversion corpus: every representative BIRD/FRR config converts to its committed `.expected.toml` byte-for-byte through the real CLI binary, so a converter regression surfaces as a diff before it reaches a compat-mode deployment |
 
 ## LDP, RPKI-RTR and YANG
 

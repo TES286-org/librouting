@@ -53,6 +53,30 @@ in one pass. Existing tests that asserted OSPF was "ignored" now
 use RIP (a protocol the converter does not cover) to verify the
 ignored-protocols path.
 
+**BIRD/FRR conversion corpus with a golden-file gate** (`cli`,
+ROADMAP "Per-protocol route attributes and an external conversion
+corpus"). The corpus half of the ROADMAP entry: a directory of
+representative BIRD and FRR configurations (`tests/corpus/{bird,frr}/`)
+paired with the exact `.expected.toml` the `lr translate` converter
+emits, covering the BGP/Babel/OSPF shapes the converter maps today —
+single and dual-channel BGP peers, import/export none, the BIRD
+filter DSL, ROA tables, static routes, Babel interface blocks, OSPF
+area/interface blocks, FRR policy (prefix-lists, route-maps,
+as-path/community lists), IPv6 activation, and the OSPFv3 version
+note.
+
+Two harnesses share the same data files. The in-crate
+`translate::corpus_tests` unit test
+(`crates/lr-cli/src/corpus_tests.rs`) drives the converter functions
+directly and runs on every platform in `cargo test`. The
+`tests/interop/translate_corpus.sh` end-to-end gate drives the real
+`lr-daemon translate` CLI binary and runs in the Linux interop CI
+job. Both honour `LR_CORPUS_UPDATE=1` to regenerate the golden files
+after an intentional converter change, and every `.expected.toml`
+round-trips through the daemon loader so the "generated TOML is
+always loadable" contract is machine-checked. A new dialect quirk now
+adds a corpus case (input + expected) instead of a bespoke assertion.
+
 ## [1.3.0] — minor: supply-chain follow-ups, BFD auth, BGP-LS
 
 librouting 1.3.0 is a minor release. Per `docs/RELEASE-PLAN.md`
