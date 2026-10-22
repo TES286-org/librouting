@@ -27,7 +27,7 @@ use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
 
 /// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4 /
-/// RFC 4360 §2 / RFC 8092 §2).
+/// RFC 4360 §2 / RFC 8092 §2 / RFC 9234 §3.1).
 const TAG_ORIGIN: u8 = 1;
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
@@ -38,6 +38,8 @@ const TAG_ORIGINATOR_ID: u8 = 9;
 const TAG_CLUSTER_LIST: u8 = 10;
 const TAG_EXT_COMMUNITIES: u8 = 16;
 const TAG_LARGE_COMMUNITIES: u8 = 32;
+/// RFC 9234 §3.1: OTC ("Only To Customer") attribute type code.
+const TAG_OTC: u8 = 35;
 
 const FLAGS_AS_PATH: u8 = 0x40;
 const FLAGS_MED: u8 = 0x80;
@@ -205,6 +207,33 @@ pub fn has_cluster_list(route: &Route) -> bool {
         .attributes
         .get(AttrTag::raw(TAG_CLUSTER_LIST))
         .is_some()
+}
+
+/// The route's OTC attribute (RFC 9234 §3.1) as a 4-byte AS number;
+/// `None` when the attribute is absent (e.g. a route from a peer with
+/// no OTC role) or when the wire form is malformed (any length other
+/// than 4 bytes). BIRD spells OTC as an integer in its filter
+/// language; the `u32` representation matches so a BIRD filter like
+/// `if bgp_otc != 0 then reject;` translates faithfully to
+/// `if bgp.otc != 0 then reject;`.
+///
+/// A present value of `0` ("set but zero") is returned as `Some(0)`
+/// — use [`has_otc`] to distinguish "absent" from "set to zero" in
+/// policies that need the distinction (the `defined(bgp.otc)` filter
+/// DSL predicate consults `has_otc`, not this accessor).
+///
+/// GitHub #19 P3: reads the 4-byte big-endian value in place via
+/// `Attributes::get_u32_be` — no `Vec<u8>` clone, no intermediate
+/// `&[u8]` slice beyond the BTreeMap lookup.
+pub fn otc(route: &Route) -> Option<u32> {
+    route.attributes.get_u32_be(AttrTag::raw(TAG_OTC))
+}
+
+/// True when an OTC attribute is physically present on the route
+/// (RFC 9234 §3.1). Use this to distinguish "no attribute" from
+/// "present but zero" — `otc()` returns `Some(0)` for the latter.
+pub fn has_otc(route: &Route) -> bool {
+    route.attributes.get(AttrTag::raw(TAG_OTC)).is_some()
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -513,5 +542,41 @@ mod tests {
         let r_bad = route_with(vec![raw_attr(TAG_CLUSTER_LIST, 0x80, vec![1, 2, 3, 4, 5])]);
         assert!(cluster_list(&r_bad).is_empty());
         assert!(has_cluster_list(&r_bad));
+    }
+
+    /// RFC 9234 §3.1 — OTC is a 4-byte AS number; the helper surfaces
+    /// it as `u32` and stays `None` on the absent and malformed
+    /// cases. A present value of `0` ("set but zero") is returned as
+    /// `Some(0)` so policies that need the distinction consult
+    /// `has_otc` instead.
+    #[test]
+    fn otc_decodes_as_u32() {
+        // Present, value 64512.
+        let r = route_with(vec![raw_attr(
+            TAG_OTC,
+            0xC0,
+            64512u32.to_be_bytes().to_vec(),
+        )]);
+        assert_eq!(otc(&r), Some(64512));
+        assert!(has_otc(&r));
+        // Absent.
+        let r_absent = route_with(vec![]);
+        assert_eq!(otc(&r_absent), None);
+        assert!(!has_otc(&r_absent));
+        // Present, value 0 — "set but zero". `otc()` returns
+        // `Some(0)`; `has_otc()` reports presence. This is the case
+        // `defined(bgp.otc)` in the filter DSL must distinguish from
+        // "absent".
+        let r_zero = route_with(vec![raw_attr(TAG_OTC, 0xC0, vec![0, 0, 0, 0])]);
+        assert_eq!(otc(&r_zero), Some(0));
+        assert!(has_otc(&r_zero));
+        // Malformed width — `otc()` returns None (the u32 fast path
+        // rejects anything but 4 bytes); `has_otc()` still reports
+        // presence (the attribute is on the route; only the value is
+        // unreadable). Mirrors the `cluster_list()` accessor's
+        // behaviour on a partial tail.
+        let r_bad = route_with(vec![raw_attr(TAG_OTC, 0xC0, vec![1, 2, 3])]);
+        assert_eq!(otc(&r_bad), None);
+        assert!(has_otc(&r_bad));
     }
 }
