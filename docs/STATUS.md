@@ -197,6 +197,8 @@ files of the `lr-cli` binary crate, which is not a library.
 | BIRD `protocol ospf` area/interface translation (RFC 2328 §C / RFC 5340 §A.4) | yes | `crates/lr-cli/src/translate::translate_bird` |
 | FRR `router ospf` and `interface IFNAME` OSPF translation (RFC 2328 §C) | yes | `crates/lr-cli/src/translate::translate_frr` |
 | FRR `router ospfv3` and `ospfv3 …` interface directives (RFC 5340 §A.4) | yes | `crates/lr-cli/src/translate::translate_frr` |
+| FRR `aggregate-address` translation (RFC 4271 §9.2.2.2) | yes | `crates/lr-cli/src/translate::translate_frr` |
+| FRR `redistribute <proto>` translation (router bgp / router ospf) | yes | `crates/lr-cli/src/translate::translate_frr` |
 | BIRD/FRR conversion corpus with golden-file gate | yes | `tests/corpus/`, `crates/lr-cli/src/corpus_tests.rs`, `tests/interop/translate_corpus.sh` |
 | Config validation without starting the daemon | yes | `crates/lr-cli/src/config_check.rs` |
 | RPKI-RTR cache client in the daemon | yes | `crates/lr-cli/src/daemon_rpki.rs` |

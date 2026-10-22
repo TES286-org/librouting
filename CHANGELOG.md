@@ -87,6 +87,54 @@ round-trips through the daemon loader so the "generated TOML is
 always loadable" contract is machine-checked. A new dialect quirk now
 adds a corpus case (input + expected) instead of a bespoke assertion.
 
+**FRR `address-family` state: `aggregate-address` and `redistribute`**
+(`cli`, ROADMAP "Per-protocol route attributes and an external
+conversion corpus"). The `lr translate frr` converter now maps the
+FRR `address-family` directives that ride inside `router bgp` (and
+the `redistribute` form inside `router ospf`/`router ospfv3`) onto
+the daemon's `[[aggregate]]` and `[[redistribute]]` tables instead
+of silently dropping them.
+
+`aggregate-address A.B.C.D/M [summary-only] [as-set] [route-map
+NAME]` (RFC 4271 §9.2.2.2) maps onto a `[[aggregate]]` row. The
+optional `summary-only`, `as-set` and `route-map NAME` qualifiers
+carry unmapped notes — lr's `[[aggregate]]` models only the prefix
+today (the daemon originates the aggregate with a zeroed AS_PATH
+plus ATOMIC_AGGREGATE and AGGREGATOR while any more-specific route
+is present, and withdraws it when the last specific disappears; the
+FRR qualifiers that suppress specifics or rewrite the aggregate's
+AS-SET have no lr equivalent yet).
+
+`redistribute <proto> [metric M] [route-map NAME]` (inside `router
+bgp`/`router ospf`/`router ospfv3`) maps onto a `[[redistribute]]`
+row. The target engine follows the active router context: `bgp`
+inside `router bgp`, `ospf`/`ospf3` inside `router ospf`/`ospfv3`.
+The source protocol maps when it is one of `bgp`/`ospf`/`ospf3`/
+`babel` (the daemon's injection surface); `connected`/`static`/
+`kernel`/`rip`/`isis` carry unmapped notes — lr models kernel/static
+routes via `networks`, not via a redistribute pipe. `m[metric M`
+carries through; `route-map NAME` is noted (lr's `[[redistribute]]`
+has no per-pipe filter hook today). A pipe whose source engine is
+not `bgp` triggers a top-level `protocols = ["bgp", "<engine>", …]`
+emission so the generated config is loadable as-is — the daemon's
+`finalize` rejects a `[[redistribute]]` whose source engine it does
+not run, so the converter emits the protocol set the pipe needs.
+
+Two related FRR directives also landed: `no bgp ebgp-requires-policy`
+is consumed silently (the converter always emits `ebgp_policy =
+"accept-all"`, which is the same intent), and `network PREFIX
+route-map NAME` keeps the prefix in `networks` while noting the
+route-map (lr's `networks` is a plain prefix list, no per-route
+attribute hook).
+
+Two new corpus cases lock in the contract: `tests/corpus/frr/
+bgp-aggregate.conf` (the `summary-only` shape) and
+`tests/corpus/frr/bgp-redistribute.conf` (the `redistribute ospf
+metric 100` + `redistribute connected` shape, exercising both the
+mapped pipe and the unmapped note). Both round-trip through the
+daemon loader so the "generated TOML is always loadable" contract
+is machine-checked.
+
 ## [1.3.0] — minor: supply-chain follow-ups, BFD auth, BGP-LS
 
 librouting 1.3.0 is a minor release. Per `docs/RELEASE-PLAN.md`

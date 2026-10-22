@@ -46,7 +46,11 @@ file changes how lr routes.
 | `import all` / `export all` | the accept-all eBGP policy |
 | Prefix lists, as-path access lists, community lists, route-maps | the matching lr policy tables |
 | `network PREFIX` (FRR), BIRD static `route` | `networks`, locally originated |
+| `network PREFIX route-map NAME` (FRR) | `networks` (prefix kept; route-map noted) |
 | BIRD `ipv4`/`ipv6` channels, FRR `address-family` plus `activate` | `mp_families` |
+| FRR `aggregate-address A.B.C.D/M [summary-only] [as-set] [route-map NAME]` | `[[aggregate]]` (qualifiers noted) |
+| FRR `redistribute <proto> [metric M] [route-map NAME]` (inside `router bgp`/`router ospf`/`router ospfv3`) | `[[redistribute]]` (`bgp`/`ospf`/`ospf3`/`babel` sources map; `connected`/`static`/`kernel`/`rip`/`isis` noted; route-map noted) |
+| FRR `no bgp ebgp-requires-policy` | consumed silently (`ebgp_policy = "accept-all"` is the converter's default) |
 
 Anything the source file contains that has no lr equivalent is never
 dropped silently. It becomes a `config warning: unmapped: …` line at
