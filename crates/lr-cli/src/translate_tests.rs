@@ -1457,3 +1457,48 @@ protocol bgp rr_client {
     assert!(body.contains("defined(bgp.cluster_list)"), "body: {body}");
     assert!(body.contains("10.0.0.1 ~ bgp.cluster_list"), "body: {body}");
 }
+
+// ---- RFC 9234 §3.1: BIRD attribute rename for OTC ----
+
+/// BIRD's `bgp_otc` attribute renames to lr's `bgp.otc` and the body
+/// compiles in the lr filter DSL. The two arms mirror the canonical
+/// RFC 9234 leak-detection idioms: reject routes that carry OTC on
+/// import from a peer/provider (the route is "customer-only" and
+/// must not transit upstream), and `defined(bgp_otc)` to distinguish
+/// "absent" from "set to zero".
+#[test]
+fn bird_filter_renames_otc_attribute() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+filter import_otc {
+    if defined(bgp_otc) && bgp_otc != 0 then reject;
+    if bgp_otc = 0 then accept;
+    reject;
+}
+
+protocol bgp customer {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 {
+        import filter import_otc;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.filters.len(), 1);
+    let body = cfg.filters[0].body.as_deref().unwrap_or("");
+    // BIRD spelling is gone.
+    assert!(!body.contains("bgp_otc"), "body: {body}");
+    // lr spelling is present.
+    assert!(body.contains("bgp.otc"), "body: {body}");
+    // BIRD `=` for equality swapped to lr `==`.
+    assert!(body.contains("bgp.otc == 0"), "body: {body}");
+    assert!(body.contains("bgp.otc != 0"), "body: {body}");
+    // `defined()` survives verbatim — it shares spelling between
+    // BIRD and lr.
+    assert!(body.contains("defined(bgp.otc)"), "body: {body}");
+}
