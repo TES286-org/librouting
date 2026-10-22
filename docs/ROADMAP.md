@@ -297,10 +297,22 @@ to the lr dotted spellings, and the corpus case
 `tests/corpus/bird/bgp-rr-loop-filter.conf` exercises all three in
 the canonical RR loop-detection idiom (`defined(bgp.cluster_list) &&
 local_cluster ~ bgp.cluster_list`, `bgp.originator_id == local_id`,
-`bgp.atomic_aggregate`). What remains is the rest of the
-per-protocol attribute surface — BIRD's route attributes that ride
-the per-route filter context — beyond the RR loop-detection subset
-that just landed.
+`bgp.atomic_aggregate`). The OTC leak-detection attribute has landed
+alongside the RR set: `RouteFieldKind::BgpOtc` (RFC 9234 §3.1) exposes
+`bgp.otc` (Int, read-only) through the filter DSL so the canonical
+leak-detection idiom (`if bgp.otc != 0 then reject;`) translates
+faithfully from BIRD's `bgp_otc`; the BIRD translator renames
+`bgp_otc` to `bgp.otc`, `lr-policy::bgp` carries the matching `otc` /
+`has_otc` helpers (the latter distinguishes "absent" from "set to
+zero" via `defined(bgp.otc)`), `lr-bgp::path::PathAttributes` gains
+`otc()` / `has_otc()` typed accessors, the peephole pass fuses
+`bgp.otc` integer comparisons into `BranchFieldIntCmp` (the same fast
+path `bgp.local_pref` and `bgp.med` use), and the corpus case
+`tests/corpus/bird/bgp-otc-leak-filter.conf` exercises both the
+leak-detection idiom and the `defined()` distinction. What remains is
+the rest of the per-protocol attribute surface — BIRD's route
+attributes that ride the per-route filter context — beyond the RR
+loop-detection and OTC subsets that have landed.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF

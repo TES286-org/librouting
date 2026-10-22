@@ -158,9 +158,10 @@ on the same route representation — see
 [`../filter_dsl_grammar.md`](../filter_dsl_grammar.md) for the syntax and
 [`../examples/filter_dsl_roa.md`](../examples/filter_dsl_roa.md) for a
 worked ROA filter. The DSL exposes the RFC 6811 validation outcome as
-`roa.state`, the RFC 1997, RFC 4360 and RFC 8092 community sets, and the
+`roa.state`, the RFC 1997, RFC 4360 and RFC 8092 community sets, the
 RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
-(`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`).
+(`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`), and
+the RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`).
 
 ## RFCs
 
@@ -178,6 +179,10 @@ RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
   the filter DSL exposes as `bgp.originator_id` and `bgp.cluster_list`.
 - RFC 6811 — the ROA validation state the filter DSL reads.
 - RFC 8326 — graceful-shutdown signalling, both directions.
+- RFC 9234 — the OTC ("Only To Customer") attribute the filter DSL
+  exposes as `bgp.otc`; the daemon's role logic (`lr-bgp::role::otc`)
+  sets the attribute on ingress and gates it on egress, and the filter
+  DSL surfaces the resulting value for leak-detection policies.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 
