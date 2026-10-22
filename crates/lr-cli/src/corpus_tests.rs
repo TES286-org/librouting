@@ -107,6 +107,17 @@ fn roundtrip(toml: &str) {
         .expect("corpus: generated TOML must finalize");
 }
 
+/// Normalise line endings to `\n`. The `.expected.toml` files are
+/// committed with LF endings, but Git for Windows checks them out as
+/// CRLF under the default `core.autocrlf=true` — so a string compare
+/// of the converter's LF output against the file read from disk would
+/// fail on every case even though the line content is identical.
+/// Normalising both sides (and on regen) makes the gate
+/// platform-independent without depending on a per-repo `.gitattributes`.
+fn normalize_eol(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
 /// A minimal unified diff between two texts, built on a longest-common-
 /// subsequence so the failure report stays readable for a multi-section
 /// TOML. Returns the diff text (empty when the inputs are identical).
@@ -174,7 +185,8 @@ fn corpus_translates_without_regression() {
             ));
             continue;
         }
-        let expected = std::fs::read_to_string(&case.expected).unwrap_or_default();
+        let expected = normalize_eol(&std::fs::read_to_string(&case.expected).unwrap_or_default());
+        let actual = normalize_eol(&actual);
         if update {
             std::fs::write(&case.expected, &actual).unwrap_or_else(|e| {
                 panic!("corpus: cannot write {}: {e}", case.expected.display())

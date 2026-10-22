@@ -45,9 +45,15 @@ run_case() {
         fail=1
         return
     fi
+    # Normalise CRLF → LF on both sides: the converter emits LF, but a
+    # Windows checkout (or a Git Bash invocation) may hand us CRLF from
+    # the golden file. `tr -d '\r'` strips the carriage returns so the
+    # byte compare is line-ending-agnostic.
     local exp
-    exp=$(cat "$expected")
-    if [ "$actual" != "$exp" ]; then
+    exp=$(tr -d '\r' <"$expected")
+    local act
+    act=$(printf '%s\n' "$actual" | tr -d '\r')
+    if [ "$act" != "$exp" ]; then
         echo "FAIL: $conf — converter output differs from $expected"
         diff -u "$expected" <(printf '%s\n' "$actual") || true
         fail=1

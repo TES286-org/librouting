@@ -1,0 +1,13 @@
+# The conversion corpus golden files are compared byte-for-byte
+# against the converter's LF output. Force LF on checkout so Git for
+# Windows (core.autocrlf=true by default) does not convert them to
+# CRLF and break the translate::corpus_tests unit test. The in-crate
+# harness also normalises line endings on read as a belt-and-braces
+# measure, but pinning the on-disk form keeps `git diff` clean on
+# every platform.
+tests/corpus/** text eol=lf
+
+# The interop shell scripts run under `bash` (Git Bash on Windows);
+# a CRLF shebang line breaks them. Pin LF so they stay executable
+# after a Windows checkout.
+*.sh text eol=lf
