@@ -9,6 +9,17 @@ fn roundtrip(toml: &str) -> DaemonConfig {
     cfg
 }
 
+/// Round-trip a translation through the daemon loader with the OSPF
+/// protocol flag set, so the OSPF tables are validated by `finalize`
+/// instead of warned about. Mirrors [`roundtrip`] for the OSPF path.
+fn roundtrip_ospf(toml: &str) -> DaemonConfig {
+    let mut cfg = DaemonConfig::with_defaults();
+    cfg.protocol = "ospf".to_string();
+    crate::daemon_config::parse_toml_subset(toml, &mut cfg).expect("generated TOML must load");
+    cfg.finalize().expect("generated TOML must finalize");
+    cfg
+}
+
 #[test]
 fn bird_single_peer() {
     let toml = render(translate_bird(
@@ -725,4 +736,279 @@ protocol bgp p1 {
         cfg.networks,
         vec!["198.51.100.0/24".to_string(), "203.0.113.0/24".to_string()]
     );
+}
+
+// ---------------------------------------------------------------------------
+// OSPF translation (BIRD `protocol ospf` and FRR `router ospf` /
+// `interface IFNAME` blocks) — RFC 2328 §C / RFC 5340 §A.4.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn bird_ospf_protocol_maps_areas_and_interfaces() {
+    // The shape the BIRD-users mailing list actually deploys: an area
+    // block with one or more interface blocks inside, each carrying
+    // the common RFC 2328 §C.1 parameters.
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0.0.0.0 {
+        interface "eth0" {
+            cost 10;
+            hello 5;
+            dead interval 20;
+            priority 100;
+            type broadcast;
+        };
+        interface "eth1" {
+            type pointopoint;
+        };
+    };
+    area 0.0.0.1 {
+        stub yes;
+        summary no;
+        default cost 25;
+        interface "eth2";
+    };
+}
+protocol bgp p1 {
+    local as 64512;
+    neighbor 192.168.1.2 as 64513;
+}
+"#,
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    // The BGP peer still converts.
+    assert_eq!(cfg.peers.len(), 1);
+    // Two areas: 0.0.0.0 (backbone) and 0.0.0.1 (stub, no-summary).
+    assert_eq!(cfg.ospf_areas.len(), 2);
+    assert_eq!(cfg.ospf_areas[0].id, Some(0));
+    assert_eq!(cfg.ospf_areas[0].kind, None, "backbone stays normal");
+    assert_eq!(cfg.ospf_areas[1].id, Some(1));
+    assert_eq!(cfg.ospf_areas[1].kind.as_deref(), Some("stub"));
+    assert_eq!(cfg.ospf_areas[1].no_summary, Some(true));
+    assert_eq!(cfg.ospf_areas[1].stub_metric, Some(25));
+    // Three interfaces across the two areas.
+    assert_eq!(cfg.ospf_interfaces.len(), 3);
+    let eth0 = &cfg.ospf_interfaces[0];
+    assert_eq!(eth0.name.as_deref(), Some("eth0"));
+    assert_eq!(eth0.area, Some(0));
+    assert_eq!(eth0.cost, Some(10));
+    assert_eq!(eth0.hello_interval, Some(5));
+    assert_eq!(eth0.dead_interval, Some(20));
+    assert_eq!(eth0.priority, Some(100));
+    assert_eq!(eth0.network_type.as_deref(), Some("broadcast"));
+    let eth1 = &cfg.ospf_interfaces[1];
+    assert_eq!(eth1.name.as_deref(), Some("eth1"));
+    assert_eq!(eth1.area, Some(0));
+    assert_eq!(eth1.network_type.as_deref(), Some("p2p"));
+    let eth2 = &cfg.ospf_interfaces[2];
+    assert_eq!(eth2.name.as_deref(), Some("eth2"));
+    assert_eq!(eth2.area, Some(1));
+    // The converter says so instead of silently switching the
+    // protocol key — same shape as the Babel note.
+    assert!(toml.contains("lr runs one protocol per daemon instance"));
+}
+
+#[test]
+fn bird_ospf_dead_count_becomes_unmapped_note() {
+    // BIRD's legacy `dead count N;` (dead interval = N * hello) has
+    // no direct lr equivalent — lr uses an explicit `dead_interval`
+    // in seconds. The converter notes the gap instead of dropping it.
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0 {
+        interface "eth0" {
+            hello 10;
+            dead count 4;
+        };
+    };
+}
+"#,
+    ));
+    assert!(toml.contains("dead count"));
+    assert!(toml.contains("lr uses dead_interval"));
+    // The hello parameter still converts.
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.ospf_interfaces[0].hello_interval, Some(10));
+}
+
+#[test]
+fn bird_ospf_unmapped_interface_parameters_stay_visible() {
+    // retransmit, transmit delay, wait, authentication, password —
+    // all noted per-interface so the operator sees the gap.
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0 {
+        interface "eth0" {
+            retransmit 5;
+            transmit delay 1;
+            wait 40;
+            authentication cryptographic;
+            password "abc";
+        };
+    };
+}
+"#,
+    ));
+    assert!(toml.contains("retransmit"));
+    assert!(toml.contains("transmit delay"));
+    assert!(toml.contains("wait"));
+    assert!(toml.contains("authentication"));
+    assert!(toml.contains("password"));
+}
+
+#[test]
+fn bird_ospf_protocol_level_statement_is_noted() {
+    // `rfc1583 yes;` has no lr equivalent — noted at protocol level.
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    rfc1583 yes;
+    area 0 { interface "eth0"; };
+}
+"#,
+    ));
+    assert!(toml.contains("protocol-level ospf statement `rfc1583`"));
+}
+
+#[test]
+fn frr_ospf_router_block_maps_areas_and_router_id() {
+    // FRR `router ospf` with area policy + `router-id`, plus a
+    // top-level `interface IFNAME` block with `ip ospf …` directives.
+    let toml = render(translate_frr(
+        "router ospf\n\
+         router-id 1.1.1.1\n\
+         area 0.0.0.1 stub no-summary\n\
+         area 0.0.0.1 default-cost 25\n\
+         area 0.0.0.2 nssa\n\
+         !\n\
+         interface eth0\n\
+         ip ospf cost 10\n\
+         ip ospf hello-interval 5\n\
+         ip ospf dead-interval 20\n\
+         ip ospf priority 100\n\
+         ip ospf network broadcast\n\
+         ip ospf area 0\n\
+         !\n\
+         interface eth1\n\
+         ip ospf network point-to-point\n\
+         ip ospf area 1\n\
+         !\n\
+         router bgp 64512\n\
+         neighbor 192.0.2.2 remote-as 64513\n",
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    // The router-id carries over (FRR form: bare `router-id` inside
+    // `router ospf`).
+    assert_eq!(cfg.router_id.as_str(), "1.1.1.1");
+    // Two areas: 0.0.0.1 stub no-summary with default-cost, 0.0.0.2
+    // nssa.
+    assert_eq!(cfg.ospf_areas.len(), 2);
+    assert_eq!(cfg.ospf_areas[0].id, Some(1));
+    assert_eq!(cfg.ospf_areas[0].kind.as_deref(), Some("stub"));
+    assert_eq!(cfg.ospf_areas[0].no_summary, Some(true));
+    assert_eq!(cfg.ospf_areas[0].stub_metric, Some(25));
+    assert_eq!(cfg.ospf_areas[1].id, Some(2));
+    assert_eq!(cfg.ospf_areas[1].kind.as_deref(), Some("nssa"));
+    // Two interfaces with their per-interface parameters.
+    assert_eq!(cfg.ospf_interfaces.len(), 2);
+    let eth0 = &cfg.ospf_interfaces[0];
+    assert_eq!(eth0.name.as_deref(), Some("eth0"));
+    assert_eq!(eth0.area, Some(0));
+    assert_eq!(eth0.cost, Some(10));
+    assert_eq!(eth0.hello_interval, Some(5));
+    assert_eq!(eth0.dead_interval, Some(20));
+    assert_eq!(eth0.priority, Some(100));
+    assert_eq!(eth0.network_type.as_deref(), Some("broadcast"));
+    let eth1 = &cfg.ospf_interfaces[1];
+    assert_eq!(eth1.name.as_deref(), Some("eth1"));
+    assert_eq!(eth1.area, Some(1));
+    assert_eq!(eth1.network_type.as_deref(), Some("p2p"));
+    // The BGP peer still converts alongside the OSPF config.
+    assert_eq!(cfg.peers.len(), 1);
+}
+
+#[test]
+fn frr_ospf_network_area_is_noted_as_unmapped() {
+    // FRR `network PREFIX area N` cannot map mechanically (lr keys
+    // interfaces by name); the converter notes the gap with a hint
+    // instead of silently dropping.
+    let toml = render(translate_frr(
+        "router ospf\n\
+         network 10.0.0.0/24 area 0\n\
+         !\n",
+    ));
+    assert!(toml.contains("network 10.0.0.0/24 area 0"));
+    assert!(toml.contains("map the matching interface manually"));
+}
+
+#[test]
+fn frr_ospf_interface_without_ospf_directives_produces_no_row() {
+    // A plain `interface IFNAME` block with only `ip address …` lines
+    // should not produce an empty `[[ospf.interface]]` table.
+    let toml = render(translate_frr(
+        "interface eth0\n\
+         ip address 10.0.0.1/24\n\
+         no ip ospf\n\
+         !\n",
+    ));
+    assert!(
+        !toml.contains("[[ospf.interface]]"),
+        "plain interface block must not produce an OSPF row: {toml}"
+    );
+}
+
+#[test]
+fn frr_ospf_unmapped_area_options_are_noted() {
+    // `area N range PREFIX` and `area N export-list NAME` have no lr
+    // equivalent — noted on the area row.
+    let toml = render(translate_frr(
+        "router ospf\n\
+         area 0.0.0.1 range 10.0.0.0/8\n\
+         area 0.0.0.1 export-list OUT\n\
+         !\n",
+    ));
+    assert!(toml.contains("area 1 range 10.0.0.0/8"));
+    assert!(toml.contains("no area-range knob"));
+    assert!(toml.contains("area 1 export-list"));
+    assert!(toml.contains("no area-list knob"));
+}
+
+#[test]
+fn frr_ospfv3_router_block_emits_version_note() {
+    // `router ospfv3` should produce the v3-specific note telling the
+    // operator to set `ospf_version = "v3"`.
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         router-id 1.1.1.1\n\
+         !\n",
+    ));
+    assert!(toml.contains("ospf_version"));
+    assert!(toml.contains("v3"));
+}
+
+#[test]
+fn bird_ospf_nssa_area_maps_kind() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+protocol ospf my_ospf {
+    area 0.0.0.5 {
+        nssa yes;
+        default cost 10;
+        interface "eth0";
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.ospf_areas[0].id, Some(5));
+    assert_eq!(cfg.ospf_areas[0].kind.as_deref(), Some("nssa"));
+    assert_eq!(cfg.ospf_areas[0].stub_metric, Some(10));
 }
