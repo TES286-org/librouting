@@ -624,6 +624,54 @@ pub enum RouteFieldKind {
     /// `defined(bgp.otc)` predicate distinguishes "absent" from
     /// "set to zero" via `has_otc`.
     BgpOtc,
+    /// `bgp.lrxp.verified` — issue #81, true when the route carries a
+    /// verified LRXP record set (tag-checked at ingress). Read-only;
+    /// `false` when the route carries no LRXP attribute (the non-LRXP
+    /// peer fallback), partial-transit forwarding material, or a
+    /// malformed store. The single bool an operator gates on when a
+    /// policy should apply only to LRXP-carrying routes.
+    LrxpVerified,
+    /// `bgp.lrxp.partial_transit` — issue #81, true when the route
+    /// carries partial-transit LRXP forwarding material (the
+    /// attribute crossed a non-lr hop, design §7). Read-only.
+    LrxpPartialTransit,
+    /// `bgp.lrxp.hint.rank` — issue #81 / design §5.1, the sender's
+    /// best-path rank for this path among its alternates (1 = the
+    /// path the sender itself uses). Read-only; `0` when the route
+    /// carries no verified hint record (the non-LRXP peer fallback).
+    LrxpHintRank,
+    /// `bgp.lrxp.hint.damp_fom` — issue #81 / design §5.1, the
+    /// sender's route-flap figure of merit (0 when damping is off).
+    /// Read-only; `0` when absent.
+    LrxpHintDampFom,
+    /// `bgp.lrxp.hint.igp_cost` — issue #81 / design §5.1, the
+    /// sender's IGP cost to this path's next hop. Read-only; `0` when
+    /// absent.
+    LrxpHintIgpCost,
+    /// `bgp.lrxp.policy.role` — issue #81 / design §5.2, the sender's
+    /// RFC 9234 role claim for this session (advisory). Read-only;
+    /// `255` (unspecified) when absent.
+    LrxpPolicyRole,
+    /// `bgp.lrxp.policy.import_digest` — issue #81 / design §5.2, the
+    /// sender's SipHash-2-4 import-filter digest as a lowercase hex
+    /// string. Read-only; empty string when absent.
+    LrxpPolicyImportDigest,
+    /// `bgp.lrxp.policy.export_digest` — issue #81 / design §5.2, the
+    /// sender's SipHash-2-4 export-filter digest as a lowercase hex
+    /// string. Read-only; empty string when absent.
+    LrxpPolicyExportDigest,
+    /// `bgp.lrxp.origin.origin_as` — issue #81 / design §5.3, the
+    /// origin AS the attestation authorises. Read-only; `0` when
+    /// absent.
+    LrxpOriginAs,
+    /// `bgp.lrxp.origin.max_valid_len` — issue #81 / design §5.3, the
+    /// maximum prefix length the origin authorises. Read-only; `0`
+    /// when absent.
+    LrxpOriginMaxValidLen,
+    /// `bgp.lrxp.origin.expiry` — issue #81 / design §5.3, the
+    /// absolute timestamp after which the record expires. Read-only;
+    /// `0` when absent.
+    LrxpOriginExpiry,
     /// `roa.state` — the RFC 6811 validation outcome for the
     /// route's prefix + origin AS. Read-only.
     RoaState,
@@ -662,6 +710,17 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpOriginatorId => "bgp.originator_id",
             RouteFieldKind::BgpClusterList => "bgp.cluster_list",
             RouteFieldKind::BgpOtc => "bgp.otc",
+            RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
+            RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
+            RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",
+            RouteFieldKind::LrxpHintDampFom => "bgp.lrxp.hint.damp_fom",
+            RouteFieldKind::LrxpHintIgpCost => "bgp.lrxp.hint.igp_cost",
+            RouteFieldKind::LrxpPolicyRole => "bgp.lrxp.policy.role",
+            RouteFieldKind::LrxpPolicyImportDigest => "bgp.lrxp.policy.import_digest",
+            RouteFieldKind::LrxpPolicyExportDigest => "bgp.lrxp.policy.export_digest",
+            RouteFieldKind::LrxpOriginAs => "bgp.lrxp.origin.origin_as",
+            RouteFieldKind::LrxpOriginMaxValidLen => "bgp.lrxp.origin.max_valid_len",
+            RouteFieldKind::LrxpOriginExpiry => "bgp.lrxp.origin.expiry",
             RouteFieldKind::RoaState => "roa.state",
         };
         f.write_str(s)

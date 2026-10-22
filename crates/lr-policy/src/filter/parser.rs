@@ -746,6 +746,20 @@ impl Parser {
                         // `bgp_otc`; the BIRD translator renames it
                         // to `bgp.otc`.
                         "otc" => RouteFieldKind::BgpOtc,
+                        // Issue #81 — LRXP exchange-plane surface.
+                        // `bgp.lrxp` opens a three-segment dotted
+                        // path (`bgp.lrxp.<class>.<field>`), plus
+                        // two bare predicates (`bgp.lrxp.verified`,
+                        // `bgp.lrxp.partial_transit`). The parser
+                        // only accepts the field when the
+                        // `exchange-plane` feature is on; otherwise
+                        // `lrxp` falls through to the
+                        // `UnknownBgpField` error so a filter that
+                        // references the LRXP surface on a
+                        // feature-less build fails fast at parse
+                        // time.
+                        #[cfg(feature = "exchange-plane")]
+                        "lrxp" => return self.parse_lrxp_field(tok.span).map(Some),
                         other => {
                             return Err(self.err(
                                 field_tok.span,
@@ -792,6 +806,96 @@ impl Parser {
             _ => return Ok(None),
         };
         Ok(Some(field))
+    }
+
+    /// Issue #81 — parse the `bgp.lrxp.<class>.<field>` surface (and
+    /// the two bare predicates `bgp.lrxp.verified` /
+    /// `bgp.lrxp.partial_transit`). The `bgp.lrxp` prefix has already
+    /// been consumed by [`try_parse_route_field`]; this method reads
+    /// the remaining `.segment` tail and dispatches to the matching
+    /// [`RouteFieldKind`]. Only compiled when the `exchange-plane`
+    /// feature is on — the `lrxp` arm in `try_parse_route_field` is
+    /// itself feature-gated, so a feature-less build rejects
+    /// `bgp.lrxp.*` at parse time with `UnknownBgpField("lrxp")`.
+    #[cfg(feature = "exchange-plane")]
+    fn parse_lrxp_field(
+        &mut self,
+        bgp_span: crate::filter::span::Span,
+    ) -> Result<RouteField, ParseError> {
+        // Consume the `lrxp` identifier.
+        self.advance();
+        self.expect(TokenKind::Dot, "`.`")?;
+        let class_tok = self.peek().cloned();
+        let Some(class_tok) = class_tok else {
+            return Err(self.err(bgp_span, ParseErrorKind::UnexpectedEof));
+        };
+        let TokenKind::Ident(class) = &class_tok.kind else {
+            return Err(self.err(
+                class_tok.span,
+                ParseErrorKind::UnexpectedToken {
+                    expected: "lrxp class name (verified, partial_transit, hint, policy, origin)",
+                    found: class_tok.kind.clone(),
+                },
+            ));
+        };
+        let kind = match class.as_str() {
+            // Bare predicates — no further `.<field>`.
+            "verified" => {
+                self.advance();
+                return Ok(RouteField::new(RouteFieldKind::LrxpVerified));
+            }
+            "partial_transit" => {
+                self.advance();
+                return Ok(RouteField::new(RouteFieldKind::LrxpPartialTransit));
+            }
+            // Three-segment paths — `bgp.lrxp.<class>.<field>`.
+            "hint" | "policy" | "origin" => {
+                self.advance();
+                self.expect(TokenKind::Dot, "`.`")?;
+                let field_tok = self.peek().cloned();
+                let Some(field_tok) = field_tok else {
+                    return Err(self.err(bgp_span, ParseErrorKind::UnexpectedEof));
+                };
+                let TokenKind::Ident(field) = &field_tok.kind else {
+                    return Err(self.err(
+                        field_tok.span,
+                        ParseErrorKind::UnexpectedToken {
+                            expected: "lrxp field name",
+                            found: field_tok.kind.clone(),
+                        },
+                    ));
+                };
+                let k = match (class.as_str(), field.as_str()) {
+                    ("hint", "rank") => RouteFieldKind::LrxpHintRank,
+                    ("hint", "damp_fom") => RouteFieldKind::LrxpHintDampFom,
+                    ("hint", "igp_cost") => RouteFieldKind::LrxpHintIgpCost,
+                    ("policy", "role") => RouteFieldKind::LrxpPolicyRole,
+                    ("policy", "import_digest") => RouteFieldKind::LrxpPolicyImportDigest,
+                    ("policy", "export_digest") => RouteFieldKind::LrxpPolicyExportDigest,
+                    ("origin", "origin_as") => RouteFieldKind::LrxpOriginAs,
+                    ("origin", "max_valid_len") => RouteFieldKind::LrxpOriginMaxValidLen,
+                    ("origin", "expiry") => RouteFieldKind::LrxpOriginExpiry,
+                    _ => {
+                        return Err(self.err(
+                            field_tok.span,
+                            ParseErrorKind::UnknownBgpField(format!(
+                                "bgp.lrxp.{}.{}",
+                                class, field
+                            )),
+                        ));
+                    }
+                };
+                k
+            }
+            other => {
+                return Err(self.err(
+                    class_tok.span,
+                    ParseErrorKind::UnknownBgpField(format!("bgp.lrxp.{other}")),
+                ));
+            }
+        };
+        self.advance();
+        Ok(RouteField::new(kind))
     }
 
     // --- Expression parsing (Pratt) ---
