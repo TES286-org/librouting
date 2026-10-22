@@ -1619,6 +1619,11 @@ fn translate_frr(text: &str) -> ConfigOut {
     // active.
     let mut iface_ctx: Option<String> = None;
     let mut in_router_ospf: bool = false;
+    // `true` when the open `router ospfv3 [N]` block sets OSPFv3
+    // (`router ospf` clears it). Read only when `in_router_ospf` is
+    // true; routes the `ospfv3 …` router-level directives to the
+    // OSPFv3-specific arms.
+    let mut router_ospf_v3: bool = false;
     for raw in text.lines() {
         // FRR directive scan: `# lr: KEY [VALUE]` / `! lr: …` are
         // global; `# lr: neighbor ADDR KEY [VALUE]` scopes to that
@@ -1654,6 +1659,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                 iface_ctx = None;
             }
             in_router_ospf = false;
+            router_ospf_v3 = false;
             af_ctx = None;
             continue;
         }
@@ -1665,6 +1671,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                     iface_ctx = None;
                 }
                 in_router_ospf = false;
+                router_ospf_v3 = false;
                 af_ctx = None;
                 out.local_as = tokens[2].parse().ok();
                 // FRR's documented default: `bgp enforce-first-as` is
@@ -1684,7 +1691,8 @@ fn translate_frr(text: &str) -> ConfigOut {
                 }
                 af_ctx = None;
                 in_router_ospf = true;
-                if tokens[1] == "ospfv3" {
+                router_ospf_v3 = tokens[1] == "ospfv3";
+                if router_ospf_v3 {
                     out.unmapped_global.push(
                         "router ospfv3: set `ospf_version = \"v3\"` and `protocol = \"ospf\"` to activate OSPFv3"
                             .to_string(),
@@ -1706,6 +1714,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                     iface_ctx = None;
                 }
                 in_router_ospf = false;
+                router_ospf_v3 = false;
                 af_ctx = None;
                 out.ignored_protocols.push(format!("router {}", tokens[1]));
             }
@@ -1719,6 +1728,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                     finish_frr_ospf_iface(&mut out, &iface_ctx);
                 }
                 in_router_ospf = false;
+                router_ospf_v3 = false;
                 af_ctx = None;
                 iface_ctx = Some(tokens[1].to_string());
             }
@@ -1767,21 +1777,86 @@ fn translate_frr(text: &str) -> ConfigOut {
                 // network|area …` inside an `interface IFNAME` block
                 // (RFC 2328 §C.1, the FRR spelling of the BIRD
                 // interface parameters).
-                apply_frr_ip_ospf(iface_ctx.as_deref().unwrap(), &tokens[2..], &mut out);
-            }
-            "ospfv3" if iface_ctx.is_some() && tokens.len() >= 2 && in_router_ospf => {
-                // OSPFv3 interface-level directives (`ospfv3 cost`,
-                // `ospfv3 hello-interval`, …) — same shape as the v2
-                // `ip ospf` directives. Noted as a follow-up rather
-                // than carried: the v3 daemon uses the same
-                // `[[ospf.interface]]` schema, but the converter
-                // currently keys off `router ospf` (v2) and a v3 path
-                // would need a separate `ospf_version = "v3"` signal.
-                note_frr_ospf_iface(
+                apply_frr_ospf_iface(
+                    "ip ospf",
                     iface_ctx.as_deref().unwrap(),
-                    &format!("{line} — OSPFv3 interface directive (use ip ospf under router ospf for v2)"),
+                    &tokens[2..],
                     &mut out,
                 );
+            }
+            "ospfv3" if iface_ctx.is_some() && tokens.len() >= 2 => {
+                // OSPFv3 interface-level directives (`ospfv3 cost`,
+                // `ospfv3 hello-interval`, `ospfv3 dead-interval`,
+                // `ospfv3 priority`, `ospfv3 network …`, `ospfv3 area
+                // N`, …) inside an `interface IFNAME` block — the
+                // OSPFv3 counterparts of the v2 `ip ospf …` directives
+                // (RFC 5340 §A.4, FRR `ospf6d`). The parameter shape is
+                // identical to v2, so the same helper maps both; only
+                // the directive stem (`ospfv3` here vs `ip ospf` for
+                // v2) is passed so the unmapped-note text is accurate.
+                // FRR does not require the `interface` block to be
+                // nested inside a `router ospfv3` stanza for these
+                // directives to take effect, so we route them whether
+                // or not `in_router_ospf` is set — same as the v2 `ip
+                // ospf` arm.
+                apply_frr_ospf_iface(
+                    "ospfv3",
+                    iface_ctx.as_deref().unwrap(),
+                    &tokens[1..],
+                    &mut out,
+                );
+            }
+            // `ospfv3 router-id A.B.C.D` inside `router ospfv3` — the
+            // OSPFv3 router identifier (RFC 5340 §C.1 / FRR `ospf6d`'s
+            // v3 spelling of the v2 `ospf router-id`). Maps onto the
+            // same `router_id` field the v2 arm fills.
+            "ospfv3"
+                if in_router_ospf
+                    && router_ospf_v3
+                    && tokens.len() >= 3
+                    && tokens[1] == "router-id" =>
+            {
+                if out.router_id.is_none() {
+                    out.router_id = Some(tokens[2].to_string());
+                }
+            }
+            // `ospfv3 area N stub|nssa|default-cost M|range PREFIX`
+            // inside `router ospfv3` — the v3 spelling of the area
+            // policy. The shape is identical to the bare `area N …`
+            // form; route through the same helper.
+            "ospfv3"
+                if in_router_ospf && router_ospf_v3 && tokens.len() >= 3 && tokens[1] == "area" =>
+            {
+                apply_frr_ospf_area(&tokens[2..], &mut out);
+            }
+            // `ospfv3 network PREFIX area N` inside `router ospfv3` —
+            // FRR's v3 interface-to-area mapping by prefix. lr keys
+            // interfaces by name, not prefix (same gap as v2); noted
+            // with a hint instead of silently dropping.
+            "ospfv3"
+                if in_router_ospf
+                    && router_ospf_v3
+                    && tokens.len() >= 5
+                    && tokens[1] == "network"
+                    && tokens[3] == "area" =>
+            {
+                out.unmapped_global.push(format!(
+                    "ospfv3 network {} area {} — lr keys [[ospf.interface]] by interface name; map the matching interface manually",
+                    tokens[2], tokens[4]
+                ));
+            }
+            // Other `ospfv3 …` router-level directives inside
+            // `router ospfv3` — `ospfv3 abr-type …`,
+            // `ospfv3 log-adjacency-changes`, `ospfv3 write-multiplier
+            // N`, `ospfv3 rfc1583compatibility`, etc. None of them
+            // have a per-instance lr equivalent; noted so the gap is
+            // visible instead of silent. (A bare `ospfv3` line with no
+            // argument is a syntax error in FRR; treated as unmapped
+            // too.)
+            "ospfv3" if in_router_ospf && router_ospf_v3 => {
+                out.unmapped_global.push(format!(
+                    "{line} — no lr equivalent (FRR OSPFv3 router-level directive)"
+                ));
             }
             // `router-id A.B.C.D` inside `router ospf` — the OSPF
             // router identifier (RFC 2328 §C.1). The BGP arm above
@@ -1888,6 +1963,7 @@ fn translate_frr(text: &str) -> ConfigOut {
                     iface_ctx = None;
                 }
                 in_router_ospf = false;
+                router_ospf_v3 = false;
             }
             "network" if tokens.len() >= 2 && tokens[1].contains('/') => {
                 // `network PREFIX` (router or address-family context)
@@ -1993,14 +2069,17 @@ fn parse_frr_prefix_list(out: &mut ConfigOut, line: &str) {
         .push((name, seq, permit, prefix.to_string(), ge, le));
 }
 
-/// One `ip ospf …` directive inside an FRR `interface IFNAME` block
-/// (RFC 2328 §C.1, the FRR spelling). `tokens` starts at the keyword
-/// after `ip ospf` (`cost`, `hello-interval`, …). The interface row is
-/// created on first reference and looked up by name on subsequent
-/// lines, so the directives may appear in any order — same shape as
-/// FRR's `neighbor` attribute handling above. Per-interface unmapped
-/// notes land directly on the row's notes vector.
-fn apply_frr_ip_ospf(iface_name: &str, tokens: &[&str], out: &mut ConfigOut) {
+/// One `ip ospf …` or `ospfv3 …` directive inside an FRR `interface
+/// IFNAME` block (RFC 2328 §C.1 for v2, RFC 5340 §A.4 / FRR `ospf6d`
+/// for v3). `prefix` is the directive stem as it appears in the source
+/// (`"ip ospf"` for v2, `"ospfv3"` for v3); `tokens` starts at the
+/// keyword after the stem (`cost`, `hello-interval`, …). The interface
+/// row is created on first reference and looked up by name on
+/// subsequent lines, so the directives may appear in any order — same
+/// shape as FRR's `neighbor` attribute handling above. Per-interface
+/// unmapped notes land directly on the row's notes vector and carry the
+/// `prefix` so the operator sees whether the gap is on a v2 or v3 line.
+fn apply_frr_ospf_iface(prefix: &str, iface_name: &str, tokens: &[&str], out: &mut ConfigOut) {
     let Some(keyword) = tokens.first() else {
         return;
     };
@@ -2067,37 +2146,16 @@ fn apply_frr_ip_ospf(iface_name: &str, tokens: &[&str], out: &mut ConfigOut) {
         | "authentication-key"
         | "message-digest-key"
         | "retransmit-interval"
-        | "transmit-delay" => {
+        | "transmit-delay"
+        | "instance-id" => {
             spec_notes.push(format!(
-                "ip ospf {keyword} … — no lr equivalent (FRR OSPF interface option)"
+                "{prefix} {keyword} … — no lr equivalent (FRR OSPF interface option)"
             ));
         }
         _ => {
-            spec_notes.push(format!("ip ospf {keyword} … — no lr equivalent"));
+            spec_notes.push(format!("{prefix} {keyword} … — no lr equivalent"));
         }
     }
-}
-
-/// Push a note onto the matching `[[ospf.interface]]` row, creating
-/// the row if it does not exist yet. Used by arms that need to attach
-/// a per-interface note without mapping a parameter (e.g. the OSPFv3
-/// interface-directive arm).
-fn note_frr_ospf_iface(iface_name: &str, note: &str, out: &mut ConfigOut) {
-    let idx = out
-        .ospf_ifaces
-        .iter()
-        .position(|(spec, _)| spec.name.as_deref() == Some(iface_name));
-    let idx = idx.unwrap_or_else(|| {
-        out.ospf_ifaces.push((
-            OspfIfSpec {
-                name: Some(iface_name.to_string()),
-                ..OspfIfSpec::default()
-            },
-            Vec::new(),
-        ));
-        out.ospf_ifaces.len() - 1
-    });
-    out.ospf_ifaces[idx].1.push(note.to_string());
 }
 
 /// One `area N …` directive inside an FRR `router ospf` block (RFC
