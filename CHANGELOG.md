@@ -13,6 +13,46 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [Unreleased]
+
+### Added
+
+**BIRD and FRR OSPF configuration translation** (`cli`, ROADMAP
+"Per-protocol route attributes and an external conversion corpus").
+The `lr translate bird|frr` converter and the native-run compat
+loader now carry OSPF configuration through to `[[ospf.area]]` and
+`[[ospf.interface]]` tables instead of dropping the whole stanza
+with an `UNMAPPED` note.
+
+BIRD `protocol ospf NAME { area N { interface "eth0" { … } } }`
+blocks translate per RFC 2328 §C / RFC 5340 §A.4. The area-level
+`stub yes`, `nssa yes`, `summary no`, `default cost N` directives
+map onto `OspfAreaSpec` (`kind`, `no_summary`, `stub_metric`). The
+interface-level `cost`, `hello`, `dead interval`, `priority`,
+`type broadcast|pointopoint` directives map onto `OspfIfSpec`
+(`cost`, `hello_interval`, `dead_interval`, `priority`,
+`network_type`). Parameters without a direct lr equivalent —
+`retransmit`, `transmit delay`, `wait`, `dead count`,
+`authentication`, `password`, the protocol-level `rfc1583` /
+`stub router` / `ecmp` knobs — surface as visible `# UNMAPPED:`
+comments so the operator sees the gap.
+
+FRR `router ospf` blocks translate the area-level `area N stub|
+nssa|default-cost M|range PREFIX` directives, and FRR `interface
+IFNAME` blocks with `ip ospf cost|hello-interval|dead-interval|
+priority|network|area` directives map onto the same `OspfIfSpec`
+shape. FRR `network PREFIX area N` cannot map mechanically (lr
+keys `[[ospf.interface]]` by interface name, not prefix); the
+converter notes the gap with a hint instead of silently dropping.
+`router ospfv3` produces a note telling the operator to set
+`ospf_version = "v3"`.
+
+The BGP side of a mixed BIRD or FRR config still converts
+alongside the OSPF tables — the converter handles both protocols
+in one pass. Existing tests that asserted OSPF was "ignored" now
+use RIP (a protocol the converter does not cover) to verify the
+ignored-protocols path.
+
 ## [1.3.0] — minor: supply-chain follow-ups, BFD auth, BGP-LS
 
 librouting 1.3.0 is a minor release. Per `docs/RELEASE-PLAN.md`

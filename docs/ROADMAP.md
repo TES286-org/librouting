@@ -245,14 +245,24 @@ without an arch-specific patch landing.
 
 **Per-protocol route attributes and an external conversion corpus.**
 `lr-daemon translate bird|frr` and the native compat loader handle the BGP
-subset; attributes that belong to another protocol are dropped with an
-`UNMAPPED` note (`crates/lr-cli/src/translate.rs`). The work is to carry the
-per-protocol attributes through the translation — OSPF and Babel metrics,
-BIRD's route attributes, FRR's address-family state — and to build a corpus
-of real configurations from both daemons with the expected output beside
-them. Done when a real configuration converts with no unmapped line that
-changes its behaviour, the corpus runs in the interop gate, and a new
-dialect quirk adds a corpus case instead of a bespoke assertion.
+subset; BIRD `protocol babel` interface blocks (RFC 8966 §A.2) and BIRD
+`protocol ospf` area/interface blocks (RFC 2328 §C / RFC 5340 §A.4)
+now carry through to `[[babel.interface]]`, `[[ospf.area]]` and
+`[[ospf.interface]]` tables. FRR `router ospf` area policy and
+`interface IFNAME` `ip ospf …` directives translate the same way
+(`crates/lr-cli/src/translate.rs`). What remains is the rest of the
+per-protocol attribute surface — BIRD's route attributes that ride
+the per-route filter context, FRR's address-family state inside
+`router bgp`, and the OSPFv3 `ospfv3 …` interface directives under
+`router ospfv3` (noted as a follow-up rather than silently dropped).
+The corpus of real configurations from both daemons with the
+expected output beside them is the other half: a small set of
+representative BIRD and FRR configs covers the BGP/Babel/OSPF
+shapes the converter actually maps today, and a new dialect quirk
+adds a corpus case instead of a bespoke assertion. Done when a real
+configuration converts with no unmapped line that changes its
+behaviour, the corpus runs in the interop gate, and a new dialect
+quirk adds a corpus case instead of a bespoke assertion.
 
 ## Tooling and supply chain
 
