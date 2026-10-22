@@ -730,6 +730,16 @@ impl Parser {
                         "ext_communities" => RouteFieldKind::BgpExtCommunities,
                         "large_communities" => RouteFieldKind::BgpLargeCommunities,
                         "origin" => RouteFieldKind::BgpOrigin,
+                        // RFC 4271 §5.1.6 + RFC 4456 §8 — read-only
+                        // attributes surfaced to the filter DSL for
+                        // loop detection and aggregation-aware
+                        // policy. BIRD spells them
+                        // `bgp_atomic_aggregate`, `bgp_originator_id`,
+                        // `bgp_cluster_list`; the BIRD translator
+                        // renames them to these lr spellings.
+                        "atomic_aggregate" => RouteFieldKind::BgpAtomicAggregate,
+                        "originator_id" => RouteFieldKind::BgpOriginatorId,
+                        "cluster_list" => RouteFieldKind::BgpClusterList,
                         other => {
                             return Err(self.err(
                                 field_tok.span,

@@ -602,6 +602,21 @@ pub enum RouteFieldKind {
     BgpLargeCommunities,
     /// `bgp.origin` — the BGP ORIGIN attribute.
     BgpOrigin,
+    /// `bgp.atomic_aggregate` — RFC 4271 §5.1.6, a length-zero
+    /// marker; `true` when present, `false` when absent. Read-only.
+    BgpAtomicAggregate,
+    /// `bgp.originator_id` — RFC 4456 §8, the 4-byte BGP Identifier
+    /// of the originator of a route-reflected route, surfaced as an
+    /// `IpAddr::V4`. Read-only; `Bool(false)` when absent (mirrors
+    /// `bgp.next_hop`'s absent representation so `defined()` is the
+    /// presence probe).
+    BgpOriginatorId,
+    /// `bgp.cluster_list` — RFC 4456 §8, the reflection-path
+    /// sequence of 4-byte CLUSTER_IDs surfaced as a `Set` of
+    /// `IpAddr::V4` values (the form BIRD's `clist` membership test
+    /// `~` consumes). Read-only; an absent attribute reads as an
+    /// empty `Set`.
+    BgpClusterList,
     /// `roa.state` — the RFC 6811 validation outcome for the
     /// route's prefix + origin AS. Read-only.
     RoaState,
@@ -636,6 +651,9 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpExtCommunities => "bgp.ext_communities",
             RouteFieldKind::BgpLargeCommunities => "bgp.large_communities",
             RouteFieldKind::BgpOrigin => "bgp.origin",
+            RouteFieldKind::BgpAtomicAggregate => "bgp.atomic_aggregate",
+            RouteFieldKind::BgpOriginatorId => "bgp.originator_id",
+            RouteFieldKind::BgpClusterList => "bgp.cluster_list",
             RouteFieldKind::RoaState => "roa.state",
         };
         f.write_str(s)

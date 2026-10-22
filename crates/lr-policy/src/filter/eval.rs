@@ -177,6 +177,33 @@ pub trait FilterContext {
     fn bgp_ext_communities(&self, route: &Route) -> Vec<(u8, u8, u32, u16)>;
     /// BGP ORIGIN (`bgp.origin`): `0 = IGP`, `1 = EGP`, `2 = INCOMPLETE`.
     fn bgp_origin(&self, route: &Route) -> Option<u8>;
+    /// BGP ATOMIC_AGGREGATE (`bgp.atomic_aggregate`, RFC 4271 §5.1.6):
+    /// `true` when the marker is present, `false` when absent. The
+    /// default delegates to [`lr_policy::bgp::atomic_aggregate`] so
+    /// every context that backs its reads with `Route.attributes`
+    /// (the daemon, the FFI built-in, the benches, the test stubs)
+    /// inherits the correct behaviour without re-implementing it.
+    fn bgp_atomic_aggregate(&self, route: &Route) -> bool {
+        crate::bgp::atomic_aggregate(route)
+    }
+    /// BGP ORIGINATOR_ID (`bgp.originator_id`, RFC 4456 §8) as an
+    /// `IpAddr::V4`; `None` when absent. The default delegates to
+    /// [`lr_policy::bgp::originator_id`].
+    fn bgp_originator_id(&self, route: &Route) -> Option<IpAddr> {
+        crate::bgp::originator_id(route)
+    }
+    /// BGP CLUSTER_LIST (`bgp.cluster_list`, RFC 4456 §8) as a
+    /// `Vec<IpAddr>` in reflection order; empty when absent. The
+    /// default delegates to [`lr_policy::bgp::cluster_list`].
+    fn bgp_cluster_list(&self, route: &Route) -> Vec<IpAddr> {
+        crate::bgp::cluster_list(route)
+    }
+    /// True when a CLUSTER_LIST attribute is physically present on
+    /// the route (RFC 4456 §8). Used by `defined(bgp.cluster_list)`
+    /// to distinguish "no attribute" from "present but empty".
+    fn bgp_has_cluster_list(&self, route: &Route) -> bool {
+        crate::bgp::has_cluster_list(route)
+    }
     /// RFC 6811 validation outcome (`roa.state`) for the route's
     /// prefix + origin AS.
     fn roa_state(&self, route: &Route) -> RoaStateLit;
@@ -602,6 +629,16 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 !self.ctx.bgp_large_communities(route).is_empty()
             }
             RouteFieldKind::BgpExtCommunities => !self.ctx.bgp_ext_communities(route).is_empty(),
+            // RFC 4271 §5.1.6: ATOMIC_AGGREGATE is a presence marker.
+            RouteFieldKind::BgpAtomicAggregate => self.ctx.bgp_atomic_aggregate(route),
+            // RFC 4456 §8: ORIGINATOR_ID is present iff the accessor
+            // returns Some(_). CLUSTER_LIST distinguishes "no
+            // attribute" from "present but empty" via the
+            // bgp_has_cluster_list helper — an empty-but-present list
+            // still counts as defined (matches BIRD's `defined()`
+            // on a `clist`).
+            RouteFieldKind::BgpOriginatorId => self.ctx.bgp_originator_id(route).is_some(),
+            RouteFieldKind::BgpClusterList => self.ctx.bgp_has_cluster_list(route),
         }
     }
 
@@ -656,6 +693,29 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpOrigin => Ok(Value::Int(i64::from(
                 self.ctx.bgp_origin(route).unwrap_or(0),
             ))),
+            // RFC 4271 §5.1.6: ATOMIC_AGGREGATE is a boolean marker.
+            RouteFieldKind::BgpAtomicAggregate => {
+                Ok(Value::Bool(self.ctx.bgp_atomic_aggregate(route)))
+            }
+            // RFC 4456 §8: ORIGINATOR_ID is an IPv4 BGP Identifier;
+            // mirror `bgp.next_hop`'s `Bool(false)` sentinel for the
+            // absent case so a direct `==` comparison does not crash
+            // (callers should gate with `defined(bgp.originator_id)`).
+            RouteFieldKind::BgpOriginatorId => Ok(self
+                .ctx
+                .bgp_originator_id(route)
+                .map(Value::Ip)
+                .unwrap_or(Value::Bool(false))),
+            // RFC 4456 §8: CLUSTER_LIST is a Vec<IpAddr> surfaced as
+            // a generic `Set` so BIRD's `~` membership test works
+            // directly (`local_cluster ~ bgp.cluster_list`).
+            RouteFieldKind::BgpClusterList => Ok(Value::Set(
+                self.ctx
+                    .bgp_cluster_list(route)
+                    .into_iter()
+                    .map(Value::Ip)
+                    .collect(),
+            )),
             RouteFieldKind::RoaState => Ok(Value::RoaState(self.ctx.roa_state(route))),
         }
     }

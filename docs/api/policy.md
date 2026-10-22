@@ -158,20 +158,24 @@ on the same route representation — see
 [`../filter_dsl_grammar.md`](../filter_dsl_grammar.md) for the syntax and
 [`../examples/filter_dsl_roa.md`](../examples/filter_dsl_roa.md) for a
 worked ROA filter. The DSL exposes the RFC 6811 validation outcome as
-`roa.state`, alongside the RFC 1997, RFC 4360 and RFC 8092 community
-sets.
+`roa.state`, the RFC 1997, RFC 4360 and RFC 8092 community sets, and the
+RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
+(`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`).
 
 ## RFCs
 
 - RFC 4271 §9.1.2.15 — AS_PATH loop detection, the `reject_as_loop`
   check; §6.7 for NEXT_HOP validity; §4.2/§5.1.5 for the attributes the
-  set actions write.
+  set actions write; §5.1.6 for the ATOMIC_AGGREGATE marker the filter
+  DSL exposes as `bgp.atomic_aggregate`.
 - RFC 2439 — route flap damping: the figure of merit, the suppress and
   reuse thresholds, and decay. RFC 7196 documents why the RFC 2439
   defaults are harmful in the default-free zone; damping is off unless
   an operator enables it.
 - RFC 1997 communities, RFC 4360 extended communities, RFC 8092 large
   communities — what the community lists match.
+- RFC 4456 — ORIGINATOR_ID and CLUSTER_LIST loop-detection attributes
+  the filter DSL exposes as `bgp.originator_id` and `bgp.cluster_list`.
 - RFC 6811 — the ROA validation state the filter DSL reads.
 - RFC 8326 — graceful-shutdown signalling, both directions.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an

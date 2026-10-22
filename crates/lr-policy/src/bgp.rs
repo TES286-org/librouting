@@ -21,7 +21,8 @@
 
 use lr_bgp::path::as_path::AsPath;
 use lr_bgp::path::communities::{Community, ExtendedCommunity, LargeCommunity};
-use lr_core::addr::Asn;
+use lr_bgp::path::well_known::{ClusterList, OriginatorId};
+use lr_core::addr::{Asn, IpAddr};
 use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
 
@@ -31,7 +32,10 @@ const TAG_ORIGIN: u8 = 1;
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
 const TAG_LOCAL_PREF: u8 = 5;
+const TAG_ATOMIC_AGGREGATE: u8 = 6;
 const TAG_COMMUNITIES: u8 = 8;
+const TAG_ORIGINATOR_ID: u8 = 9;
+const TAG_CLUSTER_LIST: u8 = 10;
 const TAG_EXT_COMMUNITIES: u8 = 16;
 const TAG_LARGE_COMMUNITIES: u8 = 32;
 
@@ -41,6 +45,13 @@ const FLAGS_LOCAL_PREF: u8 = 0x40; // well-known discretionary
 const FLAGS_COMMUNITIES: u8 = 0xC0; // optional transitive
 const FLAGS_EXT_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 4360 §3)
 const FLAGS_LARGE_COMMUNITIES: u8 = 0xC0; // optional transitive (RFC 8092 §2)
+
+// The read-only path attributes the filter DSL exposes below
+// (ATOMIC_AGGREGATE = well-known discretionary per RFC 4271 §5.1.6,
+// ORIGINATOR_ID and CLUSTER_LIST = optional non-transitive per RFC
+// 4456 §8) live in `lr-bgp::path`; the accessors here read by tag,
+// not by flags, so no `FLAGS_*` constant is needed until the
+// corresponding setters land.
 
 fn attr_bytes(route: &Route, tag: u8) -> Option<&[u8]> {
     route
@@ -139,6 +150,61 @@ pub fn local_pref(route: &Route) -> Option<u32> {
 /// `Attributes::get_u8` — no `Vec<u8>` clone.
 pub fn origin(route: &Route) -> Option<u8> {
     route.attributes.get_u8(AttrTag::raw(TAG_ORIGIN))
+}
+
+/// True when the route carries an ATOMIC_AGGREGATE attribute (RFC 4271
+/// §5.1.6). The attribute is a length-zero marker — its presence is
+/// the entire signal — so this collapses to a tag lookup with no
+/// value decoding. Returns `false` for routes originated without the
+/// marker (the common case).
+pub fn atomic_aggregate(route: &Route) -> bool {
+    route
+        .attributes
+        .get(AttrTag::raw(TAG_ATOMIC_AGGREGATE))
+        .is_some()
+}
+
+/// The route's ORIGINATOR_ID (RFC 4456 §8) as an IPv4 `IpAddr`;
+/// `None` when the attribute is absent (a non-reflected route) or
+/// when the wire form is malformed (any length other than 4 bytes).
+/// BIRD spells ORIGINATOR_ID as an `ip` in its filter language; the
+/// `IpAddr::V4` representation matches so a BIRD filter like
+/// `if bgp_originator_id = 10.0.0.1 then reject;` translates
+/// faithfully.
+pub fn originator_id(route: &Route) -> Option<IpAddr> {
+    let bytes = attr_bytes(route, TAG_ORIGINATOR_ID)?;
+    OriginatorId::decode(bytes).map(|id| id.to_ip())
+}
+
+/// The route's CLUSTER_LIST (RFC 4456 §8) as a `Vec<IpAddr>` in
+/// reflection order (most-recently-prepended first). Returns an
+/// empty `Vec` when the attribute is absent (a non-reflected route)
+/// or when the wire form is malformed; the two cases are
+/// indistinguishable through this accessor — callers that need the
+/// distinction should check `route.attributes.get(TAG_CLUSTER_LIST)`
+/// directly. BIRD spells CLUSTER_LIST as a `clist` of IPv4-typed
+/// entries; the `IpAddr::V4` representation matches so a BIRD filter
+/// like `if local_cluster ~ bgp_cluster_list then reject;` translates
+/// faithfully.
+pub fn cluster_list(route: &Route) -> Vec<IpAddr> {
+    match attr_bytes(route, TAG_CLUSTER_LIST) {
+        None => Vec::new(),
+        Some(bytes) => match ClusterList::decode(bytes) {
+            Some(list) => list.iter_ips().collect(),
+            None => Vec::new(),
+        },
+    }
+}
+
+/// True when a CLUSTER_LIST attribute is physically present on the
+/// route (RFC 4456 §8). Use this to distinguish "no attribute" from
+/// "present but empty" — `cluster_list()` collapses both to an empty
+/// `Vec`.
+pub fn has_cluster_list(route: &Route) -> bool {
+    route
+        .attributes
+        .get(AttrTag::raw(TAG_CLUSTER_LIST))
+        .is_some()
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -396,5 +462,56 @@ mod tests {
             value: vec![],
         });
         assert_eq!(r3.attributes.get_u8(AttrTag::raw(TAG_ORIGIN)), None);
+    }
+
+    /// RFC 4271 §5.1.6 — ATOMIC_AGGREGATE is a length-zero marker;
+    /// `atomic_aggregate()` reports presence, nothing more.
+    #[test]
+    fn atomic_aggregate_is_a_presence_marker() {
+        let r_with = route_with(vec![raw_attr(TAG_ATOMIC_AGGREGATE, 0x40, Vec::new())]);
+        assert!(atomic_aggregate(&r_with));
+        let r_without = route_with(vec![]);
+        assert!(!atomic_aggregate(&r_without));
+    }
+
+    /// RFC 4456 §8 — ORIGINATOR_ID is exactly 4 bytes; the helper
+    /// surfaces it as `IpAddr::V4` and stays `None` on the absent
+    /// and malformed cases.
+    #[test]
+    fn originator_id_decodes_as_v4_ipaddr() {
+        let r = route_with(vec![raw_attr(TAG_ORIGINATOR_ID, 0x80, vec![10, 0, 0, 1])]);
+        assert_eq!(originator_id(&r), Some(IpAddr::V4([10, 0, 0, 1])));
+        // Absent.
+        let r_absent = route_with(vec![]);
+        assert_eq!(originator_id(&r_absent), None);
+        // Malformed width.
+        let r_bad = route_with(vec![raw_attr(TAG_ORIGINATOR_ID, 0x80, vec![1, 2, 3])]);
+        assert_eq!(originator_id(&r_bad), None);
+    }
+
+    /// RFC 4456 §8 — CLUSTER_LIST is a flat 4-byte-per-id sequence;
+    /// the helper surfaces it as `Vec<IpAddr>` in reflection order
+    /// and falls back to empty for absent and malformed.
+    #[test]
+    fn cluster_list_decodes_to_v4_vec() {
+        let r = route_with(vec![raw_attr(
+            TAG_CLUSTER_LIST,
+            0x80,
+            vec![10, 0, 0, 1, 10, 0, 0, 2],
+        )]);
+        assert_eq!(
+            cluster_list(&r),
+            vec![IpAddr::V4([10, 0, 0, 1]), IpAddr::V4([10, 0, 0, 2])]
+        );
+        assert!(has_cluster_list(&r));
+        // Absent — empty list and `has_cluster_list` false.
+        let r_absent = route_with(vec![]);
+        assert!(cluster_list(&r_absent).is_empty());
+        assert!(!has_cluster_list(&r_absent));
+        // Malformed — partial-tail collapses to empty; the
+        // presence flag still reports the attribute is on the route.
+        let r_bad = route_with(vec![raw_attr(TAG_CLUSTER_LIST, 0x80, vec![1, 2, 3, 4, 5])]);
+        assert!(cluster_list(&r_bad).is_empty());
+        assert!(has_cluster_list(&r_bad));
     }
 }

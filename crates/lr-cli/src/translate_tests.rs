@@ -1403,3 +1403,57 @@ fn frr_network_with_route_map_keeps_prefix_noting_route_map() {
         "expected unmapped note for the route-map, got:\n{toml}"
     );
 }
+
+// ---- RFC 4271 §5.1.6 + RFC 4456 §8: BIRD attribute renames ----
+
+/// BIRD's `bgp_atomic_aggregate`, `bgp_originator_id` and
+/// `bgp_cluster_list` attributes rename to lr's dotted spellings and
+/// the body compiles in the lr filter DSL. The three arms mirror the
+/// canonical route-reflector loop-detection idioms: reject routes
+/// whose CLUSTER_LIST contains the local cluster id, reject routes
+/// whose ORIGINATOR_ID is the local BGP identifier, and optionally
+/// reject ATOMIC_AGGREGATE routes.
+#[test]
+fn bird_filter_renames_rr_loop_attributes() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+filter import_rr {
+    if defined(bgp_cluster_list) && 10.0.0.1 ~ bgp_cluster_list then reject;
+    if bgp_originator_id = 10.0.0.1 then reject;
+    if bgp_atomic_aggregate then reject;
+    accept;
+}
+
+protocol bgp rr_client {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 {
+        import filter import_rr;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.filters.len(), 1);
+    let body = cfg.filters[0].body.as_deref().unwrap_or("");
+    // BIRD spelling is gone.
+    assert!(!body.contains("bgp_atomic_aggregate"));
+    assert!(!body.contains("bgp_originator_id"));
+    assert!(!body.contains("bgp_cluster_list"));
+    // lr spelling is present.
+    assert!(body.contains("bgp.atomic_aggregate"), "body: {body}");
+    assert!(body.contains("bgp.originator_id"), "body: {body}");
+    assert!(body.contains("bgp.cluster_list"), "body: {body}");
+    // BIRD `=` for equality swapped to lr `==`.
+    assert!(
+        body.contains("bgp.originator_id == 10.0.0.1"),
+        "body: {body}"
+    );
+    // `defined()` and `~` survive verbatim — they share spelling
+    // between BIRD and lr.
+    assert!(body.contains("defined(bgp.cluster_list)"), "body: {body}");
+    assert!(body.contains("10.0.0.1 ~ bgp.cluster_list"), "body: {body}");
+}

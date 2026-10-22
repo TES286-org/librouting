@@ -50,6 +50,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Best-path selection and the router-id tiebreak | yes | `lr-bgp::best_path` |
 | Standard, extended and large communities | yes | `lr-bgp::path::communities` |
 | Well-known communities and attribute flags | yes | `lr-bgp::path::well_known`, `lr-bgp::path` |
+| ATOMIC_AGGREGATE, AGGREGATOR, ORIGINATOR_ID, CLUSTER_LIST typed accessors (RFC 4271 §5.1.6/§5.1.7, RFC 4456 §8) | yes | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::{OriginatorId, ClusterList}` |
 | Labelled-unicast NLRI and MP helpers (RFC 8277) | yes | `lr-bgp::path::labeled_nlri` |
 | NLRI types and prefix encoding | yes | `lr-bgp::nlri` |
 | Egress rewrite rules, iBGP split horizon, next-hop-self | yes | `lr-bgp::advertise` |
@@ -159,6 +160,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Filter DSL peephole optimisation | yes | `lr-policy::filter::peephole` |
 | Source spans and positioned diagnostics | yes | `lr-policy::filter::span` |
 | Cross-filter reusable function definitions | yes | `lr-cli::daemon_policy::build_filters` |
+| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §8) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp` |
 
 ## OS integration and data plane — `lr-osroute`, `lr-mpls`, `lr-srv6`
 
