@@ -905,6 +905,15 @@ jobs:
       - name: Build lr-daemon
         timeout-minutes: 15
         run: cargo build -p lr-cli
+      - name: Conversion corpus gate (lr-daemon translate x golden .expected.toml)
+        # The corpus under tests/corpus/ pairs every representative
+        # BIRD/FRR config with the exact TOML the converter emits.
+        # This is the end-to-end half (the in-crate
+        # translate::corpus_tests unit test drives the same converter
+        # functions directly). Pure converter — no reference daemons,
+        # no privileges — so it runs first as a fast regression gate.
+        timeout-minutes: 5
+        run: ./tests/interop/translate_corpus.sh
       - name: Build the RTR mock cache example
         timeout-minutes: 10
         run: cargo build -p lr-bgp --example rtr_cache_mock
