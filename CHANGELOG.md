@@ -45,7 +45,17 @@ shape. FRR `network PREFIX area N` cannot map mechanically (lr
 keys `[[ospf.interface]]` by interface name, not prefix); the
 converter notes the gap with a hint instead of silently dropping.
 `router ospfv3` produces a note telling the operator to set
-`ospf_version = "v3"`.
+`ospf_version = "v3"`, and the v3 directives under it map the same
+way as the v2 forms: `ospfv3 router-id A.B.C.D` fills `router_id`,
+`ospfv3 area N stub|nssa|default-cost M` routes through the same
+handler as the bare v2 `area N …` form, `ospfv3 cost|hello-interval|
+dead-interval|priority|network …|area N` inside an `interface IFNAME`
+block routes through the same `apply_frr_ospf_iface` helper as the
+v2 `ip ospf …` directives, `ospfv3 network PREFIX area N` produces
+the same unmapped hint as the v2 form, and `ospfv3 instance-id N` /
+`ospfv3 authentication …` / `ospfv3 abr-type …` / `ospfv3
+log-adjacency-changes` etc. are noted as unmapped with the v3
+directive stem so the operator sees the version-specific gap.
 
 The BGP side of a mixed BIRD or FRR config still converts
 alongside the OSPF tables — the converter handles both protocols
