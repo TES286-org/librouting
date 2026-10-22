@@ -504,6 +504,9 @@ lists fields accepting the append form.
 | `bgp.ext_communities`   | `ext-community-set`   |   yes    | yes  | RFC 4360 transitive 8-byte communities.                |
 | `bgp.large_communities` | `large-community-set` |   yes    | yes  | RFC 8092 12-byte communities.                          |
 | `bgp.origin`            | `int`                 |    no    |  no  | BGP ORIGIN (0=IGP, 1=EGP, 2=INCOMPLETE).               |
+| `bgp.atomic_aggregate`  | `bool`                |    no    |  no  | RFC 4271 §5.1.6; `true` when the marker is present.    |
+| `bgp.originator_id`     | `ip`                  |    no    |  no  | RFC 4456 §8; `false` when the route carries none.      |
+| `bgp.cluster_list`      | `set` of `ip`         |    no    |  no  | RFC 4456 §8 reflection path; empty when absent. `~` membership test. |
 | `roa.state`             | `roa-state`           |    no    |  no  | RFC 6811 outcome: `valid` / `invalid` / `not-found`.   |
 
 `proto` reads a string, not a protocol object: compare it with
@@ -516,6 +519,19 @@ route's prefix and origin AS at read time. The value reflects the cache state at
 evaluation time — if the RTR client has applied a delta since the filter was
 compiled, the new state is observed (the `FilterContext` reads the live
 snapshot, not a captured one).
+
+`bgp.atomic_aggregate`, `bgp.originator_id` and `bgp.cluster_list` are the
+route-reflector loop-detection attributes (RFC 4271 §5.1.6, RFC 4456 §8).
+`bgp.atomic_aggregate` is a boolean — `true` when the length-zero marker is
+present, `false` when absent. `bgp.originator_id` reads as an `ip` (the
+originator's BGP Identifier) or `false` when absent, mirroring `bgp.next_hop`'s
+absent representation; gate with `defined(bgp.originator_id)` before reading.
+`bgp.cluster_list` reads as a `set` of `ip` values in reflection order
+(most-recently-prepended first); `defined(bgp.cluster_list)` distinguishes "no
+attribute" from "present but empty", and `local_cluster ~ bgp.cluster_list`
+runs the canonical RR loop check directly. The BIRD translator renames
+`bgp_atomic_aggregate`, `bgp_originator_id` and `bgp_cluster_list` to these lr
+spellings.
 
 ---
 

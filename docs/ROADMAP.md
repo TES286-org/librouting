@@ -280,9 +280,27 @@ config is loadable as-is (the daemon's `finalize` rejects a
 ebgp-requires-policy` is consumed silently (the converter always
 emits `ebgp_policy = "accept-all"`, which is the same intent), and
 `network PREFIX route-map NAME` keeps the prefix while noting the
-route-map (lr's `networks` is a plain prefix list). What remains is
-the rest of the per-protocol attribute surface — BIRD's route
-attributes that ride the per-route filter context.
+route-map (lr's `networks` is a plain prefix list). The
+route-reflector loop-detection attributes the per-route filter
+context rides on have landed: `lr-policy::filter::ast::RouteFieldKind`
+gains `BgpAtomicAggregate` (RFC 4271 §5.1.6), `BgpOriginatorId` and
+`BgpClusterList` (RFC 4456 §8), exposed through the filter DSL as
+`bgp.atomic_aggregate` (Bool), `bgp.originator_id` (IpAddr::V4) and
+`bgp.cluster_list` (Set of IpAddr::V4) — `lr-policy::bgp` carries
+the matching `atomic_aggregate`, `originator_id`, `cluster_list` and
+`has_cluster_list` helpers that read by tag from `Route.attributes`,
+and `lr-bgp::path::PathAttributes` gains `originator_id()` and
+`cluster_list()` typed accessors alongside the existing
+`atomic_aggregate()` and `aggregator()`. The BIRD translator renames
+`bgp_atomic_aggregate` / `bgp_originator_id` / `bgp_cluster_list`
+to the lr dotted spellings, and the corpus case
+`tests/corpus/bird/bgp-rr-loop-filter.conf` exercises all three in
+the canonical RR loop-detection idiom (`defined(bgp.cluster_list) &&
+local_cluster ~ bgp.cluster_list`, `bgp.originator_id == local_id`,
+`bgp.atomic_aggregate`). What remains is the rest of the
+per-protocol attribute surface — BIRD's route attributes that ride
+the per-route filter context — beyond the RR loop-detection subset
+that just landed.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF

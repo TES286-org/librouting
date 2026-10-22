@@ -17,6 +17,39 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ### Added
 
+**BGP route-reflector loop-detection attributes in the filter DSL**
+(`bgp`, `policy`, `cli`, ROADMAP "Per-protocol route attributes and
+an external conversion corpus"). The filter DSL now exposes three
+read-only BGP path attributes that ride the per-route filter context,
+so an operator can write loop-detection and aggregation-aware
+policies directly:
+
+- `bgp.atomic_aggregate` (RFC 4271 §5.1.6) — `Bool`, true when the
+  length-zero ATOMIC_AGGREGATE marker is present, false when absent.
+- `bgp.originator_id` (RFC 4456 §8) — `IpAddr::V4` of the route's
+  originator, `Bool(false)` when absent.
+- `bgp.cluster_list` (RFC 4456 §8) — `Set` of `IpAddr::V4` in
+  reflection order, empty when absent; the existing `~` membership
+  test accepts `local_cluster ~ bgp.cluster_list` directly.
+
+`lr-bgp::path::PathAttributes` gains typed `originator_id()` and
+`cluster_list()` accessors alongside the existing `atomic_aggregate()`
+and `aggregator()`. New `OriginatorId` and `ClusterList` types in
+`lr-bgp::path::well_known` carry strict-width decoders (4 bytes for
+ORIGINATOR_ID, multiple of 4 for CLUSTER_LIST) and a `has_cluster_list`
+presence helper that distinguishes "no attribute" from "present but
+empty". `lr-policy::bgp` carries matching `atomic_aggregate`,
+`originator_id`, `cluster_list` and `has_cluster_list` helpers that
+read by tag from `Route.attributes`. The BIRD filter translator
+renames `bgp_atomic_aggregate`, `bgp_originator_id` and
+`bgp_cluster_list` to the lr dotted spellings. A new corpus case
+`tests/corpus/bird/bgp-rr-loop-filter.conf` exercises all three in
+the canonical RR loop-detection idiom. No FFI ABI change: the
+`FilterContext` trait methods carry default implementations that
+delegate to `lr_policy::bgp`, so every existing impl — daemon, FFI
+built-in, FFI callback-table, benches, test stubs — inherits the
+correct behaviour without code changes.
+
 **BIRD and FRR OSPF configuration translation** (`cli`, ROADMAP
 "Per-protocol route attributes and an external conversion corpus").
 The `lr translate bird|frr` converter and the native-run compat
