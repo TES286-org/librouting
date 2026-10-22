@@ -168,6 +168,7 @@ pub fn otc_can_advertise(route_otc: Otc, local_role: OtcRole) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use proptest::prelude::*;
 
     #[test]
     fn otc_roundtrip() {
@@ -242,5 +243,87 @@ mod tests {
         assert!(!otc_can_advertise(otc, OtcRole::Unset));
         // A route without OTC may go anywhere.
         assert!(otc_can_advertise(Otc(0), OtcRole::Peer));
+    }
+
+    // CONTRIBUTING.md: a new wire codec needs a fuzz target or
+    // proptest strategy. The bgp_decode fuzz target stores raw
+    // attribute bytes in PathAttribute::value without consulting the
+    // typed accessor, so this strategy is the floor that keeps
+    // PathAttributes::otc honest: arbitrary byte slices run through
+    // the strict-width decoder, and the round-trip contract holds for
+    // every accepted input.
+    proptest! {
+        #[test]
+        fn otc_decode_never_panics(
+            bytes in prop::collection::vec(0u8..=255, 0..=64)
+        ) {
+            // The decoder must either return Some (4-byte input) or
+            // None (any other width) — never panic.
+            let decoded = Otc::decode(&bytes);
+            if let Some(otc) = decoded {
+                // Round-trip contract: encode is the inverse of
+                // decode for every accepted input.
+                prop_assert_eq!(otc.encode(), bytes.as_slice());
+                // The 4-byte input invariant.
+                prop_assert_eq!(bytes.len(), 4);
+                // is_set() is the value != 0 predicate.
+                prop_assert_eq!(otc.is_set(), otc.0 != 0);
+            } else {
+                // Rejected inputs include every non-4-byte width.
+                prop_assert_ne!(bytes.len(), 4);
+            }
+        }
+    }
+
+    /// `PathAttributes::otc` reads by tag through the typed accessor
+    /// and stays `None` on the absent and malformed cases. The
+    /// accessor is the codec half of the `bgp.otc` filter DSL field
+    /// (RFC 9234 §3.1).
+    #[test]
+    fn path_attributes_otc_accessor_round_trips() {
+        use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
+
+        let mut attrs = PathAttributes::new();
+        // Absent — None on both `otc()` and `has_otc()`.
+        assert!(attrs.otc().is_none());
+        assert!(!attrs.has_otc());
+
+        // Present, value 64512.
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::Otc,
+            Otc::new(64512).encode().to_vec(),
+        ));
+        let o = attrs.otc().expect("present, well-formed");
+        assert_eq!(o, Otc::new(64512));
+        assert!(o.is_set());
+        assert!(attrs.has_otc());
+
+        // Present, value 0 — "set but zero". `otc()` returns
+        // `Some(Otc(0))`; `has_otc()` reports presence; `is_set()`
+        // reports false. This is the case `defined(bgp.otc)` in the
+        // filter DSL must distinguish from "absent".
+        let mut attrs_zero = PathAttributes::new();
+        attrs_zero.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::Otc,
+            Otc(0).encode().to_vec(),
+        ));
+        assert_eq!(attrs_zero.otc(), Some(Otc(0)));
+        assert!(attrs_zero.has_otc());
+        assert!(!attrs_zero.otc().unwrap().is_set());
+
+        // Malformed width — None on `otc()`, but `has_otc()` still
+        // reports presence (the attribute is on the route; only the
+        // value is unreadable). Mirrors the `cluster_list()` accessor's
+        // behaviour on a partial tail.
+        let mut attrs_bad = PathAttributes::new();
+        attrs_bad.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::Otc,
+            vec![1, 2, 3],
+        ));
+        assert!(attrs_bad.otc().is_none());
+        assert!(attrs_bad.has_otc());
     }
 }
