@@ -13,6 +13,104 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.6.0] — minor: LRXP exchange-plane records in the filter DSL (issue #81)
+
+librouting 1.6.0 is a minor release. Per `docs/RELEASE-PLAN.md`
+§1, the public Rust API gains new surface (`RouteFieldKind::Lrxp*`
+variants, twelve new `FilterContext` trait methods with default
+impls, a new `lr-policy::lrxp` module); the new `RouteFieldKind`
+variants are a breaking change for downstream `match`
+exhaustiveness, which the `api-surface` CI gate will catch going
+forward. The C ABI surface is unchanged (no new `lr_*` symbols,
+`ABI_VERSION` stays at 2); the FFI callback table
+`lr_filter_context_t` is untouched — the new `FilterContext`
+methods carry default implementations that delegate to
+`lr_policy::lrxp`, so every existing embedder inherits the correct
+behaviour without recompiling.
+
+### Stability
+
+**Minor version bump 1.5.0 → 1.6.0** for the new
+`RouteFieldKind::{LrxpVerified, LrxpPartialTransit, LrxpHintRank,
+LrxpHintDampFom, LrxpHintIgpCost, LrxpPolicyRole,
+LrxpPolicyImportDigest, LrxpPolicyExportDigest, LrxpOriginAs,
+LrxpOriginMaxValidLen, LrxpOriginExpiry}` variants. Per
+`docs/RELEASE-PLAN.md` §1, adding variants to a public enum is a
+breaking change for downstream `match` exhaustiveness; the
+project's policy (matching the v1.3.0, v1.4.0 and v1.5.0 cuts) is
+to ship it as a minor bump. The `api-surface` CI gate skips when
+the workspace version is ahead of the latest tag, so the gate will
+become blocking again at the next release cut. The C ABI surface
+is unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at 2).
+
+### Added
+
+**LRXP exchange-plane filter DSL surface** (`policy`, ROADMAP
+"LRXP exchange-plane filter DSL surface (issue #81)"). The filter
+DSL now exposes the scope-1 records a route carries under the
+private `LrExchangePlaneRecords` attribute, behind the
+`exchange-plane` feature (off by default). An operator can adjust
+`local-pref` / `MED` based on the sender-reported feasibility
+hints, policy intent, and origin attestation:
+
+- `bgp.lrxp.verified` (Bool) — true when the route carries a
+  verified LRXP record set. The single bool an operator gates on
+  when a policy should apply only to LRXP-carrying routes.
+- `bgp.lrxp.partial_transit` (Bool) — true when the store is
+  partial-transit forwarding material (design §7).
+- `bgp.lrxp.hint.rank` / `damp_fom` / `igp_cost` (Int) — the
+  scope-1 feasibility hint (design §5.1). `rank` is the sender's
+  best-path rank (1 = sender's best); the canonical idiom is `if
+  bgp.lrxp.hint.rank > 1 then { bgp.local_pref = 50; }` to
+  deprioritise poor repair candidates.
+- `bgp.lrxp.policy.role` / `import_digest` / `export_digest` (Int
+  / String / String) — the scope-1 policy intent (design §5.2).
+  The digests are lowercase hex so two sessions can compare filter
+  fingerprints with `==`.
+- `bgp.lrxp.origin.origin_as` / `max_valid_len` / `expiry` (Int)
+  — the provenance origin attestation (design §5.3). The canonical
+  idiom is boosting local-pref for routes with a verified origin:
+  `if bgp.lrxp.verified && bgp.lrxp.origin.origin_as == 64512
+  then { bgp.local_pref = 200; }`.
+
+`lr-policy` gains an `exchange-plane = ["bgp",
+"lr-bgp/exchange-plane"]` feature so the typed accessors can
+decode the private record store. `lr-policy::lrxp` is the accessor
+module — all read by tag from `Route.attributes` via the
+`lr-bgp::extensions::exchange_plane` codec. The `RouteFieldKind`
+variants are always present on the enum (so downstream `match`
+exhaustiveness is stable across feature configurations); the
+parser dispatch (`parse_lrxp_field`) and the eval dispatch
+(`field_present`, `read_route_field`) are
+`#[cfg(feature = "exchange-plane")]`-gated, with a `#[cfg(not)] _ =>
+` fallback so a feature-less build rejects `bgp.lrxp.*` at parse
+time with `UnknownBgpField` and the exhaustive matches stay
+compilable.
+
+**Fallback (issue #81 requirement)** — the graceful degradation is
+built into the accessors: a route with no `LrExchangePlaneRecords`
+attribute (the peer did not advertise the capability) reads every
+int field as `0`, every bool as `false`, every string as empty, so
+the canonical idiom `if bgp.lrxp.hint.rank > 1 then {
+bgp.local_pref = 50; }` evaluates its condition to false and the
+local-pref write does not fire — the filter no-ops on peers that
+do not run the plane.
+
+**Session-level vs per-route (issue #81 requirement)** — the
+discrepancy is resolved by reading the route's carried record set:
+policy-intent records are nominally per-session but re-attach to
+every NLRI the session advertises, so the per-route read is the
+correct granularity for a filter that adjusts `local-pref`. Hints
+and provenance are per-route by construction.
+
+**Test coverage** — 8 helper tests in `lr-policy::lrxp::tests`
+(absent, verified hint/policy/origin, combined, partial-transit,
+malformed, issue #81 fallback) + 17 eval tests in
+`lr-policy::filter::eval_tests::lrxp_tests` (verified/partial
+predicates, hint/policy/origin round-trips, `defined()` semantics,
+read-only enforcement, parse errors, the three canonical idioms).
+All feature-gated behind `exchange-plane`.
+
 ## [1.5.0] — minor: BGP OTC attribute in the filter DSL
 
 librouting 1.5.0 is a minor release. Per `docs/RELEASE-PLAN.md`

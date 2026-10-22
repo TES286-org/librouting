@@ -218,6 +218,76 @@ pub trait FilterContext {
     fn bgp_has_otc(&self, route: &Route) -> bool {
         crate::bgp::has_otc(route)
     }
+    /// Issue #81 — LRXP exchange-plane surface. True when the route
+    /// carries a verified LRXP record set (tag-checked at ingress).
+    /// The default delegates to [`crate::lrxp::verified`]; only
+    /// compiled when the `exchange-plane` feature is on.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_verified(&self, route: &Route) -> bool {
+        crate::lrxp::verified(route)
+    }
+    /// Issue #81 — true when the route carries partial-transit LRXP
+    /// forwarding material (the attribute crossed a non-lr hop,
+    /// design §7).
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_partial_transit(&self, route: &Route) -> bool {
+        crate::lrxp::partial_transit(route)
+    }
+    /// Issue #81 — the sender's best-path rank for this path among
+    /// its alternates (design §5.1: 1 = the path the sender itself
+    /// uses). `0` when the route carries no verified hint record.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_hint_rank(&self, route: &Route) -> u8 {
+        crate::lrxp::hint_rank(route)
+    }
+    /// Issue #81 — the sender's route-flap figure of merit (design
+    /// §5.1: 0 when damping is off). `0` when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_hint_damp_fom(&self, route: &Route) -> u16 {
+        crate::lrxp::hint_damp_fom(route)
+    }
+    /// Issue #81 — the sender's IGP cost to this path's next hop
+    /// (design §5.1). `0` when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_hint_igp_cost(&self, route: &Route) -> u32 {
+        crate::lrxp::hint_igp_cost(route)
+    }
+    /// Issue #81 — the sender's RFC 9234 role claim for this session
+    /// (design §5.2: advisory). `255` (unspecified) when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_policy_role(&self, route: &Route) -> u8 {
+        crate::lrxp::policy_role(route)
+    }
+    /// Issue #81 — the sender's SipHash-2-4 import-filter digest as a
+    /// lowercase hex string (design §5.2). Empty string when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_policy_import_digest_hex(&self, route: &Route) -> String {
+        crate::lrxp::policy_import_digest_hex(route)
+    }
+    /// Issue #81 — the sender's SipHash-2-4 export-filter digest as a
+    /// lowercase hex string (design §5.2). Empty string when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_policy_export_digest_hex(&self, route: &Route) -> String {
+        crate::lrxp::policy_export_digest_hex(route)
+    }
+    /// Issue #81 — the origin AS the attestation authorises (design
+    /// §5.3). `0` when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_origin_as(&self, route: &Route) -> u32 {
+        crate::lrxp::origin_as(route)
+    }
+    /// Issue #81 — the maximum prefix length the origin authorises
+    /// (design §5.3). `0` when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_origin_max_valid_len(&self, route: &Route) -> u8 {
+        crate::lrxp::origin_max_valid_len(route)
+    }
+    /// Issue #81 — the absolute timestamp after which the record
+    /// expires (design §5.3). `0` when absent.
+    #[cfg(feature = "exchange-plane")]
+    fn lrxp_origin_expiry(&self, route: &Route) -> u32 {
+        crate::lrxp::origin_expiry(route)
+    }
     /// RFC 6811 validation outcome (`roa.state`) for the route's
     /// prefix + origin AS.
     fn roa_state(&self, route: &Route) -> RoaStateLit;
@@ -658,6 +728,37 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // the latter collapses "absent" and "malformed" together
             // but the former keeps "present but zero" defined.
             RouteFieldKind::BgpOtc => self.ctx.bgp_has_otc(route),
+            // Issue #81 — LRXP `defined()` semantics. The two bare
+            // predicates (`verified`, `partial_transit`) are defined
+            // iff the route carries an LRXP store of any kind. The
+            // per-record fields (`hint.rank`, `policy.role`, etc.)
+            // are defined iff the route carries a verified store AND
+            // the corresponding record class is present in it — a
+            // partial-transit store or a verified store without the
+            // record class reads as absent.
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpVerified | RouteFieldKind::LrxpPartialTransit => {
+                crate::lrxp::store_kind(route).is_some()
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpHintRank
+            | RouteFieldKind::LrxpHintDampFom
+            | RouteFieldKind::LrxpHintIgpCost => crate::lrxp::hint(route).is_some(),
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpPolicyRole
+            | RouteFieldKind::LrxpPolicyImportDigest
+            | RouteFieldKind::LrxpPolicyExportDigest => crate::lrxp::policy(route).is_some(),
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpOriginAs
+            | RouteFieldKind::LrxpOriginMaxValidLen
+            | RouteFieldKind::LrxpOriginExpiry => crate::lrxp::origin(route).is_some(),
+            // Feature-less build: the LRXP variants are unreachable
+            // (the parser rejects `bgp.lrxp.*` with
+            // `UnknownBgpField`). The wildcard keeps the match
+            // exhaustive over the full variant set without pulling
+            // the codec into a feature-less build.
+            #[cfg(not(feature = "exchange-plane"))]
+            _ => false,
         }
     }
 
@@ -740,7 +841,65 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // that need to distinguish "absent" from "set to zero"
             // gate with `defined(bgp.otc)`.
             RouteFieldKind::BgpOtc => Ok(Value::Int(self.ctx.bgp_otc(route).unwrap_or(0) as i64)),
+            // Issue #81 — LRXP exchange-plane surface. The two bare
+            // predicates read as `Bool`; the per-record fields read
+            // as `Int` (ints default to 0) or `Str` (digests default
+            // to empty string). The fallback (no LRXP attribute) is
+            // built into the accessors — a non-LRXP peer's route
+            // reads as `false` / `0` / `""` so a filter that adjusts
+            // `local-pref` based on `bgp.lrxp.hint.rank` no-ops.
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpVerified => Ok(Value::Bool(self.ctx.lrxp_verified(route))),
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpPartialTransit => {
+                Ok(Value::Bool(self.ctx.lrxp_partial_transit(route)))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpHintRank => {
+                Ok(Value::Int(i64::from(self.ctx.lrxp_hint_rank(route))))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpHintDampFom => {
+                Ok(Value::Int(i64::from(self.ctx.lrxp_hint_damp_fom(route))))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpHintIgpCost => {
+                Ok(Value::Int(i64::from(self.ctx.lrxp_hint_igp_cost(route))))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpPolicyRole => {
+                Ok(Value::Int(i64::from(self.ctx.lrxp_policy_role(route))))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpPolicyImportDigest => {
+                Ok(Value::Str(self.ctx.lrxp_policy_import_digest_hex(route)))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpPolicyExportDigest => {
+                Ok(Value::Str(self.ctx.lrxp_policy_export_digest_hex(route)))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpOriginAs => {
+                Ok(Value::Int(i64::from(self.ctx.lrxp_origin_as(route))))
+            }
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpOriginMaxValidLen => Ok(Value::Int(i64::from(
+                self.ctx.lrxp_origin_max_valid_len(route),
+            ))),
+            #[cfg(feature = "exchange-plane")]
+            RouteFieldKind::LrxpOriginExpiry => {
+                Ok(Value::Int(i64::from(self.ctx.lrxp_origin_expiry(route))))
+            }
             RouteFieldKind::RoaState => Ok(Value::RoaState(self.ctx.roa_state(route))),
+            // Feature-less build: the LRXP variants are unreachable
+            // (the parser rejects `bgp.lrxp.*` with
+            // `UnknownBgpField`). The wildcard keeps the match
+            // exhaustive over the full variant set without pulling
+            // the codec into a feature-less build. Placed last so
+            // the explicit `RoaState` arm above stays reachable on
+            // both feature configurations.
+            #[cfg(not(feature = "exchange-plane"))]
+            _ => Ok(Value::Bool(false)),
         }
     }
 
@@ -751,10 +910,13 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// `LoadField; Push; Bin; JumpIf*` sequence pays. Only the
     /// five integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
     /// `BgpOrigin`, `BgpOtc`) reach this path — the peephole pass's
-    /// `is_int_field` gate guarantees it. The `unwrap_or(0)`
-    /// semantics for absent attributes mirror `read_route_field`
-    /// exactly so the fused and unfused paths agree for every
-    /// route.
+    /// `is_int_field` gate guarantees it. The LRXP int-typed fields
+    /// (`bgp.lrxp.hint.rank`, etc.) are deliberately NOT in
+    /// `is_int_field`: their read decodes a TLV stream (not a single
+    /// `get_u32_be`), so fusing would not save the allocation the
+    /// fast path exists to avoid. The `unwrap_or(0)` semantics for
+    /// absent attributes mirror `read_route_field` exactly so the
+    /// fused and unfused paths agree for every route.
     fn read_int_route_field(&self, field: &RouteField, route: &Route) -> Result<i64, EvalError> {
         Ok(match field.kind {
             RouteFieldKind::Source => i64::from(route.origin.proto),
@@ -763,11 +925,10 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpOrigin => i64::from(self.ctx.bgp_origin(route).unwrap_or(0)),
             RouteFieldKind::BgpOtc => self.ctx.bgp_otc(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
-            // one of the five arms above; the unreachable arms
-            // are listed so the match is exhaustive over
-            // `RouteFieldKind` and stays compilable if a new
-            // field kind is added later (the gate would still
-            // refuse to fuse it).
+            // one of the five arms above; the LRXP int-typed fields
+            // fall through to the unreachable arm (the gate refuses
+            // to fuse them) and run the unfused `read_route_field`
+            // path instead.
             _ => unreachable!("peephole is_int_field gates this"),
         })
     }

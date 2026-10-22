@@ -22,6 +22,8 @@ pub mod bgp;
 pub mod community_list;
 pub mod filter;
 pub mod hooks;
+#[cfg(feature = "exchange-plane")]
+pub mod lrxp;
 pub mod policy;
 pub mod prefix_list;
 pub mod route_map;

@@ -34,6 +34,18 @@ bgp = ["std", "dep:lr-bgp"]
 # crate and exposes `DampingImportHook`. Requires std because
 # `lr-damping` is a std crate.
 damping = ["std", "dep:lr-damping"]
+# W6.3 LRXP exchange-plane filter DSL surface (issue #81). Exposes
+# the scope-1 records a route carries (`bgp.lrxp.hint.*`,
+# `bgp.lrxp.policy.*`, `bgp.lrxp.origin.*`, `bgp.lrxp.verified`,
+# `bgp.lrxp.partial_transit`) to the filter DSL so an operator can
+# adjust `local-pref` / `MED` based on them. Pulls in the
+# `lr-bgp/exchange-plane` codec so the typed accessors can decode
+# the private record store. The fallback (peer does not advertise
+# the capability) is built-in: a route with no
+# `LrExchangePlaneRecords` attribute reads as `0` / `false` /
+# `""`, so a filter like `if bgp.lrxp.hint.rank > 1 then
+# bgp.local_pref = 50` no-ops on non-LRXP peers.
+exchange-plane = ["bgp", "lr-bgp/exchange-plane"]
 
 [dev-dependencies]
 proptest = { workspace = true }
