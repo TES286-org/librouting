@@ -2037,3 +2037,375 @@ fn bgp_otc_peephole_fused_branch_agrees_with_unfused() {
         EvalResult::Accept,
     );
 }
+
+// ---- Issue #81: bgp.lrxp.* (LRXP exchange-plane filter DSL surface) ----
+//
+// The LRXP surface is feature-gated behind `exchange-plane`. The
+// codec lives in `lr-bgp::extensions::exchange_plane`; the typed
+// accessors live in `crate::lrxp`; the filter DSL fields live in
+// `RouteFieldKind::Lrxp*`. These tests exercise the full path —
+// parse → eval → accessor → codec — against a real verified record
+// set built with the same `ExchangeKey` the production codec uses.
+//
+// The fallback requirement (issue #81: a filter that adjusts
+// `local-pref` based on `bgp.lrxp.hint.rank` no-ops on a non-LRXP
+// peer) is pinned by `lrxp_canonical_idiom_no_ops_on_non_lrxp_peer`
+// — the accessor returns 0, the filter's `rank > 1` test is false,
+// the local-pref write does not fire.
+
+#[cfg(feature = "exchange-plane")]
+mod lrxp_tests {
+    use super::*;
+    use crate::bgp::{local_pref, med};
+    use lr_bgp::extensions::exchange_plane::{
+        ExchangeKey, ExchangeRecord, HintRecord, OriginAttestation, PolicyIntent, Record,
+        STORE_PARTIAL_RAW, STORE_VERIFIED,
+    };
+
+    /// The `LrExchangePlaneRecords` attribute tag (value 254) — the
+    /// private store the ingress hook parks on the route.
+    const TAG_LRXP_STORE: u8 = 254;
+
+    fn route_with_lrxp_store(store: Option<(u8, &[u8])>) -> Route {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        if let Some((kind, payload)) = store {
+            let mut value = Vec::with_capacity(1 + payload.len());
+            value.push(kind);
+            value.extend_from_slice(payload);
+            r.attributes.insert(Attribute {
+                tag: AttrTag::raw(TAG_LRXP_STORE),
+                flags: 0x80,
+                value,
+            });
+        }
+        r
+    }
+
+    fn signed_record_set(records: Vec<Record>) -> Vec<u8> {
+        let key = ExchangeKey::hmac_sha256(1, "test-key");
+        let mut record = ExchangeRecord::new(1, key.id, [0u8; 8], 1);
+        record.records = records;
+        record.sign(&key);
+        record.encode()
+    }
+
+    fn hint_payload(rank: u8, damp: u16, igp: u32) -> Vec<u8> {
+        signed_record_set(vec![Record::Hint(HintRecord {
+            rank,
+            damp_fom: damp,
+            igp_cost: igp,
+        })])
+    }
+
+    fn policy_payload(role: u8, import: [u8; 8], export: [u8; 8]) -> Vec<u8> {
+        signed_record_set(vec![Record::Policy(PolicyIntent {
+            role,
+            import_digest: import,
+            export_digest: export,
+        })])
+    }
+
+    fn origin_payload(asn: u32, max_len: u8, expiry: u32) -> Vec<u8> {
+        signed_record_set(vec![Record::Origin(OriginAttestation {
+            origin_as: asn,
+            max_valid_len: max_len,
+            expiry,
+        })])
+    }
+
+    #[test]
+    fn lrxp_verified_reads_as_bool_true_when_present() {
+        let payload = hint_payload(1, 0, 0);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run("if bgp.lrxp.verified then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_verified_reads_as_bool_false_when_absent() {
+        // Issue #81 fallback: a route with no LRXP attribute (the
+        // peer did not advertise the capability) reads as false.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if bgp.lrxp.verified then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn lrxp_hint_rank_reads_as_int_when_present() {
+        let payload = hint_payload(2, 500, 1234);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run("if bgp.lrxp.hint.rank == 2 then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_hint_rank_reads_as_zero_when_absent() {
+        // Issue #81 fallback: the accessor returns 0 on a non-LRXP
+        // peer's route.
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run("if bgp.lrxp.hint.rank == 0 then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_hint_damp_fom_and_igp_cost_round_trip() {
+        let payload = hint_payload(1, 500, 1234);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run(
+                "if bgp.lrxp.hint.damp_fom == 500 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if bgp.lrxp.hint.igp_cost == 1234 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_policy_role_and_digests_round_trip() {
+        let payload = policy_payload(1, [0xaa; 8], [0xbb; 8]);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run("if bgp.lrxp.policy.role == 1 then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if bgp.lrxp.policy.import_digest == \"aaaaaaaaaaaaaaaa\" then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if bgp.lrxp.policy.export_digest == \"bbbbbbbbbbbbbbbb\" then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_origin_fields_round_trip() {
+        let payload = origin_payload(64512, 24, 1_700_000_000);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run(
+                "if bgp.lrxp.origin.origin_as == 64512 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if bgp.lrxp.origin.max_valid_len == 24 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run(
+                "if bgp.lrxp.origin.expiry == 1700000000 then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_partial_transit_reads_as_true_on_partial_store() {
+        // Design §7: a Partial-bit record crossed a non-lr hop —
+        // forwarding material, not consumable. `verified` is false,
+        // `partial_transit` is true.
+        let raw = [0xde, 0xad, 0xbe, 0xef];
+        let mut r = route_with_lrxp_store(Some((STORE_PARTIAL_RAW, &raw)));
+        assert_eq!(
+            run("if bgp.lrxp.partial_transit then accept; reject;", &mut r),
+            EvalResult::Accept,
+        );
+        assert_eq!(
+            run("if bgp.lrxp.verified then accept; reject;", &mut r),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn lrxp_defined_distinguishes_present_from_absent() {
+        let payload = hint_payload(1, 0, 0);
+        let mut r_with = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run(
+                "if defined(bgp.lrxp.verified) then accept; reject;",
+                &mut r_with
+            ),
+            EvalResult::Accept,
+        );
+        let mut r_without = route_with("203.0.113.0/24", 100, 0);
+        assert_eq!(
+            run(
+                "if defined(bgp.lrxp.verified) then accept; reject;",
+                &mut r_without
+            ),
+            EvalResult::Reject(None),
+        );
+    }
+
+    #[test]
+    fn lrxp_hint_rank_defined_iff_hint_record_present() {
+        // A verified store with a policy record but no hint record:
+        // `defined(bgp.lrxp.hint.rank)` is false.
+        let payload = policy_payload(1, [0; 8], [0; 8]);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run(
+                "if defined(bgp.lrxp.hint.rank) then accept; reject;",
+                &mut r
+            ),
+            EvalResult::Reject(None),
+        );
+        // A verified store with a hint record: defined is true.
+        let payload = hint_payload(1, 0, 0);
+        let mut r2 = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        assert_eq!(
+            run(
+                "if defined(bgp.lrxp.hint.rank) then accept; reject;",
+                &mut r2
+            ),
+            EvalResult::Accept,
+        );
+    }
+
+    #[test]
+    fn lrxp_fields_are_not_assignable() {
+        let err = compile("test", "bgp.lrxp.hint.rank = 1;").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("read-only") || msg.contains("ReadOnly"),
+            "expected a read-only error, got: {msg}"
+        );
+        let err = compile("test", "bgp.lrxp.verified = true;").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("read-only") || msg.contains("ReadOnly"),
+            "expected a read-only error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lrxp_unknown_class_is_a_parse_error() {
+        // `bgp.lrxp.unknown` is not a valid class — the parser
+        // rejects it at parse time.
+        let err = compile("test", "if bgp.lrxp.unknown.foo == 1 then accept; reject;").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UnknownBgpField") || msg.contains("bgp.lrxp.unknown"),
+            "expected an UnknownBgpField error, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn lrxp_unknown_field_is_a_parse_error() {
+        // `bgp.lrxp.hint.unknown` is not a valid field under `hint`.
+        let err =
+            compile("test", "if bgp.lrxp.hint.unknown == 1 then accept; reject;").unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("UnknownBgpField") || msg.contains("bgp.lrxp.hint.unknown"),
+            "expected an UnknownBgpField error, got: {msg}"
+        );
+    }
+
+    /// Issue #81 canonical idiom: a filter that deprioritises a
+    /// route whose sender reports it as rank > 1 (a poor repair
+    /// candidate per design §5.1). On a non-LRXP peer the accessor
+    /// returns 0, the `rank > 1` test is false, the local-pref
+    /// write does not fire — the graceful degradation the issue
+    /// requires.
+    #[test]
+    fn lrxp_canonical_idiom_deprioritises_high_rank() {
+        let payload = hint_payload(3, 0, 0);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        // rank 3 > 1 → local-pref set to 50, then accept.
+        let f = compile(
+            "test",
+            "if bgp.lrxp.hint.rank > 1 then { bgp.local_pref = 50; accept; } accept;",
+        )
+        .unwrap();
+        evaluate(&f, &mut r, &StubCtx);
+        assert_eq!(local_pref(&r), Some(50));
+    }
+
+    /// Issue #81 canonical idiom: the same filter no-ops on a
+    /// non-LRXP peer (rank reads as 0, the `rank > 1` test is
+    /// false, local-pref stays at its original value).
+    #[test]
+    fn lrxp_canonical_idiom_no_ops_on_non_lrxp_peer() {
+        let mut r = route_with("203.0.113.0/24", 100, 0);
+        let original_lp = local_pref(&r);
+        let f = compile(
+            "test",
+            "if bgp.lrxp.hint.rank > 1 then { bgp.local_pref = 50; accept; } accept;",
+        )
+        .unwrap();
+        evaluate(&f, &mut r, &StubCtx);
+        assert_eq!(local_pref(&r), original_lp);
+    }
+
+    /// Issue #81 — adjust MED based on the sender's IGP cost (design
+    /// §5.1: the quantity inter-AS receivers otherwise cannot see).
+    /// A higher IGP cost on the sender's side means the path is more
+    /// expensive end-to-end; the receiver bumps its MED to reflect
+    /// that.
+    #[test]
+    fn lrxp_canonical_idiom_med_from_igp_cost() {
+        let payload = hint_payload(1, 0, 2000);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        let f = compile(
+            "test",
+            "if bgp.lrxp.hint.igp_cost > 1000 then { bgp.med = 200; accept; } accept;",
+        )
+        .unwrap();
+        evaluate(&f, &mut r, &StubCtx);
+        assert_eq!(med(&r), Some(200));
+    }
+
+    /// Issue #81 — boost local-pref for routes with a verified origin
+    /// attestation (design §5.3: the defect-§4 mitigation for
+    /// deployments that have no RPKI). The `verified` predicate is
+    /// the single bool an operator gates on.
+    #[test]
+    fn lrxp_canonical_idiom_boost_verified_origin() {
+        let payload = origin_payload(64512, 24, 1_800_000_000);
+        let mut r = route_with_lrxp_store(Some((STORE_VERIFIED, &payload)));
+        let f = compile(
+            "test",
+            "if bgp.lrxp.verified && bgp.lrxp.origin.origin_as == 64512 then { bgp.local_pref = 200; accept; } accept;",
+        )
+        .unwrap();
+        evaluate(&f, &mut r, &StubCtx);
+        assert_eq!(local_pref(&r), Some(200));
+    }
+
+    // Suppress the unused-import warning for STORE_PARTIAL_RAW and
+    // STORE_VERIFIED — they are re-exported from the test helpers
+    // above and the compiler sees the path through the const items,
+    // but the import documents the codec surface.
+    #[allow(dead_code)]
+    fn _doc_anchor() -> (u8, u8) {
+        (STORE_VERIFIED, STORE_PARTIAL_RAW)
+    }
+}
