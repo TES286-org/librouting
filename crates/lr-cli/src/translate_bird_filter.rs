@@ -307,6 +307,11 @@ const RENAMES: &[(&str, &str)] = &[
     ("bgp_atomic_aggregate", "bgp.atomic_aggregate"),
     ("bgp_originator_id", "bgp.originator_id"),
     ("bgp_cluster_list", "bgp.cluster_list"),
+    // RFC 9234 §3.1 — OTC ("Only To Customer") is a 4-byte AS
+    // number surfaced as an integer (0 = absent or set to zero).
+    // BIRD's filter language spells it `bgp_otc`; lr's DSL matches
+    // the integer shape exactly, so the rename is faithful.
+    ("bgp_otc", "bgp.otc"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),

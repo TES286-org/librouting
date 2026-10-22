@@ -204,6 +204,20 @@ pub trait FilterContext {
     fn bgp_has_cluster_list(&self, route: &Route) -> bool {
         crate::bgp::has_cluster_list(route)
     }
+    /// BGP OTC (`bgp.otc`, RFC 9234 §3.1) — the 4-byte AS number
+    /// that last tagged the route for customer-only propagation.
+    /// `None` when the attribute is absent or malformed; `Some(0)`
+    /// when present but zero. The default delegates to
+    /// [`lr_policy::bgp::otc`].
+    fn bgp_otc(&self, route: &Route) -> Option<u32> {
+        crate::bgp::otc(route)
+    }
+    /// True when an OTC attribute is physically present on the route
+    /// (RFC 9234 §3.1). Used by `defined(bgp.otc)` to distinguish
+    /// "absent" from "set to zero".
+    fn bgp_has_otc(&self, route: &Route) -> bool {
+        crate::bgp::has_otc(route)
+    }
     /// RFC 6811 validation outcome (`roa.state`) for the route's
     /// prefix + origin AS.
     fn roa_state(&self, route: &Route) -> RoaStateLit;
@@ -639,6 +653,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // on a `clist`).
             RouteFieldKind::BgpOriginatorId => self.ctx.bgp_originator_id(route).is_some(),
             RouteFieldKind::BgpClusterList => self.ctx.bgp_has_cluster_list(route),
+            // RFC 9234 §3.1: OTC presence is `has_otc` (the
+            // attribute is on the route), not `otc().is_some()` —
+            // the latter collapses "absent" and "malformed" together
+            // but the former keeps "present but zero" defined.
+            RouteFieldKind::BgpOtc => self.ctx.bgp_has_otc(route),
         }
     }
 
@@ -716,6 +735,11 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     .map(Value::Ip)
                     .collect(),
             )),
+            // RFC 9234 §3.1: OTC is a 4-byte AS number surfaced as
+            // an `Int` (`0` when absent or set to zero). Callers
+            // that need to distinguish "absent" from "set to zero"
+            // gate with `defined(bgp.otc)`.
+            RouteFieldKind::BgpOtc => Ok(Value::Int(self.ctx.bgp_otc(route).unwrap_or(0) as i64)),
             RouteFieldKind::RoaState => Ok(Value::RoaState(self.ctx.roa_state(route))),
         }
     }
@@ -725,8 +749,8 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// `Instr::BranchFieldIntCmp` (GitHub #19 P6) to avoid the
     /// 32-byte `Value` allocation + `Vec::push` the unfused
     /// `LoadField; Push; Bin; JumpIf*` sequence pays. Only the
-    /// four integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
-    /// `BgpOrigin`) reach this path — the peephole pass's
+    /// five integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
+    /// `BgpOrigin`, `BgpOtc`) reach this path — the peephole pass's
     /// `is_int_field` gate guarantees it. The `unwrap_or(0)`
     /// semantics for absent attributes mirror `read_route_field`
     /// exactly so the fused and unfused paths agree for every
@@ -737,8 +761,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpLocalPref => self.ctx.bgp_local_pref(route).unwrap_or(0) as i64,
             RouteFieldKind::BgpMed => self.ctx.bgp_med(route).unwrap_or(0) as i64,
             RouteFieldKind::BgpOrigin => i64::from(self.ctx.bgp_origin(route).unwrap_or(0)),
+            RouteFieldKind::BgpOtc => self.ctx.bgp_otc(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
-            // one of the four arms above; the unreachable arms
+            // one of the five arms above; the unreachable arms
             // are listed so the match is exhaustive over
             // `RouteFieldKind` and stays compilable if a new
             // field kind is added later (the gate would still

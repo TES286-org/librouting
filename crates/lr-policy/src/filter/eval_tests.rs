@@ -1697,6 +1697,8 @@ fn vm_error_inside_user_function_carries_function_span() {
 const TAG_ATOMIC_AGGREGATE: u8 = 6;
 const TAG_ORIGINATOR_ID: u8 = 9;
 const TAG_CLUSTER_LIST: u8 = 10;
+/// RFC 9234 §3.1: OTC attribute type code.
+const TAG_OTC: u8 = 35;
 
 fn route_with_atomic_aggregate() -> Route {
     let mut r = route_with("203.0.113.0/24", 100, 0);
@@ -1903,5 +1905,135 @@ fn bgp_cluster_list_is_not_assignable() {
     assert!(
         msg.contains("read-only") || msg.contains("ReadOnly"),
         "expected a read-only error, got: {msg}"
+    );
+}
+
+// ---- RFC 9234 §3.1: bgp.otc ----
+
+fn route_with_otc(value: u32) -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_OTC),
+        flags: 0xC0,
+        value: value.to_be_bytes().to_vec(),
+    });
+    r
+}
+
+#[test]
+fn bgp_otc_reads_as_int_when_present() {
+    let mut r = route_with_otc(64512);
+    assert_eq!(
+        run("if bgp.otc == 64512 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_otc_reads_as_zero_when_absent() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    // An absent OTC reads as 0 — the unwrap_or(0) semantics on the
+    // int-typed field read. Matches BIRD's `bgp_otc` filter behaviour.
+    assert_eq!(
+        run("if bgp.otc == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_otc_mismatch_rejects() {
+    let mut r = route_with_otc(64513);
+    assert_eq!(
+        run("if bgp.otc == 64512 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_otc_is_defined_iff_present() {
+    // Present, value 64512.
+    let mut r_with = route_with_otc(64512);
+    assert_eq!(
+        run("if defined(bgp.otc) then accept; reject;", &mut r_with),
+        EvalResult::Accept,
+    );
+    // Absent.
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if defined(bgp.otc) then accept; reject;", &mut r_without),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_otc_defined_distinguishes_absent_from_set_to_zero() {
+    // RFC 9234 §3.1: a present value of 0 ("set but zero") is
+    // distinct from "absent" — `defined(bgp.otc)` reports true for
+    // the former and false for the latter. This is the case the
+    // `has_otc` accessor exists to make precise.
+    let mut r_zero = route_with_otc(0);
+    assert_eq!(
+        run("if defined(bgp.otc) then accept; reject;", &mut r_zero),
+        EvalResult::Accept,
+    );
+    let mut r_absent = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if defined(bgp.otc) then accept; reject;", &mut r_absent),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_otc_leak_detection_idiom() {
+    // RFC 9234 §5 egress rule 2 in filter form: a route that
+    // carries OTC (the value is set) is a "customer-only" route and
+    // must not transit to a provider or peer. The filter DSL spells
+    // the test the same way BIRD does — `bgp.otc != 0` — and the
+    // canonical leak-detection idiom translates faithfully.
+    let mut r_leak = route_with_otc(64512);
+    assert_eq!(
+        run("if bgp.otc != 0 then reject; accept;", &mut r_leak),
+        EvalResult::Reject(None),
+    );
+    let mut r_clean = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if bgp.otc != 0 then reject; accept;", &mut r_clean),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_otc_is_not_assignable() {
+    let err = compile("test", "bgp.otc = 64512;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_otc_peephole_fused_branch_agrees_with_unfused() {
+    // The peephole pass fuses `LoadField(BgpOtc); Push(Int(c));
+    // Bin(op); JumpIf*` into a single `BranchFieldIntCmp` for int
+    // fields. OTC was added to `is_int_field` so the fused path
+    // fires; pin the agreement between the fused and unfused paths
+    // by checking the same comparison both ways.
+    let mut r = route_with_otc(64512);
+    // Fused: constant on the RHS, comparison op in the fuse set.
+    assert_eq!(
+        run("if bgp.otc == 64512 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if bgp.otc != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    // Unfused: constant on the LHS (the peephole does not fuse
+    // `Bin(Int(c), op, LoadField)`), exercises the read_route_field
+    // path directly.
+    assert_eq!(
+        run("if 64512 == bgp.otc then accept; reject;", &mut r),
+        EvalResult::Accept,
     );
 }

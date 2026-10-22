@@ -493,6 +493,7 @@ fn is_int_field(kind: RouteFieldKind) -> bool {
             | RouteFieldKind::BgpMed
             | RouteFieldKind::BgpOrigin
             | RouteFieldKind::Source
+            | RouteFieldKind::BgpOtc
     )
 }
 

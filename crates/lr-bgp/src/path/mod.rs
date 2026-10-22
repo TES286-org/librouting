@@ -381,6 +381,25 @@ impl PathAttributes {
     pub fn has_cluster_list(&self) -> bool {
         self.get(AttrType::ClusterList).is_some()
     }
+    /// OTC (RFC 9234 §3.1) — the 4-byte "Only To Customer" attribute
+    /// carrying the AS number that last tagged the route for
+    /// customer-only propagation. `None` when the attribute is absent
+    /// or the wire form is malformed (any length other than 4 bytes).
+    /// A present value of `Otc(0)` is treated as "set but zero" by the
+    /// caller — the codec does not collapse it to `None`, so
+    /// `defined(bgp.otc)` in the filter DSL distinguishes "absent"
+    /// from "set to zero" exactly as BIRD does.
+    pub fn otc(&self) -> Option<crate::role::otc::Otc> {
+        let a = self.get(AttrType::Otc)?;
+        crate::role::otc::Otc::decode(&a.value)
+    }
+    /// True when an OTC attribute is physically present on the route
+    /// (RFC 9234 §3.1). Use this to distinguish "no attribute" from
+    /// "present but zero" — `otc()` returns `Some(Otc(0))` for the
+    /// latter.
+    pub fn has_otc(&self) -> bool {
+        self.get(AttrType::Otc).is_some()
+    }
     pub fn communities(&self) -> Vec<Community> {
         self.get(AttrType::Communities)
             .map(|a| Community::decode_set(&a.value))

@@ -507,6 +507,7 @@ lists fields accepting the append form.
 | `bgp.atomic_aggregate`  | `bool`                |    no    |  no  | RFC 4271 §5.1.6; `true` when the marker is present.    |
 | `bgp.originator_id`     | `ip`                  |    no    |  no  | RFC 4456 §8; `false` when the route carries none.      |
 | `bgp.cluster_list`      | `set` of `ip`         |    no    |  no  | RFC 4456 §8 reflection path; empty when absent. `~` membership test. |
+| `bgp.otc`               | `int`                 |    no    |  no  | RFC 9234 §3.1; `0` when absent or set to zero. `defined(bgp.otc)` distinguishes the two. |
 | `roa.state`             | `roa-state`           |    no    |  no  | RFC 6811 outcome: `valid` / `invalid` / `not-found`.   |
 
 `proto` reads a string, not a protocol object: compare it with
@@ -532,6 +533,18 @@ attribute" from "present but empty", and `local_cluster ~ bgp.cluster_list`
 runs the canonical RR loop check directly. The BIRD translator renames
 `bgp_atomic_aggregate`, `bgp_originator_id` and `bgp_cluster_list` to these lr
 spellings.
+
+`bgp.otc` is the RFC 9234 §3.1 "Only To Customer" attribute — a 4-byte AS
+number that tags a route as customer-only so it must not transit to a provider
+or peer (RFC 9234 §5 egress rule 2). It reads as an `int` (`0` when absent or
+set to zero), so the canonical leak-detection idiom spells the same way it
+does in BIRD: `if bgp.otc != 0 then reject;`. The `defined(bgp.otc)` predicate
+distinguishes "absent" from "set to zero" — a present value of `0` (rare but
+legal) reports `true` on `defined` and `0` on read, exactly as BIRD's
+`bgp_otc` does. The BIRD translator renames `bgp_otc` to `bgp.otc`. The
+attribute is read-only: the daemon's RFC 9234 role logic (`lr-bgp::role::otc`)
+sets OTC on ingress and gates it on egress, so a filter that mutates it would
+fight the role FSM.
 
 ---
 

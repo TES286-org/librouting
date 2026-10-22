@@ -13,6 +13,76 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.5.0] — minor: BGP OTC attribute in the filter DSL
+
+librouting 1.5.0 is a minor release. Per `docs/RELEASE-PLAN.md`
+§1, the public Rust API gains new surface (`RouteFieldKind::BgpOtc`,
+two new `FilterContext` trait methods with default impls, two new
+`PathAttributes` typed accessors); the new `RouteFieldKind` variant
+is a breaking change for downstream `match` exhaustiveness, which
+the `api-surface` CI gate will catch going forward. The C ABI
+surface is unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at
+2); the FFI callback table `lr_filter_context_t` is untouched — the
+new `FilterContext` methods carry default implementations that
+delegate to `lr_policy::bgp`, so every existing embedder inherits
+the correct behaviour without recompiling.
+
+### Stability
+
+**Minor version bump 1.4.0 → 1.5.0** for the new
+`RouteFieldKind::BgpOtc` variant. Per `docs/RELEASE-PLAN.md` §1,
+adding variants to a public enum is a breaking change for
+downstream `match` exhaustiveness; the project's policy (matching
+the v1.3.0 and v1.4.0 cuts that cleared the previous enum-variant
+debt the same way) is to ship it as a minor bump. The `api-surface`
+CI gate skips when the workspace version is ahead of the latest tag,
+so the gate will become blocking again at the next release cut. The
+C ABI surface is unchanged (no new `lr_*` symbols, `ABI_VERSION`
+stays at 2); the FFI callback table `lr_filter_context_t` is
+untouched — the new `FilterContext` trait methods carry default
+implementations that delegate to `lr_policy::bgp`, so every existing
+embedder inherits the correct behaviour without recompiling.
+
+### Added
+
+**BGP OTC leak-detection attribute in the filter DSL** (`bgp`,
+`policy`, `cli`, ROADMAP "Per-protocol route attributes and an
+external conversion corpus"). The filter DSL now exposes the
+RFC 9234 §3.1 OTC ("Only To Customer") attribute as `bgp.otc`
+(read-only `Int`, `0` when absent or set to zero), so an operator
+can write the canonical leak-detection idiom directly:
+
+- `if bgp.otc != 0 then reject;` — RFC 9234 §5 egress rule 2 in
+  filter form: a route that already carries OTC is "customer-only"
+  and must not transit to a provider or peer.
+- `if defined(bgp.otc) && bgp.otc != 0 then reject;` — the
+  `defined()` gate distinguishes "absent" from "set to zero" so a
+  peer that legitimately set OTC=0 (rare but legal) does not trip
+  the leak detector.
+
+`lr-bgp::path::PathAttributes` gains typed `otc()` and `has_otc()`
+accessors; the former returns `Option<Otc>` (`None` on absent or
+malformed, `Some(Otc(0))` on "set but zero"), the latter reports
+physical presence so `defined(bgp.otc)` keeps the two cases
+distinct. `lr-policy::bgp` carries matching `otc()` and `has_otc()`
+helpers that read by tag from `Route.attributes` via
+`Attributes::get_u32_be` (the same in-place u32 fast path
+`bgp.local_pref` and `bgp.med` use — no `Vec<u8>` clone). The
+filter DSL's peephole pass fuses `bgp.otc` integer comparisons
+into `BranchFieldIntCmp` (the same fast path the other int-typed
+fields use), so `if bgp.otc != 0 then …` pays no `Value::Int`
+allocation. The BIRD filter translator renames `bgp_otc` to
+`bgp.otc`. A new corpus case
+`tests/corpus/bird/bgp-otc-leak-filter.conf` exercises both the
+leak-detection idiom and the `defined()` distinction. A proptest
+strategy in `lr-bgp::role::otc` pins the `Otc::decode` contract
+for the filter DSL surface (4-byte input accepted, byte-exact
+round-trip, no input panics). No FFI ABI change: the
+`FilterContext` trait methods carry default implementations that
+delegate to `lr_policy::bgp`, so every existing impl — daemon, FFI
+built-in, FFI callback-table, benches, test stubs — inherits the
+correct behaviour without code changes.
+
 ## [1.4.0] — minor: BGP RR loop-detection attributes in the filter DSL
 
 librouting 1.4.0 is a minor release. Per `docs/RELEASE-PLAN.md`
