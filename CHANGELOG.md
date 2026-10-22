@@ -13,7 +13,21 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased]
+## [1.4.0] — minor: BGP RR loop-detection attributes in the filter DSL
+
+librouting 1.4.0 is a minor release. Per `docs/RELEASE-PLAN.md`
+§1, the public Rust API gains new surface (`RouteFieldKind`
+variants, `OriginatorId` / `ClusterList` types, four new
+`FilterContext` trait methods with default impls); the three new
+`RouteFieldKind` variants (`BgpAtomicAggregate`, `BgpOriginatorId`,
+`BgpClusterList`) are a breaking change for downstream `match`
+exhaustiveness, which the `api-surface` CI gate will catch going
+forward. The C ABI surface is unchanged (no new `lr_*` symbols,
+`ABI_VERSION` stays at 2); the FFI callback table
+`lr_filter_context_t` is untouched — the new `FilterContext`
+methods carry default implementations that delegate to
+`lr_policy::bgp`, so every existing embedder inherits the correct
+behaviour without recompiling.
 
 ### Stability
 
@@ -26,7 +40,7 @@ variants to a public enum is a breaking change for downstream
 cut that cleared the previous `AttrType::BgpLsAttribute` debt) is
 to ship it as a minor bump. The `api-surface` CI gate skips when
 the workspace version is ahead of the latest tag, so the gate will
-become blocking again at the 1.4.0 release cut. The C ABI surface
+become blocking again at the next release cut. The C ABI surface
 is unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at 2); the
 FFI callback table `lr_filter_context_t` is untouched — the new
 `FilterContext` trait methods carry default implementations that

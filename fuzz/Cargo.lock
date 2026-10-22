@@ -172,7 +172,7 @@ dependencies = [
 
 [[package]]
 name = "lr-bfd"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bitflags",
  "hmac",
@@ -183,7 +183,7 @@ dependencies = [
 
 [[package]]
 name = "lr-bgp"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bytes",
  "lr-core",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "lr-core"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "bitflags",
  "bytes",
@@ -204,14 +204,14 @@ dependencies = [
 
 [[package]]
 name = "lr-mpls"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "lr-core",
 ]
 
 [[package]]
 name = "lr-policy"
-version = "1.3.0"
+version = "1.4.0"
 dependencies = [
  "lr-bgp",
  "lr-core",
