@@ -740,6 +740,12 @@ impl Parser {
                         "atomic_aggregate" => RouteFieldKind::BgpAtomicAggregate,
                         "originator_id" => RouteFieldKind::BgpOriginatorId,
                         "cluster_list" => RouteFieldKind::BgpClusterList,
+                        // RFC 9234 §3.1 — OTC ("Only To Customer")
+                        // surfaces as an integer (the AS number that
+                        // last tagged the route). BIRD spells it
+                        // `bgp_otc`; the BIRD translator renames it
+                        // to `bgp.otc`.
+                        "otc" => RouteFieldKind::BgpOtc,
                         other => {
                             return Err(self.err(
                                 field_tok.span,

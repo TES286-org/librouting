@@ -617,6 +617,13 @@ pub enum RouteFieldKind {
     /// `~` consumes). Read-only; an absent attribute reads as an
     /// empty `Set`.
     BgpClusterList,
+    /// `bgp.otc` — RFC 9234 §3.1, the 4-byte "Only To Customer"
+    /// attribute carrying the AS number that last tagged the route
+    /// for customer-only propagation. Read-only; surfaces as an
+    /// `Int` (`0` when absent or set to zero). The
+    /// `defined(bgp.otc)` predicate distinguishes "absent" from
+    /// "set to zero" via `has_otc`.
+    BgpOtc,
     /// `roa.state` — the RFC 6811 validation outcome for the
     /// route's prefix + origin AS. Read-only.
     RoaState,
@@ -654,6 +661,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpAtomicAggregate => "bgp.atomic_aggregate",
             RouteFieldKind::BgpOriginatorId => "bgp.originator_id",
             RouteFieldKind::BgpClusterList => "bgp.cluster_list",
+            RouteFieldKind::BgpOtc => "bgp.otc",
             RouteFieldKind::RoaState => "roa.state",
         };
         f.write_str(s)

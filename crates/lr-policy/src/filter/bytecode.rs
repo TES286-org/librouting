@@ -392,7 +392,7 @@ pub enum Instr {
     /// the constant, and branches without touching the stack. Only
     /// emitted by `pass_fuse_branches` for fields whose
     /// `read_route_field` returns `Value::Int(_)` (LocalPref / Med /
-    /// Origin / Source) and comparison ops in
+    /// Origin / Source / Otc) and comparison ops in
     /// `{Eq, Ne, Lt, Le, Gt, Ge}`. The fused instruction preserves
     /// the `unwrap_or(0)` semantics of the int-typed field read — an
     /// absent attribute reads as 0, exactly like the unfused path.
