@@ -30,7 +30,8 @@ pub use labeled_nlri::{
 };
 pub use mp_nlri::{MpNextHop, MpReach, MpUnreach};
 pub use well_known::{
-    Aggregator, AtomicAggregate, LocalPref, Med, NextHop, NextHopKind, Origin, OriginKind,
+    Aggregator, AtomicAggregate, ClusterList, LocalPref, Med, NextHop, NextHopKind, Origin,
+    OriginKind, OriginatorId,
 };
 
 use lr_core::attr::{AttrTag, Attribute, Attributes};
@@ -351,6 +352,34 @@ impl PathAttributes {
     pub fn aggregator(&self) -> Option<Aggregator> {
         let a = self.get(AttrType::Aggregator)?;
         Aggregator::decode(&a.value)
+    }
+    /// ORIGINATOR_ID (RFC 4456 §8) — the BGP Identifier of the
+    /// originator of a route-reflected route. `None` when the
+    /// attribute is absent (e.g. a non-reflected route) or when the
+    /// wire form is malformed (any length other than 4 bytes).
+    pub fn originator_id(&self) -> Option<OriginatorId> {
+        let a = self.get(AttrType::OriginatorId)?;
+        OriginatorId::decode(&a.value)
+    }
+    /// CLUSTER_LIST (RFC 4456 §8) — the sequence of CLUSTER_IDs the
+    /// route has passed through. Returns an empty `ClusterList` when
+    /// the attribute is absent (a non-reflected route); returns
+    /// `None` only when the wire form is malformed (length not a
+    /// multiple of 4). Callers that distinguish "absent" from "empty"
+    /// should consult [`Self::get`] with `AttrType::ClusterList`
+    /// first; this accessor collapses the two for convenience.
+    pub fn cluster_list(&self) -> Option<ClusterList> {
+        match self.get(AttrType::ClusterList) {
+            None => Some(ClusterList::default()),
+            Some(a) => ClusterList::decode(&a.value),
+        }
+    }
+    /// True when a CLUSTER_LIST attribute is physically present on
+    /// the route (RFC 4456 §8). Use this to distinguish "no
+    /// attribute" from "present but empty" — `cluster_list()`
+    /// collapses both to an empty list.
+    pub fn has_cluster_list(&self) -> bool {
+        self.get(AttrType::ClusterList).is_some()
     }
     pub fn communities(&self) -> Vec<Community> {
         self.get(AttrType::Communities)
