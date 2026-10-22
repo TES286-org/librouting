@@ -81,7 +81,7 @@
 
 use std::process::ExitCode;
 
-use crate::daemon_config::BabelInterfaceSpec;
+use crate::daemon_config::{BabelInterfaceSpec, OspfAreaSpec, OspfIfSpec};
 use crate::translate_bird_filter::{self, BirdFilterSource, FilterRow, RoaRow};
 
 /// One lr-specific `lr:` comment directive: `key` (normalised to
@@ -232,6 +232,13 @@ pub(super) struct ConfigOut {
     /// BIRD `protocol babel` interface blocks (D14.2): the spec plus
     /// the per-interface unmapped notes.
     babel_ifaces: Vec<(BabelInterfaceSpec, Vec<String>)>,
+    /// OSPF areas and interfaces captured from BIRD `protocol ospf` or
+    /// FRR `router ospf` / `interface IFNAME` blocks. Each pair carries
+    /// the spec plus the per-block unmapped notes — surfaced as
+    /// `# UNMAPPED:` comments at render so a gap is visible instead of
+    /// silent.
+    ospf_areas: Vec<(OspfAreaSpec, Vec<String>)>,
+    ospf_ifaces: Vec<(OspfIfSpec, Vec<String>)>,
     /// Whole-peer notes rendered near the header (peers dropped
     /// because they can never start, e.g. FRR stubs without a
     /// `remote-as`).
@@ -377,6 +384,29 @@ fn translate_bird(text: &str) -> ConfigOut {
                         }
                         out.babel_ifaces.append(&mut proto.ifaces);
                     }
+                    BirdCaptureKind::Ospf(mut proto) => {
+                        let proto = &mut *proto;
+                        // Close any still-open interface/area so the
+                        // tail of the stanza is not lost when the
+                        // protocol-level `}` and the area-level `}`
+                        // arrive on the same line.
+                        finish_ospf_iface(proto);
+                        finish_ospf_area(proto);
+                        // lr runs one protocol per daemon instance —
+                        // the OSPF area/interface blocks carry over,
+                        // and the operator picks the protocol with the
+                        // top-level `protocol = "ospf"` key (mirrors
+                        // the Babel note above).
+                        out.unmapped_global.push(
+                            "protocol ospf: lr runs one protocol per daemon instance —                              set the top-level `protocol = \"ospf\"` key to activate OSPF                              (the BGP peers above need their own instance)"
+                                .to_string(),
+                        );
+                        for note in proto.proto_notes.drain(..) {
+                            out.unmapped_global.push(format!("protocol ospf: {note}"));
+                        }
+                        out.ospf_areas.append(&mut proto.areas);
+                        out.ospf_ifaces.append(&mut proto.ifaces);
+                    }
                 }
             }
             continue;
@@ -455,6 +485,17 @@ fn translate_bird(text: &str) -> ConfigOut {
                     ));
                     continue;
                 }
+                "protocol" if tokens.len() >= 3 && tokens[1] == "ospf" => {
+                    // RFC 2328 §C / RFC 5340 §A.4 — area and interface
+                    // blocks nested inside `protocol ospf NAME { … }`.
+                    capture = Some(BirdCapture::new(
+                        BirdCaptureKind::Ospf(Box::default()),
+                        line,
+                        opens,
+                        closes,
+                    ));
+                    continue;
+                }
                 _ => {}
             }
         }
@@ -483,11 +524,17 @@ fn translate_bird(text: &str) -> ConfigOut {
             }
             // Non-BGP routing protocols are reported as ignored instead
             // of vanishing silently — the converter covers the BGP
-            // control plane (Babel's interface parameters are the one
-            // exception, handled by its own capture below). `protocol
-            // device` is BIRD housekeeping with no routing meaning:
-            // skipped without a note.
-            "protocol" if tokens.len() >= 3 && tokens[1] != "static" && tokens[1] != "babel" => {
+            // control plane (Babel's interface parameters and OSPF's
+            // area/interface blocks are the exceptions, handled by
+            // their own captures above). `protocol device` is BIRD
+            // housekeeping with no routing meaning: skipped without a
+            // note.
+            "protocol"
+                if tokens.len() >= 3
+                    && tokens[1] != "static"
+                    && tokens[1] != "babel"
+                    && tokens[1] != "ospf" =>
+            {
                 if tokens[1] != "device" {
                     out.ignored_protocols.push(format!(
                         "protocol {} {}",
@@ -842,6 +889,10 @@ enum BirdCaptureKind {
     /// `protocol babel NAME` — interface-block parsing state plus
     /// protocol-level next hops. Boxed: by far the largest variant.
     Babel(Box<BabelProtoCapture>),
+    /// `protocol ospf NAME` — area-block and interface-block parsing
+    /// state (RFC 2328 §C / RFC 5340 §A.4). Boxed so adding the variant
+    /// does not grow the common small arms.
+    Ospf(Box<OspfProtoCapture>),
 }
 
 /// State accumulated while scanning a `protocol babel` stanza.
@@ -857,6 +908,33 @@ struct BabelProtoCapture {
     next_hop_v6: Option<String>,
     /// Per-interface rows finished so far.
     ifaces: Vec<(BabelInterfaceSpec, Vec<String>)>,
+}
+
+/// State accumulated while scanning a BIRD `protocol ospf NAME { … }`
+/// stanza (RFC 2328 §C for v2; the v3 shape from RFC 5340 §A.4 carries
+/// the same area/interface nesting). The BIRD dialect nests interfaces
+/// inside `area N { … }` blocks, so the capture tracks three layers:
+/// protocol-level statements, the currently-open area block, and the
+/// currently-open interface block inside it. Closing braces close the
+/// innermost open layer; the protocol block itself closes when the
+/// outer brace count returns to zero (handled by the caller).
+#[derive(Default)]
+struct OspfProtoCapture {
+    /// Finished areas with their per-area unmapped notes.
+    areas: Vec<(OspfAreaSpec, Vec<String>)>,
+    /// Finished interfaces with their per-interface unmapped notes.
+    ifaces: Vec<(OspfIfSpec, Vec<String>)>,
+    /// Currently-open area (id set on the `area N {` line).
+    area: Option<OspfAreaSpec>,
+    area_notes: Vec<String>,
+    /// Currently-open interface (name set on `interface "…" {` line).
+    /// The `area` field on the spec is filled from `area.id` when the
+    /// interface is finished, so a `None` area still produces interfaces
+    /// — they fall back to the daemon's `ospf_area` default at finalize.
+    iface: Option<OspfIfSpec>,
+    iface_notes: Vec<String>,
+    /// Protocol-level unmapped notes (carried to render).
+    proto_notes: Vec<String>,
 }
 
 impl BirdCapture {
@@ -888,6 +966,7 @@ impl BirdCapture {
                 }
             }
             BirdCaptureKind::Babel(proto) => absorb_babel_line(proto, line),
+            BirdCaptureKind::Ospf(proto) => absorb_ospf_line(proto, line),
             _ => {}
         }
     }
@@ -1064,6 +1143,303 @@ fn finish_babel_iface(proto: &mut BabelProtoCapture) {
     }
 }
 
+/// One line inside a `protocol ospf NAME { … }` stanza: track the
+/// three-layer nesting (protocol / area / interface) and map the
+/// parameters onto [`OspfAreaSpec`] / [`OspfIfSpec`]. Brace noise
+/// (`{`, `}`, `};`) closes the innermost open layer — a single `}`
+/// inside an interface block closes the interface (and stays in the
+/// area), a `}` inside an area but outside an interface closes the
+/// area. The protocol-level `}` closes the whole stanza and is
+/// detected by the caller's depth check.
+///
+/// RFC 2328 §C spells out the v2 parameters; RFC 5340 §A.4 carries the
+/// v3 counterparts. BIRD 2 unifies the two under `protocol ospf` with
+/// a `v2`/`v3` selector on the channel — lr's daemon runs one version
+/// per process (the `ospf_version` config key), so the converter does
+/// not switch the protocol key automatically and emits a note telling
+/// the operator to pick `protocol = "ospf"`.
+fn absorb_ospf_line(proto: &mut OspfProtoCapture, line: &str) {
+    let trimmed = line.trim();
+    // A pure close line ends the innermost open block.
+    if is_brace_noise(trimmed) {
+        if proto.iface.is_some() {
+            finish_ospf_iface(proto);
+        } else if proto.area.is_some() {
+            finish_ospf_area(proto);
+        }
+        return;
+    }
+    let mut tokens = trimmed.split_whitespace();
+    let t0 = tokens.next().unwrap_or("");
+    // `area N {` opens an area block. `N` is a dotted quad (`0.0.0.0`)
+    // or a plain integer (`0`). Closing any open interface/area first
+    // keeps the layering single-branch.
+    if t0 == "area" {
+        finish_ospf_iface(proto);
+        finish_ospf_area(proto);
+        let id_text = trimmed
+            .split_whitespace()
+            .nth(1)
+            .unwrap_or("")
+            .trim_end_matches('{');
+        let id = parse_area_id_text(id_text);
+        proto.area = Some(OspfAreaSpec {
+            id,
+            ..OspfAreaSpec::default()
+        });
+        proto.area_notes = Vec::new();
+        return;
+    }
+    // `interface "eth0" {` opens an interface block inside the current
+    // area (or at protocol level if no area is open — BIRD tolerates
+    // that and lr's daemon falls back to the configured default area).
+    if t0 == "interface" {
+        finish_ospf_iface(proto);
+        let raw_name = trimmed.split('"').nth(1).unwrap_or_default().to_string();
+        proto.iface = Some(OspfIfSpec {
+            name: Some(raw_name),
+            ..OspfIfSpec::default()
+        });
+        proto.iface_notes = Vec::new();
+        return;
+    }
+    // Inside an interface block: map the parameter statements.
+    if proto.iface.is_some() {
+        absorb_ospf_iface_line(proto, trimmed, t0);
+        return;
+    }
+    // Inside an area block (but not an interface): map area-level
+    // statements.
+    if proto.area.is_some() {
+        absorb_ospf_area_line(proto, trimmed, t0, tokens);
+        return;
+    }
+    // Protocol-level statements: BIRD 2 OSPF has `rfc1583 yes;`,
+    // `stub router yes;`, `ecmp yes;`, `tick N;`, `area …` (handled
+    // above) and a few others. None of them have a per-instance lr
+    // equivalent — noted instead of silently dropped.
+    if !t0.is_empty() {
+        proto.proto_notes.push(format!(
+            "protocol-level ospf statement `{t0}` — no lr equivalent"
+        ));
+    }
+}
+
+/// One line inside an `area N { … }` block (BIRD 2 OSPF): `stub yes`,
+/// `nssa yes`, `summary no`, `default cost N`, `default nssa yes`,
+/// `interface "…" { … }` (handled by the caller), `ranges { … }`,
+/// `hosts { … }`. The first four map onto [`OspfAreaSpec`]; the rest
+/// are noted.
+fn absorb_ospf_area_line(
+    proto: &mut OspfProtoCapture,
+    trimmed: &str,
+    t0: &str,
+    mut tokens: std::str::SplitWhitespace<'_>,
+) {
+    let area = proto
+        .area
+        .as_mut()
+        .expect("absorb_ospf_area_line called without an open area");
+    match t0 {
+        "stub" => {
+            // `stub yes;` / `stub no;` — only the `yes` form flips the
+            // kind; BIRD's default is non-stub, so `stub no;` is a
+            // no-op (and stays silent rather than emitting a note).
+            if trimmed.contains("yes") {
+                area.kind = Some("stub".to_string());
+            }
+        }
+        "nssa" => {
+            if trimmed.contains("yes") {
+                area.kind = Some("nssa".to_string());
+            }
+        }
+        "summary" => {
+            // `summary no;` — totally stubby / totally NSSA: suppress
+            // type-3 summary LSAs. `summary yes;` is the default and
+            // stays silent.
+            if trimmed.contains("no") {
+                area.no_summary = Some(true);
+            }
+        }
+        "default" => {
+            // `default cost N;` — metric of the default route injected
+            // into stub/NSSA areas. `default nssa yes;` controls
+            // NSSA default injection (lr has no separate knob; the
+            // stub_metric applies to both).
+            match tokens.next() {
+                Some("cost") => {
+                    if let Some(v) = tokens
+                        .next()
+                        .and_then(|v| v.trim_end_matches(';').parse().ok())
+                    {
+                        area.stub_metric = Some(v);
+                    }
+                }
+                Some("nssa") => {
+                    if !trimmed.contains("yes") {
+                        proto.area_notes.push(
+                            "default nssa no — lr has no separate NSSA-default knob".to_string(),
+                        );
+                    }
+                }
+                _ => {
+                    proto
+                        .area_notes
+                        .push(format!("default … (unrecognised form): {trimmed}"));
+                }
+            }
+        }
+        _ => {
+            proto
+                .area_notes
+                .push(format!("ospf area statement `{t0}` — no lr equivalent"));
+        }
+    }
+}
+
+/// One line inside an `interface "…" { … }` block (BIRD 2 OSPF): the
+/// interface parameters from RFC 2328 §C.1 — `cost`, `hello`,
+/// `retransmit`, `transmit delay`, `dead count`, `dead interval`,
+/// `wait`, `type broadcast|pointopoint|nbma|ptmp`, `priority`,
+/// `authentication …`, `password "…"`, `neighbors { … }`, `stub yes`.
+/// The ones lr carries map directly onto [`OspfIfSpec`]; the rest are
+/// noted so a gap is visible instead of silent.
+fn absorb_ospf_iface_line(proto: &mut OspfProtoCapture, trimmed: &str, t0: &str) {
+    let mut tokens = trimmed.split_whitespace();
+    let _ = tokens.next(); // already consumed as `t0` by the caller
+    let iface = proto
+        .iface
+        .as_mut()
+        .expect("absorb_ospf_iface_line called without an open interface");
+    match t0 {
+        "cost" => {
+            iface.cost = tokens
+                .next()
+                .and_then(|v| v.trim_end_matches(';').parse().ok());
+        }
+        "hello" => {
+            // BIRD `hello N;` is in seconds; lr's `hello_interval` is
+            // the same field with the same unit.
+            iface.hello_interval = tokens
+                .next()
+                .and_then(|v| v.trim_end_matches(';').parse().ok());
+        }
+        "dead" => {
+            // `dead interval N;` (seconds) — the explicit form BIRD 2
+            // added alongside the legacy `dead count N`. lr carries
+            // the explicit interval.
+            if tokens.next() == Some("interval") {
+                iface.dead_interval = tokens
+                    .next()
+                    .and_then(|v| v.trim_end_matches(';').parse().ok());
+            } else {
+                proto
+                    .iface_notes
+                    .push("dead count … — lr uses dead_interval (seconds)".to_string());
+            }
+        }
+        "priority" => {
+            iface.priority = tokens
+                .next()
+                .and_then(|v| v.trim_end_matches(';').parse().ok());
+        }
+        "type" => {
+            // BIRD `type broadcast|pointopoint|nbma|ptmp`. lr supports
+            // broadcast and point-to-point; nbma/ptmp are noted.
+            let kind = tokens.next().unwrap_or("").trim_end_matches(';');
+            match kind {
+                "broadcast" => iface.network_type = Some("broadcast".to_string()),
+                "pointopoint" => iface.network_type = Some("p2p".to_string()),
+                other => proto
+                    .iface_notes
+                    .push(format!("type {other} — lr supports broadcast and p2p only")),
+            }
+        }
+        // BIRD OSPF parameters with no direct lr equivalent — noted.
+        "retransmit" | "wait" => {
+            proto
+                .iface_notes
+                .push(format!("{t0} … — no lr equivalent (BIRD OSPF timer)"));
+        }
+        "transmit" => {
+            proto
+                .iface_notes
+                .push("transmit delay … — no lr equivalent (BIRD OSPF timer)".to_string());
+        }
+        "authentication" => {
+            proto.iface_notes.push(
+                "authentication … — lr OSPF auth is configured via [ospf] keys, not per-interface"
+                    .to_string(),
+            );
+        }
+        "password" => {
+            proto.iface_notes.push(
+                "password … — lr OSPF auth is configured via [ospf] keys, not per-interface"
+                    .to_string(),
+            );
+        }
+        "neighbors" | "can" | "real" | "stub" => {
+            proto.iface_notes.push(format!(
+                "{t0} … — no lr equivalent (BIRD OSPF interface option)"
+            ));
+        }
+        _ if !t0.is_empty() => {
+            proto.iface_notes.push(format!(
+                "ospf interface parameter `{t0}` — no lr equivalent"
+            ));
+        }
+        _ => {}
+    }
+}
+
+/// Close the open interface block (if any), filling the `area` field
+/// from the currently-open area's id so the rendered `[[ospf.interface]]`
+/// carries the right area assignment.
+fn finish_ospf_iface(proto: &mut OspfProtoCapture) {
+    if let Some(mut spec) = proto.iface.take() {
+        let notes = std::mem::take(&mut proto.iface_notes);
+        if spec.area.is_none() {
+            if let Some(area) = &proto.area {
+                spec.area = area.id;
+            }
+        }
+        proto.ifaces.push((spec, notes));
+    }
+}
+
+/// Close the open area block (if any).
+fn finish_ospf_area(proto: &mut OspfProtoCapture) {
+    if let Some(spec) = proto.area.take() {
+        let notes = std::mem::take(&mut proto.area_notes);
+        proto.areas.push((spec, notes));
+    }
+}
+
+/// Parse a BIRD area id (`0`, `0.0.0.0`, `1`) into a `u32`. BIRD
+/// accepts both the dotted-quad and the integer form; lr's
+/// `parse_area_id` does the same and is reused here.
+fn parse_area_id_text(text: &str) -> Option<u32> {
+    let text = text.trim().trim_end_matches(';');
+    if let Ok(n) = text.parse::<u32>() {
+        return Some(n);
+    }
+    // Dotted quad — `0.0.0.0` to `255.255.255.255`.
+    let parts: Vec<&str> = text.split('.').collect();
+    if parts.len() == 4 {
+        let mut acc: u32 = 0;
+        for p in parts {
+            let octet: u32 = p.parse().ok()?;
+            if octet > 255 {
+                return None;
+            }
+            acc = (acc << 8) | octet;
+        }
+        return Some(acc);
+    }
+    None
+}
+
 /// Parse a BIRD babel time value (`4`, `4 s`, `4000 ms`) into
 /// milliseconds. Bare numbers are seconds (BIRD's babel time default).
 fn parse_time_ms(text: &str) -> Option<u32> {
@@ -1233,6 +1609,16 @@ fn translate_frr(text: &str) -> ConfigOut {
     // `Some("ipv4-unicast")` / `Some("ipv6-unicast")` inside the
     // matching `address-family …` block, `None` in router context.
     let mut af_ctx: Option<String> = None;
+    // FRR stanzas are flat: `router bgp N`, `router ospf [N]`,
+    // `interface IFNAME`, `address-family …` each open a section that
+    // a bare `!` line closes. The OSPF capture needs both an
+    // interface-section context (for `ip ospf …` directives) and a
+    // router-ospf context (for `area N …`, `router-id`, `network …
+    // area …`). The two are mutually exclusive — only one is set at a
+    // time, and a new `router`/`interface` line replaces whichever was
+    // active.
+    let mut iface_ctx: Option<String> = None;
+    let mut in_router_ospf: bool = false;
     for raw in text.lines() {
         // FRR directive scan: `# lr: KEY [VALUE]` / `! lr: …` are
         // global; `# lr: neighbor ADDR KEY [VALUE]` scopes to that
@@ -1258,19 +1644,83 @@ fn translate_frr(text: &str) -> ConfigOut {
         if tokens.is_empty() {
             continue;
         }
+        // `!` alone on a line is FRR's section terminator — closes the
+        // open interface/router-ospf/address-family context. A trailing
+        // `!` after content (`ip ospf cost 10 !`) is rare and tolerated
+        // by the per-line handlers below.
+        if tokens == ["!"] {
+            if iface_ctx.is_some() {
+                finish_frr_ospf_iface(&mut out, &iface_ctx);
+                iface_ctx = None;
+            }
+            in_router_ospf = false;
+            af_ctx = None;
+            continue;
+        }
         match tokens[0] {
             "router" if tokens.len() >= 3 && tokens[1] == "bgp" => {
+                // A new router stanza closes any open section.
+                if iface_ctx.is_some() {
+                    finish_frr_ospf_iface(&mut out, &iface_ctx);
+                    iface_ctx = None;
+                }
+                in_router_ospf = false;
+                af_ctx = None;
                 out.local_as = tokens[2].parse().ok();
                 // FRR's documented default: `bgp enforce-first-as` is
                 // ON. The native run keeps the source implementation's
                 // semantics, so the rendered config turns it on too.
                 out.enforce_first_as = Some(true);
             }
-            // Non-BGP routing protocols (`router ospf`, `router isis`,
-            // …) are reported as ignored instead of vanishing
-            // silently — the converter covers the BGP control plane.
+            "router" if tokens.len() >= 2 && (tokens[1] == "ospf" || tokens[1] == "ospfv3") => {
+                // `router ospf [N]` / `router ospfv3 [N]`. The instance
+                // ID has no lr equivalent (lr runs one OSPF process per
+                // daemon); `ospfv3` switches the daemon's OSPF version
+                // to v3 — noted so the operator picks the right
+                // `ospf_version` key.
+                if iface_ctx.is_some() {
+                    finish_frr_ospf_iface(&mut out, &iface_ctx);
+                    iface_ctx = None;
+                }
+                af_ctx = None;
+                in_router_ospf = true;
+                if tokens[1] == "ospfv3" {
+                    out.unmapped_global.push(
+                        "router ospfv3: set `ospf_version = \"v3\"` and `protocol = \"ospf\"` to activate OSPFv3"
+                            .to_string(),
+                    );
+                } else {
+                    out.unmapped_global.push(
+                        "router ospf: set `protocol = \"ospf\"` to activate OSPF (lr runs one protocol per daemon instance)"
+                            .to_string(),
+                    );
+                }
+            }
+            // Non-BGP routing protocols other than OSPF (`router isis`,
+            // `router rip`, …) are reported as ignored instead of
+            // vanishing silently — the converter covers the BGP and
+            // OSPF control planes.
             "router" if tokens.len() >= 2 => {
+                if iface_ctx.is_some() {
+                    finish_frr_ospf_iface(&mut out, &iface_ctx);
+                    iface_ctx = None;
+                }
+                in_router_ospf = false;
+                af_ctx = None;
                 out.ignored_protocols.push(format!("router {}", tokens[1]));
+            }
+            // `interface IFNAME` opens a top-level interface block.
+            // Used for `ip ospf …`, `ip address …`, `ipv6 …`,
+            // `bfd …` directives. Only the OSPF subset is captured;
+            // the rest are ignored (lr has no per-interface BGP/BFD
+            // config in the TOML schema — those are peer-scoped).
+            "interface" if tokens.len() >= 2 => {
+                if iface_ctx.is_some() {
+                    finish_frr_ospf_iface(&mut out, &iface_ctx);
+                }
+                in_router_ospf = false;
+                af_ctx = None;
+                iface_ctx = Some(tokens[1].to_string());
             }
             "bgp" if tokens.len() >= 3 && tokens[1] == "router-id" => {
                 out.router_id = Some(tokens[2].to_string());
@@ -1311,6 +1761,52 @@ fn translate_frr(text: &str) -> ConfigOut {
             }
             "ip" if tokens.len() >= 4 && tokens[1] == "prefix-list" => {
                 parse_frr_prefix_list(&mut out, line);
+            }
+            "ip" if iface_ctx.is_some() && tokens.len() >= 3 && tokens[1] == "ospf" => {
+                // `ip ospf cost|hello-interval|dead-interval|priority|
+                // network|area …` inside an `interface IFNAME` block
+                // (RFC 2328 §C.1, the FRR spelling of the BIRD
+                // interface parameters).
+                apply_frr_ip_ospf(iface_ctx.as_deref().unwrap(), &tokens[2..], &mut out);
+            }
+            "ospfv3" if iface_ctx.is_some() && tokens.len() >= 2 && in_router_ospf => {
+                // OSPFv3 interface-level directives (`ospfv3 cost`,
+                // `ospfv3 hello-interval`, …) — same shape as the v2
+                // `ip ospf` directives. Noted as a follow-up rather
+                // than carried: the v3 daemon uses the same
+                // `[[ospf.interface]]` schema, but the converter
+                // currently keys off `router ospf` (v2) and a v3 path
+                // would need a separate `ospf_version = "v3"` signal.
+                note_frr_ospf_iface(
+                    iface_ctx.as_deref().unwrap(),
+                    &format!("{line} — OSPFv3 interface directive (use ip ospf under router ospf for v2)"),
+                    &mut out,
+                );
+            }
+            // `router-id A.B.C.D` inside `router ospf` — the OSPF
+            // router identifier (RFC 2328 §C.1). The BGP arm above
+            // already covers `bgp router-id`; this arm handles the
+            // bare `router-id` form FRR uses inside `router ospf`.
+            "router-id" if tokens.len() >= 2 && in_router_ospf => {
+                if out.router_id.is_none() {
+                    out.router_id = Some(tokens[1].to_string());
+                }
+            }
+            // `area N stub|nssa|default-cost M|range PREFIX` inside
+            // `router ospf` — area-level policy (RFC 2328 §C.2).
+            "area" if tokens.len() >= 3 && in_router_ospf => {
+                apply_frr_ospf_area(&tokens[1..], &mut out);
+            }
+            // `network PREFIX area N` inside `router ospf` — FRR's
+            // interface-to-area mapping by prefix. lr's
+            // `[[ospf.interface]]` is keyed by interface name, not
+            // prefix, so the conversion is not mechanical; noted with
+            // a hint instead of silently dropping.
+            "network" if tokens.len() >= 4 && tokens[2] == "area" && in_router_ospf => {
+                out.unmapped_global.push(format!(
+                    "network {} area {} — lr keys [[ospf.interface]] by interface name; map the matching interface manually",
+                    tokens[1], tokens[3]
+                ));
             }
             "route-map" if tokens.len() >= 4 => {
                 // route-map NAME permit|deny SEQ
@@ -1384,6 +1880,15 @@ fn translate_frr(text: &str) -> ConfigOut {
                 ));
             }
             "exit-address-family" => af_ctx = None,
+            "exit" if in_router_ospf || iface_ctx.is_some() => {
+                // FRR `exit` closes the current section (an alternative
+                // to the bare `!` line some configs use).
+                if iface_ctx.is_some() {
+                    finish_frr_ospf_iface(&mut out, &iface_ctx);
+                    iface_ctx = None;
+                }
+                in_router_ospf = false;
+            }
             "network" if tokens.len() >= 2 && tokens[1].contains('/') => {
                 // `network PREFIX` (router or address-family context)
                 // — locally originated, same as lr's `networks`.
@@ -1397,6 +1902,11 @@ fn translate_frr(text: &str) -> ConfigOut {
             }
             _ => {}
         }
+    }
+    // A config without a trailing `!` on the last section leaves the
+    // interface context open — flush it so the tail is not lost.
+    if iface_ctx.is_some() {
+        finish_frr_ospf_iface(&mut out, &iface_ctx);
     }
     // Peers whose `remote-as` never appeared: lr would refuse to
     // start them (no usable AS), so drop with a note instead of
@@ -1481,6 +1991,207 @@ fn parse_frr_prefix_list(out: &mut ConfigOut, line: &str) {
     }
     out.prefix_lists
         .push((name, seq, permit, prefix.to_string(), ge, le));
+}
+
+/// One `ip ospf …` directive inside an FRR `interface IFNAME` block
+/// (RFC 2328 §C.1, the FRR spelling). `tokens` starts at the keyword
+/// after `ip ospf` (`cost`, `hello-interval`, …). The interface row is
+/// created on first reference and looked up by name on subsequent
+/// lines, so the directives may appear in any order — same shape as
+/// FRR's `neighbor` attribute handling above. Per-interface unmapped
+/// notes land directly on the row's notes vector.
+fn apply_frr_ip_ospf(iface_name: &str, tokens: &[&str], out: &mut ConfigOut) {
+    let Some(keyword) = tokens.first() else {
+        return;
+    };
+    // Find or create the [[ospf.interface]] row for this interface.
+    // A `name` match is sufficient — FRR declares each interface once.
+    let idx = out
+        .ospf_ifaces
+        .iter()
+        .position(|(spec, _)| spec.name.as_deref() == Some(iface_name));
+    let idx = idx.unwrap_or_else(|| {
+        out.ospf_ifaces.push((
+            OspfIfSpec {
+                name: Some(iface_name.to_string()),
+                ..OspfIfSpec::default()
+            },
+            Vec::new(),
+        ));
+        out.ospf_ifaces.len() - 1
+    });
+    let (spec, spec_notes) = &mut out.ospf_ifaces[idx];
+    match *keyword {
+        "cost" => {
+            if let Some(v) = tokens.get(1).and_then(|v| v.parse().ok()) {
+                spec.cost = Some(v);
+            }
+        }
+        "hello-interval" => {
+            if let Some(v) = tokens.get(1).and_then(|v| v.parse().ok()) {
+                spec.hello_interval = Some(v);
+            }
+        }
+        "dead-interval" => {
+            if let Some(v) = tokens.get(1).and_then(|v| v.parse().ok()) {
+                spec.dead_interval = Some(v);
+            }
+        }
+        "priority" => {
+            if let Some(v) = tokens.get(1).and_then(|v| v.parse().ok()) {
+                spec.priority = Some(v);
+            }
+        }
+        "network" => {
+            // `ip ospf network broadcast|point-to-point|nbma|…`.
+            match tokens.get(1).copied() {
+                Some("broadcast") => spec.network_type = Some("broadcast".to_string()),
+                Some("point-to-point") => spec.network_type = Some("p2p".to_string()),
+                Some(other) => spec_notes.push(format!(
+                    "ip ospf network {other} — lr supports broadcast and p2p only"
+                )),
+                None => {}
+            }
+        }
+        "area" => {
+            // `ip ospf area N` — the per-interface area assignment FRR
+            // supports as an alternative to `network … area`. Maps
+            // directly onto the [[ospf.interface]] `area` field.
+            if let Some(v) = tokens.get(1).and_then(|v| parse_area_id_text(v)) {
+                spec.area = Some(v);
+            }
+        }
+        // FRR OSPF interface directives with no direct lr equivalent
+        // — noted so the operator sees the gap.
+        "authentication"
+        | "authentication-key"
+        | "message-digest-key"
+        | "retransmit-interval"
+        | "transmit-delay" => {
+            spec_notes.push(format!(
+                "ip ospf {keyword} … — no lr equivalent (FRR OSPF interface option)"
+            ));
+        }
+        _ => {
+            spec_notes.push(format!("ip ospf {keyword} … — no lr equivalent"));
+        }
+    }
+}
+
+/// Push a note onto the matching `[[ospf.interface]]` row, creating
+/// the row if it does not exist yet. Used by arms that need to attach
+/// a per-interface note without mapping a parameter (e.g. the OSPFv3
+/// interface-directive arm).
+fn note_frr_ospf_iface(iface_name: &str, note: &str, out: &mut ConfigOut) {
+    let idx = out
+        .ospf_ifaces
+        .iter()
+        .position(|(spec, _)| spec.name.as_deref() == Some(iface_name));
+    let idx = idx.unwrap_or_else(|| {
+        out.ospf_ifaces.push((
+            OspfIfSpec {
+                name: Some(iface_name.to_string()),
+                ..OspfIfSpec::default()
+            },
+            Vec::new(),
+        ));
+        out.ospf_ifaces.len() - 1
+    });
+    out.ospf_ifaces[idx].1.push(note.to_string());
+}
+
+/// One `area N …` directive inside an FRR `router ospf` block (RFC
+/// 2328 §C.2). `tokens` starts at the area id (the keyword after
+/// `area`). FRR spells the area-level stub/NSSA knobs differently
+/// from BIRD: `area N stub`, `area N nssa`, `area N default-cost M`,
+/// `area N range PREFIX`, `area N export-list …`. The first three map
+/// onto [`OspfAreaSpec`]; the rest are noted.
+fn apply_frr_ospf_area(tokens: &[&str], out: &mut ConfigOut) {
+    let Some(id_text) = tokens.first() else {
+        return;
+    };
+    let Some(id) = parse_area_id_text(id_text) else {
+        return;
+    };
+    let kind_or_sub = tokens.get(1).copied().unwrap_or("");
+    // `area N stub` / `area N nssa` / `area N stub no-summary` /
+    // `area N nssa no-summary` — find or create the area row, then
+    // flip the kind. A repeat declaration updates the same row.
+    let idx = out
+        .ospf_areas
+        .iter()
+        .position(|(spec, _)| spec.id == Some(id));
+    let idx = idx.unwrap_or_else(|| {
+        out.ospf_areas.push((
+            OspfAreaSpec {
+                id: Some(id),
+                ..OspfAreaSpec::default()
+            },
+            Vec::new(),
+        ));
+        out.ospf_areas.len() - 1
+    });
+    let (spec, notes) = &mut out.ospf_areas[idx];
+    match kind_or_sub {
+        "stub" => {
+            spec.kind = Some("stub".to_string());
+            // `area N stub no-summary` — totally stubby.
+            if tokens.get(2).copied() == Some("no-summary") {
+                spec.no_summary = Some(true);
+            }
+        }
+        "nssa" => {
+            spec.kind = Some("nssa".to_string());
+            if tokens.get(2).copied() == Some("no-summary") {
+                spec.no_summary = Some(true);
+            }
+        }
+        "default-cost" => {
+            if let Some(v) = tokens.get(2).and_then(|v| v.parse().ok()) {
+                spec.stub_metric = Some(v);
+            }
+        }
+        "range" => {
+            notes.push(format!(
+                "area {id} range {} — lr has no area-range knob (filter summaries manually)",
+                tokens.get(2).copied().unwrap_or("?")
+            ));
+        }
+        "export-list" | "import-list" | "filter-list" => {
+            notes.push(format!(
+                "area {id} {kind_or_sub} … — lr has no area-list knob (use [[filter]] instead)"
+            ));
+        }
+        "" => {
+            // `area N` alone — declares the area without policy. The
+            // row already exists from the lookup above; nothing to do.
+        }
+        other => {
+            notes.push(format!("area {id} {other} … — no lr equivalent"));
+        }
+    }
+}
+
+/// Close the open FRR interface block: drop the row if the interface
+/// had no OSPF directives at all (a plain `interface IFNAME` block
+/// with only `ip address …` lines is the common case and should not
+/// produce an empty `[[ospf.interface]]` table). Rows with only
+/// notes (no mapped parameters) are kept — the notes are the
+/// operator-facing report.
+fn finish_frr_ospf_iface(out: &mut ConfigOut, iface_ctx: &Option<String>) {
+    let Some(name) = iface_ctx.as_ref() else {
+        return;
+    };
+    out.ospf_ifaces.retain(|(spec, notes)| {
+        spec.name.as_deref() != Some(name.as_str())
+            || spec.cost.is_some()
+            || spec.hello_interval.is_some()
+            || spec.dead_interval.is_some()
+            || spec.priority.is_some()
+            || spec.network_type.is_some()
+            || spec.area.is_some()
+            || !notes.is_empty()
+    });
 }
 
 /// One `neighbor ADDR …` line in the FRR dialect. `tokens` starts at
@@ -1854,6 +2565,58 @@ fn render(out: ConfigOut) -> String {
         }
         if let Some(v) = spec.port {
             s.push_str(&format!("port = {v}\n"));
+        }
+        for n in notes {
+            s.push_str(&format!("# UNMAPPED: {n}\n"));
+        }
+        s.push('\n');
+    }
+    // OSPF areas captured from BIRD `protocol ospf` or FRR
+    // `router ospf` blocks (RFC 2328 §C / RFC 5340 §A.4).
+    for (spec, notes) in &out.ospf_areas {
+        s.push_str("[[ospf.area]]\n");
+        if let Some(id) = spec.id {
+            s.push_str(&format!("id = {id}\n"));
+        }
+        if let Some(k) = &spec.kind {
+            s.push_str(&format!("type = {}\n", toml_str(k)));
+        }
+        if let Some(v) = spec.no_summary {
+            s.push_str(&format!("no_summary = {v}\n"));
+        }
+        if let Some(v) = spec.stub_metric {
+            s.push_str(&format!("stub_metric = {v}\n"));
+        }
+        for n in notes {
+            s.push_str(&format!("# UNMAPPED: {n}\n"));
+        }
+        s.push('\n');
+    }
+    // OSPF interfaces captured from BIRD `protocol ospf` interface
+    // blocks or FRR `interface IFNAME` blocks with `ip ospf …`
+    // directives.
+    for (spec, notes) in &out.ospf_ifaces {
+        s.push_str("[[ospf.interface]]\n");
+        if let Some(n) = &spec.name {
+            s.push_str(&format!("name = {}\n", toml_str(n)));
+        }
+        if let Some(a) = spec.area {
+            s.push_str(&format!("area = {a}\n"));
+        }
+        if let Some(v) = spec.cost {
+            s.push_str(&format!("cost = {v}\n"));
+        }
+        if let Some(v) = spec.hello_interval {
+            s.push_str(&format!("hello_interval = {v}\n"));
+        }
+        if let Some(v) = spec.dead_interval {
+            s.push_str(&format!("dead_interval = {v}\n"));
+        }
+        if let Some(v) = spec.priority {
+            s.push_str(&format!("priority = {v}\n"));
+        }
+        if let Some(v) = &spec.network_type {
+            s.push_str(&format!("network_type = {}\n", toml_str(v)));
         }
         for n in notes {
             s.push_str(&format!("# UNMAPPED: {n}\n"));

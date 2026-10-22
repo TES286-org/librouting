@@ -193,6 +193,9 @@ files of the `lr-cli` binary crate, which is not a library.
 | Runtime API socket and `lrctl` client | yes | `crates/lr-cli/src/api.rs`, `crates/lr-cli/src/lrctl.rs` |
 | Prometheus exposition on `/metrics` | yes | `crates/lr-cli/src/metrics.rs` |
 | Config: native `.lr` DSL, TOML, BIRD and FRR dialects | yes | `crates/lr-cli/src/daemon_config.rs`, `crates/lr-cli/src/compat.rs`, `crates/lr-cli/src/translate.rs` |
+| BIRD `protocol babel` interface-block translation (RFC 8966 §A.2) | yes | `crates/lr-cli/src/translate::translate_bird` |
+| BIRD `protocol ospf` area/interface translation (RFC 2328 §C / RFC 5340 §A.4) | yes | `crates/lr-cli/src/translate::translate_bird` |
+| FRR `router ospf` and `interface IFNAME` OSPF translation (RFC 2328 §C) | yes | `crates/lr-cli/src/translate::translate_frr` |
 | Config validation without starting the daemon | yes | `crates/lr-cli/src/config_check.rs` |
 | RPKI-RTR cache client in the daemon | yes | `crates/lr-cli/src/daemon_rpki.rs` |
 | YANG instance data for Babel and key chains | yes | `crates/lr-cli/src/yang.rs`, `yang/ietf-babel@2024-10-10.yang` |

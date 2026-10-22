@@ -285,13 +285,17 @@ fn non_bgp_stanzas_warn_but_do_not_block() {
     let dir = std::env::temp_dir().join(format!("lr-daemon-compat-mixed-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
 
+    // OSPF and Babel are translated (their area/interface blocks
+    // carry over to [[ospf.*]] / [[babel.interface]]); a protocol the
+    // converter does not cover at all (RIP) is the one that surfaces
+    // as an "ignored" warning. The BGP side still has to come up.
     let conf = dir.join("bird-mixed.conf");
     std::fs::write(
         &conf,
         format!(
             "router id 10.0.0.1;\n\
              \n\
-             protocol ospf my_ospf {{\n    area 0 {{ interface \"eth0\"; }}\n}}\n\
+             protocol rip my_rip {{\n    interface \"eth0\";\n}}\n\
              \n\
              protocol bgp peer {{\n    local as 64512;\n    neighbor 127.0.0.1 port {port} as 64513;\n}}\n"
         ),
@@ -301,7 +305,7 @@ fn non_bgp_stanzas_warn_but_do_not_block() {
     let mixed = Daemon::spawn(&["--config", conf.to_str().unwrap()], "mixed");
     wait_log_all(
         &mixed.log,
-        &["config warning: protocol ospf my_ospf: ignored"],
+        &["config warning: protocol rip my_rip: ignored"],
     );
 
     // The BGP side still comes up (connect to a one-shot listener).
