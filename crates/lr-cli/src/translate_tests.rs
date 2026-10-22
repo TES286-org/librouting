@@ -994,6 +994,147 @@ fn frr_ospfv3_router_block_emits_version_note() {
 }
 
 #[test]
+fn frr_ospfv3_router_id_maps() {
+    // `ospfv3 router-id A.B.C.D` inside `router ospfv3` maps onto the
+    // same `router_id` field the v2 `ospf router-id` form fills.
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         ospfv3 router-id 10.0.0.7\n\
+         !\n",
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.router_id, "10.0.0.7");
+}
+
+#[test]
+fn frr_ospfv3_interface_directives_map() {
+    // The `ospfv3 cost|hello-interval|dead-interval|priority|network|
+    // area N` directives inside an `interface IFNAME` block map onto
+    // the same `[[ospf.interface]]` row the v2 `ip ospf …` directives
+    // produce (RFC 5340 §A.4, FRR `ospf6d`).
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         ospfv3 router-id 10.0.0.1\n\
+         area 1 stub\n\
+         !\n\
+         interface eth0\n\
+         ospfv3 cost 10\n\
+         ospfv3 hello-interval 5\n\
+         ospfv3 dead-interval 20\n\
+         ospfv3 priority 100\n\
+         ospfv3 network broadcast\n\
+         ospfv3 area 1\n\
+         !\n\
+         interface eth1\n\
+         ospfv3 network point-to-point\n\
+         ospfv3 area 1\n\
+         !\n",
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.router_id, "10.0.0.1");
+    assert_eq!(cfg.ospf_interfaces.len(), 2);
+    let eth0 = &cfg.ospf_interfaces[0];
+    assert_eq!(eth0.name.as_deref(), Some("eth0"));
+    assert_eq!(eth0.area, Some(1));
+    assert_eq!(eth0.cost, Some(10));
+    assert_eq!(eth0.hello_interval, Some(5));
+    assert_eq!(eth0.dead_interval, Some(20));
+    assert_eq!(eth0.priority, Some(100));
+    assert_eq!(eth0.network_type.as_deref(), Some("broadcast"));
+    let eth1 = &cfg.ospf_interfaces[1];
+    assert_eq!(eth1.name.as_deref(), Some("eth1"));
+    assert_eq!(eth1.area, Some(1));
+    assert_eq!(eth1.network_type.as_deref(), Some("p2p"));
+}
+
+#[test]
+fn frr_ospfv3_instance_id_is_noted() {
+    // `ospfv3 instance-id N` has no lr equivalent (lr's OSPFv3 daemon
+    // does not carry a per-interface instance ID); the converter notes
+    // the gap on the matching `[[ospf.interface]]` row instead of
+    // silently dropping it.
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         area 1 stub\n\
+         !\n\
+         interface eth0\n\
+         ospfv3 area 1\n\
+         ospfv3 instance-id 7\n\
+         !\n",
+    ));
+    assert!(toml.contains("ospfv3 instance-id"));
+    assert!(toml.contains("no lr equivalent"));
+}
+
+#[test]
+fn frr_ospfv3_prefixed_area_policy_maps() {
+    // `ospfv3 area N stub|nssa|default-cost M` inside `router ospfv3`
+    // — the v3 spelling of the area policy. Same shape as the bare v2
+    // `area N …` form; routes through the same handler.
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         ospfv3 router-id 10.0.0.1\n\
+         ospfv3 area 2 stub no-summary\n\
+         ospfv3 area 2 default-cost 25\n\
+         !\n",
+    ));
+    let cfg = roundtrip_ospf(&toml);
+    assert_eq!(cfg.router_id, "10.0.0.1");
+    assert_eq!(cfg.ospf_areas.len(), 1);
+    assert_eq!(cfg.ospf_areas[0].id, Some(2));
+    assert_eq!(cfg.ospf_areas[0].kind.as_deref(), Some("stub"));
+    assert_eq!(cfg.ospf_areas[0].no_summary, Some(true));
+    assert_eq!(cfg.ospf_areas[0].stub_metric, Some(25));
+}
+
+#[test]
+fn frr_ospfv3_network_area_is_noted_as_unmapped() {
+    // `ospfv3 network PREFIX area N` (the v3 spelling of the v2 `network
+    // PREFIX area N`) cannot map mechanically — lr keys interfaces by
+    // name, not prefix (same gap as v2). The converter notes the gap
+    // with a hint instead of silently dropping.
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         ospfv3 network 2001:db8::/32 area 2\n\
+         !\n",
+    ));
+    assert!(toml.contains("ospfv3 network 2001:db8::/32 area 2"));
+    assert!(toml.contains("map the matching interface manually"));
+}
+
+#[test]
+fn frr_ospfv3_router_level_unknown_directive_is_noted() {
+    // `ospfv3 abr-type …`, `ospfv3 log-adjacency-changes`, … have no lr
+    // equivalent. The converter surfaces the gap as an UNMAPPED note
+    // instead of silently dropping the directive.
+    let toml = render(translate_frr(
+        "router ospfv3\n\
+         ospfv3 abr-type shortcut\n\
+         ospfv3 log-adjacency-changes\n\
+         !\n",
+    ));
+    assert!(toml.contains("ospfv3 abr-type shortcut"));
+    assert!(toml.contains("no lr equivalent (FRR OSPFv3 router-level directive)"));
+}
+
+#[test]
+fn frr_ospfv3_interface_directives_work_outside_router_ospfv3() {
+    // FRR accepts `ospfv3 cost …` inside a top-level `interface IFNAME`
+    // block — the block does not have to be nested inside `router
+    // ospfv3`. The converter routes these the same way as the nested
+    // form (matches the v2 `ip ospf …` behaviour, which also works at
+    // top-level interface blocks).
+    let toml = render(translate_frr(
+        "interface eth0\n\
+         ospfv3 cost 5\n\
+         !\n",
+    ));
+    assert!(toml.contains("[[ospf.interface]]"));
+    assert!(toml.contains("name = \"eth0\""));
+    assert!(toml.contains("cost = 5"));
+}
+
+#[test]
 fn bird_ospf_nssa_area_maps_kind() {
     let toml = render(translate_bird(
         r#"
