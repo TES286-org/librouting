@@ -15,6 +15,24 @@ lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## [Unreleased]
 
+### Stability
+
+**Minor version bump 1.3.0 → 1.4.0** for the new
+`RouteFieldKind::{BgpAtomicAggregate, BgpOriginatorId, BgpClusterList}`
+variants and the new `OriginatorId` / `ClusterList` types in
+`lr-bgp::path::well_known`. Per `docs/RELEASE-PLAN.md` §1, adding
+variants to a public enum is a breaking change for downstream
+`match` exhaustiveness; the project's policy (matching the v1.3.0
+cut that cleared the previous `AttrType::BgpLsAttribute` debt) is
+to ship it as a minor bump. The `api-surface` CI gate skips when
+the workspace version is ahead of the latest tag, so the gate will
+become blocking again at the 1.4.0 release cut. The C ABI surface
+is unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at 2); the
+FFI callback table `lr_filter_context_t` is untouched — the new
+`FilterContext` trait methods carry default implementations that
+delegate to `lr_policy::bgp`, so every existing embedder inherits
+the correct behaviour without recompiling.
+
 ### Added
 
 **BGP route-reflector loop-detection attributes in the filter DSL**
