@@ -31,7 +31,7 @@ pub use labeled_nlri::{
 pub use mp_nlri::{MpNextHop, MpReach, MpUnreach};
 pub use well_known::{
     Aggregator, Aigp, AtomicAggregate, ClusterList, LocalPref, Med, NextHop, NextHopKind, Origin,
-    OriginKind, OriginatorId,
+    OriginKind, OriginatorId, PmsiTunnel,
 };
 
 use lr_core::attr::{AttrTag, Attribute, Attributes};
@@ -431,6 +431,40 @@ impl PathAttributes {
     /// latter (e.g. an empty value field).
     pub fn has_aigp(&self) -> bool {
         self.get(AttrType::Aigp).is_some()
+    }
+    /// PMSI Tunnel attribute (RFC 6514 §5) — the
+    /// P-Multicast Service Interface Tunnel binding a BGP UPDATE
+    /// advertises for an MVPN auto-discovery route. The attribute
+    /// is optional transitive (flags `0xC0`); the value field is
+    /// a fixed 5-byte header (Flags + Tunnel Type + MPLS Label)
+    /// followed by a variable-length Tunnel Identifier. `None`
+    /// when the attribute is absent or the value field is
+    /// malformed (shorter than 5 bytes; Tunnel Type 0 with a
+    /// non-empty Tunnel Identifier; Tunnel Type 6 with an
+    /// endpoint width other than 4 or 16 bytes). The codec
+    /// stores the raw attribute bytes verbatim so an attribute
+    /// with an unknown Tunnel Type or non-zero reserved bits
+    /// round-trips byte-for-byte.
+    ///
+    /// The filter DSL surfaces this attribute as `bgp.pmsi_tunnel`
+    /// (read-only `bool` — `true` when the attribute is present,
+    /// `false` when absent, mirroring BIRD's `EAF_TYPE_OPAQUE` +
+    /// `T_ENUM_EMPTY` exposure so the canonical idiom
+    /// `if defined(bgp.pmsi_tunnel) then reject;` translates
+    /// faithfully).
+    pub fn pmsi_tunnel(&self) -> Option<well_known::PmsiTunnel> {
+        let a = self.get(AttrType::PmsiTunnel)?;
+        well_known::PmsiTunnel::decode(&a.value)
+    }
+    /// True when a PMSI Tunnel attribute is physically present on
+    /// the route (RFC 6514 §5). Use this to distinguish "no
+    /// attribute" from "present but malformed" — `pmsi_tunnel()`
+    /// returns `None` for both, but `has_pmsi_tunnel()` reports
+    /// the attribute's physical presence so the `defined(bgp.pmsi_tunnel)`
+    /// filter DSL predicate can distinguish them exactly as BIRD's
+    /// `defined(bgp_pmsi_tunnel)` does.
+    pub fn has_pmsi_tunnel(&self) -> bool {
+        self.get(AttrType::PmsiTunnel).is_some()
     }
     pub fn communities(&self) -> Vec<Community> {
         self.get(AttrType::Communities)

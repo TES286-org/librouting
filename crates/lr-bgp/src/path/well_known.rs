@@ -383,6 +383,178 @@ impl Aigp {
     }
 }
 
+/// PMSI Tunnel attribute (RFC 6514 §5).
+///
+/// The P-Multicast Service Interface Tunnel attribute carries the
+/// provider-tunnel binding a BGP UPDATE advertises for an MVPN
+/// auto-discovery route (Intra-AS I-PMSI, Inter-As I-PMSI, S-PMSI,
+/// Leaf A-D). The attribute is optional transitive (flags `0xC0`);
+/// its value field is a fixed 5-byte header followed by a
+/// variable-length Tunnel Identifier whose syntax depends on the
+/// Tunnel Type:
+///
+/// ```text
+/// +---------------------------------+
+/// |  Flags (1 octet)                |
+/// +---------------------------------+
+/// |  Tunnel Type (1 octet)         |
+/// +---------------------------------+
+/// |  MPLS Label (3 octets)          |
+/// +---------------------------------+
+/// |  Tunnel Identifier (variable)   |
+/// +---------------------------------+
+/// ```
+///
+/// The Flags byte defines one bit (RFC 6514 §5): bit 0 = Leaf
+/// Information Required (`L`). Bits 7..1 are reserved and MUST be
+/// zero on originate. The Tunnel Type field selects the
+/// provider-tunnel technology; the codec preserves every Tunnel
+/// Type value (the BIRD filter surfaces the attribute as a presence
+/// probe, not a structured value, so an unknown Tunnel Type still
+/// round-trips byte-for-byte). The MPLS Label is the RFC 3032 §2.1
+/// 3-octet label encoding — the high-order 20 bits are the label
+/// value, the low 3 bits are the EXP, the low 1 bit is the
+/// End-of-Stack flag; the codec surfaces the 20-bit label value
+/// and re-emits the full 3-byte wire form on encode (an all-zero
+/// field means "no MPLS label").
+///
+/// `PathAttribute::value` stores the raw attribute bytes verbatim,
+/// so any well-formed attribute round-trips byte-for-byte —
+/// including attributes whose Tunnel Type the codec does not
+/// interpret and attributes whose Flags violate the "MUST be zero
+/// on originate" constraint. This type is the typed view the filter
+/// DSL's `bgp.pmsi_tunnel` field reads.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Default)]
+pub struct PmsiTunnel {
+    /// The attribute's Flags byte (RFC 6514 §5). Only bit 0 (L =
+    /// Leaf Information Required) is defined; the codec preserves
+    /// every bit so a Flags value that violates the "MUST be zero
+    /// on originate" constraint still round-trips byte-for-byte.
+    /// [`Self::leaf_info_required`] is the named accessor for the L
+    /// bit.
+    pub flags: u8,
+    /// The Tunnel Type byte (RFC 6514 §5). The named values live
+    /// in the [`TUNNEL_TYPE_*`](self#constants) constants.
+    pub tunnel_type: u8,
+    /// The 20-bit MPLS label value extracted from the high-order
+    /// bits of the 3-octet MPLS Label field. An all-zero field
+    /// decodes to `0` ("no MPLS label" per RFC 6514 §5).
+    pub mpls_label: u32,
+    /// The variable-length Tunnel Identifier (RFC 6514 §5). Its
+    /// syntax depends on `tunnel_type`; the codec preserves the
+    /// bytes verbatim.
+    pub tunnel_id: Vec<u8>,
+}
+
+/// Flags bit 0 of the PMSI Tunnel attribute (RFC 6514 §5).
+pub const PMSI_FLAG_LEAF_INFO_REQUIRED: u8 = 0b0000_0001;
+
+/// RFC 6514 §5 — Tunnel Type "No tunnel information present".
+pub const TUNNEL_TYPE_NO_INFO: u8 = 0;
+/// RFC 6514 §5 — Tunnel Type "RSVP-TE P2MP LSP".
+pub const TUNNEL_TYPE_RSVP_TE_P2MP: u8 = 1;
+/// RFC 6514 §5 — Tunnel Type "mLDP P2MP LSP".
+pub const TUNNEL_TYPE_MLDP_P2MP: u8 = 2;
+/// RFC 6514 §5 — Tunnel Type "PIM-SSM Tree".
+pub const TUNNEL_TYPE_PIM_SSM: u8 = 3;
+/// RFC 6514 §5 — Tunnel Type "PIM-SM Tree".
+pub const TUNNEL_TYPE_PIM_SM: u8 = 4;
+/// RFC 6514 §5 — Tunnel Type "BIDIR-PIM Tree".
+pub const TUNNEL_TYPE_BIDIR_PIM: u8 = 5;
+/// RFC 6514 §5 — Tunnel Type "Ingress Replication".
+pub const TUNNEL_TYPE_INGRESS_REPLICATION: u8 = 6;
+/// RFC 6514 §5 — Tunnel Type "mLDP MP2MP LSP".
+pub const TUNNEL_TYPE_MLDP_MP2MP: u8 = 7;
+
+impl PmsiTunnel {
+    /// Construct a new PMSI Tunnel attribute from its typed fields.
+    /// The MPLS label is masked to its low 20 bits and shifted into
+    /// the high-order 20 bits of the 3-byte wire field on encode;
+    /// the EXP and End-of-Stack bits are zeroed on encode.
+    pub const fn new(flags: u8, tunnel_type: u8, mpls_label: u32, tunnel_id: Vec<u8>) -> Self {
+        Self {
+            flags,
+            tunnel_type,
+            mpls_label,
+            tunnel_id,
+        }
+    }
+
+    /// True when the Leaf Information Required (L) flag is set
+    /// (RFC 6514 §5). A receiver that sees this flag set on an
+    /// Inter-As I-PMSI A-D route or an S-PMSI A-D route originates
+    /// a Leaf A-D route in response.
+    pub const fn leaf_info_required(&self) -> bool {
+        (self.flags & PMSI_FLAG_LEAF_INFO_REQUIRED) != 0
+    }
+
+    /// Decode the PMSI Tunnel attribute's value field (RFC 6514
+    /// §5). Returns `None` when the value is shorter than the
+    /// 5-byte header (Flags + Tunnel Type + MPLS Label), or when
+    /// the Tunnel Identifier length is inconsistent with the Tunnel
+    /// Type's hard rule — Tunnel Type 0 ("No tunnel information
+    /// present") MUST carry no Tunnel Identifier, and Tunnel Type
+    /// 6 ("Ingress Replication") MUST carry a 4-byte (IPv4) or
+    /// 16-byte (IPv6) endpoint address. Every other Tunnel Type
+    /// (including unknown types) decodes with the Tunnel Identifier
+    /// preserved verbatim, so the attribute round-trips
+    /// byte-for-byte (mirrors BIRD's `bgp_decode_pmsi_tunnel`
+    /// default arm, which sets the Partial bit but does not
+    /// withdraw).
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        if bytes.len() < 5 {
+            return None;
+        }
+        let flags = bytes[0];
+        let tunnel_type = bytes[1];
+        // RFC 3032 §2.1: 3-byte label field = 20-bit label +
+        // 3-bit EXP + 1-bit S. The high-order 20 bits are the
+        // label value; the low 4 bits are encoding overhead the
+        // codec surfaces only through the encoded wire form on
+        // encode (BIRD's `bgp_pmsi_get_label` makes the same
+        // `>> 4` cut).
+        let mpls_label = (u32::from_be_bytes([0, bytes[2], bytes[3], bytes[4]])) >> 4;
+        let tunnel_id = bytes[5..].to_vec();
+        match tunnel_type {
+            TUNNEL_TYPE_NO_INFO if !tunnel_id.is_empty() => return None,
+            TUNNEL_TYPE_INGRESS_REPLICATION
+                if tunnel_id.len() != 4 && tunnel_id.len() != 16 =>
+            {
+                return None;
+            }
+            _ => {}
+        }
+        Some(Self {
+            flags,
+            tunnel_type,
+            mpls_label,
+            tunnel_id,
+        })
+    }
+
+    /// Encode the typed view back into the wire form. The Flags
+    /// byte, Tunnel Type, Tunnel Identifier and the high-order 20
+    /// bits of the MPLS Label round-trip byte-for-byte with the
+    /// decode contract; the low 4 bits of the MPLS Label field
+    /// (EXP + End-of-Stack) are zeroed on encode, matching how
+    /// BIRD constructs a fresh attribute (`bgp_pmsi_new_ingress_replication`
+    /// writes the label through `put_u24` after the same `<< 4`
+    /// shift). The codec preserves the raw bytes verbatim at the
+    /// `PathAttribute::value` level so a PMSI Tunnel attribute a
+    /// peer sent with non-zero EXP/S bits round-trips byte-exact
+    /// through the codec — this encoder is for originating a fresh
+    /// attribute, not for round-tripping a received one.
+    pub fn encode(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(5 + self.tunnel_id.len());
+        out.push(self.flags);
+        out.push(self.tunnel_type);
+        let label24 = (self.mpls_label & 0x000f_ffff) << 4;
+        out.extend_from_slice(&label24.to_be_bytes()[1..4]);
+        out.extend_from_slice(&self.tunnel_id);
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -684,5 +856,212 @@ mod tests {
         ));
         assert!(attrs_bad.aigp().is_none());
         assert!(attrs_bad.has_aigp());
+    }
+
+    // ---- RFC 6514 §5: PMSI Tunnel attribute ----
+
+    #[test]
+    fn pmsi_tunnel_roundtrips_no_info() {
+        // Tunnel Type 0 ("No tunnel information present") — the
+        // attribute carries no Tunnel Identifier; the codec round-
+        // trips the 5-byte header verbatim.
+        let p = PmsiTunnel::new(0, TUNNEL_TYPE_NO_INFO, 0, Vec::new());
+        let wire = p.encode();
+        assert_eq!(wire, vec![0, 0, 0, 0, 0]);
+        let back = PmsiTunnel::decode(&wire).expect("no-info decodes");
+        assert_eq!(back, p);
+    }
+
+    #[test]
+    fn pmsi_tunnel_roundtrips_ingress_replication_v4() {
+        // Tunnel Type 6 (Ingress Replication), IPv4 endpoint,
+        // MPLS label 64512, L bit set.
+        let p = PmsiTunnel::new(
+            PMSI_FLAG_LEAF_INFO_REQUIRED,
+            TUNNEL_TYPE_INGRESS_REPLICATION,
+            64512,
+            vec![10, 0, 0, 1],
+        );
+        let wire = p.encode();
+        // 5-byte header + 4-byte endpoint = 9 bytes.
+        assert_eq!(wire.len(), 9);
+        assert_eq!(wire[0], 0b0000_0001);
+        assert_eq!(wire[1], 6);
+        // The 24-bit label field carries the 20-bit label value
+        // in its high-order 20 bits (RFC 3032 §2.1). 64512 =
+        // 0x0FC00; <<4 = 0x0FC000 → bytes [0x0F, 0xC0, 0x00].
+        assert_eq!(&wire[2..5], &[0x0F, 0xC0, 0x00]);
+        let back = PmsiTunnel::decode(&wire).expect("ingress replication decodes");
+        assert_eq!(back, p);
+        assert!(back.leaf_info_required());
+    }
+
+    #[test]
+    fn pmsi_tunnel_roundtrips_ingress_replication_v6() {
+        // Tunnel Type 6 (Ingress Replication), IPv6 endpoint (16
+        // bytes).
+        let endpoint = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1];
+        let p = PmsiTunnel::new(0, TUNNEL_TYPE_INGRESS_REPLICATION, 0, endpoint.to_vec());
+        let wire = p.encode();
+        let back = PmsiTunnel::decode(&wire).expect("v6 ingress replication decodes");
+        assert_eq!(back, p);
+        assert!(!back.leaf_info_required());
+    }
+
+    #[test]
+    fn pmsi_tunnel_unknown_type_round_trips_verbatim() {
+        // RFC 6514 §5: an undefined Tunnel Type is malformed in
+        // the spec sense but BIRD's decoder accepts it and sets
+        // the Partial bit. The lr codec preserves the bytes
+        // verbatim so the attribute round-trips byte-for-byte —
+        // the typed view does not interpret the Tunnel
+        // Identifier. This is the byte-exact contract that
+        // matches AIGP's "unknown TLV preserved" behaviour.
+        let wire: Vec<u8> = vec![0, 200, 0, 0, 0, 0xaa, 0xbb, 0xcc];
+        let p = PmsiTunnel::decode(&wire).expect("unknown Tunnel Type decodes");
+        assert_eq!(p.tunnel_type, 200);
+        assert_eq!(p.tunnel_id, vec![0xaa, 0xbb, 0xcc]);
+        assert_eq!(p.encode(), wire);
+    }
+
+    #[test]
+    fn pmsi_tunnel_preserves_label_low_bits_via_raw_bytes() {
+        // The codec stores the raw attribute bytes verbatim at the
+        // PathAttribute::value level so a PMSI Tunnel attribute a
+        // peer sent with non-zero EXP/S bits round-trips
+        // byte-exact. PmsiTunnel::encode re-emits the high-order
+        // 20 bits of the label only (EXP/S zeroed); the codec's
+        // verbatim value storage carries the rest.
+        let mut wire = vec![0, TUNNEL_TYPE_NO_INFO];
+        // 3-byte label field with the low 4 bits (EXP+S) set.
+        wire.extend_from_slice(&[0x12, 0x34, 0x57]); // label 0x12345, EXP=0b101, S=1
+        let p = PmsiTunnel::decode(&wire).expect("low-bit label decodes");
+        // The high 20 bits are the label value (0x12345).
+        assert_eq!(p.mpls_label, 0x12345);
+        // Encode re-emits the 20-bit label only (low 4 bits zeroed).
+        let re = p.encode();
+        assert_eq!(&re[2..5], &[0x12, 0x34, 0x50]);
+    }
+
+    #[test]
+    fn pmsi_tunnel_rejects_truncated_header() {
+        // 4 bytes — the 5-byte minimum (Flags + Tunnel Type +
+        // MPLS Label) is missing.
+        assert!(PmsiTunnel::decode(&[0, 0, 0, 0]).is_none());
+        assert!(PmsiTunnel::decode(&[]).is_none());
+    }
+
+    #[test]
+    fn pmsi_tunnel_rejects_no_info_with_tunnel_id() {
+        // Tunnel Type 0 MUST carry no Tunnel Identifier
+        // (RFC 6514 §5).
+        let mut wire = vec![0, TUNNEL_TYPE_NO_INFO, 0, 0, 0];
+        wire.push(0xaa);
+        assert!(PmsiTunnel::decode(&wire).is_none());
+    }
+
+    #[test]
+    fn pmsi_tunnel_rejects_ingress_replication_wrong_endpoint_width() {
+        // Tunnel Type 6 MUST carry a 4-byte (IPv4) or 16-byte
+        // (IPv6) endpoint address (RFC 6514 §5). A 5-byte
+        // endpoint is malformed.
+        let mut wire = vec![0, TUNNEL_TYPE_INGRESS_REPLICATION, 0, 0, 0];
+        wire.extend_from_slice(&[10, 0, 0, 1, 0]);
+        assert!(PmsiTunnel::decode(&wire).is_none());
+    }
+
+    #[test]
+    fn path_attributes_pmsi_tunnel_accessor_round_trips() {
+        use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
+
+        let mut attrs = PathAttributes::new();
+        // Absent — None on `pmsi_tunnel()`, false on
+        // `has_pmsi_tunnel()`.
+        assert!(attrs.pmsi_tunnel().is_none());
+        assert!(!attrs.has_pmsi_tunnel());
+
+        // Present, Tunnel Type 6 (Ingress Replication), IPv4
+        // endpoint, MPLS label 64512, L bit set.
+        let p = PmsiTunnel::new(
+            PMSI_FLAG_LEAF_INFO_REQUIRED,
+            TUNNEL_TYPE_INGRESS_REPLICATION,
+            64512,
+            vec![10, 0, 0, 1],
+        );
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::PmsiTunnel,
+            p.encode(),
+        ));
+        let back = attrs.pmsi_tunnel().expect("present, well-formed");
+        assert_eq!(back, p);
+        assert_eq!(back.tunnel_type, TUNNEL_TYPE_INGRESS_REPLICATION);
+        assert_eq!(back.mpls_label, 64512);
+        assert!(back.leaf_info_required());
+        assert!(attrs.has_pmsi_tunnel());
+
+        // Malformed value (truncated header) — None on
+        // `pmsi_tunnel()`, but `has_pmsi_tunnel()` still reports
+        // presence (the attribute is on the route; only the value
+        // is unreadable). Mirrors the AIGP accessor's behaviour
+        // on a malformed TLV stream.
+        let mut attrs_bad = PathAttributes::new();
+        attrs_bad.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true).set_transitive(true),
+            AttrType::PmsiTunnel,
+            vec![0, 0, 0, 0], // truncated header
+        ));
+        assert!(attrs_bad.pmsi_tunnel().is_none());
+        assert!(attrs_bad.has_pmsi_tunnel());
+    }
+
+    proptest! {
+        /// CONTRIBUTING.md: a new wire codec needs a fuzz target or
+        /// a proptest strategy. The decoder must never panic on
+        /// arbitrary byte input — return `Some` (the byte stream
+        /// parsed) or `None` (the byte stream was malformed).
+        #[test]
+        fn pmsi_tunnel_decode_never_panics(
+            bytes in prop::collection::vec(0u8..=255, 0..=64)
+        ) {
+            let decoded = PmsiTunnel::decode(&bytes);
+            if let Some(p) = decoded {
+                // The Flags byte, Tunnel Type and Tunnel
+                // Identifier always round-trip byte-for-byte;
+                // the low 4 bits of the MPLS Label field are
+                // zeroed on encode (the codec stores the raw
+                // bytes verbatim at the PathAttribute::value
+                // level so a peer-sent attribute still round-
+                // trips byte-exact).
+                let re = p.encode();
+                assert_eq!(re.len(), bytes.len());
+                assert_eq!(re[0], bytes[0]);
+                assert_eq!(re[1], bytes[1]);
+                assert_eq!(re[5..], bytes[5..]);
+                // The high 20 bits of the label field round-trip.
+                if bytes.len() >= 5 {
+                    let in_label =
+                        (u32::from_be_bytes([0, bytes[2], bytes[3], bytes[4]])) >> 4;
+                    let out_label = (u32::from_be_bytes([0, re[2], re[3], re[4]])) >> 4;
+                    assert_eq!(out_label, in_label);
+                }
+            } else {
+                // Rejected inputs include every byte stream
+                // shorter than the 5-byte header, and the two
+                // Tunnel-Type-specific malformed shapes (Type 0
+                // with a non-empty Tunnel Identifier; Type 6
+                // with an endpoint width other than 4 or 16).
+                if bytes.len() >= 5 {
+                    let tt = bytes[1];
+                    let tid_len = bytes.len() - 5;
+                    let rejected = match tt {
+                        0 => tid_len != 0,
+                        6 => tid_len != 4 && tid_len != 16,
+                        _ => false,
+                    };
+                    assert!(rejected, "expected rejection for tt={tt}, tid_len={tid_len}");
+                }
+            }
+        }
     }
 }
