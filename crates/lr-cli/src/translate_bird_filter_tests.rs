@@ -115,9 +115,9 @@ fn bird_only_attributes_are_unfaithful() {
         "if ifname = \"eth0\" then accept;",
         "if preference = 100 then accept;",
         // OSPF attributes lr's DSL does NOT surface yet
-        // (`ospf_metric2`, `ospf_tag`, `ospf_router_id`).
-        // `ospf_metric1` is supported (see `ospf_metric1_renames`).
-        "if ospf_metric2 = 100 then accept;",
+        // (`ospf_tag`, `ospf_router_id`). `ospf_metric1` and
+        // `ospf_metric2` are supported (see `ospf_metric1_renames`
+        // and `ospf_metric2_renames`).
         "if ospf_tag = 42 then accept;",
         "if ospf_router_id = 1.2.3.4 then accept;",
         "if krt_source = 0 then accept;",
@@ -167,6 +167,53 @@ fn ospf_metric1_defined_predicate_translates() {
     assert!(
         out.contains("ospf.metric1 == 0"),
         "expected `ospf.metric1 == 0` in output, got: {out}"
+    );
+}
+
+#[test]
+fn ospf_metric2_renames_to_dotted_field() {
+    // RFC 2328 §16.4 / RFC 5340 §4.8.5 — `ospf_metric2` is the
+    // type-2 external OSPF metric. The BIRD translator renames it
+    // to `ospf.metric2`; the canonical idiom `if
+    // defined(ospf_metric2) && ospf_metric2 > 100 then reject;`
+    // translates faithfully.
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(ospf_metric2) && ospf_metric2 > 100 then reject; accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(ospf.metric2)"),
+        "expected `defined(ospf.metric2)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("ospf.metric2 > 100"),
+        "expected `ospf.metric2 > 100` in output, got: {out}"
+    );
+    assert!(
+        !out.contains("ospf_metric2"),
+        "expected `ospf_metric2` to be renamed, got: {out}"
+    );
+}
+
+#[test]
+fn ospf_metric2_defined_predicate_translates() {
+    // The `defined()` presence probe distinguishes "not a type-2
+    // external" from "type-2 external with metric 0". The BIRD
+    // translator renames `ospf_metric2` inside `defined()` too —
+    // the rename applies to any reference, not just comparisons.
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(ospf_metric2) && ospf_metric2 = 0 then accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(ospf.metric2)"),
+        "expected `defined(ospf.metric2)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("ospf.metric2 == 0"),
+        "expected `ospf.metric2 == 0` in output, got: {out}"
     );
 }
 
