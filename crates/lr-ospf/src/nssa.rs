@@ -270,6 +270,16 @@ pub fn nssa_routes(lsdb: &Lsdb, spf_result: &SpfResult, opts: NssaCalcOpts) -> V
             asbr: key.advertising_router,
             border_router: None,
             forwarding_addr: body.forwarding_addr,
+            // RFC 3101 §2.3: the 32-bit external route tag carried in
+            // the type-7 LSA body (the body is byte-identical to the
+            // type-5 body, RFC 3101 Appendix A). The v2 LSA body
+            // always carries a 4-byte tag field (zero is
+            // well-formed), so the OSPF route computation always
+            // surfaces it for type-7 externals — `Route::tag =
+            // Some(route_tag)` on the resulting RIB route, and the
+            // policy DSL's `ospf.tag` field reads it via the
+            // `lr_policy::ospf::tag` accessor.
+            route_tag: body.route_tag,
         };
         let replace = match best.get(&prefix) {
             None => true,

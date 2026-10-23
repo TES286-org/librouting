@@ -226,6 +226,15 @@ pub struct ExternalRoute {
     pub border_router: Option<u32>,
     /// Forwarding address from the type-5 LSA (0 = ASBR itself).
     pub forwarding_addr: u32,
+    /// External route tag carried in the type-5 / type-7 LSA body
+    /// (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3). The v2 LSA body
+    /// always carries a 4-byte tag field (zero is well-formed), so
+    /// this is a plain `u32` — `Some(tag)` at the route-computation
+    /// layer becomes `Route::tag = Some(route_tag)` on the resulting
+    /// RIB route. The OSPF daemon is the only producer for received
+    /// externals; the policy `SetTag` action overwrites it for
+    /// originated externals.
+    pub route_tag: u32,
 }
 
 impl ExternalRoute {
@@ -381,6 +390,14 @@ pub fn external_routes(lsdb: &Lsdb, spf_result: &SpfResult) -> Vec<ExternalRoute
             asbr: key.advertising_router,
             border_router,
             forwarding_addr: body.forwarding_addr,
+            // RFC 2328 §A.4.5 bullet h: the 32-bit external route tag
+            // carried in the type-5 LSA body. The v2 LSA body always
+            // carries a 4-byte tag field (zero is well-formed), so the
+            // OSPF route computation always surfaces it for externals —
+            // `Route::tag = Some(route_tag)` on the resulting RIB route,
+            // and the policy DSL's `ospf.tag` field reads it via the
+            // `lr_policy::ospf::tag` accessor.
+            route_tag: body.route_tag,
         };
         let replace = match best.get(&prefix) {
             None => true,
@@ -454,6 +471,18 @@ pub struct ExternalRouteV3 {
     /// address when the F bit is set (a global address needs no
     /// interface disambiguation).
     pub next_hop: Option<IpAddr>,
+    /// External route tag (RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+    /// External-Prefix sub-TLV 3). `None` when the LSA carries no
+    /// tag (the v3 T bit is clear, or the Extended-LSA External-Prefix
+    /// TLV carries no Route Tag sub-TLV) — `Route::tag = None` on the
+    /// resulting RIB route so `defined(ospf.tag)` is false. `Some(t)`
+    /// when the LSA carries a tag — `Route::tag = Some(t)` so the
+    /// policy DSL's `ospf.tag` accessor surfaces it. Unlike the v2
+    /// form (which always carries a 4-byte tag field, zero being
+    /// well-formed), the v3 form treats a missing tag and a tag of
+    /// zero as different states, mirroring BIRD's `ea_ospf_tag`
+    /// absence-handling for OSPFv3 externals.
+    pub route_tag: Option<u32>,
 }
 
 impl ExternalRouteV3 {
@@ -495,6 +524,10 @@ struct ExternalBodyV3 {
     prefix: crate::lsa::v3::V3Prefix,
     /// The global IPv6 forwarding address (F bit / sub-TLV 1).
     forwarding_addr: Option<[u8; 16]>,
+    /// External route tag (RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+    /// External-Prefix sub-TLV 3). `None` when the LSA carries no
+    /// tag.
+    route_tag: Option<u32>,
 }
 
 /// RFC 5340 §4.8.5: compute the external route candidates for one area
@@ -618,6 +651,11 @@ fn external_routes_v3_mode(
                     e_bit: b.0.e_bit,
                     prefix: b.0.prefix,
                     forwarding_addr: b.0.ipv6_fwd_addr,
+                    // RFC 8362 §3.6 External-Prefix sub-TLV 3 —
+                    // the Extended-LSA form of the external route
+                    // tag. `None` when the sub-TLV is absent (the
+                    // originator did not attach a tag).
+                    route_tag: b.0.route_tag,
                 },
                 None => continue,
             }
@@ -628,6 +666,11 @@ fn external_routes_v3_mode(
                     e_bit: b.e_bit,
                     prefix: b.prefix,
                     forwarding_addr: b.forwarding_addr,
+                    // RFC 5340 §A.4.7 T bit — the legacy v3 form
+                    // of the external route tag. `None` when the
+                    // T bit is clear (the originator did not attach
+                    // a tag).
+                    route_tag: b.route_tag,
                 },
                 None => continue,
             }
@@ -696,6 +739,15 @@ fn external_routes_v3_mode(
             border_router,
             forwarding_addr: body.forwarding_addr.map(IpAddr::V6),
             next_hop,
+            // RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix
+            // sub-TLV 3 — the v3 external route tag. `None` when the
+            // LSA carries no tag; `Some(t)` when it does. The OSPF
+            // route computation copies this through to
+            // `Route::tag` on the resulting RIB route so the policy
+            // DSL's `ospf.tag` accessor surfaces it. Unlike the v2
+            // form, a missing v3 tag stays `None` — the v3 T bit
+            // distinguishes "no tag" from "tag of zero".
+            route_tag: body.route_tag,
         };
         let replace = match best.get(&prefix) {
             None => true,
