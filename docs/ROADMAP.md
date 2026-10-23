@@ -467,10 +467,10 @@ BIRD idiom `if defined(ospf_metric2) && ospf_metric2 > 100 then
 reject;` translates faithfully to `if defined(ospf.metric2) &&
 ospf.metric2 > 100 then reject;`. The BIRD translator renames
 `ospf_metric2` to `ospf.metric2` (and removes it from
-`UNMAPPABLE_WORDS`, leaving the remaining OSPF attributes
-`ospf_tag` / `ospf_router_id` listed there so a filter that
-references them is still marked unfaithful rather than silently
-dropping the reference); `lr-policy::ospf` carries the matching
+`UNMAPPABLE_WORDS`, leaving the remaining OSPF attribute
+`ospf_router_id` listed there so a filter that references it is
+still marked unfaithful rather than silently dropping the
+reference); `lr-policy::ospf` carries the matching
 `metric2` / `has_metric2` helpers (the latter distinguishes "not
 a type-2 external" from "type-2 external with metric 0" via
 `defined(ospf.metric2)`). The type-2 external metric rides the
@@ -502,15 +502,74 @@ allocation), so the fast path avoids the `Value::Int` allocation
 `tests/corpus/bird/ospf-metric2-filter.conf` exercises both the
 canonical high-cost type-2-external reject idiom and the
 `defined()` gate's short-circuit on a non-type-2-external route.
+The OSPF external route tag attribute has landed alongside the
+`ospf.metric2` set: `RouteFieldKind::OspfTag` (RFC 2328 §A.4.5
+bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+External-Prefix sub-TLV 3) exposes `ospf.tag` (read-only `int`,
+`0` when the route carries no tag — a non-OSPF route, an
+intra-area / inter-area OSPF route, or a v3 external without
+the T bit set — mirroring BIRD's eattr default for an
+unattached `ospf_tag` reference) so the canonical BIRD idiom
+`if defined(ospf_tag) && ospf_tag == 3735928559 then accept;`
+translates faithfully to `if defined(ospf.tag) && ospf.tag ==
+3735928559 then accept;`. The BIRD translator renames `ospf_tag`
+to `ospf.tag` (and removes it from `UNMAPPABLE_WORDS`, leaving
+the remaining OSPF attribute `ospf_router_id` listed there so a
+filter that references it is still marked unfaithful rather than
+silently dropping the reference); `lr-policy::ospf` carries the
+matching `tag` / `has_tag` helpers (the latter distinguishes "no
+tag" from "tag of zero" via `defined(ospf.tag)` — the v2 LSA
+body always carries a 4-byte tag, zero being well-formed per
+RFC 2328 §A.4.5, so a v2 external surfaces `Some(t)` even when
+the tag is zero; the v3 form's T bit distinguishes "no tag"
+from "tag of zero"). Unlike `ospf.metric2` (whose type-2
+external metric rides the private `LrOspfMetric2` path-attribute
+tag), `ospf.tag` rides the existing `Route::tag` field — the
+same field the `SetTag` policy action writes for the
+operator-side override, and the same field the OSPF
+external-LSA origination path reads when redistributing a
+route into OSPF. The OSPF route computation
+(`lr-router::instance::ospf_ops::ospf_recompute`) populates
+`Route::tag` from the LSA's tag for type-5 / type-7 externals
+only; intra-area, inter-area, and v3 externals without the T
+bit carry no `Route::tag`, so its absence is the marker
+`has_tag` consults. The codec half adds `route_tag: u32` to
+`lr-ospf::external::ExternalRoute` (v2) and `route_tag:
+Option<u32>` to `ExternalRouteV3` (v3), populated from the LSA
+body in `external_routes`, `nssa_routes` and
+`external_routes_v3_mode`. The populate-the-RIB half adds
+`route_tag: Option<u32>` to `OspfTableEntry` (pub(super),
+stays inside `lr-router::instance`) and sets `Route::tag =
+entry.route_tag` in `ospf_recompute` (replacing the previous
+hard-coded `None`). The typed accessors in `lr-policy::ospf`
+read the field via one protocol-kind `match` plus one
+`Option<u32>` field read off `route.tag` (no allocation, no
+codec, no BTreeMap lookup — cheaper than `ospf.metric2`, the
+same shape as `ospf.metric1`). The peephole pass's
+`BranchFieldIntCmp` fast path fuses `ospf.tag == N` / `> N` /
+etc. comparisons the same way it fuses `ospf.metric1` /
+`ospf.metric2` / `bgp.local_pref` / `bgp.med` / `bgp.otc` — the
+read is one `match` plus one `Option<u32>` field read (no
+allocation), so the fast path avoids the `Value::Int` allocation
++ push the unfused sequence pays. The corpus case
+`tests/corpus/bird/ospf-tag-filter.conf` exercises both the
+canonical tagged-route accept idiom and the zero-tag accept
+idiom. The Python and Go binding tests cover both the "absent"
+path (no tag set) and the "present" path (a tag set via
+`set_tag` / `SetTag`) — the C ABI exposes the existing
+`lr_route_set_tag` setter, so the binding can exercise the
+present path the `ospf.metric2` binding test could not (the
+`LrOspfMetric2` tag has no C ABI setter).
 What remains is the rest of the per-protocol attribute surface —
 BIRD's route attributes that ride the per-route filter context —
 beyond the RR loop-detection, OTC, AIGP, AGGREGATOR, PMSI Tunnel
-(BGP subset, complete) and the OSPF `ospf.metric1` / `ospf.metric2`
-attributes that have landed. The remaining OSPF attributes
-(`ospf_tag`, `ospf_router_id`) and the Babel per-route attributes
-(`babel_metric`, `babel_router_id`, `babel_seqno`) are the next
-increments; each lands as its own small PR following the same
-codec→accessor→DSL→translator→corpus shape.
+(BGP subset, complete) and the OSPF `ospf.metric1` /
+`ospf.metric2` / `ospf.tag` attributes that have landed. The
+remaining OSPF attribute (`ospf_router_id`) and the Babel
+per-route attributes (`babel_metric`, `babel_router_id`,
+`babel_seqno`) are the next increments; each lands as its own
+small PR following the same codec→accessor→DSL→translator→corpus
+shape.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF

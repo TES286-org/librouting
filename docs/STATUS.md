@@ -157,13 +157,13 @@ files of the `lr-cli` binary crate, which is not a library.
 | Policy chains and verdicts | yes | `lr-policy::policy` |
 | Named policy sets and per-route actions | yes | `lr-policy::set`, `lr-policy::action` |
 | BGP attribute access from policy | yes | `lr-policy::bgp` |
-| OSPF metric access from policy (`ospf.metric1`, RFC 2328 §16 / RFC 5340 §4.1; `ospf.metric2`, RFC 2328 §16.4 / RFC 5340 §4.8.5) | yes | `lr-policy::ospf`, `lr-bgp::path::AttrType::LrOspfMetric2` |
+| OSPF metric access from policy (`ospf.metric1`, RFC 2328 §16 / RFC 5340 §4.1; `ospf.metric2`, RFC 2328 §16.4 / RFC 5340 §4.8.5; `ospf.tag`, RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3) | yes | `lr-policy::ospf`, `lr-bgp::path::AttrType::LrOspfMetric2`, `lr-ospf::external`, `lr-router::instance::ospf_ops` |
 | Filter DSL: lexer, parser, AST, interpreter | yes | `lr-policy::filter`, `lr-policy::filter::{lexer, parser, ast, eval}` |
 | Filter DSL bytecode compiler and stack VM | yes | `lr-policy::filter::bytecode` |
 | Filter DSL peephole optimisation | yes | `lr-policy::filter::peephole` |
 | Source spans and positioned diagnostics | yes | `lr-policy::filter::span` |
 | Cross-filter reusable function definitions | yes | `lr-cli::daemon_policy::build_filters` |
-| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §8), `bgp.otc` (RFC 9234 §3.1), `bgp.aigp` (RFC 7311), `bgp.aggregator.asn` / `bgp.aggregator.speaker` (RFC 4271 §5.1.7), `bgp.pmsi_tunnel` (RFC 6514 §5), `ospf.metric1` (RFC 2328 §16 / RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340 §4.8.5), `bgp.lrxp.*` (issue #81, LRXP exchange-plane records; feature `exchange-plane`) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp`, `lr-policy::ospf`, `lr-policy::lrxp` |
+| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §8), `bgp.otc` (RFC 9234 §3.1), `bgp.aigp` (RFC 7311), `bgp.aggregator.asn` / `bgp.aggregator.speaker` (RFC 4271 §5.1.7), `bgp.pmsi_tunnel` (RFC 6514 §5), `ospf.metric1` (RFC 2328 §16 / RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340 §4.8.5), `ospf.tag` (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3), `bgp.lrxp.*` (issue #81, LRXP exchange-plane records; feature `exchange-plane`) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp`, `lr-policy::ospf`, `lr-policy::lrxp` |
 
 ## OS integration and data plane — `lr-osroute`, `lr-mpls`, `lr-srv6`
 
