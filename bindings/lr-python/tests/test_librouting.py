@@ -629,6 +629,44 @@ def test_filter_dsl():
     assert roa.evaluate(rt)[0] == librouting.FILTER_ACCEPT
 
 
+def test_filter_dsl_ospf_metric1():
+    """`ospf.metric1` reads `route.preference.metric` for OSPF routes
+    and `0` for non-OSPF routes (RFC 2328 §16 / RFC 5340 §4.1). The
+    binding exercises the full path — Python → FFI → Rust filter
+    eval → `lr-policy::ospf::metric1` accessor — so a regression in
+    any layer surfaces here."""
+    # An OSPFv2 route with metric 200: the filter accepts via the
+    # `defined()` + `> 100` arm.
+    ospf = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_OSPF)
+    ospf.set_metric(200)
+    high = librouting.compile_filter(
+        "py-ospf-high",
+        "if defined(ospf.metric1) && ospf.metric1 > 100 then reject; accept;",
+    )
+    assert high.evaluate(ospf)[0] == librouting.FILTER_REJECT
+
+    # An OSPFv2 route with metric 50: below the threshold, accepted.
+    low = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_OSPF)
+    low.set_metric(50)
+    assert high.evaluate(low)[0] == librouting.FILTER_ACCEPT
+
+    # A non-OSPF (BGP) route: `defined(ospf.metric1)` is false, so the
+    # `&&` short-circuits and the route is accepted (mirrors BIRD's
+    # eattr default for an unattached `ospf_metric1` reference).
+    bgp = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    bgp.set_metric(200)  # has no effect on `ospf.metric1`
+    assert high.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+
+    # OSPFv3 also surfaces the metric (RFC 5340 §4.1 mirrors OSPFv2 §16).
+    ospf3 = librouting.Route(([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64), librouting.PROTO_OSPF3)
+    ospf3.set_metric(220)
+    v3_high = librouting.compile_filter(
+        "py-ospf3",
+        "if ospf.metric1 == 220 then accept; reject;",
+    )
+    assert v3_high.evaluate(ospf3)[0] == librouting.FILTER_ACCEPT
+
+
 def test_package_version_tracks_the_workspace():
     """`librouting.__version__` is the single source for the package
     version; pyproject.toml reads it via `dynamic = ["version"]`. It has

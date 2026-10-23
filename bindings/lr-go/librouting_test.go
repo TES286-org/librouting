@@ -922,3 +922,81 @@ func TestFilterDSL(t *testing.T) {
 		t.Fatal("parse error must fail")
 	}
 }
+
+func TestFilterDSLOspfMetric1(t *testing.T) {
+	// `ospf.metric1` reads route.Preference.Metric for OSPF routes
+	// and 0 for non-OSPF routes (RFC 2328 §16 / RFC 5340 §4.1).
+	high, err := Compile("go-ospf-high",
+		"if defined(ospf.metric1) && ospf.metric1 > 100 then reject; accept;")
+	if err != nil {
+		t.Fatalf("Compile: %v", err)
+	}
+	defer high.Free()
+
+	// OSPFv2 route with metric 200 - above the threshold, rejected.
+	ospf, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoOspf)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer ospf.Free()
+	if err := ospf.SetMetric(200); err != nil {
+		t.Fatalf("SetMetric: %v", err)
+	}
+	verdict, _, err := high.Evaluate(ospf)
+	if err != nil || verdict != FilterReject {
+		t.Fatalf("Evaluate high-cost OSPF: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterReject)
+	}
+
+	// OSPFv2 route with metric 50 - below the threshold, accepted.
+	low, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoOspf)
+	if err != nil {
+		t.Fatalf("NewRouteV4 low: %v", err)
+	}
+	defer low.Free()
+	if err := low.SetMetric(50); err != nil {
+		t.Fatalf("SetMetric low: %v", err)
+	}
+	verdict, _, err = high.Evaluate(low)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate low-cost OSPF: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+
+	// Non-OSPF (BGP) route: `defined(ospf.metric1)` is false, so
+	// the `&&` short-circuits and the route is accepted.
+	bgp, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4 bgp: %v", err)
+	}
+	defer bgp.Free()
+	if err := bgp.SetMetric(200); err != nil {
+		t.Fatalf("SetMetric bgp: %v", err)
+	}
+	verdict, _, err = high.Evaluate(bgp)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate non-OSPF (BGP): got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+
+	// OSPFv3 also surfaces the metric (RFC 5340 §4.1 mirrors OSPFv2 §16).
+	ospf3, err := NewRouteV6([16]byte{0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 1}, 64, ProtoOspf3)
+	if err != nil {
+		t.Fatalf("NewRouteV6: %v", err)
+	}
+	defer ospf3.Free()
+	if err := ospf3.SetMetric(220); err != nil {
+		t.Fatalf("SetMetric ospf3: %v", err)
+	}
+	v3, err := Compile("go-ospf3", "if ospf.metric1 == 220 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile v3: %v", err)
+	}
+	defer v3.Free()
+	verdict, _, err = v3.Evaluate(ospf3)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv3: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+}
