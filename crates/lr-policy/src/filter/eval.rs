@@ -218,6 +218,21 @@ pub trait FilterContext {
     fn bgp_has_otc(&self, route: &Route) -> bool {
         crate::bgp::has_otc(route)
     }
+    /// BGP AIGP (`bgp.aigp`, RFC 7311) — the Accumulated IGP Metric
+    /// (the sum of every type-1 TLV's 8-byte value in the
+    /// attribute's TLV stream). `None` when the attribute is absent
+    /// or malformed; `Some(0)` when present but zero or when the
+    /// value field is empty. The default delegates to
+    /// [`lr_policy::bgp::aigp`].
+    fn bgp_aigp(&self, route: &Route) -> Option<u64> {
+        crate::bgp::aigp(route)
+    }
+    /// True when an AIGP attribute is physically present on the route
+    /// (RFC 7311). Used by `defined(bgp.aigp)` to distinguish
+    /// "absent" from "set to zero".
+    fn bgp_has_aigp(&self, route: &Route) -> bool {
+        crate::bgp::has_aigp(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -728,6 +743,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // the latter collapses "absent" and "malformed" together
             // but the former keeps "present but zero" defined.
             RouteFieldKind::BgpOtc => self.ctx.bgp_has_otc(route),
+            // RFC 7311: AIGP presence is `has_aigp` (the attribute
+            // is on the route), not `aigp().is_some()` — the latter
+            // collapses "absent" and "malformed" together but the
+            // former keeps "present but zero" (and the empty-value
+            // field case) defined.
+            RouteFieldKind::BgpAigp => self.ctx.bgp_has_aigp(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -841,6 +862,16 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // that need to distinguish "absent" from "set to zero"
             // gate with `defined(bgp.otc)`.
             RouteFieldKind::BgpOtc => Ok(Value::Int(self.ctx.bgp_otc(route).unwrap_or(0) as i64)),
+            // RFC 7311: AIGP is an 8-byte accumulated metric
+            // surfaced as an `Int` (`0` when absent or set to zero).
+            // The wire value is `u64`; the DSL's `Value::Int` is
+            // `i64`, so a value exceeding `i64::MAX` saturates —
+            // practical IGP metrics are far below `i64::MAX`.
+            // Callers that need to distinguish "absent" from "set
+            // to zero" gate with `defined(bgp.aigp)`.
+            RouteFieldKind::BgpAigp => Ok(Value::Int(
+                self.ctx.bgp_aigp(route).unwrap_or(0).min(i64::MAX as u64) as i64,
+            )),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
@@ -914,8 +945,10 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// (`bgp.lrxp.hint.rank`, etc.) are deliberately NOT in
     /// `is_int_field`: their read decodes a TLV stream (not a single
     /// `get_u32_be`), so fusing would not save the allocation the
-    /// fast path exists to avoid. The `unwrap_or(0)` semantics for
-    /// absent attributes mirror `read_route_field` exactly so the
+    /// fast path exists to avoid. `bgp.aigp` (RFC 7311) is also
+    /// deliberately NOT fused for the same reason — its read parses
+    /// the AIGP attribute's TLV stream. The `unwrap_or(0)` semantics
+    /// for absent attributes mirror `read_route_field` exactly so the
     /// fused and unfused paths agree for every route.
     fn read_int_route_field(&self, field: &RouteField, route: &Route) -> Result<i64, EvalError> {
         Ok(match field.kind {
@@ -926,9 +959,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpOtc => self.ctx.bgp_otc(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
             // one of the five arms above; the LRXP int-typed fields
-            // fall through to the unreachable arm (the gate refuses
-            // to fuse them) and run the unfused `read_route_field`
-            // path instead.
+            // and `bgp.aigp` fall through to the unreachable arm
+            // (the gate refuses to fuse them) and run the unfused
+            // `read_route_field` path instead.
             _ => unreachable!("peephole is_int_field gates this"),
         })
     }

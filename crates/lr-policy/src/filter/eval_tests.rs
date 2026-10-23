@@ -1699,6 +1699,8 @@ const TAG_ORIGINATOR_ID: u8 = 9;
 const TAG_CLUSTER_LIST: u8 = 10;
 /// RFC 9234 §3.1: OTC attribute type code.
 const TAG_OTC: u8 = 35;
+/// RFC 7311 §3: AIGP attribute type code.
+const TAG_AIGP: u8 = 26;
 
 fn route_with_atomic_aggregate() -> Route {
     let mut r = route_with("203.0.113.0/24", 100, 0);
@@ -2034,6 +2036,132 @@ fn bgp_otc_peephole_fused_branch_agrees_with_unfused() {
     // path directly.
     assert_eq!(
         run("if 64512 == bgp.otc then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+// ---- RFC 7311: bgp.aigp ----
+
+fn route_with_aigp(metric: u64) -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    // AIGP is optional non-transitive (flags 0x80). The value is a
+    // TLV stream: a single type-1 TLV carrying the 8-byte metric.
+    let mut value = Vec::with_capacity(12);
+    value.extend_from_slice(&1u16.to_be_bytes()); // type 1
+    value.extend_from_slice(&12u16.to_be_bytes()); // length 12 (4 header + 8 value)
+    value.extend_from_slice(&metric.to_be_bytes());
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_AIGP),
+        flags: 0x80,
+        value,
+    });
+    r
+}
+
+#[test]
+fn bgp_aigp_reads_as_int_when_present() {
+    let mut r = route_with_aigp(64512);
+    assert_eq!(
+        run("if bgp.aigp == 64512 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_aigp_reads_as_zero_when_absent() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    // An absent AIGP reads as 0 — the unwrap_or(0) semantics on the
+    // int-typed field read.
+    assert_eq!(
+        run("if bgp.aigp == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_aigp_mismatch_rejects() {
+    let mut r = route_with_aigp(64513);
+    assert_eq!(
+        run("if bgp.aigp == 64512 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aigp_is_defined_iff_present() {
+    // Present, metric 64512.
+    let mut r_with = route_with_aigp(64512);
+    assert_eq!(
+        run("if defined(bgp.aigp) then accept; reject;", &mut r_with),
+        EvalResult::Accept,
+    );
+    // Absent.
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if defined(bgp.aigp) then accept; reject;", &mut r_without),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aigp_defined_distinguishes_absent_from_set_to_zero() {
+    // RFC 7311: a present value of 0 ("set but zero") is distinct
+    // from "absent" — `defined(bgp.aigp)` reports true for the
+    // former and false for the latter. This is the case the
+    // `has_aigp` accessor exists to make precise.
+    let mut r_zero = route_with_aigp(0);
+    assert_eq!(
+        run("if defined(bgp.aigp) then accept; reject;", &mut r_zero),
+        EvalResult::Accept,
+    );
+    let mut r_absent = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if defined(bgp.aigp) then accept; reject;", &mut r_absent),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aigp_metric_comparison_idiom() {
+    // RFC 7311 §4: the accumulated metric is a distance — a filter
+    // can prefer a lower-metric route. The DSL spells the test the
+    // same way BIRD does — `bgp.aigp < N`.
+    let mut r_low = route_with_aigp(50);
+    assert_eq!(
+        run("if bgp.aigp < 100 then accept; reject;", &mut r_low),
+        EvalResult::Accept,
+    );
+    let mut r_high = route_with_aigp(150);
+    assert_eq!(
+        run("if bgp.aigp < 100 then accept; reject;", &mut r_high),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aigp_is_not_assignable() {
+    let err = compile("test", "bgp.aigp = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_aigp_unfused_read_path_agrees_both_directions() {
+    // AIGP is deliberately NOT in the peephole's `is_int_field` set
+    // (its read parses a TLV stream, so fusing would not save the
+    // allocation the fast path exists to avoid). Both the
+    // constant-RHS and constant-LHS comparison forms run the
+    // unfused `read_route_field` path; pin the agreement.
+    let mut r = route_with_aigp(64512);
+    assert_eq!(
+        run("if bgp.aigp == 64512 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if 64512 == bgp.aigp then accept; reject;", &mut r),
         EvalResult::Accept,
     );
 }
