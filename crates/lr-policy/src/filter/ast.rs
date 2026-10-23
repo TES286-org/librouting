@@ -714,6 +714,30 @@ pub enum RouteFieldKind {
     /// defined. BIRD spells it `ospf_tag`; the BIRD translator
     /// renames it to `ospf.tag`.
     OspfTag,
+    /// `ospf.router_id` — RFC 2328 §A.4 `Advertising Router`
+    /// field / RFC 5340 §A.4 the same field on every v3 LSA, the
+    /// 32-bit OSPF Router-ID of the router that originated the
+    /// LSA the route was computed from (the Router-LSA's
+    /// advertising router for intra-area stub routes; the
+    /// Network-LSA's advertising router — the DR — for
+    /// intra-area transit routes; the summary-LSA's advertising
+    /// router — the ABR — for inter-area routes; the
+    /// AS-external-LSA's advertising router — the ASBR — for
+    /// external routes). Read-only; surfaces as an `Int` (`0`
+    /// when the route carries no OSPF router-id attribute — a
+    /// non-OSPF route, or an OSPF route whose computation could
+    /// not identify the originating LSA's advertising router —
+    /// mirroring BIRD's eattr default for an unattached
+    /// `ospf_router_id` reference). The `defined(ospf.router_id)`
+    /// predicate distinguishes "no attribute" from "attribute
+    /// present but zero" via `has_router_id`. RFC 2328 §3.1.b
+    /// recommends a non-zero Router-ID but does not forbid
+    /// 0.0.0.0, so an OSPF route with Router-ID 0.0.0.0 reads
+    /// as `0` for `ospf.router_id == 0` and
+    /// `defined(ospf.router_id)` is true. BIRD spells it
+    /// `ospf_router_id`; the BIRD translator renames it to
+    /// `ospf.router_id`.
+    OspfRouterId,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -807,6 +831,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::OspfMetric1 => "ospf.metric1",
             RouteFieldKind::OspfMetric2 => "ospf.metric2",
             RouteFieldKind::OspfTag => "ospf.tag",
+            RouteFieldKind::OspfRouterId => "ospf.router_id",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

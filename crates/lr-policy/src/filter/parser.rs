@@ -890,6 +890,35 @@ impl Parser {
                         // — a v3 external without the T bit set
                         // reads as `0` / not defined.
                         "tag" => RouteFieldKind::OspfTag,
+                        // RFC 2328 §A.4 `Advertising Router` field /
+                        // RFC 5340 §A.4 the same field on every v3
+                        // LSA — the 32-bit OSPF Router-ID of the
+                        // router that originated the LSA the route
+                        // was computed from (the Router-LSA's
+                        // advertising router for intra-area stub
+                        // routes; the Network-LSA's advertising
+                        // router — the DR — for intra-area transit
+                        // routes; the summary-LSA's advertising
+                        // router — the ABR — for inter-area routes;
+                        // the AS-external-LSA's advertising router
+                        // — the ASBR — for external routes). BIRD
+                        // spells it `ospf_router_id`; the BIRD
+                        // translator renames it to `ospf.router_id`.
+                        // Read-only; surfaces as an `Int` (`0` when
+                        // the route carries no OSPF router-id
+                        // attribute — a non-OSPF route, or an OSPF
+                        // route whose computation could not identify
+                        // the originating LSA's advertising router
+                        // — so the canonical idiom
+                        // `if defined(ospf.router_id) &&
+                        // ospf.router_id == 192.0.2.1 then accept;`
+                        // no-ops on non-OSPF routes the same way it
+                        // does in BIRD). RFC 2328 §3.1.b recommends
+                        // a non-zero Router-ID but does not forbid
+                        // 0.0.0.0, so an OSPF route with Router-ID
+                        // 0.0.0.0 reads as `0` and
+                        // `defined(ospf.router_id)` is true.
+                        "router_id" => RouteFieldKind::OspfRouterId,
                         other => {
                             return Err(self.err(
                                 field_tok.span,
