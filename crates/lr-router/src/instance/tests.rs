@@ -3240,6 +3240,16 @@ fn ospfv3_inter_area_and_external_routes_published() {
     assert_eq!(summary_route.protocol, Protocol::Ospfv3);
     assert_eq!(summary_route.preference.metric, 17);
     assert_eq!(summary_route.next_hop, Some(IpAddr::V6(ll2)));
+    // The LrOspfMetric2 attribute is only attached to type-2
+    // external OSPF routes — an inter-area route carries no such
+    // tag, so its absence is the marker `has_metric2` consults.
+    assert_eq!(
+        summary_route.attributes.get(lr_core::attr::AttrTag::raw(
+            lr_bgp::path::AttrType::LrOspfMetric2.to_u8()
+        )),
+        None,
+        "inter-area route carries no LrOspfMetric2 tag"
+    );
     // External: type 2 → the external metric alone, via the ASBR's
     // link-local.
     let external_route = r
@@ -3250,6 +3260,24 @@ fn ospfv3_inter_area_and_external_routes_published() {
     assert_eq!(external_route.protocol, Protocol::Ospfv3);
     assert_eq!(external_route.preference.metric, 100);
     assert_eq!(external_route.next_hop, Some(IpAddr::V6(ll2)));
+    // RFC 2328 §16.4: the type-2 external metric rides the route's
+    // `preference.metric` (the value the §16.4 (6) type-2 preference
+    // ranks against) AND the private `LrOspfMetric2` attribute (so
+    // the policy DSL's `ospf.metric2` field can surface it distinctly
+    // from `ospf.metric1`, which carries the same value here — the
+    // OSPF route computation stores the external metric in
+    // `preference.metric` for type-2 externals). The attribute is
+    // 4-byte big-endian; the codec strips it at BGP encode so peers
+    // never see it.
+    assert_eq!(
+        external_route
+            .attributes
+            .get_u32_be(lr_core::attr::AttrTag::raw(
+                lr_bgp::path::AttrType::LrOspfMetric2.to_u8()
+            )),
+        Some(100),
+        "LrOspfMetric2 carries the type-2 external metric"
+    );
 }
 
 /// An F-bit 0x4005 publishes with the global forwarding address as
@@ -3339,6 +3367,21 @@ fn ospfv3_external_forwarding_address_next_hop() {
     assert_eq!(route.preference.metric, 30, "type 2: FA leg not added");
     // The FA — not the ASBR's link-local — is the published next hop.
     assert_eq!(route.next_hop, Some(IpAddr::V6(fa)));
+    // RFC 2328 §16.4 / RFC 5340 §4.8.5: the type-2 external metric
+    // (30 here) is also carried in the private `LrOspfMetric2`
+    // attribute so the policy DSL's `ospf.metric2` field can surface
+    // it distinctly from `ospf.metric1` (the §16.4 (6) type-2
+    // preference's primary sort key — which is also 30 here, since
+    // lr stores the external metric in `preference.metric` for
+    // type-2 externals; the OSPF route computation does not store
+    // the internal cost to ASBR separately on the Route).
+    assert_eq!(
+        route.attributes.get_u32_be(lr_core::attr::AttrTag::raw(
+            lr_bgp::path::AttrType::LrOspfMetric2.to_u8()
+        )),
+        Some(30),
+        "LrOspfMetric2 carries the type-2 external metric (FA-leg case)"
+    );
 }
 
 /// An OSPFv3 ABR (backbone + area 1, both v3) originates a 0x2003

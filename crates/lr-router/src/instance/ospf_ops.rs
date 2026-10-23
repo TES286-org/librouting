@@ -319,6 +319,31 @@ impl DefaultRouter {
                     attributes = attrs.into();
                     next_hop = Some(nh);
                 }
+                // RFC 2328 §16.4: a type-2 external route's
+                // `preference.metric` IS the external metric (the
+                // E-bit-set LSA value) — the metric the §16.4 (6)
+                // type-2 preference ranks against. Carry that same
+                // value in the private `LrOspfMetric2` attribute so
+                // the policy DSL's `ospf.metric2` field can surface
+                // it distinctly from `ospf.metric1`. Only attached
+                // for type-2 externals; intra-area, inter-area and
+                // type-1 external OSPF routes carry no
+                // `LrOspfMetric2` tag, so its absence is the marker
+                // `has_metric2` consults. The BGP codec strips the
+                // tag at encode so peers never see it; the value
+                // layout is the 4-byte big-endian u32 the
+                // `lr-policy::ospf::metric2` accessor reads.
+                if let OspfKind::External {
+                    metric_type: ExternalMetricType::Type2,
+                    ..
+                } = entry.kind
+                {
+                    attributes.insert(lr_core::attr::Attribute {
+                        tag: lr_core::attr::AttrTag::raw(AttrType::LrOspfMetric2.to_u8()),
+                        flags: 0x80, // optional, non-transitive
+                        value: (entry.metric as u32).to_be_bytes().to_vec(),
+                    });
+                }
                 let route = Route {
                     key: key.clone(),
                     origin: RouteOrigin {
