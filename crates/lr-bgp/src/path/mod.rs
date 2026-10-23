@@ -30,7 +30,7 @@ pub use labeled_nlri::{
 };
 pub use mp_nlri::{MpNextHop, MpReach, MpUnreach};
 pub use well_known::{
-    Aggregator, AtomicAggregate, ClusterList, LocalPref, Med, NextHop, NextHopKind, Origin,
+    Aggregator, Aigp, AtomicAggregate, ClusterList, LocalPref, Med, NextHop, NextHopKind, Origin,
     OriginKind, OriginatorId,
 };
 
@@ -106,6 +106,14 @@ pub enum AttrType {
     LargeCommunities = 32,
     /// RFC 9234: OTC (Only To Customer) — 4-byte unsigned integer.
     Otc = 35,
+    /// RFC 7311: AIGP (Accumulated IGP Metric) — an optional
+    /// non-transitive attribute whose value is a TLV stream. The
+    /// type-1 TLV carries an 8-byte unsigned accumulated metric;
+    /// the typed accessor on [`PathAttributes`] surfaces that
+    /// metric. The codec stores the raw value bytes verbatim, so
+    /// unknown TLVs round-trip byte-for-byte (RFC 7311 §3 p5:
+    /// "an AIGP TLV that is not understood MUST be preserved").
+    Aigp = 26,
     /// RFC 7752 §3.3 — BGP-LS Attribute. The attribute value is a
     /// TLV stream carrying link-state metadata for an accompanying
     /// BGP-LS NLRI (Node / Link / Prefix / SRv6 SID). Mandatory on
@@ -168,6 +176,7 @@ impl AttrType {
             29 => Self::BgpLsAttribute,
             32 => Self::LargeCommunities,
             35 => Self::Otc,
+            26 => Self::Aigp,
             254 => Self::LrExchangePlaneRecords,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
@@ -197,6 +206,7 @@ impl AttrType {
             Self::BgpLsAttribute => 29,
             Self::LargeCommunities => 32,
             Self::Otc => 35,
+            Self::Aigp => 26,
             Self::LrExchangePlaneRecords => 254,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
@@ -399,6 +409,28 @@ impl PathAttributes {
     /// latter.
     pub fn has_otc(&self) -> bool {
         self.get(AttrType::Otc).is_some()
+    }
+    /// AIGP (RFC 7311) — the Accumulated IGP Metric attribute. The
+    /// value field is a TLV stream; the typed view surfaces the
+    /// accumulated metric (the sum of every type-1 TLV's 8-byte
+    /// value). `None` when the attribute is absent or the TLV stream
+    /// is malformed (a TLV length runs past the end, or a type-1
+    /// TLV's value is not exactly 8 bytes). An empty value field
+    /// decodes to `Aigp(0)` — use [`Self::has_aigp`] to distinguish
+    /// "absent" from "present but zero".
+    ///
+    /// The codec stores the raw attribute bytes verbatim, so unknown
+    /// TLV types round-trip byte-for-byte (RFC 7311 §3 p5).
+    pub fn aigp(&self) -> Option<well_known::Aigp> {
+        let a = self.get(AttrType::Aigp)?;
+        well_known::Aigp::decode(&a.value)
+    }
+    /// True when an AIGP attribute is physically present on the route
+    /// (RFC 7311). Use this to distinguish "no attribute" from
+    /// "present but zero" — `aigp()` returns `Some(Aigp(0))` for the
+    /// latter (e.g. an empty value field).
+    pub fn has_aigp(&self) -> bool {
+        self.get(AttrType::Aigp).is_some()
     }
     pub fn communities(&self) -> Vec<Community> {
         self.get(AttrType::Communities)
