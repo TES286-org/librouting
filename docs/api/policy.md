@@ -165,7 +165,11 @@ RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), the RFC 7311
 AIGP accumulated-metric attribute (`bgp.aigp`), the RFC 4271 §5.1.7
 AGGREGATOR attribute (`bgp.aggregator.asn`, `bgp.aggregator.speaker`),
 the RFC 6514 §5 PMSI Tunnel attribute (`bgp.pmsi_tunnel`), the RFC 2328
-§16 / RFC 5340 §4.1 primary OSPF metric (`ospf.metric1`), and —
+§16 / RFC 5340 §4.1 primary OSPF metric (`ospf.metric1`), the RFC 2328
+§16.4 / RFC 5340 §4.8.5 type-2 external OSPF metric (`ospf.metric2`,
+carried through the Loc-RIB on the private `LrOspfMetric2`
+path-attribute tag the OSPF route computation attaches to type-2
+external routes), and —
 behind the `exchange-plane` feature — the LRXP exchange-plane records
 the route carries (`bgp.lrxp.*`, issue #81).
 
@@ -224,8 +228,25 @@ the route carries (`bgp.lrxp.*`, issue #81).
   arm for a non-OSPF route). The attribute surfaces as a read-only
   `int` — `0` when the route is not OSPF — and the read pays one
   `match` on `route.protocol` plus one field read, cheaper than any
-  `bgp.*` accessor that decodes a path attribute. The remaining OSPF
-  per-route attributes BIRD exposes (`ospf_metric2`, `ospf_tag`,
+  `bgp.*` accessor that decodes a path attribute.
+- RFC 2328 §16.4 / RFC 5340 §4.8.5 — the type-2 external OSPF metric
+  the filter DSL exposes as `ospf.metric2`; the typed accessor
+  (`lr-policy::ospf::metric2`) reads the private `LrOspfMetric2`
+  path-attribute tag the OSPF route computation
+  (`lr-router::instance::ospf_ops::ospf_recompute`) attaches to
+  type-2 external routes and returns `None` for everything else
+  (non-OSPF routes, OSPF intra-area / inter-area routes, and OSPF
+  type-1 external routes — mirroring BIRD's eattr default for an
+  unattached `ospf_metric2` reference, so the canonical idiom `if
+  defined(ospf.metric2) && ospf.metric2 > 100 then reject;`
+  short-circuits on the `defined()` arm for a non-type-2-external
+  route). The attribute surfaces as a read-only `int` — `0` when
+  the route is not a type-2 external — and the read pays one
+  protocol-kind `match` plus one BTreeMap lookup plus one 4-byte
+  read on `route.attributes`, cheaper than any `bgp.*` accessor
+  that decodes a multi-byte TLV stream, more expensive than
+  `ospf.metric1` (which reads a struct field, no lookup). The
+  remaining OSPF per-route attributes BIRD exposes (`ospf_tag`,
   `ospf_router_id`) have no lr-DSL spelling yet.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.

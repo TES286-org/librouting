@@ -2745,16 +2745,320 @@ fn ospf_metric1_peephole_fused_branch_agrees_with_unfused() {
 }
 
 #[test]
-fn ospf_metric1_unknown_field_is_parse_error() {
+fn ospf_unknown_field_is_parse_error() {
     // A typo in the OSPF field name surfaces a parse error at
     // compile time, not a runtime "unknown field". The parse error
     // uses the `UnknownOspfField` variant so the diagnostic names
-    // the OSPF surface (mirrors `UnknownBgpField`).
-    let err = compile("test", "if defined(ospf.metric2) then accept; reject;").unwrap_err();
+    // the OSPF surface (mirrors `UnknownBgpField`). `ospf.bogus`
+    // is not a known OSPF field — `ospf.metric1` (RFC 2328 §16 /
+    // RFC 5340 §4.1) and `ospf.metric2` (RFC 2328 §16.4 / RFC 5340
+    // §4.8.5) are the two known fields at the time of writing;
+    // `ospf.tag` and `ospf.router_id` are the next increments the
+    // ROADMAP names (still unimplemented at the time of writing).
+    let err = compile("test", "if defined(ospf.bogus) then accept; reject;").unwrap_err();
     let msg = format!("{err}");
     assert!(
-        msg.contains("ospf") && msg.contains("metric2"),
+        msg.contains("ospf") && msg.contains("bogus"),
         "expected an UnknownOspfField diagnostic, got: {msg}"
+    );
+}
+
+// ---- ospf.metric2 (RFC 2328 §16.4 / RFC 5340 §4.8.5) ----
+//
+// The `ospf.metric2` field surfaces the type-2 external OSPF metric
+// — the E-bit-set LSA metric the §16.4 (6) type-2 preference ranks
+// against. The lr `Route` data model carries the type-2 external
+// metric in `preference.metric` for type-2 externals (the same
+// field every protocol feeds into the cross-protocol admin-distance
+// sort), but the OSPF route computation drops the `metric_type`
+// marker after the §16.4 (6) selection, so the DSL has no way to
+// distinguish a type-2 external from any other OSPF route by reading
+// `preference.metric` alone. The `LrOspfMetric2` private path-
+// attribute tag (RFC 2328 §16.4, code point 253) carries the type-2
+// external metric through the Loc-RIB and is the marker
+// `has_metric2` consults. The tests below pin the full path —
+// parse → eval → accessor → attribute lookup — against routes the
+// test stub builds with the same `Attributes::insert` shape the
+// `ospf_recompute` populate step uses.
+
+/// The path-attribute tag carrying the OSPF type-2 external metric.
+/// Mirrors `lr_bgp::path::AttrType::LrOspfMetric2` (value 253) and
+/// `lr_policy::ospf::LR_OSPF_METRIC2_TAG` — kept as a `u8` here so
+/// the test stub does not need to depend on `lr-bgp` (the same
+/// hard-coding shape the accessor in `lr-policy::ospf` uses).
+const LR_OSPF_METRIC2_TAG: u8 = 253;
+
+/// Build an OSPFv2 route carrying the `LrOspfMetric2` attribute —
+/// the shape `lr-router::instance::ospf_ops::ospf_recompute`
+/// attaches for a type-2 external route.
+fn ospf_route_with_metric2(metric1: u32, metric2: u32) -> Route {
+    let mut r = ospf_route_with_metric(metric1);
+    r.attributes.insert(lr_core::attr::Attribute {
+        tag: lr_core::attr::AttrTag::raw(LR_OSPF_METRIC2_TAG),
+        flags: 0x80, // optional, non-transitive (matches the populate step's flag set)
+        value: metric2.to_be_bytes().to_vec(),
+    });
+    r
+}
+
+/// Build an OSPFv3 route carrying the `LrOspfMetric2` attribute.
+fn ospfv3_route_with_metric2(metric1: u32, metric2: u32) -> Route {
+    let mut r = ospfv3_route_with_metric(metric1);
+    r.attributes.insert(lr_core::attr::Attribute {
+        tag: lr_core::attr::AttrTag::raw(LR_OSPF_METRIC2_TAG),
+        flags: 0x80,
+        value: metric2.to_be_bytes().to_vec(),
+    });
+    r
+}
+
+#[test]
+fn ospf_metric2_reads_as_int_when_present_v2() {
+    let mut r = ospf_route_with_metric2(10, 200);
+    assert_eq!(
+        run("if ospf.metric2 == 200 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric2_reads_as_int_when_present_v3() {
+    let mut r = ospfv3_route_with_metric2(10, 220);
+    assert_eq!(
+        run("if ospf.metric2 == 220 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric2_reads_as_zero_for_non_type2_external_ospf_routes() {
+    // An OSPF route with no `LrOspfMetric2` attribute — i.e. an
+    // intra-area, inter-area or type-1 external route (the OSPF
+    // route computation only attaches the tag for type-2 externals).
+    // `ospf.metric2` reads as `0` (the unwrap_or(0) default for an
+    // absent int-typed attribute read), mirroring BIRD's eattr
+    // default for an unattached `ospf_metric2` reference. The
+    // route's `ospf.metric1` is its `preference.metric` (42 here),
+    // so the test also pins that `ospf.metric2` does not fall
+    // through to `preference.metric` on a non-type-2-external
+    // route — it reads `0`, not `42`.
+    let mut r = ospf_route_with_metric(42);
+    assert_eq!(
+        run("if ospf.metric2 == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.metric2 == 42 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric2_reads_as_zero_for_non_ospf_routes_even_with_the_attribute() {
+    // The accessor's protocol-kind fast path rejects a non-OSPF
+    // route even if the attribute is somehow present (the OSPF
+    // route computation never attaches the tag to a non-OSPF route,
+    // but a hand-crafted test route that violates the invariant
+    // still reads as `0` — defensive, mirrors `ospf.metric1`'s
+    // protocol-kind check).
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(lr_core::attr::Attribute {
+        tag: lr_core::attr::AttrTag::raw(LR_OSPF_METRIC2_TAG),
+        flags: 0x80,
+        value: 200u32.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run("if ospf.metric2 == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.metric2 == 200 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric2_mismatch_rejects() {
+    let mut r = ospf_route_with_metric2(10, 200);
+    assert_eq!(
+        run("if ospf.metric2 == 150 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric2_is_defined_iff_type2_external_ospf_route() {
+    // OSPFv2 type-2 external: defined.
+    let mut r_v2 = ospf_route_with_metric2(10, 200);
+    assert_eq!(
+        run("if defined(ospf.metric2) then accept; reject;", &mut r_v2),
+        EvalResult::Accept,
+    );
+    // OSPFv3 type-2 external: defined.
+    let mut r_v3 = ospfv3_route_with_metric2(10, 220);
+    assert_eq!(
+        run("if defined(ospf.metric2) then accept; reject;", &mut r_v3),
+        EvalResult::Accept,
+    );
+    // OSPFv2 non-type-2-external (no attribute): not defined.
+    let mut r_ospf = ospf_route_with_metric(42);
+    assert_eq!(
+        run("if defined(ospf.metric2) then accept; reject;", &mut r_ospf),
+        EvalResult::Reject(None),
+    );
+    // Non-OSPF route (BGP): not defined even if the attribute is
+    // somehow present (the protocol-kind fast path rejects it).
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    r_bgp.attributes.insert(lr_core::attr::Attribute {
+        tag: lr_core::attr::AttrTag::raw(LR_OSPF_METRIC2_TAG),
+        flags: 0x80,
+        value: 200u32.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run("if defined(ospf.metric2) then accept; reject;", &mut r_bgp),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric2_defined_distinguishes_non_type2_external_from_metric_zero() {
+    // RFC 2328 §16.4 (6): a type-2 external OSPF route with metric 0
+    // (an E-bit-set type-5 LSA whose 24-bit external metric happens
+    // to be zero, unusual but well-formed per RFC 2328 §2.3) is
+    // distinct from "not a type-2 external" — `defined(ospf.metric2)`
+    // reports true for the former and false for the latter. This
+    // is the case the `has_metric2` accessor exists to make
+    // precise.
+    let mut r_zero = ospf_route_with_metric2(10, 0);
+    assert_eq!(
+        run("if defined(ospf.metric2) then accept; reject;", &mut r_zero),
+        EvalResult::Accept,
+    );
+    let mut r_absent = ospf_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric2) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric2_canonical_bird_idiom_translates() {
+    // The canonical BIRD filter idiom for OSPF type-2 external
+    // metric policy is
+    // `if defined(ospf_metric2) && ospf_metric2 > 100 then reject;`
+    // ("a high-cost type-2 external a redistribution pipe picks up
+    // should not be re-advertised"). The translator renames
+    // `ospf_metric2` to `ospf.metric2` and the body round-trips
+    // through the daemon loader.
+    let mut r_high = ospf_route_with_metric2(10, 200);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric2) && ospf.metric2 > 100 then reject; accept;",
+            &mut r_high
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_low = ospf_route_with_metric2(10, 50);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric2) && ospf.metric2 > 100 then reject; accept;",
+            &mut r_low
+        ),
+        EvalResult::Accept,
+    );
+    // A non-type-2-external OSPF route (intra-area / inter-area /
+    // type-1 external): `defined(ospf.metric2)` is false, so the
+    // `&&` short-circuits and the route is accepted.
+    let mut r_ospf = ospf_route_with_metric(200);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric2) && ospf.metric2 > 100 then reject; accept;",
+            &mut r_ospf
+        ),
+        EvalResult::Accept,
+    );
+    // A non-OSPF (BGP) route: `defined(ospf.metric2)` is false, so
+    // the `&&` short-circuits and the route is accepted.
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric2) && ospf.metric2 > 100 then reject; accept;",
+            &mut r_bgp
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric2_is_not_assignable() {
+    let err = compile("test", "ospf.metric2 = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn ospf_metric2_peephole_fused_branch_agrees_with_unfused() {
+    // The peephole pass fuses `LoadField(OspfMetric2); Push(Int(c));
+    // Bin(op); JumpIf*` into a single `BranchFieldIntCmp` for int
+    // fields. `ospf.metric2` was added to `is_int_field` so the
+    // fused path fires; pin the agreement between the fused and
+    // unfused paths by checking the same comparison both ways.
+    let mut r = ospf_route_with_metric2(10, 150);
+    // Fused: constant on the RHS, comparison op in the fuse set.
+    assert_eq!(
+        run("if ospf.metric2 == 150 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.metric2 != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    // Unfused: constant on the LHS (the peephole does not fuse
+    // `Bin(Int(c), op, LoadField)`), exercises the read_route_field
+    // path directly.
+    assert_eq!(
+        run("if 150 == ospf.metric2 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric1_and_metric2_independent_reads() {
+    // A type-2 external OSPFv2 route: `metric1` (the route's
+    // `preference.metric` — the cost to the ASBR in lr's model for
+    // type-2 externals — actually, lr stores the external metric
+    // in `preference.metric` for type-2 externals; the cost to the
+    // ASBR is the §16.4 (6) tie-breaker the OSPF route computation
+    // drops after selection) and `metric2` (the `LrOspfMetric2`
+    // attribute value — the same external metric for type-2
+    // externals) read independently: a filter can read either
+    // without the other's value leaking through.
+    let mut r = ospf_route_with_metric2(200, 200);
+    // Both read 200.
+    assert_eq!(
+        run(
+            "if ospf.metric1 == 200 && ospf.metric2 == 200 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    // `metric1` is `preference.metric` (200), `metric2` is the
+    // attribute value (200) — both 200, but the field reads are
+    // independent.
+    let mut r2 = ospf_route_with_metric(200);
+    // No `LrOspfMetric2` attribute → `metric2` reads 0.
+    assert_eq!(
+        run(
+            "if ospf.metric1 == 200 && ospf.metric2 == 0 then accept; reject;",
+            &mut r2
+        ),
+        EvalResult::Accept,
     );
 }
 

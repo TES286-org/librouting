@@ -270,14 +270,13 @@ const UNMAPPABLE_WORDS: &[&str] = &[
     "bt_test_same",
     "bt_check_assign",
     // OSPF per-route attributes BIRD exposes that lr's filter DSL
-    // does NOT surface yet. `ospf_metric1` is supported (the
-    // BIRD translator renames it to `ospf.metric1`); the remaining
-    // OSPF attributes (`ospf_metric2` — type-2 external metric,
-    // `ospf_tag` — external route tag, `ospf_router_id` — OSPF
-    // router ID of the originator) are listed here so a filter
-    // that references them is marked unfaithful instead of
-    // silently dropping the reference.
-    "ospf_metric2",
+    // does NOT surface yet. `ospf_metric1` and `ospf_metric2` are
+    // supported (the BIRD translator renames them to `ospf.metric1`
+    // and `ospf.metric2`); the remaining OSPF attributes (`ospf_tag`
+    // — external route tag, `ospf_router_id` — OSPF router ID of the
+    // originator) are listed here so a filter that references them
+    // is marked unfaithful instead of silently dropping the
+    // reference.
     "ospf_tag",
     "ospf_router_id",
 ];
@@ -285,10 +284,12 @@ const UNMAPPABLE_WORDS: &[&str] = &[
 /// BIRD attribute-word prefixes with no lr equivalent (per-protocol
 /// attributes: `krt_source`, …). `ospf_` is intentionally NOT in
 /// this list — the lr DSL now exposes `ospf.metric1` (RFC 2328 §16 /
-/// RFC 5340 §4.1) and the BIRD translator renames `ospf_metric1`
-/// to `ospf.metric1`. The remaining OSPF attributes BIRD exposes
-/// (`ospf_metric2`, `ospf_tag`, `ospf_router_id`) are listed
-/// explicitly in [`UNMAPPABLE_WORDS`] below.
+/// RFC 5340 §4.1) and `ospf.metric2` (RFC 2328 §16.4 / RFC 5340
+/// §4.8.5), and the BIRD translator renames `ospf_metric1` to
+/// `ospf.metric1` and `ospf_metric2` to `ospf.metric2`. The
+/// remaining OSPF attributes BIRD exposes (`ospf_tag`,
+/// `ospf_router_id`) are listed explicitly in [`UNMAPPABLE_WORDS`]
+/// below.
 const UNMAPPABLE_PREFIXES: &[&str] = &[
     "krt_",
     "rip_",
@@ -362,11 +363,27 @@ const RENAMES: &[(&str, &str)] = &[
     // is not OSPF, mirroring BIRD's eattr default for an unattached
     // `ospf_metric1` reference). The canonical idiom `if
     // ospf_metric1 > 100 then reject;` translates faithfully to
-    // `if ospf.metric1 > 100 then reject;`. The remaining OSPF
-    // attributes (`ospf_metric2`, `ospf_tag`, `ospf_router_id`) are
-    // listed in [`UNMAPPABLE_WORDS`] above — they have no lr-DSL
-    // spelling yet.
+    // `if ospf.metric1 > 100 then reject;`.
     ("ospf_metric1", "ospf.metric1"),
+    // RFC 2328 §16.4 / RFC 5340 §4.8.5 — `ospf_metric2` is the
+    // type-2 external OSPF metric (the E-bit-set LSA metric the
+    // §16.4 (6) type-2 preference ranks against — alone; the cost
+    // to the ASBR breaks the tie, and that cost lives in
+    // `ospf.metric1` for type-2 externals in lr's
+    // `preference.metric` model). lr's DSL spells it `ospf.metric2`
+    // (read-only `Int`, `0` when the route is not a type-2
+    // external — i.e. a non-OSPF route, an OSPF intra-area /
+    // inter-area route, or an OSPF type-1 external route —
+    // mirroring BIRD's eattr default for an unattached
+    // `ospf_metric2` reference). The canonical idiom `if
+    // defined(ospf_metric2) && ospf_metric2 > 100 then reject;`
+    // translates faithfully to `if defined(ospf.metric2) &&
+    // ospf.metric2 > 100 then reject;` (the `defined()` arm
+    // distinguishes "not a type-2 external" from "type-2 external
+    // with metric 0"). The remaining OSPF attributes (`ospf_tag`,
+    // `ospf_router_id`) are listed in [`UNMAPPABLE_WORDS`] above —
+    // they have no lr-DSL spelling yet.
+    ("ospf_metric2", "ospf.metric2"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),

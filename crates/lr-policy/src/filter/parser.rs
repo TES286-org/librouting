@@ -854,6 +854,21 @@ impl Parser {
                         // then reject;` no-ops on non-OSPF routes the
                         // same way it does in BIRD).
                         "metric1" => RouteFieldKind::OspfMetric1,
+                        // RFC 2328 §16.4 / RFC 5340 §4.8.5 — the
+                        // type-2 external OSPF metric (the E-bit-set
+                        // LSA metric the §16.4 (6) type-2 preference
+                        // ranks against — alone; the cost to the
+                        // ASBR breaks the tie, and that cost lives in
+                        // `ospf.metric1` for type-2 externals). BIRD
+                        // spells it `ospf_metric2`; the BIRD
+                        // translator renames it to `ospf.metric2`.
+                        // Read-only; surfaces as an `Int` (`0` when
+                        // the route is not a type-2 external, so the
+                        // canonical idiom `if defined(ospf.metric2) &&
+                        // ospf.metric2 > 100 then reject;` no-ops on
+                        // non-type-2-external routes the same way it
+                        // does in BIRD).
+                        "metric2" => RouteFieldKind::OspfMetric2,
                         other => {
                             return Err(self.err(
                                 field_tok.span,

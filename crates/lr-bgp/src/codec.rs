@@ -531,14 +531,18 @@ fn encode_update(
     let attr_len_pos = out.reserve(2).ok_or(EncodeError::BufferFull)?;
     let attr_start = out.position();
     for a in u.attributes.iter() {
-        // The private LrMplsLabelStack / LrExchangePlaneRecords tags carry
-        // router-internal state inside the Loc-RIB only — they are never
-        // sent on the wire (the label stack lives in the NLRI; the
-        // exchange-plane wire form is the fresh type-251 attribute the
-        // egress path builds). Skip both during encode.
+        // The private LrMplsLabelStack / LrExchangePlaneRecords /
+        // LrOspfMetric2 tags carry router-internal state inside the
+        // Loc-RIB only — they are never sent on the wire (the label
+        // stack lives in the NLRI; the exchange-plane wire form is
+        // the fresh type-251 attribute the egress path builds; the
+        // OSPF metric-2 carries OSPF ingress state from the LSDB that
+        // BGP never re-advertises). Skip all three during encode.
         if matches!(
             a.attr_type,
-            crate::path::AttrType::LrMplsLabelStack | crate::path::AttrType::LrExchangePlaneRecords
+            crate::path::AttrType::LrMplsLabelStack
+                | crate::path::AttrType::LrExchangePlaneRecords
+                | crate::path::AttrType::LrOspfMetric2
         ) {
             continue;
         }

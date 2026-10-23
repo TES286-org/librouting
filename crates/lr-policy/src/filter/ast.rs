@@ -680,6 +680,21 @@ pub enum RouteFieldKind {
     /// BIRD spells it `ospf_metric1`; the BIRD translator renames
     /// it to `ospf.metric1`.
     OspfMetric1,
+    /// `ospf.metric2` — RFC 2328 §16.4 / RFC 5340 §4.8.5, the
+    /// type-2 external OSPF metric (the E-bit-set LSA metric the
+    /// §16.4 (6) type-2 preference ranks against — alone; the
+    /// cost to the ASBR breaks the tie, and that cost lives in
+    /// `ospf.metric1` for type-2 externals in lr's
+    /// `preference.metric` model). Read-only; surfaces as an
+    /// `Int` (`0` when the route is not a type-2 external — i.e.
+    /// a non-OSPF route, an OSPF intra-area / inter-area route,
+    /// or an OSPF type-1 external route — mirroring BIRD's eattr
+    /// default for an unattached `ospf_metric2` reference). The
+    /// `defined(ospf.metric2)` predicate distinguishes "not a
+    /// type-2 external" from "type-2 external with metric 0"
+    /// via `has_metric2`. BIRD spells it `ospf_metric2`; the
+    /// BIRD translator renames it to `ospf.metric2`.
+    OspfMetric2,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -771,6 +786,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpAggregatorSpeaker => "bgp.aggregator.speaker",
             RouteFieldKind::BgpPmsiTunnel => "bgp.pmsi_tunnel",
             RouteFieldKind::OspfMetric1 => "ospf.metric1",
+            RouteFieldKind::OspfMetric2 => "ospf.metric2",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

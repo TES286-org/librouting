@@ -146,9 +146,30 @@ pub enum AttrType {
     /// raw wire body of an attribute that arrived with the Partial bit
     /// set (forwarding material, design §7).
     LrExchangePlaneRecords = 254,
+    /// librouting-private OSPF type-2 external metric (RFC 2328 §16.4 /
+    /// RFC 5340 §4.8.5). Carries the type-2 external metric — the
+    /// 24-bit external-metric value from a type-5 / type-7 LSA's E-bit+
+    /// metric field — into the Loc-RIB so the policy DSL's
+    /// `ospf.metric2` field can surface it. *Never* transmitted on
+    /// the wire: it carries OSPF ingress state inside the Loc-RIB only
+    /// (the OSPF LSDB — not BGP — is the source), and the codec strips
+    /// it at encode so peers never see it. Only attached to OSPFv2 /
+    /// OSPFv3 routes whose `OspfKind::External` entry has `metric_type ==
+    /// ExternalMetricType::Type2`; absent for everything else.
+    ///
+    /// 253 is an internal-only code point: it never appears on the wire
+    /// (the codec strips it at encode) and it deliberately avoids the
+    /// 244-254 unassigned range that the W6.3 exchange-plane prototype
+    /// rides on for its wire attribute (type 251).
+    ///
+    /// Value layout: a single 4-byte big-endian u32 holding the 24-bit
+    /// external metric (zero-extended — RFC 2328 §2.3 caps the metric
+    /// at 24 bits, so the high byte is always zero on a well-formed
+    /// value).
+    LrOspfMetric2 = 253,
     /// Unknown attribute code. The explicit discriminant keeps the
     /// data-carrying variant out of the unit-like variants' implicit
-    /// numbering (the two private tags above sit at 254/255).
+    /// numbering (the three private tags above sit at 253/254/255).
     Other(u8) = 0,
 }
 
@@ -178,6 +199,7 @@ impl AttrType {
             35 => Self::Otc,
             26 => Self::Aigp,
             254 => Self::LrExchangePlaneRecords,
+            253 => Self::LrOspfMetric2,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
@@ -208,6 +230,7 @@ impl AttrType {
             Self::Otc => 35,
             Self::Aigp => 26,
             Self::LrExchangePlaneRecords => 254,
+            Self::LrOspfMetric2 => 253,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }
@@ -544,6 +567,61 @@ impl PathAttributes {
     pub fn label_stack(&self) -> Option<lr_mpls::LabelStack> {
         let a = self.get(AttrType::LrMplsLabelStack)?;
         lr_mpls::LabelStack::decode_4octet(&a.value).ok()
+    }
+
+    /// Attach the OSPF type-2 external metric (RFC 2328 §16.4) to this
+    /// attribute set under the private [`AttrType::LrOspfMetric2`] tag.
+    /// The tag is never transmitted on the wire; it carries the type-2
+    /// external metric the OSPF route computation extracted from a
+    /// type-5 / type-7 LSA's E-bit+metric field through the Loc-RIB so
+    /// the filter DSL's `ospf.metric2` field can surface it. Only
+    /// attached to OSPFv2 / OSPFv3 routes whose `OspfKind::External`
+    /// entry has `metric_type == ExternalMetricType::Type2`.
+    ///
+    /// `metric` is masked to the 24-bit OSPF external-metric width
+    /// (RFC 2328 §2.3 caps the metric at 24 bits; values above
+    /// `0x00ff_ffff` are clipped, never overflow).
+    pub fn set_ospf_metric2(&mut self, metric: u32) {
+        let masked = metric & 0x00ff_ffff;
+        let value = masked.to_be_bytes();
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrOspfMetric2,
+            value.to_vec(),
+        ));
+    }
+
+    /// Read back the OSPF type-2 external metric previously attached
+    /// with [`Self::set_ospf_metric2`]. Returns `None` when the route
+    /// carries no OSPF metric-2 attribute — i.e. it is not an OSPF
+    /// type-2 external route (the OSPF route computation only attaches
+    /// the tag for type-2 externals; intra-area, inter-area and
+    /// type-1 external OSPF routes carry no `LrOspfMetric2` tag, as do
+    /// all non-OSPF routes).
+    ///
+    /// A malformed value (not exactly 4 bytes) returns `None` — the
+    /// codec rejects partial-width stores at decode. Callers that
+    /// need to distinguish "absent" from "present but malformed"
+    /// should consult [`Self::has_ospf_metric2`].
+    pub fn ospf_metric2(&self) -> Option<u32> {
+        let a = self.get(AttrType::LrOspfMetric2)?;
+        if a.value.len() != 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([
+            a.value[0], a.value[1], a.value[2], a.value[3],
+        ]))
+    }
+
+    /// True when an `LrOspfMetric2` attribute is physically present on
+    /// the route (RFC 2328 §16.4). Use this to distinguish "no
+    /// attribute" from "present but malformed" — [`Self::ospf_metric2`]
+    /// returns `None` for both, but `has_ospf_metric2()` reports the
+    /// attribute's physical presence so the `defined(ospf.metric2)`
+    /// filter DSL predicate can distinguish them exactly as BIRD's
+    /// `defined(ospf_metric2)` does.
+    pub fn has_ospf_metric2(&self) -> bool {
+        self.get(AttrType::LrOspfMetric2).is_some()
     }
 
     /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`
