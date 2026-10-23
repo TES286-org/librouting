@@ -1587,3 +1587,48 @@ protocol bgp customer {
     // BIRD and lr.
     assert!(body.contains("defined(bgp.aggregator.asn)"), "body: {body}");
 }
+
+// ---- RFC 6514 §5: BIRD attribute rename for PMSI Tunnel ----
+
+/// BIRD's `bgp_pmsi_tunnel` attribute renames to lr's
+/// `bgp.pmsi_tunnel` and the body compiles in the lr filter DSL.
+/// The canonical BIRD idiom is `defined(bgp_pmsi_tunnel)` ("does
+/// the route carry a PMSI Tunnel binding — i.e. is it an MVPN
+/// A-D route?"); the rename maps it to `defined(bgp.pmsi_tunnel)`,
+/// which is faithful because BIRD exposes the attribute as an
+/// opaque bytestring (`EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY`) and lr's
+/// DSL mirrors that surface as a read-only `Bool` field.
+#[test]
+fn bird_filter_renames_pmsi_tunnel_attribute() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+filter import_pmsi {
+    if defined(bgp_pmsi_tunnel) then reject;
+    if !defined(bgp_pmsi_tunnel) then accept;
+    reject;
+}
+
+protocol bgp customer {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 {
+        import filter import_pmsi;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.filters.len(), 1);
+    let body = cfg.filters[0].body.as_deref().unwrap_or("");
+    // BIRD spelling is gone.
+    assert!(!body.contains("bgp_pmsi_tunnel"), "body: {body}");
+    // lr spelling is present.
+    assert!(body.contains("bgp.pmsi_tunnel"), "body: {body}");
+    // `defined()` survives verbatim — it shares spelling between
+    // BIRD and lr.
+    assert!(body.contains("defined(bgp.pmsi_tunnel)"), "body: {body}");
+    assert!(body.contains("!defined(bgp.pmsi_tunnel)"), "body: {body}");
+}
