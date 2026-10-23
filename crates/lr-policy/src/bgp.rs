@@ -21,13 +21,13 @@
 
 use lr_bgp::path::as_path::AsPath;
 use lr_bgp::path::communities::{Community, ExtendedCommunity, LargeCommunity};
-use lr_bgp::path::well_known::{ClusterList, OriginatorId};
+use lr_bgp::path::well_known::{Aigp, ClusterList, OriginatorId};
 use lr_core::addr::{Asn, IpAddr};
 use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
 
 /// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4 /
-/// RFC 4360 §2 / RFC 8092 §2 / RFC 9234 §3.1).
+/// RFC 4360 §2 / RFC 8092 §2 / RFC 9234 §3.1 / RFC 7311 §3).
 const TAG_ORIGIN: u8 = 1;
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
@@ -40,6 +40,8 @@ const TAG_EXT_COMMUNITIES: u8 = 16;
 const TAG_LARGE_COMMUNITIES: u8 = 32;
 /// RFC 9234 §3.1: OTC ("Only To Customer") attribute type code.
 const TAG_OTC: u8 = 35;
+/// RFC 7311 §3: AIGP ("Accumulated IGP Metric") attribute type code.
+const TAG_AIGP: u8 = 26;
 
 const FLAGS_AS_PATH: u8 = 0x40;
 const FLAGS_MED: u8 = 0x80;
@@ -234,6 +236,44 @@ pub fn otc(route: &Route) -> Option<u32> {
 /// "present but zero" — `otc()` returns `Some(0)` for the latter.
 pub fn has_otc(route: &Route) -> bool {
     route.attributes.get(AttrTag::raw(TAG_OTC)).is_some()
+}
+
+/// The route's AIGP attribute (RFC 7311) as the accumulated IGP
+/// metric — the sum of every type-1 TLV's 8-byte value in the
+/// attribute's TLV stream. `None` when the attribute is absent or
+/// the TLV stream is malformed (a TLV length runs past the end, or
+/// a type-1 TLV's value is not exactly 8 bytes). An empty value
+/// field decodes to `Some(0)` — RFC 7311 does not forbid an empty
+/// AIGP attribute.
+///
+/// A present value of `0` ("set but zero") is returned as `Some(0)`
+/// — use [`has_aigp`] to distinguish "absent" from "set to zero" in
+/// policies that need the distinction (the `defined(bgp.aigp)`
+/// filter DSL predicate consults `has_aigp`, not this accessor).
+///
+/// The metric is a `u64` on the wire (RFC 7311 §3); the filter DSL
+/// surfaces it as a signed `i64` (the `Value::Int` width), so a
+/// metric exceeding `i64::MAX` saturates to `i64::MAX` on the DSL
+/// read — practical IGP metrics are far below `i64::MAX`, and the
+/// alternative (`u64` as an unsigned DSL value) would need a new
+/// `Value` variant.
+///
+/// Reads pay one BTreeMap lookup + one TLV-stream parse per route.
+/// Unlike `local_pref` / `med` / `otc` (which use the in-place
+/// `get_u32_be` fast path), AIGP's value is a TLV stream so a
+/// single `get_u32_be` cannot read it; the parse is bounded by the
+/// attribute length and skips unknown TLVs in O(n).
+pub fn aigp(route: &Route) -> Option<u64> {
+    let bytes = route.attributes.get(AttrTag::raw(TAG_AIGP))?.value.as_slice();
+    Aigp::decode(bytes).map(|a| a.metric())
+}
+
+/// True when an AIGP attribute is physically present on the route
+/// (RFC 7311). Use this to distinguish "no attribute" from "present
+/// but zero" — `aigp()` returns `Some(0)` for the latter (e.g. an
+/// empty value field).
+pub fn has_aigp(route: &Route) -> bool {
+    route.attributes.get(AttrTag::raw(TAG_AIGP)).is_some()
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -578,5 +618,51 @@ mod tests {
         let r_bad = route_with(vec![raw_attr(TAG_OTC, 0xC0, vec![1, 2, 3])]);
         assert_eq!(otc(&r_bad), None);
         assert!(has_otc(&r_bad));
+    }
+
+    /// RFC 7311 §3 — AIGP's value is a TLV stream whose type-1 TLV
+    /// carries an 8-byte accumulated metric; the helper surfaces it
+    /// as `u64` and stays `None` on the absent and malformed cases.
+    /// A present value of `0` ("set but zero") is returned as
+    /// `Some(0)` so policies that need the distinction consult
+    /// `has_aigp` instead.
+    #[test]
+    fn aigp_decodes_as_u64() {
+        use lr_bgp::path::well_known::Aigp as AigpTy;
+        // Present, metric 64512.
+        let r = route_with(vec![raw_attr(
+            TAG_AIGP,
+            0x80,
+            AigpTy::from_metric(64512).encode(),
+        )]);
+        assert_eq!(aigp(&r), Some(64512));
+        assert!(has_aigp(&r));
+        // Absent.
+        let r_absent = route_with(vec![]);
+        assert_eq!(aigp(&r_absent), None);
+        assert!(!has_aigp(&r_absent));
+        // Present, metric 0 — "set but zero". `aigp()` returns
+        // `Some(0)`; `has_aigp()` reports presence. This is the case
+        // `defined(bgp.aigp)` in the filter DSL must distinguish from
+        // "absent".
+        let r_zero = route_with(vec![raw_attr(
+            TAG_AIGP,
+            0x80,
+            AigpTy::from_metric(0).encode(),
+        )]);
+        assert_eq!(aigp(&r_zero), Some(0));
+        assert!(has_aigp(&r_zero));
+        // Empty value field — RFC 7311 does not forbid an empty
+        // AIGP attribute; the helper surfaces it as `Some(0)`.
+        let r_empty = route_with(vec![raw_attr(TAG_AIGP, 0x80, Vec::new())]);
+        assert_eq!(aigp(&r_empty), Some(0));
+        assert!(has_aigp(&r_empty));
+        // Malformed TLV stream (truncated header) — `aigp()` returns
+        // None; `has_aigp()` still reports presence (the attribute is
+        // on the route; only the value is unreadable). Mirrors the
+        // `cluster_list()` accessor's behaviour on a partial tail.
+        let r_bad = route_with(vec![raw_attr(TAG_AIGP, 0x80, vec![0, 1, 2])]);
+        assert_eq!(aigp(&r_bad), None);
+        assert!(has_aigp(&r_bad));
     }
 }
