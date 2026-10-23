@@ -761,6 +761,19 @@ impl Parser {
                         // `bgp.aggregator.asn` (the canonical probe
                         // for `defined()`).
                         "aggregator" => return self.parse_aggregator_field(tok.span).map(Some),
+                        // RFC 6514 §5 — PMSI Tunnel is an opaque
+                        // bytestring in BIRD's filter language
+                        // (`EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY`); the
+                        // only meaningful operation is
+                        // `defined(bgp_pmsi_tunnel)` ("does the
+                        // route carry a PMSI Tunnel binding?").
+                        // lr's DSL mirrors that surface as a
+                        // read-only `Bool` field `bgp.pmsi_tunnel`
+                        // — `true` when present, `false` when
+                        // absent. BIRD spells it `bgp_pmsi_tunnel`;
+                        // the BIRD translator renames it to
+                        // `bgp.pmsi_tunnel`.
+                        "pmsi_tunnel" => RouteFieldKind::BgpPmsiTunnel,
                         // Issue #81 — LRXP exchange-plane surface.
                         // `bgp.lrxp` opens a three-segment dotted
                         // path (`bgp.lrxp.<class>.<field>`), plus

@@ -1703,6 +1703,9 @@ const TAG_OTC: u8 = 35;
 const TAG_AIGP: u8 = 26;
 /// RFC 4271 §5.1.7: AGGREGATOR attribute type code.
 const TAG_AGGREGATOR: u8 = 7;
+/// RFC 6514 §5: PMSI Tunnel attribute type code (22, optional
+/// transitive).
+const TAG_PMSI_TUNNEL: u8 = 22;
 
 fn route_with_atomic_aggregate() -> Route {
     let mut r = route_with("203.0.113.0/24", 100, 0);
@@ -2382,6 +2385,156 @@ fn bgp_aggregator_unfused_read_path_agrees_both_directions() {
             &mut r
         ),
         EvalResult::Accept,
+    );
+}
+
+// ---- RFC 6514 §5: bgp.pmsi_tunnel ----
+
+/// Build a route carrying a PMSI Tunnel attribute (RFC 6514 §5) in
+/// the canonical wire form: Flags + Tunnel Type + MPLS Label (3
+/// bytes) + Tunnel Identifier (variable). The attribute is optional
+/// transitive (flags 0xC0). The helper encodes the 20-bit MPLS label
+/// in the high 20 bits of the 3-byte label field, with the low 4 bits
+/// (EXP + End-of-Stack) zeroed on encode.
+fn route_with_pmsi_tunnel(
+    flags: u8,
+    tunnel_type: u8,
+    mpls_label: u32,
+    tunnel_id: Vec<u8>,
+) -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let mut value = Vec::with_capacity(5 + tunnel_id.len());
+    value.push(flags);
+    value.push(tunnel_type);
+    let label24 = (mpls_label & 0x000f_ffff) << 4;
+    value.extend_from_slice(&label24.to_be_bytes()[1..4]);
+    value.extend_from_slice(&tunnel_id);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_PMSI_TUNNEL),
+        flags: 0xC0,
+        value,
+    });
+    r
+}
+
+#[test]
+fn bgp_pmsi_tunnel_reads_as_bool_true_when_present() {
+    // RFC 6514 §5: Tunnel Type 6 (Ingress Replication), IPv4
+    // endpoint, MPLS label 64512, L bit set.
+    let mut r = route_with_pmsi_tunnel(0b0000_0001, 6, 64512, vec![10, 0, 0, 1]);
+    assert_eq!(
+        run("if bgp.pmsi_tunnel then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_pmsi_tunnel_reads_as_false_when_absent() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    // An absent PMSI Tunnel reads as `false` — the presence-probe
+    // shape mirrors BIRD's `defined(bgp_pmsi_tunnel)` exposure.
+    assert_eq!(
+        run("if bgp.pmsi_tunnel then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+    // The negation reads as `true`.
+    assert_eq!(
+        run("if !bgp.pmsi_tunnel then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_pmsi_tunnel_is_defined_iff_present() {
+    // Present.
+    let mut r_with = route_with_pmsi_tunnel(0, 0, 0, Vec::new());
+    assert_eq!(
+        run(
+            "if defined(bgp.pmsi_tunnel) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    // Absent.
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.pmsi_tunnel) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_pmsi_tunnel_defined_distinguishes_absent_from_present_but_malformed() {
+    // RFC 6514 §5: a present-but-malformed attribute (truncated
+    // header — the 5-byte minimum is missing) is distinct from
+    // "absent" — `defined(bgp.pmsi_tunnel)` reports true for the
+    // former and false for the latter. This is the case the
+    // `has_pmsi_tunnel` accessor exists to make precise.
+    let mut r_bad = route_with("203.0.113.0/24", 100, 0);
+    r_bad.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_PMSI_TUNNEL),
+        flags: 0xC0,
+        value: vec![0, 0, 0, 0], // truncated header
+    });
+    assert_eq!(
+        run(
+            "if defined(bgp.pmsi_tunnel) then accept; reject;",
+            &mut r_bad
+        ),
+        EvalResult::Accept,
+    );
+    // The Bool read also reports `true` — the physical presence
+    // probe, not the typed accessor's `Some/None` shape.
+    assert_eq!(
+        run("if bgp.pmsi_tunnel then accept; reject;", &mut r_bad),
+        EvalResult::Accept,
+    );
+    let mut r_absent = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.pmsi_tunnel) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_pmsi_tunnel_canonical_idiom_translates_from_bird() {
+    // RFC 6514 §5: the canonical BIRD filter idiom for a PMSI
+    // Tunnel is `if defined(bgp_pmsi_tunnel) then reject;` ("a
+    // route that carries a PMSI Tunnel binding is an MVPN A-D
+    // route — drop it on a non-MVPN edge"). The translator renames
+    // `bgp_pmsi_tunnel` to `bgp.pmsi_tunnel` and the body
+    // round-trips through the daemon loader.
+    let mut r_with = route_with_pmsi_tunnel(0, 0, 0, Vec::new());
+    assert_eq!(
+        run(
+            "if defined(bgp.pmsi_tunnel) then reject; accept;",
+            &mut r_with
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.pmsi_tunnel) then reject; accept;",
+            &mut r_without
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_pmsi_tunnel_is_not_assignable() {
+    let err = compile("test", "bgp.pmsi_tunnel = true;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
     );
 }
 
