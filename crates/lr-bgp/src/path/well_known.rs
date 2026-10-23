@@ -517,9 +517,7 @@ impl PmsiTunnel {
         let tunnel_id = bytes[5..].to_vec();
         match tunnel_type {
             TUNNEL_TYPE_NO_INFO if !tunnel_id.is_empty() => return None,
-            TUNNEL_TYPE_INGRESS_REPLICATION
-                if tunnel_id.len() != 4 && tunnel_id.len() != 16 =>
-            {
+            TUNNEL_TYPE_INGRESS_REPLICATION if tunnel_id.len() != 4 && tunnel_id.len() != 16 => {
                 return None;
             }
             _ => {}
