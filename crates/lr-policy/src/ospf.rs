@@ -13,7 +13,7 @@
 //!
 //! The lr surface is `ospf.metric1`, `ospf.metric2`, `ospf.tag`,
 //! `ospf.router_id` over time; this module opens with `metric1`,
-//! `metric2` and `tag`. Each `metric1` accessor is one branch on
+//! `metric2`, `tag` and `router_id`. Each `metric1` accessor is one branch on
 //! [`Route::protocol`] plus a field read — no allocation, no codec.
 //! The `metric2` accessor reads the private `LrOspfMetric2`
 //! path-attribute tag the OSPF route computation attaches to type-2
@@ -28,6 +28,18 @@
 //! routes; intra-area and inter-area routes carry no tag (the LSA
 //! body has no tag field for those). The existing `SetTag` policy
 //! action overwrites `Route::tag` for the operator-side override.
+//! The `router_id` accessor reads the private `LrOspfRouterId`
+//! path-attribute tag the OSPF route computation attaches to every
+//! OSPF route with a known originating LSA — one BTreeMap lookup
+//! plus one 4-byte read, no allocation, no codec dependency. The
+//! value is the 32-bit OSPF Router-ID of the router that originated
+//! the LSA the route was computed from (RFC 2328 §A.4 `Advertising
+//! Router` field / RFC 5340 §A.4 the same field on every v3 LSA) —
+//! the Router-LSA's advertising router for intra-area stub routes,
+//! the Network-LSA's advertising router (the DR) for intra-area
+//! transit routes, the summary-LSA's advertising router (the ABR)
+//! for inter-area routes, and the AS-external-LSA's advertising
+//! router (the ASBR) for external routes.
 //!
 //! RFC references:
 //! - RFC 2328 §16 — OSPFv2 route preference order and metric
@@ -36,6 +48,10 @@
 //!   the cost alone for type-2 external routes; the `metric2` field
 //!   that holds the type-2 external metric — the E-bit-set LSA
 //!   metric, §16.4 (6)).
+//! - RFC 2328 §A.4 — the LSA header's `Advertising Router` field
+//!   (the 32-bit OSPF Router-ID of the router that originated the
+//!   LSA; the value the `router_id` accessor surfaces for every
+//!   OSPF route).
 //! - RFC 2328 §A.4.5 bullet h — the 32-bit external route tag
 //!   carried in the type-5 AS-external-LSA body (the v2 form always
 //!   carries a 4-byte tag field, zero being well-formed).
@@ -45,14 +61,19 @@
 //! - RFC 5340 §4.1 — OSPFv3 route preference (mirrors OSPFv2).
 //! - RFC 5340 §4.8.5 — OSPFv3 external route calculation (mirrors
 //!   §16.4).
+//! - RFC 5340 §A.4 — the v3 LSA header's `Advertising Router`
+//!   field (mirrors RFC 2328 §A.4 — the same field, the same
+//!   semantics; the value the `router_id` accessor surfaces for v3
+//!   routes).
 //! - RFC 5340 §A.4.7 — the v3 AS-external-LSA body's T bit / tag
 //!   field (the v3 form treats a missing tag — T bit clear — as a
 //!   meaningful state distinct from a tag of zero).
 //! - RFC 8362 §3.6 — the Extended-LSA External-Prefix sub-TLV 3
 //!   carries the v3 external route tag for the OSPFv3 Extended-LSA
 //!   form.
-//! - BIRD 2 `proto/ospf/ospf.c` — `ea_ospf_metric1`, `ea_ospf_metric2`
-//!   and `ea_ospf_tag` are the eattrs these accessors surface.
+//! - BIRD 2 `proto/ospf/ospf.c` — `ea_ospf_metric1`, `ea_ospf_metric2`,
+//!   `ea_ospf_tag` and `ea_ospf_router_id` are the eattrs these
+//!   accessors surface.
 
 use lr_core::attr::AttrTag;
 use lr_core::rib::{Protocol, Route};
@@ -72,6 +93,25 @@ use lr_core::rib::{Protocol, Route};
 /// metric at 24 bits, so the high byte is always zero on a
 /// well-formed value).
 const LR_OSPF_METRIC2_TAG: u8 = 253;
+
+/// The path-attribute tag carrying the OSPF advertising-router ID
+/// (RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the
+/// same field on every v3 LSA). Mirrors
+/// `lr_bgp::path::AttrType::LrOspfRouterId` (value 252); kept as a
+/// `u8` here so the accessor stays unconditional — no `lr-bgp`
+/// dependency. The BGP codec strips the tag at encode so peers
+/// never see it; the OSPF route computation
+/// (`lr-router::instance::ospf_ops`) populates the attribute for
+/// every OSPFv2 / OSPFv3 route with a known originating LSA —
+/// intra-area (Router-LSA / Network-LSA advertising router),
+/// inter-area (summary-LSA advertising router = the ABR), and
+/// external (AS-external-LSA advertising router = the ASBR).
+///
+/// The value layout is a single 4-byte big-endian `u32` holding the
+/// 32-bit OSPF Router-ID (the LSA `Advertising Router` field is a
+/// 32-bit dotted-quad per RFC 2328 §A.4 — no masking needed; the
+/// high byte is meaningful).
+const LR_OSPF_ROUTER_ID_TAG: u8 = 252;
 
 /// The route's primary OSPF metric (RFC 2328 §16 / RFC 5340 §4.1) —
 /// the SPF cost for intra-area and inter-area routes, the
@@ -243,6 +283,81 @@ pub fn has_tag(route: &Route) -> bool {
         Protocol::Ospfv2 | Protocol::Ospfv3 => route.tag.is_some(),
         _ => false,
     }
+}
+
+/// The route's OSPF advertising-router ID (RFC 2328 §A.4
+/// `Advertising Router` field / RFC 5340 §A.4 the same field on
+/// every v3 LSA) — the 32-bit OSPF Router-ID of the router that
+/// originated the LSA the route was computed from. For intra-area
+/// stub routes this is the Router-LSA's advertising router (the
+/// router that owns the stub network); for intra-area transit
+/// routes it is the Network-LSA's advertising router (the DR); for
+/// inter-area routes it is the summary-LSA's advertising router
+/// (the ABR); for external routes it is the AS-external-LSA's
+/// advertising router (the ASBR). Returns `None` for non-OSPF
+/// routes (no LSA, no advertising router) and for OSPF routes whose
+/// route computation could not identify the originating LSA's
+/// advertising router (a defensive fallback; the LSA header always
+/// carries the field per RFC 2328 §A.4, so the OSPF route
+/// computation populates it for every received OSPF route).
+/// `Some(0)` is a meaningful value (a router may legally carry
+/// Router-ID 0.0.0.0, though RFC 2328 §3.1.b recommends a non-zero
+/// value) — use [`has_router_id`] to distinguish "no attribute"
+/// from "attribute present but zero" in policies that need the
+/// distinction (the `defined(ospf.router_id)` filter DSL predicate
+/// consults `has_router_id`, not this accessor).
+///
+/// Reads pay one BTreeMap lookup plus one 4-byte read on
+/// [`Route::attributes`] — no allocation, no codec (the value
+/// layout is a fixed 4-byte big-endian `u32`). Cheaper than any
+/// `bgp_*` accessor that decodes a multi-byte TLV stream, the same
+/// shape as [`metric2`] (which reads a different private tag) and
+/// more expensive than [`metric1`] / [`tag`] (which read struct
+/// fields, no lookup). The BGP codec strips the tag at encode so
+/// peers never see it.
+pub fn router_id(route: &Route) -> Option<u32> {
+    // Only OSPF routes can carry the LrOspfRouterId attribute — the
+    // OSPF route computation (`lr-router::instance::ospf_ops`) is
+    // the only producer. The protocol check is a cheap fast-path
+    // rejection for non-OSPF routes that avoids the BTreeMap
+    // lookup entirely.
+    if !matches!(route.protocol, Protocol::Ospfv2 | Protocol::Ospfv3) {
+        return None;
+    }
+    route
+        .attributes
+        .get_u32_be(AttrTag::raw(LR_OSPF_ROUTER_ID_TAG))
+}
+
+/// True when the route is an OSPFv2 / OSPFv3 route (RFC 2328 / RFC
+/// 5340) with a known originating LSA's advertising router, and
+/// therefore carries an OSPF router-id attribute. Use this to
+/// distinguish "no attribute" (a non-OSPF route, or an OSPF route
+/// whose route computation could not identify the originating
+/// LSA's advertising router) from "attribute present but zero"
+/// — [`router_id`] returns `Some(0)` for the latter (a router may
+/// legally carry Router-ID 0.0.0.0 per RFC 2328 §3.1.b, though
+/// non-zero is recommended).
+///
+/// The filter DSL's `defined(ospf.router_id)` predicate consults
+/// this helper, not `router_id().is_some()`: the two agree on the
+/// present-with-non-zero case (both true), but the distinction
+/// matters when a router carries Router-ID 0.0.0.0 — `has_router_id`
+/// keeps "OSPF route with Router-ID 0" defined so the canonical
+/// idiom `if defined(ospf.router_id) && ospf.router_id == 0.0.0.0
+/// then accept;` does not drop such a route. For non-OSPF routes,
+/// `has_router_id` is false (the protocol-kind fast path rejects
+/// them, mirroring BIRD's eattr absence on non-OSPF routes). For
+/// OSPF routes whose route computation populated `router_id =
+/// Some(id)`, `has_router_id` is true even when `id == 0`.
+pub fn has_router_id(route: &Route) -> bool {
+    if !matches!(route.protocol, Protocol::Ospfv2 | Protocol::Ospfv3) {
+        return false;
+    }
+    route
+        .attributes
+        .get(AttrTag::raw(LR_OSPF_ROUTER_ID_TAG))
+        .is_some()
 }
 
 #[cfg(test)]
@@ -511,5 +626,131 @@ mod tests {
         // The metric1 / metric2 reads are unchanged.
         assert_eq!(metric1(&r), Some(50));
         assert_eq!(metric2(&r), Some(200));
+    }
+
+    // ---- ospf.router_id -----------------------------------------------
+
+    /// Build an OSPF route carrying the `LrOspfRouterId` attribute —
+    /// mirrors what `lr-router::instance::ospf_ops` attaches for any
+    /// OSPF route with a known originating LSA (intra-area, inter-area
+    /// or external). The attribute's value layout is the 4-byte
+    /// big-endian form `set_ospf_router_id` writes.
+    fn ospf_route_with_router_id(protocol: Protocol, metric: u32, router_id: u32) -> Route {
+        let mut r = route(protocol, metric);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+            flags: 0x80, // optional, non-transitive (matches the BGP path-attribute flag set the codec uses)
+            value: router_id.to_be_bytes().to_vec(),
+        });
+        r
+    }
+
+    #[test]
+    fn router_id_reads_for_ospf_routes_with_the_attribute() {
+        // An OSPFv2 / OSPFv3 route whose route computation populated
+        // `OspfTableEntry::router_id = Some(rid)` — `ospf_recompute`
+        // attaches the LrOspfRouterId attribute with that value, and
+        // the accessor surfaces it.
+        for proto in [Protocol::Ospfv2, Protocol::Ospfv3] {
+            let r = ospf_route_with_router_id(proto, 10, 0xc0a8_0101);
+            assert_eq!(router_id(&r), Some(0xc0a8_0101));
+            assert!(has_router_id(&r));
+        }
+    }
+
+    #[test]
+    fn router_id_is_none_for_ospf_routes_without_the_attribute() {
+        // An OSPF route with no LrOspfRouterId attribute — i.e. a
+        // synthetic test route, or a route whose OSPF computation
+        // could not identify the originating LSA's advertising
+        // router (the defensive fallback the OSPF route computation
+        // leaves as `None`). `router_id` returns `None` and
+        // `has_router_id` is false.
+        for proto in [Protocol::Ospfv2, Protocol::Ospfv3] {
+            let r = route(proto, 42);
+            assert_eq!(router_id(&r), None);
+            assert!(!has_router_id(&r));
+        }
+    }
+
+    #[test]
+    fn router_id_is_none_for_non_ospf_routes_even_with_the_attribute() {
+        // The accessor's protocol-kind fast path rejects a non-OSPF
+        // route even if the attribute is somehow present (the OSPF
+        // route computation never attaches the tag to a non-OSPF
+        // route, but a hand-crafted test route that violates the
+        // invariant still reads as `None` — defensive, mirrors
+        // `metric2`'s protocol-kind check).
+        let r = ospf_route_with_router_id(Protocol::Bgp, 100, 0xc0a8_0101);
+        assert_eq!(router_id(&r), None);
+        assert!(!has_router_id(&r));
+    }
+
+    #[test]
+    fn router_id_zero_is_present_for_ospf() {
+        // An OSPF route with a Router-ID of 0.0.0.0 is "present but
+        // zero" — the distinction `has_router_id` exists to make
+        // precise. RFC 2328 §3.1.b recommends a non-zero value but
+        // does not forbid 0.0.0.0, so the OSPF route computation
+        // surfaces `Some(0)` for such a route, and the
+        // `defined(ospf.router_id)` filter DSL predicate consults
+        // `has_router_id`, so an OSPF route with Router-ID 0.0.0.0
+        // stays defined — mirrors `has_metric1` / `has_tag` /
+        // `has_otc` for the other presence probes.
+        for proto in [Protocol::Ospfv2, Protocol::Ospfv3] {
+            let r = ospf_route_with_router_id(proto, 10, 0);
+            assert_eq!(router_id(&r), Some(0));
+            assert!(has_router_id(&r), "OSPF route with Router-ID 0 is defined");
+        }
+    }
+
+    #[test]
+    fn router_id_malformed_value_is_absent() {
+        // A value field that is not exactly 4 bytes is "malformed"
+        // — the codec rejects it at decode (mirrors
+        // `Attributes::get_u32_be`'s length check). `router_id`
+        // returns `None` but `has_router_id` reports the attribute's
+        // physical presence (the same shape `metric2` /
+        // `has_metric2` expose for the OSPF type-2 external metric
+        // attribute, and `pmsi_tunnel` / `has_pmsi_tunnel` expose
+        // for the BGP PMSI Tunnel attribute).
+        let mut r = route(Protocol::Ospfv2, 10);
+        r.attributes.insert(Attribute {
+            tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+            flags: 0x80,
+            value: vec![0xc0, 0xa8, 0x01], // 3 bytes, not 4 — malformed
+        });
+        assert_eq!(router_id(&r), None);
+        assert!(
+            has_router_id(&r),
+            "physical presence is true even when malformed"
+        );
+    }
+
+    #[test]
+    fn router_id_independent_of_metric1_metric2_and_tag() {
+        // A filter that reads `ospf.router_id` does not leak
+        // `metric1`, `metric2` or `tag` through. The four fields
+        // live on different slots — `Route::preference.metric`,
+        // the private `LrOspfMetric2` attribute, `Route::tag` and
+        // the private `LrOspfRouterId` attribute — and the
+        // accessors do not cross-read.
+        let r = ospf_route_with_metric2(Protocol::Ospfv2, 50, 200);
+        // No router_id attached by the metric2 helper — `router_id`
+        // is `None`.
+        assert_eq!(router_id(&r), None);
+        assert!(!has_router_id(&r));
+        // The metric1 / metric2 reads are unchanged.
+        assert_eq!(metric1(&r), Some(50));
+        assert_eq!(metric2(&r), Some(200));
+        // And the router_id route's metric1 / metric2 are unchanged.
+        let r2 = ospf_route_with_router_id(Protocol::Ospfv2, 50, 0xc0a8_0101);
+        assert_eq!(metric1(&r2), Some(50));
+        assert_eq!(metric2(&r2), None);
+        assert_eq!(router_id(&r2), Some(0xc0a8_0101));
+        // `ospf.tag` is `None` for both — neither helper attaches
+        // `Route::tag`.
+        assert_eq!(tag(&r), None);
+        assert_eq!(tag(&r2), None);
     }
 }
