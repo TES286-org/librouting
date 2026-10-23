@@ -848,6 +848,78 @@ def test_filter_dsl_ospf_tag():
     assert bgp_read_zero.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
 
 
+def test_filter_dsl_ospf_router_id():
+    """`ospf.router_id` reads the private `LrOspfRouterId` path-attribute
+    tag (RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the
+    same field on every v3 LSA) the OSPF route computation attaches to
+    every OSPFv2 / OSPFv3 route with a known originating LSA. The
+    binding exercises the FFI surface — Python → C ABI → Rust filter
+    eval → `lr-policy::ospf::router_id` accessor — so a regression in
+    any layer surfaces here.
+
+    The "present" path (a route carrying the `LrOspfRouterId`
+    attribute) is exercised by the `lr-policy::ospf::router_id_*`
+    unit tests (which synthesize the attribute directly via
+    `Attributes::insert`) and the
+    `lr-router::instance::tests::ospfv3_inter_area_and_external_routes_published`
+    integration test (which populates the attribute via the OSPF
+    route computation, the only producer). The binding cannot reach
+    that path because the C ABI does not expose a setter for the
+    `LrOspfRouterId` tag — embedders read the field but never inject
+    it; the OSPF daemon is the only producer. The binding test pins
+    the "absent" path (the FFI surface, the parser, the
+    protocol-kind fast path, and the absence-handling default),
+    which is the layer an embedder's regression would surface
+    through."""
+    # An OSPFv2 route without the `LrOspfRouterId` attribute — i.e.
+    # a synthetic test route (the OSPF route computation would
+    # attach the attribute for every received OSPF route per RFC
+    # 2328 §A.4). `defined(ospf.router_id)` is false, so the `&&`
+    # short-circuits and the route is accepted; `ospf.router_id == 0`
+    # reads the unwrap_or(0) default (mirrors BIRD's eattr default
+    # for an unattached `ospf_router_id` reference).
+    ospf = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_OSPF)
+    ospf.set_metric(200)  # `preference.metric`; not the same as `ospf.router_id`
+    reject_from_specific = librouting.compile_filter(
+        "py-ospf2-rid-specific",
+        # 192.0.2.1 = 0xc000_0201 = 3221225985
+        "if defined(ospf.router_id) && ospf.router_id == 3221225985 then reject; accept;",
+    )
+    assert reject_from_specific.evaluate(ospf)[0] == librouting.FILTER_ACCEPT
+    read_zero = librouting.compile_filter(
+        "py-ospf2-rid-zero",
+        "if ospf.router_id == 0 then accept; reject;",
+    )
+    assert read_zero.evaluate(ospf)[0] == librouting.FILTER_ACCEPT
+
+    # OSPFv3 mirrors OSPFv2 (RFC 5340 §A.4 mirrors §A.4) — same
+    # absence-handling default.
+    ospf3 = librouting.Route(
+        ([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64),
+        librouting.PROTO_OSPF3,
+    )
+    ospf3.set_metric(220)
+    assert reject_from_specific.evaluate(ospf3)[0] == librouting.FILTER_ACCEPT
+    v3_zero = librouting.compile_filter(
+        "py-ospf3-rid-zero",
+        "if ospf.router_id == 0 then accept; reject;",
+    )
+    assert v3_zero.evaluate(ospf3)[0] == librouting.FILTER_ACCEPT
+
+    # A non-OSPF (BGP) route: `defined(ospf.router_id)` is false
+    # (the protocol-kind fast path rejects non-OSPF routes before
+    # the attribute lookup), so the `&&` short-circuits and the
+    # route is accepted. The protocol-kind fast path is the same
+    # shape `ospf.metric1` / `ospf.metric2` expose — defensive, in
+    # case a non-OSPF route somehow carries the attribute (the OSPF
+    # route computation never attaches the tag to a non-OSPF route,
+    # but a hand-crafted test route that violates the invariant
+    # still reads as 0).
+    bgp = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    bgp.set_metric(200)
+    assert reject_from_specific.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+
+
 def test_package_version_tracks_the_workspace():
     """`librouting.__version__` is the single source for the package
     version; pyproject.toml reads it via `dynamic = ["version"]`. It has
