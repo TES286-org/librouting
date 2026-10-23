@@ -1116,3 +1116,211 @@ func TestFilterDSLOspfMetric2(t *testing.T) {
 			verdict, err, FilterAccept)
 	}
 }
+
+func TestFilterDSLOspfTag(t *testing.T) {
+	// `ospf.tag` reads the route's external route tag (RFC 2328
+	// §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit /
+	// RFC 8362 §3.6 External-Prefix sub-TLV 3) the OSPF route
+	// computation populates from the LSA's tag for external
+	// routes. The binding exercises the FFI surface — Go → C ABI
+	// → Rust filter eval → `lr-policy::ospf::tag` accessor — so
+	// a regression in any layer surfaces here.
+	//
+	// Unlike `ospf.metric2` (whose `LrOspfMetric2` attribute has
+	// no C ABI setter — the OSPF daemon is the only producer),
+	// `ospf.tag` reads the existing `Route::tag` field, which
+	// the C ABI exposes via `lr_route_set_tag`. The binding can
+	// therefore exercise both the "absent" path (no tag set —
+	// the default for an intra-area / inter-area OSPF route)
+	// and the "present" path (a tag set via `SetTag`,
+	// mirroring what `ospf_recompute` attaches for an external
+	// route whose LSA carried a tag).
+	rejectTagged, err := Compile("go-ospf-tag-tagged",
+		"if defined(ospf.tag) && ospf.tag == 3735928559 then reject; accept;")
+	if err != nil {
+		t.Fatalf("Compile rejectTagged: %v", err)
+	}
+	defer rejectTagged.Free()
+	readZero, err := Compile("go-ospf-tag-zero",
+		"if ospf.tag == 0 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile readZero: %v", err)
+	}
+	defer readZero.Free()
+
+	// An OSPFv2 route without a tag — i.e. an intra-area /
+	// inter-area route (the OSPF route computation leaves
+	// `Route::tag = None` for those). `defined(ospf.tag)` is
+	// false, so the `&&` short-circuits and the route is
+	// accepted; `ospf.tag == 0` reads the unwrap_or(0) default
+	// (mirrors BIRD's eattr default for an unattached
+	// `ospf_tag` reference).
+	ospf, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoOspf)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer ospf.Free()
+	if err := ospf.SetMetric(200); err != nil {
+		t.Fatalf("SetMetric: %v", err)
+	}
+	verdict, _, err := rejectTagged.Evaluate(ospf)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv2 rejectTagged: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	verdict, _, err = readZero.Evaluate(ospf)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv2 readZero: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+
+	// An OSPFv2 route with a tag set via `SetTag` — mirrors
+	// the shape `ospf_recompute` attaches for an external route
+	// whose LSA carried a tag. `defined(ospf.tag)` is true; the
+	// canonical idiom `if defined(ospf.tag) && ospf.tag ==
+	// 3735928559 then accept;` matches.
+	ospfTagged, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoOspf)
+	if err != nil {
+		t.Fatalf("NewRouteV4 ospfTagged: %v", err)
+	}
+	defer ospfTagged.Free()
+	if err := ospfTagged.SetMetric(10); err != nil {
+		t.Fatalf("SetMetric ospfTagged: %v", err)
+	}
+	if err := ospfTagged.SetTag(3735928559, true); err != nil {
+		t.Fatalf("SetTag ospfTagged: %v", err)
+	}
+	acceptTagged, err := Compile("go-ospf-tag-accept-tagged",
+		"if defined(ospf.tag) && ospf.tag == 3735928559 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile acceptTagged: %v", err)
+	}
+	defer acceptTagged.Free()
+	verdict, _, err = acceptTagged.Evaluate(ospfTagged)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv2 acceptTagged: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	verdict, _, err = rejectTagged.Evaluate(ospfTagged)
+	if err != nil || verdict != FilterReject {
+		t.Fatalf("Evaluate OSPFv2 rejectTagged (tagged): got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterReject)
+	}
+
+	// A v2 external with the default zero tag is "present but
+	// zero" — `defined(ospf.tag)` is true (the v2 LSA body
+	// always carries a 4-byte tag, zero being well-formed per
+	// RFC 2328 §A.4.5), and `ospf.tag == 0` reads 0.
+	ospfZeroTag, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoOspf)
+	if err != nil {
+		t.Fatalf("NewRouteV4 ospfZeroTag: %v", err)
+	}
+	defer ospfZeroTag.Free()
+	if err := ospfZeroTag.SetMetric(10); err != nil {
+		t.Fatalf("SetMetric ospfZeroTag: %v", err)
+	}
+	if err := ospfZeroTag.SetTag(0, true); err != nil {
+		t.Fatalf("SetTag ospfZeroTag: %v", err)
+	}
+	definedZero, err := Compile("go-ospf-tag-defined-zero",
+		"if defined(ospf.tag) && ospf.tag == 0 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile definedZero: %v", err)
+	}
+	defer definedZero.Free()
+	verdict, _, err = definedZero.Evaluate(ospfZeroTag)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv2 zero-tag definedZero: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	// An OSPF route with no tag set: `defined(ospf.tag)` is
+	// false, so the `&&` short-circuits and the route is
+	// rejected by the definedZero filter (the canonical
+	// v2-zero-tag idiom should not match a route with no tag).
+	verdict, _, err = definedZero.Evaluate(ospf)
+	if err != nil || verdict != FilterReject {
+		t.Fatalf("Evaluate OSPFv2 no-tag definedZero: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterReject)
+	}
+
+	// OSPFv3 mirrors OSPFv2 (RFC 5340 §A.4.7 T bit mirrors
+	// §A.4.5) — the v3 form surfaces `Some(t)` when the T bit
+	// is set, so a `SetTag` call mirrors the T-bit-set case.
+	ospf3Tagged, err := NewRouteV6([16]byte{0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 1}, 64, ProtoOspf3)
+	if err != nil {
+		t.Fatalf("NewRouteV6 ospf3Tagged: %v", err)
+	}
+	defer ospf3Tagged.Free()
+	if err := ospf3Tagged.SetMetric(220); err != nil {
+		t.Fatalf("SetMetric ospf3Tagged: %v", err)
+	}
+	if err := ospf3Tagged.SetTag(3405705229, true); err != nil {
+		t.Fatalf("SetTag ospf3Tagged: %v", err)
+	}
+	v3Accept, err := Compile("go-ospf3-tag-accept",
+		"if defined(ospf.tag) && ospf.tag == 3405705229 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile v3Accept: %v", err)
+	}
+	defer v3Accept.Free()
+	verdict, _, err = v3Accept.Evaluate(ospf3Tagged)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv3 tagged v3Accept: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	// OSPFv3 with no tag set: `defined(ospf.tag)` is false (the
+	// absence-handling default mirrors the v2 form's
+	// intra-area / inter-area case).
+	ospf3, err := NewRouteV6([16]byte{0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 1}, 64, ProtoOspf3)
+	if err != nil {
+		t.Fatalf("NewRouteV6 ospf3: %v", err)
+	}
+	defer ospf3.Free()
+	if err := ospf3.SetMetric(220); err != nil {
+		t.Fatalf("SetMetric ospf3: %v", err)
+	}
+	verdict, _, err = v3Accept.Evaluate(ospf3)
+	if err != nil || verdict != FilterReject {
+		t.Fatalf("Evaluate OSPFv3 no-tag v3Accept: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterReject)
+	}
+
+	// A non-OSPF (BGP) route: `defined(ospf.tag)` is false (the
+	// protocol-kind fast path rejects non-OSPF routes,
+	// mirroring BIRD's eattr absence on non-OSPF routes), so
+	// the `&&` short-circuits and the route is accepted. The
+	// `SetTag` call is the legitimate case where `Route::tag`
+	// carries an operator-assigned tag for OSPF redistribution
+	// — `ospf.tag` on the BGP route still reads as `0` /
+	// not-defined because the protocol-kind fast path rejects
+	// non-OSPF routes.
+	bgp, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4 bgp: %v", err)
+	}
+	defer bgp.Free()
+	if err := bgp.SetMetric(200); err != nil {
+		t.Fatalf("SetMetric bgp: %v", err)
+	}
+	if err := bgp.SetTag(99, true); err != nil {
+		t.Fatalf("SetTag bgp: %v", err)
+	}
+	verdict, _, err = rejectTagged.Evaluate(bgp)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate non-OSPF (BGP) rejectTagged: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	bgpReadZero, err := Compile("go-bgp-tag-zero",
+		"if ospf.tag == 0 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile bgpReadZero: %v", err)
+	}
+	defer bgpReadZero.Free()
+	verdict, _, err = bgpReadZero.Evaluate(bgp)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate non-OSPF (BGP) bgpReadZero: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+}
