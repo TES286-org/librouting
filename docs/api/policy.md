@@ -272,9 +272,44 @@ the route carries (`bgp.lrxp.*`, issue #81).
   consults `has_tag`: the v2 LSA body always carries a 4-byte
   tag (zero being well-formed), so a v2 external surfaces
   `Some(t)` even when the tag is zero; the v3 form's T bit
-  distinguishes "no tag" from "tag of zero". The remaining OSPF
-  per-route attribute BIRD exposes (`ospf_router_id`) has no
-  lr-DSL spelling yet.
+  distinguishes "no tag" from "tag of zero".
+- RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the
+  same field on every v3 LSA — the 32-bit OSPF Router-ID of the
+  router that originated the LSA the route was computed from
+  (the Router-LSA's advertising router for intra-area stub
+  routes; the Network-LSA's advertising router — the DR — for
+  intra-area transit routes; the summary-LSA's advertising
+  router — the ABR — for inter-area routes; the AS-external-LSA's
+  advertising router — the ASBR — for external routes) the filter
+  DSL exposes as `ospf.router_id`; the typed accessor
+  (`lr-policy::ospf::router_id`) reads the private
+  `LrOspfRouterId` path-attribute tag the OSPF route computation
+  (`lr-router::instance::ospf_ops::ospf_recompute`) attaches to
+  every OSPFv2 / OSPFv3 route with a known originating LSA and
+  returns `None` for everything else (non-OSPF routes, and OSPF
+  routes whose computation could not identify the originating
+  LSA's advertising router — a defensive fallback; the LSA
+  header always carries the field per RFC 2328 §A.4 — mirroring
+  BIRD's eattr default for an unattached `ospf_router_id`
+  reference, so the canonical idiom `if defined(ospf.router_id) &&
+  ospf.router_id == 3221225985 then accept;` (3221225985 =
+  0xc000_0201 = 192.0.2.1) short-circuits on the `defined()` arm
+  for a route without the attribute). The attribute surfaces as
+  a read-only `int` — `0` when the route carries no OSPF
+  router-id attribute — and the read pays one `match` on
+  `route.protocol` plus one BTreeMap lookup plus one 4-byte read
+  on `route.attributes`, the same shape as `ospf.metric2` (which
+  reads a different private tag), more expensive than
+  `ospf.metric1` / `ospf.tag` (which read struct fields, no
+  lookup). The `defined(ospf.router_id)` predicate consults
+  `has_router_id`: RFC 2328 §3.1.b recommends a non-zero
+  Router-ID but does not forbid 0.0.0.0, so an OSPF route with
+  Router-ID 0.0.0.0 surfaces `Some(0)` and `defined(ospf.router_id)`
+  is true even when the Router-ID is zero. This closes the OSPF
+  filter-attribute surface — every `ospf_*` filter attribute
+  BIRD's 2 grammar declares now has a faithful lr-DSL spelling;
+  the remaining unmappable per-route attributes are the Babel
+  triplet `babel_metric` / `babel_router_id` / `babel_seqno`.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 

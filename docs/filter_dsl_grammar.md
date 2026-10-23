@@ -519,6 +519,7 @@ lists fields accepting the append form.
 | `ospf.metric1`          | `int`                 |    no    |  no  | RFC 2328 §16 / RFC 5340 §4.1; primary OSPF metric (`0` when the route is not OSPF). `defined(ospf.metric1)` distinguishes "non-OSPF route" from "OSPF route with metric 0". |
 | `ospf.metric2`          | `int`                 |    no    |  no  | RFC 2328 §16.4 / RFC 5340 §4.8.5; type-2 external OSPF metric (`0` when the route is not a type-2 external — non-OSPF, intra-area, inter-area or type-1 external). `defined(ospf.metric2)` distinguishes "not a type-2 external" from "type-2 external with metric 0". |
 | `ospf.tag`              | `int`                 |    no    |  no  | RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3; 32-bit external route tag (`0` when the route carries no tag — a non-OSPF route, an intra-area / inter-area OSPF route, or a v3 external without the T bit set). `defined(ospf.tag)` distinguishes "no tag" from "tag of zero" (the v2 LSA body always carries a 4-byte tag, zero being well-formed, so a v2 external surfaces `Some(t)` even when the tag is zero; the v3 form's T bit distinguishes "no tag" from "tag of zero"). |
+| `ospf.router_id`        | `int`                 |    no    |  no  | RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the same field on every v3 LSA; 32-bit OSPF Router-ID of the LSA's originator (`0` when the route carries no OSPF router-id attribute — a non-OSPF route, or an OSPF route whose computation could not identify the originating LSA's advertising router). `defined(ospf.router_id)` distinguishes "no attribute" from "attribute present but zero" (RFC 2328 §3.1.b recommends a non-zero Router-ID but does not forbid 0.0.0.0, so an OSPF route with Router-ID 0.0.0.0 surfaces `Some(0)` and `defined(ospf.router_id)` is true). |
 | `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
 | `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
 | `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
@@ -668,11 +669,14 @@ it does in BIRD. The `defined(ospf.metric1)` predicate consults
 and "OSPF route with metric 0" together via the `0` read; the former
 keeps an OSPF route with cost 0 defined so a cost-0 OSPF route does
 not get a false "absent" read. The BIRD translator renames
-`ospf_metric1` to `ospf.metric1`; the remaining OSPF per-route
-attributes BIRD exposes (`ospf_tag`, `ospf_router_id`) have no
-lr-DSL spelling yet and the translator marks a filter that
-references them unfaithful instead of silently dropping the
-reference. The field surfaces as an `Int` and the read is one `match`
+`ospf_metric1` to `ospf.metric1`; with `ospf_metric2`,
+`ospf_tag` and `ospf_router_id` renamed alongside the
+`ospf.metric2` / `ospf.tag` / `ospf.router_id` increments, every
+OSPF per-route attribute BIRD's filter grammar declares now has a
+faithful lr-DSL spelling; the remaining unmappable per-route
+attributes are the Babel triplet `babel_metric` / `babel_router_id`
+/ `babel_seqno`, gated by the `babel_` prefix in
+`UNMAPPABLE_PREFIXES`. The field surfaces as an `Int` and the read is one `match`
 plus one field read (no allocation), so the peephole pass's
 `BranchFieldIntCmp` fast path fires on `ospf.metric1 == N` /
 `ospf.metric1 > N` / etc. — the same fast path `bgp.local_pref` /
@@ -716,9 +720,13 @@ external route — the `LrOspfMetric2` attribute is present), not
 "malformed" together via the `None` read; the former keeps a
 type-2 external with metric 0 defined so a metric-0 type-2 external
 does not get a false "absent" read. The BIRD translator renames
-`ospf_metric2` to `ospf.metric2`; the remaining OSPF per-route
-attribute BIRD exposes (`ospf_router_id`) has no lr-DSL spelling
-yet and the translator marks a filter that references it unfaithful.
+`ospf_metric2` to `ospf.metric2`; with `ospf_tag` and
+`ospf_router_id` renamed alongside the `ospf.tag` and
+`ospf.router_id` increments, every OSPF per-route attribute
+BIRD's filter grammar declares now has a faithful lr-DSL spelling;
+the remaining unmappable per-route attributes are the Babel triplet
+`babel_metric` / `babel_router_id` / `babel_seqno`, gated by the
+`babel_` prefix in `UNMAPPABLE_PREFIXES`.
 The field surfaces as an `Int` and the read is one lookup plus one
 fixed-width read (no allocation), so the peephole pass's
 `BranchFieldIntCmp` fast path fires on `ospf.metric2 == N` /
@@ -769,12 +777,15 @@ v2 external surfaces `Some(t)` and `defined(ospf.tag)` is true even
 when the tag is zero; the v3 form's T bit (RFC 5340 §A.4.7) and the
 Extended-LSA External-Prefix sub-TLV 3 (RFC 8362 §3.6) distinguish
 "no tag" (T bit clear, no sub-TLV) from "tag of zero" (T bit set,
-value 0). The BIRD translator renames `ospf_tag` to `ospf.tag`; the
-remaining OSPF per-route attribute BIRD exposes (`ospf_router_id`)
-has no lr-DSL spelling yet and the translator marks a filter that
-references it unfaithful. The field surfaces as an `Int` and the
-read is one `match` plus one `Option<u32>` field read (no
-allocation, no BTreeMap lookup), so the peephole pass's
+value 0). The BIRD translator renames `ospf_tag` to `ospf.tag`;
+with `ospf_router_id` renamed alongside the `ospf.router_id`
+increment (see below), every OSPF per-route attribute BIRD's
+filter grammar declares now has a faithful lr-DSL spelling; the
+remaining unmappable per-route attributes are the Babel triplet
+`babel_metric` / `babel_router_id` / `babel_seqno`, gated by the
+`babel_` prefix in `UNMAPPABLE_PREFIXES`. The field surfaces as
+an `Int` and the read is one `match` plus one `Option<u32>` field
+read (no allocation, no BTreeMap lookup), so the peephole pass's
 `BranchFieldIntCmp` fast path fires on `ospf.tag == N` /
 `ospf.tag != N` / etc. — the same fast path `ospf.metric1` /
 `ospf.metric2` / `bgp.local_pref` / `bgp.med` / `bgp.otc` use,
@@ -783,6 +794,80 @@ pays. Unlike `ospf.metric2` (whose `LrOspfMetric2` attribute has
 no C ABI setter), the C ABI exposes the existing `lr_route_set_tag`
 setter, so embedders can construct a route carrying a tag — the
 binding tests exercise both the "absent" and "present" paths.
+
+`ospf.router_id` is the RFC 2328 §A.4 `Advertising Router` field
+/ RFC 5340 §A.4 the same field on every v3 LSA — the 32-bit OSPF
+Router-ID of the router that originated the LSA the route was
+computed from. For intra-area stub routes this is the Router-LSA's
+advertising router (the router that owns the stub network); for
+intra-area transit routes it is the Network-LSA's advertising
+router (the DR); for inter-area routes it is the summary-LSA's
+advertising router (the ABR); for external routes it is the
+AS-external-LSA's advertising router (the ASBR). BIRD exposes the
+value as `ospf_router_id` (an `int` eattr the OSPF protocol
+attaches to every route); lr's DSL spells it `ospf.router_id`
+(read-only `int`). The OSPF Router-ID rides the private
+`LrOspfRouterId` path-attribute tag (code point 252 — stripped at
+BGP encode, the same shape `LrOspfMetric2` at 253,
+`LrExchangePlaneRecords` at 254 and `LrMplsLabelStack` at 255
+use); the OSPF route computation
+(`lr-router::instance::ospf_ops::ospf_recompute`) attaches the
+attribute for every OSPFv2 / OSPFv3 route with a known originating
+LSA. The codec half adds the `router_id: Option<u32>` field to
+`lr-ospf::spf::SpfRoute` (populated for both v2 and v3 intra-area
+stub / transit routes, v2 / v3 inter-area summary routes and the
+v3 Intra-Area-Prefix-LSA walk). The mapping is one protocol-kind
+`match` plus one BTreeMap lookup plus one 4-byte read on
+`route.attributes` (no allocation, no codec — the value layout is a
+fixed 4-byte `u32`, read in place via `Attributes::get_u32_be`).
+The same shape as `ospf.metric2` (which reads a different private
+tag), more expensive than `ospf.metric1` / `ospf.tag` (which read
+struct fields, no lookup). A route without the attribute — a
+non-OSPF route, or an OSPF route whose computation could not
+identify the originating LSA's advertising router (a defensive
+fallback; the LSA header always carries the field per RFC 2328
+§A.4, so the OSPF route computation populates it for every
+received OSPF route) — reads as `0` (the eattr default for an
+unattached `ospf_router_id` reference), so the canonical idiom
+
+```
+if defined(ospf.router_id) && ospf.router_id == 3221225985 then accept;  # admit
+                                                                          # routes
+                                                                          # sourced
+                                                                          # by
+                                                                          # 192.0.2.1
+                                                                          # (0xc000_0201)
+```
+
+short-circuits on the `defined()` arm for a route without the
+attribute the same way it does in BIRD. The `defined(ospf.router_id)`
+predicate consults `has_router_id` (the route is an OSPFv2 / OSPFv3
+route with the `LrOspfRouterId` attribute physically present),
+not `router_id().is_some()` — the two agree on the
+present-with-non-zero case (both true), but the distinction
+matters when a router carries Router-ID 0.0.0.0 (RFC 2328 §3.1.b
+recommends a non-zero Router-ID but does not forbid it):
+`has_router_id` keeps "OSPF route with Router-ID 0" defined so the
+canonical idiom `if defined(ospf.router_id) && ospf.router_id == 0
+then accept;` does not drop such a route. The BIRD translator
+renames `ospf_router_id` to `ospf.router_id` (and removes it from
+`UNMAPPABLE_WORDS` — with this release every OSPF per-route
+attribute BIRD's filter grammar declares has a faithful lr-DSL
+spelling). The field surfaces as an `Int` and the read is one
+protocol-kind `match` plus one BTreeMap lookup plus one 4-byte
+read (no allocation), so the peephole pass's `BranchFieldIntCmp`
+fast path fires on `ospf.router_id == N` / `ospf.router_id != N` /
+etc. — the same fast path `ospf.metric1` / `ospf.metric2` /
+`ospf.tag` / `bgp.local_pref` / `bgp.med` / `bgp.otc` use, avoiding
+the `Value::Int` allocation + push the unfused sequence pays. Like
+`ospf.metric2` (whose `LrOspfMetric2` attribute has no C ABI
+setter), the `LrOspfRouterId` attribute has no C ABI setter —
+embedders read the field but never inject it; the OSPF daemon is
+the only producer, so the binding tests exercise only the "absent"
+path (the "present" path is exercised by the `lr-policy::ospf`
+unit tests that synthesize the attribute directly and the
+`lr-router::instance::tests` integration test that populates it
+via the OSPF route computation).
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
 (issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated
