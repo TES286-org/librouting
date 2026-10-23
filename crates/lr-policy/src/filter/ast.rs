@@ -695,6 +695,25 @@ pub enum RouteFieldKind {
     /// via `has_metric2`. BIRD spells it `ospf_metric2`; the
     /// BIRD translator renames it to `ospf.metric2`.
     OspfMetric2,
+    /// `ospf.tag` — RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
+    /// RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix
+    /// sub-TLV 3, the 32-bit external route tag carried in
+    /// type-5 / type-7 AS-external-LSA bodies. Read-only;
+    /// surfaces as an `Int` (`0` when the route carries no tag —
+    /// a non-OSPF route, an OSPF intra-area / inter-area route,
+    /// or a v3 external without the T bit set — mirroring
+    /// BIRD's eattr default for an unattached `ospf_tag`
+    /// reference). The `defined(ospf.tag)` predicate
+    /// distinguishes "no tag" from "tag of zero" via `has_tag`.
+    /// The v2 LSA body always carries a 4-byte tag field (zero
+    /// is well-formed per RFC 2328 §A.4.5), so a v2 external
+    /// always surfaces `Some(t)` and `defined(ospf.tag)` is
+    /// true even when the tag is zero; the v3 form's T bit
+    /// distinguishes "no tag" from "tag of zero" — a v3
+    /// external without the T bit set reads as `0` / not
+    /// defined. BIRD spells it `ospf_tag`; the BIRD translator
+    /// renames it to `ospf.tag`.
+    OspfTag,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -787,6 +806,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpPmsiTunnel => "bgp.pmsi_tunnel",
             RouteFieldKind::OspfMetric1 => "ospf.metric1",
             RouteFieldKind::OspfMetric2 => "ospf.metric2",
+            RouteFieldKind::OspfTag => "ospf.tag",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",
