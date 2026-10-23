@@ -869,6 +869,27 @@ impl Parser {
                         // non-type-2-external routes the same way it
                         // does in BIRD).
                         "metric2" => RouteFieldKind::OspfMetric2,
+                        // RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
+                        // RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+                        // External-Prefix sub-TLV 3 — the 32-bit
+                        // external route tag carried in type-5 /
+                        // type-7 AS-external-LSA bodies. BIRD spells
+                        // it `ospf_tag`; the BIRD translator renames
+                        // it to `ospf.tag`. Read-only; surfaces as an
+                        // `Int` (`0` when the route carries no tag,
+                        // so the canonical idiom `if defined(ospf.tag)
+                        // && ospf.tag == 0xdead_beef then accept;`
+                        // no-ops on routes without a tag the same way
+                        // it does in BIRD). The v2 LSA body always
+                        // carries a 4-byte tag field (zero is
+                        // well-formed per RFC 2328 §A.4.5), so a v2
+                        // external always surfaces `Some(t)` and
+                        // `defined(ospf.tag)` is true even when the
+                        // tag is zero; the v3 form's T bit
+                        // distinguishes "no tag" from "tag of zero"
+                        // — a v3 external without the T bit set
+                        // reads as `0` / not defined.
+                        "tag" => RouteFieldKind::OspfTag,
                         other => {
                             return Err(self.err(
                                 field_tok.span,

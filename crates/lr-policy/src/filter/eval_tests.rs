@@ -2751,10 +2751,11 @@ fn ospf_unknown_field_is_parse_error() {
     // uses the `UnknownOspfField` variant so the diagnostic names
     // the OSPF surface (mirrors `UnknownBgpField`). `ospf.bogus`
     // is not a known OSPF field — `ospf.metric1` (RFC 2328 §16 /
-    // RFC 5340 §4.1) and `ospf.metric2` (RFC 2328 §16.4 / RFC 5340
-    // §4.8.5) are the two known fields at the time of writing;
-    // `ospf.tag` and `ospf.router_id` are the next increments the
-    // ROADMAP names (still unimplemented at the time of writing).
+    // RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340
+    // §4.8.5) and `ospf.tag` (RFC 2328 §A.4.5 / RFC 5340 §A.4.7)
+    // are the three known fields at the time of writing;
+    // `ospf.router_id` is the next increment the ROADMAP names
+    // (still unimplemented at the time of writing).
     let err = compile("test", "if defined(ospf.bogus) then accept; reject;").unwrap_err();
     let msg = format!("{err}");
     assert!(
@@ -3056,6 +3057,290 @@ fn ospf_metric1_and_metric2_independent_reads() {
     assert_eq!(
         run(
             "if ospf.metric1 == 200 && ospf.metric2 == 0 then accept; reject;",
+            &mut r2
+        ),
+        EvalResult::Accept,
+    );
+}
+
+// ---- ospf.tag (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
+//      RFC 5340 §A.4.7 T bit / RFC 8362 §3.6) ----
+//
+// The `ospf.tag` field surfaces the route's external route tag —
+// the 32-bit tag carried in type-5 / type-7 AS-external-LSA bodies.
+// The lr `Route` data model carries the tag in the existing
+// `Route::tag: Option<u32>` field (also written by the `SetTag`
+// policy action); the OSPF route computation populates it from
+// the LSA's tag for external routes (the v2 form always surfaces
+// `Some(t)` — the v2 LSA body always carries a 4-byte tag, zero
+// being well-formed per RFC 2328 §A.4.5; the v3 form surfaces
+// `Some(t)` only when the T bit / External-Prefix sub-TLV 3 is
+// present). The tests below pin the full path — parse → eval →
+// accessor → `Route::tag` field read — against routes the test
+// stub builds with the same `Route { tag: Some(t), .. }` shape
+// the `ospf_recompute` populate step produces.
+
+/// Build an OSPFv2 route carrying a non-`None` `Route::tag` —
+/// mirrors the shape `lr-router::instance::ospf_ops::ospf_recompute`
+/// attaches for a v2 external route whose LSA body carries a tag
+/// (always present for v2 externals — the v2 LSA body always
+/// carries a 4-byte tag field, zero being well-formed).
+fn ospf_route_with_tag(metric: u32, tag: u32) -> Route {
+    let mut r = ospf_route_with_metric(metric);
+    r.tag = Some(tag);
+    r
+}
+
+/// Build an OSPFv3 route carrying a non-`None` `Route::tag` —
+/// mirrors the shape `ospf_recompute` attaches for a v3 external
+/// route whose LSA carried a T-bit-set / sub-TLV tag (the v3
+/// form requires the T bit to surface a tag, so this is the
+/// "T bit set" case).
+fn ospfv3_route_with_tag(metric: u32, tag: u32) -> Route {
+    let mut r = ospfv3_route_with_metric(metric);
+    r.tag = Some(tag);
+    r
+}
+
+#[test]
+fn ospf_tag_reads_as_int_when_present_v2() {
+    let mut r = ospf_route_with_tag(10, 3735928559);
+    assert_eq!(
+        run("if ospf.tag == 3735928559 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_tag_reads_as_int_when_present_v3() {
+    let mut r = ospfv3_route_with_tag(10, 3405705229);
+    assert_eq!(
+        run("if ospf.tag == 3405705229 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_tag_reads_as_zero_for_ospf_routes_without_a_tag() {
+    // An OSPF route with `Route::tag = None` — i.e. an intra-area,
+    // inter-area, or v3 external without the T bit set. `ospf.tag`
+    // reads as `0` (the unwrap_or(0) default for an absent int-
+    // typed attribute read), mirroring BIRD's eattr default for
+    // an unattached `ospf_tag` reference. The route's
+    // `ospf.metric1` is its `preference.metric` (42 here), so the
+    // test also pins that `ospf.tag` does not fall through to
+    // `preference.metric` on a non-external OSPF route — it
+    // reads `0`, not `42`.
+    let mut r = ospf_route_with_metric(42);
+    assert_eq!(
+        run("if ospf.tag == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.tag == 42 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_tag_reads_as_zero_for_non_ospf_routes_even_with_a_tag() {
+    // The accessor's protocol-kind fast path rejects a non-OSPF
+    // route even if `Route::tag` is `Some` (a `SetTag` action's
+    // operator-side override on a non-OSPF route is the legitimate
+    // case where `Route::tag` carries an operator-assigned tag for
+    // OSPF redistribution — `ospf.tag` on the BGP route reads as
+    // `0`, since the protocol-kind fast path rejects non-OSPF
+    // routes).
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.tag = Some(99);
+    assert_eq!(
+        run("if ospf.tag == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.tag == 99 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_tag_mismatch_rejects() {
+    let mut r = ospf_route_with_tag(10, 3735928559);
+    assert_eq!(
+        run("if ospf.tag == 305419896 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_tag_is_defined_iff_external_ospf_route() {
+    // OSPFv2 external (v2 LSA always carries a 4-byte tag): defined.
+    let mut r_v2 = ospf_route_with_tag(10, 3735928559);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_v2),
+        EvalResult::Accept,
+    );
+    // OSPFv3 external with the T bit set: defined.
+    let mut r_v3 = ospfv3_route_with_tag(10, 3405705229);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_v3),
+        EvalResult::Accept,
+    );
+    // OSPFv2 non-external (intra-area / inter-area): not defined.
+    let mut r_ospf = ospf_route_with_metric(42);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_ospf),
+        EvalResult::Reject(None),
+    );
+    // Non-OSPF route (BGP) with an operator-assigned tag: not
+    // defined (the protocol-kind fast path rejects non-OSPF
+    // routes, mirroring BIRD's eattr absence on non-OSPF routes).
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    r_bgp.tag = Some(99);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_bgp),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_tag_defined_distinguishes_no_tag_from_tag_zero() {
+    // RFC 2328 §A.4.5 bullet h: a v2 external route with tag 0
+    // (a v2 LSA whose 4-byte tag field happens to be zero, which
+    // is well-formed) is distinct from "no tag" (an intra-area /
+    // inter-area OSPF route) — `defined(ospf.tag)` reports true
+    // for the former and false for the latter. This is the case
+    // the `has_tag` accessor exists to make precise. The v3 form
+    // does NOT have this distinction — a v3 external without the
+    // T bit set reads as `0` / not-defined, and a v3 external
+    // with the T bit set and tag 0 reads as `0` / defined.
+    let mut r_zero = ospf_route_with_tag(10, 0);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_zero),
+        EvalResult::Accept,
+    );
+    let mut r_absent = ospf_route_with_metric(42);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_absent),
+        EvalResult::Reject(None),
+    );
+    // v3 with the T bit set and tag 0 — defined.
+    let mut r_v3_zero = ospfv3_route_with_tag(10, 0);
+    assert_eq!(
+        run("if defined(ospf.tag) then accept; reject;", &mut r_v3_zero),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_tag_canonical_bird_idiom_translates() {
+    // The canonical BIRD filter idiom for OSPF external route tag
+    // policy is `if defined(ospf_tag) && ospf_tag == 3735928559
+    // then accept;` ("a route a redistribution pipe tagged with
+    // 3735928559 on the upstream side should be admitted"). The
+    // translator renames `ospf_tag` to `ospf.tag` and the body
+    // round-trips through the daemon loader.
+    let mut r_match = ospf_route_with_tag(10, 3735928559);
+    assert_eq!(
+        run(
+            "if defined(ospf.tag) && ospf.tag == 3735928559 then accept; reject;",
+            &mut r_match
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_nomatch = ospf_route_with_tag(10, 305419896);
+    assert_eq!(
+        run(
+            "if defined(ospf.tag) && ospf.tag == 3735928559 then accept; reject;",
+            &mut r_nomatch
+        ),
+        EvalResult::Reject(None),
+    );
+    // A non-external OSPF route (intra-area / inter-area):
+    // `defined(ospf.tag)` is false, so the `&&` short-circuits
+    // and the route is rejected.
+    let mut r_ospf = ospf_route_with_metric(200);
+    assert_eq!(
+        run(
+            "if defined(ospf.tag) && ospf.tag == 3735928559 then accept; reject;",
+            &mut r_ospf
+        ),
+        EvalResult::Reject(None),
+    );
+    // A non-OSPF (BGP) route: `defined(ospf.tag)` is false, so
+    // the `&&` short-circuits and the route is rejected.
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(ospf.tag) && ospf.tag == 3735928559 then accept; reject;",
+            &mut r_bgp
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_tag_is_not_assignable() {
+    let err = compile("test", "ospf.tag = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn ospf_tag_peephole_fused_branch_agrees_with_unfused() {
+    // The peephole pass fuses `LoadField(OspfTag); Push(Int(c));
+    // Bin(op); JumpIf*` into a single `BranchFieldIntCmp` for int
+    // fields. `ospf.tag` was added to `is_int_field` so the fused
+    // path fires; pin the agreement between the fused and unfused
+    // paths by checking the same comparison both ways.
+    let mut r = ospf_route_with_tag(10, 305419896);
+    // Fused: constant on the RHS, comparison op in the fuse set.
+    assert_eq!(
+        run("if ospf.tag == 305419896 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.tag != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    // Unfused: constant on the LHS (the peephole does not fuse
+    // `Bin(Int(c), op, LoadField)`), exercises the read_route_field
+    // path directly.
+    assert_eq!(
+        run("if 305419896 == ospf.tag then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_tag_independent_of_metric1_and_metric2() {
+    // A type-2 external OSPFv2 route with a tag: `metric1`
+    // (`preference.metric`), `metric2` (the `LrOspfMetric2`
+    // attribute value) and `tag` (`Route::tag`) read
+    // independently: a filter can read any one without the other
+    // two leaking through. The three fields live on different
+    // slots — `Route::preference.metric`, the private
+    // `LrOspfMetric2` attribute, and `Route::tag` — and the
+    // accessors do not cross-read.
+    let mut r = ospf_route_with_metric2(200, 200);
+    r.tag = Some(3735928559);
+    // All three read independently.
+    assert_eq!(
+        run(
+            "if ospf.metric1 == 200 && ospf.metric2 == 200 && ospf.tag == 3735928559 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    // No `Route::tag` → `tag` reads 0 even though `metric1` /
+    // `metric2` are still 200.
+    let mut r2 = ospf_route_with_metric2(200, 200);
+    assert_eq!(
+        run(
+            "if ospf.metric1 == 200 && ospf.metric2 == 200 && ospf.tag == 0 then accept; reject;",
             &mut r2
         ),
         EvalResult::Accept,

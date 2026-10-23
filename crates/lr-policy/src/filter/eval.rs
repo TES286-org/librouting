@@ -320,6 +320,29 @@ pub trait FilterContext {
     fn ospf_has_metric2(&self, route: &Route) -> bool {
         crate::ospf::has_metric2(route)
     }
+    /// The route's external route tag (`ospf.tag`, RFC 2328 §A.4.5
+    /// bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362
+    /// §3.6 External-Prefix sub-TLV 3) — the 32-bit tag carried in
+    /// type-5 / type-7 AS-external-LSA bodies. `None` when the
+    /// route carries no tag — a non-OSPF route, an OSPF intra-area
+    /// / inter-area route, or a v3 external without the T bit set.
+    /// `Some(0)` for a v2 external with a zero tag (the v2 LSA
+    /// body always carries a 4-byte tag field, zero being
+    /// well-formed per RFC 2328 §A.4.5) or a v3 external with the
+    /// T bit set and a zero tag. The default delegates to
+    /// [`crate::ospf::tag`].
+    fn ospf_tag(&self, route: &Route) -> Option<u32> {
+        crate::ospf::tag(route)
+    }
+    /// True when the route is an OSPFv2 / OSPFv3 external route and
+    /// therefore carries an external route tag. Used by
+    /// `defined(ospf.tag)` to distinguish "no tag" from "tag of
+    /// zero" (the latter is defined for the v2 form, and for the
+    /// v3 form when the T bit is set). The default delegates to
+    /// [`crate::ospf::has_tag`].
+    fn ospf_has_tag(&self, route: &Route) -> bool {
+        crate::ospf::has_tag(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -870,6 +893,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // defined so the canonical idiom `if defined(ospf.metric2)
             // then accept;` does not drop a metric-0 type-2 external.
             RouteFieldKind::OspfMetric2 => self.ctx.ospf_has_metric2(route),
+            // RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7
+            // T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3:
+            // `ospf.tag` presence is `has_tag` (the route is an OSPFv2
+            // / OSPFv3 external route with a non-`None` `Route::tag`),
+            // not `tag().is_some()` — the two agree, but `has_tag`
+            // spells the contract: a v2 external always surfaces
+            // `Some(t)` (the v2 LSA body always carries a 4-byte tag
+            // field, zero being well-formed per RFC 2328 §A.4.5), so
+            // `defined(ospf.tag)` is true even when the tag is zero;
+            // a v3 external surfaces `Some(t)` only when the T bit /
+            // sub-TLV is present, so `defined(ospf.tag)` distinguishes
+            // "no tag" (T bit clear) from "tag of zero" (T bit set,
+            // value 0). For non-OSPF routes, `has_tag` is false.
+            RouteFieldKind::OspfTag => self.ctx.ospf_has_tag(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -1056,6 +1093,30 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::OspfMetric2 => {
                 Ok(Value::Int(self.ctx.ospf_metric2(route).unwrap_or(0) as i64))
             }
+            // RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340
+            // §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3:
+            // `ospf.tag` is the route's external route tag, surfaced
+            // as an `Int` (`0` when the route carries no tag,
+            // mirroring BIRD's eattr default for an unattached
+            // `ospf_tag` reference — non-OSPF routes, OSPF
+            // intra-area / inter-area routes, and v3 externals
+            // without the T bit all read as `0`). Callers that need
+            // to distinguish "no tag" from "tag of zero" gate with
+            // `defined(ospf.tag)` — the predicate consults
+            // `has_tag` (the route is an OSPF external with a
+            // non-`None` `Route::tag`), not `tag().is_some()` (the
+            // two agree, but `has_tag` spells the contract). One
+            // `match` on `route.protocol` plus one `Option<u32>`
+            // field read off `route.tag` — cheaper than
+            // `ospf.metric2` (which pays a BTreeMap lookup plus a
+            // 4-byte read) and the same shape as `ospf.metric1`
+            // (which reads a struct field, no lookup). The v2 form
+            // always surfaces `Some(t)` (the v2 LSA body always
+            // carries a 4-byte tag, zero being well-formed), so a
+            // v2 external reads as `0` for `ospf.tag == 0` and
+            // `defined(ospf.tag)` is true; the v3 form surfaces
+            // `Some(t)` only when the T bit / sub-TLV is present.
+            RouteFieldKind::OspfTag => Ok(Value::Int(self.ctx.ospf_tag(route).unwrap_or(0) as i64)),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
@@ -1161,6 +1222,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // peephole pass refuses to fuse those, so they fall
             // through to the unreachable arm).
             RouteFieldKind::OspfMetric2 => self.ctx.ospf_metric2(route).unwrap_or(0) as i64,
+            // `ospf.tag` reads `route.tag` for OSPF routes and 0
+            // for non-OSPF routes — a single `match` on
+            // `route.protocol` plus one `Option<u32>` field read,
+            // no BTreeMap lookup, no allocation. The fast path
+            // pays the same `match` the unfused `read_route_field`
+            // path pays, but skips the `Value::Int` construction +
+            // `Vec::push` on the comparison-branch hot path. The
+            // v2 form always surfaces `Some(t)` (the v2 LSA body
+            // always carries a 4-byte tag, zero being well-formed);
+            // the v3 form surfaces `Some(t)` only when the T bit /
+            // sub-TLV is present.
+            RouteFieldKind::OspfTag => self.ctx.ospf_tag(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
             // one of the arms above; the LRXP int-typed fields
             // and `bgp.aigp` fall through to the unreachable arm

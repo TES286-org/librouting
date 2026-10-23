@@ -13,35 +13,43 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: BGP PMSI Tunnel + OSPF metric1 / metric2 filter DSL surface
+## [Unreleased] — minor: BGP PMSI Tunnel + OSPF metric1 / metric2 / tag filter DSL
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
 when the attribute is present, `false` when absent), the RFC 2328
 §16 / RFC 5340 §4.1 primary OSPF metric as `ospf.metric1` (read-only
 `int` — `0` when the route is not OSPF, mirroring BIRD's eattr
-default for an unattached `ospf_metric1` reference) and the RFC 2328
+default for an unattached `ospf_metric1` reference), the RFC 2328
 §16.4 / RFC 5340 §4.8.5 type-2 external OSPF metric as `ospf.metric2`
 (read-only `int` — `0` when the route is not a type-2 external,
 mirroring BIRD's eattr default for an unattached `ospf_metric2`
-reference). Per
+reference) and the RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
+RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3
+external route tag as `ospf.tag` (read-only `int` — `0` when the
+route carries no tag, mirroring BIRD's eattr default for an
+unattached `ospf_tag` reference). Per
 `docs/RELEASE-PLAN.md` §1, the public Rust API gains new surface
 (`RouteFieldKind::BgpPmsiTunnel`, `RouteFieldKind::OspfMetric1`,
-`RouteFieldKind::OspfMetric2`, `AttrType::LrOspfMetric2`,
-`six new `FilterContext` trait methods with default impls, the
-`lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}` helpers, the
-`lr-policy::ospf::{metric1, has_metric1}` helpers and the new
-`lr-policy::ospf::{metric2, has_metric2}` helpers, the
-`lr-bgp::path::well_known::PmsiTunnel` typed view, the
+`RouteFieldKind::OspfMetric2`, `RouteFieldKind::OspfTag`,
+`AttrType::LrOspfMetric2`, eight new `FilterContext` trait methods
+with default impls, the `lr-policy::bgp::{pmsi_tunnel,
+has_pmsi_tunnel}` helpers, the `lr-policy::ospf::{metric1,
+has_metric1}` helpers, the new `lr-policy::ospf::{metric2,
+has_metric2}` helpers and the new `lr-policy::ospf::{tag, has_tag}`
+helpers, the `lr-bgp::path::well_known::PmsiTunnel` typed view, the
 `lr-bgp::path::PathAttributes::pmsi_tunnel` / `has_pmsi_tunnel`
-accessors and the new `lr-bgp::path::PathAttributes::set_ospf_metric2`
-/ `ospf_metric2` / `has_ospf_metric2` accessors); the new
-`RouteFieldKind` and `AttrType` variants are a breaking change
-for downstream `match` exhaustiveness, which the `api-surface` CI
-gate will catch when the version cuts. The C ABI surface is
-unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at 2); the
-FFI callback table `lr_filter_context_t` is untouched — the new
-`FilterContext` methods carry default implementations that
+accessors, the new `lr-bgp::path::PathAttributes::set_ospf_metric2`
+/ `ospf_metric2` / `has_ospf_metric2` accessors, and two new public
+fields on `lr-ospf::external::ExternalRoute` and
+`ExternalRouteV3` carrying the LSA's external route tag); the new
+`RouteFieldKind`, `AttrType` and `ExternalRoute` / `ExternalRouteV3`
+variants are a breaking change for downstream `match`
+exhaustiveness and struct-literal construction, which the
+`api-surface` CI gate will catch when the version cuts. The C ABI
+surface is unchanged (no new `lr_*` symbols, `ABI_VERSION` stays
+at 2); the FFI callback table `lr_filter_context_t` is untouched —
+the new `FilterContext` methods carry default implementations that
 delegate to `lr_policy::bgp` and `lr_policy::ospf`, so every
 existing embedder inherits the correct behaviour without
 recompiling.
@@ -150,9 +158,9 @@ type-5 LSA whose 24-bit external metric happens to be zero,
 unusual but well-formed per RFC 2328 §2.3) stays defined, so the
 canonical idiom does not drop it. The BIRD translator renames
 `ospf_metric2` to `ospf.metric2` (and removes it from
-`UNMAPPABLE_WORDS`, leaving the remaining OSPF attributes
-`ospf_tag` / `ospf_router_id` listed there so a filter that
-references them is still marked unfaithful). The peephole
+`UNMAPPABLE_WORDS`, leaving the remaining OSPF attribute
+`ospf_router_id` listed there so a filter that references it is
+still marked unfaithful). The peephole
 pass's `BranchFieldIntCmp` fast path fuses `ospf.metric2 == N` /
 `> N` / etc. comparisons the same way it fuses `ospf.metric1` /
 `bgp.local_pref` / `bgp.med` / `bgp.otc` — the read is one
@@ -161,6 +169,66 @@ path avoids the `Value::Int` allocation + push the unfused
 sequence pays. The C ABI does not expose a setter for the
 `LrOspfMetric2` tag — embedders read the field but never inject
 it; the OSPF daemon is the only producer.
+
+**OSPF tag filter DSL surface** (`policy`, `cli`, `ospf`, ROADMAP
+"Per-protocol route attributes and an external conversion corpus").
+The filter DSL now exposes the RFC 2328 §A.4.5 bullet h /
+RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+External-Prefix sub-TLV 3 external route tag — the 32-bit tag
+carried in type-5 / type-7 AS-external-LSA bodies. BIRD exposes
+the value in its filter language as `ospf_tag` (an `int` eattr
+the OSPF protocol attaches to external routes); lr's DSL spells
+it `ospf.tag` (read-only `int`). Unlike `ospf.metric2` (whose
+type-2 external metric rides the private `LrOspfMetric2`
+path-attribute tag), `ospf.tag` rides the existing `Route::tag`
+field — the same field the `SetTag` policy action writes for
+the operator-side override, and the same field the OSPF
+external-LSA origination path reads when redistributing a route
+into OSPF. The OSPF route computation
+(`lr-router::instance::ospf_ops::ospf_recompute`) populates
+`Route::tag` from the LSA's tag for type-5 / type-7 externals
+(the v2 form always carries a 4-byte tag, zero being
+well-formed per RFC 2328 §A.4.5 — `Route::tag = Some(t)` even
+when the tag is zero; the v3 form's T bit / External-Prefix
+sub-TLV 3 carries a tag only when present, so a missing v3 tag
+stays `None`). The codec half adds the `route_tag: u32` field
+to `lr-ospf::external::ExternalRoute` (v2) and `route_tag:
+Option<u32>` to `ExternalRouteV3` (v3), populated from the
+LSA body in `external_routes`, `nssa_routes` and
+`external_routes_v3_mode`. The populate-the-RIB half adds
+`route_tag: Option<u32>` to `OspfTableEntry` (pub(super), stays
+inside `lr-router::instance`) and sets `Route::tag =
+entry.route_tag` in `ospf_recompute` (replacing the previous
+hard-coded `None`). The accessor half adds the
+`lr-policy::ospf::{tag, has_tag}` helpers (the latter
+distinguishes "no tag" from "tag of zero" via
+`defined(ospf.tag)`). The filter-DSL half adds
+`RouteFieldKind::OspfTag` (read-only `int`), the parser
+dispatch for `ospf.tag`, the eval dispatch (`field_present`
+consults `has_tag`; `read_route_field` returns the int), the
+`FilterContext::ospf_tag` / `ospf_has_tag` default impls that
+delegate to `lr_policy::ospf`, and the `OspfTag` arm in the
+peephole pass's `is_int_field` set so the `BranchFieldIntCmp`
+fast path fires on `ospf.tag == N` / `> N` / etc. — the read
+is one `match` on `route.protocol` plus one `Option<u32>`
+field read off `route.tag`, no allocation, no BTreeMap lookup,
+cheaper than `ospf.metric2` (which pays a BTreeMap lookup plus
+a 4-byte read) and the same shape as `ospf.metric1` (which
+reads a struct field, no lookup). The BIRD translator renames
+`ospf_tag` to `ospf.tag` (and removes it from
+`UNMAPPABLE_WORDS`, leaving the remaining OSPF attribute
+`ospf_router_id` listed there so a filter that references it
+is still marked unfaithful). The corpus case
+`tests/corpus/bird/ospf-tag-filter.conf` exercises both the
+canonical tagged-route accept idiom and the zero-tag accept
+idiom. The Python and Go binding tests cover both the "absent"
+path (no tag set — the default for an intra-area / inter-area
+OSPF route) and the "present" path (a tag set via
+`set_tag` / `SetTag`, mirroring what `ospf_recompute` attaches
+for an external route whose LSA carried a tag) — the C ABI
+exposes the existing `lr_route_set_tag` setter, so the binding
+can exercise the present path that the metric2 binding test
+could not (the `LrOspfMetric2` tag has no C ABI setter).
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

@@ -225,6 +225,20 @@ pub(super) struct OspfTableEntry {
     /// intra-area routes carry their neighbor's link-local; v2 routes
     /// resolve on-link and publish None).
     pub(super) next_hop: Option<IpAddr>,
+    /// The 32-bit external route tag (RFC 2328 §A.4.5 bullet h /
+    /// RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+    /// External-Prefix sub-TLV 3). `None` for intra-area and
+    /// inter-area routes (the LSA carries no tag for those). For
+    /// external routes the v2 form always surfaces the LSA's 4-byte
+    /// tag (zero is well-formed) as `Some(tag)`; the v3 form
+    /// surfaces `Some(tag)` when the T bit (or sub-TLV) is present,
+    /// `None` otherwise. The OSPF route computation copies this
+    /// through to `Route::tag` on the resulting RIB route so the
+    /// policy DSL's `ospf.tag` accessor can surface it. The
+    /// existing `SetTag` policy action overwrites `Route::tag` —
+    /// the populate here is the receive-side input, the policy
+    /// action is the operator-side override.
+    pub(super) route_tag: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -292,6 +306,12 @@ impl OspfTableEntry {
             label: None,
             label_nh: None,
             next_hop,
+            // Intra-area routes carry no LSA tag (the router-LSA /
+            // network-LSA bodies have no tag field). `None` here
+            // means `defined(ospf.tag)` is false on the resulting
+            // RIB route, mirroring BIRD's eattr absence on
+            // intra-area routes.
+            route_tag: None,
         }
     }
 
@@ -304,6 +324,7 @@ impl OspfTableEntry {
             label: None,
             label_nh: None,
             next_hop,
+            route_tag: None,
         }
     }
 
@@ -316,6 +337,12 @@ impl OspfTableEntry {
             label: None,
             label_nh: None,
             next_hop: None,
+            // Inter-area routes carry no LSA tag (the summary-LSA
+            // body has no tag field). `None` here means
+            // `defined(ospf.tag)` is false on the resulting RIB
+            // route, mirroring BIRD's eattr absence on inter-area
+            // routes.
+            route_tag: None,
         }
     }
 
@@ -337,7 +364,31 @@ impl OspfTableEntry {
             label: None,
             label_nh: None,
             next_hop: None,
+            // The `external` constructor is the legacy shape that
+            // predates the route-tag plumbing — the LSA tag is
+            // surfaced through `with_route_tag` after construction
+            // (the v2 form's tag is always present, the v3 form's
+            // tag is `Option<u32>`). `None` here is the safe
+            // default the constructors the v2 / v3 paths in
+            // `ospf_recompute` overwrite via `with_route_tag`.
+            route_tag: None,
         }
+    }
+
+    /// Builder-style setter for the external route tag (RFC 2328
+    /// §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit /
+    /// RFC 8362 §3.6 External-Prefix sub-TLV 3). The OSPF route
+    /// computation calls this on external entries constructed via
+    /// [`Self::external`] to surface the LSA's tag through to
+    /// `Route::tag` on the resulting RIB route. `Some(tag)` for the
+    /// v2 form (the LSA always carries a 4-byte tag — zero is
+    /// well-formed); `Some(tag)` or `None` for the v3 form depending
+    /// on the T bit / sub-TLV presence. Intra-area and inter-area
+    /// entries never call this — they keep the constructor's
+    /// `None` default.
+    pub(super) fn with_route_tag(mut self, route_tag: Option<u32>) -> Self {
+        self.route_tag = route_tag;
+        self
     }
 
     pub(super) fn is_intra(&self) -> bool {

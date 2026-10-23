@@ -130,6 +130,15 @@ impl DefaultRouter {
                                 .then(|| IpAddr::V4(r.forwarding_addr.to_be_bytes())),
                             r.internal_cost,
                         )
+                        // RFC 2328 §A.4.5 bullet h: the v2 LSA body
+                        // always carries a 4-byte tag field (zero is
+                        // well-formed), so the OSPF route computation
+                        // always surfaces it for type-5 externals —
+                        // `Route::tag = Some(route_tag)` on the
+                        // resulting RIB route, and the policy DSL's
+                        // `ospf.tag` field reads it via the
+                        // `lr_policy::ospf::tag` accessor.
+                        .with_route_tag(Some(r.route_tag))
                     });
                 }
             }
@@ -151,6 +160,13 @@ impl DefaultRouter {
                                 .then(|| IpAddr::V4(r.forwarding_addr.to_be_bytes())),
                             r.internal_cost,
                         )
+                        // RFC 3101 §2.3 / Appendix A: the type-7 LSA
+                        // body is byte-identical to the type-5 body,
+                        // so the v2 LSA tag is always present (zero
+                        // is well-formed). The OSPF route computation
+                        // surfaces it for type-7 externals the same
+                        // way it does for type-5 externals above.
+                        .with_route_tag(Some(r.route_tag))
                     });
                 }
             }
@@ -225,6 +241,10 @@ impl DefaultRouter {
                         label: None,
                         label_nh: None,
                         next_hop: r.next_hop,
+                        // Inter-area summary routes (RFC 5340 §4.8.3
+                        // 0x2003 / RFC 8362 0xA023) carry no LSA tag
+                        // — the summary body has no tag field.
+                        route_tag: None,
                     });
                 }
                 // §4.8.5: AS externals from 0x4005 — `external_routes_v3`
@@ -247,6 +267,15 @@ impl DefaultRouter {
                         label: None,
                         label_nh: None,
                         next_hop: r.next_hop,
+                        // RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+                        // External-Prefix sub-TLV 3 — the v3
+                        // external route tag. `None` when the LSA
+                        // carries no tag; `Some(t)` when it does.
+                        // The route-computation loop below copies
+                        // this through to `Route::tag` so the
+                        // policy DSL's `ospf.tag` accessor surfaces
+                        // it.
+                        route_tag: r.route_tag,
                     });
                 }
                 for (prefix, entry) in table {
@@ -359,7 +388,21 @@ impl DefaultRouter {
                     attributes,
                     age_ms: 0,
                     path_id: 0,
-                    tag: None,
+                    // RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
+                    // RFC 5340 §A.4.7 T bit / RFC 8362 §3.6
+                    // External-Prefix sub-TLV 3 — the external route
+                    // tag the OSPF route computation surfaces for
+                    // external routes. `None` for intra-area and
+                    // inter-area routes (the LSA carries no tag for
+                    // those); `Some(tag)` for external routes (the
+                    // v2 form always carries a 4-byte tag, zero
+                    // being well-formed; the v3 form carries a tag
+                    // iff the T bit / sub-TLV is present). The policy
+                    // DSL's `ospf.tag` accessor reads this via
+                    // `lr_policy::ospf::tag`; the existing `SetTag`
+                    // policy action overwrites it for the
+                    // operator-side override.
+                    tag: entry.route_tag,
                 };
                 (key, route)
             })
@@ -740,6 +783,10 @@ impl DefaultRouter {
                         label: None,
                         label_nh: None,
                         next_hop: r.next_hop,
+                        // Inter-area summary routes (RFC 5340 §4.8.3
+                        // 0x2003 / RFC 8362 0xA023) carry no LSA tag —
+                        // the summary body has no tag field.
+                        route_tag: None,
                     });
                 }
                 (*id, t)

@@ -736,6 +736,118 @@ def test_filter_dsl_ospf_metric2():
     assert reject_high.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
 
 
+def test_filter_dsl_ospf_tag():
+    """`ospf.tag` reads the route's external route tag (RFC 2328
+    §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit /
+    RFC 8362 §3.6 External-Prefix sub-TLV 3) the OSPF route
+    computation populates from the LSA's tag for external routes.
+    The binding exercises the FFI surface — Python → C ABI → Rust
+    filter eval → `lr-policy::ospf::tag` accessor — so a regression
+    in any layer surfaces here.
+
+    Unlike `ospf.metric2` (whose `LrOspfMetric2` attribute has no
+    C ABI setter — the OSPF daemon is the only producer), `ospf.tag`
+    reads the existing `Route::tag` field, which the C ABI exposes
+    via `lr_route_set_tag`. The binding can therefore exercise
+    both the "absent" path (no tag set — the default for an
+    intra-area / inter-area OSPF route) and the "present" path (a
+    tag set via `set_tag`, mirroring what `ospf_recompute` attaches
+    for an external route whose LSA carried a tag)."""
+    # An OSPFv2 route without a tag — i.e. an intra-area /
+    # inter-area route (the OSPF route computation leaves
+    # `Route::tag = None` for those). `defined(ospf.tag)` is false,
+    # so the `&&` short-circuits and the route is accepted;
+    # `ospf.tag == 0` reads the unwrap_or(0) default (mirrors
+    # BIRD's eattr default for an unattached `ospf_tag` reference).
+    ospf = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_OSPF)
+    ospf.set_metric(200)
+    reject_tagged = librouting.compile_filter(
+        "py-ospf2-tag-tagged",
+        "if defined(ospf.tag) && ospf.tag == 3735928559 then reject; accept;",
+    )
+    assert reject_tagged.evaluate(ospf)[0] == librouting.FILTER_ACCEPT
+    read_zero = librouting.compile_filter(
+        "py-ospf2-tag-zero",
+        "if ospf.tag == 0 then accept; reject;",
+    )
+    assert read_zero.evaluate(ospf)[0] == librouting.FILTER_ACCEPT
+
+    # An OSPFv2 route with a tag set via `set_tag` — mirrors the
+    # shape `ospf_recompute` attaches for an external route whose
+    # LSA carried a tag. `defined(ospf.tag)` is true; the canonical
+    # idiom `if defined(ospf.tag) && ospf.tag == 3735928559 then
+    # accept;` matches.
+    ospf_tagged = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_OSPF)
+    ospf_tagged.set_metric(10)
+    ospf_tagged.set_tag(3735928559)  # 0xdead_beef
+    accept_tagged = librouting.compile_filter(
+        "py-ospf2-tag-accept-tagged",
+        "if defined(ospf.tag) && ospf.tag == 3735928559 then accept; reject;",
+    )
+    assert accept_tagged.evaluate(ospf_tagged)[0] == librouting.FILTER_ACCEPT
+    assert reject_tagged.evaluate(ospf_tagged)[0] == librouting.FILTER_REJECT
+
+    # A v2 external with the default zero tag is "present but
+    # zero" — `defined(ospf.tag)` is true (the v2 LSA body always
+    # carries a 4-byte tag, zero being well-formed per RFC 2328
+    # §A.4.5), and `ospf.tag == 0` reads 0.
+    ospf_zero_tag = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_OSPF)
+    ospf_zero_tag.set_metric(10)
+    ospf_zero_tag.set_tag(0)
+    defined_zero = librouting.compile_filter(
+        "py-ospf2-tag-defined-zero",
+        "if defined(ospf.tag) && ospf.tag == 0 then accept; reject;",
+    )
+    assert defined_zero.evaluate(ospf_zero_tag)[0] == librouting.FILTER_ACCEPT
+    # An OSPF route with no tag set: `defined(ospf.tag)` is false,
+    # so the `&&` short-circuits and the route is rejected by the
+    # defined_zero filter (the canonical v2-zero-tag idiom should
+    # not match a route with no tag).
+    assert defined_zero.evaluate(ospf)[0] == librouting.FILTER_REJECT
+
+    # OSPFv3 mirrors OSPFv2 (RFC 5340 §A.4.7 T bit mirrors §A.4.5)
+    # — the v3 form surfaces `Some(t)` when the T bit is set, so a
+    # `set_tag` call mirrors the T-bit-set case.
+    ospf3_tagged = librouting.Route(
+        ([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64),
+        librouting.PROTO_OSPF3,
+    )
+    ospf3_tagged.set_metric(220)
+    ospf3_tagged.set_tag(3405705229)  # 0xcafe_f00d
+    v3_accept = librouting.compile_filter(
+        "py-ospf3-tag-accept",
+        "if defined(ospf.tag) && ospf.tag == 3405705229 then accept; reject;",
+    )
+    assert v3_accept.evaluate(ospf3_tagged)[0] == librouting.FILTER_ACCEPT
+    # OSPFv3 with no tag set: `defined(ospf.tag)` is false (the
+    # absence-handling default mirrors the v2 form's intra-area /
+    # inter-area case).
+    ospf3 = librouting.Route(
+        ([0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1], 64),
+        librouting.PROTO_OSPF3,
+    )
+    ospf3.set_metric(220)
+    assert v3_accept.evaluate(ospf3)[0] == librouting.FILTER_REJECT
+
+    # A non-OSPF (BGP) route: `defined(ospf.tag)` is false (the
+    # protocol-kind fast path rejects non-OSPF routes, mirroring
+    # BIRD's eattr absence on non-OSPF routes), so the `&&`
+    # short-circuits and the route is accepted. The `set_tag` call
+    # is the legitimate case where `Route::tag` carries an
+    # operator-assigned tag for OSPF redistribution — `ospf.tag`
+    # on the BGP route still reads as `0` / not-defined because
+    # the protocol-kind fast path rejects non-OSPF routes.
+    bgp = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    bgp.set_metric(200)
+    bgp.set_tag(99)
+    assert reject_tagged.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+    bgp_read_zero = librouting.compile_filter(
+        "py-bgp-tag-zero",
+        "if ospf.tag == 0 then accept; reject;",
+    )
+    assert bgp_read_zero.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+
+
 def test_package_version_tracks_the_workspace():
     """`librouting.__version__` is the single source for the package
     version; pyproject.toml reads it via `dynamic = ["version"]`. It has

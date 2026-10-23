@@ -169,7 +169,11 @@ the RFC 6514 §5 PMSI Tunnel attribute (`bgp.pmsi_tunnel`), the RFC 2328
 §16.4 / RFC 5340 §4.8.5 type-2 external OSPF metric (`ospf.metric2`,
 carried through the Loc-RIB on the private `LrOspfMetric2`
 path-attribute tag the OSPF route computation attaches to type-2
-external routes), and —
+external routes), the RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
+RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3
+external route tag (`ospf.tag`, carried through the Loc-RIB on the
+existing `Route::tag` field the OSPF route computation populates
+from the LSA's tag for type-5 / type-7 externals), and —
 behind the `exchange-plane` feature — the LRXP exchange-plane records
 the route carries (`bgp.lrxp.*`, issue #81).
 
@@ -245,9 +249,32 @@ the route carries (`bgp.lrxp.*`, issue #81).
   protocol-kind `match` plus one BTreeMap lookup plus one 4-byte
   read on `route.attributes`, cheaper than any `bgp.*` accessor
   that decodes a multi-byte TLV stream, more expensive than
-  `ospf.metric1` (which reads a struct field, no lookup). The
-  remaining OSPF per-route attributes BIRD exposes (`ospf_tag`,
-  `ospf_router_id`) have no lr-DSL spelling yet.
+  `ospf.metric1` (which reads a struct field, no lookup).
+- RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7 T bit /
+  RFC 8362 §3.6 External-Prefix sub-TLV 3 — the 32-bit external
+  route tag the filter DSL exposes as `ospf.tag`; the typed
+  accessor (`lr-policy::ospf::tag`) reads the existing
+  `Route::tag` field the OSPF route computation
+  (`lr-router::instance::ospf_ops::ospf_recompute`) populates
+  from the LSA's tag for type-5 / type-7 externals and returns
+  `None` for everything else (non-OSPF routes, OSPF intra-area /
+  inter-area routes, and v3 externals without the T bit set —
+  mirroring BIRD's eattr default for an unattached `ospf_tag`
+  reference, so the canonical idiom `if defined(ospf.tag) &&
+  ospf.tag == 3735928559 then accept;` short-circuits on the
+  `defined()` arm for a route without a tag). The attribute
+  surfaces as a read-only `int` — `0` when the route carries no
+  tag — and the read pays one `match` on `route.protocol` plus
+  one `Option<u32>` field read off `route.tag`, cheaper than
+  `ospf.metric2` (which pays a BTreeMap lookup plus a 4-byte
+  read) and the same shape as `ospf.metric1` (which reads a
+  struct field, no lookup). The `defined(ospf.tag)` predicate
+  consults `has_tag`: the v2 LSA body always carries a 4-byte
+  tag (zero being well-formed), so a v2 external surfaces
+  `Some(t)` even when the tag is zero; the v3 form's T bit
+  distinguishes "no tag" from "tag of zero". The remaining OSPF
+  per-route attribute BIRD exposes (`ospf_router_id`) has no
+  lr-DSL spelling yet.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 

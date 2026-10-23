@@ -148,6 +148,77 @@ fn type1_external_adds_asbr_cost() {
     assert_eq!(r.internal_cost, 10);
     assert_eq!(r.asbr, 2);
     assert_eq!(r.border_router, None);
+    // `ExternalDestination::new` defaults `route_tag` to 0, so the
+    // OSPF route computation surfaces the v2 LSA's zero tag (well-
+    // formed per RFC 2328 §A.4.5). The resulting RIB `Route::tag`
+    // is `Some(0)` — `ospf.tag` reads 0 and `defined(ospf.tag)` is
+    // true (the LSA always carries the 4-byte tag field).
+    assert_eq!(r.route_tag, 0);
+}
+
+#[test]
+fn type1_external_carries_nonzero_route_tag() {
+    // A type-1 external LSA with a non-zero external route tag (RFC
+    // 2328 §A.4.5 bullet h) — the OSPF route computation surfaces
+    // the tag through `ExternalRoute::route_tag` so the resulting
+    // RIB `Route::tag` carries it and the policy DSL's `ospf.tag`
+    // accessor reads the value. Mirrors the BIRD `ospf_tag` eattr.
+    let mut lsdb = Lsdb::new();
+    let mut r1 = Lsa {
+        header: LsaHeader {
+            ls_age: 0,
+            options: 0x02,
+            ls_type: LsaTypeV2::RouterLsa as u16,
+            link_state_id: 1,
+            advertising_router: 1,
+            ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body: crate::spf::encode_router_lsa_body(
+            0,
+            vec![crate::lsa::RouterLink {
+                link_id: 2,
+                link_data: 0,
+                link_type: 1,
+                tos: 0,
+                metric: 10,
+            }],
+        ),
+    };
+    r1.finalize();
+    lsdb.install(r1, 0);
+    let mut r2 = Lsa {
+        header: LsaHeader {
+            ls_age: 0,
+            options: 0x02,
+            ls_type: LsaTypeV2::RouterLsa as u16,
+            link_state_id: 2,
+            advertising_router: 2,
+            ls_sequence_number: INITIAL_SEQUENCE_NUMBER,
+            ls_checksum: 0,
+            length: 0,
+        },
+        body: crate::spf::encode_router_lsa_body(
+            0,
+            vec![crate::lsa::RouterLink {
+                link_id: 1,
+                link_data: 0,
+                link_type: 1,
+                tos: 0,
+                metric: 10,
+            }],
+        ),
+    };
+    r2.finalize();
+    lsdb.install(r2, 0);
+    let mut dest = ExternalDestination::new(net(0xc6336400, 24), 5, ExternalMetricType::Type1);
+    dest.route_tag = 0xdead_beef;
+    lsdb.install(originate_external_lsa(2, &dest, None).unwrap(), 0);
+    let result = run_spf(&lsdb, 1);
+    let routes = external_routes(&lsdb, &result);
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].route_tag, 0xdead_beef);
 }
 
 #[test]
@@ -208,6 +279,10 @@ fn type2_external_keeps_external_metric_only() {
     assert_eq!(routes.len(), 1);
     assert_eq!(routes[0].metric, 7);
     assert_eq!(routes[0].internal_cost, 10);
+    // The v2 LSA body always carries a 4-byte tag field — the
+    // `ExternalDestination::new` default of 0 surfaces here. Mirrors
+    // the type-1 case.
+    assert_eq!(routes[0].route_tag, 0);
 }
 
 #[test]

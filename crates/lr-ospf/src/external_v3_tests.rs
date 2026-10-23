@@ -90,6 +90,12 @@ fn v3_external_intra_area_asbr() {
     assert_eq!(r.asbr, r2);
     assert_eq!(r.border_router, None);
     assert_eq!(r.forwarding_addr, None);
+    // `V3ExternalDestination::new` defaults `route_tag` to `None`,
+    // so the v3 LSA carries no T-bit-set tag field. The OSPF route
+    // computation surfaces `None` here, so the resulting RIB
+    // `Route::tag` is `None` and `defined(ospf.tag)` is false (the
+    // v3 T bit distinguishes "no tag" from "tag of zero").
+    assert_eq!(r.route_tag, None);
 
     // The type 1 form: cost-to-ASBR + external metric.
     let dest1 = V3ExternalDestination::new(p, 100, false);
@@ -102,6 +108,29 @@ fn v3_external_intra_area_asbr() {
     let routes1 = external_routes_v3(&db1, &spf1);
     assert_eq!(routes1[0].metric, 110, "type 1: internal + external");
     assert_eq!(routes1[0].metric_type, ExternalMetricType::Type1);
+}
+
+/// A v3 0x4005 LSA with the T-bit-set external route tag (RFC 5340
+/// §A.4.7) — the OSPF route computation surfaces the tag through
+/// `ExternalRouteV3::route_tag` so the resulting RIB `Route::tag`
+/// carries it and the policy DSL's `ospf.tag` accessor reads the
+/// value. Mirrors the v2 `type1_external_carries_nonzero_route_tag`
+/// case, but the v3 form's T bit is the presence marker (a missing
+/// v3 tag stays `None`, unlike the v2 form which always carries a
+/// 4-byte tag field).
+#[test]
+fn v3_external_intra_area_asbr_carries_route_tag() {
+    let (r1, r2) = (0x0a00_0001, 0x0a00_0002);
+    let mut db = v3_p2p_lsdb(r1, r2);
+    let p = ext_prefix([0x20, 0x01, 0x0d, 0xb8, 0xbe, 0xef], 48);
+    let mut dest = V3ExternalDestination::new(p, 100, true);
+    dest.route_tag = Some(0xdead_beef);
+    db.install(originate_v3_as_external_lsa(r2, 1, &dest, None).unwrap(), 0);
+
+    let spf = run_spf_v3(&db, r1);
+    let routes = external_routes_v3(&db, &spf);
+    assert_eq!(routes.len(), 1);
+    assert_eq!(routes[0].route_tag, Some(0xdead_beef));
 }
 
 /// §16.4 (b) v3 form: the ASBR sits in another area — a 0x2004 from
