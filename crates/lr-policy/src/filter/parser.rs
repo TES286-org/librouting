@@ -752,6 +752,15 @@ impl Parser {
                         // BIRD spells it `bgp_aigp`; the BIRD
                         // translator renames it to `bgp.aigp`.
                         "aigp" => RouteFieldKind::BgpAigp,
+                        // RFC 4271 §5.1.7 — AGGREGATOR is a
+                        // structured `(asn, speaker)` pair; the lr
+                        // DSL decomposes it into two fields
+                        // (`bgp.aggregator.asn`, `bgp.aggregator.speaker`).
+                        // BIRD spells it `bgp_aggregator`; the BIRD
+                        // translator renames it to
+                        // `bgp.aggregator.asn` (the canonical probe
+                        // for `defined()`).
+                        "aggregator" => return self.parse_aggregator_field(tok.span).map(Some),
                         // Issue #81 — LRXP exchange-plane surface.
                         // `bgp.lrxp` opens a three-segment dotted
                         // path (`bgp.lrxp.<class>.<field>`), plus
@@ -812,6 +821,47 @@ impl Parser {
             _ => return Ok(None),
         };
         Ok(Some(field))
+    }
+
+    /// RFC 4271 §5.1.7 — parse the `bgp.aggregator.<field>` surface.
+    /// The `bgp.aggregator` prefix has already been consumed by
+    /// [`try_parse_route_field`]; this method reads the remaining
+    /// `.field` tail (`asn` or `speaker`) and dispatches to the
+    /// matching [`RouteFieldKind`]. Always compiled — the AGGREGATOR
+    /// attribute is a standard well-known attribute with no feature
+    /// gate.
+    fn parse_aggregator_field(
+        &mut self,
+        bgp_span: crate::filter::span::Span,
+    ) -> Result<RouteField, ParseError> {
+        // Consume the `aggregator` identifier.
+        self.advance();
+        self.expect(TokenKind::Dot, "`.`")?;
+        let field_tok = self.peek().cloned();
+        let Some(field_tok) = field_tok else {
+            return Err(self.err(bgp_span, ParseErrorKind::UnexpectedEof));
+        };
+        let TokenKind::Ident(field) = &field_tok.kind else {
+            return Err(self.err(
+                field_tok.span,
+                ParseErrorKind::UnexpectedToken {
+                    expected: "aggregator field name (asn, speaker)",
+                    found: field_tok.kind.clone(),
+                },
+            ));
+        };
+        let kind = match field.as_str() {
+            "asn" => RouteFieldKind::BgpAggregatorAsn,
+            "speaker" => RouteFieldKind::BgpAggregatorSpeaker,
+            other => {
+                return Err(self.err(
+                    field_tok.span,
+                    ParseErrorKind::UnknownBgpField(format!("bgp.aggregator.{other}")),
+                ));
+            }
+        };
+        self.advance();
+        Ok(RouteField::new(kind))
     }
 
     /// Issue #81 — parse the `bgp.lrxp.<class>.<field>` surface (and

@@ -1701,6 +1701,8 @@ const TAG_CLUSTER_LIST: u8 = 10;
 const TAG_OTC: u8 = 35;
 /// RFC 7311 §3: AIGP attribute type code.
 const TAG_AIGP: u8 = 26;
+/// RFC 4271 §5.1.7: AGGREGATOR attribute type code.
+const TAG_AGGREGATOR: u8 = 7;
 
 fn route_with_atomic_aggregate() -> Route {
     let mut r = route_with("203.0.113.0/24", 100, 0);
@@ -2162,6 +2164,223 @@ fn bgp_aigp_unfused_read_path_agrees_both_directions() {
     );
     assert_eq!(
         run("if 64512 == bgp.aigp then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+// ---- RFC 4271 §5.1.7: bgp.aggregator.{asn,speaker} ----
+
+/// Build a route carrying an AGGREGATOR attribute in the canonical
+/// 4-byte-AS wire form (the stored encoding after ingress reconciles
+/// AS4_AGGREGATOR). AGGREGATOR is optional transitive (flags 0xC0).
+fn route_with_aggregator(asn: u32, speaker: [u8; 4]) -> Route {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let mut value = Vec::with_capacity(8);
+    value.extend_from_slice(&asn.to_be_bytes());
+    value.extend_from_slice(&speaker);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(TAG_AGGREGATOR),
+        flags: 0xC0,
+        value,
+    });
+    r
+}
+
+#[test]
+fn bgp_aggregator_asn_reads_as_int_when_present() {
+    let mut r = route_with_aggregator(64512, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if bgp.aggregator.asn == 64512 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_aggregator_asn_reads_as_zero_when_absent() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    // An absent AGGREGATOR reads as 0 — the unwrap_or(0) semantics on
+    // the int-typed field read. Matches BIRD's `bgp_aggregator`
+    // filter behaviour on a non-aggregated route.
+    assert_eq!(
+        run("if bgp.aggregator.asn == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_aggregator_asn_mismatch_rejects() {
+    let mut r = route_with_aggregator(64513, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if bgp.aggregator.asn == 64512 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aggregator_speaker_reads_as_ip_when_present() {
+    let mut r = route_with_aggregator(64512, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if bgp.aggregator.speaker == 10.0.0.1 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn bgp_aggregator_asn_is_defined_iff_present() {
+    // Present.
+    let mut r_with = route_with_aggregator(64512, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.asn) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    // Absent.
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.asn) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aggregator_speaker_shares_presence_with_asn() {
+    // Both components are present together or absent together, so
+    // `defined(bgp.aggregator.speaker)` agrees with
+    // `defined(bgp.aggregator.asn)` — the canonical probe.
+    let mut r_with = route_with_aggregator(64512, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.speaker) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_without = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.speaker) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aggregator_defined_distinguishes_absent_from_set_to_zero() {
+    // RFC 4271 §5.1.7: a present value of AS 0 ("set but zero") is
+    // distinct from "absent" — `defined(bgp.aggregator.asn)` reports
+    // true for the former and false for the latter. This is the case
+    // the `has_aggregator` accessor exists to make precise.
+    let mut r_zero = route_with_aggregator(0, [0, 0, 0, 0]);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.asn) then accept; reject;",
+            &mut r_zero
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_absent = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.asn) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aggregator_aggregation_aware_policy_idiom() {
+    // The canonical aggregation-aware idiom: accept routes that were
+    // aggregated by a known AS, fall through otherwise. The DSL
+    // spells the test the same way an operator would against BIRD's
+    // `bgp_aggregator`.
+    let mut r_known = route_with_aggregator(64512, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.asn) && bgp.aggregator.asn == 64512 then accept; reject;",
+            &mut r_known
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_other = route_with_aggregator(65000, [10, 0, 0, 2]);
+    assert_eq!(
+        run(
+            "if defined(bgp.aggregator.asn) && bgp.aggregator.asn == 64512 then accept; reject;",
+            &mut r_other
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn bgp_aggregator_asn_is_not_assignable() {
+    let err = compile("test", "bgp.aggregator.asn = 64512;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_aggregator_speaker_is_not_assignable() {
+    let err = compile("test", "bgp.aggregator.speaker = 10.0.0.1;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_aggregator_unknown_subfield_is_a_parse_error() {
+    // `bgp.aggregator.<unknown>` is rejected at parse time with
+    // `UnknownBgpField` so a typo does not silently no-op.
+    let err = compile("test", "if bgp.aggregator.bogus == 0 then accept; reject;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("bgp.aggregator.bogus") || msg.contains("UnknownBgpField"),
+        "expected an UnknownBgpField error, got: {msg}"
+    );
+}
+
+#[test]
+fn bgp_aggregator_unfused_read_path_agrees_both_directions() {
+    // AGGREGATOR is deliberately NOT in the peephole's `is_int_field`
+    // set (its read decodes the Aggregator struct — a length check +
+    // two fixed-size copies — not a single `get_u32_be`, so fusing
+    // would not save the allocation the fast path exists to avoid;
+    // mirrors the AIGP decision). Both the constant-RHS and
+    // constant-LHS comparison forms run the unfused `read_route_field`
+    // path; pin the agreement.
+    let mut r = route_with_aggregator(64512, [10, 0, 0, 1]);
+    assert_eq!(
+        run(
+            "if bgp.aggregator.asn == 64512 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run(
+            "if 64512 == bgp.aggregator.asn then accept; reject;",
+            &mut r
+        ),
         EvalResult::Accept,
     );
 }

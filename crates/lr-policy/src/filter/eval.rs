@@ -233,6 +233,30 @@ pub trait FilterContext {
     fn bgp_has_aigp(&self, route: &Route) -> bool {
         crate::bgp::has_aigp(route)
     }
+    /// BGP AGGREGATOR AS number (`bgp.aggregator.asn`, RFC 4271
+    /// §5.1.7) — the AS of the BGP speaker that performed route
+    /// aggregation. `None` when the attribute is absent or malformed;
+    /// `Some(0)` when present but zero. The default delegates to
+    /// [`lr_policy::bgp::aggregator_asn`].
+    fn bgp_aggregator_asn(&self, route: &Route) -> Option<u32> {
+        crate::bgp::aggregator_asn(route)
+    }
+    /// BGP AGGREGATOR speaker IP (`bgp.aggregator.speaker`,
+    /// RFC 4271 §5.1.7) — the IPv4 address of the BGP speaker that
+    /// performed route aggregation. `None` when the attribute is
+    /// absent or malformed. The default delegates to
+    /// [`lr_policy::bgp::aggregator_speaker`].
+    fn bgp_aggregator_speaker(&self, route: &Route) -> Option<IpAddr> {
+        crate::bgp::aggregator_speaker(route)
+    }
+    /// True when an AGGREGATOR attribute is physically present on the
+    /// route (RFC 4271 §5.1.7). Used by `defined(bgp.aggregator.asn)`
+    /// to distinguish "absent" from "set to zero". Both `asn` and
+    /// `speaker` share the same presence, so this probe serves
+    /// either field.
+    fn bgp_has_aggregator(&self, route: &Route) -> bool {
+        crate::bgp::has_aggregator(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -749,6 +773,16 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // former keeps "present but zero" (and the empty-value
             // field case) defined.
             RouteFieldKind::BgpAigp => self.ctx.bgp_has_aigp(route),
+            // RFC 4271 §5.1.7: AGGREGATOR presence is
+            // `has_aggregator` (the attribute is on the route), not
+            // `aggregator_asn().is_some()` — the latter collapses
+            // "absent" and "malformed" together but the former keeps
+            // "present but zero" defined. Both `asn` and `speaker`
+            // share the same physical presence, so one probe serves
+            // either field.
+            RouteFieldKind::BgpAggregatorAsn | RouteFieldKind::BgpAggregatorSpeaker => {
+                self.ctx.bgp_has_aggregator(route)
+            }
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -872,6 +906,23 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpAigp => Ok(Value::Int(
                 self.ctx.bgp_aigp(route).unwrap_or(0).min(i64::MAX as u64) as i64,
             )),
+            // RFC 4271 §5.1.7: AGGREGATOR AS is a 4-byte AS number
+            // surfaced as an `Int` (`0` when absent or set to zero).
+            // Callers that need to distinguish "absent" from "set to
+            // zero" gate with `defined(bgp.aggregator.asn)`.
+            RouteFieldKind::BgpAggregatorAsn => Ok(Value::Int(
+                self.ctx.bgp_aggregator_asn(route).unwrap_or(0) as i64,
+            )),
+            // RFC 4271 §5.1.7: AGGREGATOR speaker is an IPv4 address
+            // surfaced as an `Ip`; mirror `bgp.next_hop`'s /
+            // `bgp.originator_id`'s `Bool(false)` sentinel for the
+            // absent case so a direct `==` comparison does not crash
+            // (callers should gate with `defined(bgp.aggregator.asn)`).
+            RouteFieldKind::BgpAggregatorSpeaker => Ok(self
+                .ctx
+                .bgp_aggregator_speaker(route)
+                .map(Value::Ip)
+                .unwrap_or(Value::Bool(false))),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
