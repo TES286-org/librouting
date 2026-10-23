@@ -167,9 +167,36 @@ pub enum AttrType {
     /// at 24 bits, so the high byte is always zero on a well-formed
     /// value).
     LrOspfMetric2 = 253,
+    /// librouting-private OSPF advertising-router ID (RFC 2328 §A.4
+    /// `Advertising Router` field / RFC 5340 §A.4 the same field on
+    /// every v3 LSA). Carries the 32-bit OSPF Router-ID of the router
+    /// that originated the LSA the route was computed from — the
+    /// Router-LSA's advertising router for intra-area stub routes, the
+    /// Network-LSA's advertising router (the DR) for intra-area transit
+    /// routes, the summary-LSA's advertising router (the ABR) for
+    /// inter-area routes, and the AS-external-LSA's advertising router
+    /// (the ASBR) for external routes — into the Loc-RIB so the policy
+    /// DSL's `ospf.router_id` field can surface it. *Never*
+    /// transmitted on the wire: it carries OSPF ingress state inside
+    /// the Loc-RIB only (the OSPF LSDB — not BGP — is the source),
+    /// and the codec strips it at encode so peers never see it.
+    /// Attached to every OSPFv2 / OSPFv3 route that has a known
+    /// originating LSA; absent for non-OSPF routes.
+    ///
+    /// 252 is an internal-only code point: it never appears on the
+    /// wire (the codec strips it at encode) and it deliberately
+    /// avoids the 244-254 unassigned range that the W6.3
+    /// exchange-plane prototype rides on for its wire attribute
+    /// (type 251).
+    ///
+    /// Value layout: a single 4-byte big-endian u32 holding the OSPF
+    /// Router-ID (the LSA `Advertising Router` field is a 32-bit
+    /// dotted-quad, RFC 2328 §A.4 — no masking needed; the high byte
+    /// is meaningful).
+    LrOspfRouterId = 252,
     /// Unknown attribute code. The explicit discriminant keeps the
     /// data-carrying variant out of the unit-like variants' implicit
-    /// numbering (the three private tags above sit at 253/254/255).
+    /// numbering (the four private tags above sit at 252/253/254/255).
     Other(u8) = 0,
 }
 
@@ -200,6 +227,7 @@ impl AttrType {
             26 => Self::Aigp,
             254 => Self::LrExchangePlaneRecords,
             253 => Self::LrOspfMetric2,
+            252 => Self::LrOspfRouterId,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
@@ -231,6 +259,7 @@ impl AttrType {
             Self::Aigp => 26,
             Self::LrExchangePlaneRecords => 254,
             Self::LrOspfMetric2 => 253,
+            Self::LrOspfRouterId => 252,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }
@@ -622,6 +651,62 @@ impl PathAttributes {
     /// `defined(ospf_metric2)` does.
     pub fn has_ospf_metric2(&self) -> bool {
         self.get(AttrType::LrOspfMetric2).is_some()
+    }
+
+    /// Attach the OSPF advertising-router ID (RFC 2328 §A.4 `Advertising
+    /// Router` field / RFC 5340 §A.4 the same field on every v3 LSA) to
+    /// this attribute set under the private [`AttrType::LrOspfRouterId`]
+    /// tag. The tag is never transmitted on the wire; it carries the
+    /// 32-bit OSPF Router-ID of the router that originated the LSA the
+    /// route was computed from (the Router-LSA's advertising router for
+    /// intra-area stub routes; the Network-LSA's advertising router —
+    /// the DR — for intra-area transit routes; the summary-LSA's
+    /// advertising router — the ABR — for inter-area routes; the
+    /// AS-external-LSA's advertising router — the ASBR — for external
+    /// routes) through the Loc-RIB so the filter DSL's `ospf.router_id`
+    /// field can surface it. Attached to every OSPFv2 / OSPFv3 route
+    /// that has a known originating LSA; absent for non-OSPF routes.
+    ///
+    /// `router_id` is the raw 32-bit OSPF Router-ID (no masking — the
+    /// field is 32-bit per RFC 2328 §A.4).
+    pub fn set_ospf_router_id(&mut self, router_id: u32) {
+        let value = router_id.to_be_bytes();
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrOspfRouterId,
+            value.to_vec(),
+        ));
+    }
+
+    /// Read back the OSPF advertising-router ID previously attached
+    /// with [`Self::set_ospf_router_id`]. Returns `None` when the
+    /// route carries no OSPF router-id attribute — i.e. it is not an
+    /// OSPF route, or the OSPF route computation could not identify
+    /// the originating LSA's advertising router.
+    ///
+    /// A malformed value (not exactly 4 bytes) returns `None` — the
+    /// codec rejects partial-width stores at decode. Callers that need
+    /// to distinguish "absent" from "present but malformed" should
+    /// consult [`Self::has_ospf_router_id`].
+    pub fn ospf_router_id(&self) -> Option<u32> {
+        let a = self.get(AttrType::LrOspfRouterId)?;
+        if a.value.len() != 4 {
+            return None;
+        }
+        Some(u32::from_be_bytes([
+            a.value[0], a.value[1], a.value[2], a.value[3],
+        ]))
+    }
+
+    /// True when an `LrOspfRouterId` attribute is physically present on
+    /// the route (RFC 2328 §A.4). Use this to distinguish "no
+    /// attribute" from "present but malformed" — [`Self::ospf_router_id`]
+    /// returns `None` for both, but `has_ospf_router_id()` reports the
+    /// attribute's physical presence so the `defined(ospf.router_id)`
+    /// filter DSL predicate can distinguish them exactly as BIRD's
+    /// `defined(ospf_router_id)` does.
+    pub fn has_ospf_router_id(&self) -> bool {
+        self.get(AttrType::LrOspfRouterId).is_some()
     }
 
     /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`
