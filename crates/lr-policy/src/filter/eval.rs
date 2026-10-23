@@ -298,6 +298,28 @@ pub trait FilterContext {
     fn ospf_has_metric1(&self, route: &Route) -> bool {
         crate::ospf::has_metric1(route)
     }
+    /// The route's type-2 external OSPF metric (`ospf.metric2`, RFC
+    /// 2328 §16.4 / RFC 5340 §4.8.5) — the E-bit-set LSA metric the
+    /// §16.4 (6) type-2 preference ranks against. `None` when the
+    /// route is not a type-2 external — non-OSPF routes, OSPF
+    /// intra-area / inter-area routes, and OSPF type-1 external
+    /// routes (the OSPF route computation only attaches the
+    /// `LrOspfMetric2` attribute for type-2 externals). `Some(0)`
+    /// for a type-2 external with metric 0. The default delegates
+    /// to [`crate::ospf::metric2`].
+    fn ospf_metric2(&self, route: &Route) -> Option<u32> {
+        crate::ospf::metric2(route)
+    }
+    /// True when the route is an OSPFv2 / OSPFv3 type-2 external
+    /// route (RFC 2328 §16.4 / RFC 5340 §4.8.5) and therefore
+    /// carries a secondary OSPF metric. Used by
+    /// `defined(ospf.metric2)` to distinguish "not a type-2
+    /// external" from "type-2 external with metric 0" (the latter
+    /// is defined). The default delegates to
+    /// [`crate::ospf::has_metric2`].
+    fn ospf_has_metric2(&self, route: &Route) -> bool {
+        crate::ospf::has_metric2(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -840,6 +862,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // `if defined(ospf.metric1) then accept;` does not drop
             // a cost-0 OSPF route.
             RouteFieldKind::OspfMetric1 => self.ctx.ospf_has_metric1(route),
+            // RFC 2328 §16.4 / RFC 5340 §4.8.5: `ospf.metric2` presence
+            // is `has_metric2` (the route is an OSPFv2 / OSPFv3
+            // type-2 external route), not `metric2().is_some()` — the
+            // two agree on the type-2-external case (both true), but
+            // `has_metric2` keeps a type-2 external with metric 0
+            // defined so the canonical idiom `if defined(ospf.metric2)
+            // then accept;` does not drop a metric-0 type-2 external.
+            RouteFieldKind::OspfMetric2 => self.ctx.ospf_has_metric2(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -1006,6 +1036,26 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::OspfMetric1 => {
                 Ok(Value::Int(self.ctx.ospf_metric1(route).unwrap_or(0) as i64))
             }
+            // RFC 2328 §16.4 / RFC 5340 §4.8.5: `ospf.metric2` is the
+            // type-2 external OSPF metric, surfaced as an `Int` (`0`
+            // when the route is not a type-2 external, mirroring
+            // BIRD's eattr default for an unattached `ospf_metric2`
+            // reference — non-OSPF routes, OSPF intra-area /
+            // inter-area routes, and OSPF type-1 external routes all
+            // read as `0`). Callers that need to distinguish "not a
+            // type-2 external" from "type-2 external with metric 0"
+            // gate with `defined(ospf.metric2)` — the predicate
+            // consults `has_metric2` (the `LrOspfMetric2` attribute
+            // is present), not `metric2().is_some()` (which
+            // collapses "absent" and "malformed" together via the
+            // `None` read). One BTreeMap lookup plus one 4-byte
+            // read on the route's `attributes` bag — cheaper than
+            // any `bgp_*` accessor that decodes a multi-byte TLV
+            // stream, more expensive than `ospf.metric1` (which
+            // reads a struct field, no lookup).
+            RouteFieldKind::OspfMetric2 => {
+                Ok(Value::Int(self.ctx.ospf_metric2(route).unwrap_or(0) as i64))
+            }
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
@@ -1099,6 +1149,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // `Value::Int` construction + `Vec::push` on the
             // comparison-branch hot path.
             RouteFieldKind::OspfMetric1 => self.ctx.ospf_metric1(route).unwrap_or(0) as i64,
+            // `ospf.metric2` reads the private `LrOspfMetric2`
+            // path-attribute tag the OSPF route computation attaches to
+            // type-2 external routes — one BTreeMap lookup plus one
+            // 4-byte read on `route.attributes`, no allocation. The
+            // fast path pays the same lookup the unfused
+            // `read_route_field` path pays, but skips the
+            // `Value::Int` construction + `Vec::push` on the
+            // comparison-branch hot path. Cheaper than any `bgp_*`
+            // accessor that decodes a multi-byte TLV stream (the
+            // peephole pass refuses to fuse those, so they fall
+            // through to the unreachable arm).
+            RouteFieldKind::OspfMetric2 => self.ctx.ospf_metric2(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
             // one of the arms above; the LRXP int-typed fields
             // and `bgp.aigp` fall through to the unreachable arm
