@@ -3297,6 +3297,42 @@ fn ospfv3_inter_area_and_external_routes_published() {
         external_route.tag, None,
         "v3 external without T bit carries no tag"
     );
+    // RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the
+    // same field on every v3 LSA — the OSPF Router-ID of the
+    // router that originated the LSA the route was computed from.
+    // The OSPF route computation attaches the private
+    // `LrOspfRouterId` path-attribute tag for every OSPFv2 / OSPFv3
+    // route with a known originating LSA: intra-area routes
+    // populate from the Router-LSA's advertising router (or
+    // Network-LSA's for transit routes), inter-area routes from
+    // the summary-LSA's advertising router (the ABR), and
+    // external routes from the AS-external-LSA's advertising
+    // router (the ASBR). The inter-area summary route was
+    // originated by the remote router `r2` = `0x0a00_0002` (the
+    // test's ABR), and the external route was also originated by
+    // `r2` (the test's ASBR — both LSAs arrive in the same LSU
+    // from `r2`). Both attributes are 4-byte big-endian; the
+    // codec strips them at BGP encode so peers never see them.
+    assert_eq!(
+        summary_route
+            .attributes
+            .get_u32_be(lr_core::attr::AttrTag::raw(
+                lr_bgp::path::AttrType::LrOspfRouterId.to_u8()
+            )),
+        Some(0x0a00_0002),
+        "LrOspfRouterId carries the inter-area route's originating \
+         ABR (the remote router that originated the summary-LSA)"
+    );
+    assert_eq!(
+        external_route
+            .attributes
+            .get_u32_be(lr_core::attr::AttrTag::raw(
+                lr_bgp::path::AttrType::LrOspfRouterId.to_u8()
+            )),
+        Some(0x0a00_0002),
+        "LrOspfRouterId carries the external route's originating \
+         ASBR (the AS-external-LSA's advertising router)"
+    );
 }
 
 /// RFC 5340 §A.4.7 T bit: a v3 0x4005 LSA carrying a non-zero

@@ -3347,6 +3347,339 @@ fn ospf_tag_independent_of_metric1_and_metric2() {
     );
 }
 
+// ---- ospf.router_id (RFC 2328 §A.4 / RFC 5340 §A.4 `Advertising
+//      Router` field) ----
+//
+// The `ospf.router_id` field surfaces the 32-bit OSPF Router-ID of the
+// router that originated the LSA the route was computed from — the
+// Router-LSA's advertising router for intra-area stub routes, the
+// Network-LSA's advertising router (the DR) for intra-area transit
+// routes, the summary-LSA's advertising router (the ABR) for
+// inter-area routes, and the AS-external-LSA's advertising router
+// (the ASBR) for external routes. The OSPF route computation
+// (`lr-router::instance::ospf_ops::ospf_recompute`) attaches a
+// private `LrOspfRouterId` path-attribute tag (code point 252) on
+// every OSPFv2 / OSPFv3 route with a known originating LSA; the
+// `lr_policy::ospf::router_id` / `has_router_id` accessors read it
+// back. The tests below pin the full path — parse → eval → accessor
+// → attribute lookup — against routes the test stub builds with the
+// same `Attributes::insert` shape the `ospf_recompute` populate step
+// uses.
+
+/// The path-attribute tag carrying the OSPF advertising-router ID.
+/// Mirrors `lr_bgp::path::AttrType::LrOspfRouterId` (value 252) and
+/// `lr_policy::ospf::LR_OSPF_ROUTER_ID_TAG` — kept as a `u8` here so
+/// the test stub does not need to depend on `lr-bgp` (the same
+/// hard-coding shape the accessor in `lr-policy::ospf` uses).
+const LR_OSPF_ROUTER_ID_TAG: u8 = 252;
+
+/// Build an OSPFv2 route carrying the `LrOspfRouterId` attribute —
+/// the shape `lr-router::instance::ospf_ops::ospf_recompute`
+/// attaches for any OSPFv2 route with a known originating LSA
+/// (intra-area stub / transit, inter-area, or external).
+fn ospf_route_with_router_id(metric: u32, router_id: u32) -> Route {
+    let mut r = ospf_route_with_metric(metric);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+        flags: 0x80, // optional, non-transitive (matches the populate step's flag set)
+        value: router_id.to_be_bytes().to_vec(),
+    });
+    r
+}
+
+/// Build an OSPFv3 route carrying the `LrOspfRouterId` attribute.
+fn ospfv3_route_with_router_id(metric: u32, router_id: u32) -> Route {
+    let mut r = ospfv3_route_with_metric(metric);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: router_id.to_be_bytes().to_vec(),
+    });
+    r
+}
+
+#[test]
+fn ospf_router_id_reads_as_int_when_present_v2() {
+    // 192.0.2.1 = 0xc000_0201 — a typical OSPF Router-ID.
+    let mut r = ospf_route_with_router_id(10, 0xc000_0201);
+    assert_eq!(
+        run(
+            "if ospf.router_id == 3221225985 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_router_id_reads_as_int_when_present_v3() {
+    // 2001:db8::1's low 32 bits = 0x0000_0001 — the v3 form uses the
+    // same 32-bit OSPF Router-ID dotted-quad as v2 (RFC 5340 §2.4).
+    let mut r = ospfv3_route_with_router_id(10, 1);
+    assert_eq!(
+        run("if ospf.router_id == 1 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_router_id_reads_as_zero_for_ospf_routes_without_the_attribute() {
+    // An OSPF route with no `LrOspfRouterId` attribute — i.e. a
+    // synthetic test route, or a route whose OSPF computation could
+    // not identify the originating LSA's advertising router (the
+    // defensive fallback the OSPF route computation leaves as
+    // `None`). `ospf.router_id` reads as `0` (the unwrap_or(0)
+    // default for an absent int-typed attribute read), mirroring
+    // BIRD's eattr default for an unattached `ospf_router_id`
+    // reference. The route's `ospf.metric1` is its
+    // `preference.metric` (42 here), so the test also pins that
+    // `ospf.router_id` does not fall through to `preference.metric`
+    // on an OSPF route without the attribute — it reads `0`, not
+    // `42`.
+    let mut r = ospf_route_with_metric(42);
+    assert_eq!(
+        run("if ospf.router_id == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.router_id == 42 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_router_id_reads_as_zero_for_non_ospf_routes_even_with_the_attribute() {
+    // The accessor's protocol-kind fast path rejects a non-OSPF
+    // route even if the attribute is somehow present (the OSPF
+    // route computation never attaches the tag to a non-OSPF route,
+    // but a hand-crafted test route that violates the invariant
+    // still reads as `0` — defensive, mirrors `ospf.metric1`'s /
+    // `ospf.metric2`'s protocol-kind check).
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: 0xc000_0201u32.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run("if ospf.router_id == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run(
+            "if ospf.router_id == 3221225985 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_router_id_mismatch_rejects() {
+    let mut r = ospf_route_with_router_id(10, 0xc000_0201);
+    assert_eq!(
+        run(
+            "if ospf.router_id == 3221225986 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_router_id_is_defined_iff_ospf_route_with_attribute() {
+    // OSPFv2 route with the attribute: defined.
+    let mut r_v2 = ospf_route_with_router_id(10, 0xc000_0201);
+    assert_eq!(
+        run("if defined(ospf.router_id) then accept; reject;", &mut r_v2),
+        EvalResult::Accept,
+    );
+    // OSPFv3 route with the attribute: defined.
+    let mut r_v3 = ospfv3_route_with_router_id(10, 1);
+    assert_eq!(
+        run("if defined(ospf.router_id) then accept; reject;", &mut r_v3),
+        EvalResult::Accept,
+    );
+    // OSPFv2 route without the attribute: not defined.
+    let mut r_ospf = ospf_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) then accept; reject;",
+            &mut r_ospf
+        ),
+        EvalResult::Reject(None),
+    );
+    // Non-OSPF route (BGP): not defined even if the attribute is
+    // somehow present (the protocol-kind fast path rejects it).
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    r_bgp.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: 0xc000_0201u32.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) then accept; reject;",
+            &mut r_bgp
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_router_id_defined_distinguishes_absent_from_router_id_zero() {
+    // RFC 2328 §3.1.b recommends a non-zero OSPF Router-ID but does
+    // not forbid 0.0.0.0. A router that carries Router-ID 0.0.0.0
+    // surfaces `Some(0)` on its OSPF routes — `defined(ospf.router_id)`
+    // reports true for those routes and false for OSPF routes whose
+    // computation could not identify the originating LSA's
+    // advertising router (the defensive fallback). This is the case
+    // the `has_router_id` accessor exists to make precise.
+    let mut r_zero = ospf_route_with_router_id(10, 0);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) then accept; reject;",
+            &mut r_zero
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_absent = ospf_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_router_id_canonical_bird_idiom_translates() {
+    // The canonical BIRD filter idiom for OSPF router-id policy is
+    // `if defined(ospf_router_id) && ospf_router_id == 192.0.2.1
+    // then accept;` ("only re-advertise routes whose originating
+    // LSA was sourced by 192.0.2.1"). The translator renames
+    // `ospf_router_id` to `ospf.router_id` and the body round-trips
+    // through the daemon loader. 192.0.2.1 = 0xc000_0201 =
+    // 3221225985.
+    let mut r_match = ospf_route_with_router_id(10, 0xc000_0201);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) && ospf.router_id == 3221225985 then accept; reject;",
+            &mut r_match
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_nomatch = ospf_route_with_router_id(10, 0xc000_0202);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) && ospf.router_id == 3221225985 then accept; reject;",
+            &mut r_nomatch
+        ),
+        EvalResult::Reject(None),
+    );
+    // An OSPF route without the attribute: `defined(ospf.router_id)`
+    // is false, so the `&&` short-circuits and the route is
+    // rejected.
+    let mut r_ospf = ospf_route_with_metric(200);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) && ospf.router_id == 3221225985 then accept; reject;",
+            &mut r_ospf
+        ),
+        EvalResult::Reject(None),
+    );
+    // A non-OSPF (BGP) route: `defined(ospf.router_id)` is false,
+    // so the `&&` short-circuits and the route is rejected.
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(ospf.router_id) && ospf.router_id == 3221225985 then accept; reject;",
+            &mut r_bgp
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_router_id_is_not_assignable() {
+    let err = compile("test", "ospf.router_id = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn ospf_router_id_peephole_fused_branch_agrees_with_unfused() {
+    // The peephole pass fuses `LoadField(OspfRouterId); Push(Int(c));
+    // Bin(op); JumpIf*` into a single `BranchFieldIntCmp` for int
+    // fields. `ospf.router_id` was added to `is_int_field` so the
+    // fused path fires; pin the agreement between the fused and
+    // unfused paths by checking the same comparison both ways.
+    let mut r = ospf_route_with_router_id(10, 0xc000_0201);
+    // Fused: constant on the RHS, comparison op in the fuse set.
+    assert_eq!(
+        run(
+            "if ospf.router_id == 3221225985 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.router_id != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    // Unfused: constant on the LHS (the peephole does not fuse
+    // `Bin(Int(c), op, LoadField)`), exercises the read_route_field
+    // path directly.
+    assert_eq!(
+        run(
+            "if 3221225985 == ospf.router_id then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_router_id_independent_of_metric1_metric2_and_tag() {
+    // An OSPFv2 route carrying all four per-route OSPF attribute
+    // surfaces: `metric1` (`preference.metric`), `metric2` (the
+    // `LrOspfMetric2` attribute), `tag` (`Route::tag`) and
+    // `router_id` (the `LrOspfRouterId` attribute). The four
+    // fields live on different slots and the accessors do not
+    // cross-read.
+    let mut r = ospf_route_with_metric2(200, 200);
+    r.tag = Some(3735928559);
+    // Attach the router_id attribute — `ospf_recompute` would.
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_OSPF_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: 0xc000_0201u32.to_be_bytes().to_vec(),
+    });
+    // All four read independently.
+    assert_eq!(
+        run(
+            "if ospf.metric1 == 200 && ospf.metric2 == 200 && ospf.tag == 3735928559 && ospf.router_id == 3221225985 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    // A route with `router_id` but no `metric2` or `tag`: the
+    // `metric2` / `tag` reads default to 0; `router_id` reads its
+    // value.
+    let mut r2 = ospf_route_with_router_id(50, 0xc000_0201);
+    assert_eq!(
+        run(
+            "if ospf.metric1 == 50 && ospf.metric2 == 0 && ospf.tag == 0 && ospf.router_id == 3221225985 then accept; reject;",
+            &mut r2
+        ),
+        EvalResult::Accept,
+    );
+}
+
 // ---- Issue #81: bgp.lrxp.* (LRXP exchange-plane filter DSL surface) ----
 //
 // The LRXP surface is feature-gated behind `exchange-plane`. The

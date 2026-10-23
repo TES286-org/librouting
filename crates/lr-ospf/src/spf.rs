@@ -60,6 +60,19 @@ pub struct SpfRoute {
     /// For inter-area routes derived from summary-LSAs: the advertising
     /// border router. `None` for intra-area routes.
     pub border_router: Option<u32>,
+    /// The OSPF Router-ID of the router that originated the LSA this
+    /// route was computed from (RFC 2328 §A.4 `Advertising Router`
+    /// field / RFC 5340 §A.4 the same field on every v3 LSA). For
+    /// intra-area stub routes this is the Router-LSA's advertising
+    /// router (the router that owns the stub network); for intra-area
+    /// transit routes it is the Network-LSA's advertising router (the
+    /// DR); for inter-area routes it is the summary-LSA's advertising
+    /// router (the ABR — the same value as `border_router`). The OSPF
+    /// route computation surfaces this through to a private
+    /// `LrOspfRouterId` path-attribute tag on the resulting RIB route
+    /// so the policy DSL's `ospf.router_id` accessor can surface it
+    /// (mirrors BIRD's `ospf_router_id` eattr).
+    pub router_id: Option<u32>,
 }
 
 impl Ord for SpfVertex {
@@ -98,8 +111,14 @@ impl PartialEq for SpfVertex {
 pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
     // Pre-scan the database into link maps.
     let mut router_lsas: BTreeMap<u32, Vec<RouterLink>> = BTreeMap::new();
-    // link-state ID (the DR's IP) → (network mask, attached router IDs).
-    let mut network_lsas: BTreeMap<u32, (u32, Vec<u32>)> = BTreeMap::new();
+    // link-state ID (the DR's IP) → (network mask, attached router IDs,
+    // advertising router — the DR's Router-ID). The advertising router
+    // is the Network-LSA's `Advertising Router` header field; it rides
+    // alongside the (mask, attached) pair so the per-prefix
+    // `SpfRoute::router_id` (the originating LSA's advertising router
+    // the policy DSL's `ospf.router_id` accessor surfaces) is available
+    // for intra-area transit routes without re-walking the LSDB.
+    let mut network_lsas: BTreeMap<u32, (u32, Vec<u32>, u32)> = BTreeMap::new();
     for (key, entry) in lsdb.iter() {
         if key.ls_type == LsaTypeV2::RouterLsa as u16 {
             router_lsas
@@ -114,9 +133,21 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                 entry.lsa.body[3],
             ]);
             let attached = decode_network_attached_routers(&entry.lsa.body);
-            network_lsas
-                .entry(key.link_state_id)
-                .or_insert((mask, attached));
+            // `or_insert` keeps the first Network-LSA per link-state
+            // ID (the DR's IP) — the same first-match-in-database-order
+            // rule the BTreeMap iteration order preserves for the
+            // router_lsas map above. The advertising router is the
+            // Network-LSA's `Advertising Router` header field — the
+            // DR's Router-ID (RFC 2328 §A.4.3 Network-LSAs: "the
+            // advertising router for a Network-LSA is the DR for that
+            // network"). The first-LSA-wins rule means the value
+            // matches the (mask, attached) pair the relaxation loop
+            // reads from this entry.
+            network_lsas.entry(key.link_state_id).or_insert((
+                mask,
+                attached,
+                key.advertising_router,
+            ));
         }
     }
 
@@ -221,6 +252,14 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                                 metric: current_dist + link.metric as u64,
                                 next_hop,
                                 border_router: None,
+                                // The stub network's originating LSA is
+                                // the current router's Router-LSA — the
+                                // `rid` matched against the loop is the
+                                // LSA's `Advertising Router` field. The
+                                // SPF traversal pops routers in distance
+                                // order, so this is the router that owns
+                                // the stub network on the shortest path.
+                                router_id: Some(rid),
                             });
                         }
                         _ => {}
@@ -235,7 +274,7 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                 // counterpart of a stub link, which §12.4.1.2 no longer
                 // advertises once the transit link appears (BIRD
                 // spfa_process_net parity).
-                if let Some((mask, attached)) = network_lsas.get(&ls_id) {
+                if let Some((mask, attached, adv_router)) = network_lsas.get(&ls_id) {
                     let net = ls_id & *mask;
                     // The path toward the transit network is the path
                     // toward the network vertex (the same one a
@@ -246,6 +285,11 @@ pub fn run_spf(lsdb: &Lsdb, root: u32) -> SpfResult {
                         metric: current_dist,
                         next_hop,
                         border_router: None,
+                        // The transit network's originating LSA is the
+                        // Network-LSA — `adv_router` is its `Advertising
+                        // Router` header field, the DR's Router-ID
+                        // (RFC 2328 §A.4.3).
+                        router_id: Some(*adv_router),
                     });
                     // §16.1.1 (4): routers attached to a directly
                     // reachable transit network are one hop away —
@@ -404,6 +448,12 @@ pub fn summary_routes(lsdb: &Lsdb, result: &SpfResult) -> Vec<SpfRoute> {
             metric: dist + u64::from(metric),
             next_hop: None, // resolved from the border router's next hop by the caller
             border_router: Some(key.advertising_router),
+            // The summary-LSA's advertising router IS the ABR that
+            // originated it (RFC 2328 §A.4.3 Summary-LSAs), so the
+            // originating LSA's advertising router matches the
+            // border_router value the inter-area route computation
+            // already records.
+            router_id: Some(key.advertising_router),
         };
         let replace = match best.get(&prefix) {
             None => true,
@@ -1081,6 +1131,17 @@ fn run_spf_v3_mode(lsdb: &Lsdb, root: u32, extended: bool) -> SpfResultV3 {
                 metric: d,
                 next_hop: next_hop.map(|nh| nh.link_local),
                 border_router: None,
+                // The Intra-Area-Prefix-LSA references the vertex
+                // (Router-LSA or Network-LSA) whose distance the
+                // prefixes inherit; `*ref_adv` is that reference's
+                // advertising router — for Router references, the
+                // router's own Router-ID; for Network references, the
+                // DR's Router-ID (the Network-LSA's advertising
+                // router, RFC 5340 §A.4.3). In both cases it is the
+                // OSPF Router-ID of the LSA the prefix originated from
+                // — the value the policy DSL's `ospf.router_id`
+                // accessor surfaces.
+                router_id: Some(*ref_adv),
             };
             let replace = match best.get(&prefix) {
                 None => true,
@@ -1227,6 +1288,12 @@ pub(crate) fn summary_routes_v3_mode(
                 .get(&V3VertexId::Router(key.advertising_router))
                 .map(|nh| nh.link_local),
             border_router: Some(key.advertising_router),
+            // The v3 inter-area-prefix-LSA's advertising router IS
+            // the ABR that originated it (RFC 5340 §A.4.3
+            // Inter-Area-Prefix-LSA), so the originating LSA's
+            // advertising router matches the border_router value the
+            // inter-area route computation already records.
+            router_id: Some(key.advertising_router),
         };
         let replace = match best.get(&prefix) {
             None => true,

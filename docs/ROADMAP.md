@@ -467,10 +467,12 @@ BIRD idiom `if defined(ospf_metric2) && ospf_metric2 > 100 then
 reject;` translates faithfully to `if defined(ospf.metric2) &&
 ospf.metric2 > 100 then reject;`. The BIRD translator renames
 `ospf_metric2` to `ospf.metric2` (and removes it from
-`UNMAPPABLE_WORDS`, leaving the remaining OSPF attribute
-`ospf_router_id` listed there so a filter that references it is
-still marked unfaithful rather than silently dropping the
-reference); `lr-policy::ospf` carries the matching
+`UNMAPPABLE_WORDS`; with `ospf_router_id` removed alongside the
+later `ospf.tag` and `ospf.router_id` increments, no OSPF
+per-route attributes remain in `UNMAPPABLE_WORDS` — the remaining
+unmappable per-route attributes are the Babel triplet `babel_metric`
+/ `babel_router_id` / `babel_seqno`, gated by the `babel_` prefix
+in `UNMAPPABLE_PREFIXES`); `lr-policy::ospf` carries the matching
 `metric2` / `has_metric2` helpers (the latter distinguishes "not
 a type-2 external" from "type-2 external with metric 0" via
 `defined(ospf.metric2)`). The type-2 external metric rides the
@@ -513,10 +515,13 @@ unattached `ospf_tag` reference) so the canonical BIRD idiom
 `if defined(ospf_tag) && ospf_tag == 3735928559 then accept;`
 translates faithfully to `if defined(ospf.tag) && ospf.tag ==
 3735928559 then accept;`. The BIRD translator renames `ospf_tag`
-to `ospf.tag` (and removes it from `UNMAPPABLE_WORDS`, leaving
-the remaining OSPF attribute `ospf_router_id` listed there so a
-filter that references it is still marked unfaithful rather than
-silently dropping the reference); `lr-policy::ospf` carries the
+to `ospf.tag` (and removes it from `UNMAPPABLE_WORDS`; with
+`ospf_router_id` removed alongside the later `ospf.router_id`
+increment, no OSPF per-route attributes remain in
+`UNMAPPABLE_WORDS` — the remaining unmappable per-route
+attributes are the Babel triplet `babel_metric` /
+`babel_router_id` / `babel_seqno`, gated by the `babel_` prefix
+in `UNMAPPABLE_PREFIXES`); `lr-policy::ospf` carries the
 matching `tag` / `has_tag` helpers (the latter distinguishes "no
 tag" from "tag of zero" via `defined(ospf.tag)` — the v2 LSA
 body always carries a 4-byte tag, zero being well-formed per
@@ -560,16 +565,89 @@ path (no tag set) and the "present" path (a tag set via
 `lr_route_set_tag` setter, so the binding can exercise the
 present path the `ospf.metric2` binding test could not (the
 `LrOspfMetric2` tag has no C ABI setter).
+The OSPF advertising-router ID attribute has landed alongside the
+`ospf.tag` set: `RouteFieldKind::OspfRouterId` (RFC 2328 §A.4
+`Advertising Router` field / RFC 5340 §A.4 the same field on every
+v3 LSA) exposes `ospf.router_id` (read-only `int`, `0` when the
+route carries no OSPF router-id attribute, mirroring BIRD's eattr
+default for an unattached `ospf_router_id` reference) so the
+canonical BIRD idiom `if defined(ospf_router_id) && ospf_router_id
+== 192.0.2.1 then accept;` translates faithfully to `if
+defined(ospf.router_id) && ospf.router_id == 3221225985 then
+accept;` (192.0.2.1 = 0xc000_0201 = 3221225985; the `defined()`
+arm distinguishes "no attribute" from "attribute present but
+zero" — RFC 2328 §3.1.b recommends a non-zero Router-ID but does
+not forbid 0.0.0.0, so an OSPF route with Router-ID 0.0.0.0
+surfaces `Some(0)` and `defined(ospf.router_id)` is true). The
+BIRD translator renames `ospf_router_id` to `ospf.router_id` (and
+removes it from `UNMAPPABLE_WORDS` — with this release every
+OSPF per-route attribute BIRD's filter grammar declares has a
+faithful lr-DSL spelling); `lr-policy::ospf` carries the matching
+`router_id` / `has_router_id` helpers (the latter distinguishes
+"no attribute" from "attribute present but zero" via
+`defined(ospf.router_id)`), `lr-bgp::path::PathAttributes` gains
+the `set_ospf_router_id` / `ospf_router_id` / `has_ospf_router_id`
+typed accessors (the value layout is a single 4-byte big-endian
+`u32` holding the 32-bit OSPF Router-ID — the LSA `Advertising
+Router` field is a 32-bit dotted-quad per RFC 2328 §A.4, no
+masking needed; the high byte is meaningful), the OSPF Router-ID
+rides the new private `LrOspfRouterId` path-attribute tag (code
+point 252 — stripped at BGP encode, the same shape
+`LrOspfMetric2` at 253, `LrExchangePlaneRecords` at 254 and
+`LrMplsLabelStack` at 255 use), and the OSPF route computation
+(`lr-router::instance::ospf_ops::ospf_recompute`) attaches the
+attribute for every OSPFv2 / OSPFv3 route with a known
+originating LSA — intra-area stub routes populate from the
+Router-LSA's advertising router; intra-area transit routes from
+the Network-LSA's advertising router (the DR); inter-area routes
+from the summary-LSA's advertising router (the ABR); external
+routes from the AS-external-LSA's advertising router (the ASBR).
+The codec half adds the `router_id: Option<u32>` field to
+`lr-ospf::spf::SpfRoute` (populated for both v2 and v3 intra-area
+stub / transit routes, v2 / v3 inter-area summary routes and the
+v3 Intra-Area-Prefix-LSA walk — the v2 `network_lsas` BTreeMap
+grows a third tuple slot for the Network-LSA's `Advertising
+Router` header field). The populate-the-RIB half adds
+`router_id: Option<u32>` to `OspfTableEntry` (pub(super), stays
+inside `lr-router::instance`) and the `with_router_id` builder;
+`ospf_area_table` and `ospf_recompute` populate the field. The
+typed accessors in `lr-policy::ospf` read the attribute via one
+protocol-kind `match` plus one BTreeMap lookup plus one 4-byte
+read on `route.attributes` (no allocation, no codec — the value
+layout is a fixed 4-byte `u32`, read in place via
+`Attributes::get_u32_be`). The same shape as `ospf.metric2`
+(which reads a different private tag), more expensive than
+`ospf.metric1` / `ospf.tag` (which read struct fields, no
+lookup). The peephole pass's `BranchFieldIntCmp` fast path fuses
+`ospf.router_id == N` / `> N` / etc. comparisons the same way it
+fuses `ospf.metric1` / `ospf.metric2` / `ospf.tag` /
+`bgp.local_pref` / `bgp.med` / `bgp.otc` — the read is one lookup
+plus one fixed-width read (no allocation), so the fast path
+avoids the `Value::Int` allocation + push the unfused sequence
+pays. The corpus case `tests/corpus/bird/ospf-router-id-filter.conf`
+exercises both the canonical specific-originator accept idiom
+and the zero-router-id accept idiom. The Python and Go binding
+tests cover the "absent" path (no `LrOspfRouterId` attribute set
+— the default for a synthetic test route; the OSPF daemon is the
+only producer and the C ABI does not expose a setter for this
+tag, mirroring the `LrOspfMetric2` shape) — the "present" path
+is exercised by the `lr-policy::ospf::router_id_*` unit tests
+(which synthesize the attribute directly via
+`Attributes::insert`) and the `lr-router::instance::tests`
+integration test (which populates the attribute via the OSPF
+route computation, the only producer). This closes the last gap
+in BIRD's OSPF filter-attribute surface — every `ospf_*` filter
+attribute the BIRD 2 grammar declares now has a faithful lr-DSL
+spelling.
 What remains is the rest of the per-protocol attribute surface —
 BIRD's route attributes that ride the per-route filter context —
 beyond the RR loop-detection, OTC, AIGP, AGGREGATOR, PMSI Tunnel
 (BGP subset, complete) and the OSPF `ospf.metric1` /
-`ospf.metric2` / `ospf.tag` attributes that have landed. The
-remaining OSPF attribute (`ospf_router_id`) and the Babel
-per-route attributes (`babel_metric`, `babel_router_id`,
-`babel_seqno`) are the next increments; each lands as its own
-small PR following the same codec→accessor→DSL→translator→corpus
-shape.
+`ospf.metric2` / `ospf.tag` / `ospf.router_id` attributes that
+have landed. The Babel per-route attributes (`babel_metric`,
+`babel_router_id`, `babel_seqno`) are the next increments; each
+lands as its own small PR following the same
+codec→accessor→DSL→translator→corpus shape.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF
@@ -584,8 +662,8 @@ an intentional converter change; every `.expected.toml` round-trips
 through the daemon loader so the "generated TOML is always loadable"
 contract is machine-checked. A new dialect quirk now adds a corpus
 case (input + expected) instead of a bespoke assertion. What remains
-is the per-protocol attribute surface named above; the corpus grows
-as each new shape lands.
+is the Babel per-route attribute surface named above; the corpus
+grows as each new shape lands.
 
 ## Tooling and supply chain
 

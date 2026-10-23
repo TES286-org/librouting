@@ -1324,3 +1324,122 @@ func TestFilterDSLOspfTag(t *testing.T) {
 			verdict, err, FilterAccept)
 	}
 }
+
+func TestFilterDSLOspfRouterId(t *testing.T) {
+	// `ospf.router_id` reads the private `LrOspfRouterId`
+	// path-attribute tag (RFC 2328 §A.4 `Advertising Router`
+	// field / RFC 5340 §A.4 the same field on every v3 LSA) the
+	// OSPF route computation attaches to every OSPFv2 / OSPFv3
+	// route with a known originating LSA. The binding exercises
+	// the FFI surface — Go → C ABI → Rust filter eval →
+	// `lr-policy::ospf::router_id` accessor — so a regression in
+	// any layer surfaces here.
+	//
+	// The "present" path (a route carrying the `LrOspfRouterId`
+	// attribute) is exercised by the `lr-policy::ospf::router_id_*`
+	// unit tests (which synthesize the attribute directly via
+	// `Attributes::insert`) and the
+	// `lr-router::instance::tests::ospfv3_inter_area_and_external_routes_published`
+	// integration test (which populates the attribute via the
+	// OSPF route computation, the only producer). The binding
+	// cannot reach that path because the C ABI does not expose
+	// a setter for the `LrOspfRouterId` tag — embedders read the
+	// field but never inject it; the OSPF daemon is the only
+	// producer. The binding test pins the "absent" path (the
+	// FFI surface, the parser, the protocol-kind fast path, and
+	// the absence-handling default), which is the layer an
+	// embedder's regression would surface through.
+	rejectFromSpecific, err := Compile("go-ospf-rid-specific",
+		// 192.0.2.1 = 0xc000_0201 = 3221225985
+		"if defined(ospf.router_id) && ospf.router_id == 3221225985 then reject; accept;")
+	if err != nil {
+		t.Fatalf("Compile rejectFromSpecific: %v", err)
+	}
+	defer rejectFromSpecific.Free()
+	readZero, err := Compile("go-ospf-rid-zero",
+		"if ospf.router_id == 0 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile readZero: %v", err)
+	}
+	defer readZero.Free()
+
+	// An OSPFv2 route without the `LrOspfRouterId` attribute —
+	// i.e. a synthetic test route (the OSPF route computation
+	// would attach the attribute for every received OSPF route
+	// per RFC 2328 §A.4). `defined(ospf.router_id)` is false, so
+	// the `&&` short-circuits and the route is accepted;
+	// `ospf.router_id == 0` reads the unwrap_or(0) default
+	// (mirrors BIRD's eattr default for an unattached
+	// `ospf_router_id` reference).
+	ospf, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoOspf)
+	if err != nil {
+		t.Fatalf("NewRouteV4: %v", err)
+	}
+	defer ospf.Free()
+	if err := ospf.SetMetric(200); err != nil {
+		t.Fatalf("SetMetric: %v", err)
+	}
+	// `preference.metric` is 200 — `ospf.router_id` must NOT
+	// read it (the attribute is absent). `defined()` short-circuits.
+	verdict, _, err := rejectFromSpecific.Evaluate(ospf)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv2 rejectFromSpecific: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	verdict, _, err = readZero.Evaluate(ospf)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv2 readZero: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+
+	// OSPFv3 mirrors OSPFv2 (RFC 5340 §A.4 mirrors §A.4) — same
+	// absence-handling default.
+	ospf3, err := NewRouteV6([16]byte{0x20, 0x01, 0x0D, 0xB8, 0, 0, 0, 0,
+		0, 0, 0, 0, 0, 0, 0, 1}, 64, ProtoOspf3)
+	if err != nil {
+		t.Fatalf("NewRouteV6: %v", err)
+	}
+	defer ospf3.Free()
+	if err := ospf3.SetMetric(220); err != nil {
+		t.Fatalf("SetMetric ospf3: %v", err)
+	}
+	verdict, _, err = rejectFromSpecific.Evaluate(ospf3)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv3 rejectFromSpecific: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+	v3Zero, err := Compile("go-ospf3-rid-zero",
+		"if ospf.router_id == 0 then accept; reject;")
+	if err != nil {
+		t.Fatalf("Compile v3Zero: %v", err)
+	}
+	defer v3Zero.Free()
+	verdict, _, err = v3Zero.Evaluate(ospf3)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate OSPFv3 readZero: got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+
+	// A non-OSPF (BGP) route: `defined(ospf.router_id)` is false
+	// (the protocol-kind fast path rejects non-OSPF routes
+	// before the attribute lookup), so the `&&` short-circuits
+	// and the route is accepted. The protocol-kind fast path is
+	// the same shape `ospf.metric1` / `ospf.metric2` expose —
+	// defensive, in case a non-OSPF route somehow carries the
+	// attribute (the OSPF route computation never attaches the
+	// tag to a non-OSPF route, but a hand-crafted test route
+	// that violates the invariant still reads as 0).
+	bgp, err := NewRouteV4([4]byte{203, 0, 113, 0}, 24, ProtoBgp)
+	if err != nil {
+		t.Fatalf("NewRouteV4 bgp: %v", err)
+	}
+	defer bgp.Free()
+	if err := bgp.SetMetric(200); err != nil {
+		t.Fatalf("SetMetric bgp: %v", err)
+	}
+	verdict, _, err = rejectFromSpecific.Evaluate(bgp)
+	if err != nil || verdict != FilterAccept {
+		t.Fatalf("Evaluate non-OSPF (BGP): got (%d, _, %v), want (%d, _, nil)",
+			verdict, err, FilterAccept)
+	}
+}

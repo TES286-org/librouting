@@ -270,26 +270,30 @@ const UNMAPPABLE_WORDS: &[&str] = &[
     "bt_test_same",
     "bt_check_assign",
     // OSPF per-route attributes BIRD exposes that lr's filter DSL
-    // does NOT surface yet. `ospf_metric1`, `ospf_metric2` and
-    // `ospf_tag` are supported (the BIRD translator renames them to
-    // `ospf.metric1`, `ospf.metric2` and `ospf.tag`); the remaining
-    // OSPF attribute (`ospf_router_id` — OSPF router ID of the
-    // originator) is listed here so a filter that references it
-    // is marked unfaithful instead of silently dropping the
-    // reference.
-    "ospf_router_id",
+    // does NOT surface yet. `ospf_metric1`, `ospf_metric2`,
+    // `ospf_tag` and `ospf_router_id` are supported (the BIRD
+    // translator renames them to `ospf.metric1`, `ospf.metric2`,
+    // `ospf.tag` and `ospf.router_id`). The remaining Babel
+    // per-route attributes (`babel_metric`, `babel_router_id`,
+    // `babel_seqno`) are the next increments and are listed in
+    // [`UNMAPPABLE_PREFIXES`] below so a filter that references
+    // them is marked unfaithful instead of silently dropping
+    // the reference.
 ];
 
 /// BIRD attribute-word prefixes with no lr equivalent (per-protocol
 /// attributes: `krt_source`, …). `ospf_` is intentionally NOT in
 /// this list — the lr DSL now exposes `ospf.metric1` (RFC 2328 §16 /
-/// RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340 §4.8.5)
-/// and `ospf.tag` (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
-/// RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3),
-/// and the BIRD translator renames `ospf_metric1` to `ospf.metric1`,
-/// `ospf_metric2` to `ospf.metric2`, and `ospf_tag` to `ospf.tag`.
-/// The remaining OSPF attribute BIRD exposes (`ospf_router_id`) is
-/// listed explicitly in [`UNMAPPABLE_WORDS`] below.
+/// RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340 §4.8.5),
+/// `ospf.tag` (RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340
+/// §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3) and
+/// `ospf.router_id` (RFC 2328 §A.4 `Advertising Router` field /
+/// RFC 5340 §A.4 the same field on every v3 LSA), and the BIRD
+/// translator renames `ospf_metric1` to `ospf.metric1`, `ospf_metric2`
+/// to `ospf.metric2`, `ospf_tag` to `ospf.tag`, and `ospf_router_id`
+/// to `ospf.router_id`. The remaining per-protocol attributes BIRD
+/// exposes (`babel_*`) are the next increments and the `babel_`
+/// prefix below marks a filter that references them unfaithful.
 const UNMAPPABLE_PREFIXES: &[&str] = &[
     "krt_",
     "rip_",
@@ -399,10 +403,32 @@ const RENAMES: &[(&str, &str)] = &[
     // external always surfaces `Some(t)` and `defined(ospf.tag)`
     // is true even when the tag is zero; the v3 form's T bit
     // distinguishes "no tag" (T bit clear) from "tag of zero"
-    // (T bit set, value 0)). The remaining OSPF attribute
-    // (`ospf_router_id`) is listed in [`UNMAPPABLE_WORDS`] above
-    // — it has no lr-DSL spelling yet.
+    // (T bit set, value 0)).
     ("ospf_tag", "ospf.tag"),
+    // RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4
+    // the same field on every v3 LSA — `ospf_router_id` is the
+    // 32-bit OSPF Router-ID of the router that originated the LSA
+    // the route was computed from (the Router-LSA's advertising
+    // router for intra-area stub routes; the Network-LSA's
+    // advertising router — the DR — for intra-area transit routes;
+    // the summary-LSA's advertising router — the ABR — for
+    // inter-area routes; the AS-external-LSA's advertising router
+    // — the ASBR — for external routes). lr's DSL spells it
+    // `ospf.router_id` (read-only `Int`, `0` when the route
+    // carries no OSPF router-id attribute — a non-OSPF route, or
+    // an OSPF route whose computation could not identify the
+    // originating LSA's advertising router — mirroring BIRD's
+    // eattr default for an unattached `ospf_router_id` reference).
+    // The canonical idiom `if defined(ospf_router_id) &&
+    // ospf_router_id == 192.0.2.1 then accept;` translates
+    // faithfully to `if defined(ospf.router_id) && ospf.router_id
+    // == 192.0.2.1 then accept;` (the `defined()` arm
+    // distinguishes "no attribute" from "attribute present but
+    // zero": RFC 2328 §3.1.b recommends a non-zero Router-ID but
+    // does not forbid 0.0.0.0, so an OSPF route with Router-ID
+    // 0.0.0.0 reads as `0` for `ospf.router_id == 0` and
+    // `defined(ospf.router_id)` is true).
+    ("ospf_router_id", "ospf.router_id"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),

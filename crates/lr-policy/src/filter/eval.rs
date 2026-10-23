@@ -343,6 +343,41 @@ pub trait FilterContext {
     fn ospf_has_tag(&self, route: &Route) -> bool {
         crate::ospf::has_tag(route)
     }
+    /// The route's OSPF advertising-router ID (`ospf.router_id`,
+    /// RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4
+    /// the same field on every v3 LSA) — the 32-bit OSPF
+    /// Router-ID of the router that originated the LSA the route
+    /// was computed from (the Router-LSA's advertising router
+    /// for intra-area stub routes; the Network-LSA's advertising
+    /// router — the DR — for intra-area transit routes; the
+    /// summary-LSA's advertising router — the ABR — for
+    /// inter-area routes; the AS-external-LSA's advertising
+    /// router — the ASBR — for external routes). `None` when the
+    /// route is not OSPF, or the OSPF route computation could not
+    /// identify the originating LSA's advertising router (a
+    /// defensive fallback; the LSA header always carries the
+    /// field per RFC 2328 §A.4, so the OSPF route computation
+    /// populates it for every received OSPF route). `Some(0)`
+    /// is a meaningful value (a router may legally carry
+    /// Router-ID 0.0.0.0, though RFC 2328 §3.1.b recommends a
+    /// non-zero value). The default delegates to
+    /// [`crate::ospf::router_id`].
+    fn ospf_router_id(&self, route: &Route) -> Option<u32> {
+        crate::ospf::router_id(route)
+    }
+    /// True when the route is an OSPFv2 / OSPFv3 route with a
+    /// known originating LSA's advertising router (RFC 2328 §A.4 /
+    /// RFC 5340 §A.4). Used by `defined(ospf.router_id)` to
+    /// distinguish "no attribute" (a non-OSPF route, or an OSPF
+    /// route whose computation could not identify the
+    /// originating LSA's advertising router) from "attribute
+    /// present but zero" (an OSPF route whose originator carries
+    /// Router-ID 0.0.0.0 — RFC 2328 §3.1.b recommends non-zero
+    /// but does not forbid it). The default delegates to
+    /// [`crate::ospf::has_router_id`].
+    fn ospf_has_router_id(&self, route: &Route) -> bool {
+        crate::ospf::has_router_id(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -907,6 +942,21 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // "no tag" (T bit clear) from "tag of zero" (T bit set,
             // value 0). For non-OSPF routes, `has_tag` is false.
             RouteFieldKind::OspfTag => self.ctx.ospf_has_tag(route),
+            // RFC 2328 §A.4 `Advertising Router` field / RFC 5340
+            // §A.4 the same field on every v3 LSA: `ospf.router_id`
+            // presence is `has_router_id` (the route is an OSPFv2 /
+            // OSPFv3 route with a known originating LSA's
+            // advertising router), not `router_id().is_some()` —
+            // the two agree on the present-with-non-zero case
+            // (both true), but the distinction matters when a
+            // router carries Router-ID 0.0.0.0 (RFC 2328 §3.1.b
+            // recommends non-zero but does not forbid it):
+            // `has_router_id` keeps "OSPF route with Router-ID 0"
+            // defined so the canonical idiom `if
+            // defined(ospf.router_id) && ospf.router_id == 0
+            // then accept;` does not drop such a route. For
+            // non-OSPF routes, `has_router_id` is false.
+            RouteFieldKind::OspfRouterId => self.ctx.ospf_has_router_id(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -1117,6 +1167,34 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // `defined(ospf.tag)` is true; the v3 form surfaces
             // `Some(t)` only when the T bit / sub-TLV is present.
             RouteFieldKind::OspfTag => Ok(Value::Int(self.ctx.ospf_tag(route).unwrap_or(0) as i64)),
+            // RFC 2328 §A.4 `Advertising Router` field / RFC 5340
+            // §A.4 the same field on every v3 LSA: `ospf.router_id`
+            // is the route's OSPF advertising-router ID, surfaced
+            // as an `Int` (`0` when the route carries no OSPF
+            // router-id attribute — a non-OSPF route, or an OSPF
+            // route whose computation could not identify the
+            // originating LSA's advertising router — mirroring
+            // BIRD's eattr default for an unattached
+            // `ospf_router_id` reference). Callers that need to
+            // distinguish "no attribute" from "attribute present
+            // but zero" gate with `defined(ospf.router_id)` — the
+            // predicate consults `has_router_id` (the route is an
+            // OSPF route with the LrOspfRouterId attribute
+            // physically present), not `router_id().is_some()`
+            // (which collapses "absent" and "malformed" together
+            // via the `None` read). One BTreeMap lookup plus one
+            // 4-byte read on `route.attributes` — the same shape
+            // as `ospf.metric2` (which reads a different private
+            // tag), cheaper than any `bgp_*` accessor that
+            // decodes a multi-byte TLV stream, more expensive
+            // than `ospf.metric1` / `ospf.tag` (which read struct
+            // fields, no lookup). RFC 2328 §3.1.b recommends a
+            // non-zero Router-ID but does not forbid 0.0.0.0, so
+            // an OSPF route with Router-ID 0.0.0.0 reads as `0`
+            // and `defined(ospf.router_id)` is true.
+            RouteFieldKind::OspfRouterId => Ok(Value::Int(
+                self.ctx.ospf_router_id(route).unwrap_or(0) as i64,
+            )),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
@@ -1234,6 +1312,22 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // the v3 form surfaces `Some(t)` only when the T bit /
             // sub-TLV is present.
             RouteFieldKind::OspfTag => self.ctx.ospf_tag(route).unwrap_or(0) as i64,
+            // `ospf.router_id` reads the private `LrOspfRouterId`
+            // path-attribute tag the OSPF route computation
+            // attaches to every OSPFv2 / OSPFv3 route with a known
+            // originating LSA — one BTreeMap lookup plus one
+            // 4-byte read on `route.attributes`, no allocation.
+            // The fast path pays the same lookup the unfused
+            // `read_route_field` path pays, but skips the
+            // `Value::Int` construction + `Vec::push` on the
+            // comparison-branch hot path. The same shape as
+            // `ospf.metric2` (which reads a different private tag),
+            // cheaper than any `bgp_*` accessor that decodes a
+            // multi-byte TLV stream. RFC 2328 §3.1.b recommends a
+            // non-zero Router-ID but does not forbid 0.0.0.0, so
+            // an OSPF route with Router-ID 0.0.0.0 reads as `0`
+            // and `defined(ospf.router_id)` is true.
+            RouteFieldKind::OspfRouterId => self.ctx.ospf_router_id(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
             // one of the arms above; the LRXP int-typed fields
             // and `bgp.aigp` fall through to the unreachable arm

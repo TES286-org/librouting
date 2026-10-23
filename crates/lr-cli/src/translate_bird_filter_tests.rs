@@ -114,11 +114,14 @@ fn bird_only_attributes_are_unfaithful() {
         "if gw = 192.0.2.1 then accept;",
         "if ifname = \"eth0\" then accept;",
         "if preference = 100 then accept;",
-        // OSPF attribute lr's DSL does NOT surface yet
-        // (`ospf_router_id`). `ospf_metric1`, `ospf_metric2` and
-        // `ospf_tag` are supported (see `ospf_metric1_renames`,
-        // `ospf_metric2_renames` and `ospf_tag_renames`).
-        "if ospf_router_id = 1.2.3.4 then accept;",
+        // OSPF attributes lr's DSL does NOT surface yet — the
+        // remaining Babel per-route attributes (`babel_metric`,
+        // `babel_router_id`, `babel_seqno`). The OSPF attributes
+        // (`ospf_metric1`, `ospf_metric2`, `ospf_tag`,
+        // `ospf_router_id`) are all supported (see
+        // `ospf_metric1_renames`, `ospf_metric2_renames`,
+        // `ospf_tag_renames`, `ospf_router_id_renames`).
+        "if babel_metric = 100 then accept;",
         "if krt_source = 0 then accept;",
         "if source = RTS_BGP then accept;",
     ] {
@@ -263,6 +266,60 @@ fn ospf_tag_defined_predicate_translates() {
     assert!(
         out.contains("ospf.tag == 0"),
         "expected `ospf.tag == 0` in output, got: {out}"
+    );
+}
+
+#[test]
+fn ospf_router_id_renames_to_dotted_field() {
+    // RFC 2328 §A.4 `Advertising Router` field / RFC 5340 §A.4 the
+    // same field on every v3 LSA — `ospf_router_id` is the 32-bit
+    // OSPF Router-ID of the router that originated the LSA the
+    // route was computed from. The BIRD translator renames it to
+    // `ospf.router_id`; the canonical idiom `if
+    // defined(ospf_router_id) && ospf_router_id == 3221225985 then
+    // accept;` (3221225985 = 0xc000_0201 = 192.0.2.1) translates
+    // faithfully.
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(ospf_router_id) && ospf_router_id = 3221225985 then accept; reject;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(ospf.router_id)"),
+        "expected `defined(ospf.router_id)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("ospf.router_id == 3221225985"),
+        "expected `ospf.router_id == 3221225985` in output, got: {out}"
+    );
+    assert!(
+        !out.contains("ospf_router_id"),
+        "expected `ospf_router_id` to be renamed, got: {out}"
+    );
+}
+
+#[test]
+fn ospf_router_id_defined_predicate_translates() {
+    // The `defined()` presence probe distinguishes "no attribute"
+    // (a non-OSPF route, or an OSPF route whose computation could
+    // not identify the originating LSA's advertising router) from
+    // "attribute present but zero" (a router carrying Router-ID
+    // 0.0.0.0 — RFC 2328 §3.1.b recommends non-zero but does not
+    // forbid it). The BIRD translator renames `ospf_router_id`
+    // inside `defined()` too — the rename applies to any reference,
+    // not just comparisons.
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(ospf_router_id) && ospf_router_id = 0 then accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(ospf.router_id)"),
+        "expected `defined(ospf.router_id)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("ospf.router_id == 0"),
+        "expected `ospf.router_id == 0` in output, got: {out}"
     );
 }
 

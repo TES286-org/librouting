@@ -378,6 +378,7 @@ fn spf_route_struct_field_coverage() {
         metric: 5,
         next_hop: None,
         border_router: None,
+        router_id: None,
     };
     assert_eq!(r.metric, 5);
 }
