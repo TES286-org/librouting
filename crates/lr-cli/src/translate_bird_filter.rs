@@ -318,6 +318,17 @@ const RENAMES: &[(&str, &str)] = &[
     // DSL matches the integer shape exactly, so the rename is
     // faithful.
     ("bgp_aigp", "bgp.aigp"),
+    // RFC 4271 §5.1.7 — AGGREGATOR is a structured (asn, speaker)
+    // pair. BIRD's filter language spells it `bgp_aggregator` (an
+    // egroup value); lr's DSL decomposes the pair into two fields
+    // (`bgp.aggregator.asn`, `bgp.aggregator.speaker`). The canonical
+    // BIRD idiom is `defined(bgp_aggregator)` ("was this route
+    // aggregated?"); the rename maps it to `defined(bgp.aggregator.asn)`,
+    // which is faithful because both components are present together
+    // or absent together. A bare `bgp_aggregator` reference (e.g. in
+    // a comparison or print) maps to the AS number — the component an
+    // operator most often matches against.
+    ("bgp_aggregator", "bgp.aggregator.asn"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),

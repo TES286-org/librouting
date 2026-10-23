@@ -1541,3 +1541,49 @@ protocol bgp customer {
     // BIRD and lr.
     assert!(body.contains("defined(bgp.aigp)"), "body: {body}");
 }
+
+// ---- RFC 4271 §5.1.7: BIRD attribute rename for AGGREGATOR ----
+
+/// BIRD's `bgp_aggregator` attribute renames to lr's
+/// `bgp.aggregator.asn` and the body compiles in the lr filter DSL.
+/// The canonical BIRD idiom is `defined(bgp_aggregator)` ("was this
+/// route aggregated?"); the rename maps it to
+/// `defined(bgp.aggregator.asn)`, which is faithful because the AS
+/// and speaker are present together or absent together. A bare
+/// comparison on the aggregator value (`bgp_aggregator = 0`) maps to
+/// the AS-number component.
+#[test]
+fn bird_filter_renames_aggregator_attribute() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+filter import_aggregator {
+    if defined(bgp_aggregator) then accept;
+    if bgp_aggregator = 0 then accept;
+    reject;
+}
+
+protocol bgp customer {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 {
+        import filter import_aggregator;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.filters.len(), 1);
+    let body = cfg.filters[0].body.as_deref().unwrap_or("");
+    // BIRD spelling is gone.
+    assert!(!body.contains("bgp_aggregator"), "body: {body}");
+    // lr spelling is present — the canonical probe for `defined()`.
+    assert!(body.contains("bgp.aggregator.asn"), "body: {body}");
+    // BIRD `=` for equality swapped to lr `==`.
+    assert!(body.contains("bgp.aggregator.asn == 0"), "body: {body}");
+    // `defined()` survives verbatim — it shares spelling between
+    // BIRD and lr.
+    assert!(body.contains("defined(bgp.aggregator.asn)"), "body: {body}");
+}
