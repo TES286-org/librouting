@@ -269,13 +269,28 @@ const UNMAPPABLE_WORDS: &[&str] = &[
     "bt_test_suite",
     "bt_test_same",
     "bt_check_assign",
+    // OSPF per-route attributes BIRD exposes that lr's filter DSL
+    // does NOT surface yet. `ospf_metric1` is supported (the
+    // BIRD translator renames it to `ospf.metric1`); the remaining
+    // OSPF attributes (`ospf_metric2` — type-2 external metric,
+    // `ospf_tag` — external route tag, `ospf_router_id` — OSPF
+    // router ID of the originator) are listed here so a filter
+    // that references them is marked unfaithful instead of
+    // silently dropping the reference.
+    "ospf_metric2",
+    "ospf_tag",
+    "ospf_router_id",
 ];
 
 /// BIRD attribute-word prefixes with no lr equivalent (per-protocol
-/// attributes: `ospf_router_id`, `krt_source`, …).
+/// attributes: `krt_source`, …). `ospf_` is intentionally NOT in
+/// this list — the lr DSL now exposes `ospf.metric1` (RFC 2328 §16 /
+/// RFC 5340 §4.1) and the BIRD translator renames `ospf_metric1`
+/// to `ospf.metric1`. The remaining OSPF attributes BIRD exposes
+/// (`ospf_metric2`, `ospf_tag`, `ospf_router_id`) are listed
+/// explicitly in [`UNMAPPABLE_WORDS`] below.
 const UNMAPPABLE_PREFIXES: &[&str] = &[
     "krt_",
-    "ospf_",
     "rip_",
     "babel_",
     "static_",
@@ -339,6 +354,19 @@ const RENAMES: &[(&str, &str)] = &[
     // `if defined(bgp_pmsi_tunnel) then reject;` translates
     // faithfully to `if defined(bgp.pmsi_tunnel) then reject;`.
     ("bgp_pmsi_tunnel", "bgp.pmsi_tunnel"),
+    // RFC 2328 §16 / RFC 5340 §4.1 — `ospf_metric1` is the primary
+    // OSPF metric (the SPF cost for intra-area and inter-area
+    // routes; the cost-plus-external-metric for type-1 external
+    // routes; the cost alone for type-2 external routes). lr's DSL
+    // spells it `ospf.metric1` (read-only `Int`, `0` when the route
+    // is not OSPF, mirroring BIRD's eattr default for an unattached
+    // `ospf_metric1` reference). The canonical idiom `if
+    // ospf_metric1 > 100 then reject;` translates faithfully to
+    // `if ospf.metric1 > 100 then reject;`. The remaining OSPF
+    // attributes (`ospf_metric2`, `ospf_tag`, `ospf_router_id`) are
+    // listed in [`UNMAPPABLE_WORDS`] above — they have no lr-DSL
+    // spelling yet.
+    ("ospf_metric1", "ospf.metric1"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),
