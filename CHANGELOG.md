@@ -13,6 +13,98 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
+
+librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`
+§1, the public Rust API gains new surface (`RouteFieldKind::BgpAggregatorAsn`
+and `RouteFieldKind::BgpAggregatorSpeaker`, three new `FilterContext`
+trait methods with default impls, the `lr-policy::bgp::{aggregator,
+aggregator_asn, aggregator_speaker, has_aggregator}` helpers); the new
+`RouteFieldKind` variants are a breaking change for downstream `match`
+exhaustiveness, which the `api-surface` CI gate will catch going
+forward. The C ABI surface is unchanged (no new `lr_*` symbols,
+`ABI_VERSION` stays at 2); the FFI callback table
+`lr_filter_context_t` is untouched — the new `FilterContext` methods
+carry default implementations that delegate to `lr_policy::bgp`, so
+every existing embedder inherits the correct behaviour without
+recompiling. The typed `aggregator()` accessor on
+`lr-bgp::path::PathAttributes` already existed; this release wires it
+into the filter DSL.
+
+### Stability
+
+**Minor version bump 1.7.0 → 1.8.0** for the two new
+`RouteFieldKind::{BgpAggregatorAsn, BgpAggregatorSpeaker}` variants.
+Per `docs/RELEASE-PLAN.md` §1, adding variants to a public enum is a
+breaking change for downstream `match` exhaustiveness; the project's
+policy (matching the v1.3.0 through v1.7.0 cuts) is to ship it as a
+minor bump. The `api-surface` CI gate skips when the workspace version
+is ahead of the latest tag, so the gate will become blocking again at
+the next release cut. The C ABI surface is unchanged (no new `lr_*`
+symbols, `ABI_VERSION` stays at 2).
+
+### Added
+
+**BGP AGGREGATOR filter DSL surface** (`policy`, `cli`, ROADMAP
+"Per-protocol route attributes and an external conversion corpus").
+The filter DSL now exposes the RFC 4271 §5.1.7 AGGREGATOR attribute —
+the `(AS, IP)` pair a BGP speaker stamps onto a route when it
+summarises a less-specific across several more-specifics — so an
+operator can write aggregation-aware policy:
+
+- `bgp.aggregator.asn` (Int, read-only) — the aggregator's AS number
+  (`0` when absent or set to zero). The canonical aggregation-aware
+  idiom is `if defined(bgp.aggregator.asn) && bgp.aggregator.asn ==
+  64512 then accept;`.
+- `bgp.aggregator.speaker` (Ip, read-only) — the aggregator's speaker
+  IPv4 address (`false` when absent, mirroring `bgp.next_hop` /
+  `bgp.originator_id`'s absent representation; gate with
+  `defined(bgp.aggregator.asn)` before reading).
+- `defined(bgp.aggregator.asn)` distinguishes "absent" from "set to
+  zero" — a present value of AS 0 (rare but legal) reports `true` on
+  `defined` and `0` on read. Both components are present together or
+  absent together, so `defined(bgp.aggregator.speaker)` reports the
+  same presence; `asn` is the canonical probe.
+
+`lr-policy::bgp::{aggregator, aggregator_asn, aggregator_speaker,
+has_aggregator}` are the helper quadruple the filter DSL reads
+through. `aggregator()` decodes the `Aggregator` struct (a length
+check + two fixed-size copies); `aggregator_asn()` / `aggregator_speaker()`
+project the pair; `has_aggregator()` is the presence probe. The typed
+`aggregator()` accessor on `lr-bgp::path::PathAttributes` already
+existed — it accepts both the 6-byte (2-byte-AS) and 8-byte (4-byte-AS)
+wire forms, and ingress reconciles AS4_AGGREGATOR (type 18, RFC 6793)
+into the canonical type-7 tag, so a single read sees the resolved value
+regardless of the peer's AS-width capability.
+
+AGGREGATOR is deliberately **not** fused by the peephole pass's
+`BranchFieldIntCmp` fast path — its read decodes the `Aggregator` struct
+(a length check + two fixed-size copies, not a single `get_u32_be`), so
+fusing would not save the allocation the fast path exists to avoid (the
+same reasoning that keeps `bgp.aigp` and the LRXP int-typed fields out
+of `is_int_field`). Both the constant-RHS and constant-LHS comparison
+forms run the unfused `read_route_field` path; the fused and unfused
+paths agree for every route.
+
+The BIRD translator renames `bgp_aggregator` to `bgp.aggregator.asn`
+(the canonical presence probe). The corpus case
+`tests/corpus/bird/bgp-aggregator-filter.conf` exercises both arms of
+the canonical aggregation-aware idiom (`defined(bgp_aggregator) then
+accept` and `bgp_aggregator = 0 then accept`) so the converter
+round-trips the filter body through `bgp.aggregator.asn` and the daemon
+loader accepts the generated TOML.
+
+### Compatibility
+
+- BIRD `bgp_aggregator` filters translate to `bgp.aggregator.asn` —
+  the canonical probe for `defined()` (both components are present
+  together or absent together, so the presence check is faithful).
+- `defined(bgp_aggregator)` survives verbatim — `defined()` shares
+  spelling between BIRD and lr.
+- FFI embedders see no ABI change: the `FilterContext` trait methods
+  `bgp_aggregator_asn` / `bgp_aggregator_speaker` / `bgp_has_aggregator`
+  carry default implementations.
+
 ## [1.7.0] — minor: BGP AIGP attribute in the filter DSL (RFC 7311)
 
 librouting 1.7.0 is a minor release. Per `docs/RELEASE-PLAN.md`
