@@ -3255,7 +3255,10 @@ fn ospfv3_inter_area_and_external_routes_published() {
     // the policy DSL's `defined(ospf.tag)` predicate is false on
     // the resulting RIB route — mirrors BIRD's eattr absence on
     // inter-area routes.
-    assert_eq!(summary_route.tag, None, "inter-area route carries no LSA tag");
+    assert_eq!(
+        summary_route.tag, None,
+        "inter-area route carries no LSA tag"
+    );
     // External: type 2 → the external metric alone, via the ASBR's
     // link-local.
     let external_route = r
@@ -3290,7 +3293,10 @@ fn ospfv3_inter_area_and_external_routes_published() {
     // the resulting RIB route — the v3 T bit distinguishes "no
     // tag" from "tag of zero", so a missing v3 tag stays `None`
     // (unlike the v2 form which always carries a 4-byte tag field).
-    assert_eq!(external_route.tag, None, "v3 external without T bit carries no tag");
+    assert_eq!(
+        external_route.tag, None,
+        "v3 external without T bit carries no tag"
+    );
 }
 
 /// RFC 5340 §A.4.7 T bit: a v3 0x4005 LSA carrying a non-zero
@@ -3382,8 +3388,11 @@ fn ospf_external_type5_carries_route_tag() {
     let ours = router_lsa(r1, vec![(r2, 0, P2P, 10)]);
     let br = router_lsa(r2, vec![(r1, 0, P2P, 10)]);
     // r2's external for 198.51.100.0/24 with a non-zero tag.
-    let mut dest =
-        ExternalDestination::new(Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24), 5, ExternalMetricType::Type1);
+    let mut dest = ExternalDestination::new(
+        Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24),
+        5,
+        ExternalMetricType::Type1,
+    );
     dest.route_tag = 0xdead_beef;
     let ext = originate_external_lsa(r2, &dest, None).unwrap();
     let bytes = ospf_lsu_bytes(r2, 0, vec![ours, br, ext]);
@@ -3418,8 +3427,11 @@ fn ospf_external_type5_zero_tag_is_present() {
     use lr_ospf::external::{originate_external_lsa, ExternalDestination, ExternalMetricType};
     let ours = router_lsa(r1, vec![(r2, 0, P2P, 10)]);
     let br = router_lsa(r2, vec![(r1, 0, P2P, 10)]);
-    let dest =
-        ExternalDestination::new(Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24), 5, ExternalMetricType::Type1);
+    let dest = ExternalDestination::new(
+        Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24),
+        5,
+        ExternalMetricType::Type1,
+    );
     let ext = originate_external_lsa(r2, &dest, None).unwrap();
     let bytes = ospf_lsu_bytes(r2, 0, vec![ours, br, ext]);
     r.feed_input(h, &bytes).expect("feed v2 LSU");

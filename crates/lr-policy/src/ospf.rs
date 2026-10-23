@@ -491,7 +491,10 @@ mod tests {
         // stays defined.
         let r = ospf_route_with_tag(Protocol::Ospfv3, 10, 0);
         assert_eq!(tag(&r), Some(0));
-        assert!(has_tag(&r), "v3 external with T bit set and tag 0 is defined");
+        assert!(
+            has_tag(&r),
+            "v3 external with T bit set and tag 0 is defined"
+        );
     }
 
     #[test]

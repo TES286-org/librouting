@@ -1116,9 +1116,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // v2 external reads as `0` for `ospf.tag == 0` and
             // `defined(ospf.tag)` is true; the v3 form surfaces
             // `Some(t)` only when the T bit / sub-TLV is present.
-            RouteFieldKind::OspfTag => {
-                Ok(Value::Int(self.ctx.ospf_tag(route).unwrap_or(0) as i64))
-            }
+            RouteFieldKind::OspfTag => Ok(Value::Int(self.ctx.ospf_tag(route).unwrap_or(0) as i64)),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default

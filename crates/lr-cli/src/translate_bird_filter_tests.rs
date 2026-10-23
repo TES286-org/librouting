@@ -255,10 +255,7 @@ fn ospf_tag_defined_predicate_translates() {
     // `defined()` too — the rename applies to any reference, not
     // just comparisons.
     let c = ctx(&[], 0);
-    let out = body_ok(
-        "if defined(ospf_tag) && ospf_tag = 0 then accept;",
-        &c,
-    );
+    let out = body_ok("if defined(ospf_tag) && ospf_tag = 0 then accept;", &c);
     assert!(
         out.contains("defined(ospf.tag)"),
         "expected `defined(ospf.tag)` in output, got: {out}"
