@@ -21,13 +21,14 @@
 
 use lr_bgp::path::as_path::AsPath;
 use lr_bgp::path::communities::{Community, ExtendedCommunity, LargeCommunity};
-use lr_bgp::path::well_known::{Aggregator, Aigp, ClusterList, OriginatorId};
+use lr_bgp::path::well_known::{Aggregator, Aigp, ClusterList, OriginatorId, PmsiTunnel};
 use lr_core::addr::{Asn, IpAddr};
 use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
 
 /// Well-known attribute type codes (RFC 4271 §4.2 / RFC 1997 §4 /
-/// RFC 4360 §2 / RFC 8092 §2 / RFC 9234 §3.1 / RFC 7311 §3).
+/// RFC 4360 §2 / RFC 8092 §2 / RFC 9234 §3.1 / RFC 7311 §3 /
+/// RFC 6514 §5).
 const TAG_ORIGIN: u8 = 1;
 const TAG_AS_PATH: u8 = 2;
 const TAG_MED: u8 = 4;
@@ -50,6 +51,11 @@ const TAG_LARGE_COMMUNITIES: u8 = 32;
 const TAG_OTC: u8 = 35;
 /// RFC 7311 §3: AIGP ("Accumulated IGP Metric") attribute type code.
 const TAG_AIGP: u8 = 26;
+/// RFC 6514 §5: PMSI Tunnel attribute type code (22, optional
+/// transitive). The value field is a fixed 5-byte header (Flags +
+/// Tunnel Type + MPLS Label) followed by a variable-length Tunnel
+/// Identifier.
+const TAG_PMSI_TUNNEL: u8 = 22;
 
 const FLAGS_AS_PATH: u8 = 0x40;
 const FLAGS_MED: u8 = 0x80;
@@ -342,6 +348,53 @@ pub fn aggregator_speaker(route: &Route) -> Option<IpAddr> {
 /// returns `Some(0)` for the latter.
 pub fn has_aggregator(route: &Route) -> bool {
     route.attributes.get(AttrTag::raw(TAG_AGGREGATOR)).is_some()
+}
+
+/// The route's PMSI Tunnel attribute (RFC 6514 §5) decoded into the
+/// typed view the policy layer reads — the provider-tunnel binding a
+/// BGP UPDATE advertises for an MVPN auto-discovery route. `None`
+/// when the attribute is absent (the route is not an MVPN A-D route)
+/// or when the value field is malformed (shorter than the 5-byte
+/// header; Tunnel Type 0 with a non-empty Tunnel Identifier; Tunnel
+/// Type 6 with an endpoint width other than 4 or 16 bytes). The
+/// codec stores the raw attribute bytes verbatim so any well-formed
+/// attribute round-trips byte-for-byte.
+///
+/// BIRD exposes the attribute in its filter language as
+/// `bgp_pmsi_tunnel` (an opaque bytestring; the only meaningful
+/// operation is `defined(bgp_pmsi_tunnel)` — "does the route carry
+/// a PMSI Tunnel binding?"). The lr DSL mirrors that surface as a
+/// read-only `bool` field `bgp.pmsi_tunnel` (read through
+/// `has_pmsi_tunnel`, not `pmsi_tunnel()` — the latter collapses
+/// "absent" and "malformed" together, but the former keeps
+/// "present but malformed" defined so a partial-bit UPDATE from a
+/// non-MVPN peer does not get a false `defined()` read).
+///
+/// Reads pay one BTreeMap lookup + one `PmsiTunnel::decode` (a
+/// length check, three fixed-size copies and a per-Tunnel-Type
+/// length validation); no allocation on the common path beyond the
+/// `tunnel_id` Vec (mirrors AIGP's TLV-stream read cost). Like
+/// AIGP, the read is not a single `get_u32_be`, so the peephole
+/// pass does not fuse `bgp.pmsi_tunnel` integer comparisons into
+/// `BranchFieldIntCmp` — but the field surfaces as a `Bool`, so the
+/// comparison shape does not arise in the DSL.
+pub fn pmsi_tunnel(route: &Route) -> Option<PmsiTunnel> {
+    let bytes = attr_bytes(route, TAG_PMSI_TUNNEL)?;
+    PmsiTunnel::decode(bytes)
+}
+
+/// True when a PMSI Tunnel attribute is physically present on the
+/// route (RFC 6514 §5). Use this to distinguish "no attribute" from
+/// "present but malformed" — `pmsi_tunnel()` returns `None` for
+/// both, but `has_pmsi_tunnel()` reports the attribute's physical
+/// presence so the `defined(bgp.pmsi_tunnel)` filter DSL predicate
+/// can distinguish them exactly as BIRD's `defined(bgp_pmsi_tunnel)`
+/// does.
+pub fn has_pmsi_tunnel(route: &Route) -> bool {
+    route
+        .attributes
+        .get(AttrTag::raw(TAG_PMSI_TUNNEL))
+        .is_some()
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -801,5 +854,79 @@ mod tests {
         assert_eq!(aggregator_asn(&r_bad), None);
         assert_eq!(aggregator_speaker(&r_bad), None);
         assert!(has_aggregator(&r_bad));
+    }
+
+    /// RFC 6514 §5 — PMSI Tunnel is a 5-byte minimum (Flags + Tunnel
+    /// Type + MPLS Label) plus a variable-length Tunnel Identifier.
+    /// The helper surfaces the typed view (Flags, Tunnel Type,
+    /// MPLS Label, Tunnel Identifier) and stays `None` on the
+    /// absent and malformed cases. A present-but-malformed attribute
+    /// (truncated header, Tunnel Type 0 with a non-empty Tunnel
+    /// Identifier, Tunnel Type 6 with an endpoint width other than
+    /// 4 or 16) is reported as physically present by `has_pmsi_tunnel`
+    /// so the `defined(bgp.pmsi_tunnel)` filter DSL predicate can
+    /// distinguish "present but malformed" from "absent".
+    #[test]
+    fn pmsi_tunnel_decodes_typed_view() {
+        use lr_bgp::path::well_known::{
+            PmsiTunnel as PmsiTy, PMSI_FLAG_LEAF_INFO_REQUIRED, TUNNEL_TYPE_INGRESS_REPLICATION,
+            TUNNEL_TYPE_NO_INFO,
+        };
+        // Present, Tunnel Type 6 (Ingress Replication), IPv4
+        // endpoint, MPLS label 64512, L bit set.
+        let r = route_with(vec![raw_attr(
+            TAG_PMSI_TUNNEL,
+            0xC0,
+            PmsiTy::new(
+                PMSI_FLAG_LEAF_INFO_REQUIRED,
+                TUNNEL_TYPE_INGRESS_REPLICATION,
+                64512,
+                vec![10, 0, 0, 1],
+            )
+            .encode(),
+        )]);
+        let p = pmsi_tunnel(&r).expect("present, well-formed");
+        assert_eq!(p.tunnel_type, TUNNEL_TYPE_INGRESS_REPLICATION);
+        assert_eq!(p.mpls_label, 64512);
+        assert_eq!(p.tunnel_id, vec![10, 0, 0, 1]);
+        assert!(p.leaf_info_required());
+        assert!(has_pmsi_tunnel(&r));
+        // Absent.
+        let r_absent = route_with(vec![]);
+        assert_eq!(pmsi_tunnel(&r_absent), None);
+        assert!(!has_pmsi_tunnel(&r_absent));
+        // Present, Tunnel Type 0 ("No tunnel information present")
+        // — the attribute carries no Tunnel Identifier; the helper
+        // surfaces the typed view (`mpls_label = 0`, empty
+        // `tunnel_id`).
+        let r_no_info = route_with(vec![raw_attr(
+            TAG_PMSI_TUNNEL,
+            0xC0,
+            PmsiTy::new(0, TUNNEL_TYPE_NO_INFO, 0, Vec::new()).encode(),
+        )]);
+        let p = pmsi_tunnel(&r_no_info).expect("no-info decodes");
+        assert_eq!(p.tunnel_type, TUNNEL_TYPE_NO_INFO);
+        assert_eq!(p.mpls_label, 0);
+        assert!(p.tunnel_id.is_empty());
+        assert!(!p.leaf_info_required());
+        assert!(has_pmsi_tunnel(&r_no_info));
+        // Malformed value (truncated header) — `pmsi_tunnel()`
+        // returns None; `has_pmsi_tunnel()` still reports presence
+        // (the attribute is on the route; only the value is
+        // unreadable). Mirrors the AIGP accessor's behaviour on a
+        // malformed TLV stream.
+        let r_bad = route_with(vec![raw_attr(TAG_PMSI_TUNNEL, 0xC0, vec![0, 0, 0, 0])]);
+        assert_eq!(pmsi_tunnel(&r_bad), None);
+        assert!(has_pmsi_tunnel(&r_bad));
+        // Tunnel Type 0 with a non-empty Tunnel Identifier — RFC
+        // 6514 §5 forbids this; the helper surfaces it as `None`
+        // while `has_pmsi_tunnel` still reports presence.
+        let r_bad_no_info = route_with(vec![raw_attr(
+            TAG_PMSI_TUNNEL,
+            0xC0,
+            vec![0, TUNNEL_TYPE_NO_INFO, 0, 0, 0, 0xaa],
+        )]);
+        assert_eq!(pmsi_tunnel(&r_bad_no_info), None);
+        assert!(has_pmsi_tunnel(&r_bad_no_info));
     }
 }
