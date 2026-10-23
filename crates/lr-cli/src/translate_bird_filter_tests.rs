@@ -114,11 +114,10 @@ fn bird_only_attributes_are_unfaithful() {
         "if gw = 192.0.2.1 then accept;",
         "if ifname = \"eth0\" then accept;",
         "if preference = 100 then accept;",
-        // OSPF attributes lr's DSL does NOT surface yet
-        // (`ospf_tag`, `ospf_router_id`). `ospf_metric1` and
-        // `ospf_metric2` are supported (see `ospf_metric1_renames`
-        // and `ospf_metric2_renames`).
-        "if ospf_tag = 42 then accept;",
+        // OSPF attribute lr's DSL does NOT surface yet
+        // (`ospf_router_id`). `ospf_metric1`, `ospf_metric2` and
+        // `ospf_tag` are supported (see `ospf_metric1_renames`,
+        // `ospf_metric2_renames` and `ospf_tag_renames`).
         "if ospf_router_id = 1.2.3.4 then accept;",
         "if krt_source = 0 then accept;",
         "if source = RTS_BGP then accept;",
@@ -214,6 +213,59 @@ fn ospf_metric2_defined_predicate_translates() {
     assert!(
         out.contains("ospf.metric2 == 0"),
         "expected `ospf.metric2 == 0` in output, got: {out}"
+    );
+}
+
+#[test]
+fn ospf_tag_renames_to_dotted_field() {
+    // RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 / RFC 5340 §A.4.7
+    // T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3 — `ospf_tag`
+    // is the 32-bit external route tag. The BIRD translator renames
+    // it to `ospf.tag`; the canonical idiom `if defined(ospf_tag)
+    // && ospf_tag == 3735928559 then accept;` translates
+    // faithfully.
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(ospf_tag) && ospf_tag = 3735928559 then accept; reject;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(ospf.tag)"),
+        "expected `defined(ospf.tag)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("ospf.tag == 3735928559"),
+        "expected `ospf.tag == 3735928559` in output, got: {out}"
+    );
+    assert!(
+        !out.contains("ospf_tag"),
+        "expected `ospf_tag` to be renamed, got: {out}"
+    );
+}
+
+#[test]
+fn ospf_tag_defined_predicate_translates() {
+    // The `defined()` presence probe distinguishes "no tag" from
+    // "tag of zero": the v2 LSA body always carries a 4-byte tag
+    // field (zero being well-formed per RFC 2328 §A.4.5), so a v2
+    // external surfaces `Some(t)` and `defined(ospf.tag)` is true
+    // even when the tag is zero; the v3 form's T bit distinguishes
+    // "no tag" (T bit clear) from "tag of zero" (T bit set, value
+    // 0). The BIRD translator renames `ospf_tag` inside
+    // `defined()` too — the rename applies to any reference, not
+    // just comparisons.
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(ospf_tag) && ospf_tag = 0 then accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(ospf.tag)"),
+        "expected `defined(ospf.tag)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("ospf.tag == 0"),
+        "expected `ospf.tag == 0` in output, got: {out}"
     );
 }
 
