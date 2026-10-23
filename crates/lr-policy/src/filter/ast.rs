@@ -653,6 +653,20 @@ pub enum RouteFieldKind {
     /// (the `speaker` field's own `defined()` reports the same
     /// presence, but `asn` is the canonical probe).
     BgpAggregatorSpeaker,
+    /// `bgp.pmsi_tunnel` — RFC 6514 §5, the P-Multicast Service
+    /// Interface Tunnel attribute (path attribute type 22,
+    /// optional transitive). The attribute carries the
+    /// provider-tunnel binding a BGP UPDATE advertises for an
+    /// MVPN auto-discovery route (Intra-AS I-PMSI, Inter-AS
+    /// I-PMSI, S-PMSI, Leaf A-D). Read-only; surfaces as a
+    /// `Bool` (`false` when absent, `true` when present,
+    /// mirroring BIRD's `EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY`
+    /// exposure so the canonical idiom
+    /// `if defined(bgp.pmsi_tunnel) then reject;` translates
+    /// faithfully). The `defined(bgp.pmsi_tunnel)` predicate
+    /// distinguishes "absent" from "present but malformed" via
+    /// `has_pmsi_tunnel`.
+    BgpPmsiTunnel,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -742,6 +756,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpAigp => "bgp.aigp",
             RouteFieldKind::BgpAggregatorAsn => "bgp.aggregator.asn",
             RouteFieldKind::BgpAggregatorSpeaker => "bgp.aggregator.speaker",
+            RouteFieldKind::BgpPmsiTunnel => "bgp.pmsi_tunnel",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

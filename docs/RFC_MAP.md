@@ -27,6 +27,7 @@ scope.
 | 5492 | `lr-bgp::capabilities` | capability optional parameter |
 | 5925 | `lr-osroute::tcp_auth` | TCP-AO key installation |
 | 6396 | `lr-mrt` | TABLE_DUMP_V2 read and write, BGP4MP decode |
+| 6514 | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::PmsiTunnel`, `lr-policy::bgp`, `lr-policy::filter::ast::RouteFieldKind` | PMSI Tunnel attribute (type 22, optional transitive) for MVPN auto-discovery; `PmsiTunnel` codec (Flags + Tunnel Type + 3-octet MPLS Label + variable Tunnel Identifier; Tunnel Type 0 / 6 hard rules enforced, unknown types preserved verbatim); `PathAttributes::pmsi_tunnel`/`has_pmsi_tunnel` typed accessors; `bgp.pmsi_tunnel` filter DSL field (read-only `bool`, `defined(bgp.pmsi_tunnel)` distinguishes "absent" from "present but malformed") |
 | 6793 | `lr-bgp::extensions::asn4`, `lr-bgp::path::as_path` | four-octet AS, AS4_PATH reconstruction |
 | 6811 | `lr-bgp::roa`, `lr-bgp::roa_store` | prefix-origin validation |
 | 7311 | `lr-bgp::path::PathAttributes`, `lr-bgp::path::well_known::Aigp`, `lr-policy::bgp`, `lr-policy::filter::ast::RouteFieldKind` | AIGP ("Accumulated IGP Metric") attribute (type 26, optional non-transitive); `Aigp` TLV-stream codec (type-1 TLV = 8-byte accumulated metric, unknown TLVs preserved); `PathAttributes::aigp`/`has_aigp` typed accessors; `bgp.aigp` filter DSL field (read-only `int`, `defined(bgp.aigp)` distinguishes "absent" from "set to zero") |

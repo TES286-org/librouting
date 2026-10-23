@@ -257,6 +257,28 @@ pub trait FilterContext {
     fn bgp_has_aggregator(&self, route: &Route) -> bool {
         crate::bgp::has_aggregator(route)
     }
+    /// BGP PMSI Tunnel attribute (`bgp.pmsi_tunnel`, RFC 6514 §5) —
+    /// the typed view the policy layer surfaces (Flags, Tunnel
+    /// Type, the 20-bit MPLS label, the variable-length Tunnel
+    /// Identifier). `None` when the attribute is absent or
+    /// malformed. The default delegates to
+    /// [`lr_policy::bgp::pmsi_tunnel`].
+    ///
+    /// The filter DSL surfaces this attribute as a `Bool`
+    /// (`bgp.pmsi_tunnel`) read through [`Self::bgp_has_pmsi_tunnel`],
+    /// not through this accessor — the latter collapses "absent"
+    /// and "malformed" together, but the former keeps "present but
+    /// malformed" defined so a partial-bit UPDATE from a non-MVPN
+    /// peer does not get a false `defined()` read.
+    fn bgp_pmsi_tunnel(&self, route: &Route) -> Option<lr_bgp::path::PmsiTunnel> {
+        crate::bgp::pmsi_tunnel(route)
+    }
+    /// True when a PMSI Tunnel attribute is physically present on
+    /// the route (RFC 6514 §5). Used by `defined(bgp.pmsi_tunnel)`
+    /// to distinguish "absent" from "present but malformed".
+    fn bgp_has_pmsi_tunnel(&self, route: &Route) -> bool {
+        crate::bgp::has_pmsi_tunnel(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -783,6 +805,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpAggregatorAsn | RouteFieldKind::BgpAggregatorSpeaker => {
                 self.ctx.bgp_has_aggregator(route)
             }
+            // RFC 6514 §5: PMSI Tunnel presence is
+            // `has_pmsi_tunnel` (the attribute is on the route),
+            // not `pmsi_tunnel().is_some()` — the latter collapses
+            // "absent" and "malformed" together but the former
+            // keeps "present but malformed" defined (matches
+            // BIRD's `defined(bgp_pmsi_tunnel)` on a partial-bit
+            // UPDATE from a non-MVPN peer).
+            RouteFieldKind::BgpPmsiTunnel => self.ctx.bgp_has_pmsi_tunnel(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -923,6 +953,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 .bgp_aggregator_speaker(route)
                 .map(Value::Ip)
                 .unwrap_or(Value::Bool(false))),
+            // RFC 6514 §5: PMSI Tunnel is a presence-probe `Bool`
+            // mirroring BIRD's `EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY`
+            // exposure (`defined(bgp_pmsi_tunnel)` is the only
+            // meaningful test). `true` when the attribute is on the
+            // route (present, well-formed or malformed — the
+            // physical presence probe); `false` when absent. Callers
+            // that need the malformed distinction gate with
+            // `defined(bgp.pmsi_tunnel)`, which consults
+            // `has_pmsi_tunnel` (the same physical presence check),
+            // not `pmsi_tunnel()` (which collapses "absent" and
+            // "malformed" together).
+            RouteFieldKind::BgpPmsiTunnel => Ok(Value::Bool(self.ctx.bgp_has_pmsi_tunnel(route))),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default

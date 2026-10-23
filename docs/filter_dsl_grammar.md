@@ -510,7 +510,8 @@ lists fields accepting the append form.
 | `bgp.otc`               | `int`                 |    no    |  no  | RFC 9234 §3.1; `0` when absent or set to zero. `defined(bgp.otc)` distinguishes the two. |
 | `bgp.aigp`              | `int`                 |    no    |  no  | RFC 7311; accumulated IGP metric (`0` when absent or set to zero, saturating to `i64::MAX` if the u64 wire value exceeds the signed DSL width). `defined(bgp.aigp)` distinguishes the two. |
 | `bgp.aggregator.asn`    | `int`                 |    no    |  no  | RFC 4271 §5.1.7; aggregator AS (`0` when absent or set to zero). `defined(bgp.aggregator.asn)` distinguishes the two. |
-| `bgp.aggregator.speaker`| `ip`                  |    no    |  no  | RFC 4271 §5.1.7; aggregator speaker IP (`false` when absent). |
+| `bgp.aggregator.speaker`| `ip`                 |    no    |  no  | RFC 4271 §5.1.7; aggregator speaker IP (`false` when absent). |
+| `bgp.pmsi_tunnel`       | `bool`                |    no    |  no  | RFC 6514 §5; `true` when the attribute is present, `false` when absent. `defined(bgp.pmsi_tunnel)` distinguishes "absent" from "present but malformed". |
 | `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
 | `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
 | `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
@@ -606,6 +607,35 @@ a filter that mutates it would fight the aggregation pipeline. Like `bgp.aigp`,
 `BranchFieldIntCmp` fast path — its read decodes the `Aggregator` struct (a
 length check + two fixed-size copies, not a single `get_u32_be`), so fusing
 would not save the allocation the fast path exists to avoid.
+
+`bgp.pmsi_tunnel` is the RFC 6514 §5 P-Multicast Service Interface Tunnel
+attribute — the provider-tunnel binding a BGP UPDATE advertises for an MVPN
+auto-discovery route (Intra-AS I-PMSI, Inter-As I-PMSI, S-PMSI, Leaf A-D).
+BIRD exposes the attribute in its filter language as `bgp_pmsi_tunnel` (an
+opaque bytestring — `EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY` — where the only
+meaningful operation is `defined(bgp_pmsi_tunnel)` ("does the route carry a
+PMSI Tunnel binding?")); lr's DSL mirrors that surface as a read-only `bool`
+— `true` when the attribute is present, `false` when absent. The canonical
+presence-probe idiom spells the same way it does in BIRD:
+
+```
+if defined(bgp.pmsi_tunnel) then reject;   # drop MVPN A-D routes
+                                           # on a non-MVPN edge
+```
+
+The `defined(bgp.pmsi_tunnel)` predicate consults `has_pmsi_tunnel` (the
+attribute is on the route), not `pmsi_tunnel().is_some()` (which collapses
+"absent" and "malformed" together); the "present but malformed" case (a
+partial-bit UPDATE from a non-MVPN peer, a truncated header, a Tunnel Type
+0 with a non-empty Tunnel Identifier, a Tunnel Type 6 with an endpoint width
+other than 4 or 16 bytes) stays defined so a partial-bit UPDATE does not get
+a false read. The BIRD translator renames `bgp_pmsi_tunnel` to
+`bgp.pmsi_tunnel`. The attribute is read-only: it carries the
+provider-tunnel binding the MVPN data plane needs, so a filter that mutates
+it would corrupt multicast forwarding. The field surfaces as a `Bool`, so
+the int-comparison `BranchFieldIntCmp` fast path the peephole pass fuses
+`bgp.local_pref` / `bgp.med` / `bgp.otc` into does not arise; every
+`bgp.pmsi_tunnel` read runs the unfused `read_route_field` path.
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
 (issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated

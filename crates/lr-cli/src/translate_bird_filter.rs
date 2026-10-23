@@ -329,6 +329,16 @@ const RENAMES: &[(&str, &str)] = &[
     // a comparison or print) maps to the AS number — the component an
     // operator most often matches against.
     ("bgp_aggregator", "bgp.aggregator.asn"),
+    // RFC 6514 §5 — PMSI Tunnel is an opaque bytestring in BIRD's
+    // filter language (`EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY`); the
+    // only meaningful operation is `defined(bgp_pmsi_tunnel)`
+    // ("does the route carry a PMSI Tunnel binding — i.e. is it
+    // an MVPN A-D route?"). lr's DSL mirrors that surface as a
+    // read-only `Bool` field `bgp.pmsi_tunnel` (`true` when
+    // present, `false` when absent), so the canonical idiom
+    // `if defined(bgp_pmsi_tunnel) then reject;` translates
+    // faithfully to `if defined(bgp.pmsi_tunnel) then reject;`.
+    ("bgp_pmsi_tunnel", "bgp.pmsi_tunnel"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),
