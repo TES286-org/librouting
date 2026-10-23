@@ -52,12 +52,12 @@ scope.
 
 | RFC | crate::module | what it implements |
 | --- | --- | --- |
-| 2328 | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf` | OSPFv2 codec, LSDB and SPF |
+| 2328 | `lr-ospf::packet`, `lr-ospf::lsdb`, `lr-ospf::spf`, `lr-policy::ospf`, `lr-policy::filter::ast::RouteFieldKind` | OSPFv2 codec, LSDB and SPF; §16 route preference order and metric semantics surfaced in the filter DSL as `ospf.metric1` (read-only `int`, `0` for non-OSPF routes — mirrors BIRD's eattr default for an unattached `ospf_metric1` reference; `defined(ospf.metric1)` distinguishes "non-OSPF route" from "OSPF route with metric 0" via `lr-policy::ospf::has_metric1`) |
 | 3101 | `lr-ospf::nssa` | type-7 origination, P-bit and translation |
 | 3623 | `lr-ospf::gr`, `lr-ospf::lsa::grace` | graceful restart and the Grace-LSA |
 | 5187 | `lr-ospf::lsa::grace`, `lr-ospf::gr` | v3 Grace-LSA, LS type 0x000b |
 | 5250 | `lr-ospf::lsa`, `lr-ospf::exchange` | opaque LSA types and the DD O-bit |
-| 5340 | `lr-ospf::packet`, `lr-ospf::lsa::v3`, `lr-ospf::spf` | OSPFv3 codec, LSA bodies, SPF |
+| 5340 | `lr-ospf::packet`, `lr-ospf::lsa::v3`, `lr-ospf::spf`, `lr-policy::ospf`, `lr-policy::filter::ast::RouteFieldKind` | OSPFv3 codec, LSA bodies, SPF; §4.1 route preference (mirrors OSPFv2 §16) surfaced in the filter DSL as `ospf.metric1` |
 | 5709 | `lr-ospf::auth::crypto` | HMAC-SHA-1 and HMAC-SHA-256 trailer |
 | 7166 | `lr-ospf::auth::v3_auth` | v3 authentication trailer |
 | 7684 | `lr-ospf::lsa::sr` | extended prefix and link opaque LSAs |

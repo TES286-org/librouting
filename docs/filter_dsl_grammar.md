@@ -311,16 +311,20 @@ route_field := "net"
              | "proto"
              | "source"
              | "bgp" "." bgp_field
+             | "ospf" "." ospf_field
              | "roa" "." "state" ;
 bgp_field   := "local_pref" | "med" | "next_hop"
              | "as_path" | "communities"
              | "ext_communities" | "large_communities"
              | "origin" ;
+ospf_field  := "metric1" ;
 ```
 
 The settable subset (allowed on the left-hand side of `=`) is: `bgp.local_pref`,
 `bgp.med`, `bgp.next_hop`, `bgp.communities`, `bgp.ext_communities`,
-`bgp.large_communities`.
+`bgp.large_communities`. Every `ospf.*` field is read-only — the
+OSPF metric is the SPF computation's output and a filter must not
+overwrite it.
 
 The `+=` form is restricted further: only the three community-set fields
 (`bgp.communities`, `bgp.ext_communities`, `bgp.large_communities`) accept `+=`.
@@ -512,6 +516,7 @@ lists fields accepting the append form.
 | `bgp.aggregator.asn`    | `int`                 |    no    |  no  | RFC 4271 §5.1.7; aggregator AS (`0` when absent or set to zero). `defined(bgp.aggregator.asn)` distinguishes the two. |
 | `bgp.aggregator.speaker`| `ip`                 |    no    |  no  | RFC 4271 §5.1.7; aggregator speaker IP (`false` when absent). |
 | `bgp.pmsi_tunnel`       | `bool`                |    no    |  no  | RFC 6514 §5; `true` when the attribute is present, `false` when absent. `defined(bgp.pmsi_tunnel)` distinguishes "absent" from "present but malformed". |
+| `ospf.metric1`          | `int`                 |    no    |  no  | RFC 2328 §16 / RFC 5340 §4.1; primary OSPF metric (`0` when the route is not OSPF). `defined(ospf.metric1)` distinguishes "non-OSPF route" from "OSPF route with metric 0". |
 | `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
 | `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
 | `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
@@ -636,6 +641,41 @@ it would corrupt multicast forwarding. The field surfaces as a `Bool`, so
 the int-comparison `BranchFieldIntCmp` fast path the peephole pass fuses
 `bgp.local_pref` / `bgp.med` / `bgp.otc` into does not arise; every
 `bgp.pmsi_tunnel` read runs the unfused `read_route_field` path.
+
+`ospf.metric1` is the RFC 2328 §16 / RFC 5340 §4.1 primary OSPF metric —
+the SPF cost for intra-area and inter-area routes, the cost-plus-external
+metric for type-1 external routes, and the cost alone for type-2 external
+routes. BIRD exposes the value as `ospf_metric1` (an `int` eattr the OSPF
+protocol attaches); lr's DSL spells it `ospf.metric1` (read-only `int`).
+The mapping is one `match` on `route.protocol` plus one field read off
+`route.preference.metric` — no BTreeMap lookup, no allocation, no codec;
+cheaper than any `bgp.*` accessor that decodes a path attribute. A
+non-OSPF route reads as `0` (the eattr default for an unattached
+`ospf_metric1` reference), so the canonical idiom
+
+```
+if defined(ospf.metric1) && ospf.metric1 > 100 then reject;  # drop
+                                                              # high-cost
+                                                              # OSPF routes
+```
+
+short-circuits on the `defined()` arm for a non-OSPF route the same way
+it does in BIRD. The `defined(ospf.metric1)` predicate consults
+`has_metric1` (the route is an OSPFv2 / OSPFv3 route), not
+`metric1().is_some()` — the latter would collapse "non-OSPF route"
+and "OSPF route with metric 0" together via the `0` read; the former
+keeps an OSPF route with cost 0 defined so a cost-0 OSPF route does
+not get a false "absent" read. The BIRD translator renames
+`ospf_metric1` to `ospf.metric1`; the remaining OSPF per-route
+attributes BIRD exposes (`ospf_metric2`, `ospf_tag`, `ospf_router_id`)
+have no lr-DSL spelling yet and the translator marks a filter that
+references them unfaithful instead of silently dropping the
+reference. The field surfaces as an `Int` and the read is one `match`
+plus one field read (no allocation), so the peephole pass's
+`BranchFieldIntCmp` fast path fires on `ospf.metric1 == N` /
+`ospf.metric1 > N` / etc. — the same fast path `bgp.local_pref` /
+`bgp.med` / `bgp.otc` use, avoiding the `Value::Int` allocation + push
+the unfused sequence pays.
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
 (issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated
@@ -877,7 +917,7 @@ divergences are:
 | Boolean operators        | `&&`, `\|\|`, `!`               | identical                         |
 | Equality / assignment    | `=` / `:=`                      | `==` / `=`                        |
 | Match / non-match        | `~` / `!~`                      | identical                         |
-| Attribute names          | `bgp_path`, `bgp_local_pref`, … | `bgp.as_path`, `bgp.local_pref`, … |
+| Attribute names          | `bgp_path`, `bgp_local_pref`, …, `ospf_metric1`, … | `bgp.as_path`, `bgp.local_pref`, …, `ospf.metric1`, … |
 | Variables                | typed (`int x := 5;`)           | untyped (`let x = 5;`)            |
 | `case` arm separator     | `:`                             | `=>`                              |
 | `case` else arm          | `else:`                         | `default =>`                      |

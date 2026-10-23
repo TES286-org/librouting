@@ -430,10 +430,41 @@ an `Int`, so the int-comparison shape does not arise in the DSL.
 This closes the last gap in BIRD's filter-attribute surface — every
 `bgp_*` filter attribute the BIRD 2 grammar declares now has a
 faithful lr-DSL spelling.
-What remains is the rest of the per-protocol attribute surface — BIRD's
-route attributes that ride the per-route filter context — beyond the RR
-loop-detection, OTC, AIGP, AGGREGATOR, and PMSI Tunnel subsets that have
-landed.
+The OSPF metric attribute has landed as the first per-protocol
+attribute beyond the BGP subset: `RouteFieldKind::OspfMetric1`
+(RFC 2328 §16 / RFC 5340 §4.1) exposes `ospf.metric1` (read-only
+`int`, `0` when the route is not OSPF, mirroring BIRD's eattr
+default for an unattached `ospf_metric1` reference) so the canonical
+BIRD idiom `if defined(ospf_metric1) && ospf_metric1 > 100 then
+reject;` translates faithfully to `if defined(ospf.metric1) &&
+ospf.metric1 > 100 then reject;`. The BIRD translator renames
+`ospf_metric1` to `ospf.metric1` (and drops `ospf_` from
+`UNMAPPABLE_PREFIXES`, listing the remaining OSPF attributes
+`ospf_metric2` / `ospf_tag` / `ospf_router_id` in
+`UNMAPPABLE_WORDS` instead so a filter that references them is
+marked unfaithful rather than silently dropping the reference);
+`lr-policy::ospf` carries the matching `metric1` / `has_metric1`
+helpers (the latter distinguishes "non-OSPF route" from "OSPF route
+with metric 0" via `defined(ospf.metric1)`), the typed accessors
+read `route.preference.metric` for OSPFv2 / OSPFv3 routes and
+`None` for everything else (one `match` plus one field read — no
+BTreeMap lookup, no allocation, cheaper than any `bgp.*` accessor
+that decodes a path attribute), and the peephole pass's
+`BranchFieldIntCmp` fast path fuses `ospf.metric1 == N` / `> N` /
+etc. comparisons the same way it fuses `bgp.local_pref` / `bgp.med`
+/ `bgp.otc`. The corpus case
+`tests/corpus/bird/ospf-metric-filter.conf` exercises both the
+canonical high-cost reject idiom and the `defined()` gate's
+short-circuit on a non-OSPF route.
+What remains is the rest of the per-protocol attribute surface —
+BIRD's route attributes that ride the per-route filter context —
+beyond the RR loop-detection, OTC, AIGP, AGGREGATOR, PMSI Tunnel
+(BGP subset, complete) and the OSPF `ospf.metric1` attribute that
+has landed. The remaining OSPF attributes (`ospf_metric2`,
+`ospf_tag`, `ospf_router_id`) and the Babel per-route attributes
+(`babel_metric`, `babel_router_id`, `babel_seqno`) are the next
+increments; each lands as its own small PR following the same
+codec→accessor→DSL→translator→corpus shape.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF
