@@ -162,16 +162,23 @@ worked ROA filter. The DSL exposes the RFC 6811 validation outcome as
 RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
 (`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`), the
 RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), the RFC 7311
-AIGP accumulated-metric attribute (`bgp.aigp`), and — behind
-the `exchange-plane` feature — the LRXP exchange-plane records the
-route carries (`bgp.lrxp.*`, issue #81).
+AIGP accumulated-metric attribute (`bgp.aigp`), the RFC 4271 §5.1.7
+AGGREGATOR attribute (`bgp.aggregator.asn`, `bgp.aggregator.speaker`),
+and — behind the `exchange-plane` feature — the LRXP exchange-plane
+records the route carries (`bgp.lrxp.*`, issue #81).
 
 ## RFCs
 
 - RFC 4271 §9.1.2.15 — AS_PATH loop detection, the `reject_as_loop`
   check; §6.7 for NEXT_HOP validity; §4.2/§5.1.5 for the attributes the
   set actions write; §5.1.6 for the ATOMIC_AGGREGATE marker the filter
-  DSL exposes as `bgp.atomic_aggregate`.
+  DSL exposes as `bgp.atomic_aggregate`; §5.1.7 for the AGGREGATOR
+  attribute the filter DSL exposes as `bgp.aggregator.asn` and
+  `bgp.aggregator.speaker` (the `(AS, IP)` pair a speaker stamps onto a
+  summarised route; the typed accessor
+  `lr-bgp::path::PathAttributes::aggregator` decodes both the 2-byte and
+  4-byte-AS wire forms, and ingress reconciles AS4_AGGREGATOR into the
+  canonical type-7 tag).
 - RFC 2439 — route flap damping: the figure of merit, the suppress and
   reuse thresholds, and decay. RFC 7196 documents why the RFC 2439
   defaults are harmful in the default-free zone; damping is off unless

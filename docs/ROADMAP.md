@@ -381,10 +381,30 @@ deliberately not fused by the peephole pass's `BranchFieldIntCmp` fast
 path — its read parses the AIGP TLV stream (not a single
 `get_u32_be`), so fusing would not save the allocation the fast path
 exists to avoid; both comparison forms run the unfused
-`read_route_field` path. What remains is the rest of the per-protocol
-attribute surface — BIRD's route attributes that ride the per-route
-filter context — beyond the RR loop-detection, OTC, and AIGP subsets
-that have landed.
+`read_route_field` path. The AGGREGATOR aggregation-source attribute has
+landed alongside the AIGP set: `RouteFieldKind::BgpAggregatorAsn` and
+`RouteFieldKind::BgpAggregatorSpeaker` (RFC 4271 §5.1.7) expose
+`bgp.aggregator.asn` (Int, read-only) and `bgp.aggregator.speaker` (Ip,
+read-only) through the filter DSL so the canonical aggregation-aware
+idiom (`if defined(bgp.aggregator.asn) && bgp.aggregator.asn == 64512
+then accept;`) translates faithfully from BIRD's `bgp_aggregator`; the
+BIRD translator renames `bgp_aggregator` to `bgp.aggregator.asn` (the
+canonical presence probe — both components are present together or
+absent together), `lr-policy::bgp` carries the matching `aggregator`,
+`aggregator_asn`, `aggregator_speaker` / `has_aggregator` helpers (the
+latter distinguishes "absent" from "set to zero" via
+`defined(bgp.aggregator.asn)`), the typed `aggregator()` accessor on
+`lr-bgp::path::PathAttributes` already existed (it decodes both the
+2-byte and 4-byte-AS wire forms), and the corpus case
+`tests/corpus/bird/bgp-aggregator-filter.conf` exercises both the
+aggregation-aware idiom and the `defined()` distinction. Like AIGP,
+`bgp.aggregator.asn` is deliberately not fused by the peephole pass's
+`BranchFieldIntCmp` fast path — its read decodes the `Aggregator` struct
+(a length check + two fixed-size copies, not a single `get_u32_be`), so
+fusing would not save the allocation the fast path exists to avoid.
+What remains is the rest of the per-protocol attribute surface — BIRD's
+route attributes that ride the per-route filter context — beyond the RR
+loop-detection, OTC, AIGP, and AGGREGATOR subsets that have landed.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF

@@ -15,7 +15,7 @@ scope.
 | 2439 | `lr-damping` | route flap damping figure of merit |
 | 2545 | `lr-bgp::path::mp_nlri` | IPv6 NLRI over MP-BGP |
 | 2918 | `lr-bgp::message::route_refresh` | ROUTE-REFRESH message |
-| 4271 | `lr-bgp::fsm`, `lr-bgp::message`, `lr-bgp::path::well_known`, `lr-policy::bgp` | FSM, message codec, §9.1.2 selection, §5.1.6 ATOMIC_AGGREGATE typed accessor and filter-DSL exposure |
+| 4271 | `lr-bgp::fsm`, `lr-bgp::message`, `lr-bgp::path::well_known`, `lr-policy::bgp`, `lr-policy::filter::ast::RouteFieldKind` | FSM, message codec, §9.1.2 selection, §5.1.6 ATOMIC_AGGREGATE typed accessor and filter-DSL exposure (`bgp.atomic_aggregate`), §5.1.7 AGGREGATOR typed accessor and filter-DSL exposure (`bgp.aggregator.asn` / `bgp.aggregator.speaker`, `defined(bgp.aggregator.asn)` distinguishes "absent" from "set to zero") |
 | 4360 | `lr-bgp::path::communities` | EXTENDED_COMMUNITIES attribute |
 | 4456 | `lr-bgp::role::cluster`, `lr-bgp::path::well_known`, `lr-policy::bgp`, `lr-policy::filter::ast` | route reflection, ORIGINATOR_ID, CLUSTER_LIST — wire codec accessors on `PathAttributes`, `OriginatorId`/`ClusterList` types, filter-DSL exposure as `bgp.originator_id` and `bgp.cluster_list` |
 | 4486 | `lr-bgp::message::notification` | CEASE subcodes, subcode 1 for max-prefix |
