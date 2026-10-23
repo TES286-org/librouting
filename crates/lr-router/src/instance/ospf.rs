@@ -239,6 +239,26 @@ pub(super) struct OspfTableEntry {
     /// the populate here is the receive-side input, the policy
     /// action is the operator-side override.
     pub(super) route_tag: Option<u32>,
+    /// The 32-bit OSPF Router-ID of the router that originated the
+    /// LSA this route was computed from (RFC 2328 §A.4 `Advertising
+    /// Router` field / RFC 5340 §A.4 the same field on every v3 LSA).
+    /// For intra-area stub routes this is the Router-LSA's
+    /// advertising router; for intra-area transit routes it is the
+    /// Network-LSA's advertising router (the DR); for inter-area
+    /// routes it is the summary-LSA's advertising router (the ABR —
+    /// the same value as [`OspfKind::Inter::border_router`]); for
+    /// external routes it is the AS-external-LSA's advertising
+    /// router (the ASBR — the same value as
+    /// [`OspfKind::External::asbr`]). The OSPF route computation
+    /// copies this through to a private `LrOspfRouterId`
+    /// path-attribute tag on the resulting RIB route so the policy
+    /// DSL's `ospf.router_id` accessor can surface it (mirrors
+    /// BIRD's `ospf_router_id` eattr). `None` only when the
+    /// originating LSA's advertising router could not be identified
+    /// (a defensive fallback; the LSA header always carries an
+    /// `Advertising Router` field per RFC 2328 §A.4, so all
+    /// constructed entries populate this).
+    pub(super) router_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -312,6 +332,14 @@ impl OspfTableEntry {
             // RIB route, mirroring BIRD's eattr absence on
             // intra-area routes.
             route_tag: None,
+            // `with_router_id` populates the originating LSA's
+            // advertising router after construction (the value
+            // comes from the SpfRoute that drove the intra-area
+            // entry — the Router-LSA / Network-LSA's advertising
+            // router). `None` here is the safe default the
+            // constructors in `ospf_recompute` overwrite via
+            // `with_router_id`.
+            router_id: None,
         }
     }
 
@@ -325,6 +353,7 @@ impl OspfTableEntry {
             label_nh: None,
             next_hop,
             route_tag: None,
+            router_id: None,
         }
     }
 
@@ -343,6 +372,12 @@ impl OspfTableEntry {
             // route, mirroring BIRD's eattr absence on inter-area
             // routes.
             route_tag: None,
+            // `with_router_id` populates the summary-LSA's
+            // advertising router (the ABR — the same value as
+            // `OspfKind::Inter::border_router`). `None` here is
+            // the safe default `ospf_recompute` overwrites via
+            // `with_router_id`.
+            router_id: None,
         }
     }
 
@@ -372,6 +407,13 @@ impl OspfTableEntry {
             // default the constructors the v2 / v3 paths in
             // `ospf_recompute` overwrite via `with_route_tag`.
             route_tag: None,
+            // The AS-external-LSA's advertising router IS the ASBR
+            // — the same value `OspfKind::External::asbr` already
+            // holds. `with_router_id` populates it after
+            // construction (the same shape `with_route_tag` uses);
+            // `None` here is the safe default `ospf_recompute`
+            // overwrites via `with_router_id`.
+            router_id: None,
         }
     }
 
@@ -388,6 +430,25 @@ impl OspfTableEntry {
     /// `None` default.
     pub(super) fn with_route_tag(mut self, route_tag: Option<u32>) -> Self {
         self.route_tag = route_tag;
+        self
+    }
+
+    /// Builder-style setter for the OSPF originating LSA's
+    /// advertising router (RFC 2328 §A.4 `Advertising Router`
+    /// field / RFC 5340 §A.4 the same field on every v3 LSA). The
+    /// OSPF route computation calls this on entries constructed
+    /// via [`Self::intra`], [`Self::intra_v3`], [`Self::inter`] or
+    /// [`Self::external`] to surface the originating LSA's
+    /// advertising router through to a private `LrOspfRouterId`
+    /// path-attribute tag on the resulting RIB route (the value the
+    /// policy DSL's `ospf.router_id` accessor surfaces). `Some(id)`
+    /// whenever the entry's LSA carries an advertising router (the
+    /// LSA header always carries the field per RFC 2328 §A.4 — the
+    /// OSPF route computation populates it for all routes);
+    /// `None` is a defensive fallback for synthetic test entries
+    /// that bypass the LSA path.
+    pub(super) fn with_router_id(mut self, router_id: Option<u32>) -> Self {
+        self.router_id = router_id;
         self
     }
 

@@ -99,9 +99,18 @@ impl DefaultRouter {
             // to replace the connected route — breaking reachability to
             // the gateway itself and cascading ENETUNREACH on every
             // downstream route that points through it.
-            table
-                .entry(r.prefix)
-                .or_insert_with(|| OspfTableEntry::intra(r.metric, r.next_hop));
+            table.entry(r.prefix).or_insert_with(|| {
+                OspfTableEntry::intra(r.metric, r.next_hop)
+                    // RFC 2328 §A.4 `Advertising Router` field
+                    // — the Router-LSA's advertising router for
+                    // stub routes (the router that owns the stub
+                    // network). SpfRoute carries it on the new
+                    // `router_id` field; the policy DSL's
+                    // `ospf.router_id` accessor surfaces it through
+                    // the private `LrOspfRouterId` path attribute
+                    // `ospf_recompute` attaches.
+                    .with_router_id(r.router_id)
+            });
         }
         for r in spf::summary_routes(lsdb, spf_result) {
             // `no_summary` areas must only ever derive the default from
@@ -110,9 +119,15 @@ impl DefaultRouter {
             if kind.no_summary() && r.prefix.prefix_len != 0 {
                 continue;
             }
-            table
-                .entry(r.prefix)
-                .or_insert_with(|| OspfTableEntry::inter(r.metric, r.border_router));
+            table.entry(r.prefix).or_insert_with(|| {
+                OspfTableEntry::inter(r.metric, r.border_router)
+                    // RFC 2328 §A.4.3 — the summary-LSA's
+                    // advertising router IS the ABR that
+                    // originated it, the same value as the
+                    // `border_router` argument above. SpfRoute
+                    // carries it on the `router_id` field.
+                    .with_router_id(r.router_id)
+            });
         }
         match kind {
             OspfAreaType::Normal => {
@@ -139,6 +154,14 @@ impl DefaultRouter {
                         // `ospf.tag` field reads it via the
                         // `lr_policy::ospf::tag` accessor.
                         .with_route_tag(Some(r.route_tag))
+                        // RFC 2328 §A.4 — the AS-external-LSA's
+                        // advertising router IS the ASBR (the same
+                        // value as the `asbr` argument above). The
+                        // OSPF route computation surfaces it through
+                        // the private `LrOspfRouterId` path
+                        // attribute so the policy DSL's
+                        // `ospf.router_id` accessor can read it.
+                        .with_router_id(Some(r.asbr))
                     });
                 }
             }
@@ -167,6 +190,14 @@ impl DefaultRouter {
                         // surfaces it for type-7 externals the same
                         // way it does for type-5 externals above.
                         .with_route_tag(Some(r.route_tag))
+                        // RFC 3101 §3 — the type-7 LSA's advertising
+                        // router IS the ASBR (the same value as the
+                        // `asbr` argument above), mirroring the
+                        // type-5 path. Surfaces it through the private
+                        // `LrOspfRouterId` path attribute so the
+                        // policy DSL's `ospf.router_id` accessor can
+                        // read it.
+                        .with_router_id(Some(r.asbr))
                     });
                 }
             }
@@ -201,9 +232,20 @@ impl DefaultRouter {
                 };
                 let mut table: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
-                    table
-                        .entry(r.prefix)
-                        .or_insert_with(|| OspfTableEntry::intra_v3(r.metric, r.next_hop));
+                    table.entry(r.prefix).or_insert_with(|| {
+                        OspfTableEntry::intra_v3(r.metric, r.next_hop)
+                            // RFC 5340 §A.4 — the v3 Intra-Area-Prefix
+                            // LSA's referenced advertising router. For
+                            // Router references this is the router's own
+                            // Router-ID; for Network references it is
+                            // the DR's Router-ID (the Network-LSA's
+                            // advertising router). SpfRoute carries it
+                            // on the new `router_id` field; the policy
+                            // DSL's `ospf.router_id` accessor surfaces
+                            // it through the private `LrOspfRouterId`
+                            // path attribute `ospf_recompute` attaches.
+                            .with_router_id(r.router_id)
+                    });
                 }
                 if self.ospf_srv6_receive {
                     // RFC 9513 §5: locators of supported algorithms
@@ -245,6 +287,15 @@ impl DefaultRouter {
                         // 0x2003 / RFC 8362 0xA023) carry no LSA tag
                         // — the summary body has no tag field.
                         route_tag: None,
+                        // The inter-area-prefix-LSA's advertising
+                        // router IS the ABR that originated it — the
+                        // same value as the `border_router` field
+                        // above. SpfRoute carries it on the new
+                        // `router_id` field so the policy DSL's
+                        // `ospf.router_id` accessor can surface it
+                        // through the private `LrOspfRouterId` path
+                        // attribute attached in `ospf_recompute`.
+                        router_id: r.router_id,
                     });
                 }
                 // §4.8.5: AS externals from 0x4005 — `external_routes_v3`
@@ -276,6 +327,14 @@ impl DefaultRouter {
                         // policy DSL's `ospf.tag` accessor surfaces
                         // it.
                         route_tag: r.route_tag,
+                        // The AS-external-LSA's advertising router
+                        // IS the ASBR — the same value as the
+                        // `asbr` field above. The OSPF route
+                        // computation surfaces it through the
+                        // private `LrOspfRouterId` path attribute
+                        // so the policy DSL's `ospf.router_id`
+                        // accessor can read it.
+                        router_id: Some(r.asbr),
                     });
                 }
                 for (prefix, entry) in table {
@@ -371,6 +430,33 @@ impl DefaultRouter {
                         tag: lr_core::attr::AttrTag::raw(AttrType::LrOspfMetric2.to_u8()),
                         flags: 0x80, // optional, non-transitive
                         value: (entry.metric as u32).to_be_bytes().to_vec(),
+                    });
+                }
+                // RFC 2328 §A.4 `Advertising Router` field / RFC 5340
+                // §A.4 the same field on every v3 LSA — the OSPF
+                // Router-ID of the router that originated the LSA the
+                // route was computed from (the Router-LSA's
+                // advertising router for intra-area stub routes; the
+                // Network-LSA's advertising router — the DR — for
+                // intra-area transit routes; the summary-LSA's
+                // advertising router — the ABR — for inter-area
+                // routes; the AS-external-LSA's advertising router —
+                // the ASBR — for external routes). Carry the value in
+                // the private `LrOspfRouterId` attribute so the policy
+                // DSL's `ospf.router_id` field can surface it
+                // (mirrors BIRD's `ospf_router_id` eattr). Attached
+                // for every OSPF route where the OSPF route computation
+                // populated `OspfTableEntry::router_id`; absent for
+                // non-OSPF routes and synthetic test entries that
+                // bypass the LSA path. The BGP codec strips the tag at
+                // encode so peers never see it; the value layout is
+                // the 4-byte big-endian u32 the
+                // `lr-policy::ospf::router_id` accessor reads.
+                if let Some(rid) = entry.router_id {
+                    attributes.insert(lr_core::attr::Attribute {
+                        tag: lr_core::attr::AttrTag::raw(AttrType::LrOspfRouterId.to_u8()),
+                        flags: 0x80, // optional, non-transitive
+                        value: rid.to_be_bytes().to_vec(),
                     });
                 }
                 let route = Route {
@@ -764,8 +850,17 @@ impl DefaultRouter {
                 let spf3 = spf_results.get(id).expect("v3 spf result");
                 let mut t: BTreeMap<Prefix, OspfTableEntry> = BTreeMap::new();
                 for r in &spf3.routes {
-                    t.entry(r.prefix)
-                        .or_insert_with(|| OspfTableEntry::intra_v3(r.metric, r.next_hop));
+                    t.entry(r.prefix).or_insert_with(|| {
+                        OspfTableEntry::intra_v3(r.metric, r.next_hop)
+                            // RFC 5340 §A.4 — the v3 Intra-Area-Prefix
+                            // LSA's referenced advertising router; the
+                            // same value the global `ospf_recompute`
+                            // path attaches. Surfaced here so the ABR
+                            // summary origination below sees the same
+                            // `OspfTableEntry::router_id` value the
+                            // merged-table path would.
+                            .with_router_id(r.router_id)
+                    });
                 }
                 for r in if self.ospf_v3_extended_lsas {
                     spf::summary_routes_v3_extended(&area.lsdb, spf3)
@@ -787,6 +882,14 @@ impl DefaultRouter {
                         // 0x2003 / RFC 8362 0xA023) carry no LSA tag —
                         // the summary body has no tag field.
                         route_tag: None,
+                        // The inter-area-prefix-LSA's advertising
+                        // router IS the ABR — the same value as the
+                        // `border_router` field above. SpfRoute carries
+                        // it on the new `router_id` field so the ABR
+                        // summary origination code below can keep
+                        // consulting `OspfTableEntry::router_id` for
+                        // the originating ABR.
+                        router_id: r.router_id,
                     });
                 }
                 (*id, t)
