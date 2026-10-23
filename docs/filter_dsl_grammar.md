@@ -508,6 +508,7 @@ lists fields accepting the append form.
 | `bgp.originator_id`     | `ip`                  |    no    |  no  | RFC 4456 §8; `false` when the route carries none.      |
 | `bgp.cluster_list`      | `set` of `ip`         |    no    |  no  | RFC 4456 §8 reflection path; empty when absent. `~` membership test. |
 | `bgp.otc`               | `int`                 |    no    |  no  | RFC 9234 §3.1; `0` when absent or set to zero. `defined(bgp.otc)` distinguishes the two. |
+| `bgp.aigp`              | `int`                 |    no    |  no  | RFC 7311; accumulated IGP metric (`0` when absent or set to zero, saturating to `i64::MAX` if the u64 wire value exceeds the signed DSL width). `defined(bgp.aigp)` distinguishes the two. |
 | `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
 | `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
 | `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
@@ -556,6 +557,28 @@ legal) reports `true` on `defined` and `0` on read, exactly as BIRD's
 attribute is read-only: the daemon's RFC 9234 role logic (`lr-bgp::role::otc`)
 sets OTC on ingress and gates it on egress, so a filter that mutates it would
 fight the role FSM.
+
+`bgp.aigp` is the RFC 7311 "Accumulated IGP Metric" attribute — the 8-byte
+accumulated metric a single administrative domain carries across contiguous
+BGP ASes so BGP can select paths by IGP distance end-to-end. The attribute's
+value field is a TLV stream whose type-1 TLV carries the metric; the field
+surfaces the accumulated value (the sum of every type-1 TLV, defensive against
+the malformed "multiple type-1 TLVs" case) as an `int` (`0` when absent or set
+to zero). The wire value is `u64`; the DSL's `int` is `i64`, so a value
+exceeding `i64::MAX` saturates — practical IGP metrics are far below
+`i64::MAX`. The canonical metric-comparison idiom spells the same way it does
+in BIRD: `if bgp.aigp < 100 then accept;` (prefer lower-metric paths). The
+`defined(bgp.aigp)` predicate distinguishes "absent" from "set to zero" — a
+present value of `0` (or an empty value field) reports `true` on `defined` and
+`0` on read. The BIRD translator renames `bgp_aigp` to `bgp.aigp`. The
+attribute is read-only: the daemon's best-path decision process (RFC 7311 §4,
+a future follow-up) will own the metric, so a filter that mutates it would
+fight the decision process. Unlike `bgp.local_pref` / `bgp.med` / `bgp.otc`,
+`bgp.aigp` is deliberately not fused by the peephole pass's
+`BranchFieldIntCmp` fast path — its read parses the AIGP TLV stream (not a
+single `get_u32_be`), so fusing would not save the allocation the fast path
+exists to avoid; both comparison forms run the unfused `read_route_field`
+path.
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
 (issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated

@@ -624,6 +624,15 @@ pub enum RouteFieldKind {
     /// `defined(bgp.otc)` predicate distinguishes "absent" from
     /// "set to zero" via `has_otc`.
     BgpOtc,
+    /// `bgp.aigp` — RFC 7311, the Accumulated IGP Metric attribute
+    /// (path attribute type 26, optional non-transitive). The value
+    /// field is a TLV stream whose type-1 TLV carries an 8-byte
+    /// accumulated metric; the field surfaces that metric as an
+    /// `Int` (`0` when absent or set to zero, saturating to
+    /// `i64::MAX` if the u64 wire value exceeds the signed DSL
+    /// width). Read-only; the `defined(bgp.aigp)` predicate
+    /// distinguishes "absent" from "set to zero" via `has_aigp`.
+    BgpAigp,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -710,6 +719,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpOriginatorId => "bgp.originator_id",
             RouteFieldKind::BgpClusterList => "bgp.cluster_list",
             RouteFieldKind::BgpOtc => "bgp.otc",
+            RouteFieldKind::BgpAigp => "bgp.aigp",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

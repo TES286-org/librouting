@@ -1502,3 +1502,42 @@ protocol bgp customer {
     // BIRD and lr.
     assert!(body.contains("defined(bgp.otc)"), "body: {body}");
 }
+
+/// RFC 7311 AIGP metric-comparison idioms: prefer lower-metric paths
+/// and `defined(bgp_aigp)` to distinguish "absent" from "set to zero".
+#[test]
+fn bird_filter_renames_aigp_attribute() {
+    let toml = render(translate_bird(
+        r#"
+router id 10.0.0.1;
+
+filter import_aigp {
+    if defined(bgp_aigp) && bgp_aigp < 100 then accept;
+    if bgp_aigp = 0 then accept;
+    reject;
+}
+
+protocol bgp customer {
+    local as 64512;
+    neighbor 192.0.2.2 as 64513;
+    ipv4 {
+        import filter import_aigp;
+        export all;
+    };
+}
+"#,
+    ));
+    let cfg = roundtrip(&toml);
+    assert_eq!(cfg.filters.len(), 1);
+    let body = cfg.filters[0].body.as_deref().unwrap_or("");
+    // BIRD spelling is gone.
+    assert!(!body.contains("bgp_aigp"), "body: {body}");
+    // lr spelling is present.
+    assert!(body.contains("bgp.aigp"), "body: {body}");
+    // BIRD `=` for equality swapped to lr `==`.
+    assert!(body.contains("bgp.aigp == 0"), "body: {body}");
+    assert!(body.contains("bgp.aigp < 100"), "body: {body}");
+    // `defined()` survives verbatim — it shares spelling between
+    // BIRD and lr.
+    assert!(body.contains("defined(bgp.aigp)"), "body: {body}");
+}

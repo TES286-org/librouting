@@ -746,6 +746,12 @@ impl Parser {
                         // `bgp_otc`; the BIRD translator renames it
                         // to `bgp.otc`.
                         "otc" => RouteFieldKind::BgpOtc,
+                        // RFC 7311 — AIGP ("Accumulated IGP Metric")
+                        // surfaces as an integer (the accumulated
+                        // metric from the attribute's type-1 TLV).
+                        // BIRD spells it `bgp_aigp`; the BIRD
+                        // translator renames it to `bgp.aigp`.
+                        "aigp" => RouteFieldKind::BgpAigp,
                         // Issue #81 — LRXP exchange-plane surface.
                         // `bgp.lrxp` opens a three-segment dotted
                         // path (`bgp.lrxp.<class>.<field>`), plus

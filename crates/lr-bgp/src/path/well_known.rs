@@ -275,6 +275,114 @@ impl ClusterList {
     }
 }
 
+/// AIGP path attribute (RFC 7311).
+///
+/// The Accumulated IGP Metric attribute carries a single
+/// administrative domain's end-to-end IGP distance so BGP can
+/// select paths by metric across contiguous ASes under one
+/// administration. The attribute is optional non-transitive
+/// (flags `0x80`); its value field is a TLV stream (RFC 7311 §3):
+///
+/// - Type 1 — AIGP: an 8-byte big-endian unsigned integer, the
+///   accumulated metric.
+/// - Other types: preserved verbatim by the codec (RFC 7311 §3 p5:
+///   "an AIGP TLV that is not understood MUST be preserved") so the
+///   attribute round-trips byte-for-byte.
+///
+/// The typed view surfaces the *accumulated metric* — the sum of
+/// every type-1 TLV's 8-byte value. RFC 7311 §3.4.3 ("Modifications
+/// by a Non-Originator") specifies a single type-1 TLV whose value
+/// is updated in place; summing is the defensive choice for the
+/// "multiple type-1 TLVs" case a malformed peer might emit and
+/// matches the attribute's "accumulated" semantics.
+///
+/// The codec stores the raw attribute bytes verbatim in
+/// [`crate::path::PathAttribute::value`]; this type is the typed
+/// view the filter DSL's `bgp.aigp` field reads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+pub struct Aigp(pub u64);
+
+/// AIGP TLV type codes (RFC 7311 §3, IANA "BGP AIGP TLV Types"
+/// registry).
+pub const AIGP_TLV_AIGP: u16 = 1;
+
+impl Aigp {
+    /// Construct from an accumulated metric value.
+    pub const fn from_metric(m: u64) -> Self {
+        Self(m)
+    }
+
+    /// The accumulated IGP metric.
+    pub const fn metric(self) -> u64 {
+        self.0
+    }
+
+    /// Decode the AIGP attribute's value field (a TLV stream) and
+    /// return the accumulated metric — the sum of every type-1
+    /// (AIGP) TLV's 8-byte big-endian value. Returns `None` when the
+    /// TLV stream is malformed (a TLV length runs past the end of
+    /// the attribute, or a type-1 TLV's value is not exactly 8
+    /// bytes). Unknown TLV types are skipped, preserving forward
+    /// compatibility (RFC 7311 §3 p5).
+    ///
+    /// An empty value field decodes to `Aigp(0)` — RFC 7311 does not
+    /// forbid an empty AIGP attribute, and a non-originator that
+    /// receives one cannot add to a metric that does not exist, so
+    /// the attribute is treated as "present, metric zero" rather
+    /// than malformed. Callers that need to distinguish "absent"
+    /// from "present but zero" consult [`PathAttributes::has_aigp`].
+    pub fn decode(bytes: &[u8]) -> Option<Self> {
+        let mut acc: u64 = 0;
+        let mut i = 0;
+        while i < bytes.len() {
+            // TLV header: 2-byte type + 2-byte length (RFC 7311 §3).
+            if i + 4 > bytes.len() {
+                return None;
+            }
+            let tlv_type = u16::from_be_bytes([bytes[i], bytes[i + 1]]);
+            let tlv_len = u16::from_be_bytes([bytes[i + 2], bytes[i + 3]]) as usize;
+            // The length field includes the 4-byte header (RFC 7311
+            // §3: "the Length field ... includes the Type and Length
+            // fields").
+            if tlv_len < 4 {
+                return None;
+            }
+            let value_len = tlv_len - 4;
+            let value_start = i + 4;
+            let value_end = value_start + value_len;
+            if value_end > bytes.len() {
+                return None;
+            }
+            if tlv_type == AIGP_TLV_AIGP {
+                // RFC 7311 §3: the type-1 TLV value is an 8-byte
+                // unsigned integer. A type-1 TLV with any other
+                // value width is malformed.
+                if value_len != 8 {
+                    return None;
+                }
+                let mut v = [0u8; 8];
+                v.copy_from_slice(&bytes[value_start..value_end]);
+                acc = acc.wrapping_add(u64::from_be_bytes(v));
+            }
+            // Unknown TLV types are skipped (preserved by the codec).
+            i = value_end;
+        }
+        Some(Self(acc))
+    }
+
+    /// Encode a single type-1 AIGP TLV carrying `self.0` as the
+    /// accumulated metric. Originators emit exactly one type-1 TLV
+    /// (RFC 7311 §3.4.1); non-originators modify the existing
+    /// TLV's value in place (§3.4.3) rather than appending.
+    pub fn encode(self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(12);
+        out.extend_from_slice(&AIGP_TLV_AIGP.to_be_bytes()); // type
+        out.extend_from_slice(&12u16.to_be_bytes()); // length: 4 (header) + 8 (value)
+        out.extend_from_slice(&self.0.to_be_bytes());
+        out
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -402,5 +510,179 @@ mod tests {
                 prop_assert_ne!(bytes.len() % 4, 0);
             }
         }
+
+        #[test]
+        fn aigp_decode_never_panics(
+            bytes in prop::collection::vec(0u8..=255, 0..=256)
+        ) {
+            // The decoder must return Some or None — never panic —
+            // for any byte slice. A None means the TLV stream was
+            // malformed (a length runs past the end, or a type-1 TLV
+            // value is not 8 bytes).
+            let decoded = Aigp::decode(&bytes);
+            if let Some(aigp) = decoded {
+                // The accumulated metric is a u64 — every accepted
+                // input decodes to a finite value.
+                let _ = aigp.metric();
+            }
+        }
+    }
+
+    // ---- RFC 7311: AIGP ----
+
+    #[test]
+    fn aigp_roundtrips_single_type1_tlv() {
+        let a = Aigp::from_metric(0x0123_4567_89ab_cdef);
+        let wire = a.encode();
+        // type(2) + length(2) + value(8) = 12 bytes
+        assert_eq!(wire.len(), 12);
+        assert_eq!(&wire[0..2], &1u16.to_be_bytes()); // type 1
+        assert_eq!(&wire[2..4], &12u16.to_be_bytes()); // length 12
+        let back = Aigp::decode(&wire).expect("single type-1 TLV decodes");
+        assert_eq!(back, a);
+        assert_eq!(back.metric(), 0x0123_4567_89ab_cdef);
+    }
+
+    #[test]
+    fn aigp_roundtrips_zero_metric() {
+        let a = Aigp::from_metric(0);
+        let wire = a.encode();
+        let back = Aigp::decode(&wire).expect("zero metric decodes");
+        assert_eq!(back, a);
+    }
+
+    #[test]
+    fn aigp_empty_value_decodes_as_zero() {
+        // An empty AIGP attribute value field decodes to Aigp(0)
+        // — RFC 7311 does not forbid an empty value, and a
+        // non-originator cannot add to a metric that does not exist.
+        let back = Aigp::decode(&[]).expect("empty value decodes");
+        assert_eq!(back, Aigp::from_metric(0));
+    }
+
+    #[test]
+    fn aigp_unknown_tlv_skipped_metric_preserved() {
+        // RFC 7311 §3 p5: an unknown TLV MUST be preserved. The
+        // typed view skips it; the codec preserves the raw bytes.
+        // Build: [type-1 TLV metric=100] [unknown type-99 TLV].
+        let mut wire = Aigp::from_metric(100).encode();
+        // Append an unknown TLV: type=99, length=6 (header + 2 value bytes).
+        wire.extend_from_slice(&99u16.to_be_bytes());
+        wire.extend_from_slice(&6u16.to_be_bytes());
+        wire.extend_from_slice(&[0xaa, 0xbb]);
+        let back = Aigp::decode(&wire).expect("unknown TLV is skipped, not rejected");
+        assert_eq!(back, Aigp::from_metric(100));
+    }
+
+    #[test]
+    fn aigp_multiple_type1_tlvs_sum() {
+        // RFC 7311 §3.4.3 specifies a single type-1 TLV updated in
+        // place; the defensive choice for "multiple type-1 TLVs" is
+        // to sum them (the attribute's "accumulated" semantics).
+        let mut wire = Aigp::from_metric(100).encode();
+        wire.extend_from_slice(&Aigp::from_metric(23).encode());
+        let back = Aigp::decode(&wire).expect("multiple type-1 TLVs decode");
+        assert_eq!(back, Aigp::from_metric(123));
+    }
+
+    #[test]
+    fn aigp_rejects_truncated_tlv_header() {
+        // 3 bytes — not enough for the 4-byte TLV header.
+        assert!(Aigp::decode(&[0, 1, 2]).is_none());
+    }
+
+    #[test]
+    fn aigp_rejects_length_overrun() {
+        // TLV header claims length 20 but only 4 bytes follow.
+        let mut wire = vec![0, 1, 0, 20];
+        wire.extend_from_slice(&[0; 4]);
+        assert!(Aigp::decode(&wire).is_none());
+    }
+
+    #[test]
+    fn aigp_rejects_length_below_header() {
+        // RFC 7311 §3: the length includes the 4-byte header, so a
+        // length of 3 is malformed.
+        assert!(Aigp::decode(&[0, 1, 0, 3]).is_none());
+    }
+
+    #[test]
+    fn aigp_rejects_wrong_type1_value_width() {
+        // Type-1 TLV with a 7-byte value (must be exactly 8).
+        let mut wire = vec![0, 1, 0, 11]; // type 1, length 11 (4 header + 7 value)
+        wire.extend_from_slice(&[0; 7]);
+        assert!(Aigp::decode(&wire).is_none());
+    }
+
+    /// `PathAttributes::aigp` reads by tag through the typed
+    /// accessor and stays `None` on the absent and malformed cases.
+    /// Mirrors the `path_attributes_otc_accessor_round_trips` test
+    /// in `role::otc` — the codec half of the `bgp.aigp` filter DSL
+    /// field (RFC 7311).
+    #[test]
+    fn path_attributes_aigp_accessor_round_trips() {
+        use crate::path::{AttrType, PathAttrFlags, PathAttribute, PathAttributes};
+
+        let mut attrs = PathAttributes::new();
+        // Absent — None on both `aigp()` and `has_aigp()`.
+        assert!(attrs.aigp().is_none());
+        assert!(!attrs.has_aigp());
+
+        // Present, metric 64512.
+        attrs.insert(PathAttribute::new(
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
+            AttrType::Aigp,
+            Aigp::from_metric(64512).encode(),
+        ));
+        let a = attrs.aigp().expect("present, well-formed");
+        assert_eq!(a, Aigp::from_metric(64512));
+        assert_eq!(a.metric(), 64512);
+        assert!(attrs.has_aigp());
+
+        // Present, metric 0 — "set but zero". `aigp()` returns
+        // `Some(Aigp(0))`; `has_aigp()` reports presence. This is
+        // the case `defined(bgp.aigp)` in the filter DSL must
+        // distinguish from "absent".
+        let mut attrs_zero = PathAttributes::new();
+        attrs_zero.insert(PathAttribute::new(
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
+            AttrType::Aigp,
+            Aigp::from_metric(0).encode(),
+        ));
+        assert_eq!(attrs_zero.aigp(), Some(Aigp::from_metric(0)));
+        assert!(attrs_zero.has_aigp());
+
+        // Empty value field — decodes to `Aigp(0)` (RFC 7311 does
+        // not forbid an empty value). `has_aigp()` reports presence;
+        // `aigp()` reports `Some(Aigp(0))`.
+        let mut attrs_empty = PathAttributes::new();
+        attrs_empty.insert(PathAttribute::new(
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
+            AttrType::Aigp,
+            vec![],
+        ));
+        assert_eq!(attrs_empty.aigp(), Some(Aigp::from_metric(0)));
+        assert!(attrs_empty.has_aigp());
+
+        // Malformed TLV stream — None on `aigp()`, but `has_aigp()`
+        // still reports presence (the attribute is on the route; only
+        // the value is unreadable). Mirrors the `otc()` accessor's
+        // behaviour on a malformed width.
+        let mut attrs_bad = PathAttributes::new();
+        attrs_bad.insert(PathAttribute::new(
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
+            AttrType::Aigp,
+            vec![0, 1, 2], // truncated TLV header
+        ));
+        assert!(attrs_bad.aigp().is_none());
+        assert!(attrs_bad.has_aigp());
     }
 }

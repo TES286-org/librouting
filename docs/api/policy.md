@@ -161,7 +161,8 @@ worked ROA filter. The DSL exposes the RFC 6811 validation outcome as
 `roa.state`, the RFC 1997, RFC 4360 and RFC 8092 community sets, the
 RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
 (`bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list`), the
-RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), and — behind
+RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), the RFC 7311
+AIGP accumulated-metric attribute (`bgp.aigp`), and — behind
 the `exchange-plane` feature — the LRXP exchange-plane records the
 route carries (`bgp.lrxp.*`, issue #81).
 
@@ -185,6 +186,13 @@ route carries (`bgp.lrxp.*`, issue #81).
   exposes as `bgp.otc`; the daemon's role logic (`lr-bgp::role::otc`)
   sets the attribute on ingress and gates it on egress, and the filter
   DSL surfaces the resulting value for leak-detection policies.
+- RFC 7311 — the AIGP ("Accumulated IGP Metric") attribute the filter
+  DSL exposes as `bgp.aigp`; the typed accessor
+  (`lr-bgp::path::PathAttributes::aigp`) decodes the attribute's TLV
+  stream (type-1 TLV = 8-byte accumulated metric, unknown TLVs
+  preserved) and surfaces the accumulated metric for metric-comparison
+  policies (`if bgp.aigp < 100 then accept;`). The daemon's best-path
+  decision process (RFC 7311 §4) is a future follow-up.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 

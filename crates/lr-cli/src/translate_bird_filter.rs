@@ -312,6 +312,12 @@ const RENAMES: &[(&str, &str)] = &[
     // BIRD's filter language spells it `bgp_otc`; lr's DSL matches
     // the integer shape exactly, so the rename is faithful.
     ("bgp_otc", "bgp.otc"),
+    // RFC 7311 — AIGP ("Accumulated IGP Metric") is an 8-byte
+    // accumulated metric surfaced as an integer (0 = absent or set
+    // to zero). BIRD's filter language spells it `bgp_aigp`; lr's
+    // DSL matches the integer shape exactly, so the rename is
+    // faithful.
+    ("bgp_aigp", "bgp.aigp"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),
