@@ -264,7 +264,11 @@ pub fn has_otc(route: &Route) -> bool {
 /// single `get_u32_be` cannot read it; the parse is bounded by the
 /// attribute length and skips unknown TLVs in O(n).
 pub fn aigp(route: &Route) -> Option<u64> {
-    let bytes = route.attributes.get(AttrTag::raw(TAG_AIGP))?.value.as_slice();
+    let bytes = route
+        .attributes
+        .get(AttrTag::raw(TAG_AIGP))?
+        .value
+        .as_slice();
     Aigp::decode(bytes).map(|a| a.metric())
 }
 

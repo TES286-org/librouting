@@ -630,7 +630,9 @@ mod tests {
 
         // Present, metric 64512.
         attrs.insert(PathAttribute::new(
-            PathAttrFlags::new().set_optional(true).set_transitive(false),
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
             AttrType::Aigp,
             Aigp::from_metric(64512).encode(),
         ));
@@ -645,7 +647,9 @@ mod tests {
         // distinguish from "absent".
         let mut attrs_zero = PathAttributes::new();
         attrs_zero.insert(PathAttribute::new(
-            PathAttrFlags::new().set_optional(true).set_transitive(false),
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
             AttrType::Aigp,
             Aigp::from_metric(0).encode(),
         ));
@@ -657,7 +661,9 @@ mod tests {
         // `aigp()` reports `Some(Aigp(0))`.
         let mut attrs_empty = PathAttributes::new();
         attrs_empty.insert(PathAttribute::new(
-            PathAttrFlags::new().set_optional(true).set_transitive(false),
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
             AttrType::Aigp,
             vec![],
         ));
@@ -670,7 +676,9 @@ mod tests {
         // behaviour on a malformed width.
         let mut attrs_bad = PathAttributes::new();
         attrs_bad.insert(PathAttribute::new(
-            PathAttrFlags::new().set_optional(true).set_transitive(false),
+            PathAttrFlags::new()
+                .set_optional(true)
+                .set_transitive(false),
             AttrType::Aigp,
             vec![0, 1, 2], // truncated TLV header
         ));
