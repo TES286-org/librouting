@@ -3250,6 +3250,12 @@ fn ospfv3_inter_area_and_external_routes_published() {
         None,
         "inter-area route carries no LrOspfMetric2 tag"
     );
+    // Inter-area summary routes carry no LSA tag (RFC 5340 §4.8.3
+    // 0x2003 bodies have no tag field). `Route::tag` is `None` and
+    // the policy DSL's `defined(ospf.tag)` predicate is false on
+    // the resulting RIB route — mirrors BIRD's eattr absence on
+    // inter-area routes.
+    assert_eq!(summary_route.tag, None, "inter-area route carries no LSA tag");
     // External: type 2 → the external metric alone, via the ASBR's
     // link-local.
     let external_route = r
@@ -3278,6 +3284,159 @@ fn ospfv3_inter_area_and_external_routes_published() {
         Some(100),
         "LrOspfMetric2 carries the type-2 external metric"
     );
+    // The `V3ExternalDestination::new` default leaves `route_tag`
+    // `None`, so the v3 0x4005 LSA carries no T-bit-set tag field.
+    // `Route::tag` is `None` and `defined(ospf.tag)` is false on
+    // the resulting RIB route — the v3 T bit distinguishes "no
+    // tag" from "tag of zero", so a missing v3 tag stays `None`
+    // (unlike the v2 form which always carries a 4-byte tag field).
+    assert_eq!(external_route.tag, None, "v3 external without T bit carries no tag");
+}
+
+/// RFC 5340 §A.4.7 T bit: a v3 0x4005 LSA carrying a non-zero
+/// external route tag propagates the tag through the OSPF route
+/// computation to the resulting RIB `Route::tag`, so the policy
+/// DSL's `ospf.tag` accessor can surface it. Mirrors the v2
+/// `ospf_external_type5_carries_route_tag` test but on the v3 plane
+/// (the T bit is the presence marker, not the always-present v2
+/// 4-byte tag field).
+#[test]
+fn ospfv3_external_route_tag_published() {
+    let mut r = DefaultRouter::new();
+    let r1 = RouterId::from_u32(0x0a00_0001);
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv3(r1, 0).with_ospf_mtu(1500))
+        .expect("v3 session");
+
+    use lr_ospf::lsa::v3::{
+        originate_v3_as_external_lsa, originate_v3_link_lsa, originate_v3_router_lsa,
+        V3ExternalDestination, LINK_TYPE_POINTTOPOINT, ROUTER_BIT_V6,
+    };
+    let mut ll2 = [0u8; 16];
+    ll2[0] = 0xfe;
+    ll2[1] = 0x80;
+    ll2[15] = 2;
+    let link = lr_ospf::lsa::v3::V3RouterLink {
+        link_type: LINK_TYPE_POINTTOPOINT,
+        metric: 10,
+        interface_id: 3,
+        neighbor_interface_id: 5,
+        neighbor_router_id: 0x0a00_0001,
+    };
+    let router_lsa = originate_v3_router_lsa(r2, ROUTER_BIT_V6, 0x13, &[link], None).unwrap();
+    let link_lsa = originate_v3_link_lsa(r2, 3, 1, 0x13, ll2, vec![], None).unwrap();
+    let own_lsa = originate_v3_router_lsa(
+        0x0a00_0001,
+        ROUTER_BIT_V6,
+        0x13,
+        &[lr_ospf::lsa::v3::V3RouterLink {
+            link_type: LINK_TYPE_POINTTOPOINT,
+            metric: 10,
+            interface_id: 5,
+            neighbor_interface_id: 3,
+            neighbor_router_id: r2,
+        }],
+        None,
+    )
+    .unwrap();
+    // r2's 0x4005 with the T bit set and a non-zero tag.
+    let mut ep = [0u8; 16];
+    ep[..6].copy_from_slice(&[0x20, 0x01, 0x0d, 0xb8, 0x00, 0x0b]);
+    let mut ext_dest = V3ExternalDestination::new(Prefix::new_v6(ep, 48), 100, true);
+    ext_dest.route_tag = Some(0xdead_beef);
+    let external = originate_v3_as_external_lsa(r2, 1, &ext_dest, None).unwrap();
+
+    let bytes = ospf3_lsu_bytes(r2, 0, vec![router_lsa, link_lsa, own_lsa, external]);
+    r.feed_input(h, &bytes).expect("feed v3 LSU");
+    let _ = r.drain_output(h);
+
+    let external_route = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key.prefix == Prefix::new_v6(ep, 48))
+        .expect("external route published");
+    assert_eq!(external_route.protocol, Protocol::Ospfv3);
+    assert_eq!(external_route.tag, Some(0xdead_beef));
+}
+
+/// RFC 2328 §A.4.5 bullet h: a v2 type-5 LSA carrying a non-zero
+/// external route tag propagates the tag through the OSPF route
+/// computation to the resulting RIB `Route::tag`, so the policy
+/// DSL's `ospf.tag` accessor can surface it. The v2 LSA body always
+/// carries a 4-byte tag field (zero is well-formed) so the
+/// resulting `Route::tag` is always `Some(t)` for v2 externals —
+/// `defined(ospf.tag)` is true even when the tag is zero.
+#[test]
+fn ospf_external_type5_carries_route_tag() {
+    let mut r = DefaultRouter::new();
+    let r1: u32 = 0x0a00_0001;
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv2(RouterId::from_u32(r1), 0).with_ospf_mtu(1500))
+        .expect("v2 session");
+
+    use lr_ospf::external::{originate_external_lsa, ExternalDestination, ExternalMetricType};
+    // The daemon's own router-LSA + r2's router-LSA — both must be
+    // in the LSDB so the SPF computation reaches the ASBR (r2).
+    let ours = router_lsa(r1, vec![(r2, 0, P2P, 10)]);
+    let br = router_lsa(r2, vec![(r1, 0, P2P, 10)]);
+    // r2's external for 198.51.100.0/24 with a non-zero tag.
+    let mut dest =
+        ExternalDestination::new(Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24), 5, ExternalMetricType::Type1);
+    dest.route_tag = 0xdead_beef;
+    let ext = originate_external_lsa(r2, &dest, None).unwrap();
+    let bytes = ospf_lsu_bytes(r2, 0, vec![ours, br, ext]);
+    r.feed_input(h, &bytes).expect("feed v2 LSU");
+    let _ = r.drain_output(h);
+
+    let external_route = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key.prefix == Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24))
+        .expect("external route published");
+    assert_eq!(external_route.protocol, Protocol::Ospfv2);
+    assert_eq!(external_route.tag, Some(0xdead_beef));
+}
+
+/// RFC 2328 §A.4.5 bullet h: a v2 type-5 LSA with the default
+/// (`ExternalDestination::new`) zero tag still surfaces
+/// `Route::tag = Some(0)` on the resulting RIB route — the v2 LSA
+/// body always carries a 4-byte tag field (zero is well-formed), so
+/// `defined(ospf.tag)` is true for any v2 external even when the
+/// tag value is zero. This is the distinction the v3 form's T bit
+/// does NOT have (a missing v3 tag stays `None`).
+#[test]
+fn ospf_external_type5_zero_tag_is_present() {
+    let mut r = DefaultRouter::new();
+    let r1: u32 = 0x0a00_0001;
+    let r2 = 0x0a00_0002u32;
+    let h = r
+        .add_session(SessionConfig::ospfv2(RouterId::from_u32(r1), 0).with_ospf_mtu(1500))
+        .expect("v2 session");
+
+    use lr_ospf::external::{originate_external_lsa, ExternalDestination, ExternalMetricType};
+    let ours = router_lsa(r1, vec![(r2, 0, P2P, 10)]);
+    let br = router_lsa(r2, vec![(r1, 0, P2P, 10)]);
+    let dest =
+        ExternalDestination::new(Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24), 5, ExternalMetricType::Type1);
+    let ext = originate_external_lsa(r2, &dest, None).unwrap();
+    let bytes = ospf_lsu_bytes(r2, 0, vec![ours, br, ext]);
+    r.feed_input(h, &bytes).expect("feed v2 LSU");
+    let _ = r.drain_output(h);
+
+    let external_route = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.key.prefix == Prefix::new_v4([0xc6, 0x33, 0x64, 0], 24))
+        .expect("external route published");
+    assert_eq!(external_route.protocol, Protocol::Ospfv2);
+    // `Some(0)` — the v2 LSA body always carries a 4-byte tag
+    // field, and zero is well-formed per RFC 2328 §A.4.5. The
+    // policy DSL's `defined(ospf.tag)` predicate is true on this
+    // route (mirrors BIRD's `ea_ospf_tag` attachment for v2
+    // externals), and `ospf.tag` reads 0.
+    assert_eq!(external_route.tag, Some(0));
 }
 
 /// An F-bit 0x4005 publishes with the global forwarding address as
