@@ -363,10 +363,28 @@ zero" via `defined(bgp.otc)`), `lr-bgp::path::PathAttributes` gains
 `bgp.otc` integer comparisons into `BranchFieldIntCmp` (the same fast
 path `bgp.local_pref` and `bgp.med` use), and the corpus case
 `tests/corpus/bird/bgp-otc-leak-filter.conf` exercises both the
-leak-detection idiom and the `defined()` distinction. What remains is
-the rest of the per-protocol attribute surface — BIRD's route
-attributes that ride the per-route filter context — beyond the RR
-loop-detection and OTC subsets that have landed.
+leak-detection idiom and the `defined()` distinction. The AIGP
+accumulated-metric attribute has landed alongside the OTC set:
+`RouteFieldKind::BgpAigp` (RFC 7311) exposes `bgp.aigp` (Int,
+read-only) through the filter DSL so the canonical metric-comparison
+idiom (`if bgp.aigp < 100 then accept;`) translates faithfully from
+BIRD's `bgp_aigp`; the BIRD translator renames `bgp_aigp` to
+`bgp.aigp`, `lr-policy::bgp` carries the matching `aigp` /
+`has_aigp` helpers (the latter distinguishes "absent" from "set to
+zero" via `defined(bgp.aigp)`), `lr-bgp::path::PathAttributes` gains
+`aigp()` / `has_aigp()` typed accessors backed by an `Aigp` TLV-stream
+codec (type-1 TLV = 8-byte accumulated metric, unknown TLVs preserved
+for byte-exact round-trip), and the corpus case
+`tests/corpus/bird/bgp-aigp-metric-filter.conf` exercises both the
+metric-comparison idiom and the `defined()` distinction. AIGP is
+deliberately not fused by the peephole pass's `BranchFieldIntCmp` fast
+path — its read parses the AIGP TLV stream (not a single
+`get_u32_be`), so fusing would not save the allocation the fast path
+exists to avoid; both comparison forms run the unfused
+`read_route_field` path. What remains is the rest of the per-protocol
+attribute surface — BIRD's route attributes that ride the per-route
+filter context — beyond the RR loop-detection, OTC, and AIGP subsets
+that have landed.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF

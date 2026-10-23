@@ -13,6 +13,97 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [1.7.0] — minor: BGP AIGP attribute in the filter DSL (RFC 7311)
+
+librouting 1.7.0 is a minor release. Per `docs/RELEASE-PLAN.md`
+§1, the public Rust API gains new surface (`RouteFieldKind::BgpAigp`,
+two new `FilterContext` trait methods with default impls, the
+`lr-bgp::path::well_known::Aigp` type and `PathAttributes::aigp` /
+`has_aigp` accessors, the `lr-policy::bgp::{aigp, has_aigp}` helpers,
+and `AttrType::Aigp`); the new `RouteFieldKind` variant is a breaking
+change for downstream `match` exhaustiveness, which the `api-surface`
+CI gate will catch going forward. The C ABI surface is unchanged (no
+new `lr_*` symbols, `ABI_VERSION` stays at 2); the FFI callback table
+`lr_filter_context_t` is untouched — the new `FilterContext` methods
+carry default implementations that delegate to `lr_policy::bgp`, so
+every existing embedder inherits the correct behaviour without
+recompiling.
+
+### Stability
+
+**Minor version bump 1.6.0 → 1.7.0** for the new
+`RouteFieldKind::BgpAigp` variant and the new `AttrType::Aigp`
+discriminant. Per `docs/RELEASE-PLAN.md` §1, adding variants to a
+public enum is a breaking change for downstream `match`
+exhaustiveness; the project's policy (matching the v1.3.0, v1.4.0,
+v1.5.0 and v1.6.0 cuts) is to ship it as a minor bump. The
+`api-surface` CI gate skips when the workspace version is ahead of
+the latest tag, so the gate will become blocking again at the next
+release cut. The C ABI surface is unchanged (no new `lr_*` symbols,
+`ABI_VERSION` stays at 2).
+
+### Added
+
+**BGP AIGP filter DSL surface** (`bgp`, `policy`, `cli`, ROADMAP
+"Per-protocol route attributes and an external conversion corpus").
+The filter DSL now exposes the RFC 7311 "Accumulated IGP Metric"
+attribute so an operator can prefer lower-metric paths within an
+AIGP administrative domain:
+
+- `bgp.aigp` (Int, read-only) — the accumulated IGP metric (the sum
+  of every type-1 TLV's 8-byte value in the attribute's TLV stream).
+  `0` when absent or set to zero; the wire value is `u64` and the
+  DSL's `int` is `i64`, so a value exceeding `i64::MAX` saturates
+  (practical IGP metrics are far below `i64::MAX`). The canonical
+  metric-comparison idiom is `if bgp.aigp < 100 then accept;`.
+- `defined(bgp.aigp)` distinguishes "absent" from "set to zero" — a
+  present value of `0` (or an empty value field) reports `true` on
+  `defined` and `0` on read, exactly as BIRD's `bgp_aigp` does.
+
+`lr-bgp::path::well_known::Aigp(pub u64)` is the typed view; its
+decoder walks the attribute's TLV stream, sums every type-1 TLV's
+8-byte big-endian value (the defensive choice for the malformed
+"multiple type-1 TLVs" case, matching the attribute's "accumulated"
+semantics per RFC 7311 §3.4.3), skips unknown TLV types (RFC 7311
+§3 p5: "an AIGP TLV that is not understood MUST be preserved"), and
+returns `None` on a malformed stream. The codec stores the raw
+attribute bytes verbatim in `PathAttribute::value`, so unknown TLVs
+round-trip byte-for-byte. `AttrType::Aigp = 26` joins the
+`AttrType` enum; the attribute is optional non-transitive (not
+well-known, not mandatory).
+
+`lr-policy::bgp::{aigp, has_aigp}` are the helper pair the filter
+DSL reads through. Reads pay one BTreeMap lookup + one TLV-stream
+parse per route; unlike `bgp.local_pref` / `bgp.med` / `bgp.otc`
+(which use the in-place `get_u32_be` fast path — GitHub #19 P3),
+AIGP's value is a TLV stream so a single `get_u32_be` cannot read
+it. The parse is bounded by the attribute length and skips unknown
+TLVs in O(n).
+
+AIGP is deliberately **not** fused by the peephole pass's
+`BranchFieldIntCmp` fast path — its read parses a TLV stream (not a
+single `get_u32_be`), so fusing would not save the allocation the
+fast path exists to avoid (the same reasoning that keeps the LRXP
+int-typed fields out of `is_int_field`). Both the constant-RHS and
+constant-LHS comparison forms run the unfused `read_route_field`
+path; the fused and unfused paths agree for every route.
+
+The BIRD translator renames `bgp_aigp` to `bgp.aigp`. The corpus
+case `tests/corpus/bird/bgp-aigp-metric-filter.conf` exercises both
+arms of the canonical metric-comparison idiom (`defined(bgp_aigp) &&
+bgp_aigp < 100 then accept` and `bgp_aigp = 0 then accept`) so the
+converter round-trips the filter body through `bgp.aigp` and the
+daemon loader accepts the generated TOML.
+
+### Compatibility
+
+- BIRD `bgp_aigp` filters translate to `bgp.aigp` with no semantic
+  shim (both are integers, `0` = absent or set to zero).
+- `defined(bgp_aigp)` survives verbatim — `defined()` shares spelling
+  between BIRD and lr.
+- FFI embedders see no ABI change: the `FilterContext` trait methods
+  `bgp_aigp` / `bgp_has_aigp` carry default implementations.
+
 ## [1.6.0] — minor: LRXP exchange-plane records in the filter DSL (issue #81)
 
 librouting 1.6.0 is a minor release. Per `docs/RELEASE-PLAN.md`
