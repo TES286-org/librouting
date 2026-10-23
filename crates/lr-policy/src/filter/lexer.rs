@@ -95,6 +95,7 @@ pub enum TokenKind {
     Source,
     Bgp,
     Roa,
+    Ospf,
 
     Eof,
 }
@@ -289,6 +290,7 @@ impl<'a> Lexer<'a> {
             "source" => TokenKind::Source,
             "bgp" => TokenKind::Bgp,
             "roa" => TokenKind::Roa,
+            "ospf" => TokenKind::Ospf,
             "_" => TokenKind::Underscore,
             other => TokenKind::Ident(other.to_string()),
         };
@@ -639,7 +641,7 @@ mod tests {
     #[test]
     fn keywords() {
         assert_eq!(
-            kinds("if then else let var accept reject with case default true false net proto source bgp roa"),
+            kinds("if then else let var accept reject with case default true false net proto source bgp roa ospf"),
             vec![
                 TokenKind::If,
                 TokenKind::Then,
@@ -658,6 +660,7 @@ mod tests {
                 TokenKind::Source,
                 TokenKind::Bgp,
                 TokenKind::Roa,
+                TokenKind::Ospf,
                 TokenKind::Eof,
             ]
         );

@@ -667,6 +667,19 @@ pub enum RouteFieldKind {
     /// distinguishes "absent" from "present but malformed" via
     /// `has_pmsi_tunnel`.
     BgpPmsiTunnel,
+    /// `ospf.metric1` — RFC 2328 §16 / RFC 5340 §4.1, the primary
+    /// OSPF metric (the SPF cost for intra-area and inter-area
+    /// routes; the cost-plus-external-metric for type-1 external
+    /// routes; the cost alone for type-2 external routes — the
+    /// field the OSPF decision process ranks against). Read-only;
+    /// surfaces as an `Int` (`0` when the route is not OSPF, so a
+    /// BIRD-style `if ospf_metric1 > 100 then reject;` no-ops on
+    /// non-OSPF routes the same way it does in BIRD). The
+    /// `defined(ospf.metric1)` predicate distinguishes "non-OSPF
+    /// route" from "OSPF route with metric 0" via `has_metric1`.
+    /// BIRD spells it `ospf_metric1`; the BIRD translator renames
+    /// it to `ospf.metric1`.
+    OspfMetric1,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -757,6 +770,7 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpAggregatorAsn => "bgp.aggregator.asn",
             RouteFieldKind::BgpAggregatorSpeaker => "bgp.aggregator.speaker",
             RouteFieldKind::BgpPmsiTunnel => "bgp.pmsi_tunnel",
+            RouteFieldKind::OspfMetric1 => "ospf.metric1",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

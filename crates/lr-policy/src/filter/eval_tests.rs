@@ -2538,6 +2538,226 @@ fn bgp_pmsi_tunnel_is_not_assignable() {
     );
 }
 
+// ---- RFC 2328 §16 / RFC 5340 §4.1: ospf.metric1 ----
+
+/// Build an OSPFv2 route carrying the given primary metric in the
+/// `preference.metric` slot the OSPF SPF computation populates
+/// (RFC 2328 §16). The protocol kind is `Ospfv2`; the `metric1`
+/// accessor reads this slot for OSPF routes and `None` for
+/// everything else (mirrors BIRD's eattr semantics).
+fn ospf_route_with_metric(metric: u32) -> Route {
+    let prefix: Prefix = "203.0.113.0/24".parse().unwrap();
+    Route {
+        key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+        origin: RouteOrigin { proto: 3, peer: 0 },
+        protocol: Protocol::Ospfv2,
+        preference: Preference::new(Protocol::Ospfv2.default_admin_distance(), metric),
+        next_hop: None,
+        attributes: Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+/// Build an OSPFv3 route carrying the given primary metric. Mirrors
+/// [`ospf_route_with_metric`] for the v3 protocol kind so the
+/// `has_metric1`/`metric1` accessors cover both OSPF versions.
+fn ospfv3_route_with_metric(metric: u32) -> Route {
+    let prefix: Prefix = "2001:db8::/32".parse().unwrap();
+    Route {
+        key: RouteKey::new(prefix, NlriFamily::IPV6_UNICAST),
+        origin: RouteOrigin { proto: 3, peer: 0 },
+        protocol: Protocol::Ospfv3,
+        preference: Preference::new(Protocol::Ospfv3.default_admin_distance(), metric),
+        next_hop: None,
+        attributes: Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+#[test]
+fn ospf_metric1_reads_as_int_when_present_v2() {
+    let mut r = ospf_route_with_metric(150);
+    assert_eq!(
+        run("if ospf.metric1 == 150 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric1_reads_as_int_when_present_v3() {
+    let mut r = ospfv3_route_with_metric(220);
+    assert_eq!(
+        run("if ospf.metric1 == 220 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric1_reads_as_zero_for_non_ospf_routes() {
+    // A BGP route carries a metric in the same `preference.metric`
+    // slot the OSPF SPF computation populates (the LOCAL_PREF the BGP
+    // decision process ranks against is in `attributes`, but
+    // `preference.metric` is the cross-protocol metric). The
+    // `ospf.metric1` accessor reads `None` for a non-OSPF route, so
+    // the DSL read falls back to `0` — the unwrap_or(0) semantics on
+    // the int-typed field read. Mirrors BIRD's eattr default for an
+    // unattached `ospf_metric1` reference.
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    // The BGP route has `preference.metric = 100` (set by
+    // `route_with`); `ospf.metric1` must NOT read that 100.
+    assert_eq!(
+        run("if ospf.metric1 == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.metric1 == 100 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric1_mismatch_rejects() {
+    let mut r = ospf_route_with_metric(200);
+    assert_eq!(
+        run("if ospf.metric1 == 150 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric1_is_defined_iff_ospf_route() {
+    // OSPFv2 route: defined.
+    let mut r_v2 = ospf_route_with_metric(0);
+    assert_eq!(
+        run("if defined(ospf.metric1) then accept; reject;", &mut r_v2),
+        EvalResult::Accept,
+    );
+    // OSPFv3 route: defined.
+    let mut r_v3 = ospfv3_route_with_metric(0);
+    assert_eq!(
+        run("if defined(ospf.metric1) then accept; reject;", &mut r_v3),
+        EvalResult::Accept,
+    );
+    // Non-OSPF route: not defined.
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if defined(ospf.metric1) then accept; reject;", &mut r_bgp),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric1_defined_distinguishes_non_ospf_from_metric_zero() {
+    // RFC 2328 §16: an OSPF route with cost 0 (a loopback or other
+    // directly-attached network OSPF originates with cost 0) is
+    // distinct from "non-OSPF route" — `defined(ospf.metric1)`
+    // reports true for the former and false for the latter. This
+    // is the case the `has_metric1` accessor exists to make precise.
+    let mut r_zero = ospf_route_with_metric(0);
+    assert_eq!(
+        run("if defined(ospf.metric1) then accept; reject;", &mut r_zero),
+        EvalResult::Accept,
+    );
+    let mut r_absent = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric1) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn ospf_metric1_canonical_bird_idiom_translates() {
+    // The canonical BIRD filter idiom for OSPF metric policy is
+    // `if defined(ospf_metric1) && ospf_metric1 > 100 then reject;`
+    // ("a high-cost OSPF route a redistribution pipe picks up
+    // should not be re-advertised"). The translator renames
+    // `ospf_metric1` to `ospf.metric1` and the body round-trips
+    // through the daemon loader.
+    let mut r_high = ospf_route_with_metric(200);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric1) && ospf.metric1 > 100 then reject; accept;",
+            &mut r_high
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_low = ospf_route_with_metric(50);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric1) && ospf.metric1 > 100 then reject; accept;",
+            &mut r_low
+        ),
+        EvalResult::Accept,
+    );
+    // A non-OSPF route: `defined(ospf.metric1)` is false, so the
+    // `&&` short-circuits and the route is accepted.
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(ospf.metric1) && ospf.metric1 > 100 then reject; accept;",
+            &mut r_bgp
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric1_is_not_assignable() {
+    let err = compile("test", "ospf.metric1 = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn ospf_metric1_peephole_fused_branch_agrees_with_unfused() {
+    // The peephole pass fuses `LoadField(OspfMetric1); Push(Int(c));
+    // Bin(op); JumpIf*` into a single `BranchFieldIntCmp` for int
+    // fields. `ospf.metric1` was added to `is_int_field` so the
+    // fused path fires; pin the agreement between the fused and
+    // unfused paths by checking the same comparison both ways.
+    let mut r = ospf_route_with_metric(150);
+    // Fused: constant on the RHS, comparison op in the fuse set.
+    assert_eq!(
+        run("if ospf.metric1 == 150 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if ospf.metric1 != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    // Unfused: constant on the LHS (the peephole does not fuse
+    // `Bin(Int(c), op, LoadField)`), exercises the read_route_field
+    // path directly.
+    assert_eq!(
+        run("if 150 == ospf.metric1 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn ospf_metric1_unknown_field_is_parse_error() {
+    // A typo in the OSPF field name surfaces a parse error at
+    // compile time, not a runtime "unknown field". The parse error
+    // uses the `UnknownOspfField` variant so the diagnostic names
+    // the OSPF surface (mirrors `UnknownBgpField`).
+    let err = compile("test", "if defined(ospf.metric2) then accept; reject;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("ospf") && msg.contains("metric2"),
+        "expected an UnknownOspfField diagnostic, got: {msg}"
+    );
+}
+
 // ---- Issue #81: bgp.lrxp.* (LRXP exchange-plane filter DSL surface) ----
 //
 // The LRXP surface is feature-gated behind `exchange-plane`. The

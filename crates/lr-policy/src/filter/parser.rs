@@ -45,6 +45,7 @@ pub enum ParseErrorKind {
     UnknownRouteField(String),
     ReadOnlyField(String),
     UnknownBgpField(String),
+    UnknownOspfField(String),
     InvalidPrefixRange(String),
     InvalidCommunity(String),
     EmptyFilterBody,
@@ -107,6 +108,7 @@ impl fmt::Display for ParseErrorKind {
                 write!(f, "field '{s}' is read-only (cannot assign)")
             }
             ParseErrorKind::UnknownBgpField(s) => write!(f, "unknown bgp field '{s}'"),
+            ParseErrorKind::UnknownOspfField(s) => write!(f, "unknown ospf field '{s}'"),
             ParseErrorKind::InvalidPrefixRange(s) => write!(f, "invalid prefix range '{s}'"),
             ParseErrorKind::InvalidCommunity(s) => write!(f, "invalid community '{s}'"),
             ParseErrorKind::EmptyFilterBody => write!(f, "filter body is empty"),
@@ -831,6 +833,47 @@ impl Parser {
                     }
                 }
             }
+            TokenKind::Ospf => {
+                self.advance();
+                self.expect(TokenKind::Dot, "`.`")?;
+                let field_tok = self.peek().cloned();
+                let Some(field_tok) = field_tok else {
+                    return Err(self.err(tok.span, ParseErrorKind::UnexpectedEof));
+                };
+                let kind = match field_tok.kind {
+                    TokenKind::Ident(s) => match s.as_str() {
+                        // RFC 2328 §16 / RFC 5340 §4.1 — the primary
+                        // OSPF metric (the SPF cost for intra-area and
+                        // inter-area routes; cost + external metric for
+                        // type-1 external routes; cost alone for
+                        // type-2 external routes). BIRD spells it
+                        // `ospf_metric1`; the BIRD translator renames
+                        // it to `ospf.metric1`. Read-only; surfaces as
+                        // an `Int` (`0` when the route is not OSPF, so
+                        // the canonical idiom `if ospf.metric1 > 100
+                        // then reject;` no-ops on non-OSPF routes the
+                        // same way it does in BIRD).
+                        "metric1" => RouteFieldKind::OspfMetric1,
+                        other => {
+                            return Err(self.err(
+                                field_tok.span,
+                                ParseErrorKind::UnknownOspfField(other.to_string()),
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(self.err(
+                            field_tok.span,
+                            ParseErrorKind::UnexpectedToken {
+                                expected: "ospf field name",
+                                found: other.clone(),
+                            },
+                        ));
+                    }
+                };
+                self.advance();
+                RouteField::new(kind)
+            }
             _ => return Ok(None),
         };
         Ok(Some(field))
@@ -1250,7 +1293,8 @@ impl Parser {
             | TokenKind::Proto
             | TokenKind::Source
             | TokenKind::Bgp
-            | TokenKind::Roa => {
+            | TokenKind::Roa
+            | TokenKind::Ospf => {
                 let field = self.try_parse_route_field()?.ok_or_else(|| {
                     self.err(
                         tok.span,

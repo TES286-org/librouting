@@ -13,23 +13,29 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: BGP PMSI Tunnel attribute in the filter DSL (RFC 6514 §5)
+## [Unreleased] — minor: BGP PMSI Tunnel + OSPF metric1 filter DSL surface
 
-librouting's next minor release will expose the RFC 6514 §5 PMSI Tunnel
-attribute in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` —
-`true` when the attribute is present, `false` when absent). Per
+The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
+in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
+when the attribute is present, `false` when absent) and the RFC 2328
+§16 / RFC 5340 §4.1 primary OSPF metric as `ospf.metric1` (read-only
+`int` — `0` when the route is not OSPF, mirroring BIRD's eattr
+default for an unattached `ospf_metric1` reference). Per
 `docs/RELEASE-PLAN.md` §1, the public Rust API gains new surface
-(`RouteFieldKind::BgpPmsiTunnel`, two new `FilterContext` trait methods
-with default impls, the `lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}`
-helpers, the `lr-bgp::path::well_known::PmsiTunnel` typed view and the
+(`RouteFieldKind::BgpPmsiTunnel`, `RouteFieldKind::OspfMetric1`,
+four new `FilterContext` trait methods with default impls, the
+`lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}` helpers and the
+new `lr-policy::ospf::{metric1, has_metric1}` helpers, the
+`lr-bgp::path::well_known::PmsiTunnel` typed view and the
 `lr-bgp::path::PathAttributes::pmsi_tunnel` / `has_pmsi_tunnel`
-accessors); the new `RouteFieldKind` variant is a breaking change for
-downstream `match` exhaustiveness, which the `api-surface` CI gate will
-catch when the version cuts. The C ABI surface is unchanged (no new
-`lr_*` symbols, `ABI_VERSION` stays at 2); the FFI callback table
-`lr_filter_context_t` is untouched — the new `FilterContext` methods
-carry default implementations that delegate to `lr_policy::bgp`, so
-every existing embedder inherits the correct behaviour without
+accessors); the new `RouteFieldKind` variants are a breaking change
+for downstream `match` exhaustiveness, which the `api-surface` CI
+gate will catch when the version cuts. The C ABI surface is
+unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at 2); the
+FFI callback table `lr_filter_context_t` is untouched — the new
+`FilterContext` methods carry default implementations that
+delegate to `lr_policy::bgp` and `lr_policy::ospf`, so every
+existing embedder inherits the correct behaviour without
 recompiling.
 
 ### Added
@@ -56,6 +62,40 @@ endpoint). The `defined(bgp.pmsi_tunnel)` predicate distinguishes
 closes the last gap in BIRD's filter-attribute surface — every
 `bgp_*` filter attribute the BIRD 2 grammar declares now has a
 faithful lr-DSL spelling.
+
+**OSPF metric1 filter DSL surface** (`policy`, `cli`, ROADMAP
+"Per-protocol route attributes and an external conversion corpus").
+The filter DSL now exposes the RFC 2328 §16 / RFC 5340 §4.1 primary
+OSPF metric — the SPF cost for intra-area and inter-area routes,
+the cost-plus-external-metric for type-1 external routes, and the
+cost alone for type-2 external routes. BIRD exposes the value in
+its filter language as `ospf_metric1` (an `int` eattr the OSPF
+protocol attaches); lr's DSL spells it `ospf.metric1` (read-only
+`int`). The mapping is one `match` on `route.protocol` plus one
+field read off `route.preference.metric` — no BTreeMap lookup, no
+allocation, no codec — cheaper than any `bgp.*` accessor that
+decodes a path attribute. A non-OSPF route reads as `0` (the eattr
+default for an unattached `ospf_metric1` reference), so the canonical
+BIRD idiom `if defined(ospf_metric1) && ospf_metric1 > 100 then
+reject;` translates faithfully to `if defined(ospf.metric1) &&
+ospf.metric1 > 100 then reject;` and short-circuits on the
+`defined()` arm for a non-OSPF route the same way it does in BIRD.
+The `defined(ospf.metric1)` predicate distinguishes "non-OSPF
+route" from "OSPF route with metric 0" via `has_metric1` — a
+cost-0 OSPF route stays defined (a loopback or other
+directly-attached network OSPF originates with cost 0), so the
+canonical idiom does not drop it. The BIRD translator renames
+`ospf_metric1` to `ospf.metric1`; the remaining OSPF per-route
+attributes BIRD exposes (`ospf_metric2`, `ospf_tag`,
+`ospf_router_id`) have no lr-DSL spelling yet and the translator
+marks a filter that references them unfaithful (the `ospf_` prefix
+is no longer in `UNMAPPABLE_PREFIXES`; the three remaining OSPF
+attributes are listed in `UNMAPPABLE_WORDS` instead). The peephole
+pass's `BranchFieldIntCmp` fast path fuses `ospf.metric1 == N` /
+`> N` / etc. comparisons the same way it fuses `bgp.local_pref` /
+`bgp.med` / `bgp.otc` — the read is one `match` plus one field
+read (no allocation), so the fast path avoids the `Value::Int`
+allocation + push the unfused sequence pays.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 

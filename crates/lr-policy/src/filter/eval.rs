@@ -279,6 +279,25 @@ pub trait FilterContext {
     fn bgp_has_pmsi_tunnel(&self, route: &Route) -> bool {
         crate::bgp::has_pmsi_tunnel(route)
     }
+    /// The route's primary OSPF metric (`ospf.metric1`, RFC 2328 §16 /
+    /// RFC 5340 §4.1) — the SPF cost for intra-area and inter-area
+    /// routes, the cost-plus-external-metric for type-1 external
+    /// routes, and the cost alone for type-2 external routes.
+    /// `None` when the route is not OSPF (so the canonical BIRD idiom
+    /// `if ospf_metric1 > 100 then reject;` no-ops on non-OSPF
+    /// routes). `Some(0)` for an OSPF route with cost 0. The
+    /// default delegates to [`crate::ospf::metric1`].
+    fn ospf_metric1(&self, route: &Route) -> Option<u32> {
+        crate::ospf::metric1(route)
+    }
+    /// True when the route is an OSPFv2 / OSPFv3 route and therefore
+    /// carries a primary OSPF metric (RFC 2328 §16 / RFC 5340 §4.1).
+    /// Used by `defined(ospf.metric1)` to distinguish "non-OSPF
+    /// route" from "OSPF route with metric 0" (the latter is
+    /// defined). The default delegates to [`crate::ospf::has_metric1`].
+    fn ospf_has_metric1(&self, route: &Route) -> bool {
+        crate::ospf::has_metric1(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -813,6 +832,14 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // BIRD's `defined(bgp_pmsi_tunnel)` on a partial-bit
             // UPDATE from a non-MVPN peer).
             RouteFieldKind::BgpPmsiTunnel => self.ctx.bgp_has_pmsi_tunnel(route),
+            // RFC 2328 §16 / RFC 5340 §4.1: `ospf.metric1` presence
+            // is `has_metric1` (the route is an OSPFv2 / OSPFv3
+            // route), not `metric1().is_some()` — the two agree on
+            // the OSPF case (both true), but `has_metric1` keeps an
+            // OSPF route with cost 0 defined so the canonical idiom
+            // `if defined(ospf.metric1) then accept;` does not drop
+            // a cost-0 OSPF route.
+            RouteFieldKind::OspfMetric1 => self.ctx.ospf_has_metric1(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -965,6 +992,20 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // not `pmsi_tunnel()` (which collapses "absent" and
             // "malformed" together).
             RouteFieldKind::BgpPmsiTunnel => Ok(Value::Bool(self.ctx.bgp_has_pmsi_tunnel(route))),
+            // RFC 2328 §16 / RFC 5340 §4.1: `ospf.metric1` is the
+            // primary OSPF metric, surfaced as an `Int` (`0` when
+            // the route is not OSPF, mirroring BIRD's eattr default
+            // for an unattached `ospf_metric1` reference). Callers
+            // that need to distinguish "non-OSPF route" from "OSPF
+            // route with metric 0" gate with `defined(ospf.metric1)`
+            // — the predicate consults `has_metric1` (the protocol
+            // is OSPF), not `metric1().is_some()` (which collapses
+            // the two cases via the `0` read). Cheaper than any
+            // `bgp_*` accessor: one `match` on `route.protocol` plus
+            // one field read, no BTreeMap lookup, no allocation.
+            RouteFieldKind::OspfMetric1 => {
+                Ok(Value::Int(self.ctx.ospf_metric1(route).unwrap_or(0) as i64))
+            }
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
@@ -1032,12 +1073,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
     /// `Instr::BranchFieldIntCmp` (GitHub #19 P6) to avoid the
     /// 32-byte `Value` allocation + `Vec::push` the unfused
     /// `LoadField; Push; Bin; JumpIf*` sequence pays. Only the
-    /// five integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
-    /// `BgpOrigin`, `BgpOtc`) reach this path — the peephole pass's
-    /// `is_int_field` gate guarantees it. The LRXP int-typed fields
-    /// (`bgp.lrxp.hint.rank`, etc.) are deliberately NOT in
-    /// `is_int_field`: their read decodes a TLV stream (not a single
-    /// `get_u32_be`), so fusing would not save the allocation the
+    /// six integer kinds (`Source`, `BgpLocalPref`, `BgpMed`,
+    /// `BgpOrigin`, `BgpOtc`, `OspfMetric1`) reach this path — the
+    /// peephole pass's `is_int_field` gate guarantees it. The LRXP
+    /// int-typed fields (`bgp.lrxp.hint.rank`, etc.) are deliberately
+    /// NOT in `is_int_field`: their read decodes a TLV stream (not a
+    /// single `get_u32_be`), so fusing would not save the allocation the
     /// fast path exists to avoid. `bgp.aigp` (RFC 7311) is also
     /// deliberately NOT fused for the same reason — its read parses
     /// the AIGP attribute's TLV stream. The `unwrap_or(0)` semantics
@@ -1050,8 +1091,16 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::BgpMed => self.ctx.bgp_med(route).unwrap_or(0) as i64,
             RouteFieldKind::BgpOrigin => i64::from(self.ctx.bgp_origin(route).unwrap_or(0)),
             RouteFieldKind::BgpOtc => self.ctx.bgp_otc(route).unwrap_or(0) as i64,
+            // `ospf.metric1` reads `route.preference.metric` for OSPF
+            // routes and 0 for non-OSPF routes — a single `match` on
+            // `route.protocol` plus one field read, no BTreeMap lookup,
+            // no allocation. The fast path pays the same `match` the
+            // unfused `read_route_field` path pays, but skips the
+            // `Value::Int` construction + `Vec::push` on the
+            // comparison-branch hot path.
+            RouteFieldKind::OspfMetric1 => self.ctx.ospf_metric1(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
-            // one of the five arms above; the LRXP int-typed fields
+            // one of the arms above; the LRXP int-typed fields
             // and `bgp.aigp` fall through to the unreachable arm
             // (the gate refuses to fuse them) and run the unfused
             // `read_route_field` path instead.

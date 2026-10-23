@@ -24,6 +24,7 @@ pub mod filter;
 pub mod hooks;
 #[cfg(feature = "exchange-plane")]
 pub mod lrxp;
+pub mod ospf;
 pub mod policy;
 pub mod prefix_list;
 pub mod route_map;

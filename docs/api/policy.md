@@ -164,7 +164,8 @@ RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
 RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), the RFC 7311
 AIGP accumulated-metric attribute (`bgp.aigp`), the RFC 4271 §5.1.7
 AGGREGATOR attribute (`bgp.aggregator.asn`, `bgp.aggregator.speaker`),
-the RFC 6514 §5 PMSI Tunnel attribute (`bgp.pmsi_tunnel`), and —
+the RFC 6514 §5 PMSI Tunnel attribute (`bgp.pmsi_tunnel`), the RFC 2328
+§16 / RFC 5340 §4.1 primary OSPF metric (`ospf.metric1`), and —
 behind the `exchange-plane` feature — the LRXP exchange-plane records
 the route carries (`bgp.lrxp.*`, issue #81).
 
@@ -213,6 +214,19 @@ the route carries (`bgp.lrxp.*`, issue #81).
   when absent — mirroring BIRD's `EAF_TYPE_OPAQUE` +
   `T_ENUM_EMPTY` exposure so the canonical presence-probe idiom
   `if defined(bgp.pmsi_tunnel) then reject;` translates faithfully.
+- RFC 2328 §16 / RFC 5340 §4.1 — the primary OSPF metric the filter
+  DSL exposes as `ospf.metric1`; the typed accessor
+  (`lr-policy::ospf::metric1`) reads `route.preference.metric` for
+  OSPFv2 / OSPFv3 routes and returns `None` for non-OSPF routes
+  (mirroring BIRD's eattr default for an unattached `ospf_metric1`
+  reference, so the canonical idiom `if defined(ospf.metric1) &&
+  ospf.metric1 > 100 then reject;` short-circuits on the `defined()`
+  arm for a non-OSPF route). The attribute surfaces as a read-only
+  `int` — `0` when the route is not OSPF — and the read pays one
+  `match` on `route.protocol` plus one field read, cheaper than any
+  `bgp.*` accessor that decodes a path attribute. The remaining OSPF
+  per-route attributes BIRD exposes (`ospf_metric2`, `ospf_tag`,
+  `ospf_router_id`) have no lr-DSL spelling yet.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 

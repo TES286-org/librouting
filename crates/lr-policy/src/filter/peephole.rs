@@ -494,6 +494,7 @@ fn is_int_field(kind: RouteFieldKind) -> bool {
             | RouteFieldKind::BgpOrigin
             | RouteFieldKind::Source
             | RouteFieldKind::BgpOtc
+            | RouteFieldKind::OspfMetric1
     )
 }
 
