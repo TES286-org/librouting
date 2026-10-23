@@ -633,6 +633,26 @@ pub enum RouteFieldKind {
     /// width). Read-only; the `defined(bgp.aigp)` predicate
     /// distinguishes "absent" from "set to zero" via `has_aigp`.
     BgpAigp,
+    /// `bgp.aggregator.asn` — RFC 4271 §5.1.7, the AS number of the
+    /// BGP speaker that performed route aggregation. The attribute
+    /// is optional transitive; the stored form is the canonical
+    /// 4-byte-AS encoding (ingress reconciles AS4_AGGREGATOR, type
+    /// 18, into the type-7 tag). Surfaces as an `Int` (`0` when
+    /// absent or set to zero). Read-only; the
+    /// `defined(bgp.aggregator.asn)` predicate distinguishes "absent"
+    /// from "set to zero" via `has_aggregator`. Both `asn` and
+    /// `speaker` are present together or absent together, so the
+    /// presence probe is faithful on either field.
+    BgpAggregatorAsn,
+    /// `bgp.aggregator.speaker` — RFC 4271 §5.1.7, the IPv4 address
+    /// of the BGP speaker that performed route aggregation. Surfaces
+    /// as an `IpAddr::V4` (`Bool(false)` sentinel when absent,
+    /// mirroring `bgp.next_hop` / `bgp.originator_id` so a direct
+    /// `==` comparison does not crash). Read-only; callers that need
+    /// the presence distinction gate with `defined(bgp.aggregator.asn)`
+    /// (the `speaker` field's own `defined()` reports the same
+    /// presence, but `asn` is the canonical probe).
+    BgpAggregatorSpeaker,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -720,6 +740,8 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::BgpClusterList => "bgp.cluster_list",
             RouteFieldKind::BgpOtc => "bgp.otc",
             RouteFieldKind::BgpAigp => "bgp.aigp",
+            RouteFieldKind::BgpAggregatorAsn => "bgp.aggregator.asn",
+            RouteFieldKind::BgpAggregatorSpeaker => "bgp.aggregator.speaker",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

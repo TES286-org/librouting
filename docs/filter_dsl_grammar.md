@@ -509,6 +509,8 @@ lists fields accepting the append form.
 | `bgp.cluster_list`      | `set` of `ip`         |    no    |  no  | RFC 4456 §8 reflection path; empty when absent. `~` membership test. |
 | `bgp.otc`               | `int`                 |    no    |  no  | RFC 9234 §3.1; `0` when absent or set to zero. `defined(bgp.otc)` distinguishes the two. |
 | `bgp.aigp`              | `int`                 |    no    |  no  | RFC 7311; accumulated IGP metric (`0` when absent or set to zero, saturating to `i64::MAX` if the u64 wire value exceeds the signed DSL width). `defined(bgp.aigp)` distinguishes the two. |
+| `bgp.aggregator.asn`    | `int`                 |    no    |  no  | RFC 4271 §5.1.7; aggregator AS (`0` when absent or set to zero). `defined(bgp.aggregator.asn)` distinguishes the two. |
+| `bgp.aggregator.speaker`| `ip`                  |    no    |  no  | RFC 4271 §5.1.7; aggregator speaker IP (`false` when absent). |
 | `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
 | `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
 | `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
@@ -579,6 +581,31 @@ fight the decision process. Unlike `bgp.local_pref` / `bgp.med` / `bgp.otc`,
 single `get_u32_be`), so fusing would not save the allocation the fast path
 exists to avoid; both comparison forms run the unfused `read_route_field`
 path.
+
+`bgp.aggregator.asn` and `bgp.aggregator.speaker` are the RFC 4271 §5.1.7
+AGGREGATOR attribute — the `(AS, IP)` pair a BGP speaker stamps onto a route
+when it summarises a less-specific across several more-specifics. BIRD spells
+the attribute `bgp_aggregator` (a structured `egroup` value); lr's DSL
+decomposes the pair into two fields so a policy can match either component
+independently. `bgp.aggregator.asn` reads as an `int` (`0` when absent or set
+to zero); `bgp.aggregator.speaker` reads as an `ip` (the speaker's IPv4
+address, `false` when absent — mirroring `bgp.next_hop` / `bgp.originator_id`'s
+absent representation, so gate with `defined(bgp.aggregator.asn)` before
+reading the speaker). Both components are present together or absent together,
+so `defined(bgp.aggregator.asn)` and `defined(bgp.aggregator.speaker)` report
+the same presence — `asn` is the canonical probe. The canonical
+aggregation-aware idiom spells the same way it does in BIRD:
+`if defined(bgp.aggregator.asn) && bgp.aggregator.asn == 64512 then accept;`
+(accept routes aggregated by a known AS). The `defined()` predicate
+distinguishes "absent" from "set to zero" — a present value of AS 0 (rare but
+legal) reports `true` on `defined` and `0` on read. The BIRD translator
+renames `bgp_aggregator` to `bgp.aggregator.asn` (the canonical probe). The
+attribute is read-only: the daemon's aggregation logic stamps it on egress, so
+a filter that mutates it would fight the aggregation pipeline. Like `bgp.aigp`,
+`bgp.aggregator.asn` is deliberately not fused by the peephole pass's
+`BranchFieldIntCmp` fast path — its read decodes the `Aggregator` struct (a
+length check + two fixed-size copies, not a single `get_u32_be`), so fusing
+would not save the allocation the fast path exists to avoid.
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
 (issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated

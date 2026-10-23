@@ -161,7 +161,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | Filter DSL peephole optimisation | yes | `lr-policy::filter::peephole` |
 | Source spans and positioned diagnostics | yes | `lr-policy::filter::span` |
 | Cross-filter reusable function definitions | yes | `lr-cli::daemon_policy::build_filters` |
-| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §8), `bgp.otc` (RFC 9234 §3.1), `bgp.aigp` (RFC 7311), `bgp.lrxp.*` (issue #81, LRXP exchange-plane records; feature `exchange-plane`) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp`, `lr-policy::lrxp` |
+| Filter DSL route fields: `bgp.atomic_aggregate`, `bgp.originator_id`, `bgp.cluster_list` (RFC 4271 §5.1.6, RFC 4456 §8), `bgp.otc` (RFC 9234 §3.1), `bgp.aigp` (RFC 7311), `bgp.aggregator.asn` / `bgp.aggregator.speaker` (RFC 4271 §5.1.7), `bgp.lrxp.*` (issue #81, LRXP exchange-plane records; feature `exchange-plane`) | yes | `lr-policy::filter::ast::RouteFieldKind`, `lr-policy::bgp`, `lr-policy::lrxp` |
 
 ## OS integration and data plane — `lr-osroute`, `lr-mpls`, `lr-srv6`
 

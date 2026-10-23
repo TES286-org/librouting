@@ -21,7 +21,7 @@
 
 use lr_bgp::path::as_path::AsPath;
 use lr_bgp::path::communities::{Community, ExtendedCommunity, LargeCommunity};
-use lr_bgp::path::well_known::{Aigp, ClusterList, OriginatorId};
+use lr_bgp::path::well_known::{Aggregator, Aigp, ClusterList, OriginatorId};
 use lr_core::addr::{Asn, IpAddr};
 use lr_core::attr::{AttrTag, Attribute};
 use lr_core::rib::Route;
@@ -36,6 +36,14 @@ const TAG_ATOMIC_AGGREGATE: u8 = 6;
 const TAG_COMMUNITIES: u8 = 8;
 const TAG_ORIGINATOR_ID: u8 = 9;
 const TAG_CLUSTER_LIST: u8 = 10;
+/// RFC 4271 §5.1.7: AGGREGATOR attribute type code. The attribute is
+/// optional transitive; the value is 6 bytes (2-byte AS + 4-byte
+/// speaker IP) on legacy sessions or 8 bytes (4-byte AS + 4-byte
+/// speaker IP) on 4-byte-AS-capable sessions. The codec in
+/// `lr-bgp::path::well_known::Aggregator` accepts both widths and
+/// the ingress normalisation reconciles AS4_AGGREGATOR (type 18)
+/// into the canonical 4-byte form stored under this tag.
+const TAG_AGGREGATOR: u8 = 7;
 const TAG_EXT_COMMUNITIES: u8 = 16;
 const TAG_LARGE_COMMUNITIES: u8 = 32;
 /// RFC 9234 §3.1: OTC ("Only To Customer") attribute type code.
@@ -278,6 +286,62 @@ pub fn aigp(route: &Route) -> Option<u64> {
 /// empty value field).
 pub fn has_aigp(route: &Route) -> bool {
     route.attributes.get(AttrTag::raw(TAG_AIGP)).is_some()
+}
+
+/// The route's AGGREGATOR attribute (RFC 4271 §5.1.7) decoded into
+/// its `(asn, speaker)` pair. `None` when the attribute is absent (a
+/// route that was not aggregated) or when the wire form is malformed
+/// (any length other than 6 or 8 bytes). The stored form is the
+/// canonical 4-byte-AS encoding — ingress reconciles AS4_AGGREGATOR
+/// (type 18, RFC 6793) into this tag so a single read sees the
+/// resolved value regardless of the peer's AS-width capability.
+///
+/// BIRD spells AGGREGATOR as a structured `egroup` value in its
+/// filter language; lr's DSL decomposes the pair into two fields
+/// (`bgp.aggregator.asn`, `bgp.aggregator.speaker`) so a policy can
+/// match either component independently. The canonical idiom
+/// `defined(bgp_aggregator)` — "was this route aggregated?" —
+/// translates to `defined(bgp.aggregator.asn)`; both components are
+/// present together or absent together, so the presence probe is
+/// faithful on either field.
+///
+/// Reads pay one BTreeMap lookup + one `Aggregator::decode` (a
+/// length check + two fixed-size copies); no allocation on the
+/// common path. The 2-byte-AS legacy wire form (6 bytes) is widened
+/// to a 32-bit `Asn` by the codec, so the accessor never returns a
+/// truncated AS.
+pub fn aggregator(route: &Route) -> Option<Aggregator> {
+    let bytes = attr_bytes(route, TAG_AGGREGATOR)?;
+    Aggregator::decode(bytes)
+}
+
+/// The route's aggregator AS number (RFC 4271 §5.1.7) as a `u32`;
+/// `None` when the AGGREGATOR attribute is absent or malformed. A
+/// present value of `0` ("set but zero") is returned as `Some(0)` —
+/// use [`has_aggregator`] to distinguish "absent" from "set to zero"
+/// in policies that need the distinction (the
+/// `defined(bgp.aggregator.asn)` filter DSL predicate consults
+/// `has_aggregator`, not this accessor).
+pub fn aggregator_asn(route: &Route) -> Option<u32> {
+    aggregator(route).map(|a| a.asn.0)
+}
+
+/// The route's aggregator speaker IP (RFC 4271 §5.1.7) as an
+/// `IpAddr::V4`; `None` when the AGGREGATOR attribute is absent or
+/// malformed. BIRD spells the speaker as an `ip`; the `IpAddr::V4`
+/// representation matches so a BIRD filter like
+/// `if bgp_aggregator.speaker = 10.0.0.1 then reject;` translates
+/// faithfully.
+pub fn aggregator_speaker(route: &Route) -> Option<IpAddr> {
+    aggregator(route).map(|a| IpAddr::V4(a.speaker))
+}
+
+/// True when an AGGREGATOR attribute is physically present on the
+/// route (RFC 4271 §5.1.7). Use this to distinguish "no attribute"
+/// from "present but the AS/speaker is zero" — `aggregator_asn()`
+/// returns `Some(0)` for the latter.
+pub fn has_aggregator(route: &Route) -> bool {
+    route.attributes.get(AttrTag::raw(TAG_AGGREGATOR)).is_some()
 }
 
 /// Prepend `asn` to the route's AS_PATH (RFC 4271 §4.3), creating the
@@ -668,5 +732,74 @@ mod tests {
         let r_bad = route_with(vec![raw_attr(TAG_AIGP, 0x80, vec![0, 1, 2])]);
         assert_eq!(aigp(&r_bad), None);
         assert!(has_aigp(&r_bad));
+    }
+
+    /// RFC 4271 §5.1.7 — AGGREGATOR is a 6-byte (2-byte AS) or 8-byte
+    /// (4-byte AS) value; the helper surfaces the AS as `u32` (the
+    /// 2-byte form is widened) and the speaker as `IpAddr::V4`, and
+    /// stays `None` on the absent and malformed cases. A present
+    /// value of AS 0 ("set but zero") is returned as `Some(0)` so
+    /// policies that need the distinction consult `has_aggregator`
+    /// instead.
+    #[test]
+    fn aggregator_decodes_asn_and_speaker() {
+        use lr_bgp::path::well_known::Aggregator as AggregatorTy;
+        // Present, 4-byte AS form (the canonical stored encoding).
+        let r = route_with(vec![raw_attr(
+            TAG_AGGREGATOR,
+            0xC0,
+            AggregatorTy {
+                asn: Asn(64512),
+                speaker: [10, 0, 0, 1],
+            }
+            .encode_4()
+            .to_vec(),
+        )]);
+        assert_eq!(aggregator_asn(&r), Some(64512));
+        assert_eq!(aggregator_speaker(&r), Some(IpAddr::V4([10, 0, 0, 1])));
+        assert!(has_aggregator(&r));
+        // Absent.
+        let r_absent = route_with(vec![]);
+        assert_eq!(aggregator_asn(&r_absent), None);
+        assert_eq!(aggregator_speaker(&r_absent), None);
+        assert!(!has_aggregator(&r_absent));
+        // Present, AS 0 — "set but zero". `aggregator_asn()` returns
+        // `Some(0)`; `has_aggregator()` reports presence. This is the
+        // case `defined(bgp.aggregator.asn)` in the filter DSL must
+        // distinguish from "absent".
+        let r_zero = route_with(vec![raw_attr(
+            TAG_AGGREGATOR,
+            0xC0,
+            AggregatorTy {
+                asn: Asn(0),
+                speaker: [0, 0, 0, 0],
+            }
+            .encode_4()
+            .to_vec(),
+        )]);
+        assert_eq!(aggregator_asn(&r_zero), Some(0));
+        assert!(has_aggregator(&r_zero));
+        // Legacy 2-byte-AS wire form (6 bytes) — widened to a 32-bit
+        // `Asn` by the codec so the accessor never returns a
+        // truncated AS.
+        let r_legacy = route_with(vec![raw_attr(
+            TAG_AGGREGATOR,
+            0xC0,
+            vec![0xFC, 0x00, 10, 0, 0, 1], // AS 64512, speaker 10.0.0.1
+        )]);
+        assert_eq!(aggregator_asn(&r_legacy), Some(64512));
+        assert_eq!(
+            aggregator_speaker(&r_legacy),
+            Some(IpAddr::V4([10, 0, 0, 1]))
+        );
+        // Malformed width — `aggregator_asn()` / `aggregator_speaker()`
+        // return None; `has_aggregator()` still reports presence (the
+        // attribute is on the route; only the value is unreadable).
+        // Mirrors the `cluster_list()` accessor's behaviour on a
+        // partial tail.
+        let r_bad = route_with(vec![raw_attr(TAG_AGGREGATOR, 0xC0, vec![1, 2, 3])]);
+        assert_eq!(aggregator_asn(&r_bad), None);
+        assert_eq!(aggregator_speaker(&r_bad), None);
+        assert!(has_aggregator(&r_bad));
     }
 }
