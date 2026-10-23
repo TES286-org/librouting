@@ -456,12 +456,58 @@ etc. comparisons the same way it fuses `bgp.local_pref` / `bgp.med`
 `tests/corpus/bird/ospf-metric-filter.conf` exercises both the
 canonical high-cost reject idiom and the `defined()` gate's
 short-circuit on a non-OSPF route.
+The OSPF type-2 external metric attribute has landed alongside
+the `ospf.metric1` set: `RouteFieldKind::OspfMetric2`
+(RFC 2328 §16.4 / RFC 5340 §4.8.5) exposes `ospf.metric2`
+(read-only `int`, `0` when the route is not a type-2 external —
+i.e. a non-OSPF route, an OSPF intra-area / inter-area route, or
+an OSPF type-1 external route — mirroring BIRD's eattr default
+for an unattached `ospf_metric2` reference) so the canonical
+BIRD idiom `if defined(ospf_metric2) && ospf_metric2 > 100 then
+reject;` translates faithfully to `if defined(ospf.metric2) &&
+ospf.metric2 > 100 then reject;`. The BIRD translator renames
+`ospf_metric2` to `ospf.metric2` (and removes it from
+`UNMAPPABLE_WORDS`, leaving the remaining OSPF attributes
+`ospf_tag` / `ospf_router_id` listed there so a filter that
+references them is still marked unfaithful rather than silently
+dropping the reference); `lr-policy::ospf` carries the matching
+`metric2` / `has_metric2` helpers (the latter distinguishes "not
+a type-2 external" from "type-2 external with metric 0" via
+`defined(ospf.metric2)`). The type-2 external metric rides the
+private `LrOspfMetric2` path-attribute tag (code point 253 —
+stripped at BGP encode, the same shape `LrMplsLabelStack` at 255
+and `LrExchangePlaneRecords` at 254 use): `lr-bgp::path::AttrType`
+gains the `LrOspfMetric2` variant, `lr-bgp::path::PathAttributes`
+gains the `set_ospf_metric2` / `ospf_metric2` / `has_ospf_metric2`
+accessors (the value layout is a single 4-byte big-endian `u32`
+holding the 24-bit external metric, zero-extended), and
+`lr-router::instance::ospf_ops::ospf_recompute` attaches the
+attribute for type-2 externals (where `OspfKind::External {
+metric_type: ExternalMetricType::Type2, .. }` matches) — only
+for type-2 externals; intra-area, inter-area and type-1
+external OSPF routes carry no `LrOspfMetric2` tag, so its
+absence is the marker `has_metric2` consults. The typed
+accessors in `lr-policy::ospf` read the attribute via one
+BTreeMap lookup plus one 4-byte read on `route.attributes` (no
+allocation, no codec — the value layout is a fixed 4-byte `u32`,
+read in place via `Attributes::get_u32_be`). Cheaper than any
+`bgp.*` accessor that decodes a multi-byte TLV stream, but more
+expensive than `ospf.metric1` (which reads a struct field, no
+lookup). The peephole pass's `BranchFieldIntCmp` fast path fuses
+`ospf.metric2 == N` / `> N` / etc. comparisons the same way it
+fuses `ospf.metric1` / `bgp.local_pref` / `bgp.med` / `bgp.otc`
+— the read is one lookup plus one fixed-width read (no
+allocation), so the fast path avoids the `Value::Int` allocation
++ push the unfused sequence pays. The corpus case
+`tests/corpus/bird/ospf-metric2-filter.conf` exercises both the
+canonical high-cost type-2-external reject idiom and the
+`defined()` gate's short-circuit on a non-type-2-external route.
 What remains is the rest of the per-protocol attribute surface —
 BIRD's route attributes that ride the per-route filter context —
 beyond the RR loop-detection, OTC, AIGP, AGGREGATOR, PMSI Tunnel
-(BGP subset, complete) and the OSPF `ospf.metric1` attribute that
-has landed. The remaining OSPF attributes (`ospf_metric2`,
-`ospf_tag`, `ospf_router_id`) and the Babel per-route attributes
+(BGP subset, complete) and the OSPF `ospf.metric1` / `ospf.metric2`
+attributes that have landed. The remaining OSPF attributes
+(`ospf_tag`, `ospf_router_id`) and the Babel per-route attributes
 (`babel_metric`, `babel_router_id`, `babel_seqno`) are the next
 increments; each lands as its own small PR following the same
 codec→accessor→DSL→translator→corpus shape.

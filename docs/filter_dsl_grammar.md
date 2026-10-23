@@ -317,7 +317,7 @@ bgp_field   := "local_pref" | "med" | "next_hop"
              | "as_path" | "communities"
              | "ext_communities" | "large_communities"
              | "origin" ;
-ospf_field  := "metric1" ;
+ospf_field  := "metric1" | "metric2" ;
 ```
 
 The settable subset (allowed on the left-hand side of `=`) is: `bgp.local_pref`,
@@ -517,6 +517,7 @@ lists fields accepting the append form.
 | `bgp.aggregator.speaker`| `ip`                 |    no    |  no  | RFC 4271 §5.1.7; aggregator speaker IP (`false` when absent). |
 | `bgp.pmsi_tunnel`       | `bool`                |    no    |  no  | RFC 6514 §5; `true` when the attribute is present, `false` when absent. `defined(bgp.pmsi_tunnel)` distinguishes "absent" from "present but malformed". |
 | `ospf.metric1`          | `int`                 |    no    |  no  | RFC 2328 §16 / RFC 5340 §4.1; primary OSPF metric (`0` when the route is not OSPF). `defined(ospf.metric1)` distinguishes "non-OSPF route" from "OSPF route with metric 0". |
+| `ospf.metric2`          | `int`                 |    no    |  no  | RFC 2328 §16.4 / RFC 5340 §4.8.5; type-2 external OSPF metric (`0` when the route is not a type-2 external — non-OSPF, intra-area, inter-area or type-1 external). `defined(ospf.metric2)` distinguishes "not a type-2 external" from "type-2 external with metric 0". |
 | `bgp.lrxp.verified`     | `bool`                |    no    |  no  | Issue #81; `true` when the route carries a verified LRXP record set. Feature `exchange-plane`. |
 | `bgp.lrxp.partial_transit` | `bool`             |    no    |  no  | Issue #81; `true` when the LRXP store is partial-transit forwarding material. Feature `exchange-plane`. |
 | `bgp.lrxp.hint.rank`    | `int`                 |    no    |  no  | Issue #81 / LRXP §5.1; sender's best-path rank (1 = sender's best). `0` when absent. Feature `exchange-plane`. |
@@ -667,8 +668,8 @@ and "OSPF route with metric 0" together via the `0` read; the former
 keeps an OSPF route with cost 0 defined so a cost-0 OSPF route does
 not get a false "absent" read. The BIRD translator renames
 `ospf_metric1` to `ospf.metric1`; the remaining OSPF per-route
-attributes BIRD exposes (`ospf_metric2`, `ospf_tag`, `ospf_router_id`)
-have no lr-DSL spelling yet and the translator marks a filter that
+attributes BIRD exposes (`ospf_tag`, `ospf_router_id`) have no
+lr-DSL spelling yet and the translator marks a filter that
 references them unfaithful instead of silently dropping the
 reference. The field surfaces as an `Int` and the read is one `match`
 plus one field read (no allocation), so the peephole pass's
@@ -676,6 +677,55 @@ plus one field read (no allocation), so the peephole pass's
 `ospf.metric1 > N` / etc. — the same fast path `bgp.local_pref` /
 `bgp.med` / `bgp.otc` use, avoiding the `Value::Int` allocation + push
 the unfused sequence pays.
+
+`ospf.metric2` is the RFC 2328 §16.4 / RFC 5340 §4.8.5 type-2
+external OSPF metric — the E-bit-set LSA metric the §16.4 (6)
+type-2 preference ranks against (alone; the cost to the ASBR breaks
+the tie, and that cost lives in `ospf.metric1` for type-2 externals
+in lr's `preference.metric` model). BIRD exposes the value as
+`ospf_metric2` (an `int` eattr the OSPF protocol attaches to
+type-2 external routes); lr's DSL spells it `ospf.metric2`
+(read-only `int`). The mapping is one protocol-kind `match` plus one
+BTreeMap lookup plus one 4-byte read on `route.attributes` — the
+type-2 external metric rides the private `LrOspfMetric2` path-
+attribute tag (code point 253 — stripped at BGP encode, the same
+shape `LrMplsLabelStack` at 255 and `LrExchangePlaneRecords` at 254
+use) that `lr-router::instance::ospf_ops::ospf_recompute` attaches
+for type-2 externals. The protocol-kind `match` is a cheap fast-path
+rejection for non-OSPF routes that avoids the BTreeMap lookup
+entirely; the OSPF route computation never attaches the tag to a
+non-OSPF route, but a hand-crafted route that violates the invariant
+still reads as `0` (defensive). A non-type-2-external route —
+non-OSPF, intra-area, inter-area or type-1 external — reads as `0`
+(the eattr default for an unattached `ospf_metric2` reference), so
+the canonical idiom
+
+```
+if defined(ospf.metric2) && ospf.metric2 > 100 then reject;  # drop
+                                                              # high-cost
+                                                              # type-2
+                                                              # externals
+```
+
+short-circuits on the `defined()` arm for a non-type-2-external route
+the same way it does in BIRD. The `defined(ospf.metric2)` predicate
+consults `has_metric2` (the route is an OSPFv2 / OSPFv3 type-2
+external route — the `LrOspfMetric2` attribute is present), not
+`metric2().is_some()` — the latter would collapse "absent" and
+"malformed" together via the `None` read; the former keeps a
+type-2 external with metric 0 defined so a metric-0 type-2 external
+does not get a false "absent" read. The BIRD translator renames
+`ospf_metric2` to `ospf.metric2`; the remaining OSPF per-route
+attributes BIRD exposes (`ospf_tag`, `ospf_router_id`) have no
+lr-DSL spelling yet and the translator marks a filter that references
+them unfaithful. The field surfaces as an `Int` and the read is one
+lookup plus one fixed-width read (no allocation), so the peephole
+pass's `BranchFieldIntCmp` fast path fires on `ospf.metric2 == N` /
+`ospf.metric2 > N` / etc. — the same fast path `ospf.metric1` /
+`bgp.local_pref` / `bgp.med` / `bgp.otc` use, avoiding the
+`Value::Int` allocation + push the unfused sequence pays. The C ABI
+does not expose a setter for the `LrOspfMetric2` tag — embedders read
+the field but never inject it; the OSPF daemon is the only producer.
 
 The `bgp.lrxp.*` fields expose the LRXP exchange-plane records a route carries
 (issue #81, design `docs/research/EXCHANGE-PLANE.md`). They are feature-gated
@@ -917,7 +967,7 @@ divergences are:
 | Boolean operators        | `&&`, `\|\|`, `!`               | identical                         |
 | Equality / assignment    | `=` / `:=`                      | `==` / `=`                        |
 | Match / non-match        | `~` / `!~`                      | identical                         |
-| Attribute names          | `bgp_path`, `bgp_local_pref`, …, `ospf_metric1`, … | `bgp.as_path`, `bgp.local_pref`, …, `ospf.metric1`, … |
+| Attribute names          | `bgp_path`, `bgp_local_pref`, …, `ospf_metric1`, `ospf_metric2`, … | `bgp.as_path`, `bgp.local_pref`, …, `ospf.metric1`, `ospf.metric2`, … |
 | Variables                | typed (`int x := 5;`)           | untyped (`let x = 5;`)            |
 | `case` arm separator     | `:`                             | `=>`                              |
 | `case` else arm          | `else:`                         | `default =>`                      |

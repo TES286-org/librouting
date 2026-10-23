@@ -13,22 +13,30 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: BGP PMSI Tunnel + OSPF metric1 filter DSL surface
+## [Unreleased] — minor: BGP PMSI Tunnel + OSPF metric1 / metric2 filter DSL surface
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
-when the attribute is present, `false` when absent) and the RFC 2328
+when the attribute is present, `false` when absent), the RFC 2328
 §16 / RFC 5340 §4.1 primary OSPF metric as `ospf.metric1` (read-only
 `int` — `0` when the route is not OSPF, mirroring BIRD's eattr
-default for an unattached `ospf_metric1` reference). Per
+default for an unattached `ospf_metric1` reference) and the RFC 2328
+§16.4 / RFC 5340 §4.8.5 type-2 external OSPF metric as `ospf.metric2`
+(read-only `int` — `0` when the route is not a type-2 external,
+mirroring BIRD's eattr default for an unattached `ospf_metric2`
+reference). Per
 `docs/RELEASE-PLAN.md` §1, the public Rust API gains new surface
 (`RouteFieldKind::BgpPmsiTunnel`, `RouteFieldKind::OspfMetric1`,
-four new `FilterContext` trait methods with default impls, the
-`lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}` helpers and the
-new `lr-policy::ospf::{metric1, has_metric1}` helpers, the
-`lr-bgp::path::well_known::PmsiTunnel` typed view and the
+`RouteFieldKind::OspfMetric2`, `AttrType::LrOspfMetric2`,
+`six new `FilterContext` trait methods with default impls, the
+`lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}` helpers, the
+`lr-policy::ospf::{metric1, has_metric1}` helpers and the new
+`lr-policy::ospf::{metric2, has_metric2}` helpers, the
+`lr-bgp::path::well_known::PmsiTunnel` typed view, the
 `lr-bgp::path::PathAttributes::pmsi_tunnel` / `has_pmsi_tunnel`
-accessors); the new `RouteFieldKind` variants are a breaking change
+accessors and the new `lr-bgp::path::PathAttributes::set_ospf_metric2`
+/ `ospf_metric2` / `has_ospf_metric2` accessors); the new
+`RouteFieldKind` and `AttrType` variants are a breaking change
 for downstream `match` exhaustiveness, which the `api-surface` CI
 gate will catch when the version cuts. The C ABI surface is
 unchanged (no new `lr_*` symbols, `ABI_VERSION` stays at 2); the
@@ -96,6 +104,63 @@ pass's `BranchFieldIntCmp` fast path fuses `ospf.metric1 == N` /
 `bgp.med` / `bgp.otc` — the read is one `match` plus one field
 read (no allocation), so the fast path avoids the `Value::Int`
 allocation + push the unfused sequence pays.
+
+**OSPF metric2 filter DSL surface** (`policy`, `cli`, `ospf`,
+ROADMAP "Per-protocol route attributes and an external conversion
+corpus"). The filter DSL now exposes the RFC 2328 §16.4 /
+RFC 5340 §4.8.5 type-2 external OSPF metric — the E-bit-set LSA
+metric the §16.4 (6) type-2 preference ranks against (alone; the
+cost to the ASBR breaks the tie, and that cost lives in
+`ospf.metric1` for type-2 externals in lr's `preference.metric`
+model). BIRD exposes the value in its filter language as
+`ospf_metric2` (an `int` eattr the OSPF protocol attaches to
+type-2 external routes); lr's DSL spells it `ospf.metric2`
+(read-only `int`). The type-2 external metric rides the private
+`LrOspfMetric2` path-attribute tag (code point 253 — stripped at
+BGP encode, the same shape `LrMplsLabelStack` at 255 and
+`LrExchangePlaneRecords` at 254 use): `lr-bgp::path::AttrType`
+gains the `LrOspfMetric2` variant, `lr-bgp::path::PathAttributes`
+gains the `set_ospf_metric2` / `ospf_metric2` / `has_ospf_metric2`
+accessors (the value layout is a single 4-byte big-endian `u32`
+holding the 24-bit external metric, zero-extended), and
+`lr-router::instance::ospf_ops::ospf_recompute` attaches the
+attribute for type-2 externals (where `OspfKind::External {
+metric_type: ExternalMetricType::Type2, .. }` matches) — only
+for type-2 externals; intra-area, inter-area and type-1
+external OSPF routes carry no `LrOspfMetric2` tag, so its
+absence is the marker `has_metric2` consults. The typed
+accessors in `lr-policy::ospf` read the attribute via one
+protocol-kind `match` plus one BTreeMap lookup plus one 4-byte
+read on `route.attributes` (no allocation, no codec — the value
+layout is a fixed 4-byte `u32`, read in place via
+`Attributes::get_u32_be`). Cheaper than any `bgp.*` accessor
+that decodes a multi-byte TLV stream, more expensive than
+`ospf.metric1` (which reads a struct field, no lookup). A
+non-type-2-external route — non-OSPF, intra-area, inter-area or
+type-1 external — reads as `0` (the eattr default for an
+unattached `ospf_metric2` reference), so the canonical BIRD idiom
+`if defined(ospf_metric2) && ospf_metric2 > 100 then reject;`
+translates faithfully to `if defined(ospf.metric2) &&
+ospf.metric2 > 100 then reject;` and short-circuits on the
+`defined()` arm for a non-type-2-external route the same way it
+does in BIRD. The `defined(ospf.metric2)` predicate distinguishes
+"not a type-2 external" from "type-2 external with metric 0"
+via `has_metric2` — a metric-0 type-2 external (an E-bit-set
+type-5 LSA whose 24-bit external metric happens to be zero,
+unusual but well-formed per RFC 2328 §2.3) stays defined, so the
+canonical idiom does not drop it. The BIRD translator renames
+`ospf_metric2` to `ospf.metric2` (and removes it from
+`UNMAPPABLE_WORDS`, leaving the remaining OSPF attributes
+`ospf_tag` / `ospf_router_id` listed there so a filter that
+references them is still marked unfaithful). The peephole
+pass's `BranchFieldIntCmp` fast path fuses `ospf.metric2 == N` /
+`> N` / etc. comparisons the same way it fuses `ospf.metric1` /
+`bgp.local_pref` / `bgp.med` / `bgp.otc` — the read is one
+lookup plus one fixed-width read (no allocation), so the fast
+path avoids the `Value::Int` allocation + push the unfused
+sequence pays. The C ABI does not expose a setter for the
+`LrOspfMetric2` tag — embedders read the field but never inject
+it; the OSPF daemon is the only producer.
 
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
