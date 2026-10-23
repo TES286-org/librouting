@@ -164,8 +164,9 @@ RFC 4271 §5.1.6 / RFC 4456 §8 route-reflector loop-detection attributes
 RFC 9234 §3.1 OTC leak-detection attribute (`bgp.otc`), the RFC 7311
 AIGP accumulated-metric attribute (`bgp.aigp`), the RFC 4271 §5.1.7
 AGGREGATOR attribute (`bgp.aggregator.asn`, `bgp.aggregator.speaker`),
-and — behind the `exchange-plane` feature — the LRXP exchange-plane
-records the route carries (`bgp.lrxp.*`, issue #81).
+the RFC 6514 §5 PMSI Tunnel attribute (`bgp.pmsi_tunnel`), and —
+behind the `exchange-plane` feature — the LRXP exchange-plane records
+the route carries (`bgp.lrxp.*`, issue #81).
 
 ## RFCs
 
@@ -200,6 +201,18 @@ records the route carries (`bgp.lrxp.*`, issue #81).
   preserved) and surfaces the accumulated metric for metric-comparison
   policies (`if bgp.aigp < 100 then accept;`). The daemon's best-path
   decision process (RFC 7311 §4) is a future follow-up.
+- RFC 6514 §5 — the PMSI Tunnel attribute the filter DSL exposes as
+  `bgp.pmsi_tunnel`; the typed accessor
+  (`lr-bgp::path::PathAttributes::pmsi_tunnel`) decodes the
+  attribute's value field (Flags + Tunnel Type + 3-octet MPLS Label
+  + variable-length Tunnel Identifier; Tunnel Type 0 hard rule
+  enforced, Tunnel Type 6 endpoint-width hard rule enforced, unknown
+  types preserved verbatim, mirroring BIRD's
+  `bgp_decode_pmsi_tunnel` default arm). The attribute surfaces as a
+  read-only `bool` — `true` when the attribute is present, `false`
+  when absent — mirroring BIRD's `EAF_TYPE_OPAQUE` +
+  `T_ENUM_EMPTY` exposure so the canonical presence-probe idiom
+  `if defined(bgp.pmsi_tunnel) then reject;` translates faithfully.
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 

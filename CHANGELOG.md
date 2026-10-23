@@ -13,6 +13,50 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
+## [Unreleased] — minor: BGP PMSI Tunnel attribute in the filter DSL (RFC 6514 §5)
+
+librouting's next minor release will expose the RFC 6514 §5 PMSI Tunnel
+attribute in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` —
+`true` when the attribute is present, `false` when absent). Per
+`docs/RELEASE-PLAN.md` §1, the public Rust API gains new surface
+(`RouteFieldKind::BgpPmsiTunnel`, two new `FilterContext` trait methods
+with default impls, the `lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}`
+helpers, the `lr-bgp::path::well_known::PmsiTunnel` typed view and the
+`lr-bgp::path::PathAttributes::pmsi_tunnel` / `has_pmsi_tunnel`
+accessors); the new `RouteFieldKind` variant is a breaking change for
+downstream `match` exhaustiveness, which the `api-surface` CI gate will
+catch when the version cuts. The C ABI surface is unchanged (no new
+`lr_*` symbols, `ABI_VERSION` stays at 2); the FFI callback table
+`lr_filter_context_t` is untouched — the new `FilterContext` methods
+carry default implementations that delegate to `lr_policy::bgp`, so
+every existing embedder inherits the correct behaviour without
+recompiling.
+
+### Added
+
+**BGP PMSI Tunnel filter DSL surface** (`policy`, `cli`, ROADMAP
+"Per-protocol route attributes and an external conversion corpus").
+The filter DSL now exposes the RFC 6514 §5 PMSI Tunnel attribute —
+the provider-tunnel binding a BGP UPDATE advertises for an MVPN
+auto-discovery route (Intra-AS I-PMSI, Inter-As I-PMSI, S-PMSI, Leaf
+A-D). BIRD exposes the attribute in its filter language as
+`bgp_pmsi_tunnel` (an opaque bytestring — `EAF_TYPE_OPAQUE` +
+`T_ENUM_EMPTY` — where the only meaningful operation is
+`defined(bgp_pmsi_tunnel)`); lr's DSL mirrors that surface as a
+read-only `bool` so the canonical presence-probe idiom
+`if defined(bgp.pmsi_tunnel) then reject;` translates faithfully. The
+codec stores the raw attribute bytes verbatim so a peer-sent attribute
+with non-zero reserved bits or non-zero EXP/S bits round-trips
+byte-exact, and the typed view decodes the Flags byte, Tunnel Type,
+20-bit MPLS label and variable-length Tunnel Identifier with the two
+RFC 6514 §5 hard rules enforced (Tunnel Type 0 MUST carry no Tunnel
+Identifier; Tunnel Type 6 MUST carry a 4-byte IPv4 or 16-byte IPv6
+endpoint). The `defined(bgp.pmsi_tunnel)` predicate distinguishes
+"absent" from "present but malformed" via `has_pmsi_tunnel`. This
+closes the last gap in BIRD's filter-attribute surface — every
+`bgp_*` filter attribute the BIRD 2 grammar declares now has a
+faithful lr-DSL spelling.
+
 ## [1.8.0] — minor: BGP AGGREGATOR attribute in the filter DSL (RFC 4271 §5.1.7)
 
 librouting 1.8.0 is a minor release. Per `docs/RELEASE-PLAN.md`

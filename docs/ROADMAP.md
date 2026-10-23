@@ -402,9 +402,38 @@ aggregation-aware idiom and the `defined()` distinction. Like AIGP,
 `BranchFieldIntCmp` fast path — its read decodes the `Aggregator` struct
 (a length check + two fixed-size copies, not a single `get_u32_be`), so
 fusing would not save the allocation the fast path exists to avoid.
+The PMSI Tunnel attribute has landed alongside the AGGREGATOR set:
+`RouteFieldKind::BgpPmsiTunnel` (RFC 6514 §5) exposes `bgp.pmsi_tunnel`
+(read-only `Bool`, `false` when absent, `true` when present,
+mirroring BIRD's `EAF_TYPE_OPAQUE` + `T_ENUM_EMPTY` exposure so the
+canonical presence-probe idiom `if defined(bgp_pmsi_tunnel) then
+reject;` translates faithfully to `if defined(bgp.pmsi_tunnel) then
+reject;`); the BIRD translator renames `bgp_pmsi_tunnel` to
+`bgp.pmsi_tunnel`, `lr-policy::bgp` carries the matching `pmsi_tunnel`
+/ `has_pmsi_tunnel` helpers (the latter distinguishes "absent" from
+"present but malformed" via `defined(bgp.pmsi_tunnel)`), the typed
+`pmsi_tunnel()` / `has_pmsi_tunnel()` accessors on
+`lr-bgp::path::PathAttributes` decode the attribute's value field
+(Flags + Tunnel Type + 3-octet MPLS Label + variable-length Tunnel
+Identifier; Tunnel Type 0 MUST carry no Tunnel Identifier, Tunnel
+Type 6 MUST carry a 4-byte IPv4 or 16-byte IPv6 endpoint — every
+other Tunnel Type is preserved verbatim, mirroring BIRD's
+`bgp_decode_pmsi_tunnel` default arm that sets the Partial bit
+rather than withdraws), the codec stores the raw attribute bytes
+verbatim so a peer-sent attribute with non-zero reserved bits or
+non-zero EXP/S bits round-trips byte-exact, and the corpus case
+`tests/corpus/bird/bgp-pmsi-tunnel-filter.conf` exercises both the
+canonical reject idiom and its negation. Like AGGREGATOR,
+`bgp.pmsi_tunnel` is deliberately not fused by the peephole pass's
+`BranchFieldIntCmp` fast path — the field surfaces as a `Bool`, not
+an `Int`, so the int-comparison shape does not arise in the DSL.
+This closes the last gap in BIRD's filter-attribute surface — every
+`bgp_*` filter attribute the BIRD 2 grammar declares now has a
+faithful lr-DSL spelling.
 What remains is the rest of the per-protocol attribute surface — BIRD's
 route attributes that ride the per-route filter context — beyond the RR
-loop-detection, OTC, AIGP, and AGGREGATOR subsets that have landed.
+loop-detection, OTC, AIGP, AGGREGATOR, and PMSI Tunnel subsets that have
+landed.
 The conversion corpus has landed: `tests/corpus/{bird,frr}/` pairs
 every representative BIRD and FRR config with the exact
 `.expected.toml` the converter emits, covering the BGP/Babel/OSPF
