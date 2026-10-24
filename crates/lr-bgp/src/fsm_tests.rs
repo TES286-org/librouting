@@ -825,16 +825,19 @@ fn unknown_attribute_relay_sets_partial_and_drops_non_transitive() {
 
     // Build an UPDATE carrying (1) an unknown transitive attr with
     // flags 0xC0 and (2) an unknown optional non-transitive attr
-    // with flags 0x80.
+    // with flags 0x80. Code points 200/201 are arbitrary — they
+    // must avoid the librouting-private tag range (250-255, see
+    // `lr_bgp::path::AttrType`) so the relay path does not strip
+    // them as internal state.
     let mut u = Update::new();
     u.attributes.insert(PathAttribute::new(
         PathAttrFlags::new().set_optional(true).set_transitive(true),
-        AttrType::Other(250),
+        AttrType::Other(200),
         vec![1, 2, 3],
     ));
     u.attributes.insert(PathAttribute::new(
         PathAttrFlags::new().set_optional(true),
-        AttrType::Other(249),
+        AttrType::Other(201),
         vec![4, 5],
     ));
     u.attributes.insert(PathAttribute::new(
@@ -867,11 +870,11 @@ fn unknown_attribute_relay_sets_partial_and_drops_non_transitive() {
         .expect("route installed");
     let bag: crate::path::PathAttributes = installed.attributes.into();
     let relayed = bag
-        .get(AttrType::Other(250))
+        .get(AttrType::Other(200))
         .expect("transitive unknown forwarded");
     assert!(relayed.flags.partial(), "Partial bit set per RFC 4271 §5.3");
     assert!(
-        bag.get(AttrType::Other(249)).is_none(),
+        bag.get(AttrType::Other(201)).is_none(),
         "optional non-transitive unknown not propagated"
     );
 }
