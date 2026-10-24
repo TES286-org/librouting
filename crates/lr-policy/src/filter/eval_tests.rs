@@ -1582,6 +1582,57 @@ fn run_vm_err(filter_src: &str) -> EvalError {
     }
 }
 
+/// Regression for the VM-stack-underflow span bug (issue #18 Phase 0
+/// contract — every error carries the span of the instruction that
+/// produced it). Before the fix, `vm_stack_error` returned
+/// `Span::default()` with `line 0 col 0`; the synthetic underflow
+/// below would have produced a zero-position diagnostic instead of
+/// pointing at the offending op.
+#[test]
+fn vm_stack_underflow_carries_real_instruction_span() {
+    use crate::filter::bytecode::{CompiledFilter, Instr};
+    use crate::filter::span::{LineIndex, Span};
+
+    // Hand-assembled bytecode: a single `Instr::Not` pops a value but
+    // nothing pushes one, so the VM underflows. The compiler never
+    // emits this shape — the test bypasses it to exercise the cold
+    // error path directly. The span of the offending instruction is
+    // bytes 4..7 of "abc!xyz" (the "xyz" portion), so the diagnostic
+    // should land at line 1 col 5.
+    let src = "abc!xyz";
+    let line_index = LineIndex::new(src);
+    let cf = CompiledFilter {
+        name: "synthetic".to_string(),
+        code: vec![Instr::Not],
+        spans: vec![Span::new(4, 7)],
+        line_index: LineIndex::new(src),
+        functions: Vec::new(),
+        function_index: std::collections::BTreeMap::new(),
+    };
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    let mut ev = Evaluator {
+        ctx: &StubCtx,
+        scopes: vec![Scope::new()],
+        functions: std::collections::BTreeMap::new(),
+        call_depth: 0,
+        pending_verdict: None,
+        line_index: &line_index,
+    };
+    let err = ev
+        .run_code(&cf.code, &cf.spans, &cf, &mut r)
+        .expect_err("Instr::Not with an empty stack must underflow");
+    // The contract: the error's span, line and col come from the
+    // offending instruction's span (bytes 4..7), not from
+    // `Span::default()`.
+    assert_eq!(err.span, Span::new(4, 7));
+    assert_eq!((err.line, err.col), (1, 5));
+    assert!(
+        matches!(&err.kind, EvalErrorKind::TypeMismatch { .. }),
+        "expected TypeMismatch, got {:?}",
+        err.kind
+    );
+}
+
 #[test]
 fn eval_error_assign_undefined_carries_span() {
     let src = "accept;\nzz = 1;";
@@ -2752,10 +2803,9 @@ fn ospf_unknown_field_is_parse_error() {
     // the OSPF surface (mirrors `UnknownBgpField`). `ospf.bogus`
     // is not a known OSPF field — `ospf.metric1` (RFC 2328 §16 /
     // RFC 5340 §4.1), `ospf.metric2` (RFC 2328 §16.4 / RFC 5340
-    // §4.8.5) and `ospf.tag` (RFC 2328 §A.4.5 / RFC 5340 §A.4.7)
-    // are the three known fields at the time of writing;
-    // `ospf.router_id` is the next increment the ROADMAP names
-    // (still unimplemented at the time of writing).
+    // §4.8.5), `ospf.tag` (RFC 2328 §A.4.5 / RFC 5340 §A.4.7) and
+    // `ospf.router_id` (RFC 2328 §A.4 `Advertising Router`) are
+    // the four known fields; `ospf.bogus` is rejected as unknown.
     let err = compile("test", "if defined(ospf.bogus) then accept; reject;").unwrap_err();
     let msg = format!("{err}");
     assert!(

@@ -2651,15 +2651,19 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     stack.push(v);
                 }
                 Instr::StoreVar(name) => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     self.scopes
                         .last_mut()
-                        .ok_or_else(vm_stack_error)?
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?
                         .vars
                         .insert(name.clone(), v);
                 }
                 Instr::AssignVar(name) => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     let span = spans[ip];
                     self.assign(name, v, span)?;
                 }
@@ -2667,21 +2671,32 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     tmp = stack.pop();
                 }
                 Instr::LoadTmp => {
-                    stack.push(tmp.clone().ok_or_else(vm_stack_error)?);
+                    stack.push(
+                        tmp.clone()
+                            .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?,
+                    );
                 }
                 Instr::Bin(op) => {
-                    let r = stack.pop().ok_or_else(vm_stack_error)?;
-                    let l = stack.pop().ok_or_else(vm_stack_error)?;
+                    let r = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
+                    let l = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     let span = spans[ip];
                     let v = self.eval_binary(*op, l, r, span)?;
                     stack.push(v);
                 }
                 Instr::Not => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     stack.push(Value::Bool(!v.truthy()));
                 }
                 Instr::Neg => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     match v {
                         Value::Int(n) => stack.push(Value::Int(-n)),
                         other => {
@@ -2691,14 +2706,18 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     }
                 }
                 Instr::JumpIfFalse(t) => {
-                    let c = stack.pop().ok_or_else(vm_stack_error)?;
+                    let c = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     if !c.truthy() {
                         ip = *t;
                         continue;
                     }
                 }
                 Instr::JumpIfTrue(t) => {
-                    let c = stack.pop().ok_or_else(vm_stack_error)?;
+                    let c = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     if c.truthy() {
                         ip = *t;
                         continue;
@@ -2709,11 +2728,15 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     continue;
                 }
                 Instr::Truthy => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     stack.push(Value::Bool(v.truthy()));
                 }
                 Instr::Match { negated, rhs } => {
-                    let l = stack.pop().ok_or_else(vm_stack_error)?;
+                    let l = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     let m = self.run_match(rhs, &l, route)?;
                     stack.push(Value::Bool(if *negated { !m } else { m }));
                 }
@@ -2768,8 +2791,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 // `CallFn { idx, argc }` at compile time. The built-in
                 // dispatch goes through `eval_call`.
                 Instr::Call { name, argc } => {
-                    let args: Vec<Value> =
-                        stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let args: Vec<Value> = stack.split_off(
+                        stack
+                            .len()
+                            .checked_sub(*argc)
+                            .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?,
+                    );
                     let span = spans[ip];
                     let v = self.eval_call(name, &args, route, span)?;
                     stack.push(v);
@@ -2784,8 +2811,12 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 // P2: user-function call by index — direct Vec access,
                 // no BTreeMap lookup per call.
                 Instr::CallFn { idx, argc } => {
-                    let args: Vec<Value> =
-                        stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let args: Vec<Value> = stack.split_off(
+                        stack
+                            .len()
+                            .checked_sub(*argc)
+                            .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?,
+                    );
                     let span = spans[ip];
                     let f = cf.functions.get(*idx).ok_or_else(|| EvalError {
                         kind: EvalErrorKind::UnknownFunction(format!(
@@ -2810,19 +2841,27 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                     method,
                     argc,
                 } => {
-                    let args: Vec<Value> =
-                        stack.split_off(stack.len().checked_sub(*argc).ok_or_else(vm_stack_error)?);
+                    let args: Vec<Value> = stack.split_off(
+                        stack
+                            .len()
+                            .checked_sub(*argc)
+                            .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?,
+                    );
                     let span = spans[ip];
                     let v = self.eval_method(field, method, &args, route, span)?;
                     stack.push(v);
                 }
                 Instr::AssignField(field) => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     let span = spans[ip];
                     self.assign_route_field(field, v, route, span)?;
                 }
                 Instr::AppendField(field) => {
-                    let v = stack.pop().ok_or_else(vm_stack_error)?;
+                    let v = stack
+                        .pop()
+                        .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                     let span = spans[ip];
                     self.append_route_field(field, v, route, span)?;
                 }
@@ -2836,7 +2875,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
                 Instr::Accept => return Ok(VmFlow::Accept),
                 Instr::Reject { from_stack } => {
                     let reason = if *from_stack {
-                        let v = stack.pop().ok_or_else(vm_stack_error)?;
+                        let v = stack
+                            .pop()
+                            .ok_or_else(|| vm_stack_error(spans[ip], self.line_index))?;
                         match v {
                             Value::Str(s) => Some(s),
                             other => Some(format!("{other}")),
@@ -2895,7 +2936,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
         for (param, arg) in f.params.iter().zip(args.iter()) {
             self.scopes
                 .last_mut()
-                .ok_or_else(vm_stack_error)?
+                .ok_or_else(|| vm_stack_error(span, self.line_index))?
                 .vars
                 .insert(param.clone(), arg.clone());
         }
@@ -2995,18 +3036,22 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
 
 /// VM invariant violation: the stack was empty where a value was
 /// required. Not attributable to user source (well-formed bytecode
-/// from the total compiler never underflows), so the error carries
-/// the default span / zero position.
-fn vm_stack_error() -> EvalError {
+/// from the total compiler never underflows), but the Phase 0
+/// contract (issue #18) still requires every error to carry the span
+/// of the instruction that produced it — pass the current
+/// instruction's span and the filter's [`LineIndex`] so the diagnostic
+/// points at the offending op.
+fn vm_stack_error(span: Span, line_index: &LineIndex) -> EvalError {
+    let (line, col) = line_index.line_col(span.start);
     EvalError {
         kind: EvalErrorKind::TypeMismatch {
             op: "vm".to_string(),
             lhs: "empty stack".to_string(),
             rhs: "value".to_string(),
         },
-        span: Span::default(),
-        line: 0,
-        col: 0,
+        span,
+        line,
+        col,
     }
 }
 
