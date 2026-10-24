@@ -105,6 +105,38 @@ impl RoaStore {
         inner.rebuild();
     }
 
+    /// Insert one entry into the **static** layer (the FFI's
+    /// `lr_router_add_roa_entry` path). Returns `true` when the entry
+    /// was newly inserted (the snapshot is rebuilt), `false` when it
+    /// was already present (no rebuild, no reader disturbance).
+    ///
+    /// This is the per-entry counterpart of [`Self::replace_static`]:
+    /// the same atomic snapshot swap discipline applies, just on a
+    /// one-entry patch instead of the whole table. The RTR layer is
+    /// untouched.
+    pub fn add_static(&self, entry: RoaEntry) -> bool {
+        let mut inner = self.lock();
+        if inner.static_entries.insert(entry) {
+            inner.rebuild();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Remove one entry from the **static** layer. Returns `true` when
+    /// the entry was present (the snapshot is rebuilt), `false` when
+    /// it was not in the table (no-op). Mirrors [`Self::add_static`].
+    pub fn remove_static(&self, entry: &RoaEntry) -> bool {
+        let mut inner = self.lock();
+        if inner.static_entries.remove(entry) {
+            inner.rebuild();
+            true
+        } else {
+            false
+        }
+    }
+
     /// Apply one completed sync's delta batch atomically. Per RFC 8210
     /// §5.6 duplicates coalesce and §12 code-6 unknown withdrawals are
     /// no-ops — both are the natural set semantics here, the caller

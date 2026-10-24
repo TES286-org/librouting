@@ -596,6 +596,19 @@ pub struct DefaultRouter {
     /// latches (a full table from a policy-less peer must not produce
     /// one log event per route).
     session_policy: BTreeMap<u64, SessionPolicy>,
+    /// Live ROA database (RFC 6482 / RFC 6811). Owned by the router so
+    /// FFI embedders that don't go through the daemon's DaemonFilterContext
+    /// can still install ROAs via `lr_router_add_roa_entry` and toggle
+    /// prefix-origin validation via `lr_router_set_roa_validate`. The
+    /// daemon does **not** share this store — it builds its own
+    /// `DaemonFilterContext` from `[[roa]]` config at startup, so the
+    /// two paths are independent and never stomp on each other.
+    roa: std::sync::Arc<lr_bgp::RoaStore>,
+    /// Whether the [`lr_policy::hooks::RoaValidationImportHook`] is
+    /// currently installed on `self.hooks`. Tracks the flag so
+    /// `set_roa_validate(true)` is idempotent and `set_roa_validate(false)`
+    /// can find and remove the hook again.
+    roa_validate_enabled: bool,
     /// W6.3 exchange-plane state per BGP session (feature
     /// `exchange-plane`): the last verified record set per prefix and
     /// the partial-transit counter (design §7).
@@ -703,6 +716,8 @@ impl Default for DefaultRouter {
             ebgp_requires_policy: false,
             enforce_first_as: false,
             session_policy: BTreeMap::new(),
+            roa: std::sync::Arc::new(lr_bgp::RoaStore::new()),
+            roa_validate_enabled: false,
             #[cfg(feature = "exchange-plane")]
             exchange_plane_state: BTreeMap::new(),
         }
@@ -775,6 +790,93 @@ impl DefaultRouter {
     /// True when [`Self::set_enforce_first_as`] is currently engaged.
     pub fn enforce_first_as(&self) -> bool {
         self.enforce_first_as
+    }
+
+    /// Borrow the router's live ROA store (RFC 6482 / RFC 6811).
+    ///
+    /// Returns a shared `Arc` so the caller can keep the store alive
+    /// across router mutations and the import hook can read the
+    /// latest snapshot without re-cloning. The store starts empty —
+    /// FFI embedders populate it via `lr_router_add_roa_entry`, the
+    /// daemon builds its own `DaemonFilterContext` from `[[roa]]`
+    /// config (the two paths are independent and never stomp on each
+    /// other).
+    pub fn roa_store(&self) -> &std::sync::Arc<lr_bgp::RoaStore> {
+        &self.roa
+    }
+
+    /// Replace the router's ROA store wholesale.
+    ///
+    /// Used when an embedder has its own `RoaStore` (e.g. an RTR
+    /// client thread feeding deltas into a store built off-line)
+    /// and wants the router's import hook to consult that store
+    /// instead of the default-empty one. The previously-installed
+    /// hook (if any) keeps its own `Arc` clone — call
+    /// [`Self::set_roa_validate`]`(false)` then `(true)` after the
+    /// swap so the hook re-binds to the new store.
+    pub fn set_roa_store(&mut self, store: std::sync::Arc<lr_bgp::RoaStore>) {
+        self.roa = store;
+    }
+
+    /// Insert one ROA entry into the router's static ROA layer
+    /// (the FFI's `lr_router_add_roa_entry` path). Returns `true`
+    /// when the entry was newly inserted (snapshot rebuilt), `false`
+    /// when it was already present (no-op).
+    ///
+    /// The entry's RFC 6482 invariants (`max_length >= prefix_len`,
+    /// `max_length <= family width`) are enforced at construction
+    /// time by [`lr_bgp::RoaEntry::exact`] /
+    /// [`lr_bgp::RoaEntry::with_max_length`], so callers that build
+    /// the entry through those constructors cannot smuggle a
+    /// malformed entry past this method.
+    pub fn add_roa_entry(&mut self, entry: lr_bgp::RoaEntry) -> bool {
+        self.roa.add_static(entry)
+    }
+
+    /// Toggle RFC 6811 §2 prefix-origin validation on or off.
+    ///
+    /// When on, an [`lr_policy::hooks::RoaValidationImportHook`] is
+    /// installed on the import hook chain — every BGP UPDATE is
+    /// validated against the router's [`roa_store`](Self::roa_store)
+    /// *before* it enters Adj-RIB-In. Routes whose origin AS is not
+    /// authorized by any covering ROA are dropped (`Invalid`);
+    /// `Valid` and `NotFound` routes pass through unchanged.
+    ///
+    /// When off, the hook is removed (if previously installed) and
+    /// ROA validation stops. Idempotent: turning it on twice in a row
+    /// installs the hook once; turning it off twice is a no-op.
+    ///
+    /// The hook shares its `Arc<RoaStore>` with the router — entries
+    /// added via [`Self::add_roa_entry`] after the hook is installed
+    /// are visible to the next import without re-installing it.
+    pub fn set_roa_validate(&mut self, enable: bool) {
+        if enable == self.roa_validate_enabled {
+            return;
+        }
+        if enable {
+            let hook =
+                lr_policy::hooks::RoaValidationImportHook::new(std::sync::Arc::clone(&self.roa));
+            self.hooks.import.push(Box::new(hook));
+            self.roa_validate_enabled = true;
+        } else {
+            // The hook chain is a Vec<Box<dyn ImportHook>>; we cannot
+            // compare trait objects by identity, so we rebuild the
+            // chain without `rfc6811-roa` hooks. Other import hooks
+            // (drain-mode, damping, custom embedder hooks) survive.
+            let kept: Vec<Box<dyn lr_policy::hooks::ImportHook>> = self
+                .hooks
+                .import
+                .drain(..)
+                .filter(|h| h.name() != "rfc6811-roa")
+                .collect();
+            self.hooks.import = kept;
+            self.roa_validate_enabled = false;
+        }
+    }
+
+    /// True when [`Self::set_roa_validate`] is currently engaged.
+    pub fn roa_validate_enabled(&self) -> bool {
+        self.roa_validate_enabled
     }
 
     /// Declare which directions of a BGP session carry an explicit

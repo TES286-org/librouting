@@ -373,7 +373,9 @@ fn parse_getroute_reply_reads_v6_prefsrc() {
         0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
     ];
     let reply = getroute_reply(&[(&RTA_OIF, &oif), (&RTA_PREFSRC, &prefsrc)]);
-    let queried = IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42]);
+    let queried = IpAddr::V6([
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42,
+    ]);
     let info = parse_getroute_reply(&reply, queried).unwrap();
     assert_eq!(info.if_index, 9);
     assert_eq!(info.prefsrc, Some(IpAddr::V6(prefsrc)));

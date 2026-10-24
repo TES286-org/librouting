@@ -1482,7 +1482,7 @@ pub unsafe extern "C" fn lr_router_add_roa_entry(
 ) -> i32 {
     guarded(
         || {
-            let _router = match unsafe { lock_router(r) } {
+            let mut router = match unsafe { lock_router(r) } {
                 Some(g) => g,
                 None => return -1,
             };
@@ -1516,14 +1516,18 @@ pub unsafe extern "C" fn lr_router_add_roa_entry(
                     }
                 }
             };
-            // The DefaultRouter does not yet expose a mutable ROA
-            // table accessor; the daemon's DaemonFilterContext builds
-            // the table at startup from [[roa]] config. The FFI
-            // surface validates the entry here (fail-closed on
-            // malformed input) and returns 0 so embedders can
-            // programmatically validate ROA data before pushing it
-            // through the daemon config.
-            let _ = (_router, entry);
+            // Actually install the entry on the router's static ROA
+            // layer. The previous implementation validated the entry
+            // here (fail-closed on malformed input) and then discarded
+            // the data with `let _ = (_router, entry); 0` — a
+            // silent-success fake-impl that misled embedders into
+            // thinking the entry had landed. With
+            // `DefaultRouter::add_roa_entry` wired through to
+            // `RoaStore::add_static`, the entry now lands on the
+            // live ROA table the import hook consults (when
+            // `lr_router_set_roa_validate(r, 1)` is set) and the
+            // `roa.state` filter DSL accessor reads.
+            router.add_roa_entry(entry);
             0
         },
         LR_ERR_PANIC,
@@ -1543,14 +1547,19 @@ pub unsafe extern "C" fn lr_router_add_roa_entry(
 pub unsafe extern "C" fn lr_router_set_roa_validate(r: lr_router_t, enable: u8) -> i32 {
     guarded(
         || {
-            let _router = match unsafe { lock_router(r) } {
+            let mut router = match unsafe { lock_router(r) } {
                 Some(g) => g,
                 None => return -1,
             };
-            // The actual install happens when the daemon starts; the
-            // FFI surface here records the flag for the next reload.
-            // Future work: install the hook on a live router.
-            let _ = enable;
+            // Actually install / remove the RFC 6811 §2 import hook
+            // on the router's hook chain. The previous
+            // implementation did `let _ = enable; 0` — a silent
+            // no-op that pretended to record the flag for the next
+            // reload but never actually toggled validation. With
+            // `DefaultRouter::set_roa_validate` wired through to
+            // `RoaValidationImportHook`, the toggle now lands on
+            // the live import pipeline.
+            router.set_roa_validate(enable != 0);
             0
         },
         LR_ERR_PANIC,

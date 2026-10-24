@@ -297,3 +297,135 @@ fn add_bgp_session_ext_omits_ipv4_unicast_mp_when_disabled() {
     );
     unsafe { unbox_router(r) };
 }
+
+/// Regression: `lr_router_add_roa_entry` previously validated the
+/// caller-supplied ROA entry (fail-closed on malformed input) and
+/// then discarded the data with `let _ = (_router, entry); 0` — a
+/// silent-success fake-impl. The entry never landed on the router's
+/// ROA table. Verify the entry now actually reaches the table by
+/// re-locking the router and consulting the live `RoaStore`.
+#[test]
+fn add_roa_entry_installs_into_router_roa_store() {
+    use lr_router::DefaultRouter;
+    let r = lr_router_new();
+    let prefix_v4 = [203u8, 0, 113, 0];
+    // Insert (203.0.113.0/24, max_length=24, ASN=65001) — exact-prefix
+    // authorization, the canonical ROA shape.
+    assert_eq!(
+        unsafe { lr_router_add_roa_entry(r, prefix_v4.as_ptr(), std::ptr::null(), 24, 24, 65001,) },
+        0
+    );
+    // Walk back into the boxed DefaultRouter and read the live ROA
+    // snapshot. The store starts empty, so a non-empty snapshot means
+    // the entry landed.
+    unsafe {
+        let boxed: &std::sync::Mutex<DefaultRouter> =
+            &*(r as *const std::sync::Mutex<DefaultRouter>);
+        let g = boxed.lock().unwrap();
+        let store = g.roa_store();
+        assert_eq!(store.len(), 1, "ROA store should hold one entry after add");
+        let snapshot = store.load();
+        let prefix = lr_core::addr::Prefix::v4([203, 0, 113, 0], 24);
+        // The route's origin AS is authorized: Valid.
+        assert_eq!(
+            snapshot.validate(&prefix, Some(lr_core::addr::Asn(65001))),
+            lr_bgp::RoaState::Valid,
+        );
+        // A different origin AS under the same prefix: Invalid.
+        assert_eq!(
+            snapshot.validate(&prefix, Some(lr_core::addr::Asn(666))),
+            lr_bgp::RoaState::Invalid,
+        );
+    }
+    unsafe { unbox_router(r) };
+}
+
+/// Regression: `lr_router_set_roa_validate` previously did
+/// `let _ = enable; 0` — a silent no-op that never installed the
+/// RFC 6811 §2 import hook. Verify the toggle now actually installs
+/// (and removes) the hook on the live router.
+#[test]
+fn set_roa_validate_toggles_import_hook() {
+    use lr_router::DefaultRouter;
+    let r = lr_router_new();
+    unsafe {
+        let boxed: &std::sync::Mutex<DefaultRouter> =
+            &*(r as *const std::sync::Mutex<DefaultRouter>);
+        {
+            let g = boxed.lock().unwrap();
+            assert!(
+                !g.roa_validate_enabled(),
+                "ROA validation must start disabled"
+            );
+        }
+        // Install the hook.
+        assert_eq!(lr_router_set_roa_validate(r, 1), 0);
+        {
+            let g = boxed.lock().unwrap();
+            assert!(
+                g.roa_validate_enabled(),
+                "ROA validation must be enabled after set_roa_validate(1)"
+            );
+        }
+        // Remove the hook.
+        assert_eq!(lr_router_set_roa_validate(r, 0), 0);
+        {
+            let g = boxed.lock().unwrap();
+            assert!(
+                !g.roa_validate_enabled(),
+                "ROA validation must be disabled after set_roa_validate(0)"
+            );
+        }
+        // Idempotent: on twice in a row installs once.
+        assert_eq!(lr_router_set_roa_validate(r, 1), 0);
+        assert_eq!(lr_router_set_roa_validate(r, 1), 0);
+        {
+            let g = boxed.lock().unwrap();
+            assert!(g.roa_validate_enabled());
+        }
+    }
+    unsafe { unbox_router(r) };
+}
+
+/// Regression for the previous fake-impl contract: passing NULL for
+/// both prefix pointers must still fail closed with -3 (and a clear
+/// last-error string), not silently succeed.
+#[test]
+fn add_roa_entry_rejects_null_prefix_pointers() {
+    let r = lr_router_new();
+    assert_eq!(
+        unsafe { lr_router_add_roa_entry(r, std::ptr::null(), std::ptr::null(), 24, 24, 65001,) },
+        -3
+    );
+    assert!(
+        last_error().contains("both prefix_v4 and prefix_v6 are NULL"),
+        "{}",
+        last_error()
+    );
+    unsafe { unbox_router(r) };
+}
+
+/// Regression for malformed input: a `max_length` below the prefix
+/// length is rejected by `RoaEntry::with_max_length` (RFC 6482 §3).
+/// The FFI surface must surface that error as -3, not silently
+/// discard the entry with success.
+#[test]
+fn add_roa_entry_rejects_max_length_below_prefix_len() {
+    let r = lr_router_new();
+    let prefix_v4 = [203u8, 0, 113, 0];
+    assert_eq!(
+        unsafe {
+            lr_router_add_roa_entry(
+                r,
+                prefix_v4.as_ptr(),
+                std::ptr::null(),
+                24,
+                16, // < prefix_len — RFC 6482 invariant violation
+                65001,
+            )
+        },
+        -3
+    );
+    assert!(last_error().contains("max_length"), "{}", last_error());
+    unsafe { unbox_router(r) };
+}

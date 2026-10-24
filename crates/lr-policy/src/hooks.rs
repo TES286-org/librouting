@@ -470,6 +470,75 @@ impl ImportHook for DrainModeImportHook {
     }
 }
 
+/// RFC 6811 §2 prefix-origin validation hook.
+///
+/// When installed on the import hook chain, every BGP UPDATE is
+/// validated against the supplied [`RoaStore`] *before* it enters
+/// Adj-RIB-In. Routes whose origin AS is not authorized by any
+/// covering ROA are dropped (`Invalid`); routes that no ROA covers
+/// (`NotFound`) and routes that match a covering ROA (`Valid`) pass
+/// through unchanged.
+///
+/// Routes without an origin AS (locally originated, or routes whose
+/// AS_PATH is empty / a confed-only sequence) are `NotFound` per
+/// RFC 6811 §2 and pass through.
+///
+/// The hook consults the *current* [`RoaStore`] snapshot per route
+/// — the same atomic-swap snapshot the RTR cache refreshes and the
+/// `[[roa]]` config reload path replaces. Validation therefore
+/// tracks the live cache without recompilation, exactly like the
+/// filter DSL's `roa.state` accessor.
+///
+/// This is the import-pipeline counterpart of the daemon's
+/// `DaemonFilterContext::roa_state`: where the daemon runs ROA
+/// validation inside a filter DSL evaluation, this hook runs it as
+/// a stand-alone import gate for FFI embedders that don't go through
+/// the daemon's filter surface. The two paths share the same
+/// [`RoaStore`] data.
+#[cfg(feature = "bgp")]
+#[derive(Debug, Clone)]
+pub struct RoaValidationImportHook {
+    store: std::sync::Arc<lr_bgp::RoaStore>,
+}
+
+#[cfg(feature = "bgp")]
+impl RoaValidationImportHook {
+    /// Wrap a shared [`RoaStore`] for installation on the import hook
+    /// chain. The `Arc` is shared with whatever code path mutates the
+    /// store (the FFI's `lr_router_add_roa_entry`, the daemon's RTR
+    /// thread, the `[[roa]]` reload path) so the hook always sees the
+    /// latest snapshot.
+    pub fn new(store: std::sync::Arc<lr_bgp::RoaStore>) -> Self {
+        Self { store }
+    }
+
+    /// Borrow the underlying shared store handle.
+    pub fn shared_store(&self) -> &std::sync::Arc<lr_bgp::RoaStore> {
+        &self.store
+    }
+}
+
+#[cfg(feature = "bgp")]
+impl ImportHook for RoaValidationImportHook {
+    fn name(&self) -> &str {
+        "rfc6811-roa"
+    }
+
+    fn on_import(&self, route: &mut Route) -> HookVerdict {
+        // RFC 6811 §2: Validity is a function of (prefix, origin AS).
+        // A route with no origin AS (empty AS_PATH or a confed-only
+        // sequence that did not escape its confederation) is
+        // `NotFound` and stays admissible — the daemon's filter
+        // surface treats it the same way (see DaemonFilterContext).
+        let origin = crate::bgp::as_sequence(route).last().copied();
+        let snapshot = self.store.load();
+        match snapshot.validate(&route.key.prefix, origin) {
+            lr_bgp::RoaState::Invalid => HookVerdict::Drop,
+            lr_bgp::RoaState::Valid | lr_bgp::RoaState::NotFound => HookVerdict::Keep,
+        }
+    }
+}
+
 /// A collection of hooks + safety net configuration. Aggregated by the
 /// router instance and invoked at the appropriate pipeline stages.
 #[derive(Default)]
