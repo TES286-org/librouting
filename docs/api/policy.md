@@ -313,6 +313,76 @@ the route carries (`bgp.lrxp.*`, issue #81).
 - Route-map evaluation order and implicit deny are FRR behaviour, not an
   RFC.
 
+### Babel per-route attributes — `babel.metric` / `babel.seqno` / `babel.router_id`
+
+The Babel per-route attribute surface mirrors BIRD's `babel_metric`,
+`babel_router_id` and `babel_seqno` eattrs (RFC 8966 §3.2 — the
+route's `(prefix, source-prefix, router-id, seqno)` four-tuple key
+and the metric the decision process ranks against). The three
+attributes surface through the filter DSL:
+
+- `babel.metric` (RFC 8966 §3.2 + §3.4.3) — the value the Update
+  TLV advertised, folded into `route.preference.metric` by the
+  Babel route computation after applying the receiver-side link
+  cost. Read-only `int`, `0` when the route is not Babel,
+  mirroring BIRD's eattr default for an unattached `babel_metric`
+  reference. `defined(babel.metric)` distinguishes "non-Babel
+  route" from "Babel route with metric 0" via
+  `lr-policy::babel::has_metric`. The read is one branch on
+  `route.protocol` plus one field read (no allocation), so the
+  peephole pass's `BranchFieldIntCmp` fast path fuses
+  `babel.metric == N` / `> N` / etc. comparisons the same way it
+  fuses `ospf.metric1` / `bgp.local_pref` / `bgp.med` /
+  `bgp.otc`.
+- `babel.seqno` (RFC 8966 §3.2 + §4.6.9) — the source's sequence
+  number the feasibility machinery ranks against. Read-only `int`,
+  `0` when the route is not Babel, mirroring BIRD's eattr default
+  for an unattached `babel_seqno` reference. `defined(babel.seqno)`
+  distinguishes "non-Babel route" from "Babel route with seqno 0"
+  via `lr-policy::babel::has_seqno` (RFC 8966 §3.1 treats 0 as a
+  valid sequence number). The seqno rides the private
+  `LrBabelSeqno` path-attribute tag (code point 251 — stripped at
+  BGP encode, the same shape `LrOspfMetric2` at 253 uses), and
+  the Babel route computation
+  (`lr-router::instance::babel::BabelRuntime::best_routes`)
+  attaches the attribute for every published Babel route,
+  populated from the Update TLV's seqno. The peephole pass's
+  `BranchFieldIntCmp` fast path fuses `babel.seqno == N` / `> N` /
+  etc. comparisons the same way it fuses `ospf.metric2` /
+  `ospf.tag` / `ospf.router_id`.
+- `babel.router_id` (RFC 8966 §3.2 + §4.6.8) — the 64-bit
+  EUI-64-style value the route's source claims, carried in every
+  Update TLV's Router-Id TLV. Read-only `int`, `0` when the route
+  is not Babel, mirroring BIRD's eattr default for an unattached
+  `babel_router_id` reference — though BIRD stores the value as
+  an opaque 8-byte bytestring under `EAF_TYPE_OPAQUE`, lr's DSL
+  exposes it as a 64-bit `Int` for the canonical
+  `defined(babel.router_id)` idiom and for direct equality
+  against the route's i64-form literal; a value with the high
+  bit set (>= `0x8000_0000_0000_0000`) reads as a negative i64
+  but round-trips losslessly for the comparison operator (the
+  lexer parses i64 literals). `defined(babel.router_id)`
+  distinguishes "no attribute" from "attribute present but zero"
+  via `lr-policy::babel::has_router_id` (RFC 8966 §3.1 does not
+  forbid Router-ID 0; the EUI-64 form discourages it but the
+  protocol accepts any 64-bit value). The Router-ID rides the
+  private `LrBabelRouterId` path-attribute tag (code point 250 —
+  stripped at BGP encode, the same shape `LrOspfRouterId` at 252
+  uses), and the Babel route computation
+  (`lr-router::instance::babel::BabelRuntime::best_routes`)
+  attaches the attribute for every published Babel route,
+  populated from the Router-Id TLV's 64-bit value. The peephole
+  pass's `BranchFieldIntCmp` fast path fuses
+  `babel.router_id == N` / `> N` / etc. comparisons the same way
+  it fuses `ospf.router_id` / `ospf.metric2` / `ospf.tag`.
+
+The BIRD translator renames `babel_metric` to `babel.metric`,
+`babel_seqno` to `babel.seqno` and `babel_router_id` to
+`babel.router_id` (and removes the `babel_` prefix from
+`UNMAPPABLE_PREFIXES`); with this release every BIRD per-route
+filter attribute the BIRD 2 grammar declares under the
+`ospf_*` / `babel_*` prefixes has a faithful lr-DSL spelling.
+
 ## See also
 
 - [`bgp.md`](bgp.md) — the sessions these hooks run in front of.

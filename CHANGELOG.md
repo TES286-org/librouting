@@ -13,7 +13,7 @@ is the consumer-facing summary — protocol features that ship, breaking
 changes that affect embedders, dependency bumps. Forward-looking work
 lives in [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
-## [Unreleased] — minor: PMSI Tunnel, OSPF metric1/2, tag, router_id filter DSL
+## [Unreleased] — minor: PMSI Tunnel, OSPF + Babel per-route filter DSL
 
 The next minor release exposes the RFC 6514 §5 PMSI Tunnel attribute
 in the filter DSL as `bgp.pmsi_tunnel` (read-only `bool` — `true`
@@ -28,27 +28,56 @@ reference), the RFC 2328 §A.4.5 bullet h / RFC 3101 §2.3 /
 RFC 5340 §A.4.7 T bit / RFC 8362 §3.6 External-Prefix sub-TLV 3
 external route tag as `ospf.tag` (read-only `int` — `0` when the
 route carries no tag, mirroring BIRD's eattr default for an
-unattached `ospf_tag` reference) and the RFC 2328 §A.4 /
+unattached `ospf_tag` reference), the RFC 2328 §A.4 /
 RFC 5340 §A.4 OSPF `Advertising Router` field as `ospf.router_id`
 (read-only `int` — `0` when the route carries no OSPF router-id
 attribute, mirroring BIRD's eattr default for an unattached
-`ospf_router_id` reference). Per `docs/RELEASE-PLAN.md` §1, the
+`ospf_router_id` reference), the RFC 8966 §3.2 + §3.4.3 primary
+Babel metric as `babel.metric` (read-only `int` — `0` when the
+route is not Babel, mirroring BIRD's eattr default for an
+unattached `babel_metric` reference), the RFC 8966 §3.2 + §4.6.9
+Babel sequence number as `babel.seqno` (read-only `int` — `0`
+when the route is not Babel, mirroring BIRD's eattr default for
+an unattached `babel_seqno` reference — RFC 8966 §3.1 treats 0 as
+a valid sequence number, so `defined(babel.seqno)` distinguishes
+"non-Babel route" from "Babel route with seqno 0"), and the RFC
+8966 §3.2 + §4.6.8 Babel Router-ID as `babel.router_id`
+(read-only `int` — `0` when the route is not Babel, mirroring
+BIRD's eattr default for an unattached `babel_router_id`
+reference — though BIRD stores the value as an opaque 8-byte
+bytestring under `EAF_TYPE_OPAQUE`, lr's DSL exposes it as a
+64-bit `Int` for the canonical `defined(babel.router_id)` idiom
+and for direct equality against the route's i64-form literal;
+`defined(babel.router_id)` distinguishes "no attribute" from
+"attribute present but zero" — RFC 8966 §3.1 does not forbid
+Router-ID 0, the EUI-64 form discourages it but the protocol
+accepts any 64-bit value). Per `docs/RELEASE-PLAN.md` §1, the
 public Rust API gains new surface (`RouteFieldKind::BgpPmsiTunnel`,
 `RouteFieldKind::OspfMetric1`, `RouteFieldKind::OspfMetric2`,
 `RouteFieldKind::OspfTag`, `RouteFieldKind::OspfRouterId`,
-`AttrType::LrOspfMetric2`, `AttrType::LrOspfRouterId`, ten new
+`RouteFieldKind::BabelMetric`, `RouteFieldKind::BabelSeqno`,
+`RouteFieldKind::BabelRouterId`,
+`AttrType::LrOspfMetric2`, `AttrType::LrOspfRouterId`,
+`AttrType::LrBabelSeqno`, `AttrType::LrBabelRouterId`, sixteen new
 `FilterContext` trait methods with default impls, the
 `lr-policy::bgp::{pmsi_tunnel, has_pmsi_tunnel}` helpers, the
 `lr-policy::ospf::{metric1, has_metric1}` helpers, the
 `lr-policy::ospf::{metric2, has_metric2}` helpers, the
 `lr-policy::ospf::{tag, has_tag}` helpers and the new
-`lr-policy::ospf::{router_id, has_router_id}` helpers, the
+`lr-policy::ospf::{router_id, has_router_id}` helpers, the new
+`lr-policy::babel::{metric, has_metric}` / `{seqno, has_seqno}` /
+`{router_id, has_router_id}` helpers, the
 `lr-bgp::path::well_known::PmsiTunnel` typed view, the
 `lr-bgp::path::PathAttributes::pmsi_tunnel` / `has_pmsi_tunnel`
 accessors, the `lr-bgp::path::PathAttributes::set_ospf_metric2`
 / `ospf_metric2` / `has_ospf_metric2` accessors, the new
 `lr-bgp::path::PathAttributes::set_ospf_router_id` /
 `ospf_router_id` / `has_ospf_router_id` accessors, the new
+`lr-bgp::path::PathAttributes::set_babel_seqno` / `babel_seqno`
+/ `has_babel_seqno` accessors, the new
+`lr-bgp::path::PathAttributes::set_babel_router_id` /
+`babel_router_id` / `has_babel_router_id` accessors, the new
+`Attributes::get_u64_be` helper on `lr-core::attr`, the new
 `router_id: Option<u32>` field on `lr-ospf::spf::SpfRoute`, and two
 new public fields on `lr-ospf::external::ExternalRoute` and
 `ExternalRouteV3` carrying the LSA's external route tag); the new
