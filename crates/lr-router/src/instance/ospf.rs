@@ -25,10 +25,16 @@ use lr_ospf::packet::{
 /// area — LSAs flooded within an area belong to the area, not to the
 /// adjacency that happened to deliver them). See [`OspfAreaState`].
 ///
-/// This is a simplified but functional driver: Hellos advance the
-/// neighbor FSM and LS-Updates are handed to the area LSDB. Full
-/// DBD/LSR exchange sequencing is the embedder's job to extend (the FSM
-/// states are all exposed).
+/// The runtime drives the full RFC 2328 §10 adjacency lifecycle:
+/// Hellos advance the neighbor FSM (Init / 2-Way / ExStart / Exchange /
+/// Loading / Full), DBDs negotiate the master/slave role and seed the
+/// LS-Request queue (§10.6 + §10.7 via `DbExchange`), LS-Requests are
+/// satisfied from the area LSDB (§10.9), LS-Updates flow into the area
+/// LSDB through the exchange driver (§13), and LS-Acks are received
+/// fire-and-forget (§13.7). [`OspfRuntime::handle_packet`] is the
+/// dispatch point; the exchange state is owned by
+/// [`lr_ospf::exchange::DbExchange`] so the codec can stream-decode the
+/// packet body without holding the LSDB lock.
 pub(super) struct OspfRuntime {
     pub(super) router_id: u32,
     pub(super) area_id: u32,
