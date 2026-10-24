@@ -25,7 +25,7 @@
 //! regressed.
 
 use criterion::{criterion_group, criterion_main, Criterion, Throughput};
-use lr_bgp::roa::{RoaEntry, RoaState, RoaTable, RoaTableBuilder};
+use lr_bgp::roa::{RoaState, RoaTable, RoaTableBuilder};
 use lr_core::addr::{Asn, Prefix};
 use std::hint::black_box;
 
@@ -80,9 +80,3 @@ fn bench_roa_validate(c: &mut Criterion) {
 
 criterion_group!(benches, bench_roa_validate);
 criterion_main!(benches);
-
-// Use the unused `RoaEntry` import to avoid warnings — the
-// bench imports the type for documentation references but does
-// not construct entries directly.
-#[allow(dead_code)]
-fn _roa_entry_unused(_e: RoaEntry) {}
