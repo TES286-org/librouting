@@ -317,10 +317,14 @@ impl BgpPeer {
             && self.extended_next_hop_for(1, 1, 2)
             && matches!(next_hop, Some(lr_core::addr::IpAddr::V6(_)));
         if enh_ipv4_over_v6 {
-            let nh = match next_hop {
-                Some(lr_core::addr::IpAddr::V6(b)) => MpNextHop::V4OverV6(b),
-                _ => unreachable!("checked above"),
+            // The `enh_ipv4_over_v6` guard above narrows `next_hop` to
+            // `Some(IpAddr::V6(_))`; `let`-`else` makes the proof local
+            // at the type level — no inline `match` whose `_` arm can
+            // rot if the guard is ever refactored.
+            let Some(lr_core::addr::IpAddr::V6(b)) = next_hop else {
+                unreachable!("enh_ipv4_over_v6 guard narrowed next_hop to Some(V6)");
             };
+            let nh = MpNextHop::V4OverV6(b);
             attrs.remove(AttrType::NextHop);
             attrs.remove(AttrType::MpReachNlri);
             attrs.remove(AttrType::MpUnreachNlri);
