@@ -49,7 +49,10 @@
 //!
 //! The End.X / LAN End.X projection update that consumes this codec
 //! to attach the SRv6 Endpoint Behavior TLV to a projected End.X
-//! NLRI is a separate follow-up; this module is the foundation.
+//! NLRI landed in 1.3.0 via
+//! `lr-router::instance::DefaultRouter::bgpls_republish_end_x` —
+//! see `crates/lr-router/src/instance/mod.rs` and the End.X tests in
+//! `crates/lr-router/src/instance/tests.rs`.
 
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::error::{EncodeError, ParseError};

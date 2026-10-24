@@ -69,17 +69,23 @@
 //!
 //! This is the codec half of issue #60's work breakdown. The OSPF LSDB
 //! → BGP-LS projection (RFC 7752 §3 with SR-MPLS / SRv6 descriptors)
-//! and the daemon wiring (`--bgp-ls` flag, capability negotiation) are
-//! separate follow-ups. The SRv6 SID NLRI (RFC 9514 §6, NLRI Type 6) is
-//! modelled in full at the NLRI level: the inner SRv6 SID Descriptor
-//! TLV stream is parsed into a typed [`Srv6SidDescriptor`] carrying the
-//! mandatory SRv6 SID Information TLV (§6.1, type 518, 16-byte SID) and
-//! any optional Multi-Topology ID TLV (RFC 7752 §3.2.1.5, type 263).
+//! lives in `lr-router::instance::lsdb_to_bgpls` and is exercised by
+//! the daemon's `--bgp-ls` flag (`crates/lr-cli/src/daemon.rs`,
+//! `BgplsDriver`) which advertises the BGP-LS AFI/SAFI on the BGP
+//! sessions that opt in. The SRv6 SID NLRI (RFC 9514 §6, NLRI Type 6)
+//! is modelled in full at the NLRI level: the inner SRv6 SID
+//! Descriptor TLV stream is parsed into a typed [`Srv6SidDescriptor`]
+//! carrying the mandatory SRv6 SID Information TLV (§6.1, type 518,
+//! 16-byte SID) and any optional Multi-Topology ID TLV (RFC 7752
+//! §3.2.1.5, type 263).
 //!
 //! The BGP-LS *Attribute* TLVs that ride alongside the SRv6 SID NLRI
 //! (RFC 9514 §7 SRv6 Endpoint Behavior, §8 SRv6 SID Structure) are a
 //! separate codec surface — they live in the BGP-LS Attribute, not in
-//! the NLRI — and are out of scope for this module.
+//! the NLRI — and are modelled in [`crate::path::bgp_ls_attr`]. The
+//! End.X / LAN End.X projection update (attaching the §7 attribute
+//! to a projected End.X NLRI) is wired through
+//! `lr-router::instance::DefaultRouter::bgpls_republish_end_x`.
 
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::error::{EncodeError, ParseError};
