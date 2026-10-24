@@ -194,24 +194,65 @@ impl RoaStore {
     /// (RFC 8210 cache), or `both` (present in both layers, deduplicated
     /// into one in the merged snapshot).
     ///
+    /// # Contract
+    ///
+    /// The caller is expected to pass an entry drawn from
+    /// [`load`](Self::load)`().entries()` (or one that was added to
+    /// either layer via [`replace_static`](Self::replace_static) or
+    /// [`apply_rtr_deltas`](Self::apply_rtr_deltas)). An entry that
+    /// is in *neither* layer is an orphan; the unchecked API returns
+    /// `RoaProvenance::Static` as a historical fallback (it is not
+    /// part of the operator protocol, so the wire shape is stable)
+    /// but fires a `debug_assert!` so test paths that misuse the API
+    /// surface the problem. Use
+    /// [`provenance_of_checked`](Self::provenance_of_checked) to
+    /// surface orphan entries as `None` instead of mislabeling them
+    /// as static.
+    ///
     /// Performance: two `HashSet::contains` calls under a read lock.
     /// The lock is held only for the duration of the lookups; the
     /// `RoaEntry` is `Copy` so no allocation is needed.
     pub fn provenance_of(&self, entry: &RoaEntry) -> RoaProvenance {
+        // The historical contract: callers pass an entry drawn from
+        // `snapshot.entries()`, so the `(false, false)` arm is
+        // unreachable in production. Keep the legacy `Static` fallback
+        // (it is not part of the operator protocol, so the wire shape
+        // is stable) but fire a `debug_assert!` so test paths that
+        // misuse the unchecked API surface the problem. Callers that
+        // need to handle orphan entries explicitly should use
+        // [`provenance_of_checked`](Self::provenance_of_checked),
+        // which returns `Option<RoaProvenance>` and reports `None`
+        // for entries that are in neither layer.
+        let provenance = self.provenance_of_checked(entry);
+        provenance.unwrap_or_else(|| {
+            debug_assert!(
+                false,
+                "provenance_of: entry {entry:?} is in neither layer; \
+                 use provenance_of_checked for unknown entries"
+            );
+            RoaProvenance::Static
+        })
+    }
+
+    /// Like [`provenance_of`](Self::provenance_of) but reports `None`
+    /// for orphan entries that are in neither the static nor the RTR
+    /// layer. New callers should prefer this variant — the unchecked
+    /// API returns `RoaProvenance::Static` as a historical fallback
+    /// for orphan entries, which mislabels the entry (an orphan is in
+    /// *no* layer, not in the static layer).
+    ///
+    /// Performance: two `HashSet::contains` calls under a read lock.
+    /// The lock is held only for the duration of the lookups; the
+    /// `RoaEntry` is `Copy` so no allocation is needed.
+    pub fn provenance_of_checked(&self, entry: &RoaEntry) -> Option<RoaProvenance> {
         let inner = self.read();
         let in_static = inner.static_entries.contains(entry);
         let in_rtr = inner.rtr_entries.contains(entry);
         match (in_static, in_rtr) {
-            (true, true) => RoaProvenance::Both,
-            (true, false) => RoaProvenance::Static,
-            (false, true) => RoaProvenance::Rtr,
-            // An entry not in either layer should not happen — the
-            // merged snapshot is the union of the two layers, so
-            // every entry in `snapshot.entries()` is in at least one.
-            // Report `Static` as a defensive fallback (the entry came
-            // from somewhere; the operator can investigate via the
-            // per-layer counts in the summary line).
-            (false, false) => RoaProvenance::Static,
+            (true, true) => Some(RoaProvenance::Both),
+            (true, false) => Some(RoaProvenance::Static),
+            (false, true) => Some(RoaProvenance::Rtr),
+            (false, false) => None,
         }
     }
 
@@ -510,11 +551,24 @@ mod tests {
         store.replace_static([b]);
         store.apply_rtr_deltas(&[delta(true, b)]);
         assert_eq!(store.provenance_of(&b), RoaProvenance::Both);
+    }
 
-        // Entry not in either layer — defensive fallback to Static.
+    #[test]
+    fn provenance_of_checked_returns_none_for_orphan() {
+        // The checked API surfaces the orphan case the unchecked
+        // `provenance_of` historically reported as `Static`. New
+        // callers should prefer `provenance_of_checked` so an unknown
+        // entry is reported as `None`, not mislabeled as static.
         let store = RoaStore::new();
         let orphan = entry(p4([192, 0, 2, 0], 24), 24, 64514);
-        assert_eq!(store.provenance_of(&orphan), RoaProvenance::Static);
+        assert_eq!(store.provenance_of_checked(&orphan), None);
+
+        // The checked API agrees with `provenance_of` on entries that
+        // are actually present.
+        let store = RoaStore::new();
+        let s = entry(p4([203, 0, 113, 0], 24), 24, 64512);
+        store.replace_static([s]);
+        assert_eq!(store.provenance_of_checked(&s), Some(RoaProvenance::Static));
     }
 
     #[test]

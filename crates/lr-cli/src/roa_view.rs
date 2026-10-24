@@ -71,12 +71,18 @@ fn render_summary(total: usize, static_count: usize, rtr_count: usize) -> String
 }
 
 /// Walk the merged snapshot and emit one line per entry. Provenance
-/// is recovered per-entry via [`RoaStore::provenance_of`], so each
-/// line reports the exact layer membership (`static`, `rtr`, or
-/// `both`) rather than a coarse table-wide value.
+/// is recovered per-entry via [`RoaStore::provenance_of_checked`], so
+/// each line reports the exact layer membership (`static`, `rtr`, or
+/// `both`) rather than a coarse table-wide value. An orphan entry
+/// (present in neither layer) surfaces as `unknown` instead of the
+/// historical `static` fallback, so the operator can spot snapshot
+/// corruption without consulting the per-layer counts.
 fn render_entries(out: &mut String, snapshot: &Arc<RoaTable>, store: &RoaStore) {
     for entry in snapshot.entries() {
-        let source = store.provenance_of(entry).as_str();
+        let source = store
+            .provenance_of_checked(entry)
+            .map(|p| p.as_str())
+            .unwrap_or("unknown");
         let _ = writeln!(
             out,
             "{} max-length {} as {} source {}",
