@@ -1304,9 +1304,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // `route.protocol` plus one field read, no BTreeMap
             // lookup, no allocation. The same shape
             // `ospf.metric1` exposes for OSPF.
-            RouteFieldKind::BabelMetric => Ok(Value::Int(
-                self.ctx.babel_metric(route).unwrap_or(0) as i64,
-            )),
+            RouteFieldKind::BabelMetric => {
+                Ok(Value::Int(self.ctx.babel_metric(route).unwrap_or(0) as i64))
+            }
             // RFC 8966 §3.2 + §4.6.9 — `babel.seqno` reads the
             // private `LrBabelSeqno` path-attribute tag the Babel
             // route computation attaches to every Babel route it
@@ -1317,9 +1317,9 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // tag). Returns the unwrap_or(0) default for a
             // non-Babel route, mirroring BIRD's eattr default for
             // an unattached `babel_seqno` reference.
-            RouteFieldKind::BabelSeqno => Ok(Value::Int(
-                i64::from(self.ctx.babel_seqno(route).unwrap_or(0)),
-            )),
+            RouteFieldKind::BabelSeqno => Ok(Value::Int(i64::from(
+                self.ctx.babel_seqno(route).unwrap_or(0),
+            ))),
             // RFC 8966 §3.2 + §4.6.8 — `babel.router_id` reads the
             // private `LrBabelRouterId` path-attribute tag the
             // Babel route computation attaches to every Babel
@@ -1486,9 +1486,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // comparison-branch hot path. The same shape
             // `ospf.metric2` exposes for the OSPF type-2 external
             // metric (which reads a different private tag).
-            RouteFieldKind::BabelSeqno => {
-                i64::from(self.ctx.babel_seqno(route).unwrap_or(0))
-            }
+            RouteFieldKind::BabelSeqno => i64::from(self.ctx.babel_seqno(route).unwrap_or(0)),
             // `babel.router_id` reads the private `LrBabelRouterId`
             // path-attribute tag the Babel route computation
             // attaches to every Babel route it publishes — one
@@ -1505,9 +1503,7 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // advertising-router ID (which reads a 4-byte tag
             // instead of the Babel form's 8-byte tag, but the read
             // shape is identical).
-            RouteFieldKind::BabelRouterId => {
-                self.ctx.babel_router_id(route).unwrap_or(0) as i64
-            }
+            RouteFieldKind::BabelRouterId => self.ctx.babel_router_id(route).unwrap_or(0) as i64,
             // The peephole pass's `is_int_field` gate guarantees
             // one of the arms above; the LRXP int-typed fields
             // and `bgp.aigp` fall through to the unreachable arm

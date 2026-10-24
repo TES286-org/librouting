@@ -3910,10 +3910,7 @@ fn babel_seqno_is_defined_iff_babel_route_with_attribute() {
 fn babel_seqno_defined_distinguishes_absent_from_seqno_zero() {
     let mut r_zero = babel_route_with_seqno(192, 0);
     assert_eq!(
-        run(
-            "if defined(babel.seqno) then accept; reject;",
-            &mut r_zero
-        ),
+        run("if defined(babel.seqno) then accept; reject;", &mut r_zero),
         EvalResult::Accept,
     );
     let mut r_absent = babel_route_with_metric(42);

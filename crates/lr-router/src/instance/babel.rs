@@ -589,9 +589,7 @@ impl BabelRuntime {
                 // `lr-router::instance::ospf_ops::ospf_recompute`.
                 let mut attributes = lr_core::attr::Attributes::new();
                 attributes.insert(lr_core::attr::Attribute {
-                    tag: lr_core::attr::AttrTag::raw(
-                        lr_bgp::path::AttrType::LrBabelSeqno.to_u8(),
-                    ),
+                    tag: lr_core::attr::AttrTag::raw(lr_bgp::path::AttrType::LrBabelSeqno.to_u8()),
                     flags: 0x80, // optional, non-transitive
                     value: (u32::from(r.seqno)).to_be_bytes().to_vec(),
                 });

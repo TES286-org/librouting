@@ -180,25 +180,23 @@ fn babel_announcement_attaches_seqno_and_router_id_attributes() {
     let route = r
         .rib_snapshot()
         .into_iter()
-        .find(|rt| rt.protocol == Protocol::Babel && rt.key.prefix == Prefix::new_v4([10, 99, 1, 0], 24))
+        .find(|rt| {
+            rt.protocol == Protocol::Babel && rt.key.prefix == Prefix::new_v4([10, 99, 1, 0], 24)
+        })
         .expect("babel route published");
 
     assert_eq!(route.preference.metric, 192);
     assert_eq!(
-        route
-            .attributes
-            .get_u32_be(lr_core::attr::AttrTag::raw(
-                lr_bgp::path::AttrType::LrBabelSeqno.to_u8()
-            )),
+        route.attributes.get_u32_be(lr_core::attr::AttrTag::raw(
+            lr_bgp::path::AttrType::LrBabelSeqno.to_u8()
+        )),
         Some(1),
         "LrBabelSeqno carries the source's seqno (1)"
     );
     assert_eq!(
-        route
-            .attributes
-            .get_u64_be(lr_core::attr::AttrTag::raw(
-                lr_bgp::path::AttrType::LrBabelRouterId.to_u8()
-            )),
+        route.attributes.get_u64_be(lr_core::attr::AttrTag::raw(
+            lr_bgp::path::AttrType::LrBabelRouterId.to_u8()
+        )),
         Some(0x0102_0304_0506_0708),
         "LrBabelRouterId carries the source's 64-bit Router-ID"
     );

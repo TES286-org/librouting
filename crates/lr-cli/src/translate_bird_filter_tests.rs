@@ -345,7 +345,10 @@ fn babel_metric_renames_to_dotted_field() {
 #[test]
 fn babel_metric_defined_predicate_translates() {
     let c = ctx(&[], 0);
-    let out = body_ok("if defined(babel_metric) && babel_metric = 0 then accept;", &c);
+    let out = body_ok(
+        "if defined(babel_metric) && babel_metric = 0 then accept;",
+        &c,
+    );
     assert!(
         out.contains("defined(babel.metric)"),
         "expected `defined(babel.metric)` in output, got: {out}"
@@ -397,10 +400,7 @@ fn babel_seqno_defined_predicate_translates() {
 #[test]
 fn babel_router_id_renames_to_dotted_field() {
     let c = ctx(&[], 0);
-    let out = body_ok(
-        "if defined(babel_router_id) then accept; reject;",
-        &c,
-    );
+    let out = body_ok("if defined(babel_router_id) then accept; reject;", &c);
     assert!(
         out.contains("defined(babel.router_id)"),
         "expected `defined(babel.router_id)` in output, got: {out}"

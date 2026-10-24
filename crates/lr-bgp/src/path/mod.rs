@@ -846,8 +846,8 @@ impl PathAttributes {
             return None;
         }
         Some(u64::from_be_bytes([
-            a.value[0], a.value[1], a.value[2], a.value[3],
-            a.value[4], a.value[5], a.value[6], a.value[7],
+            a.value[0], a.value[1], a.value[2], a.value[3], a.value[4], a.value[5], a.value[6],
+            a.value[7],
         ]))
     }
 
