@@ -45,8 +45,17 @@
 //!   └─────────────────────────────────────────────────────┘
 //! ```
 //!
-//! Kernel MPLS installation of learned bindings is future work (the
-//! BGP-LU dataplane mirror covers that role today).
+//! Kernel MPLS installation of learned bindings is wired under
+//! `[ldp] install_kernel` (Linux only; non-Linux platforms skip the
+//! mirror). The daemon owns three kernel-route shapes: a pop route per
+//! local binding label (tail), an encap route per learned binding
+//! (head), and a transit swap route for label-swapped traffic. The
+//! plumbing lives in [`LdpDaemon::install_tail`] /
+//! [`install_head`] / [`install_swap`] (and their `uninstall_*`
+//! counterparts); the per-route state is keyed by prefix so
+//! withdrawals and session teardown reverse the right LSP. The
+//! BGP-LU dataplane mirror covers the same role for BGP-derived
+//! labels; the two paths share `lr-osroute::mpls_route`.
 
 use crate::Component;
 use std::collections::{BTreeSet, HashMap};

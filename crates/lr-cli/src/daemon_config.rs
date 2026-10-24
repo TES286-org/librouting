@@ -597,8 +597,12 @@ impl LdpTargetedSpec {
 
 /// One `[[ldp.bind]]` table (or `--ldp-bind` flag): a local FEC-label
 /// binding advertised downstream-unsolicited to every operational
-/// peer. Explicit (deterministic) label allocation; automatic
-/// allocation from a label range is future work.
+/// peer. Labels are allocated explicitly when the table carries a
+/// non-zero `label` value, or automatically from the `[ldp]
+/// label_min..=label_max` range when `label = 0` — the daemon walks
+/// the range, hands out the first free value that does not collide
+/// with an explicit bind, and rewrites the entry in place (see
+/// `DaemonConfig::finalize_ldp`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct LdpBindSpec {
     /// FEC prefix (`"203.0.113.0/24"`), required.
