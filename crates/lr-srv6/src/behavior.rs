@@ -32,11 +32,12 @@
 //! against the live registry
 //! (`https://www.iana.org/assignments/segment-routing/`): RFC 8986
 //! assigned the contiguous block 1–24 plus 26–39 (25 is Reserved);
-//! later RFCs appended from 40 (End.MAP/End.Limit, RFC 9433; the
-//! NEXT-CSID family, RFC 9800). Unassigned values are `None` from
-//! [`Behavior::from_wire`]; RFC 8986 §4.19 says the data plane treats
-//! them as "End.Un" (count and drop), which is a *policy*, not a
-//! registry value, so no variant is synthesized for it.
+//! RFC 9433 appended 40 (End.MAP) and 41 (End.Limit) for the 3GPP
+//! mobile user plane. The NEXT-CSID family from RFC 9800 starts at
+//! 42 and is not modelled here yet. Unassigned values are `None`
+//! from [`Behavior::from_wire`]; RFC 8986 §4.19 says the data plane
+//! treats them as "End.Un" (count and drop), which is a *policy*,
+//! not a registry value, so no variant is synthesized for it.
 //!
 //! ## PSP / USP / USD flavors
 //!
@@ -158,9 +159,24 @@ pub enum Behavior {
     EndTUspUsd = 38,
     /// End.T with PSP, USP & USD (RFC 8986 §4.3 + §4.16).
     EndTPspUspUsd = 39,
-    // Later RFC assignments (40 End.MAP / 41 End.Limit — RFC 9433;
-    // the NEXT-CSID family — RFC 9800) are not modelled yet; add them
-    // here with their registry values when needed.
+    /// End.MAP — SRv6 mobile user-plane mapping (RFC 9433 §6.2).
+    /// The endpoint replaces the active SID (a per-PDU-session
+    /// anchoring SID) with the next-hop SID stored in its local
+    /// mapping table, then forwards. Used in 3GPP mobile user-plane
+    /// interworking to chain UPFs without re-encapsulating.
+    EndMap = 40,
+    /// End.Limit — per-session rate-limit (RFC 9433 §6.8). Rate-
+    /// limits traffic destined to the SID by the configured policy,
+    /// letting the operator cap the bandwidth consumed by a mobile
+    /// session independently of forwarding. The packet is otherwise
+    /// processed as `End` (RFC 8986 §4.1).
+    EndLimit = 41,
+    // The NEXT-CSID family (RFC 9800) starts at 42 — RFC 9800
+    // assigns a contiguous block (End/End.X/End.T with NEXT-CSID
+    // and their flavor combinations, plus the uDX/uDT short forms).
+    // Modelling that family requires the 16-octet CSID layout rules
+    // (RFC 9800 §5) on top of the variant set, so it is left for a
+    // follow-up that lands the full block at once.
 }
 
 impl Behavior {
@@ -171,11 +187,11 @@ impl Behavior {
 
     /// Look up a behavior by its 16-bit wire value. Returns `None`
     /// for unassigned values (RFC 8986 §9.2 — the registry is sparse:
-    /// 0 is invalid, 25 is Reserved, and everything ≥ 40 currently
-    /// unassigned by this crate is either a later-RFC assignment the
-    /// crate does not model or genuinely unallocated; both MUST be
-    /// treated as `End.Un` per §4.19 by data-plane policy, but the
-    /// crate leaves that decision to the caller).
+    /// 0 is invalid, 25 is Reserved, and the values ≥ 42 the crate
+    /// does not model yet (the NEXT-CSID family from RFC 9800 and
+    /// later assignments) MUST be treated as `End.Un` per §4.19 by
+    /// data-plane policy, but the crate leaves that decision to the
+    /// caller).
     pub fn from_wire(v: u16) -> Option<Self> {
         // Match on the literal value so the mapping stays a
         // reviewable transcript of the registry itself.
@@ -218,6 +234,8 @@ impl Behavior {
             37 => Self::EndTPspUsd,
             38 => Self::EndTUspUsd,
             39 => Self::EndTPspUspUsd,
+            40 => Self::EndMap,
+            41 => Self::EndLimit,
             _ => return None,
         })
     }
@@ -265,6 +283,8 @@ impl Behavior {
             Self::EndTPspUsd => "End.T with PSP & USD",
             Self::EndTUspUsd => "End.T with USP & USD",
             Self::EndTPspUspUsd => "End.T with PSP, USP & USD",
+            Self::EndMap => "End.MAP",
+            Self::EndLimit => "End.Limit",
         }
     }
 
@@ -476,13 +496,40 @@ mod tests {
 
     #[test]
     fn behavior_from_wire_unassigned() {
-        // 0 is invalid, 25 Reserved, 40+ unassigned-or-unmodelled,
-        // and the registry's high ranges (32768+ Private Use is the
-        // only other populated block) are not behaviors either.
+        // 0 is invalid, 25 Reserved, 42+ unassigned-or-unmodelled
+        // (NEXT-CSID family from RFC 9800 starts at 42), and the
+        // registry's high ranges (32768+ Private Use is the only
+        // other populated block) are not behaviors either.
         assert!(Behavior::from_wire(0).is_none());
         assert!(Behavior::from_wire(25).is_none());
-        assert!(Behavior::from_wire(40).is_none());
+        assert!(Behavior::from_wire(42).is_none());
         assert!(Behavior::from_wire(u16::MAX).is_none());
+    }
+
+    /// RFC 9433 §6.2 (End.MAP) and §6.8 (End.Limit) wire values,
+    /// checked against the live IANA registry:
+    /// <https://www.iana.org/assignments/segment-routing/srv6-endpoint-behaviors.csv>
+    /// (rows `40,0x0028,End.MAP,[RFC 9433],IETF` and
+    /// `41,0x0029,End.Limit,[RFC 9433],IETF`).
+    #[test]
+    fn behavior_rfc_9433_assignments() {
+        let map = Behavior::from_wire(40).expect("End.MAP assigned at 40");
+        assert_eq!(map, Behavior::EndMap);
+        assert_eq!(map.wire_value(), 40);
+        assert_eq!(map.name(), "End.MAP");
+
+        let limit = Behavior::from_wire(41).expect("End.Limit assigned at 41");
+        assert_eq!(limit, Behavior::EndLimit);
+        assert_eq!(limit.wire_value(), 41);
+        assert_eq!(limit.name(), "End.Limit");
+
+        // RFC 9433 assigns the *mobile user-plane* End.M.* family
+        // (End.M.GTP6.D/Di/E, End.M.GTP4.E) at 69-72, well above
+        // 42. Those depend on a GTP-specific argument layout the
+        // crate does not model; left for a follow-up.
+        for v in [69u16, 70, 71, 72] {
+            assert!(Behavior::from_wire(v).is_none(), "{v}: End.M.* not modelled");
+        }
     }
 
     #[test]
@@ -562,5 +609,7 @@ mod tests {
         assert_eq!(format!("{}", Behavior::EndDX6), "End.DX6");
         assert_eq!(format!("{}", Behavior::EndB6EncapsRed), "End.B6.Encaps.Red");
         assert_eq!(format!("{}", Behavior::EndUsd), "End with USD");
+        assert_eq!(format!("{}", Behavior::EndMap), "End.MAP");
+        assert_eq!(format!("{}", Behavior::EndLimit), "End.Limit");
     }
 }
