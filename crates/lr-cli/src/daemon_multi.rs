@@ -202,6 +202,45 @@ struct Engine {
     started: bool,
 }
 
+/// The kind of routing protocol a spawned engine runs. `lr-daemon
+/// --protocol bgp,ospf,babel` resolves each entry from the
+/// comma-separated list into one [`EngineKind`]; the supervisor thread
+/// then matches exhaustively on the enum both for the thread name
+/// (via [`EngineKind::name`]) and for the daemon entry point
+/// (`run_bgp_daemon` / `run_ospf_daemon` / `run_ospf3_daemon` /
+/// `run_babel_daemon`). Keeping both matches exhaustive on the same
+/// enum replaces the previous two-stage `&'static str` match — the
+/// second stage was `_ => unreachable!()` and the first stage was
+/// `other => unreachable!("multi-protocol dispatcher let '{}' through",
+/// other)`, and the two had to be kept in sync by hand. The upstream
+/// `[[protocols]]` parser validates the set, so the
+/// `unreachable!()` arms are still defensive — but a future
+/// variant added to [`EngineKind`] now surfaces as a compile error
+/// on both call sites instead of silently slipping through the `_`
+/// arm of the second match.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum EngineKind {
+    Bgp,
+    Ospf,
+    Ospf3,
+    Babel,
+}
+
+impl EngineKind {
+    /// The log/socket-friendly name. Matches the historical
+    /// `&'static str` constants so `Engine::name` and the
+    /// thread name keep the same shape (`"bgp"`, `"ospf"`, `"ospf3"`,
+    /// `"babel"`).
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Bgp => "bgp",
+            Self::Ospf => "ospf",
+            Self::Ospf3 => "ospf3",
+            Self::Babel => "babel",
+        }
+    }
+}
+
 /// Run the multi-protocol daemon: one shared router, one running
 /// flag, one ticker and one API socket, one thread per engine.
 ///
@@ -299,27 +338,27 @@ pub(crate) fn run_multi_daemon(cfg: &DaemonConfig, rid: RouterId, set: &[String]
             status: Arc::clone(&status),
         };
         let cfg = cfg.clone();
-        let engine_name: &'static str = match name.as_str() {
-            "bgp" => "bgp",
+        let engine_kind: EngineKind = match name.as_str() {
+            "bgp" => EngineKind::Bgp,
             "ospf" => {
                 if cfg.ospf_version == "v3" {
-                    "ospf3"
+                    EngineKind::Ospf3
                 } else {
-                    "ospf"
+                    EngineKind::Ospf
                 }
             }
-            "babel" => "babel",
+            "babel" => EngineKind::Babel,
             // The dispatcher validated the set; anything else is a bug.
             other => unreachable!("multi-protocol dispatcher let '{}' through", other),
         };
+        let engine_name = engine_kind.name();
         let spawn = thread::Builder::new()
             .name(format!("lr-engine-{engine_name}"))
-            .spawn(move || match engine_name {
-                "bgp" => crate::run_bgp_daemon(&cfg, rid, Some(host)),
-                "ospf" => crate::daemon_ospf::run_ospf_daemon(&cfg, rid, Some(host)),
-                "ospf3" => crate::daemon_ospf3::run_ospf3_daemon(&cfg, rid, Some(host)),
-                "babel" => crate::run_babel_daemon(&cfg, Some(host)),
-                _ => unreachable!(),
+            .spawn(move || match engine_kind {
+                EngineKind::Bgp => crate::run_bgp_daemon(&cfg, rid, Some(host)),
+                EngineKind::Ospf => crate::daemon_ospf::run_ospf_daemon(&cfg, rid, Some(host)),
+                EngineKind::Ospf3 => crate::daemon_ospf3::run_ospf3_daemon(&cfg, rid, Some(host)),
+                EngineKind::Babel => crate::run_babel_daemon(&cfg, Some(host)),
             });
         match spawn {
             Ok(handle) => engines.push(Engine {
