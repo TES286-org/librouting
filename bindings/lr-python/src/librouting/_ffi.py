@@ -119,6 +119,13 @@ int32_t lr_router_request_route_refresh(lr_router_t r,
                                         uint64_t session,
                                         uint16_t afi,
                                         uint8_t safi);
+int32_t lr_router_add_roa_entry(lr_router_t r,
+                                 const uint8_t *prefix_v4,
+                                 const uint8_t *prefix_v6,
+                                 uint8_t prefix_len,
+                                 uint8_t max_length,
+                                 uint32_t asn);
+int32_t lr_router_set_roa_validate(lr_router_t r, uint8_t enable);
 int32_t lr_router_originate_v4(lr_router_t r,
                                const uint8_t *prefix_addr,
                                uint8_t prefix_len,
