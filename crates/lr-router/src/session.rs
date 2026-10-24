@@ -256,6 +256,21 @@ pub struct SessionConfig {
     /// its own (it is transport-agnostic), so the embedder supplies it.
     /// Only meaningful together with `collision_group`.
     pub locally_initiated: bool,
+    /// True when the peer on the other end of this session is an RFC 4456
+    /// route-reflector client of the local speaker. Propagated to
+    /// [`lr_bgp::PeerConfig::route_reflector_client`] by
+    /// [`crate::DefaultRouter::add_session`]; the reflection path in
+    /// `lr_bgp::advertise` stamps ORIGINATOR_ID + CLUSTER_LIST only when
+    /// *both* this flag and [`Self::route_reflector`].`enabled` are set
+    /// (RFC 4456 §3).
+    pub route_reflector_client: bool,
+    /// Route-reflector configuration for the local speaker (RFC 4456).
+    /// Propagated to [`lr_bgp::PeerConfig::route_reflector`] by
+    /// [`crate::DefaultRouter::add_session`]. Left at the default
+    /// (`enabled = false`) when the local speaker is not a reflector;
+    /// setting `enabled = true` activates the per-speaker reflection
+    /// posture used together with [`Self::route_reflector_client`].
+    pub route_reflector: lr_bgp::role::RouteReflectorConfig,
 }
 
 impl SessionConfig {
@@ -305,6 +320,8 @@ impl SessionConfig {
             maximum_prefix_restart_time: 0,
             collision_group: None,
             locally_initiated: false,
+            route_reflector_client: false,
+            route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
         }
     }
 
@@ -449,6 +466,43 @@ impl SessionConfig {
         self
     }
 
+    /// Mark this BGP session as a route-reflector client (RFC 4456 §3).
+    /// Sets [`Self::route_reflector_client`] = `true`; the reflection
+    /// path also requires [`Self::route_reflector`]`.`[`enabled`]
+    /// = `true` on the local speaker, which the builder does NOT
+    /// flip implicitly (per RFC 4456 §3, the two flags are
+    /// independent so a non-reflector with an accidentally set
+    /// `rr_client` flag does not stamp reflection attributes).
+    ///
+    /// No-op for OSPF / Babel sessions.
+    ///
+    /// [`enabled`]: lr_bgp::role::RouteReflectorConfig::enabled
+    pub fn with_route_reflector_client(mut self) -> Self {
+        self.route_reflector_client = true;
+        self
+    }
+
+    /// Configure the local speaker as an RFC 4456 route reflector with
+    /// the given cluster id. When `cluster_id` is `None`, the effective
+    /// cluster id falls back to the local BGP identifier (see
+    /// [`lr_bgp::role::RouteReflectorConfig::effective_cluster_id`]).
+    ///
+    /// Sets [`Self::route_reflector`]`.`[`enabled`] = `true` and stamps
+    /// the cluster id; reflection still requires the per-peer flag
+    /// [`Self::with_route_reflector_client`] to be set on the sessions
+    /// whose peer is a client.
+    ///
+    /// No-op for OSPF / Babel sessions.
+    ///
+    /// [`enabled`]: lr_bgp::role::RouteReflectorConfig::enabled
+    pub fn with_route_reflector(mut self, cluster_id: Option<lr_bgp::role::ClusterId>) -> Self {
+        self.route_reflector.enabled = true;
+        if let Some(c) = cluster_id {
+            self.route_reflector.cluster_id = c;
+        }
+        self
+    }
+
     /// Build an OSPFv2 session config.
     pub fn ospfv2(router_id: RouterId, area_id: u32) -> Self {
         Self {
@@ -486,6 +540,8 @@ impl SessionConfig {
             maximum_prefix_restart_time: 0,
             collision_group: None,
             locally_initiated: false,
+            route_reflector_client: false,
+            route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
         }
     }
 
@@ -537,6 +593,8 @@ impl SessionConfig {
             maximum_prefix_restart_time: 0,
             collision_group: None,
             locally_initiated: false,
+            route_reflector_client: false,
+            route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
         }
     }
 }

@@ -3763,6 +3763,15 @@ impl RouterInstance for DefaultRouter {
                 p_cfg.maximum_prefix_action = cfg.maximum_prefix_action;
                 p_cfg.maximum_prefix_threshold = cfg.maximum_prefix_threshold;
                 p_cfg.maximum_prefix_restart_time = cfg.maximum_prefix_restart_time;
+                // RFC 4456: route-reflector posture is per-speaker
+                // (RouteReflectorConfig.enabled) and per-peer
+                // (route_reflector_client). Both live on PeerConfig
+                // downstream; propagate them here so an embedder using
+                // SessionConfig + add_session reaches the reflection path
+                // without touching PeerConfig directly. See
+                // docs/examples/bgp_route_reflector.md.
+                p_cfg.route_reflector_client = cfg.route_reflector_client;
+                p_cfg.route_reflector = cfg.route_reflector.clone();
                 let peer = BgpPeer::new(p_cfg);
                 if let Some(group) = cfg.collision_group {
                     self.collision_meta

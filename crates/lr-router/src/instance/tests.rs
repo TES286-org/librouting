@@ -925,6 +925,113 @@ fn add_and_remove_bgp_session() {
     assert!(r.remove_session(h).is_ok());
 }
 
+// Pins the SessionConfig -> PeerConfig plumbing for RFC 4456
+// route-reflector posture. The embedder-facing API lives on
+// SessionConfig; `DefaultRouter::add_session` is responsible for
+// copying the two flags through to BgpPeerConfig so the reflection
+// path in `lr_bgp::advertise` sees them. Without this test, a future
+// refactor that adds a new SessionConfig field but forgets to wire
+// it would silently drop the RR configuration on the floor (the same
+// shape of bug defects.txt L60 in `docs/examples/bgp_route_reflector.md`
+// called out for `RouteReflectorConfig::enabled`).
+#[test]
+fn add_session_propagates_route_reflector_config() {
+    use lr_bgp::role::{ClusterId, RouteReflectorConfig};
+
+    let mut r = DefaultRouter::new();
+    // Default posture: not a reflector, not a client.
+    let h_plain = r
+        .add_session(SessionConfig::bgp(
+            Asn(64512),
+            Asn(64512),
+            RouterId::from_v4([10, 0, 0, 1]),
+        ))
+        .unwrap();
+    {
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&h_plain.0).unwrap() else {
+            panic!("expected BGP session");
+        };
+        let cfg = peer.config();
+        assert!(!cfg.route_reflector_client, "default is not a client");
+        assert!(
+            !cfg.route_reflector.enabled,
+            "default route_reflector.enabled is false"
+        );
+        assert_eq!(
+            cfg.route_reflector.cluster_id,
+            ClusterId::default(),
+            "default cluster_id is zero"
+        );
+    }
+
+    // Reflector posture with explicit cluster id, plus client flag.
+    let h_rr = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 254]))
+                .with_route_reflector(Some(ClusterId::from_v4([10, 0, 0, 1])))
+                .with_route_reflector_client(),
+        )
+        .unwrap();
+    {
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&h_rr.0).unwrap() else {
+            panic!("expected BGP session");
+        };
+        let cfg = peer.config();
+        assert!(
+            cfg.route_reflector_client,
+            "with_route_reflector_client flips the per-peer flag"
+        );
+        assert!(
+            cfg.route_reflector.enabled,
+            "with_route_reflector flips route_reflector.enabled"
+        );
+        assert_eq!(
+            cfg.route_reflector.cluster_id,
+            ClusterId::from_v4([10, 0, 0, 1]),
+            "explicit cluster id propagates"
+        );
+        // RouteReflectorConfig::effective_cluster_id honours the
+        // local BGP identifier when no cluster id is configured; pin
+        // the explicit-cluster case here so the fallback is exercised
+        // separately.
+        assert_eq!(
+            cfg.route_reflector
+                .effective_cluster_id(RouterId::from_v4([10, 0, 0, 254])),
+            ClusterId::from_v4([10, 0, 0, 1]),
+            "explicit cluster id wins over the bgp_id fallback"
+        );
+    }
+
+    // `with_route_reflector(None)` should leave cluster_id at zero so
+    // the effective value falls back to the local BGP identifier.
+    let h_fallback = r
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 2]))
+                .with_route_reflector(None),
+        )
+        .unwrap();
+    {
+        let SessionState::Bgp { peer, .. } = r.sessions.get(&h_fallback.0).unwrap() else {
+            panic!("expected BGP session");
+        };
+        let cfg = peer.config();
+        assert!(cfg.route_reflector.enabled);
+        assert_eq!(
+            cfg.route_reflector.cluster_id,
+            ClusterId::default(),
+            "cluster_id stays at zero when None is passed"
+        );
+        let bgp_id = RouterId::from_v4([10, 0, 0, 2]);
+        assert_eq!(
+            cfg.route_reflector.effective_cluster_id(bgp_id),
+            ClusterId(bgp_id.as_u32()),
+            "fallback to local BGP identifier"
+        );
+        // Confirm the default config struct is also reachable.
+        let _default_cfg: RouteReflectorConfig = RouteReflectorConfig::default();
+    }
+}
+
 #[test]
 fn tick_drives_timers() {
     let mut r = DefaultRouter::new();

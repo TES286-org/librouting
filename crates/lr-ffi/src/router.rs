@@ -176,6 +176,15 @@ pub unsafe extern "C" fn lr_router_add_bgp_session_ext(
                 // both transports of a bidirectional peer (the daemon).
                 collision_group: None,
                 locally_initiated: false,
+                // RFC 4456: route-reflector posture is off by default
+                // for FFI-constructed sessions; embedders wanting
+                // reflection call `lr_router_add_session` then
+                // `DefaultRouter::add_session` propagates these into
+                // `PeerConfig`. The FFI surface does not (yet) expose
+                // dedicated setters for these two fields; tracked as
+                // part of the defects.txt follow-up for the RR API.
+                route_reflector_client: false,
+                route_reflector: lr_bgp::role::RouteReflectorConfig::default(),
             };
             match router.add_session(cfg) {
                 Ok(h) => {
