@@ -540,7 +540,6 @@ impl<'a> Lexer<'a> {
                 }
                 _ => TokenKind::Eq,
             },
-            b'?' => TokenKind::Underscore, // unused — keep for completeness
             other => {
                 return Err(LexerError {
                     span: Span::point(self.pos - 1),
