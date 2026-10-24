@@ -580,9 +580,17 @@ fn encode_nlri(entry: &Nlri, add_path: bool, out: &mut WriteBuf<'_>) -> Result<(
     }
     out.put_u8(p.prefix_len).ok_or(EncodeError::BufferFull)?;
     let n = (p.prefix_len as usize).div_ceil(8);
+    // The `!p.is_ipv4()` guard above is the canonical check; the
+    // `IpAddr::V6(_)` arm is a defense-in-depth return so a future
+    // refactor that drops the guard cannot turn a malformed encode
+    // into a `panic!` on the data path.
     let bytes = match &p.addr {
         IpAddr::V4(b) => b,
-        _ => unreachable!(),
+        IpAddr::V6(_) => {
+            return Err(EncodeError::InvalidValue(
+                "NLRI in legacy section must be IPv4",
+            ));
+        }
     };
     out.put_bytes(&bytes[..n]).ok_or(EncodeError::BufferFull)?;
     Ok(())

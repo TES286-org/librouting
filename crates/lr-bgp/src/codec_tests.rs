@@ -281,3 +281,52 @@ fn streaming_decoder_splits_feed_without_duplication() {
         assert!(matches!(m, BgpMessage::Keepalive(_)));
     }
 }
+
+/// Regression: an IPv6 prefix placed in the legacy IPv4 NLRI section of
+/// an UPDATE must be rejected by the encoder with `EncodeError::InvalidValue`
+/// — never panic via `unreachable!()`. RFC 4271 §4.3 reserves the
+/// top-level NLRI list for IPv4; IPv6 NLRI must travel inside
+/// `MP_REACH_NLRI` / `MP_UNREACH_NLRI` (RFC 4760 §3).
+///
+/// The legacy `encode_nlri` had a `_ => unreachable!()` arm in its
+/// `match p.addr` block. The guard at function entry already returned
+/// `InvalidValue` for `!p.is_ipv4()`, but the `unreachable!()` arm was
+/// a `panic!` landmine if a future refactor dropped the guard. The
+/// `IpAddr::V6(_)` arm now returns `InvalidValue` so the encoder is
+/// panic-free on the data path regardless of the guard.
+#[test]
+fn encode_nlri_rejects_ipv6_prefix_without_panicking() {
+    let mut u = Update::new();
+    // Push an IPv6 prefix into the legacy NLRI section. This is
+    // malformed by construction (RFC 4271 §4.3 / RFC 4760 §3) but
+    // the encoder must surface it as `InvalidValue`, not as a panic.
+    u.nlri.push(Nlri::new(
+        0,
+        Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
+            128,
+        ),
+    ));
+    u.attributes.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::Origin,
+        vec![0],
+    ));
+    u.attributes.insert(PathAttribute::new(
+        PathAttrFlags::new().set_transitive(true),
+        AttrType::AsPath,
+        Vec::new(),
+    ));
+    let codec = BgpCodec::new();
+    let res = codec.encode_vec(&BgpMessage::Update(u));
+    let err = res.expect_err(
+        "IPv6 NLRI in the legacy section must fail encoding with InvalidValue, not succeed",
+    );
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("NLRI in legacy section must be IPv4")
+            || msg.contains("InvalidValue")
+            || msg.contains("invalid value"),
+        "expected an InvalidValue error, got: {msg}"
+    );
+}
