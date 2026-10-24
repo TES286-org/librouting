@@ -4514,17 +4514,9 @@ fn apply_safety_key(
     if section != "safety" {
         return Ok(false);
     }
-    // Helper closures keep the match arms short and the error messages
-    // uniform. `bool_field` parses a TOML bool; `int_field` parses a
-    // decimal integer.
-    let bool_field = |v: &str, name: &str| -> Result<bool, String> {
-        parse_bool(v)
-            .then_some(v.parse::<bool>().unwrap_or_default())
-            .ok_or_else(|| format!("bad {name} '{v}' (true|false)"))
-    };
-    // `parse_bool` already returns a `bool`, but the helper above
-    // keeps the error path uniform. Simpler: just call parse_bool and
-    // validate it is one of the recognised forms.
+    // `parse_safety_bool` parses a TOML bool and surfaces a uniform
+    // "bad <name> '<value>' (true|false)" error on typos. All boolean
+    // keys in the `[safety]` section route through it.
     let parse_safety_bool = |v: &str, name: &str| -> Result<bool, String> {
         if v == "true" || v == "false" {
             Ok(parse_bool(v))
@@ -4613,10 +4605,6 @@ fn apply_safety_key(
             ))
         }
     }
-    // Silence the unused warning for `bool_field` — kept as
-    // documentation of the alternative parsing shape; will be removed
-    // if no caller picks it up in a follow-up.
-    let _ = bool_field;
     Ok(true)
 }
 
