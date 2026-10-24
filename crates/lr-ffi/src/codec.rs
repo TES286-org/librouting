@@ -1,8 +1,19 @@
 //! Layer-1 codec FFI: `lr_bgp_decode`, `lr_bgp_encode`, `lr_ospf_decode`,
 //! `lr_babel_decode`.
 //!
-//! Stateless. Accepts raw byte slices; returns `lr_bytes_t` of decoded JSON
-//! (or some structured form — for now, the bytes of the parsed message).
+//! Stateless. Accepts raw byte slices; returns `lr_bytes_t` of the
+//! re-encoded / echoed bytes for the parsed message:
+//!
+//! - `lr_bgp_decode` round-trips the parsed message through
+//!   `BgpCodec::encode_vec`, producing a canonical byte form whose
+//!   first byte is the type code (RFC 4271 §4.1 message type). Useful
+//!   for codec-level fuzzing / differential checks against a peer's
+//!   raw bytes.
+//! - `lr_ospf_decode_v2` and `lr_babel_decode` echo the raw input
+//!   bytes — the parse is checked (decode errors return `LR_ERR_CODEC`
+//!   = `-5`), but the parsed structure is not yet projected into a
+//!   stable canonical form. A future revision will round-trip these
+//!   through their encoders like the BGP path does.
 //!
 //! Every entry point runs inside the crate's `catch_unwind` barrier
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
