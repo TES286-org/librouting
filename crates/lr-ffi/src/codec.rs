@@ -2,18 +2,19 @@
 //! `lr_babel_decode`.
 //!
 //! Stateless. Accepts raw byte slices; returns `lr_bytes_t` of the
-//! re-encoded / echoed bytes for the parsed message:
+//! re-encoded canonical bytes for the parsed message:
 //!
 //! - `lr_bgp_decode` round-trips the parsed message through
 //!   `BgpCodec::encode_vec`, producing a canonical byte form whose
 //!   first byte is the type code (RFC 4271 §4.1 message type). Useful
 //!   for codec-level fuzzing / differential checks against a peer's
 //!   raw bytes.
-//! - `lr_ospf_decode_v2` and `lr_babel_decode` echo the raw input
-//!   bytes — the parse is checked (decode errors return `LR_ERR_CODEC`
-//!   = `-5`), but the parsed structure is not yet projected into a
-//!   stable canonical form. A future revision will round-trip these
-//!   through their encoders like the BGP path does.
+//! - `lr_ospf_decode_v2` and `lr_babel_decode` round-trip the parsed
+//!   message through `OspfCodec::encode_vec` / `BabelCodec::encode_vec`
+//!   the same way the BGP path does. The parse is checked (decode
+//!   errors return `LR_ERR_CODEC` = `-5`); a successful re-encode
+//!   returns the canonical byte form so FFI consumers see a stable
+//!   shape regardless of which optional fields the peer set.
 //!
 //! Every entry point runs inside the crate's `catch_unwind` barrier
 //! ([`crate::guarded`]): a panic returns `LR_ERR_PANIC` and sets the
@@ -400,9 +401,19 @@ pub extern "C" fn lr_ospf_decode_v2(data: *const u8, len: usize, out: *mut lr_by
             let slice = unsafe { std::slice::from_raw_parts(data, len) };
             let mut codec = OspfC::v2();
             match codec.decode_slice(slice) {
-                Ok(Some(_p)) => {
-                    // For FFI we just return the raw input bytes for now.
-                    unsafe { *out = lr_bytes_t::from_vec(slice.to_vec()) }
+                Ok(Some(p)) => {
+                    // Round-trip through the encoder so callers get the
+                    // canonical byte form, same as `lr_bgp_decode`. The
+                    // raw input bytes were a placeholder; the parsed
+                    // structure is now projected through `encode_vec`.
+                    let bytes = match codec.encode_vec(&p) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            set_last_error(e.to_string());
+                            return -4;
+                        }
+                    };
+                    unsafe { *out = lr_bytes_t::from_vec(bytes) }
                     0
                 }
                 Ok(None) => {
@@ -429,8 +440,19 @@ pub extern "C" fn lr_babel_decode(data: *const u8, len: usize, out: *mut lr_byte
             let slice = unsafe { std::slice::from_raw_parts(data, len) };
             let mut codec = BabelC::new();
             match codec.decode_slice(slice) {
-                Ok(Some(_f)) => {
-                    unsafe { *out = lr_bytes_t::from_vec(slice.to_vec()) }
+                Ok(Some(f)) => {
+                    // Round-trip through the encoder so callers get the
+                    // canonical byte form, same as `lr_bgp_decode`. The
+                    // raw input bytes were a placeholder; the parsed
+                    // structure is now projected through `encode_vec`.
+                    let bytes = match codec.encode_vec(&f) {
+                        Ok(b) => b,
+                        Err(e) => {
+                            set_last_error(e.to_string());
+                            return -4;
+                        }
+                    };
+                    unsafe { *out = lr_bytes_t::from_vec(bytes) }
                     0
                 }
                 Ok(None) => {
@@ -818,6 +840,145 @@ mod tests {
                 )
             },
             -1
+        );
+    }
+
+    fn new_out() -> lr_bytes_t {
+        lr_bytes_t {
+            ptr: std::ptr::null_mut(),
+            len: 0,
+            cap: 0,
+        }
+    }
+
+    #[test]
+    fn ospf_decode_v2_round_trips_through_encoder() {
+        // Build a minimal OSPFv2 Hello (RFC 2328 §A.3.1) via the
+        // library codec so the FFI surface gets valid bytes to chew on.
+        let codec = OspfC::v2();
+        let pkt = lr_ospf::OspfPacket {
+            header: lr_ospf::OspfHeader {
+                version: 2,
+                kind: 1, // Hello.
+                length: 0,
+                router_id: 0x01020304,
+                area_id: 0,
+                checksum: 0,
+                au_type_or_instance: 0,
+                auth_data: 0,
+            },
+            body: lr_ospf::packet::OspfBody::Hello(lr_ospf::packet::HelloBody {
+                network_mask: 0xffffff00,
+                hello_interval: 10,
+                options: 0x02,
+                priority: 1,
+                dead_interval: 40,
+                dr: 0,
+                bdr: 0,
+                neighbors: vec![0x01020304, 0x05060708],
+            }),
+        };
+        let mut bytes = codec.encode_vec(&pkt).unwrap();
+        lr_ospf::origination::finalize_v2_packet(&mut bytes);
+
+        let mut out = new_out();
+        let rc = lr_ospf_decode_v2(bytes.as_ptr(), bytes.len(), &raw mut out);
+        assert_eq!(rc, 0, "decode must succeed on a valid Hello");
+        let got = take(&out);
+        // The output is the re-encoded canonical form, not the raw
+        // input bytes. The fixed header layout: version (1) + kind (1)
+        // + length (2) + router-id (4) + area-id (4) + checksum (2)
+        // + au_type (2) + auth_data (8) = 24 bytes.
+        assert_eq!(got[0], 2, "OSPF version 2");
+        assert_eq!(got[1], 1, "Hello kind");
+        assert_eq!(&got[4..8], &0x01020304u32.to_be_bytes(), "router-id");
+        // Length covers header (24) + Hello body (network_mask 4 +
+        // hello_interval 2 + options 1 + priority 1 + dead_interval 4
+        // + dr 4 + bdr 4 + neighbors 8 = 28) = 52.
+        assert_eq!(&got[2..4], &52u16.to_be_bytes(), "packet length");
+        drop_bytes(out);
+    }
+
+    #[test]
+    fn ospf_decode_v2_rejects_null_pointers() {
+        let mut out = new_out();
+        assert_eq!(lr_ospf_decode_v2(std::ptr::null(), 0, &raw mut out), -1);
+        let bytes = [0u8; 24];
+        assert_eq!(
+            lr_ospf_decode_v2(bytes.as_ptr(), bytes.len(), std::ptr::null_mut()),
+            -1
+        );
+    }
+
+    #[test]
+    fn ospf_decode_v2_rejects_truncated_input() {
+        // Three bytes cannot fit the OSPF fixed header (24 bytes).
+        let bytes = [0u8, 2, 1];
+        let mut out = new_out();
+        let rc = lr_ospf_decode_v2(bytes.as_ptr(), bytes.len(), &raw mut out);
+        assert!(
+            rc == -3 || rc == -5,
+            "truncated/malformed input returns -3/-5, got {rc}"
+        );
+    }
+
+    #[test]
+    fn babel_decode_round_trips_through_encoder() {
+        // A minimal Babel frame: one Hello TLV (RFC 8966 §A.2) plus a
+        // single Pad1 to round the body up to a non-trivial length.
+        let h = lr_babel::message::Hello::new(1, 200);
+        let mut frame = lr_babel::BabelFrame::empty();
+        frame.body.push(lr_babel::tlv::Tlv::new(
+            lr_babel::tlv::TlvType::Hello,
+            h.encode().to_vec(),
+        ));
+        frame.body.push(lr_babel::tlv::Tlv::pad1());
+        let codec = BabelC::new();
+        let bytes = codec.encode_vec(&frame).unwrap();
+
+        let mut out = new_out();
+        let rc = lr_babel_decode(bytes.as_ptr(), bytes.len(), &raw mut out);
+        assert_eq!(rc, 0, "decode must succeed on a valid Babel frame");
+        let got = take(&out);
+        // Wire layout (RFC 8966 §4.1): magic (1) + version (1) +
+        // body_length (2 BE) + body. The body begins at offset 4 with
+        // the Hello TLV: type (1) + length (1) + value (6 for the
+        // encoded Hello — `Hello::new(1, 200)` packs seqno + interval
+        // into 6 bytes).
+        assert_eq!(got[0], 0x2a, "Babel magic");
+        assert_eq!(got[1], 2, "Babel version 2");
+        // Hello TLV type lives at offset 4, after the fixed header.
+        assert_eq!(
+            got[4],
+            lr_babel::tlv::TlvType::Hello.to_u8(),
+            "first TLV is Hello"
+        );
+        // The Hello TLV value is 6 bytes (RFC 8966 §A.2: 2-byte
+        // seqno + 2-byte interval + 2 reserved bits).
+        assert_eq!(got[5], 6, "Hello TLV value length is 6");
+        drop_bytes(out);
+    }
+
+    #[test]
+    fn babel_decode_rejects_null_pointers() {
+        let mut out = new_out();
+        assert_eq!(lr_babel_decode(std::ptr::null(), 0, &raw mut out), -1);
+        let bytes = [0u8; 4];
+        assert_eq!(
+            lr_babel_decode(bytes.as_ptr(), bytes.len(), std::ptr::null_mut()),
+            -1
+        );
+    }
+
+    #[test]
+    fn babel_decode_rejects_truncated_input() {
+        // Two bytes cannot fit the magic + body.
+        let bytes = [0x2a, 0x00];
+        let mut out = new_out();
+        let rc = lr_babel_decode(bytes.as_ptr(), bytes.len(), &raw mut out);
+        assert!(
+            rc == -3 || rc == -5,
+            "truncated/malformed input returns -3/-5, got {rc}"
         );
     }
 }
