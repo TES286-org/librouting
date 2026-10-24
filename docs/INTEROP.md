@@ -66,7 +66,7 @@ portable ones.
 | `bgp_transit.sh` | three lr-daemons, one network namespace each | a route learned on one edge survives re-advertisement by the middle router and stays forwardable on the far edge |
 | `mpls_lsp.sh` | two lr-daemons, kernel MPLS enabled | BGP-LU reaches the dataplane: each daemon mirrors its half of the LSP (tail pop, head encap) and a ping crosses it |
 | `multi_protocol.sh` | one lr-daemon running BGP and OSPF against one BIRD | the multi-protocol supervisor serves both protocols from one process |
-| `exchange_plane.sh` | lr-daemon `--exchange-plane` against plain BIRD | the prototype capability stays inert against a peer that does not advertise it (RFC 5492 §3) |
+| `exchange_plane.sh` | lr-daemon `--exchange-plane` against plain BIRD | the experimental capability stays inert against a peer that does not advertise it (RFC 5492 §3) |
 | `parity.sh` | lr-daemon to BIRD through a recording proxy | replaying the captured UPDATE stream reproduces BIRD's own view of the learned routes (`lr parity-replay`, `lr mrt diff`) |
 
 ## BGP against BIRD and FRR

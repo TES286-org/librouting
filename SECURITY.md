@@ -2,16 +2,14 @@
 
 ## Supported versions
 
-librouting is pre-1.0. Security fixes land on `main` and are published in
-whatever pre-release tag comes next; there is no maintenance branch for
-older releases. If you run an older build, move to the latest tag.
+librouting is past 1.0. Security fixes land on `main` and are published in
+the next minor (or patch, when the fix is sufficiently contained) release.
+The latest minor is the only supported branch; older minors are not. If
+you run an older build, move to the latest tag.
 
 The workspace version is `[workspace.package] version` in
 [`Cargo.toml`](Cargo.toml) — check that file for what "latest" means
 today.
-
-After 1.0 the policy becomes: the latest minor release is supported, and
-older minors are not.
 
 ## Reporting a vulnerability
 

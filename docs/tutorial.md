@@ -11,8 +11,19 @@ loop. If you would rather run a router than build one, read
 
 ## Before you start
 
-The crates are not published to a registry yet, so depend on the
-repository and pin a tag or revision you have tested:
+The crates are published; the workspace version in `Cargo.toml` is the
+current release. You can either depend on the registry-published
+versions of the crates:
+
+```toml
+[dependencies]
+lr-core = "1.8"
+lr-bgp = "1.8"
+lr-router = "1.8"
+```
+
+…or depend on a pinned git revision (useful when running an unreleased
+fix):
 
 ```toml
 [dependencies]

@@ -194,7 +194,7 @@ files of the `lr-cli` binary crate, which is not a library.
 | FFI ROA store and origin validation | yes | `lr-ffi::roa_store`, `lr-ffi::filters` |
 | C++ header-only RAII wrapper | yes | `include/librouting.hpp` |
 | Go and Python bindings | yes | `bindings/lr-go`, `bindings/lr-python` |
-| Daemon for BGP, OSPFv2, OSPFv3, Babel, LDP, BMP and combinations | yes | `crates/lr-cli/src/daemon.rs`, `daemon_multi.rs` |
+| Daemon for BGP, OSPFv2, OSPFv3, Babel, LDP, BMP and combinations | yes | `crates/lr-cli/src/daemon.rs`, `daemon_multi.rs`, `daemon_bgpls.rs`, `shutdown.rs` |
 | Categorised logging: severity, components, per-component levels, plain/JSON format, file mirror | yes | `crates/lr-cli/src/daemon_logger.rs` |
 | Runtime API socket and `lrctl` client | yes | `crates/lr-cli/src/api.rs`, `crates/lr-cli/src/lrctl.rs` |
 | Prometheus exposition on `/metrics` | yes | `crates/lr-cli/src/metrics.rs` |

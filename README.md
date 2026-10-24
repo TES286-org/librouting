@@ -120,11 +120,12 @@ The design behind the C surface is in
 
 ## Status
 
-The library is pre-1.0 and in its release freeze: the public Rust API and
-the C ABI are frozen for the 1.0 cut, so a breaking change ships as a new
-release candidate and restarts the freeze clock. The workspace version
-lives in `[workspace.package] version` in `Cargo.toml`; that file is the
-source of truth.
+The library is past 1.0 and in its stability window: the public Rust API and
+the C ABI are frozen, so a breaking change ships as a major-version bump
+and a release-notes entry. The workspace version lives in
+`[workspace.package] version` in `Cargo.toml`; that file is the source of
+truth. [`docs/RELEASE-PLAN.md`](docs/RELEASE-PLAN.md) §4 has the post-1.0
+governance rules.
 
 [`docs/STATUS.md`](docs/STATUS.md) lists what is implemented and what is
 not. [`docs/ROADMAP.md`](docs/ROADMAP.md) lists what is planned.

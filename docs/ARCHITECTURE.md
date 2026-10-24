@@ -551,9 +551,9 @@ panic barrier and the handle model.
 Each crate declares its own features in its `Cargo.toml` under
 `[features]`; that file is the only current list, and
 `cargo metadata` is the machine-readable view. The gates that change
-which code compiles in a meaningful way are `lr-policy`'s `bgp` and
-`damping` features, `lr-bgp`'s `labeled_unicast` and `exchange-plane`,
-and `lr-mrt`'s `bgp`.
+which code compiles in a meaningful way are `lr-policy`'s `bgp`,
+`damping` and `exchange-plane` features, `lr-bgp`'s `labeled_unicast`,
+`bgp_ls` and `exchange-plane`, and `lr-mrt`'s `bgp`.
 
 ## Tests
 

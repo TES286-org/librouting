@@ -1,10 +1,13 @@
-# librouting Release Plan — toward 1.0.0 and beyond
+# librouting Release Plan — 1.0 and beyond
 
 This document is the canonical reference for the librouting versioning policy,
-the API-freeze criteria gating the move from 0.x to 1.0, the release flow
-itself, and the post-1.0 governance rules. It is the source of truth that the
-`.github/workflows/release.yml` workflow and the `STATUS.md` roadmap summary
+the API-freeze criteria that governed the move from 0.x to 1.0, the release
+flow itself, and the post-1.0 governance rules. It is the source of truth that
+the `.github/workflows/release.yml` workflow and the `STATUS.md` roadmap summary
 both defer to.
+
+The 1.0 cut landed (see `CHANGELOG.md` `[1.0.0]`); the §2 freeze criteria are
+preserved as historical reference, and §4 carries the live post-1.0 rules.
 
 The current state of the project against these criteria is captured in
 [`STATUS.md`](STATUS.md); this document defines the criteria themselves.
@@ -19,7 +22,7 @@ in the strict form the Rust ecosystem expects of a library:
 
 | Change                                                                            | Bump                                                        |
 | --------------------------------------------------------------------------------- | ----------------------------------------------------------- |
-| Breaking change to a public Rust API (signature, type, trait, behaviour contract) | **minor** before 1.0, **major** after 1.0                   |
+| Breaking change to a public Rust API (signature, type, trait, behaviour contract) | **major** (was: **minor** before 1.0; 1.0 cut landed)      |
 | New public API (function, type, trait)                                            | **minor**                                                   |
 | New feature flag, new protocol crate, new daemon flag                             | **minor**                                                   |
 | Bug fix that does not change a documented public contract                         | **patch**                                                   |
@@ -36,10 +39,10 @@ shares the bump.
 The librouting public API has **three tiers**, each with a different stability
 contract:
 
-| Tier                                 | Surface                                                                                                                                                                                                            | Stability contract                                                                                                                                                                                                                             |
-| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **1 — Rust library API**             | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-ldp`, `lr-bfd`, `lr-rib`, `lr-policy`, `lr-router`, `lr-damping`, `lr-mpls`, `lr-mrt`, `lr-bmp`, `lr-srv6`, `lr-osroute` — `pub` items reached from the crate root | Semver-tracked. Breaking changes are gated by a minor (pre-1.0) / major (post-1.0) bump and a release-notes entry.                                                                                                                             |
-| **2 — C ABI** (`lr-ffi`)             | `include/lr_ffi.h`, `include/librouting.hpp` — the `lr_*` symbols exported from `lr-ffi` and the `lr_router_t` / `lr_bytes_t` types                                                                                | **ABI-stable.** A breaking ABI change is a major version bump _even pre-1.0_, because embedders (Go / Python / C / C++) compile against the published header. The `lr_abi_version()` accessor is bumped in lockstep.                           |
+| Tier                                 | Surface                                                                                                                                                                                                            | Stability contract                                                                                                                                                                                                                                            |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **1 — Rust library API**             | `lr-core`, `lr-bgp`, `lr-ospf`, `lr-babel`, `lr-ldp`, `lr-bfd`, `lr-rib`, `lr-policy`, `lr-router`, `lr-damping`, `lr-mpls`, `lr-mrt`, `lr-bmp`, `lr-srv6`, `lr-osroute` — `pub` items reached from the crate root | Semver-tracked. Breaking changes are gated by a **major** bump and a release-notes entry (the pre-1.0 "**minor** for breaking" rule sunset when 1.0 cut).                                                                                                      |
+| **2 — C ABI** (`lr-ffi`)             | `include/lr_ffi.h`, `include/librouting.hpp` — the `lr_*` symbols exported from `lr-ffi` and the `lr_router_t` / `lr_bytes_t` types                                                                                | **ABI-stable.** A breaking ABI change is a major version bump, because embedders (Go / Python / C / C++) compile against the published header. The `lr_abi_version()` accessor is bumped in lockstep.                                                          |
 | **3 — Daemon flag + config surface** | `lr-daemon` CLI flags, the config schema (native `.lr` DSL in `templates/daemon.lr` + the TOML subset twin), the `lr:` extension directives, the `--api-socket` line protocol                                      | **Documented stability.** A flag can be renamed only across a minor bump and must be supported as a deprecated alias for at least one minor cycle. The `--api-socket` line protocol's existing commands are stable; new commands are additive. |
 
 ### What is **not** public API
@@ -48,10 +51,10 @@ contract:
   the public API; they may change freely.
 - `tests/`, `templates/`, `docs/`, `yang/` are not part of the public API — they
   are reference material that ships alongside the library.
-- The exchange-plane prototype (`--features exchange-plane`) is explicitly
+- The exchange-plane surface (`--features exchange-plane`) is explicitly
   experimental; its wire format rides IANA experimental code points pending an
-  RFC 7120 early allocation. A 1.0 cut **does not** freeze the exchange-plane
-  surface.
+  RFC 7120 early allocation. Even after the 1.0 cut, the exchange-plane surface
+  is **not** frozen — the feature flag exists for embedders that opt in.
 
 ---
 
@@ -63,10 +66,12 @@ directly.
 
 ### 2.1. RFC coverage at feature parity with the reference implementations
 
-The capability tables in [`STATUS.md`](STATUS.md) must show ✅ for every RFC the
+The capability tables in [`STATUS.md`](STATUS.md) must show `yes` for every RFC the
 project considers in-scope at parity with BIRD 2.17.x and FRR 10.x. The
-deliberately-out-of-scope items (BGPsec alone) must be enumerated as ❌ with
-rationale — no silent gaps.
+deliberately-out-of-scope items (BGPsec alone) must be enumerated as `no` with
+rationale — no silent gaps. (`STATUS.md` uses `yes` / `partial` / `no` instead
+of the ✅ / ⚠️ / ❌ glyphs so the table renders identically in plain-text
+terminals and on GitHub.)
 
 ### 2.2. Cross-vendor interop verified in CI
 
@@ -129,7 +134,8 @@ aspirational features):
 - `docs/tutorial.md` — book-style tutorial (3 chapters, every snippet pinned by
   `crates/lr-tests/tests/tutorial_snippets.rs`)
 - `docs/ARCHITECTURE.md` — layering + RIB pipeline + testing layout
-- `docs/API.md` — public Rust API tour, layer by layer
+- `docs/api/` — public Rust API tour, layer by layer (one file per
+  crate; see [`docs/api/README.md`](api/README.md) for the index)
 - `docs/lr-cli.md` — CLI user guide
 - `docs/lr-cli-internals.md` — CLI internals / extension patterns
 - `docs/RUNBOOK.md` — daemon lifecycle + runtime API + troubleshooting

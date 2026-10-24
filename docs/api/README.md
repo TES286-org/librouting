@@ -102,14 +102,16 @@ default build, because those are what a snippet can silently miss.
 | `lr-bgp` | `long_lived` | RFC 9494 long-lived graceful restart |
 | `lr-bgp` | `exchange-plane` | private exchange plane (experimental) |
 | `lr-router` | `exchange-plane` | forwards to `lr-bgp/exchange-plane` |
+| `lr-policy` | `exchange-plane` | LRXP exchange-plane records in the filter DSL (forwards to `lr-bgp/exchange-plane`) |
 | `lr-policy` | `damping` | RFC 2439 `DampingImportHook` |
 
 Defaults worth knowing: `lr-bgp` enables `asn4`, `mp_bgp`, `addpath`,
-`graceful_restart`, `enhanced_rr`, `extended_communities` and
-`labeled_unicast`; `lr-router` enables `labeled_unicast`; `lr-policy`
+`graceful_restart`, `enhanced_rr`, `extended_communities`, `labeled_unicast`
+and `bgp_ls`; `lr-router` enables `labeled_unicast`; `lr-policy`
 and `lr-mrt` enable `bgp`; `lr-ospf` enables `v2`, `v3`, `nssa`, `te`,
 `hmac_sha` and `graceful_restart`; `lr-babel` enables
-`source_specific`. Each API page names the feature its snippets need.
+`source_specific`; `lr-bfd` enables `std` and `keyed-auth`. Each API
+page names the feature its snippets need.
 
 ## `no_std`
 

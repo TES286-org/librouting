@@ -57,17 +57,19 @@ dropped silently. It becomes a `config warning: unmapped: …` line at
 startup, or a `# UNMAPPED:` comment when you run the converter.
 
 A non-BGP routing protocol in the file — BIRD `protocol ospf …`, FRR
-`router ospf …`, and friends — is reported and ignored: `config warning:
-<stanza>: ignored — the compat surface runs the BGP control plane only`.
-The BGP part still runs. BIRD's `protocol device` is housekeeping with no
-routing meaning and is skipped without a note.
+`router ospf …`, BIRD `protocol babel …`, FRR `router babel …`, and so on
+— is converted to lr's own protocol stanzas since 1.4.0 (BGP, OSPFv2,
+OSPFv3, Babel and BFD are translated; everything else still falls back to
+the `config warning: <stanza>: ignored — no lr equivalent` path).
+BIRD's `protocol device` is housekeeping with no routing meaning and is
+skipped without a note.
 
-Combining BGP and OSPF *from one BIRD or FRR file* is not supported: the
-compat surface loads the BGP control plane, and the non-BGP stanzas are
-reported as ignored. Running several protocols in one process is
-supported through lr's own configuration — the `--protocol bgp,ospf`
-CLI form and the `protocol = "bgp,ospf"` key — which is a different
-surface from loading someone else's file.
+Combining BGP and OSPF (or any other supported pair of protocols) *from
+one BIRD or FRR file* is supported since 1.4.0: the compat surface loads
+every translated stanza into one lr config, and the daemon's
+`--protocol bgp,ospf` (or the equivalent `protocol = "bgp,ospf"` key)
+runs them side by side in a single process. Protocols lr does not yet
+translate are still reported as `ignored`.
 
 ## Dialect defaults
 
@@ -189,8 +191,9 @@ still need a restart, exactly as with the native configuration. The
 
 ## Limitations
 
-- BGP control plane only. OSPF, Babel and BFD stanzas in the source file
-  are reported as ignored; BFD *settings on a BGP peer* do map.
+- BGP, OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own
+  stanzas (since 1.4.0); other protocols (RIP, IS-IS, PIM, etc.) are
+  reported as `ignored`. BFD *settings on a BGP peer* also map.
 - A BIRD or FRR `include` is not expanded: the compat loader takes the
   file it was given, so an include-heavy configuration needs its pieces
   inlined first. The native `.lr` dialect is different — it resolves

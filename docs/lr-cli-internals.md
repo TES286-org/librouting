@@ -36,7 +36,7 @@ can run any of them without a parser framework.
 | `main.rs` | `lr` entry point and subcommand dispatch |
 | `daemon.rs` | `lr-daemon` entry point, BGP run path, Babel run path, BMP collector, kernel mirror |
 | `daemon_multi.rs` | Multi-protocol supervisor for `--protocol bgp,ospf,babel` |
-| `daemon_config.rs` | `DaemonConfig` model, argv parser, TOML loader, shared key dispatch |
+| `daemon_config.rs` | `DaemonConfig` model, argv parser, TOML loader, shared key dispatch, `.lr` DSL loader |
 | `daemon_policy.rs` | TOML policy tables compiled into an `lr_policy::PolicySet` |
 | `daemon_ospf.rs` | OSPFv2 run path over raw sockets |
 | `daemon_ospf3.rs` | OSPFv3 run path over raw IPv6 sockets |
@@ -50,7 +50,7 @@ can run any of them without a parser framework.
 | `config_dsl/emit.rs` | Deterministic `DaemonConfig` to `.lr` renderer |
 | `config_check.rs` | `config check` and `config to-dsl` subcommands |
 | `compat.rs` | Native BIRD 2 and FRR 10 configuration loading |
-| `translate.rs` | `translate bird\|frr` shallow config converter |
+| `translate.rs` | `translate bird\|frr` config converter (BGP, OSPFv2/v3, Babel, BFD, aggregates, redistributes, static routes, route-maps, filter-DSL snippets) |
 | `translate_bird_filter.rs` | BIRD filter language to the lr filter DSL |
 | `parity.rs` | Capture, replay and `mrt diff` parity harness |
 | `yang.rs` | `yang render` XML instance data |

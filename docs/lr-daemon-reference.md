@@ -133,10 +133,14 @@ flag's parser is only the fallback for an unparseable argument.
 | `--max-prefixes N` | `[bgp] max_prefixes` | none | 0 = no limit |
 | `--max-prefix-action A` | `[bgp] max_prefix_action` | `warn` | `warn`, `teardown`, `restart` |
 | `--max-prefix-threshold P` | `[bgp] max_prefix_threshold` | 75 | Percent |
+| `--max-prefix-restart-time S` | `[bgp] max_prefix_restart_time` / `[[peer]] max_prefix_restart_time` | 0 | Cooldown (seconds) before re-establishing after a `restart` action (landed in rc.6). When 0, `restart` behaves as an alias for `teardown` (no cooldown). |
 
 `warn` only logs; a session is torn down only with `--max-prefix-action
 teardown` or `restart`. The daemon does not validate the action string —
-anything that is not `teardown` or `restart` is treated as `warn`.
+anything that is not `teardown` or `restart` is treated as `warn`. Since
+rc.6, `restart` carries its own cooldown via `--max-prefix-restart-time`
+(or `max_prefix_restart_time` per-peer); when the cooldown is 0, `restart`
+behaves as an alias for `teardown`.
 
 ### BFD
 
@@ -165,13 +169,18 @@ anything that is not `teardown` or `restart` is treated as `warn`.
 | --- | --- | --- | --- |
 | `--ospf-version V` | `[ospf] version` | `v2` | `v2`/`2`, `v3`/`3` |
 | `--ospf-interface NAME` | `[[ospf.interface]] name` | — | Repeatable |
-| `--ospf-area ID` | — | 0 | Integer or dotted quad |
+| `--ospf-area ID` | `[[ospf.area]] id` / `[[ospf.interface]] area` | 0 | Integer or dotted quad |
 | `--ospf-hello-interval S` | `[ospf] hello_interval` | 10 | |
 | `--ospf-dead-interval S` | `[ospf] dead_interval` | 40 | |
 
 `--ospf-area` sets the default area for interfaces that do not name one.
-It has no configuration-file counterpart: the `[ospf]` schema has no
-`area` key, so a file must set `area` on each `[[ospf.interface]]`.
+The configuration-file counterpart is the `[[ospf.area]]` block (landed
+in rc.6), which declares non-backbone areas and their type (`normal` /
+`stub` / `nssa`, optional `no_summary`, optional `stub_metric`). The
+backbone area (0) is always implicit and always `normal`, so a config
+using only area 0 needs no `[[ospf.area]]` block — but interfaces that
+attach to a non-backbone area must reference an `id` declared by an
+`[[ospf.area]]` block.
 
 ### OSPF graceful restart
 
@@ -564,8 +573,10 @@ authentication on the intended interface.
 
 The first matching pattern in file order wins, mirroring BIRD's
 `interface` directive. `rtt_min_us` must be below `rtt_max_us` when both
-are set. The daemon currently applies the matched parameters to its one
-Babel session rather than spawning one per matched interface.
+are set. Since rc.3, the daemon resolves one Babel session per matched
+interface (see `docs/examples/babel_multi_nic.md` for the multi-NIC
+walkthrough); the matched parameters apply per-session, not to a single
+shared session.
 
 ### `[ldp]`
 

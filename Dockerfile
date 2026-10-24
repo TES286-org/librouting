@@ -1,4 +1,4 @@
-# librouting container image (ROADMAP-v3 D12.3).
+# librouting container image.
 #
 # Multi-stage build:
 #   1. Builder stage — `rust:1.88-slim-bookworm` (matches the
@@ -19,9 +19,9 @@
 #      Kubernetes command/args override).
 #
 # Quick start:
-#   docker build -t librouting:rc.3 .
+#   docker build -t librouting:latest .
 #   docker run --rm --network host \
-#       librouting:rc.3 \
+#       librouting:latest \
 #       --local-as 64512 --peer-as 64513 --router-id 10.0.0.1 \
 #       --listen 127.0.0.1:1179 --network 203.0.113.0/24 \
 #       --api-socket /run/lr-daemon/api.sock \
@@ -171,7 +171,7 @@ VOLUME ["/etc/lr-daemon", "/run/lr-daemon"]
 USER lr
 
 # The entrypoint is `lr-daemon` with no default args — operators
-# pass CLI flags via `docker run ... librouting:rc.3 --local-as
+# pass CLI flags via `docker run ... librouting:latest --local-as
 # ... --peer-as ...` or a Kubernetes `args:` override. The
 # `--config /etc/lr-daemon/daemon.toml` form is the recommended
 # production deployment (mount the config as a ConfigMap).

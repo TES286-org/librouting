@@ -28,10 +28,12 @@ cargo build --release -p lr-cli
 There is no `-c`; the flag is `--config PATH`.
 
 The dialect is recognised from the content, and a compat-loaded config
-keeps its dialect across reloads. Unmapped constructs and non-BGP
-stanzas become `config warning: …` lines at startup; [COMPAT.md](COMPAT.md)
-has the surface and the `lr:` comment directives. A TOML config adds
-`config deprecation: …` on every load and every reload.
+keeps its dialect across reloads. Unmapped constructs and unsupported
+protocol stanzas become `config warning: …` lines at startup (BGP,
+OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own stanzas
+since 1.4.0); [COMPAT.md](COMPAT.md) has the surface and the `lr:`
+comment directives. A TOML config adds `config deprecation: …` on every
+load and every reload.
 
 | Signal (Unix) / event (Windows) | Effect |
 | --- | --- |

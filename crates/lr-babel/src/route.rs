@@ -41,20 +41,26 @@ struct RouteTiming {
 /// babeld's route hold time for an announced interval, in milliseconds.
 ///
 /// RFC 8966 §3.2.5 specifies the hold time as `4 × interval + interval/2`
-/// (4.5× the Update interval). The previous implementation used `6 ×`
-/// the interval with a 15 s floor. On tunnel interfaces (WireGuard, etc.)
-/// the 15 s floor is too tight — a single lost Update packet (latency
-/// spike, brief packet reordering) can cause the route to expire and
-/// trigger a batch withdrawal + re-install cycle (the "flaky Babel"
-/// symptom from the production report).
+/// (4.5× the Update interval) and lets the speaker pick a larger value.
+/// This implementation deliberately uses **6×** the interval — same
+/// multiplier as babeld's own conservative default — with a 30 s floor.
+/// On tunnel interfaces (WireGuard, etc.) the previous 15 s floor was
+/// too tight — a single lost Update packet (latency spike, brief packet
+/// reordering) could cause the route to expire and trigger a batch
+/// withdrawal + re-install cycle (the "flaky Babel" symptom from the
+/// production report).
 ///
-/// The fix: raise the floor to 30 s. babeld's default
-/// `hold_time = MAX(4 × interval + interval / 2, 15)` but babeld also
-/// benefits from the kernel's route cache; lr installs routes into the
-/// kernel FIB directly, so a brief gap between expiry and re-advertisement
-/// produces an immediate blackhole. The 30 s floor gives 2× the previous
-/// buffer for packet loss on tunnel interfaces, while still expiring
-/// stale routes in a reasonable time.
+/// The 30 s floor gives 2× the previous buffer for packet loss on
+/// tunnel interfaces, while still expiring stale routes in a reasonable
+/// time. The 4.5× RFC minimum is *not* used: babeld also benefits from
+/// the kernel's route cache; lr installs routes into the kernel FIB
+/// directly, so a brief gap between expiry and re-advertisement
+/// produces an immediate blackhole, and the extra 1.5× margin is
+/// cheaper than re-learning the lesson.
+///
+/// Returns: `max(interval_cs × 60, 30_000)` milliseconds — i.e. the
+/// 6× hold with a 30 s floor. `interval_cs` is the Babel Update
+/// Interval TLV's value (centiseconds).
 fn hold_ms(interval_cs: u16) -> u64 {
     (u64::from(interval_cs) * 60).max(30_000)
 }
@@ -166,9 +172,11 @@ impl BabelRouteTable {
 
     /// Expire the routes whose re-announcement hold time lapsed
     /// (RFC 8966 §3.2.5): every Update refreshes the hold deadline of
-    /// its claim; `hold_ms` out the route goes — babeld's
-    /// `hold_time = MAX(4 × I/100 + I/50, 15)` s. Returns the withdrawn
-    /// keys so the caller can publish the retraction delta.
+    /// its claim; once `hold_ms(interval_cs)` elapses without a
+    /// refresh, the route is withdrawn. `hold_ms` returns
+    /// `max(interval_cs × 60, 30_000)` ms — see its docstring for
+    /// the rationale. Returns the withdrawn keys so the caller can
+    /// publish the retraction delta.
     pub fn expire(&mut self, now_ms: u64) -> Vec<RouteKey> {
         let gone: Vec<RouteKey> = self
             .timing

@@ -151,8 +151,9 @@ directly:
 `--config-dialect` accepts `bird`, `frr`, `toml` and `lr`. The resolved
 dialect is remembered and reused on `SIGHUP` and on the API `reload`
 command, so a compat-mode daemon does not break on reload. Unmapped
-constructs and non-BGP stanzas become startup warnings, in the
-`config warning: …` voice; see [COMPAT.md](COMPAT.md) for the mapping
+constructs become startup warnings, in the `config warning: …` voice;
+BGP, OSPFv2, OSPFv3, Babel and BFD stanzas translate to lr's own
+stanzas (since 1.4.0); see [COMPAT.md](COMPAT.md) for the mapping
 surface, the `lr:` comment directives and the documented deviations.
 
 `lr-daemon translate bird|frr FILE` performs a best-effort conversion of
@@ -364,4 +365,4 @@ exposure story; see [RUNBOOK.md](RUNBOOK.md#prometheus-metrics-endpoint).
 | Worked configurations | [examples/](examples/) |
 | Verifying against BIRD and FRR | [INTEROP.md](INTEROP.md) |
 | Module layout | [lr-cli-internals.md](lr-cli-internals.md) |
-| The exchange-plane prototype | [research/EXCHANGE-PLANE.md](research/EXCHANGE-PLANE.md) |
+| The exchange-plane surface | [research/EXCHANGE-PLANE.md](research/EXCHANGE-PLANE.md) |

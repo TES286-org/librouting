@@ -149,10 +149,22 @@ domain sockets (not supported here)`.
 | --- | --- | --- |
 | `lrctl status` | `status` | Daemon summary |
 | `lrctl sessions [list]` | `sessions` | One line per session |
+| `lrctl session <h> <sub>` | `session <h> <sub>` | Per-session control: `soft-in`, `refresh-in`, etc. |
 | `lrctl routes show [prefix]` | `routes` | Loc-RIB dump |
+| `lrctl routes count` | `show routes count` | Loc-RIB size only (cheaper than `routes show` on a full table) |
 | `lrctl routes dump <path>` | `mrt <path>` | Write the Loc-RIB as MRT |
 | `lrctl reload` | `reload` | Re-apply the configuration |
+| `lrctl show status` | `show status` | Daemon status (alias of `status`) |
+| `lrctl show memory` | `show memory` | RSS / virtual-size / peak |
+| `lrctl show routes [count]` | `show routes [count]` | Loc-RIB (alias of `routes show`) |
+| `lrctl show roa` / `lrctl show roa count` | `show roa [count]` | ROA table dump or count |
+| `lrctl roa list` / `lrctl roa count` | `show roa [count]` | Alias of `show roa` |
+| `lrctl memory` | `show memory` | Alias of `show memory` |
+| `lrctl ping` | `ping` | Round-trip the API socket |
 | `lrctl shutdown` | `shutdown` | Graceful shutdown |
+| `lrctl shutdown drain` | `shutdown drain` | Drain mode (stop accepting new routes, withdraw what we originated) |
+| `lrctl shutdown status` | `shutdown status` | Drain status |
+| `lrctl shutdown abort` | `shutdown abort` | Abort an in-progress drain |
 | `lrctl filter compile <body>` | (none) | Validate a filter body |
 | `lrctl version`, `lrctl help` | (none) | Version or banner |
 

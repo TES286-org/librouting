@@ -66,7 +66,7 @@ information-model gaps.
   algorithms and requires no PKI roll-out; where BGPsec re-signs per AS on the
   path, LRXP re-signs per _lr_ hop only.
 - **RFC 7120 (early IANA allocation)**: the path to production code points once
-  the prototype stabilizes.
+  the experimental surface stabilizes.
 
 ## 3. Negotiation
 
@@ -90,7 +90,7 @@ parameter):
       | key block TLVs ...                    |
       +---------------------------------------+
 
-  - `version`: 0 for the prototype; a mismatch deactivates the plane (never the
+  - `version`: 0 for the experimental surface; a mismatch deactivates the plane (never the
     session).
   - `flags`: bit 0 — "provenance capable" (the speaker can verify signatures);
     bit 1 — "hints capable". A speaker may advertise the capability and use only
@@ -104,9 +104,9 @@ parameter):
         | key-id (2)   | alg (1)      | reserved |
         +--------------+--------------+----------+
 
-    - `alg` 0 = HMAC-SHA256 (the prototype; the same primitive lr-babel's RFC
+    - `alg` 0 = HMAC-SHA256 (the initial algorithm; the same primitive lr-babel's RFC
       8967 auth already uses), 1 = Ed25519 (the target for provenance once the
-      prototype settles).
+      surface settles).
 
 **Session activation rule:** the plane is active on a session only when _both_
 OPENs carry the capability with the same version, and the intersection of the
@@ -273,7 +273,7 @@ the session's when provenance propagates.
 
 ## 8. Trust model and security considerations
 
-- **Prototype trust**: symmetric, pre-shared per key-id (HMAC-SHA256). Key
+- **Initial trust model**: symmetric, pre-shared per key-id (HMAC-SHA256). Key
   distribution is configuration, exactly like the existing `[babel.key]` /
   TCP-AO keys. Rotation = new key-id advertised in the key block while the old
   one verifies; keys are removed only after the expiry of provenance records
@@ -358,11 +358,11 @@ the session's when provenance propagates.
    existing RPKI repository when present?
 2. Should policy-intent digests use a canonical prefix-list encoding shared with
    the daemon's policy engine (`lr-policy`), so digests are comparable across
-   implementations? (Prototype: yes, SipHash-2-4 over the sorted, normalized
+   implementations? (Current implementation: yes, SipHash-2-4 over the sorted, normalized
    set.)
 3. Route-server mode (RFC 7947): hints computed by a route server describe the
    server's view, which is not the client's next hop — do RS sessions suppress
-   class-0 records by default? (Prototype: yes, pending review.)
+   class-0 records by default? (Current implementation: yes, pending review.)
 4. Does the provenance chain interact with RFC 8212's require-policy mode as a
    _third_ acceptance criterion (route acceptable only with a valid origin
    attestation)? Configurable, default no — keeping rule 1 of this document.

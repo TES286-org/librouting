@@ -238,7 +238,7 @@ any single default explicitly.
 | ROA source | `[[roa]] prefix, max_length, asn` | `roa table` plus an RPKI session | `rpki` cache |
 | Validation trigger | `[bgp] roa_validate = true` | `rpki reload` | `bgp rpki on` |
 | Invalid action | `roa_invalid_action = "reject"` | `reject` | `bgp rpki invalid reject` |
-| Filter access | `roa.state == "invalid"` | `roa_check()` | `extcommunity rt …` |
+| Filter access | `roa.state == "invalid"` | `roa_check()` | `bgp rpki invalid-only` (route-map) |
 | Malformed ROA | fail closed | strict | strict |
 
 ## 12. BIRD-like filter DSL
@@ -329,7 +329,9 @@ Recorded so that nobody "fixes" them by accident:
 3. **BIRD needs the IPv4 unicast capability advertised and FRR does
    not**, so the one `default_ipv4_unicast` flag produces per-dialect
    capability lists (§4). This is a wire-level necessity.
-4. **The `restart` maximum-prefix action has no cooldown yet.** It tears
-   the session down like `teardown`, where BIRD refuses to re-establish
-   for the configured period. Treat `restart` as an alias until the
-   cooldown lands.
+4. **The `restart` maximum-prefix action cooldown** landed in rc.6
+   (`max_prefix_restart_time`, plus the `--max-prefix-restart-time`
+   flag). When the cooldown is 0, `restart` behaves as an alias for
+   `teardown` (no cooldown) — matching the previously-documented
+   deviation. Set a non-zero `max_prefix_restart_time` to get the
+   BIRD-style re-establishment gate.

@@ -355,12 +355,16 @@ The codec entry points that _are_ exported are `lr_bgp_decode`,
 [`include/lr_ffi.h`](../include/lr_ffi.h) for the current list rather
 than a list copied here.
 
-### The exchange-plane prototype
+### The exchange-plane surface
 
-The daemon's `exchange-plane` feature
-([`crates/lr-cli/Cargo.toml`](../crates/lr-cli/Cargo.toml)) is
-experimental and its wire format rides IANA experimental code points, so
-the ABI does not expose it. It is daemon-only by design. See
+The `exchange-plane` feature lives in three crates —
+[`lr-bgp`](../crates/lr-bgp/Cargo.toml) (the wire codec),
+[`lr-policy`](../crates/lr-policy/Cargo.toml) (the filter DSL surface,
+landed in 1.6.0 / issue #81) and
+[`lr-router`](../crates/lr-router/Cargo.toml) (forwards to
+`lr-bgp/exchange-plane`). The daemon's `exchange-plane` feature turns on
+all three. The wire format rides IANA experimental code points, so the
+C ABI does not expose it: it is daemon-only by design. See
 [`research/EXCHANGE-PLANE.md`](research/EXCHANGE-PLANE.md).
 
 ## 10. The error model
@@ -397,6 +401,7 @@ header defines the matching `LR_ERR_*` macros:
 | `-2` | `LR_ERR_INVALID_HANDLE` | `InvalidHandle` |
 | `-3` | `LR_ERR_BAD_UTF8` | `BadUtf8` |
 | `-4` | `LR_ERR_PANIC` | `Panic` |
+| `-5` | `LR_ERR_CODEC` | `Codec` (SRv6 entry points only) |
 | `-6` | `LR_ERR_OTHER` | `Other` |
 
 The enum itself is not exported to C (§4), so the macros are the C-side
@@ -404,11 +409,12 @@ contract. Two names need care:
 
 - **`-3`** is also the documented code for a malformed argument on many
   entry points, not only for a string that was not valid UTF-8.
-- **`-5`** has no `LR_ERR_*` macro. `LrError::AbiMismatch` is declared
-  but no entry point returns it when versions disagree. The two SRv6
-  entry points use the bare literal `-5` for an SRH encode or decode
-  error, which their doc comments in the header state
+- **`-5`** is `LR_ERR_CODEC` (added in rc.6). It is **not** a general
+  error code: only the two SRv6 codec entry points return it for their
+  own encode/decode failures, as their doc comments in the header state
   ([`crates/lr-ffi/src/srv6.rs`](../crates/lr-ffi/src/srv6.rs)).
+  `LrError::AbiMismatch` is declared but no entry point returns it when
+  versions disagree.
 
 ### Checking the ABI version
 

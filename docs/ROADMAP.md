@@ -13,7 +13,7 @@ defines it; the code wins over any sentence here.
 
 ## Protocol coverage
 
-**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9552).** Done —
+**BGP-LS (RFC 7752) with the SRv6 extensions (RFC 9514).** Done —
 the wire codec, the OSPF LSDB → BGP-LS projection, the daemon
 wiring (`--bgp-ls` flag + `[bgp_ls]` config block + incremental
 republish driver), the BIRD interop lab, and the BGP-LS
