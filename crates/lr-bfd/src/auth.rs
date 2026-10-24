@@ -13,12 +13,18 @@
 //!   `type | len | key-id | reserved | sequence | 20-byte digest`.
 //!   `Auth Len` = 28.
 //!
-//! This crate does not implement the cryptographic algorithms
-//! themselves (`lr-bfd` is no_std-friendly and avoids a crypto
-//! dependency): the wire codec frames the section and the embedder
-//! supplies the digest as opaque bytes. [`BfdSession`]s support the
-//! cryptographic-free Simple Password type end-to-end; the digest types
-//! are framing-only.
+//! This module owns only the wire framing: encode / decode the section,
+//! validate per-type length and `Auth Len` constraints. The digest
+//! computation, the per-session sequence-number state and the
+//! anti-replay window live in [`crate::keyed_auth`] behind the
+//! `keyed-auth` feature (on by default). A session that wants
+//! authenticated packets end-to-end installs a [`crate::BfdKeyedAuth`]
+//! via [`crate::session::BfdSession::set_keyed_auth`]; the session then
+//! signs every outbound packet and verifies every inbound packet
+//! through it. Without the `keyed-auth` feature, [`BfdSession`]s
+//! support the cryptographic-free Simple Password type end-to-end;
+//! the keyed-hash types stay framing-only (the embedder computes and
+//! verifies the digest out-of-band).
 
 use lr_core::buf::{ReadBuf, WriteBuf};
 use lr_core::error::{EncodeError, ParseError};
