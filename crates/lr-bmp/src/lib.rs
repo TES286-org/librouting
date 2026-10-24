@@ -491,11 +491,22 @@ fn decode_peer_header(buf: &[u8]) -> Result<PeerHeader, ParseError> {
     if buf.len() < PeerHeader::LEN {
         return Err(ParseError::truncated("bmp.peer_header"));
     }
+    // RFC 7854 §4.2: Peer Type is one of {0=Global, 1=RD, 2=Local};
+    // values 3..=255 are reserved for future use and MUST NOT be
+    // emitted by a conformant implementation. The previous lenient
+    // decoder mapped reserved values to `Global`, masking malformed
+    // input as a real global peer — surface the wire byte as an
+    // `UnknownType` parse error so the collector can drop the frame
+    // and log the peer byte instead of installing routes attributed
+    // to a peer that did not really send them.
     let peer_type = match buf[0] {
         0 => PeerType::Global,
         1 => PeerType::Rd,
         2 => PeerType::Local,
-        _ => PeerType::Global, // lenient: treat unknown as global
+        other => {
+            return Err(ParseError::unknown_type(0, "bmp.peer_header.peer_type")
+                .with_detail(format!("peer_type {other} is reserved (RFC 7854 §4.2)")));
+        }
     };
     let peer_flags = PeerFlags(buf[1]);
     let peer_distinguisher = u64::from_be_bytes([
@@ -734,5 +745,61 @@ mod tests {
     fn msg_type_display() {
         assert_eq!(BmpMsgType::RouteMonitoring.to_string(), "RouteMonitoring");
         assert_eq!(BmpMsgType::PeerUp.to_string(), "PeerUp");
+    }
+
+    // Regression for the silent peer_type → Global fallback. Before
+    // the fix, `decode_peer_header` mapped reserved peer_type values
+    // (3..=255) to `Global`, masking malformed input as a real global
+    // peer (RFC 7854 §4.2 reserves those values). The strict decoder
+    // surfaces an `UnknownType` error so the collector can drop the
+    // frame and log the wire byte instead.
+    #[test]
+    fn decode_rejects_reserved_peer_type() {
+        let peer = sample_peer_header();
+        let msg = BmpMessage::route_monitoring(peer, &[]);
+        let mut enc = BmpCodec::new().encode_vec(&msg).unwrap();
+        // Common header (6) puts the peer header at byte 6. The first
+        // peer-header octet is the peer_type byte (RFC 7854 §4.2).
+        // Set it to a reserved value (3) and verify the decoder rejects
+        // the frame rather than mapping the peer to Global.
+        enc[6] = 3;
+        let mut codec = BmpCodec::new();
+        let err = codec.decode_slice(&enc).unwrap_err();
+        // The error kind matches `ParseError::unknown_type(...).kind`
+        // without naming the `ErrorKind` variant directly (it lives
+        // in `lr-core::error`, not in this crate's prelude).
+        let expected_kind = ParseError::unknown_type(0, "x").kind;
+        assert_eq!(err.kind, expected_kind);
+        assert_eq!(err.context, "bmp.peer_header.peer_type");
+        assert!(
+            err.detail
+                .as_deref()
+                .unwrap_or_default()
+                .contains("reserved"),
+            "error should mention the reserved status, got: {:?}",
+            err.detail
+        );
+    }
+
+    #[test]
+    fn decode_accepts_each_assigned_peer_type() {
+        // RFC 7854 §4.2: only 0, 1, 2 are assigned; each must round-trip.
+        for (byte, expected) in [
+            (0u8, PeerType::Global),
+            (1, PeerType::Rd),
+            (2, PeerType::Local),
+        ] {
+            let peer = sample_peer_header();
+            let msg = BmpMessage::route_monitoring(peer, &[]);
+            let mut enc = BmpCodec::new().encode_vec(&msg).unwrap();
+            enc[6] = byte;
+            let mut codec = BmpCodec::new();
+            let dec = codec.decode_slice(&enc).unwrap().unwrap();
+            assert_eq!(
+                dec.peer.unwrap().peer_type,
+                expected,
+                "peer_type byte {byte} should decode to {expected:?}"
+            );
+        }
     }
 }
