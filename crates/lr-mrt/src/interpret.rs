@@ -103,6 +103,13 @@ fn read_len(bytes: &[u8], extended: bool) -> Option<usize> {
 fn mp_reach_next_hop(attrs: &PathAttributes) -> Option<IpAddr> {
     let a = attrs.get(AttrType::MpReachNlri)?;
     let reach = lr_bgp::path::MpReach::decode(&a.value)?;
-    let _ = MpNextHop::V4([0; 4]); // keep the enum import honest
-    Some(reach.next_hop.primary())
+    // `reach.next_hop` is an `MpNextHop`; binding it explicitly here
+    // keeps the `MpNextHop` import honest (the type never appears by
+    // name otherwise — `primary()` is the only method the rest of the
+    // crate needs, and Rust's unused-imports lint fires when a name
+    // vanishes behind type inference). The previous form was a bare
+    // `let _ = MpNextHop::V4([0; 4]);` discarded value flagged by
+    // defects.txt L106 as dead code.
+    let nh: &MpNextHop = &reach.next_hop;
+    Some(nh.primary())
 }
