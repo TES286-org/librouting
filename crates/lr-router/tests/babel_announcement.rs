@@ -163,3 +163,43 @@ fn authenticated_announcement_installs_route() {
         "route must install through the RFC 8967 layer"
     );
 }
+
+/// RFC 8966 §3.2 + §4.6.8 / §4.6.9 — the Babel route computation
+/// attaches the private `LrBabelSeqno` / `LrBabelRouterId` path
+/// attributes on every published Babel route so the policy DSL's
+/// `babel.seqno` / `babel.router_id` fields can surface the
+/// source's sequence number and Router-ID. The announcement
+/// frame carries a Router-Id TLV with `id = [1..8]` =
+/// `0x0102_0304_0506_0708` and an Update TLV with `seqno = 1`
+/// for prefix `10.99.1.0/24`.
+#[test]
+fn babel_announcement_attaches_seqno_and_router_id_attributes() {
+    let (mut r, h) = babel_session();
+    r.feed_input(h, &announcement_frame(1)).unwrap();
+
+    let route = r
+        .rib_snapshot()
+        .into_iter()
+        .find(|rt| rt.protocol == Protocol::Babel && rt.key.prefix == Prefix::new_v4([10, 99, 1, 0], 24))
+        .expect("babel route published");
+
+    assert_eq!(route.preference.metric, 192);
+    assert_eq!(
+        route
+            .attributes
+            .get_u32_be(lr_core::attr::AttrTag::raw(
+                lr_bgp::path::AttrType::LrBabelSeqno.to_u8()
+            )),
+        Some(1),
+        "LrBabelSeqno carries the source's seqno (1)"
+    );
+    assert_eq!(
+        route
+            .attributes
+            .get_u64_be(lr_core::attr::AttrTag::raw(
+                lr_bgp::path::AttrType::LrBabelRouterId.to_u8()
+            )),
+        Some(0x0102_0304_0506_0708),
+        "LrBabelRouterId carries the source's 64-bit Router-ID"
+    );
+}

@@ -619,7 +619,7 @@ impl BabelRuntime {
                         r.metric,
                     ),
                     next_hop: Some(next_hop),
-                    attributes: lr_core::attr::Attributes::new(),
+                    attributes,
                     age_ms: 0,
                     path_id: 0,
                     tag: None,
