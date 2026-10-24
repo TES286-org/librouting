@@ -348,19 +348,11 @@ pub(crate) struct BabelInterfaceSpec {
     pub group: Option<String>,
 }
 
-impl BabelInterfaceSpec {
-    /// Human-readable label for log lines.
-    ///
-    /// Currently unused — the Babel interface matcher in `run_babel_daemon`
-    /// reads `spec.name` directly. Kept for API parity with `PeerSpec`,
-    /// `OspfIfSpec` and `LdpIfSpec` (all of which expose `label()`); the
-    /// per-interface multi-socket spawning planned for a follow-up will
-    /// use it for per-session log lines.
-    #[allow(dead_code)]
-    pub fn label(&self) -> &str {
-        self.name.as_deref().unwrap_or("(unnamed)")
-    }
-}
+// `PeerSpec`, `OspfIfSpec` and `LdpIfSpec` each expose a `label()`
+// helper because the daemon's session-key log path calls them. The
+// Babel interface matcher in `run_babel_daemon` reads `spec.name`
+// directly (the multi-NIC spawning landed in rc.3 and uses the kernel
+// interface name `entry.name`), so no `label()` is needed here.
 
 /// One `[[roa]]` table — a Route Origin Authorization binding
 /// (RFC 6482 §3 / RFC 6811 §2). Loaded at startup into the

@@ -211,16 +211,6 @@ impl LogFormat {
             _ => None,
         }
     }
-
-    /// Stable string form, used by `--help` text and by config
-    /// validators that echo back the parsed value.
-    #[allow(dead_code)]
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Plain => "plain",
-            Self::Json => "json",
-        }
-    }
 }
 
 /// ANSI colour policy. `Auto` enables colour when stderr is a TTY.
@@ -239,16 +229,6 @@ impl ColorMode {
             "on" | "yes" | "true" | "always" => Some(Self::On),
             "off" | "no" | "false" | "never" => Some(Self::Off),
             _ => None,
-        }
-    }
-
-    /// Stable string form. See [`LogFormat::as_str`].
-    #[allow(dead_code)]
-    pub(crate) fn as_str(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::On => "on",
-            Self::Off => "off",
         }
     }
 }
@@ -353,27 +333,6 @@ pub(crate) fn init_logger(cfg: LogConfig) -> Result<(), String> {
         *m.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = cfg;
     }
     Ok(())
-}
-
-/// True if `init_logger` has run. Tests use this to install a default
-/// config before any `log_*!` call. Subcommands that do not parse the
-/// daemon's full argument set also call it to decide whether to
-/// install a default.
-#[allow(dead_code)]
-pub(crate) fn logger_initialised() -> bool {
-    LOG_CONFIG.get().is_some()
-}
-
-/// Install a default `LogConfig` if none is present. Used by tests and
-/// by subcommands that do not parse the daemon's full argument set
-/// (so a `log_*!` call before the main daemon installs its config
-/// still produces output at the default level instead of dropping
-/// silently).
-#[allow(dead_code)]
-pub(crate) fn ensure_logger_default() {
-    if LOG_CONFIG.get().is_none() {
-        let _ = LOG_CONFIG.set(Mutex::new(LogConfig::default()));
-    }
 }
 
 fn current_config() -> LogConfig {
