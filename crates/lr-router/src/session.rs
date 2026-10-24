@@ -675,6 +675,22 @@ pub enum SessionErrorKind {
     /// Anything not enumerated above — the FSM reports a Close
     /// without further classification.
     Other = 6,
+    /// OSPF neighbour killed by an unrecoverable mismatch (RFC 2328
+    /// §10.6 — AdjOk? / §10.3 — Hello parameter mismatch). The OSPF
+    /// equivalent of `NotificationReceived`: the peer was reachable
+    /// but the adjacency cannot come up because of a Hello / option
+    /// mismatch that the FSM does not recover from.
+    OspfKill = 7,
+    /// OSPF DBD sequence mismatch (RFC 2328 §10.9 / Fig. 12). The
+    /// exchange FSM restarts the adjacency from ExStart; the kind
+    /// records the last mismatch rather than counting every restart
+    /// (the restart counter lives in `SessionStats::state_transitions`).
+    OspfSeqMismatch = 8,
+    /// OSPF received a malformed or inconsistent LSA in an LS-Update
+    /// or LS-Request (RFC 2328 §13.7 / §A.3 — Bad LSA event). The peer
+    /// is reset; the offending LSA is dropped from the LSDB and the
+    /// adjacency re-floods from the ExStart state.
+    OspfBadLsa = 9,
 }
 
 impl SessionErrorKind {
@@ -690,6 +706,9 @@ impl SessionErrorKind {
             Self::ParseError => "parse-error",
             Self::Manual => "manual",
             Self::Other => "other",
+            Self::OspfKill => "ospf-kill",
+            Self::OspfSeqMismatch => "ospf-seq-mismatch",
+            Self::OspfBadLsa => "ospf-bad-lsa",
         }
     }
 }
@@ -867,6 +886,9 @@ mod session_stats_tests {
             (SessionErrorKind::ParseError, "parse-error"),
             (SessionErrorKind::Manual, "manual"),
             (SessionErrorKind::Other, "other"),
+            (SessionErrorKind::OspfKill, "ospf-kill"),
+            (SessionErrorKind::OspfSeqMismatch, "ospf-seq-mismatch"),
+            (SessionErrorKind::OspfBadLsa, "ospf-bad-lsa"),
         ];
         for (kind, name) in cases {
             assert_eq!(kind.as_str(), name);

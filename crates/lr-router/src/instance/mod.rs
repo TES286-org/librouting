@@ -336,11 +336,18 @@ enum SessionState {
         runtime: OspfRuntime,
         conn: MemoryConn,
         /// Operational statistics (issue #52) — same shape as the BGP
-        /// variant. OSPF does not have a NOTIFICATION mechanism, so
-        /// `last_error` records the `Kill`/`SeqMismatch`/`BadLsa`
-        /// causes as `Other` for now; the field is here for parity so
-        /// `show session <handle>` renders the same shape across
-        /// protocols.
+        /// variant. OSPF does not have a NOTIFICATION mechanism; when
+        /// the OSPF path is wired to record FSM errors into `last_error`,
+        /// the dedicated `SessionErrorKind::OspfKill` /
+        /// `OspfSeqMismatch` / `OspfBadLsa` variants (RFC 2328 §10.3 /
+        /// §10.9 / §13.7) carry the cause. Until that wiring lands the
+        /// OSPF dispatch sites drop FSM `Vec<Action>` events with
+        /// `let _ = self.neighbor.step(..)` (see
+        /// `crates/lr-router/src/instance/ospf.rs:605` and the
+        /// `crates/lr-ospf/src/exchange.rs` siblings — tracked in
+        /// defects.txt under the OSPF `PLACEHOLDER` umbrella), so
+        /// `last_error` stays at `SessionErrorKind::None` for OSPF
+        /// sessions today.
         stats: SessionStats,
     },
     Babel {
