@@ -1196,6 +1196,38 @@ impl LdpDaemon {
                         addrs.join(",")
                     );
                 }
+                EngineEvent::AddressWithdrawn { peer_id, addresses } => {
+                    let addrs: Vec<String> =
+                        addresses.addresses.iter().map(|a| a.to_string()).collect();
+                    log_info!(
+                        Component::Ldp,
+                        "address withdraw from {}: {} (RFC 5036 §3.5.6)",
+                        peer_id,
+                        addrs.join(",")
+                    );
+                }
+                EngineEvent::LabelAbortReceived {
+                    peer_id,
+                    message_id,
+                    request_message_id,
+                    prefixes,
+                } => {
+                    let pfxs: Vec<String> = prefixes.iter().map(|p| p.to_string()).collect();
+                    log_info!(
+                        Component::Ldp,
+                        "label abort from {} (msg-id {} request-id {}): {} \
+                         (RFC 5036 §3.5.9 — outstanding request cancel is the \
+                         daemon's job)",
+                        peer_id,
+                        message_id,
+                        request_message_id.0,
+                        if pfxs.is_empty() {
+                            "wildcard".to_string()
+                        } else {
+                            pfxs.join(",")
+                        }
+                    );
+                }
                 EngineEvent::NotificationReceived { peer_id, status } => {
                     log_info!(
                         Component::Ldp,

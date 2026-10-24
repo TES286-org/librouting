@@ -258,6 +258,36 @@ pub enum EngineEvent {
         peer_id: LdpId,
         message: RawMessage,
     },
+    /// RFC 5036 §3.5.6: the peer withdrew previously advertised
+    /// interface addresses. The engine keeps no per-peer address
+    /// database (the §3.5.6 receiver-side state is the embedder's
+    /// responsibility — see `EngineEvent::AddressReceived` for the
+    /// symmetric advertise path), so the event surfaces the withdraw
+    /// verbatim and the embedder updates its own address table. The
+    /// `addresses` list is the wire `Address List TLV` value as
+    /// decoded by the session layer.
+    AddressWithdrawn {
+        peer_id: LdpId,
+        addresses: AddressList,
+    },
+    /// RFC 5036 §3.5.9: the peer aborted an outstanding Label
+    /// Request. The engine does not yet track its own outstanding
+    /// Label Requests (the §3.5.9 receiver-side rules — cancel the
+    /// matching outgoing Label Request; if a Label Mapping was
+    /// already received for the aborted FEC, send a Label Release —
+    /// are the embedder's job) so the event surfaces the abort with
+    /// the wire's `message_id`, the original Label Request's
+    /// `request_message_id` and the prefixes the abort targets, so
+    /// the embedder can match it against its outstanding-request
+    /// table. A FEC the engine does not recognise is still surfaced
+    /// — the embedder may track requests the engine never saw
+    /// announced (e.g. ones it issued itself and is waiting on).
+    LabelAbortReceived {
+        peer_id: LdpId,
+        message_id: u32,
+        request_message_id: crate::tlv::LabelRequestMessageId,
+        prefixes: alloc::vec::Vec<Prefix>,
+    },
     /// Transit allocation (§3.5.7.1.1): the engine allocated (or
     /// refreshed) the local label for a FEC learned from peers and
     /// re-advertised it upstream. `in_label` is the locally allocated
@@ -1101,8 +1131,21 @@ impl LdpEngine {
                         addresses,
                     });
                 }
-                SessionEvent::AddressWithdrawReceived(_) => {
-                    // No address database in this slice; ignored.
+                SessionEvent::AddressWithdrawReceived(addresses) => {
+                    // RFC 5036 §3.5.6: the peer withdrew interface
+                    // addresses. The engine keeps no per-peer
+                    // address database (the advertise path surfaces
+                    // `EngineEvent::AddressReceived` for the embedder
+                    // to record), so forward the withdraw verbatim
+                    // — the embedder's address table is the source of
+                    // truth for any FIB resolution that uses the
+                    // advertised addresses. Previously this branch was
+                    // a silent no-op, so the embedder never learned
+                    // about a withdraw and kept stale addresses.
+                    self.events.push_back(EngineEvent::AddressWithdrawn {
+                        peer_id: peer,
+                        addresses,
+                    });
                 }
                 SessionEvent::LabelMappingReceived(m) => {
                     // RFC 5036 §3.4.5.1.2 + A.2.6: check the received
@@ -1312,7 +1355,37 @@ impl LdpEngine {
                         }
                     }
                 }
-                SessionEvent::LabelAbortReceived(_) => {}
+                SessionEvent::LabelAbortReceived(m) => {
+                    // RFC 5036 §3.5.9: the peer aborted an outstanding
+                    // Label Request. The engine does not yet track its
+                    // own outstanding Label Requests, so it cannot cancel
+                    // the matching outgoing request or release a label
+                    // mapping that may have already arrived — those
+                    // §3.5.9 receiver-side actions stay the embedder's
+                    // job. Forward the abort (wire `message_id`, the
+                    // original Label Request's `request_message_id`
+                    // and the prefixes the abort targets) so the
+                    // embedder can match it against its own
+                    // outstanding-request table. Previously this branch
+                    // was a silent no-op, so an abort from the peer was
+                    // invisible to the embedder and the embedder kept
+                    // waiting on a request that would never complete.
+                    let prefixes: alloc::vec::Vec<Prefix> = m
+                        .fec
+                        .elements
+                        .iter()
+                        .filter_map(|el| match el {
+                            crate::tlv::FecElement::Prefix(p) => Some(*p),
+                            _ => None,
+                        })
+                        .collect();
+                    self.events.push_back(EngineEvent::LabelAbortReceived {
+                        peer_id: peer,
+                        message_id: m.message_id,
+                        request_message_id: m.request_message_id,
+                        prefixes,
+                    });
+                }
                 SessionEvent::UnknownMessage(raw) => {
                     self.events.push_back(EngineEvent::UnknownMessage {
                         peer_id: peer,
@@ -2229,5 +2302,163 @@ mod tests {
             "own Hellos must not create adjacencies"
         );
         assert!(engine.take_events().is_empty());
+    }
+
+    // Regression for the two `SessionEvent` arms the engine used to
+    // silently drop: `AddressWithdrawReceived` and `LabelAbortReceived`
+    // (RFC 5036 §3.5.6 / §3.5.9). The engine itself owns no per-peer
+    // address database and no outstanding-Label-Request table, so the
+    // only correct action is to forward the event to the embedder so
+    // the §3.5.6 / §3.5.9 receiver-side bookkeeping can run there. The
+    // tests call `absorb_session_events` directly — the e2e wire
+    // harness in `tests/session_e2e.rs` covers the end-to-end path.
+    fn engine_for_unit_test() -> LdpEngine {
+        let local = LdpId::new([3, 3, 3, 3], 0);
+        let cfg = LdpEngineConfig::new(local, IpAddr::V4([10, 0, 0, 3]));
+        LdpEngine::new(cfg)
+    }
+
+    #[test]
+    fn address_withdraw_surfaces_engine_event() {
+        let mut engine = engine_for_unit_test();
+        let peer = LdpId::new([4, 4, 4, 4], 0);
+        // §3.5.6 withdraw: the peer previously advertised 10.0.0.1 and
+        // 10.0.0.2 (via an Address message that arrived earlier); now
+        // it withdraws both. The engine surfaces the verbatim list so
+        // the embedder can drop them from its per-peer table.
+        let addresses = AddressList {
+            addresses: alloc::vec::Vec::from([
+                IpAddr::V4([10, 0, 0, 1]),
+                IpAddr::V4([10, 0, 0, 2]),
+            ]),
+        };
+        let down = engine.absorb_session_events(
+            Instant::from_millis(0),
+            peer,
+            1,
+            alloc::vec::Vec::from([SessionEvent::AddressWithdrawReceived(addresses.clone())]),
+        );
+        assert!(!down, "a withdraw is not a session-down trigger");
+        let events = engine.take_events();
+        let withdraw = events
+            .iter()
+            .find(|e| matches!(e, EngineEvent::AddressWithdrawn { .. }))
+            .expect("AddressWithdrawReceived must surface as AddressWithdrawn");
+        match withdraw {
+            EngineEvent::AddressWithdrawn {
+                peer_id,
+                addresses: got,
+            } => {
+                assert_eq!(*peer_id, peer);
+                assert_eq!(*got, addresses);
+            }
+            other => panic!("expected AddressWithdrawn, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn label_abort_surfaces_engine_event_with_request_message_id() {
+        let mut engine = engine_for_unit_test();
+        let peer = LdpId::new([4, 4, 4, 4], 0);
+        // §3.5.9 abort: the peer aborted the Label Request whose
+        // `message_id` was 0x0001_1111, targeting 10.10.0.0/24 and
+        // 10.20.0.0/24. The engine surfaces the abort with both the
+        // wire's own `message_id` and the original Label Request's
+        // `request_message_id` so the embedder can match it against
+        // its own outstanding-request table.
+        let msg = crate::message::LabelAbortMsg {
+            message_id: 0x0002_2222,
+            fec: crate::tlv::Fec {
+                elements: alloc::vec::Vec::from([
+                    crate::tlv::FecElement::Prefix(Prefix::new_v4([10, 10, 0, 0], 24)),
+                    crate::tlv::FecElement::Prefix(Prefix::new_v4([10, 20, 0, 0], 24)),
+                ]),
+            },
+            request_message_id: crate::tlv::LabelRequestMessageId(0x0001_1111),
+            unknown_tlvs: alloc::vec::Vec::new(),
+        };
+        let down = engine.absorb_session_events(
+            Instant::from_millis(0),
+            peer,
+            1,
+            alloc::vec::Vec::from([SessionEvent::LabelAbortReceived(msg)]),
+        );
+        assert!(!down, "an abort is not a session-down trigger");
+        let events = engine.take_events();
+        let abort = events
+            .iter()
+            .find(|e| matches!(e, EngineEvent::LabelAbortReceived { .. }))
+            .expect("LabelAbortReceived must surface as a LabelAbortReceived event");
+        match abort {
+            EngineEvent::LabelAbortReceived {
+                peer_id,
+                message_id,
+                request_message_id,
+                prefixes,
+            } => {
+                assert_eq!(*peer_id, peer);
+                assert_eq!(*message_id, 0x0002_2222);
+                assert_eq!(
+                    *request_message_id,
+                    crate::tlv::LabelRequestMessageId(0x0001_1111)
+                );
+                assert_eq!(
+                    *prefixes,
+                    alloc::vec::Vec::from([
+                        Prefix::new_v4([10, 10, 0, 0], 24),
+                        Prefix::new_v4([10, 20, 0, 0], 24),
+                    ])
+                );
+            }
+            other => panic!("expected LabelAbortReceived, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn label_abort_with_wildcard_fec_surfaces_empty_prefix_list() {
+        // §3.5.9: a Wildcard FEC abort targets every FEC the peer
+        // ever requested from us. The engine does not (yet) track
+        // outgoing requests, so the event surfaces with an empty
+        // `prefixes` list and the embedder walks its own table to
+        // find every outstanding request it has for the aborting peer.
+        let mut engine = engine_for_unit_test();
+        let peer = LdpId::new([4, 4, 4, 4], 0);
+        let msg = crate::message::LabelAbortMsg {
+            message_id: 0x0003_3333,
+            fec: crate::tlv::Fec::wildcard(),
+            request_message_id: crate::tlv::LabelRequestMessageId(0x0001_1111),
+            unknown_tlvs: alloc::vec::Vec::new(),
+        };
+        engine.absorb_session_events(
+            Instant::from_millis(0),
+            peer,
+            1,
+            alloc::vec::Vec::from([SessionEvent::LabelAbortReceived(msg)]),
+        );
+        let events = engine.take_events();
+        match events
+            .iter()
+            .find(|e| matches!(e, EngineEvent::LabelAbortReceived { .. }))
+            .expect("wildcard abort must still surface as LabelAbortReceived")
+        {
+            EngineEvent::LabelAbortReceived {
+                peer_id,
+                message_id,
+                request_message_id,
+                prefixes,
+            } => {
+                assert_eq!(*peer_id, peer);
+                assert_eq!(*message_id, 0x0003_3333);
+                assert_eq!(
+                    *request_message_id,
+                    crate::tlv::LabelRequestMessageId(0x0001_1111)
+                );
+                assert!(
+                    prefixes.is_empty(),
+                    "a Wildcard FEC contributes no Prefix elements"
+                );
+            }
+            other => panic!("expected LabelAbortReceived, got {other:?}"),
+        }
     }
 }
