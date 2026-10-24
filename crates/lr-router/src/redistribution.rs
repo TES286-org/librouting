@@ -126,28 +126,31 @@ impl RedistributionPipe {
 
     /// True when `route_prefix` matches the pipe's allow-list (or when
     /// no allow-list is configured).
+    ///
+    /// Matching is bit-level containment, not byte-level: an allow prefix
+    /// of `203.0.113.0/25` matches a route for `203.0.113.5/32` because the
+    /// route's network address falls inside the /25 (the high 25 bits
+    /// agree). The previous implementation compared only whole bytes
+    /// (`div_ceil(plen / 8)` octets) and silently rejected any route whose
+    /// host bits inside the allow prefix's partial last byte differed from
+    /// the allow prefix's stored address — a regression on every
+    /// non-byte-boundary allow prefix.
     pub fn matches(&self, route_prefix: &lr_core::addr::Prefix) -> bool {
         if self.allow_prefixes.is_empty() {
             return true;
         }
         for (addr, plen) in &self.allow_prefixes {
-            // Simple containment: the route prefix is within the allow
-            // prefix when the allow prefix is shorter and the high bits
-            // match.
-            if *plen <= route_prefix.prefix_len {
-                // Check the high `plen` bits of both addresses match.
-                let n = (*plen as usize).div_ceil(8);
-                let a = match addr {
-                    lr_core::addr::IpAddr::V4(b) => &b[..n.min(4)],
-                    lr_core::addr::IpAddr::V6(b) => &b[..n.min(16)],
-                };
-                let b = match &route_prefix.addr {
-                    lr_core::addr::IpAddr::V4(b) => &b[..n.min(4)],
-                    lr_core::addr::IpAddr::V6(b) => &b[..n.min(16)],
-                };
-                if a == b {
-                    return true;
-                }
+            // Bit-level containment via `Prefix::contains_prefix`, which
+            // masks both addresses down to `plen` bits and compares. This
+            // is the same primitive the daemon's filter DSL uses for
+            // `prefix-set` membership, so the import filter and the
+            // redistribution pipe agree on what "within" means.
+            let allow = match addr {
+                lr_core::addr::IpAddr::V4(b) => lr_core::addr::Prefix::new_v4(*b, *plen),
+                lr_core::addr::IpAddr::V6(b) => lr_core::addr::Prefix::new_v6(*b, *plen),
+            };
+            if allow.contains_prefix(route_prefix) {
+                return true;
             }
         }
         false
@@ -223,5 +226,75 @@ mod tests {
             [0x20, 0x01, 0x0d, 0xb9, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1],
             64,
         )));
+    }
+
+    // Regression for the byte-prefix-vs-bit-prefix bug. Before the fix,
+    // `matches()` compared `div_ceil(plen / 8)` whole bytes and silently
+    // rejected routes whose host bits inside the allow prefix's partial
+    // last byte differed from the allow prefix's stored address.
+    #[test]
+    fn matches_non_byte_boundary_v4() {
+        // Allow 203.0.113.0/25 (covers 203.0.113.0 .. 203.0.113.127).
+        let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2)
+            .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 0]), 25)]);
+        // 203.0.113.5/32 is inside the /25 — the high 25 bits agree.
+        assert!(
+            p.matches(&Prefix::new_v4([203, 0, 113, 5], 32)),
+            "non-byte-boundary host inside the allow prefix must match"
+        );
+        // 203.0.113.0/25 itself matches.
+        assert!(p.matches(&Prefix::new_v4([203, 0, 113, 0], 25)));
+        // 203.0.113.128/25 is the other half of the /24 — outside the
+        // /25 — must NOT match.
+        assert!(!p.matches(&Prefix::new_v4([203, 0, 113, 128], 25)));
+        // 203.0.113.200/32 is also outside the /25.
+        assert!(!p.matches(&Prefix::new_v4([203, 0, 113, 200], 32)));
+    }
+
+    #[test]
+    fn matches_non_byte_boundary_v6() {
+        // Allow 2001:db8:0:8::/33. The /33 boundary is the high bit of
+        // byte 4 (group 2 high byte): any address whose first 32 bits are
+        // 2001:db8 and whose 33rd bit is 0 is inside. The 0x08 lives in
+        // byte 7 (well below the /33 mask), so it is ignored.
+        let p =
+            RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2).with_allow_prefixes(vec![(
+                IpAddr::V6([
+                    0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x08, 0, 0, 0, 0, 0, 0, 0, 0,
+                ]),
+                33,
+            )]);
+        // 2001:db8:0:1::/64 is inside the /33 (byte 4 = 0x00, 33rd bit 0).
+        assert!(p.matches(&Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x01, 0, 0, 0, 0, 0, 0, 0, 1,],
+            64,
+        )));
+        // 2001:db8:0:80::/64 still has byte 4 = 0x00 (the 0x80 is in
+        // byte 7, below the /33 boundary), so it is inside the /33.
+        assert!(p.matches(&Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0x00, 0x00, 0x00, 0x80, 0, 0, 0, 0, 0, 0, 0, 1,],
+            64,
+        )));
+        // 2001:db8:8000::/64 has byte 4 = 0x80 — 33rd bit set, outside
+        // the /33 — must NOT match.
+        assert!(!p.matches(&Prefix::new_v6(
+            [0x20, 0x01, 0x0d, 0xb8, 0x80, 0x00, 0x00, 0x00, 0, 0, 0, 0, 0, 0, 0, 1,],
+            64,
+        )));
+    }
+
+    #[test]
+    fn matches_unnormalised_allow_address() {
+        // The allow prefix's stored address may carry host bits (callers
+        // pass `Prefix::addr` directly, which is not normalised to the
+        // network address). Containment must still be computed against
+        // the masked network.
+        let p = RedistributionPipe::new(Protocol::Bgp, Protocol::Ospfv2)
+            .with_allow_prefixes(vec![(IpAddr::V4([203, 0, 113, 5]), 25)]);
+        // 203.0.113.5/25 normalises to 203.0.113.0/25, so 203.0.113.10/32
+        // is inside it.
+        assert!(p.matches(&Prefix::new_v4([203, 0, 113, 10], 32)));
+        // 203.0.113.200/32 is outside the /25.
+        assert!(!p.matches(&Prefix::new_v4([203, 0, 113, 200], 32)));
     }
 }
