@@ -61,30 +61,37 @@ fn ibgp_route_propagates_with_local_pref() {
     assert_eq!(attrs.local_pref(), Some(lr_bgp::path::LocalPref(100)));
 }
 
-/// Route-Reflector: clients C1 and C2 both peer with RR. A route originated
-/// by C1 is reflected to C2 (with ORIGINATOR_ID + CLUSTER_LIST) even though
-/// C1-C2 have no direct session — iBGP split-horizon is lifted for clients.
+/// Route-Reflector: clients C1 and C2 both peer with RR. A route
+/// originated by C1 is reflected to C2 (with ORIGINATOR_ID +
+/// CLUSTER_LIST) even though C1-C2 have no direct session — iBGP
+/// split-horizon is lifted for clients. Pins the full
+/// `DefaultRouter::add_session` -> `BgpPeer::advertise` reflection
+/// path so a future refactor that drops one of the two flags on
+/// the floor (the same shape of bug defects.txt L121-L130 called
+/// out for the previous shape of this test) fails here.
 #[test]
 fn route_reflector_reflects_between_clients() {
     let mut rr = DefaultRouter::new();
     let mut c1 = DefaultRouter::new();
     let mut c2 = DefaultRouter::new();
 
-    // RR-side sessions marked as RR-client by matching peer AS + same AS.
-    // The rr-client flag is set on the RR's view of each client session.
+    // RR-side sessions: the local speaker is a reflector with a
+    // cluster id, and each peer is flagged as a client. The two
+    // flags are independent per RFC 4456 §3 — see
+    // `crates/lr-bgp/src/advertise.rs` for the gating rule.
     let h_rr1 = rr
-        .add_session(SessionConfig::bgp(
-            Asn(64512),
-            Asn(64512),
-            RouterId::from_v4([10, 0, 0, 254]),
-        ))
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 254]))
+                .with_route_reflector(Some(lr_bgp::role::ClusterId::from_v4([10, 0, 0, 254])))
+                .with_route_reflector_client(),
+        )
         .unwrap();
     let h_rr2 = rr
-        .add_session(SessionConfig::bgp(
-            Asn(64512),
-            Asn(64512),
-            RouterId::from_v4([10, 0, 0, 254]),
-        ))
+        .add_session(
+            SessionConfig::bgp(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 254]))
+                .with_route_reflector(Some(lr_bgp::role::ClusterId::from_v4([10, 0, 0, 254])))
+                .with_route_reflector_client(),
+        )
         .unwrap();
     let h_c1 = c1
         .add_session(SessionConfig::bgp(
@@ -118,14 +125,112 @@ fn route_reflector_reflects_between_clients() {
     pump(&mut c1, h_c1, &mut rr, h_rr1);
     assert_eq!(rr.rib_snapshot().len(), 1, "RR learns C1's route");
 
-    // NOTE: without the RR-client flag, iBGP split-horizon suppresses the
-    // reflection (this is the default and the assertion pins it); see
-    // docs/examples/bgp_route_reflector.md for enabling reflection via
-    // PeerConfig::route_reflector_client on the RR side.
     pump(&mut rr, h_rr2, &mut c2, h_c2);
+    let c2_snap = c2.rib_snapshot();
+    assert_eq!(
+        c2_snap.len(),
+        1,
+        "RR reflects C1's route to C2 (iBGP split-horizon lifted for clients)"
+    );
+    // The reflected UPDATE carries ORIGINATOR_ID (RFC 4456 §9) and
+    // CLUSTER_LIST (RFC 4456 §10) — both stamped by
+    // `BgpPeer::advertise` for client-bound UPDATEs.
+    //
+    // NOTE: the value of ORIGINATOR_ID is intentionally not pinned
+    // here. RFC 4456 §9 specifies the BGP Identifier of the route's
+    // originator in the local AS (i.e. C1's identifier, 10.0.0.1),
+    // but the current `BgpPeer::advertise` implementation stamps
+    // `self.cfg.local_bgp_id` (the RR's own identifier, 10.0.0.254)
+    // because the egress peer does not have access to the inbound
+    // peer's bgp_id. Plumbing that lookup is a separate,
+    // semver-significant API change tracked in defects.txt; this
+    // test only pins that the reflection attributes are stamped at
+    // all, which is the contract the previous shape of this test
+    // failed to verify.
+    let attrs: lr_bgp::path::PathAttributes = c2_snap[0].attributes.clone().into();
+    assert!(
+        attrs.originator_id().is_some(),
+        "ORIGINATOR_ID present on a reflected UPDATE (RFC 4456 §9)"
+    );
+    let cluster_list = attrs
+        .cluster_list()
+        .expect("CLUSTER_LIST present on a reflected UPDATE");
+    // CLUSTER_LIST's wire element is a 4-octet cluster id (RFC 4456
+    // §10), which the crate represents as `RouterId` (same 4-byte
+    // shape); the RR's effective cluster id came from
+    // `RouteReflectorConfig::cluster_id = ClusterId::from_v4(...)`,
+    // so the wire value equals that cluster id's underlying 4 bytes.
+    assert_eq!(
+        cluster_list.0,
+        &[RouterId::from_v4([10, 0, 0, 254])],
+        "CLUSTER_LIST carries the RR's cluster id"
+    );
+}
+
+/// Pin the negative case: an iBGP speaker who is NOT a route
+/// reflector does not reflect a route learned from one iBGP peer to
+/// another iBGP peer. RFC 4271 §9.1.3 Phase 3 split-horizon rule.
+/// Without this test, a regression that lifts split-horizon
+/// unconditionally would silently leak iBGP routes.
+#[test]
+fn ibgp_split_horizon_suppresses_reflection_when_not_reflector() {
+    let mut mid = DefaultRouter::new();
+    let mut c1 = DefaultRouter::new();
+    let mut c2 = DefaultRouter::new();
+
+    // `mid` is a plain iBGP speaker: route_reflector.enabled stays
+    // false (the default), and neither session is flagged as a
+    // client.
+    let h_mid1 = mid
+        .add_session(SessionConfig::bgp(
+            Asn(64512),
+            Asn(64512),
+            RouterId::from_v4([10, 0, 0, 254]),
+        ))
+        .unwrap();
+    let h_mid2 = mid
+        .add_session(SessionConfig::bgp(
+            Asn(64512),
+            Asn(64512),
+            RouterId::from_v4([10, 0, 0, 254]),
+        ))
+        .unwrap();
+    let h_c1 = c1
+        .add_session(SessionConfig::bgp(
+            Asn(64512),
+            Asn(64512),
+            RouterId::from_v4([10, 0, 0, 1]),
+        ))
+        .unwrap();
+    let h_c2 = c2
+        .add_session(SessionConfig::bgp(
+            Asn(64512),
+            Asn(64512),
+            RouterId::from_v4([10, 0, 0, 2]),
+        ))
+        .unwrap();
+
+    mid.start_session(h_mid1).unwrap();
+    mid.start_session(h_mid2).unwrap();
+    c1.start_session(h_c1).unwrap();
+    c2.start_session(h_c2).unwrap();
+    pump(&mut c1, h_c1, &mut mid, h_mid1);
+    pump(&mut c2, h_c2, &mut mid, h_mid2);
+    let _ = mid.poll_events();
+    let _ = c1.poll_events();
+    let _ = c2.poll_events();
+
+    c1.originate(
+        Prefix::new_v4([198, 51, 100, 0], 24),
+        Some(IpAddr::V4([192, 0, 2, 1])),
+    );
+    pump(&mut c1, h_c1, &mut mid, h_mid1);
+    assert_eq!(mid.rib_snapshot().len(), 1, "mid learns C1's route");
+
+    pump(&mut mid, h_mid2, &mut c2, h_c2);
     assert!(
         c2.rib_snapshot().is_empty(),
-        "plain iBGP speaker does not reflect (split-horizon)"
+        "plain iBGP speaker does not reflect (RFC 4271 §9.1.3 split-horizon)"
     );
 }
 
