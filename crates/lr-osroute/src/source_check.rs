@@ -19,8 +19,8 @@
 //! | Platform | Status |
 //! |----------|--------|
 //! | Windows  | yes — `GetBestRoute2` returns the kernel's chosen source |
-//! | Linux    | yes (no-op) — the rtnetlink helper is not yet factored out |
-//! | other    | yes (no-op) — the diagnostic returns `Ok` so the daemon still runs |
+//! | Linux    | partial (no-op) — returns `Ok` without consulting the kernel; the rtnetlink helper is not yet factored out |
+//! | other    | partial (no-op) — returns `Ok` so the daemon still runs; the diagnostic does not fire |
 //!
 //! The function is safe to call at startup; it performs one syscall per
 //! peer and never blocks.
