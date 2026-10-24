@@ -205,17 +205,19 @@ pub enum AttrType {
     /// see it. Attached to every Babel route the router's Babel
     /// runtime publishes; absent for non-Babel routes.
     ///
-    /// 251 is an internal-only code point: it never appears on the
-    /// wire (the codec strips it at encode) and it deliberately
-    /// avoids the 244-254 unassigned range that the W6.3
-    /// exchange-plane prototype rides on for its wire attribute
-    /// (type 251).
+    /// 249 is an internal-only code point: it never appears on
+    /// the wire (the codec strips it at encode) and it
+    /// deliberately avoids the 251 wire code point that the
+    /// W6.3 exchange-plane prototype rides on (the exchange-
+    /// plane wire attribute is `Other(251)`, not a private
+    /// `AttrType` variant — the relay path preserves it), and
+    /// the 250 code point that `LrBabelRouterId` rides on.
     ///
     /// Value layout: a single 4-byte big-endian u32 holding the
     /// 16-bit Babel seqno (zero-extended — RFC 8966 §4.6.9 caps
     /// the seqno at 16 bits, so the high two bytes are always
     /// zero on a well-formed value).
-    LrBabelSeqno = 251,
+    LrBabelSeqno = 249,
     /// librouting-private Babel Router-ID (RFC 8966 §3.2 +
     /// §4.6.8 — the 64-bit EUI-64-style Router-ID carried in every
     /// Update TLV's Router-Id TLV). Carries the 64-bit Babel
@@ -232,9 +234,10 @@ pub enum AttrType {
     ///
     /// 250 is an internal-only code point: it never appears on
     /// the wire (the codec strips it at encode) and it
-    /// deliberately avoids the 244-254 unassigned range that
-    /// the W6.3 exchange-plane prototype rides on for its wire
-    /// attribute (type 251).
+    /// deliberately avoids the 251 wire code point that the
+    /// W6.3 exchange-plane prototype rides on (the exchange-
+    /// plane wire attribute is `Other(251)`, not a private
+    /// `AttrType` variant — the relay path preserves it).
     ///
     /// Value layout: 8 bytes, big-endian, holding the 64-bit
     /// Babel Router-ID. RFC 8966 §3.2 + §4.6.8 specify the
@@ -246,7 +249,10 @@ pub enum AttrType {
     LrBabelRouterId = 250,
     /// Unknown attribute code. The explicit discriminant keeps the
     /// data-carrying variant out of the unit-like variants' implicit
-    /// numbering (the six private tags above sit at 250/251/252/253/254/255).
+    /// numbering (the six private tags above sit at
+    /// 249/250/252/253/254/255 — code point 251 is the W6.3
+    /// exchange-plane wire attribute, not a private `AttrType`
+    /// variant).
     Other(u8) = 0,
 }
 
@@ -278,8 +284,8 @@ impl AttrType {
             254 => Self::LrExchangePlaneRecords,
             253 => Self::LrOspfMetric2,
             252 => Self::LrOspfRouterId,
-            251 => Self::LrBabelSeqno,
             250 => Self::LrBabelRouterId,
+            249 => Self::LrBabelSeqno,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
@@ -312,8 +318,8 @@ impl AttrType {
             Self::LrExchangePlaneRecords => 254,
             Self::LrOspfMetric2 => 253,
             Self::LrOspfRouterId => 252,
-            Self::LrBabelSeqno => 251,
             Self::LrBabelRouterId => 250,
+            Self::LrBabelSeqno => 249,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }

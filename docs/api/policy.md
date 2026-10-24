@@ -341,7 +341,7 @@ attributes surface through the filter DSL:
   distinguishes "non-Babel route" from "Babel route with seqno 0"
   via `lr-policy::babel::has_seqno` (RFC 8966 §3.1 treats 0 as a
   valid sequence number). The seqno rides the private
-  `LrBabelSeqno` path-attribute tag (code point 251 — stripped at
+  `LrBabelSeqno` path-attribute tag (code point 249 — stripped at
   BGP encode, the same shape `LrOspfMetric2` at 253 uses), and
   the Babel route computation
   (`lr-router::instance::babel::BabelRuntime::best_routes`)

@@ -13,7 +13,7 @@
 //! never attached the attribute.
 //!
 //! The Babel seqno and Router-ID ride private path-attribute tags —
-//! `LrBabelSeqno` (code point 251) and `LrBabelRouterId` (250) —
+//! `LrBabelSeqno` (code point 249) and `LrBabelRouterId` (250) —
 //! the Babel route computation attaches to every Babel route the
 //! router's Babel runtime publishes. The codec strips both at BGP
 //! encode so peers never see them; only the Babel runtime
@@ -47,7 +47,7 @@ use lr_core::rib::{Protocol, Route};
 /// The path-attribute tag carrying the Babel seqno (RFC 8966 §3.2 +
 /// §4.6.9 — the 16-bit unsigned sequence number carried in every
 /// Update TLV). Mirrors `lr_bgp::path::AttrType::LrBabelSeqno`
-/// (value 251); kept as a `u8` here so the accessor stays
+/// (value 249); kept as a `u8` here so the accessor stays
 /// unconditional — no `lr-bgp` dependency. The BGP codec strips the
 /// tag at encode so peers never see it; only the Babel route
 /// computation (`lr-router::instance::babel::BabelRuntime`)
@@ -58,7 +58,7 @@ use lr_core::rib::{Protocol, Route};
 /// 16-bit Babel seqno (zero-extended — RFC 8966 §4.6.9 caps the
 /// seqno at 16 bits, so the high two bytes are always zero on a
 /// well-formed value).
-const LR_BABEL_SEQNO_TAG: u8 = 251;
+const LR_BABEL_SEQNO_TAG: u8 = 249;
 
 /// The path-attribute tag carrying the Babel Router-ID (RFC 8966
 /// §3.2 + §4.6.8 — the 64-bit EUI-64-style Router-ID carried in

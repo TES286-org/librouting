@@ -3695,8 +3695,8 @@ fn ospf_router_id_independent_of_metric1_metric2_and_tag() {
 /// `lr_policy::babel::LR_BABEL_SEQNO_TAG` — kept as a `u8` here so the
 /// test stub does not need to depend on `lr-bgp` (the same hard-coding
 /// shape the accessor in `lr-policy::babel` uses). Mirrors
-/// `lr_bgp::path::AttrType::LrBabelSeqno` (value 251).
-const LR_BABEL_SEQNO_TAG: u8 = 251;
+/// `lr_bgp::path::AttrType::LrBabelSeqno` (value 249).
+const LR_BABEL_SEQNO_TAG: u8 = 249;
 
 /// `lr_policy::babel::LR_BABEL_ROUTER_ID_TAG` — kept as a `u8` here so
 /// the test stub does not need to depend on `lr-bgp` (the same

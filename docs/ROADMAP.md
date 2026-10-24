@@ -675,7 +675,7 @@ value). The BIRD translator renames `babel_seqno` to
 `babel.seqno` (and removes it from `UNMAPPABLE_PREFIXES`),
 `lr-policy::babel` carries the matching `seqno` / `has_seqno`
 helpers, the type-2-external-metric shape: the seqno rides the
-private `LrBabelSeqno` path-attribute tag (code point 251 —
+private `LrBabelSeqno` path-attribute tag (code point 249 —
 stripped at BGP encode, the same shape `LrOspfMetric2` at 253
 uses), and the Babel route computation
 (`lr-router::instance::babel::BabelRuntime::best_routes`)
