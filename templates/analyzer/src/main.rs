@@ -2,13 +2,19 @@
 //!
 //! Usage:
 //!   echo 001e0204... | cargo run -- bgp
+//!   echo 001e0204... | cargo run -- ospf
+//!   echo 001e0204... | cargo run -- ospfv3
+//!   echo 001e0204... | cargo run -- babel
 //!
-//! The optional positional argument selects the decoder. `bgp` is the
-//! default and the only one implemented in this template; reading a pcap
-//! file instead of a hex blob would need the `pcap` crate as a dependency.
+//! The positional argument selects the decoder. `bgp`, `ospf`, `ospfv3`
+//! and `babel` are wired up; reading a pcap file instead of a hex blob
+//! would need the `pcap` crate as a dependency.
 
 use std::env;
 use std::io::Read;
+
+use lr_core::buf::ReadBuf;
+use lr_core::codec::Decoder;
 
 fn main() {
     let mut args = env::args().skip(1);
@@ -23,24 +29,42 @@ fn main() {
             return;
         }
     };
-    match kind.as_str() {
-        "bgp" => {
-            let mut codec = lr_bgp::BgpCodec::new();
-            let mut r = lr_core::buf::ReadBuf::new(&bytes);
-            use lr_core::codec::Decoder;
-            while let Ok(Some(msg)) = codec.decode(&mut r) {
-                println!("{:#?}", msg);
-            }
-        }
-        _ => {
-            eprintln!("unknown kind: {}", kind);
-        }
+    if let Err(e) = run(&kind, &bytes) {
+        eprintln!("decode error: {}", e);
+        std::process::exit(1);
     }
 }
 
+/// Drive one codec over `bytes`, printing each decoded PDU. The codec
+/// type stays opaque to `main` so future decoders slot in by adding a
+/// match arm here.
+fn run(kind: &str, bytes: &[u8]) -> Result<(), String> {
+    match kind {
+        "bgp" => drive(lr_bgp::BgpCodec::new(), bytes),
+        "ospf" | "ospfv2" => drive(lr_ospf::OspfCodec::v2(), bytes),
+        "ospfv3" | "ospf3" => drive(lr_ospf::OspfCodec::v3(), bytes),
+        "babel" => drive(lr_babel::BabelCodec::new(), bytes),
+        _ => Err(format!("unknown kind: {kind} (try bgp|ospf|ospfv3|babel)")),
+    }
+}
+
+/// Repeatedly call `codec.decode` until the buffer stops yielding PDU
+/// frames. Each decoded PDU is printed with `{:#?}` so the operator
+/// sees the full structured shape, not a one-line summary.
+fn drive<M: std::fmt::Debug, D: Decoder<M>>(mut codec: D, bytes: &[u8]) -> Result<(), String> {
+    let mut r = ReadBuf::new(bytes);
+    while let Ok(Some(msg)) = codec.decode(&mut r) {
+        println!("{:#?}", msg);
+    }
+    Ok(())
+}
+
 fn decode_hex(s: &str) -> Result<Vec<u8>, String> {
-    let s = s.trim().trim_start_matches("0x").replace([' ', '\n', '\t'], "");
-    if s.len() % 2 != 0 {
+    let s = s
+        .trim()
+        .trim_start_matches("0x")
+        .replace([' ', '\n', '\t'], "");
+    if !s.len().is_multiple_of(2) {
         return Err("odd-length hex".into());
     }
     let mut out = Vec::with_capacity(s.len() / 2);

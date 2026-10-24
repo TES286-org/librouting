@@ -6,7 +6,8 @@ projects. Copy a project directory as the starting point for a new tool:
 ```sh
 cp -r templates/analyzer ~/projects/my-analyzer
 cd ~/projects/my-analyzer
-# Decode a hex blob on stdin as a BGP message (argv[1] picks the kind).
+# Decode a hex blob on stdin as a BGP, OSPF or Babel message
+# (argv[1] picks the kind: `bgp` (default), `ospf`, `ospfv3`, `babel`).
 echo 'ffffffffffffffffffffffffffffffff001304' | cargo run -- bgp
 ```
 
@@ -17,7 +18,7 @@ Each project directory is a self-contained Cargo workspace with its own
 
 | Template | Description |
 | --- | --- |
-| `analyzer/` | Decodes a hex BGP message read from stdin. |
+| `analyzer/` | Decodes a hex BGP / OSPFv2 / OSPFv3 / Babel message from stdin. |
 | `bgp-rr/` | iBGP route reflector cluster (RFC 4456). |
 | `os-integration/` | `lr-osroute` over Linux rtnetlink; installs routes. |
 | `bfd-integration/` | BGP peer with BFD fast failure detection. |
