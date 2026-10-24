@@ -574,6 +574,34 @@ impl BabelRuntime {
                     lr_core::addr::IpAddr::V6(b) if b == [0u8; 16] => nh_v6_default,
                     other => other,
                 };
+                // The two private path-attribute tags the Babel
+                // route computation attaches so the filter DSL's
+                // `babel.seqno` / `babel.router_id` fields can
+                // surface the source's sequence number and
+                // Router-ID. The codec strips both tags at BGP
+                // encode so peers never see them — they carry
+                // Babel ingress state inside the Loc-RIB only.
+                // `babel.metric` reads `route.preference.metric`
+                // directly (no attribute) the same way
+                // `ospf.metric1` does, so no attribute for it
+                // here either. Mirrors the `LrOspfMetric2` /
+                // `LrOspfRouterId` attachment in
+                // `lr-router::instance::ospf_ops::ospf_recompute`.
+                let mut attributes = lr_core::attr::Attributes::new();
+                attributes.insert(lr_core::attr::Attribute {
+                    tag: lr_core::attr::AttrTag::raw(
+                        lr_bgp::path::AttrType::LrBabelSeqno.to_u8(),
+                    ),
+                    flags: 0x80, // optional, non-transitive
+                    value: (u32::from(r.seqno)).to_be_bytes().to_vec(),
+                });
+                attributes.insert(lr_core::attr::Attribute {
+                    tag: lr_core::attr::AttrTag::raw(
+                        lr_bgp::path::AttrType::LrBabelRouterId.to_u8(),
+                    ),
+                    flags: 0x80, // optional, non-transitive
+                    value: u64::from_be_bytes(r.key.router_id).to_be_bytes().to_vec(),
+                });
                 Route {
                     key: RouteKey::new(r.key.destination, family),
                     origin: RouteOrigin {
