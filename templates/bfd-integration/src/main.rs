@@ -17,8 +17,12 @@ fn main() {
 
     // 2. Two BFD sessions wired together (in-process demo of the
     //    RFC 5880 handshake; a real deployment drives them from UDP
-    //    sockets on port 3784 — see lr_osroute::bfd_transport and the
-    //    daemon's --bfd wiring).
+    //    sockets on port 3784 — see the `lr-osroute` crate's
+    //    `bfd_transport` module and the daemon's `--bfd` wiring.
+    //    (`lr-osroute` is not in this template's `[dependencies]`
+    //    table because the template only demonstrates the in-process
+    //    handshake; add `lr-osroute = { path = "../../crates/lr-osroute" }`
+    //    to drive the sessions from real UDP sockets.)
     let cfg = BfdConfig {
         detect_mult: 3,
         desired_min_tx_interval: 100_000,

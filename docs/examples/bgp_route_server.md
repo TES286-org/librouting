@@ -52,10 +52,16 @@ fn main() {
 for that session (RFC 7947 §2.3.4), so a client sees the originator's own
 path and next hop rather than one through the route server.
 
-`client` is the only field with an effect. The optional
+`client` is the only field the live code path reads today. The optional
 `inbound_policy`, `outbound_policy`, `strip_communities` and
-`add_communities` fields are carried in the struct but no code path reads
-them.
+`add_communities` fields are reserved API surface for per-client filter
+chain wiring (RFC 7947 §2.3.4 community rewriting and per-client
+route-maps): they ship on the struct so a downstream embedder can populate
+them now and the daemon's egress path can pick them up later without a
+semver break. The fields are intentionally kept `pub` rather than tagged
+`#[allow(dead_code)]`: the public struct shape is part of the C ABI freeze,
+so removing them would be a major-version bump. Tracked as future work
+under the route-server stanza in `docs/ROADMAP.md`.
 
 ## Per-client community rewriting
 
