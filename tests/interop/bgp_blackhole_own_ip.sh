@@ -22,7 +22,7 @@ BIRDC=${BIRDC:-birdc}
 if ! command -v "$BIRD" >/dev/null 2>&1; then
     if [ -x $HOME/opt/bird/root/usr/sbin/bird ]; then
         BIRD=$HOME/opt/bird/root/usr/sbin/bird
-        BIRDC=$HOME/opt/bird/root/usr/sbin/birdcl
+        BIRDC=$HOME/opt/bird/root/usr/sbin/birdc
     else
         echo "SKIP: bird/birdc not found"
         exit 0
