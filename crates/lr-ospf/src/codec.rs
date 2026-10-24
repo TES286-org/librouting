@@ -90,9 +90,16 @@ impl Encoder<OspfPacket> for OspfCodec {
         // Patch length
         out.patch(start + 2, &(total as u16).to_be_bytes())
             .ok_or(EncodeError::BufferFull)?;
-        // Patch checksum (zero — embedder can recompute if needed).
-        // OSPF checksums are typically computed at the egress with the IPv4
-        // pseudo-header; for library purposes we leave it to the embedder.
+        // The checksum field at header offset 12 is written verbatim from
+        // `h.checksum` (encode_header writes it once at the top of the
+        // packet and is not patched here). The library does not compute
+        // the OSPF checksum itself: OSPFv2's checksum folds in the IPv4
+        // pseudo-header (RFC 2328 §A.1), which requires the IP header
+        // the embedder will hand to sendto(); OSPFv3 folds in the IPv6
+        // pseudo-header (RFC 5340 §A.3). Embedders that own the L3 frame
+        // (the daemon does, raw `IPPROTO_OSPF` socket) recompute on
+        // egress; embedders that go through a transport abstraction must
+        // compute the checksum before the wire too.
         Ok(total)
     }
 }
