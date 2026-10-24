@@ -114,14 +114,19 @@ fn bird_only_attributes_are_unfaithful() {
         "if gw = 192.0.2.1 then accept;",
         "if ifname = \"eth0\" then accept;",
         "if preference = 100 then accept;",
-        // OSPF attributes lr's DSL does NOT surface yet — the
-        // remaining Babel per-route attributes (`babel_metric`,
-        // `babel_router_id`, `babel_seqno`). The OSPF attributes
-        // (`ospf_metric1`, `ospf_metric2`, `ospf_tag`,
-        // `ospf_router_id`) are all supported (see
-        // `ospf_metric1_renames`, `ospf_metric2_renames`,
-        // `ospf_tag_renames`, `ospf_router_id_renames`).
-        "if babel_metric = 100 then accept;",
+        // OSPF and Babel per-route attributes are all supported
+        // now (the BIRD translator renames them to `ospf.*` and
+        // `babel.*` — see `ospf_metric1_renames_to_dotted_field`,
+        // `ospf_metric2_renames_to_dotted_field`,
+        // `ospf_tag_renames_to_dotted_field`,
+        // `ospf_router_id_renames_to_dotted_field`,
+        // `babel_metric_renames_to_dotted_field`,
+        // `babel_seqno_renames_to_dotted_field`,
+        // `babel_router_id_renames_to_dotted_field`). The remaining
+        // unmappable per-route attributes are the BIRD route-source
+        // enum literals (RTS_BGP, RTS_STATIC, ...) and the kernel
+        // / RIP / static / direct / device / pipe / aggregated
+        // per-protocol attributes (`krt_source`, ...).
         "if krt_source = 0 then accept;",
         "if source = RTS_BGP then accept;",
     ] {
@@ -320,6 +325,106 @@ fn ospf_router_id_defined_predicate_translates() {
     assert!(
         out.contains("ospf.router_id == 0"),
         "expected `ospf.router_id == 0` in output, got: {out}"
+    );
+}
+
+#[test]
+fn babel_metric_renames_to_dotted_field() {
+    let c = ctx(&[], 0);
+    let out = body_ok("if babel_metric > 100 then reject; accept;", &c);
+    assert!(
+        out.contains("if babel.metric > 100 then reject;"),
+        "expected `babel.metric` in output, got: {out}"
+    );
+    assert!(
+        !out.contains("babel_metric"),
+        "expected `babel_metric` to be renamed, got: {out}"
+    );
+}
+
+#[test]
+fn babel_metric_defined_predicate_translates() {
+    let c = ctx(&[], 0);
+    let out = body_ok("if defined(babel_metric) && babel_metric = 0 then accept;", &c);
+    assert!(
+        out.contains("defined(babel.metric)"),
+        "expected `defined(babel.metric)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("babel.metric == 0"),
+        "expected `babel.metric == 0` in output, got: {out}"
+    );
+}
+
+#[test]
+fn babel_seqno_renames_to_dotted_field() {
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(babel_seqno) && babel_seqno > 100 then reject; accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(babel.seqno)"),
+        "expected `defined(babel.seqno)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("babel.seqno > 100"),
+        "expected `babel.seqno > 100` in output, got: {out}"
+    );
+    assert!(
+        !out.contains("babel_seqno"),
+        "expected `babel_seqno` to be renamed, got: {out}"
+    );
+}
+
+#[test]
+fn babel_seqno_defined_predicate_translates() {
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(babel_seqno) && babel_seqno = 0 then accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(babel.seqno)"),
+        "expected `defined(babel.seqno)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("babel.seqno == 0"),
+        "expected `babel.seqno == 0` in output, got: {out}"
+    );
+}
+
+#[test]
+fn babel_router_id_renames_to_dotted_field() {
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(babel_router_id) then accept; reject;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(babel.router_id)"),
+        "expected `defined(babel.router_id)` in output, got: {out}"
+    );
+    assert!(
+        !out.contains("babel_router_id"),
+        "expected `babel_router_id` to be renamed, got: {out}"
+    );
+}
+
+#[test]
+fn babel_router_id_defined_predicate_translates() {
+    let c = ctx(&[], 0);
+    let out = body_ok(
+        "if defined(babel_router_id) && babel_router_id = 0 then accept;",
+        &c,
+    );
+    assert!(
+        out.contains("defined(babel.router_id)"),
+        "expected `defined(babel.router_id)` in output, got: {out}"
+    );
+    assert!(
+        out.contains("babel.router_id == 0"),
+        "expected `babel.router_id == 0` in output, got: {out}"
     );
 }
 

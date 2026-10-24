@@ -269,16 +269,23 @@ const UNMAPPABLE_WORDS: &[&str] = &[
     "bt_test_suite",
     "bt_test_same",
     "bt_check_assign",
-    // OSPF per-route attributes BIRD exposes that lr's filter DSL
-    // does NOT surface yet. `ospf_metric1`, `ospf_metric2`,
-    // `ospf_tag` and `ospf_router_id` are supported (the BIRD
-    // translator renames them to `ospf.metric1`, `ospf.metric2`,
-    // `ospf.tag` and `ospf.router_id`). The remaining Babel
-    // per-route attributes (`babel_metric`, `babel_router_id`,
-    // `babel_seqno`) are the next increments and are listed in
-    // [`UNMAPPABLE_PREFIXES`] below so a filter that references
-    // them is marked unfaithful instead of silently dropping
-    // the reference.
+    // OSPF and Babel per-route attributes BIRD exposes that
+    // lr's filter DSL now surfaces. `ospf_metric1`,
+    // `ospf_metric2`, `ospf_tag` and `ospf_router_id` are
+    // supported (the BIRD translator renames them to
+    // `ospf.metric1`, `ospf.metric2`, `ospf.tag` and
+    // `ospf.router_id`). `babel_metric`, `babel_router_id`
+    // and `babel_seqno` are also supported (the BIRD
+    // translator renames them to `babel.metric`,
+    // `babel.router_id` and `babel.seqno`). With this release
+    // every BIRD per-route filter attribute the BIRD 2 grammar
+    // declares under the `ospf_*` / `babel_*` prefixes has a
+    // faithful lr-DSL spelling; the remaining unmappable
+    // per-route attributes are the BIRD route-source enum
+    // literals (RTS_BGP, RTS_STATIC, ...) and the kernel /
+    // RIP / static / direct / device / pipe / aggregated
+    // per-protocol attributes, gated by the `*_` prefixes in
+    // [`UNMAPPABLE_PREFIXES`] below.
 ];
 
 /// BIRD attribute-word prefixes with no lr equivalent (per-protocol
@@ -291,13 +298,22 @@ const UNMAPPABLE_WORDS: &[&str] = &[
 /// RFC 5340 §A.4 the same field on every v3 LSA), and the BIRD
 /// translator renames `ospf_metric1` to `ospf.metric1`, `ospf_metric2`
 /// to `ospf.metric2`, `ospf_tag` to `ospf.tag`, and `ospf_router_id`
-/// to `ospf.router_id`. The remaining per-protocol attributes BIRD
-/// exposes (`babel_*`) are the next increments and the `babel_`
-/// prefix below marks a filter that references them unfaithful.
+/// to `ospf.router_id`. `babel_` is intentionally NOT in this list
+/// either — the lr DSL now exposes `babel.metric` (RFC 8966 §3.2 +
+/// §3.4.3), `babel.seqno` (RFC 8966 §3.2 + §4.6.9) and
+/// `babel.router_id` (RFC 8966 §3.2 + §4.6.8), and the BIRD
+/// translator renames `babel_metric` to `babel.metric`,
+/// `babel_seqno` to `babel.seqno`, and `babel_router_id` to
+/// `babel.router_id`. With this release every BIRD per-route
+/// filter attribute the BIRD 2 grammar declares under the
+/// `ospf_*` / `babel_*` prefixes has a faithful lr-DSL spelling;
+/// the remaining unmappable per-route attributes are the BIRD
+/// route-source enum literals (RTS_BGP, RTS_STATIC, ...) and the
+/// kernel / RIP / static / direct / device / pipe / aggregated
+/// per-protocol attributes, gated by the `*_` prefixes below.
 const UNMAPPABLE_PREFIXES: &[&str] = &[
     "krt_",
     "rip_",
-    "babel_",
     "static_",
     "direct_",
     "device_",
@@ -429,6 +445,52 @@ const RENAMES: &[(&str, &str)] = &[
     // 0.0.0.0 reads as `0` for `ospf.router_id == 0` and
     // `defined(ospf.router_id)` is true).
     ("ospf_router_id", "ospf.router_id"),
+    // RFC 8966 §3.2 + §3.4.3 — `babel_metric` is the route's
+    // primary Babel metric (the value the Update TLV advertised,
+    // folded into `route.preference.metric` by the Babel route
+    // computation after applying the receiver-side link cost —
+    // the field the decision process ranks against, lowest-
+    // metric feasible route wins per RFC 8966 §3.5.1). lr's DSL
+    // spells it `babel.metric` (read-only `Int`, `0` when the
+    // route is not Babel, mirroring BIRD's eattr default for an
+    // unattached `babel_metric` reference). The canonical idiom
+    // `if babel_metric > 100 then reject;` translates faithfully
+    // to `if babel.metric > 100 then reject;`.
+    ("babel_metric", "babel.metric"),
+    // RFC 8966 §3.2 + §4.6.9 — `babel_seqno` is the route's
+    // 16-bit unsigned Babel sequence number (the source's
+    // sequence number the feasibility machinery ranks against
+    // per RFC 8966 §3.4.2). lr's DSL spells it `babel.seqno`
+    // (read-only `Int`, `0` when the route is not Babel,
+    // mirroring BIRD's eattr default for an unattached
+    // `babel_seqno` reference). The canonical idiom `if
+    // defined(babel_seqno) && babel_seqno > 100 then reject;`
+    // translates faithfully to `if defined(babel.seqno) &&
+    // babel.seqno > 100 then reject;` (the `defined()` arm
+    // distinguishes "non-Babel route" from "Babel route with
+    // seqno 0" — RFC 8966 §3.1 treats 0 as a valid sequence
+    // number).
+    ("babel_seqno", "babel.seqno"),
+    // RFC 8966 §3.2 + §4.6.8 — `babel_router_id` is the route's
+    // 64-bit Babel Router-ID (the EUI-64-style value the
+    // route's source claims; carried in every Update TLV's
+    // Router-Id TLV so the receiver pairs the route with its
+    // source). lr's DSL spells it `babel.router_id` (read-only
+    // `Int`, `0` when the route is not Babel, mirroring BIRD's
+    // eattr default for an unattached `babel_router_id`
+    // reference — though BIRD stores the value as an opaque
+    // 8-byte bytestring under `EAF_TYPE_OPAQUE`, lr's DSL
+    // exposes it as a 64-bit `Int` for the canonical
+    // `defined(babel_router_id)` idiom and for direct equality
+    // against the route's i64-form literal). The canonical
+    // idiom `if defined(babel_router_id) then accept;`
+    // translates faithfully to `if defined(babel.router_id)
+    // then accept;` (the `defined()` arm distinguishes "no
+    // attribute" from "attribute present but zero": RFC 8966
+    // §3.1 does not forbid Router-ID 0, so a Babel route with
+    // Router-ID 0 reads as `0` for `babel.router_id == 0` and
+    // `defined(babel.router_id)` is true).
+    ("babel_router_id", "babel.router_id"),
     // RFC 6811 outcome literals → lr's roa.state strings.
     ("ROA_VALID", "\"valid\""),
     ("ROA_UNKNOWN", "\"not-found\""),
