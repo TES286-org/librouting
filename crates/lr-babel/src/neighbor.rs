@@ -128,7 +128,7 @@ impl BabelNeighbor {
             self.hello_history.remove(0);
         }
         // Recompute rxcost per RFC 8966 §3.4.1.
-        self.rxcost = compute_rxcost(self.hello_interval_cs, self.hello_history.len());
+        self.rxcost = compute_rxcost(&self.hello_history);
     }
 
     /// Record an incoming timestamped Hello (BABEL-RTT): the bookkeeping
@@ -241,11 +241,49 @@ impl BabelNeighbor {
     }
 }
 
-fn compute_rxcost(_interval_cs: u16, history_len: usize) -> u32 {
-    // Simplified: missing any hello doubles cost.
-    let missed = 16usize.saturating_sub(history_len);
+/// Reception cost (RFC 8966 §3.4.1 / §3.4.3) approximated from the
+/// recent Hello sequence-number history.
+///
+/// The full RFC 8966 algorithm (Appendix A.1) keeps a 16-bit Hello
+/// history bit-vector; this crate keeps the last <=16 received
+/// sequence numbers in `hello_history`, so the missed-hello count is
+/// derived from the span between the oldest and newest sequence
+/// number in the window minus the entries we actually recorded:
+///
+/// ```text
+/// span = newest - oldest + 1 (mod 2^16)
+/// missed = max(0, span - history.len())
+/// ```
+///
+/// This is the linear interpolation between "perfect reception"
+/// (missed == 0, rxcost == 100) and "fully missed" (missed >= 16,
+/// rxcost == INFINITY per RFC 8966 §3.4.3 — "if no Hello TLVs of
+/// either kind were received recently, then the cost is infinite").
+/// The 16-bit dead-interval check itself lives in
+/// [`BabelNeighbor::is_alive`], which consults `hello_interval_cs`
+/// to compute the 4× interval dead window.
+///
+/// The nominal cost of 100 is babeld's `96` rounded up; the +50
+/// per-missed penalty matches the existing wire behaviour and gives a
+/// finite degradation curve before the neighbour is declared dead.
+fn compute_rxcost(history: &[u16]) -> u32 {
+    let missed = if history.len() <= 1 {
+        0
+    } else {
+        let first = *history.first().unwrap();
+        let last = *history.last().unwrap();
+        // Span = (last - first + 1) mod 2^16 — the count of Hellos the
+        // peer sent between the oldest and newest we recorded,
+        // inclusive of both endpoints. Subtracting the ones we
+        // actually recorded leaves the count we missed in transit.
+        let span = last.wrapping_sub(first).wrapping_add(1) as u32;
+        span.saturating_sub(history.len() as u32)
+    };
+    if missed >= 16 {
+        return 0xffff;
+    }
     let base = 100u32;
-    base + (missed as u32) * 50
+    base + missed * 50
 }
 
 #[cfg(test)]

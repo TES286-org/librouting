@@ -173,3 +173,73 @@ fn rtt_wraparound_keeps_small_deltas_correct() {
     // remote = 400, local = 500 → RTT 100 us, doubled on first sample.
     assert_eq!(n.rtt_us(10), Some(200));
 }
+
+// ---------------------------------------------------------------------------
+// rxcost — regression for the missed-hellos computation that used to
+// confuse "history length" with "missed count" (defects.txt L244-L249).
+// ---------------------------------------------------------------------------
+
+/// First Hello: no missed packets to count yet — base rxcost only.
+#[test]
+fn rxcost_first_hello_is_nominal() {
+    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
+    n.hello(1, 100, 0);
+    assert_eq!(n.rxcost, 100);
+}
+
+/// Consecutive Hellos with no gap: still nominal — the span equals the
+/// history length, so `missed` stays at 0. The previous implementation
+/// would have computed `16 - history.len()` and charged 50 per slot
+/// below 16, producing a steeply inflated rxcost for every healthy
+/// neighbour.
+#[test]
+fn rxcost_perfect_reception_stays_at_nominal() {
+    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
+    for seqno in 1..=8u16 {
+        n.hello(seqno, 100, 0);
+    }
+    assert_eq!(n.rxcost, 100, "no missed Hellos => nominal rxcost only");
+}
+
+/// Hellos 1, 2, 3, 5 (missed 4) — span is 5..=1 = 4, history is 3, so
+/// missed = 1; rxcost = 100 + 1 * 50 = 150.
+#[test]
+fn rxcost_counts_missed_hellos_from_seqno_gap() {
+    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
+    n.hello(1, 100, 0);
+    n.hello(2, 100, 0);
+    n.hello(3, 100, 0);
+    n.hello(5, 100, 0); // missed 4 in transit
+    assert_eq!(
+        n.rxcost, 150,
+        "one missed Hello in the recent window => nominal + 50"
+    );
+}
+
+/// A large gap (15 missed in the recent window) is still finite; the
+/// full 16-missed case flips to INFINITY (0xffff) per RFC 8966 §3.4.3.
+#[test]
+fn rxcost_saturates_to_infinity_at_full_window_miss() {
+    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
+    n.hello(1, 100, 0);
+    n.hello(17, 100, 0); // span 17, history 2 → missed 15 — finite
+    assert_eq!(n.rxcost, 100 + 15 * 50);
+    n.hello(18, 100, 0); // span 18, history 3 → missed 15 still
+    assert_eq!(n.rxcost, 100 + 15 * 50);
+    // Now jump past the 16-window: span 20, history 4 → missed 16 →
+    // INFINITY per RFC 8966 §3.4.3.
+    n.hello(20, 100, 0);
+    assert_eq!(n.rxcost, 0xffff);
+}
+
+/// Sequence numbers wrap modulo 2^16. The wrapping span computation
+/// must not panic or misattribute "missed" across the wrap boundary.
+#[test]
+fn rxcost_wraps_correctly_across_seqno_modulus() {
+    let mut n = BabelNeighbor::new(IpAddr::V4([10, 0, 0, 1]), 0);
+    n.hello(u16::MAX - 1, 100, 0); // 65534
+    n.hello(u16::MAX, 100, 0); // 65535
+    n.hello(1, 100, 0); // wraps to 1; span = 1 - 65534 + 1 (mod 2^16) = 4
+                        // history.len() = 3, span = 4 → missed = 1
+    assert_eq!(n.rxcost, 150);
+}
