@@ -71,6 +71,7 @@ const RTM_GETROUTE: u16 = 26;
 const RTA_DST: u16 = 1;
 const RTA_OIF: u16 = 4;
 const RTA_GATEWAY: u16 = 5;
+const RTA_PREFSRC: u16 = 7;
 const RTA_VIA: u16 = 18;
 const RTA_NEWDST: u16 = 19;
 const RTA_ENCAP_TYPE: u16 = 21;
@@ -306,11 +307,23 @@ fn parse_getroute_reply(resp: &[u8], queried: IpAddr) -> Result<NexthopInfo, Mpl
                 }
                 _ => {}
             },
-            7 if data.len() >= 4 => {
-                // RTA_PREFSRC (not named above — lookup replies carry it
-                // for directly connected destinations).
-                prefsrc = Some(IpAddr::V4([data[0], data[1], data[2], data[3]]));
-            }
+            RTA_PREFSRC => match queried {
+                // The kernel returns RTA_PREFSRC sized to the address
+                // family of the route it resolved — 4 bytes for IPv4,
+                // 16 bytes for IPv6. The previous hard-coded IPv4 read
+                // truncated an IPv6 preferred source to its first four
+                // bytes (and reinterpreted them as an IPv4 address),
+                // producing a bogus `prefsrc` for every IPv6 FIB lookup.
+                IpAddr::V4(_) if data.len() >= 4 => {
+                    prefsrc = Some(IpAddr::V4([data[0], data[1], data[2], data[3]]));
+                }
+                IpAddr::V6(_) if data.len() >= 16 => {
+                    let mut o = [0u8; 16];
+                    o.copy_from_slice(&data[..16]);
+                    prefsrc = Some(IpAddr::V6(o));
+                }
+                _ => {}
+            },
             _ => {}
         }
         cursor += (rta_len + 3) & !3;

@@ -316,7 +316,7 @@ fn parse_getroute_reply_reads_oif_gateway_prefsrc() {
     let reply = getroute_reply(&[
         (&RTA_OIF, &oif),
         (&RTA_GATEWAY, &gw),
-        (&7, &prefsrc), // RTA_PREFSRC
+        (&RTA_PREFSRC, &prefsrc),
     ]);
     let info = parse_getroute_reply(&reply, IpAddr::V4([10, 0, 0, 9])).unwrap();
     assert_eq!(info.if_index, 5);
@@ -346,7 +346,7 @@ fn parse_getroute_reply_error_message_is_an_error() {
 #[test]
 fn parse_getroute_reply_requires_an_oif() {
     let prefsrc = [192u8, 0, 2, 254];
-    let reply = getroute_reply(&[(&7, &prefsrc)]);
+    let reply = getroute_reply(&[(&RTA_PREFSRC, &prefsrc)]);
     assert!(parse_getroute_reply(&reply, IpAddr::V4([10, 0, 0, 9])).is_err());
 }
 
@@ -359,4 +359,22 @@ fn parse_getroute_reply_handles_v6_gateway() {
     let info = parse_getroute_reply(&reply, queried).unwrap();
     assert_eq!(info.if_index, 3);
     assert_eq!(info.gateway, Some(IpAddr::V6(gw)));
+}
+
+#[test]
+fn parse_getroute_reply_reads_v6_prefsrc() {
+    // Regression: RTA_PREFSRC for an IPv6 lookup must NOT be truncated
+    // to its first four bytes as an IPv4 address. Before the fix, the
+    // parser hardcoded IpAddr::V4([data[0..4]]) for type 7, so an IPv6
+    // preferred source was wrongly reported as an IPv4 address built
+    // from its first four octets.
+    let oif = 9u32.to_ne_bytes();
+    let prefsrc: [u8; 16] = [
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x01,
+    ];
+    let reply = getroute_reply(&[(&RTA_OIF, &oif), (&RTA_PREFSRC, &prefsrc)]);
+    let queried = IpAddr::V6([0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x42]);
+    let info = parse_getroute_reply(&reply, queried).unwrap();
+    assert_eq!(info.if_index, 9);
+    assert_eq!(info.prefsrc, Some(IpAddr::V6(prefsrc)));
 }
