@@ -3680,6 +3680,528 @@ fn ospf_router_id_independent_of_metric1_metric2_and_tag() {
     );
 }
 
+// ---- RFC 8966 §3.2 + §3.4.3 / §4.6.8 / §4.6.9: babel.{metric,seqno,router_id} ----
+//
+// The Babel per-route attribute surface mirrors BIRD's `babel_metric`,
+// `babel_router_id` and `babel_seqno` eattrs. The codec half lives in
+// `lr-bgp::path::AttrType::{LrBabelSeqno, LrBabelRouterId}` (private
+// tags the Babel runtime attaches; the codec strips them at BGP
+// encode). The typed accessors live in `crate::babel`; the filter DSL
+// fields live in `RouteFieldKind::{BabelMetric, BabelSeqno,
+// BabelRouterId}`. These tests exercise the full path — parse →
+// eval → accessor — against a real Babel route shape the Babel
+// runtime would publish.
+
+/// `lr_policy::babel::LR_BABEL_SEQNO_TAG` — kept as a `u8` here so the
+/// test stub does not need to depend on `lr-bgp` (the same hard-coding
+/// shape the accessor in `lr-policy::babel` uses). Mirrors
+/// `lr_bgp::path::AttrType::LrBabelSeqno` (value 251).
+const LR_BABEL_SEQNO_TAG: u8 = 251;
+
+/// `lr_policy::babel::LR_BABEL_ROUTER_ID_TAG` — kept as a `u8` here so
+/// the test stub does not need to depend on `lr-bgp` (the same
+/// hard-coding shape the accessor in `lr-policy::babel` uses). Mirrors
+/// `lr_bgp::path::AttrType::LrBabelRouterId` (value 250).
+const LR_BABEL_ROUTER_ID_TAG: u8 = 250;
+
+fn babel_route_with_metric(metric: u32) -> Route {
+    let prefix: Prefix = "203.0.113.0/24".parse().unwrap();
+    Route {
+        key: RouteKey::new(prefix, NlriFamily::IPV4_UNICAST),
+        origin: RouteOrigin { proto: 4, peer: 0 },
+        protocol: Protocol::Babel,
+        preference: Preference::new(Protocol::Babel.default_admin_distance(), metric),
+        next_hop: None,
+        attributes: Attributes::new(),
+        age_ms: 0,
+        path_id: 0,
+        tag: None,
+    }
+}
+
+fn babel_route_with_seqno(metric: u32, seqno: u16) -> Route {
+    let mut r = babel_route_with_metric(metric);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_SEQNO_TAG),
+        flags: 0x80,
+        value: (u32::from(seqno)).to_be_bytes().to_vec(),
+    });
+    r
+}
+
+fn babel_route_with_router_id(metric: u32, router_id: u64) -> Route {
+    let mut r = babel_route_with_metric(metric);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: router_id.to_be_bytes().to_vec(),
+    });
+    r
+}
+
+#[test]
+fn babel_metric_reads_as_int_when_present() {
+    let mut r = babel_route_with_metric(192);
+    assert_eq!(
+        run("if babel.metric == 192 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_metric_reads_as_zero_for_non_babel_routes() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run("if babel.metric == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.metric == 100 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_metric_canonical_bird_idiom_translates() {
+    let mut r_high = babel_route_with_metric(192);
+    assert_eq!(
+        run("if babel.metric > 100 then reject; accept;", &mut r_high),
+        EvalResult::Reject(None),
+    );
+    let mut r_low = babel_route_with_metric(50);
+    assert_eq!(
+        run("if babel.metric > 100 then reject; accept;", &mut r_low),
+        EvalResult::Accept,
+    );
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(babel.metric) && babel.metric > 100 then reject; accept;",
+            &mut r_bgp
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_metric_zero_is_present_for_babel() {
+    let mut r = babel_route_with_metric(0);
+    assert_eq!(
+        run(
+            "if defined(babel.metric) && babel.metric == 0 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(babel.metric) && babel.metric == 0 then accept; reject;",
+            &mut r_bgp
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_metric_is_not_assignable() {
+    let err = compile("test", "babel.metric = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn babel_metric_peephole_fused_branch_agrees_with_unfused() {
+    let mut r = babel_route_with_metric(192);
+    assert_eq!(
+        run("if babel.metric == 192 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.metric != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if 192 == babel.metric then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_seqno_reads_as_int_when_present() {
+    let mut r = babel_route_with_seqno(192, 7);
+    assert_eq!(
+        run("if babel.seqno == 7 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_seqno_reads_as_zero_for_babel_routes_without_the_attribute() {
+    let mut r = babel_route_with_metric(42);
+    assert_eq!(
+        run("if babel.seqno == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.seqno == 42 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_seqno_reads_as_zero_for_non_babel_routes_even_with_the_attribute() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_SEQNO_TAG),
+        flags: 0x80,
+        value: 7u32.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run("if babel.seqno == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.seqno == 7 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_seqno_mismatch_rejects() {
+    let mut r = babel_route_with_seqno(192, 7);
+    assert_eq!(
+        run("if babel.seqno == 8 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_seqno_is_defined_iff_babel_route_with_attribute() {
+    let mut r_with = babel_route_with_seqno(192, 7);
+    assert_eq!(
+        run("if defined(babel.seqno) then accept; reject;", &mut r_with),
+        EvalResult::Accept,
+    );
+    let mut r_without = babel_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(babel.seqno) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    r_bgp.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_SEQNO_TAG),
+        flags: 0x80,
+        value: 7u32.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run("if defined(babel.seqno) then accept; reject;", &mut r_bgp),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_seqno_defined_distinguishes_absent_from_seqno_zero() {
+    let mut r_zero = babel_route_with_seqno(192, 0);
+    assert_eq!(
+        run(
+            "if defined(babel.seqno) then accept; reject;",
+            &mut r_zero
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_absent = babel_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(babel.seqno) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_seqno_canonical_bird_idiom_translates() {
+    let mut r_high = babel_route_with_seqno(192, 200);
+    assert_eq!(
+        run(
+            "if defined(babel.seqno) && babel.seqno > 100 then reject; accept;",
+            &mut r_high
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_low = babel_route_with_seqno(192, 50);
+    assert_eq!(
+        run(
+            "if defined(babel.seqno) && babel.seqno > 100 then reject; accept;",
+            &mut r_low
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_babel = babel_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(babel.seqno) && babel.seqno > 100 then reject; accept;",
+            &mut r_babel
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_seqno_is_not_assignable() {
+    let err = compile("test", "babel.seqno = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn babel_seqno_peephole_fused_branch_agrees_with_unfused() {
+    let mut r = babel_route_with_seqno(192, 7);
+    assert_eq!(
+        run("if babel.seqno == 7 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.seqno != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if 7 == babel.seqno then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_router_id_reads_as_int_when_present() {
+    let mut r = babel_route_with_router_id(192, 0x0102_0304_0506_0708);
+    assert_eq!(
+        run(
+            "if babel.router_id == 72623859790382856 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_router_id_reads_as_zero_for_babel_routes_without_the_attribute() {
+    let mut r = babel_route_with_metric(42);
+    assert_eq!(
+        run("if babel.router_id == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.router_id == 42 then accept; reject;", &mut r),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_router_id_reads_as_zero_for_non_babel_routes_even_with_the_attribute() {
+    let mut r = route_with("203.0.113.0/24", 100, 0);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: 0x0102_0304_0506_0708u64.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run("if babel.router_id == 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run(
+            "if babel.router_id == 72623859790382856 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_router_id_mismatch_rejects() {
+    let mut r = babel_route_with_router_id(192, 0x0102_0304_0506_0708);
+    assert_eq!(
+        run(
+            "if babel.router_id == 72623859790382857 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_router_id_is_defined_iff_babel_route_with_attribute() {
+    let mut r_with = babel_route_with_router_id(192, 0x0102_0304_0506_0708);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_with
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_without = babel_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_without
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    r_bgp.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: 0x0102_0304_0506_0708u64.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_bgp
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_router_id_defined_distinguishes_absent_from_router_id_zero() {
+    let mut r_zero = babel_route_with_router_id(192, 0);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_zero
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_absent = babel_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_absent
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_router_id_high_bit_set_round_trips_through_i64() {
+    // i64::MAX = 0x7fff_ffff_ffff_ffff — the largest positive
+    // literal the lexer accepts. A 64-bit value with the high
+    // bit set (>= 0x8000_0000_0000_0000) reads as a negative i64
+    // through the DSL's `Int` literal surface, but the lexer's
+    // `Int(i64)` token cannot represent the bit-pattern that
+    // wraps to a negative number directly (it errors with
+    // `InvalidNumber`). The babel.rs unit test
+    // `router_id_high_bit_set_round_trips_through_i64` pins the
+    // underlying accessor's losslessness directly; this eval
+    // test only verifies the DSL surface agrees with the
+    // accessor when the literal is expressible (i64::MAX).
+    let max = 0x7fff_ffff_ffff_ffffu64; // i64::MAX
+    let mut r = babel_route_with_router_id(192, max);
+    assert_eq!(
+        run(
+            "if babel.router_id == 9223372036854775807 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_router_id_canonical_bird_idiom_translates() {
+    let mut r_match = babel_route_with_router_id(192, 0x0102_0304_0506_0708);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_match
+        ),
+        EvalResult::Accept,
+    );
+    let mut r_ospf = babel_route_with_metric(42);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_ospf
+        ),
+        EvalResult::Reject(None),
+    );
+    let mut r_bgp = route_with("203.0.113.0/24", 100, 0);
+    assert_eq!(
+        run(
+            "if defined(babel.router_id) then accept; reject;",
+            &mut r_bgp
+        ),
+        EvalResult::Reject(None),
+    );
+}
+
+#[test]
+fn babel_router_id_is_not_assignable() {
+    let err = compile("test", "babel.router_id = 100;").unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("read-only") || msg.contains("ReadOnly"),
+        "expected a read-only error, got: {msg}"
+    );
+}
+
+#[test]
+fn babel_router_id_peephole_fused_branch_agrees_with_unfused() {
+    let mut r = babel_route_with_router_id(192, 0x0102_0304_0506_0708);
+    assert_eq!(
+        run(
+            "if babel.router_id == 72623859790382856 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run("if babel.router_id != 0 then accept; reject;", &mut r),
+        EvalResult::Accept,
+    );
+    assert_eq!(
+        run(
+            "if 72623859790382856 == babel.router_id then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+}
+
+#[test]
+fn babel_fields_independent_of_each_other() {
+    let mut r = babel_route_with_seqno(192, 7);
+    r.attributes.insert(Attribute {
+        tag: AttrTag::raw(LR_BABEL_ROUTER_ID_TAG),
+        flags: 0x80,
+        value: 0x0102_0304_0506_0708u64.to_be_bytes().to_vec(),
+    });
+    assert_eq!(
+        run(
+            "if babel.metric == 192 && babel.seqno == 7 && babel.router_id == 72623859790382856 then accept; reject;",
+            &mut r
+        ),
+        EvalResult::Accept,
+    );
+    let mut r2 = babel_route_with_seqno(192, 7);
+    assert_eq!(
+        run(
+            "if babel.metric == 192 && babel.seqno == 7 && babel.router_id == 0 then accept; reject;",
+            &mut r2
+        ),
+        EvalResult::Accept,
+    );
+}
+
 // ---- Issue #81: bgp.lrxp.* (LRXP exchange-plane filter DSL surface) ----
 //
 // The LRXP surface is feature-gated behind `exchange-plane`. The

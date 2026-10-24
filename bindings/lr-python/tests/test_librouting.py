@@ -920,6 +920,124 @@ def test_filter_dsl_ospf_router_id():
     assert reject_from_specific.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
 
 
+def test_filter_dsl_babel_metric():
+    """`babel.metric` reads `route.preference.metric` for Babel routes
+    and `0` for non-Babel routes (RFC 8966 §3.2 + §3.4.3 — the value
+    the Update TLV advertised, folded into `route.preference.metric`
+    by the Babel route computation after applying the receiver-side
+    link cost). The binding exercises the full path — Python → FFI
+    → Rust filter eval → `lr-policy::babel::metric` accessor — so a
+    regression in any layer surfaces here."""
+    babel = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BABEL)
+    babel.set_metric(192)
+    reject_high = librouting.compile_filter(
+        "py-babel-high",
+        "if defined(babel.metric) && babel.metric > 100 then reject; accept;",
+    )
+    assert reject_high.evaluate(babel)[0] == librouting.FILTER_REJECT
+
+    low = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BABEL)
+    low.set_metric(50)
+    assert reject_high.evaluate(low)[0] == librouting.FILTER_ACCEPT
+
+    bgp = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    bgp.set_metric(200)  # has no effect on `babel.metric`
+    assert reject_high.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+
+    zero_metric = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BABEL)
+    zero_metric.set_metric(0)
+    accept_zero = librouting.compile_filter(
+        "py-babel-zero",
+        "if defined(babel.metric) && babel.metric == 0 then accept; reject;",
+    )
+    assert accept_zero.evaluate(zero_metric)[0] == librouting.FILTER_ACCEPT
+    assert accept_zero.evaluate(bgp)[0] == librouting.FILTER_REJECT
+
+
+def test_filter_dsl_babel_seqno():
+    """`babel.seqno` reads the private `LrBabelSeqno` path-attribute
+    tag (RFC 8966 §3.2 + §4.6.9 — the 16-bit unsigned sequence
+    number carried in every Update TLV) the Babel route
+    computation attaches to every Babel route it publishes. The
+    binding exercises the FFI surface — Python → C ABI → Rust
+    filter eval → `lr-policy::babel::seqno` accessor — so a
+    regression in any layer surfaces here.
+
+    The "present" path (a route carrying the `LrBabelSeqno`
+    attribute) is exercised by the `lr-policy::babel::seqno_*`
+    unit tests (which synthesize the attribute directly via
+    `Attributes::insert`) and the
+    `lr-router::tests::babel_announcement::babel_announcement_attaches_seqno_and_router_id_attributes`
+    integration test (which populates the attribute via the Babel
+    route computation, the only producer). The binding cannot
+    reach that path because the C ABI does not expose a setter
+    for the `LrBabelSeqno` tag — embedders read the field but
+    never inject it; the Babel daemon is the only producer. The
+    binding test pins the "absent" path (the FFI surface, the
+    parser, the protocol-kind fast path, and the
+    absence-handling default), which is the layer an embedder's
+    regression would surface through."""
+    babel = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BABEL)
+    babel.set_metric(192)
+    reject_high = librouting.compile_filter(
+        "py-babel-seqno-high",
+        "if defined(babel.seqno) && babel.seqno > 100 then reject; accept;",
+    )
+    assert reject_high.evaluate(babel)[0] == librouting.FILTER_ACCEPT
+    read_zero = librouting.compile_filter(
+        "py-babel-seqno-zero",
+        "if babel.seqno == 0 then accept; reject;",
+    )
+    assert read_zero.evaluate(babel)[0] == librouting.FILTER_ACCEPT
+
+    bgp = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    bgp.set_metric(200)
+    assert reject_high.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+
+
+def test_filter_dsl_babel_router_id():
+    """`babel.router_id` reads the private `LrBabelRouterId`
+    path-attribute tag (RFC 8966 §3.2 + §4.6.8 — the 64-bit
+    EUI-64-style Router-ID carried in every Update TLV's
+    Router-Id TLV) the Babel route computation attaches to
+    every Babel route it publishes. The binding exercises the
+    FFI surface — Python → C ABI → Rust filter eval →
+    `lr-policy::babel::router_id` accessor — so a regression in
+    any layer surfaces here.
+
+    The "present" path (a route carrying the `LrBabelRouterId`
+    attribute) is exercised by the `lr-policy::babel::router_id_*`
+    unit tests (which synthesize the attribute directly via
+    `Attributes::insert`) and the
+    `lr-router::tests::babel_announcement::babel_announcement_attaches_seqno_and_router_id_attributes`
+    integration test (which populates the attribute via the Babel
+    route computation, the only producer). The binding cannot
+    reach that path because the C ABI does not expose a setter
+    for the `LrBabelRouterId` tag — embedders read the field but
+    never inject it; the Babel daemon is the only producer. The
+    binding test pins the "absent" path (the FFI surface, the
+    parser, the protocol-kind fast path, and the
+    absence-handling default), which is the layer an embedder's
+    regression would surface through."""
+    babel = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BABEL)
+    babel.set_metric(192)
+    reject_known = librouting.compile_filter(
+        "py-babel-rid-known",
+        # 0x0102030405060708 = 72623859790382856
+        "if defined(babel.router_id) && babel.router_id == 72623859790382856 then reject; accept;",
+    )
+    assert reject_known.evaluate(babel)[0] == librouting.FILTER_ACCEPT
+    read_zero = librouting.compile_filter(
+        "py-babel-rid-zero",
+        "if babel.router_id == 0 then accept; reject;",
+    )
+    assert read_zero.evaluate(babel)[0] == librouting.FILTER_ACCEPT
+
+    bgp = librouting.Route(([203, 0, 113, 0], 24), librouting.PROTO_BGP)
+    bgp.set_metric(200)
+    assert reject_known.evaluate(bgp)[0] == librouting.FILTER_ACCEPT
+
+
 def test_package_version_tracks_the_workspace():
     """`librouting.__version__` is the single source for the package
     version; pyproject.toml reads it via `dynamic = ["version"]`. It has
