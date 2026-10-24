@@ -911,8 +911,13 @@ pub fn build_record_set(
             let digest = match (&chain_from, input.received) {
                 (Some((asn, d)), _) => hop_digest(key, input.local_as, d, *asn),
                 (None, Some(_received)) => {
-                    // Upstream set had provenance but no origin anchor:
-                    // handled above (scope stripped) — unreachable here.
+                    // Upstream set had provenance but no origin anchor
+                    // (no `Record::Origin` upstream of us). Without an
+                    // origin anchor we have nothing to chain our hop's
+                    // signature onto, so this is the explicit "no chain
+                    // can be produced" arm — return `None` so the
+                    // caller drops the record set rather than stamping
+                    // a chain with no origin.
                     return None;
                 }
                 (None, _) => {
