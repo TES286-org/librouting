@@ -716,12 +716,15 @@ dependencies = [
  "lr-bgp",
  "lr-bmp",
  "lr-core",
+ "lr-damping",
  "lr-mpls",
+ "lr-mrt",
  "lr-ospf",
  "lr-osroute",
  "lr-policy",
  "lr-rib",
  "lr-router",
+ "lr-srv6",
 ]
 
 [[package]]

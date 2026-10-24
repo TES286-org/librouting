@@ -28,3 +28,10 @@ lr-router = { workspace = true }
 lr-osroute = { workspace = true }
 lr-bmp = { workspace = true }
 lr-mpls = { workspace = true }
+# Smoke-tested from `tests/smoke_crates.rs`. The daemon consumes each
+# transitively through `lr-router` / `lr-cli`; the integration suite
+# pulls them in directly so the smoke tests can reach the public API
+# without going through the daemon's feature-gated paths.
+lr-mrt = { workspace = true }
+lr-damping = { workspace = true }
+lr-srv6 = { workspace = true }
