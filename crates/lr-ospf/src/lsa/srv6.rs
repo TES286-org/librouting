@@ -101,7 +101,10 @@ pub const LOCATOR_SUBTLV_PREFIX_SRC_ROUTER_ADDR: u16 = 5;
 pub const LOCATOR_SUBTLV_SID_STRUCTURE: u16 = 10;
 /// SRv6 SID Structure (§10) in the "OSPFv3 Extended-LSA Sub-TLVs"
 /// registry — the value the sub-TLV carries when it rides the End.X
-/// sub-TLVs of the E-Router-Link TLV (RFC 9513 §13.7; later slice).
+/// sub-TLVs of the E-Router-Link TLV (RFC 9513 §13.7). The codec
+/// parses and emits this sub-TLV inside `Srv6EndXSidSubTlv::decode`
+/// / `Srv6EndXSidSubTlv::encode` and the LAN-End.X counterpart —
+/// see `walk_end_x_sub_tlvs` for the entry point.
 pub const EXT_SUBTLV_SID_STRUCTURE: u16 = 30;
 
 /// Locator route types (RFC 9513 §7.1). Any other value ignores the
