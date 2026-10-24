@@ -299,10 +299,13 @@ pub(crate) struct BabelKeySpec {
 /// When no `[[babel.interface]]` block exists the daemon keeps the
 /// legacy single-socket path: one Babel session bound to the global
 /// `--local-address`. When one or more blocks exist the daemon
-/// enumerates the system interfaces, matches each name against the
-/// patterns in file order, and uses the first match's parameters
-/// for the single Babel session. A future per-interface multi-socket
-/// spawning will run one Babel session per matched interface.
+/// enumerates system interfaces via `lr_osroute::ospf_transport::
+/// list_interfaces`, matches each name against the patterns in file
+/// order, and spawns one `BabelIface` (one Babel session) per matched
+/// system interface — see `resolve_babel_interfaces` in `daemon.rs`
+/// and `docs/examples/babel_multi_nic.md`. An interface whose sockets
+/// cannot bind is skipped with a warning; zero usable interfaces is
+/// the hard error.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub(crate) struct BabelInterfaceSpec {
     /// Kernel interface name or glob pattern (`eth*`, `eth?`).
