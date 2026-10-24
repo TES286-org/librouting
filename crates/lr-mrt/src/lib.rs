@@ -295,14 +295,31 @@ fn decode_tdv2(subtype: u16, body: &[u8]) -> Result<MrtRecord, ParseError> {
             | tdv2_subtype::RIB_GENERIC_ADDPATH
     );
     match subtype {
+        // RFC 6396 §4.3.2: AFI/SAFI-specific RIB subtypes. The
+        // multicast variants (3, 5, 8, 10) share the entry layout
+        // with their unicast counterparts; only the implicit AFI/SAFI
+        // differs. The decoder dispatches on the prefix family the
+        // same way for both.
         tdv2_subtype::RIB_IPV4_UNICAST
         | tdv2_subtype::RIB_IPV4_UNICAST_ADDPATH
-        | tdv2_subtype::RIB_IPV6_UNICAST
-        | tdv2_subtype::RIB_IPV6_UNICAST_ADDPATH => {
-            Ok(MrtRecord::Rib(decode_rib_table(subtype, body, add_path)?))
+        | tdv2_subtype::RIB_IPV4_MULTICAST
+        | tdv2_subtype::RIB_IPV4_MULTICAST_ADDPATH => {
+            Ok(MrtRecord::Rib(decode_rib_table(body, add_path, false)?))
         }
-        // Multicast/generic RIBs share the entry layout but carry
-        // different AFI/SAFI semantics; treat them as opaque for now.
+        tdv2_subtype::RIB_IPV6_UNICAST
+        | tdv2_subtype::RIB_IPV6_UNICAST_ADDPATH
+        | tdv2_subtype::RIB_IPV6_MULTICAST
+        | tdv2_subtype::RIB_IPV6_MULTICAST_ADDPATH => {
+            Ok(MrtRecord::Rib(decode_rib_table(body, add_path, true)?))
+        }
+        // RFC 6396 §4.3.3: RIB_GENERIC prepends an AFI (2 octets)
+        // and SAFI (1 octet) after the sequence number so the prefix
+        // family is dynamic. Only AFI 1 (IPv4) and AFI 2 (IPv6) have
+        // a known prefix layout here; an unknown AFI keeps the record
+        // opaque so a forward-compatible tool can skip past it.
+        tdv2_subtype::RIB_GENERIC | tdv2_subtype::RIB_GENERIC_ADDPATH => {
+            decode_rib_generic(body, add_path)
+        }
         _ => Ok(MrtRecord::Unknown {
             msg_type: msg_type::TABLE_DUMP_V2,
             subtype,
@@ -351,13 +368,12 @@ fn decode_peer_index_table(body: &[u8]) -> Result<PeerIndexTable, ParseError> {
     })
 }
 
-/// `RIB_*` body: sequence, prefix, entry count, entries.
-fn decode_rib_table(subtype: u16, body: &[u8], add_path: bool) -> Result<RibTable, ParseError> {
+/// `RIB_*` body (RFC 6396 §4.3.2): sequence, prefix, entry count,
+/// entries. The caller passes `ipv6` because the AFI/SAFI-specific
+/// subtypes encode it implicitly in the subtype number; the generic
+/// subtype derives it from the wire AFI.
+fn decode_rib_table(body: &[u8], add_path: bool, ipv6: bool) -> Result<RibTable, ParseError> {
     let ctx = "mrt.rib_table";
-    let ipv6 = matches!(
-        subtype,
-        tdv2_subtype::RIB_IPV6_UNICAST | tdv2_subtype::RIB_IPV6_UNICAST_ADDPATH
-    );
     let mut r = Reader::new(body);
     let sequence = r.u32(ctx)?;
     let prefix = r.prefix(ipv6, ctx)?;
@@ -383,6 +399,63 @@ fn decode_rib_table(subtype: u16, body: &[u8], add_path: bool) -> Result<RibTabl
         add_path,
         entries,
     })
+}
+
+/// `RIB_GENERIC[_ADDPATH]` body (RFC 6396 §4.3.3): the same RIB
+/// layout as the AFI/SAFI-specific subtypes but with a 2-octet AFI
+/// and 1-octet SAFI inserted between the sequence number and the
+/// NLRI. The prefix family is derived from the AFI — IPv4 (AFI 1)
+/// and IPv6 (AFI 2) are the only families whose NLRI layout this
+/// crate decodes; any other AFI keeps the record opaque.
+///
+/// The SAFI is read for completeness (RFC 6396 §4.3.3 requires it
+/// on the wire) but does not influence the layout — the NLRI for a
+/// given AFI is the same shape across SAFIs (unicast, multicast,
+/// MPLS-labeled, ...). A future caller that needs to surface the
+/// AFI/SAFI can extend [`RibTable`] with a separate field.
+fn decode_rib_generic(body: &[u8], add_path: bool) -> Result<MrtRecord, ParseError> {
+    let ctx = "mrt.rib_generic";
+    let mut r = Reader::new(body);
+    let sequence = r.u32(ctx)?;
+    let afi = r.u16(ctx)?;
+    let _safi = r.u8(ctx)?;
+    let ipv6 = match afi {
+        1 => false,
+        2 => true,
+        _ => {
+            return Ok(MrtRecord::Unknown {
+                msg_type: msg_type::TABLE_DUMP_V2,
+                subtype: if add_path {
+                    tdv2_subtype::RIB_GENERIC_ADDPATH
+                } else {
+                    tdv2_subtype::RIB_GENERIC
+                },
+            });
+        }
+    };
+    let prefix = r.prefix(ipv6, ctx)?;
+    let entry_count = r.u16(ctx)? as usize;
+    let mut entries = Vec::with_capacity(entry_count.min(4096));
+    for _ in 0..entry_count {
+        let ectx = "mrt.rib_generic.entry";
+        let peer_index = r.u16(ectx)?;
+        let originated_time = r.u32(ectx)?;
+        let path_id = if add_path { r.u32(ectx)? } else { 0 };
+        let attr_len = r.u16(ectx)? as usize;
+        let attributes = r.bytes(attr_len, ectx)?.to_vec();
+        entries.push(RibEntry {
+            peer_index,
+            originated_time,
+            path_id,
+            attributes,
+        });
+    }
+    Ok(MrtRecord::Rib(RibTable {
+        sequence,
+        prefix,
+        add_path,
+        entries,
+    }))
 }
 
 /// BGP4MP body decoder (header already consumed for `_ET` variants).

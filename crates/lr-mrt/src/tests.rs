@@ -517,3 +517,164 @@ fn parse_file_roundtrip() {
     assert!(matches!(records[0], MrtRecord::PeerIndexTable(_)));
     std::fs::remove_file(&path).ok();
 }
+
+// ---------------------------------------------------------------------------
+// RFC 6396 §4.3.2 multicast RIB subtypes and §4.3.3 RIB_GENERIC.
+//
+// Before these subtypes were wired through `decode_rib_table`, the
+// multicast v4/v6 (3, 5, 8, 10) and generic (6, 11) subtypes
+// returned `MrtRecord::Unknown`, so a tool consuming a multicast or
+// generic dump silently lost every prefix. The four cases below
+// build wire-format records by hand to lock the layout in.
+// ---------------------------------------------------------------------------
+
+/// Build a 12-byte MRT record header.
+fn mrt_header(subtype: u16, body_len: u32) -> [u8; 12] {
+    let mut h = [0u8; 12];
+    h[0..4].copy_from_slice(&0x6a91_c861u32.to_be_bytes()); // timestamp
+    h[4..6].copy_from_slice(&0x000du16.to_be_bytes()); // TABLE_DUMP_V2
+    h[6..8].copy_from_slice(&subtype.to_be_bytes());
+    h[8..12].copy_from_slice(&body_len.to_be_bytes());
+    h
+}
+
+#[test]
+fn decodes_rib_ipv4_multicast() {
+    // RFC 6396 §4.3.2: layout identical to RIB_IPV4_UNICAST. One
+    // 198.51.100.0/24 entry, one peer, empty attribute set.
+    let body = &[
+        0x00, 0x00, 0x00, 0x07, // sequence 7
+        0x18, // prefix length 24
+        0xc6, 0x33, 0x64, // 198.51.100
+        0x00, 0x01, // entry count 1
+        0x00, 0x05, // peer index 5
+        0x6a, 0x91, 0xc8, 0x5f, // originated time
+        0x00, 0x00, // attribute length 0
+    ];
+    let mut wire = mrt_header(tdv2_subtype::RIB_IPV4_MULTICAST, body.len() as u32).to_vec();
+    wire.extend_from_slice(body);
+    let records = reader_drain(&wire);
+    assert_eq!(records.len(), 1);
+    let MrtRecord::Rib(r) = &records[0] else {
+        panic!("RIB_IPV4_MULTICAST must decode to a Rib record, not Unknown");
+    };
+    assert_eq!(r.sequence, 7);
+    assert_eq!(r.prefix, "198.51.100.0/24".parse().unwrap());
+    assert!(!r.add_path);
+    assert_eq!(r.entries.len(), 1);
+    assert_eq!(r.entries[0].peer_index, 5);
+}
+
+#[test]
+fn decodes_rib_ipv6_multicast_addpath() {
+    // RFC 6396 §4.3.2 + RFC 8050: layout identical to
+    // RIB_IPV6_UNICAST_ADDPATH. The entry carries a path identifier.
+    let body = &[
+        0x00, 0x00, 0x00, 0x42, // sequence 0x42
+        0x40, // prefix length 64
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, // 2001:db8::
+        0x00, 0x01, // entry count 1
+        0x00, 0x07, // peer index 7
+        0x6a, 0x91, 0xc8, 0x5f, // originated time
+        0x00, 0x00, 0x00, 0x09, // path identifier 9
+        0x00, 0x00, // attribute length 0
+    ];
+    let mut wire = mrt_header(tdv2_subtype::RIB_IPV6_MULTICAST_ADDPATH, body.len() as u32).to_vec();
+    wire.extend_from_slice(body);
+    let records = reader_drain(&wire);
+    assert_eq!(records.len(), 1);
+    let MrtRecord::Rib(r) = &records[0] else {
+        panic!("RIB_IPV6_MULTICAST_ADDPATH must decode to a Rib record, not Unknown");
+    };
+    assert_eq!(r.sequence, 0x42);
+    assert_eq!(r.prefix, "2001:db8::/64".parse().unwrap());
+    assert!(r.add_path);
+    assert_eq!(r.entries.len(), 1);
+    assert_eq!(r.entries[0].peer_index, 7);
+    assert_eq!(r.entries[0].path_id, 9);
+}
+
+#[test]
+fn decodes_rib_generic_v4() {
+    // RFC 6396 §4.3.3: RIB_GENERIC prepends AFI(2) + SAFI(1) between
+    // the sequence number and the NLRI. AFI=1 (IPv4), SAFI=1 (unicast)
+    // — the multicast SAFI (2) shares the layout.
+    let body = &[
+        0x00, 0x00, 0x00, 0x09, // sequence 9
+        0x00, 0x01, // AFI = IPv4
+        0x01, // SAFI = unicast
+        0x18, // prefix length 24
+        0xc6, 0x33, 0x64, // 198.51.100
+        0x00, 0x01, // entry count 1
+        0x00, 0x03, // peer index 3
+        0x6a, 0x91, 0xc8, 0x5f, // originated time
+        0x00, 0x00, // attribute length 0
+    ];
+    let mut wire = mrt_header(tdv2_subtype::RIB_GENERIC, body.len() as u32).to_vec();
+    wire.extend_from_slice(body);
+    let records = reader_drain(&wire);
+    assert_eq!(records.len(), 1);
+    let MrtRecord::Rib(r) = &records[0] else {
+        panic!("RIB_GENERIC with AFI=1 must decode to a Rib record, not Unknown");
+    };
+    assert_eq!(r.sequence, 9);
+    assert_eq!(r.prefix, "198.51.100.0/24".parse().unwrap());
+    assert!(!r.add_path);
+    assert_eq!(r.entries.len(), 1);
+    assert_eq!(r.entries[0].peer_index, 3);
+}
+
+#[test]
+fn decodes_rib_generic_v6_addpath() {
+    // RFC 6396 §4.3.3 + RFC 8050: RIB_GENERIC_ADDPATH with AFI=2
+    // (IPv6), SAFI=2 (multicast). The entry carries a path id.
+    let body = &[
+        0x00, 0x00, 0x00, 0x11, // sequence 0x11
+        0x00, 0x02, // AFI = IPv6
+        0x02, // SAFI = multicast
+        0x40, // prefix length 64
+        0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, // 2001:db8::
+        0x00, 0x01, // entry count 1
+        0x00, 0x04, // peer index 4
+        0x6a, 0x91, 0xc8, 0x5f, // originated time
+        0x00, 0x00, 0x00, 0x05, // path identifier 5
+        0x00, 0x00, // attribute length 0
+    ];
+    let mut wire = mrt_header(tdv2_subtype::RIB_GENERIC_ADDPATH, body.len() as u32).to_vec();
+    wire.extend_from_slice(body);
+    let records = reader_drain(&wire);
+    assert_eq!(records.len(), 1);
+    let MrtRecord::Rib(r) = &records[0] else {
+        panic!("RIB_GENERIC_ADDPATH with AFI=2 must decode to a Rib record, not Unknown");
+    };
+    assert_eq!(r.sequence, 0x11);
+    assert_eq!(r.prefix, "2001:db8::/64".parse().unwrap());
+    assert!(r.add_path);
+    assert_eq!(r.entries.len(), 1);
+    assert_eq!(r.entries[0].peer_index, 4);
+    assert_eq!(r.entries[0].path_id, 5);
+}
+
+#[test]
+fn rib_generic_unknown_afi_stays_unknown() {
+    // RFC 6396 §4.3.3: "An implementation that does not recognize
+    // particular AFI and SAFI values SHOULD discard the remainder of
+    // the MRT record." AFI=42 (unassigned) keeps the record opaque
+    // so a forward-compatible consumer can skip past it without
+    // misinterpreting the body.
+    let body = &[
+        0x00, 0x00, 0x00, 0x09, // sequence 9
+        0x00, 0x2a, // AFI = 42 (unassigned)
+        0x01, // SAFI = 1
+        // Body continues but should be ignored.
+        0x18, 0xc6, 0x33, 0x64, 0x00, 0x01, 0x00, 0x03, 0x6a, 0x91, 0xc8, 0x5f, 0x00, 0x00,
+    ];
+    let mut wire = mrt_header(tdv2_subtype::RIB_GENERIC, body.len() as u32).to_vec();
+    wire.extend_from_slice(body);
+    let records = reader_drain(&wire);
+    assert_eq!(records.len(), 1);
+    assert!(
+        matches!(&records[0], MrtRecord::Unknown { subtype, .. } if *subtype == tdv2_subtype::RIB_GENERIC),
+        "unknown AFI must surface as Unknown, not as a misparsed Rib"
+    );
+}
