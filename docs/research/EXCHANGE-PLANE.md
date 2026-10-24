@@ -90,8 +90,8 @@ parameter):
       | key block TLVs ...                    |
       +---------------------------------------+
 
-  - `version`: 0 for the experimental surface; a mismatch deactivates the plane (never the
-    session).
+  - `version`: 0 for the experimental surface; a mismatch deactivates
+    the plane (never the session).
   - `flags`: bit 0 — "provenance capable" (the speaker can verify signatures);
     bit 1 — "hints capable". A speaker may advertise the capability and use only
     the record classes it cares about.
@@ -104,9 +104,9 @@ parameter):
         | key-id (2)   | alg (1)      | reserved |
         +--------------+--------------+----------+
 
-    - `alg` 0 = HMAC-SHA256 (the initial algorithm; the same primitive lr-babel's RFC
-      8967 auth already uses), 1 = Ed25519 (the target for provenance once the
-      surface settles).
+    - `alg` 0 = HMAC-SHA256 (the initial algorithm; the same primitive
+      lr-babel's RFC 8967 auth already uses), 1 = Ed25519 (the target
+      for provenance once the surface settles).
 
 **Session activation rule:** the plane is active on a session only when _both_
 OPENs carry the capability with the same version, and the intersection of the

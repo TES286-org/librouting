@@ -13,12 +13,21 @@ Read this page to run a target or to add one.
 
 The targets are:
 
-- `bgp_decode` (`BgpCodec::decode_slice`) — BGP message framing + OPEN/UPDATE/KEEPALIVE/NOTIFICATION codec.
-- `bgp_ls_decode` (RFC 7752 / RFC 9514 BGP-LS NLRI codec) — Node/Link/Prefix/SRv6 SID NLRI parsing under arbitrary wire input; landed in 1.3.0.
-- `bgp_ls_attr_decode` (BGP-LS Attribute TLV codec, RFC 7752 §3.3 + RFC 9514 §7-§8) — Node/Link/Prefix Attribute TLVs, SRv6 Endpoint Behavior / BGP PeerNode SID / SID Structure TLVs; landed in 1.3.0.
-- `filter_parser` (`lr_policy::filter::compile`) — the `.lr` filter DSL parser.
-- `roa_validate` (`RoaTableBuilder::add` + `RoaTable::validate`) — RFC 6811 §2 prefix-origin validation.
-- `bfd_auth` (`BfdKeyedAuth::verify_inbound` + the BFD Control packet codec) — RFC 5880 keyed-MD5/SHA1 authentication.
+- `bgp_decode` (`BgpCodec::decode_slice`) — BGP message framing +
+  OPEN/UPDATE/KEEPALIVE/NOTIFICATION codec.
+- `bgp_ls_decode` (RFC 7752 / RFC 9514 BGP-LS NLRI codec) —
+  Node/Link/Prefix/SRv6 SID NLRI parsing under arbitrary wire input;
+  landed in 1.3.0.
+- `bgp_ls_attr_decode` (BGP-LS Attribute TLV codec,
+  RFC 7752 §3.3 + RFC 9514 §7-§8) — Node/Link/Prefix Attribute TLVs,
+  SRv6 Endpoint Behavior / BGP PeerNode SID / SID Structure TLVs;
+  landed in 1.3.0.
+- `filter_parser` (`lr_policy::filter::compile`) — the `.lr` filter
+  DSL parser.
+- `roa_validate` (`RoaTableBuilder::add` + `RoaTable::validate`) —
+  RFC 6811 §2 prefix-origin validation.
+- `bfd_auth` (`BfdKeyedAuth::verify_inbound` + the BFD Control packet
+  codec) — RFC 5880 keyed-MD5/SHA1 authentication.
 
 ## Layout
 
