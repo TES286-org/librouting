@@ -3579,9 +3579,10 @@ carry the per-feature detail.
   daemon entry point via `spawn_metrics()`. 7 e2e tests in
   `crates/lr-cli/tests/daemon_metrics.rs`. Documented in
   `docs/RUNBOOK.md`, `docs/lr-cli.md` and `templates/daemon.toml`.
-  Filter-eval latency histograms and UPDATE tx/rx counters remain
-  open — they require per-session counters the daemon does not track
-  today.
+  Filter-eval latency histograms and UPDATE tx/rx counters landed
+  later in this release (D12.4) — see the
+  "Per-session BGP UPDATE counters + filter-eval latency histograms"
+  bullet below.
 - `lrctl` operational CLI (ROADMAP-v3 D12.1): a third `lr-cli` binary
   alongside `lr` and `lr-daemon`. Connects to a running `lr-daemon`
   over its Unix API socket and proxies the line-oriented command
