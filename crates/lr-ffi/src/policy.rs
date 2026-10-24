@@ -26,7 +26,7 @@ use crate::error::set_last_error;
 use crate::error::LR_ERR_PANIC;
 use crate::guarded;
 use crate::handle::{lock_router, lr_damping_t, lr_router_t, OpaqueDamping};
-use lr_core::addr::{Asn, Prefix};
+use lr_core::addr::Prefix;
 use lr_core::rib::Protocol;
 use lr_router::redistribution::{MetricPolicy, RedistributionPipe};
 use std::sync::{Arc, Mutex};
@@ -391,14 +391,6 @@ pub unsafe extern "C" fn lr_damping_destroy(d: *mut OpaqueDamping) {
 
 fn box_damping(t: Arc<Mutex<lr_damping::DampingTable>>) -> lr_damping_t {
     Box::into_raw(Box::new(t)) as lr_damping_t
-}
-
-/// Keep the Asn import referenced when feature combinations trim the
-/// surface (the aggregation path does not use it today, but the
-/// pipe/allow-list machinery will grow tag-aware filtering).
-#[allow(dead_code)]
-fn _asn_witness(a: Asn) -> u32 {
-    a.0
 }
 
 #[cfg(test)]
