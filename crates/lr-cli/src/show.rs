@@ -284,42 +284,6 @@ fn render_session_detail(out: &mut String, s: &SessionSummary) {
     );
 }
 
-/// Process memory snapshot. On Linux, reads `/proc/self/status` for
-/// `VmRSS` and `VmSize` (the same fields `top` and `ps` report). On
-/// other platforms, both fields are `None` — BIRD's `show memory` does
-/// the same on platforms without a discoverable value.
-#[allow(dead_code)]
-struct ProcessMemory {
-    rss_bytes: Option<u64>,
-    vsize_bytes: Option<u64>,
-}
-
-#[allow(dead_code)]
-impl ProcessMemory {
-    fn unknown() -> Self {
-        Self {
-            rss_bytes: None,
-            vsize_bytes: None,
-        }
-    }
-}
-
-#[allow(dead_code)]
-fn process_memory() -> ProcessMemory {
-    let m = crate::sysinfo::process_memory();
-    ProcessMemory {
-        rss_bytes: m.rss_bytes,
-        vsize_bytes: m.vsize_bytes,
-    }
-}
-
-/// Format a memory byte count: `None` → the string `unknown` (BIRD
-/// parity for "no value available"); `Some(n)` → the integer.
-#[allow(dead_code)]
-fn fmt_bytes(value: Option<u64>) -> String {
-    crate::sysinfo::fmt_bytes(value)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
