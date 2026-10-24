@@ -528,7 +528,10 @@ mod tests {
         // 42. Those depend on a GTP-specific argument layout the
         // crate does not model; left for a follow-up.
         for v in [69u16, 70, 71, 72] {
-            assert!(Behavior::from_wire(v).is_none(), "{v}: End.M.* not modelled");
+            assert!(
+                Behavior::from_wire(v).is_none(),
+                "{v}: End.M.* not modelled"
+            );
         }
     }
 
