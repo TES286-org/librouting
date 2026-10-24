@@ -123,6 +123,19 @@ pub const SRH_FIXED_LEN: usize = 8;
 /// IPv6 address).
 pub const SRH_SEGMENT_LEN: usize = 16;
 
+/// TLV option type `Pad1` (RFC 8200 §4.4.1 — the single-octet padding
+/// option, no length or value field). Used by the SRH encoder to insert
+/// exactly one padding octet when the unpadded TLV tail is seven octets
+/// short of an 8-octet boundary.
+pub const TLV_PAD1: u8 = 0;
+
+/// TLV option type `PadN` (RFC 8200 §4.4.2 — the multi-octet padding
+/// option, two header octets plus `length` zero-octet value bytes).
+/// Used by the SRH encoder for alignment deltas of two through seven
+/// octets. A `PadN` with `length = 0` pads two octets; `length = 5`
+/// pads the full seven.
+pub const TLV_PADN: u8 = 1;
+
 /// Maximum number of segments in an SRH (RFC 8754 §2 — `Hdr Ext
 /// Len` is a single octet, so the segment list is bounded by
 /// `(255 * 8) / 16 = 127` entries; in practice 127 is the cap).
@@ -159,7 +172,10 @@ pub struct Srh {
     pub segments: Vec<Sid>,
     /// Optional TLV bytes following the segment list (RFC 8754 §2.6).
     /// The crate passes them through verbatim — TLV interpretation is
-    /// out of scope for this slice.
+    /// out of scope for this slice. The encoder auto-appends Pad1 /
+    /// PadN TLVs (RFC 8200 §4.4) so the SRH total length is always a
+    /// multiple of 8 (RFC 8754 §2.2); callers that already pad
+    /// correctly see no change.
     pub tlvs: Vec<u8>,
 }
 
@@ -359,22 +375,20 @@ impl Srh {
         // RFC 8200 §4.8: Hdr Ext Len = (header_total_octets / 8) - 1.
         // The SRH total length is fixed-prefix (8) + segments
         // (n * 16) + TLV bytes.
-        let total_octets = SRH_FIXED_LEN + n as usize * SRH_SEGMENT_LEN + self.tlvs.len();
-        // The total MUST be a multiple of 8 (RFC 8200 §4.8). TLV
-        // padding is the sender's responsibility — the crate does not
-        // auto-pad because RFC 8754 §2.6 leaves TLV encoding to the
-        // TLV authors (HMAC TLV type 5 etc.).
-        if !total_octets.is_multiple_of(8) {
-            // We don't return an error here — the caller is expected
-            // to pad. The wire encoder writes the bytes as-is. The
-            // Hdr Ext Len field is computed from the actual length,
-            // which is what the kernel does too (it reads the SRH up
-            // to Hdr Ext Len * 8 + 8).
-        }
+        let unpadded_octets = SRH_FIXED_LEN + n as usize * SRH_SEGMENT_LEN + self.tlvs.len();
+        // RFC 8200 §4.8 / RFC 8754 §2.2: the SRH total length MUST be
+        // a multiple of 8 octets. The encoder auto-pads the TLV tail
+        // with Pad1 (RFC 8200 §4.4.1) for a single missing octet or
+        // PadN (§4.4.2) for two through seven octets — the wire never
+        // leaves the crate misaligned, so callers do not need to
+        // pre-pad their TLVs. A caller that already padded correctly
+        // hits `pad == 0` and the output is byte-for-byte unchanged.
+        let pad = (8 - (unpadded_octets % 8)) % 8;
+        let total_octets = unpadded_octets + pad;
         let hdr_ext_len = ((total_octets / 8) - 1) as u8;
         // The Hdr Ext Len upper bound: 255 means 2048 octets total
         // (8 + 255*8). With 127 segments (127*16=2032), plus 8-octet
-        // header, that's 2040 — fits.
+        // header, that's 2040 — fits even before TLV padding.
         if total_octets > 2048 {
             return Err(SrhError::TooManySegments);
         }
@@ -390,6 +404,22 @@ impl Srh {
             out.extend_from_slice(s.as_bytes());
         }
         out.extend_from_slice(&self.tlvs);
+        // Append the auto-padding TLV (RFC 8200 §4.4.1 Pad1 for d=1,
+        // §4.4.2 PadN for d>=2). The decode path treats the bytes as
+        // part of the TLV region verbatim, so a round-trip is stable:
+        // the next encode sees the PadN inside `tlvs`, computes
+        // `unpadded_octets % 8 == 0` and appends nothing.
+        match pad {
+            0 => {}
+            1 => out.push(TLV_PAD1),
+            d => {
+                out.push(TLV_PADN);
+                out.push((d - 2) as u8);
+                // PadN value: `d - 2` zero octets. `resize` extends
+                // the Vec in one grow, no per-octet push loop.
+                out.resize(out.len() + d - 2, 0);
+            }
+        }
         Ok(out)
     }
 
@@ -751,5 +781,82 @@ mod tests {
         assert_eq!(enc[1], 254, "hdr_ext_len = 2040/8 - 1 = 254");
         let dec = Srh::decode(&enc).unwrap();
         assert_eq!(dec.len(), MAX_SEGMENTS);
+    }
+
+    // Regression for the SRH 8-octet alignment bug. Before the fix,
+    // `encode_vec` left the TLV tail misaligned when the caller's TLVs
+    // did not themselves pad to an 8-octet boundary — RFC 8200 §4.8 /
+    // RFC 8754 §2.2 require the SRH total length to be a multiple of 8.
+    #[test]
+    fn srh_encode_pads_unaligned_tlv_tail() {
+        let segs = vec![sid("fcbb:bb00::1")];
+        // TLV tail of 3 octets: total = 8 + 16 + 3 = 27 — needs 5
+        // octets of padding to reach 32. RFC 8200 §4.4.2 PadN with
+        // length=3 (type 1, length 3, 3 zero-octet value).
+        let srh = Srh::new(segs).unwrap().with_tlvs(vec![0xaa, 0xbb, 0xcc]);
+        let enc = srh.encode_vec().unwrap();
+        assert_eq!(
+            enc.len(),
+            32,
+            "encoder must pad to the next 8-octet boundary"
+        );
+        assert_eq!(enc[1], 3, "hdr_ext_len = 32/8 - 1 = 3");
+        // Fixed header (8) + one segment (16) = 24, then TLVs start at 24.
+        // Caller's TLV (3 octets): 0xaa 0xbb 0xcc at indices 24..27.
+        assert_eq!(&enc[24..27], &[0xaa, 0xbb, 0xcc]);
+        // PadN TLV at indices 27..32: type 1, length 3, 3 zero octets.
+        assert_eq!(enc[27], TLV_PADN);
+        assert_eq!(enc[28], 3);
+        assert_eq!(&enc[29..32], &[0, 0, 0]);
+        // The decoder treats the PadN bytes as part of the TLV region
+        // verbatim, so a round-trip is stable: re-encoding the decoded
+        // SRH sees `tlvs.len() % 8 == 0` and appends nothing extra.
+        let dec = Srh::decode(&enc).unwrap();
+        assert_eq!(dec.tlvs, vec![0xaa, 0xbb, 0xcc, TLV_PADN, 3, 0, 0, 0]);
+        let enc2 = dec.encode_vec().unwrap();
+        assert_eq!(enc2, enc, "round-trip is byte-stable");
+    }
+
+    #[test]
+    fn srh_encode_pads_single_octet_with_pad1() {
+        let segs = vec![sid("fcbb:bb00::1")];
+        // TLV tail of 7 octets: total = 8 + 16 + 7 = 31 — needs 1
+        // octet of Pad1 (RFC 8200 §4.4.1) to reach 32.
+        let srh = Srh::new(segs).unwrap().with_tlvs(vec![0xaa; 7]);
+        let enc = srh.encode_vec().unwrap();
+        assert_eq!(enc.len(), 32);
+        assert_eq!(enc[31], TLV_PAD1, "trailing Pad1 octet");
+        assert_eq!(enc[1], 3, "hdr_ext_len = 32/8 - 1 = 3");
+    }
+
+    #[test]
+    fn srh_encode_no_padding_when_already_aligned() {
+        let segs = vec![sid("fcbb:bb00::1")];
+        // TLV tail of 8 octets: total = 8 + 16 + 8 = 32 — already
+        // aligned, no padding appended.
+        let srh = Srh::new(segs).unwrap().with_tlvs(vec![0xaa; 8]);
+        let enc = srh.encode_vec().unwrap();
+        assert_eq!(enc.len(), 32);
+        assert_eq!(&enc[24..32], &[0xaa; 8], "no auto-padding bytes appended");
+    }
+
+    #[test]
+    fn srh_encode_pads_every_delta_from_1_to_7() {
+        // For each delta from 1 to 7, an unpadded tail of `8 - delta`
+        // octets must round up to 8 — so total TLV (caller bytes +
+        // auto-pad) is always 8 octets.
+        for delta in 1..=7usize {
+            let segs = vec![sid("fcbb:bb00::1")];
+            let caller_len = 8 - delta;
+            let srh = Srh::new(segs).unwrap().with_tlvs(vec![0x55; caller_len]);
+            let enc = srh.encode_vec().unwrap();
+            assert_eq!(
+                enc.len(),
+                8 + 16 + 8,
+                "delta={delta}: encoder must pad to 8-octet alignment"
+            );
+            // hdr_ext_len = (8 + 16 + 8) / 8 - 1 = 3.
+            assert_eq!(enc[1], 3);
+        }
     }
 }
