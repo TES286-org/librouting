@@ -46,6 +46,14 @@ pub enum ParseErrorKind {
     ReadOnlyField(String),
     UnknownBgpField(String),
     UnknownOspfField(String),
+    /// An unknown `babel.<field>` reference at parse time
+    /// (e.g. `babel.foo`). The field name is carried in the
+    /// `String` so the diagnostic surfaces the offending name —
+    /// mirrors [`UnknownBgpField`] / [`UnknownOspfField`] for the
+    /// BGP / OSPF arms. Used by the Babel arm of
+    /// `try_parse_route_field` for any `babel.<field>` that does
+    /// not match `metric` / `seqno` / `router_id`.
+    UnknownBabelField(String),
     InvalidPrefixRange(String),
     InvalidCommunity(String),
     EmptyFilterBody,
@@ -109,6 +117,7 @@ impl fmt::Display for ParseErrorKind {
             }
             ParseErrorKind::UnknownBgpField(s) => write!(f, "unknown bgp field '{s}'"),
             ParseErrorKind::UnknownOspfField(s) => write!(f, "unknown ospf field '{s}'"),
+            ParseErrorKind::UnknownBabelField(s) => write!(f, "unknown babel field '{s}'"),
             ParseErrorKind::InvalidPrefixRange(s) => write!(f, "invalid prefix range '{s}'"),
             ParseErrorKind::InvalidCommunity(s) => write!(f, "invalid community '{s}'"),
             ParseErrorKind::EmptyFilterBody => write!(f, "filter body is empty"),
@@ -939,6 +948,92 @@ impl Parser {
                 self.advance();
                 RouteField::new(kind)
             }
+            TokenKind::Babel => {
+                self.advance();
+                self.expect(TokenKind::Dot, "`.`")?;
+                let field_tok = self.peek().cloned();
+                let Some(field_tok) = field_tok else {
+                    return Err(self.err(tok.span, ParseErrorKind::UnexpectedEof));
+                };
+                let kind = match field_tok.kind {
+                    TokenKind::Ident(s) => match s.as_str() {
+                        // RFC 8966 §3.2 + §3.4.3 — the route's
+                        // primary Babel metric (the value the
+                        // Update TLV advertised, folded into
+                        // `route.preference.metric` by the Babel
+                        // route computation after applying the
+                        // receiver-side link cost — the field the
+                        // decision process ranks against,
+                        // lowest-metric feasible route wins per
+                        // RFC 8966 §3.5.1). BIRD spells it
+                        // `babel_metric`; the BIRD translator
+                        // renames it to `babel.metric`. Read-only;
+                        // surfaces as an `Int` (`0` when the route
+                        // is not Babel, so the canonical idiom
+                        // `if babel.metric > 100 then reject;`
+                        // no-ops on non-Babel routes the same way
+                        // it does in BIRD).
+                        "metric" => RouteFieldKind::BabelMetric,
+                        // RFC 8966 §3.2 + §4.6.9 — the route's
+                        // 16-bit unsigned Babel sequence number
+                        // (the source's sequence number the
+                        // feasibility machinery ranks against
+                        // per RFC 8966 §3.4.2). BIRD spells it
+                        // `babel_seqno`; the BIRD translator
+                        // renames it to `babel.seqno`. Read-only;
+                        // surfaces as an `Int` (`0` when the
+                        // route is not Babel, mirroring BIRD's
+                        // eattr default for an unattached
+                        // `babel_seqno` reference). The
+                        // `defined(babel.seqno)` predicate
+                        // distinguishes "non-Babel route" from
+                        // "Babel route with seqno 0" via
+                        // `has_seqno`.
+                        "seqno" => RouteFieldKind::BabelSeqno,
+                        // RFC 8966 §3.2 + §4.6.8 — the route's
+                        // 64-bit Babel Router-ID (the EUI-64-style
+                        // value the route's source claims;
+                        // carried in every Update TLV's Router-Id
+                        // TLV so the receiver pairs the route
+                        // with its source). BIRD spells it
+                        // `babel_router_id`; the BIRD translator
+                        // renames it to `babel.router_id`.
+                        // Read-only; surfaces as an `Int` (`0`
+                        // when the route is not Babel, mirroring
+                        // BIRD's eattr default for an unattached
+                        // `babel_router_id` reference — though
+                        // BIRD stores the value as an opaque
+                        // 8-byte bytestring under
+                        // `EAF_TYPE_OPAQUE`, lr's DSL exposes it
+                        // as a 64-bit `Int` for the canonical
+                        // `defined(babel.router_id)` idiom and
+                        // for direct equality against the
+                        // route's i64-form literal). The
+                        // `defined(babel.router_id)` predicate
+                        // distinguishes "no attribute" from
+                        // "attribute present but zero" via
+                        // `has_router_id`.
+                        "router_id" => RouteFieldKind::BabelRouterId,
+                        other => {
+                            return Err(self.err(
+                                field_tok.span,
+                                ParseErrorKind::UnknownBabelField(other.to_string()),
+                            ));
+                        }
+                    },
+                    other => {
+                        return Err(self.err(
+                            field_tok.span,
+                            ParseErrorKind::UnexpectedToken {
+                                expected: "babel field name",
+                                found: other.clone(),
+                            },
+                        ));
+                    }
+                };
+                self.advance();
+                RouteField::new(kind)
+            }
             _ => return Ok(None),
         };
         Ok(Some(field))
@@ -1359,7 +1454,8 @@ impl Parser {
             | TokenKind::Source
             | TokenKind::Bgp
             | TokenKind::Roa
-            | TokenKind::Ospf => {
+            | TokenKind::Ospf
+            | TokenKind::Babel => {
                 let field = self.try_parse_route_field()?.ok_or_else(|| {
                     self.err(
                         tok.span,

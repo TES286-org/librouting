@@ -498,6 +498,9 @@ fn is_int_field(kind: RouteFieldKind) -> bool {
             | RouteFieldKind::OspfMetric2
             | RouteFieldKind::OspfTag
             | RouteFieldKind::OspfRouterId
+            | RouteFieldKind::BabelMetric
+            | RouteFieldKind::BabelSeqno
+            | RouteFieldKind::BabelRouterId
     )
 }
 

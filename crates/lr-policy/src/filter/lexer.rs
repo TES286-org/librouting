@@ -96,6 +96,15 @@ pub enum TokenKind {
     Bgp,
     Roa,
     Ospf,
+    /// `babel` — opens the `babel.{metric,seqno,router_id}` dotted
+    /// field surface (RFC 8966 — the Babel per-route attributes
+    /// BIRD's filter language exposes under the `babel_*` prefix).
+    /// The BIRD translator renames `babel_metric` to `babel.metric`,
+    /// `babel_seqno` to `babel.seqno`, and `babel_router_id` to
+    /// `babel.router_id` so the canonical BIRD idioms translate
+    /// faithfully. The lexer emits a dedicated keyword token so
+    /// `babel` cannot be shadowed by an operator-named variable.
+    Babel,
 
     Eof,
 }
@@ -291,6 +300,7 @@ impl<'a> Lexer<'a> {
             "bgp" => TokenKind::Bgp,
             "roa" => TokenKind::Roa,
             "ospf" => TokenKind::Ospf,
+            "babel" => TokenKind::Babel,
             "_" => TokenKind::Underscore,
             other => TokenKind::Ident(other.to_string()),
         };
@@ -641,7 +651,7 @@ mod tests {
     #[test]
     fn keywords() {
         assert_eq!(
-            kinds("if then else let var accept reject with case default true false net proto source bgp roa ospf"),
+            kinds("if then else let var accept reject with case default true false net proto source bgp roa ospf babel"),
             vec![
                 TokenKind::If,
                 TokenKind::Then,
@@ -661,6 +671,7 @@ mod tests {
                 TokenKind::Bgp,
                 TokenKind::Roa,
                 TokenKind::Ospf,
+                TokenKind::Babel,
                 TokenKind::Eof,
             ]
         );

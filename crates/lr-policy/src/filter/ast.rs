@@ -738,6 +738,75 @@ pub enum RouteFieldKind {
     /// `ospf_router_id`; the BIRD translator renames it to
     /// `ospf.router_id`.
     OspfRouterId,
+    /// `babel.metric` — RFC 8966 §3.2 + §3.4.3, the route's primary
+    /// Babel metric (the value the Update TLV advertised, folded
+    /// into `route.preference.metric` by the Babel route
+    /// computation after applying the receiver-side link cost —
+    /// the field the decision process ranks against, lowest-
+    /// metric feasible route wins per RFC 8966 §3.5.1). Read-only;
+    /// surfaces as an `Int` (`0` when the route is not Babel, so
+    /// the canonical idiom `if babel.metric > 100 then reject;`
+    /// no-ops on non-Babel routes the same way it does in BIRD).
+    /// The `defined(babel.metric)` predicate distinguishes
+    /// "non-Babel route" from "Babel route with metric 0" via
+    /// `has_metric`. BIRD spells it `babel_metric`; the BIRD
+    /// translator renames it to `babel.metric`. The same shape
+    /// `ospf.metric1` exposes for OSPF (both read a struct field,
+    /// no BTreeMap lookup, no allocation); the peephole pass's
+    /// `BranchFieldIntCmp` fast path fuses `babel.metric == N` /
+    /// `> N` / etc. comparisons the same way it fuses
+    /// `ospf.metric1` / `bgp.local_pref` / `bgp.med` / `bgp.otc`.
+    BabelMetric,
+    /// `babel.seqno` — RFC 8966 §3.2 + §4.6.9, the route's 16-bit
+    /// unsigned Babel sequence number (the source's sequence
+    /// number the feasibility machinery ranks against per RFC
+    /// 8966 §3.4.2). Read-only; surfaces as an `Int` (`0` when
+    /// the route is not Babel, mirroring BIRD's eattr default
+    /// for an unattached `babel_seqno` reference). The
+    /// `defined(babel.seqno)` predicate distinguishes "non-Babel
+    /// route" from "Babel route with seqno 0" via `has_seqno`
+    /// (RFC 8966 §3.1 treats 0 as a valid sequence number — the
+    /// wrapping arithmetic `(seqno as i16).wrapping_sub(...)`
+    /// ranks against it the same as any other value). BIRD
+    /// spells it `babel_seqno`; the BIRD translator renames it
+    /// to `babel.seqno`. The same shape `ospf.metric2` exposes
+    /// for the OSPF type-2 external metric (both read a private
+    /// path-attribute tag via one BTreeMap lookup plus one
+    /// fixed-width read, no allocation); the peephole pass's
+    /// `BranchFieldIntCmp` fast path fuses `babel.seqno == N` /
+    /// `> N` / etc. comparisons the same way it fuses
+    /// `ospf.metric2` / `ospf.tag` / `ospf.router_id`.
+    BabelSeqno,
+    /// `babel.router_id` — RFC 8966 §3.2 + §4.6.8, the route's
+    /// 64-bit Babel Router-ID (the EUI-64-style value the
+    /// route's source claims; carried in every Update TLV's
+    /// Router-Id TLV so the receiver pairs the route with its
+    /// source). Read-only; surfaces as an `Int` (`0` when the
+    /// route is not Babel, mirroring BIRD's eattr default for
+    /// an unattached `babel_router_id` reference — though BIRD
+    /// stores the value as an opaque 8-byte bytestring under
+    /// `EAF_TYPE_OPAQUE`, lr's DSL exposes it as a 64-bit
+    /// `Int` for the canonical `defined(babel.router_id)`
+    /// idiom and for direct equality against the route's
+    /// i64-form literal; a value with the high bit set (>=
+    /// `0x8000_0000_0000_0000`) reads as a negative i64 but
+    /// round-trips losslessly for the comparison operator since
+    /// the lexer parses i64 literals). The
+    /// `defined(babel.router_id)` predicate distinguishes "no
+    /// attribute" from "attribute present but zero" via
+    /// `has_router_id`. BIRD spells it `babel_router_id`; the
+    /// BIRD translator renames it to `babel.router_id`. The
+    /// same shape `ospf.router_id` exposes for the OSPF
+    /// advertising-router ID (both read a private
+    /// path-attribute tag via one BTreeMap lookup plus one
+    /// fixed-width read, no allocation; the Babel form's
+    /// 8-byte width is wider than the OSPF form's 4-byte
+    /// width but the read shape is identical); the peephole
+    /// pass's `BranchFieldIntCmp` fast path fuses
+    /// `babel.router_id == N` / `> N` / etc. comparisons the
+    /// same way it fuses `ospf.router_id` / `ospf.metric2` /
+    /// `ospf.tag`.
+    BabelRouterId,
     /// `bgp.lrxp.verified` — issue #81, true when the route carries a
     /// verified LRXP record set (tag-checked at ingress). Read-only;
     /// `false` when the route carries no LRXP attribute (the non-LRXP
@@ -832,6 +901,9 @@ impl fmt::Display for RouteFieldKind {
             RouteFieldKind::OspfMetric2 => "ospf.metric2",
             RouteFieldKind::OspfTag => "ospf.tag",
             RouteFieldKind::OspfRouterId => "ospf.router_id",
+            RouteFieldKind::BabelMetric => "babel.metric",
+            RouteFieldKind::BabelSeqno => "babel.seqno",
+            RouteFieldKind::BabelRouterId => "babel.router_id",
             RouteFieldKind::LrxpVerified => "bgp.lrxp.verified",
             RouteFieldKind::LrxpPartialTransit => "bgp.lrxp.partial_transit",
             RouteFieldKind::LrxpHintRank => "bgp.lrxp.hint.rank",

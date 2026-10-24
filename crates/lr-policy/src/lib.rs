@@ -17,6 +17,7 @@
 
 pub mod action;
 pub mod as_path_filter;
+pub mod babel;
 #[cfg(feature = "bgp")]
 pub mod bgp;
 pub mod community_list;

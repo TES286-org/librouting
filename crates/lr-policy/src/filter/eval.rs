@@ -378,6 +378,71 @@ pub trait FilterContext {
     fn ospf_has_router_id(&self, route: &Route) -> bool {
         crate::ospf::has_router_id(route)
     }
+    /// The route's primary Babel metric (`babel.metric`, RFC 8966
+    /// §3.2 + §3.4.3 — the value the Update TLV advertised,
+    /// folded into `route.preference.metric` by the Babel route
+    /// computation after applying the receiver-side link cost).
+    /// `None` when the route is not Babel (so the canonical BIRD
+    /// idiom `if babel_metric > 100 then reject;` no-ops on
+    /// non-Babel routes). `Some(0)` for a Babel route with cost 0.
+    /// The default delegates to [`crate::babel::metric`].
+    fn babel_metric(&self, route: &Route) -> Option<u32> {
+        crate::babel::metric(route)
+    }
+    /// True when the route is a Babel route (RFC 8966 §3.2) and
+    /// therefore carries a primary Babel metric. Used by
+    /// `defined(babel.metric)` to distinguish "non-Babel route"
+    /// from "Babel route with metric 0" (the latter is defined).
+    /// The default delegates to [`crate::babel::has_metric`].
+    fn babel_has_metric(&self, route: &Route) -> bool {
+        crate::babel::has_metric(route)
+    }
+    /// The route's Babel seqno (`babel.seqno`, RFC 8966 §3.2 +
+    /// §4.6.9 — the 16-bit unsigned sequence number carried in
+    /// every Update TLV, the source's sequence number the
+    /// feasibility machinery ranks against per RFC 8966 §3.4.2).
+    /// `None` when the route is not Babel (the Babel route
+    /// computation only attaches the `LrBabelSeqno` attribute for
+    /// Babel routes). `Some(0)` for a Babel route with seqno 0
+    /// (RFC 8966 §3.1 treats 0 as a valid sequence number — the
+    /// wrapping arithmetic ranks against it the same as any
+    /// other value). The default delegates to
+    /// [`crate::babel::seqno`].
+    fn babel_seqno(&self, route: &Route) -> Option<u16> {
+        crate::babel::seqno(route)
+    }
+    /// True when the route is a Babel route (RFC 8966 §3.2) and
+    /// therefore carries a Babel seqno attribute. Used by
+    /// `defined(babel.seqno)` to distinguish "non-Babel route"
+    /// from "Babel route with seqno 0" (the latter is defined).
+    /// The default delegates to [`crate::babel::has_seqno`].
+    fn babel_has_seqno(&self, route: &Route) -> bool {
+        crate::babel::has_seqno(route)
+    }
+    /// The route's Babel Router-ID (`babel.router_id`, RFC 8966
+    /// §3.2 + §4.6.8 — the 64-bit EUI-64-style Router-ID carried
+    /// in every Update TLV's Router-Id TLV, identifying the
+    /// router that originated the route's source). `None` when
+    /// the route is not Babel (the Babel route computation is the
+    /// only producer of the `LrBabelRouterId` attribute). `Some(0)`
+    /// is a meaningful value — a Babel source may legally carry
+    /// Router-ID 0. The default delegates to
+    /// [`crate::babel::router_id`].
+    fn babel_router_id(&self, route: &Route) -> Option<u64> {
+        crate::babel::router_id(route)
+    }
+    /// True when the route is a Babel route (RFC 8966 §3.2) with a
+    /// known source Router-ID and therefore carries a Babel
+    /// router-id attribute. Used by `defined(babel.router_id)` to
+    /// distinguish "no attribute" (a non-Babel route) from
+    /// "attribute present but zero" (a Babel route whose source
+    /// claims Router-ID 0 — RFC 8966 §3.1 does not forbid it; the
+    /// EUI-64 form discourages it but the protocol accepts any
+    /// 64-bit value). The default delegates to
+    /// [`crate::babel::has_router_id`].
+    fn babel_has_router_id(&self, route: &Route) -> bool {
+        crate::babel::has_router_id(route)
+    }
     /// Issue #81 — LRXP exchange-plane surface. True when the route
     /// carries a verified LRXP record set (tag-checked at ingress).
     /// The default delegates to [`crate::lrxp::verified`]; only
@@ -957,6 +1022,44 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // then accept;` does not drop such a route. For
             // non-OSPF routes, `has_router_id` is false.
             RouteFieldKind::OspfRouterId => self.ctx.ospf_has_router_id(route),
+            // RFC 8966 §3.2 + §3.4.3: `babel.metric` presence is
+            // `has_metric` (the route is a Babel route), not
+            // `metric().is_some()` — the two agree on the Babel
+            // case (both true), but `has_metric` keeps a Babel
+            // route with cost 0 defined so the canonical idiom
+            // `if defined(babel.metric) then accept;` does not drop
+            // a cost-0 Babel route. The same shape `ospf.metric1`
+            // exposes for the OSPF primary-metric presence probe.
+            RouteFieldKind::BabelMetric => self.ctx.babel_has_metric(route),
+            // RFC 8966 §3.2 + §4.6.9: `babel.seqno` presence is
+            // `has_seqno` (the route is a Babel route with the
+            // `LrBabelSeqno` attribute), not `seqno().is_some()`
+            // — the two agree on the Babel case (both true), but
+            // `has_seqno` keeps a Babel route with seqno 0 defined
+            // so the canonical idiom `if defined(babel.seqno)
+            // then accept;` does not drop a seqno-0 Babel route
+            // (RFC 8966 §3.1 treats 0 as a valid sequence number
+            // — the wrapping arithmetic ranks against it the
+            // same as any other value). For non-Babel routes,
+            // `has_seqno` is false. The same shape
+            // `ospf.metric2` exposes for the OSPF type-2-external
+            // metric presence probe.
+            RouteFieldKind::BabelSeqno => self.ctx.babel_has_seqno(route),
+            // RFC 8966 §3.2 + §4.6.8: `babel.router_id` presence
+            // is `has_router_id` (the route is a Babel route with
+            // the `LrBabelRouterId` attribute), not
+            // `router_id().is_some()` — the two agree on the
+            // present-with-non-zero case (both true), but the
+            // distinction matters when a Babel source carries
+            // Router-ID 0 (RFC 8966 §3.1 does not forbid it):
+            // `has_router_id` keeps "Babel route with Router-ID
+            // 0" defined so the canonical idiom `if
+            // defined(babel.router_id) && babel.router_id == 0
+            // then accept;` does not drop such a route. For
+            // non-Babel routes, `has_router_id` is false. The
+            // same shape `ospf.router_id` exposes for the OSPF
+            // advertising-router ID presence probe.
+            RouteFieldKind::BabelRouterId => self.ctx.babel_has_router_id(route),
             // Issue #81 — LRXP `defined()` semantics. The two bare
             // predicates (`verified`, `partial_transit`) are defined
             // iff the route carries an LRXP store of any kind. The
@@ -1195,6 +1298,42 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             RouteFieldKind::OspfRouterId => Ok(Value::Int(
                 self.ctx.ospf_router_id(route).unwrap_or(0) as i64,
             )),
+            // RFC 8966 §3.2 + §3.4.3 — `babel.metric` reads
+            // `route.preference.metric` for Babel routes and 0
+            // for non-Babel routes — a single `match` on
+            // `route.protocol` plus one field read, no BTreeMap
+            // lookup, no allocation. The same shape
+            // `ospf.metric1` exposes for OSPF.
+            RouteFieldKind::BabelMetric => Ok(Value::Int(
+                self.ctx.babel_metric(route).unwrap_or(0) as i64,
+            )),
+            // RFC 8966 §3.2 + §4.6.9 — `babel.seqno` reads the
+            // private `LrBabelSeqno` path-attribute tag the Babel
+            // route computation attaches to every Babel route it
+            // publishes — one BTreeMap lookup plus one 4-byte
+            // read on `route.attributes`, no allocation. The same
+            // shape `ospf.metric2` exposes for the OSPF type-2
+            // external metric (which reads a different private
+            // tag). Returns the unwrap_or(0) default for a
+            // non-Babel route, mirroring BIRD's eattr default for
+            // an unattached `babel_seqno` reference.
+            RouteFieldKind::BabelSeqno => Ok(Value::Int(
+                i64::from(self.ctx.babel_seqno(route).unwrap_or(0)),
+            )),
+            // RFC 8966 §3.2 + §4.6.8 — `babel.router_id` reads the
+            // private `LrBabelRouterId` path-attribute tag the
+            // Babel route computation attaches to every Babel
+            // route it publishes — one BTreeMap lookup plus one
+            // 8-byte read on `route.attributes`, no allocation.
+            // The 64-bit value is exposed as `Int` (i64); a value
+            // with the high bit set reads as a negative i64 but
+            // round-trips losslessly for the comparison operator.
+            // Returns the unwrap_or(0) default for a non-Babel
+            // route, mirroring BIRD's eattr default for an
+            // unattached `babel_router_id` reference.
+            RouteFieldKind::BabelRouterId => Ok(Value::Int(
+                self.ctx.babel_router_id(route).unwrap_or(0) as i64,
+            )),
             // Issue #81 — LRXP exchange-plane surface. The two bare
             // predicates read as `Bool`; the per-record fields read
             // as `Int` (ints default to 0) or `Str` (digests default
@@ -1328,6 +1467,47 @@ impl<'a, C: FilterContext + ?Sized> Evaluator<'a, C> {
             // an OSPF route with Router-ID 0.0.0.0 reads as `0`
             // and `defined(ospf.router_id)` is true.
             RouteFieldKind::OspfRouterId => self.ctx.ospf_router_id(route).unwrap_or(0) as i64,
+            // `babel.metric` reads `route.preference.metric` for Babel
+            // routes and 0 for non-Babel routes — a single `match` on
+            // `route.protocol` plus one field read, no BTreeMap lookup,
+            // no allocation. The fast path pays the same `match` the
+            // unfused `read_route_field` path pays, but skips the
+            // `Value::Int` construction + `Vec::push` on the
+            // comparison-branch hot path. The same shape
+            // `ospf.metric1` exposes for OSPF.
+            RouteFieldKind::BabelMetric => self.ctx.babel_metric(route).unwrap_or(0) as i64,
+            // `babel.seqno` reads the private `LrBabelSeqno`
+            // path-attribute tag the Babel route computation attaches
+            // to every Babel route it publishes — one BTreeMap lookup
+            // plus one 4-byte read on `route.attributes`, no
+            // allocation. The fast path pays the same lookup the
+            // unfused `read_route_field` path pays, but skips the
+            // `Value::Int` construction + `Vec::push` on the
+            // comparison-branch hot path. The same shape
+            // `ospf.metric2` exposes for the OSPF type-2 external
+            // metric (which reads a different private tag).
+            RouteFieldKind::BabelSeqno => {
+                i64::from(self.ctx.babel_seqno(route).unwrap_or(0))
+            }
+            // `babel.router_id` reads the private `LrBabelRouterId`
+            // path-attribute tag the Babel route computation
+            // attaches to every Babel route it publishes — one
+            // BTreeMap lookup plus one 8-byte read on
+            // `route.attributes`, no allocation. The 64-bit value
+            // is exposed as `Int` (i64); a value with the high bit
+            // set reads as a negative i64 but round-trips
+            // losslessly for the comparison operator (the lexer
+            // parses i64 literals). The fast path pays the same
+            // lookup the unfused `read_route_field` path pays, but
+            // skips the `Value::Int` construction + `Vec::push` on
+            // the comparison-branch hot path. The same shape
+            // `ospf.router_id` exposes for the OSPF
+            // advertising-router ID (which reads a 4-byte tag
+            // instead of the Babel form's 8-byte tag, but the read
+            // shape is identical).
+            RouteFieldKind::BabelRouterId => {
+                self.ctx.babel_router_id(route).unwrap_or(0) as i64
+            }
             // The peephole pass's `is_int_field` gate guarantees
             // one of the arms above; the LRXP int-typed fields
             // and `bgp.aigp` fall through to the unreachable arm

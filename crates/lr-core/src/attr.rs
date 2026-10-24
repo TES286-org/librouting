@@ -68,6 +68,26 @@ impl Attributes {
         Some(u32::from_be_bytes(b))
     }
 
+    /// Read an 8-byte big-endian unsigned integer attribute in place
+    /// — the 64-bit-width sibling of [`Self::get_u32_be`]. Used by
+    /// the filter DSL's `babel.router_id` integer fast path: the
+    /// 64-bit Babel Router-ID (RFC 8966 §4.6.8) lives in the
+    /// `LrBabelRouterId` private path-attribute tag (8-byte
+    /// big-endian). Reads the 8 bytes directly off the stored slice
+    /// — no allocation.
+    ///
+    /// Returns `None` when the tag is absent or the value is not
+    /// exactly 8 bytes long (a length mismatch indicates a
+    /// malformed attribute and is treated as "absent" — the
+    /// caller's `unwrap_or(0)` default applies; the corresponding
+    /// `has_*` predicate reports physical presence for the
+    /// `defined(babel.router_id)` distinction).
+    pub fn get_u64_be(&self, tag: AttrTag) -> Option<u64> {
+        let a = self.inner.get(&tag.0)?;
+        let b = a.value.as_slice().try_into().ok()?;
+        Some(u64::from_be_bytes(b))
+    }
+
     /// Read a 1-byte unsigned integer attribute in place. Used by
     /// the filter DSL's `bgp.origin` fast path (GitHub #19 P3).
     /// Returns `None` when the tag is absent or the value is not

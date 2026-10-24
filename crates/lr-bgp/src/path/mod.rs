@@ -194,9 +194,59 @@ pub enum AttrType {
     /// dotted-quad, RFC 2328 §A.4 — no masking needed; the high byte
     /// is meaningful).
     LrOspfRouterId = 252,
+    /// librouting-private Babel sequence number (RFC 8966 §3.2 +
+    /// §4.6.9 — the 16-bit unsigned sequence number carried in every
+    /// Update TLV). Carries the seqno the Babel route computation
+    /// surfaced from `BabelRoute::seqno` into the Loc-RIB so the
+    /// policy DSL's `babel.seqno` field can surface it. *Never*
+    /// transmitted on the wire: it carries Babel ingress state
+    /// inside the Loc-RIB only (the Babel LSDB — not BGP — is the
+    /// source), and the codec strips it at encode so peers never
+    /// see it. Attached to every Babel route the router's Babel
+    /// runtime publishes; absent for non-Babel routes.
+    ///
+    /// 251 is an internal-only code point: it never appears on the
+    /// wire (the codec strips it at encode) and it deliberately
+    /// avoids the 244-254 unassigned range that the W6.3
+    /// exchange-plane prototype rides on for its wire attribute
+    /// (type 251).
+    ///
+    /// Value layout: a single 4-byte big-endian u32 holding the
+    /// 16-bit Babel seqno (zero-extended — RFC 8966 §4.6.9 caps
+    /// the seqno at 16 bits, so the high two bytes are always
+    /// zero on a well-formed value).
+    LrBabelSeqno = 251,
+    /// librouting-private Babel Router-ID (RFC 8966 §3.2 +
+    /// §4.6.8 — the 64-bit EUI-64-style Router-ID carried in every
+    /// Update TLV's Router-Id TLV). Carries the 64-bit Babel
+    /// Router-ID of the router that originated the route's
+    /// source (the upstream that injected the destination into
+    /// the Babel network) into the Loc-RIB so the policy DSL's
+    /// `babel.router_id` field can surface it. *Never*
+    /// transmitted on the wire: it carries Babel ingress state
+    /// inside the Loc-RIB only (the Babel route table — not
+    /// BGP — is the source), and the codec strips it at encode
+    /// so peers never see it. Attached to every Babel route the
+    /// router's Babel runtime publishes; absent for non-Babel
+    /// routes.
+    ///
+    /// 250 is an internal-only code point: it never appears on
+    /// the wire (the codec strips it at encode) and it
+    /// deliberately avoids the 244-254 unassigned range that
+    /// the W6.3 exchange-plane prototype rides on for its wire
+    /// attribute (type 251).
+    ///
+    /// Value layout: 8 bytes, big-endian, holding the 64-bit
+    /// Babel Router-ID. RFC 8966 §3.2 + §4.6.8 specify the
+    /// 64-bit EUI-64-style value — no masking needed. The DSL
+    /// exposes it as an `Int` (i64); a value with the high bit
+    /// set (>= 0x8000_0000_0000_0000) reads as a negative i64
+    /// but round-trips through `as i64` / `as u64` losslessly
+    /// for the comparison operator.
+    LrBabelRouterId = 250,
     /// Unknown attribute code. The explicit discriminant keeps the
     /// data-carrying variant out of the unit-like variants' implicit
-    /// numbering (the four private tags above sit at 252/253/254/255).
+    /// numbering (the six private tags above sit at 250/251/252/253/254/255).
     Other(u8) = 0,
 }
 
@@ -228,6 +278,8 @@ impl AttrType {
             254 => Self::LrExchangePlaneRecords,
             253 => Self::LrOspfMetric2,
             252 => Self::LrOspfRouterId,
+            251 => Self::LrBabelSeqno,
+            250 => Self::LrBabelRouterId,
             255 => Self::LrMplsLabelStack,
             _ => Self::Other(v),
         }
@@ -260,6 +312,8 @@ impl AttrType {
             Self::LrExchangePlaneRecords => 254,
             Self::LrOspfMetric2 => 253,
             Self::LrOspfRouterId => 252,
+            Self::LrBabelSeqno => 251,
+            Self::LrBabelRouterId => 250,
             Self::LrMplsLabelStack => 255,
             Self::Other(v) => v,
         }
@@ -707,6 +761,106 @@ impl PathAttributes {
     /// `defined(ospf_router_id)` does.
     pub fn has_ospf_router_id(&self) -> bool {
         self.get(AttrType::LrOspfRouterId).is_some()
+    }
+
+    /// Attach the Babel sequence number (RFC 8966 §3.2 + §4.6.9 — the
+    /// 16-bit unsigned sequence number carried in every Update TLV)
+    /// to this attribute set under the private
+    /// [`AttrType::LrBabelSeqno`] tag. The tag is never transmitted
+    /// on the wire; it carries the seqno the Babel route computation
+    /// surfaced from `BabelRoute::seqno` through the Loc-RIB so the
+    /// filter DSL's `babel.seqno` field can surface it. Attached to
+    /// every Babel route the router's Babel runtime publishes;
+    /// absent for non-Babel routes.
+    pub fn set_babel_seqno(&mut self, seqno: u16) {
+        let value = (u32::from(seqno)).to_be_bytes();
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrBabelSeqno,
+            value.to_vec(),
+        ));
+    }
+
+    /// Read back the Babel sequence number previously attached with
+    /// [`Self::set_babel_seqno`]. Returns `None` when the route
+    /// carries no Babel seqno attribute — i.e. it is not a Babel
+    /// route (the Babel runtime is the only producer of the tag).
+    ///
+    /// A malformed value (not exactly 4 bytes) returns `None` — the
+    /// codec rejects partial-width stores at decode. Callers that
+    /// need to distinguish "absent" from "present but malformed"
+    /// should consult [`Self::has_babel_seqno`].
+    pub fn babel_seqno(&self) -> Option<u16> {
+        let a = self.get(AttrType::LrBabelSeqno)?;
+        if a.value.len() != 4 {
+            return None;
+        }
+        Some(u16::from_be_bytes([a.value[2], a.value[3]]))
+    }
+
+    /// True when an `LrBabelSeqno` attribute is physically present on
+    /// the route (RFC 8966 §3.2). Use this to distinguish "no
+    /// attribute" from "present but malformed" —
+    /// [`Self::babel_seqno`] returns `None` for both, but
+    /// `has_babel_seqno()` reports the attribute's physical presence
+    /// so the `defined(babel.seqno)` filter DSL predicate can
+    /// distinguish them exactly as BIRD's `defined(babel_seqno)`
+    /// does.
+    pub fn has_babel_seqno(&self) -> bool {
+        self.get(AttrType::LrBabelSeqno).is_some()
+    }
+
+    /// Attach the Babel Router-ID (RFC 8966 §3.2 + §4.6.8 — the
+    /// 64-bit EUI-64-style Router-ID carried in every Update TLV's
+    /// Router-Id TLV) to this attribute set under the private
+    /// [`AttrType::LrBabelRouterId`] tag. The tag is never
+    /// transmitted on the wire; it carries the 64-bit Babel
+    /// Router-ID of the router that originated the route's source
+    /// (the upstream that injected the destination into the Babel
+    /// network) through the Loc-RIB so the filter DSL's
+    /// `babel.router_id` field can surface it. Attached to every
+    /// Babel route the router's Babel runtime publishes; absent for
+    /// non-Babel routes.
+    pub fn set_babel_router_id(&mut self, router_id: u64) {
+        let value = router_id.to_be_bytes();
+        self.insert(PathAttribute::new(
+            PathAttrFlags::new().set_optional(true),
+            AttrType::LrBabelRouterId,
+            value.to_vec(),
+        ));
+    }
+
+    /// Read back the Babel Router-ID previously attached with
+    /// [`Self::set_babel_router_id`]. Returns `None` when the
+    /// route carries no Babel router-id attribute — i.e. it is not
+    /// a Babel route (the Babel runtime is the only producer of
+    /// the tag).
+    ///
+    /// A malformed value (not exactly 8 bytes) returns `None` — the
+    /// codec rejects partial-width stores at decode. Callers that
+    /// need to distinguish "absent" from "present but malformed"
+    /// should consult [`Self::has_babel_router_id`].
+    pub fn babel_router_id(&self) -> Option<u64> {
+        let a = self.get(AttrType::LrBabelRouterId)?;
+        if a.value.len() != 8 {
+            return None;
+        }
+        Some(u64::from_be_bytes([
+            a.value[0], a.value[1], a.value[2], a.value[3],
+            a.value[4], a.value[5], a.value[6], a.value[7],
+        ]))
+    }
+
+    /// True when an `LrBabelRouterId` attribute is physically
+    /// present on the route (RFC 8966 §3.2). Use this to distinguish
+    /// "no attribute" from "present but malformed" —
+    /// [`Self::babel_router_id`] returns `None` for both, but
+    /// `has_babel_router_id()` reports the attribute's physical
+    /// presence so the `defined(babel.router_id)` filter DSL
+    /// predicate can distinguish them exactly as BIRD's
+    /// `defined(babel_router_id)` does.
+    pub fn has_babel_router_id(&self) -> bool {
+        self.get(AttrType::LrBabelRouterId).is_some()
     }
 
     /// Decode MP_REACH_NLRI with RFC 7911 Add-Path awareness: `add_path`
