@@ -39,12 +39,15 @@
 //!   └────────────────────────────────────────────────────────────┘
 //! ```
 //!
-//! Limitations (see docs/STATUS.md): OSPFv2 only; authentication is not
-//! wired into the daemon yet. Broadcast segments (RFC 2328 §9.4) run
-//! the full DR/BDR election — Hello DR/BDR fields (§A.3.2), the §10.4
-//! adjacency gate, §12.4.1.2 transit links and §12.4.2 Network-LSAs —
-//! behind the per-interface `network_type = "broadcast"` switch; p2p
-//! remains the default so existing labs are unaffected.
+//! Limitations (see docs/STATUS.md): this module covers OSPFv2 only;
+//! OSPFv3 lives in `daemon_ospf3` and dispatches from
+//! `--protocol ospf` when `ospf_version = "v3"`. Authentication is not
+//! wired into the v2 daemon yet. Broadcast segments (RFC 2328 §9.4)
+//! run the full DR/BDR election — Hello DR/BDR fields (§A.3.2), the
+//! §10.4 adjacency gate, §12.4.1.2 transit links and §12.4.2
+//! Network-LSAs — behind the per-interface `network_type =
+//! "broadcast"` switch; p2p remains the default so existing labs
+//! are unaffected.
 
 use crate::Component;
 use std::collections::BTreeMap;
