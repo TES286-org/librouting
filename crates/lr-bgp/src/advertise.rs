@@ -225,7 +225,17 @@ impl BgpPeer {
         // --- Route-Reflector reflection attributes (RFC 4456 §3) ---
         // ORIGINATOR_ID and CLUSTER_LIST are optional non-transitive
         // (RFC 4456 §5): optional=1, transitive=0 → 0x80.
-        if topo.rr_client {
+        //
+        // Gating: `topo.rr_client` says this peer is configured as a
+        // client; `route_reflector.enabled` says *this speaker* is
+        // itself a route reflector. RFC 4456 §3 makes reflection a
+        // per-speaker behavior — a non-reflector with an accidentally
+        // set `rr_client` flag must NOT stamp ORIGINATOR_ID /
+        // CLUSTER_LIST, because no cluster is defined for the local
+        // speaker. The `enabled` field is therefore read here so the
+        // per-peer flag is honoured only when the local speaker is
+        // actually configured as a reflector.
+        if topo.rr_client && self.cfg.route_reflector.enabled {
             let cluster = self
                 .cfg
                 .route_reflector

@@ -230,11 +230,16 @@ fn ibgp_locally_originated_route_gets_next_hop() {
 }
 
 /// RR reflection: advertising an iBGP-learned route to an RR client
-/// succeeds and carries ORIGINATOR_ID + CLUSTER_LIST.
+/// succeeds and carries ORIGINATOR_ID + CLUSTER_LIST. Per RFC 4456 §3,
+/// the reflection attributes are stamped only when *both* flags are
+/// set — the per-peer `route_reflector_client` flag and the
+/// per-speaker `route_reflector.enabled` flag — so the cluster-id
+/// is defined before ORIGINATOR_ID is inserted.
 #[test]
 fn rr_reflection_to_client() {
     let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
     cfg.route_reflector_client = true;
+    cfg.route_reflector.enabled = true;
     let mut peer = established_peer(cfg);
     let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
     assert!(peer.advertise(&route));
@@ -269,6 +274,41 @@ fn withdraw_encodes() {
     }
 }
 
+/// RR reflection is gated on `route_reflector.enabled` as well as the
+/// per-peer `route_reflector_client` flag. RFC 4456 §3 makes reflection
+/// a per-speaker behavior — a peer marked as an RR-client of a speaker
+/// that is itself not a reflector must NOT receive ORIGINATOR_ID /
+/// CLUSTER_LIST, because no cluster id is defined for the local
+/// speaker. This test pins the gating: with `route_reflector_client =
+/// true` and `route_reflector.enabled = false` (the default), the
+/// reflected UPDATE carries neither attribute.
+#[test]
+fn rr_reflection_suppressed_when_route_reflector_disabled() {
+    let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
+    cfg.route_reflector_client = true;
+    // `cfg.route_reflector.enabled` stays at its `Default::default()`
+    // value of `false` — the speaker is not configured as a reflector.
+    let mut peer = established_peer(cfg);
+    let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 1);
+    assert!(peer.advertise(&route));
+    let bytes = peer.drain_outgoing();
+    let mut dec = crate::codec::BgpCodec::new();
+    let mut r = lr_core::buf::ReadBuf::new(&bytes);
+    match dec.decode(&mut r) {
+        Ok(Some(BgpMessage::Update(u))) => {
+            assert!(
+                u.attributes.get(AttrType::OriginatorId).is_none(),
+                "ORIGINATOR_ID must not be stamped when route_reflector.enabled = false"
+            );
+            assert!(
+                u.attributes.get(AttrType::ClusterList).is_none(),
+                "CLUSTER_LIST must not be stamped when route_reflector.enabled = false"
+            );
+        }
+        _ => panic!("UPDATE did not decode"),
+    }
+}
+
 /// Attribute flag conformance: strict implementations (BIRD, FRR)
 /// validate the optional/transitive bits of well-known attributes.
 /// LOCAL_PREF is well-known discretionary → 0x40; ORIGINATOR_ID and
@@ -277,6 +317,7 @@ fn withdraw_encodes() {
 fn attribute_flags_match_rfc() {
     let mut cfg = PeerConfig::new(Asn(64512), Asn(64512), RouterId::from_v4([10, 0, 0, 1]));
     cfg.route_reflector_client = true;
+    cfg.route_reflector.enabled = true;
     let mut peer = established_peer(cfg);
     let route = bgp_route(&[64500], [192, 0, 2, 1], [203, 0, 113, 0], 24, 0);
     assert!(peer.advertise(&route));

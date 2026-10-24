@@ -56,8 +56,11 @@ fn main() {
 `cluster_id` is left at 0 to fall back to the local BGP identifier;
 `RouteReflectorConfig::effective_cluster_id` does that fallback. Set
 `route_reflector_client` only on the sessions where the peer is your
-client: the reflection attributes are keyed off it. The
-`RouteReflectorConfig::enabled` field is not read by any code path.
+client and `route_reflector.enabled = true` on the speaker itself:
+the reflection attributes are stamped only when *both* are set, per
+RFC 4456 §3 (a non-reflector with an accidentally set `rr_client` flag
+must not stamp ORIGINATOR_ID / CLUSTER_LIST, because no cluster is
+defined for the local speaker).
 
 ## What the reflector adds
 
