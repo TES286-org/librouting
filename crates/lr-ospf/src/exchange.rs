@@ -46,8 +46,31 @@ pub const DD_MS: u8 = 0x01; // Master/Slave
 
 /// Fixed overhead of one LSA header.
 const LSA_HEADER_LEN: usize = 20;
-/// IP(20) + OSPF(24) + DBD fixed body(8): the header room of a DBD.
-const DD_OVERHEAD: usize = 52;
+
+/// v2 DBD overhead (RFC 2328 §A.3.1, §A.3.3): IPv4(20) + OSPFv2 header(24)
+/// plus DBD fixed body(8) = 52 bytes. This is the room a DBD packet consumes
+/// before any LSA header is appended.
+///
+/// The value mirrors FRR's `ospf_packet_max` for v2:
+/// `ifmtu - sizeof(struct ip) - OSPF_HEADER_SIZE - OSPF_DB_DESC_MIN_SIZE`,
+/// with `OSPF_HEADER_SIZE = 24` and `OSPF_DB_DESC_MIN_SIZE = 8` per RFC 2328
+/// §A.3.3 (`mtu(2) | options(1) | flags(1) | dd_seq(4)`).
+pub const DD_OVERHEAD_V2: usize = 52;
+
+/// v3 DBD overhead (RFC 5340 §A.3.1, §A.3.3): IPv6(40) + OSPFv3 header(16)
+/// plus DBD fixed body(12) = 68 bytes.
+///
+/// The DBD body grows from 8 to 12 bytes because RFC 5340 §A.3.3 carries
+/// a 24-bit Options word plus two reserved bytes, the OSPF header shrinks
+/// from 24 to 16 bytes (no authentication field), and the L3 header grows
+/// from 20 (IPv4) to 40 (IPv6). Net: +16 bytes vs v2.
+///
+/// The value mirrors FRR's `ospf6_packet_max` for v3:
+/// `ifmtu - sizeof(struct ip6_hdr)` returns the room for an OSPFv3 packet
+/// (header + body); subtracting `OSPF6_HEADER_SIZE` (16) and the v3 DBD
+/// fixed body (12) leaves the LSA-header payload room — i.e. the OSPFv3
+/// DBD paging constant is `ifmtu - 40 - 16 - 12 = ifmtu - 68`.
+pub const DD_OVERHEAD_V3: usize = 68;
 
 /// Retransmit interval for the pending DBD / LS-Request (BIRD/FRR
 /// default RxmtInterval).
@@ -141,13 +164,23 @@ pub struct DbExchange {
     /// daemon that exposes a per-interface `rxmt_interval` knob can
     /// drive the wait without touching the codec.
     rxmt_interval_ms: u64,
+    /// DBD/LSU paging overhead for the active version — v2 callers see
+    /// [`DD_OVERHEAD_V2`] (52 bytes; IPv4 + OSPFv2 + DBD body), v3
+    /// callers see [`DD_OVERHEAD_V3`] (68 bytes; IPv6 + OSPFv3 + DBD
+    /// body). Cached at construction so the paging hot loop reads one
+    /// field instead of branching on `version` per page. RFC 5340 §A.1
+    /// forbids IPv6 fragmentation for OSPFv3, so an over-sized DBD is
+    /// silently dropped on the wire — using the correct per-version
+    /// overhead is what keeps the paging arithmetic inside the MTU.
+    dd_overhead: usize,
 }
 
 impl DbExchange {
     /// Create the driver. `iface_mtu` is clamped to at least
-    /// [`DD_OVERHEAD`] so the DBD/LSU paging arithmetic
-    /// (`iface_mtu - DD_OVERHEAD`) can never underflow for tiny MTUs
-    /// (audit E1).
+    /// [`DD_OVERHEAD_V2`] so the DBD/LSU paging arithmetic
+    /// (`iface_mtu - DD_OVERHEAD_V2`) can never underflow for tiny MTUs
+    /// (audit E1). Equivalent to
+    /// [`DbExchange::with_version`]`(rid, area, mtu, OspfVersion::V2)`.
     pub fn new(router_id: u32, area_id: u32, iface_mtu: u16) -> Self {
         Self::with_version(router_id, area_id, iface_mtu, OspfVersion::V2)
     }
@@ -156,13 +189,26 @@ impl DbExchange {
     /// emits 16-byte-header packets and advertises the RFC 5340 §A.2
     /// V6|R|E option set; the v2 driver keeps the E|O (RFC 5250 §3)
     /// set.
+    ///
+    /// The interface MTU clamp is version-aware: v2 clamps to
+    /// [`DD_OVERHEAD_V2`] (52 bytes), v3 to [`DD_OVERHEAD_V3`] (68
+    /// bytes). RFC 5340 §A.1 forbids IPv6 fragmentation for OSPFv3
+    /// packets, so the v3 paging arithmetic must subtract the larger
+    /// v3 overhead (IPv6 40 + OSPFv3 header 16 + DBD body 12 = 68)
+    /// rather than the v2 one — a v3 driver that subtracted only 52
+    /// bytes per page would emit DBDs that exceed the IPv6 MTU and get
+    /// silently dropped on the wire.
     pub fn with_version(
         router_id: u32,
         area_id: u32,
         iface_mtu: u16,
         version: OspfVersion,
     ) -> Self {
-        let iface_mtu = iface_mtu.max(DD_OVERHEAD as u16);
+        let dd_overhead = match version {
+            OspfVersion::V2 => DD_OVERHEAD_V2,
+            OspfVersion::V3 => DD_OVERHEAD_V3,
+        };
+        let iface_mtu = iface_mtu.max(dd_overhead as u16);
         Self {
             router_id,
             area_id,
@@ -187,6 +233,7 @@ impl DbExchange {
                 0x02 | u32::from(crate::lsa::grace::OPTIONS_O_BIT)
             },
             rxmt_interval_ms: RXMT_INTERVAL_MS,
+            dd_overhead,
         }
     }
 
@@ -403,8 +450,16 @@ impl DbExchange {
             }
         }
         // Page the answer: one LSU per MTU-sized batch. The MTU is
-        // clamped at construction, so this cannot underflow.
-        let max_bytes = self.iface_mtu as usize - DD_OVERHEAD;
+        // clamped at construction, so this cannot underflow. The
+        // paging uses the version-aware `dd_overhead` (v2: 52, v3:
+        // 68) which is the DBD overhead; for LSU the true overhead is
+        // slightly smaller (the LSU body's 4-byte `lsa_count` field
+        // vs the DBD body's 8/12 bytes), so subtracting the DBD
+        // overhead is conservative — it under-fills the LSU by 4 (v2)
+        // or 8 (v3) bytes per page, never over-fills. This keeps the
+        // arithmetic in lockstep with the DBD paging and avoids a
+        // second per-version constant for the LSU.
+        let max_bytes = self.iface_mtu as usize - self.dd_overhead;
         let mut batch: Vec<Lsa> = Vec::new();
         let mut batch_bytes = 0usize;
         for lsa in lsas {
@@ -576,9 +631,10 @@ impl DbExchange {
     /// The next page of our LSA headers (`our_cursor` walks the LSDB).
     fn next_our_chunk(&mut self, lsdb: &Lsdb) -> (Vec<LsaHeader>, bool) {
         // Saturating so a degenerate MTU can never underflow (the MTU is
-        // also clamped at construction).
+        // also clamped at construction). The overhead is version-aware
+        // (v2: 52, v3: 68), cached in `self.dd_overhead` at construction.
         let per_page =
-            ((self.iface_mtu as usize).saturating_sub(DD_OVERHEAD) / LSA_HEADER_LEN).max(1);
+            ((self.iface_mtu as usize).saturating_sub(self.dd_overhead) / LSA_HEADER_LEN).max(1);
         let mut headers = Vec::with_capacity(per_page);
         let mut iter = lsdb.headers().into_iter().skip(self.our_cursor);
         for h in iter.by_ref().take(per_page) {

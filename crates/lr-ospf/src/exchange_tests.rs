@@ -519,9 +519,9 @@ fn header_paging_respects_mtu() {
         .unwrap();
         lsdb.install(lsa, 0);
     }
-    let mut ex = DbExchange::new(US, AREA, (DD_OVERHEAD + LSA_HEADER_LEN + 4) as u16);
+    let mut ex = DbExchange::new(US, AREA, (DD_OVERHEAD_V2 + LSA_HEADER_LEN + 4) as u16);
     let mut nbr = neighbor_at_exstart(US);
-    let mut them = DbExchange::new(THEM, AREA, (DD_OVERHEAD + LSA_HEADER_LEN + 4) as u16);
+    let mut them = DbExchange::new(THEM, AREA, (DD_OVERHEAD_V2 + LSA_HEADER_LEN + 4) as u16);
 
     // Negotiate: THEM (higher id) is master.
     let them_init = them.initial_db_desc(5, NOW);
@@ -538,7 +538,7 @@ fn header_paging_respects_mtu() {
         // of its own), sequence advanced.
         seq = seq.wrapping_add(1);
         let master_dd = DbDescBody {
-            mtu: (DD_OVERHEAD + LSA_HEADER_LEN + 4) as u16,
+            mtu: (DD_OVERHEAD_V2 + LSA_HEADER_LEN + 4) as u16,
             options: 0x02,
             flags: DD_MS | DD_M,
             dd_seq: seq,
