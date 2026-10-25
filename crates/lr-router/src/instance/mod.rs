@@ -4121,6 +4121,32 @@ impl RouterInstance for DefaultRouter {
                                 outbound.extend_from_slice(&bytes);
                             }
                         }
+                        // Drain the neighbor-FSM actions captured by
+                        // the OSPF runtime: translate them into the
+                        // router-level event channel so OSPF neighbor
+                        // transitions surface the same way BGP ones
+                        // do. The FSM stamps `Event::PeerStateChange`
+                        // with `session: 0` because it has no session
+                        // handle of its own; substitute the live
+                        // session handle here.
+                        for action in step.actions {
+                            if let lr_core::fsm::Action::EmitEvent(ev) = action {
+                                match ev {
+                                    lr_core::event::Event::PeerStateChange {
+                                        peer_state, ..
+                                    } => {
+                                        self.pending_events.push(RouterEvent::PeerStateChange {
+                                            session: h,
+                                            state: peer_state,
+                                        });
+                                    }
+                                    lr_core::event::Event::Log(msg) => {
+                                        self.pending_events.push(RouterEvent::Log(msg));
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                     }
                     if !outbound.is_empty() {
                         Self::finalize_ospf_v2_egress(runtime.protocol, &mut outbound);
@@ -6231,6 +6257,7 @@ impl DefaultRouter {
         bdr: u32,
     ) -> Result<bool, String> {
         let mut outbound: Vec<u8> = Vec::new();
+        let mut captured_actions: Vec<lr_core::fsm::Action> = Vec::new();
         {
             let state = self
                 .sessions
@@ -6245,16 +6272,23 @@ impl DefaultRouter {
             runtime.dr = dr;
             runtime.bdr = bdr;
             // §9.4 step 7 / §10.3: the AdjOK? event re-examines the
-            // adjacency eligibility of the neighbor.
+            // adjacency eligibility of the neighbor. Capture the FSM
+            // actions — the transition into / out of ExStart surfaces
+            // to the embedder the same way the Hello-driven transitions
+            // do (handled in `feed_input`'s OSPF dispatch path).
             let was = runtime.neighbor.state;
             if was == NeighborState::TwoWay && runtime.adjacency_viable() {
-                let _ = runtime
-                    .neighbor
-                    .step(NeighborEvent::AdjOk { proceed: true });
+                captured_actions.extend(
+                    runtime
+                        .neighbor
+                        .step(NeighborEvent::AdjOk { proceed: true }),
+                );
             } else if was >= NeighborState::ExStart && !runtime.adjacency_viable() {
-                let _ = runtime
-                    .neighbor
-                    .step(NeighborEvent::AdjOk { proceed: false });
+                captured_actions.extend(
+                    runtime
+                        .neighbor
+                        .step(NeighborEvent::AdjOk { proceed: false }),
+                );
                 // BIRD's INM_ADJOK demotion resets the exchange lists so
                 // a later re-adjacency starts a fresh DBD negotiation.
                 runtime.exchange = lr_ospf::exchange::DbExchange::new(
@@ -6275,6 +6309,26 @@ impl DefaultRouter {
             if !outbound.is_empty() {
                 Self::finalize_ospf_v2_egress(runtime.protocol, &mut outbound);
                 conn.put_output(&outbound);
+            }
+        }
+        // Translate the FSM actions into the router-level event
+        // channel — the FSM stamps `Event::PeerStateChange` with
+        // `session: 0` because it has no session handle of its own;
+        // substitute the live session handle here.
+        for action in captured_actions {
+            if let lr_core::fsm::Action::EmitEvent(ev) = action {
+                match ev {
+                    lr_core::event::Event::PeerStateChange { peer_state, .. } => {
+                        self.pending_events.push(RouterEvent::PeerStateChange {
+                            session: h,
+                            state: peer_state,
+                        });
+                    }
+                    lr_core::event::Event::Log(msg) => {
+                        self.pending_events.push(RouterEvent::Log(msg));
+                    }
+                    _ => {}
+                }
             }
         }
         Ok(true)

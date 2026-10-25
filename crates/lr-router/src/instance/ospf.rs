@@ -8,7 +8,7 @@
 
 use crate::session::{OspfAreaType, SessionHandle};
 use lr_core::addr::{IpAddr, RouterId};
-use lr_core::fsm::StateMachine;
+use lr_core::fsm::{Action, StateMachine};
 use lr_core::rib::Protocol;
 use lr_ospf::external::ExternalMetricType;
 use lr_ospf::lsa::{Lsa, LsaTypeV2};
@@ -293,6 +293,15 @@ pub(super) enum OspfKind {
 pub(super) struct OspfStep {
     pub(super) lsas: Vec<Lsa>,
     pub(super) outbound: Vec<OspfPacket>,
+    /// Neighbor-FSM actions captured while dispatching the packet (the
+    /// `handle_packet` Hello/DbDesc paths and the exchange driver both
+    /// step the FSM; the resulting actions used to be discarded). The
+    /// router instance translates `Action::EmitEvent(Event::PeerState
+    /// Change { .. })` into `RouterEvent::PeerStateChange { .. }` (and
+    /// the `Event::Log(..)` actions into `RouterEvent::Log(..)`) so
+    /// OSPF neighbor transitions are observable to the embedder — the
+    /// same surface BGP sessions already have.
+    pub(super) actions: Vec<Action>,
 }
 
 /// Build one LS-Update packet for an area.
@@ -602,18 +611,19 @@ impl OspfRuntime {
                     // Hello without us in it — just refresh timers.
                     return OspfStep::default();
                 };
-                let _ = self.neighbor.step(ev);
+                let mut step = OspfStep::default();
+                step.actions.extend(self.neighbor.step(ev));
                 // §10.2: 2-Way + adjacency decision → ExStart. The
                 // decision is §10.4: ptp always adjoints; broadcast
                 // segments require the DR/BDR relationship.
                 if self.neighbor.state == NeighborState::TwoWay {
                     let proceed = self.adjacency_viable();
-                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed });
+                    step.actions
+                        .extend(self.neighbor.step(NeighborEvent::AdjOk { proceed }));
                 }
                 // Entering ExStart emits the initial DBD (§10.3); after
                 // a sequence-mismatch restart the exchange driver
                 // already queued a fresh one.
-                let mut step = OspfStep::default();
                 if self.neighbor.state == NeighborState::ExStart && !self.exchange.started() {
                     let seq = now_ms as u32 ^ self.router_id | 1;
                     step.outbound
@@ -622,20 +632,23 @@ impl OspfRuntime {
                 step
             }
             OspfBody::DbDesc(d) => {
+                let mut step = OspfStep::default();
                 // A DBD proves the neighbor sees us: RFC 2328 §10.6
                 // (via BIRD's INM_2WAYREC) advances Init/2-Way to
                 // ExStart before the exchange runs — the peer may have
                 // completed 2-Way detection on its side first.
                 if self.neighbor.state == NeighborState::Init {
-                    let _ = self.neighbor.step(NeighborEvent::HelloSeen {
-                        dr: 0,
-                        bdr: 0,
-                        priority: 1,
-                    });
+                    step.actions
+                        .extend(self.neighbor.step(NeighborEvent::HelloSeen {
+                            dr: 0,
+                            bdr: 0,
+                            priority: 1,
+                        }));
                 }
                 if self.neighbor.state == NeighborState::TwoWay {
                     let proceed = self.adjacency_viable();
-                    let _ = self.neighbor.step(NeighborEvent::AdjOk { proceed });
+                    step.actions
+                        .extend(self.neighbor.step(NeighborEvent::AdjOk { proceed }));
                 }
                 // §10.6: Database Description packets carry exchange
                 // state only from ExStart on. A neighbor that never
@@ -648,13 +661,22 @@ impl OspfRuntime {
                 // it here leaves the exchange half-negotiated with no
                 // one to drive it to Full. The adjacency re-opens
                 // through set_ospf_dr_state (§9.4 step 7) or the next
-                // Hello, both of which emit the initial DBD.
+                // Hello, both of which emit the initial DBD. The FSM
+                // actions captured above still surface to the embedder
+                // (a `PeerStateChange` to `2-Way` is observable even
+                // when the exchange driver has not taken over yet).
                 if self.neighbor.state < NeighborState::ExStart {
-                    return OspfStep::default();
+                    return step;
                 }
-                self.exchange
+                let mut exchange_step: OspfStep = self
+                    .exchange
                     .on_db_desc(d, pkt.header.router_id, lsdb, &mut self.neighbor, now_ms)
-                    .into()
+                    .into();
+                // Prepend the actions captured above (HelloSeen / AdjOk
+                // transitions) so the embedder sees them in the order
+                // they were generated.
+                exchange_step.actions.splice(0..0, step.actions);
+                exchange_step
             }
             OspfBody::LsRequest(r) => self
                 .exchange
@@ -682,6 +704,7 @@ impl From<lr_ospf::exchange::ExchangeStep> for OspfStep {
         Self {
             lsas: step.lsas,
             outbound: step.outbound,
+            actions: step.actions,
         }
     }
 }

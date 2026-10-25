@@ -30,7 +30,7 @@
 
 use crate::lsa::{Lsa, LsaHeader};
 use crate::lsdb::Lsdb;
-use lr_core::fsm::StateMachine;
+use lr_core::fsm::{Action, StateMachine};
 
 use crate::neighbor::{NeighborEvent, OspfNeighbor};
 use crate::packet::{
@@ -87,6 +87,16 @@ pub struct ExchangeStep {
     pub lsas: Vec<Lsa>,
     /// True on the transition into Full.
     pub newly_full: bool,
+    /// Neighbor-FSM actions produced while processing this step (RFC 2328
+    /// §10.1 — the FSM emits `Action::EmitEvent(Event::PeerStateChange
+    /// { .. })` on every transition, plus `Action::EmitEvent(Event::Log
+    /// (..))` on restart / mismatch paths). The exchange driver used to
+    /// discard these with `let _ = neighbor.step(..)`; the caller now
+    /// drains them into its own event queue so OSPF neighbor state
+    /// transitions are observable to the embedder (the daemon's
+    /// `RouterEvent::PeerStateChange` channel) — matching the BGP
+    /// peer-state surface.
+    pub actions: Vec<Action>,
 }
 
 /// The DBD/LSR exchange driver for one neighbor (RFC 2328 §10.3–§10.8).
@@ -247,7 +257,8 @@ impl DbExchange {
                     self.master_role = false;
                     self.seq = d.dd_seq;
                     self.phase = Phase::Exchange;
-                    let _ = neighbor.step(NeighborEvent::NegotiationDone);
+                    step.actions
+                        .extend(neighbor.step(NeighborEvent::NegotiationDone));
                     let (headers, more) = self.next_our_chunk(lsdb);
                     let flags = DD_M * u8::from(more);
                     let pkt = self.db_desc_packet(flags, self.seq, headers.clone());
@@ -265,7 +276,8 @@ impl DbExchange {
                     self.started = true;
                     self.master_role = true;
                     self.phase = Phase::Exchange;
-                    let _ = neighbor.step(NeighborEvent::NegotiationDone);
+                    step.actions
+                        .extend(neighbor.step(NeighborEvent::NegotiationDone));
                     self.process_their_headers(&d.lsa_headers, lsdb, &mut step);
                     self.seq = self.seq.wrapping_add(1);
                     self.send_master_db_desc(lsdb, &mut step, now_ms);
@@ -416,7 +428,8 @@ impl DbExchange {
         step.outbound.push(ack);
         if satisfied && self.lsr_queue.is_empty() && self.phase == Phase::Loading {
             self.phase = Phase::Full;
-            let _ = neighbor.step(NeighborEvent::ExchangeDone); // Loading → Full
+            step.actions
+                .extend(neighbor.step(NeighborEvent::ExchangeDone)); // Loading → Full
             step.newly_full = true;
         }
         step
@@ -555,10 +568,12 @@ impl DbExchange {
         step: &mut ExchangeStep,
         now_ms: u64,
     ) {
-        let _ = neighbor.step(NeighborEvent::ExchangeDone); // Exchange → Loading
+        step.actions
+            .extend(neighbor.step(NeighborEvent::ExchangeDone)); // Exchange → Loading
         if self.lsr_queue.is_empty() {
             self.phase = Phase::Full;
-            let _ = neighbor.step(NeighborEvent::ExchangeDone); // Loading → Full
+            step.actions
+                .extend(neighbor.step(NeighborEvent::ExchangeDone)); // Loading → Full
             step.newly_full = true;
         } else {
             self.phase = Phase::Loading;
@@ -574,7 +589,8 @@ impl DbExchange {
         now_ms: u64,
         step: &mut ExchangeStep,
     ) {
-        let _ = neighbor.step(NeighborEvent::SeqMismatch); // ≥ExStart → ExStart
+        step.actions
+            .extend(neighbor.step(NeighborEvent::SeqMismatch)); // ≥ExStart → ExStart
         self.restart(self.seq.wrapping_add(1));
         step.outbound.push(self.initial_db_desc(self.seq, now_ms));
     }

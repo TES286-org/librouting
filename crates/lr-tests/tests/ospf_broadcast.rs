@@ -281,3 +281,77 @@ fn network_lsa_derives_transit_prefix_route() {
         snap.iter().map(|rt| rt.key.prefix).collect::<Vec<_>>()
     );
 }
+
+// ===========================================================================
+// Neighbor-FSM event surface (issue #92 follow-up)
+// ===========================================================================
+
+/// Drain `PeerStateChange` events into a sorted string vec so the test
+/// can assert which transitions surfaced without depending on order
+/// (the embedder's poll loop may batch them).
+fn peer_state_transitions(r: &mut DefaultRouter) -> Vec<String> {
+    r.poll_events()
+        .into_iter()
+        .filter_map(|e| match e {
+            lr_router::RouterEvent::PeerStateChange { state, .. } => Some(state.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// OSPF neighbor FSM transitions surface as `RouterEvent::PeerStateChange`
+/// on the same channel BGP peer-state changes already use. Before the
+/// fix, the exchange driver and `set_ospf_dr_state` discarded the FSM's
+/// `Vec<Action>` output with `let _ = neighbor.step(..)`, so the embedder
+/// never saw "Init" / "2-Way" / "ExStart" transitions for OSPF sessions.
+#[test]
+fn ospf_neighbor_transitions_surface_as_peer_state_change() {
+    let mut r = DefaultRouter::new();
+    let h = r
+        .add_session(broadcast_config([1, 1, 1, 1], 0x0a63_0101, 0x0a63_0102))
+        .unwrap();
+    let _ = r.poll_events();
+    // First Hello: the neighbor sees us, so the FSM transitions
+    // Down → Init. The PeerStateChange event surfaces on the next poll.
+    r.feed_input(h, &hello_bytes([2, 2, 2, 2], true)).unwrap();
+    let events = peer_state_transitions(&mut r);
+    assert!(
+        events.iter().any(|s| s == "Init"),
+        "Init transition must surface, got: {events:?}",
+    );
+    // Second Hello: the neighbor sees us again — Init → 2-Way. The
+    // broadcast segment has not elected a DR yet, so the §10.4 gate
+    // keeps us at 2-Way (no ExStart).
+    r.feed_input(h, &hello_bytes([2, 2, 2, 2], true)).unwrap();
+    let events = peer_state_transitions(&mut r);
+    assert!(
+        events.iter().any(|s| s == "2-Way"),
+        "2-Way transition must surface, got: {events:?}",
+    );
+}
+
+/// The §9.4 step 7 / §10.3 path through `set_ospf_dr_state` (the
+/// daemon's election reports the neighbor as DR) opens the §10.4 gate
+/// and transitions 2-Way → ExStart — the same transition the Hello path
+/// can fire, but reached from a different call site that used to discard
+/// the FSM actions too.
+#[test]
+fn ospf_dr_election_transition_to_exstart_surfaces() {
+    let mut r = DefaultRouter::new();
+    let h = r
+        .add_session(broadcast_config([1, 1, 1, 1], 0x0a63_0101, 0x0a63_0102))
+        .unwrap();
+    let _ = r.poll_events();
+    // Two Hellos to reach 2-Way (the §10.4 gate is still closed).
+    r.feed_input(h, &hello_bytes([2, 2, 2, 2], true)).unwrap();
+    r.feed_input(h, &hello_bytes([2, 2, 2, 2], true)).unwrap();
+    let _ = peer_state_transitions(&mut r);
+    // The daemon's election reports the neighbor (10.99.1.2) as DR —
+    // §9.4 step 7 advances 2-Way → ExStart.
+    r.set_ospf_dr_state(h, 0x0a63_0102, 0).unwrap();
+    let events = peer_state_transitions(&mut r);
+    assert!(
+        events.iter().any(|s| s == "ExStart"),
+        "ExStart transition from set_ospf_dr_state must surface, got: {events:?}",
+    );
+}
