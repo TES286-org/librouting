@@ -5,9 +5,13 @@
 //! with both role assignments exercised.
 
 use super::*;
+use crate::lsa::v3::{
+    originate_v3_router_lsa, V3RouterLink, LINK_TYPE_POINTTOPOINT, LS_TYPE_ROUTER, ROUTER_BIT_V6,
+};
 use crate::lsdb::Lsdb;
 use crate::neighbor::{NeighborState, OspfNeighbor};
 use crate::origination::{originate_router_lsa, RouterLsaFlags, RouterLsaLink};
+use crate::packet::OSPF_V3_OPTIONS_DEFAULT;
 
 const US: u32 = 0x0a00_0001; // 10.0.0.1
 const THEM: u32 = 0x0a00_0002; // 10.0.0.2 (higher — master by §10.3)
@@ -568,6 +572,346 @@ fn header_paging_respects_mtu() {
     );
     // The sequences echo the master each round.
     assert_eq!(pages[2].dd_seq, seq);
+}
+
+// ===== OSPFv3 (RFC 5340) coverage =====
+//
+// `DbExchange::with_version(.., OspfVersion::V3)` was previously
+// uncovered by `exchange_tests.rs` (defects.txt TEST-GAP entry on
+// `crates/lr-ospf/src/exchange.rs`). The v3 wire shapes are
+// exercised in `codec.rs` (`v3_dbdesc_uses_24bit_options_and_flags_at_offset_5`,
+// `v3_ls_request_reserved_word_leads_16bit_type`,
+// `v3_lsu_carries_full_16bit_lsa_type_on_the_wire`); these tests pin
+// the *exchange driver's* v3-specific behaviour — the default
+// Options set on the initial DBD, the version-aware paging overhead
+// (v2: 52 bytes; v3: 68 bytes — IPv6 + OSPFv3 header + v3 DBD body),
+// and a full master/slave negotiation that drives a v3 Router-LSA
+// (LS type 0x2001) through the LSR/LSU/LSAck conversation to Full.
+
+fn v3_exchange(rid: u32, lsdb: &Lsdb) -> DbExchange {
+    let _ = lsdb;
+    DbExchange::with_version(rid, AREA, MTU, OspfVersion::V3)
+}
+
+/// Originate a v3 Router-LSA (RFC 5340 §A.4.3, LS type 0x2001) for one
+/// point-to-point link. The v3 Router-LSA body shape is `bits(1) |
+/// options(3) | links` (no link-count field; descriptors run to the
+/// end of the LSA), and a regular IPv6 router sets
+/// [`ROUTER_BIT_V6`] plus [`ROUTER_BIT_E`] if it originates
+/// AS-external LSAs.
+fn v3_lsdb_with(router_id: u32, links: &[V3RouterLink]) -> Lsdb {
+    let mut lsdb = Lsdb::new();
+    let bits = ROUTER_BIT_V6;
+    let options = OSPF_V3_OPTIONS_DEFAULT;
+    if let Some(lsa) = originate_v3_router_lsa(router_id, bits, options, links, None) {
+        lsdb.install(lsa, 0);
+    }
+    lsdb
+}
+
+fn v3_p2p_link(metric: u16, neighbor_iface: u32, neighbor_rid: u32) -> V3RouterLink {
+    V3RouterLink {
+        link_type: LINK_TYPE_POINTTOPOINT,
+        metric,
+        interface_id: 1,
+        neighbor_interface_id: neighbor_iface,
+        neighbor_router_id: neighbor_rid,
+    }
+}
+
+/// The v3 driver's initial DBD carries the RFC 5340 §A.2 default
+/// Options set (V6 | E | R = 0x13), not the v2 E | O set. Without
+/// this pin, a future regression that flipped the version check in
+/// `with_version` would silently advertise v2 options on a v3 DBD,
+/// which §A.4.1 forbids (the V6 bit is mandatory for IPv6 routing
+/// participation; the R bit signals a router that contributes to
+/// forwarding).
+#[test]
+fn v3_initial_db_desc_carries_v3_default_options() {
+    let lsdb = Lsdb::new();
+    let mut ex = v3_exchange(US, &lsdb);
+    let init = ex.initial_db_desc(7, NOW);
+    let dd = body_db_desc(&init);
+    assert_eq!(
+        dd.options, OSPF_V3_OPTIONS_DEFAULT,
+        "v3 DBD advertises V6|R|E (RFC 5340 §A.2)"
+    );
+    assert_eq!(dd.options, 0x13, "V6(0x01) | E(0x02) | R(0x10) = 0x13");
+    assert_eq!(
+        dd.flags,
+        DD_I | DD_M | DD_MS,
+        "v3 initial DBD still carries I|M|MS (RFC 2328 §10.3 unchanged by 5340)"
+    );
+}
+
+/// The version-aware MTU clamp. v3's overhead is 68 bytes (IPv6 40 +
+/// OSPFv3 header 16 + DBD body 12); the constructor's clamp must use
+/// 68, not v2's 52. Without this pin a v3 driver constructed with
+/// `iface_mtu = 60` would leave `mtu - overhead = 60 - 52 = 8` bytes
+/// of headroom that does not actually exist on the wire (the real
+/// headroom is `60 - 68 = -8`, i.e. the DBD body alone does not fit),
+/// and `next_our_chunk` would return `1` header per page anyway
+/// (the `.max(1)` floor) — silently emitting oversized DBDs.
+#[test]
+fn v3_with_version_clamps_iface_mtu_to_v3_overhead() {
+    let ex = DbExchange::with_version(US, AREA, 60, OspfVersion::V3);
+    assert_eq!(
+        ex.iface_mtu, DD_OVERHEAD_V3 as u16,
+        "v3 iface_mtu clamped to DD_OVERHEAD_V3 (68), not DD_OVERHEAD_V2 (52)"
+    );
+    // v2 keeps its 52-byte clamp.
+    let ex_v2 = DbExchange::new(US, AREA, 50);
+    assert_eq!(ex_v2.iface_mtu, DD_OVERHEAD_V2 as u16);
+}
+
+/// The v3 paging arithmetic uses the v3 overhead (68). The
+/// `header_paging_respects_mtu` test pins the v2 case at
+/// `DD_OVERHEAD_V2 + LSA_HEADER_LEN + 4` (one header per page); this
+/// is the v3 mirror — `DD_OVERHEAD_V3 + LSA_HEADER_LEN + 4` (still
+/// one header per page, but the arithmetic would yield TWO without
+/// the version-aware overhead, since `92 - 52 = 40 = 2 * 20`).
+///
+/// Three v3 Router-LSAs (each 0x2001 with one point-to-point link)
+/// drive three pages — one LSA header per page, M clear on the last.
+#[test]
+fn v3_header_paging_uses_v3_aware_overhead() {
+    let mut lsdb = Lsdb::new();
+    for i in 0..3u32 {
+        let lsa = originate_v3_router_lsa(
+            0x0a00_0001 + i,
+            ROUTER_BIT_V6,
+            OSPF_V3_OPTIONS_DEFAULT,
+            &[v3_p2p_link(1, 100 + i, 0x0a00_0001 + ((i + 1) % 3))],
+            None,
+        )
+        .unwrap();
+        lsdb.install(lsa, 0);
+    }
+    // MTU chosen so exactly one v3 LSA header fits: 68 (v3 overhead)
+    // + 20 (one header) + 4 (spare) = 92. The paging arithmetic with
+    // the correct overhead yields 1 header per page; with v2's 52 it
+    // would yield 2 headers per page (40 bytes / 20 bytes).
+    let mtu = (DD_OVERHEAD_V3 + LSA_HEADER_LEN + 4) as u16;
+    let mut ex = DbExchange::with_version(US, AREA, mtu, OspfVersion::V3);
+    let mut nbr = neighbor_at_exstart(US);
+    let mut them = DbExchange::with_version(THEM, AREA, mtu, OspfVersion::V3);
+
+    let them_init = them.initial_db_desc(5, NOW);
+    let step = ex.on_db_desc(body_db_desc(&them_init), THEM, &lsdb, &mut nbr, NOW);
+    let mut pages: Vec<DbDescBody> = vec![body_db_desc(&step.outbound[0]).clone()];
+    assert_eq!(
+        pages[0].lsa_headers.len(),
+        1,
+        "v3 paging yields one header per page (correct v3 overhead 68)"
+    );
+    assert_eq!(pages[0].flags & DD_M, DD_M, "more pages follow");
+
+    // Master rounds: each advances the sequence and consumes one more
+    // header from our LSDB.
+    let mut seq = body_db_desc(&them_init).dd_seq;
+    for round in 0..4 {
+        seq = seq.wrapping_add(1);
+        let master_dd = DbDescBody {
+            mtu,
+            // v3 default options on the master side too.
+            options: OSPF_V3_OPTIONS_DEFAULT,
+            flags: DD_MS | DD_M,
+            dd_seq: seq,
+            lsa_headers: vec![],
+        };
+        let step = ex.on_db_desc(&master_dd, THEM, &lsdb, &mut nbr, NOW + round as u64 * 10);
+        let answer = step
+            .outbound
+            .iter()
+            .map(body_db_desc)
+            .find(|d| d.flags & DD_MS == 0)
+            .expect("slave answer");
+        pages.push(answer.clone());
+        if answer.flags & DD_M == 0 {
+            break;
+        }
+    }
+
+    // Three headers total, one per page, M clear on the last — same
+    // invariant as `header_paging_respects_mtu`, just with the v3
+    // overhead.
+    assert_eq!(pages.len(), 3, "three pages at one header each");
+    let headers: usize = pages.iter().map(|p| p.lsa_headers.len()).sum();
+    assert_eq!(headers, 3, "every v3 LSA header paged exactly once");
+    assert_eq!(
+        pages.last().unwrap().flags & DD_M,
+        0,
+        "final v3 page clears More"
+    );
+    // Each paged LSA header is a v3 Router-LSA (LS type 0x2001) —
+    // pins that the v3 LSDB walk produces 16-bit ls_type values and
+    // not v2's 8-bit `1`.
+    for page in &pages {
+        for h in &page.lsa_headers {
+            assert_eq!(
+                h.ls_type, LS_TYPE_ROUTER,
+                "v3 LSA header carries 0x2001 (16-bit ls_type)"
+            );
+        }
+    }
+    assert_eq!(pages[2].dd_seq, seq);
+}
+
+/// Full v3 master/slave exchange — the v3 mirror of
+/// `slave_negotiation_and_full_exchange_with_master`. Each side has
+/// one v3 Router-LSA (LS type 0x2001) describing a point-to-point
+/// link; the scripted conversation is identical to the v2 case
+/// (initials cross → slave answers → master bumps seq and pages →
+/// both M=0 → Loading → LSR/LSU cross → both Full). The v3-specific
+/// assertions pin: (a) the DD Options word is V6|R|E on every DD we
+/// send; (b) the LSR entry carries the 16-bit v3 LS type; (c) the
+/// LSU round-trips the original v3 Router-LSA unchanged.
+#[test]
+fn v3_slave_negotiation_and_full_exchange_with_master() {
+    let our_lsdb = v3_lsdb_with(US, &[v3_p2p_link(10, 0x0000_0001, THEM)]);
+    let their_lsdb = v3_lsdb_with(THEM, &[v3_p2p_link(20, 0x0000_0002, US)]);
+
+    let mut us = v3_exchange(US, &our_lsdb);
+    let mut us_nbr = neighbor_at_exstart(US);
+    let mut them = v3_exchange(THEM, &their_lsdb);
+    let mut them_nbr = neighbor_at_exstart(THEM);
+
+    // 1. Initial DBDs cross. Both advertise V6|R|E (RFC 5340 §A.2).
+    let us_init = us.initial_db_desc(US + 1, NOW);
+    let them_init = them.initial_db_desc(THEM + 1, NOW);
+    assert_eq!(
+        body_db_desc(&us_init).options,
+        OSPF_V3_OPTIONS_DEFAULT,
+        "US initial DBD carries V6|R|E"
+    );
+    assert_eq!(
+        body_db_desc(&them_init).options,
+        OSPF_V3_OPTIONS_DEFAULT,
+        "THEM initial DBD carries V6|R|E"
+    );
+    assert_eq!(
+        body_db_desc(&us_init).flags,
+        DD_I | DD_M | DD_MS,
+        "v3 initial DBD carries I|M|MS"
+    );
+
+    // 2. US receives THEM's initial (higher id) → slave, answers with
+    //    its own v3 Router-LSA header.
+    let step_us = us.on_db_desc(body_db_desc(&them_init), THEM, &our_lsdb, &mut us_nbr, NOW);
+    assert_eq!(step_us.outbound.len(), 1);
+    let answer = &step_us.outbound[0];
+    let answer_dd = body_db_desc(answer);
+    assert_eq!(answer_dd.flags & DD_MS, 0, "slave clears MS");
+    assert_eq!(answer_dd.flags & DD_I, 0, "slave clears I");
+    assert_eq!(answer_dd.dd_seq, body_db_desc(&them_init).dd_seq);
+    assert_eq!(answer_dd.lsa_headers.len(), 1);
+    assert_eq!(
+        answer_dd.lsa_headers[0].ls_type, LS_TYPE_ROUTER,
+        "v3 LSA header on the slave's answer carries LS type 0x2001"
+    );
+    assert_eq!(answer_dd.options, OSPF_V3_OPTIONS_DEFAULT);
+    assert_eq!(us.phase(), Phase::Exchange);
+    assert_eq!(us_nbr.state, NeighborState::Exchange);
+
+    // 3. THEM receives US's initial (lower id, ignored) then US's
+    //    answer → master is negotiated, sends its own v3 headers,
+    //    seq+1.
+    let step_noise = them.on_db_desc(body_db_desc(&us_init), US, &their_lsdb, &mut them_nbr, NOW);
+    assert!(step_noise.outbound.is_empty());
+    let step_them = them.on_db_desc(answer_dd, US, &their_lsdb, &mut them_nbr, NOW);
+    assert_eq!(step_them.outbound.len(), 1);
+    let master_dd = body_db_desc(&step_them.outbound[0]);
+    assert_eq!(master_dd.flags & DD_MS, DD_MS);
+    assert_eq!(master_dd.dd_seq, body_db_desc(&them_init).dd_seq + 1);
+    assert_eq!(master_dd.lsa_headers.len(), 1);
+    assert_eq!(master_dd.options, OSPF_V3_OPTIONS_DEFAULT);
+    assert_eq!(them.phase(), Phase::Exchange);
+    assert_eq!(them_nbr.state, NeighborState::Exchange);
+
+    // 4. US processes the master's page: queues THEIR LSA (missing),
+    //    answers M=0 and emits its LSR (16-bit ls_type in the entry).
+    let step_us = us.on_db_desc(master_dd, THEM, &our_lsdb, &mut us_nbr, NOW + 10);
+    let slave_final = step_us
+        .outbound
+        .iter()
+        .map(body_db_desc)
+        .find(|d| d.flags & DD_MS == 0)
+        .expect("slave echo DBD");
+    assert_eq!(slave_final.flags & DD_M, 0);
+    assert_eq!(slave_final.dd_seq, master_dd.dd_seq);
+    assert_eq!(us.pending_requests(), 1);
+    assert_eq!(us.phase(), Phase::Loading);
+    assert_eq!(us_nbr.state, NeighborState::Loading);
+    let us_lsr_pkt = step_us
+        .outbound
+        .iter()
+        .find(|p| p.header.kind == OspfPacketType::LinkStateRequest as u8)
+        .expect("slave emits its LSR at exchange completion");
+    let us_lsr = body_ls_request(us_lsr_pkt);
+    assert_eq!(us_lsr.entries.len(), 1);
+    assert_eq!(
+        us_lsr.entries[0].ls_type, LS_TYPE_ROUTER,
+        "v3 LSR entry carries the 16-bit LS type 0x2001"
+    );
+
+    // 5. THEM receives the slave's final echo → enters Loading, LSRs
+    //    OUR LSA.
+    let step_them = them.on_db_desc(slave_final, US, &their_lsdb, &mut them_nbr, NOW + 20);
+    assert_eq!(them.phase(), Phase::Loading);
+    assert_eq!(them_nbr.state, NeighborState::Loading);
+    assert_eq!(step_them.outbound.len(), 1);
+    assert_eq!(
+        step_them.outbound[0].header.kind,
+        OspfPacketType::LinkStateRequest as u8
+    );
+    assert_eq!(them.pending_requests(), 1);
+
+    // 6. Cross-LRS round-trip: each side answers the other's request
+    //    with its own v3 Router-LSA.
+    let them_lsreq = step_them.outbound[0].clone();
+    let them_answer = them.on_ls_request(
+        body_ls_request(us_lsr_pkt),
+        &their_lsdb,
+        &mut them_nbr,
+        NOW + 30,
+    );
+    assert_eq!(them_answer.outbound.len(), 1);
+    assert_eq!(
+        them_answer.outbound[0].header.kind,
+        OspfPacketType::LinkStateUpdate as u8
+    );
+    let us_answer = us.on_ls_request(
+        body_ls_request(&them_lsreq),
+        &our_lsdb,
+        &mut us_nbr,
+        NOW + 30,
+    );
+    assert_eq!(us_answer.outbound.len(), 1);
+    assert_eq!(
+        us_answer.outbound[0].header.kind,
+        OspfPacketType::LinkStateUpdate as u8
+    );
+
+    // 7. US receives THEM's LS-Update (their v3 Router-LSA), acks, Full.
+    let step_us = us.on_ls_update(body_ls_update(&them_answer.outbound[0]), &mut us_nbr);
+    assert_eq!(step_us.lsas.len(), 1);
+    assert_eq!(
+        step_us.lsas[0].header.ls_type, LS_TYPE_ROUTER,
+        "v3 LS-Update carries a 0x2001 Router-LSA"
+    );
+    assert!(step_us
+        .outbound
+        .iter()
+        .any(|p| p.header.kind == OspfPacketType::LinkStateAck as u8));
+    assert_eq!(us.phase(), Phase::Full);
+    assert_eq!(us_nbr.state, NeighborState::Full);
+    assert!(step_us.newly_full);
+
+    // 8. THEM receives OUR LS-Update, acks, Full.
+    let step_them = them.on_ls_update(body_ls_update(&us_answer.outbound[0]), &mut them_nbr);
+    assert_eq!(them.phase(), Phase::Full);
+    assert_eq!(them_nbr.state, NeighborState::Full);
+    assert!(step_them.newly_full);
 }
 
 // ----- helpers -----
