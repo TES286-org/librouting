@@ -694,9 +694,15 @@ pub struct SpfLocatorRoute {
 /// The LSDB pre-scan for the v3 calculation: per-type maps built once so
 /// the relaxation loop never re-walks the database.
 struct V3Topology {
-    /// Router-LSAs (0x2001) by advertising router. One LSA per router:
-    /// the first instance in database order wins (fragmented
-    /// Router-LSAs — multiple per router — are not split apart here).
+    /// Router-LSAs (0x2001) by advertising router. RFC 5340 §4.4.2 lets
+    /// a router originate multiple Router-LSAs per area, disambiguated
+    /// by the Link State ID (the fragment number 0, 1, …). A receiver
+    /// merges all fragments into one virtual vertex: the links lists
+    /// concatenate (in ascending Link State ID order — the LSDB's
+    /// `BTreeMap` iteration order keeps `LsaKey` ascending, so the
+    /// walker visits fragments in order); the `bits` and `options`
+    /// fields come from the first fragment (§4.4.2 mandates the same
+    /// values across all fragments a router originates for the area).
     router_lsas: BTreeMap<u32, V3RouterLsaBody>,
     /// The 24-bit options each Router-LSA advertises (§A.2) — what a
     /// 0x2004 originator mirrors for that router (§4.4.3.5).
@@ -740,11 +746,31 @@ impl V3Topology {
                         let Some(body) = ERouterLsaBody::decode(&entry.lsa.body) else {
                             continue;
                         };
-                        // First E-Router-LSA per router wins (fragmented
-                        // E-Router-LSAs concatenate, RFC 5340 §A.4.3
-                        // semantics carried over by RFC 8362 §4.1 — the
-                        // same first-instance rule the legacy scan uses).
+                        // RFC 5340 §4.4.2 (carried over by RFC 8362
+                        // §4.1 for E-Router-LSAs): multiple fragments
+                        // per router merge into one virtual vertex.
+                        // The first fragment (lowest Link State ID —
+                        // the LSDB's BTreeMap iteration order is
+                        // ascending) supplies the bits/options, and
+                        // every subsequent fragment's link list is
+                        // appended.
+                        let mapped: Vec<crate::lsa::v3::V3RouterLink> = body
+                            .links
+                            .iter()
+                            .map(|l| crate::lsa::v3::V3RouterLink {
+                                link_type: l.link_type,
+                                metric: l.metric,
+                                interface_id: l.interface_id,
+                                neighbor_interface_id: l.neighbor_interface_id,
+                                neighbor_router_id: l.neighbor_router_id,
+                            })
+                            .collect();
                         if e_routers.insert(key.advertising_router) {
+                            // First fragment for this router: install
+                            // the merged body with the first fragment's
+                            // bits/options (§4.4.2 mandates these be
+                            // identical across all fragments the
+                            // router originates for the area).
                             t.router_options
                                 .insert(key.advertising_router, body.options);
                             t.router_lsas.insert(
@@ -752,19 +778,16 @@ impl V3Topology {
                                 V3RouterLsaBody {
                                     bits: body.bits,
                                     options: body.options,
-                                    links: body
-                                        .links
-                                        .iter()
-                                        .map(|l| crate::lsa::v3::V3RouterLink {
-                                            link_type: l.link_type,
-                                            metric: l.metric,
-                                            interface_id: l.interface_id,
-                                            neighbor_interface_id: l.neighbor_interface_id,
-                                            neighbor_router_id: l.neighbor_router_id,
-                                        })
-                                        .collect(),
+                                    links: mapped,
                                 },
                             );
+                        } else {
+                            // Subsequent fragment: append its links to
+                            // the merged body. The first fragment's
+                            // bits/options stay (RFC 5340 §4.4.2).
+                            if let Some(merged) = t.router_lsas.get_mut(&key.advertising_router) {
+                                merged.links.extend(mapped);
+                            }
                         }
                     }
                     x if x == LS_TYPE_E_NETWORK => {
@@ -807,10 +830,25 @@ impl V3Topology {
                             continue;
                         }
                         if let Some(body) = V3RouterLsaBody::decode(&entry.lsa.body) {
+                            // RFC 5340 §4.4.2: multiple legacy
+                            // Router-LSA fragments per router merge
+                            // into one virtual vertex. The first
+                            // fragment (lowest Link State ID, which
+                            // the LSDB's BTreeMap iteration visits
+                            // first) supplies the bits/options;
+                            // subsequent fragments append their link
+                            // list to the merged body without cloning.
                             t.router_options
                                 .entry(key.advertising_router)
                                 .or_insert(body.options);
-                            t.router_lsas.entry(key.advertising_router).or_insert(body);
+                            match t.router_lsas.entry(key.advertising_router) {
+                                std::collections::btree_map::Entry::Occupied(mut e) => {
+                                    e.get_mut().links.extend(body.links);
+                                }
+                                std::collections::btree_map::Entry::Vacant(e) => {
+                                    e.insert(body);
+                                }
+                            }
                         }
                     }
                     x if x == LS_TYPE_NETWORK => {
@@ -846,10 +884,25 @@ impl V3Topology {
             match key.ls_type {
                 x if x == LS_TYPE_ROUTER => {
                     if let Some(body) = V3RouterLsaBody::decode(&entry.lsa.body) {
+                        // RFC 5340 §4.4.2: multiple legacy
+                        // Router-LSA fragments per router merge into
+                        // one virtual vertex. The first fragment
+                        // (lowest Link State ID — the LSDB's
+                        // BTreeMap iteration visits ascending) supplies
+                        // the bits/options; subsequent fragments append
+                        // their link list to the merged body without
+                        // cloning.
                         t.router_options
                             .entry(key.advertising_router)
                             .or_insert(body.options);
-                        t.router_lsas.entry(key.advertising_router).or_insert(body);
+                        match t.router_lsas.entry(key.advertising_router) {
+                            std::collections::btree_map::Entry::Occupied(mut e) => {
+                                e.get_mut().links.extend(body.links);
+                            }
+                            std::collections::btree_map::Entry::Vacant(e) => {
+                                e.insert(body);
+                            }
+                        }
                     }
                 }
                 x if x == LS_TYPE_NETWORK => {
